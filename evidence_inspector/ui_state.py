@@ -34,6 +34,7 @@ class SessionStatus(StrEnum):
 
 
 AuditRunner = Callable[[Case, Claim], AuditResult | AuditError]
+DEMO_CLAIM_ID = "claim.fragment-method-equivalence"
 
 
 @dataclass(slots=True)
@@ -51,9 +52,12 @@ class UIState:
     def for_case(cls, case: Case) -> UIState:
         """Initialize state without executing checks or model calls."""
 
+        claim_ids = {claim.id for claim in case.claims}
         return cls(
             case=case,
-            selected_claim_id=case.claims[0].id,
+            selected_claim_id=(
+                DEMO_CLAIM_ID if DEMO_CLAIM_ID in claim_ids else case.claims[0].id
+            ),
             claims={claim.id: claim for claim in case.claims},
         )
 

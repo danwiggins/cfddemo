@@ -80,6 +80,14 @@ def test_initialization_and_ordinary_state_operations_do_not_call_runner() -> No
     assert runner  # The runner is never registered with ordinary reruns.
 
 
+def test_real_demo_defaults_to_method_mismatch_claim() -> None:
+    from evidence_inspector.case_bundle import load_case_bundle
+
+    state = UIState.for_case(load_case_bundle("data/demo/case.json"))
+
+    assert state.selected_claim_id == "claim.fragment-method-equivalence"
+
+
 def test_execute_calls_runner_once_and_publishes_current_result() -> None:
     state = UIState.for_case(build_synthetic_case())
     result = _audit_for(state, execution_mode=ExecutionMode.LIVE)

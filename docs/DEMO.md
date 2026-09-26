@@ -13,8 +13,8 @@ whether the report's claims match both the measurements and the written method.
    Point to the explicit denominator, raw mode, median, and reads above 1 kb.
 3. **Show cell origin.** Explain the sequence: methylation extraction, Loyfer
    marker overlap, fragment UXM classification, then NNLS mixture fitting.
-4. **Run the evidence review.** Select the method-equivalence claim and replay
-   the assessment. The reviewer cites both passages and flags the mismatch:
+4. **Run the evidence review.** Click **Show the mismatch**. The reviewer cites
+   both passages and flags the mismatch:
    aligned reference span is not the same method as subtracting a fixed 45 bp.
 5. **Close on the distinction.** Code computes the biology; AI audits the
    interpretation. Neither is allowed to silently change the measurement.

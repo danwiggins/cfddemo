@@ -90,6 +90,7 @@ takes precedence over the public aggregate bundle.
 ## Documentation
 
 - [Three-minute demo](docs/DEMO.md)
+- [75-second recording script](docs/RECORDING-SCRIPT.md)
 - [Algorithm and evidence design](docs/ALGORITHMS.md)
 - [Railway deployment](docs/DEPLOYMENT.md)
 

@@ -105,9 +105,9 @@ p, li, label, [data-testid="stCaptionContainer"] {
   border-radius: 26px;
   box-shadow: 0 22px 55px rgba(27, 27, 43, 0.15);
   color: white;
-  margin-bottom: 2.5rem;
+  margin-bottom: 2.1rem;
   overflow: hidden;
-  padding: 3.5rem 3.75rem 3.25rem;
+  padding: 2.7rem 3.2rem 2.6rem;
   position: relative;
 }
 
@@ -129,7 +129,7 @@ p, li, label, [data-testid="stCaptionContainer"] {
 .traceback-hero h1 {
   color: white !important;
   font-family: Cambria, Georgia, serif !important;
-  font-size: clamp(3.3rem, 8vw, 6.4rem);
+  font-size: clamp(3.1rem, 7vw, 5.2rem);
   line-height: 0.92;
   margin: 0;
 }
@@ -137,7 +137,7 @@ p, li, label, [data-testid="stCaptionContainer"] {
 .traceback-hero h2 {
   color: white !important;
   font-family: Cambria, Georgia, serif !important;
-  font-size: clamp(1.6rem, 3.4vw, 2.7rem);
+  font-size: clamp(1.5rem, 3vw, 2.25rem);
   line-height: 1.08;
   margin: 1.35rem 0 1rem;
   max-width: 820px;
@@ -181,6 +181,51 @@ p, li, label, [data-testid="stCaptionContainer"] {
 
 .hero-action.secondary {
   border: 1px solid rgba(255, 255, 255, 0.28);
+}
+
+.truth-strip {
+  background: var(--surface);
+  border: 1px solid var(--line);
+  border-radius: 16px;
+  display: grid;
+  grid-template-columns: repeat(3, 1fr);
+  margin: -1.2rem auto 2.2rem;
+  max-width: 1080px;
+  overflow: hidden;
+  position: relative;
+}
+
+.truth-strip > div {
+  padding: 0.95rem 1.1rem;
+}
+
+.truth-strip > div + div {
+  border-left: 1px solid var(--line);
+}
+
+.truth-strip strong {
+  color: var(--ink);
+  display: block;
+  font-family: Cambria, Georgia, serif;
+  margin-bottom: 0.2rem;
+}
+
+.truth-strip span {
+  color: var(--muted);
+  font-family: Calibri, Arial, sans-serif;
+  font-size: 0.86rem;
+}
+
+.truth-strip .real strong { color: var(--teal); }
+.truth-strip .recorded strong { color: var(--gold); }
+.truth-strip .unbuilt strong { color: var(--red); }
+
+.judge-moment {
+  background: linear-gradient(135deg, var(--teal-soft), #FFFFFF);
+  border: 1px solid #B7D9D6;
+  border-radius: 20px;
+  margin-bottom: 2.4rem;
+  padding: 1.35rem 1.5rem 0.35rem;
 }
 
 .review-flow {
@@ -358,6 +403,11 @@ hr {
 @media (max-width: 760px) {
   .block-container { padding: 1rem 1rem 3rem; }
   .traceback-hero { padding: 2.2rem 1.45rem; }
+  .truth-strip { grid-template-columns: 1fr; margin-top: -1rem; }
+  .truth-strip > div + div {
+    border-left: 0;
+    border-top: 1px solid var(--line);
+  }
   .review-flow { grid-template-columns: 1fr; }
   .review-flow .arrow {
     justify-self: center;
@@ -389,10 +439,40 @@ def _render_header(st: Any) -> None:
     <span class="hero-tag">Research use only</span>
   </div>
   <div class="hero-actions">
-    <a class="hero-action primary" href="#readout-1">See the computed results ↓</a>
+    <a class="hero-action primary" href="#ai-review">Watch AI catch the mismatch ↓</a>
+    <a class="hero-action secondary" href="#readout-1">Explore the results</a>
     <a class="hero-action secondary" href="https://github.com/danwiggins/cfddemo" target="_blank">View GitHub ↗</a>
   </div>
 </section>
+""",
+        unsafe_allow_html=True,
+    )
+
+
+def _render_truth_strip(st: Any, *, replay_mode: bool) -> None:
+    """State exactly what a judge is seeing."""
+
+    review_detail = (
+        "Validated AI assessment replay; no provider call"
+        if replay_mode
+        else "Live bounded review through Amazon Bedrock"
+    )
+    st.markdown(
+        f"""
+<div class="truth-strip">
+  <div class="real">
+    <strong>Real</strong>
+    <span>One MinION run and two computed bioinformatics readouts</span>
+  </div>
+  <div class="recorded">
+    <strong>{"Recorded" if replay_mode else "Live"}</strong>
+    <span>{review_detail}</span>
+  </div>
+  <div class="unbuilt">
+    <strong>Not built</strong>
+    <span>Copy-number analysis and clinical diagnosis</span>
+  </div>
+</div>
 """,
         unsafe_allow_html=True,
     )
@@ -1127,7 +1207,8 @@ def _render_citations(st: Any, case: Case, audit: AuditResult) -> None:
     for evidence_id in audit.evidence_ids:
         source = source_by_id.get(evidence_id)
         if source is not None:
-            _render_source(st, source)
+            st.caption(f"{_source_heading(source)} · `{source.id}`")
+            st.info(source.quote)
             continue
         result = result_by_id.get(evidence_id)
         if result is not None:
@@ -1223,6 +1304,62 @@ def _render_claim_controls(st: Any, state: UIState) -> bool:
     return editor_value == state.selected_claim.text
 
 
+def _render_review_workspace(
+    st: Any,
+    state: UIState,
+    runner: AuditRunner,
+    *,
+    replay_mode: bool,
+) -> None:
+    """Render the primary judge interaction before the long-form results."""
+
+    st.markdown(
+        """
+<span id="ai-review"></span>
+<div class="judge-moment">
+  <p class="section-kicker">The judge moment · AI evidence review</p>
+  <h3>Can the written method reproduce the chart?</h3>
+  <p>
+    The report says its updated method uses aligned reference span. Its
+    reproduction instructions still say to subtract a fixed 45 bp. Run the
+    review to test whether those passages actually agree.
+  </p>
+</div>
+""",
+        unsafe_allow_html=True,
+    )
+    if replay_mode:
+        st.info(
+            "Public demo mode replays a recorded, validated AI assessment and "
+            "makes no provider call. The cited passages and computed evidence "
+            "are the registered demo inputs."
+        )
+    else:
+        st.caption(
+            "Live mode: one explicit click sends bounded registered evidence to "
+            "the configured Bedrock model."
+        )
+    pressed = st.button(
+        "Show the mismatch" if replay_mode else "Run AI evidence review",
+        type="primary",
+        disabled=state.status == SessionStatus.RUNNING,
+        help="Starts one review. Other interactions do not call the model.",
+    )
+    if pressed:
+        with st.spinner("Checking both method passages…"):
+            execute_audit(state, runner)
+
+    if state.error is not None:
+        _render_error(st, state.error)
+    if state.selected_audit is not None:
+        st.divider()
+        _render_audit(st, state, state.selected_audit)
+    else:
+        st.caption("One click reveals the assessment and both exact citations.")
+    with st.expander("Inspect the claim or choose another check", expanded=False):
+        _render_claim_controls(st, state)
+
+
 def run_app(
     *,
     case: Case | None = None,
@@ -1264,48 +1401,12 @@ def run_app(
         runner = audit_runner or _default_runner
 
     _render_header(st)
+    _render_truth_strip(st, replay_mode=replay_mode)
+    _render_review_workspace(st, state, runner, replay_mode=replay_mode)
     _render_signal_overview(st)
     _render_case_scope(st, active_case)
     _render_fragmentomics_evidence(st, active_case)
     _render_cell_origin_evidence(st)
-    st.divider()
-    st.markdown(
-        '<p class="section-kicker">Interactive evidence review</p>',
-        unsafe_allow_html=True,
-    )
-    st.subheader("Now test the interpretation—not just the chart")
-    st.write(
-        "Choose a claim, edit it if you want, and run the reviewer. The AI may "
-        "interpret and cite registered evidence, but it cannot invent a new "
-        "measurement or silently change the denominator."
-    )
-    if replay_mode:
-        st.info(
-            "Public demo mode: this button replays recorded, validated AI "
-            "assessments and makes no provider call. Run locally with Bedrock "
-            "credentials to review new or edited claims."
-        )
-    editor_is_committed = _render_claim_controls(st, state)
-
-    pressed = st.button(
-        "Replay assessment" if replay_mode else "Run check",
-        type="primary",
-        disabled=state.status == SessionStatus.RUNNING or not editor_is_committed,
-        help="Starts one review. Other interactions do not call the model.",
-    )
-    if pressed:
-        with st.spinner("Checking the claim against registered evidence…"):
-            execute_audit(state, runner)
-
-    if state.error is not None:
-        _render_error(st, state.error)
-    if state.selected_audit is not None:
-        st.divider()
-        _render_audit(st, state, state.selected_audit)
-    else:
-        st.caption(
-            "No assessment has been run for this claim. Results are session-only."
-        )
 
 
 if __name__ == "__main__":

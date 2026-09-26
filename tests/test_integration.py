@@ -103,8 +103,7 @@ def test_method_drift_causal_and_insufficient_paths_remain_scoped() -> None:
         == "insufficient_evidence"
     )
     assert (
-        outcomes["raw-aligned-noncomparability"]["actual_tool"]
-        == "insufficient_inputs"
+        outcomes["raw-aligned-noncomparability"]["actual_tool"] == "insufficient_inputs"
     )
 
 
@@ -353,21 +352,18 @@ run_app(
     ).run()
 
     assert not app.exception
-    assert app.button[0].label == "Run check"
+    assert app.button[0].label == "Run AI evidence review"
     assert not app.button[0].disabled
     markdown_values = {item.value for item in app.markdown}
     assert any(
         "One blood draw. Two computed cfDNA signals." in value
         for value in markdown_values
     )
-    assert any(
-        "Not built in this demo" in value for value in markdown_values
-    )
+    assert any("Not built in this demo" in value for value in markdown_values)
     assert "**How the fragment-length algorithm works**" in markdown_values
     assert "**Presentation source**" not in markdown_values
     assert any(
-        item.value.startswith("Result 1 — My cfDNA is clean")
-        for item in app.subheader
+        item.value.startswith("Result 1 — My cfDNA is clean") for item in app.subheader
     )
 
     app.button[0].click().run()
@@ -420,9 +416,7 @@ def test_registered_but_inapplicable_source_citation_fails_closed() -> None:
         "next_checks": [],
     }
     result = EvidenceReviewer(
-        ScriptedResponsesClient(
-            (json.dumps(selection), json.dumps(assessment))
-        )
+        ScriptedResponsesClient((json.dumps(selection), json.dumps(assessment)))
     ).audit_safe(case, "claim.synthetic-length")
 
     assert isinstance(result, AuditError)
