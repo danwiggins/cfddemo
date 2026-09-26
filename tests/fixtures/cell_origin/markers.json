@@ -1,0 +1,20 @@
+[
+  {
+    "marker_id": "marker.immune.1",
+    "chromosome": "chr1",
+    "start0": 100,
+    "end0": 200,
+    "target_cell_type_id": "immune",
+    "atlas_id": "atlas.synthetic-loyfer.v1",
+    "source_ids": ["source.synthetic-atlas"]
+  },
+  {
+    "marker_id": "marker.liver.1",
+    "chromosome": "chr2",
+    "start0": 300,
+    "end0": 400,
+    "target_cell_type_id": "liver",
+    "atlas_id": "atlas.synthetic-loyfer.v1",
+    "source_ids": ["source.synthetic-atlas"]
+  }
+]

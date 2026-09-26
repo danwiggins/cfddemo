@@ -1,0 +1,28 @@
+{
+  "atlas_id": "atlas.synthetic-loyfer.v1",
+  "method": {
+    "family": "loyfer_fragment_uxm",
+    "atlas_kind": "loyfer",
+    "feature_definition": "fragment_u_fraction",
+    "observation_unit": "classified_fragment",
+    "solver": "nnls"
+  },
+  "cell_type_ids": ["immune", "liver"],
+  "rows": [
+    {
+      "marker_id": "marker.immune.1",
+      "values": [
+        {"cell_type_id": "immune", "u_fraction": 0.8},
+        {"cell_type_id": "liver", "u_fraction": 0.2}
+      ]
+    },
+    {
+      "marker_id": "marker.liver.1",
+      "values": [
+        {"cell_type_id": "immune", "u_fraction": 0.2},
+        {"cell_type_id": "liver", "u_fraction": 0.8}
+      ]
+    }
+  ],
+  "source_ids": ["source.synthetic-atlas"]
+}

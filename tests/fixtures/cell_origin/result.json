@@ -1,0 +1,148 @@
+{
+  "result_id": "cell-origin.synthetic.v1",
+  "method": {
+    "family": "loyfer_fragment_uxm",
+    "atlas_kind": "loyfer",
+    "feature_definition": "fragment_u_fraction",
+    "observation_unit": "classified_fragment",
+    "solver": "nnls"
+  },
+  "marker_counts": [
+    {
+      "marker_id": "marker.immune.1",
+      "u_count": 2,
+      "x_count": 1,
+      "m_count": 2,
+      "classified_fragment_count": 5,
+      "u_fraction": 0.4
+    },
+    {
+      "marker_id": "marker.liver.1",
+      "u_count": 3,
+      "x_count": 1,
+      "m_count": 1,
+      "classified_fragment_count": 5,
+      "u_fraction": 0.6
+    }
+  ],
+  "deconvolution": {
+    "result_id": "nnls.synthetic.v1",
+    "method": {
+      "family": "loyfer_fragment_uxm",
+      "atlas_kind": "loyfer",
+      "feature_definition": "fragment_u_fraction",
+      "observation_unit": "classified_fragment",
+      "solver": "nnls"
+    },
+    "atlas_id": "atlas.synthetic-loyfer.v1",
+    "marker_ids": ["marker.immune.1", "marker.liver.1"],
+    "estimates": [
+      {
+        "cell_type_id": "immune",
+        "raw_nnls_weight": 0.3333333333333333,
+        "fraction": 0.3333333333333333
+      },
+      {
+        "cell_type_id": "liver",
+        "raw_nnls_weight": 0.6666666666666666,
+        "fraction": 0.6666666666666666
+      }
+    ],
+    "diagnostics": {
+      "converged": true,
+      "iterations": 2,
+      "residual_l2": 0.0,
+      "objective_value": 0.0
+    }
+  },
+  "bootstrap": {
+    "source_result_id": "nnls.synthetic.v1",
+    "replicates": 100,
+    "random_seed": 7,
+    "confidence_level": 0.95,
+    "intervals": [
+      {
+        "cell_type_id": "immune",
+        "estimate": 0.3333333333333333,
+        "lower_fraction": 0.2,
+        "upper_fraction": 0.5
+      },
+      {
+        "cell_type_id": "liver",
+        "estimate": 0.6666666666666666,
+        "lower_fraction": 0.5,
+        "upper_fraction": 0.8
+      }
+    ]
+  },
+  "range_comparison": {
+    "reference_kind": "observed_cohort_range",
+    "rows": [
+      {
+        "cell_type_id": "immune",
+        "fraction": 0.3333333333333333,
+        "min_fraction": 0.1,
+        "max_fraction": 0.3,
+        "classification": "above",
+        "source_ids": ["source.synthetic-slide"]
+      },
+      {
+        "cell_type_id": "liver",
+        "fraction": 0.6666666666666666,
+        "min_fraction": 0.5,
+        "max_fraction": 0.8,
+        "classification": "within",
+        "source_ids": ["source.synthetic-slide"]
+      }
+    ],
+    "partial_table": false
+  },
+  "provenance": {
+    "schema_version": "cell-origin.v1",
+    "input_artifacts": [
+      {
+        "artifact_id": "artifact.synthetic-calls.v1",
+        "sha256": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+        "size_bytes": 1024
+      },
+      {
+        "artifact_id": "artifact.synthetic-atlas.v1",
+        "sha256": "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+        "size_bytes": 512
+      }
+    ],
+    "source_ids": ["source.synthetic-atlas", "source.synthetic-slide"],
+    "software_versions": [
+      {"software_id": "modkit", "version": "0.5.0"},
+      {"software_id": "cell-origin-pipeline", "version": "1.0.0"}
+    ],
+    "method": {
+      "family": "loyfer_fragment_uxm",
+      "atlas_kind": "loyfer",
+      "feature_definition": "fragment_u_fraction",
+      "observation_unit": "classified_fragment",
+      "solver": "nnls"
+    },
+    "uxm_thresholds": {
+      "minimum_cpgs": 4,
+      "unmethylated_max_exclusive": 0.251,
+      "methylated_min_inclusive": 0.75
+    },
+    "input_fragment_count": 8,
+    "marker_overlap_count": 12,
+    "classified_fragment_marker_count": 10,
+    "excluded_fewer_than_four_cpgs": 2,
+    "partial_input": true,
+    "verification_level": "sampled_recomputed"
+  },
+  "validation": {
+    "records": [
+      {"check": "strict_schema", "passed": true},
+      {"check": "digests_verified", "passed": true},
+      {"check": "markers_match_atlas", "passed": true},
+      {"check": "uxm_counts_reconciled", "passed": true},
+      {"check": "fractions_normalized", "passed": true},
+      {"check": "model_safe", "passed": true}
+    ]
+  }
+}

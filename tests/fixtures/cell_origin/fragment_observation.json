@@ -1,0 +1,54 @@
+{
+  "fragment_digest": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+  "marker": {
+    "marker_id": "marker.immune.1",
+    "chromosome": "chr1",
+    "start0": 100,
+    "end0": 200,
+    "target_cell_type_id": "immune",
+    "atlas_id": "atlas.synthetic-loyfer.v1",
+    "source_ids": ["source.synthetic-atlas"]
+  },
+  "cpg_calls": [
+    {
+      "fragment_digest": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "chromosome": "chr1",
+      "position0": 110,
+      "strand": "+",
+      "modification_code": "m",
+      "modified_probability": 0.05,
+      "state": "unmethylated"
+    },
+    {
+      "fragment_digest": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "chromosome": "chr1",
+      "position0": 120,
+      "strand": "+",
+      "modification_code": "m",
+      "modified_probability": 0.10,
+      "state": "unmethylated"
+    },
+    {
+      "fragment_digest": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "chromosome": "chr1",
+      "position0": 130,
+      "strand": "-",
+      "modification_code": "m",
+      "modified_probability": 0.15,
+      "state": "unmethylated"
+    },
+    {
+      "fragment_digest": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "chromosome": "chr1",
+      "position0": 140,
+      "strand": "-",
+      "modification_code": "m",
+      "modified_probability": 0.90,
+      "state": "methylated"
+    }
+  ],
+  "callable_cpg_count": 4,
+  "methylated_cpg_count": 1,
+  "methylation_fraction": 0.25,
+  "state": "U"
+}

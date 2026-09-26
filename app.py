@@ -4,9 +4,12 @@ from __future__ import annotations
 
 from collections.abc import Iterable
 from importlib import import_module
+from pathlib import Path
 from typing import Any
 
 from evidence_inspector.case_bundle import CaseBundleLoadError, load_default_case
+from evidence_inspector.cell_origin_pipeline import CellOriginResultBundle
+from evidence_inspector.fragmentomics import chart_rows
 from evidence_inspector.models import (
     AuditError,
     AuditResult,
@@ -14,7 +17,9 @@ from evidence_inspector.models import (
     Claim,
     ErrorCode,
     ExecutionMode,
+    ReadLengthSummaryValues,
     Source,
+    ToolName,
     ToolResult,
 )
 from evidence_inspector.ui_state import (
@@ -28,6 +33,8 @@ from evidence_inspector.ui_state import (
 )
 
 SESSION_KEY = "traceback_ui_state"
+FRAGMENT_SOURCE_SLIDE = Path("data/local/slides/fragment-length-source.png")
+CELL_ORIGIN_RESULT = Path("data/local/cell-origin/result.json")
 
 
 def _humanize(value: object) -> str:
@@ -105,6 +112,390 @@ def _render_case_scope(st: Any, case: Case) -> None:
             st.markdown(f"**{_humanize(capability.name)} — {label}**")
             if capability.unavailable_reason:
                 st.caption(capability.unavailable_reason)
+
+
+def _render_fragmentomics_evidence(st: Any, case: Case) -> None:
+    """Render the computed distribution before any model interpretation."""
+
+    result = next(
+        (
+            item
+            for item in case.tool_results
+            if item.tool == ToolName.READ_LENGTH_SUMMARY
+            and item.status.value == "ok"
+        ),
+        None,
+    )
+    if result is None:
+        return
+    try:
+        values = ReadLengthSummaryValues.model_validate(result.values)
+        rows = chart_rows(values)
+    except ValueError:
+        st.error("The registered fragment-length result failed chart validation.")
+        return
+
+    st.subheader("Algorithmic regeneration")
+    st.caption(
+        "Computed from the immutable BAM-derived artifact. This panel uses raw "
+        "query-sequence length; no fixed adapter subtraction is applied."
+    )
+    count, mode, median, tail = st.columns(4)
+    count.metric("Accepted reads", f"{values.valid_read_count:,}")
+    mode.metric("Raw mode", f"{values.mode_bp} bp")
+    median.metric("Raw median", f"{values.median_bp:g} bp")
+    tail.metric("Reads >1 kb", f"{values.fraction_gt_1000:.2%}")
+
+    source_column, computed_column = st.columns(2)
+    with source_column:
+        st.markdown("**Presentation source**")
+        if FRAGMENT_SOURCE_SLIDE.is_file():
+            st.image(
+                str(FRAGMENT_SOURCE_SLIDE),
+                caption=(
+                    "Slide-reported analysis. The right panel uses a fixed adapter "
+                    "subtraction and is not recomputed evidence."
+                ),
+                use_container_width=True,
+            )
+        else:
+            st.info("Optional source slide is not registered locally.")
+    with computed_column:
+        st.markdown("**Regenerated from BAM query lengths**")
+        st.vega_lite_chart(
+            list(rows),
+            spec={
+                "mark": {
+                    "type": "area",
+                    "line": {"color": "#0E7490"},
+                    "color": "#67E8F9",
+                },
+                "encoding": {
+                    "x": {
+                        "field": "length_bp",
+                        "type": "quantitative",
+                        "title": "Raw query length (bp)",
+                        "scale": {"domain": [50, 800]},
+                    },
+                    "y": {
+                        "field": "read_count",
+                        "type": "quantitative",
+                        "title": "Read count per 5 bp",
+                    },
+                    "tooltip": [
+                        {
+                            "field": "length_bp",
+                            "type": "quantitative",
+                            "title": "Bin start (bp)",
+                        },
+                        {
+                            "field": "read_count",
+                            "type": "quantitative",
+                            "title": "Reads",
+                            "format": ",",
+                        },
+                    ],
+                },
+            },
+            use_container_width=True,
+        )
+        st.caption(
+            f"Verification: {_humanize(result.verification_level)}. "
+            "Aligned span appears only after hg38 alignment succeeds."
+        )
+
+
+def _render_cell_origin_evidence(st: Any) -> None:
+    """Render validated cell-origin estimates without inventing absent results."""
+
+    if not CELL_ORIGIN_RESULT.is_file():
+        with st.expander("Cell-origin deconvolution", expanded=False):
+            st.info(
+                "No validated cell-origin result is registered yet. Run the "
+                "methylation → UXM → NNLS pipeline to populate this chart."
+            )
+        return
+
+    try:
+        bundle = CellOriginResultBundle.model_validate_json(
+            CELL_ORIGIN_RESULT.read_text(encoding="utf-8")
+        )
+    except (OSError, ValueError):
+        st.error("The registered cell-origin result failed strict validation.")
+        return
+    result = bundle.result
+    range_rows = [
+        row.model_dump(mode="json")
+        for row in bundle.charts.healthy_context_rows
+    ]
+    if range_rows:
+        composition = [
+            {
+                "label": row["label"],
+                "rank": rank,
+                "percent": row["sample_percent"],
+                "lower_percent": (
+                    row["sample_lower_percent"]
+                    if row["sample_lower_percent"] is not None
+                    else row["sample_percent"]
+                ),
+                "upper_percent": (
+                    row["sample_upper_percent"]
+                    if row["sample_upper_percent"] is not None
+                    else row["sample_percent"]
+                ),
+                "value_label": f"{row['sample_percent']:.1f}%",
+            }
+            for rank, row in enumerate(
+                sorted(
+                    range_rows,
+                    key=lambda item: item["sample_percent"],
+                    reverse=True,
+                ),
+                start=1,
+            )
+        ]
+    else:
+        composition = [
+            {
+                **row.model_dump(mode="json"),
+                "value_label": f"{row.percent:.1f}%",
+            }
+            for row in bundle.charts.composition_rows
+            if row.show_by_default and row.fraction >= 0.001
+        ][:10]
+
+    st.subheader("Cell-origin deconvolution")
+    st.caption(
+        "Realigned Nanopore CpG calls → fragment U/X/M classification → "
+        "count-weighted NNLS. This is an analytical reconstruction, not a "
+        "diagnostic result."
+    )
+    observed_markers = len(result.marker_counts)
+    st.info(
+        "Reproduction gap: the report describes ~17,300 qualifying fragments "
+        "across 6,469 markers. This strict rerun produced "
+        f"{result.provenance.classified_fragment_marker_count:,} classified "
+        f"fragment–marker groups across {observed_markers:,} markers. The "
+        "chart is computed, but the extraction settings or counting units are "
+        "not yet reconciled."
+    )
+    left, right = st.columns((0.9, 1.25))
+    with left:
+        st.markdown("**Top estimated contributors**")
+        st.vega_lite_chart(
+            composition,
+            spec={
+                "height": {"step": 31},
+                "encoding": {
+                    "y": {
+                        "field": "label",
+                        "type": "nominal",
+                        "sort": {"field": "rank", "order": "ascending"},
+                        "title": None,
+                        "axis": {"labelLimit": 155},
+                    }
+                },
+                "layer": [
+                    {
+                        "mark": {
+                            "type": "bar",
+                            "cornerRadiusEnd": 5,
+                            "color": "#0E7490",
+                        },
+                        "encoding": {
+                            "x": {
+                                "field": "percent",
+                                "type": "quantitative",
+                                "title": "Estimated contribution (%)",
+                            },
+                            "tooltip": [
+                                {"field": "label", "title": "Cell type"},
+                                {
+                                    "field": "percent",
+                                    "title": "Estimate",
+                                    "format": ".1f",
+                                },
+                                {
+                                    "field": "lower_percent",
+                                    "title": "Bootstrap lower",
+                                    "format": ".1f",
+                                },
+                                {
+                                    "field": "upper_percent",
+                                    "title": "Bootstrap upper",
+                                    "format": ".1f",
+                                },
+                            ],
+                        },
+                    },
+                    {
+                        "mark": {
+                            "type": "text",
+                            "align": "left",
+                            "dx": 5,
+                            "fontWeight": 600,
+                            "color": "#E2E8F0",
+                        },
+                        "encoding": {
+                            "x": {
+                                "field": "percent",
+                                "type": "quantitative",
+                            },
+                            "text": {"field": "value_label"},
+                        },
+                    },
+                ],
+            },
+            use_container_width=True,
+        )
+    with right:
+        st.markdown("**Sample versus healthy plasma donors**")
+        if not range_rows:
+            st.info("No method-matched healthy reference table is registered.")
+        else:
+            st.vega_lite_chart(
+                range_rows,
+                spec={
+                    "height": {"step": 34},
+                    "encoding": {
+                        "y": {
+                            "field": "label",
+                            "type": "nominal",
+                            "sort": {
+                                "field": "sample_percent",
+                                "order": "descending",
+                            },
+                            "title": None,
+                            "axis": {"labelLimit": 155},
+                        },
+                        "x": {
+                            "type": "quantitative",
+                            "scale": {"zero": True},
+                            "title": "Estimated contribution (%)",
+                        },
+                    },
+                    "layer": [
+                        {
+                            "mark": {
+                                "type": "rule",
+                                "strokeWidth": 3,
+                                "color": "#94A3B8",
+                            },
+                            "encoding": {
+                                "x": {"field": "healthy_min_percent"},
+                                "x2": {"field": "healthy_max_percent"},
+                                "tooltip": [
+                                    {
+                                        "field": "healthy_min_percent",
+                                        "title": "Healthy minimum",
+                                        "format": ".1f",
+                                    },
+                                    {
+                                        "field": "healthy_max_percent",
+                                        "title": "Healthy maximum",
+                                        "format": ".1f",
+                                    },
+                                ],
+                            },
+                        },
+                        {
+                            "mark": {
+                                "type": "bar",
+                                "height": 11,
+                                "cornerRadius": 5,
+                                "color": "#67E8F9",
+                                "opacity": 0.9,
+                            },
+                            "encoding": {
+                                "x": {"field": "healthy_q1_percent"},
+                                "x2": {"field": "healthy_q3_percent"},
+                            },
+                        },
+                        {
+                            "mark": {
+                                "type": "tick",
+                                "thickness": 2,
+                                "size": 18,
+                                "color": "#164E63",
+                            },
+                            "encoding": {
+                                "x": {"field": "healthy_median_percent"}
+                            },
+                        },
+                        {
+                            "transform": [
+                                {"filter": "datum.uncertainty_available"}
+                            ],
+                            "mark": {
+                                "type": "rule",
+                                "strokeWidth": 2,
+                                "color": "#7C3AED",
+                            },
+                            "encoding": {
+                                "x": {"field": "sample_lower_percent"},
+                                "x2": {"field": "sample_upper_percent"},
+                            },
+                        },
+                        {
+                            "mark": {
+                                "type": "point",
+                                "filled": True,
+                                "size": 135,
+                                "stroke": "white",
+                                "strokeWidth": 1.5,
+                            },
+                            "encoding": {
+                                "x": {"field": "sample_percent"},
+                                "color": {
+                                    "field": "classification",
+                                    "type": "nominal",
+                                    "scale": {
+                                        "domain": ["within", "below", "above"],
+                                        "range": ["#0F766E", "#C2410C", "#C2410C"],
+                                    },
+                                    "legend": {"title": None, "orient": "top"},
+                                },
+                                "shape": {
+                                    "field": "classification",
+                                    "type": "nominal",
+                                    "scale": {
+                                        "domain": ["within", "below", "above"],
+                                        "range": ["circle", "triangle-left", "triangle-right"],
+                                    },
+                                    "legend": None,
+                                },
+                                "tooltip": [
+                                    {"field": "label", "title": "Cell type"},
+                                    {
+                                        "field": "sample_percent",
+                                        "title": "Sample",
+                                        "format": ".1f",
+                                    },
+                                    {
+                                        "field": "classification",
+                                        "title": "Range check",
+                                    },
+                                ],
+                            },
+                        },
+                    ],
+                },
+                use_container_width=True,
+            )
+
+    diagnostics = result.deconvolution.diagnostics
+    st.caption(
+        "Grey = observed min–max · cyan = IQR · tick = median · "
+        "dot = regenerated sample · purple whisker = bootstrap interval."
+    )
+    st.caption(
+        f"{len(bundle.charts.composition_rows)} cell types · "
+        f"residual L2 {diagnostics.residual_l2:.4g} · "
+        f"{result.provenance.classified_fragment_marker_count:,} classified "
+        f"fragment–marker observations · "
+        f"{_humanize(result.provenance.verification_level)}"
+    )
 
 
 def _source_heading(source: Source) -> str:
@@ -296,6 +687,8 @@ def run_app(
 
     _render_header(st)
     _render_case_scope(st, active_case)
+    _render_fragmentomics_evidence(st, active_case)
+    _render_cell_origin_evidence(st)
     st.divider()
     editor_is_committed = _render_claim_controls(st, state)
 
