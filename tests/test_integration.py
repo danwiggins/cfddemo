@@ -342,6 +342,13 @@ run_app(
     assert app.title[0].value == "Traceback"
     assert app.button[0].label == "Run check"
     assert not app.button[0].disabled
+    markdown_values = {item.value for item in app.markdown}
+    assert "**How the fragment-length algorithm works**" in markdown_values
+    assert "**Presentation source**" not in markdown_values
+    assert any(
+        item.value.startswith("Result 1 — My cfDNA is clean")
+        for item in app.subheader
+    )
 
     app.button[0].click().run()
     metrics = {(metric.label, metric.value) for metric in app.metric}
