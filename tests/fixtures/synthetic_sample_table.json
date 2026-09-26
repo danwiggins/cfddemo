@@ -1,0 +1,4 @@
+[
+  {"cell_type_id":"immune","parent_id":null,"is_leaf":true,"fraction":0.20},
+  {"cell_type_id":"vascular","parent_id":null,"is_leaf":true,"fraction":0.01}
+]

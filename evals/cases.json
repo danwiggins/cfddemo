@@ -1,0 +1,230 @@
+[
+  {
+    "id": "supported-length",
+    "claim_id": "claim.synthetic-length",
+    "claim_text": "The synthetic subset's modal query-sequence length is 167 bp.",
+    "expected_status": "supported",
+    "expected_tools": ["read_length_summary"],
+    "selection": {
+      "tool": "read_length_summary",
+      "reason": "The claim states a directly recomputable query-length measurement.",
+      "artifact_ids": ["artifact.synthetic-lengths.v1"],
+      "source_ids": []
+    },
+    "assessment": {
+      "status": "supported",
+      "summary": "The measured mode supports the scoped synthetic claim.",
+      "citations": [
+        {
+          "evidence_id": "result.synthetic-length-summary.v1",
+          "quote": null
+        }
+      ],
+      "numeric_assertions": [
+        {
+          "evidence_id": "result.synthetic-length-summary.v1",
+          "field": "mode_bp",
+          "value": 167,
+          "unit": "bp",
+          "definition": "lowest query-sequence length among tied highest counts",
+          "denominator": "accepted unique positive-length primary reads (n=8)",
+          "filters": [
+            "primary records only",
+            "first eligible record per read ID",
+            "positive query-sequence length"
+          ]
+        }
+      ],
+      "assumptions": [],
+      "missing_validation": [
+        "The synthetic partial collection is not biological or clinical validation."
+      ],
+      "revised_text": "The registered synthetic subset has the measured modal query-sequence length.",
+      "next_checks": []
+    }
+  },
+  {
+    "id": "false-mode",
+    "claim_id": "claim.synthetic-length",
+    "claim_text": "The synthetic subset's modal query-sequence length is 168 bp.",
+    "expected_status": "contradicted",
+    "expected_tools": ["read_length_summary"],
+    "selection": {
+      "tool": "read_length_summary",
+      "reason": "The claimed mode can be checked against the immutable length summary.",
+      "artifact_ids": ["artifact.synthetic-lengths.v1"],
+      "source_ids": []
+    },
+    "assessment": {
+      "status": "contradicted",
+      "summary": "The measured mode conflicts with the scoped synthetic claim.",
+      "citations": [
+        {
+          "evidence_id": "result.synthetic-length-summary.v1",
+          "quote": null
+        }
+      ],
+      "numeric_assertions": [
+        {
+          "evidence_id": "result.synthetic-length-summary.v1",
+          "field": "mode_bp",
+          "value": 167,
+          "unit": "bp",
+          "definition": "lowest query-sequence length among tied highest counts",
+          "denominator": "accepted unique positive-length primary reads (n=8)",
+          "filters": [
+            "primary records only",
+            "first eligible record per read ID",
+            "positive query-sequence length"
+          ]
+        }
+      ],
+      "assumptions": [],
+      "missing_validation": [
+        "The synthetic partial collection is not biological or clinical validation."
+      ],
+      "revised_text": "The registered synthetic subset has the measured modal query-sequence length.",
+      "next_checks": []
+    }
+  },
+  {
+    "id": "table-discrepancy",
+    "claim_id": "claim.synthetic-method-equivalence",
+    "claim_text": "All supplied synthetic cell fractions are within their supplied ranges.",
+    "expected_status": "contradicted",
+    "expected_tools": ["compare_reference_ranges"],
+    "selection": {
+      "tool": "compare_reference_ranges",
+      "reason": "The all-categories statement requires the complete validated synthetic table.",
+      "artifact_ids": [
+        "artifact.synthetic-sample-table.v1",
+        "artifact.synthetic-reference-table.v1"
+      ],
+      "source_ids": []
+    },
+    "assessment": {
+      "status": "contradicted",
+      "summary": "At least one supplied category falls outside its supplied observed range.",
+      "citations": [
+        {
+          "evidence_id": "result.synthetic-reference-comparison.v1",
+          "quote": null
+        }
+      ],
+      "numeric_assertions": [],
+      "assumptions": [
+        "The supplied synthetic transcription is treated as complete for this comparison."
+      ],
+      "missing_validation": [
+        "Observed cohort ranges are not clinical normal intervals."
+      ],
+      "revised_text": "The supplied synthetic categories do not all fall within their supplied observed ranges.",
+      "next_checks": []
+    }
+  },
+  {
+    "id": "method-drift",
+    "claim_id": "claim.synthetic-method-equivalence",
+    "claim_text": "The synthetic reproduction instruction uses the same length method as the synthetic current method.",
+    "expected_status": "contradicted",
+    "expected_tools": ["source_review"],
+    "selection": {
+      "tool": "source_review",
+      "reason": "The method-equivalence claim is resolved by comparing the two registered passages.",
+      "artifact_ids": [],
+      "source_ids": [
+        "source.synthetic-method-current",
+        "source.synthetic-method-instructions"
+      ]
+    },
+    "assessment": {
+      "status": "contradicted",
+      "summary": "The supplied passages describe different measurement methods.",
+      "citations": [
+        {
+          "evidence_id": "source.synthetic-method-current",
+          "quote": "Synthetic current method: calculate length from the aligned reference span without constant subtraction."
+        },
+        {
+          "evidence_id": "source.synthetic-method-instructions",
+          "quote": "Synthetic reproduction instruction: subtract a constant 45 bp from each query-sequence length."
+        }
+      ],
+      "numeric_assertions": [],
+      "assumptions": [],
+      "missing_validation": [
+        "Source review does not validate the underlying biology."
+      ],
+      "revised_text": "The reproduction instruction differs from the current aligned-span method.",
+      "next_checks": []
+    }
+  },
+  {
+    "id": "causal-hypothesis",
+    "claim_id": "claim.synthetic-causal",
+    "claim_text": "The synthetic cell-fraction difference is caused by disease.",
+    "expected_status": "hypothesis",
+    "expected_tools": ["source_review"],
+    "selection": {
+      "tool": "source_review",
+      "reason": "The supplied passages can establish what was asserted but cannot test causation.",
+      "artifact_ids": [],
+      "source_ids": [
+        "source.synthetic-causal",
+        "source.synthetic-table"
+      ]
+    },
+    "assessment": {
+      "status": "hypothesis",
+      "summary": "The causal explanation remains untested by the supplied observational evidence.",
+      "citations": [
+        {
+          "evidence_id": "source.synthetic-causal",
+          "quote": "Synthetic assertion: the observed cell-fraction difference is caused by disease."
+        },
+        {
+          "evidence_id": "source.synthetic-table",
+          "quote": "Synthetic cell-fraction table for contract tests."
+        }
+      ],
+      "numeric_assertions": [],
+      "assumptions": [
+        "The supplied observations are descriptive."
+      ],
+      "missing_validation": [
+        "A direct causal experiment or validated causal design is unavailable."
+      ],
+      "revised_text": "Disease causation is an untested hypothesis for the observed synthetic difference.",
+      "next_checks": []
+    }
+  },
+  {
+    "id": "raw-aligned-noncomparability",
+    "claim_id": "claim.synthetic-length",
+    "claim_text": "The raw query-length prefix disproves an aligned-span result and establishes disease absence.",
+    "expected_status": "insufficient_evidence",
+    "expected_tools": ["source_review", "insufficient_inputs"],
+    "selection": {
+      "tool": "insufficient_inputs",
+      "reason": "Raw query length cannot reproduce aligned span or establish a diagnostic conclusion.",
+      "artifact_ids": [],
+      "source_ids": []
+    },
+    "assessment": {
+      "status": "insufficient_evidence",
+      "summary": "The available descriptive raw-length evidence cannot establish either asserted conclusion.",
+      "citations": [],
+      "numeric_assertions": [],
+      "assumptions": [
+        "Raw query length and aligned reference span are distinct measurements."
+      ],
+      "missing_validation": [
+        "Comparable alignment processing and diagnostic validation are unavailable."
+      ],
+      "revised_text": "The raw query-length prefix is descriptive and does not resolve the aligned-span or diagnostic claims.",
+      "next_checks": [
+        "Use a comparable validated alignment workflow for aligned-span assessment."
+      ]
+    }
+  }
+]

@@ -1,6 +1,6 @@
-# Runtime dependency: AWS SDK for Python (Amazon Bedrock Runtime).
-boto3>=1.40.0
-
-# Test dependency. Kept here so `pip install -r requirements.txt` gives
-# workshop participants a ready-to-run test suite in a single step.
-pytest>=8.0.0
+# Keep this fallback installer aligned with pyproject.toml.
+boto3==1.40.0
+pydantic==2.11.7
+pysam==0.23.3
+streamlit==1.48.0
+pytest==8.4.1

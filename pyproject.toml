@@ -1,11 +1,21 @@
 [project]
-name = "bedrock-chat"
+name = "traceback-evidence-inspector"
 version = "0.1.0"
-description = "Sample terminal chat app that talks to GPT models on Amazon Bedrock."
-requires-python = ">=3.9"
-dependencies = ["boto3>=1.40.0"]
+description = "Local-first cfDNA evidence inspection prototype with Amazon Bedrock review."
+readme = "README.md"
+requires-python = ">=3.11,<3.12"
+dependencies = [
+    "boto3==1.40.0",
+    "pydantic==2.11.7",
+    "pysam==0.23.3",
+    "streamlit==1.48.0",
+]
+
+[dependency-groups]
+dev = [
+    "pytest==8.4.1",
+]
 
 [tool.pytest.ini_options]
-# Make the `bedrock_chat` package importable when running `pytest` from this folder.
 pythonpath = ["."]
 testpaths = ["tests"]

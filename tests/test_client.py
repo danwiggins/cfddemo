@@ -122,3 +122,15 @@ def test_send_omits_temperature_by_default():
     client.send("hi")
 
     assert "temperature" not in fake.calls[0]["body"]
+
+
+def test_failed_send_does_not_append_assistant_history():
+    def failing_transport(_url, _headers, _body):
+        raise RuntimeError("offline")
+
+    client = BedrockChatClient(settings=Settings(), transport=failing_transport)
+
+    with pytest.raises(RuntimeError, match="offline"):
+        client.send("ping")
+
+    assert client.history == [{"role": "user", "content": "ping"}]

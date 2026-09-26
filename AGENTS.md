@@ -1,42 +1,42 @@
-# AGENTS.md — bedrock-chat
+# AGENTS.md — Traceback
 
 Guidance for Codex (and other coding agents) working in this project.
 
 ## What this project is
 
-A minimal terminal chat app that talks to GPT models on **Amazon Bedrock**
-using Bedrock's OpenAI-compatible **responses** endpoint
-(`bedrock-mantle.<region>.api.aws/openai/v1/responses`) with SigV4 auth. This
-is the same surface Codex uses — the GPT-5.x models are not served by the
-Converse API. It is the sample project for
-Part 2 of the OpenAI on AWS workshop.
+Traceback is a local-first Streamlit prototype for auditing scientific claims
+against bounded deterministic evidence and cited source passages. It uses
+Amazon Bedrock's OpenAI-compatible responses endpoint with SigV4 auth. The
+original terminal chat remains available as a transport example.
 
 ## Layout
 
-- `bedrock_chat/config.py` — environment-driven `Settings` (model, region, inference params). No AWS calls.
-- `bedrock_chat/client.py` — `BedrockChatClient` (conversation history + SigV4-signed responses-API call) and pure helpers `build_message` / `extract_text`. The HTTP transport is injectable for offline tests.
-- `bedrock_chat/__main__.py` — interactive REPL: `python -m bedrock_chat`.
-- `tests/` — pytest suite. Fully offline: the client accepts an injected fake, helpers are pure.
+- `app.py` — Streamlit interface and evidence display.
+- `evidence_inspector/` — strict contracts, BAM preparation, deterministic
+  checks, case loading, review orchestration, and UI state.
+- `bedrock_chat/responses.py` — stateless deadline-aware Bedrock adapter.
+- `bedrock_chat/` — preserved terminal chat and shared transport helpers.
+- `scripts/prepare_local_case.py` — bounded local BAM preparation.
+- `evals/` — synthetic six-case semantic evaluation harness.
+- `tests/` — fully offline pytest suite.
 
 ## Run it
 
 ```bash
-python3 -m venv .venv
-source .venv/bin/activate
-pip install -r requirements.txt
-
-# Talk to Bedrock (needs AWS credentials + model access):
-python -m bedrock_chat
+uv sync
+uv run pytest
+uv run streamlit run app.py
 ```
 
 Config comes from the environment: `BEDROCK_MODEL_ID`, `BEDROCK_REGION`
 (falls back to `AWS_REGION` / `AWS_DEFAULT_REGION`), `BEDROCK_MAX_TOKENS`,
-`BEDROCK_TEMPERATURE`.
+`BEDROCK_TEMPERATURE`, and optional `TRACEBACK_CASE_PATH`.
 
 ## Test
 
 ```bash
-pytest
+uv run pytest
+uv run python -m evals.harness
 ```
 
 Tests must never require live AWS access — keep new tests offline by injecting a
@@ -44,7 +44,13 @@ fake client or exercising pure helpers.
 
 ## Conventions for changes
 
-- Keep AWS-touching code isolated in `client.py`; keep helpers pure and tested.
+- Never commit `data/local/`, BAMs, supplied documents, credentials, read IDs,
+  absolute local paths, or live evaluation results.
+- Keep raw sequence and identifiers out of model prompts; send only curated
+  excerpts and aggregate evidence.
+- Preserve explicit metric definitions, denominators, filters, units, sample
+  linkage, trimming state, and partial-collection limits.
+- Keep AWS-touching code isolated in `bedrock_chat/`; keep helpers pure and tested.
 - `boto3` is imported lazily so the test suite runs without AWS setup — preserve that.
 - Add a test with every behavior change; run `pytest` before finishing.
 - Match the existing style: type hints, module docstrings, small focused functions.

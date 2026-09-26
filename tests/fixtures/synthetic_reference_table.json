@@ -1,0 +1,4 @@
+[
+  {"cell_type_id":"immune","min_fraction":0.10,"max_fraction":0.30,"cohort_id":"synthetic-cohort","source_id":"source.synthetic-table","assay":"synthetic assay"},
+  {"cell_type_id":"vascular","min_fraction":0.02,"max_fraction":0.08,"cohort_id":"synthetic-cohort","source_id":"source.synthetic-table","assay":"synthetic assay"}
+]

@@ -1,5 +1,46 @@
+# Python and tooling
 .venv/
 __pycache__/
-*.pyc
+*.py[cod]
 .pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage
+htmlcov/
 *.egg-info/
+dist/
+build/
+
+# Secrets and local configuration
+.env
+.env*
+.streamlit/secrets.toml
+*.pem
+*.key
+
+# Private/local inputs and generated evaluation records
+/data/local/
+/data/private/
+/inputs/
+/private/
+/evals/results/
+
+# Sequence data and indexes must never be committed
+*.bam
+*.bai
+*.cram
+*.crai
+*.sam
+*.fastq
+*.fastq.gz
+*.fq
+*.fq.gz
+*.fasta
+*.fasta.gz
+*.fa
+*.fa.gz
+
+# Supplied reports/presentations are private inputs, not repository assets
+*.docx
+*.pdf
+*.pptx

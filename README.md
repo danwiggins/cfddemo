@@ -1,51 +1,68 @@
-# bedrock-chat
+# Traceback
 
-A minimal terminal chat app that talks to GPT models on **Amazon Bedrock**
-(via Bedrock's OpenAI-compatible responses API). This is the sample project used throughout
-**Part 2** of the OpenAI on AWS workshop.
+Traceback is a local-first cfDNA evidence-inspection prototype. It connects a
+source-backed claim to a bounded deterministic check, measured evidence, and a
+cited AI assessment. The Streamlit application is under construction.
 
-## Prerequisites
-
-- Python 3.9+
-- An AWS account with Amazon Bedrock access and the `openai.gpt-5.4` or
-  `openai.gpt-5.5` model enabled in your target Region
-- AWS credentials available to the AWS SDK (env vars, `aws configure`, SSO, or a named profile)
+The existing `bedrock_chat` terminal client remains available as the Bedrock
+responses-API transport example.
 
 ## Setup
 
-```bash
-python3 -m venv .venv
-source .venv/bin/activate        # Windows: .venv\Scripts\activate
-pip install -r requirements.txt
-```
-
-## Run
+Requires Python 3.11 and
+[uv](https://docs.astral.sh/uv/).
 
 ```bash
-python -m bedrock_chat
+uv sync
+uv run pytest
 ```
 
-Then type messages at the `you>` prompt. Type `exit` or `quit` to leave.
-
-### Configuration (environment variables)
-
-| Variable | Default | Purpose |
-|---|---|---|
-| `BEDROCK_MODEL_ID` | `openai.gpt-5.5` | Bedrock model id |
-| `BEDROCK_REGION` | `us-east-2` | Region (falls back to `AWS_REGION` / `AWS_DEFAULT_REGION`) |
-| `BEDROCK_MAX_TOKENS` | `1024` | Max response tokens |
-| `BEDROCK_TEMPERATURE` | _(unset)_ | Sampling temperature. Omitted by default — GPT-5.x reasoning models reject it; set only for models that support it. |
-
-## Test
+Run the app:
 
 ```bash
-pytest
+uv run streamlit run app.py
 ```
 
-The test suite runs fully offline — no AWS credentials required.
+The existing terminal chat can still be run with:
 
-## Codex + Bedrock
+```bash
+uv run python -m bedrock_chat
+```
 
-To drive this project with the Codex CLI/App pointed at Bedrock, see
-[`codex-config.example.toml`](./codex-config.example.toml) for a starting
-`~/.codex/config.toml`, and [`AGENTS.md`](./AGENTS.md) for agent guidance.
+## Evaluation
+
+Run the six synthetic semantic cases offline:
+
+```bash
+uv run python -m evals.harness
+```
+
+After model and Region access are verified, run the same cases live with
+`uv run python -m evals.harness --live`. Metadata-only live results are written
+under ignored `evals/results/`; never commit live evaluation records.
+
+## Bedrock configuration
+
+AWS credentials use the standard SDK credential chain. Runtime settings are
+environment-driven:
+
+| Variable | Default |
+|---|---|
+| `BEDROCK_MODEL_ID` | `openai.gpt-5.5` |
+| `BEDROCK_REGION` | `us-east-2` |
+| `BEDROCK_MAX_TOKENS` | `1024` |
+| `BEDROCK_TEMPERATURE` | unset |
+
+Model and Region access must be verified locally before a live evaluation.
+
+## Privacy boundary
+
+Place BAMs, supplied reports, curated private excerpts, manifests containing
+local paths, and generated evaluation records under `data/local/` or another
+ignored private-input directory. Never commit `.env*`, sequence files, source
+documents, credentials, read IDs, absolute local paths, or patient/sample
+identifiers. Only synthetic fixtures and de-identified evaluation definitions
+belong in Git.
+
+Tests must remain offline. Raw reads stay local; model requests may contain only
+bounded curated excerpts and aggregate check results.
