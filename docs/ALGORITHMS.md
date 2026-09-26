@@ -47,7 +47,23 @@ The comparison chart uses the observed 23-donor healthy-plasma distribution
 from the registered Loyfer reference: min–max, IQR, median, sample estimate, and
 bootstrap interval.
 
-## 3. Bounded AI evidence review
+## 3. Experimental chromosome dosage
+
+```text
+aligned BAM
+  → primary mapped non-duplicate reads with MAPQ ≥20
+  → read-start counts in complete 5 Mb autosomal bins
+  → remove bins below 55% of each chromosome median
+  → compare chromosome medians with the genome-wide median
+  → flag only shifts beyond ±0.20 log₂
+```
+
+This is a conservative whole-chromosome screen. It is not ichorCNA: there is no
+panel of normals, segmentation model, or tumor-fraction inference. It cannot
+resolve focal or subclonal events. The threshold is a visualization boundary,
+not a validated clinical cutoff.
+
+## 4. Bounded AI evidence review
 
 The model does not calculate fragment or methylation results. It receives:
 
@@ -69,6 +85,8 @@ bindings.
 - One research sample does not establish diagnostic performance.
 - The fragment bundle is a registered subset with unverified sample linkage.
 - Cell-origin estimates depend on marker coverage and atlas assumptions.
+- The dosage screen uses sample-internal normalization and tests only broad
+  whole-chromosome shifts.
 - Shallow whole-genome sequencing may miss low tumor fractions.
 - The report contains a known reproduction mismatch between its updated
   fragment method and older fixed-subtraction instructions.

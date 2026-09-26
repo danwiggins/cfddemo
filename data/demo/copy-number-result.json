@@ -1,0 +1,276 @@
+{
+  "chromosomes": [
+    {
+      "chromosome": "chr1",
+      "classification": "within_threshold",
+      "estimated_copy_number": 2.0451923076923078,
+      "full_bin_count": 49,
+      "log2_ratio": 0.03223650493221784,
+      "median_retained_bin_count": 6381.0,
+      "ordinal": 1,
+      "read_count": 278337,
+      "retained_bin_count": 43
+    },
+    {
+      "chromosome": "chr2",
+      "classification": "within_threshold",
+      "estimated_copy_number": 2.0221153846153848,
+      "full_bin_count": 48,
+      "log2_ratio": 0.015865321703324945,
+      "median_retained_bin_count": 6309.0,
+      "ordinal": 2,
+      "read_count": 296130,
+      "retained_bin_count": 47
+    },
+    {
+      "chromosome": "chr3",
+      "classification": "within_threshold",
+      "estimated_copy_number": 2.0330128205128206,
+      "full_bin_count": 39,
+      "log2_ratio": 0.02361931308325934,
+      "median_retained_bin_count": 6343.0,
+      "ordinal": 3,
+      "read_count": 245886,
+      "retained_bin_count": 39
+    },
+    {
+      "chromosome": "chr4",
+      "classification": "within_threshold",
+      "estimated_copy_number": 1.9423076923076923,
+      "full_bin_count": 38,
+      "log2_ratio": -0.04222823538929744,
+      "median_retained_bin_count": 6060.0,
+      "ordinal": 4,
+      "read_count": 227727,
+      "retained_bin_count": 38
+    },
+    {
+      "chromosome": "chr5",
+      "classification": "within_threshold",
+      "estimated_copy_number": 1.9705128205128206,
+      "full_bin_count": 36,
+      "log2_ratio": -0.021428864058839314,
+      "median_retained_bin_count": 6148.0,
+      "ordinal": 5,
+      "read_count": 215512,
+      "retained_bin_count": 35
+    },
+    {
+      "chromosome": "chr6",
+      "classification": "within_threshold",
+      "estimated_copy_number": 1.998397435897436,
+      "full_bin_count": 34,
+      "log2_ratio": -0.0011564690325782782,
+      "median_retained_bin_count": 6235.0,
+      "ordinal": 6,
+      "read_count": 209010,
+      "retained_bin_count": 34
+    },
+    {
+      "chromosome": "chr7",
+      "classification": "within_threshold",
+      "estimated_copy_number": 1.9496794871794871,
+      "full_bin_count": 31,
+      "log2_ratio": -0.03676302487760643,
+      "median_retained_bin_count": 6083.0,
+      "ordinal": 7,
+      "read_count": 182106,
+      "retained_bin_count": 29
+    },
+    {
+      "chromosome": "chr8",
+      "classification": "within_threshold",
+      "estimated_copy_number": 1.9711538461538463,
+      "full_bin_count": 29,
+      "log2_ratio": -0.020959618635646046,
+      "median_retained_bin_count": 6150.0,
+      "ordinal": 8,
+      "read_count": 177248,
+      "retained_bin_count": 29
+    },
+    {
+      "chromosome": "chr9",
+      "classification": "within_threshold",
+      "estimated_copy_number": 2.023397435897436,
+      "full_bin_count": 27,
+      "log2_ratio": 0.016779722013377615,
+      "median_retained_bin_count": 6313.0,
+      "ordinal": 9,
+      "read_count": 137075,
+      "retained_bin_count": 21
+    },
+    {
+      "chromosome": "chr10",
+      "classification": "within_threshold",
+      "estimated_copy_number": 2.0517628205128204,
+      "full_bin_count": 26,
+      "log2_ratio": 0.036863968056709835,
+      "median_retained_bin_count": 6401.5,
+      "ordinal": 10,
+      "read_count": 162129,
+      "retained_bin_count": 26
+    },
+    {
+      "chromosome": "chr11",
+      "classification": "within_threshold",
+      "estimated_copy_number": 1.9979166666666666,
+      "full_bin_count": 27,
+      "log2_ratio": -0.001503590590387781,
+      "median_retained_bin_count": 6233.5,
+      "ordinal": 11,
+      "read_count": 165321,
+      "retained_bin_count": 26
+    },
+    {
+      "chromosome": "chr12",
+      "classification": "within_threshold",
+      "estimated_copy_number": 1.982371794871795,
+      "full_bin_count": 26,
+      "log2_ratio": -0.012772433885878579,
+      "median_retained_bin_count": 6185.0,
+      "ordinal": 12,
+      "read_count": 158829,
+      "retained_bin_count": 25
+    },
+    {
+      "chromosome": "chr13",
+      "classification": "within_threshold",
+      "estimated_copy_number": 1.9618589743589743,
+      "full_bin_count": 22,
+      "log2_ratio": -0.02777866094304679,
+      "median_retained_bin_count": 6121.0,
+      "ordinal": 13,
+      "read_count": 112585,
+      "retained_bin_count": 18
+    },
+    {
+      "chromosome": "chr14",
+      "classification": "within_threshold",
+      "estimated_copy_number": 2.0397435897435896,
+      "full_bin_count": 21,
+      "log2_ratio": 0.02838780658143693,
+      "median_retained_bin_count": 6364.0,
+      "ordinal": 14,
+      "read_count": 107708,
+      "retained_bin_count": 17
+    },
+    {
+      "chromosome": "chr15",
+      "classification": "within_threshold",
+      "estimated_copy_number": 2.073557692307692,
+      "full_bin_count": 20,
+      "log2_ratio": 0.05210818770604587,
+      "median_retained_bin_count": 6469.5,
+      "ordinal": 15,
+      "read_count": 99833,
+      "retained_bin_count": 16
+    },
+    {
+      "chromosome": "chr16",
+      "classification": "within_threshold",
+      "estimated_copy_number": 2.001923076923077,
+      "full_bin_count": 18,
+      "log2_ratio": 0.0013865402709625759,
+      "median_retained_bin_count": 6246.0,
+      "ordinal": 16,
+      "read_count": 98975,
+      "retained_bin_count": 16
+    },
+    {
+      "chromosome": "chr17",
+      "classification": "within_threshold",
+      "estimated_copy_number": 2.0009615384615387,
+      "full_bin_count": 16,
+      "log2_ratio": 0.0006934367068803337,
+      "median_retained_bin_count": 6243.0,
+      "ordinal": 17,
+      "read_count": 94525,
+      "retained_bin_count": 15
+    },
+    {
+      "chromosome": "chr18",
+      "classification": "within_threshold",
+      "estimated_copy_number": 2.012179487179487,
+      "full_bin_count": 16,
+      "log2_ratio": 0.008758999832504447,
+      "median_retained_bin_count": 6278.0,
+      "ordinal": 18,
+      "read_count": 93805,
+      "retained_bin_count": 15
+    },
+    {
+      "chromosome": "chr19",
+      "classification": "within_threshold",
+      "estimated_copy_number": 1.8125,
+      "full_bin_count": 11,
+      "log2_ratio": -0.14201900487242788,
+      "median_retained_bin_count": 5655.0,
+      "ordinal": 19,
+      "read_count": 59837,
+      "retained_bin_count": 11
+    },
+    {
+      "chromosome": "chr20",
+      "classification": "within_threshold",
+      "estimated_copy_number": 2.087660256410256,
+      "full_bin_count": 12,
+      "log2_ratio": 0.06188694836714477,
+      "median_retained_bin_count": 6513.5,
+      "ordinal": 20,
+      "read_count": 75304,
+      "retained_bin_count": 12
+    },
+    {
+      "chromosome": "chr21",
+      "classification": "within_threshold",
+      "estimated_copy_number": 1.9288461538461539,
+      "full_bin_count": 9,
+      "log2_ratio": -0.052261922416273816,
+      "median_retained_bin_count": 6018.0,
+      "ordinal": 21,
+      "read_count": 44946,
+      "retained_bin_count": 8
+    },
+    {
+      "chromosome": "chr22",
+      "classification": "within_threshold",
+      "estimated_copy_number": 2.1009615384615383,
+      "full_bin_count": 10,
+      "log2_ratio": 0.07104975135950611,
+      "median_retained_bin_count": 6555.0,
+      "ordinal": 22,
+      "read_count": 45638,
+      "retained_bin_count": 7
+    }
+  ],
+  "flagged_chromosome_count": 0,
+  "genome_log2_mad": 0.06115931148226041,
+  "genome_median_bin_count": 6240.0,
+  "limitations": [
+    "Experimental broad whole-chromosome screen; not ichorCNA.",
+    "No panel of normals, segmentation model, or tumor-fraction estimate.",
+    "Sample-internal normalization cannot establish focal or subclonal events.",
+    "Sex chromosomes and partial terminal bins are excluded.",
+    "The fixed threshold is a conservative visualization boundary, not a validated clinical cutoff."
+  ],
+  "provenance": {
+    "accepted_read_count": 3288466,
+    "event_threshold_log2": 0.2,
+    "filters": [
+      "autosomes chr1 through chr22",
+      "primary alignments only",
+      "mapped, QC-pass, non-duplicate reads",
+      "mapping quality at least 20",
+      "read start assigned to one 5 Mb full-length bin",
+      "bins below 55% of their chromosome median excluded"
+    ],
+    "input_artifact_sha256": "ff6cba23e84ec8afec982b97703f2c8990d28f555ec51ab6f37a99014a1d6f0b",
+    "low_bin_retention_fraction": 0.55,
+    "method": "sample_internal_chromosome_median",
+    "minimum_mapping_quality": 20,
+    "schema_version": "copy-number-screen.v1",
+    "verification_level": "recomputed",
+    "window_size_bp": 5000000
+  },
+  "schema_version": "copy-number-screen.v1"
+}

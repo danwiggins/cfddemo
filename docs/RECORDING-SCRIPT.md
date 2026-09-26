@@ -6,8 +6,8 @@ Use the live site at <https://cfddemo-production.up.railway.app>. Record at
 ## 0:00–0:12 — The premise
 
 > This is Traceback. We took one real tube of blood, sequenced its cell-free DNA
-> on a MinION, and computed two independent signals: fragment length and
-> methylation-based cell origin.
+> on a MinION, and computed three independent signals: fragment length,
+> methylation-based cell origin, and broad chromosome dosage.
 
 Keep the hero and **Real / Recorded / Not built** strip visible.
 
@@ -34,9 +34,14 @@ Click **Explore the results** or scroll to the fragment chart.
 > classifies fragments, and uses non-negative least squares to estimate cell
 > origin.
 
+Scroll to the chromosome-dosage chart.
+
+> The third readout counts high-confidence reads in fixed genome bins. No
+> chromosome crosses the conservative broad-event threshold. This is an
+> experimental screen, not ichorCNA or tumor-fraction inference.
+
 ## 1:02–1:15 — Close
 
-> This is a research feasibility demo, not a diagnostic. Copy number is not
-> built. The point is that every conclusion remains attached to its algorithm,
-> source, denominator, and limitations.
-
+> This is a research feasibility demo, not a diagnostic. The point is that every
+> conclusion remains attached to its algorithm, source, denominator, and
+> limitations.

@@ -326,6 +326,7 @@ def test_public_demo_bundles_exclude_paths_and_raw_identifiers() -> None:
     for relative_path in (
         "data/demo/case.json",
         "data/demo/cell-origin-result.json",
+        "data/demo/copy-number-result.json",
     ):
         encoded = (ROOT / relative_path).read_text(encoding="utf-8")
         assert "/Users/" not in encoded
@@ -356,10 +357,14 @@ run_app(
     assert not app.button[0].disabled
     markdown_values = {item.value for item in app.markdown}
     assert any(
-        "One blood draw. Two computed cfDNA signals." in value
+        "One blood draw. Three computed cfDNA signals." in value
         for value in markdown_values
     )
-    assert any("Not built in this demo" in value for value in markdown_values)
+    assert any("Experimental · Readout 3" in value for value in markdown_values)
+    assert any(
+        item.value.startswith("Result 3 — No broad copy-number")
+        for item in app.subheader
+    )
     assert "**How the fragment-length algorithm works**" in markdown_values
     assert "**Presentation source**" not in markdown_values
     assert any(

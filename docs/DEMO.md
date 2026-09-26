@@ -2,21 +2,24 @@
 
 ## The one-line story
 
-Traceback computes two cfDNA signals from one real MinION run, then checks
+Traceback computes three cfDNA signals from one real MinION run, then checks
 whether the report's claims match both the measurements and the written method.
 
 ## Walkthrough
 
-1. **Start with the scope.** One consenting research sample; fragment length
-   and methylation cell origin are built. Copy number is not.
+1. **Start with the scope.** One consenting research sample; fragment length,
+   methylation cell origin, and an experimental whole-chromosome dosage screen
+   are built.
 2. **Show fragmentomics.** The chart is regenerated from accepted BAM records.
    Point to the explicit denominator, raw mode, median, and reads above 1 kb.
 3. **Show cell origin.** Explain the sequence: methylation extraction, Loyfer
    marker overlap, fragment UXM classification, then NNLS mixture fitting.
-4. **Run the evidence review.** Click **Show the mismatch**. The reviewer cites
+4. **Show chromosome dosage.** High-confidence read starts are counted in 5 Mb
+   bins. All autosomes remain inside the conservative broad-event threshold.
+5. **Run the evidence review.** Click **Show the mismatch**. The reviewer cites
    both passages and flags the mismatch:
    aligned reference span is not the same method as subtracting a fixed 45 bp.
-5. **Close on the distinction.** Code computes the biology; AI audits the
+6. **Close on the distinction.** Code computes the biology; AI audits the
    interpretation. Neither is allowed to silently change the measurement.
 
 ## What is real
@@ -38,7 +41,8 @@ same bounded review live.
 
 ## What is not built
 
-- Copy-number analysis
+- ichorCNA segmentation or tumor-fraction inference
+- focal or subclonal copy-number calling
 - Clinical classification or diagnosis
 - Prospective validation, sensitivity, or specificity claims
 - A consumer workflow

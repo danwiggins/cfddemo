@@ -2,14 +2,18 @@
 
 from __future__ import annotations
 
+import os
 from collections.abc import Iterable
 from importlib import import_module
-import os
 from pathlib import Path
 from typing import Any
 
 from evidence_inspector.case_bundle import CaseBundleLoadError, load_default_case
 from evidence_inspector.cell_origin_pipeline import CellOriginResultBundle
+from evidence_inspector.copy_number import (
+    EVENT_THRESHOLD_LOG2,
+    CopyNumberResultBundle,
+)
 from evidence_inspector.fragmentomics import chart_rows
 from evidence_inspector.models import (
     AuditError,
@@ -37,6 +41,10 @@ SESSION_KEY = "traceback_ui_state"
 CELL_ORIGIN_RESULTS = (
     Path("data/local/cell-origin/result.json"),
     Path("data/demo/cell-origin-result.json"),
+)
+COPY_NUMBER_RESULTS = (
+    Path("data/local/copy-number/result.json"),
+    Path("data/demo/copy-number-result.json"),
 )
 
 
@@ -426,11 +434,11 @@ def _render_header(st: Any) -> None:
 <section class="traceback-hero">
   <p class="traceback-eyebrow">Healthcare AI Hackathon · Research demo</p>
   <h1>Traceback</h1>
-  <h2>One blood draw. Two computed cfDNA signals. Every claim traceable.</h2>
+  <h2>One blood draw. Three computed cfDNA signals. Every claim traceable.</h2>
   <p class="hero-copy">
-    A local-first pipeline that turns Oxford Nanopore reads into fragment-length
-    and methylation cell-origin evidence, then uses AI to test the interpretation
-    against the measured result and its source.
+    A local-first pipeline that turns Oxford Nanopore reads into fragment-length,
+    methylation cell-origin, and chromosome-dosage evidence, then uses AI to test
+    the interpretation against the measured result and its source.
   </p>
   <div class="hero-tags">
     <span class="hero-tag">Real MinION data</span>
@@ -462,7 +470,7 @@ def _render_truth_strip(st: Any, *, replay_mode: bool) -> None:
 <div class="truth-strip">
   <div class="real">
     <strong>Real</strong>
-    <span>One MinION run and two computed bioinformatics readouts</span>
+    <span>One MinION run and three computed bioinformatics readouts</span>
   </div>
   <div class="recorded">
     <strong>{"Recorded" if replay_mode else "Live"}</strong>
@@ -470,7 +478,7 @@ def _render_truth_strip(st: Any, *, replay_mode: bool) -> None:
   </div>
   <div class="unbuilt">
     <strong>Not built</strong>
-    <span>Copy-number analysis and clinical diagnosis</span>
+    <span>Validated tumor-fraction calling or clinical diagnosis</span>
   </div>
 </div>
 """,
@@ -489,7 +497,7 @@ def _render_signal_overview(st: Any) -> None:
     st.write(
         "Cell-free DNA is a mixture of short fragments released by tissues across "
         "the body. A single methylation-aware sequencing run can expose three "
-        "different signals. This demo computes the first two."
+        "different signals. This demo computes all three at research-screening scope."
     )
     length, methylation, copy_number = st.columns(3)
     with length:
@@ -517,10 +525,10 @@ def _render_signal_overview(st: Any) -> None:
     with copy_number:
         st.markdown(
             """
-<div class="story-card pending">
-  <div class="card-label">Not built in this demo</div>
-  <strong>Copy number</strong>
-  <p>Tumors can gain or lose chromosome arms. This readout remains future work, not a demonstrated result.</p>
+<div class="story-card active">
+  <div class="card-label">Experimental · Readout 3</div>
+  <strong>Chromosome dosage</strong>
+  <p>A conservative whole-chromosome screen tests for broad gains or losses. It is not a tumor-fraction caller.</p>
 </div>
 """,
             unsafe_allow_html=True,
@@ -1150,6 +1158,179 @@ def _render_cell_origin_evidence(st: Any) -> None:
     )
 
 
+def _render_copy_number_evidence(st: Any) -> None:
+    """Render the isolated experimental whole-chromosome dosage screen."""
+
+    result_path = next(
+        (path for path in COPY_NUMBER_RESULTS if path.is_file()),
+        None,
+    )
+    if result_path is None:
+        return
+    try:
+        bundle = CopyNumberResultBundle.model_validate_json(
+            result_path.read_text(encoding="utf-8")
+        )
+    except (OSError, ValueError):
+        st.error("The registered copy-number screen failed strict validation.")
+        return
+
+    rows = [
+        {
+            **row.model_dump(mode="json"),
+            "label": row.chromosome.removeprefix("chr"),
+        }
+        for row in bundle.chromosomes
+    ]
+    largest = max(bundle.chromosomes, key=lambda row: abs(row.log2_ratio))
+
+    st.markdown(
+        '<span id="readout-3"></span><p class="section-kicker">Readout 3 · Chromosome dosage</p>',
+        unsafe_allow_html=True,
+    )
+    st.subheader("Result 3 — No broad copy-number cancer signal detected")
+    st.caption(
+        "Primary read starts → 5 Mb autosomal bins → low-coverage bin exclusion "
+        "→ sample-internal chromosome medians. Experimental research screen only."
+    )
+    accepted, bins, spread, events = st.columns(4)
+    accepted.metric(
+        "Accepted reads",
+        f"{bundle.provenance.accepted_read_count:,}",
+    )
+    bins.metric("Window size", "5 Mb")
+    spread.metric("Genome log₂ MAD", f"{bundle.genome_log2_mad:.3f}")
+    events.metric("Broad events", str(bundle.flagged_chromosome_count))
+
+    explanation, chart = st.columns((0.72, 1.28))
+    with explanation:
+        st.markdown("**How the chromosome-dosage algorithm works**")
+        st.markdown(
+            """
+1. **Keep high-confidence reads**: primary, mapped, QC-pass, non-duplicate, MAPQ ≥20.
+2. **Count read starts** in complete 5 Mb bins across chromosomes 1–22.
+3. **Remove obvious coverage gaps** below 55% of each chromosome's median.
+4. **Compare chromosome medians** with the genome-wide median and flag only shifts beyond ±0.20 log₂.
+"""
+        )
+        st.markdown(
+            """
+<div class="interpretation-card">
+  <strong>Why the scope is narrow</strong>
+  <p>This can reveal broad whole-chromosome dosage shifts. It does not perform segmentation, infer tumor fraction, or resolve focal and subclonal events.</p>
+</div>
+""",
+            unsafe_allow_html=True,
+        )
+    with chart:
+        st.markdown("**Autosomal dosage profile**")
+        st.vega_lite_chart(
+            rows,
+            spec={
+                "layer": [
+                    {
+                        "mark": {"type": "rule", "color": "#6B6B7B"},
+                        "encoding": {"y": {"datum": 0}},
+                    },
+                    {
+                        "mark": {
+                            "type": "rule",
+                            "color": "#B3262E",
+                            "strokeDash": [5, 4],
+                        },
+                        "encoding": {"y": {"datum": EVENT_THRESHOLD_LOG2}},
+                    },
+                    {
+                        "mark": {
+                            "type": "rule",
+                            "color": "#B3262E",
+                            "strokeDash": [5, 4],
+                        },
+                        "encoding": {"y": {"datum": -EVENT_THRESHOLD_LOG2}},
+                    },
+                    {
+                        "mark": {
+                            "type": "bar",
+                            "cornerRadiusTopLeft": 3,
+                            "cornerRadiusTopRight": 3,
+                        },
+                        "encoding": {
+                            "x": {
+                                "field": "label",
+                                "type": "ordinal",
+                                "sort": [str(index) for index in range(1, 23)],
+                                "title": "Chromosome",
+                            },
+                            "y": {
+                                "field": "log2_ratio",
+                                "type": "quantitative",
+                                "title": "Chromosome median log₂ ratio",
+                                "scale": {"domain": [-0.25, 0.25]},
+                            },
+                            "color": {
+                                "condition": {
+                                    "test": "datum.classification !== 'within_threshold'",
+                                    "value": "#B3262E",
+                                },
+                                "value": "#1B7F79",
+                            },
+                            "tooltip": [
+                                {"field": "chromosome", "title": "Chromosome"},
+                                {
+                                    "field": "log2_ratio",
+                                    "title": "log₂ ratio",
+                                    "format": "+.3f",
+                                },
+                                {
+                                    "field": "estimated_copy_number",
+                                    "title": "Illustrative copies",
+                                    "format": ".2f",
+                                },
+                                {
+                                    "field": "retained_bin_count",
+                                    "title": "Retained bins",
+                                },
+                            ],
+                        },
+                    },
+                ],
+                "config": {
+                    "axis": {
+                        "domainColor": "#C9C9D6",
+                        "gridColor": "#E3E3E8",
+                        "labelColor": "#6B6B7B",
+                        "titleColor": "#1B1B2B",
+                    },
+                    "view": {"stroke": None},
+                },
+                "background": "#FFFFFF",
+            },
+            use_container_width=True,
+            theme=None,
+        )
+        st.caption("Red dashed lines = conservative ±0.20 log₂ screen threshold.")
+
+    st.markdown(
+        f"""
+<div class="interpretation-card">
+  <div class="card-label">How to read the result</div>
+  <strong>All autosomes remain inside the broad-event screen threshold</strong>
+  <p>
+    The largest residual is {largest.chromosome} at {largest.log2_ratio:+.3f}
+    log₂. Without a panel of normals, residual chromosome-specific coverage bias
+    cannot be separated from biology; the algorithm therefore makes no focal,
+    subclonal, or tumor-fraction claim.
+  </p>
+</div>
+""",
+        unsafe_allow_html=True,
+    )
+    st.caption(
+        "This is not ichorCNA and not a clinical diagnostic. It is a deterministic "
+        "whole-chromosome dosage screen computed from the registered BAM."
+    )
+
+
 def _source_heading(source: Source) -> str:
     locator = f"{_humanize(source.locator.kind)} {source.locator.value}"
     return f"{source.document_id} · {locator}"
@@ -1407,6 +1588,7 @@ def run_app(
     _render_case_scope(st, active_case)
     _render_fragmentomics_evidence(st, active_case)
     _render_cell_origin_evidence(st)
+    _render_copy_number_evidence(st)
 
 
 if __name__ == "__main__":

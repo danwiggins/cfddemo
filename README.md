@@ -1,10 +1,10 @@
 # Traceback
 
-**One blood draw. Two computed cfDNA signals. Every claim traceable.**
+**One blood draw. Three computed cfDNA signals. Every claim traceable.**
 
-Traceback turns Oxford Nanopore reads into fragment-length and methylation
-cell-origin evidence, then uses a bounded AI reviewer to check whether the
-written interpretation is actually supported.
+Traceback turns Oxford Nanopore reads into fragment-length, methylation
+cell-origin, and chromosome-dosage evidence, then uses a bounded AI reviewer
+to check whether the written interpretation is actually supported.
 
 [Open the live demo](https://cfddemo-production.up.railway.app) ·
 [View the repository](https://github.com/danwiggins/cfddemo) ·
@@ -19,21 +19,26 @@ written interpretation is actually supported.
   explicit filters, denominator, mode, median, and long-fragment fraction.
 - **Cell origin:** CpG methylation calls classified against Loyfer markers,
   followed by count-weighted NNLS deconvolution and seeded bootstrap intervals.
+- **Chromosome dosage:** an experimental whole-chromosome screen using
+  high-confidence read starts in fixed 5 Mb bins.
 - **AI evidence review:** the model can select only registered checks and must
   cite the exact result or source passage behind its conclusion.
 - **A real catch:** the reviewer identifies that the report's updated
   aligned-span method conflicts with its fixed 45 bp subtraction instructions.
 
-Copy-number analysis is deliberately shown as **not built**.
+The third readout is deliberately narrow: it is not ichorCNA, does not estimate
+tumor fraction, and cannot resolve focal or subclonal events.
 
 ```mermaid
 flowchart LR
     A[MinION modBAM] --> B[Fragment-length summary]
     A --> C[CpG methylation extraction]
+    A --> J[Whole-chromosome dosage screen]
     C --> D[Loyfer UXM classification]
     D --> E[NNLS cell-mixture estimate]
     B --> F[Registered evidence]
     E --> F
+    J --> F
     G[Source passages] --> F
     F --> H[Bounded AI review]
     H --> I[Cited assessment + limitations]
@@ -86,6 +91,13 @@ TRACEBACK_FRAGMENT_HASH_SALT='local-private-value' \
 
 The validated result is written to `data/local/cell-origin/result.json` and
 takes precedence over the public aggregate bundle.
+
+Regenerate the experimental chromosome-dosage result:
+
+```bash
+uv run python -m scripts.regenerate_copy_number \
+  --bam data/local/cell-origin/full.hg38.sorted.bam
+```
 
 ## Documentation
 
