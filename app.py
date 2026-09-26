@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from collections.abc import Iterable
 from importlib import import_module
+import os
 from pathlib import Path
 from typing import Any
 
@@ -110,18 +111,6 @@ p, li, label, [data-testid="stCaptionContainer"] {
   position: relative;
 }
 
-.traceback-hero::after {
-  background: var(--teal);
-  border-radius: 999px;
-  content: "";
-  height: 220px;
-  opacity: 0.24;
-  position: absolute;
-  right: -70px;
-  top: -90px;
-  width: 220px;
-}
-
 .traceback-eyebrow, .section-kicker {
   color: #76C7C1;
   font-family: Calibri, Arial, sans-serif;
@@ -167,6 +156,76 @@ p, li, label, [data-testid="stCaptionContainer"] {
   flex-wrap: wrap;
   gap: 0.55rem;
   margin-top: 1.55rem;
+}
+
+.hero-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.7rem;
+  margin-top: 1.2rem;
+}
+
+.hero-action {
+  border-radius: 999px;
+  color: white !important;
+  font-family: Calibri, Arial, sans-serif;
+  font-size: 0.9rem;
+  font-weight: 700;
+  padding: 0.65rem 1rem;
+  text-decoration: none !important;
+}
+
+.hero-action.primary {
+  background: var(--teal);
+}
+
+.hero-action.secondary {
+  border: 1px solid rgba(255, 255, 255, 0.28);
+}
+
+.review-flow {
+  align-items: stretch;
+  background: var(--ink);
+  border-radius: 16px;
+  color: white;
+  display: grid;
+  gap: 0;
+  grid-template-columns: 1fr auto 1fr auto 1fr;
+  margin-top: 1rem;
+  overflow: hidden;
+}
+
+.review-flow > div {
+  padding: 1.2rem 1.25rem;
+}
+
+.review-flow small {
+  color: #76C7C1;
+  display: block;
+  font-size: 0.72rem;
+  font-weight: 700;
+  letter-spacing: 0.1em;
+  margin-bottom: 0.4rem;
+  text-transform: uppercase;
+}
+
+.review-flow strong {
+  display: block;
+  font-family: Cambria, Georgia, serif;
+  font-size: 1.05rem;
+  margin-bottom: 0.3rem;
+}
+
+.review-flow p {
+  color: #C9C9D6;
+  line-height: 1.4;
+  margin: 0;
+}
+
+.review-flow .arrow {
+  align-self: center;
+  color: #76C7C1;
+  font-size: 1.3rem;
 }
 
 .hero-tag {
@@ -299,6 +358,11 @@ hr {
 @media (max-width: 760px) {
   .block-container { padding: 1rem 1rem 3rem; }
   .traceback-hero { padding: 2.2rem 1.45rem; }
+  .review-flow { grid-template-columns: 1fr; }
+  .review-flow .arrow {
+    justify-self: center;
+    transform: rotate(90deg);
+  }
 }
 </style>
 """,
@@ -323,6 +387,10 @@ def _render_header(st: Any) -> None:
     <span class="hero-tag">Deterministic bioinformatics</span>
     <span class="hero-tag">AI evidence review</span>
     <span class="hero-tag">Research use only</span>
+  </div>
+  <div class="hero-actions">
+    <a class="hero-action primary" href="#readout-1">See the computed results ↓</a>
+    <a class="hero-action secondary" href="https://github.com/danwiggins/cfddemo" target="_blank">View GitHub ↗</a>
   </div>
 </section>
 """,
@@ -383,40 +451,30 @@ def _render_signal_overview(st: Any) -> None:
         unsafe_allow_html=True,
     )
     st.subheader("The algorithms calculate. The AI reviews the claim.")
-    compute, review, report = st.columns(3)
-    with compute:
-        st.markdown(
-            """
-<div class="pipeline-step">
-  <div class="step-number">1</div>
-  <strong>Compute</strong>
-  <p>Bounded code filters reads, measures fragments, classifies methylation, and fits the mixture.</p>
+    st.markdown(
+        """
+<div class="review-flow">
+  <div>
+    <small>Deterministic code</small>
+    <strong>Compute the evidence</strong>
+    <p>Filter reads, measure fragments, classify methylation, and fit the mixture.</p>
+  </div>
+  <span class="arrow">→</span>
+  <div>
+    <small>Bounded AI review</small>
+    <strong>Test the written claim</strong>
+    <p>Select one allowed check and compare the claim with registered evidence.</p>
+  </div>
+  <span class="arrow">→</span>
+  <div>
+    <small>Traceable output</small>
+    <strong>Cite what supports it</strong>
+    <p>Attach exact measurements, source passages, definitions, and limitations.</p>
+  </div>
 </div>
 """,
-            unsafe_allow_html=True,
-        )
-    with review:
-        st.markdown(
-            """
-<div class="pipeline-step">
-  <div class="step-number">2</div>
-  <strong>Review</strong>
-  <p>The model selects an allowed check and compares the written claim with registered evidence.</p>
-</div>
-""",
-            unsafe_allow_html=True,
-        )
-    with report:
-        st.markdown(
-            """
-<div class="pipeline-step">
-  <div class="step-number">3</div>
-  <strong>Trace</strong>
-  <p>The result cites exact measurements and source passages, with limitations kept attached.</p>
-</div>
-""",
-            unsafe_allow_html=True,
-        )
+        unsafe_allow_html=True,
+    )
 
 
 def _default_runner(case: Case, claim: Claim) -> AuditResult | AuditError:
@@ -483,8 +541,7 @@ def _render_fragmentomics_evidence(st: Any, case: Case) -> None:
         (
             item
             for item in case.tool_results
-            if item.tool == ToolName.READ_LENGTH_SUMMARY
-            and item.status.value == "ok"
+            if item.tool == ToolName.READ_LENGTH_SUMMARY and item.status.value == "ok"
         ),
         None,
     )
@@ -498,7 +555,7 @@ def _render_fragmentomics_evidence(st: Any, case: Case) -> None:
         return
 
     st.markdown(
-        '<p class="section-kicker">Readout 1 · Fragmentomics</p>',
+        '<span id="readout-1"></span><p class="section-kicker">Readout 1 · Fragmentomics</p>',
         unsafe_allow_html=True,
     )
     st.subheader(
@@ -646,8 +703,7 @@ def _render_cell_origin_evidence(st: Any) -> None:
         return
     result = bundle.result
     range_rows = [
-        row.model_dump(mode="json")
-        for row in bundle.charts.healthy_context_rows
+        row.model_dump(mode="json") for row in bundle.charts.healthy_context_rows
     ]
     if range_rows:
         composition = [
@@ -924,14 +980,10 @@ def _render_cell_origin_evidence(st: Any) -> None:
                                 "size": 18,
                                 "color": "#1B7F79",
                             },
-                            "encoding": {
-                                "x": {"field": "healthy_median_percent"}
-                            },
+                            "encoding": {"x": {"field": "healthy_median_percent"}},
                         },
                         {
-                            "transform": [
-                                {"filter": "datum.uncertainty_available"}
-                            ],
+                            "transform": [{"filter": "datum.uncertainty_available"}],
                             "mark": {
                                 "type": "rule",
                                 "strokeWidth": 2,
@@ -966,7 +1018,11 @@ def _render_cell_origin_evidence(st: Any) -> None:
                                     "type": "nominal",
                                     "scale": {
                                         "domain": ["within", "below", "above"],
-                                        "range": ["circle", "triangle-left", "triangle-right"],
+                                        "range": [
+                                            "circle",
+                                            "triangle-left",
+                                            "triangle-right",
+                                        ],
                                     },
                                     "legend": None,
                                 },
@@ -1132,8 +1188,7 @@ def _commit_editor(st: Any, state: UIState, editor_key: str) -> None:
 def _render_claim_controls(st: Any, state: UIState) -> bool:
     claim_ids = tuple(claim.id for claim in state.case.claims)
     claim_labels = {
-        claim.id: f"{_humanize(claim.kind)} · {claim.id}"
-        for claim in state.case.claims
+        claim.id: f"{_humanize(claim.kind)} · {claim.id}" for claim in state.case.claims
     }
     selected = st.selectbox(
         "Claim",
@@ -1189,9 +1244,7 @@ def run_app(
             active_case = load_default_case()
         except CaseBundleLoadError:
             _render_header(st)
-            st.error(
-                "INVALID_INPUT: The configured case bundle could not be loaded."
-            )
+            st.error("INVALID_INPUT: The configured case bundle could not be loaded.")
             st.caption(
                 "Verify that the configured bundle exists and satisfies the case "
                 "contract. No fallback case was loaded."
@@ -1200,7 +1253,15 @@ def run_app(
 
     state = ensure_case(st.session_state.get(SESSION_KEY), active_case)
     st.session_state[SESSION_KEY] = state
-    runner = audit_runner or _default_runner
+    replay_mode = (
+        audit_runner is None and os.environ.get("TRACEBACK_DEMO_REPLAY") == "1"
+    )
+    if replay_mode:
+        from evidence_inspector.demo_replay import replay_assessment
+
+        runner = replay_assessment
+    else:
+        runner = audit_runner or _default_runner
 
     _render_header(st)
     _render_signal_overview(st)
@@ -1218,10 +1279,16 @@ def run_app(
         "interpret and cite registered evidence, but it cannot invent a new "
         "measurement or silently change the denominator."
     )
+    if replay_mode:
+        st.info(
+            "Public demo mode: this button replays recorded, validated AI "
+            "assessments and makes no provider call. Run locally with Bedrock "
+            "credentials to review new or edited claims."
+        )
     editor_is_committed = _render_claim_controls(st, state)
 
     pressed = st.button(
-        "Run check",
+        "Replay assessment" if replay_mode else "Run check",
         type="primary",
         disabled=state.status == SessionStatus.RUNNING or not editor_is_committed,
         help="Starts one review. Other interactions do not call the model.",
