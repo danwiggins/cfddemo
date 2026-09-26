@@ -6,7 +6,8 @@ Traceback turns Oxford Nanopore reads into fragment-length and methylation
 cell-origin evidence, then uses a bounded AI reviewer to check whether the
 written interpretation is actually supported.
 
-[Open the repository](https://github.com/danwiggins/cfddemo) ·
+[Open the live demo](https://cfddemo-production.up.railway.app) ·
+[View the repository](https://github.com/danwiggins/cfddemo) ·
 [Demo walkthrough](docs/DEMO.md) · [Algorithms](docs/ALGORITHMS.md)
 
 > Research prototype only. It does not diagnose cancer or replace a validated

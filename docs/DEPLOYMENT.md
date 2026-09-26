@@ -1,5 +1,7 @@
 # Railway deployment
 
+Live service: <https://cfddemo-production.up.railway.app>
+
 The repository includes a `Procfile` for Streamlit:
 
 ```text
