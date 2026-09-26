@@ -33,7 +33,10 @@ from evidence_inspector.ui_state import (
 )
 
 SESSION_KEY = "traceback_ui_state"
-CELL_ORIGIN_RESULT = Path("data/local/cell-origin/result.json")
+CELL_ORIGIN_RESULTS = (
+    Path("data/local/cell-origin/result.json"),
+    Path("data/demo/cell-origin-result.json"),
+)
 
 
 def _humanize(value: object) -> str:
@@ -51,12 +54,369 @@ def execution_label(mode: ExecutionMode) -> str:
     }[mode]
 
 
-def _render_header(st: Any) -> None:
-    st.title("Traceback")
-    st.caption(
-        "Inspect the evidence chain behind a claim. This prototype does not "
-        "diagnose disease or validate an assay."
+def _inject_design_system(st: Any) -> None:
+    """Apply the deck's visual system to the standalone demo."""
+
+    st.markdown(
+        """
+<style>
+:root {
+  --ink: #1B1B2B;
+  --ink-soft: #2A2A45;
+  --muted: #6B6B7B;
+  --paper: #FAFAFA;
+  --surface: #FFFFFF;
+  --line: #E3E3E8;
+  --teal: #1B7F79;
+  --teal-soft: #E4F1F0;
+  --red: #B3262E;
+  --red-soft: #F7E8E9;
+  --gold: #C9A227;
+}
+
+.stApp {
+  background: var(--paper);
+  color: var(--ink);
+}
+
+[data-testid="stHeader"] {
+  background: rgba(250, 250, 250, 0.92);
+}
+
+.block-container {
+  max-width: 1180px;
+  padding-top: 2rem;
+  padding-bottom: 5rem;
+}
+
+h1, h2, h3, [data-testid="stHeadingWithActionElements"] {
+  color: var(--ink) !important;
+  font-family: Cambria, Georgia, serif !important;
+  letter-spacing: -0.02em;
+}
+
+p, li, label, [data-testid="stCaptionContainer"] {
+  font-family: Calibri, Arial, sans-serif;
+}
+
+.traceback-hero {
+  background: var(--ink);
+  border-radius: 26px;
+  box-shadow: 0 22px 55px rgba(27, 27, 43, 0.15);
+  color: white;
+  margin-bottom: 2.5rem;
+  overflow: hidden;
+  padding: 3.5rem 3.75rem 3.25rem;
+  position: relative;
+}
+
+.traceback-hero::after {
+  background: var(--teal);
+  border-radius: 999px;
+  content: "";
+  height: 220px;
+  opacity: 0.24;
+  position: absolute;
+  right: -70px;
+  top: -90px;
+  width: 220px;
+}
+
+.traceback-eyebrow, .section-kicker {
+  color: #76C7C1;
+  font-family: Calibri, Arial, sans-serif;
+  font-size: 0.78rem;
+  font-weight: 700;
+  letter-spacing: 0.13em;
+  margin: 0 0 0.9rem;
+  text-transform: uppercase;
+}
+
+.section-kicker {
+  color: var(--teal);
+  margin: 2.4rem 0 0.35rem;
+}
+
+.traceback-hero h1 {
+  color: white !important;
+  font-family: Cambria, Georgia, serif !important;
+  font-size: clamp(3.3rem, 8vw, 6.4rem);
+  line-height: 0.92;
+  margin: 0;
+}
+
+.traceback-hero h2 {
+  color: white !important;
+  font-family: Cambria, Georgia, serif !important;
+  font-size: clamp(1.6rem, 3.4vw, 2.7rem);
+  line-height: 1.08;
+  margin: 1.35rem 0 1rem;
+  max-width: 820px;
+}
+
+.traceback-hero .hero-copy {
+  color: #C9C9D6;
+  font-family: Calibri, Arial, sans-serif;
+  font-size: 1.08rem;
+  line-height: 1.5;
+  max-width: 780px;
+}
+
+.hero-tags {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.55rem;
+  margin-top: 1.55rem;
+}
+
+.hero-tag {
+  background: rgba(255, 255, 255, 0.08);
+  border: 1px solid rgba(255, 255, 255, 0.16);
+  border-radius: 999px;
+  color: white;
+  font-family: Calibri, Arial, sans-serif;
+  font-size: 0.82rem;
+  padding: 0.44rem 0.75rem;
+}
+
+.story-card, .pipeline-step, .interpretation-card {
+  background: var(--surface);
+  border: 1px solid var(--line);
+  border-radius: 16px;
+  height: 100%;
+  padding: 1.15rem 1.2rem;
+}
+
+.story-card strong, .pipeline-step strong, .interpretation-card strong {
+  color: var(--ink);
+  display: block;
+  font-family: Cambria, Georgia, serif;
+  font-size: 1.08rem;
+  margin-bottom: 0.4rem;
+}
+
+.story-card p, .pipeline-step p, .interpretation-card p {
+  color: var(--muted);
+  line-height: 1.42;
+  margin: 0;
+}
+
+.story-card.active {
+  background: var(--teal-soft);
+  border-color: #B7D9D6;
+}
+
+.story-card.pending {
+  background: #F4F4F7;
+}
+
+.card-label, .step-number {
+  color: var(--teal);
+  font-family: Calibri, Arial, sans-serif;
+  font-size: 0.72rem;
+  font-weight: 700;
+  letter-spacing: 0.1em;
+  margin-bottom: 0.55rem;
+  text-transform: uppercase;
+}
+
+.step-number {
+  background: var(--teal);
+  border-radius: 999px;
+  color: white;
+  display: inline-grid;
+  height: 1.7rem;
+  letter-spacing: 0;
+  margin-bottom: 0.7rem;
+  place-items: center;
+  width: 1.7rem;
+}
+
+.measured-note {
+  background: var(--teal-soft);
+  border-radius: 14px;
+  color: var(--ink-soft);
+  font-family: Calibri, Arial, sans-serif;
+  line-height: 1.45;
+  margin: 0.6rem 0 1.1rem;
+  padding: 1rem 1.15rem;
+}
+
+.measured-note strong {
+  color: var(--teal);
+}
+
+.limitation-note {
+  background: var(--red-soft);
+  border-radius: 14px;
+  color: var(--ink-soft);
+  font-family: Calibri, Arial, sans-serif;
+  line-height: 1.45;
+  margin: 1rem 0;
+  padding: 1rem 1.15rem;
+}
+
+.limitation-note strong {
+  color: var(--red);
+}
+
+div[data-testid="stMetric"] {
+  background: var(--surface);
+  border: 1px solid var(--line);
+  border-radius: 14px;
+  padding: 0.85rem 1rem;
+}
+
+div[data-testid="stMetricValue"] {
+  color: var(--ink);
+  font-family: Cambria, Georgia, serif;
+}
+
+div[data-testid="stExpander"] {
+  background: var(--surface);
+  border-color: var(--line);
+  border-radius: 14px;
+}
+
+.stButton > button[kind="primary"] {
+  background: var(--teal);
+  border: 0;
+  border-radius: 999px;
+  font-weight: 700;
+  padding-left: 1.4rem;
+  padding-right: 1.4rem;
+}
+
+.stButton > button[kind="primary"]:hover {
+  background: #126B66;
+}
+
+hr {
+  border-color: var(--line) !important;
+  margin: 2.8rem 0 !important;
+}
+
+@media (max-width: 760px) {
+  .block-container { padding: 1rem 1rem 3rem; }
+  .traceback-hero { padding: 2.2rem 1.45rem; }
+}
+</style>
+""",
+        unsafe_allow_html=True,
     )
+
+
+def _render_header(st: Any) -> None:
+    st.markdown(
+        """
+<section class="traceback-hero">
+  <p class="traceback-eyebrow">Healthcare AI Hackathon · Research demo</p>
+  <h1>Traceback</h1>
+  <h2>One blood draw. Two computed cfDNA signals. Every claim traceable.</h2>
+  <p class="hero-copy">
+    A local-first pipeline that turns Oxford Nanopore reads into fragment-length
+    and methylation cell-origin evidence, then uses AI to test the interpretation
+    against the measured result and its source.
+  </p>
+  <div class="hero-tags">
+    <span class="hero-tag">Real MinION data</span>
+    <span class="hero-tag">Deterministic bioinformatics</span>
+    <span class="hero-tag">AI evidence review</span>
+    <span class="hero-tag">Research use only</span>
+  </div>
+</section>
+""",
+        unsafe_allow_html=True,
+    )
+
+
+def _render_signal_overview(st: Any) -> None:
+    """Explain the biological premise and honest build scope."""
+
+    st.markdown(
+        '<p class="section-kicker">Why cfDNA</p>',
+        unsafe_allow_html=True,
+    )
+    st.subheader("Dying cells shed DNA into blood—and each fragment carries clues")
+    st.write(
+        "Cell-free DNA is a mixture of short fragments released by tissues across "
+        "the body. A single methylation-aware sequencing run can expose three "
+        "different signals. This demo computes the first two."
+    )
+    length, methylation, copy_number = st.columns(3)
+    with length:
+        st.markdown(
+            """
+<div class="story-card active">
+  <div class="card-label">Built · Readout 1</div>
+  <strong>Fragment length</strong>
+  <p>Healthy cfDNA forms a nucleosome ladder. Tumor-derived fragments often shift shorter.</p>
+</div>
+""",
+            unsafe_allow_html=True,
+        )
+    with methylation:
+        st.markdown(
+            """
+<div class="story-card active">
+  <div class="card-label">Built · Readout 2</div>
+  <strong>Methylation barcode</strong>
+  <p>Cell types retain distinct CpG patterns, allowing a mixture to be decomposed by tissue.</p>
+</div>
+""",
+            unsafe_allow_html=True,
+        )
+    with copy_number:
+        st.markdown(
+            """
+<div class="story-card pending">
+  <div class="card-label">Not built in this demo</div>
+  <strong>Copy number</strong>
+  <p>Tumors can gain or lose chromosome arms. This readout remains future work, not a demonstrated result.</p>
+</div>
+""",
+            unsafe_allow_html=True,
+        )
+
+    st.markdown(
+        '<p class="section-kicker">What AI does</p>',
+        unsafe_allow_html=True,
+    )
+    st.subheader("The algorithms calculate. The AI reviews the claim.")
+    compute, review, report = st.columns(3)
+    with compute:
+        st.markdown(
+            """
+<div class="pipeline-step">
+  <div class="step-number">1</div>
+  <strong>Compute</strong>
+  <p>Bounded code filters reads, measures fragments, classifies methylation, and fits the mixture.</p>
+</div>
+""",
+            unsafe_allow_html=True,
+        )
+    with review:
+        st.markdown(
+            """
+<div class="pipeline-step">
+  <div class="step-number">2</div>
+  <strong>Review</strong>
+  <p>The model selects an allowed check and compares the written claim with registered evidence.</p>
+</div>
+""",
+            unsafe_allow_html=True,
+        )
+    with report:
+        st.markdown(
+            """
+<div class="pipeline-step">
+  <div class="step-number">3</div>
+  <strong>Trace</strong>
+  <p>The result cites exact measurements and source passages, with limitations kept attached.</p>
+</div>
+""",
+            unsafe_allow_html=True,
+        )
 
 
 def _default_runner(case: Case, claim: Claim) -> AuditResult | AuditError:
@@ -89,7 +449,11 @@ def _write_items(st: Any, heading: str, items: Iterable[str]) -> None:
 
 def _render_case_scope(st: Any, case: Case) -> None:
     manifest = case.manifest
-    st.subheader("Case scope")
+    st.markdown(
+        '<p class="section-kicker">The registered run</p>',
+        unsafe_allow_html=True,
+    )
+    st.subheader("What went into this analysis")
     left, middle, right = st.columns(3)
     left.metric("Dataset", case.dataset_id)
     middle.metric(
@@ -98,14 +462,13 @@ def _render_case_scope(st: Any, case: Case) -> None:
     )
     right.metric("Trimming", _humanize(manifest.trimming.status))
 
-    st.caption(
-        f"Dataset revision: `{case.dataset_revision[:12]}…` · "
-        f"{'Partial collection' if manifest.partial_collection else 'Complete registered collection'}"
-    )
-    st.caption(f"Linkage: {manifest.sample_linkage.operator_rationale}")
-    st.caption(f"Processing: {manifest.trimming.processing_detail}")
-
-    with st.expander("Available checks", expanded=False):
+    with st.expander("Data provenance and available checks", expanded=False):
+        st.caption(
+            f"Dataset revision: `{case.dataset_revision[:12]}…` · "
+            f"{'Partial collection' if manifest.partial_collection else 'Complete registered collection'}"
+        )
+        st.caption(f"Linkage: {manifest.sample_linkage.operator_rationale}")
+        st.caption(f"Processing: {manifest.trimming.processing_detail}")
         for capability in manifest.capabilities:
             label = "Available" if capability.available else "Unavailable"
             st.markdown(f"**{_humanize(capability.name)} — {label}**")
@@ -134,6 +497,10 @@ def _render_fragmentomics_evidence(st: Any, case: Case) -> None:
         st.error("The registered fragment-length result failed chart validation.")
         return
 
+    st.markdown(
+        '<p class="section-kicker">Readout 1 · Fragmentomics</p>',
+        unsafe_allow_html=True,
+    )
     st.subheader(
         "Result 1 — My cfDNA is clean, intact nucleosomal DNA: "
         "no short-fragment cancer signal"
@@ -148,6 +515,16 @@ def _render_fragmentomics_evidence(st: Any, case: Case) -> None:
     mode.metric("Raw mode", f"{values.mode_bp} bp")
     median.metric("Raw median", f"{values.median_bp:g} bp")
     tail.metric("Reads >1 kb", f"{values.fraction_gt_1000:.2%}")
+    st.markdown(
+        """
+<div class="measured-note">
+  <strong>What is actually measured:</strong>
+  raw query-sequence length for each accepted primary BAM record. The chart,
+  mode, median, and long-fragment fraction all use that same denominator.
+</div>
+""",
+        unsafe_allow_html=True,
+    )
 
     explanation_column, computed_column = st.columns((0.8, 1.2))
     with explanation_column:
@@ -160,9 +537,14 @@ def _render_fragmentomics_evidence(st: Any, case: Case) -> None:
 4. **Bin the lengths** in 5 bp intervals, then calculate the mode, median, and long-fragment fraction.
 """
         )
-        st.info(
-            "Every number in the chart comes from the same filtered set of BAM "
-            "records, so the result is deterministic and auditable."
+        st.markdown(
+            """
+<div class="interpretation-card">
+  <strong>Why this is auditable</strong>
+  <p>Every number comes from the same explicit set of BAM records. Re-running the same artifact produces the same result.</p>
+</div>
+""",
+            unsafe_allow_html=True,
         )
     with computed_column:
         st.markdown("**Computed fragment-length distribution**")
@@ -171,8 +553,8 @@ def _render_fragmentomics_evidence(st: Any, case: Case) -> None:
             spec={
                 "mark": {
                     "type": "area",
-                    "line": {"color": "#0E7490"},
-                    "color": "#67E8F9",
+                    "line": {"color": "#1B7F79", "strokeWidth": 2},
+                    "color": "#B7D9D6",
                 },
                 "encoding": {
                     "x": {
@@ -200,8 +582,19 @@ def _render_fragmentomics_evidence(st: Any, case: Case) -> None:
                         },
                     ],
                 },
+                "config": {
+                    "axis": {
+                        "domainColor": "#C9C9D6",
+                        "gridColor": "#E3E3E8",
+                        "labelColor": "#6B6B7B",
+                        "titleColor": "#1B1B2B",
+                    },
+                    "view": {"stroke": None},
+                },
+                "background": "#FFFFFF",
             },
             use_container_width=True,
+            theme=None,
         )
         st.caption(
             f"Verification: {_humanize(result.verification_level)}. "
@@ -209,10 +602,19 @@ def _render_fragmentomics_evidence(st: Any, case: Case) -> None:
         )
     st.markdown(
         """
-- Textbook mono/di/tri-nucleosome ladder: 167 / 334 / 501 bp after the slide's assumed 45 bp ONT adapter removal (212 / 379 / 546 bp on this raw-length chart).
-- Fewer than 1% of reads are longer than 1 kb, consistent with low high-molecular-weight gDNA contamination in this filtered dataset.
-- No shift toward the short (~145 bp) fragment population associated with tumor-derived cfDNA is visible.
-"""
+<div class="interpretation-card">
+  <div class="card-label">How to read the result</div>
+  <strong>A nucleosome ladder is visible without a short-fragment shift</strong>
+  <p>
+    Textbook mono/di/tri peaks are 167 / 334 / 501 bp after the slide's assumed
+    45 bp adapter removal, equivalent to 212 / 379 / 546 bp on this raw chart.
+    Fewer than 1% of reads are longer than 1 kb, consistent with low
+    high-molecular-weight gDNA contamination. No shift toward the short
+    (~145 bp) population associated with tumor-derived cfDNA is visible.
+  </p>
+</div>
+""",
+        unsafe_allow_html=True,
     )
     st.caption(
         "Research/feasibility interpretation, not a clinical diagnostic. "
@@ -223,7 +625,11 @@ def _render_fragmentomics_evidence(st: Any, case: Case) -> None:
 def _render_cell_origin_evidence(st: Any) -> None:
     """Render validated cell-origin estimates without inventing absent results."""
 
-    if not CELL_ORIGIN_RESULT.is_file():
+    result_path = next(
+        (path for path in CELL_ORIGIN_RESULTS if path.is_file()),
+        None,
+    )
+    if result_path is None:
         with st.expander("Cell-origin deconvolution", expanded=False):
             st.info(
                 "No validated cell-origin result is registered yet. Run the "
@@ -233,7 +639,7 @@ def _render_cell_origin_evidence(st: Any) -> None:
 
     try:
         bundle = CellOriginResultBundle.model_validate_json(
-            CELL_ORIGIN_RESULT.read_text(encoding="utf-8")
+            result_path.read_text(encoding="utf-8")
         )
     except (OSError, ValueError):
         st.error("The registered cell-origin result failed strict validation.")
@@ -280,7 +686,11 @@ def _render_cell_origin_evidence(st: Any) -> None:
             if row.show_by_default and row.fraction >= 0.001
         ][:10]
 
-    st.subheader("Cell-origin deconvolution")
+    st.markdown(
+        '<p class="section-kicker">Readout 2 · Methylation</p>',
+        unsafe_allow_html=True,
+    )
+    st.subheader("Which tissues contributed this cell-free DNA?")
     st.caption(
         "Realigned Nanopore CpG calls → fragment U/X/M classification → "
         "count-weighted NNLS. This is an analytical reconstruction, not a "
@@ -288,34 +698,81 @@ def _render_cell_origin_evidence(st: Any) -> None:
     )
     st.markdown("**How the cell-origin algorithm works**")
     extract, match, classify, solve = st.columns(4)
-    extract.markdown(
-        "**1 · Extract methylation**  \n"
-        "Read CpG modification calls from the hg38-aligned Nanopore BAM."
-    )
-    match.markdown(
-        "**2 · Match markers**  \n"
-        "Intersect each fragment with the curated Loyfer cell-type marker atlas."
-    )
-    classify.markdown(
-        "**3 · Classify fragments**  \n"
-        "Label each fragment–marker pair U, X, or M from its unmethylated CpG fraction."
-    )
-    solve.markdown(
-        "**4 · Deconvolve**  \n"
-        "Use non-negative least squares to find the cell mixture that best explains the counts."
-    )
+    with extract:
+        st.markdown(
+            """
+<div class="pipeline-step">
+  <div class="step-number">1</div>
+  <strong>Extract methylation</strong>
+  <p>Read CpG modification calls from the hg38-aligned Nanopore BAM.</p>
+</div>
+""",
+            unsafe_allow_html=True,
+        )
+    with match:
+        st.markdown(
+            """
+<div class="pipeline-step">
+  <div class="step-number">2</div>
+  <strong>Match markers</strong>
+  <p>Intersect each fragment with the curated Loyfer cell-type marker atlas.</p>
+</div>
+""",
+            unsafe_allow_html=True,
+        )
+    with classify:
+        st.markdown(
+            """
+<div class="pipeline-step">
+  <div class="step-number">3</div>
+  <strong>Classify U / X / M</strong>
+  <p>Label each fragment–marker pair from its unmethylated CpG fraction.</p>
+</div>
+""",
+            unsafe_allow_html=True,
+        )
+    with solve:
+        st.markdown(
+            """
+<div class="pipeline-step">
+  <div class="step-number">4</div>
+  <strong>Solve the mixture</strong>
+  <p>Use non-negative least squares to find the cell mixture that best explains the counts.</p>
+</div>
+""",
+            unsafe_allow_html=True,
+        )
     st.caption(
         "Bootstrap resampling repeats the solve to estimate uncertainty. "
         "The bars below are computed outputs, not copied presentation values."
     )
     observed_markers = len(result.marker_counts)
-    st.info(
-        "Reproduction gap: the report describes ~17,300 qualifying fragments "
-        "across 6,469 markers. This strict rerun produced "
-        f"{result.provenance.classified_fragment_marker_count:,} classified "
-        f"fragment–marker groups across {observed_markers:,} markers. The "
-        "chart is computed, but the extraction settings or counting units are "
-        "not yet reconciled."
+    fragments, overlaps, classified, markers = st.columns(4)
+    fragments.metric(
+        "Input fragments",
+        f"{result.provenance.input_fragment_count:,}",
+    )
+    overlaps.metric(
+        "Marker overlaps",
+        f"{result.provenance.marker_overlap_count:,}",
+    )
+    classified.metric(
+        "Classified groups",
+        f"{result.provenance.classified_fragment_marker_count:,}",
+    )
+    markers.metric("Observed markers", f"{observed_markers:,}")
+    st.markdown(
+        f"""
+<div class="limitation-note">
+  <strong>Known reproduction gap:</strong>
+  the report describes ~17,300 qualifying fragments across 6,469 markers.
+  This strict rerun produced
+  {result.provenance.classified_fragment_marker_count:,} classified
+  fragment–marker groups across {observed_markers:,} markers. The chart is
+  computed, but the extraction settings or counting units are not reconciled.
+</div>
+""",
+        unsafe_allow_html=True,
     )
     left, right = st.columns((0.9, 1.25))
     with left:
@@ -338,7 +795,7 @@ def _render_cell_origin_evidence(st: Any) -> None:
                         "mark": {
                             "type": "bar",
                             "cornerRadiusEnd": 5,
-                            "color": "#0E7490",
+                            "color": "#1B7F79",
                         },
                         "encoding": {
                             "x": {
@@ -372,7 +829,7 @@ def _render_cell_origin_evidence(st: Any) -> None:
                             "align": "left",
                             "dx": 5,
                             "fontWeight": 600,
-                            "color": "#E2E8F0",
+                            "color": "#1B1B2B",
                         },
                         "encoding": {
                             "x": {
@@ -383,8 +840,19 @@ def _render_cell_origin_evidence(st: Any) -> None:
                         },
                     },
                 ],
+                "config": {
+                    "axis": {
+                        "domainColor": "#C9C9D6",
+                        "gridColor": "#E3E3E8",
+                        "labelColor": "#6B6B7B",
+                        "titleColor": "#1B1B2B",
+                    },
+                    "view": {"stroke": None},
+                },
+                "background": "#FFFFFF",
             },
             use_container_width=True,
+            theme=None,
         )
     with right:
         st.markdown("**Sample versus healthy plasma donors**")
@@ -417,7 +885,7 @@ def _render_cell_origin_evidence(st: Any) -> None:
                             "mark": {
                                 "type": "rule",
                                 "strokeWidth": 3,
-                                "color": "#94A3B8",
+                                "color": "#C9C9D6",
                             },
                             "encoding": {
                                 "x": {"field": "healthy_min_percent"},
@@ -441,7 +909,7 @@ def _render_cell_origin_evidence(st: Any) -> None:
                                 "type": "bar",
                                 "height": 11,
                                 "cornerRadius": 5,
-                                "color": "#67E8F9",
+                                "color": "#B7D9D6",
                                 "opacity": 0.9,
                             },
                             "encoding": {
@@ -454,7 +922,7 @@ def _render_cell_origin_evidence(st: Any) -> None:
                                 "type": "tick",
                                 "thickness": 2,
                                 "size": 18,
-                                "color": "#164E63",
+                                "color": "#1B7F79",
                             },
                             "encoding": {
                                 "x": {"field": "healthy_median_percent"}
@@ -467,7 +935,7 @@ def _render_cell_origin_evidence(st: Any) -> None:
                             "mark": {
                                 "type": "rule",
                                 "strokeWidth": 2,
-                                "color": "#7C3AED",
+                                "color": "#B3262E",
                             },
                             "encoding": {
                                 "x": {"field": "sample_lower_percent"},
@@ -489,7 +957,7 @@ def _render_cell_origin_evidence(st: Any) -> None:
                                     "type": "nominal",
                                     "scale": {
                                         "domain": ["within", "below", "above"],
-                                        "range": ["#0F766E", "#C2410C", "#C2410C"],
+                                        "range": ["#1B7F79", "#B3262E", "#B3262E"],
                                     },
                                     "legend": {"title": None, "orient": "top"},
                                 },
@@ -517,14 +985,25 @@ def _render_cell_origin_evidence(st: Any) -> None:
                             },
                         },
                     ],
+                    "config": {
+                        "axis": {
+                            "domainColor": "#C9C9D6",
+                            "gridColor": "#E3E3E8",
+                            "labelColor": "#6B6B7B",
+                            "titleColor": "#1B1B2B",
+                        },
+                        "view": {"stroke": None},
+                    },
+                    "background": "#FFFFFF",
                 },
                 use_container_width=True,
+                theme=None,
             )
 
     diagnostics = result.deconvolution.diagnostics
     st.caption(
-        "Grey = observed min–max · cyan = IQR · tick = median · "
-        "dot = regenerated sample · purple whisker = bootstrap interval."
+        "Grey = observed min–max · pale teal = IQR · tick = median · "
+        "dot = regenerated sample · red whisker = bootstrap interval."
     )
     st.caption(
         f"{len(bundle.charts.composition_rows)} cell types · "
@@ -701,7 +1180,8 @@ def run_app(
         import streamlit as streamlit_module
 
     st = streamlit_module
-    st.set_page_config(page_title="Traceback", page_icon="🔎", layout="centered")
+    st.set_page_config(page_title="Traceback", page_icon="🔎", layout="wide")
+    _inject_design_system(st)
     if case is not None:
         active_case = case
     else:
@@ -723,10 +1203,21 @@ def run_app(
     runner = audit_runner or _default_runner
 
     _render_header(st)
+    _render_signal_overview(st)
     _render_case_scope(st, active_case)
     _render_fragmentomics_evidence(st, active_case)
     _render_cell_origin_evidence(st)
     st.divider()
+    st.markdown(
+        '<p class="section-kicker">Interactive evidence review</p>',
+        unsafe_allow_html=True,
+    )
+    st.subheader("Now test the interpretation—not just the chart")
+    st.write(
+        "Choose a claim, edit it if you want, and run the reviewer. The AI may "
+        "interpret and cite registered evidence, but it cannot invent a new "
+        "measurement or silently change the denominator."
+    )
     editor_is_committed = _render_claim_controls(st, state)
 
     pressed = st.button(

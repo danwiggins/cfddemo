@@ -43,6 +43,7 @@ SYNTHETIC_LENGTH_ARTIFACT_ID = "artifact.synthetic-lengths.v1"
 SYNTHETIC_SAMPLE_TABLE_ID = "artifact.synthetic-sample-table.v1"
 SYNTHETIC_REFERENCE_TABLE_ID = "artifact.synthetic-reference-table.v1"
 DEFAULT_LOCAL_CASE_PATH = Path("data/local/case.json")
+DEFAULT_DEMO_CASE_PATH = Path("data/demo/case.json")
 MAX_CASE_BUNDLE_BYTES = 4_194_304
 
 
@@ -478,7 +479,7 @@ def load_case_bundle(path: str | Path) -> Case:
 
 
 def load_default_case(path: str | Path | None = None) -> Case:
-    """Load explicit, environment, conventional-local, or synthetic case data."""
+    """Load explicit, environment, local, public-demo, or synthetic case data."""
 
     if path is not None:
         return load_case_bundle(path)
@@ -487,6 +488,8 @@ def load_default_case(path: str | Path | None = None) -> Case:
         return load_case_bundle(environment_path)
     if DEFAULT_LOCAL_CASE_PATH.is_file():
         return load_case_bundle(DEFAULT_LOCAL_CASE_PATH)
+    if DEFAULT_DEMO_CASE_PATH.is_file():
+        return load_case_bundle(DEFAULT_DEMO_CASE_PATH)
     return build_synthetic_case()
 
 
@@ -494,6 +497,7 @@ SYNTHETIC_CASE = build_synthetic_case()
 
 __all__ = [
     "CaseBundleLoadError",
+    "DEFAULT_DEMO_CASE_PATH",
     "DEFAULT_LOCAL_CASE_PATH",
     "MAX_CASE_BUNDLE_BYTES",
     "SYNTHETIC_CASE",

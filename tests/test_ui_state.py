@@ -266,6 +266,25 @@ def test_app_default_selects_conventional_local_case(
     assert _dataset_metric(app) == "dataset.local.v1"
 
 
+def test_app_default_selects_public_demo_case_when_local_data_is_absent(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.delenv("TRACEBACK_CASE_PATH", raising=False)
+    demo_case = tmp_path / "data" / "demo" / "case.json"
+    _write_named_case(
+        demo_case,
+        case_id="case.demo.v1",
+        dataset_id="dataset.demo.v1",
+    )
+    monkeypatch.chdir(tmp_path)
+
+    app = _run_default_app()
+
+    assert not app.exception
+    assert _dataset_metric(app) == "dataset.demo.v1"
+
+
 def test_app_default_uses_synthetic_when_local_data_is_absent(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,

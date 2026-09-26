@@ -24,6 +24,11 @@ Run the app:
 uv run streamlit run app.py
 ```
 
+The public deployment uses de-identified aggregate demo bundles under
+`data/demo/`. They contain binned measurements, cell-mixture estimates, and
+provenance metadata only—never BAMs, read IDs, local paths, or source documents.
+Private local results under `data/local/` take precedence when present.
+
 ## Cell-origin regeneration
 
 The local pipeline implements:

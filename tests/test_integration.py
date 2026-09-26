@@ -323,6 +323,20 @@ def test_privacy_ignore_boundary_covers_local_inputs_and_live_results() -> None:
     assert set(completed.stdout.splitlines()) == set(candidates)
 
 
+def test_public_demo_bundles_exclude_paths_and_raw_identifiers() -> None:
+    for relative_path in (
+        "data/demo/case.json",
+        "data/demo/cell-origin-result.json",
+    ):
+        encoded = (ROOT / relative_path).read_text(encoding="utf-8")
+        assert "/Users/" not in encoded
+        assert "/private/" not in encoded
+        assert "Downloads" not in encoded
+        assert "bam_pass" not in encoded
+        assert "nrconley" not in encoded.lower()
+        assert "dan@" not in encoded.lower()
+
+
 def test_streamlit_apptest_smoke_and_stale_rerun() -> None:
     app = AppTest.from_string(
         """
@@ -339,10 +353,16 @@ run_app(
     ).run()
 
     assert not app.exception
-    assert app.title[0].value == "Traceback"
     assert app.button[0].label == "Run check"
     assert not app.button[0].disabled
     markdown_values = {item.value for item in app.markdown}
+    assert any(
+        "One blood draw. Two computed cfDNA signals." in value
+        for value in markdown_values
+    )
+    assert any(
+        "Not built in this demo" in value for value in markdown_values
+    )
     assert "**How the fragment-length algorithm works**" in markdown_values
     assert "**Presentation source**" not in markdown_values
     assert any(
