@@ -1,0 +1,11 @@
+[project]
+name = "bedrock-chat"
+version = "0.1.0"
+description = "Sample terminal chat app that talks to GPT models on Amazon Bedrock."
+requires-python = ">=3.9"
+dependencies = ["boto3>=1.40.0"]
+
+[tool.pytest.ini_options]
+# Make the `bedrock_chat` package importable when running `pytest` from this folder.
+pythonpath = ["."]
+testpaths = ["tests"]
