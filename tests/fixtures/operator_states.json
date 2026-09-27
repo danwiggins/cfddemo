@@ -1,0 +1,41 @@
+{
+  "empty": {
+    "headline": "No synthetic jobs yet",
+    "next_action": "Run traceback demo"
+  },
+  "queued": {
+    "state": "queued",
+    "headline": "Synthetic job queued",
+    "record_availability": "unavailable"
+  },
+  "processing": {
+    "state": "running",
+    "headline": "Synthetic job processing",
+    "record_availability": "unavailable"
+  },
+  "stale": {
+    "state": "running",
+    "headline": "Runner status is stale",
+    "record_availability": "unavailable"
+  },
+  "paused": {
+    "state": "paused",
+    "headline": "Job paused",
+    "record_availability": "unavailable"
+  },
+  "retryable_failure": {
+    "state": "retryable_failure",
+    "headline": "Job needs recovery",
+    "record_availability": "unavailable"
+  },
+  "complete_unverified": {
+    "state": "complete",
+    "headline": "Record created; verification required",
+    "record_availability": "verifying"
+  },
+  "complete_verified": {
+    "state": "complete",
+    "headline": "Signed local record ready",
+    "record_availability": "ready"
+  }
+}

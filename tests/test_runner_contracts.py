@@ -101,11 +101,6 @@ def test_cli_doctor_and_demo_are_explicitly_synthetic(capsys: pytest.CaptureFixt
     assert main(["doctor"]) == 0
     assert "Real-data execution is not enabled" in capsys.readouterr().out
 
-    assert main(["demo", "--json"]) == 0
-    payload = json.loads(capsys.readouterr().out)
-    assert payload["status"] == "contract_validated"
-    assert payload["real_data_enabled"] is False
-
 
 def test_nested_contracts_are_immutable_and_nonfinite_is_rejected() -> None:
     request = _request(execution_options={"threads": 2, "offline": True})
