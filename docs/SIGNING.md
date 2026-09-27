@@ -58,6 +58,17 @@ re-derives the chart and report, and checks measurement/provenance identity.
 It rejects missing or extra files, duplicate JSON keys, unsupported versions,
 noncanonical JSON, malformed checksum paths, symlinks, non-regular entries,
 unknown keys, revoked keys, wrong-purpose keys, and invalid signatures.
+Verification also reapplies the current export privacy and claims policy after
+signature verification; a trusted producer cannot sign policy-forbidden text
+into an accepted record.
+
+Untrusted directories are bounded before authentication. The reader opens each
+allowlisted entry without following a final symlink, verifies the opened file is
+regular, checks its declared filesystem size before reading, reads at most the
+per-file limit plus one byte, and enforces a 36 MiB aggregate cap. Measurement
+and chart JSON are each limited to 16 MiB; the fixed report is limited to 2 MiB;
+manifests, provenance, limitations, checksums, and signatures have smaller
+role-specific limits. These are format limits, not scientific thresholds.
 
 The signature does not make SHA-256 a privacy mechanism. Export provenance
 uses a provider-keyed HMAC commitment; ordinary input digests remain local.
