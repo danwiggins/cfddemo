@@ -163,7 +163,13 @@ def build_result_bundle(
         LIMITATIONS_PATH: _canonical_line_json(limitations),
         REPORT_PATH: render_report(parsed_measurement),
     }
-    record_id = f"record-{_digest(measurement_content + content[PROVENANCE_PATH])[:24]}"
+    record_identity = canonical_json_bytes(
+        {
+            "measurement_sha256": _digest(measurement_content),
+            "provenance_sha256": _digest(content[PROVENANCE_PATH]),
+        }
+    )
+    record_id = f"record-{_digest(record_identity)[:24]}"
     manifest = ResultBundleManifest(
         record_id=record_id,
         workflow_release_id=parsed_provenance.workflow_release_id,
