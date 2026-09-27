@@ -22,7 +22,7 @@ conditions hold:
 
 - samtools quickcheck reaches a valid BAM end-of-file marker;
 - the header declares coordinate sort and a complete record scan proves
-  nondecreasing `(reference_id, reference_start)` order, with unmapped records
+  nondecreasing `(reference_id, reference_start)` order, with unplaced records
   last;
 - the supplied BAI/CSI opens, reports an index, its mapped/unmapped totals
   reconcile with the complete BAM scan, and its exact bytes match a temporary
