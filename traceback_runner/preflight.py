@@ -113,7 +113,7 @@ def _report(checks: list[PreflightCheck]) -> PreflightReport:
 
 def validate_bam_snapshot(
     bam_path: str | Path,
-    index_path: str | Path,
+    index_path: str | Path | None,
     registered_reference: RegisteredReference,
     policy: BamPreflightPolicy,
 ) -> PreflightReport:
@@ -122,7 +122,7 @@ def validate_bam_snapshot(
     import pysam
 
     bam_locator = str(bam_path)
-    index_locator = str(index_path)
+    index_locator = str(index_path) if index_path is not None else None
     checks: list[PreflightCheck] = []
     try:
         pysam.quickcheck(bam_locator)
@@ -138,6 +138,8 @@ def validate_bam_snapshot(
             header = bam.header.to_dict()
             index_counts: tuple[int, int] | None = None
             try:
+                if index_locator is None:
+                    raise OSError("index was not supplied")
                 with pysam.AlignmentFile(
                     bam_locator,
                     "rb",
