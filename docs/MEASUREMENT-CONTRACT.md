@@ -22,13 +22,26 @@ conditions hold:
 
 - samtools quickcheck reaches a valid BAM end-of-file marker;
 - the header declares coordinate sort and a complete record scan proves
-  nondecreasing `(reference_id, reference_start)` order, with unmapped records
+  nondecreasing `(reference_id, reference_start)` order, with unplaced records
   last;
-- the supplied BAI/CSI opens, reports an index, and its mapped/unmapped totals
-  reconcile with the complete BAM scan;
+- the supplied BAI/CSI opens, reports an index, its mapped/unmapped totals
+  reconcile with the complete BAM scan, and its exact bytes match a temporary
+  deterministic rebuild from the sealed BAM using the supplied index format;
 - ordered `@SQ` names and lengths exactly match the registered reference; and
 - every `@SQ` row carries the registered assembly ID (`AS`) and lowercase MD5
   provenance (`M5`).
+
+Coordinate validation treats FLAG4 records with a valid reference and position
+as placed records. Only records lacking a reference or position begin the
+unplaced tail; a later placed record then blocks the input.
+
+The first-wave synthetic index contract is deliberately narrower than every
+semantically valid index encoding. BAI is rebuilt with the supported default
+settings. BGZF-compressed CSI is rebuilt with the supplied, bounded
+`min_shift` (1–31). A valid index produced with other serialization or depth
+settings may be rejected even if some queries work; the remediation is to
+rebuild the index with the supported settings, not to label the BAM corrupt.
+Temporary rebuilt indexes are removed automatically before preflight returns.
 
 Failure of any item is blocking (`TBX-BAM-001` or `TBX-BAM-002`). Library error
 text is not propagated because it can contain a local path.

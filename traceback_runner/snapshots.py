@@ -7,6 +7,7 @@ locators and ordinary SHA-256 digests and must never be exported.
 from __future__ import annotations
 
 import hashlib
+import json
 import os
 import shutil
 import stat
@@ -15,7 +16,7 @@ from dataclasses import dataclass
 from pathlib import Path, PurePosixPath
 from typing import Callable, Iterable
 
-from evidence_inspector.models import canonical_json_bytes
+from .serialization import canonical_json_bytes
 
 
 class SnapshotError(RuntimeError):
@@ -232,3 +233,111 @@ def input_tree_sha256(source_root: Path, relative_files: Iterable[str]) -> str:
             }
         )
     ).hexdigest()
+
+
+def verify_snapshot(
+    snapshot_path: Path, *, expected_manifest_sha256: str | None = None
+) -> InputSnapshot:
+    """Rehash every sealed byte and reconstruct a verified snapshot."""
+
+    if snapshot_path.is_symlink() or not snapshot_path.is_dir():
+        raise SnapshotViolation("snapshot directory is missing or unsafe")
+    manifest_path = snapshot_path / "input-manifest.local.json"
+    try:
+        if manifest_path.is_symlink() or not manifest_path.is_file():
+            raise SnapshotViolation("snapshot manifest is missing or unsafe")
+        raw = manifest_path.read_bytes()
+        payload = json.loads(raw)
+        if not isinstance(payload, dict):
+            raise SnapshotViolation("snapshot manifest must be an object")
+    except (OSError, ValueError, json.JSONDecodeError) as exc:
+        raise SnapshotViolation("snapshot manifest is missing or malformed") from exc
+    if raw != canonical_json_bytes(payload):
+        raise SnapshotViolation("snapshot manifest is not canonical")
+    manifest_sha256 = hashlib.sha256(raw).hexdigest()
+    if (
+        expected_manifest_sha256 is not None
+        and manifest_sha256 != expected_manifest_sha256
+    ):
+        raise SnapshotViolation("snapshot manifest digest changed")
+    try:
+        if payload.pop("schema_version") != "traceback.input-snapshot.v1":
+            raise SnapshotViolation("unsupported snapshot schema")
+        snapshot_id = payload.pop("snapshot_id")
+        content_sha256 = payload.pop("content_sha256")
+        files = tuple(SnapshotFile(**item) for item in payload.pop("files"))
+        if payload:
+            raise SnapshotViolation("snapshot manifest contains unknown fields")
+    except (KeyError, TypeError, ValueError) as exc:
+        if isinstance(exc, SnapshotViolation):
+            raise
+        raise SnapshotViolation("snapshot manifest fields are invalid") from exc
+    if not files or any(
+        not isinstance(item.relative_path, str)
+        or type(item.size_bytes) is not int or item.size_bytes < 0
+        or not isinstance(item.sha256_local, str)
+        or len(item.sha256_local) != 64
+        or any(c not in "0123456789abcdef" for c in item.sha256_local)
+        for item in files
+    ):
+        raise SnapshotViolation("snapshot file declarations are invalid")
+    names = tuple(item.relative_path for item in files)
+    if names != tuple(sorted(set(names))):
+        raise SnapshotViolation("snapshot file declarations are duplicate or unordered")
+    if snapshot_id != snapshot_path.name:
+        raise SnapshotViolation("snapshot identity does not match its directory")
+
+    expected_locators = {item.relative_path for item in files}
+    expected_directories = {
+        parent.as_posix()
+        for name in expected_locators
+        for parent in _safe_relative(name).parents
+        if parent.as_posix() != "."
+    }
+    actual_locators: set[str] = set()
+    for path in snapshot_path.rglob("*"):
+        relative = path.relative_to(snapshot_path).as_posix()
+        if path.is_symlink():
+            raise SnapshotViolation(f"snapshot contains a symlink: {relative}")
+        if path.is_dir():
+            if relative not in expected_directories:
+                raise SnapshotViolation("snapshot directory inventory changed")
+        elif path.is_file():
+            if relative != "input-manifest.local.json":
+                actual_locators.add(relative)
+        else:
+            raise SnapshotViolation("snapshot contains a non-regular entry")
+    if actual_locators != expected_locators:
+        raise SnapshotViolation("snapshot file inventory changed")
+
+    for item in files:
+        relative = _safe_relative(item.relative_path)
+        path = snapshot_path.joinpath(*relative.parts)
+        if not path.is_file() or path.is_symlink():
+            raise SnapshotViolation(f"snapshot file is missing or unsafe: {item.relative_path}")
+        digest = hashlib.sha256()
+        size = 0
+        with path.open("rb") as handle:
+            while chunk := handle.read(1024 * 1024):
+                digest.update(chunk)
+                size += len(chunk)
+        if size != item.size_bytes or digest.hexdigest() != item.sha256_local:
+            raise SnapshotViolation(f"snapshot file digest changed: {item.relative_path}")
+
+    calculated_content = hashlib.sha256(
+        canonical_json_bytes(
+            {
+                "schema_version": "traceback.input-tree.v1",
+                "files": [item.__dict__ for item in files],
+            }
+        )
+    ).hexdigest()
+    if calculated_content != content_sha256:
+        raise SnapshotViolation("snapshot content identity is inconsistent")
+    return InputSnapshot(
+        snapshot_id=snapshot_id,
+        path=snapshot_path,
+        files=files,
+        content_sha256=content_sha256,
+        manifest_sha256=manifest_sha256,
+    )

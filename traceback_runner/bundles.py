@@ -5,6 +5,7 @@ from __future__ import annotations
 import hashlib
 import os
 import re
+import stat
 import tempfile
 from pathlib import Path
 from typing import Annotated, Literal, Mapping
@@ -89,6 +90,17 @@ _CONTENT_PATHS = (
 )
 _CHECKSUM_PATHS = (MANIFEST_PATH, *_CONTENT_PATHS)
 _ALL_PATHS = frozenset((*_CHECKSUM_PATHS, CHECKSUMS_PATH, SIGNATURE_PATH))
+_MAX_FILE_BYTES: dict[str, int] = {
+    MANIFEST_PATH: 256 * 1024,
+    MEASUREMENT_PATH: 16 * 1024 * 1024,
+    CHART_PATH: 16 * 1024 * 1024,
+    PROVENANCE_PATH: 1024 * 1024,
+    LIMITATIONS_PATH: 64 * 1024,
+    REPORT_PATH: 2 * 1024 * 1024,
+    CHECKSUMS_PATH: 64 * 1024,
+    SIGNATURE_PATH: 16 * 1024,
+}
+_MAX_TOTAL_BYTES = 36 * 1024 * 1024
 
 
 BundleManifest = ResultBundleManifest
@@ -224,6 +236,7 @@ def _read_exact_files(bundle_dir: Path) -> dict[str, bytes]:
         raise BundleFilesystemError("bundle path must be a real directory, not a symlink")
     found: set[str] = set()
     content: dict[str, bytes] = {}
+    total_bytes = 0
     for entry in bundle_dir.rglob("*"):
         relative = entry.relative_to(bundle_dir).as_posix()
         if entry.is_symlink():
@@ -237,7 +250,31 @@ def _read_exact_files(bundle_dir: Path) -> dict[str, bytes]:
         found.add(relative)
         if relative not in _ALL_PATHS:
             raise BundleFilesystemError(f"unexpected file in bundle: {relative}")
-        content[relative] = entry.read_bytes()
+        limit = _MAX_FILE_BYTES[relative]
+        flags = os.O_RDONLY | getattr(os, "O_CLOEXEC", 0) | getattr(os, "O_NOFOLLOW", 0)
+        try:
+            descriptor = os.open(entry, flags)
+        except OSError as exc:
+            raise BundleFilesystemError(f"cannot safely open bundle file: {relative}") from exc
+        with os.fdopen(descriptor, "rb") as stream:
+            metadata = os.fstat(stream.fileno())
+            if not stat.S_ISREG(metadata.st_mode):
+                raise BundleFilesystemError(f"non-regular bundle entry: {relative}")
+            if metadata.st_size > limit:
+                raise BundleFilesystemError(
+                    f"bundle file exceeds {limit} byte limit: {relative}"
+                )
+            if total_bytes + metadata.st_size > _MAX_TOTAL_BYTES:
+                raise BundleFilesystemError("bundle exceeds total byte limit")
+            value = stream.read(limit + 1)
+        if len(value) > limit:
+            raise BundleFilesystemError(
+                f"bundle file exceeds {limit} byte limit: {relative}"
+            )
+        total_bytes += len(value)
+        if total_bytes > _MAX_TOTAL_BYTES:
+            raise BundleFilesystemError("bundle exceeds total byte limit")
+        content[relative] = value
     if found != _ALL_PATHS:
         missing = sorted(_ALL_PATHS - found)
         raise BundleFilesystemError(f"bundle file set mismatch; missing={missing}")
@@ -302,18 +339,22 @@ def verify_bundle(bundle_dir: str | Path, trust_store: TrustStore) -> VerifiedBu
         purpose=KeyPurpose.RESULT,
     )
 
-    measurement = _parse_json(
+    parsed_measurement = _parse_json(
         content[MEASUREMENT_PATH], FragmentMeasurement, "measurement"
     )
     chart = _parse_json(content[CHART_PATH], FragmentLengthChart, "chart")
-    provenance = _parse_json(content[PROVENANCE_PATH], ExportRunProvenance, "provenance")
+    parsed_provenance = _parse_json(
+        content[PROVENANCE_PATH], ExportRunProvenance, "provenance"
+    )
     limitations = _parse_json(
         content[LIMITATIONS_PATH], ExportLimitations, "limitations"
     )
-    assert isinstance(measurement, FragmentMeasurement)
+    assert isinstance(parsed_measurement, FragmentMeasurement)
     assert isinstance(chart, FragmentLengthChart)
-    assert isinstance(provenance, ExportRunProvenance)
+    assert isinstance(parsed_provenance, ExportRunProvenance)
     assert isinstance(limitations, ExportLimitations)
+    measurement = validate_measurement(parsed_measurement)
+    provenance = validate_provenance(parsed_provenance)
 
     expected_chart = chart_for_measurement(measurement, _digest(content[MEASUREMENT_PATH]))
     if chart != expected_chart:

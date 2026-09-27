@@ -142,9 +142,53 @@ def test_locked_measurement_contract_reconciles_and_has_unbounded_final_bin() ->
         histogram=histogram,
     )
     assert measurement.records_scanned == 8
+    encoded = canonical_json_bytes(measurement)
+    assert canonical_model_from_bytes(FragmentMeasurement, encoded) == measurement
     with pytest.raises(ValidationError, match="cannot construct"):
         measurement.model_copy(update={"completion": CompletionState.CAPPED}).__class__.model_validate(
             {**measurement.model_dump(mode="json"), "completion": "capped"}
+        )
+
+
+@pytest.mark.parametrize(
+    "bounds",
+    [
+        ((50, 100), (75, None)),
+        ((0, 50), (75, None)),
+        ((50, 100), (0, None)),
+        ((0, 50), (50, 100)),
+    ],
+    ids=("overlap", "gap", "out-of-order", "finite-final"),
+)
+def test_measurement_rejects_noncanonical_histogram_structure(
+    bounds: tuple[tuple[int, int | None], ...],
+) -> None:
+    histogram = tuple(
+        HistogramCount(
+            bin={"lower_inclusive": lower, "upper_exclusive": upper},
+            count=1,
+        )
+        for lower, upper in bounds
+    )
+    exclusions = ExclusionCounts(
+        unmapped=0,
+        secondary=0,
+        supplementary=0,
+        qc_failure=0,
+        duplicate=0,
+        low_mapping_quality=0,
+        unregistered_contig=0,
+        no_reference_span=0,
+    )
+    with pytest.raises(ValidationError, match="histogram bin"):
+        FragmentMeasurement(
+            definition_id="aligned-reference-span.synthetic.v1",
+            reference_id="synthetic-reference.v1",
+            completion=CompletionState.COMPLETE,
+            records_scanned=len(bounds),
+            eligible_alignments=len(bounds),
+            exclusions=exclusions,
+            histogram=histogram,
         )
 
 

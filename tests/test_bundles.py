@@ -2,12 +2,19 @@
 
 from __future__ import annotations
 
+import hashlib
 import json
 from pathlib import Path
 
 import pytest
 
 from traceback_runner.bundles import (
+    CHECKSUMS_PATH,
+    MANIFEST_PATH,
+    PROVENANCE_PATH,
+    _CHECKSUM_PATHS,
+    _checksums_bytes,
+    _signing_payload,
     BundleFilesystemError,
     BundleFormatError,
     BundleIntegrityError,
@@ -15,16 +22,19 @@ from traceback_runner.bundles import (
     inspect_bundle,
     verify_bundle,
 )
+from traceback_runner.contracts import canonical_json_bytes
 from traceback_runner.export import ExportBoundaryError, validate_measurement
 from traceback_runner.fixtures import synthetic_fragment_policy
 from traceback_runner.measurement import finalize_measurement, scan_aligned_reference_spans
 from traceback_runner.signing import (
+    DevelopmentSigningKey,
     InvalidSignatureError,
     KeyPurpose,
     RevokedKeyError,
     TrustStore,
     UnknownKeyError,
     generate_development_keypair,
+    sign_bytes,
 )
 
 
@@ -91,6 +101,31 @@ def _bundle(tmp_path: Path):
         signing_key=key,
     )
     return path, key, store
+
+
+def _resign_with_provenance(
+    path: Path, key: DevelopmentSigningKey, provenance: dict[str, object]
+) -> None:
+    provenance_content = canonical_json_bytes(provenance)
+    (path / PROVENANCE_PATH).write_bytes(provenance_content)
+    manifest_path = path / MANIFEST_PATH
+    manifest = json.loads(manifest_path.read_bytes())
+    for item in manifest["contents"]:
+        if item["relative_path"] == PROVENANCE_PATH:
+            item["sha256"] = hashlib.sha256(provenance_content).hexdigest()
+            item["size_bytes"] = len(provenance_content)
+    manifest_path.write_bytes(canonical_json_bytes(manifest))
+    content = {
+        relative: (path / relative).read_bytes() for relative in _CHECKSUM_PATHS
+    }
+    checksums = _checksums_bytes(content)
+    (path / CHECKSUMS_PATH).write_bytes(checksums)
+    signature = sign_bytes(
+        canonical_json_bytes(_signing_payload(checksums)),
+        key,
+        purpose=KeyPurpose.RESULT,
+    )
+    (path / "bundle.sig").write_bytes(canonical_json_bytes(signature))
 
 
 def test_actual_synthetic_scan_bundles_and_verifies_losslessly(tmp_path: Path) -> None:
@@ -207,6 +242,16 @@ def test_verifier_checks_actual_content_not_declared_digest(tmp_path: Path) -> N
         verify_bundle(path, store)
 
 
+def test_valid_signature_cannot_bypass_export_privacy_policy(tmp_path: Path) -> None:
+    path, key, store = _bundle(tmp_path)
+    provenance = json.loads((path / PROVENANCE_PATH).read_bytes())
+    provenance["run_token"] = "b" * 64
+    _resign_with_provenance(path, key, provenance)
+
+    with pytest.raises(ExportBoundaryError, match="raw SHA-256"):
+        verify_bundle(path, store)
+
+
 def test_wrong_missing_and_revoked_trust_fail(tmp_path: Path) -> None:
     path, key, store = _bundle(tmp_path)
     with pytest.raises(UnknownKeyError):
@@ -263,6 +308,18 @@ def test_missing_files_and_symlinks_are_rejected(tmp_path: Path) -> None:
     target.symlink_to(path2 / "limitations.json")
     with pytest.raises(BundleFilesystemError, match="symlink"):
         verify_bundle(path2, store2)
+
+
+def test_oversized_sparse_file_is_rejected_before_content_read(tmp_path: Path) -> None:
+    path, _, store = _bundle(tmp_path)
+    report = path / "report.html"
+    with report.open("wb") as stream:
+        stream.truncate(32 * 1024 * 1024)
+
+    with pytest.raises(BundleFilesystemError, match="exceeds .* byte limit: report.html"):
+        verify_bundle(path, store)
+    with pytest.raises(BundleFilesystemError, match="exceeds .* byte limit: report.html"):
+        inspect_bundle(path)
 
 
 def test_traversal_inventory_and_unsupported_schema_are_rejected(tmp_path: Path) -> None:

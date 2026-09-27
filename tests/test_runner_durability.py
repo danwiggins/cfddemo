@@ -6,6 +6,7 @@ import json
 import sqlite3
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
+from threading import Event
 
 import pytest
 
@@ -159,9 +160,37 @@ def test_lease_expiry_fences_stale_worker_commit(tmp_path: Path) -> None:
         runner.store.commit_attempt(first, "old/receipt.json", "b" * 64)
 
 
+def test_recovery_does_not_quarantine_active_unexpired_attempt(tmp_path: Path) -> None:
+    source, files = _source(tmp_path)
+    runner = Runner(tmp_path / "state", synthetic_enabled=True)
+    job = runner.submit(_request(source, files), source, files)
+    started = Event()
+    release = Event()
+
+    def callback(context: object) -> StageResult:
+        started.set()
+        assert release.wait(5)
+        (context.attempt_dir / "result.json").write_text("{}")  # type: ignore[attr-defined]
+        return StageResult({"result": "result.json"})
+
+    with ThreadPoolExecutor(max_workers=1) as pool:
+        future = pool.submit(
+            runner.execute,
+            job.job_id,
+            [StageSpec("measure", "v1", callback)],
+            worker_id="live-worker",
+        )
+        assert started.wait(5)
+        report = runner.recover(job.job_id)
+        assert report.quarantined == ()
+        release.set()
+        assert future.result().state == JobState.COMPLETE
+
+
 def test_publication_crash_is_adopted_exactly_once(tmp_path: Path) -> None:
     source, files = _source(tmp_path)
     fired = False
+    clock = FakeClock()
 
     def crash(point: str) -> None:
         nonlocal fired
@@ -170,12 +199,13 @@ def test_publication_crash_is_adopted_exactly_once(tmp_path: Path) -> None:
             raise InjectedCrash(point)
 
     state = tmp_path / "state"
-    runner = Runner(state, synthetic_enabled=True, fault_injector=crash)
+    runner = Runner(state, clock=clock, synthetic_enabled=True, fault_injector=crash)
     job = runner.submit(_request(source, files), source, files)
     with pytest.raises(InjectedCrash):
         runner.execute(job.job_id, [_stage()], worker_id="worker-a")
 
-    recovered = Runner(state, synthetic_enabled=True)
+    clock.now += 31
+    recovered = Runner(state, clock=clock, synthetic_enabled=True)
     report = recovered.recover(job.job_id)
     assert report.adopted == ("measure",)
     assert recovered.recover(job.job_id).adopted == ("measure",)
@@ -263,6 +293,94 @@ def test_changed_stage_version_cannot_reuse_previous_receipt(tmp_path: Path) -> 
         if load_receipt(path).contract.attempt == 2
     )
     assert isinstance(envelope.contract, StageReceipt)
+
+
+def test_changed_ancestor_invalidates_unchanged_downstream_receipt(tmp_path: Path) -> None:
+    source, files = _source(tmp_path)
+    calls: list[str] = []
+    commits = 0
+
+    def upstream(version: str):
+        def callback(context: object) -> StageResult:
+            calls.append(version)
+            (context.attempt_dir / "result").write_text(version)  # type: ignore[attr-defined]
+            return StageResult({"result": "result"})
+
+        return callback
+
+    def downstream(context: object) -> StageResult:
+        calls.append("downstream")
+        prior = (context.prior_stage_dirs[-1] / "result").read_text()  # type: ignore[attr-defined]
+        (context.attempt_dir / "result").write_text(prior)  # type: ignore[attr-defined]
+        return StageResult({"result": "result"})
+
+    def crash(point: str) -> None:
+        nonlocal commits
+        if point == "after_db_commit":
+            commits += 1
+            if commits == 2:
+                raise InjectedCrash(point)
+
+    runner = Runner(
+        tmp_path / "state", synthetic_enabled=True, fault_injector=crash
+    )
+    job = runner.submit(_request(source, files), source, files)
+    with pytest.raises(InjectedCrash):
+        runner.execute(
+            job.job_id,
+            [
+                StageSpec("validate", "v1", upstream("v1")),
+                StageSpec("measure", "v1", downstream),
+            ],
+            worker_id="old",
+        )
+
+    runner.fault_injector = None
+    runner.execute(
+        job.job_id,
+        [
+            StageSpec("validate", "v2", upstream("v2")),
+            StageSpec("measure", "v1", downstream),
+        ],
+        worker_id="new",
+    )
+    assert calls == ["v1", "downstream", "v2", "downstream"]
+    assert runner.outputs(job.job_id, "measure")["result"].read_text() == "v2"
+
+
+def test_snapshot_is_rehashed_before_stage_callback(tmp_path: Path) -> None:
+    source, files = _source(tmp_path)
+    runner = Runner(tmp_path / "state", synthetic_enabled=True)
+    job = runner.submit(_request(source, files), source, files)
+    sealed = runner.snapshots_dir / job.job_id / "input.bin"
+    sealed.chmod(0o644)
+    sealed.write_text("tampered")
+
+    with pytest.raises(SnapshotViolation, match="digest changed"):
+        runner.execute(job.job_id, [_stage()], worker_id="worker")
+    assert runner.status(job.job_id).state == JobState.TERMINAL_FAILURE
+
+
+def test_resubmit_recovers_snapshot_sealed_before_db_attach(tmp_path: Path) -> None:
+    source, files = _source(tmp_path)
+    fired = False
+
+    def crash(point: str) -> None:
+        nonlocal fired
+        if point == "after_snapshot_seal" and not fired:
+            fired = True
+            raise InjectedCrash(point)
+
+    state = tmp_path / "state"
+    runner = Runner(state, synthetic_enabled=True, fault_injector=crash)
+    request = _request(source, files)
+    with pytest.raises(InjectedCrash):
+        runner.submit(request, source, files)
+
+    recovered = Runner(state, synthetic_enabled=True)
+    job = recovered.submit(request, source, files)
+    assert job.state == JobState.READY
+    assert recovered.execute(job.job_id, [_stage()], worker_id="worker").state == JobState.COMPLETE
 
 
 def test_recovery_preserves_verified_receipts_from_multiple_stages(tmp_path: Path) -> None:
@@ -371,3 +489,211 @@ def test_backup_and_unsupported_schema_fail_closed(tmp_path: Path) -> None:
         connection.execute("INSERT INTO metadata VALUES ('schema_version', '999')")
     with pytest.raises(UnsupportedSchema, match="unsupported"):
         JobStore(bad)
+
+
+@pytest.mark.parametrize("point", [
+    "before_snapshot_capture", "after_snapshot_seal", "after_snapshot_attach",
+    "after_snapshot_validating",
+])
+def test_submission_crash_boundaries_recover_on_resubmit(tmp_path: Path, point: str) -> None:
+    source, files = _source(tmp_path)
+    request = _request(source, files)
+    state = tmp_path / "state"
+
+    def crash(current: str) -> None:
+        if current == point:
+            raise InjectedCrash(point)
+
+    runner = Runner(state, synthetic_enabled=True, fault_injector=crash)
+    with pytest.raises(InjectedCrash):
+        runner.submit(request, source, files)
+    pending = runner.store.submit(request)
+    if point == "before_snapshot_capture":
+        incomplete = runner.snapshots_dir / f".{pending.job_id}.dead.tmp"
+        incomplete.mkdir()
+        (incomplete / "partial").write_bytes(b"partial")
+    recovered = Runner(state, synthetic_enabled=True)
+    job = recovered.submit(request, source, files)
+    assert job.job_id == pending.job_id
+    assert job.state == JobState.READY
+    if point == "before_snapshot_capture":
+        assert not incomplete.exists()
+        assert any(recovered.quarantine_dir.iterdir())
+    assert recovered.execute(job.job_id, [_stage()], worker_id="resumed").state == JobState.COMPLETE
+
+
+@pytest.mark.parametrize("point", ["after_snapshot_seal", "after_snapshot_attach", "after_snapshot_validating"])
+def test_recover_finishes_sealed_submission_without_source(tmp_path: Path, point: str) -> None:
+    source, files = _source(tmp_path)
+    runner = Runner(tmp_path / "state", synthetic_enabled=True)
+
+    def crash(current: str) -> None:
+        if current == point:
+            raise InjectedCrash(point)
+
+    runner.fault_injector = crash
+    request = _request(source, files)
+    with pytest.raises(InjectedCrash):
+        runner.submit(request, source, files)
+    job = runner.store.submit(request)
+    runner.fault_injector = None
+    (source / files[0]).unlink()
+    runner.recover(job.job_id)
+    assert runner.status(job.job_id).state == JobState.READY
+
+
+def test_recovery_quarantine_holds_lease_grant_transaction(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    source, files = _source(tmp_path)
+    clock = FakeClock()
+    runner = Runner(tmp_path / "state", clock=clock, synthetic_enabled=True)
+    job = runner.submit(_request(source, files), source, files)
+    runner.store.transition(job.job_id, JobState.RUNNING, "test")
+    old = runner.store.acquire_lease(job.job_id, "measure", "a" * 64, "old", 1)
+    directory = runner.attempts_dir / job.job_id / f"measure-{old.token}"
+    directory.mkdir(parents=True)
+    clock.now += 2
+    grant_started = Event()
+    grant_finished = Event()
+    real_quarantine = runner._quarantine
+    futures = []
+
+    def grant():
+        grant_started.set()
+        lease = runner.store.acquire_lease(job.job_id, "measure", "a" * 64, "new", 10)
+        current = runner.attempts_dir / job.job_id / f"measure-{lease.token}"
+        current.mkdir()
+        grant_finished.set()
+        return lease, current
+
+    with ThreadPoolExecutor(max_workers=1) as pool:
+        def quarantine(path, reason):
+            futures.append(pool.submit(grant))
+            assert grant_started.wait(5)
+            assert not grant_finished.wait(0.1)
+            return real_quarantine(path, reason)
+        monkeypatch.setattr(runner, "_quarantine", quarantine)
+        report = runner.recover(job.job_id)
+        lease, current = futures[0].result(timeout=5)
+    assert len(report.quarantined) == 1
+    assert current.is_dir()
+    assert lease.token > old.token
+    with pytest.raises(StaleLease):
+        runner.store.heartbeat(old, 10)
+    assert runner.recover(job.job_id).quarantined == ()
+
+
+def test_missing_attached_manifest_fails_closed_during_recovery(tmp_path: Path) -> None:
+    source, files = _source(tmp_path)
+    runner = Runner(tmp_path / "state", synthetic_enabled=True)
+    request = _request(source, files)
+
+    def crash(point: str) -> None:
+        if point == "after_snapshot_attach":
+            raise InjectedCrash(point)
+    runner.fault_injector = crash
+    with pytest.raises(InjectedCrash):
+        runner.submit(request, source, files)
+    record = runner.store.submit(request)
+    snapshot = runner.snapshots_dir / record.job_id
+    snapshot.chmod(0o755)
+    (snapshot / "input-manifest.local.json").unlink()
+    runner.fault_injector = None
+    with pytest.raises(SnapshotViolation, match="manifest"):
+        runner.recover(record.job_id)
+    assert runner.status(record.job_id).state == JobState.TERMINAL_FAILURE
+
+
+def test_recovery_does_not_adopt_live_publication_before_commit(tmp_path: Path) -> None:
+    source, files = _source(tmp_path)
+    published = Event()
+    finish = Event()
+
+    def pause(point: str) -> None:
+        if point == "after_publication":
+            published.set()
+            assert finish.wait(5)
+
+    runner = Runner(tmp_path / "state", synthetic_enabled=True, fault_injector=pause)
+    job = runner.submit(_request(source, files), source, files)
+    with ThreadPoolExecutor(max_workers=1) as pool:
+        future = pool.submit(runner.execute, job.job_id, [_stage()], worker_id="live")
+        assert published.wait(5)
+        report = runner.recover(job.job_id)
+        assert report.adopted == ()
+        assert report.quarantined == ()
+        assert runner.store.get(job.job_id).lease_owner == "live"
+        finish.set()
+        assert future.result(timeout=5).state == JobState.COMPLETE
+
+
+@pytest.mark.parametrize("new_names", [
+    ("measure", "validate"),
+    ("validate", "technical_qc", "measure"),
+    ("measure",),
+])
+def test_changed_stage_order_addition_and_removal_recompute_inputs(tmp_path: Path, new_names) -> None:
+    source, files = _source(tmp_path)
+    calls = []
+    runner = Runner(tmp_path / "state", synthetic_enabled=True)
+    job = runner.submit(_request(source, files), source, files)
+
+    def stage(name):
+        def callback(context):
+            calls.append(name)
+            predecessors = [p.name for p in context.prior_stage_dirs]
+            (context.attempt_dir / "result.json").write_text(json.dumps(predecessors))
+            return StageResult({"result": "result.json"})
+        return StageSpec(name, "v1", callback)
+
+    committed = 0
+    def crash(point):
+        nonlocal committed
+        if point == "after_db_commit":
+            committed += 1
+            if committed == 2:
+                raise InjectedCrash(point)
+    runner.fault_injector = crash
+    with pytest.raises(InjectedCrash):
+        runner.execute(job.job_id, [stage("validate"), stage("measure")], worker_id="old")
+    runner.fault_injector = None
+    calls.clear()
+    result = runner.execute(job.job_id, [stage(n) for n in new_names], worker_id="new")
+    assert result.state == JobState.COMPLETE
+    expected = list(new_names[1:]) if new_names[0] == "validate" else list(new_names)
+    assert calls == expected
+
+
+@pytest.mark.parametrize("corruption", ["extra-file", "extra-directory", "missing-manifest"])
+def test_sealed_snapshot_inventory_changes_block_execution(tmp_path: Path, corruption: str) -> None:
+    source, files = _source(tmp_path)
+    runner = Runner(tmp_path / "state", synthetic_enabled=True)
+    job = runner.submit(_request(source, files), source, files)
+    root = runner.snapshots_dir / job.job_id
+    root.chmod(0o755)
+    if corruption == "extra-file":
+        (root / "undeclared").write_bytes(b"unexpected")
+    elif corruption == "extra-directory":
+        (root / "undeclared").mkdir()
+    else:
+        (root / "input-manifest.local.json").unlink()
+    with pytest.raises(SnapshotViolation):
+        runner.execute(job.job_id, [_stage()], worker_id="worker")
+    assert runner.status(job.job_id).state == JobState.TERMINAL_FAILURE
+
+
+def test_callback_snapshot_mutation_cannot_publish(tmp_path: Path) -> None:
+    source, files = _source(tmp_path)
+    runner = Runner(tmp_path / "state", synthetic_enabled=True)
+    job = runner.submit(_request(source, files), source, files)
+
+    def mutate(context):
+        input_file = context.sealed_input_dir / files[0]
+        input_file.chmod(0o644)
+        input_file.write_bytes(b"changed during callback")
+        (context.attempt_dir / "out").write_bytes(b"invalid result")
+        return StageResult({"result": "out"})
+
+    with pytest.raises(SnapshotViolation, match="digest changed"):
+        runner.execute(job.job_id, [StageSpec("measure", "v1", mutate)], worker_id="worker")
+    assert runner.status(job.job_id).state == JobState.TERMINAL_FAILURE
+    assert not (runner.artifacts_dir / job.job_id).exists()

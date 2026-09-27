@@ -39,12 +39,12 @@ CONTIG_MD5 = "0" * 32
 OTHER_MD5 = "1" * 32
 
 
-def _reference() -> RegisteredReference:
+def _reference(*, length: int = 10_000) -> RegisteredReference:
     return RegisteredReference(
         reference_id="synthetic-reference-v1",
         assembly="synthetic-assembly-v1",
         asset_sha256="2" * 64,
-        contigs=(ReferenceContig(name="chrSynthetic1", length=10_000, md5=CONTIG_MD5),),
+        contigs=(ReferenceContig(name="chrSynthetic1", length=length, md5=CONTIG_MD5),),
     )
 
 
@@ -109,6 +109,7 @@ def _segment(
     flag: int = 0,
     mapq: int = 60,
     tags: bool | str = False,
+    placed_unmapped: bool = False,
 ) -> object:
     record = pysam.AlignedSegment()
     record.query_name = name
@@ -118,14 +119,14 @@ def _segment(
     )
     record.query_sequence = "C" * query_length
     record.flag = flag
-    if flag & 4:
+    if flag & 4 and not placed_unmapped:
         record.reference_id = -1
         record.reference_start = -1
     else:
         record.reference_id = 0
         record.reference_start = start
     record.mapping_quality = mapq
-    record.cigartuples = actual_cigar
+    record.cigartuples = None if flag & 4 else actual_cigar
     record.query_qualities = pysam.qualitystring_to_array("I" * query_length)
     if tags:
         record.set_tag("MM", "C+m,0;")
@@ -308,6 +309,107 @@ def test_preflight_rejects_index_from_different_snapshot(tmp_path: Path) -> None
     assert result.fragment_measurement_eligible is False
     assert any(
         check.outcome == PreflightOutcome.BLOCKED and "index" in check.problem
+        for check in result.checks
+    )
+
+
+def test_preflight_rejects_wrong_same_count_bai(tmp_path: Path) -> None:
+    header = _header(length=100_000)
+    target_bam, _ = _write_bam(
+        tmp_path,
+        [{"name": "target", "start": 10}],
+        header=header,
+        stem="target",
+    )
+    _, donor_index = _write_bam(
+        tmp_path,
+        [{"name": "donor", "start": 30_000}],
+        header=header,
+        stem="donor",
+    )
+    result = validate_bam_snapshot(
+        target_bam, donor_index, _reference(length=100_000), _preflight_policy()
+    )
+    assert result.fragment_measurement_eligible is False
+    assert any(
+        check.outcome == PreflightOutcome.BLOCKED and "index" in check.problem
+        for check in result.checks
+    )
+
+
+def test_preflight_accepts_matching_csi(tmp_path: Path) -> None:
+    import pysam
+
+    bam_path, _ = _write_bam(
+        tmp_path,
+        [{"name": "read", "start": 10}],
+        stem="csi-input",
+    )
+    csi_path = tmp_path / "csi-input.bam.csi"
+    pysam.index("-c", "-o", str(csi_path), str(bam_path))
+    result = validate_bam_snapshot(
+        bam_path, csi_path, _reference(), _preflight_policy(model=None)
+    )
+    assert result.fragment_measurement_eligible is True
+
+
+def test_placed_unmapped_record_does_not_start_unplaced_tail(tmp_path: Path) -> None:
+    bam_path, index_path = _write_bam(
+        tmp_path,
+        [
+            {
+                "name": "placed-unmapped",
+                "start": 10,
+                "flag": 4,
+                "placed_unmapped": True,
+            },
+            {"name": "mapped", "start": 100},
+        ],
+        stem="placed-unmapped",
+    )
+    result = validate_bam_snapshot(
+        bam_path, index_path, _reference(), _preflight_policy(model=None)
+    )
+    assert result.fragment_measurement_eligible is True
+    assert not any(
+        check.outcome == PreflightOutcome.BLOCKED and "sort order" in check.problem
+        for check in result.checks
+    )
+
+
+@pytest.mark.parametrize(
+    "records",
+    [
+        [
+            {"name": "mapped-later", "start": 100},
+            {
+                "name": "placed-unmapped-earlier",
+                "start": 10,
+                "flag": 4,
+                "placed_unmapped": True,
+            },
+        ],
+        [
+            {"name": "unplaced", "start": 0, "flag": 4},
+            {"name": "placed-after-tail", "start": 100},
+        ],
+    ],
+)
+def test_preflight_rejects_invalid_placed_record_order(
+    tmp_path: Path, records: list[dict[str, object]]
+) -> None:
+    bam_path, missing_index = _write_bam(
+        tmp_path,
+        records,
+        stem="invalid-coordinate-order",
+        index=False,
+    )
+    result = validate_bam_snapshot(
+        bam_path, missing_index, _reference(), _preflight_policy(model=None)
+    )
+    assert result.fragment_measurement_eligible is False
+    assert any(
+        check.outcome == PreflightOutcome.BLOCKED and "sort order" in check.problem
         for check in result.checks
     )
 
