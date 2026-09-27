@@ -2,10 +2,12 @@
 
 Status: first implementation wave; synthetic data only.
 
-L0 owns scope, staffing sessions 1–5, interface arbitration, integration,
-verification, and the PR queue. The reviewed PRODUCT-SPEC.md and EPICS.md are
-the product authority. PRODUCT-PLAN.md is historical. The public Streamlit
-demo remains separate. No deployment, main-branch merge, real genomic
+L0 is the higher-model coordinator and reviewer. L0 owns sprint planning,
+feature scope, roadmap, staffing and implementation lanes, dependency
+sequencing, interface arbitration, integration, verification, and the PR
+queue. Sessions 1–5 are the implementers. The reviewed PRODUCT-SPEC.md and
+EPICS.md are the product authority. PRODUCT-PLAN.md is historical. The public
+Streamlit demo remains separate. No deployment, main-branch merge, real genomic
 processing, or protocol approval is implied by this wave.
 
 ## First-wave PR stack
@@ -17,6 +19,15 @@ processing, or protocol approval is implied by this wave.
 | 3 | l0/s3-measurement | l0/s2-runner | E3/E5/E6 synthetic modBAM preflight and complete aligned reference-span scan, deterministic aggregates |
 | 4 | l0/s4-signing | l0/s3-measurement | E8 development Ed25519 trust, canonical bundles, offline verification, export allowlist, claims/privacy tests |
 | 5 | l0/s5-operator | l0/s4-signing | E7 and E2 integration: offline doctor/demo/inspect/verify and job/recovery CLI, protocol approval rendering, operator documentation |
+
+Task IDs for handoff discovery:
+
+- L0: `01a0e07f-9738-7113-a9ed-88854d60d661`
+- S1: `01a0e088-3a0b-71e2-82db-8ce7a1643e16`
+- S2: `01a0e088-8fbb-7782-a412-b2edc0042837`
+- S3: `01a0e088-f546-7a03-a9c2-4451accb99e6`
+- S4: `01a0e089-59e8-71c1-b5fe-60a49b372362`
+- S5: `01a0e08a-2f4a-76f1-8234-0bd2431bd8ef`
 
 All sessions start from one preserved baseline and can work in parallel in
 their owned modules. Before finalizing its PR, each session merges its completed
