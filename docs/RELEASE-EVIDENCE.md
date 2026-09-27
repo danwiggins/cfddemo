@@ -52,6 +52,12 @@ digest. A truncated history therefore cannot replay an old approval after a
 later revocation. The head cannot attest decisions after its `as_of` time.
 At `now >= expires_at`, authority is expired.
 
+For a verified result, `fresh_until` is the earliest expiry among every
+authority dependency: the head, trust policy, each relied-on role grant, and
+the latest qualification decision where applicable. At that exact instant the
+result is no longer current. Unknown and invalid results expose no verification
+timestamp or freshness TTL.
+
 Offline verification is explicitly **as of** the supplied authority snapshot.
 Missing, future, expired or mismatched authority remains `unknown`; it is not a
 claim about live current state.

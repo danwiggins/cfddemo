@@ -475,6 +475,7 @@ def _asset_result(
     asset_reference_sha256: str,
     head: ReleaseAuthorityHead | None,
     reference: AssetReference | None = None,
+    fresh_until: datetime | None = None,
 ) -> AssetAuthorizationDecision:
     return AssetAuthorizationDecision(
         authority_status=status,
@@ -486,8 +487,12 @@ def _asset_result(
         asset_id=asset_id,
         asset_version=asset_version,
         asset_reference_sha256=asset_reference_sha256,
-        verified_as_of=head.as_of if head is not None else None,
-        fresh_until=head.expires_at if head is not None else None,
+        verified_as_of=(
+            head.as_of
+            if status == AuthorityStatus.VERIFIED and head is not None
+            else None
+        ),
+        fresh_until=fresh_until if status == AuthorityStatus.VERIFIED else None,
         authorized_reference=reference,
     )
 
@@ -613,6 +618,12 @@ def verify_release_asset_authorization(
             head=authority_head,
             **common,
         )
+    assert grant is not None
+    effective_fresh_until = min(
+        authority_head.expires_at,
+        role_policy.expires_at,
+        grant.expires_at,
+    )
     try:
         verify_signature(
             release_evidence_bytes(package),
@@ -642,6 +653,7 @@ def verify_release_asset_authorization(
             lifecycle=AssetLifecycleStatus.REVOKED,
             failure=AuthorityFailure.NONE,
             head=authority_head,
+            fresh_until=effective_fresh_until,
             **common,
         )
     return _asset_result(
@@ -650,6 +662,7 @@ def verify_release_asset_authorization(
         failure=AuthorityFailure.NONE,
         head=authority_head,
         reference=reference,
+        fresh_until=effective_fresh_until,
         **common,
     )
 
@@ -662,6 +675,7 @@ def _qualification_result(
     outcome: QualificationOutcome | None = None,
     latest: QualificationDecision | None = None,
     head: QualificationAuthorityHead | None = None,
+    fresh_until: datetime | None = None,
 ) -> QualificationVerification:
     return QualificationVerification(
         authority_status=status,
@@ -674,8 +688,10 @@ def _qualification_result(
         latest_decision_sha256=qualification_decision_digest(latest)
         if latest
         else None,
-        verified_as_of=head.as_of if head else None,
-        fresh_until=head.expires_at if head else None,
+        verified_as_of=(
+            head.as_of if status == AuthorityStatus.VERIFIED and head else None
+        ),
+        fresh_until=fresh_until if status == AuthorityStatus.VERIFIED else None,
     )
 
 
@@ -726,6 +742,7 @@ def verify_development_qualification_history(
             head=authority_head,
         )
     previous: QualificationDecision | None = None
+    relied_grant_expiries: list[datetime] = []
     for envelope in history:
         decision = envelope.decision
         if decision.binding != expected_binding:
@@ -794,6 +811,8 @@ def verify_development_qualification_history(
                 binding=expected_binding,
                 head=authority_head,
             )
+        assert grant is not None
+        relied_grant_expiries.append(grant.expires_at)
         try:
             verify_signature(
                 qualification_decision_bytes(decision),
@@ -843,6 +862,12 @@ def verify_development_qualification_history(
         outcome=latest.outcome,
         latest=latest,
         head=authority_head,
+        fresh_until=min(
+            authority_head.expires_at,
+            role_policy.expires_at,
+            latest.expires_at,
+            *relied_grant_expiries,
+        ),
     )
 
 

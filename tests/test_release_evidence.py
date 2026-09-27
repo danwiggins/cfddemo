@@ -321,6 +321,7 @@ def test_release_asset_authorization_requires_external_trust_role_head_and_exact
     assert verified.authority_status == AuthorityStatus.VERIFIED
     assert verified.lifecycle_status == AssetLifecycleStatus.ACTIVE
     assert verified.authorized_reference == reference
+    assert verified.fresh_until == head.expires_at
     assert verified.real_data_authorized is False
     assert verified.qualification_probe_authorized is False
 
@@ -345,6 +346,8 @@ def test_release_asset_authorization_requires_external_trust_role_head_and_exact
         AuthorityFailure.AUTHORITY_HEAD_MISSING,
         None,
     )
+    assert unknown.verified_as_of is None
+    assert unknown.fresh_until is None
 
     wrong_binding = binding.model_copy(update={"workstation_profile_sha256": "f" * 64})
     mismatch = verify_release_asset_authorization(
@@ -633,6 +636,8 @@ def test_qualification_rejects_forgery_wrong_expected_profile_and_decision_expir
         AuthorityFailure.DECISION_EXPIRED,
     )
     assert expired_result.accepted_as_development_test_evidence is False
+    assert expired_result.verified_as_of is None
+    assert expired_result.fresh_until is None
 
 
 def test_authority_head_as_of_includes_equal_decision_time_but_not_later_decision() -> (
@@ -679,3 +684,88 @@ def test_authority_head_as_of_includes_equal_decision_time_but_not_later_decisio
         AuthorityFailure.DECISION_NOT_YET_VALID,
     )
     assert later.accepted_as_development_test_evidence is False
+
+
+def test_effective_freshness_uses_shortest_grant_and_decision_expiry() -> None:
+    package = _package()
+    binding = qualification_binding(package)
+    key = generate_development_keypair(KeyPurpose.RELEASE)
+    trust = TrustStore()
+    trust.add_signing_key(key)
+    policy = _policy(binding, key.key_id)
+    short_expiry = T0 + timedelta(minutes=30)
+    short_release_grant = policy.grants[1].model_copy(
+        update={"expires_at": short_expiry}
+    )
+    short_policy = QualificationTrustPolicy.model_validate(
+        {
+            **policy.model_dump(mode="json"),
+            "grants": (policy.grants[0], short_release_grant),
+        }
+    )
+    envelope = sign_development_release_evidence(
+        package,
+        key,
+        signer_role=ApproverRole.RELEASE_REVIEWER,
+    )
+    package_digest = domain_digest(DigestDomain.RELEASE_EVIDENCE, package)
+    reference = package.assets[0]
+    reference_digest = domain_digest(DigestDomain.ASSET_REFERENCE, reference)
+    release_head = ReleaseAuthorityHead(
+        release_id=package.release_id,
+        release_version=package.version,
+        package_sha256=package_digest,
+        as_of=T0,
+        expires_at=T0 + timedelta(hours=3),
+    )
+    before = verify_release_asset_authorization(
+        envelope,
+        trust,
+        short_policy,
+        release_head,
+        expected_binding=binding,
+        expected_package_sha256=package_digest,
+        expected_asset_id=reference.content.asset_id,
+        expected_asset_version=reference.content.version,
+        expected_asset_reference_sha256=reference_digest,
+        now=T0,
+    )
+    assert before.authority_status == AuthorityStatus.VERIFIED
+    assert before.fresh_until == short_expiry
+
+    at_expiry = verify_release_asset_authorization(
+        envelope,
+        trust,
+        short_policy,
+        release_head,
+        expected_binding=binding,
+        expected_package_sha256=package_digest,
+        expected_asset_id=reference.content.asset_id,
+        expected_asset_version=reference.content.version,
+        expected_asset_reference_sha256=reference_digest,
+        now=short_expiry,
+    )
+    assert at_expiry.authority_status == AuthorityStatus.INVALID
+    assert at_expiry.failure == AuthorityFailure.TRUST_GRANT_EXPIRED
+    assert at_expiry.verified_as_of is None
+    assert at_expiry.fresh_until is None
+
+    decision = _decision(binding)
+    decision_envelope = sign_development_qualification_decision(decision, key)
+    decision_head = QualificationAuthorityHead(
+        binding=binding,
+        latest_sequence=1,
+        latest_decision_sha256=qualification_decision_digest(decision),
+        as_of=T0,
+        expires_at=T0 + timedelta(hours=3),
+    )
+    qualification = verify_development_qualification_history(
+        (decision_envelope,),
+        trust,
+        policy,
+        decision_head,
+        expected_binding=binding,
+        now=T0,
+    )
+    assert qualification.authority_status == AuthorityStatus.VERIFIED
+    assert qualification.fresh_until == decision.expires_at
