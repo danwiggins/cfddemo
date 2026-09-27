@@ -186,6 +186,19 @@ class HistogramBin(RunnerContract):
         return self
 
 
+def _validate_histogram_bins(bins: tuple[HistogramBin, ...]) -> None:
+    """Enforce the shared ordered, contiguous, unbounded-final bin shape."""
+
+    for index, item in enumerate(bins):
+        if item.upper_exclusive is None and index != len(bins) - 1:
+            raise ValueError("only the final histogram bin may be unbounded")
+    if bins[-1].upper_exclusive is not None:
+        raise ValueError("final histogram bin must be explicitly unbounded")
+    for previous, current in zip(bins, bins[1:]):
+        if previous.upper_exclusive != current.lower_inclusive:
+            raise ValueError("histogram bins must be contiguous and ordered")
+
+
 class FragmentMeasurementPolicy(RunnerContract):
     schema_version: Literal["traceback.fragment-policy.v1"] = "traceback.fragment-policy.v1"
     definition_id: Identifier
@@ -208,14 +221,7 @@ class FragmentMeasurementPolicy(RunnerContract):
             raise ValueError("contigs must be unique")
         if self.consumed_cigar_operations != ("M", "D", "N", "=", "X"):
             raise ValueError("v1 consumed CIGAR operations are locked to M,D,N,=,X")
-        for index, item in enumerate(self.bins):
-            if item.upper_exclusive is None and index != len(self.bins) - 1:
-                raise ValueError("only the final histogram bin may be unbounded")
-        if self.bins[-1].upper_exclusive is not None:
-            raise ValueError("final histogram bin must be explicitly unbounded")
-        for previous, current in zip(self.bins, self.bins[1:]):
-            if previous.upper_exclusive != current.lower_inclusive:
-                raise ValueError("histogram bins must be contiguous and ordered")
+        _validate_histogram_bins(self.bins)
         return self
 
 
@@ -390,6 +396,7 @@ class FragmentMeasurement(RunnerContract):
 
     @model_validator(mode="after")
     def reconciles(self) -> FragmentMeasurement:
+        _validate_histogram_bins(tuple(item.bin for item in self.histogram))
         if self.records_scanned != self.eligible_alignments + self.exclusions.total:
             raise ValueError("records_scanned must reconcile eligible and excluded records")
         if sum(item.count for item in self.histogram) != self.eligible_alignments:
