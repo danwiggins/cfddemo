@@ -3,21 +3,25 @@
 from __future__ import annotations
 
 import hashlib
-import json
 import os
 import re
 import tempfile
 from pathlib import Path
 from typing import Annotated, Literal, Mapping
 
-from pydantic import BaseModel, ConfigDict, Field, StringConstraints
+from pydantic import BaseModel, ConfigDict, StringConstraints
 
-from evidence_inspector.models import canonical_json_bytes
+from traceback_runner.contracts import (
+    BundleContent,
+    ExportRunProvenance,
+    FragmentMeasurement,
+    ResultBundleManifest,
+    canonical_json_bytes,
+    canonical_model_from_bytes,
+)
 from traceback_runner.export import (
     ExportLimitations,
-    ExportProvenance,
     FragmentLengthChart,
-    FragmentLengthMeasurement,
     chart_for_measurement,
     render_report,
     validate_measurement,
@@ -87,30 +91,7 @@ _CHECKSUM_PATHS = (MANIFEST_PATH, *_CONTENT_PATHS)
 _ALL_PATHS = frozenset((*_CHECKSUM_PATHS, CHECKSUMS_PATH, SIGNATURE_PATH))
 
 
-class BundleFile(_ClosedModel):
-    path: BundlePath
-    size_bytes: int = Field(ge=0)
-    sha256: Sha256
-
-
-class BundleManifest(_ClosedModel):
-    schema_version: Literal["traceback.result-bundle.v1"] = (
-        "traceback.result-bundle.v1"
-    )
-    synthetic_only: Literal[True] = True
-    trust_namespace: Literal[TrustNamespace.DEVELOPMENT_SYNTHETIC] = (
-        TrustNamespace.DEVELOPMENT_SYNTHETIC
-    )
-    signing_purpose: Literal[KeyPurpose.RESULT] = KeyPurpose.RESULT
-    signing_key_id: Annotated[
-        str,
-        StringConstraints(
-            min_length=8,
-            max_length=128,
-            pattern=r"^[A-Za-z0-9][A-Za-z0-9_.:-]*$",
-        ),
-    ]
-    files: tuple[BundleFile, ...] = Field(min_length=5, max_length=5)
+BundleManifest = ResultBundleManifest
 
 
 class BundleSigningPayload(_ClosedModel):
@@ -130,10 +111,10 @@ class BundleSigningPayload(_ClosedModel):
 
 class VerifiedBundle(_ClosedModel):
     path: str
-    manifest: BundleManifest
-    measurement: FragmentLengthMeasurement
+    manifest: ResultBundleManifest
+    measurement: FragmentMeasurement
     chart: FragmentLengthChart
-    provenance: ExportProvenance
+    provenance: ExportRunProvenance
     limitations: ExportLimitations
     signature: SignatureEnvelope
 
@@ -143,7 +124,7 @@ def _digest(content: bytes) -> str:
 
 
 def _canonical_line_json(model: BaseModel) -> bytes:
-    return canonical_json_bytes(model) + b"\n"
+    return canonical_json_bytes(model)
 
 
 def _checksums_bytes(files: Mapping[str, bytes]) -> bytes:
@@ -162,8 +143,8 @@ def _signing_payload(checksums: bytes) -> BundleSigningPayload:
 def build_result_bundle(
     output_dir: str | Path,
     *,
-    measurement: FragmentLengthMeasurement | Mapping[str, object],
-    provenance: ExportProvenance | Mapping[str, object],
+    measurement: FragmentMeasurement | Mapping[str, object],
+    provenance: ExportRunProvenance | Mapping[str, object],
     signing_key: DevelopmentSigningKey,
 ) -> Path:
     """Build one atomic, synthetic-only bundle from strict aggregate inputs."""
@@ -172,15 +153,6 @@ def build_result_bundle(
         raise BundleFormatError("result bundles require a result-purpose signing key")
     parsed_measurement = validate_measurement(measurement)
     parsed_provenance = validate_provenance(provenance)
-    if (
-        parsed_provenance.workflow_release_id
-        != parsed_measurement.workflow_release_id
-        or parsed_provenance.measurement_definition_id
-        != parsed_measurement.measurement_definition_id
-        or parsed_provenance.reference_id != parsed_measurement.reference_id
-    ):
-        raise BundleFormatError("measurement and provenance identities do not match")
-
     measurement_content = _canonical_line_json(parsed_measurement)
     chart = chart_for_measurement(parsed_measurement, _digest(measurement_content))
     limitations = ExportLimitations()
@@ -191,11 +163,15 @@ def build_result_bundle(
         LIMITATIONS_PATH: _canonical_line_json(limitations),
         REPORT_PATH: render_report(parsed_measurement),
     }
-    manifest = BundleManifest(
+    record_id = f"record-{_digest(measurement_content + content[PROVENANCE_PATH])[:24]}"
+    manifest = ResultBundleManifest(
+        record_id=record_id,
+        workflow_release_id=parsed_provenance.workflow_release_id,
+        measurement_schema_versions=(parsed_measurement.schema_version,),
         signing_key_id=signing_key.key_id,
-        files=tuple(
-            BundleFile(path=path, size_bytes=len(content[path]), sha256=_digest(content[path]))
-            for path in _CONTENT_PATHS
+        contents=tuple(
+            BundleContent(relative_path=path, size_bytes=len(content[path]), sha256=_digest(content[path]))
+            for path in sorted(_CONTENT_PATHS)
         ),
     )
     content[MANIFEST_PATH] = _canonical_line_json(manifest)
@@ -263,21 +239,10 @@ def _read_exact_files(bundle_dir: Path) -> dict[str, bytes]:
 
 
 def _parse_json(content: bytes, model: type[BaseModel], label: str) -> BaseModel:
-    def reject_duplicates(pairs: list[tuple[str, object]]) -> dict[str, object]:
-        value: dict[str, object] = {}
-        for key, nested in pairs:
-            if key in value:
-                raise ValueError(f"duplicate JSON key {key!r}")
-            value[key] = nested
-        return value
-
     try:
-        value = json.loads(content, object_pairs_hook=reject_duplicates)
-        parsed = model.model_validate(value)
+        parsed = canonical_model_from_bytes(model, content)
     except Exception as exc:
         raise BundleFormatError(f"invalid {label}") from exc
-    if content != _canonical_line_json(parsed):
-        raise BundleFormatError(f"{label} is not canonical JSON")
     return parsed
 
 
@@ -305,9 +270,9 @@ def verify_bundle(bundle_dir: str | Path, trust_store: TrustStore) -> VerifiedBu
 
     root = Path(bundle_dir)
     content = _read_exact_files(root)
-    manifest = _parse_json(content[MANIFEST_PATH], BundleManifest, "bundle manifest")
+    manifest = _parse_json(content[MANIFEST_PATH], ResultBundleManifest, "bundle manifest")
     signature = _parse_json(content[SIGNATURE_PATH], SignatureEnvelope, "signature")
-    assert isinstance(manifest, BundleManifest)
+    assert isinstance(manifest, ResultBundleManifest)
     assert isinstance(signature, SignatureEnvelope)
     if signature.key_id != manifest.signing_key_id:
         raise BundleIntegrityError("manifest and signature key identifiers differ")
@@ -316,13 +281,13 @@ def verify_bundle(bundle_dir: str | Path, trust_store: TrustStore) -> VerifiedBu
     for path, expected in checksums.items():
         if _digest(content[path]) != expected:
             raise BundleIntegrityError(f"checksum mismatch for {path}")
-    manifest_files = tuple(item.path for item in manifest.files)
-    if manifest_files != _CONTENT_PATHS:
+    manifest_files = tuple(item.relative_path for item in manifest.contents)
+    if manifest_files != tuple(sorted(_CONTENT_PATHS)):
         raise BundleFormatError("manifest content inventory or ordering is invalid")
-    for item in manifest.files:
-        actual = content[item.path]
+    for item in manifest.contents:
+        actual = content[item.relative_path]
         if len(actual) != item.size_bytes or _digest(actual) != item.sha256:
-            raise BundleIntegrityError(f"manifest mismatch for {item.path}")
+            raise BundleIntegrityError(f"manifest mismatch for {item.relative_path}")
 
     verify_signature(
         canonical_json_bytes(_signing_payload(content[CHECKSUMS_PATH])),
@@ -332,16 +297,16 @@ def verify_bundle(bundle_dir: str | Path, trust_store: TrustStore) -> VerifiedBu
     )
 
     measurement = _parse_json(
-        content[MEASUREMENT_PATH], FragmentLengthMeasurement, "measurement"
+        content[MEASUREMENT_PATH], FragmentMeasurement, "measurement"
     )
     chart = _parse_json(content[CHART_PATH], FragmentLengthChart, "chart")
-    provenance = _parse_json(content[PROVENANCE_PATH], ExportProvenance, "provenance")
+    provenance = _parse_json(content[PROVENANCE_PATH], ExportRunProvenance, "provenance")
     limitations = _parse_json(
         content[LIMITATIONS_PATH], ExportLimitations, "limitations"
     )
-    assert isinstance(measurement, FragmentLengthMeasurement)
+    assert isinstance(measurement, FragmentMeasurement)
     assert isinstance(chart, FragmentLengthChart)
-    assert isinstance(provenance, ExportProvenance)
+    assert isinstance(provenance, ExportRunProvenance)
     assert isinstance(limitations, ExportLimitations)
 
     expected_chart = chart_for_measurement(measurement, _digest(content[MEASUREMENT_PATH]))
@@ -349,12 +314,10 @@ def verify_bundle(bundle_dir: str | Path, trust_store: TrustStore) -> VerifiedBu
         raise BundleIntegrityError("chart does not derive from the canonical measurement")
     if content[REPORT_PATH] != render_report(measurement):
         raise BundleIntegrityError("report is not the approved rendering of measurement")
-    if (
-        provenance.workflow_release_id != measurement.workflow_release_id
-        or provenance.measurement_definition_id != measurement.measurement_definition_id
-        or provenance.reference_id != measurement.reference_id
-    ):
-        raise BundleIntegrityError("provenance does not identify the measurement")
+    if provenance.workflow_release_id != manifest.workflow_release_id:
+        raise BundleIntegrityError("provenance does not identify the workflow release")
+    if manifest.measurement_schema_versions != (measurement.schema_version,):
+        raise BundleIntegrityError("manifest does not identify the measurement schema")
     return VerifiedBundle(
         path=str(root.resolve()),
         manifest=manifest,
@@ -366,12 +329,12 @@ def verify_bundle(bundle_dir: str | Path, trust_store: TrustStore) -> VerifiedBu
     )
 
 
-def inspect_bundle(bundle_dir: str | Path) -> BundleManifest:
+def inspect_bundle(bundle_dir: str | Path) -> ResultBundleManifest:
     """Inspect an untrusted manifest without implying verification."""
 
     content = _read_exact_files(Path(bundle_dir))
-    manifest = _parse_json(content[MANIFEST_PATH], BundleManifest, "bundle manifest")
-    assert isinstance(manifest, BundleManifest)
+    manifest = _parse_json(content[MANIFEST_PATH], ResultBundleManifest, "bundle manifest")
+    assert isinstance(manifest, ResultBundleManifest)
     return manifest
 
 

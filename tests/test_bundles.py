@@ -16,7 +16,9 @@ from traceback_runner.bundles import (
     verify_bundle,
 )
 from traceback_runner.export import ExportBoundaryError, validate_measurement
+from traceback_runner.fixtures import synthetic_fragment_policy
 from traceback_runner.signing import (
+    InvalidSignatureError,
     KeyPurpose,
     RevokedKeyError,
     TrustStore,
@@ -26,21 +28,31 @@ from traceback_runner.signing import (
 
 
 def _measurement(**updates: object) -> dict[str, object]:
+    bins = synthetic_fragment_policy().bins
     value: dict[str, object] = {
-        "schema_version": "traceback.fragment-length.v1",
-        "synthetic_only": True,
-        "measurement_definition_id": "aligned-reference-span.v1",
-        "workflow_release_id": "synthetic-workflow.v1",
+        "schema_version": "traceback.fragment-measurement.v1",
+        "definition_id": "aligned-reference-span.v1",
+        "approval_state": "unapproved_synthetic",
         "reference_id": "synthetic-reference.v1",
         "completion": "complete",
-        "unit": "bp",
-        "minimum_mapq": 20,
-        "total_alignments": 4,
+        "records_scanned": 4,
         "eligible_alignments": 3,
-        "excluded_alignments": 1,
-        "bins": [
-            {"lower_bp": 0, "upper_bp": 150, "count": 1},
-            {"lower_bp": 150, "upper_bp": 200, "count": 2},
+        "exclusions": {
+            "unmapped": 1,
+            "secondary": 0,
+            "supplementary": 0,
+            "qc_failure": 0,
+            "duplicate": 0,
+            "low_mapping_quality": 0,
+            "unregistered_contig": 0,
+            "no_reference_span": 0,
+        },
+        "histogram": [
+            {
+                "bin": item.model_dump(mode="json"),
+                "count": 1 if index == 0 else 2 if index == 1 else 0,
+            }
+            for index, item in enumerate(bins)
         ],
     }
     value.update(updates)
@@ -49,13 +61,18 @@ def _measurement(**updates: object) -> dict[str, object]:
 
 def _provenance(**updates: object) -> dict[str, object]:
     value: dict[str, object] = {
-        "schema_version": "traceback.provenance.v1",
-        "synthetic_only": True,
+        "schema_version": "traceback.run-provenance.v1",
+        "run_token": "synthetic.run.v1",
+        "input_kind": "modbam",
+        "protocol_run_token": "synthetic.protocol.v1",
         "workflow_release_id": "synthetic-workflow.v1",
-        "measurement_definition_id": "aligned-reference-span.v1",
-        "reference_id": "synthetic-reference.v1",
-        "input_commitment": f"hmac-sha256:{'a' * 64}",
-        "tools": [{"name": "traceback", "version": "0.1.0"}],
+        "artifacts": [
+            {
+                "role": "analysis_input",
+                "size_bytes": 100,
+                "provider_hmac_sha256": "a" * 64,
+            }
+        ],
     }
     value.update(updates)
     return value
@@ -134,6 +151,25 @@ def test_wrong_missing_and_revoked_trust_fail(tmp_path: Path) -> None:
 
     store.revoke(key.key_id)
     with pytest.raises(RevokedKeyError):
+        verify_bundle(path, store)
+
+
+def test_bundle_rejects_wrong_purpose_key_and_tampered_signature(tmp_path: Path) -> None:
+    release_key = generate_development_keypair(KeyPurpose.RELEASE)
+    with pytest.raises(BundleFormatError, match="result-purpose"):
+        build_result_bundle(
+            tmp_path / "wrong-purpose",
+            measurement=_measurement(),
+            provenance=_provenance(),
+            signing_key=release_key,
+        )
+
+    path, _, store = _bundle(tmp_path / "tampered")
+    signature_path = path / "bundle.sig"
+    signature = json.loads(signature_path.read_text())
+    signature["signature_base64"] = "eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eA=="
+    signature_path.write_text(json.dumps(signature, sort_keys=True, separators=(",", ":")))
+    with pytest.raises(InvalidSignatureError):
         verify_bundle(path, store)
 
 
@@ -216,8 +252,8 @@ def test_incomplete_zero_or_unreconciled_measurements_cannot_publish() -> None:
     for update in (
         {"completion": "interrupted"},
         {"eligible_alignments": 0},
-        {"excluded_alignments": 2},
-        {"bins": [{"lower_bp": 0, "upper_bp": None, "count": 2}]},
+        {"records_scanned": 5},
+        {"histogram": [{"bin": {"lower_inclusive": 0, "upper_exclusive": None}, "count": 2}]},
     ):
         with pytest.raises(ExportBoundaryError):
             validate_measurement(_measurement(**update))

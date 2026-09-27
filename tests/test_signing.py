@@ -11,8 +11,6 @@ from traceback_runner.signing import (
     KeyPurpose,
     RevokedKeyError,
     SignatureEnvelope,
-    TrustNamespace,
-    TrustNamespaceError,
     TrustStore,
     UnknownKeyError,
     WrongPurposeError,
