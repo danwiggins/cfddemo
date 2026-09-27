@@ -184,6 +184,9 @@ class QualificationTrustPolicy(RunnerContract):
     def ordered_unique_grants(self) -> QualificationTrustPolicy:
         if self.expires_at <= self.issued_at:
             raise ValueError("policy expires_at must be after issued_at")
+        for grant in self.grants:
+            if grant.valid_from < self.issued_at or grant.expires_at > self.expires_at:
+                raise ValueError("grant validity must be contained by policy validity")
         keys = tuple(
             (
                 item.scope.value,

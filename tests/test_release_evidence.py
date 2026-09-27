@@ -218,6 +218,14 @@ def test_strict_contracts_reject_unknown_fields_bad_times_and_incomplete_revocat
         )
     with pytest.raises(ValidationError, match="revoked assets require"):
         AssetLifecycle(status=AssetStatus.REVOKED)
+    with pytest.raises(ValidationError, match="string_pattern_mismatch"):
+        AssetContentIdentity(
+            asset_id="synthetic-reference",
+            version="v1",
+            kind=AssetKind.REFERENCE,
+            content_sha256="not-a-digest",
+            content_size_bytes=128,
+        )
     with pytest.raises(ValidationError, match="timezone-aware UTC"):
         AssetLifecycle(
             status=AssetStatus.REVOKED,
@@ -595,19 +603,22 @@ def test_qualification_rejects_forgery_wrong_expected_profile_and_decision_expir
         AuthorityFailure.SIGNATURE_INVALID,
     )
 
-    wrong_profile = binding.model_copy(update={"workstation_profile_sha256": "f" * 64})
-    wrong_result = verify_development_qualification_history(
-        (envelope,),
-        trust,
-        policy,
-        head,
-        expected_binding=wrong_profile,
-        now=T0,
-    )
-    assert (wrong_result.authority_status, wrong_result.failure) == (
-        AuthorityStatus.INVALID,
-        AuthorityFailure.EXPECTED_BINDING_MISMATCH,
-    )
+    for wrong_binding in (
+        binding.model_copy(update={"workstation_profile_sha256": "f" * 64}),
+        binding.model_copy(update={"release_evidence_sha256": "e" * 64}),
+    ):
+        wrong_result = verify_development_qualification_history(
+            (envelope,),
+            trust,
+            policy,
+            head,
+            expected_binding=wrong_binding,
+            now=T0,
+        )
+        assert (wrong_result.authority_status, wrong_result.failure) == (
+            AuthorityStatus.INVALID,
+            AuthorityFailure.EXPECTED_BINDING_MISMATCH,
+        )
 
     expired_result = verify_development_qualification_history(
         (envelope,),
