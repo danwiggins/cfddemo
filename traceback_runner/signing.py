@@ -114,6 +114,11 @@ class DevelopmentSigningKey:
     private_key: Ed25519PrivateKey
     namespace: TrustNamespace = TrustNamespace.DEVELOPMENT_SYNTHETIC
 
+    def __post_init__(self) -> None:
+        expected = _development_key_id(self.public_key_bytes(), self.purpose)
+        if self.key_id != expected:
+            raise SigningError("development key identifier does not match its public key")
+
     def public_key_bytes(self) -> bytes:
         return self.private_key.public_key().public_bytes(
             encoding=serialization.Encoding.Raw,
@@ -132,6 +137,9 @@ class TrustedKey:
     def __post_init__(self) -> None:
         if len(self.public_key_bytes) != 32:
             raise ValueError("Ed25519 public keys must be exactly 32 bytes")
+        expected = _development_key_id(self.public_key_bytes, self.purpose)
+        if self.key_id != expected:
+            raise SigningError("trusted key identifier does not match its public key")
 
 
 class TrustStore:
@@ -177,6 +185,11 @@ class TrustStore:
             raise UnknownKeyError(f"unknown signing key {key_id!r}") from exc
 
 
+def _development_key_id(public_key_bytes: bytes, purpose: KeyPurpose) -> str:
+    fingerprint = hashlib.sha256(public_key_bytes).hexdigest()[:24]
+    return f"dev-{purpose.value}-{fingerprint}"
+
+
 def generate_development_keypair(purpose: KeyPurpose) -> DevelopmentSigningKey:
     """Create an ephemeral synthetic-only Ed25519 signing key."""
 
@@ -185,9 +198,8 @@ def generate_development_keypair(purpose: KeyPurpose) -> DevelopmentSigningKey:
         encoding=serialization.Encoding.Raw,
         format=serialization.PublicFormat.Raw,
     )
-    fingerprint = hashlib.sha256(public_bytes).hexdigest()[:24]
     return DevelopmentSigningKey(
-        key_id=f"dev-{purpose.value}-{fingerprint}",
+        key_id=_development_key_id(public_bytes, purpose),
         purpose=purpose,
         private_key=private_key,
     )

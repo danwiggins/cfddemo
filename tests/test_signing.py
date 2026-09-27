@@ -45,6 +45,10 @@ def test_public_development_trust_round_trips_without_private_key_material() -> 
     with pytest.raises(ValueError, match="canonical"):
         load_development_trust(b" \n" + content)
 
+    tampered = content.replace(key.key_id.encode(), b"dev-result-000000000000000000000000")
+    with pytest.raises(ValueError, match="does not match"):
+        load_development_trust(tampered)
+
 
 def test_signature_rejects_tampering_wrong_key_and_missing_key() -> None:
     key = generate_development_keypair(KeyPurpose.RESULT)
