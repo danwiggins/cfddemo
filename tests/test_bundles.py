@@ -17,6 +17,7 @@ from traceback_runner.bundles import (
 )
 from traceback_runner.export import ExportBoundaryError, validate_measurement
 from traceback_runner.fixtures import synthetic_fragment_policy
+from traceback_runner.measurement import finalize_measurement, scan_aligned_reference_spans
 from traceback_runner.signing import (
     InvalidSignatureError,
     KeyPurpose,
@@ -90,6 +91,72 @@ def _bundle(tmp_path: Path):
         signing_key=key,
     )
     return path, key, store
+
+
+def test_actual_synthetic_scan_bundles_and_verifies_losslessly(tmp_path: Path) -> None:
+    import pysam
+
+    policy = synthetic_fragment_policy()
+    header = pysam.AlignmentHeader.from_dict(
+        {
+            "HD": {"VN": "1.6", "SO": "coordinate"},
+            "SQ": [{"SN": "synthetic_chr1", "LN": 10_000}],
+        }
+    )
+    bam_path = tmp_path / "actual-synthetic-scan.bam"
+    with pysam.AlignmentFile(bam_path, "wb", header=header) as output:
+        for index, span in enumerate((50, 600)):
+            record = pysam.AlignedSegment(header)
+            record.query_name = f"private-read-{index}"
+            record.query_sequence = "C" * span
+            record.flag = 0
+            record.reference_id = 0
+            record.reference_start = index * 1_000
+            record.mapping_quality = 60
+            record.cigartuples = [(0, span)]
+            record.query_qualities = pysam.qualitystring_to_array("I" * span)
+            output.write(record)
+
+    measurement = finalize_measurement(
+        scan_aligned_reference_spans(bam_path, policy)
+    )
+    assert measurement.histogram[0].bin.lower_inclusive == 0
+    assert measurement.histogram[0].count == 1
+    assert measurement.histogram[-1].bin.upper_exclusive is None
+    assert measurement.histogram[-1].count == 1
+
+    key = generate_development_keypair(KeyPurpose.RESULT)
+    trust = TrustStore()
+    trust.add_signing_key(key)
+    bundle = build_result_bundle(
+        tmp_path / "scanned-record",
+        measurement=measurement,
+        provenance=_provenance(
+            run_token="synthetic.run.integration",
+            protocol_run_token="synthetic.protocol.integration",
+            artifacts=[
+                {
+                    "role": "analysis_input",
+                    "artifact_token": "synthetic-bam.integration",
+                    "size_bytes": bam_path.stat().st_size,
+                    "provider_hmac_sha256": "c" * 64,
+                }
+            ],
+        ),
+        signing_key=key,
+    )
+    verified = verify_bundle(bundle, trust)
+
+    assert verified.measurement == measurement
+    assert verified.chart.rows[0].lower_inclusive == 0
+    assert verified.chart.rows[0].count == 1
+    assert verified.chart.rows[-1].upper_exclusive is None
+    assert verified.chart.rows[-1].count == 1
+    serialized = b"".join(
+        path.read_bytes() for path in bundle.rglob("*") if path.is_file()
+    )
+    assert b"private-read" not in serialized
+    assert str(tmp_path).encode() not in serialized
 
 
 def test_build_and_verify_canonical_bundle_without_embedded_trust_root(tmp_path: Path) -> None:
