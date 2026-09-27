@@ -1,9 +1,9 @@
 # Traceback MinION-to-Research-Record Specification
 
 Status: `/autoplan` reviewed; synthetic contract implementation may start,
-real-data execution remains gated  
-Product boundary: research-use software, one qualified MinION workflow, hg38  
-Primary input: complete MinKNOW run directory with retained POD5  
+real-data execution remains gated
+Product boundary: research-use software, one qualified MinION workflow, hg38
+Primary input: complete MinKNOW run directory with retained POD5
 Fast-path input: compatible coordinate-sorted modBAM plus BAI/CSI
 
 ## 1. Objective

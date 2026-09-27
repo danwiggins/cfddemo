@@ -6,7 +6,7 @@ unapproved for real genomic data, hardware, scientific, or protocol use.
 
 from __future__ import annotations
 
-from datetime import datetime
+from datetime import date, datetime
 from enum import StrEnum
 from pathlib import PurePosixPath
 from typing import Annotated, Literal
@@ -116,6 +116,7 @@ class ArtifactCommitment(RunnerContract):
     """Export-safe commitment with no locator or reusable raw digest."""
 
     role: Identifier
+    artifact_token: Identifier
     size_bytes: int = Field(ge=0)
     provider_hmac_sha256: Sha256
 
@@ -147,9 +148,9 @@ class ExportRunProvenance(RunnerContract):
 
     @model_validator(mode="after")
     def deterministic_unique_artifacts(self) -> ExportRunProvenance:
-        roles = [item.role for item in self.artifacts]
-        if roles != sorted(roles) or len(roles) != len(set(roles)):
-            raise ValueError("artifact commitments must have unique sorted roles")
+        keys = [(item.role, item.artifact_token) for item in self.artifacts]
+        if keys != sorted(keys) or len(keys) != len(set(keys)):
+            raise ValueError("artifact commitments must be uniquely sorted by role and token")
         return self
 
 
@@ -228,12 +229,13 @@ class WorkflowStage(RunnerContract):
 class WorkflowRelease(RunnerContract):
     schema_version: Literal["traceback.workflow-release.v1"] = "traceback.workflow-release.v1"
     release_id: Identifier
-    release_sha256: Sha256
     approval_state: Literal[ApprovalState.UNAPPROVED_SYNTHETIC] = ApprovalState.UNAPPROVED_SYNTHETIC
     synthetic_only: Literal[True] = True
     expires_at: datetime
     reference_id: Identifier
     reference_sha256: Sha256
+    canonical_basecall_model_id: Identifier | None
+    modified_base_model_ids: tuple[Identifier, ...]
     supported_input_kinds: tuple[InputKind, ...] = Field(min_length=1)
     stages: tuple[WorkflowStage, ...] = Field(min_length=1)
     fragment_policy: FragmentMeasurementPolicy
@@ -251,6 +253,8 @@ class WorkflowRelease(RunnerContract):
     def internally_consistent(self) -> WorkflowRelease:
         if len(set(self.supported_input_kinds)) != len(self.supported_input_kinds):
             raise ValueError("supported_input_kinds must be unique")
+        if len(set(self.modified_base_model_ids)) != len(self.modified_base_model_ids):
+            raise ValueError("modified_base_model_ids must be unique")
         names = [stage.name for stage in self.stages]
         if len(names) != len(set(names)):
             raise ValueError("stage names must be unique")
@@ -423,8 +427,27 @@ class ResultBundleManifest(RunnerContract):
 class CompatibilityItem(RunnerContract):
     category: Identifier
     item_id: Identifier
+    display_name: NonEmptyText
+    description: NonEmptyText
     status: Literal["required", "recommended", "optional"]
+    instruction_kind: Literal["compatibility_fact", "wet_lab_instruction"] = "compatibility_fact"
+    rendering: Literal["display", "withhold"] = "display"
     approval_state: Literal[ApprovalState.UNAPPROVED_SYNTHETIC] = ApprovalState.UNAPPROVED_SYNTHETIC
+    protocol_version: Identifier | None = None
+    owner: NonEmptyText | None = None
+    source: NonEmptyText | None = None
+    source_version: Identifier | None = None
+    last_reviewed: date | None = None
+
+    @model_validator(mode="after")
+    def fail_closed_instructions(self) -> CompatibilityItem:
+        provenance = (self.protocol_version, self.owner, self.source, self.source_version, self.last_reviewed)
+        if self.instruction_kind == "wet_lab_instruction":
+            if self.rendering != "withhold":
+                raise ValueError("unapproved wet-lab instructions must be withheld")
+            if any(item is None for item in provenance):
+                raise ValueError("wet-lab instructions require complete versioned provenance")
+        return self
 
 
 class CompatibilityManifest(RunnerContract):
