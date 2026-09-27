@@ -33,6 +33,7 @@ from traceback_runner.fixtures import (
     create_synthetic_bam,
     synthetic_fragment_policy,
 )
+from traceback_runner.snapshots import capture_snapshot
 
 CONTIG_MD5 = "0" * 32
 OTHER_MD5 = "1" * 32
@@ -425,6 +426,37 @@ def test_shared_synthetic_fixture_runs_through_preflight_and_measurement(
     assert measurement.eligible_alignments == 1
     assert measurement.exclusions.total == 7
     assert measurement.exclusions.unregistered_contig == 1
+
+
+def test_measurement_reads_runner_owned_sealed_snapshot_paths(tmp_path: Path) -> None:
+    delivery = tmp_path / "mutable-delivery"
+    fixture = create_synthetic_bam(delivery, SyntheticBamKind.VALID_MODBAM)
+    assert fixture.index_path is not None
+    snapshot = capture_snapshot(
+        delivery,
+        (fixture.bam_path.name, fixture.index_path.name),
+        tmp_path / "runner-snapshots",
+        snapshot_id="synthetic-sealed-input",
+    )
+    bam_path = snapshot.path / fixture.bam_path.name
+    index_path = snapshot.path / fixture.index_path.name
+    assert bam_path.stat().st_mode & 0o222 == 0
+    assert index_path.stat().st_mode & 0o222 == 0
+
+    report = validate_bam_snapshot(
+        bam_path,
+        index_path,
+        fixture.registered_reference,
+        BamPreflightPolicy(
+            policy_id="synthetic-preflight-v1",
+            modified_base_model_id=fixture.expected_modified_base_model,
+        ),
+    )
+    assert report.fragment_measurement_eligible is True
+    measurement = finalize_measurement(
+        scan_aligned_reference_spans(bam_path, synthetic_fragment_policy())
+    )
+    assert measurement.eligible_alignments == 1
 
 
 @pytest.mark.parametrize(
