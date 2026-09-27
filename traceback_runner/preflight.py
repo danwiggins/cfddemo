@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import struct
+import tempfile
 from pathlib import Path
 from typing import Any
 
@@ -89,6 +91,45 @@ def _modification_tags_valid(record: Any) -> tuple[bool, bool]:
     )
 
 
+def _same_bytes(left: Path, right: Path) -> bool:
+    if left.stat().st_size != right.stat().st_size:
+        return False
+    with left.open("rb") as left_handle, right.open("rb") as right_handle:
+        while left_chunk := left_handle.read(1024 * 1024):
+            if left_chunk != right_handle.read(len(left_chunk)):
+                return False
+        return right_handle.read(1) == b""
+
+
+def _index_matches_bam(bam_path: str, index_path: str, pysam: Any) -> bool:
+    """Rebuild the supplied BAI/CSI format and compare its exact index bytes."""
+
+    supplied = Path(index_path)
+    with supplied.open("rb") as handle:
+        prefix = handle.read(12)
+    if prefix[:4] == b"BAI\x01":
+        arguments = ()
+        suffix = ".bai"
+    else:
+        try:
+            with pysam.BGZFile(str(supplied), "rb") as handle:
+                prefix = handle.read(12)
+        except (OSError, ValueError):
+            return False
+    if prefix[:4] == b"CSI\x01" and len(prefix) == 12:
+        min_shift = struct.unpack("<i", prefix[4:8])[0]
+        if not 1 <= min_shift <= 31:
+            return False
+        arguments = ("-c", "-m", str(min_shift))
+        suffix = ".csi"
+    elif prefix[:4] != b"BAI\x01":
+        return False
+    with tempfile.TemporaryDirectory(prefix="traceback-index-check-") as directory:
+        rebuilt = Path(directory) / f"rebuilt{suffix}"
+        pysam.index(*arguments, "-o", str(rebuilt), bam_path)
+        return _same_bytes(supplied, rebuilt)
+
+
 def _report(checks: list[PreflightCheck]) -> PreflightReport:
     severity = {
         PreflightOutcome.PASS: 0,
@@ -152,6 +193,8 @@ def validate_bam_snapshot(
                         sum(item.mapped for item in stats),
                         sum(item.unmapped for item in stats) + indexed.nocoordinate,
                     )
+                if not _index_matches_bam(bam_locator, index_locator, pysam):
+                    raise ValueError("index does not correspond to BAM")
             except Exception:
                 checks.append(
                     _check(
@@ -184,16 +227,19 @@ def validate_bam_snapshot(
             saw_tagged = saw_invalid = False
             actual_sorted = True
             previous: tuple[int, int] | None = None
-            saw_unmapped = False
+            saw_unplaced = False
             observed_mapped = observed_unmapped = sampled = 0
             for record in bam.fetch(until_eof=True):
                 if record.is_unmapped:
-                    saw_unmapped = True
                     observed_unmapped += 1
                 else:
                     observed_mapped += 1
+                is_unplaced = record.reference_id < 0 or record.reference_start < 0
+                if is_unplaced:
+                    saw_unplaced = True
+                else:
                     coordinate = (record.reference_id, record.reference_start)
-                    if saw_unmapped or (previous is not None and coordinate < previous):
+                    if saw_unplaced or (previous is not None and coordinate < previous):
                         actual_sorted = False
                     previous = coordinate
                 if record.is_unmapped or record.is_secondary or record.is_supplementary:
