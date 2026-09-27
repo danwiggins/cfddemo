@@ -69,10 +69,15 @@ the same exit code as human output.
 ## Recovery
 
 - **Stale status:** wait for or restart the local runner, then run `status`
-  again. Do not start a duplicate job while freshness is unknown.
+  again. A successful local status read is a fresh observation even for an old
+  completed or paused job. Do not start a duplicate job while freshness is unknown.
 - **Paused:** use `resume` after the reason for pausing is resolved.
+- **Interrupted process:** `resume` recovers a RUNNING job after its worker lease
+  expires. An unexpired lease blocks recovery so a live worker is not displaced.
 - **Retryable failure:** inspect `logs`, follow the one stated remediation,
-  then use `retry`. Verified completed stage receipts are reused.
+  then use `retry` followed by `resume`. There is no background queue worker;
+  retry queues the job and resume executes it. Verified completed stage receipts
+  are reused.
 - **Verification failed:** do not treat the record as ready. Confirm that the
   development trust store was configured independently from the bundle and
   rerun `verify`.
@@ -103,3 +108,10 @@ The synthetic workflow does not prove rootless OCI isolation, zero-egress
 execution, Dorado behavior, MinION compatibility, real POD5 processing,
 scientific validity, operator usability, signing-key custody, or a qualified
 wet-lab protocol. Those gates remain open after this development wave.
+
+Development public trust entries are accumulated, preserving prior keys and
+revocations; ephemeral private keys are not persisted. Record copies are verified
+in private staging, flushed, and published with an exclusive atomic rename on
+macOS/Linux. An invalid existing record is retained and a verified recovery sibling
+is published; no existing user output is deleted or replaced. CLI mutations are
+serialized per workspace by an OS lock released on process exit.

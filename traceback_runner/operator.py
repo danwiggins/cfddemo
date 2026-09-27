@@ -146,7 +146,7 @@ def build_job_view(
         JobState.QUEUED,
     }:
         headline = "Synthetic job queued"
-        next_action = "Wait for local execution"
+        next_action = f"Run traceback resume {job_id} --root <same-root> to start local execution"
     else:
         headline = f"Job {state.value.replace('_', ' ')}"
         next_action = "Inspect the local job state"
