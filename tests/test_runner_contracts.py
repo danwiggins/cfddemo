@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+from pathlib import Path
 
 import pytest
 from pydantic import ValidationError
@@ -19,6 +20,18 @@ from traceback_runner.contracts import (
     PreflightReport,
     job_key,
     validate_transition,
+)
+from traceback_runner import (
+    CompletionState,
+    ExclusionCounts,
+    FragmentMeasurement,
+    HistogramCount,
+    SyntheticBamKind,
+    canonical_json_bytes,
+    canonical_model_from_bytes,
+    create_synthetic_bam,
+    create_synthetic_minknow_run,
+    synthetic_fragment_policy,
 )
 
 
@@ -90,3 +103,66 @@ def test_cli_doctor_and_demo_are_explicitly_synthetic(capsys: pytest.CaptureFixt
     payload = json.loads(capsys.readouterr().out)
     assert payload["status"] == "contract_validated"
     assert payload["real_data_enabled"] is False
+
+
+def test_nested_contracts_are_immutable_and_nonfinite_is_rejected() -> None:
+    request = _request(execution_options={"threads": 2, "offline": True})
+    with pytest.raises(ValidationError, match="frozen"):
+        request.execution_options.threads = 3  # type: ignore[misc]
+    with pytest.raises(ValidationError, match="finite_number"):
+        _request(execution_options={"threads": float("nan"), "offline": True})
+    with pytest.raises(ValueError, match="non-finite"):
+        canonical_json_bytes({"nested": [float("inf")]})
+
+
+def test_canonical_round_trip_requires_exact_bytes_and_schema() -> None:
+    request = _request(execution_options={"threads": 2, "offline": True})
+    encoded = canonical_json_bytes(request)
+    assert canonical_model_from_bytes(JobRequest, encoded) == request
+    with pytest.raises(ValueError, match="not canonical"):
+        canonical_model_from_bytes(JobRequest, json.dumps(request.model_dump(mode="json"), indent=2).encode())
+    with pytest.raises(ValidationError, match="schema_version"):
+        JobRequest.model_validate({**request.model_dump(mode="json"), "schema_version": "traceback.job-request.v2"})
+
+
+def test_locked_measurement_contract_reconciles_and_has_unbounded_final_bin() -> None:
+    policy = synthetic_fragment_policy()
+    assert policy.consumed_cigar_operations == ("M", "D", "N", "=", "X")
+    assert policy.bins[-1].upper_exclusive is None
+    exclusions = ExclusionCounts(
+        unmapped=1, secondary=1, supplementary=1, qc_failure=1,
+        duplicate=1, low_mapping_quality=1, unregistered_contig=1,
+        no_reference_span=0,
+    )
+    histogram = tuple(HistogramCount(bin=item, count=1 if index == 1 else 0) for index, item in enumerate(policy.bins))
+    measurement = FragmentMeasurement(
+        definition_id=policy.definition_id,
+        reference_id=policy.reference_id,
+        completion=CompletionState.COMPLETE,
+        records_scanned=8,
+        eligible_alignments=1,
+        exclusions=exclusions,
+        histogram=histogram,
+    )
+    assert measurement.records_scanned == 8
+    with pytest.raises(ValidationError, match="cannot construct"):
+        measurement.model_copy(update={"completion": CompletionState.CAPPED}).__class__.model_validate(
+            {**measurement.model_dump(mode="json"), "completion": "capped"}
+        )
+
+
+@pytest.mark.parametrize("kind", list(SyntheticBamKind))
+def test_synthetic_bam_fixtures_are_runtime_only_and_exact(tmp_path: Path, kind: SyntheticBamKind) -> None:
+    fixture = create_synthetic_bam(tmp_path / kind.value, kind)
+    assert fixture.bam_path.is_file()
+    assert fixture.registered_reference.reference_id == fixture.reference_id
+    if kind == SyntheticBamKind.CORRUPT:
+        assert fixture.index_path is None
+    else:
+        assert fixture.index_path is not None and fixture.index_path.is_file()
+
+
+def test_synthetic_minknow_fixture_contains_metadata_not_signal(tmp_path: Path) -> None:
+    root = create_synthetic_minknow_run(tmp_path)
+    assert (root / "sample_sheet.json").is_file()
+    assert list((root / "pod5").glob("*.pod5")) == []
