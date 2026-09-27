@@ -1,3 +1,7 @@
+[build-system]
+requires = ["hatchling==1.27.0"]
+build-backend = "hatchling.build"
+
 [project]
 name = "traceback-evidence-inspector"
 version = "0.1.0"
@@ -6,6 +10,7 @@ readme = "README.md"
 requires-python = ">=3.11,<3.12"
 dependencies = [
     "boto3==1.40.0",
+    "cryptography==46.0.3",
     "numpy==2.4.6",
     "openpyxl==3.1.5",
     "pydantic==2.11.7",
@@ -24,3 +29,6 @@ dev = [
 [tool.pytest.ini_options]
 pythonpath = ["."]
 testpaths = ["tests"]
+
+[tool.hatch.build.targets.wheel]
+packages = ["bedrock_chat", "evidence_inspector", "evals", "traceback_runner"]
