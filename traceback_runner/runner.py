@@ -7,12 +7,14 @@ zero-egress, hardware, genomic-data, or scientific qualification boundary.
 from __future__ import annotations
 
 import hashlib
+import fcntl
 import os
 import time
 from dataclasses import dataclass, field
+from contextlib import contextmanager
 from pathlib import Path
 from types import MappingProxyType
-from typing import Callable, Iterable, Mapping, Sequence
+from typing import Callable, Iterable, Iterator, Mapping, Sequence
 
 from .contracts import ArtifactDigest, JobRecord, JobRequest, JobState, StageName
 from .receipts import (
@@ -24,9 +26,9 @@ from .receipts import (
     verify_receipt,
     write_receipt,
 )
-from .snapshots import SnapshotViolation, capture_snapshot
+from .snapshots import InputSnapshot, SnapshotViolation, capture_snapshot, verify_snapshot
 from .serialization import canonical_json_bytes
-from .store import AttemptLease, JobStore, StoredJobRecord, StoreError
+from .store import AttemptLease, JobStore, StoredJobRecord, StoreError, LeaseBusy
 
 
 class RunnerError(RuntimeError):
@@ -160,39 +162,56 @@ class Runner:
         """Atomically deduplicate a request and bind it to copied sealed bytes."""
 
         record = self.store.submit(request, idempotency_key)
-        if record.state != JobState.DISCOVERED:
-            return self._public_record(record)
-        try:
-            self.store.transition(record.job_id, JobState.SNAPSHOTTING, "capturing sealed input")
-        except ValueError:
-            return self.status(record.job_id)
-        try:
-            snapshot = capture_snapshot(
-                source_root,
-                relative_files,
-                self.snapshots_dir,
-                snapshot_id=record.job_id,
-            )
-            if snapshot.content_sha256 != request.input_tree_sha256_local:
-                self._quarantine(snapshot.path, "snapshot-digest-mismatch")
-                raise SnapshotViolation(
-                    "captured input tree does not match JobRequest.input_tree_sha256_local"
+        # Process-scoped flock is released by process death, unlike a durable
+        # "capturing" flag. Separate opens also serialize concurrent threads.
+        with self._submission_guard(record.job_id):
+            record = self.store.get(record.job_id)
+            if record.state not in {
+                JobState.DISCOVERED, JobState.SNAPSHOTTING, JobState.VALIDATING
+            }:
+                return self._public_record(record)
+            if record.state == JobState.DISCOVERED:
+                record = self.store.transition(
+                    record.job_id, JobState.SNAPSHOTTING, "capturing sealed input"
                 )
-            self.store.attach_snapshot(
-                record.job_id,
-                snapshot.snapshot_id,
-                snapshot.manifest_sha256,
-                snapshot.summary(),
-            )
-            self.store.transition(record.job_id, JobState.VALIDATING, "snapshot sealed")
-            self.store.transition(record.job_id, JobState.READY, "snapshot digest verified")
-            return self.status(record.job_id)
-        except SnapshotViolation as exc:
-            self.store.transition(record.job_id, JobState.TERMINAL_FAILURE, str(exc))
-            raise
-        except Exception as exc:
-            self.store.transition(record.job_id, JobState.RETRYABLE_FAILURE, str(exc))
-            raise
+            try:
+                self._fault("before_snapshot_capture")
+                snapshot_path = self.snapshots_dir / record.job_id
+                if snapshot_path.exists() or snapshot_path.is_symlink():
+                    snapshot = verify_snapshot(
+                        snapshot_path,
+                        expected_manifest_sha256=record.snapshot_manifest_sha256,
+                    )
+                elif record.snapshot_id is not None or record.state == JobState.VALIDATING:
+                    raise SnapshotViolation("attached snapshot is missing")
+                else:
+                    # A dead capturing process may have left an incomplete
+                    # private tree. Only this job's flock owner can restart it.
+                    for temporary in self.snapshots_dir.glob(f".{record.job_id}.*.tmp"):
+                        self._quarantine(temporary, "incomplete-snapshot")
+                    snapshot = capture_snapshot(
+                        source_root, relative_files, self.snapshots_dir,
+                        snapshot_id=record.job_id,
+                    )
+                    self._fault("after_snapshot_seal")
+                return self._attach_snapshot(record, request, snapshot)
+            except SnapshotViolation as exc:
+                self.store.transition(record.job_id, JobState.TERMINAL_FAILURE, str(exc))
+                raise
+            except Exception as exc:
+                self.store.transition(record.job_id, JobState.RETRYABLE_FAILURE, str(exc))
+                raise
+
+    @contextmanager
+    def _submission_guard(self, job_id: str) -> Iterator[None]:
+        locks = self.root / "submission-locks"
+        locks.mkdir(exist_ok=True)
+        with (locks / f"{job_id}.lock").open("a+b") as handle:
+            fcntl.flock(handle.fileno(), fcntl.LOCK_EX)
+            try:
+                yield
+            finally:
+                fcntl.flock(handle.fileno(), fcntl.LOCK_UN)
 
     def status(self, job_id: str) -> JobRecord:
         return self._public_record(self.store.get(job_id))
@@ -265,6 +284,11 @@ class Runner:
             record = self.store.transition(job_id, JobState.RUNNING, "synthetic execution started")
         if record.state != JobState.RUNNING:
             raise RunnerError(f"job cannot execute from state {record.state.value}")
+        try:
+            self._verify_job_snapshot(job_id)
+        except SnapshotViolation as exc:
+            self.store.transition(job_id, JobState.TERMINAL_FAILURE, str(exc))
+            raise
 
         committed = self.store.committed_stage_definitions(job_id)
         prior_dirs: list[Path] = []
@@ -273,16 +297,17 @@ class Runner:
             existing = committed.get(stage.name)
             if existing == stage.definition_sha256:
                 directory, receipt = self._verified_publication(job_id, stage.name, existing)
-                prior_dirs.append(directory)
-                ordered_inputs.extend(
-                    ArtifactDigest(
-                        role=f"{stage.name.value}.{output.role}",
-                        sha256=output.sha256,
-                        size_bytes=output.size_bytes,
+                if receipt.contract.ordered_inputs == tuple(ordered_inputs):
+                    prior_dirs.append(directory)
+                    ordered_inputs.extend(
+                        ArtifactDigest(
+                            role=f"{stage.name.value}.{output.role}",
+                            sha256=output.sha256,
+                            size_bytes=output.size_bytes,
+                        )
+                        for output in receipt.contract.outputs
                     )
-                    for output in receipt.contract.outputs
-                )
-                continue
+                    continue
 
             lease = self.store.acquire_lease(
                 job_id,
@@ -310,7 +335,9 @@ class Runner:
                 heartbeat=heartbeat,
             )
             try:
+                self._verify_job_snapshot(job_id)
                 result = stage.callback(context)
+                self._verify_job_snapshot(job_id)
                 if not result.postconditions or not all(result.postconditions.values()):
                     raise OutputCorrupt("stage postconditions did not all pass")
                 outputs = hash_outputs(attempt_dir, result.outputs)
@@ -360,6 +387,9 @@ class Runner:
                 )
             except InjectedCrash:
                 raise
+            except SnapshotViolation as exc:
+                self.store.fail_attempt(current_lease, str(exc), retryable=False)
+                raise
             except Exception as exc:
                 self.store.fail_attempt(current_lease, str(exc), retryable=True)
                 raise
@@ -375,6 +405,22 @@ class Runner:
 
     def recover(self, job_id: str) -> RecoveryReport:
         """Adopt exactly-current publications and quarantine every other orphan."""
+
+        with self._submission_guard(job_id):
+            record = self.store.get(job_id)
+            if record.state in {JobState.SNAPSHOTTING, JobState.VALIDATING}:
+                path = self.snapshots_dir / job_id
+                if path.exists() or record.snapshot_id is not None or record.state == JobState.VALIDATING:
+                    try:
+                        snapshot = verify_snapshot(
+                            path, expected_manifest_sha256=record.snapshot_manifest_sha256
+                        )
+                        self._attach_snapshot(record, self.store.request(job_id), snapshot)
+                    except SnapshotViolation as exc:
+                        self.store.transition(job_id, JobState.TERMINAL_FAILURE, str(exc))
+                        raise
+                # Before seal no source locator is persisted. Resubmit with the
+                # original request/source safely recaptures under the same lock.
 
         adopted: list[str] = []
         quarantined: list[str] = []
@@ -412,14 +458,21 @@ class Runner:
                         quarantined.append(self._quarantine(directory, "stale-publication"))
                     else:
                         adopted.append(receipt.contract.stage.value)
+                except LeaseBusy:
+                    # Published bytes are immutable, but the worker has not
+                    # relinquished its right to commit. Recovery must wait.
+                    continue
                 except (ReceiptCorrupt, OutputCorrupt) as exc:
                     quarantined.append(self._quarantine(directory, "corrupt-publication"))
                     raise OrphanQuarantined(str(exc)) from exc
 
         private_root = self.attempts_dir / job_id
-        if private_root.exists():
-            for directory in sorted(path for path in private_root.iterdir() if path.is_dir()):
-                quarantined.append(self._quarantine(directory, "private-orphan"))
+        with self.store.private_recovery_guard(job_id) as active_name:
+            if private_root.exists():
+                for directory in sorted(path for path in private_root.iterdir() if path.is_dir()):
+                    if directory.name == active_name:
+                        continue
+                    quarantined.append(self._quarantine(directory, "private-orphan"))
         return RecoveryReport(tuple(adopted), tuple(quarantined))
 
     def backup(self, destination: Path) -> Path:
@@ -459,11 +512,51 @@ class Runner:
                     receipt = verify_receipt(path)
                     if receipt.stage_definition_sha256 == definition_sha256:
                         candidates.append((path, receipt))
-        if len(candidates) != 1:
+        if not candidates:
             raise ReceiptCorrupt(
-                f"expected exactly one verified publication for {stage}, found {len(candidates)}"
+                f"expected a verified publication for {stage}, found none"
             )
-        return candidates[0]
+        latest_attempt = max(item[1].contract.attempt for item in candidates)
+        latest = [item for item in candidates if item[1].contract.attempt == latest_attempt]
+        if len(latest) != 1:
+            raise ReceiptCorrupt(f"multiple publications claim {stage} attempt {latest_attempt}")
+        return latest[0]
+
+    def _attach_snapshot(
+        self, record: StoredJobRecord, request: JobRequest, snapshot: InputSnapshot
+    ) -> JobRecord:
+        if snapshot.content_sha256 != request.input_tree_sha256_local:
+            self._quarantine(snapshot.path, "snapshot-digest-mismatch")
+            raise SnapshotViolation(
+                "captured input tree does not match JobRequest.input_tree_sha256_local"
+            )
+        self.store.attach_snapshot(
+            record.job_id,
+            snapshot.snapshot_id,
+            snapshot.manifest_sha256,
+            snapshot.summary(),
+        )
+        self._fault("after_snapshot_attach")
+        if record.state == JobState.SNAPSHOTTING:
+            self.store.transition(record.job_id, JobState.VALIDATING, "snapshot sealed")
+        elif record.state != JobState.VALIDATING:
+            raise RunnerError(f"cannot attach snapshot from {record.state.value}")
+        self._fault("after_snapshot_validating")
+        self._verify_job_snapshot(record.job_id)
+        self.store.transition(record.job_id, JobState.READY, "snapshot digest verified")
+        return self.status(record.job_id)
+
+    def _verify_job_snapshot(self, job_id: str) -> None:
+        record = self.store.get(job_id)
+        if record.snapshot_id is None or record.snapshot_manifest_sha256 is None:
+            raise SnapshotViolation("job has no attached immutable snapshot")
+        snapshot = verify_snapshot(
+            self.snapshots_dir / record.snapshot_id,
+            expected_manifest_sha256=record.snapshot_manifest_sha256,
+        )
+        request = self.store.request(job_id)
+        if snapshot.content_sha256 != request.input_tree_sha256_local:
+            raise SnapshotViolation("snapshot no longer matches the submitted request")
 
     def _public_record(self, record: StoredJobRecord) -> JobRecord:
         request = self.store.request(record.job_id)
