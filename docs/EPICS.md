@@ -1,6 +1,6 @@
 # Traceback Product Epics
 
-Status: `/autoplan`-reviewed implementation sequence  
+Status: `/autoplan`-reviewed implementation sequence
 Delivery rule: preserve the existing public demo while product code is built
 behind separate entry points.
 
@@ -51,7 +51,7 @@ Acceptance:
 - the same protocol version appears in sample sheet, runner manifest, record,
   and documentation.
 
-Depends on: none.  
+Depends on: none.
 Blocks: E3, E7, pilot launch.
 
 ## E1. Define product contracts and synthetic fixtures
@@ -76,7 +76,7 @@ Acceptance:
 - canonical serialization is byte-stable;
 - migration policy is documented before any v2 schema exists.
 
-Depends on: none.  
+Depends on: none.
 Blocks: E2 through E9.
 
 ## E2. Build the local runner foundation
@@ -108,7 +108,7 @@ Acceptance:
 - paths outside configured roots are rejected;
 - every error contains problem, cause, fix, docs link, job ID, and retryability.
 
-Depends on: E1.  
+Depends on: E1.
 Blocks: E3 through E9.
 
 ## E3. Import and preflight MinKNOW run packages
@@ -138,7 +138,7 @@ Acceptance:
 - ordinary BAM and FASTQ never qualify for methylation;
 - no raw path, read ID, or reusable genomic digest enters serialized output.
 
-Depends on: E0, E1, E2.  
+Depends on: E0, E1, E2.
 Blocks: E5 through E9.
 
 ## E4. Add pinned POD5 basecalling and alignment
@@ -165,7 +165,7 @@ Acceptance:
 - the qualified workstation produces a validated analysis input;
   reproducibility is measured as a qualification result rather than assumed.
 
-Depends on: E1, E2, E3, E5, E6, E8.  
+Depends on: E1, E2, E3, E5, E6, E8.
 Blocks: E9 and declaration of the complete MinKNOW-to-record MVP.
 
 ## E5. Validate the analysis-ready modBAM
@@ -188,7 +188,7 @@ Acceptance:
 - invalid modification tags are never heuristically repaired;
 - every eligibility decision names the requirement and supporting artifact.
 
-Depends on: E3 for the modBAM slice; E4 only for POD5-produced input.  
+Depends on: E3 for the modBAM slice; E4 only for POD5-produced input.
 Blocks: E6, E10, E11.
 
 ## E6. Publish one deterministic fragment research record
@@ -213,7 +213,7 @@ Acceptance:
 - identical inputs and release produce byte-identical measurement JSON;
 - no clinical or health-status language passes publication.
 
-Depends on: E5.  
+Depends on: E5.
 Blocks: E7 through E9.
 
 ## E7. Ship the operator experience and Protocol & Setup documentation
@@ -244,7 +244,7 @@ Acceptance:
 - page and printable checklist derive from one compatibility manifest;
 - no unapproved wet-lab instruction can publish.
 
-Depends on: E0 through E6.  
+Depends on: E0 through E6.
 Blocks: E9.
 
 ## E8. Enforce signed local records and the raw-data boundary
@@ -271,7 +271,7 @@ Acceptance:
 - the deterministic record remains complete when AI is unavailable;
 - no upload or deletion occurs implicitly.
 
-Depends on: E1, E2, E6.  
+Depends on: E1, E2, E6.
 Blocks: E9.
 
 ## E9. Paid pilot operations, validation, and release controls
@@ -299,7 +299,7 @@ Acceptance:
 - previous signed workflow can be restored without changing historical records;
 - counsel and scientific owners approve the exact release journey.
 
-Depends on: E0 through E8.  
+Depends on: E0 through E8.
 Blocks: paid pilot expansion.
 
 ## E10. Add cell-origin methylation
@@ -322,7 +322,7 @@ Acceptance:
 - no healthy/abnormal classification appears in personalized output;
 - existing bounded privacy contracts remain intact.
 
-Depends on: E5, E8, separate analytical approval.  
+Depends on: E5, E8, separate analytical approval.
 MVP: deferred.
 
 ## E11. Add broad chromosome dosage
@@ -344,7 +344,7 @@ Acceptance:
 - visualization thresholds are not presented as clinical cutoffs;
 - focal/subclonal and tumor-fraction limits remain visible.
 
-Depends on: E5, E8, separate analytical approval.  
+Depends on: E5, E8, separate analytical approval.
 MVP: deferred.
 
 ## E12. Add longitudinal comparison
@@ -367,7 +367,7 @@ Acceptance:
 - no increase/decrease receives clinical meaning;
 - historical records remain immutable.
 
-Depends on: E6 or later measurements plus repeatability evidence.  
+Depends on: E6 or later measurements plus repeatability evidence.
 MVP: deferred.
 
 ## Cross-epic test suites

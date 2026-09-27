@@ -1,4 +1,3 @@
-<!-- /autoplan restore point: /Users/danwiggins/.gstack/projects/danwiggins-cfddemo/main-autoplan-restore-20260926-162006.md -->
 # Traceback Consumer Research Product Plan
 
 > Historical strategy exploration. Where this document conflicts with

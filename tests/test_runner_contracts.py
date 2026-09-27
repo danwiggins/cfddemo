@@ -22,6 +22,7 @@ from traceback_runner.contracts import (
     validate_transition,
 )
 from traceback_runner import (
+    CompatibilityItem,
     CompletionState,
     ExclusionCounts,
     FragmentMeasurement,
@@ -61,6 +62,7 @@ def test_runner_contracts_are_closed_and_export_commitment_has_no_locator() -> N
 
     artifact = ArtifactCommitment(
         role="analysis_input",
+        artifact_token="synthetic-artifact",
         size_bytes=12,
         provider_hmac_sha256="a" * 64,
     )
@@ -166,3 +168,23 @@ def test_synthetic_minknow_fixture_contains_metadata_not_signal(tmp_path: Path) 
     root = create_synthetic_minknow_run(tmp_path)
     assert (root / "sample_sheet.json").is_file()
     assert list((root / "pod5").glob("*.pod5")) == []
+
+
+def test_unapproved_wet_lab_instruction_fails_closed() -> None:
+    values = {
+        "category": "collection",
+        "item_id": "synthetic-step",
+        "display_name": "Synthetic withheld step",
+        "description": "Not an instruction for real work.",
+        "status": "required",
+        "instruction_kind": "wet_lab_instruction",
+        "rendering": "withhold",
+        "protocol_version": "synthetic-protocol.v1",
+        "owner": "synthetic scientific owner",
+        "source": "synthetic fixture source",
+        "source_version": "fixture.v1",
+        "last_reviewed": "2026-09-26",
+    }
+    assert CompatibilityItem.model_validate(values).rendering == "withhold"
+    with pytest.raises(ValidationError, match="must be withheld"):
+        CompatibilityItem.model_validate({**values, "rendering": "display"})

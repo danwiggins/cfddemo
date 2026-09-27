@@ -1,6 +1,6 @@
 # Protocol & Setup
 
-Status: documentation contract and sourced device baseline.  
+Status: documentation contract and sourced device baseline.
 Exact wet-lab instructions are not yet approved for operator use.
 
 ## What this page will do
