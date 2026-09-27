@@ -11,9 +11,8 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Callable, Iterator
 
-from evidence_inspector.models import canonical_json_bytes
-
 from .contracts import JobRequest, JobState, job_key, validate_transition
+from .serialization import canonical_json_bytes
 
 SCHEMA_VERSION = 1
 
@@ -39,11 +38,12 @@ class StaleLease(StoreError):
 
 
 @dataclass(frozen=True)
-class JobRecord:
+class StoredJobRecord:
     job_id: str
     request_key: str
     state: JobState
     snapshot_id: str | None
+    snapshot_manifest_sha256: str | None
     current_stage: str | None
     lease_token: int
     lease_owner: str | None
@@ -163,12 +163,13 @@ class JobStore:
                 connection.execute("PRAGMA synchronous=FULL")
 
     @staticmethod
-    def _record(row: sqlite3.Row) -> JobRecord:
-        return JobRecord(
+    def _record(row: sqlite3.Row) -> StoredJobRecord:
+        return StoredJobRecord(
             job_id=row["job_id"],
             request_key=row["request_key"],
             state=JobState(row["state"]),
             snapshot_id=row["snapshot_id"],
+            snapshot_manifest_sha256=row["snapshot_manifest_sha256"],
             current_stage=row["current_stage"],
             lease_token=row["lease_token"],
             lease_owner=row["lease_owner"],
@@ -178,7 +179,9 @@ class JobStore:
             last_error=row["last_error"],
         )
 
-    def submit(self, request: JobRequest, idempotency_key: str | None = None) -> JobRecord:
+    def submit(
+        self, request: JobRequest, idempotency_key: str | None = None
+    ) -> StoredJobRecord:
         request_identity = job_key(request)
         key = idempotency_key or request_identity
         now = self.clock()
@@ -217,7 +220,7 @@ class JobStore:
             assert row is not None
             return self._record(row)
 
-    def get(self, job_id: str) -> JobRecord:
+    def get(self, job_id: str) -> StoredJobRecord:
         with self._connect() as connection:
             row = connection.execute("SELECT * FROM jobs WHERE job_id=?", (job_id,)).fetchone()
         if row is None:
@@ -233,7 +236,9 @@ class JobStore:
             raise KeyError(job_id)
         return JobRequest.model_validate_json(row[0])
 
-    def transition(self, job_id: str, state: JobState, reason: str) -> JobRecord:
+    def transition(
+        self, job_id: str, state: JobState, reason: str
+    ) -> StoredJobRecord:
         with self._transaction() as connection:
             row = connection.execute("SELECT * FROM jobs WHERE job_id=?", (job_id,)).fetchone()
             if row is None:
@@ -385,7 +390,12 @@ class JobStore:
             )
 
     def adopt_published_attempt(
-        self, lease: AttemptLease, receipt_path: str, receipt_sha256: str
+        self,
+        lease: AttemptLease,
+        receipt_path: str,
+        receipt_sha256: str,
+        stage_definition_sha256: str,
+        input_manifest_sha256: str,
     ) -> bool:
         """Adopt publication after a DB-boundary crash, even if its lease expired."""
 
@@ -394,11 +404,16 @@ class JobStore:
             if row is None:
                 return False
             attempt = connection.execute(
-                """SELECT status, receipt_sha256 FROM attempts
+                """SELECT status, receipt_sha256, stage_definition_sha256 FROM attempts
                    WHERE job_id=? AND stage=? AND attempt=? AND lease_token=?""",
                 (lease.job_id, lease.stage, lease.attempt, lease.token),
             ).fetchone()
             if attempt is None:
+                return False
+            if (
+                attempt["stage_definition_sha256"] != stage_definition_sha256
+                or row["snapshot_manifest_sha256"] != input_manifest_sha256
+            ):
                 return False
             if attempt["status"] == "committed":
                 return attempt["receipt_sha256"] == receipt_sha256

@@ -10,7 +10,8 @@ from pathlib import Path
 import pytest
 
 from evidence_inspector.models import sha256_bytes
-from traceback_runner.contracts import InputKind, JobRequest, JobState
+from traceback_runner.contracts import InputKind, JobRequest, JobState, StageReceipt
+from traceback_runner.receipts import OutputCorrupt, load_receipt
 from traceback_runner.runner import (
     InjectedCrash,
     OrphanQuarantined,
@@ -41,7 +42,7 @@ def _request(source: Path, files: list[str]) -> JobRequest:
         input_kind=InputKind.MODBAM,
         input_tree_sha256_local=input_tree_sha256(source, files),
         workflow_release_sha256=sha256_bytes(b"synthetic-workflow-v1"),
-        execution_options={"synthetic": True},
+        execution_options={"offline": True, "threads": 1},
     )
 
 
@@ -122,6 +123,27 @@ def test_snapshot_rejects_mutation_and_symlink(tmp_path: Path) -> None:
         capture_snapshot(source, ["escape.bin"], tmp_path / "snapshots2")
 
 
+def test_stage_output_cannot_escape_attempt_through_symlink(tmp_path: Path) -> None:
+    source, files = _source(tmp_path)
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    (outside / "result.json").write_text("{}")
+    runner = Runner(tmp_path / "state", synthetic_enabled=True)
+    job = runner.submit(_request(source, files), source, files)
+
+    def callback(context: object) -> StageResult:
+        (context.attempt_dir / "link").symlink_to(outside)  # type: ignore[attr-defined]
+        return StageResult({"result": "link/result.json"})
+
+    with pytest.raises(OutputCorrupt, match="escapes attempt directory"):
+        runner.execute(
+            job.job_id,
+            [StageSpec("measure", "v1", callback)],
+            worker_id="worker",
+        )
+    assert runner.status(job.job_id).state == JobState.RETRYABLE_FAILURE
+
+
 def test_lease_expiry_fences_stale_worker_commit(tmp_path: Path) -> None:
     clock = FakeClock()
     source, files = _source(tmp_path)
@@ -191,25 +213,70 @@ def test_db_commit_crash_reuses_receipt_without_rerunning_callback(tmp_path: Pat
     with pytest.raises(InjectedCrash):
         runner.execute(job.job_id, [stage], worker_id="worker-a")
     assert calls == 1
+    recovered = Runner(state, synthetic_enabled=True)
+    assert recovered.execute(job.job_id, [stage], worker_id="worker-b").state == JobState.COMPLETE
+    assert calls == 1
+
+
+def test_changed_stage_version_cannot_reuse_previous_receipt(tmp_path: Path) -> None:
+    source, files = _source(tmp_path)
+    calls: list[str] = []
+
+    def callback(version: str):
+        def run(context: object) -> StageResult:
+            calls.append(version)
+            (context.attempt_dir / "result.json").write_text(version)  # type: ignore[attr-defined]
+            return StageResult({"result": "result.json"})
+
+        return run
+
+    fired = False
+
+    def crash(point: str) -> None:
+        nonlocal fired
+        if point == "after_db_commit" and not fired:
+            fired = True
+            raise InjectedCrash(point)
+
+    state = tmp_path / "state"
+    runner = Runner(state, synthetic_enabled=True, fault_injector=crash)
+    job = runner.submit(_request(source, files), source, files)
+    with pytest.raises(InjectedCrash):
+        runner.execute(
+            job.job_id,
+            [StageSpec("measure", "v1", callback("v1"))],
+            worker_id="worker-a",
+        )
+
+    recovered = Runner(state, synthetic_enabled=True)
+    recovered.execute(
+        job.job_id,
+        [StageSpec("measure", "v2", callback("v2"))],
+        worker_id="worker-b",
+    )
+    assert calls == ["v1", "v2"]
+    assert recovered.outputs(job.job_id, "measure")["result"].read_text() == "v2"
+    publications = (recovered.artifacts_dir / job.job_id / "measure").iterdir()
+    envelope = next(
+        load_receipt(path)
+        for path in publications
+        if load_receipt(path).contract.attempt == 2
+    )
+    assert isinstance(envelope.contract, StageReceipt)
 
 
 def test_recovery_preserves_verified_receipts_from_multiple_stages(tmp_path: Path) -> None:
     source, files = _source(tmp_path)
     runner = Runner(tmp_path / "state", synthetic_enabled=True)
     job = runner.submit(_request(source, files), source, files)
-    stages = [_stage("prepare"), _stage("measure")]
+    stages = [_stage("validate"), _stage("measure")]
     assert runner.execute(job.job_id, stages, worker_id="worker").state == JobState.COMPLETE
 
     report = runner.recover(job.job_id)
-    assert set(report.adopted) == {"prepare", "measure"}
+    assert set(report.adopted) == {"validate", "measure"}
     assert report.quarantined == ()
-    assert runner.outputs(job.job_id, "prepare")["result"].is_file()
+    assert runner.outputs(job.job_id, "validate")["result"].is_file()
     assert runner.outputs(job.job_id, "measure")["result"].is_file()
-
-    recovered = Runner(state, synthetic_enabled=True)
-    assert recovered.execute(job.job_id, [stage], worker_id="worker-b").state == JobState.COMPLETE
-    assert calls == 1
-
 
 def test_private_crash_is_quarantined_and_retried_after_lease_expiry(
     tmp_path: Path,

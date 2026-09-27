@@ -8,27 +8,25 @@ from __future__ import annotations
 
 import hashlib
 import os
-import re
 import time
 from dataclasses import dataclass, field
 from pathlib import Path
+from types import MappingProxyType
 from typing import Callable, Iterable, Mapping, Sequence
 
-from evidence_inspector.models import canonical_json_bytes
-
-from .contracts import JobRequest, JobState
+from .contracts import ArtifactDigest, JobRecord, JobRequest, JobState, StageName
 from .receipts import (
     OutputCorrupt,
+    ReceiptEnvelope,
     ReceiptCorrupt,
-    StageReceipt,
+    build_receipt,
     hash_outputs,
     verify_receipt,
     write_receipt,
 )
 from .snapshots import SnapshotViolation, capture_snapshot
-from .store import AttemptLease, JobRecord, JobStore, StoreError
-
-_STAGE_NAME = re.compile(r"^[a-z][a-z0-9_-]{0,63}$")
+from .serialization import canonical_json_bytes
+from .store import AttemptLease, JobStore, StoredJobRecord, StoreError
 
 
 class RunnerError(RuntimeError):
@@ -57,11 +55,18 @@ class StageResult:
     metadata: Mapping[str, bool | int | str] = field(default_factory=dict)
     postconditions: Mapping[str, bool] = field(default_factory=lambda: {"validated": True})
 
+    def __post_init__(self) -> None:
+        object.__setattr__(self, "outputs", MappingProxyType(dict(self.outputs)))
+        object.__setattr__(self, "metadata", MappingProxyType(dict(self.metadata)))
+        object.__setattr__(
+            self, "postconditions", MappingProxyType(dict(self.postconditions))
+        )
+
 
 @dataclass(frozen=True)
 class StageContext:
     job_id: str
-    stage: str
+    stage: StageName
     attempt: int
     lease_token: int
     sealed_input_dir: Path
@@ -72,16 +77,21 @@ class StageContext:
 
 @dataclass(frozen=True)
 class StageSpec:
-    name: str
+    name: StageName | str
     version: str
     callback: Callable[[StageContext], StageResult]
     parameters: Mapping[str, bool | int | str] = field(default_factory=dict)
 
     def __post_init__(self) -> None:
-        if not _STAGE_NAME.fullmatch(self.name):
-            raise StageDefinitionError(f"invalid stage name: {self.name!r}")
+        try:
+            object.__setattr__(self, "name", StageName(self.name))
+        except ValueError as exc:
+            raise StageDefinitionError(f"unknown shared stage name: {self.name!r}") from exc
         if not self.version.strip():
             raise StageDefinitionError("stage version is required")
+        object.__setattr__(
+            self, "parameters", MappingProxyType(dict(self.parameters))
+        )
 
     @property
     def definition_sha256(self) -> str:
@@ -89,7 +99,7 @@ class StageSpec:
             canonical_json_bytes(
                 {
                     "schema_version": "traceback.stage-definition.v1",
-                    "name": self.name,
+                    "name": self.name.value,
                     "version": self.version,
                     "parameters": dict(self.parameters),
                 }
@@ -151,7 +161,7 @@ class Runner:
 
         record = self.store.submit(request, idempotency_key)
         if record.state != JobState.DISCOVERED:
-            return record
+            return self._public_record(record)
         try:
             self.store.transition(record.job_id, JobState.SNAPSHOTTING, "capturing sealed input")
         except ValueError:
@@ -175,7 +185,8 @@ class Runner:
                 snapshot.summary(),
             )
             self.store.transition(record.job_id, JobState.VALIDATING, "snapshot sealed")
-            return self.store.transition(record.job_id, JobState.READY, "snapshot digest verified")
+            self.store.transition(record.job_id, JobState.READY, "snapshot digest verified")
+            return self.status(record.job_id)
         except SnapshotViolation as exc:
             self.store.transition(record.job_id, JobState.TERMINAL_FAILURE, str(exc))
             raise
@@ -184,7 +195,7 @@ class Runner:
             raise
 
     def status(self, job_id: str) -> JobRecord:
-        return self.store.get(job_id)
+        return self._public_record(self.store.get(job_id))
 
     def snapshot(self, job_id: str) -> dict[str, object]:
         """Return a read-only value view with relative paths only."""
@@ -194,7 +205,7 @@ class Runner:
     def outputs(
         self,
         job_id: str,
-        stage: str,
+        stage: StageName | str,
         *,
         stage_definition_sha256: str | None = None,
     ) -> Mapping[str, Path]:
@@ -204,20 +215,26 @@ class Runner:
         export records, logs, or UI fixtures. Callers should use receipt roles.
         """
 
+        stage_name = StageName(stage)
         committed = self.store.committed_stage_definitions(job_id)
-        definition = stage_definition_sha256 or committed.get(stage)
+        definition = stage_definition_sha256 or committed.get(stage_name.value)
         if definition is None:
-            raise KeyError(f"no committed stage: {stage}")
-        directory, receipt = self._verified_publication(job_id, stage, definition)
+            raise KeyError(f"no committed stage: {stage_name.value}")
+        directory, receipt = self._verified_publication(
+            job_id, stage_name.value, definition
+        )
         return {
-            output.role: directory / output.relative_path for output in receipt.outputs
+            output.role: directory / receipt.output_locators[output.role]
+            for output in receipt.contract.outputs
         }
 
     def request_pause(self, job_id: str) -> JobRecord:
-        return self.store.transition(job_id, JobState.PAUSE_REQUESTED, "operator requested pause")
+        self.store.transition(job_id, JobState.PAUSE_REQUESTED, "operator requested pause")
+        return self.status(job_id)
 
     def retry(self, job_id: str) -> JobRecord:
-        return self.store.transition(job_id, JobState.QUEUED, "operator requested retry")
+        self.store.transition(job_id, JobState.QUEUED, "operator requested retry")
+        return self.status(job_id)
 
     def resume(
         self, job_id: str, stages: Sequence[StageSpec], *, worker_id: str
@@ -257,17 +274,24 @@ class Runner:
             if existing == stage.definition_sha256:
                 directory, receipt = self._verified_publication(job_id, stage.name, existing)
                 prior_dirs.append(directory)
-                ordered_inputs.extend(output.sha256 for output in receipt.outputs)
+                ordered_inputs.extend(
+                    ArtifactDigest(
+                        role=f"{stage.name.value}.{output.role}",
+                        sha256=output.sha256,
+                        size_bytes=output.size_bytes,
+                    )
+                    for output in receipt.contract.outputs
+                )
                 continue
 
             lease = self.store.acquire_lease(
                 job_id,
-                stage.name,
+                stage.name.value,
                 stage.definition_sha256,
                 worker_id,
                 self.lease_seconds,
             )
-            attempt_dir = self.attempts_dir / job_id / f"{stage.name}-{lease.token}"
+            attempt_dir = self.attempts_dir / job_id / f"{stage.name.value}-{lease.token}"
             attempt_dir.mkdir(parents=True, mode=0o700)
             current_lease = lease
 
@@ -292,7 +316,7 @@ class Runner:
                 outputs = hash_outputs(attempt_dir, result.outputs)
                 request = self.store.request(job_id)
                 summary = self.snapshot(job_id)
-                receipt = StageReceipt(
+                receipt = build_receipt(
                     job_id=job_id,
                     stage=stage.name,
                     attempt=lease.attempt,
@@ -300,7 +324,7 @@ class Runner:
                     stage_definition_sha256=stage.definition_sha256,
                     workflow_release_sha256=request.workflow_release_sha256,
                     input_manifest_sha256=str(summary["manifest_sha256"]),
-                    ordered_input_sha256=tuple(ordered_inputs),
+                    ordered_inputs=tuple(ordered_inputs),
                     outputs=outputs,
                     metadata=result.metadata,
                     postconditions=result.postconditions,
@@ -308,6 +332,9 @@ class Runner:
                 write_receipt(attempt_dir, receipt)
                 self._seal_attempt(attempt_dir)
                 self._fault("after_receipt")
+                current_lease = self.store.heartbeat(
+                    current_lease, self.lease_seconds
+                )
                 publication = self._publication_path(receipt)
                 publication.parent.mkdir(parents=True, exist_ok=True)
                 if publication.exists():
@@ -323,7 +350,14 @@ class Runner:
                 )
                 self._fault("after_db_commit")
                 prior_dirs.append(publication)
-                ordered_inputs.extend(output.sha256 for output in outputs)
+                ordered_inputs.extend(
+                    ArtifactDigest(
+                        role=f"{stage.name.value}.{output.role}",
+                        sha256=output.sha256,
+                        size_bytes=output.size_bytes,
+                    )
+                    for output in outputs
+                )
             except InjectedCrash:
                 raise
             except Exception as exc:
@@ -331,11 +365,13 @@ class Runner:
                 raise
 
             if self.status(job_id).state == JobState.PAUSE_REQUESTED:
-                return self.store.transition(job_id, JobState.PAUSED, "paused at stage boundary")
+                self.store.transition(job_id, JobState.PAUSED, "paused at stage boundary")
+                return self.status(job_id)
 
         self.store.transition(job_id, JobState.VALIDATING_OUTPUT, "all stage receipts verified")
         self.store.transition(job_id, JobState.SIGNING, "synthetic completion receipt stage passed")
-        return self.store.transition(job_id, JobState.COMPLETE, "synthetic workflow complete")
+        self.store.transition(job_id, JobState.COMPLETE, "synthetic workflow complete")
+        return self.status(job_id)
 
     def recover(self, job_id: str) -> RecoveryReport:
         """Adopt exactly-current publications and quarantine every other orphan."""
@@ -350,21 +386,32 @@ class Runner:
                 try:
                     receipt = verify_receipt(directory)
                     lease = AttemptLease(
-                        receipt.job_id,
-                        receipt.stage,
-                        receipt.attempt,
-                        receipt.lease_token,
+                        receipt.contract.job_id,
+                        receipt.contract.stage.value,
+                        receipt.contract.attempt,
+                        receipt.contract.fencing_token,
                         "recovery",
                         0,
                     )
-                    if receipt.job_id != job_id or not self.store.adopt_published_attempt(
-                        lease,
-                        str(directory.relative_to(self.root)),
-                        receipt.sha256,
+                    request = self.store.request(job_id)
+                    workflow_matches = (
+                        receipt.contract.workflow_release_sha256
+                        == request.workflow_release_sha256
+                    )
+                    if (
+                        receipt.contract.job_id != job_id
+                        or not workflow_matches
+                        or not self.store.adopt_published_attempt(
+                            lease,
+                            str(directory.relative_to(self.root)),
+                            receipt.sha256,
+                            receipt.stage_definition_sha256,
+                            receipt.input_manifest_sha256,
+                        )
                     ):
                         quarantined.append(self._quarantine(directory, "stale-publication"))
                     else:
-                        adopted.append(receipt.stage)
+                        adopted.append(receipt.contract.stage.value)
                 except (ReceiptCorrupt, OutputCorrupt) as exc:
                     quarantined.append(self._quarantine(directory, "corrupt-publication"))
                     raise OrphanQuarantined(str(exc)) from exc
@@ -378,24 +425,34 @@ class Runner:
     def backup(self, destination: Path) -> Path:
         return self.store.backup(destination)
 
-    def _snapshot_input_digests(self, job_id: str) -> list[str]:
+    def _snapshot_input_digests(self, job_id: str) -> list[ArtifactDigest]:
         files = self.snapshot(job_id)["files"]
         assert isinstance(files, list)
-        return [str(item["sha256_local"]) for item in files]
+        return [
+            ArtifactDigest(
+                role=f"snapshot.{index:04d}",
+                sha256=str(item["sha256_local"]),
+                size_bytes=int(item["size_bytes"]),
+            )
+            for index, item in enumerate(files)
+        ]
 
-    def _publication_path(self, receipt: StageReceipt) -> Path:
+    def _publication_path(self, receipt: ReceiptEnvelope) -> Path:
         return (
             self.artifacts_dir
-            / receipt.job_id
-            / receipt.stage
-            / f"{receipt.stage_definition_sha256[:16]}-a{receipt.attempt}-t{receipt.lease_token}"
+            / receipt.contract.job_id
+            / receipt.contract.stage.value
+            / (
+                f"{receipt.stage_definition_sha256[:16]}-"
+                f"a{receipt.contract.attempt}-t{receipt.contract.fencing_token}"
+            )
         )
 
     def _verified_publication(
         self, job_id: str, stage: str, definition_sha256: str
-    ) -> tuple[Path, StageReceipt]:
+    ) -> tuple[Path, ReceiptEnvelope]:
         root = self.artifacts_dir / job_id / stage
-        candidates: list[tuple[Path, StageReceipt]] = []
+        candidates: list[tuple[Path, ReceiptEnvelope]] = []
         if root.exists():
             for path in root.iterdir():
                 if path.is_dir():
@@ -407,6 +464,19 @@ class Runner:
                 f"expected exactly one verified publication for {stage}, found {len(candidates)}"
             )
         return candidates[0]
+
+    def _public_record(self, record: StoredJobRecord) -> JobRecord:
+        request = self.store.request(record.job_id)
+        active_stage = StageName(record.current_stage) if record.current_stage else None
+        return JobRecord(
+            job_id=record.job_id,
+            job_key=record.request_key,
+            state=record.state,
+            workflow_release_sha256=request.workflow_release_sha256,
+            input_snapshot_sha256=record.snapshot_manifest_sha256,
+            active_stage=active_stage,
+            lease_fencing_token=(record.lease_token if record.lease_owner else None),
+        )
 
     def _quarantine(self, path: Path, reason: str) -> str:
         destination = self.quarantine_dir / f"{path.name}-{reason}-{time.time_ns()}"
