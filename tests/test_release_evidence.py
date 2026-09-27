@@ -242,6 +242,19 @@ def test_strict_contracts_reject_unknown_fields_bad_times_and_incomplete_revocat
                     "sequence": invalid,
                 }
             )
+    grant_values = {
+        "scope": AuthorityScope.QUALIFICATION_DECISION,
+        "role": ApproverRole.ENGINEERING_REVIEWER,
+        "key_id": "dev-release-synthetic",
+        "binding": binding,
+        "valid_from": T0,
+        "expires_at": T0 + timedelta(hours=1),
+        "status": GrantStatus.ACTIVE,
+    }
+    with pytest.raises(ValidationError, match="active grants forbid"):
+        SignerRoleGrant(**grant_values, revoked_at=T0)
+    with pytest.raises(ValidationError, match="active grants forbid"):
+        SignerRoleGrant(**grant_values, revocation_reference="revocation-1")
 
 
 def test_missing_scientific_evidence_stays_explicit_and_complete() -> None:
@@ -609,3 +622,49 @@ def test_qualification_rejects_forgery_wrong_expected_profile_and_decision_expir
         AuthorityFailure.DECISION_EXPIRED,
     )
     assert expired_result.accepted_as_development_test_evidence is False
+
+
+def test_authority_head_as_of_includes_equal_decision_time_but_not_later_decision() -> (
+    None
+):
+    binding = qualification_binding(_package())
+    key = generate_development_keypair(KeyPurpose.RELEASE)
+    trust = TrustStore()
+    trust.add_signing_key(key)
+    policy = _policy(binding, key.key_id)
+    decision = _decision(binding)
+    envelope = sign_development_qualification_decision(decision, key)
+    digest = qualification_decision_digest(decision)
+    equal_head = QualificationAuthorityHead(
+        binding=binding,
+        latest_sequence=1,
+        latest_decision_sha256=digest,
+        as_of=decision.decided_at,
+        expires_at=decision.expires_at,
+    )
+    equal = verify_development_qualification_history(
+        (envelope,),
+        trust,
+        policy,
+        equal_head,
+        expected_binding=binding,
+        now=decision.decided_at,
+    )
+    assert equal.accepted_as_development_test_evidence is True
+
+    stale_head = equal_head.model_copy(
+        update={"as_of": decision.decided_at - timedelta(seconds=1)}
+    )
+    later = verify_development_qualification_history(
+        (envelope,),
+        trust,
+        policy,
+        stale_head,
+        expected_binding=binding,
+        now=decision.decided_at,
+    )
+    assert (later.authority_status, later.failure) == (
+        AuthorityStatus.INVALID,
+        AuthorityFailure.DECISION_NOT_YET_VALID,
+    )
+    assert later.accepted_as_development_test_evidence is False

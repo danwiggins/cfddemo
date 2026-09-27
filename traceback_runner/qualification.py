@@ -153,13 +153,12 @@ class SignerRoleGrant(RunnerContract):
     def valid_window_and_revocation(self) -> SignerRoleGrant:
         if self.expires_at <= self.valid_from:
             raise ValueError("grant expires_at must be after valid_from")
-        revoked = self.status == GrantStatus.REVOKED
-        if revoked != (
-            self.revocation_reference is not None and self.revoked_at is not None
-        ):
-            raise ValueError(
-                "revoked grants require complete revocation metadata; active grants forbid it"
-            )
+        has_reference = self.revocation_reference is not None
+        has_time = self.revoked_at is not None
+        if self.status == GrantStatus.ACTIVE and (has_reference or has_time):
+            raise ValueError("active grants forbid revocation metadata")
+        if self.status == GrantStatus.REVOKED and not (has_reference and has_time):
+            raise ValueError("revoked grants require complete revocation metadata")
         return self
 
 
@@ -730,6 +729,13 @@ def verify_development_qualification_history(
             return _qualification_result(
                 status=AuthorityStatus.INVALID,
                 failure=AuthorityFailure.EXPECTED_BINDING_MISMATCH,
+                binding=expected_binding,
+                head=authority_head,
+            )
+        if decision.decided_at > authority_head.as_of:
+            return _qualification_result(
+                status=AuthorityStatus.INVALID,
+                failure=AuthorityFailure.DECISION_NOT_YET_VALID,
                 binding=expected_binding,
                 head=authority_head,
             )
