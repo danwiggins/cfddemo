@@ -419,6 +419,8 @@ class JobStore:
                 return attempt["receipt_sha256"] == receipt_sha256
             if row["lease_token"] != lease.token:
                 return False
+            if row["lease_owner"] is not None and row["lease_expires_at"] >= self.clock():
+                raise LeaseBusy("publication still belongs to a live worker")
             connection.execute(
                 """UPDATE attempts SET status='committed', receipt_path=?, receipt_sha256=?
                    WHERE job_id=? AND stage=? AND attempt=?""",
@@ -450,6 +452,37 @@ class JobStore:
         for row in rows:
             result.setdefault(row["stage"], row["stage_definition_sha256"])
         return result
+
+    @contextmanager
+    def private_recovery_guard(self, job_id: str) -> Iterator[str | None]:
+        """Classify and fence private attempts while excluding new lease grants.
+
+        The caller must perform its directory scan/renames inside this guard.
+        A recovery crash can roll back the fence, but an expired worker still
+        cannot heartbeat/commit; a repeated recovery is safe.
+        """
+
+        with self._transaction() as connection:
+            row = connection.execute("SELECT * FROM jobs WHERE job_id=?", (job_id,)).fetchone()
+            if row is None:
+                raise KeyError(job_id)
+            active = None
+            now = self.clock()
+            if row["lease_owner"] is not None:
+                if row["lease_expires_at"] is not None and row["lease_expires_at"] >= now:
+                    active = f"{row['current_stage']}-{row['lease_token']}"
+                else:
+                    connection.execute(
+                        """UPDATE jobs SET lease_token=lease_token+1, lease_owner=NULL,
+                           lease_expires_at=NULL, updated_at=? WHERE job_id=?""",
+                        (now, job_id),
+                    )
+                    connection.execute(
+                        """UPDATE attempts SET status='abandoned'
+                           WHERE job_id=? AND lease_token=? AND status='running'""",
+                        (job_id, row["lease_token"]),
+                    )
+            yield active
 
     def fail_attempt(self, lease: AttemptLease, message: str, *, retryable: bool) -> None:
         target = JobState.RETRYABLE_FAILURE if retryable else JobState.TERMINAL_FAILURE

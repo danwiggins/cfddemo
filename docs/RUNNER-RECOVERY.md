@@ -102,3 +102,29 @@ and qualification evidence.
 - Reviewed expand/contract migrations and active-job rollback exercises.
 - Real modBAM/POD5, Dorado, hg38, workstation, scientific, and protocol
   qualification.
+
+### Recovery review hardening
+
+Submission capture and resubmission share a per-job POSIX file lock, released
+by process exit. A replay rehashes an existing sealed snapshot and can complete
+SNAPSHOTTING, attached, or VALIDATING boundaries without recopying the source.
+Before seal, resubmit the same request with its source to restart capture;
+job-specific incomplete private trees are quarantined under that same lock.
+No original absolute source locator is persisted for automatic recapture.
+Missing or changed attached snapshots fail closed rather than being silently
+recreated from mutable source data.
+
+Private-attempt classification and quarantine run inside one SQLite write
+transaction, excluding concurrent lease grants. Current unexpired attempt
+directories are preserved; expired ownership is fenced before quarantine.
+An immutable publication from a still-live lease is neither adopted nor moved:
+recovery waits for lease expiry, then verifies and adopts. This avoids stealing
+a live worker's publication between rename and its database commit.
+
+Execution rehashes the sealed snapshot before reuse and before/after each
+synthetic callback. Stage reuse requires the exact current ordered input
+commitments, so a changed ancestor, stage order, insertion or removal cannot
+silently reuse a stale descendant. Multiple same-definition attempts select
+the latest verified attempt deterministically. These checks detect persistent
+corruption or accidental mutation; in-process callbacks are trusted synthetic
+code, not isolation from a malicious same-user process.
