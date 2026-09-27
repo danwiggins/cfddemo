@@ -69,6 +69,7 @@ def _provenance(**updates: object) -> dict[str, object]:
         "artifacts": [
             {
                 "role": "analysis_input",
+                "artifact_token": "synthetic-input.v1",
                 "size_bytes": 100,
                 "provider_hmac_sha256": "a" * 64,
             }
