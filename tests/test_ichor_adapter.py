@@ -760,6 +760,27 @@ def test_standalone_result_binds_statuses_to_canonical_masks(tmp_path: Path) -> 
         bin_events.read_text().replace("chr1\t1000001\t2000000\tNEUT\t-0.01\n", "")
     )
     result = validate_ichor_outputs(prepare_ichor_run(_request(mask_index=1)), output)
+    overlap_payload = result.model_dump(mode="python")
+    original_segment = overlap_payload["segments"][0]
+    overlap_payload["segments"] = (
+        {
+            **original_segment,
+            "start": 0,
+            "end": 2_000_000,
+            "native_span_bin_count": 2,
+            "retained_bin_count": 1,
+        },
+        {
+            **original_segment,
+            "start": 1_000_000,
+            "end": 4_000_000,
+            "native_span_bin_count": 3,
+            "retained_bin_count": 2,
+        },
+    )
+    with pytest.raises(ValidationError, match="segments overlap"):
+        CnvDevelopmentResult.model_validate(overlap_payload)
+
     payload = result.model_dump(mode="python")
     payload["bin_statuses"][1]["mask_reason"] = "different_prespecified_mask"
 

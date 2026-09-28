@@ -1468,6 +1468,11 @@ def _replay_segment_structure(
         segment_keys, key=lambda item: (order[item[0]], item[1], item[2])
     ):
         raise ValueError("segments violate the canonical grid order")
+    previous_end: dict[str, int] = {}
+    for segment in segments:
+        if segment.start < previous_end.get(segment.contig, 0):
+            raise ValueError("segments overlap")
+        previous_end[segment.contig] = segment.end
     removed = {(item.bin.contig, item.bin.start, item.bin.end) for item in grid.masks}
     expected_event_keys = [
         (item.contig, item.start, item.end)
