@@ -53,6 +53,14 @@ Version = Annotated[
         pattern=r"^[A-Za-z0-9][A-Za-z0-9_.+:-]*$",
     ),
 ]
+SourceIdentity = Annotated[
+    str,
+    StringConstraints(
+        min_length=1,
+        max_length=256,
+        pattern=r"^[^\s]+$",
+    ),
+]
 
 UXM_UNMETHYLATED_MAX_EXCLUSIVE = 0.251
 UXM_METHYLATED_MIN_INCLUSIVE = 0.75
@@ -123,6 +131,24 @@ class NnlsRowScale(StrEnum):
     REFERENCE_COUNT = "reference_count"
     SQRT_COUNT = "sqrt_count"
     UNWEIGHTED = "unweighted"
+
+
+class ModProbabilityPolicy(StrEnum):
+    """How canonical and modified cytosine states were selected."""
+
+    HARD_CALL_COLLAPSED_M_H = "hard_call_collapsed_m_h"
+    PRECALL_COMBINED_M_H = "precall_combined_m_h"
+
+
+class ModkitSourceSchema(StrEnum):
+    """Generic schemas; neither value claims native Modkit compatibility."""
+
+    GENERIC_HARD_CALL_CPG_V2 = "traceback.generic-hard-call-cpg.v2"
+    GENERIC_CMH_PROBABILITIES_V1 = "traceback.generic-cmh-probabilities.v1"
+
+
+class ReferenceContextValidationScope(StrEnum):
+    CENTERED_CPG_DYAD = "centered_cpg_dyad"
 
 
 class RangeClassification(StrEnum):
@@ -260,6 +286,240 @@ class ModkitCpgCall(StrictModel):
     modification_code: Literal["m"] = "m"
     modified_probability: CanonicalFraction
     state: CpgCallState
+
+
+class ModkitCpgCallV2(StrictModel):
+    """Reference-validated local CpG call with explicit coordinate identity.
+
+    ``original_position0`` is the reference position supplied by the generic
+    adapter. ``canonical_cpg_position0`` is always the reference-forward C of
+    the validated CpG dyad. The two strand fields are intentionally distinct.
+    """
+
+    schema_version: Literal["cell-origin-cpg-call.v2"] = (
+        "cell-origin-cpg-call.v2"
+    )
+    fragment_digest: Sha256
+    chromosome: Chromosome
+    original_position0: int = Field(ge=0)
+    canonical_cpg_position0: int = Field(ge=0)
+    modification_strand: Strand
+    reference_mod_strand: Strand
+    selected_state_probability: CanonicalFraction
+    state: CpgCallState
+    policy: ModProbabilityPolicy
+
+    @model_validator(mode="after")
+    def validate_canonical_coordinate(self) -> ModkitCpgCallV2:
+        if self.reference_mod_strand == Strand.PLUS:
+            expected = self.original_position0
+        else:
+            if self.original_position0 == 0:
+                raise ValueError("minus-strand CpG position cannot underflow")
+            expected = self.original_position0 - 1
+        if self.canonical_cpg_position0 != expected:
+            raise ValueError(
+                "canonical CpG position does not match reference modification strand"
+            )
+        return self
+
+
+class ModkitInputProvenanceV2(StrictModel):
+    """Identity and probability policies for a generic CpG adapter."""
+
+    source_schema_id: ModkitSourceSchema
+    source_schema_version: Version
+    source_tool_id: SourceIdentity
+    source_tool_version: SourceIdentity
+    source_model_id: SourceIdentity
+    source_model_version: SourceIdentity
+    policy: ModProbabilityPolicy
+    probability_threshold: CanonicalFraction | None
+    probability_threshold_source: Literal["adapter_explicit", "source_unknown"]
+    tie_policy: Literal["exclude_exact_ties"] = "exclude_exact_ties"
+    probability_tie_tolerance: Literal[0.0] = 0.0
+    probability_sum_tolerance: Literal[1e-6] = 1e-6
+    reference_id: Identifier
+    reference_sha256: Sha256
+    reference_context_provider_id: Identifier
+    reference_context_validation_scope: Literal[
+        ReferenceContextValidationScope.CENTERED_CPG_DYAD
+    ] = ReferenceContextValidationScope.CENTERED_CPG_DYAD
+    coordinate_policy_id: Literal["canonical-reference-forward-cpg-c.v1"] = (
+        "canonical-reference-forward-cpg-c.v1"
+    )
+    duplicate_policy: Literal["exact_observation_only"] = (
+        "exact_observation_only"
+    )
+
+    @model_validator(mode="after")
+    def validate_source_policy(self) -> ModkitInputProvenanceV2:
+        if self.policy == ModProbabilityPolicy.HARD_CALL_COLLAPSED_M_H:
+            if self.source_schema_id != ModkitSourceSchema.GENERIC_HARD_CALL_CPG_V2:
+                raise ValueError(
+                    "hard-call policy requires the generic hard-call schema"
+                )
+            if self.source_schema_version != "2":
+                raise ValueError("generic hard-call schema version must be 2")
+            if self.probability_threshold is not None:
+                raise ValueError("hard-call input cannot claim an adapter threshold")
+            if self.probability_threshold_source != "source_unknown":
+                raise ValueError("hard-call threshold source must be source_unknown")
+        else:
+            if (
+                self.source_schema_id
+                != ModkitSourceSchema.GENERIC_CMH_PROBABILITIES_V1
+            ):
+                raise ValueError(
+                    "precall-combined policy requires the generic C/m/h schema"
+                )
+            if self.source_schema_version != "1":
+                raise ValueError("generic C/m/h probability schema version must be 1")
+            if self.probability_threshold is None:
+                raise ValueError("probability input requires an explicit threshold")
+            if self.probability_threshold_source != "adapter_explicit":
+                raise ValueError(
+                    "probability-input threshold source must be adapter_explicit"
+                )
+        return self
+
+
+class ModkitIngestionLedgerV2(StrictModel):
+    """Mutually exclusive row accounting for one successful generic adapter run."""
+
+    policy: ModProbabilityPolicy
+    total_rows: int = Field(ge=0)
+    source_failed_rows: int = Field(ge=0)
+    source_passed_rows: int = Field(ge=0)
+    excluded_non_c_rows: int = Field(ge=0)
+    candidate_c_rows: int = Field(ge=0)
+    hard_call_c_rows: int = Field(ge=0)
+    hard_call_m_rows: int = Field(ge=0)
+    hard_call_h_rows: int = Field(ge=0)
+    probability_input_rows: int = Field(ge=0)
+    excluded_probability_tie_rows: int = Field(ge=0)
+    excluded_low_confidence_rows: int = Field(ge=0)
+    eligible_call_rows: int = Field(ge=0)
+    unmethylated_call_rows: int = Field(ge=0)
+    methylated_call_rows: int = Field(ge=0)
+    reference_plus_call_rows: int = Field(ge=0)
+    reference_minus_call_rows: int = Field(ge=0)
+    malformed_rows: Literal[0] = 0
+    duplicate_rows: Literal[0] = 0
+
+    @model_validator(mode="after")
+    def reconcile_stages(self) -> ModkitIngestionLedgerV2:
+        if self.total_rows != self.source_failed_rows + self.source_passed_rows:
+            raise ValueError("source failed and passed rows must equal total rows")
+        if self.source_passed_rows != self.excluded_non_c_rows + self.candidate_c_rows:
+            raise ValueError("non-C and candidate C rows must equal source-passed rows")
+        terminal = (
+            self.excluded_probability_tie_rows
+            + self.excluded_low_confidence_rows
+            + self.eligible_call_rows
+        )
+        if self.candidate_c_rows != terminal:
+            raise ValueError("candidate C terminal buckets must reconcile")
+        if self.eligible_call_rows != (
+            self.unmethylated_call_rows + self.methylated_call_rows
+        ):
+            raise ValueError("call-state counts must equal eligible calls")
+        if self.eligible_call_rows != (
+            self.reference_plus_call_rows + self.reference_minus_call_rows
+        ):
+            raise ValueError("reference-strand counts must equal eligible calls")
+
+        hard_rows = (
+            self.hard_call_c_rows
+            + self.hard_call_m_rows
+            + self.hard_call_h_rows
+        )
+        if self.policy == ModProbabilityPolicy.HARD_CALL_COLLAPSED_M_H:
+            if hard_rows != self.candidate_c_rows or self.probability_input_rows != 0:
+                raise ValueError(
+                    "hard-call source-state rows must partition candidates"
+                )
+            if self.excluded_probability_tie_rows or self.excluded_low_confidence_rows:
+                raise ValueError(
+                    "hard-call input cannot claim adapter probability exclusions"
+                )
+            if self.hard_call_c_rows != self.unmethylated_call_rows:
+                raise ValueError(
+                    "hard-call C rows must equal unmethylated calls"
+                )
+            if (
+                self.hard_call_m_rows + self.hard_call_h_rows
+                != self.methylated_call_rows
+            ):
+                raise ValueError(
+                    "hard-call m and h rows must equal methylated calls"
+                )
+        elif hard_rows != 0 or self.probability_input_rows != self.candidate_c_rows:
+            raise ValueError("probability-input rows must partition candidates")
+        return self
+
+
+class ModkitInputResultV2(StrictModel):
+    """Calls plus a fully reconciled, reference-bound ingestion ledger."""
+
+    schema_version: Literal["cell-origin-modkit-input.v2"] = (
+        "cell-origin-modkit-input.v2"
+    )
+    provenance: ModkitInputProvenanceV2
+    ledger: ModkitIngestionLedgerV2
+    calls: tuple[ModkitCpgCallV2, ...]
+
+    @model_validator(mode="after")
+    def validate_calls(self) -> ModkitInputResultV2:
+        if self.ledger.policy != self.provenance.policy:
+            raise ValueError("ledger and provenance probability policies must match")
+        if len(self.calls) != self.ledger.eligible_call_rows:
+            raise ValueError("emitted calls must equal eligible-call ledger rows")
+        if any(call.policy != self.provenance.policy for call in self.calls):
+            raise ValueError("every call must use the provenance probability policy")
+
+        unmethylated = sum(
+            call.state == CpgCallState.UNMETHYLATED for call in self.calls
+        )
+        if unmethylated != self.ledger.unmethylated_call_rows:
+            raise ValueError("unmethylated calls do not match the ledger")
+        if len(self.calls) - unmethylated != self.ledger.methylated_call_rows:
+            raise ValueError("methylated calls do not match the ledger")
+        plus = sum(
+            call.reference_mod_strand == Strand.PLUS for call in self.calls
+        )
+        if plus != self.ledger.reference_plus_call_rows:
+            raise ValueError("plus-reference-strand calls do not match the ledger")
+        if len(self.calls) - plus != self.ledger.reference_minus_call_rows:
+            raise ValueError("minus-reference-strand calls do not match the ledger")
+
+        threshold = self.provenance.probability_threshold
+        if self.provenance.policy == ModProbabilityPolicy.PRECALL_COMBINED_M_H:
+            if threshold is None:
+                raise ValueError("probability input is missing its bound threshold")
+            for call in self.calls:
+                if call.selected_state_probability == 0.5:
+                    raise ValueError("exact probability ties must be excluded")
+                if call.selected_state_probability < 0.5:
+                    raise ValueError(
+                        "selected state probability must exceed 0.5"
+                    )
+                if call.selected_state_probability < threshold:
+                    raise ValueError("call probability is below the bound threshold")
+
+        seen: set[tuple[str, str, int, Strand, Strand]] = set()
+        for call in self.calls:
+            key = (
+                call.fragment_digest,
+                call.chromosome,
+                call.canonical_cpg_position0,
+                call.modification_strand,
+                call.reference_mod_strand,
+            )
+            if key in seen:
+                raise ValueError("exact call observations must be unique")
+            seen.add(key)
+        return self
 
 
 class FragmentMarkerObservation(StrictModel):
@@ -686,13 +946,20 @@ __all__ = [
     "LOYFER_UXM_METHOD",
     "MarkerCountRow",
     "MethodDefinition",
+    "ModProbabilityPolicy",
     "ModkitCpgCall",
+    "ModkitCpgCallV2",
+    "ModkitIngestionLedgerV2",
+    "ModkitInputProvenanceV2",
+    "ModkitInputResultV2",
+    "ModkitSourceSchema",
     "NnlsDiagnostics",
     "NnlsDiagnosticsV2",
     "NnlsRowScale",
     "ObservationUnit",
     "RangeClassification",
     "RangeComparison",
+    "ReferenceContextValidationScope",
     "ReferenceRangeKind",
     "ReferenceRangeRow",
     "SoftwareVersion",
