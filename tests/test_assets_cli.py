@@ -7,6 +7,8 @@ import json
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
+import pytest
+
 from traceback_runner.assets import build_synthetic_asset_package
 from traceback_runner.cli import ExitCode, main
 from traceback_runner.qualification import (
@@ -353,3 +355,79 @@ def test_verify_keeps_integrity_distinct_when_authority_later_expires(
     assert result["data"]["installed"] is True
     assert result["data"]["integrity"] == "valid"
     assert result["data"]["authority"] == "unknown"
+
+
+def test_assets_verify_absent_registry_does_not_mutate_root(
+    tmp_path: Path, capsys
+) -> None:
+    paths = _write_inputs(tmp_path)
+    root = tmp_path / "absent-product-root"
+
+    code, result = _invoke(
+        capsys, "assets", "verify", *_asset_args(paths, root)
+    )
+
+    assert code == ExitCode.NOT_FOUND
+    assert result["data"]["installed"] is False
+    assert not root.exists()
+
+
+def test_assets_install_final_authority_check_gates_success(
+    tmp_path: Path, capsys, monkeypatch
+) -> None:
+    paths = _write_inputs(tmp_path)
+    root = tmp_path / "product-root"
+    active_now = datetime.now(UTC)
+
+    class AdvancingDateTime(datetime):
+        calls = 0
+
+        @classmethod
+        def now(cls, tz=None):
+            cls.calls += 1
+            observed = active_now if cls.calls <= 6 else active_now + timedelta(days=2)
+            return observed if tz is None else observed.astimezone(tz)
+
+    monkeypatch.setattr("traceback_runner.cli.datetime", AdvancingDateTime)
+    code, result = _invoke(
+        capsys,
+        "assets",
+        "install",
+        *_asset_args(paths, root),
+        "--package",
+        paths["package"],
+    )
+
+    assert code == ExitCode.BLOCKED
+    assert result["status"] == "blocked"
+    assert result["data"]["installed"] is True
+    assert result["data"]["integrity"] == "valid"
+    assert result["data"]["authority"] == "unknown"
+
+
+@pytest.mark.parametrize(
+    "corruption", ("malformed", "noncanonical", "oversized", "truncated")
+)
+def test_assets_authority_inputs_fail_as_verification_errors(
+    tmp_path: Path, capsys, corruption: str
+) -> None:
+    paths = _write_inputs(tmp_path)
+    root = tmp_path / "product-root"
+    target = paths["role_policy"]
+    original = target.read_bytes()
+    if corruption == "malformed":
+        target.write_bytes(b"{}")
+    elif corruption == "noncanonical":
+        target.write_bytes(original + b"\n")
+    elif corruption == "oversized":
+        target.write_bytes(b"x" * (2 * 1024 * 1024 + 1))
+    else:
+        target.write_bytes(original[:-1])
+
+    code, result = _invoke(
+        capsys, "assets", "verify", *_asset_args(paths, root)
+    )
+
+    assert code == ExitCode.VERIFICATION_FAILED
+    assert result["status"] == "verification_failed"
+    assert not root.exists()

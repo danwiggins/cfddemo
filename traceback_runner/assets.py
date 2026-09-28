@@ -299,6 +299,22 @@ class AssetRegistry:
         self.staging = self.root / ".staging"
         self._initialize()
 
+    @classmethod
+    def open_existing(cls, root: str | Path) -> AssetRegistry:
+        """Open an initialized registry for read-only verification."""
+
+        registry = cls.__new__(cls)
+        registry.root = Path(root)
+        registry.min_free_fraction = 0.20
+        registry._minimum_free_ratio = Fraction(1, 5)
+        registry._capacity_provider = _filesystem_capacity
+        registry._fault_injector = None
+        registry.objects = registry.root / "objects" / "sha256"
+        registry.references = registry.root / "references"
+        registry.staging = registry.root / ".staging"
+        registry._assert_registry_layout()
+        return registry
+
     def _initialize(self) -> None:
         if self.root.is_symlink():
             raise AssetFilesystemError("registry root cannot be a symlink")

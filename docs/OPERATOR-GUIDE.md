@@ -96,7 +96,7 @@ installation never authorizes execution, real input, or a qualification probe.
 | 2 | CLI usage error |
 | 3 | Blocked or unsupported operation |
 | 4 | Local job, bundle, or trust material was not found |
-| 5 | Bundle validation or signature verification failed |
+| 5 | Bundle, asset package/integrity, signature, or authority-input verification failed |
 | 6 | Retryable local runner failure |
 | 7 | Unexpected internal failure |
 

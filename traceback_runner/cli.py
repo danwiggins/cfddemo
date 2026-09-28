@@ -11,6 +11,7 @@ import json
 import os
 import platform
 import shutil
+import stat
 import sys
 import tempfile
 import uuid
@@ -30,6 +31,7 @@ _TRUST_RELATIVE = Path("trust/development-result-trust.json")
 _BAM_NAME = "valid_modbam.bam"
 _INDEX_NAME = "valid_modbam.bam.bai"
 _WORKFLOW_ID = "synthetic-development-v1"
+_MAX_ASSET_AUTHORITY_INPUT_BYTES = 2 * 1024 * 1024
 
 
 class ExitCode(IntEnum):
@@ -788,16 +790,64 @@ def _asset_authorization(args: argparse.Namespace) -> Any:
     from .serialization import canonical_model_from_bytes
     from .signing import load_development_trust
 
-    envelope = canonical_model_from_bytes(
-        ReleaseEvidenceEnvelope, args.release_evidence.read_bytes()
-    )
-    role_policy = canonical_model_from_bytes(
-        QualificationTrustPolicy, args.role_policy.read_bytes()
-    )
-    authority_head = canonical_model_from_bytes(
-        ReleaseAuthorityHead, args.authority_head.read_bytes()
-    )
-    trust_store = load_development_trust(args.trust_store.read_bytes())
+    def read_authority_input(path: Path) -> bytes:
+        flags = (
+            os.O_RDONLY
+            | getattr(os, "O_CLOEXEC", 0)
+            | getattr(os, "O_NOFOLLOW", 0)
+            | getattr(os, "O_NONBLOCK", 0)
+        )
+        try:
+            descriptor = os.open(path, flags)
+        except FileNotFoundError:
+            raise
+        except OSError as exc:
+            raise AssetEvidenceInputError(
+                "independent authority input cannot be opened safely"
+            ) from exc
+        try:
+            metadata = os.fstat(descriptor)
+            if not stat.S_ISREG(metadata.st_mode):
+                raise AssetEvidenceInputError(
+                    "independent authority input must be a regular file"
+                )
+            if metadata.st_size > _MAX_ASSET_AUTHORITY_INPUT_BYTES:
+                raise AssetEvidenceInputError(
+                    "independent authority input exceeds its bounded limit"
+                )
+            with os.fdopen(descriptor, "rb") as stream:
+                descriptor = -1
+                content = stream.read(_MAX_ASSET_AUTHORITY_INPUT_BYTES + 1)
+            if len(content) > _MAX_ASSET_AUTHORITY_INPUT_BYTES:
+                raise AssetEvidenceInputError(
+                    "independent authority input exceeds its bounded limit"
+                )
+            return content
+        finally:
+            if descriptor >= 0:
+                os.close(descriptor)
+
+    try:
+        envelope = canonical_model_from_bytes(
+            ReleaseEvidenceEnvelope, read_authority_input(args.release_evidence)
+        )
+        role_policy = canonical_model_from_bytes(
+            QualificationTrustPolicy, read_authority_input(args.role_policy)
+        )
+        authority_head = canonical_model_from_bytes(
+            ReleaseAuthorityHead, read_authority_input(args.authority_head)
+        )
+        trust_store = load_development_trust(
+            read_authority_input(args.trust_store)
+        )
+    except FileNotFoundError:
+        raise
+    except AssetEvidenceInputError:
+        raise
+    except Exception as exc:
+        raise AssetEvidenceInputError(
+            "independent authority input is malformed or noncanonical"
+        ) from exc
 
     matching_bindings: dict[bytes, Any] = {}
     for grant in role_policy.grants:
@@ -900,7 +950,7 @@ def _asset_result_data(
 
 
 def _assets_install(args: argparse.Namespace) -> tuple[ExitCode, dict[str, Any]]:
-    from .assets import AssetRegistry
+    from .assets import AssetRegistry, IntegrityStatus
     from .qualification import AssetLifecycleStatus, AuthorityFailure, AuthorityStatus
 
     authorization = _asset_authorization(args)
@@ -949,6 +999,34 @@ def _assets_install(args: argparse.Namespace) -> tuple[ExitCode, dict[str, Any]]
     )
     data["newly_registered"] = installed.newly_registered
     data["content_size_bytes"] = installed.content_size_bytes
+    if (
+        not verification.installed
+        or verification.integrity_status != IntegrityStatus.VALID
+    ):
+        return ExitCode.VERIFICATION_FAILED, _result(
+            "assets install",
+            "verification_failed",
+            "Installed synthetic asset failed post-publication integrity verification",
+            data=data,
+        )
+    if decision.authority_status == AuthorityStatus.INVALID:
+        return ExitCode.VERIFICATION_FAILED, _result(
+            "assets install",
+            "verification_failed",
+            "Installed bytes are intact but post-publication authority is invalid",
+            data=data,
+        )
+    if (
+        decision.authority_status != AuthorityStatus.VERIFIED
+        or decision.lifecycle_status != AssetLifecycleStatus.ACTIVE
+        or not verification.registration_matches_current_reference
+    ):
+        return ExitCode.BLOCKED, _result(
+            "assets install",
+            "blocked",
+            "Asset was published but is unavailable because current authority is not active",
+            data=data,
+        )
     return ExitCode.OK, _result(
         "assets install",
         "ok",
@@ -962,7 +1040,22 @@ def _assets_verify(args: argparse.Namespace) -> tuple[ExitCode, dict[str, Any]]:
     from .qualification import AssetLifecycleStatus, AuthorityFailure, AuthorityStatus
 
     authorization = _asset_authorization(args)
-    registry = AssetRegistry(args.root / "assets")
+    registry_root = args.root / "assets"
+    if not registry_root.exists() and not registry_root.is_symlink():
+        decision = _asset_decision(
+            authorization, asset_id=args.asset_id, version=args.version
+        )
+        return ExitCode.NOT_FOUND, _result(
+            "assets verify",
+            "not_found",
+            "Synthetic asset is not installed",
+            data=_asset_result_data(
+                asset_id=args.asset_id,
+                version=args.version,
+                decision=decision,
+            ),
+        )
+    registry = AssetRegistry.open_existing(registry_root)
     verification = registry.verify(
         asset_id=args.asset_id,
         version=args.version,
@@ -1093,7 +1186,8 @@ def main(argv: Sequence[str] | None = None) -> int:
     try:
         mutation = (
             _operator_lock(args.root)
-            if args.command in {"demo", "resume", "retry", "assets"}
+            if args.command in {"demo", "resume", "retry"}
+            or (args.command == "assets" and args.asset_command == "install")
             else nullcontext()
         )
         with mutation:
