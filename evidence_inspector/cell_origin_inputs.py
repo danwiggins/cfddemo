@@ -12,9 +12,20 @@ import math
 from contextlib import contextmanager
 from dataclasses import dataclass
 from enum import StrEnum
+from functools import wraps
 from os import PathLike
 from pathlib import Path
-from typing import IO, Any, Callable, Iterable, Iterator, Mapping, Sequence
+from typing import (
+    IO,
+    Any,
+    Callable,
+    Iterable,
+    Iterator,
+    Mapping,
+    ParamSpec,
+    Sequence,
+    TypeVar,
+)
 
 from pydantic import Field, ValidationError, model_validator
 
@@ -40,6 +51,8 @@ from evidence_inspector.cell_origin_models import (
 DEFAULT_MAX_ROWS = 1_000_000
 
 ReferenceContextProvider = Callable[[str, int, int], str]
+_P = ParamSpec("_P")
+_T = TypeVar("_T")
 
 
 class CellOriginInputError(ValueError):
@@ -419,6 +432,19 @@ def _model_error(input_name: str, row_number: int, exc: Exception) -> None:
     ) from exc
 
 
+def _sanitize_v2_input_errors(function: Callable[_P, _T]) -> Callable[_P, _T]:
+    """Suppress private source/provider details from chained public errors."""
+
+    @wraps(function)
+    def wrapped(*args: _P.args, **kwargs: _P.kwargs) -> _T:
+        try:
+            return function(*args, **kwargs)
+        except CellOriginInputError as exc:
+            raise CellOriginInputError(str(exc)) from None
+
+    return wrapped
+
+
 def _strand(value: Any, field: str, row_number: int) -> Strand:
     text = _required_text(value, field, row_number)
     try:
@@ -443,6 +469,17 @@ def _validate_v2_common(
         raise CellOriginInputError("fragment_hash_salt must be nonempty bytes")
     if not callable(reference_context_provider):
         raise CellOriginInputError("reference context provider must be callable")
+
+
+def _validate_v2_declared_columns(
+    actual: Sequence[str], declared: Sequence[str]
+) -> None:
+    try:
+        _validate_declared_columns(actual, declared)
+    except CellOriginInputError:
+        raise CellOriginInputError(
+            "generic CpG input header does not match the declared schema"
+        ) from None
 
 
 def _canonical_cpg_position(
@@ -513,6 +550,7 @@ def _v2_result(
         ) from exc
 
 
+@_sanitize_v2_input_errors
 def load_generic_hard_call_cpg_v2(
     source: TextSource,
     *,
@@ -522,7 +560,12 @@ def load_generic_hard_call_cpg_v2(
     reference_context_provider: ReferenceContextProvider,
     max_rows: int = DEFAULT_MAX_ROWS,
 ) -> ModkitInputResultV2:
-    """Load the declared generic hard-call schema without claiming Modkit parity."""
+    """Load the generic hard-call schema using a caller-trusted provider.
+
+    The reference ID and digest are bound provenance supplied by the caller;
+    this generic loader does not independently prove the provider's backing
+    FASTA bytes.
+    """
 
     if provenance.policy != ModProbabilityPolicy.HARD_CALL_COLLAPSED_M_H:
         raise CellOriginInputError("hard-call loader requires hard-call provenance")
@@ -554,7 +597,9 @@ def load_generic_hard_call_cpg_v2(
     seen: set[tuple[str, str, int, Strand, Strand]] = set()
     with _open_text(source) as handle:
         reader = csv.DictReader(handle, delimiter="\t")
-        _validate_declared_columns(reader.fieldnames or (), columns.declared())
+        _validate_v2_declared_columns(
+            reader.fieldnames or (), columns.declared()
+        )
         for row_number, row in _bounded_rows(reader, max_rows=max_rows):
             counters["total_rows"] += 1
             if None in row:
@@ -653,6 +698,7 @@ def load_generic_hard_call_cpg_v2(
     return _v2_result(provenance=provenance, calls=calls, counters=counters)
 
 
+@_sanitize_v2_input_errors
 def load_generic_cmh_probabilities_v1(
     source: TextSource,
     *,
@@ -662,7 +708,12 @@ def load_generic_cmh_probabilities_v1(
     reference_context_provider: ReferenceContextProvider,
     max_rows: int = DEFAULT_MAX_ROWS,
 ) -> ModkitInputResultV2:
-    """Combine generic C/m/h probabilities before selecting a CpG state."""
+    """Combine C/m/h probabilities using a caller-trusted reference provider.
+
+    The reference ID and digest are bound provenance supplied by the caller;
+    this generic loader does not independently prove the provider's backing
+    FASTA bytes.
+    """
 
     if provenance.policy != ModProbabilityPolicy.PRECALL_COMBINED_M_H:
         raise CellOriginInputError(
@@ -702,7 +753,9 @@ def load_generic_cmh_probabilities_v1(
     seen: set[tuple[str, str, int, Strand, Strand]] = set()
     with _open_text(source) as handle:
         reader = csv.DictReader(handle, delimiter="\t")
-        _validate_declared_columns(reader.fieldnames or (), columns.declared())
+        _validate_v2_declared_columns(
+            reader.fieldnames or (), columns.declared()
+        )
         for row_number, row in _bounded_rows(reader, max_rows=max_rows):
             counters["total_rows"] += 1
             if None in row:

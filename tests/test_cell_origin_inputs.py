@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import io
+import traceback
 from dataclasses import replace
 
 import pytest
@@ -394,6 +395,82 @@ def test_v2_zero_threshold_and_deterministic_repeat_are_explicit() -> None:
     assert first.provenance.probability_threshold == 0.0
     assert first.provenance.probability_tie_tolerance == 0.0
     assert first.provenance.probability_sum_tolerance == 1e-6
+
+
+def test_v2_provider_failure_traceback_suppresses_private_exception_text() -> None:
+    private_text = "PRIVATE_SENTINEL:/secret/reference.fa:ACGT"
+
+    def malicious_provider(chromosome: str, start0: int, end0: int) -> str:
+        raise RuntimeError(private_text)
+
+    text = HARD_V2_HEADER + (
+        "private-read\tchr1\t100\t+\t+\tC\tm\t0.9\tfalse\n"
+    )
+
+    with pytest.raises(CellOriginInputError) as captured:
+        load_generic_hard_call_cpg_v2(
+            io.StringIO(text),
+            columns=HARD_V2_COLUMNS,
+            provenance=hard_v2_provenance(),
+            fragment_hash_salt=b"test-salt",
+            reference_context_provider=malicious_provider,
+        )
+
+    rendered = "".join(
+        traceback.format_exception(
+            type(captured.value), captured.value, captured.value.__traceback__
+        )
+    )
+    assert private_text not in rendered
+    assert "private-read" not in rendered
+    assert "reference context provider failed at row 1" in rendered
+
+
+def test_v2_invalid_value_traceback_suppresses_raw_field_text() -> None:
+    private_text = "PRIVATE_SENTINEL_RAW_PROBABILITY"
+    text = HARD_V2_HEADER + (
+        f"private-read\tchr1\t100\t+\t+\tC\tm\t{private_text}\tfalse\n"
+    )
+
+    with pytest.raises(CellOriginInputError) as captured:
+        load_generic_hard_call_cpg_v2(
+            io.StringIO(text),
+            columns=HARD_V2_COLUMNS,
+            provenance=hard_v2_provenance(),
+            fragment_hash_salt=b"test-salt",
+            reference_context_provider=cpg_provider,
+        )
+
+    rendered = "".join(
+        traceback.format_exception(
+            type(captured.value), captured.value, captured.value.__traceback__
+        )
+    )
+    assert private_text not in rendered
+    assert "private-read" not in rendered
+    assert "selected_state_probability must be numeric at row 1" in rendered
+
+
+def test_v2_header_error_suppresses_unknown_source_column() -> None:
+    private_text = "PRIVATE_SENTINEL_HEADER"
+    text = HARD_V2_HEADER.rstrip("\n") + f"\t{private_text}\n"
+
+    with pytest.raises(CellOriginInputError) as captured:
+        load_generic_hard_call_cpg_v2(
+            io.StringIO(text),
+            columns=HARD_V2_COLUMNS,
+            provenance=hard_v2_provenance(),
+            fragment_hash_salt=b"test-salt",
+            reference_context_provider=cpg_provider,
+        )
+
+    rendered = "".join(
+        traceback.format_exception(
+            type(captured.value), captured.value, captured.value.__traceback__
+        )
+    )
+    assert private_text not in rendered
+    assert "header does not match the declared schema" in rendered
 
 
 def test_modkit_loader_requires_explicit_coordinate_and_probability_units() -> None:
