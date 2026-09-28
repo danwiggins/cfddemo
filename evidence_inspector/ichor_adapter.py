@@ -56,11 +56,19 @@ class StrictModel(BaseModel):
     )
 
 
-def _canonical_sha256(value: BaseModel | Sequence[BaseModel]) -> str:
+CanonicalDigestValue = BaseModel | str | int | float | bool | None
+
+
+def _canonical_sha256(
+    value: BaseModel | Sequence[CanonicalDigestValue],
+) -> str:
     if isinstance(value, BaseModel):
         payload: object = value.model_dump(mode="json")
     else:
-        payload = [item.model_dump(mode="json") for item in value]
+        payload = [
+            item.model_dump(mode="json") if isinstance(item, BaseModel) else item
+            for item in value
+        ]
     encoded = json.dumps(
         payload,
         sort_keys=True,
@@ -71,7 +79,7 @@ def _canonical_sha256(value: BaseModel | Sequence[BaseModel]) -> str:
     return hashlib.sha256(encoded).hexdigest()
 
 
-def contract_sha256(value: BaseModel | Sequence[BaseModel]) -> str:
+def contract_sha256(value: BaseModel | Sequence[CanonicalDigestValue]) -> str:
     """Return the canonical contract digest used by adapter bindings."""
 
     return _canonical_sha256(value)
@@ -168,12 +176,18 @@ class CanonicalBin(StrictModel):
 
 class CanonicalBinMask(StrictModel):
     bin: CanonicalBin
-    reason: Literal[
-        "centromere_or_flank",
-        "low_mappability",
-        "invalid_gc",
-        "other_prespecified",
-    ]
+    reason: Literal["centromere_or_flank", "low_mappability"]
+    source_artifact_sha256: Sha256
+    source_value: FiniteFloat | None = None
+    upstream_row_presence: Literal["removed"] = "removed"
+
+    @model_validator(mode="after")
+    def reason_specific_evidence(self) -> CanonicalBinMask:
+        if self.reason == "centromere_or_flank" and self.source_value is not None:
+            raise ValueError("centromere masks cannot claim a map score")
+        if self.reason == "low_mappability" and self.source_value is None:
+            raise ValueError("low-mappability masks require a bound map score")
+        return self
 
 
 class CanonicalGrid(StrictModel):
@@ -231,6 +245,8 @@ class WigGridBinding(StrictModel):
     step_bp: int = Field(gt=0)
     bin_size_bp: int = Field(gt=0)
     canonical_bin_definition_sha256: Sha256
+    canonical_values: tuple[FiniteFloat, ...] | None = None
+    canonical_values_sha256: Sha256 | None = None
     canonical_conversion: Literal["start1_to_zero_based_half_open"] = (
         "start1_to_zero_based_half_open"
     )
@@ -243,6 +259,18 @@ class WigGridBinding(StrictModel):
             raise ValueError(
                 "v1 WIG binding requires span, step, and bin size to agree"
             )
+        has_values = self.canonical_values is not None
+        if has_values != (self.canonical_values_sha256 is not None):
+            raise ValueError("canonical WIG values require their exact digest")
+        if self.role == "map_wig":
+            if self.canonical_values is None:
+                raise ValueError("mappability WIG requires replayable canonical values")
+            if any(not 0 <= value <= 1 for value in self.canonical_values):
+                raise ValueError("mappability values must be within zero and one")
+            if _canonical_sha256(self.canonical_values) != self.canonical_values_sha256:
+                raise ValueError("canonical mappability value digest mismatch")
+        elif has_values:
+            raise ValueError("only the mappability WIG binds canonical values in v1")
         return self
 
 
@@ -348,6 +376,10 @@ class CnvAssetSet(StrictModel):
             raise ValueError("GC asset role is invalid")
         if self.mappability is not None and self.mappability.role != "map_wig":
             raise ValueError("mappability asset role is invalid")
+        if self.mappability is not None and len(
+            self.mappability.canonical_values or ()
+        ) != len(self.canonical_grid.bins):
+            raise ValueError("mappability values do not cover the canonical grid")
         return self
 
 
@@ -500,6 +532,74 @@ class CnvRunRequest(StrictModel):
         )
         if expected_contigs != self.counting_policy.contigs:
             raise ValueError("model chromosomes do not match counting contigs")
+        centromere_masks = {
+            item.bin
+            for item in self.assets.canonical_grid.masks
+            if item.reason == "centromere_or_flank"
+        }
+        expected_centromere_masks = {
+            bin_row
+            for bin_row in self.assets.canonical_grid.bins
+            for interval in self.assets.centromere.canonical_intervals
+            if bin_row.contig == interval.contig
+            and bin_row.start < interval.end + self.parameters.centromere_flank_bp
+            and bin_row.end
+            > max(0, interval.start - self.parameters.centromere_flank_bp)
+        }
+        if centromere_masks != expected_centromere_masks:
+            raise ValueError(
+                "centromere masks do not match the bound intervals and flank"
+            )
+        map_values = (
+            self.assets.mappability.canonical_values
+            if self.assets.mappability is not None
+            else None
+        )
+        expected_low_masks = {
+            bin_row
+            for index, bin_row in enumerate(self.assets.canonical_grid.bins)
+            if bin_row not in expected_centromere_masks
+            and map_values is not None
+            and map_values[index] < self.parameters.minimum_map_score
+        }
+        low_masks = {
+            item.bin
+            for item in self.assets.canonical_grid.masks
+            if item.reason == "low_mappability"
+        }
+        if low_masks != expected_low_masks:
+            raise ValueError(
+                "low-mappability masks do not match the bound map values and threshold"
+            )
+        bin_positions = {
+            bin_row: index
+            for index, bin_row in enumerate(self.assets.canonical_grid.bins)
+        }
+        for mask in self.assets.canonical_grid.masks:
+            if mask.reason == "centromere_or_flank":
+                if mask.source_artifact_sha256 != (
+                    self.assets.centromere.identity.content_sha256
+                ):
+                    raise ValueError("centromere mask is not bound to its source asset")
+            else:
+                if self.assets.mappability is None:
+                    raise ValueError("low-mappability mask requires a map asset")
+                if mask.source_artifact_sha256 != (
+                    self.assets.mappability.identity.content_sha256
+                ):
+                    raise ValueError(
+                        "low-mappability mask is not bound to its source asset"
+                    )
+                assert mask.source_value is not None
+                expected_value = map_values[bin_positions[mask.bin]]
+                if mask.source_value != expected_value:
+                    raise ValueError(
+                        "low-mappability mask does not match its map value"
+                    )
+                if not mask.source_value < self.parameters.minimum_map_score:
+                    raise ValueError(
+                        "low-mappability mask does not satisfy the pinned threshold"
+                    )
         return self
 
 
@@ -904,6 +1004,28 @@ class CnvDevelopmentResult(StrictModel):
         }
         if set(status_by_key) != expected_keys:
             raise ValueError("bin statuses do not cover the canonical grid")
+        ordered_status_keys = [
+            (item.contig, item.start, item.end) for item in self.bin_statuses
+        ]
+        ordered_grid_keys = [
+            (item.contig, item.start, item.end) for item in self.canonical_grid.bins
+        ]
+        if ordered_status_keys != ordered_grid_keys:
+            raise ValueError("bin statuses do not follow canonical grid order")
+        masks = {
+            (item.bin.contig, item.bin.start, item.bin.end): item.reason
+            for item in self.canonical_grid.masks
+        }
+        for key, status in status_by_key.items():
+            expected_mask = masks.get(key)
+            if expected_mask is None:
+                if status.status != "retained" or status.mask_reason is not None:
+                    raise ValueError("bin status disagrees with canonical masks")
+            elif (
+                status.status != "masked_prespecified"
+                or status.mask_reason != expected_mask
+            ):
+                raise ValueError("bin status disagrees with canonical masks")
         retained = {
             key: item
             for key, item in status_by_key.items()
@@ -1078,9 +1200,7 @@ def _parse_corrected(
             raise IchorOutputError("corrected-depth rows must be unique")
         observed_keys.append(key)
         if key in masks:
-            if raw_value.strip().upper() not in {"NA", "NAN"}:
-                raise IchorOutputError("prespecified masked bin has a corrected value")
-            continue
+            raise IchorOutputError("upstream emitted a row for a removed masked bin")
         value = _finite(raw_value, "corrected log2")
         result.append(
             CorrectedBin(contig=contig, start=start, end=end, corrected_log2=value)
@@ -1173,11 +1293,7 @@ def _parse_bin_events(
     expected_order = {
         (row.contig, row.start, row.end): index for index, row in enumerate(grid.bins)
     }
-    centromere_removed = {
-        (item.bin.contig, item.bin.start, item.bin.end)
-        for item in grid.masks
-        if item.reason == "centromere_or_flank"
-    }
+    removed = {(item.bin.contig, item.bin.start, item.bin.end) for item in grid.masks}
     event_column = f"{sample_id}.event"
     result: list[CnaBinEvent] = []
     for row in _rows(path):
@@ -1190,7 +1306,7 @@ def _parse_bin_events(
             raw_event = row[event_column].strip()
         except KeyError:
             raise IchorOutputError("bin-level CNA columns are invalid") from None
-        if key not in expected_order or key in centromere_removed:
+        if key not in expected_order or key in removed:
             raise IchorOutputError("bin-level CNA row is outside its analysis grid")
         result.append(
             CnaBinEvent(
@@ -1207,7 +1323,7 @@ def _parse_bin_events(
         expected_order[key] for key in keys
     ):
         raise IchorOutputError("bin-level CNA rows violate declared contig order")
-    expected = set(expected_order) - centromere_removed
+    expected = set(expected_order) - removed
     if set(keys) != expected:
         raise IchorOutputError("bin-level CNA output has missing rows")
     return tuple(result)
@@ -1346,6 +1462,21 @@ def _replay_segment_structure(
     bin_events: Sequence[CnaBinEvent],
 ) -> IdentifiabilityEvidence:
     grid_bins = grid.bins
+    order = {contig: index for index, contig in enumerate(grid.contig_order)}
+    segment_keys = [(item.contig, item.start, item.end) for item in segments]
+    if any(item.contig not in order for item in segments) or segment_keys != sorted(
+        segment_keys, key=lambda item: (order[item[0]], item[1], item[2])
+    ):
+        raise ValueError("segments violate the canonical grid order")
+    removed = {(item.bin.contig, item.bin.start, item.bin.end) for item in grid.masks}
+    expected_event_keys = [
+        (item.contig, item.start, item.end)
+        for item in grid_bins
+        if (item.contig, item.start, item.end) not in removed
+    ]
+    event_keys = [(item.contig, item.start, item.end) for item in bin_events]
+    if event_keys != expected_event_keys:
+        raise ValueError("bin-level CNA events do not match the analysis grid")
     retained_keys = {
         (item.contig, item.start, item.end)
         for item in statuses
@@ -1516,24 +1647,29 @@ def validate_ichor_outputs(
     ]
     if prepared.request.pon_mode == "none_development":
         limitations.append("No protocol-matched panel of normals was supplied.")
-    return CnvDevelopmentResult(
-        status=status,
-        request_sha256=prepared.request_sha256,
-        pon_mode=prepared.request.pon_mode,
-        canonical_grid=prepared.request.assets.canonical_grid,
-        parameters=prepared.request.parameters,
-        corrected_bins=corrected,
-        bin_statuses=bin_statuses,
-        segments=segments,
-        bin_events=bin_events,
-        candidates=candidates,
-        selected_solution=selected,
-        identifiability_evidence=identifiability_evidence,
-        identifiability=identifiability,
-        output_capabilities=prepared.output_capabilities,
-        artifacts=tuple(sorted(artifacts, key=lambda item: item.role)),
-        limitations=tuple(limitations),
-    )
+    try:
+        return CnvDevelopmentResult(
+            status=status,
+            request_sha256=prepared.request_sha256,
+            pon_mode=prepared.request.pon_mode,
+            canonical_grid=prepared.request.assets.canonical_grid,
+            parameters=prepared.request.parameters,
+            corrected_bins=corrected,
+            bin_statuses=bin_statuses,
+            segments=segments,
+            bin_events=bin_events,
+            candidates=candidates,
+            selected_solution=selected,
+            identifiability_evidence=identifiability_evidence,
+            identifiability=identifiability,
+            output_capabilities=prepared.output_capabilities,
+            artifacts=tuple(sorted(artifacts, key=lambda item: item.role)),
+            limitations=tuple(limitations),
+        )
+    except (ValidationError, ValueError):
+        raise IchorOutputError(
+            "upstream output violates the adapter contract"
+        ) from None
 
 
 __all__ = [

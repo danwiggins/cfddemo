@@ -79,7 +79,13 @@ def _grid(*, mask_index: int | None = None) -> CanonicalGrid:
         contig_order=("chr1",),
         bins=bins,
         masks=(
-            (CanonicalBinMask(bin=bins[mask_index], reason="centromere_or_flank"),)
+            (
+                CanonicalBinMask(
+                    bin=bins[mask_index],
+                    reason="centromere_or_flank",
+                    source_artifact_sha256="6" * 64,
+                ),
+            )
             if mask_index is not None
             else ()
         ),
@@ -99,6 +105,18 @@ def _request(*, with_pon: bool = False, mask_index: int | None = None) -> CnvRun
     )
 
     def wig(role: str, marker: str) -> WigGridBinding:
+        values = (
+            tuple(
+                0.5
+                if mask_index is not None and index == mask_index
+                else 0.9
+                if mask_index is not None and index == (mask_index + 1) % len(grid.bins)
+                else 1.0
+                for index, _ in enumerate(grid.bins)
+            )
+            if role == "map_wig"
+            else None
+        )
         return WigGridBinding(
             role=role,
             identity=_artifact(f"asset.{role}", marker),
@@ -108,6 +126,10 @@ def _request(*, with_pon: bool = False, mask_index: int | None = None) -> CnvRun
             step_bp=1_000_000,
             bin_size_bp=1_000_000,
             canonical_bin_definition_sha256=grid.bin_definition_sha256,
+            canonical_values=values,
+            canonical_values_sha256=(
+                contract_sha256(values) if values is not None else None
+            ),
             source_url=f"https://example.invalid/{role}",
             declared_license_or_terms="synthetic fixture only",
         )
@@ -137,14 +159,34 @@ def _request(*, with_pon: bool = False, mask_index: int | None = None) -> CnvRun
             assembly="hg38",
             contig_dictionary_sha256=contigs,
             canonical_intervals=(
-                CentromereInterval(contig="chr1", start=121_699_999, end=125_100_000),
+                CentromereInterval(
+                    contig="chr1",
+                    start=(
+                        grid.bins[mask_index].start + 200_000
+                        if mask_index is not None
+                        else 121_699_999
+                    ),
+                    end=(
+                        grid.bins[mask_index].start + 300_000
+                        if mask_index is not None
+                        else 125_100_000
+                    ),
+                ),
             ),
             interval_set_sha256=contract_sha256(
                 (
                     CentromereInterval(
                         contig="chr1",
-                        start=121_699_999,
-                        end=125_100_000,
+                        start=(
+                            grid.bins[mask_index].start + 200_000
+                            if mask_index is not None
+                            else 121_699_999
+                        ),
+                        end=(
+                            grid.bins[mask_index].start + 300_000
+                            if mask_index is not None
+                            else 125_100_000
+                        ),
                     ),
                 )
             ),
@@ -298,6 +340,30 @@ def test_role_specific_coordinates_lineage_and_pon_are_bound() -> None:
     with pytest.raises(ValueError, match="canonical grid order"):
         CnvRunRequest.model_validate(wrong_contigs)
 
+    wrong_centromere = _request(mask_index=1).model_dump(mode="python")
+    intervals = (CentromereInterval(contig="chr1", start=121_699_999, end=125_100_000),)
+    wrong_centromere["assets"]["centromere"]["canonical_intervals"] = tuple(
+        item.model_dump(mode="python") for item in intervals
+    )
+    wrong_centromere["assets"]["centromere"]["interval_set_sha256"] = contract_sha256(
+        intervals
+    )
+    with pytest.raises(ValueError, match="intervals and flank"):
+        CnvRunRequest.model_validate(wrong_centromere)
+
+    unsupported_mask = _request().model_dump(mode="python")
+    unsupported_mask["assets"]["canonical_grid"]["masks"] = (
+        {
+            "bin": unsupported_mask["assets"]["canonical_grid"]["bins"][0],
+            "reason": "other_prespecified",
+            "source_artifact_sha256": "4" * 64,
+            "source_value": None,
+            "upstream_row_presence": "removed",
+        },
+    )
+    with pytest.raises(ValidationError, match="centromere_or_flank|low_mappability"):
+        CnvRunRequest.model_validate(unsupported_mask)
+
 
 def test_source_derived_formats_and_natural_contig_order() -> None:
     upstream = FIXTURES / "upstream"
@@ -359,6 +425,11 @@ def test_parser_accepts_native_chr1_through_chr12_order(tmp_path: Path) -> None:
         payload["assets"][role]["canonical_bin_definition_sha256"] = (
             grid.bin_definition_sha256
         )
+    map_values = tuple(1.0 for _ in bins)
+    payload["assets"]["mappability"]["canonical_values"] = map_values
+    payload["assets"]["mappability"]["canonical_values_sha256"] = contract_sha256(
+        map_values
+    )
     payload["counting_policy"]["contigs"] = contigs
     policy = CountingPolicy.model_validate(payload["counting_policy"])
     payload["raw_wig_lineage"]["counting_policy_sha256"] = contract_sha256(policy)
@@ -470,7 +541,15 @@ def test_contradictory_selected_summary_is_rejected(tmp_path: Path) -> None:
 def test_prespecified_mask_is_explicit_and_unexplained_omission_fails(
     tmp_path: Path,
 ) -> None:
-    masked_output = _fixture(tmp_path, "neutral")
+    unexpected_output = _fixture(tmp_path, "neutral")
+    with pytest.raises(IchorOutputError, match="row for a removed masked bin"):
+        validate_ichor_outputs(
+            prepare_ichor_run(_request(mask_index=1)), unexpected_output
+        )
+
+    masked_output = Path(
+        shutil.copytree(FIXTURES / "neutral", tmp_path / "neutral_masked")
+    )
     corrected = masked_output / "sample.correctedDepth.txt"
     corrected.write_text(
         corrected.read_text().replace("chr1\t1000001\t2000000\t-0.01\n", "")
@@ -548,7 +627,12 @@ def test_largest_altered_segment_uses_genomic_span_not_retained_count(
         contig_order=("chr1",),
         bins=bins,
         masks=tuple(
-            CanonicalBinMask(bin=bins[index], reason="centromere_or_flank")
+            CanonicalBinMask(
+                bin=bins[index],
+                reason="low_mappability",
+                source_artifact_sha256="4" * 64,
+                source_value=0.5,
+            )
             for index in (1, 2)
         ),
         bin_definition_sha256=contract_sha256(bins),
@@ -559,6 +643,11 @@ def test_largest_altered_segment_uses_genomic_span_not_retained_count(
         payload["assets"][role]["canonical_bin_definition_sha256"] = (
             grid.bin_definition_sha256
         )
+    map_values = tuple(0.5 if index in (1, 2) else 1.0 for index, _ in enumerate(bins))
+    payload["assets"]["mappability"]["canonical_values"] = map_values
+    payload["assets"]["mappability"]["canonical_values_sha256"] = contract_sha256(
+        map_values
+    )
     payload["raw_wig_lineage"]["canonical_bin_definition_sha256"] = (
         grid.bin_definition_sha256
     )
@@ -598,6 +687,8 @@ def test_largest_altered_segment_uses_genomic_span_not_retained_count(
         4_000_000,
     )
     assert result.identifiability_evidence.largest_altered_segment_retained_overlap == 2
+    assert result.bin_statuses[1].mask_reason == "low_mappability"
+    assert result.bin_statuses[2].mask_reason == "low_mappability"
 
 
 def test_force_zero_is_one_way_and_replayed_from_upstream_evidence(
@@ -627,7 +718,7 @@ def test_force_zero_is_one_way_and_replayed_from_upstream_evidence(
 
 @pytest.mark.parametrize(
     "mutation",
-    ("status", "corrected", "segment", "evidence", "artifact"),
+    ("status", "corrected", "segment", "event", "evidence", "artifact"),
 )
 def test_standalone_result_rejects_semantic_tampering(
     tmp_path: Path,
@@ -644,6 +735,9 @@ def test_standalone_result_rejects_semantic_tampering(
         payload["bin_statuses"][0]["corrected_log2"] = -0.19
     elif mutation == "segment":
         payload["segments"][0]["native_span_bin_count"] = 1
+    elif mutation == "event":
+        payload["bin_events"][0]["start"] += 123
+        payload["bin_events"][0]["end"] += 123
     elif mutation == "evidence":
         payload["identifiability_evidence"][
             "largest_altered_segment_retained_overlap"
@@ -652,6 +746,24 @@ def test_standalone_result_rejects_semantic_tampering(
         payload["artifacts"][0]["relative_path"] = "wrong-output.txt"
 
     with pytest.raises(ValidationError):
+        CnvDevelopmentResult.model_validate(payload)
+
+
+def test_standalone_result_binds_statuses_to_canonical_masks(tmp_path: Path) -> None:
+    output = _fixture(tmp_path, "neutral")
+    corrected = output / "sample.correctedDepth.txt"
+    corrected.write_text(
+        corrected.read_text().replace("chr1\t1000001\t2000000\t-0.01\n", "")
+    )
+    bin_events = output / "sample.cna.seg"
+    bin_events.write_text(
+        bin_events.read_text().replace("chr1\t1000001\t2000000\tNEUT\t-0.01\n", "")
+    )
+    result = validate_ichor_outputs(prepare_ichor_run(_request(mask_index=1)), output)
+    payload = result.model_dump(mode="python")
+    payload["bin_statuses"][1]["mask_reason"] = "different_prespecified_mask"
+
+    with pytest.raises(ValidationError, match="canonical masks"):
         CnvDevelopmentResult.model_validate(payload)
 
 
@@ -678,6 +790,21 @@ def test_parser_errors_are_sanitized_without_chained_private_details(
     )
     assert "PRIVATE_SENTINEL" not in rendered
     assert str(path) not in rendered
+
+
+def test_final_result_validation_error_is_sanitized(tmp_path: Path) -> None:
+    output = _fixture(tmp_path, "arm_loss")
+    params = output / "sample.params.txt"
+    lines = params.read_text().splitlines()
+    lines.append(lines[-1])
+    params.write_text("\n".join(lines) + "\n")
+
+    with pytest.raises(
+        IchorOutputError, match="violates the adapter contract"
+    ) as captured:
+        validate_ichor_outputs(prepare_ichor_run(_request()), output)
+
+    assert captured.value.__cause__ is None
 
 
 @pytest.mark.parametrize(
