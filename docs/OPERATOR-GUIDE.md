@@ -43,6 +43,14 @@ traceback resume JOB_ID [--root ROOT] [--json]
 traceback retry JOB_ID [--root ROOT] [--json]
 traceback inspect BUNDLE [--json]
 traceback verify BUNDLE --trust-store TRUST_STORE [--json]
+traceback assets install --release-evidence ENVELOPE \
+  --trust-store TRUST_STORE --role-policy POLICY \
+  --authority-head HEAD --asset ASSET_ID --version VERSION \
+  --package PACKAGE [--root ROOT] [--json]
+traceback assets verify --release-evidence ENVELOPE \
+  --trust-store TRUST_STORE --role-policy POLICY \
+  --authority-head HEAD --asset ASSET_ID --version VERSION \
+  [--root ROOT] [--json]
 traceback support-bundle JOB_ID --output OUTPUT [--root ROOT] [--json]
 ```
 
@@ -50,6 +58,35 @@ traceback support-bundle JOB_ID --output OUTPUT [--root ROOT] [--json]
 real-data execution. `run` rejects real-data execution in this wave rather than
 simulating success. File-selection arguments may be local paths; JSON output,
 support bundles, and exported record content do not include them.
+
+## Offline synthetic assets
+
+`assets install` accepts one bounded, uncompressed synthetic package and never
+downloads content. The signed release envelope, public trust store, role
+policy, and current authority head are separate local inputs. The CLI refuses
+to infer trust from either the envelope or the asset package. Asset ID and
+version must be selected explicitly.
+
+`--root` retains its normal CLI meaning: the Traceback product root. Asset
+objects and registrations are stored beneath its private `assets` directory.
+Command output never includes input or registry paths.
+
+Install succeeds only when authority is verified, lifecycle is active, the
+package matches the authority-bound asset reference, byte integrity passes,
+and the registry can retain its 20% free-space floor. Unknown, expired,
+ambiguous, invalid, or revoked authority fails closed before asset staging.
+
+`assets verify` reports these dimensions separately:
+
+- `installed`: whether an identifier/version registration exists;
+- `integrity`: `absent`, `valid`, or `invalid` for local bytes;
+- `authority`: `verified`, `invalid`, or `unknown`;
+- `lifecycle`: `active`, `revoked`, or `unknown`; and
+- `verified_as_of` / `fresh_until`: the bounded offline authority window.
+
+An existing object may remain integrity-valid when authority is unknown or
+revoked. It remains unavailable for use and is not silently deleted. Asset
+installation never authorizes execution, real input, or a qualification probe.
 
 ## Stable exit codes
 
@@ -59,7 +96,7 @@ support bundles, and exported record content do not include them.
 | 2 | CLI usage error |
 | 3 | Blocked or unsupported operation |
 | 4 | Local job, bundle, or trust material was not found |
-| 5 | Bundle validation or signature verification failed |
+| 5 | Bundle, asset package/integrity, signature, or authority-input verification failed |
 | 6 | Retryable local runner failure |
 | 7 | Unexpected internal failure |
 

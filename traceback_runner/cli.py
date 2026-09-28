@@ -11,6 +11,7 @@ import json
 import os
 import platform
 import shutil
+import stat
 import sys
 import tempfile
 import uuid
@@ -30,6 +31,7 @@ _TRUST_RELATIVE = Path("trust/development-result-trust.json")
 _BAM_NAME = "valid_modbam.bam"
 _INDEX_NAME = "valid_modbam.bam.bai"
 _WORKFLOW_ID = "synthetic-development-v1"
+_MAX_ASSET_AUTHORITY_INPUT_BYTES = 2 * 1024 * 1024
 
 
 class ExitCode(IntEnum):
@@ -42,6 +44,10 @@ class ExitCode(IntEnum):
     VERIFICATION_FAILED = 5
     RETRYABLE_FAILURE = 6
     INTERNAL_ERROR = 7
+
+
+class AssetEvidenceInputError(ValueError):
+    """Independent asset authority inputs are malformed or ambiguous."""
 
 
 def _root_argument(parser: argparse.ArgumentParser) -> None:
@@ -95,6 +101,24 @@ def _parser() -> argparse.ArgumentParser:
     verify.add_argument("bundle", type=Path)
     verify.add_argument("--trust-store", required=True, type=Path)
     verify.add_argument("--json", action="store_true", dest="as_json")
+
+    assets = commands.add_parser("assets", help="manage offline synthetic assets")
+    asset_commands = assets.add_subparsers(dest="asset_command", required=True)
+    for name in ("install", "verify"):
+        asset_command = asset_commands.add_parser(
+            name, help=f"{name} one authority-bound synthetic asset"
+        )
+        asset_command.add_argument("--release-evidence", required=True, type=Path)
+        asset_command.add_argument("--trust-store", required=True, type=Path)
+        asset_command.add_argument("--role-policy", required=True, type=Path)
+        asset_command.add_argument("--authority-head", required=True, type=Path)
+        asset_command.add_argument("--asset", required=True, dest="asset_id")
+        asset_command.add_argument("--version", required=True)
+        _root_argument(asset_command)
+        asset_command.add_argument("--json", action="store_true", dest="as_json")
+    asset_commands.choices["install"].add_argument(
+        "--package", required=True, type=Path
+    )
 
     support = commands.add_parser(
         "support-bundle", help="write allowlisted redacted diagnostics"
@@ -251,8 +275,10 @@ def _append_development_trust(path: Path, content: bytes) -> None:
     The caller holds the workspace mutation lock. Private keys remain ephemeral.
     """
     from .signing import (
-        DevelopmentTrustDocument, SigningError,
-        development_trust_document_bytes, load_development_trust,
+        DevelopmentTrustDocument,
+        SigningError,
+        development_trust_document_bytes,
+        load_development_trust,
     )
 
     load_development_trust(content)
@@ -751,6 +777,346 @@ def _verify(args: argparse.Namespace) -> tuple[ExitCode, dict[str, Any]]:
     )
 
 
+def _asset_authorization(args: argparse.Namespace) -> Any:
+    """Load exact, independent authority inputs without trusting the envelope."""
+
+    from .assets import ReleaseAuthorization
+    from .qualification import (
+        AuthorityScope,
+        QualificationTrustPolicy,
+        ReleaseAuthorityHead,
+        ReleaseEvidenceEnvelope,
+    )
+    from .serialization import canonical_model_from_bytes
+    from .signing import load_development_trust
+
+    def read_authority_input(path: Path) -> bytes:
+        flags = (
+            os.O_RDONLY
+            | getattr(os, "O_CLOEXEC", 0)
+            | getattr(os, "O_NOFOLLOW", 0)
+            | getattr(os, "O_NONBLOCK", 0)
+        )
+        try:
+            descriptor = os.open(path, flags)
+        except FileNotFoundError:
+            raise
+        except OSError as exc:
+            raise AssetEvidenceInputError(
+                "independent authority input cannot be opened safely"
+            ) from exc
+        try:
+            metadata = os.fstat(descriptor)
+            if not stat.S_ISREG(metadata.st_mode):
+                raise AssetEvidenceInputError(
+                    "independent authority input must be a regular file"
+                )
+            if metadata.st_size > _MAX_ASSET_AUTHORITY_INPUT_BYTES:
+                raise AssetEvidenceInputError(
+                    "independent authority input exceeds its bounded limit"
+                )
+            with os.fdopen(descriptor, "rb") as stream:
+                descriptor = -1
+                content = stream.read(_MAX_ASSET_AUTHORITY_INPUT_BYTES + 1)
+            if len(content) > _MAX_ASSET_AUTHORITY_INPUT_BYTES:
+                raise AssetEvidenceInputError(
+                    "independent authority input exceeds its bounded limit"
+                )
+            return content
+        finally:
+            if descriptor >= 0:
+                os.close(descriptor)
+
+    try:
+        envelope = canonical_model_from_bytes(
+            ReleaseEvidenceEnvelope, read_authority_input(args.release_evidence)
+        )
+        role_policy = canonical_model_from_bytes(
+            QualificationTrustPolicy, read_authority_input(args.role_policy)
+        )
+        authority_head = canonical_model_from_bytes(
+            ReleaseAuthorityHead, read_authority_input(args.authority_head)
+        )
+        trust_store = load_development_trust(
+            read_authority_input(args.trust_store)
+        )
+    except FileNotFoundError:
+        raise
+    except AssetEvidenceInputError:
+        raise
+    except Exception as exc:
+        raise AssetEvidenceInputError(
+            "independent authority input is malformed or noncanonical"
+        ) from exc
+
+    matching_bindings: dict[bytes, Any] = {}
+    for grant in role_policy.grants:
+        binding = grant.binding
+        if (
+            grant.scope == AuthorityScope.RELEASE_EVIDENCE
+            and binding.release_id == authority_head.release_id
+            and binding.release_version == authority_head.release_version
+            and binding.release_evidence_sha256 == authority_head.package_sha256
+        ):
+            matching_bindings[canonical_json_bytes(binding)] = binding
+    if len(matching_bindings) != 1:
+        raise AssetEvidenceInputError(
+            "authority policy must contain one distinct matching release binding"
+        )
+    expected_binding = next(iter(matching_bindings.values()))
+    return ReleaseAuthorization(
+        envelope=envelope,
+        trust_store=trust_store,
+        role_policy=role_policy,
+        authority_head=authority_head,
+        expected_binding=expected_binding,
+        expected_package_sha256=authority_head.package_sha256,
+        now=lambda: datetime.now(UTC),
+    )
+
+
+def _asset_decision(
+    authorization: Any, *, asset_id: str, version: str
+) -> Any:
+    from .assets import AssetAuthorityError
+    from .qualification import verify_release_asset_authorization
+    from .release_evidence import DigestDomain, domain_digest
+
+    reference = next(
+        (
+            item
+            for item in authorization.envelope.package.assets
+            if (item.content.asset_id, item.content.version) == (asset_id, version)
+        ),
+        None,
+    )
+    if reference is None:
+        raise AssetAuthorityError("selected asset is absent from release evidence")
+    current = authorization.now()
+    return verify_release_asset_authorization(
+        authorization.envelope,
+        authorization.trust_store,
+        authorization.role_policy,
+        authorization.authority_head,
+        expected_binding=authorization.expected_binding,
+        expected_package_sha256=authorization.expected_package_sha256,
+        expected_asset_id=asset_id,
+        expected_asset_version=version,
+        expected_asset_reference_sha256=domain_digest(
+            DigestDomain.ASSET_REFERENCE, reference
+        ),
+        now=current,
+    )
+
+
+def _asset_result_data(
+    *,
+    asset_id: str,
+    version: str,
+    decision: Any,
+    verification: Any | None = None,
+) -> dict[str, Any]:
+    return {
+        "asset_id": asset_id,
+        "version": version,
+        "installed": verification.installed if verification is not None else False,
+        "integrity": (
+            verification.integrity_status.value
+            if verification is not None
+            else "absent"
+        ),
+        "authority": decision.authority_status.value,
+        "lifecycle": decision.lifecycle_status.value,
+        "authority_failure": decision.failure.value,
+        "registration_matches_current_reference": (
+            verification.registration_matches_current_reference
+            if verification is not None
+            else False
+        ),
+        "verified_as_of": (
+            decision.verified_as_of.isoformat()
+            if decision.verified_as_of is not None
+            else None
+        ),
+        "fresh_until": (
+            decision.fresh_until.isoformat()
+            if decision.fresh_until is not None
+            else None
+        ),
+        "real_data_authorized": False,
+        "execution_authorized": False,
+        "qualification_probe_authorized": False,
+    }
+
+
+def _assets_install(args: argparse.Namespace) -> tuple[ExitCode, dict[str, Any]]:
+    from .assets import AssetRegistry, IntegrityStatus
+    from .qualification import AssetLifecycleStatus, AuthorityFailure, AuthorityStatus
+
+    authorization = _asset_authorization(args)
+    decision = _asset_decision(
+        authorization, asset_id=args.asset_id, version=args.version
+    )
+    if decision.failure == AuthorityFailure.UNKNOWN_SIGNER:
+        raise AssetEvidenceInputError("release authority signer is not trusted")
+    if decision.authority_status == AuthorityStatus.INVALID:
+        raise AssetEvidenceInputError("release authority verification is invalid")
+    if (
+        decision.authority_status != AuthorityStatus.VERIFIED
+        or decision.lifecycle_status != AssetLifecycleStatus.ACTIVE
+    ):
+        return ExitCode.BLOCKED, _result(
+            "assets install",
+            "blocked",
+            "Asset authority is not current and active; no install was performed",
+            data=_asset_result_data(
+                asset_id=args.asset_id,
+                version=args.version,
+                decision=decision,
+            ),
+        )
+
+    registry = AssetRegistry(args.root / "assets")
+    installed = registry.install(
+        args.package,
+        asset_id=args.asset_id,
+        version=args.version,
+        authorization=authorization,
+    )
+    verification = registry.verify(
+        asset_id=args.asset_id,
+        version=args.version,
+        authorization=authorization,
+    )
+    decision = _asset_decision(
+        authorization, asset_id=args.asset_id, version=args.version
+    )
+    data = _asset_result_data(
+        asset_id=args.asset_id,
+        version=args.version,
+        decision=decision,
+        verification=verification,
+    )
+    data["newly_registered"] = installed.newly_registered
+    data["content_size_bytes"] = installed.content_size_bytes
+    if (
+        not verification.installed
+        or verification.integrity_status != IntegrityStatus.VALID
+    ):
+        return ExitCode.VERIFICATION_FAILED, _result(
+            "assets install",
+            "verification_failed",
+            "Installed synthetic asset failed post-publication integrity verification",
+            data=data,
+        )
+    if decision.authority_status == AuthorityStatus.INVALID:
+        return ExitCode.VERIFICATION_FAILED, _result(
+            "assets install",
+            "verification_failed",
+            "Installed bytes are intact but post-publication authority is invalid",
+            data=data,
+        )
+    if (
+        decision.authority_status != AuthorityStatus.VERIFIED
+        or decision.lifecycle_status != AssetLifecycleStatus.ACTIVE
+        or not verification.registration_matches_current_reference
+    ):
+        return ExitCode.BLOCKED, _result(
+            "assets install",
+            "blocked",
+            "Asset was published but is unavailable because current authority is not active",
+            data=data,
+        )
+    return ExitCode.OK, _result(
+        "assets install",
+        "ok",
+        "Synthetic asset installed and verified offline; execution remains disabled",
+        data=data,
+    )
+
+
+def _assets_verify(args: argparse.Namespace) -> tuple[ExitCode, dict[str, Any]]:
+    from .assets import AssetRegistry, IntegrityStatus
+    from .qualification import AssetLifecycleStatus, AuthorityFailure, AuthorityStatus
+
+    authorization = _asset_authorization(args)
+    registry_root = args.root / "assets"
+    if not registry_root.exists() and not registry_root.is_symlink():
+        decision = _asset_decision(
+            authorization, asset_id=args.asset_id, version=args.version
+        )
+        return ExitCode.NOT_FOUND, _result(
+            "assets verify",
+            "not_found",
+            "Synthetic asset is not installed",
+            data=_asset_result_data(
+                asset_id=args.asset_id,
+                version=args.version,
+                decision=decision,
+            ),
+        )
+    registry = AssetRegistry.open_existing(registry_root)
+    verification = registry.verify(
+        asset_id=args.asset_id,
+        version=args.version,
+        authorization=authorization,
+    )
+    decision = _asset_decision(
+        authorization, asset_id=args.asset_id, version=args.version
+    )
+    data = _asset_result_data(
+        asset_id=args.asset_id,
+        version=args.version,
+        decision=decision,
+        verification=verification,
+    )
+    if decision.failure == AuthorityFailure.UNKNOWN_SIGNER:
+        raise AssetEvidenceInputError("release authority signer is not trusted")
+    if not verification.installed:
+        return ExitCode.NOT_FOUND, _result(
+            "assets verify", "not_found", "Synthetic asset is not installed", data=data
+        )
+    if verification.integrity_status != IntegrityStatus.VALID:
+        return ExitCode.VERIFICATION_FAILED, _result(
+            "assets verify",
+            "verification_failed",
+            "Installed synthetic asset failed integrity verification",
+            data=data,
+        )
+    if decision.authority_status == AuthorityStatus.INVALID:
+        return ExitCode.VERIFICATION_FAILED, _result(
+            "assets verify",
+            "verification_failed",
+            "Installed bytes are intact but release authority is invalid",
+            data=data,
+        )
+    if (
+        decision.authority_status != AuthorityStatus.VERIFIED
+        or decision.lifecycle_status != AssetLifecycleStatus.ACTIVE
+        or not verification.registration_matches_current_reference
+    ):
+        return ExitCode.BLOCKED, _result(
+            "assets verify",
+            "blocked",
+            "Installed bytes are intact but authority is not current and active",
+            data=data,
+        )
+    return ExitCode.OK, _result(
+        "assets verify",
+        "ok",
+        "Synthetic asset integrity and current authority verified; execution remains disabled",
+        data=data,
+    )
+
+
+def _assets(args: argparse.Namespace) -> tuple[ExitCode, dict[str, Any]]:
+    if args.asset_command == "install":
+        return _assets_install(args)
+    if args.asset_command == "verify":
+        return _assets_verify(args)
+    raise AssertionError(f"unhandled assets command {args.asset_command}")
+
+
 def _support_bundle(args: argparse.Namespace) -> tuple[ExitCode, dict[str, Any]]:
     runner = _existing_runner(args.root)
     record = runner.status(args.job_id)
@@ -808,6 +1174,8 @@ def _dispatch(args: argparse.Namespace) -> tuple[ExitCode, dict[str, Any]]:
         return _inspect(args)
     if args.command == "verify":
         return _verify(args)
+    if args.command == "assets":
+        return _assets(args)
     if args.command == "support-bundle":
         return _support_bundle(args)
     raise AssertionError(f"unhandled command {args.command}")
@@ -816,7 +1184,12 @@ def _dispatch(args: argparse.Namespace) -> tuple[ExitCode, dict[str, Any]]:
 def main(argv: Sequence[str] | None = None) -> int:
     args = _parser().parse_args(argv)
     try:
-        mutation = _operator_lock(args.root) if args.command in {"demo", "resume", "retry"} else nullcontext()
+        mutation = (
+            _operator_lock(args.root)
+            if args.command in {"demo", "resume", "retry"}
+            or (args.command == "assets" and args.asset_command == "install")
+            else nullcontext()
+        )
         with mutation:
             code, payload = _dispatch(args)
     except OperatorBusy:
@@ -833,6 +1206,9 @@ def main(argv: Sequence[str] | None = None) -> int:
         )
     except Exception as exc:
         verification_error_names = {
+            "AssetEvidenceInputError",
+            "AssetIntegrityError",
+            "AssetPackageError",
             "BundleError",
             "BundleFilesystemError",
             "BundleFormatError",
@@ -845,10 +1221,37 @@ def main(argv: Sequence[str] | None = None) -> int:
             "TrustNamespaceError",
         }
         if any(base.__name__ in verification_error_names for base in type(exc).mro()):
+            asset_failure = args.command == "assets"
             code, payload = ExitCode.VERIFICATION_FAILED, _result(
                 args.command,
                 "verification_failed",
-                "Bundle or development trust verification failed",
+                (
+                    "Asset package or independent authority input verification failed"
+                    if asset_failure
+                    else "Bundle or development trust verification failed"
+                ),
+            )
+        elif any(
+            base.__name__
+            in {
+                "AssetAuthorityError",
+                "AssetCapacityError",
+                "AssetConflictError",
+                "AssetFilesystemError",
+            }
+            for base in type(exc).mro()
+        ):
+            code, payload = ExitCode.BLOCKED, _result(
+                args.command,
+                "blocked",
+                "Synthetic asset operation was blocked before use",
+            )
+        elif args.command == "assets" and isinstance(exc, OSError):
+            code, payload = ExitCode.RETRYABLE_FAILURE, _result(
+                args.command,
+                "retryable_failure",
+                "Local asset storage operation failed; retry after checking the filesystem",
+                data={"retryable": True},
             )
         elif args.command in {"demo", "resume", "retry", "pause"}:
             code, payload = ExitCode.RETRYABLE_FAILURE, _result(
