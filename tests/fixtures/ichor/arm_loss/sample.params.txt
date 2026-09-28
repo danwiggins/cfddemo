@@ -7,5 +7,7 @@ Tumor Fraction:	0.1
 Ploidy:	2
 
 init	n_est	phi_est	BIC	Frac_genome_subclonal	Frac_CNA_subclonal	loglik
-n0.9-p2	0.9	2	80	0	0	-40
-n0.95-p2	0.96	2	90	0	0	-45
+n0.95-p2	0.9	2	NA	0	0	-40
+n0.99-p2	0.96	2	NA	0	0	-45
+n0.995-p2	0.97	2	NA	0	0	-46
+n0.999-p2	0.98	2	NA	0	0	-47

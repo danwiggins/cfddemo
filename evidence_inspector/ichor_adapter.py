@@ -904,7 +904,7 @@ class CandidateSolution(StrictModel):
     estimated_normal_fraction: FiniteFloat = Field(ge=0, le=1)
     model_fraction: FiniteFloat = Field(ge=0, le=1)
     estimated_ploidy: FiniteFloat = Field(gt=0)
-    bic: FiniteFloat | None
+    bic: None = None
     fraction_genome_subclonal: FiniteFloat | None = Field(default=None, ge=0, le=1)
     fraction_cna_subclonal: FiniteFloat | None = Field(default=None, ge=0, le=1)
     log_likelihood: FiniteFloat
@@ -952,6 +952,19 @@ class CnvDevelopmentResult(StrictModel):
         ids = [item.candidate_id for item in self.candidates]
         if len(ids) != len(set(ids)):
             raise ValueError("candidate IDs must be unique")
+        expected_initializations = _expected_candidate_initializations(self.parameters)
+        observed_initializations = tuple(
+            f"n{format(item.initial_normal_fraction, '.15g')}"
+            f"-p{format(item.initial_ploidy, '.15g')}"
+            for item in self.candidates
+        )
+        expected_ids = tuple(
+            value.replace("-", ".") for value in expected_initializations
+        )
+        if observed_initializations != expected_initializations or tuple(ids) != (
+            expected_ids
+        ):
+            raise ValueError("candidates do not match the bound parameter grid")
         selected = self.selected_solution.matched_candidate_id
         if selected is not None and selected not in ids:
             raise ValueError("selected candidate is not present")
@@ -1102,7 +1115,7 @@ def _rows(path: Path) -> list[dict[str, str]]:
     return rows
 
 
-def _finite(value: str, label: str) -> float:
+def _finite(value: object, label: str) -> float:
     try:
         parsed = float(value)
     except (TypeError, ValueError):
@@ -1170,10 +1183,17 @@ def _optional_fraction(value: str, label: str) -> float | None:
     return parsed
 
 
-def _optional_native_na(value: str, label: str) -> float | None:
-    if value.strip().upper() == "NA":
+def _optional_native_na(value: object, label: str) -> float | None:
+    if not isinstance(value, str):
+        raise IchorOutputError(f"{label} is missing")
+    if value == "NA":
         return None
     return _finite(value, label)
+
+
+def _exact_native_na(value: object, label: str) -> None:
+    if value != "NA":
+        raise IchorOutputError(f"{label} must be exact native NA")
 
 
 def _parse_corrected(
@@ -1340,6 +1360,17 @@ def _parse_init(value: str) -> tuple[float, float]:
     return _finite(normal, "initial normal"), _finite(ploidy, "initial ploidy")
 
 
+def _expected_candidate_initializations(
+    parameters: IchorParameterSet,
+) -> tuple[str, ...]:
+    return tuple(
+        f"n{format(normal, '.15g')}-p{format(ploidy, '.15g')}"
+        for normal in parameters.normal_fraction_starts
+        for ploidy in parameters.ploidy_starts
+        if not (normal == 0.95 and ploidy != 2)
+    )
+
+
 def _significant(value: float, digits: int) -> float:
     if value == 0:
         return 0.0
@@ -1363,6 +1394,7 @@ def _selection_matches(
 def _parse_params(
     path: Path,
     sample_id: str,
+    parameters: IchorParameterSet,
 ) -> tuple[SelectedSolution, tuple[CandidateSolution, ...]]:
     try:
         lines = path.read_text(encoding="utf-8").splitlines()
@@ -1401,6 +1433,7 @@ def _parse_params(
     if header_index is None:
         raise IchorOutputError("candidate table is absent")
     candidates: list[CandidateSolution] = []
+    observed_initializations: list[str] = []
     for line in lines[header_index + 1 :]:
         if not line.strip():
             continue
@@ -1408,6 +1441,7 @@ def _parse_params(
         if len(values) != len(candidate_header):
             raise IchorOutputError("candidate row has the wrong number of fields")
         row = dict(zip(candidate_header, values, strict=True))
+        observed_initializations.append(row["init"])
         initial_normal, initial_ploidy = _parse_init(row["init"])
         estimated_normal = _finite(row["n_est"], "estimated normal")
         candidates.append(
@@ -1418,7 +1452,7 @@ def _parse_params(
                 estimated_normal_fraction=estimated_normal,
                 model_fraction=1 - estimated_normal,
                 estimated_ploidy=_finite(row["phi_est"], "estimated ploidy"),
-                bic=_optional_native_na(row["BIC"], "candidate BIC"),
+                bic=_exact_native_na(row["BIC"], "candidate BIC"),
                 fraction_genome_subclonal=_optional_fraction(
                     row["Frac_genome_subclonal"], "subclonal genome fraction"
                 ),
@@ -1430,6 +1464,12 @@ def _parse_params(
         )
     if not candidates:
         raise IchorOutputError("candidate table is empty")
+    if tuple(observed_initializations) != _expected_candidate_initializations(
+        parameters
+    ):
+        raise IchorOutputError(
+            "candidate initializations do not match the bound request"
+        )
     provisional = SelectedSolution(
         sample_id=sample_id,
         model_fraction=selected_fraction,
@@ -1618,6 +1658,7 @@ def validate_ichor_outputs(
         selected, candidates = _parse_params(
             output_directory / str(role_paths["parameters_and_candidates"]),
             prepared.request.sample_id,
+            prepared.request.parameters,
         )
     except IchorOutputError:
         raise

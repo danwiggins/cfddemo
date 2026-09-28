@@ -93,7 +93,13 @@ def _grid(*, mask_index: int | None = None) -> CanonicalGrid:
     )
 
 
-def _request(*, with_pon: bool = False, mask_index: int | None = None) -> CnvRunRequest:
+def _request(
+    *,
+    with_pon: bool = False,
+    mask_index: int | None = None,
+    normal_fraction_starts: tuple[float, ...] = (0.95, 0.99, 0.995, 0.999),
+    ploidy_starts: tuple[float, ...] = (2.0,),
+) -> CnvRunRequest:
     grid = _grid(mask_index=mask_index)
     contigs = "d" * 64
     reference = ReferenceFastaBinding(
@@ -236,8 +242,8 @@ def _request(*, with_pon: bool = False, mask_index: int | None = None) -> CnvRun
         pon_mode=("protocol_matched_frozen" if with_pon else "none_development"),
         parameters=IchorParameterSet(
             chromosomes=(1,),
-            normal_fraction_starts=(0.95, 0.99, 0.995, 0.999),
-            ploidy_starts=(2.0,),
+            normal_fraction_starts=normal_fraction_starts,
+            ploidy_starts=ploidy_starts,
             max_copy_number=3,
             include_subclonal_states=False,
             lambda_policy="automatic",
@@ -475,8 +481,9 @@ def test_parse_neutral_fixture_returns_typed_insufficient_result(
     assert result.status == "insufficient_information"
     assert result.identifiability == "insufficient_altered_structure"
     assert result.selected_solution.model_fraction == 0
-    assert result.selected_solution.matched_candidate_id == "n1.p2"
-    assert len(result.candidates) == 2
+    assert result.selected_solution.matched_candidate_id == "n0.95.p2"
+    assert len(result.candidates) == 4
+    assert [item.bic for item in result.candidates] == [None, None, None, None]
     assert len(result.corrected_bins) == 4
     assert result.corrected_bins[0].start == 0
     assert result.corrected_bins[-1].end == 4_000_000
@@ -497,11 +504,12 @@ def test_parse_arm_loss_preserves_candidates_and_descriptive_segment(
     assert result.status == "complete"
     assert result.identifiability == "not_assessed"
     assert result.selected_solution.model_fraction == 0.1
-    assert result.selected_solution.matched_candidate_id == "n0.9.p2"
+    assert result.selected_solution.matched_candidate_id == "n0.95.p2"
     assert [item.call for item in result.segments] == ["HETD", "NEUT"]
     assert result.segments[0].start == 0
     assert result.segments[0].end == 2_000_000
-    assert [item.log_likelihood for item in result.candidates] == [-40, -45]
+    assert [item.log_likelihood for item in result.candidates] == [-40, -45, -46, -47]
+    assert all(item.bic is None for item in result.candidates)
 
 
 def test_candidate_na_is_typed_and_ambiguous_selected_match_is_not_overclaimed(
@@ -511,10 +519,12 @@ def test_candidate_na_is_typed_and_ambiguous_selected_match_is_not_overclaimed(
     params = output / "sample.params.txt"
     text = params.read_text()
     text = text.replace(
-        "n0.9-p2\t0.9\t2\t80\t0\t0\t-40", "n0.9-p2\t0.9\t2\t80\tNA\tNaN\t-40"
+        "n0.95-p2\t0.9\t2\tNA\t0\t0\t-40",
+        "n0.95-p2\t0.9\t2\tNA\tNA\tNaN\t-40",
     )
     text = text.replace(
-        "n0.95-p2\t0.96\t2\t90\t0\t0\t-45", "n0.95-p2\t0.9\t2\t90\t0\t0\t-45"
+        "n0.99-p2\t0.96\t2\tNA\t0\t0\t-45",
+        "n0.99-p2\t0.9\t2\tNA\t0\t0\t-45",
     )
     params.write_text(text)
 
@@ -533,7 +543,8 @@ def test_native_retained_na_and_single_candidate_bic_na_are_preserved(
     tmp_path: Path,
 ) -> None:
     result = validate_ichor_outputs(
-        prepare_ichor_run(_request()), _fixture(tmp_path, "native_na")
+        prepare_ichor_run(_request(normal_fraction_starts=(1.0,))),
+        _fixture(tmp_path, "native_na"),
     )
 
     assert result.corrected_bins[0].corrected_log2 is None
@@ -547,6 +558,74 @@ def test_native_retained_na_and_single_candidate_bic_na_are_preserved(
     assert (
         CnvDevelopmentResult.model_validate(result.model_dump(mode="python")) == result
     )
+
+
+def test_candidate_initializations_match_request_and_upstream_skip_rule(
+    tmp_path: Path,
+) -> None:
+    request = _request(
+        normal_fraction_starts=(0.95, 0.99),
+        ploidy_starts=(2.0, 3.0),
+    )
+    output = _fixture(tmp_path, "neutral")
+    params = output / "sample.params.txt"
+    lines = params.read_text().splitlines()
+    header_index = next(
+        index for index, line in enumerate(lines) if line.startswith("init\t")
+    )
+    lines[header_index + 1 :] = [
+        "n0.95-p2\t1\t2\tNA\t0\t0\t-50",
+        "n0.99-p2\t0.99\t2\tNA\t0\t0\t-51",
+        "n0.99-p3\t0.99\t3\tNA\t0\t0\t-52",
+    ]
+    params.write_text("\n".join(lines) + "\n")
+
+    result = validate_ichor_outputs(prepare_ichor_run(request), output)
+
+    assert [item.candidate_id for item in result.candidates] == [
+        "n0.95.p2",
+        "n0.99.p2",
+        "n0.99.p3",
+    ]
+    assert all(item.bic is None for item in result.candidates)
+
+    lines.append("n0.95-p3\t0.95\t3\tNA\t0\t0\t-53")
+    params.write_text("\n".join(lines) + "\n")
+    with pytest.raises(IchorOutputError, match="initializations do not match"):
+        validate_ichor_outputs(prepare_ichor_run(request), output)
+
+
+@pytest.mark.parametrize("mutation", ("missing", "reordered"))
+def test_candidate_initialization_set_is_complete_and_ordered(
+    tmp_path: Path,
+    mutation: str,
+) -> None:
+    output = _fixture(tmp_path, "neutral")
+    params = output / "sample.params.txt"
+    lines = params.read_text().splitlines()
+    header_index = next(
+        index for index, line in enumerate(lines) if line.startswith("init\t")
+    )
+    if mutation == "missing":
+        lines.pop(header_index + 2)
+    else:
+        lines[header_index + 1], lines[header_index + 2] = (
+            lines[header_index + 2],
+            lines[header_index + 1],
+        )
+    params.write_text("\n".join(lines) + "\n")
+
+    with pytest.raises(IchorOutputError, match="initializations do not match"):
+        validate_ichor_outputs(prepare_ichor_run(_request()), output)
+
+
+def test_pinned_candidate_bic_requires_exact_native_na(tmp_path: Path) -> None:
+    output = _fixture(tmp_path, "neutral")
+    params = output / "sample.params.txt"
+    params.write_text(params.read_text().replace("\tNA\t0\t0\t-50", "\t80\t0\t0\t-50"))
+
+    with pytest.raises(IchorOutputError, match="candidate BIC must be exact native NA"):
+        validate_ichor_outputs(prepare_ichor_run(_request()), output)
 
 
 def test_contradictory_selected_summary_is_rejected(tmp_path: Path) -> None:
@@ -727,7 +806,7 @@ def test_force_zero_is_one_way_and_replayed_from_upstream_evidence(
     params.write_text(
         params.read_text()
         .replace("sample\t0.1\t2", "sample\t0\t2")
-        .replace("n0.9-p2\t0.9\t2", "n1-p2\t1\t2")
+        .replace("n0.95-p2\t0.9\t2", "n0.95-p2\t1\t2")
     )
     result = validate_ichor_outputs(prepare_ichor_run(_request()), output)
     assert result.identifiability_evidence.force_zero_condition is False
@@ -738,7 +817,16 @@ def test_force_zero_is_one_way_and_replayed_from_upstream_evidence(
 
 @pytest.mark.parametrize(
     "mutation",
-    ("status", "corrected", "segment", "event", "evidence", "artifact"),
+    (
+        "status",
+        "corrected",
+        "segment",
+        "event",
+        "evidence",
+        "candidate_init",
+        "bic",
+        "artifact",
+    ),
 )
 def test_standalone_result_rejects_semantic_tampering(
     tmp_path: Path,
@@ -762,6 +850,10 @@ def test_standalone_result_rejects_semantic_tampering(
         payload["identifiability_evidence"][
             "largest_altered_segment_retained_overlap"
         ] = 3
+    elif mutation == "candidate_init":
+        payload["candidates"][0]["initial_normal_fraction"] = 0.9
+    elif mutation == "bic":
+        payload["candidates"][0]["bic"] = 80
     else:
         payload["artifacts"][0]["relative_path"] = "wrong-output.txt"
 
@@ -833,7 +925,7 @@ def test_parser_errors_are_sanitized_without_chained_private_details(
     assert str(path) not in rendered
 
 
-def test_final_result_validation_error_is_sanitized(tmp_path: Path) -> None:
+def test_duplicate_candidate_grid_error_is_sanitized(tmp_path: Path) -> None:
     output = _fixture(tmp_path, "arm_loss")
     params = output / "sample.params.txt"
     lines = params.read_text().splitlines()
@@ -841,7 +933,7 @@ def test_final_result_validation_error_is_sanitized(tmp_path: Path) -> None:
     params.write_text("\n".join(lines) + "\n")
 
     with pytest.raises(
-        IchorOutputError, match="violates the adapter contract"
+        IchorOutputError, match="initializations do not match"
     ) as captured:
         validate_ichor_outputs(prepare_ichor_run(_request()), output)
 
@@ -853,6 +945,9 @@ def test_final_result_validation_error_is_sanitized(tmp_path: Path) -> None:
     (
         ("missing", "missing required outputs"),
         ("nan", "must be finite"),
+        ("infinity", "must be finite"),
+        ("empty", "is not numeric"),
+        ("missing_field", "is missing"),
         ("coordinate", "outside the canonical grid"),
         ("candidate", "candidate table is absent"),
         ("symlink", "regular non-symlink"),
@@ -870,6 +965,17 @@ def test_parser_fails_closed_on_malformed_outputs(
     elif mutation == "nan":
         path = output / "sample.correctedDepth.txt"
         path.write_text(path.read_text().replace("-0.20", "NaN"))
+    elif mutation == "infinity":
+        path = output / "sample.correctedDepth.txt"
+        path.write_text(path.read_text().replace("-0.20", "Inf"))
+    elif mutation == "empty":
+        path = output / "sample.correctedDepth.txt"
+        path.write_text(path.read_text().replace("-0.20", ""))
+    elif mutation == "missing_field":
+        path = output / "sample.correctedDepth.txt"
+        path.write_text(
+            path.read_text().replace("chr1\t1\t1000000\t-0.20", "chr1\t1\t1000000")
+        )
     elif mutation == "coordinate":
         path = output / "sample.correctedDepth.txt"
         path.write_text(
