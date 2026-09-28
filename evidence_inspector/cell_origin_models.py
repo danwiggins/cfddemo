@@ -111,6 +111,20 @@ class SolverKind(StrEnum):
     NNLS = "nnls"
 
 
+class NnlsRowScale(StrEnum):
+    """Explicit row scaling applied before solving the NNLS system.
+
+    ``REFERENCE_COUNT`` reproduces the inspected reference implementation by
+    multiplying both the atlas row and observation by the classified-fragment
+    count. ``SQRT_COUNT`` names the historical local transform descriptively;
+    it does not assert a validated variance model.
+    """
+
+    REFERENCE_COUNT = "reference_count"
+    SQRT_COUNT = "sqrt_count"
+    UNWEIGHTED = "unweighted"
+
+
 class RangeClassification(StrEnum):
     BELOW = "below"
     WITHIN = "within"
@@ -411,6 +425,19 @@ class NnlsDiagnostics(StrictModel):
     objective_value: NonNegativeFinite
 
 
+class NnlsDiagnosticsV2(StrictModel):
+    """Version-two diagnostics with an explicit estimator row transform."""
+
+    converged: bool
+    iterations: int = Field(ge=0)
+    residual_l2: NonNegativeFinite
+    objective_value: NonNegativeFinite
+    row_scale: NnlsRowScale
+    solver_tolerance: float = Field(gt=0.0, allow_inf_nan=False)
+    max_iterations: int = Field(ge=1)
+    solver_implementation_id: Identifier
+
+
 class DeconvolutionOutput(StrictModel):
     result_id: Identifier
     method: MethodDefinition
@@ -430,6 +457,14 @@ class DeconvolutionOutput(StrictModel):
         if not math.isclose(total, 1.0, rel_tol=0.0, abs_tol=1e-9):
             raise ValueError("canonical cell fractions must sum to 1")
         return self
+
+
+class DeconvolutionOutputV2(DeconvolutionOutput):
+    """Additive output boundary that never infers identity for v1 results."""
+
+    schema_version: Literal["cell-origin-deconvolution.v2"]
+    atlas_sha256: Sha256
+    diagnostics: NnlsDiagnosticsV2
 
 
 class BootstrapInterval(StrictModel):
@@ -642,6 +677,7 @@ __all__ = [
     "CellOriginResult",
     "CpgCallState",
     "DeconvolutionOutput",
+    "DeconvolutionOutputV2",
     "DigestArtifact",
     "FeatureDefinition",
     "FragmentMarkerObservation",
@@ -652,6 +688,8 @@ __all__ = [
     "MethodDefinition",
     "ModkitCpgCall",
     "NnlsDiagnostics",
+    "NnlsDiagnosticsV2",
+    "NnlsRowScale",
     "ObservationUnit",
     "RangeClassification",
     "RangeComparison",
