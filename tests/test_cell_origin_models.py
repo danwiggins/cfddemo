@@ -11,6 +11,9 @@ from pydantic import TypeAdapter, ValidationError
 
 from evidence_inspector.cell_origin_models import (
     AtlasUMatrix,
+    BootstrapDiagnosticsV2,
+    BootstrapInformationStatus,
+    BootstrapIntervalV2,
     CellOriginInputBundle,
     CellOriginResult,
     DeconvolutionOutput,
@@ -706,6 +709,27 @@ def test_bootstrap_and_range_rows_are_bound_to_estimates() -> None:
     payload["range_comparison"]["rows"][0]["classification"] = "within"
     with pytest.raises(ValidationError, match="inclusive range"):
         validate_json(CellOriginResult, payload)
+
+
+def test_v2_bootstrap_diagnostics_reconcile_all_resamples() -> None:
+    with pytest.raises(ValidationError, match="resample accounting"):
+        BootstrapDiagnosticsV2(
+            requested_resamples=5,
+            successful_resamples=2,
+            failed_resamples=1,
+            degenerate_resamples=1,
+        )
+
+
+def test_v2_bootstrap_rejects_zero_width_as_available_information() -> None:
+    with pytest.raises(ValidationError, match="positive width"):
+        BootstrapIntervalV2(
+            cell_type_id="immune",
+            estimate=0.5,
+            information_status=BootstrapInformationStatus.AVAILABLE,
+            lower_fraction=0.5,
+            upper_fraction=0.5,
+        )
 
 
 @pytest.mark.parametrize(

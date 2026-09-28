@@ -22,8 +22,12 @@ import numpy as np
 
 from evidence_inspector.cell_origin_models import (
     AtlasUMatrix,
+    BootstrapDiagnosticsV2,
+    BootstrapInformationStatus,
     BootstrapInterval,
+    BootstrapIntervalV2,
     BootstrapResult,
+    BootstrapResultV2,
     CellFractionEstimate,
     DeconvolutionOutput,
     DeconvolutionOutputV2,
@@ -510,6 +514,159 @@ def bootstrap_uxm(
     )
 
 
+def bootstrap_uxm_v2(
+    marker_counts: Sequence[MarkerCountRow],
+    atlas: AtlasUMatrix,
+    source: DeconvolutionOutput,
+    *,
+    replicates: int,
+    random_seed: int,
+    confidence_level: float = 0.95,
+    tolerance: float = DEFAULT_TOLERANCE,
+    max_iterations: int = 10_000,
+) -> BootstrapResultV2:
+    """Report sparse/degenerate bootstrap behavior without overstating precision.
+
+    This preserves the historical estimator: independent binomial resampling of
+    classified U/non-U fragment calls within each marker. It does not perform
+    molecule-level resampling or preserve cross-marker molecule linkage.
+    """
+
+    if isinstance(replicates, bool) or not isinstance(replicates, int):
+        raise DeconvolutionError("replicates must be an integer")
+    if replicates < 2:
+        raise DeconvolutionError("replicates must be at least 2")
+    if (
+        isinstance(random_seed, bool)
+        or not isinstance(random_seed, int)
+        or random_seed < 0
+    ):
+        raise DeconvolutionError("random_seed must be a nonnegative integer")
+    if (
+        isinstance(confidence_level, bool)
+        or not isinstance(confidence_level, (int, float))
+        or not math.isfinite(confidence_level)
+        or not 0.0 < confidence_level < 1.0
+    ):
+        raise DeconvolutionError(
+            "confidence_level must be finite and strictly between 0 and 1"
+        )
+
+    marker_ids, matrix, observed, counts = _aligned_arrays(marker_counts, atlas)
+    if source.method != LOYFER_UXM_METHOD:
+        raise DeconvolutionError("bootstrap source must use the Loyfer UXM method")
+    if source.atlas_id != atlas.atlas_id:
+        raise DeconvolutionError("bootstrap source atlas does not match")
+    if source.marker_ids != marker_ids:
+        raise DeconvolutionError("bootstrap source marker order does not match")
+    if tuple(item.cell_type_id for item in source.estimates) != atlas.cell_type_ids:
+        raise DeconvolutionError("bootstrap source cell types do not match")
+
+    integer_counts = counts.astype(np.int64)
+    rng = np.random.default_rng(random_seed)
+    samples: list[np.ndarray] = []
+    failed = 0
+    degenerate = 0
+    for _ in range(replicates):
+        sampled_u = rng.binomial(integer_counts, observed)
+        sampled_observed = sampled_u / counts
+        if np.all(sampled_observed <= tolerance):
+            degenerate += 1
+            continue
+        try:
+            weights, _, converged, _ = _solve_arrays(
+                matrix,
+                sampled_observed,
+                counts,
+                row_scale=NnlsRowScale.SQRT_COUNT,
+                tolerance=tolerance,
+                max_iterations=max_iterations,
+            )
+        except DeconvolutionError:
+            failed += 1
+            continue
+        if not converged:
+            failed += 1
+            continue
+        weight_sum = float(np.sum(weights))
+        if not math.isfinite(weight_sum) or weight_sum <= tolerance:
+            degenerate += 1
+            continue
+        samples.append(weights / weight_sum)
+
+    point_estimates = np.asarray(
+        [item.fraction for item in source.estimates],
+        dtype=np.float64,
+    )
+    alpha = (1.0 - confidence_level) / 2.0
+    if samples:
+        sample_matrix = np.asarray(samples, dtype=np.float64)
+        raw_lower = np.quantile(sample_matrix, alpha, axis=0, method="linear")
+        raw_upper = np.quantile(
+            sample_matrix,
+            1.0 - alpha,
+            axis=0,
+            method="linear",
+        )
+    else:
+        raw_lower = raw_upper = np.full_like(point_estimates, np.nan)
+
+    intervals = []
+    for cell_type_id, estimate, raw_low, raw_high in zip(
+        atlas.cell_type_ids,
+        point_estimates,
+        raw_lower,
+        raw_upper,
+        strict=True,
+    ):
+        if len(samples) >= 2 and math.isfinite(raw_low) and raw_low < raw_high:
+            intervals.append(
+                BootstrapIntervalV2(
+                    cell_type_id=cell_type_id,
+                    estimate=float(estimate),
+                    information_status=BootstrapInformationStatus.AVAILABLE,
+                    lower_fraction=float(min(raw_low, estimate)),
+                    upper_fraction=float(max(raw_high, estimate)),
+                )
+            )
+        else:
+            intervals.append(
+                BootstrapIntervalV2(
+                    cell_type_id=cell_type_id,
+                    estimate=float(estimate),
+                    information_status=(
+                        BootstrapInformationStatus.INSUFFICIENT_INFORMATION
+                    ),
+                )
+            )
+
+    available = sum(
+        interval.information_status == BootstrapInformationStatus.AVAILABLE
+        for interval in intervals
+    )
+    information_status = (
+        BootstrapInformationStatus.INSUFFICIENT_INFORMATION
+        if available == 0
+        else BootstrapInformationStatus.AVAILABLE
+        if available == len(intervals)
+        else BootstrapInformationStatus.PARTIAL_INFORMATION
+    )
+    return BootstrapResultV2(
+        source_result_id=source.result_id,
+        replicates=replicates,
+        random_seed=random_seed,
+        confidence_level=float(confidence_level),
+        information_status=information_status,
+        intervals=tuple(intervals),
+        diagnostics=BootstrapDiagnosticsV2(
+            requested_resamples=replicates,
+            successful_resamples=len(samples),
+            failed_resamples=failed,
+            degenerate_resamples=degenerate,
+        ),
+    )
+
+
 def compare_observed_cohort_ranges(
     source: DeconvolutionOutput,
     ranges: Sequence[ObservedCohortRange],
@@ -565,6 +722,7 @@ __all__ = [
     "DeconvolutionError",
     "ObservedCohortRange",
     "bootstrap_uxm",
+    "bootstrap_uxm_v2",
     "compare_observed_cohort_ranges",
     "deconvolve_uxm",
 ]

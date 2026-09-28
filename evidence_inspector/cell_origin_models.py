@@ -765,6 +765,113 @@ class BootstrapResult(StrictModel):
         return self
 
 
+class BootstrapInformationStatus(StrEnum):
+    AVAILABLE = "available"
+    PARTIAL_INFORMATION = "partial_information"
+    INSUFFICIENT_INFORMATION = "insufficient_information"
+
+
+class BootstrapIntervalV2(StrictModel):
+    """One cell-type interval that never represents zero width as precision."""
+
+    cell_type_id: Identifier
+    estimate: CanonicalFraction
+    information_status: Literal[
+        BootstrapInformationStatus.AVAILABLE,
+        BootstrapInformationStatus.INSUFFICIENT_INFORMATION,
+    ]
+    lower_fraction: CanonicalFraction | None = None
+    upper_fraction: CanonicalFraction | None = None
+
+    @model_validator(mode="after")
+    def validate_information(self) -> BootstrapIntervalV2:
+        if self.information_status == BootstrapInformationStatus.AVAILABLE:
+            if self.lower_fraction is None or self.upper_fraction is None:
+                raise ValueError("available bootstrap interval requires bounds")
+            if self.lower_fraction >= self.upper_fraction:
+                raise ValueError(
+                    "available bootstrap interval must have positive width"
+                )
+            if not self.lower_fraction <= self.estimate <= self.upper_fraction:
+                raise ValueError("bootstrap interval must contain its estimate")
+        elif self.lower_fraction is not None or self.upper_fraction is not None:
+            raise ValueError(
+                "insufficient-information bootstrap interval cannot claim bounds"
+            )
+        return self
+
+
+class BootstrapDiagnosticsV2(StrictModel):
+    """Complete resample accounting and estimator identity."""
+
+    schema_version: Literal["cell-origin-bootstrap-diagnostics.v2"] = (
+        "cell-origin-bootstrap-diagnostics.v2"
+    )
+    requested_resamples: int = Field(ge=2)
+    successful_resamples: int = Field(ge=0)
+    failed_resamples: int = Field(ge=0)
+    degenerate_resamples: int = Field(ge=0)
+    resampling_unit: Literal["classified_fragment_call_within_marker"] = (
+        "classified_fragment_call_within_marker"
+    )
+    method_id: Literal["independent-marker-binomial-bootstrap.v1"] = (
+        "independent-marker-binomial-bootstrap.v1"
+    )
+    preserves_cross_marker_molecule_linkage: Literal[False] = False
+    limitation_id: Literal["cross-marker-molecule-linkage-not-preserved"] = (
+        "cross-marker-molecule-linkage-not-preserved"
+    )
+
+    @model_validator(mode="after")
+    def reconcile_resamples(self) -> BootstrapDiagnosticsV2:
+        if self.requested_resamples != (
+            self.successful_resamples
+            + self.failed_resamples
+            + self.degenerate_resamples
+        ):
+            raise ValueError("bootstrap resample accounting must reconcile")
+        return self
+
+
+class BootstrapResultV2(StrictModel):
+    """Additive uncertainty result with explicit information availability."""
+
+    schema_version: Literal["cell-origin-bootstrap.v2"] = (
+        "cell-origin-bootstrap.v2"
+    )
+    source_result_id: Identifier
+    replicates: int = Field(ge=2)
+    random_seed: int = Field(ge=0)
+    confidence_level: CanonicalFraction
+    information_status: BootstrapInformationStatus
+    intervals: tuple[BootstrapIntervalV2, ...] = Field(min_length=1)
+    diagnostics: BootstrapDiagnosticsV2
+
+    @model_validator(mode="after")
+    def validate_result(self) -> BootstrapResultV2:
+        if not 0.0 < self.confidence_level < 1.0:
+            raise ValueError("confidence_level must be strictly between 0 and 1")
+        if self.replicates != self.diagnostics.requested_resamples:
+            raise ValueError("bootstrap diagnostics must match requested replicates")
+        ids = [interval.cell_type_id for interval in self.intervals]
+        if len(set(ids)) != len(ids):
+            raise ValueError("bootstrap cell_type_id values must be unique")
+        available = sum(
+            interval.information_status == BootstrapInformationStatus.AVAILABLE
+            for interval in self.intervals
+        )
+        expected = (
+            BootstrapInformationStatus.INSUFFICIENT_INFORMATION
+            if available == 0
+            else BootstrapInformationStatus.AVAILABLE
+            if available == len(self.intervals)
+            else BootstrapInformationStatus.PARTIAL_INFORMATION
+        )
+        if self.information_status != expected:
+            raise ValueError("bootstrap information status does not match intervals")
+        return self
+
+
 class ReferenceRangeRow(StrictModel):
     cell_type_id: Identifier
     fraction: CanonicalFraction
@@ -890,7 +997,7 @@ class CellOriginResult(StrictModel):
     method: MethodDefinition
     marker_counts: tuple[MarkerCountRow, ...] = Field(min_length=1)
     deconvolution: DeconvolutionOutput
-    bootstrap: BootstrapResult | None = None
+    bootstrap: BootstrapResult | BootstrapResultV2 | None = None
     range_comparison: RangeComparison | None = None
     provenance: CellOriginProvenance
     validation: ValidationReport
@@ -936,7 +1043,11 @@ __all__ = [
     "AtlasUMatrixRow",
     "AtlasUValue",
     "BootstrapInterval",
+    "BootstrapIntervalV2",
+    "BootstrapDiagnosticsV2",
+    "BootstrapInformationStatus",
     "BootstrapResult",
+    "BootstrapResultV2",
     "CanonicalFraction",
     "CellFractionEstimate",
     "CellOriginInputBundle",
