@@ -274,6 +274,30 @@ def test_v2_canonicalizes_both_reference_strands_to_one_cpg_dyad() -> None:
     assert result.calls[1].reference_mod_strand.value == "-"
 
 
+def test_v2_canonicalization_handles_reference_origin_boundary() -> None:
+    requested: list[tuple[str, int, int]] = []
+
+    def boundary_provider(chromosome: str, start0: int, end0: int) -> str:
+        requested.append((chromosome, start0, end0))
+        return "CG"
+
+    text = HARD_V2_HEADER + (
+        "plus\tchr1\t0\t+\t+\tC\tm\t0.9\tfalse\n"
+        "minus\tchr1\t1\t+\t-\tC\tm\t0.9\tfalse\n"
+    )
+
+    result = load_generic_hard_call_cpg_v2(
+        io.StringIO(text),
+        columns=HARD_V2_COLUMNS,
+        provenance=hard_v2_provenance(),
+        fragment_hash_salt=b"test-salt",
+        reference_context_provider=boundary_provider,
+    )
+
+    assert [call.canonical_cpg_position0 for call in result.calls] == [0, 0]
+    assert requested == [("chr1", 0, 2), ("chr1", 0, 2)]
+
+
 @pytest.mark.parametrize(
     ("row", "message", "provider"),
     [
