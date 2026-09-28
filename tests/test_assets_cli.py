@@ -372,6 +372,49 @@ def test_assets_verify_absent_registry_does_not_mutate_root(
     assert not root.exists()
 
 
+def test_assets_verify_works_with_read_only_existing_registry(
+    tmp_path: Path, capsys
+) -> None:
+    paths = _write_inputs(tmp_path)
+    root = tmp_path / "product-root"
+    code, _ = _invoke(
+        capsys,
+        "assets",
+        "install",
+        *_asset_args(paths, root),
+        "--package",
+        paths["package"],
+    )
+    assert code == ExitCode.OK
+    registry = root / "assets"
+    files = [path for path in registry.rglob("*") if path.is_file()]
+    directories = [registry, *(path for path in registry.rglob("*") if path.is_dir())]
+    before = {
+        path.relative_to(registry).as_posix(): path.read_bytes() for path in files
+    }
+    try:
+        for path in files:
+            path.chmod(0o444)
+        for path in reversed(directories):
+            path.chmod(0o555)
+
+        code, result = _invoke(
+            capsys, "assets", "verify", *_asset_args(paths, root)
+        )
+
+        assert code == ExitCode.OK
+        assert result["data"]["integrity"] == "valid"
+        assert {
+            path.relative_to(registry).as_posix(): path.read_bytes()
+            for path in files
+        } == before
+    finally:
+        for path in directories:
+            path.chmod(0o700)
+        for path in files:
+            path.chmod(0o600)
+
+
 def test_assets_install_final_authority_check_gates_success(
     tmp_path: Path, capsys, monkeypatch
 ) -> None:
