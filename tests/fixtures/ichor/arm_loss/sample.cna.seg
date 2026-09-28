@@ -1,0 +1,5 @@
+chr	start	end	sample.event	sample.logR
+chr1	1	1000000	HETD	-0.20
+chr1	1000001	2000000	HETD	-0.21
+chr1	2000001	3000000	NEUT	0.00
+chr1	3000001	4000000	NEUT	0.01
