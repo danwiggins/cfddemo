@@ -43,6 +43,10 @@ MODKIT_EXECUTABLE_SHA256 = (
 MODKIT_LICENSE_SHA256 = (
     "39cc712a23eead54302ce722e2d0cb6eb73d94ad42f407e7153829a4d5154884"
 )
+# Captured from the digest-pinned release executable using ``extract full
+# --cpg``. In v0.6.4, ``--cpg`` filters through an implicit CpG motif but does
+# not set the explicit ``motif`` argument that enables the optional ``motifs``
+# output column. An explicit ``--motif`` command is a different schema.
 MODKIT_FULL_HEADER = (
     "read_id",
     "forward_read_position",
@@ -104,6 +108,45 @@ class AlignmentExclusionLedger(StrictModel):
         return self
 
 
+class AlignmentPrefilterReceipt(StrictModel):
+    """Digest-bound, structurally validated samtools prefilter execution."""
+
+    schema_version: Literal["traceback.alignment-prefilter.v1"] = (
+        "traceback.alignment-prefilter.v1"
+    )
+    samtools_version: str = Field(min_length=1, max_length=64)
+    samtools_executable_sha256: Sha256
+    executable_arg: str = Field(min_length=1, max_length=1024)
+    source_bam_arg: str = Field(min_length=1, max_length=1024)
+    output_bam_arg: str = Field(min_length=1, max_length=1024)
+    source_bam_sha256: Sha256
+    output_bam_sha256: Sha256
+    minimum_mapq: int = Field(ge=0, le=255)
+    flag_exclusion_mask: Literal[3844] = 3844
+    argv: tuple[str, ...] = Field(min_length=10)
+    alignment_ledger: AlignmentExclusionLedger
+
+    @model_validator(mode="after")
+    def validate_command(self) -> AlignmentPrefilterReceipt:
+        expected = (
+            self.executable_arg,
+            "view",
+            "-b",
+            "-F",
+            str(self.flag_exclusion_mask),
+            "-q",
+            str(self.minimum_mapq),
+            "-o",
+            self.output_bam_arg,
+            self.source_bam_arg,
+        )
+        if self.argv != expected:
+            raise ValueError(
+                "alignment prefilter argv does not match its bound command fields"
+            )
+        return self
+
+
 class ModkitExecutionManifest(StrictModel):
     """Digested execution record required by the native adapter."""
 
@@ -116,7 +159,12 @@ class ModkitExecutionManifest(StrictModel):
     modkit_executable_sha256: Literal[MODKIT_EXECUTABLE_SHA256]
     modkit_license_sha256: Literal[MODKIT_LICENSE_SHA256]
     container_image_digest: str = Field(pattern=r"^sha256:[0-9a-f]{64}$")
-    argv: tuple[str, ...] = Field(min_length=2)
+    executable_arg: str = Field(min_length=1, max_length=1024)
+    input_bam_arg: str = Field(min_length=1, max_length=1024)
+    output_arg: str = Field(min_length=1, max_length=1024)
+    reference_arg: str = Field(min_length=1, max_length=1024)
+    log_arg: str = Field(min_length=1, max_length=1024)
+    argv: tuple[str, ...] = Field(min_length=21)
     input_bam_sha256: Sha256
     raw_output_sha256: Sha256
     reference_fasta_sha256: Sha256
@@ -124,32 +172,43 @@ class ModkitExecutionManifest(StrictModel):
     transform_id: Literal["traceback.modkit-full-cmh.v1"] = (
         "traceback.modkit-full-cmh.v1"
     )
-    minimum_mapq: int = Field(ge=0, le=255)
+    alignment_prefilter: AlignmentPrefilterReceipt
     alignment_policy: Literal["primary-mapped-pass-qc-nonduplicate-mapq.v1"]
-    alignment_ledger: AlignmentExclusionLedger
     inferred_policy: Literal["include_as_canonical", "exclude"]
 
     @model_validator(mode="after")
     def validate_argv(self) -> ModkitExecutionManifest:
-        required = {
+        expected = (
+            self.executable_arg,
             "extract",
             "full",
+            self.input_bam_arg,
+            self.output_arg,
             "--bgzf",
             "--reference",
+            self.reference_arg,
             "--cpg",
             "--mapped-only",
             "--ignore-index",
-        }
-        if not required.issubset(self.argv):
-            raise ValueError("Modkit argv is missing required pinned extraction flags")
-        forbidden = {
-            "--allow-non-primary",
-            "--ignore",
-            "--edge-filter",
-            "--ignore-implicit",
-        }
-        if forbidden.intersection(self.argv):
-            raise ValueError("Modkit argv enables an unsupported extraction transform")
+            "--threads",
+            "1",
+            "--io-threads",
+            "1",
+            "--out-threads",
+            "1",
+            "--suppress-progress",
+            "--log-filepath",
+            self.log_arg,
+            "--force",
+        )
+        if self.argv != expected:
+            raise ValueError(
+                "Modkit argv does not match its bound extraction command fields"
+            )
+        if self.input_bam_sha256 != self.alignment_prefilter.output_bam_sha256:
+            raise ValueError("Modkit input digest does not match prefilter output")
+        if self.input_bam_arg != self.alignment_prefilter.output_bam_arg:
+            raise ValueError("Modkit input argument does not match prefilter output")
         return self
 
 
@@ -384,6 +443,13 @@ def load_modkit_extract_full_064(
                         non_c_rows += 1
                         continue
                     c_rows += 1
+                    canonical_base = _required(
+                        row, "canonical_base", row_number
+                    )
+                    if canonical_base != "C":
+                        raise CellOriginInputError(
+                            f"C observation has non-C canonical base at row {row_number}"
+                        )
                     flag = _integer(
                         _required(row, "flag", row_number),
                         "flag",
@@ -413,13 +479,43 @@ def load_modkit_extract_full_064(
                             f"unsupported C modification code at row {row_number}"
                         )
                     strand_text = _required(row, "mod_strand", row_number)
+                    ref_strand_text = _required(
+                        row, "ref_strand", row_number
+                    )
                     ref_mod_text = _required(row, "ref_mod_strand", row_number)
-                    if strand_text not in {"+", "-"} or ref_mod_text not in {
-                        "+",
-                        "-",
-                    }:
+                    if any(
+                        value not in {"+", "-"}
+                        for value in (
+                            strand_text,
+                            ref_strand_text,
+                            ref_mod_text,
+                        )
+                    ):
                         raise CellOriginInputError(
                             f"invalid strand at row {row_number}"
+                        )
+                    alignment_values = {
+                        field: _integer(
+                            _required(row, field, row_number),
+                            field,
+                            row_number,
+                        )
+                        for field in (
+                            "fw_soft_clipped_start",
+                            "fw_soft_clipped_end",
+                            "alignment_start",
+                            "alignment_end",
+                            "read_length",
+                        )
+                    }
+                    if (
+                        any(value < 0 for value in alignment_values.values())
+                        or alignment_values["read_length"] == 0
+                        or alignment_values["alignment_end"]
+                        < alignment_values["alignment_start"]
+                    ):
+                        raise CellOriginInputError(
+                            f"invalid alignment identity at row {row_number}"
                         )
                     fragment = _fragment_digest(
                         _required(row, "read_id", row_number), fragment_hash_salt
@@ -434,12 +530,17 @@ def load_modkit_extract_full_064(
                             "chrom": _required(row, "chrom", row_number),
                             "position0": position0,
                             "mod_strand": strand_text,
+                            "ref_strand": ref_strand_text,
                             "ref_mod_strand": ref_mod_text,
                             "inferred": inferred_text == "true",
                             "flag": flag,
-                            "canonical_base": _required(
-                                row, "canonical_base", row_number
+                            **alignment_values,
+                            "base_qual": _required(row, "base_qual", row_number),
+                            "ref_kmer": _required(row, "ref_kmer", row_number),
+                            "query_kmer": _required(
+                                row, "query_kmer", row_number
                             ),
+                            "canonical_base": canonical_base,
                             "modified_primary_base": primary,
                         },
                         sort_keys=True,
@@ -567,6 +668,10 @@ def load_modkit_extract_full_064(
                 unmethylated_count += state == CpgCallState.UNMETHYLATED
         finally:
             database.close()
+    except (OSError, EOFError, UnicodeError, csv.Error):
+        raise CellOriginInputError(
+            "Modkit output decompression or text decoding failed"
+        ) from None
     except (sqlite3.Error, ValidationError) as exc:
         raise CellOriginInputError("native Modkit ingestion failed validation") from exc
     finally:
@@ -630,6 +735,7 @@ def load_modkit_extract_full_064(
 
 __all__ = [
     "AlignmentExclusionLedger",
+    "AlignmentPrefilterReceipt",
     "BoundFastaProvider",
     "MODKIT_EXECUTABLE_SHA256",
     "MODKIT_FULL_HEADER",
