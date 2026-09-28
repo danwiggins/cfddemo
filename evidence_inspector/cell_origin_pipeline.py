@@ -46,11 +46,13 @@ from evidence_inspector.cell_origin_inputs import (
 )
 from evidence_inspector.cell_origin_models import (
     AtlasUMatrix,
+    BootstrapInformationStatus,
     CellOriginProvenance,
     CellOriginResult,
     DigestArtifact,
     GenomicMarker,
     LOYFER_UXM_METHOD,
+    NnlsRowScale,
     SoftwareVersion,
     StrictModel,
     UxmThresholds,
@@ -59,7 +61,10 @@ from evidence_inspector.cell_origin_models import (
     ValidationReport,
     VerificationLevel,
 )
-from evidence_inspector.deconvolution import bootstrap_uxm, deconvolve_uxm
+from evidence_inspector.deconvolution import (
+    bootstrap_uxm_v2,
+    deconvolve_uxm_v2,
+)
 from evidence_inspector.uxm import (
     UxmClassificationResult,
     UxmDiagnostics,
@@ -197,17 +202,41 @@ class CompositionChartRow(StrictModel):
     rank: int = Field(ge=1)
     fraction: float = Field(ge=0.0, le=1.0)
     percent: float = Field(ge=0.0, le=100.0)
-    lower_fraction: float = Field(ge=0.0, le=1.0)
-    upper_fraction: float = Field(ge=0.0, le=1.0)
-    lower_percent: float = Field(ge=0.0, le=100.0)
-    upper_percent: float = Field(ge=0.0, le=100.0)
+    lower_fraction: float | None = Field(default=None, ge=0.0, le=1.0)
+    upper_fraction: float | None = Field(default=None, ge=0.0, le=1.0)
+    lower_percent: float | None = Field(default=None, ge=0.0, le=100.0)
+    upper_percent: float | None = Field(default=None, ge=0.0, le=100.0)
+    uncertainty_available: bool = True
+    uncertainty_status: BootstrapInformationStatus = (
+        BootstrapInformationStatus.AVAILABLE
+    )
     color: str = Field(pattern=r"^#[0-9A-F]{6}$")
     show_by_default: bool
 
     @model_validator(mode="after")
     def validate_interval(self) -> CompositionChartRow:
-        if not self.lower_fraction <= self.fraction <= self.upper_fraction:
-            raise ValueError("composition uncertainty must contain the estimate")
+        values = (
+            self.lower_fraction,
+            self.upper_fraction,
+            self.lower_percent,
+            self.upper_percent,
+        )
+        has_interval = all(value is not None for value in values)
+        if any(value is not None for value in values) and not has_interval:
+            raise ValueError("composition uncertainty bounds must be all-or-none")
+        if self.uncertainty_available != has_interval:
+            raise ValueError("composition uncertainty availability is inconsistent")
+        if self.uncertainty_available:
+            if self.uncertainty_status != BootstrapInformationStatus.AVAILABLE:
+                raise ValueError(
+                    "available composition uncertainty needs available status"
+                )
+            assert self.lower_fraction is not None
+            assert self.upper_fraction is not None
+            if not self.lower_fraction <= self.fraction <= self.upper_fraction:
+                raise ValueError("composition uncertainty must contain the estimate")
+        elif self.uncertainty_status == BootstrapInformationStatus.AVAILABLE:
+            raise ValueError("unavailable composition uncertainty cannot be available")
         return self
 
 
@@ -1239,7 +1268,7 @@ def _load_healthy(
 def _healthy_chart_rows(
     healthy: _LoyferHealthyTable,
     estimates: Mapping[str, float],
-    intervals: Mapping[str, tuple[float, float]],
+    intervals: Mapping[str, tuple[float | None, float | None]],
     labels: Mapping[str, str],
 ) -> tuple[HealthyRangeChartRow, ...]:
     direct_ids = {
@@ -1529,8 +1558,12 @@ def run_pipeline(
             )
         marker_ids = tuple(row.marker_id for row in classified.marker_counts)
         atlas = _filtered_atlas(resources.atlas, marker_ids)
-        deconvolution = deconvolve_uxm(classified.marker_counts, atlas)
-        bootstrap = bootstrap_uxm(
+        deconvolution = deconvolve_uxm_v2(
+            classified.marker_counts,
+            atlas,
+            row_scale=NnlsRowScale.SQRT_COUNT,
+        )
+        bootstrap = bootstrap_uxm_v2(
             classified.marker_counts,
             atlas,
             deconvolution,
@@ -1643,6 +1676,11 @@ def run_pipeline(
         )
         for rank, estimate in enumerate(ordered_estimates, start=1):
             lower, upper = interval_by_id[estimate.cell_type_id]
+            interval = next(
+                item
+                for item in bootstrap.intervals
+                if item.cell_type_id == estimate.cell_type_id
+            )
             composition.append(
                 CompositionChartRow(
                     cell_type_id=estimate.cell_type_id,
@@ -1654,8 +1692,16 @@ def run_pipeline(
                     percent=estimate.fraction * 100.0,
                     lower_fraction=lower,
                     upper_fraction=upper,
-                    lower_percent=lower * 100.0,
-                    upper_percent=upper * 100.0,
+                    lower_percent=(
+                        lower * 100.0 if lower is not None else None
+                    ),
+                    upper_percent=(
+                        upper * 100.0 if upper is not None else None
+                    ),
+                    uncertainty_available=(
+                        lower is not None and upper is not None
+                    ),
+                    uncertainty_status=interval.information_status,
                     color=PALETTE[(rank - 1) % len(PALETTE)],
                     show_by_default=rank <= DEFAULT_TOP_COMPOSITION_ROWS,
                 )
@@ -1682,6 +1728,11 @@ def run_pipeline(
             (
                 "Observed markers without at least four callable fragment CpGs "
                 "do not enter the NNLS fit."
+            ),
+            (
+                "Bootstrap v2 independently resamples classified fragment calls "
+                "within each marker and does not preserve cross-marker molecule "
+                "linkage. Unusable uncertainty is reported as unavailable."
             ),
         ]
         if resources.collapsed_duplicate_count:

@@ -821,6 +821,16 @@ class BootstrapDiagnosticsV2(StrictModel):
     limitation_id: Literal["cross-marker-molecule-linkage-not-preserved"] = (
         "cross-marker-molecule-linkage-not-preserved"
     )
+    minimum_tail_observations: Literal[2] = 2
+    tail_probability: float = Field(gt=0.0, lt=0.5, allow_inf_nan=False)
+    minimum_successful_resamples: int = Field(ge=2)
+    maximum_failed_resample_fraction: Literal[0.0] = 0.0
+    observed_failed_resample_fraction: CanonicalFraction
+    interval_eligibility_met: bool
+    nnls_row_scale: NnlsRowScale
+    solver_tolerance: float = Field(gt=0.0, allow_inf_nan=False)
+    max_iterations: int = Field(ge=1)
+    solver_implementation_id: Identifier
 
     @model_validator(mode="after")
     def reconcile_resamples(self) -> BootstrapDiagnosticsV2:
@@ -830,6 +840,23 @@ class BootstrapDiagnosticsV2(StrictModel):
             + self.degenerate_resamples
         ):
             raise ValueError("bootstrap resample accounting must reconcile")
+        expected_failed_fraction = (
+            self.failed_resamples / self.requested_resamples
+        )
+        if not math.isclose(
+            self.observed_failed_resample_fraction,
+            expected_failed_fraction,
+            rel_tol=0.0,
+            abs_tol=1e-15,
+        ):
+            raise ValueError("observed bootstrap failure fraction is inconsistent")
+        expected_eligibility = (
+            self.successful_resamples >= self.minimum_successful_resamples
+            and self.observed_failed_resample_fraction
+            <= self.maximum_failed_resample_fraction
+        )
+        if self.interval_eligibility_met != expected_eligibility:
+            raise ValueError("bootstrap interval eligibility is inconsistent")
         return self
 
 
@@ -853,6 +880,20 @@ class BootstrapResultV2(StrictModel):
             raise ValueError("confidence_level must be strictly between 0 and 1")
         if self.replicates != self.diagnostics.requested_resamples:
             raise ValueError("bootstrap diagnostics must match requested replicates")
+        expected_tail_probability = (1.0 - self.confidence_level) / 2.0
+        if not math.isclose(
+            self.diagnostics.tail_probability,
+            expected_tail_probability,
+            rel_tol=0.0,
+            abs_tol=1e-15,
+        ):
+            raise ValueError("bootstrap tail probability is inconsistent")
+        expected_minimum = math.ceil(
+            self.diagnostics.minimum_tail_observations
+            / self.diagnostics.tail_probability
+        )
+        if self.diagnostics.minimum_successful_resamples != expected_minimum:
+            raise ValueError("bootstrap tail-resolution threshold is inconsistent")
         ids = [interval.cell_type_id for interval in self.intervals]
         if len(set(ids)) != len(ids):
             raise ValueError("bootstrap cell_type_id values must be unique")
@@ -860,6 +901,10 @@ class BootstrapResultV2(StrictModel):
             interval.information_status == BootstrapInformationStatus.AVAILABLE
             for interval in self.intervals
         )
+        if available and not self.diagnostics.interval_eligibility_met:
+            raise ValueError(
+                "available intervals require eligible successful resamples"
+            )
         expected = (
             BootstrapInformationStatus.INSUFFICIENT_INFORMATION
             if available == 0

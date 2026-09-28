@@ -14,6 +14,7 @@ from evidence_inspector.cell_origin_models import (
     BootstrapDiagnosticsV2,
     BootstrapInformationStatus,
     BootstrapIntervalV2,
+    BootstrapResultV2,
     CellOriginInputBundle,
     CellOriginResult,
     DeconvolutionOutput,
@@ -718,6 +719,14 @@ def test_v2_bootstrap_diagnostics_reconcile_all_resamples() -> None:
             successful_resamples=2,
             failed_resamples=1,
             degenerate_resamples=1,
+            tail_probability=0.025,
+            minimum_successful_resamples=80,
+            observed_failed_resample_fraction=0.2,
+            interval_eligibility_met=False,
+            nnls_row_scale=NnlsRowScale.SQRT_COUNT,
+            solver_tolerance=1e-12,
+            max_iterations=10_000,
+            solver_implementation_id="traceback.active-set-nnls.v1",
         )
 
 
@@ -729,6 +738,41 @@ def test_v2_bootstrap_rejects_zero_width_as_available_information() -> None:
             information_status=BootstrapInformationStatus.AVAILABLE,
             lower_fraction=0.5,
             upper_fraction=0.5,
+        )
+
+
+def test_v2_bootstrap_cannot_publish_available_interval_without_successes() -> None:
+    diagnostics = BootstrapDiagnosticsV2(
+        requested_resamples=80,
+        successful_resamples=0,
+        failed_resamples=0,
+        degenerate_resamples=80,
+        tail_probability=0.025,
+        minimum_successful_resamples=80,
+        observed_failed_resample_fraction=0.0,
+        interval_eligibility_met=False,
+        nnls_row_scale=NnlsRowScale.SQRT_COUNT,
+        solver_tolerance=1e-12,
+        max_iterations=10_000,
+        solver_implementation_id="traceback.active-set-nnls.v1",
+    )
+    with pytest.raises(ValidationError, match="eligible successful resamples"):
+        BootstrapResultV2(
+            source_result_id="nnls.synthetic.v1",
+            replicates=80,
+            random_seed=7,
+            confidence_level=0.95,
+            information_status=BootstrapInformationStatus.AVAILABLE,
+            intervals=(
+                BootstrapIntervalV2(
+                    cell_type_id="immune",
+                    estimate=0.5,
+                    information_status=BootstrapInformationStatus.AVAILABLE,
+                    lower_fraction=0.4,
+                    upper_fraction=0.6,
+                ),
+            ),
+            diagnostics=diagnostics,
         )
 
 

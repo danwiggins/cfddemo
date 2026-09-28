@@ -799,15 +799,12 @@ def _render_cell_origin_evidence(st: Any) -> None:
                 "label": row["label"],
                 "rank": rank,
                 "percent": row["sample_percent"],
-                "lower_percent": (
-                    row["sample_lower_percent"]
-                    if row["sample_lower_percent"] is not None
-                    else row["sample_percent"]
-                ),
-                "upper_percent": (
-                    row["sample_upper_percent"]
-                    if row["sample_upper_percent"] is not None
-                    else row["sample_percent"]
+                "lower_percent": row["sample_lower_percent"],
+                "upper_percent": row["sample_upper_percent"],
+                "uncertainty_label": (
+                    "Available"
+                    if row["uncertainty_available"]
+                    else "Unavailable — insufficient information"
                 ),
                 "value_label": f"{row['sample_percent']:.1f}%",
             }
@@ -825,6 +822,11 @@ def _render_cell_origin_evidence(st: Any) -> None:
             {
                 **row.model_dump(mode="json"),
                 "value_label": f"{row.percent:.1f}%",
+                "uncertainty_label": (
+                    "Available"
+                    if row.uncertainty_available
+                    else "Unavailable — insufficient information"
+                ),
             }
             for row in bundle.charts.composition_rows
             if row.show_by_default and row.fraction >= 0.001
@@ -963,6 +965,10 @@ def _render_cell_origin_evidence(st: Any) -> None:
                                     "field": "upper_percent",
                                     "title": "Bootstrap upper",
                                     "format": ".1f",
+                                },
+                                {
+                                    "field": "uncertainty_label",
+                                    "title": "Bootstrap uncertainty",
                                 },
                             ],
                         },

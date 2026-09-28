@@ -517,13 +517,13 @@ def bootstrap_uxm(
 def bootstrap_uxm_v2(
     marker_counts: Sequence[MarkerCountRow],
     atlas: AtlasUMatrix,
-    source: DeconvolutionOutput,
+    source: DeconvolutionOutputV2,
     *,
     replicates: int,
     random_seed: int,
     confidence_level: float = 0.95,
-    tolerance: float = DEFAULT_TOLERANCE,
-    max_iterations: int = 10_000,
+    tolerance: float | None = None,
+    max_iterations: int | None = None,
 ) -> BootstrapResultV2:
     """Report sparse/degenerate bootstrap behavior without overstating precision.
 
@@ -551,6 +551,43 @@ def bootstrap_uxm_v2(
         raise DeconvolutionError(
             "confidence_level must be finite and strictly between 0 and 1"
         )
+    if not isinstance(source, DeconvolutionOutputV2):
+        raise DeconvolutionError(
+            "bootstrap v2 requires a versioned deconvolution source"
+        )
+    source_diagnostics = source.diagnostics
+    if (
+        source_diagnostics.solver_implementation_id
+        != NNLS_SOLVER_IMPLEMENTATION_ID
+    ):
+        raise DeconvolutionError("bootstrap v2 does not support the source solver")
+    if tolerance is not None and (
+        isinstance(tolerance, bool)
+        or not isinstance(tolerance, (int, float))
+        or not math.isfinite(tolerance)
+        or tolerance <= 0.0
+    ):
+        raise DeconvolutionError("tolerance must be finite and greater than zero")
+    effective_tolerance = (
+        source_diagnostics.solver_tolerance
+        if tolerance is None
+        else float(tolerance)
+    )
+    if effective_tolerance != source_diagnostics.solver_tolerance:
+        raise DeconvolutionError(
+            "bootstrap tolerance must match the source deconvolution"
+        )
+    if max_iterations is not None:
+        _validate_positive_integer(max_iterations, "max_iterations")
+    effective_max_iterations = (
+        source_diagnostics.max_iterations
+        if max_iterations is None
+        else max_iterations
+    )
+    if effective_max_iterations != source_diagnostics.max_iterations:
+        raise DeconvolutionError(
+            "bootstrap max_iterations must match the source deconvolution"
+        )
 
     marker_ids, matrix, observed, counts = _aligned_arrays(marker_counts, atlas)
     if source.method != LOYFER_UXM_METHOD:
@@ -570,7 +607,7 @@ def bootstrap_uxm_v2(
     for _ in range(replicates):
         sampled_u = rng.binomial(integer_counts, observed)
         sampled_observed = sampled_u / counts
-        if np.all(sampled_observed <= tolerance):
+        if np.all(sampled_observed <= effective_tolerance):
             degenerate += 1
             continue
         try:
@@ -578,9 +615,9 @@ def bootstrap_uxm_v2(
                 matrix,
                 sampled_observed,
                 counts,
-                row_scale=NnlsRowScale.SQRT_COUNT,
-                tolerance=tolerance,
-                max_iterations=max_iterations,
+                row_scale=source_diagnostics.row_scale,
+                tolerance=effective_tolerance,
+                max_iterations=effective_max_iterations,
             )
         except DeconvolutionError:
             failed += 1
@@ -589,7 +626,7 @@ def bootstrap_uxm_v2(
             failed += 1
             continue
         weight_sum = float(np.sum(weights))
-        if not math.isfinite(weight_sum) or weight_sum <= tolerance:
+        if not math.isfinite(weight_sum) or weight_sum <= effective_tolerance:
             degenerate += 1
             continue
         samples.append(weights / weight_sum)
@@ -599,6 +636,17 @@ def bootstrap_uxm_v2(
         dtype=np.float64,
     )
     alpha = (1.0 - confidence_level) / 2.0
+    minimum_tail_observations = 2
+    minimum_successful_resamples = math.ceil(
+        minimum_tail_observations / alpha
+    )
+    maximum_failed_resample_fraction = 0.0
+    observed_failed_resample_fraction = failed / replicates
+    interval_eligibility_met = (
+        len(samples) >= minimum_successful_resamples
+        and observed_failed_resample_fraction
+        <= maximum_failed_resample_fraction
+    )
     if samples:
         sample_matrix = np.asarray(samples, dtype=np.float64)
         raw_lower = np.quantile(sample_matrix, alpha, axis=0, method="linear")
@@ -619,7 +667,11 @@ def bootstrap_uxm_v2(
         raw_upper,
         strict=True,
     ):
-        if len(samples) >= 2 and math.isfinite(raw_low) and raw_low < raw_high:
+        if (
+            interval_eligibility_met
+            and math.isfinite(raw_low)
+            and raw_low < raw_high
+        ):
             intervals.append(
                 BootstrapIntervalV2(
                     cell_type_id=cell_type_id,
@@ -663,6 +715,18 @@ def bootstrap_uxm_v2(
             successful_resamples=len(samples),
             failed_resamples=failed,
             degenerate_resamples=degenerate,
+            minimum_tail_observations=minimum_tail_observations,
+            tail_probability=alpha,
+            minimum_successful_resamples=minimum_successful_resamples,
+            maximum_failed_resample_fraction=maximum_failed_resample_fraction,
+            observed_failed_resample_fraction=observed_failed_resample_fraction,
+            interval_eligibility_met=interval_eligibility_met,
+            nnls_row_scale=source_diagnostics.row_scale,
+            solver_tolerance=effective_tolerance,
+            max_iterations=effective_max_iterations,
+            solver_implementation_id=(
+                source_diagnostics.solver_implementation_id
+            ),
         ),
     )
 
