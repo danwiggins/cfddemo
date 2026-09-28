@@ -141,10 +141,11 @@ class ModProbabilityPolicy(StrEnum):
 
 
 class ModkitSourceSchema(StrEnum):
-    """Generic schemas; neither value claims native Modkit compatibility."""
+    """Declared generic schemas plus one pinned native Modkit schema."""
 
     GENERIC_HARD_CALL_CPG_V2 = "traceback.generic-hard-call-cpg.v2"
     GENERIC_CMH_PROBABILITIES_V1 = "traceback.generic-cmh-probabilities.v1"
+    MODKIT_EXTRACT_FULL_064 = "modkit.extract-full.v0.6.4"
 
 
 class ReferenceContextValidationScope(StrEnum):
@@ -366,15 +367,22 @@ class ModkitInputProvenanceV2(StrictModel):
             if self.probability_threshold_source != "source_unknown":
                 raise ValueError("hard-call threshold source must be source_unknown")
         else:
-            if (
-                self.source_schema_id
-                != ModkitSourceSchema.GENERIC_CMH_PROBABILITIES_V1
-            ):
+            if self.source_schema_id not in {
+                ModkitSourceSchema.GENERIC_CMH_PROBABILITIES_V1,
+                ModkitSourceSchema.MODKIT_EXTRACT_FULL_064,
+            }:
                 raise ValueError(
-                    "precall-combined policy requires the generic C/m/h schema"
+                    "precall-combined policy requires the generic C/m/h schema "
+                    "or pinned native Modkit schema"
                 )
-            if self.source_schema_version != "1":
-                raise ValueError("generic C/m/h probability schema version must be 1")
+            expected_version = (
+                "1"
+                if self.source_schema_id
+                == ModkitSourceSchema.GENERIC_CMH_PROBABILITIES_V1
+                else "0.6.4"
+            )
+            if self.source_schema_version != expected_version:
+                raise ValueError("probability schema version does not match its ID")
             if self.probability_threshold is None:
                 raise ValueError("probability input requires an explicit threshold")
             if self.probability_threshold_source != "adapter_explicit":
