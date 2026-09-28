@@ -18,6 +18,7 @@ from evidence_inspector.cell_origin_models import (
 )
 from evidence_inspector.deconvolution import (
     DeconvolutionError,
+    NNLS_SOLVER_IMPLEMENTATION_ID,
     ObservedCohortRange,
     bootstrap_uxm,
     compare_observed_cohort_ranges,
@@ -119,6 +120,12 @@ def test_versioned_row_scales_match_independent_analytic_solutions() -> None:
     )
     assert historical_v2.schema_version == "cell-origin-deconvolution.v2"
     assert historical_v2.diagnostics.row_scale == NnlsRowScale.SQRT_COUNT
+    assert historical_v2.diagnostics.solver_tolerance == 1e-12
+    assert historical_v2.diagnostics.max_iterations == 10_000
+    assert (
+        historical_v2.diagnostics.solver_implementation_id
+        == NNLS_SOLVER_IMPLEMENTATION_ID
+    )
     assert reference.estimates[0].raw_nnls_weight == pytest.approx(
         (10**2 * 0.9 + 100**2 * 0.1) / (10**2 + 100**2)
     )
@@ -251,6 +258,54 @@ def test_v2_row_scale_is_required() -> None:
 
     with pytest.raises(TypeError, match="row_scale"):
         deconvolve_uxm_v2(counts, fixture_atlas())  # type: ignore[call-arg]
+
+
+def test_v2_identity_binds_solver_settings_and_full_atlas() -> None:
+    atlas = fixture_atlas()
+    counts = (
+        marker_count("marker.immune.1", 4, 10),
+        marker_count("marker.liver.1", 6, 10),
+    )
+    changed_payload = atlas.model_dump(mode="python")
+    changed_payload["rows"][0]["values"][0]["u_fraction"] = 0.79
+    changed_atlas = AtlasUMatrix.model_validate(changed_payload)
+
+    baseline = deconvolve_uxm_v2(
+        counts, atlas, row_scale=NnlsRowScale.REFERENCE_COUNT
+    )
+    repeated = deconvolve_uxm_v2(
+        counts, atlas, row_scale=NnlsRowScale.REFERENCE_COUNT
+    )
+    changed_tolerance = deconvolve_uxm_v2(
+        counts,
+        atlas,
+        row_scale=NnlsRowScale.REFERENCE_COUNT,
+        tolerance=1e-10,
+    )
+    changed_iterations = deconvolve_uxm_v2(
+        counts,
+        atlas,
+        row_scale=NnlsRowScale.REFERENCE_COUNT,
+        max_iterations=9_999,
+    )
+    changed_matrix = deconvolve_uxm_v2(
+        counts,
+        changed_atlas,
+        row_scale=NnlsRowScale.REFERENCE_COUNT,
+    )
+
+    assert repeated == baseline
+    assert changed_atlas.atlas_id == atlas.atlas_id
+    assert changed_matrix.atlas_sha256 != baseline.atlas_sha256
+    assert len(baseline.atlas_sha256) == 64
+    assert len(
+        {
+            baseline.result_id,
+            changed_tolerance.result_id,
+            changed_iterations.result_id,
+            changed_matrix.result_id,
+        }
+    ) == 4
 
 
 def test_result_id_is_deterministic_and_input_bound() -> None:

@@ -38,6 +38,7 @@ from evidence_inspector.cell_origin_models import (
 )
 
 DEFAULT_TOLERANCE = 1e-12
+NNLS_SOLVER_IMPLEMENTATION_ID = "traceback.active-set-nnls.v1"
 
 
 class DeconvolutionError(ValueError):
@@ -241,22 +242,37 @@ def _result_id(
 
 def _result_id_v2(
     marker_counts: Sequence[MarkerCountRow],
-    atlas: AtlasUMatrix,
+    atlas_sha256: str,
     row_scale: NnlsRowScale,
+    *,
+    tolerance: float,
+    max_iterations: int,
 ) -> str:
     payload = {
-        "atlas": atlas.model_dump(mode="json"),
+        "atlas_sha256": atlas_sha256,
         "marker_counts": [
             row.model_dump(mode="json") for row in marker_counts
         ],
         "method": LOYFER_UXM_METHOD.model_dump(mode="json"),
         "nnls_row_scale": row_scale.value,
+        "solver_implementation_id": NNLS_SOLVER_IMPLEMENTATION_ID,
+        "solver_tolerance": float(tolerance),
+        "max_iterations": max_iterations,
         "schema_version": "cell-origin-deconvolution.v2",
     }
     digest = hashlib.sha256(
         json.dumps(payload, sort_keys=True, separators=(",", ":")).encode()
     ).hexdigest()
     return f"nnls-v2.{digest[:24]}"
+
+
+def _atlas_sha256(atlas: AtlasUMatrix) -> str:
+    payload = json.dumps(
+        atlas.model_dump(mode="json"),
+        sort_keys=True,
+        separators=(",", ":"),
+    ).encode()
+    return hashlib.sha256(payload).hexdigest()
 
 
 def deconvolve_uxm(
@@ -351,6 +367,7 @@ def deconvolve_uxm_v2(
         )
 
     fractions = weights / weight_sum
+    atlas_sha256 = _atlas_sha256(atlas)
     estimates = tuple(
         CellFractionEstimate(
             cell_type_id=cell_type_id,
@@ -366,9 +383,16 @@ def deconvolve_uxm_v2(
     )
     return DeconvolutionOutputV2(
         schema_version="cell-origin-deconvolution.v2",
-        result_id=_result_id_v2(marker_counts, atlas, scale_mode),
+        result_id=_result_id_v2(
+            marker_counts,
+            atlas_sha256,
+            scale_mode,
+            tolerance=float(tolerance),
+            max_iterations=max_iterations,
+        ),
         method=LOYFER_UXM_METHOD,
         atlas_id=atlas.atlas_id,
+        atlas_sha256=atlas_sha256,
         marker_ids=marker_ids,
         estimates=estimates,
         diagnostics=NnlsDiagnosticsV2(
@@ -377,6 +401,9 @@ def deconvolve_uxm_v2(
             residual_l2=residual_l2,
             objective_value=0.5 * residual_l2 * residual_l2,
             row_scale=scale_mode,
+            solver_tolerance=float(tolerance),
+            max_iterations=max_iterations,
+            solver_implementation_id=NNLS_SOLVER_IMPLEMENTATION_ID,
         ),
     )
 
