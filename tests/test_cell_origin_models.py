@@ -30,6 +30,13 @@ from evidence_inspector.cell_origin_models import (
 )
 
 FIXTURES = Path(__file__).parent / "fixtures" / "cell_origin"
+V2_SOLVER_DIAGNOSTICS = {
+    "row_scale": "sqrt_count",
+    "solver_tolerance": 1e-12,
+    "max_iterations": 10_000,
+    "solver_implementation_id": "traceback.active-set-nnls.v1",
+}
+V2_ATLAS_SHA256 = "a" * 64
 
 
 def fixture_bytes(name: str) -> bytes:
@@ -268,7 +275,7 @@ def test_v2_deconvolution_requires_explicit_row_scale_and_schema() -> None:
     wrong_schema = {
         **v1,
         "schema_version": "cell-origin-deconvolution.v1",
-        "diagnostics": {**v1["diagnostics"], "row_scale": "sqrt_count"},
+        "diagnostics": {**v1["diagnostics"], **V2_SOLVER_DIAGNOSTICS},
     }
     with pytest.raises(ValidationError, match="cell-origin-deconvolution.v2"):
         validate_json(DeconvolutionOutputV2, wrong_schema)
@@ -280,6 +287,8 @@ def test_v2_deconvolution_round_trips_each_row_scale(
 ) -> None:
     payload = fixture_payload("result.json")["deconvolution"]
     payload["schema_version"] = "cell-origin-deconvolution.v2"
+    payload["atlas_sha256"] = V2_ATLAS_SHA256
+    payload["diagnostics"].update(V2_SOLVER_DIAGNOSTICS)
     payload["diagnostics"]["row_scale"] = row_scale.value
 
     output = validate_json(DeconvolutionOutputV2, payload)
@@ -299,7 +308,12 @@ def test_v1_and_v2_deconvolution_boundaries_do_not_silently_coerce() -> None:
     v2 = {
         **v1,
         "schema_version": "cell-origin-deconvolution.v2",
-        "diagnostics": {**v1["diagnostics"], "row_scale": "reference_count"},
+        "atlas_sha256": V2_ATLAS_SHA256,
+        "diagnostics": {
+            **v1["diagnostics"],
+            **V2_SOLVER_DIAGNOSTICS,
+            "row_scale": "reference_count",
+        },
     }
     with pytest.raises(ValidationError, match="schema_version|row_scale"):
         validate_json(DeconvolutionOutput, v2)
@@ -307,10 +321,68 @@ def test_v1_and_v2_deconvolution_boundaries_do_not_silently_coerce() -> None:
     invalid_scale = {
         **v1,
         "schema_version": "cell-origin-deconvolution.v2",
-        "diagnostics": {**v1["diagnostics"], "row_scale": "variance_weighted"},
+        "atlas_sha256": V2_ATLAS_SHA256,
+        "diagnostics": {
+            **v1["diagnostics"],
+            **V2_SOLVER_DIAGNOSTICS,
+            "row_scale": "variance_weighted",
+        },
     }
     with pytest.raises(ValidationError, match="row_scale"):
         validate_json(DeconvolutionOutputV2, invalid_scale)
+
+
+@pytest.mark.parametrize(
+    "field",
+    ["solver_tolerance", "max_iterations", "solver_implementation_id"],
+)
+def test_v2_deconvolution_requires_effective_solver_configuration(
+    field: str,
+) -> None:
+    payload = fixture_payload("result.json")["deconvolution"]
+    payload["schema_version"] = "cell-origin-deconvolution.v2"
+    payload["atlas_sha256"] = V2_ATLAS_SHA256
+    payload["diagnostics"].update(V2_SOLVER_DIAGNOSTICS)
+    del payload["diagnostics"][field]
+
+    with pytest.raises(ValidationError, match=field):
+        validate_json(DeconvolutionOutputV2, payload)
+
+
+@pytest.mark.parametrize(
+    ("updates", "match"),
+    [
+        ({"solver_tolerance": 0.0}, "solver_tolerance"),
+        ({"solver_tolerance": float("nan")}, "solver_tolerance"),
+        ({"max_iterations": 0}, "max_iterations"),
+        ({"solver_implementation_id": "contains spaces"}, "solver_implementation_id"),
+    ],
+)
+def test_v2_deconvolution_rejects_invalid_solver_configuration(
+    updates: dict[str, object],
+    match: str,
+) -> None:
+    payload = fixture_payload("result.json")["deconvolution"]
+    payload["schema_version"] = "cell-origin-deconvolution.v2"
+    payload["atlas_sha256"] = V2_ATLAS_SHA256
+    payload["diagnostics"].update(V2_SOLVER_DIAGNOSTICS)
+    payload["diagnostics"].update(updates)
+
+    with pytest.raises(ValidationError, match=match):
+        validate_json(DeconvolutionOutputV2, payload)
+
+
+def test_v2_deconvolution_requires_valid_atlas_digest() -> None:
+    payload = fixture_payload("result.json")["deconvolution"]
+    payload["schema_version"] = "cell-origin-deconvolution.v2"
+    payload["diagnostics"].update(V2_SOLVER_DIAGNOSTICS)
+
+    with pytest.raises(ValidationError, match="atlas_sha256"):
+        validate_json(DeconvolutionOutputV2, payload)
+
+    payload["atlas_sha256"] = "not-a-sha256"
+    with pytest.raises(ValidationError, match="atlas_sha256"):
+        validate_json(DeconvolutionOutputV2, payload)
 
 
 def test_bootstrap_and_range_rows_are_bound_to_estimates() -> None:
