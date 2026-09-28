@@ -1,0 +1,10 @@
+Sample	Tumor Fraction	Ploidy
+sample	0	2
+
+sample
+Gender:	unknown
+Tumor Fraction:	0
+Ploidy:	2
+
+init	n_est	phi_est	BIC	Frac_genome_subclonal	Frac_CNA_subclonal	loglik
+n1-p2	1	2	NA	0	0	-50

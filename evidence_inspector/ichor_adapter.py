@@ -805,7 +805,7 @@ class CorrectedBin(StrictModel):
     contig: Identifier
     start: int = Field(ge=0)
     end: int = Field(gt=0)
-    corrected_log2: FiniteFloat
+    corrected_log2: FiniteFloat | None
 
     @model_validator(mode="after")
     def increasing(self) -> CorrectedBin:
@@ -826,10 +826,8 @@ class CorrectedBinStatus(StrictModel):
     def coherent_status(self) -> CorrectedBinStatus:
         if self.end <= self.start:
             raise ValueError("bin-status end must exceed start")
-        if self.status == "retained" and (
-            self.corrected_log2 is None or self.mask_reason is not None
-        ):
-            raise ValueError("retained bin requires a value and no mask reason")
+        if self.status == "retained" and self.mask_reason is not None:
+            raise ValueError("retained bin cannot have a mask reason")
         if self.status == "masked_prespecified" and (
             self.corrected_log2 is not None or self.mask_reason is None
         ):
@@ -906,7 +904,7 @@ class CandidateSolution(StrictModel):
     estimated_normal_fraction: FiniteFloat = Field(ge=0, le=1)
     model_fraction: FiniteFloat = Field(ge=0, le=1)
     estimated_ploidy: FiniteFloat = Field(gt=0)
-    bic: FiniteFloat
+    bic: FiniteFloat | None
     fraction_genome_subclonal: FiniteFloat | None = Field(default=None, ge=0, le=1)
     fraction_cna_subclonal: FiniteFloat | None = Field(default=None, ge=0, le=1)
     log_likelihood: FiniteFloat
@@ -1172,6 +1170,12 @@ def _optional_fraction(value: str, label: str) -> float | None:
     return parsed
 
 
+def _optional_native_na(value: str, label: str) -> float | None:
+    if value.strip().upper() == "NA":
+        return None
+    return _finite(value, label)
+
+
 def _parse_corrected(
     path: Path,
     grid: CanonicalGrid,
@@ -1201,7 +1205,7 @@ def _parse_corrected(
         observed_keys.append(key)
         if key in masks:
             raise IchorOutputError("upstream emitted a row for a removed masked bin")
-        value = _finite(raw_value, "corrected log2")
+        value = _optional_native_na(raw_value, "corrected log2")
         result.append(
             CorrectedBin(contig=contig, start=start, end=end, corrected_log2=value)
         )
@@ -1414,7 +1418,7 @@ def _parse_params(
                 estimated_normal_fraction=estimated_normal,
                 model_fraction=1 - estimated_normal,
                 estimated_ploidy=_finite(row["phi_est"], "estimated ploidy"),
-                bic=_finite(row["BIC"], "candidate BIC"),
+                bic=_optional_native_na(row["BIC"], "candidate BIC"),
                 fraction_genome_subclonal=_optional_fraction(
                     row["Frac_genome_subclonal"], "subclonal genome fraction"
                 ),
@@ -1650,6 +1654,16 @@ def validate_ichor_outputs(
         "RData is retained by digest but is not deserialized by this parser.",
         "Raw .seg is retained by digest; v1 parses .seg.txt and bin-level .cna.seg.",
     ]
+    if any(item.corrected_log2 is None for item in corrected):
+        limitations.append(
+            "Native retained bins with unavailable corrected log2 values are "
+            "represented as null, never as zero or a prespecified mask."
+        )
+    if any(item.bic is None for item in candidates):
+        limitations.append(
+            "Native unavailable candidate BIC values are represented as null; "
+            "no finite selection score is claimed."
+        )
     if prepared.request.pon_mode == "none_development":
         limitations.append("No protocol-matched panel of normals was supplied.")
     try:

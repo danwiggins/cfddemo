@@ -529,6 +529,26 @@ def test_candidate_na_is_typed_and_ambiguous_selected_match_is_not_overclaimed(
     assert result.identifiability == "not_assessed"
 
 
+def test_native_retained_na_and_single_candidate_bic_na_are_preserved(
+    tmp_path: Path,
+) -> None:
+    result = validate_ichor_outputs(
+        prepare_ichor_run(_request()), _fixture(tmp_path, "native_na")
+    )
+
+    assert result.corrected_bins[0].corrected_log2 is None
+    assert result.bin_statuses[0].status == "retained"
+    assert result.bin_statuses[0].mask_reason is None
+    assert result.bin_statuses[0].corrected_log2 is None
+    assert result.candidates[0].bic is None
+    assert result.selected_solution.matched_candidate_id == "n1.p2"
+    assert any("never as zero" in item for item in result.limitations)
+    assert any("no finite selection score" in item for item in result.limitations)
+    assert (
+        CnvDevelopmentResult.model_validate(result.model_dump(mode="python")) == result
+    )
+
+
 def test_contradictory_selected_summary_is_rejected(tmp_path: Path) -> None:
     output = _fixture(tmp_path, "arm_loss")
     params = output / "sample.params.txt"
