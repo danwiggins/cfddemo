@@ -50,7 +50,10 @@ DosageDirection = Literal[
     "higher_relative_dosage",
     "lower_relative_dosage",
 ]
-SequenceIdentityVerification = Literal["md5_verified", "length_only_unverified"]
+HeaderCompatibilityScope = Literal[
+    "header_m5_names_lengths_match",
+    "header_names_lengths_match_m5_incomplete",
+]
 
 
 class StrictModel(BaseModel):
@@ -166,10 +169,63 @@ class ReadAccounting(StrictModel):
         return self
 
 
-class ReferenceVerification(StrictModel):
+class BamHeaderContig(StrictModel):
+    name: ContigName
+    length: int = Field(gt=0)
+    declared_md5: Md5 | None = None
+
+
+class BamHeaderReferenceCompatibility(StrictModel):
     reference_id: Identifier
-    sequence_identity: SequenceIdentityVerification
-    verified_contig_count: int = Field(ge=22)
+    scope: HeaderCompatibilityScope
+    autosomes: tuple[BamHeaderContig, ...] = Field(min_length=22, max_length=22)
+    actual_fasta_bytes_verified: Literal[False] = False
+
+
+class DosageQcScanPolicy(StrictModel):
+    window_size_bp: int = Field(gt=0)
+    minimum_mapping_quality: int = Field(ge=0, le=255)
+    filter_precedence: tuple[
+        Literal[
+            "unmapped",
+            "secondary",
+            "supplementary",
+            "qc_failure",
+            "duplicate",
+            "below_mapq",
+            "non_autosomal",
+            "outside_analyzed_bins",
+            "accepted",
+        ],
+        ...,
+    ] = (
+        "unmapped",
+        "secondary",
+        "supplementary",
+        "qc_failure",
+        "duplicate",
+        "below_mapq",
+        "non_autosomal",
+        "outside_analyzed_bins",
+        "accepted",
+    )
+
+    @model_validator(mode="after")
+    def exact_precedence(self) -> DosageQcScanPolicy:
+        expected = (
+            "unmapped",
+            "secondary",
+            "supplementary",
+            "qc_failure",
+            "duplicate",
+            "below_mapq",
+            "non_autosomal",
+            "outside_analyzed_bins",
+            "accepted",
+        )
+        if self.filter_precedence != expected:
+            raise ValueError("v2 filter precedence is fixed")
+        return self
 
 
 class ChromosomeDosageQc(StrictModel):
@@ -213,12 +269,13 @@ class ChromosomeDosageQc(StrictModel):
 class DosageQcProvenance(StrictModel):
     input_artifact_sha256: Sha256
     reference: ReferenceBinding
-    reference_verification: ReferenceVerification
+    bam_header_compatibility: BamHeaderReferenceCompatibility
     read_accounting: ReadAccounting
-    window_size_bp: int = Field(gt=0)
-    minimum_mapping_quality: int = Field(ge=0, le=255)
-    low_bin_retention_fraction: FiniteFloat = Field(gt=0, le=1)
-    visualization_boundary_log2: FiniteFloat = Field(gt=0)
+    scan_policy: DosageQcScanPolicy
+    low_bin_retention_fraction: Literal[0.55] = DEFAULT_LOW_BIN_FRACTION
+    visualization_boundary_log2: Literal[0.2] = (
+        DEFAULT_VISUALIZATION_BOUNDARY_LOG2
+    )
     filters: tuple[str, ...]
     method: Literal["sample_internal_chromosome_median"] = (
         "sample_internal_chromosome_median"
@@ -228,6 +285,7 @@ class DosageQcProvenance(StrictModel):
 
 class DosageQcResultBundle(StrictModel):
     schema_version: Literal["copy-number-dosage-qc.v2"] = SCHEMA_VERSION
+    analysis_status: Literal["complete"] = "complete"
     identity: DosageQcIdentity = DosageQcIdentity()
     bins: tuple[BinCount, ...] = Field(min_length=22)
     chromosomes: tuple[ChromosomeDosageQc, ...] = Field(min_length=22, max_length=22)
@@ -239,38 +297,79 @@ class DosageQcResultBundle(StrictModel):
 
     @model_validator(mode="after")
     def reconcile_bundle(self) -> DosageQcResultBundle:
-        if tuple(row.chromosome for row in self.chromosomes) != AUTOSOMES:
-            raise ValueError("chromosomes must be ordered chr1 through chr22")
-        if sum(row.accepted_read_start_count for row in self.bins) != (
-            self.provenance.read_accounting.accepted_autosomal_read_count
+        _validate_evidence_bindings(self.bins, self.provenance)
+        replay = _derive_dosage(self.bins)
+        if isinstance(replay, tuple) and replay and isinstance(replay[0], str):
+            raise ValueError("complete result has insufficient-information bins")
+        chromosomes, genome_median, log2_mad, outside = replay
+        if self.chromosomes != chromosomes:
+            raise ValueError("chromosome summaries do not match semantic replay")
+        if not math.isclose(
+            self.genome_median_bin_count, genome_median, rel_tol=0, abs_tol=1e-12
         ):
-            raise ValueError("accepted read count does not equal emitted bin counts")
-        by_contig = {
-            chromosome: sum(
-                row.accepted_read_start_count
-                for row in self.bins
-                if row.contig == chromosome
-            )
-            for chromosome in AUTOSOMES
-        }
-        if any(
-            row.accepted_read_count != by_contig[row.chromosome]
-            for row in self.chromosomes
+            raise ValueError("genome median does not match semantic replay")
+        if not math.isclose(
+            self.genome_log2_mad, log2_mad, rel_tol=0, abs_tol=1e-12
         ):
-            raise ValueError("chromosome read count does not equal its bin counts")
-        outside = sum(
-            row.dosage_direction != "within_visualization_boundary"
-            for row in self.chromosomes
-        )
-        if outside != self.outside_visualization_boundary_count:
-            raise ValueError("visualization-boundary count is inconsistent")
+            raise ValueError("genome log2 MAD does not match semantic replay")
+        if self.outside_visualization_boundary_count != outside:
+            raise ValueError("visualization-boundary count does not match replay")
         return self
 
 
 class BamDosageQcScan(StrictModel):
-    bins: tuple[BinCount, ...]
+    schema_version: Literal["copy-number-dosage-qc-scan.v1"] = (
+        "copy-number-dosage-qc-scan.v1"
+    )
+    input_artifact_sha256: Sha256
+    reference: ReferenceBinding
+    scan_policy: DosageQcScanPolicy
+    bins: tuple[BinCount, ...] = Field(min_length=22)
     accounting: ReadAccounting
-    reference_verification: ReferenceVerification
+    bam_header_compatibility: BamHeaderReferenceCompatibility
+
+    @model_validator(mode="after")
+    def validate_scan(self) -> BamDosageQcScan:
+        definitions = _definitions_from_counts(self.bins)
+        validate_bins(
+            self.reference,
+            definitions,
+            window_size_bp=self.scan_policy.window_size_bp,
+        )
+        if sum(row.accepted_read_start_count for row in self.bins) != (
+            self.accounting.accepted_autosomal_read_count
+        ):
+            raise ValueError("accepted read count does not equal emitted bin counts")
+        expected_compatibility = _header_compatibility(
+            self.bam_header_compatibility.autosomes,
+            self.reference,
+        )
+        if self.bam_header_compatibility != expected_compatibility:
+            raise ValueError("BAM-header compatibility does not match bound reference")
+        return self
+
+
+class DosageQcInsufficientResultBundle(StrictModel):
+    schema_version: Literal["copy-number-dosage-qc.v2"] = SCHEMA_VERSION
+    analysis_status: Literal["insufficient_information"] = "insufficient_information"
+    identity: DosageQcIdentity = DosageQcIdentity()
+    bins: tuple[BinCount, ...] = Field(min_length=22)
+    reasons: tuple[str, ...] = Field(min_length=1)
+    provenance: DosageQcProvenance
+    limitations: tuple[str, ...] = Field(min_length=1)
+
+    @model_validator(mode="after")
+    def replay_insufficiency(self) -> DosageQcInsufficientResultBundle:
+        _validate_evidence_bindings(self.bins, self.provenance)
+        replay = _derive_dosage(self.bins)
+        if not (isinstance(replay, tuple) and replay and isinstance(replay[0], str)):
+            raise ValueError("insufficient result has enough information")
+        if self.reasons != replay:
+            raise ValueError("insufficient-information reasons do not match replay")
+        return self
+
+
+DosageQcAnalysisResult = DosageQcResultBundle | DosageQcInsufficientResultBundle
 
 
 def fixed_width_bins(
@@ -332,34 +431,79 @@ def validate_bins(
         raise ValueError("bin-definition digest does not match reference binding")
 
 
-def _verify_bam_reference(bam: object, reference: ReferenceBinding) -> ReferenceVerification:
-    lengths = dict(zip(bam.references, bam.lengths, strict=True))
-    expected = {contig.name: contig for contig in reference.contigs}
-    for chromosome in AUTOSOMES:
-        if chromosome not in lengths:
-            raise ValueError(f"BAM is missing bound autosome: {chromosome}")
-        if lengths[chromosome] != expected[chromosome].length:
-            raise ValueError(f"BAM/reference contig length mismatch: {chromosome}")
+def _definitions_from_counts(bins: Sequence[BinCount]) -> tuple[BinDefinition, ...]:
+    return tuple(
+        BinDefinition(
+            contig=row.contig,
+            start=row.start,
+            end=row.end,
+            is_terminal_partial_bin=row.is_terminal_partial_bin,
+        )
+        for row in bins
+    )
 
+
+def _header_compatibility(
+    autosomes: Sequence[BamHeaderContig],
+    reference: ReferenceBinding,
+) -> BamHeaderReferenceCompatibility:
+    expected = {contig.name: contig for contig in reference.contigs}
+    observed = {contig.name: contig for contig in autosomes}
+    if tuple(contig.name for contig in autosomes) != AUTOSOMES:
+        raise ValueError("BAM-header autosomes must be ordered chr1 through chr22")
+    all_m5_match = True
+    for chromosome in AUTOSOMES:
+        if chromosome not in observed:
+            raise ValueError(f"BAM is missing bound autosome: {chromosome}")
+        if observed[chromosome].length != expected[chromosome].length:
+            raise ValueError(f"BAM/reference contig length mismatch: {chromosome}")
+        expected_md5 = expected[chromosome].md5
+        observed_md5 = observed[chromosome].declared_md5
+        if expected_md5 is not None and observed_md5 is not None:
+            if observed_md5 != expected_md5:
+                raise ValueError(f"BAM/reference contig MD5 mismatch: {chromosome}")
+        else:
+            all_m5_match = False
+    return BamHeaderReferenceCompatibility(
+        reference_id=reference.reference_id,
+        scope=(
+            "header_m5_names_lengths_match"
+            if all_m5_match
+            else "header_names_lengths_match_m5_incomplete"
+        ),
+        autosomes=tuple(autosomes),
+    )
+
+
+def _compatibility_from_bam(
+    bam: object,
+    reference: ReferenceBinding,
+) -> BamHeaderReferenceCompatibility:
     header_rows = {
         row["SN"]: row for row in bam.header.to_dict().get("SQ", ()) if "SN" in row
     }
-    all_md5_verified = True
+    lengths = dict(zip(bam.references, bam.lengths, strict=True))
+    autosomes: list[BamHeaderContig] = []
     for chromosome in AUTOSOMES:
-        expected_md5 = expected[chromosome].md5
-        observed_md5 = header_rows.get(chromosome, {}).get("M5")
-        if expected_md5 is not None and observed_md5 is not None:
-            if observed_md5.lower() != expected_md5:
-                raise ValueError(f"BAM/reference contig MD5 mismatch: {chromosome}")
-        else:
-            all_md5_verified = False
-    return ReferenceVerification(
-        reference_id=reference.reference_id,
-        sequence_identity=(
-            "md5_verified" if all_md5_verified else "length_only_unverified"
-        ),
-        verified_contig_count=len(AUTOSOMES),
-    )
+        if chromosome not in lengths:
+            raise ValueError(f"BAM is missing bound autosome: {chromosome}")
+        declared_md5 = header_rows.get(chromosome, {}).get("M5")
+        autosomes.append(
+            BamHeaderContig(
+                name=chromosome,
+                length=lengths[chromosome],
+                declared_md5=(declared_md5.lower() if declared_md5 else None),
+            )
+        )
+    return _header_compatibility(autosomes, reference)
+
+
+def _sha256_file(path: Path) -> str:
+    digest = hashlib.sha256()
+    with path.open("rb") as stream:
+        for chunk in iter(lambda: stream.read(8 * 1024 * 1024), b""):
+            digest.update(chunk)
+    return digest.hexdigest()
 
 
 def scan_bam(
@@ -377,6 +521,7 @@ def scan_bam(
     if not 0 <= minimum_mapping_quality <= 255:
         raise ValueError("minimum mapping quality must be between 0 and 255")
     validate_bins(reference, bins, window_size_bp=window_size_bp)
+    input_artifact_sha256 = _sha256_file(path)
     counts = [0] * len(bins)
     bin_index = {
         (row.contig, row.start // window_size_bp): index
@@ -397,7 +542,7 @@ def scan_bam(
     inspected = 0
 
     with pysam.AlignmentFile(path, "rb") as bam:
-        verification = _verify_bam_reference(bam, reference)
+        compatibility = _compatibility_from_bam(bam, reference)
         for read in bam.fetch(until_eof=True):
             inspected += 1
             if read.is_unmapped:
@@ -433,6 +578,9 @@ def scan_bam(
             counts[target] += 1
             accounting["accepted_autosomal_read_count"] += 1
 
+    if _sha256_file(path) != input_artifact_sha256:
+        raise ValueError("BAM content changed while it was being scanned")
+
     emitted = tuple(
         BinCount(
             **definition.model_dump(mode="python"),
@@ -445,67 +593,67 @@ def scan_bam(
         for definition, count in zip(bins, counts, strict=True)
     )
     return BamDosageQcScan(
+        input_artifact_sha256=input_artifact_sha256,
+        reference=reference,
+        scan_policy=DosageQcScanPolicy(
+            window_size_bp=window_size_bp,
+            minimum_mapping_quality=minimum_mapping_quality,
+        ),
         bins=emitted,
         accounting=ReadAccounting(
             inspected_alignment_count=inspected,
             **accounting,
         ),
-        reference_verification=verification,
+        bam_header_compatibility=compatibility,
     )
 
 
-def compute_dosage_qc(
-    scan: BamDosageQcScan,
-    *,
-    input_artifact_sha256: str,
-    reference: ReferenceBinding,
-    window_size_bp: int = DEFAULT_WINDOW_SIZE_BP,
-    minimum_mapping_quality: int = DEFAULT_MIN_MAPQ,
-) -> DosageQcResultBundle:
-    """Apply the legacy chromosome-median calculation to accountable full bins."""
-
-    if scan.reference_verification.reference_id != reference.reference_id:
-        raise ValueError("scan/reference identity mismatch")
-    definitions = tuple(
-        BinDefinition(
-            contig=row.contig,
-            start=row.start,
-            end=row.end,
-            is_terminal_partial_bin=row.is_terminal_partial_bin,
-        )
-        for row in scan.bins
-    )
-    validate_bins(reference, definitions, window_size_bp=window_size_bp)
+def _derive_dosage(
+    bins: Sequence[BinCount],
+) -> (
+    tuple[str, ...]
+    | tuple[tuple[ChromosomeDosageQc, ...], float, float, int]
+):
+    """Replay every derived field or return deterministic insufficiency reasons."""
 
     retained_by_chromosome: dict[str, np.ndarray] = {}
     all_retained: list[float] = []
+    reasons: list[str] = []
     for chromosome in AUTOSOMES:
         values = np.asarray(
             [
                 row.accepted_read_start_count
-                for row in scan.bins
+                for row in bins
                 if row.contig == chromosome and row.included_in_screen
             ],
             dtype=float,
         )
         if values.size == 0:
-            raise ValueError(f"{chromosome} requires at least one complete bin")
+            reasons.append(f"{chromosome}:no_complete_bins")
+            continue
         chromosome_median = float(np.median(values))
+        if chromosome_median <= 0:
+            reasons.append(f"{chromosome}:zero_complete_bin_median")
+            continue
         retained = values[values >= chromosome_median * DEFAULT_LOW_BIN_FRACTION]
-        if retained.size == 0:
-            raise ValueError(f"{chromosome} has no retained complete bins")
+        if retained.size == 0 or float(np.median(retained)) <= 0:
+            reasons.append(f"{chromosome}:no_positive_retained_bins")
+            continue
         retained_by_chromosome[chromosome] = retained
         all_retained.extend(float(value) for value in retained)
 
+    if reasons:
+        return tuple(reasons)
+
     genome_median = float(np.median(all_retained))
     if genome_median <= 0:
-        raise ValueError("genome-wide retained-bin median must be positive")
+        return ("genome:zero_retained_bin_median",)
     log2_values = np.log2(np.asarray(all_retained) / genome_median)
     log2_mad = float(np.median(np.abs(log2_values - np.median(log2_values))))
 
     rows: list[ChromosomeDosageQc] = []
     for ordinal, chromosome in enumerate(AUTOSOMES, start=1):
-        chromosome_bins = [row for row in scan.bins if row.contig == chromosome]
+        chromosome_bins = [row for row in bins if row.contig == chromosome]
         complete_bins = [row for row in chromosome_bins if row.included_in_screen]
         retained = retained_by_chromosome[chromosome]
         chromosome_median = float(np.median(retained))
@@ -532,47 +680,107 @@ def compute_dosage_qc(
             )
         )
 
+    chromosomes = tuple(rows)
+    return (
+        chromosomes,
+        genome_median,
+        log2_mad,
+        sum(
+            row.dosage_direction != "within_visualization_boundary"
+            for row in chromosomes
+        ),
+    )
+
+
+def _filters(policy: DosageQcScanPolicy) -> tuple[str, ...]:
+    return (
+        "autosomes chr1 through chr22",
+        "primary alignments only",
+        "mapped, QC-pass, non-duplicate reads",
+        f"mapping quality at least {policy.minimum_mapping_quality}",
+        "read start assigned to one exact reference-bound bin",
+        "terminal partial bins counted but excluded from dosage calculation",
+        "complete bins below 55% of their chromosome median excluded",
+    )
+
+
+def _validate_evidence_bindings(
+    bins: Sequence[BinCount],
+    provenance: DosageQcProvenance,
+) -> None:
+    validate_bins(
+        provenance.reference,
+        _definitions_from_counts(bins),
+        window_size_bp=provenance.scan_policy.window_size_bp,
+    )
+    if sum(row.accepted_read_start_count for row in bins) != (
+        provenance.read_accounting.accepted_autosomal_read_count
+    ):
+        raise ValueError("accepted read count does not equal emitted bin counts")
+    compatibility = _header_compatibility(
+        provenance.bam_header_compatibility.autosomes,
+        provenance.reference,
+    )
+    if provenance.bam_header_compatibility != compatibility:
+        raise ValueError("BAM-header compatibility does not match bound reference")
+    if provenance.filters != _filters(provenance.scan_policy):
+        raise ValueError("filter description does not match effective scan policy")
+
+
+def _provenance_from_scan(scan: BamDosageQcScan) -> DosageQcProvenance:
+    return DosageQcProvenance(
+        input_artifact_sha256=scan.input_artifact_sha256,
+        reference=scan.reference,
+        bam_header_compatibility=scan.bam_header_compatibility,
+        read_accounting=scan.accounting,
+        scan_policy=scan.scan_policy,
+        filters=_filters(scan.scan_policy),
+    )
+
+
+def compute_dosage_qc(scan: BamDosageQcScan) -> DosageQcAnalysisResult:
+    """Derive an evidence-bound result without caller-supplied provenance."""
+
+    provenance = _provenance_from_scan(scan)
+    replay = _derive_dosage(scan.bins)
+    limitations = (
+        "Exploratory, uncalibrated whole-chromosome dosage quality control.",
+        "Not a cancer test and not a tumor-fraction estimate.",
+        "No GC or mappability correction, panel of normals, or segmentation model.",
+        "Descriptive dosage directions use an unvalidated visualization boundary.",
+    )
+    if isinstance(replay, tuple) and replay and isinstance(replay[0], str):
+        return DosageQcInsufficientResultBundle(
+            bins=scan.bins,
+            reasons=replay,
+            provenance=provenance,
+            limitations=(
+                *limitations,
+                "No dosage summary was computed for sparse chromosome coverage.",
+            ),
+        )
+
+    chromosomes, genome_median, log2_mad, outside = replay
+
     return DosageQcResultBundle(
         bins=scan.bins,
-        chromosomes=tuple(rows),
+        chromosomes=chromosomes,
         genome_median_bin_count=genome_median,
         genome_log2_mad=log2_mad,
-        outside_visualization_boundary_count=sum(
-            row.dosage_direction != "within_visualization_boundary" for row in rows
-        ),
-        provenance=DosageQcProvenance(
-            input_artifact_sha256=input_artifact_sha256,
-            reference=reference,
-            reference_verification=scan.reference_verification,
-            read_accounting=scan.accounting,
-            window_size_bp=window_size_bp,
-            minimum_mapping_quality=minimum_mapping_quality,
-            low_bin_retention_fraction=DEFAULT_LOW_BIN_FRACTION,
-            visualization_boundary_log2=DEFAULT_VISUALIZATION_BOUNDARY_LOG2,
-            filters=(
-                "autosomes chr1 through chr22",
-                "primary alignments only",
-                "mapped, QC-pass, non-duplicate reads",
-                f"mapping quality at least {minimum_mapping_quality}",
-                "read start assigned to one exact reference-bound bin",
-                "terminal partial bins counted but excluded from dosage calculation",
-                "complete bins below 55% of their chromosome median excluded",
-            ),
-        ),
-        limitations=(
-            "Exploratory, uncalibrated whole-chromosome dosage quality control.",
-            "Not a cancer test and not a tumor-fraction estimate.",
-            "No GC or mappability correction, panel of normals, or segmentation model.",
-            "Descriptive dosage directions use an unvalidated visualization boundary.",
-        ),
+        outside_visualization_boundary_count=outside,
+        provenance=provenance,
+        limitations=limitations,
     )
 
 
 __all__ = [
     "AUTOSOMES",
+    "BamHeaderReferenceCompatibility",
     "BamDosageQcScan",
     "BinCount",
     "BinDefinition",
+    "DosageQcAnalysisResult",
+    "DosageQcInsufficientResultBundle",
     "DosageQcResultBundle",
     "ReadAccounting",
     "ReferenceBinding",

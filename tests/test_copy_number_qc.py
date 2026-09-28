@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import hashlib
 import json
 from pathlib import Path
 
@@ -12,7 +13,9 @@ from pydantic import ValidationError
 from evidence_inspector.copy_number import CopyNumberResultBundle
 from evidence_inspector.copy_number_qc import (
     AUTOSOMES,
+    BamDosageQcScan,
     BinDefinition,
+    DosageQcInsufficientResultBundle,
     DosageQcResultBundle,
     ReferenceBinding,
     ReferenceContigBinding,
@@ -110,6 +113,13 @@ def _write_fixture_bam(path: Path) -> Path:
             _record(header, name="duplicate", contig="chr2", flag=0x400),
             _record(header, name="low-mapq", contig="chr2", mapq=19),
             _record(header, name="non-autosomal", contig="chrUn"),
+            _record(
+                header,
+                name="secondary-and-supplementary",
+                contig="chr2",
+                flag=0x100 | 0x800,
+            ),
+            _record(header, name="outside-contig", contig="chr1", start=25),
         )
     )
     with pysam.AlignmentFile(path, "wb", header=header) as stream:
@@ -136,20 +146,23 @@ def test_exact_half_open_edges_and_mutually_exclusive_accounting(tmp_path: Path)
     assert repeated.model_dump_json() == scan.model_dump_json()
 
     accounting = scan.accounting
-    assert accounting.inspected_alignment_count == 55
+    assert accounting.inspected_alignment_count == 57
     assert accounting.accepted_autosomal_read_count == 48
     assert accounting.excluded_unmapped == 1
-    assert accounting.excluded_secondary == 1
+    assert accounting.excluded_secondary == 2
     assert accounting.excluded_supplementary == 1
     assert accounting.excluded_qc_failure == 1
     assert accounting.excluded_duplicate == 1
     assert accounting.excluded_below_mapq == 1
     assert accounting.excluded_non_autosomal == 1
-    assert accounting.excluded_outside_analyzed_bins == 0
+    assert accounting.excluded_outside_analyzed_bins == 1
     assert accounting.accepted_autosomal_read_count == sum(
         row.accepted_read_start_count for row in scan.bins
     )
-    assert scan.reference_verification.sequence_identity == "md5_verified"
+    assert scan.bam_header_compatibility.scope == "header_m5_names_lengths_match"
+    assert scan.bam_header_compatibility.actual_fasta_bytes_verified is False
+    assert scan.scan_policy.minimum_mapping_quality == 20
+    assert scan.input_artifact_sha256 == hashlib.sha256(bam.read_bytes()).hexdigest()
 
     expected_edges = json.loads((FIXTURES / "bin_edges.json").read_text())["cases"]
     chr1 = [row for row in scan.bins if row.contig == "chr1"]
@@ -176,12 +189,8 @@ def test_result_identity_and_cross_level_totals_are_strict(tmp_path: Path) -> No
         bins=bins,
         window_size_bp=10,
     )
-    result = compute_dosage_qc(
-        scan,
-        input_artifact_sha256="b" * 64,
-        reference=reference,
-        window_size_bp=10,
-    )
+    result = compute_dosage_qc(scan)
+    assert isinstance(result, DosageQcResultBundle)
 
     assert result.schema_version == "copy-number-dosage-qc.v2"
     assert result.identity.intended_use == "exploratory_quality_control"
@@ -189,6 +198,9 @@ def test_result_identity_and_cross_level_totals_are_strict(tmp_path: Path) -> No
     assert result.identity.diagnostic_interpretation_allowed is False
     assert result.identity.tumor_fraction_estimate_present is False
     assert result.identity.qualification_status == "development_unqualified"
+    assert result.provenance.input_artifact_sha256 == scan.input_artifact_sha256
+    assert result.provenance.reference == scan.reference
+    assert result.provenance.scan_policy == scan.scan_policy
     assert result.chromosomes[0].accepted_read_count == 6
     assert result.chromosomes[0].complete_bin_count == 2
     assert result.chromosomes[0].dosage_direction == "higher_relative_dosage"
@@ -204,8 +216,28 @@ def test_result_identity_and_cross_level_totals_are_strict(tmp_path: Path) -> No
         index for index, row in enumerate(moved["bins"]) if row["contig"] == "chr2"
     )
     moved["bins"][chr2_first]["accepted_read_start_count"] -= 1
-    with pytest.raises(ValueError, match="chromosome read count"):
+    with pytest.raises(ValueError, match="semantic replay"):
         DosageQcResultBundle.model_validate(moved)
+
+    changed_coordinate = result.model_dump(mode="python")
+    changed_coordinate["bins"][0]["start"] = 1
+    with pytest.raises(ValueError, match="exact ordered reference tiling"):
+        DosageQcResultBundle.model_validate(changed_coordinate)
+
+    changed_summary = result.model_dump(mode="python")
+    changed_summary["chromosomes"][0]["median_retained_bin_count"] = 3.0
+    with pytest.raises(ValueError, match="semantic replay"):
+        DosageQcResultBundle.model_validate(changed_summary)
+
+    changed_genome = result.model_dump(mode="python")
+    changed_genome["genome_median_bin_count"] = 2.0
+    with pytest.raises(ValueError, match="genome median"):
+        DosageQcResultBundle.model_validate(changed_genome)
+
+    changed_boundary = result.model_dump(mode="python")
+    changed_boundary["provenance"]["visualization_boundary_log2"] = 0.25
+    with pytest.raises(ValidationError):
+        DosageQcResultBundle.model_validate(changed_boundary)
 
 
 def test_reference_and_bin_changes_fail_closed(tmp_path: Path) -> None:
@@ -251,6 +283,17 @@ def test_reference_and_bin_changes_fail_closed(tmp_path: Path) -> None:
     with pytest.raises(ValueError, match="missing autosomes"):
         ReferenceBinding.model_validate(mixed_names)
 
+    scan = scan_bam(
+        bam,
+        reference=reference,
+        bins=bins,
+        window_size_bp=10,
+    )
+    changed_compatibility = scan.model_dump(mode="python")
+    changed_compatibility["bam_header_compatibility"]["reference_id"] = "other"
+    with pytest.raises(ValueError, match="compatibility"):
+        BamDosageQcScan.model_validate(changed_compatibility)
+
 
 def test_historical_v1_and_additive_v2_do_not_relabel_each_other(tmp_path: Path) -> None:
     reference, bins = _reference_and_bins()
@@ -260,12 +303,8 @@ def test_historical_v1_and_additive_v2_do_not_relabel_each_other(tmp_path: Path)
         bins=bins,
         window_size_bp=10,
     )
-    v2 = compute_dosage_qc(
-        scan,
-        input_artifact_sha256="c" * 64,
-        reference=reference,
-        window_size_bp=10,
-    )
+    v2 = compute_dosage_qc(scan)
+    assert isinstance(v2, DosageQcResultBundle)
 
     with pytest.raises(ValidationError):
         CopyNumberResultBundle.model_validate(v2.model_dump(mode="python"))
@@ -274,3 +313,62 @@ def test_historical_v1_and_additive_v2_do_not_relabel_each_other(tmp_path: Path)
     v2_payload["schema_version"] = "copy-number-screen.v1"
     with pytest.raises(ValidationError):
         DosageQcResultBundle.model_validate(v2_payload)
+
+
+def test_zero_median_chromosome_returns_insufficient_information(
+    tmp_path: Path,
+) -> None:
+    reference, bins = _reference_and_bins()
+    scan = scan_bam(
+        _write_fixture_bam(tmp_path / "sparse.bam"),
+        reference=reference,
+        bins=bins,
+        window_size_bp=10,
+    )
+    payload = scan.model_dump(mode="python")
+    removed = 0
+    for row in payload["bins"]:
+        if row["contig"] == "chr22":
+            removed += row["accepted_read_start_count"]
+            row["accepted_read_start_count"] = 0
+    payload["accounting"]["accepted_autosomal_read_count"] -= removed
+    payload["accounting"]["inspected_alignment_count"] -= removed
+    sparse_scan = BamDosageQcScan.model_validate(payload)
+
+    result = compute_dosage_qc(sparse_scan)
+
+    assert isinstance(result, DosageQcInsufficientResultBundle)
+    assert result.analysis_status == "insufficient_information"
+    assert result.reasons == ("chr22:zero_complete_bin_median",)
+    assert "No dosage summary" in result.limitations[-1]
+
+    changed_reason = result.model_dump(mode="python")
+    changed_reason["reasons"] = ("chr1:zero_complete_bin_median",)
+    with pytest.raises(ValueError, match="reasons do not match"):
+        DosageQcInsufficientResultBundle.model_validate(changed_reason)
+
+
+def test_mixed_sparse_bins_retain_positive_information(tmp_path: Path) -> None:
+    reference, bins = _reference_and_bins()
+    scan = scan_bam(
+        _write_fixture_bam(tmp_path / "mixed-sparse.bam"),
+        reference=reference,
+        bins=bins,
+        window_size_bp=10,
+    )
+    payload = scan.model_dump(mode="python")
+    first_chr22 = next(
+        row
+        for row in payload["bins"]
+        if row["contig"] == "chr22" and row["included_in_screen"]
+    )
+    first_chr22["accepted_read_start_count"] = 0
+    payload["accounting"]["accepted_autosomal_read_count"] -= 1
+    payload["accounting"]["inspected_alignment_count"] -= 1
+    mixed_scan = BamDosageQcScan.model_validate(payload)
+
+    result = compute_dosage_qc(mixed_scan)
+
+    assert isinstance(result, DosageQcResultBundle)
+    assert result.chromosomes[-1].retained_complete_bin_count == 1
+    assert result.chromosomes[-1].median_retained_bin_count == 1
