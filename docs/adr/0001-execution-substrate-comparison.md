@@ -4,6 +4,11 @@
 - Date: 2026-09-27
 - Scope: A02 synthetic comparison only
 
+> Historical evidence note: host inventory and runtime availability in this ADR
+> were observed on 2026-09-27. They are not a live inventory. Later development
+> experiments, including CPU-only native tool smokes on another local runtime,
+> do not retroactively exercise or qualify any A02 candidate.
+
 ## Decision
 
 Carry direct rootless Podman execution forward as the provisional candidate for
