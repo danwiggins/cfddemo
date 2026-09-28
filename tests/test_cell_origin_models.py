@@ -13,12 +13,15 @@ from evidence_inspector.cell_origin_models import (
     AtlasUMatrix,
     CellOriginInputBundle,
     CellOriginResult,
+    DeconvolutionOutput,
+    DeconvolutionOutputV2,
     FragmentMarkerObservation,
     GenomicMarker,
     KATSMAN_METHATLAS_METHOD,
     LOYFER_UXM_METHOD,
     MarkerCountRow,
     MethodDefinition,
+    NnlsRowScale,
     RangeClassification,
     ReferenceRangeRow,
     UxmState,
@@ -248,6 +251,66 @@ def test_deconvolution_requires_canonical_normalized_fractions() -> None:
     payload["deconvolution"]["estimates"][0]["fraction"] = 0.2
     with pytest.raises(ValidationError, match="sum to 1"):
         validate_json(CellOriginResult, payload)
+
+
+def test_v2_deconvolution_requires_explicit_row_scale_and_schema() -> None:
+    v1 = fixture_payload("result.json")["deconvolution"]
+    with pytest.raises(ValidationError, match="schema_version|row_scale"):
+        validate_json(DeconvolutionOutputV2, v1)
+
+    missing_scale = {
+        **v1,
+        "schema_version": "cell-origin-deconvolution.v2",
+    }
+    with pytest.raises(ValidationError, match="row_scale"):
+        validate_json(DeconvolutionOutputV2, missing_scale)
+
+    wrong_schema = {
+        **v1,
+        "schema_version": "cell-origin-deconvolution.v1",
+        "diagnostics": {**v1["diagnostics"], "row_scale": "sqrt_count"},
+    }
+    with pytest.raises(ValidationError, match="cell-origin-deconvolution.v2"):
+        validate_json(DeconvolutionOutputV2, wrong_schema)
+
+
+@pytest.mark.parametrize("row_scale", list(NnlsRowScale))
+def test_v2_deconvolution_round_trips_each_row_scale(
+    row_scale: NnlsRowScale,
+) -> None:
+    payload = fixture_payload("result.json")["deconvolution"]
+    payload["schema_version"] = "cell-origin-deconvolution.v2"
+    payload["diagnostics"]["row_scale"] = row_scale.value
+
+    output = validate_json(DeconvolutionOutputV2, payload)
+
+    assert output.schema_version == "cell-origin-deconvolution.v2"
+    assert output.diagnostics.row_scale == row_scale
+    assert (
+        DeconvolutionOutputV2.model_validate_json(output.model_dump_json())
+        == output
+    )
+
+
+def test_v1_and_v2_deconvolution_boundaries_do_not_silently_coerce() -> None:
+    v1 = fixture_payload("result.json")["deconvolution"]
+    assert validate_json(DeconvolutionOutput, v1).diagnostics.converged
+
+    v2 = {
+        **v1,
+        "schema_version": "cell-origin-deconvolution.v2",
+        "diagnostics": {**v1["diagnostics"], "row_scale": "reference_count"},
+    }
+    with pytest.raises(ValidationError, match="schema_version|row_scale"):
+        validate_json(DeconvolutionOutput, v2)
+
+    invalid_scale = {
+        **v1,
+        "schema_version": "cell-origin-deconvolution.v2",
+        "diagnostics": {**v1["diagnostics"], "row_scale": "variance_weighted"},
+    }
+    with pytest.raises(ValidationError, match="row_scale"):
+        validate_json(DeconvolutionOutputV2, invalid_scale)
 
 
 def test_bootstrap_and_range_rows_are_bound_to_estimates() -> None:
