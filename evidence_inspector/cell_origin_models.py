@@ -443,6 +443,17 @@ class ModkitIngestionLedgerV2(StrictModel):
                 raise ValueError(
                     "hard-call input cannot claim adapter probability exclusions"
                 )
+            if self.hard_call_c_rows != self.unmethylated_call_rows:
+                raise ValueError(
+                    "hard-call C rows must equal unmethylated calls"
+                )
+            if (
+                self.hard_call_m_rows + self.hard_call_h_rows
+                != self.methylated_call_rows
+            ):
+                raise ValueError(
+                    "hard-call m and h rows must equal methylated calls"
+                )
         elif hard_rows != 0 or self.probability_input_rows != self.candidate_c_rows:
             raise ValueError("probability-input rows must partition candidates")
         return self
