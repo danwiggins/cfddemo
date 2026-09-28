@@ -433,6 +433,9 @@ class NnlsDiagnosticsV2(StrictModel):
     residual_l2: NonNegativeFinite
     objective_value: NonNegativeFinite
     row_scale: NnlsRowScale
+    solver_tolerance: float = Field(gt=0.0, allow_inf_nan=False)
+    max_iterations: int = Field(ge=1)
+    solver_implementation_id: Identifier
 
 
 class DeconvolutionOutput(StrictModel):
@@ -460,6 +463,7 @@ class DeconvolutionOutputV2(DeconvolutionOutput):
     """Additive output boundary that never infers identity for v1 results."""
 
     schema_version: Literal["cell-origin-deconvolution.v2"]
+    atlas_sha256: Sha256
     diagnostics: NnlsDiagnosticsV2
 
 
