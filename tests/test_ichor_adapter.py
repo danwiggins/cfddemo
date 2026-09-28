@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import shutil
+import traceback
 from pathlib import Path
 
 import pytest
@@ -15,8 +16,10 @@ from evidence_inspector.ichor_adapter import (
     CanonicalBin,
     CanonicalBinMask,
     CanonicalGrid,
+    CentromereInterval,
     CentromereTableBinding,
     CnvAssetSet,
+    CnvDevelopmentResult,
     CnvRunRequest,
     CountingPolicy,
     ExternalComponentBinding,
@@ -30,6 +33,7 @@ from evidence_inspector.ichor_adapter import (
     WigGridBinding,
     contract_sha256,
     prepare_ichor_run,
+    validate_centromere_table,
     validate_ichor_outputs,
 )
 
@@ -62,7 +66,7 @@ def _component(
     )
 
 
-def _grid(*, mask_last: bool = False) -> CanonicalGrid:
+def _grid(*, mask_index: int | None = None) -> CanonicalGrid:
     bins = tuple(
         CanonicalBin(
             contig="chr1",
@@ -75,16 +79,16 @@ def _grid(*, mask_last: bool = False) -> CanonicalGrid:
         contig_order=("chr1",),
         bins=bins,
         masks=(
-            (CanonicalBinMask(bin=bins[-1], reason="centromere_or_flank"),)
-            if mask_last
+            (CanonicalBinMask(bin=bins[mask_index], reason="centromere_or_flank"),)
+            if mask_index is not None
             else ()
         ),
         bin_definition_sha256=contract_sha256(bins),
     )
 
 
-def _request(*, with_pon: bool = False, mask_last: bool = False) -> CnvRunRequest:
-    grid = _grid(mask_last=mask_last)
+def _request(*, with_pon: bool = False, mask_index: int | None = None) -> CnvRunRequest:
+    grid = _grid(mask_index=mask_index)
     contigs = "d" * 64
     reference = ReferenceFastaBinding(
         identity=_artifact("reference.hg38", "1"),
@@ -132,7 +136,18 @@ def _request(*, with_pon: bool = False, mask_last: bool = False) -> CnvRunReques
             identity=_artifact("asset.centromere", "6"),
             assembly="hg38",
             contig_dictionary_sha256=contigs,
-            interval_set_sha256="7" * 64,
+            canonical_intervals=(
+                CentromereInterval(contig="chr1", start=121_699_999, end=125_100_000),
+            ),
+            interval_set_sha256=contract_sha256(
+                (
+                    CentromereInterval(
+                        contig="chr1",
+                        start=121_699_999,
+                        end=125_100_000,
+                    ),
+                )
+            ),
             source_url="https://example.invalid/centromere",
             declared_license_or_terms="synthetic fixture only",
         ),
@@ -287,17 +302,38 @@ def test_role_specific_coordinates_lineage_and_pon_are_bound() -> None:
 def test_source_derived_formats_and_natural_contig_order() -> None:
     upstream = FIXTURES / "upstream"
     centromere_lines = (
-        upstream / "GRCh38.centromere.first12.tsv"
-    ).read_text().splitlines()
+        (upstream / "GRCh38.centromere.first12.tsv").read_text().splitlines()
+    )
     assert centromere_lines[0].split("\t") == ["Chr", "Start", "End", "GapType"]
     contigs = tuple(line.split("\t", 1)[0] for line in centromere_lines[1:])
     assert contigs == tuple(f"chr{index}" for index in range(1, 13))
     wig_header = (upstream / "gc_hg38_1000kb.first10.wig").read_text().splitlines()[0]
     assert wig_header == "fixedStep chrom=chr1 start=1 step=1000000 span=1000000"
 
+    intervals = tuple(
+        CentromereInterval(
+            contig=fields[0],
+            start=int(fields[1]) - 1,
+            end=int(fields[2]),
+        )
+        for fields in (line.split("\t") for line in centromere_lines[1:])
+    )
+    binding = CentromereTableBinding(
+        identity=_artifact("upstream.centromere", "7"),
+        assembly="hg38",
+        contig_dictionary_sha256="d" * 64,
+        canonical_intervals=intervals,
+        interval_set_sha256=contract_sha256(intervals),
+        source_url="https://github.com/broadinstitute/ichorCNA",
+        declared_license_or_terms="GPL-3 repository fixture",
+    )
+    assert (
+        validate_centromere_table(upstream / "GRCh38.centromere.first12.tsv", binding)
+        == intervals
+    )
+
     bins = tuple(
-        CanonicalBin(contig=contig, start=0, end=1_000_000)
-        for contig in contigs
+        CanonicalBin(contig=contig, start=0, end=1_000_000) for contig in contigs
     )
     grid = CanonicalGrid(
         contig_order=contigs,
@@ -310,8 +346,7 @@ def test_source_derived_formats_and_natural_contig_order() -> None:
 def test_parser_accepts_native_chr1_through_chr12_order(tmp_path: Path) -> None:
     contigs = tuple(f"chr{index}" for index in range(1, 13))
     bins = tuple(
-        CanonicalBin(contig=contig, start=0, end=1_000_000)
-        for contig in contigs
+        CanonicalBin(contig=contig, start=0, end=1_000_000) for contig in contigs
     )
     grid = CanonicalGrid(
         contig_order=contigs,
@@ -336,8 +371,7 @@ def test_parser_accepts_native_chr1_through_chr12_order(tmp_path: Path) -> None:
     output = _fixture(tmp_path, "neutral")
     corrected_header = "chr\tstart\tend\tlog2_TNratio_corrected\n"
     (output / "sample.correctedDepth.txt").write_text(
-        corrected_header
-        + "".join(f"{contig}\t1\t1000000\t0\n" for contig in contigs)
+        corrected_header + "".join(f"{contig}\t1\t1000000\t0\n" for contig in contigs)
     )
     segment_header = (
         "ID\tchrom\tstart\tend\tnum.mark\tseg.median.logR\t"
@@ -350,6 +384,10 @@ def test_parser_accepts_native_chr1_through_chr12_order(tmp_path: Path) -> None:
             for contig in contigs
         )
     )
+    (output / "sample.cna.seg").write_text(
+        "chr\tstart\tend\tsample.event\n"
+        + "".join(f"{contig}\t1\t1000000\tNEUT\n" for contig in contigs)
+    )
 
     result = validate_ichor_outputs(prepare_ichor_run(request), output)
 
@@ -357,7 +395,9 @@ def test_parser_accepts_native_chr1_through_chr12_order(tmp_path: Path) -> None:
     assert tuple(row.contig for row in result.segments) == contigs
 
 
-def test_parse_neutral_fixture_returns_typed_insufficient_result(tmp_path: Path) -> None:
+def test_parse_neutral_fixture_returns_typed_insufficient_result(
+    tmp_path: Path,
+) -> None:
     prepared = prepare_ichor_run(_request())
     result = validate_ichor_outputs(prepared, _fixture(tmp_path, "neutral"))
 
@@ -372,7 +412,9 @@ def test_parse_neutral_fixture_returns_typed_insufficient_result(tmp_path: Path)
     assert len(result.artifacts) == 6
     assert result.product_release_authorized is False
     assert result.qualification_status == "development_unqualified"
-    assert result.limitations[-1] == "No protocol-matched panel of normals was supplied."
+    assert (
+        result.limitations[-1] == "No protocol-matched panel of normals was supplied."
+    )
 
 
 def test_parse_arm_loss_preserves_candidates_and_descriptive_segment(
@@ -397,8 +439,12 @@ def test_candidate_na_is_typed_and_ambiguous_selected_match_is_not_overclaimed(
     output = _fixture(tmp_path, "arm_loss")
     params = output / "sample.params.txt"
     text = params.read_text()
-    text = text.replace("n0.9-p2\t0.9\t2\t80\t0\t0\t-40", "n0.9-p2\t0.9\t2\t80\tNA\tNaN\t-40")
-    text = text.replace("n0.95-p2\t0.96\t2\t90\t0\t0\t-45", "n0.95-p2\t0.9\t2\t90\t0\t0\t-45")
+    text = text.replace(
+        "n0.9-p2\t0.9\t2\t80\t0\t0\t-40", "n0.9-p2\t0.9\t2\t80\tNA\tNaN\t-40"
+    )
+    text = text.replace(
+        "n0.95-p2\t0.96\t2\t90\t0\t0\t-45", "n0.95-p2\t0.9\t2\t90\t0\t0\t-45"
+    )
     params.write_text(text)
 
     result = validate_ichor_outputs(prepare_ichor_run(_request()), output)
@@ -427,23 +473,211 @@ def test_prespecified_mask_is_explicit_and_unexplained_omission_fails(
     masked_output = _fixture(tmp_path, "neutral")
     corrected = masked_output / "sample.correctedDepth.txt"
     corrected.write_text(
-        corrected.read_text().replace("chr1\t3000001\t4000000\t0.01\n", "")
+        corrected.read_text().replace("chr1\t1000001\t2000000\t-0.01\n", "")
     )
-    segment = masked_output / "sample.seg.txt"
-    segment.write_text(segment.read_text().replace("4000000\t4", "3000000\t3"))
+    bin_events = masked_output / "sample.cna.seg"
+    bin_events.write_text(
+        bin_events.read_text().replace("chr1\t1000001\t2000000\tNEUT\t-0.01\n", "")
+    )
 
     masked = validate_ichor_outputs(
-        prepare_ichor_run(_request(mask_last=True)), masked_output
+        prepare_ichor_run(_request(mask_index=1)), masked_output
     )
-    assert masked.bin_statuses[-1].status == "masked_prespecified"
-    assert masked.bin_statuses[-1].mask_reason == "centromere_or_flank"
+    assert masked.bin_statuses[1].status == "masked_prespecified"
+    assert masked.bin_statuses[1].mask_reason == "centromere_or_flank"
     assert len(masked.corrected_bins) == 3
+    assert masked.segments[0].native_span_bin_count == 4
+    assert masked.segments[0].retained_bin_count == 3
+
+    bad_output = Path(
+        shutil.copytree(FIXTURES / "neutral", tmp_path / "neutral_bad_count")
+    )
+    corrected = bad_output / "sample.correctedDepth.txt"
+    corrected.write_text(
+        corrected.read_text().replace("chr1\t1000001\t2000000\t-0.01\n", "")
+    )
+    bin_events = bad_output / "sample.cna.seg"
+    bin_events.write_text(
+        bin_events.read_text().replace("chr1\t1000001\t2000000\tNEUT\t-0.01\n", "")
+    )
+    segment = bad_output / "sample.seg.txt"
+    segment.write_text(segment.read_text().replace("4000000\t4", "4000000\t3"))
+    with pytest.raises(IchorOutputError, match="structural evidence is inconsistent"):
+        validate_ichor_outputs(prepare_ichor_run(_request(mask_index=1)), bad_output)
 
     unexplained_output = _fixture(tmp_path, "arm_loss")
     path = unexplained_output / "sample.correctedDepth.txt"
     path.write_text(path.read_text().replace("chr1\t3000001\t4000000\t0.01\n", ""))
     with pytest.raises(IchorOutputError, match="unexplained missing bins"):
         validate_ichor_outputs(prepare_ichor_run(_request()), unexplained_output)
+
+
+@pytest.mark.parametrize("mutation", ("missing", "duplicate", "outside"))
+def test_bin_level_events_fail_closed_on_structural_tampering(
+    tmp_path: Path,
+    mutation: str,
+) -> None:
+    output = _fixture(tmp_path, "arm_loss")
+    path = output / "sample.cna.seg"
+    lines = path.read_text().splitlines()
+    if mutation == "missing":
+        lines.pop()
+        match = "missing rows"
+    elif mutation == "duplicate":
+        lines.append(lines[-1])
+        match = "must be unique"
+    else:
+        lines[-1] = lines[-1].replace("3000001", "3000002")
+        match = "outside its analysis grid"
+    path.write_text("\n".join(lines) + "\n")
+
+    with pytest.raises(IchorOutputError, match=match):
+        validate_ichor_outputs(prepare_ichor_run(_request()), output)
+
+
+def test_largest_altered_segment_uses_genomic_span_not_retained_count(
+    tmp_path: Path,
+) -> None:
+    bins = tuple(
+        CanonicalBin(
+            contig="chr1", start=index * 1_000_000, end=(index + 1) * 1_000_000
+        )
+        for index in range(8)
+    )
+    grid = CanonicalGrid(
+        contig_order=("chr1",),
+        bins=bins,
+        masks=tuple(
+            CanonicalBinMask(bin=bins[index], reason="centromere_or_flank")
+            for index in (1, 2)
+        ),
+        bin_definition_sha256=contract_sha256(bins),
+    )
+    payload = _request().model_dump(mode="python")
+    payload["assets"]["canonical_grid"] = grid.model_dump(mode="python")
+    for role in ("raw_counts", "gc", "mappability"):
+        payload["assets"][role]["canonical_bin_definition_sha256"] = (
+            grid.bin_definition_sha256
+        )
+    payload["raw_wig_lineage"]["canonical_bin_definition_sha256"] = (
+        grid.bin_definition_sha256
+    )
+    request = CnvRunRequest.model_validate(payload)
+    output = _fixture(tmp_path, "arm_loss")
+    (output / "sample.correctedDepth.txt").write_text(
+        "chr\tstart\tend\tlog2_TNratio_corrected\n"
+        "chr1\t1\t1000000\t-0.2\n"
+        "chr1\t3000001\t4000000\t-0.2\n"
+        "chr1\t4000001\t5000000\t0.2\n"
+        "chr1\t5000001\t6000000\t0.2\n"
+        "chr1\t6000001\t7000000\t0.2\n"
+        "chr1\t7000001\t8000000\t0.0\n"
+    )
+    (output / "sample.seg.txt").write_text(
+        "ID\tchrom\tstart\tend\tnum.mark\tseg.median.logR\t"
+        "copy.number\tcall\tsubclone.status\n"
+        "sample\tchr1\t1\t4000000\t4\t-0.2\t1\tHETD\tFALSE\n"
+        "sample\tchr1\t4000001\t7000000\t3\t0.2\t3\tGAIN\tFALSE\n"
+        "sample\tchr1\t7000001\t8000000\t1\t0\t2\tNEUT\tFALSE\n"
+    )
+    (output / "sample.cna.seg").write_text(
+        "chr\tstart\tend\tsample.event\n"
+        "chr1\t1\t1000000\tHETD\n"
+        "chr1\t3000001\t4000000\tHETD\n"
+        "chr1\t4000001\t5000000\tGAIN\n"
+        "chr1\t5000001\t6000000\tGAIN\n"
+        "chr1\t6000001\t7000000\tGAIN\n"
+        "chr1\t7000001\t8000000\tNEUT\n"
+    )
+
+    result = validate_ichor_outputs(prepare_ichor_run(request), output)
+
+    assert result.identifiability_evidence.largest_altered_segment == (
+        "chr1",
+        0,
+        4_000_000,
+    )
+    assert result.identifiability_evidence.largest_altered_segment_retained_overlap == 2
+
+
+def test_force_zero_is_one_way_and_replayed_from_upstream_evidence(
+    tmp_path: Path,
+) -> None:
+    payload = _request().model_dump(mode="python")
+    payload["parameters"]["altered_fraction_threshold"] = 0.6
+    force_zero_request = CnvRunRequest.model_validate(payload)
+    with pytest.raises(IchorOutputError, match="force-zero evidence contradicts"):
+        validate_ichor_outputs(
+            prepare_ichor_run(force_zero_request), _fixture(tmp_path, "arm_loss")
+        )
+
+    output = Path(shutil.copytree(FIXTURES / "arm_loss", tmp_path / "arm_loss_zero"))
+    params = output / "sample.params.txt"
+    params.write_text(
+        params.read_text()
+        .replace("sample\t0.1\t2", "sample\t0\t2")
+        .replace("n0.9-p2\t0.9\t2", "n1-p2\t1\t2")
+    )
+    result = validate_ichor_outputs(prepare_ichor_run(_request()), output)
+    assert result.identifiability_evidence.force_zero_condition is False
+    assert result.selected_solution.model_fraction == 0
+    assert result.status == "complete"
+    assert result.identifiability == "not_assessed"
+
+
+@pytest.mark.parametrize(
+    "mutation",
+    ("status", "corrected", "segment", "evidence", "artifact"),
+)
+def test_standalone_result_rejects_semantic_tampering(
+    tmp_path: Path,
+    mutation: str,
+) -> None:
+    result = validate_ichor_outputs(
+        prepare_ichor_run(_request()), _fixture(tmp_path, "arm_loss")
+    )
+    payload = result.model_dump(mode="python")
+    if mutation == "status":
+        payload["status"] = "insufficient_information"
+        payload["identifiability"] = "insufficient_altered_structure"
+    elif mutation == "corrected":
+        payload["bin_statuses"][0]["corrected_log2"] = -0.19
+    elif mutation == "segment":
+        payload["segments"][0]["native_span_bin_count"] = 1
+    elif mutation == "evidence":
+        payload["identifiability_evidence"][
+            "largest_altered_segment_retained_overlap"
+        ] = 3
+    else:
+        payload["artifacts"][0]["relative_path"] = "wrong-output.txt"
+
+    with pytest.raises(ValidationError):
+        CnvDevelopmentResult.model_validate(payload)
+
+
+@pytest.mark.parametrize("mutation", ("invalid_utf8", "private_numeric"))
+def test_parser_errors_are_sanitized_without_chained_private_details(
+    tmp_path: Path,
+    mutation: str,
+) -> None:
+    output = _fixture(tmp_path, "arm_loss")
+    path = output / "sample.correctedDepth.txt"
+    if mutation == "invalid_utf8":
+        path.write_bytes(b"\xffPRIVATE_SENTINEL")
+    else:
+        path.write_text(path.read_text().replace("-0.20", "PRIVATE_SENTINEL"))
+
+    with pytest.raises(IchorOutputError) as captured:
+        validate_ichor_outputs(prepare_ichor_run(_request()), output)
+
+    assert captured.value.__cause__ is None
+    rendered = "".join(
+        traceback.format_exception(
+            type(captured.value), captured.value, captured.value.__traceback__
+        )
+    )
+    assert "PRIVATE_SENTINEL" not in rendered
+    assert str(path) not in rendered
 
 
 @pytest.mark.parametrize(
@@ -454,7 +688,7 @@ def test_prespecified_mask_is_explicit_and_unexplained_omission_fails(
         ("coordinate", "outside the canonical grid"),
         ("candidate", "candidate table is absent"),
         ("symlink", "regular non-symlink"),
-        ("segment_count", "retained corrected bins"),
+        ("segment_count", "structural evidence is inconsistent"),
     ),
 )
 def test_parser_fails_closed_on_malformed_outputs(
@@ -470,7 +704,9 @@ def test_parser_fails_closed_on_malformed_outputs(
         path.write_text(path.read_text().replace("-0.20", "NaN"))
     elif mutation == "coordinate":
         path = output / "sample.correctedDepth.txt"
-        path.write_text(path.read_text().replace("chr1\t1\t1000000", "chr1\t2\t1000001"))
+        path.write_text(
+            path.read_text().replace("chr1\t1\t1000000", "chr1\t2\t1000001")
+        )
     elif mutation == "candidate":
         path = output / "sample.params.txt"
         lines = path.read_text().splitlines()

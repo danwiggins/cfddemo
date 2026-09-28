@@ -98,7 +98,9 @@ class ExternalComponentBinding(StrictModel):
     @model_validator(mode="after")
     def modification_identity(self) -> ExternalComponentBinding:
         if self.modified != (self.modification_manifest_sha256 is not None):
-            raise ValueError("modified components require exactly one modification manifest")
+            raise ValueError(
+                "modified components require exactly one modification manifest"
+            )
         return self
 
 
@@ -135,10 +137,13 @@ class RuntimeBinding(StrictModel):
         if self.target in {"local_r", "oci"} and (
             self.r_version is None or self.package_lock_sha256 is None
         ):
-            raise ValueError("executable targets require exact R and package-lock identities")
+            raise ValueError(
+                "executable targets require exact R and package-lock identities"
+            )
         if self.target == "oci":
-            if self.oci_manifest_digest is None or not self.oci_manifest_digest.startswith(
-                "sha256:"
+            if (
+                self.oci_manifest_digest is None
+                or not self.oci_manifest_digest.startswith("sha256:")
             ):
                 raise ValueError("OCI target requires a manifest digest, never a tag")
         elif self.oci_manifest_digest is not None:
@@ -235,7 +240,21 @@ class WigGridBinding(StrictModel):
     @model_validator(mode="after")
     def fixed_width(self) -> WigGridBinding:
         if not self.span_bp == self.step_bp == self.bin_size_bp:
-            raise ValueError("v1 WIG binding requires span, step, and bin size to agree")
+            raise ValueError(
+                "v1 WIG binding requires span, step, and bin size to agree"
+            )
+        return self
+
+
+class CentromereInterval(StrictModel):
+    contig: Identifier
+    start: int = Field(ge=0)
+    end: int = Field(gt=0)
+
+    @model_validator(mode="after")
+    def increasing(self) -> CentromereInterval:
+        if self.end <= self.start:
+            raise ValueError("centromere interval end must exceed start")
         return self
 
 
@@ -248,16 +267,24 @@ class CentromereTableBinding(StrictModel):
     required_columns: tuple[
         Literal["Chr"], Literal["Start"], Literal["End"], Literal["GapType"]
     ] = ("Chr", "Start", "End", "GapType")
-    native_coordinates: Literal["one_based_closed_granges"] = (
-        "one_based_closed_granges"
-    )
+    native_coordinates: Literal["one_based_closed_granges"] = "one_based_closed_granges"
     required_gap_type: Literal["centromere"] = "centromere"
+    canonical_intervals: tuple[CentromereInterval, ...] = Field(min_length=1)
     interval_set_sha256: Sha256
     canonical_conversion: Literal["one_based_closed_to_zero_based_half_open"] = (
         "one_based_closed_to_zero_based_half_open"
     )
     source_url: str = Field(min_length=1, max_length=2048)
     declared_license_or_terms: str = Field(min_length=1, max_length=512)
+
+    @model_validator(mode="after")
+    def bind_intervals(self) -> CentromereTableBinding:
+        keys = [(row.contig, row.start, row.end) for row in self.canonical_intervals]
+        if len(keys) != len(set(keys)):
+            raise ValueError("centromere intervals must be unique")
+        if _canonical_sha256(self.canonical_intervals) != self.interval_set_sha256:
+            raise ValueError("centromere interval-set digest mismatch")
+        return self
 
 
 class PanelOfNormalsBinding(StrictModel):
@@ -382,7 +409,9 @@ class IchorParameterSet(StrictModel):
             raise ValueError("normal-fraction starts must be within zero and one")
         if not self.normal_fraction_starts or not self.ploidy_starts:
             raise ValueError("normal and ploidy starts cannot be empty")
-        if self.normal_fraction_starts != tuple(sorted(set(self.normal_fraction_starts))):
+        if self.normal_fraction_starts != tuple(
+            sorted(set(self.normal_fraction_starts))
+        ):
             raise ValueError("normal-fraction starts must be sorted and unique")
         if self.ploidy_starts != tuple(sorted(set(self.ploidy_starts))):
             raise ValueError("ploidy starts must be sorted and unique")
@@ -390,15 +419,15 @@ class IchorParameterSet(StrictModel):
             raise ValueError("explicit lambda policy requires four values")
         if self.lambda_policy == "automatic" and self.lambda_values is not None:
             raise ValueError("automatic lambda policy cannot include values")
-        if self.lambda_values is not None and any(value <= 0 for value in self.lambda_values):
+        if self.lambda_values is not None and any(
+            value <= 0 for value in self.lambda_values
+        ):
             raise ValueError("lambda values must be positive")
         return self
 
 
 class CnvRunRequest(StrictModel):
-    schema_version: Literal["traceback.ichor-request.v1"] = (
-        "traceback.ichor-request.v1"
-    )
+    schema_version: Literal["traceback.ichor-request.v1"] = "traceback.ichor-request.v1"
     sample_id: Identifier
     input_bam: ArtifactIdentity
     input_bai: ArtifactIdentity
@@ -406,9 +435,7 @@ class CnvRunRequest(StrictModel):
     assets: CnvAssetSet
     counting_policy: CountingPolicy
     raw_wig_lineage: RawWigLineage
-    read_count_source: Literal[
-        "hmmcopy_utils_readcounter", "precomputed_bound_wig"
-    ]
+    read_count_source: Literal["hmmcopy_utils_readcounter", "precomputed_bound_wig"]
     pon_mode: Literal["none_development", "protocol_matched_frozen"]
     parameters: IchorParameterSet
     development_input_authorized: Literal[True] = True
@@ -442,7 +469,10 @@ class CnvRunRequest(StrictModel):
                 ),
                 None,
             )
-            if utilities is None or utilities.source_commit_sha1 != HMMCOPY_UTILS_COMMIT:
+            if (
+                utilities is None
+                or utilities.source_commit_sha1 != HMMCOPY_UTILS_COMMIT
+            ):
                 raise ValueError("hmmcopy_utils counter source is not pinned")
             if self.raw_wig_lineage.counter_implementation_sha256 not in {
                 item.content_sha256 for item in utilities.invoked_files
@@ -532,7 +562,9 @@ class PreparedIchorRun(StrictModel):
         if self.argv != _expected_argv(self.request):
             raise ValueError("prepared argv does not match the bound request")
         if self.output_capabilities != _output_capabilities(self.request.sample_id):
-            raise ValueError("prepared output capabilities do not match pinned upstream")
+            raise ValueError(
+                "prepared output capabilities do not match pinned upstream"
+            )
         return self
 
 
@@ -709,7 +741,8 @@ class CnaSegment(StrictModel):
     contig: Identifier
     start: int = Field(ge=0)
     end: int = Field(gt=0)
-    bin_count: int = Field(gt=0)
+    native_span_bin_count: int = Field(gt=0)
+    retained_bin_count: int = Field(gt=0)
     median_log2: FiniteFloat
     copy_number: int = Field(ge=0)
     call: str = Field(min_length=1, max_length=64)
@@ -719,6 +752,50 @@ class CnaSegment(StrictModel):
     def increasing(self) -> CnaSegment:
         if self.end <= self.start:
             raise ValueError("segment end must exceed start")
+        return self
+
+
+class CnaBinEvent(StrictModel):
+    contig: Identifier
+    start: int = Field(ge=0)
+    end: int = Field(gt=0)
+    event: str | None = Field(default=None, max_length=64)
+
+    @model_validator(mode="after")
+    def increasing(self) -> CnaBinEvent:
+        if self.end <= self.start:
+            raise ValueError("CNA-bin end must exceed start")
+        return self
+
+
+class IdentifiabilityEvidence(StrictModel):
+    largest_altered_segment: tuple[Identifier, int, int] | None
+    largest_altered_segment_retained_overlap: int = Field(ge=0)
+    altered_training_bin_count: int = Field(ge=0)
+    total_training_bin_count: int = Field(gt=0)
+    altered_training_fraction: FiniteFloat = Field(ge=0, le=1)
+    minimum_segment_bins: int = Field(gt=0)
+    altered_fraction_threshold: FiniteFloat = Field(ge=0, le=1)
+    force_zero_condition: bool
+
+    @model_validator(mode="after")
+    def arithmetic(self) -> IdentifiabilityEvidence:
+        expected_fraction = (
+            self.altered_training_bin_count / self.total_training_bin_count
+        )
+        if not math.isclose(
+            self.altered_training_fraction,
+            expected_fraction,
+            rel_tol=0,
+            abs_tol=1e-12,
+        ):
+            raise ValueError("altered training fraction arithmetic is inconsistent")
+        expected_force = (
+            self.largest_altered_segment_retained_overlap <= self.minimum_segment_bins
+            and self.altered_training_fraction <= self.altered_fraction_threshold
+        )
+        if self.force_zero_condition != expected_force:
+            raise ValueError("force-zero evidence arithmetic is inconsistent")
         return self
 
 
@@ -750,18 +827,20 @@ class CnvDevelopmentResult(StrictModel):
         "traceback.ichor-development-result.v1"
     )
     status: Literal["complete", "insufficient_information"]
-    qualification_status: Literal["development_unqualified"] = (
-        "development_unqualified"
-    )
+    qualification_status: Literal["development_unqualified"] = "development_unqualified"
     development_input_authorized: Literal[True] = True
     product_release_authorized: Literal[False] = False
     request_sha256: Sha256
     pon_mode: Literal["none_development", "protocol_matched_frozen"]
+    canonical_grid: CanonicalGrid
+    parameters: IchorParameterSet
     corrected_bins: tuple[CorrectedBin, ...]
     bin_statuses: tuple[CorrectedBinStatus, ...]
     segments: tuple[CnaSegment, ...]
+    bin_events: tuple[CnaBinEvent, ...]
     candidates: tuple[CandidateSolution, ...]
     selected_solution: SelectedSolution
+    identifiability_evidence: IdentifiabilityEvidence
     identifiability: Literal[
         "insufficient_altered_structure",
         "not_assessed",
@@ -781,15 +860,91 @@ class CnvDevelopmentResult(StrictModel):
         resolved = self.selected_solution.selection_resolution.startswith("resolved")
         if resolved != (selected is not None):
             raise ValueError("selected candidate and resolution disagree")
+        matches = _selection_matches(self.selected_solution, self.candidates)
+        if not matches:
+            raise ValueError("selected summary contradicts every candidate")
+        expected_selected = matches[0] if len(matches) == 1 else None
+        expected_resolution = (
+            "resolved_unique_rounded_match"
+            if len(matches) == 1
+            else "not_resolved_rounded_collision"
+        )
+        if selected != expected_selected or (
+            self.selected_solution.selection_resolution != expected_resolution
+        ):
+            raise ValueError("selected solution does not match rounding replay")
         artifact_roles = [item.role for item in self.artifacts]
         if artifact_roles != sorted(artifact_roles) or len(artifact_roles) != len(
             set(artifact_roles)
         ):
             raise ValueError("output artifacts must be uniquely sorted by role")
-        if self.status == "insufficient_information" and self.identifiability != (
-            "insufficient_altered_structure"
+        expected_capabilities = _output_capabilities(self.selected_solution.sample_id)
+        if self.output_capabilities != expected_capabilities:
+            raise ValueError("result output capabilities do not match pinned upstream")
+        emitted = {
+            item.role: item.relative_path
+            for item in self.output_capabilities
+            if item.relative_path is not None
+        }
+        artifacts = {item.role: item.relative_path for item in self.artifacts}
+        if artifacts != emitted:
+            raise ValueError("result artifacts do not match emitted capability paths")
+        status_by_key = {
+            (item.contig, item.start, item.end): item for item in self.bin_statuses
+        }
+        if len(status_by_key) != len(self.bin_statuses):
+            raise ValueError("bin statuses must be unique")
+        corrected_by_key = {
+            (item.contig, item.start, item.end): item for item in self.corrected_bins
+        }
+        if len(corrected_by_key) != len(self.corrected_bins):
+            raise ValueError("corrected bins must be unique")
+        expected_keys = {
+            (item.contig, item.start, item.end) for item in self.canonical_grid.bins
+        }
+        if set(status_by_key) != expected_keys:
+            raise ValueError("bin statuses do not cover the canonical grid")
+        retained = {
+            key: item
+            for key, item in status_by_key.items()
+            if item.status == "retained"
+        }
+        if set(corrected_by_key) != set(retained):
+            raise ValueError("corrected bins disagree with retained statuses")
+        for key, corrected in corrected_by_key.items():
+            if retained[key].corrected_log2 != corrected.corrected_log2:
+                raise ValueError("corrected value disagrees with retained status")
+        insufficient = _replay_segment_structure(
+            self.canonical_grid,
+            self.bin_statuses,
+            self.segments,
+            self.parameters,
+            self.bin_events,
+        )
+        if self.identifiability_evidence != insufficient:
+            raise ValueError("identifiability evidence does not match semantic replay")
+        if (
+            insufficient.force_zero_condition
+            and self.selected_solution.model_fraction != 0
         ):
-            raise ValueError("insufficient result must retain its identifiability reason")
+            raise ValueError(
+                "structurally insufficient result has nonzero model fraction"
+            )
+        expected_status = (
+            "insufficient_information"
+            if insufficient.force_zero_condition
+            else "complete"
+        )
+        expected_identifiability = (
+            "insufficient_altered_structure"
+            if insufficient.force_zero_condition
+            else "not_assessed"
+        )
+        if (
+            self.status != expected_status
+            or self.identifiability != expected_identifiability
+        ):
+            raise ValueError("status and identifiability do not match semantic replay")
         return self
 
 
@@ -800,22 +955,28 @@ class IchorOutputError(ValueError):
 def _safe_output(path: Path) -> tuple[str, int]:
     try:
         metadata = path.lstat()
-    except OSError as exc:
-        raise IchorOutputError(f"missing required output: {path.name}") from exc
+    except OSError:
+        raise IchorOutputError(f"missing required output: {path.name}") from None
     if not stat.S_ISREG(metadata.st_mode) or path.is_symlink():
         raise IchorOutputError(f"output must be a regular non-symlink: {path.name}")
     if metadata.st_size <= 0 or metadata.st_size > MAX_OUTPUT_BYTES:
         raise IchorOutputError(f"output size is invalid: {path.name}")
     digest = hashlib.sha256()
-    with path.open("rb") as stream:
-        for chunk in iter(lambda: stream.read(1024 * 1024), b""):
-            digest.update(chunk)
+    try:
+        with path.open("rb") as stream:
+            for chunk in iter(lambda: stream.read(1024 * 1024), b""):
+                digest.update(chunk)
+    except OSError:
+        raise IchorOutputError(f"output could not be read: {path.name}") from None
     return digest.hexdigest(), metadata.st_size
 
 
 def _rows(path: Path) -> list[dict[str, str]]:
-    with path.open("r", encoding="utf-8", newline="") as stream:
-        rows = list(csv.DictReader(stream, delimiter="\t"))
+    try:
+        with path.open("r", encoding="utf-8", newline="") as stream:
+            rows = list(csv.DictReader(stream, delimiter="\t"))
+    except (UnicodeError, OSError, csv.Error):
+        raise IchorOutputError("output text could not be parsed") from None
     if not rows or len(rows) > MAX_ROWS:
         raise IchorOutputError(f"output row count is invalid: {path.name}")
     return rows
@@ -824,8 +985,8 @@ def _rows(path: Path) -> list[dict[str, str]]:
 def _finite(value: str, label: str) -> float:
     try:
         parsed = float(value)
-    except ValueError as exc:
-        raise IchorOutputError(f"{label} is not numeric") from exc
+    except (TypeError, ValueError):
+        raise IchorOutputError(f"{label} is not numeric") from None
     if not math.isfinite(parsed):
         raise IchorOutputError(f"{label} must be finite")
     return parsed
@@ -836,6 +997,48 @@ def _integer(value: str, label: str) -> int:
     if not parsed.is_integer():
         raise IchorOutputError(f"{label} must be an integer")
     return int(parsed)
+
+
+def validate_centromere_table(
+    path: Path,
+    binding: CentromereTableBinding,
+) -> tuple[CentromereInterval, ...]:
+    """Validate the pinned headered table and replay its GRanges conversion."""
+
+    _safe_output(path)
+    try:
+        with path.open("r", encoding="utf-8", newline="") as stream:
+            reader = csv.DictReader(stream, delimiter="\t")
+            if tuple(reader.fieldnames or ()) != binding.required_columns:
+                raise IchorOutputError("centromere table columns are invalid")
+            intervals: list[CentromereInterval] = []
+            for row in reader:
+                if row["GapType"] != binding.required_gap_type:
+                    raise IchorOutputError(
+                        "centromere table contains an unsupported gap type"
+                    )
+                start_one_based = _integer(row["Start"], "centromere start")
+                if start_one_based <= 0:
+                    raise IchorOutputError(
+                        "centromere start must be one-based positive"
+                    )
+                intervals.append(
+                    CentromereInterval(
+                        contig=row["Chr"],
+                        start=start_one_based - 1,
+                        end=_integer(row["End"], "centromere end"),
+                    )
+                )
+    except IchorOutputError:
+        raise
+    except (UnicodeError, OSError, csv.Error, KeyError):
+        raise IchorOutputError("centromere table could not be parsed") from None
+    parsed = tuple(intervals)
+    if not parsed:
+        raise IchorOutputError("centromere table is empty")
+    if parsed != binding.canonical_intervals:
+        raise IchorOutputError("centromere table does not match its canonical binding")
+    return parsed
 
 
 def _optional_fraction(value: str, label: str) -> float | None:
@@ -866,8 +1069,8 @@ def _parse_corrected(
             start = _integer(row["start"], "corrected start") - 1
             end = _integer(row["end"], "corrected end")
             raw_value = row["log2_TNratio_corrected"]
-        except KeyError as exc:
-            raise IchorOutputError("corrected-depth columns are invalid") from exc
+        except KeyError:
+            raise IchorOutputError("corrected-depth columns are invalid") from None
         key = (contig, start, end)
         if key not in expected_order:
             raise IchorOutputError("corrected-depth row is outside the canonical grid")
@@ -915,6 +1118,7 @@ def _parse_segments(
     path: Path,
     sample_id: str,
     grid: CanonicalGrid,
+    corrected: Sequence[CorrectedBin],
 ) -> tuple[CnaSegment, ...]:
     result: list[CnaSegment] = []
     for row in _rows(path):
@@ -924,20 +1128,29 @@ def _parse_segments(
             subclone = row["subclone.status"].upper()
             if subclone not in {"TRUE", "FALSE"}:
                 raise IchorOutputError("segment subclone status is invalid")
+            start = _integer(row["start"], "segment start") - 1
+            end = _integer(row["end"], "segment end")
+            retained_count = sum(
+                item.contig == row["chrom"] and item.start >= start and item.end <= end
+                for item in corrected
+            )
             result.append(
                 CnaSegment(
                     contig=row["chrom"],
-                    start=_integer(row["start"], "segment start") - 1,
-                    end=_integer(row["end"], "segment end"),
-                    bin_count=_integer(row["num.mark"], "segment bin count"),
+                    start=start,
+                    end=end,
+                    native_span_bin_count=_integer(
+                        row["num.mark"], "segment native span bin count"
+                    ),
+                    retained_bin_count=retained_count,
                     median_log2=_finite(row["seg.median.logR"], "segment median"),
                     copy_number=_integer(row["copy.number"], "segment copy number"),
                     call=row["call"],
                     subclone_status=subclone == "TRUE",
                 )
             )
-        except KeyError as exc:
-            raise IchorOutputError("segment columns are invalid") from exc
+        except KeyError:
+            raise IchorOutputError("segment columns are invalid") from None
     order = {contig: index for index, contig in enumerate(grid.contig_order)}
     if any(row.contig not in order for row in result):
         raise IchorOutputError("segment references an undeclared contig")
@@ -949,6 +1162,54 @@ def _parse_segments(
         if row.start < previous.get(row.contig, 0):
             raise IchorOutputError("segments cannot overlap")
         previous[row.contig] = row.end
+    return tuple(result)
+
+
+def _parse_bin_events(
+    path: Path,
+    sample_id: str,
+    grid: CanonicalGrid,
+) -> tuple[CnaBinEvent, ...]:
+    expected_order = {
+        (row.contig, row.start, row.end): index for index, row in enumerate(grid.bins)
+    }
+    centromere_removed = {
+        (item.bin.contig, item.bin.start, item.bin.end)
+        for item in grid.masks
+        if item.reason == "centromere_or_flank"
+    }
+    event_column = f"{sample_id}.event"
+    result: list[CnaBinEvent] = []
+    for row in _rows(path):
+        try:
+            key = (
+                row["chr"],
+                _integer(row["start"], "CNA-bin start") - 1,
+                _integer(row["end"], "CNA-bin end"),
+            )
+            raw_event = row[event_column].strip()
+        except KeyError:
+            raise IchorOutputError("bin-level CNA columns are invalid") from None
+        if key not in expected_order or key in centromere_removed:
+            raise IchorOutputError("bin-level CNA row is outside its analysis grid")
+        result.append(
+            CnaBinEvent(
+                contig=key[0],
+                start=key[1],
+                end=key[2],
+                event=(None if raw_event.upper() in {"NA", "NAN", ""} else raw_event),
+            )
+        )
+    keys = [(row.contig, row.start, row.end) for row in result]
+    if len(keys) != len(set(keys)):
+        raise IchorOutputError("bin-level CNA rows must be unique")
+    if [expected_order[key] for key in keys] != sorted(
+        expected_order[key] for key in keys
+    ):
+        raise IchorOutputError("bin-level CNA rows violate declared contig order")
+    expected = set(expected_order) - centromere_removed
+    if set(keys) != expected:
+        raise IchorOutputError("bin-level CNA output has missing rows")
     return tuple(result)
 
 
@@ -966,18 +1227,35 @@ def _significant(value: float, digits: int) -> float:
     return round(value, places)
 
 
+def _selection_matches(
+    selected: SelectedSolution,
+    candidates: Sequence[CandidateSolution],
+) -> tuple[str, ...]:
+    return tuple(
+        item.candidate_id
+        for item in candidates
+        if _significant(item.estimated_normal_fraction, 2)
+        == _significant(1 - selected.model_fraction, 2)
+        and _significant(item.estimated_ploidy, 4) == _significant(selected.ploidy, 4)
+    )
+
+
 def _parse_params(
     path: Path,
     sample_id: str,
 ) -> tuple[SelectedSolution, tuple[CandidateSolution, ...]]:
-    lines = path.read_text(encoding="utf-8").splitlines()
+    try:
+        lines = path.read_text(encoding="utf-8").splitlines()
+    except (UnicodeError, OSError):
+        raise IchorOutputError("parameter output could not be parsed") from None
     if len(lines) < 3:
         raise IchorOutputError("parameter output is truncated")
     selected_header = lines[0].split("\t")
     selected_values = lines[1].split("\t")
-    if selected_header != ["Sample", "Tumor Fraction", "Ploidy"] or len(
-        selected_values
-    ) != 3:
+    if (
+        selected_header != ["Sample", "Tumor Fraction", "Ploidy"]
+        or len(selected_values) != 3
+    ):
         raise IchorOutputError("selected parameter summary is invalid")
     if selected_values[0] != sample_id:
         raise IchorOutputError("selected parameter sample ID mismatch")
@@ -993,7 +1271,11 @@ def _parse_params(
         "loglik",
     ]
     header_index = next(
-        (index for index, line in enumerate(lines) if line.split("\t") == candidate_header),
+        (
+            index
+            for index, line in enumerate(lines)
+            if line.split("\t") == candidate_header
+        ),
         None,
     )
     if header_index is None:
@@ -1028,14 +1310,14 @@ def _parse_params(
         )
     if not candidates:
         raise IchorOutputError("candidate table is empty")
-    matched = [
-        item.candidate_id
-        for item in candidates
-        if _significant(item.estimated_normal_fraction, 2)
-        == _significant(1 - selected_fraction, 2)
-        and _significant(item.estimated_ploidy, 4)
-        == _significant(selected_ploidy, 4)
-    ]
+    provisional = SelectedSolution(
+        sample_id=sample_id,
+        model_fraction=selected_fraction,
+        ploidy=selected_ploidy,
+        matched_candidate_id=None,
+        selection_resolution="not_resolved_rounded_collision",
+    )
+    matched = _selection_matches(provisional, candidates)
     if not matched:
         raise IchorOutputError(
             "selected summary contradicts every rounding-compatible candidate"
@@ -1056,6 +1338,86 @@ def _parse_params(
     )
 
 
+def _replay_segment_structure(
+    grid: CanonicalGrid,
+    statuses: Sequence[CorrectedBinStatus],
+    segments: Sequence[CnaSegment],
+    parameters: IchorParameterSet,
+    bin_events: Sequence[CnaBinEvent],
+) -> IdentifiabilityEvidence:
+    grid_bins = grid.bins
+    retained_keys = {
+        (item.contig, item.start, item.end)
+        for item in statuses
+        if item.status == "retained"
+    }
+    coverage = {key: 0 for key in retained_keys}
+    neutral_calls = {"NEUT", "NEUTRAL"}
+    altered_segments: list[CnaSegment] = []
+    for segment in segments:
+        span_bins = [
+            row
+            for row in grid_bins
+            if row.contig == segment.contig
+            and row.start >= segment.start
+            and row.end <= segment.end
+        ]
+        if (
+            not span_bins
+            or span_bins[0].start != segment.start
+            or span_bins[-1].end != segment.end
+            or len(span_bins) != segment.native_span_bin_count
+        ):
+            raise ValueError("segment native span does not match canonical bins")
+        retained_in_segment = [
+            row
+            for row in span_bins
+            if (row.contig, row.start, row.end) in retained_keys
+        ]
+        if len(retained_in_segment) != segment.retained_bin_count:
+            raise ValueError("segment retained count does not match bin statuses")
+        for row in retained_in_segment:
+            coverage[(row.contig, row.start, row.end)] += 1
+        if segment.call.upper() not in neutral_calls:
+            altered_segments.append(segment)
+    if any(value != 1 for value in coverage.values()):
+        raise ValueError("segments do not cover every retained bin exactly once")
+
+    largest = (
+        max(altered_segments, key=lambda item: item.end - item.start)
+        if altered_segments
+        else None
+    )
+    largest_key = (
+        (largest.contig, largest.start, largest.end) if largest is not None else None
+    )
+    max_valid_overlap = largest.retained_bin_count if largest is not None else 0
+
+    training = {f"chr{chromosome}" for chromosome in parameters.chromosomes}
+    training_events = [item for item in bin_events if item.contig in training]
+    if not training_events:
+        raise ValueError("bin-level CNA output has no training-chromosome rows")
+    altered_count = sum(
+        item.event is not None and item.event.upper() not in neutral_calls
+        for item in training_events
+    )
+    total_count = len(training_events)
+    altered_fraction = altered_count / total_count
+    return IdentifiabilityEvidence(
+        largest_altered_segment=largest_key,
+        largest_altered_segment_retained_overlap=max_valid_overlap,
+        altered_training_bin_count=altered_count,
+        total_training_bin_count=total_count,
+        altered_training_fraction=altered_fraction,
+        minimum_segment_bins=parameters.minimum_segment_bins,
+        altered_fraction_threshold=parameters.altered_fraction_threshold,
+        force_zero_condition=(
+            max_valid_overlap <= parameters.minimum_segment_bins
+            and altered_fraction <= parameters.altered_fraction_threshold
+        ),
+    )
+
+
 def validate_ichor_outputs(
     prepared: PreparedIchorRun,
     output_directory: Path,
@@ -1064,21 +1426,20 @@ def validate_ichor_outputs(
 
     try:
         output_metadata = output_directory.lstat()
-    except OSError as exc:
-        raise IchorOutputError("output directory is absent") from exc
+    except OSError:
+        raise IchorOutputError("output directory is absent") from None
     if not stat.S_ISDIR(output_metadata.st_mode) or output_directory.is_symlink():
         raise IchorOutputError("output directory is absent")
     emitted = [
-        item
-        for item in prepared.output_capabilities
-        if item.relative_path is not None
+        item for item in prepared.output_capabilities if item.relative_path is not None
     ]
     allowed = {item.relative_path for item in emitted}
-    observed = {
-        path.name
-        for path in output_directory.iterdir()
-        if path.name in allowed
-    }
+    try:
+        observed = {
+            path.name for path in output_directory.iterdir() if path.name in allowed
+        }
+    except OSError:
+        raise IchorOutputError("output directory could not be read") from None
     missing = sorted(allowed - observed)
     if missing:
         raise IchorOutputError(f"missing required outputs: {missing}")
@@ -1107,47 +1468,38 @@ def validate_ichor_outputs(
             output_directory / str(role_paths["segments_detailed"]),
             prepared.request.sample_id,
             prepared.request.assets.canonical_grid,
+            corrected,
+        )
+        bin_events = _parse_bin_events(
+            output_directory / str(role_paths["bin_level_cna"]),
+            prepared.request.sample_id,
+            prepared.request.assets.canonical_grid,
         )
         selected, candidates = _parse_params(
             output_directory / str(role_paths["parameters_and_candidates"]),
             prepared.request.sample_id,
         )
-    except ValidationError as exc:
-        raise IchorOutputError("upstream output violates the adapter contract") from exc
-    coverage_count = {
-        (row.contig, row.start, row.end): 0 for row in corrected
-    }
-    for segment in segments:
-        covered = [
-            row
-            for row in corrected
-            if row.contig == segment.contig
-            and row.start >= segment.start
-            and row.end <= segment.end
-        ]
-        if (
-            not covered
-            or covered[0].start != segment.start
-            or covered[-1].end != segment.end
-            or len(covered) != segment.bin_count
-        ):
-            raise IchorOutputError("segment does not align with retained corrected bins")
-        for row in covered:
-            coverage_count[(row.contig, row.start, row.end)] += 1
-    if any(count != 1 for count in coverage_count.values()):
-        raise IchorOutputError("segments do not cover each retained corrected bin once")
-    neutral_calls = {"NEUT", "NEUTRAL"}
-    altered = [item for item in segments if item.call.upper() not in neutral_calls]
-    altered_bins = sum(item.bin_count for item in altered)
-    total_bins = sum(item.bin_count for item in segments)
-    largest_altered = max((item.bin_count for item in altered), default=0)
-    altered_fraction = altered_bins / total_bins if total_bins else 0
-    insufficient_structure = (
-        selected.model_fraction == 0
-        and largest_altered <= prepared.request.parameters.minimum_segment_bins
-        and altered_fraction <= prepared.request.parameters.altered_fraction_threshold
-    )
-    if insufficient_structure:
+    except IchorOutputError:
+        raise
+    except (ValidationError, ValueError):
+        raise IchorOutputError(
+            "upstream output violates the adapter contract"
+        ) from None
+    try:
+        identifiability_evidence = _replay_segment_structure(
+            prepared.request.assets.canonical_grid,
+            bin_statuses,
+            segments,
+            prepared.request.parameters,
+            bin_events,
+        )
+    except ValueError:
+        raise IchorOutputError("upstream structural evidence is inconsistent") from None
+    if identifiability_evidence.force_zero_condition and selected.model_fraction != 0:
+        raise IchorOutputError(
+            "pinned force-zero evidence contradicts the selected model fraction"
+        )
+    if identifiability_evidence.force_zero_condition:
         status: Literal["complete", "insufficient_information"] = (
             "insufficient_information"
         )
@@ -1160,7 +1512,7 @@ def validate_ichor_outputs(
         "Model fraction is conditional on copy-state, ploidy, and parameter assumptions.",
         "Separate GC-only, map-only, and PoN-residual stages are not emitted upstream.",
         "RData is retained by digest but is not deserialized by this parser.",
-        "Raw .seg and bin-level .cna.seg files are retained by digest; v1 parses .seg.txt.",
+        "Raw .seg is retained by digest; v1 parses .seg.txt and bin-level .cna.seg.",
     ]
     if prepared.request.pon_mode == "none_development":
         limitations.append("No protocol-matched panel of normals was supplied.")
@@ -1168,11 +1520,15 @@ def validate_ichor_outputs(
         status=status,
         request_sha256=prepared.request_sha256,
         pon_mode=prepared.request.pon_mode,
+        canonical_grid=prepared.request.assets.canonical_grid,
+        parameters=prepared.request.parameters,
         corrected_bins=corrected,
         bin_statuses=bin_statuses,
         segments=segments,
+        bin_events=bin_events,
         candidates=candidates,
         selected_solution=selected,
+        identifiability_evidence=identifiability_evidence,
         identifiability=identifiability,
         output_capabilities=prepared.output_capabilities,
         artifacts=tuple(sorted(artifacts, key=lambda item: item.role)),
@@ -1181,27 +1537,32 @@ def validate_ichor_outputs(
 
 
 __all__ = [
+    "HMMCOPY_COMMIT",
+    "HMMCOPY_UTILS_COMMIT",
+    "ICHOR_COMMIT",
     "CanonicalBin",
     "CanonicalBinMask",
     "CanonicalGrid",
+    "CentromereInterval",
     "CentromereTableBinding",
+    "CnaBinEvent",
+    "CnaSegment",
     "CnvAssetSet",
     "CnvDevelopmentResult",
     "CnvRunRequest",
     "CountingPolicy",
     "ExternalComponentBinding",
-    "HMMCOPY_COMMIT",
-    "HMMCOPY_UTILS_COMMIT",
-    "ICHOR_COMMIT",
     "IchorOutputError",
     "IchorParameterSet",
+    "IdentifiabilityEvidence",
     "PanelOfNormalsBinding",
     "PreparedIchorRun",
     "RawWigLineage",
     "ReferenceFastaBinding",
     "RuntimeBinding",
     "WigGridBinding",
-    "prepare_ichor_run",
     "contract_sha256",
+    "prepare_ichor_run",
+    "validate_centromere_table",
     "validate_ichor_outputs",
 ]
