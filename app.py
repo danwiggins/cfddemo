@@ -1151,7 +1151,7 @@ def _render_cell_origin_evidence(st: Any) -> None:
 
 
 def _render_copy_number_evidence(st: Any) -> None:
-    """Render the isolated experimental whole-chromosome dosage screen."""
+    """Render isolated exploratory whole-chromosome relative dosage QC."""
 
     result_path = next(
         (path for path in COPY_NUMBER_RESULTS if path.is_file()),
@@ -1164,7 +1164,7 @@ def _render_copy_number_evidence(st: Any) -> None:
             result_path.read_text(encoding="utf-8")
         )
     except (OSError, ValueError):
-        st.error("The registered copy-number screen failed strict validation.")
+        st.error("The registered relative-dosage result failed strict validation.")
         return
 
     rows = [
@@ -1206,14 +1206,14 @@ def _render_copy_number_evidence(st: Any) -> None:
 1. **Keep high-confidence reads**: primary, mapped, QC-pass, non-duplicate, MAPQ ≥20.
 2. **Count read starts** in complete 5 Mb bins across chromosomes 1–22.
 3. **Remove obvious coverage gaps** below 55% of each chromosome's median.
-4. **Compare chromosome medians** with the genome-wide median and flag only shifts beyond ±0.20 log₂.
+4. **Compare chromosome medians** with the genome-wide median and label values outside the unvalidated ±0.20 log₂ visualization boundary.
 """
         )
         st.markdown(
             """
 <div class="interpretation-card">
   <strong>Why the scope is narrow</strong>
-  <p>This can reveal broad whole-chromosome dosage shifts. It does not perform segmentation, infer tumor fraction, or resolve focal and subclonal events.</p>
+  <p>This shows sample-internal relative dosage values. Without calibration and a compatible normal panel, it cannot establish broad copy gains or losses.</p>
 </div>
 """,
             unsafe_allow_html=True,
@@ -1231,7 +1231,7 @@ def _render_copy_number_evidence(st: Any) -> None:
                     {
                         "mark": {
                             "type": "rule",
-                            "color": "#B3262E",
+                            "color": "#6B6B7B",
                             "strokeDash": [5, 4],
                         },
                         "encoding": {"y": {"datum": EVENT_THRESHOLD_LOG2}},
@@ -1239,7 +1239,7 @@ def _render_copy_number_evidence(st: Any) -> None:
                     {
                         "mark": {
                             "type": "rule",
-                            "color": "#B3262E",
+                            "color": "#6B6B7B",
                             "strokeDash": [5, 4],
                         },
                         "encoding": {"y": {"datum": -EVENT_THRESHOLD_LOG2}},
@@ -1266,7 +1266,7 @@ def _render_copy_number_evidence(st: Any) -> None:
                             "color": {
                                 "condition": {
                                     "test": "datum.classification !== 'within_threshold'",
-                                    "value": "#B3262E",
+                                    "value": "#6B6B7B",
                                 },
                                 "value": "#1B7F79",
                             },
@@ -1279,7 +1279,7 @@ def _render_copy_number_evidence(st: Any) -> None:
                                 },
                                 {
                                     "field": "estimated_copy_number",
-                                    "title": "Illustrative copies",
+                                    "title": "Illustrative relative dosage",
                                     "format": ".2f",
                                 },
                                 {
@@ -1304,7 +1304,9 @@ def _render_copy_number_evidence(st: Any) -> None:
             use_container_width=True,
             theme=None,
         )
-        st.caption("Red dashed lines = conservative ±0.20 log₂ screen threshold.")
+        st.caption(
+            "Dashed lines = prespecified, unvalidated ±0.20 log₂ visualization boundary."
+        )
 
     boundary_summary = (
         "All autosomal medians remain inside the prespecified visualization boundary"

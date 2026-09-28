@@ -22,6 +22,8 @@ def test_personalized_results_do_not_make_negative_or_contamination_claims() -> 
         "No broad copy-number cancer signal detected",
         "research-screening scope",
         "tests for broad gains or losses",
+        "conservative ±0.20 log₂ screen threshold",
+        "This can reveal broad whole-chromosome dosage shifts",
     )
 
     for phrase in forbidden:
