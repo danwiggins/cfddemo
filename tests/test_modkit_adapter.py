@@ -104,6 +104,10 @@ def _manifest(
     *,
     inferred_policy: str = "include_as_canonical",
 ) -> ModkitExecutionManifest:
+    prefiltered_bam = source.parent / "synthetic.filtered.bam"
+    if not prefiltered_bam.exists():
+        prefiltered_bam.write_bytes(b"invented prefiltered BAM bytes")
+    prefiltered_bam_sha256 = _digest(prefiltered_bam)
     prefilter = AlignmentPrefilterReceipt(
         samtools_version="1.20",
         samtools_executable_sha256="3" * 64,
@@ -111,7 +115,7 @@ def _manifest(
         source_bam_arg="source.bam",
         output_bam_arg="synthetic.filtered.bam",
         source_bam_sha256="4" * 64,
-        output_bam_sha256="2" * 64,
+        output_bam_sha256=prefiltered_bam_sha256,
         minimum_mapq=20,
         argv=(
             "samtools",
@@ -171,7 +175,7 @@ def _manifest(
             "full.log",
             "--force",
         ),
-        input_bam_sha256="2" * 64,
+        input_bam_sha256=prefiltered_bam_sha256,
         raw_output_sha256=_digest(source),
         reference_fasta_sha256=_digest(fasta),
         reference_fai_sha256=_digest(fai),
@@ -190,6 +194,7 @@ def _load(
     return load_modkit_extract_full_064(
         source,
         manifest=manifest,
+        prefiltered_bam_path=source.parent / "synthetic.filtered.bam",
         fasta_path=fasta,
         fai_path=fai,
         fragment_hash_salt=b"private-test-salt",
@@ -257,6 +262,7 @@ def test_native_adapter_combines_m_h_and_declares_inferred_policy(
     ]
     assert included.ingestion.calls[0].selected_state_probability == pytest.approx(0.7)
     assert included.native_ledger.inferred_observations == 1
+    assert included.execution.alignment_prefilter.verification_level == "reported"
     assert excluded.native_ledger.excluded_inferred_observations == 1
     assert len(excluded.ingestion.calls) == 1
     assert "invented-read" not in included.model_dump_json()
@@ -396,6 +402,17 @@ def test_execution_manifest_binds_prefilter_output(
         ModkitExecutionManifest.model_validate(payload)
 
 
+def test_native_adapter_recomputes_prefiltered_bam_digest(tmp_path: Path) -> None:
+    fasta, fai = _reference(tmp_path)
+    source = _source(tmp_path, _paired_rows())
+    manifest = _manifest(source, fasta, fai)
+    prefiltered_bam = tmp_path / "synthetic.filtered.bam"
+    prefiltered_bam.write_bytes(b"different actual BAM bytes")
+
+    with pytest.raises(CellOriginInputError, match="prefiltered BAM digest"):
+        _load(source, fasta, fai, manifest)
+
+
 def test_native_adapter_rejects_non_c_canonical_base(tmp_path: Path) -> None:
     fasta, fai = _reference(tmp_path)
     source = _source(
@@ -466,6 +483,8 @@ def test_development_entry_point_requires_private_hash_salt(
             "modkit-0.6.4-full-cmh-v2",
             "--extract-full",
             str(tmp_path / "input.bgz"),
+            "--prefiltered-bam",
+            str(tmp_path / "filtered.bam"),
             "--execution-manifest",
             str(tmp_path / "manifest.json"),
             "--reference-fasta",

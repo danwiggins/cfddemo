@@ -31,6 +31,7 @@ def _parser() -> argparse.ArgumentParser:
         help="Required non-default development opt-in.",
     )
     parser.add_argument("--extract-full", required=True, type=Path)
+    parser.add_argument("--prefiltered-bam", required=True, type=Path)
     parser.add_argument("--execution-manifest", required=True, type=Path)
     parser.add_argument("--reference-fasta", required=True, type=Path)
     parser.add_argument("--reference-fai", required=True, type=Path)
@@ -59,6 +60,7 @@ def main(argv: list[str] | None = None) -> int:
         result = load_modkit_extract_full_064(
             arguments.extract_full,
             manifest=manifest,
+            prefiltered_bam_path=arguments.prefiltered_bam,
             fasta_path=arguments.reference_fasta,
             fai_path=arguments.reference_fai,
             fragment_hash_salt=salt.encode("utf-8"),

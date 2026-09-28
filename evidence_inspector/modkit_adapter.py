@@ -109,11 +109,17 @@ class AlignmentExclusionLedger(StrictModel):
 
 
 class AlignmentPrefilterReceipt(StrictModel):
-    """Digest-bound, structurally validated samtools prefilter execution."""
+    """Reported samtools metadata with a structurally validated command.
+
+    The adapter independently verifies only the output BAM bytes. Samtools
+    identity, source-BAM identity, execution, and the exclusion ledger remain
+    reported claims unless wrapped by a separately trusted execution envelope.
+    """
 
     schema_version: Literal["traceback.alignment-prefilter.v1"] = (
         "traceback.alignment-prefilter.v1"
     )
+    verification_level: Literal["reported"] = "reported"
     samtools_version: str = Field(min_length=1, max_length=64)
     samtools_executable_sha256: Sha256
     executable_arg: str = Field(min_length=1, max_length=1024)
@@ -368,6 +374,7 @@ def load_modkit_extract_full_064(
     source_path: Path,
     *,
     manifest: ModkitExecutionManifest,
+    prefiltered_bam_path: Path,
     fasta_path: Path,
     fai_path: Path,
     fragment_hash_salt: bytes,
@@ -394,6 +401,15 @@ def load_modkit_extract_full_064(
         raise CellOriginInputError("probability threshold must be within [0, 1]")
     if _sha256_path(source_path) != manifest.raw_output_sha256:
         raise CellOriginInputError("Modkit output digest does not match receipt")
+    prefiltered_bam_sha256 = _sha256_path(prefiltered_bam_path)
+    if prefiltered_bam_sha256 != manifest.input_bam_sha256:
+        raise CellOriginInputError(
+            "prefiltered BAM digest does not match Modkit input receipt"
+        )
+    if prefiltered_bam_sha256 != manifest.alignment_prefilter.output_bam_sha256:
+        raise CellOriginInputError(
+            "prefiltered BAM digest does not match prefilter receipt"
+        )
     provider = BoundFastaProvider(
         fasta_path,
         fai_path,
