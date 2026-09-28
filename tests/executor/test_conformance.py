@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import json
+from dataclasses import replace
+from typing import Sequence
 
 import pytest
 
@@ -11,6 +13,7 @@ from tests.executor.conformance import (
     EvidenceKind,
     ExecutorRequestFixture,
     MountFixture,
+    RuntimeObservation,
     RuntimeState,
     inventory_runtimes,
     main,
@@ -19,8 +22,31 @@ from tests.executor.conformance import (
 )
 
 
+@pytest.fixture(autouse=True)
+def _forbid_live_runtime_probe(monkeypatch: pytest.MonkeyPatch) -> None:
+    def forbidden_probe(_command: str, _arguments: Sequence[str]) -> tuple[bool, str]:
+        raise AssertionError("offline tests must inject runtime observations or probes")
+
+    monkeypatch.setattr(
+        "tests.executor.conformance._command_version", forbidden_probe
+    )
+
+
+def _offline_runtime_observations() -> tuple[RuntimeObservation, ...]:
+    return tuple(
+        RuntimeObservation(
+            candidate=candidate,
+            state=RuntimeState.UNTESTED,
+            evidence=EvidenceKind.OBSERVED,
+            reason="hermetic test observation; no installed command invoked",
+            commands=(),
+        )
+        for candidate in Candidate
+    )
+
+
 def test_all_candidates_run_identical_nonqualifying_fixture_traces() -> None:
-    report = run_comparison()
+    report = run_comparison(_offline_runtime_observations())
 
     assert report.synthetic_only is True
     assert report.real_data_authorized is False
@@ -28,7 +54,7 @@ def test_all_candidates_run_identical_nonqualifying_fixture_traces() -> None:
     assert {trace.scenario for trace in report.traces} == {
         "complete",
         "changed_input_rejected",
-        "offline_restart_after_publication",
+        "runner_reinstantiation_after_publication",
     }
     assert all(trace.passed for trace in report.traces)
     assert all(trace.evidence == EvidenceKind.OBSERVED for trace in report.traces)
@@ -43,6 +69,23 @@ def test_fixture_request_cannot_authorize_real_execution() -> None:
     assert fixture.real_data_authorized is False
     assert fixture.network == "none"
     assert sum(not mount.read_only for mount in fixture.mounts) == 1
+
+
+@pytest.mark.parametrize(
+    ("changes", "message"),
+    (
+        ({"synthetic_only": False}, "synthetic-only"),
+        ({"real_data_authorized": True}, "cannot authorize real data"),
+        ({"network": "default"}, "network must remain disabled"),
+    ),
+)
+def test_fixture_request_rejects_forbidden_execution_authority(
+    changes: dict[str, object], message: str
+) -> None:
+    fixture = request_fixture(Candidate.DIRECT_OCI, "a" * 64)
+
+    with pytest.raises(ValueError, match=message):
+        replace(fixture, **changes)
 
 
 def test_fixture_request_rejects_second_writable_mount() -> None:
@@ -61,18 +104,38 @@ def test_fixture_request_rejects_second_writable_mount() -> None:
 
 
 def test_runtime_inventory_is_observation_not_qualification() -> None:
-    observations = inventory_runtimes()
+    calls: list[tuple[str, tuple[str, ...]]] = []
+
+    def probe(command: str, arguments: Sequence[str]) -> tuple[bool, str]:
+        argv = tuple(arguments)
+        calls.append((command, argv))
+        return True, f"synthetic {command} CLI"
+
+    observations = inventory_runtimes(probe=probe, host_system="Linux")
 
     assert {item.candidate for item in observations} == set(Candidate)
     assert all(item.evidence == EvidenceKind.OBSERVED for item in observations)
     assert all(item.state in set(RuntimeState) for item in observations)
     assert all(item.reason for item in observations)
+    direct = next(item for item in observations if item.candidate == Candidate.DIRECT_OCI)
+    assert direct.state == RuntimeState.UNTESTED
+    assert "CLI prerequisite detected" in direct.reason
+    assert "rootless execution was not exercised" in direct.reason
+    assert {command for command, _ in calls} == {
+        "epi2me",
+        "docker",
+        "podman",
+        "nextflow",
+        "java",
+    }
 
 
 def test_json_cli_is_canonical_and_explicitly_nonqualifying(
     capsys: pytest.CaptureFixture[str],
 ) -> None:
-    assert main(["--json"]) == 0
+    assert main(
+        ["--json"], runtime_observations=_offline_runtime_observations()
+    ) == 0
     raw = capsys.readouterr().out.strip()
     payload = json.loads(raw)
 

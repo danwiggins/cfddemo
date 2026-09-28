@@ -61,8 +61,9 @@ Traceback custody/recovery scenarios for each candidate identity:
 
 1. complete and adopt one canonical fixture output;
 2. reject a changed sealed input before dispatch; and
-3. recover after a process boundary following publication without rerunning the
-   stage.
+3. construct a fresh `Runner` in the same interpreter after an injected
+   interruption following publication, then adopt the receipt without rerunning
+   the stage.
 
 `ExecutorRequestFixture` is deliberately isolated under `tests/`. It fixes
 synthetic-only input, `network="none"`, argv, opaque mounts, bounded resources,
@@ -171,6 +172,9 @@ required controls, it fails rather than receiving simulated evidence.
 - No OCI image, workflow, model, reference, or large runtime was installed.
 - Linux namespace, cgroup, seccomp/capability, filesystem, GPU, offline, timeout,
   and process-tree behavior remain untested.
+- Recovery across an actual OS process boundary remains untested; the checked-in
+  fixture establishes only same-process `Runner` re-instantiation over persisted
+  state.
 - Vendor licensing, support terms, exact workflow suitability, and stable
   automation interfaces remain unverified.
 - Candidate choice remains provisional until the named experiment produces

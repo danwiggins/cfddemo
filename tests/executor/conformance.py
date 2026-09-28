@@ -16,7 +16,7 @@ import tempfile
 from dataclasses import asdict, dataclass
 from enum import StrEnum
 from pathlib import Path, PurePosixPath
-from typing import Literal, Sequence
+from typing import Callable, Literal, Sequence
 
 from traceback_runner.contracts import InputKind, JobRequest, JobState
 from traceback_runner.runner import InjectedCrash, Runner, StageResult, StageSpec
@@ -85,6 +85,12 @@ class ExecutorRequestFixture:
     real_data_authorized: Literal[False] = False
 
     def __post_init__(self) -> None:
+        if self.synthetic_only is not True:
+            raise ValueError("fixture must remain synthetic-only")
+        if self.real_data_authorized is not False:
+            raise ValueError("fixture cannot authorize real data")
+        if self.network != "none":
+            raise ValueError("fixture network must remain disabled")
         for name in ("workflow_sha256", "stage_sha256", "snapshot_sha256"):
             value = getattr(self, name)
             if len(value) != 64 or any(character not in "0123456789abcdef" for character in value):
@@ -154,13 +160,26 @@ def _command_version(command: str, arguments: Sequence[str]) -> tuple[bool, str]
     return completed.returncode == 0, detail[:160]
 
 
-def inventory_runtimes() -> tuple[RuntimeObservation, ...]:
-    system = platform.system()
-    epi2me_ok, epi2me_detail = _command_version("epi2me", ("--version",))
-    docker_ok, docker_detail = _command_version("docker", ("info", "--format", "{{.ServerVersion}}"))
-    podman_ok, podman_detail = _command_version("podman", ("--version",))
-    nextflow_ok, nextflow_detail = _command_version("nextflow", ("-version",))
-    java_ok, java_detail = _command_version("java", ("-version",))
+def inventory_runtimes(
+    *,
+    probe: Callable[[str, Sequence[str]], tuple[bool, str]] | None = None,
+    host_system: str | None = None,
+) -> tuple[RuntimeObservation, ...]:
+    """Inventory CLI prerequisites without claiming executor qualification.
+
+    The default probe may invoke installed commands and is reserved for the
+    explicit comparison CLI. Tests inject a hermetic probe.
+    """
+
+    runtime_probe = _command_version if probe is None else probe
+    system = host_system if host_system is not None else platform.system()
+    epi2me_ok, epi2me_detail = runtime_probe("epi2me", ("--version",))
+    docker_ok, docker_detail = runtime_probe(
+        "docker", ("info", "--format", "{{.ServerVersion}}")
+    )
+    podman_ok, podman_detail = runtime_probe("podman", ("--version",))
+    nextflow_ok, nextflow_detail = runtime_probe("nextflow", ("-version",))
+    java_ok, java_detail = runtime_probe("java", ("-version",))
 
     vendor_ok = epi2me_ok and docker_ok
     direct_ok = system == "Linux" and podman_ok
@@ -179,12 +198,18 @@ def inventory_runtimes() -> tuple[RuntimeObservation, ...]:
         ),
         RuntimeObservation(
             candidate=Candidate.DIRECT_OCI,
-            state=RuntimeState.AVAILABLE if direct_ok else RuntimeState.UNAVAILABLE,
+            state=RuntimeState.UNTESTED if direct_ok else RuntimeState.UNAVAILABLE,
             evidence=EvidenceKind.OBSERVED,
             reason=(
-                f"Linux rootless-runtime probe available: {podman_detail}"
+                (
+                    "Linux and Podman CLI prerequisite detected; rootless "
+                    f"execution was not exercised: {podman_detail}"
+                )
                 if direct_ok
-                else f"requires Linux and Podman; host={system}; Podman={podman_detail}"
+                else (
+                    "requires Linux and a Podman CLI prerequisite; "
+                    f"host={system}; Podman={podman_detail}"
+                )
             ),
             commands=("podman",),
         ),
@@ -319,7 +344,7 @@ def _trace_changed_input(candidate: Candidate, root: Path) -> TraceResult:
     )
 
 
-def _trace_kill_restart(candidate: Candidate, root: Path) -> TraceResult:
+def _trace_runner_reinstantiation(candidate: Candidate, root: Path) -> TraceResult:
     source = _source(root)
     fired = False
     now = [1_000.0]
@@ -351,16 +376,21 @@ def _trace_kill_restart(candidate: Candidate, root: Path) -> TraceResult:
     passed = result.state == JobState.COMPLETE and calls == [candidate.value]
     return TraceResult(
         candidate,
-        "offline_restart_after_publication",
+        "runner_reinstantiation_after_publication",
         passed,
         EvidenceKind.OBSERVED,
         False,
         False,
-        "Published fixture receipt was adopted exactly once after process restart",
+        (
+            "Published fixture receipt was adopted exactly once after same-process "
+            "Runner re-instantiation"
+        ),
     )
 
 
-def run_comparison() -> ComparisonReport:
+def run_comparison(
+    runtime_observations: tuple[RuntimeObservation, ...],
+) -> ComparisonReport:
     traces: list[TraceResult] = []
     with tempfile.TemporaryDirectory(prefix="traceback-executor-fixture-") as temporary:
         root = Path(temporary)
@@ -369,7 +399,9 @@ def run_comparison() -> ComparisonReport:
                 (
                     _trace_completion(candidate, root / candidate.value / "complete"),
                     _trace_changed_input(candidate, root / candidate.value / "changed"),
-                    _trace_kill_restart(candidate, root / candidate.value / "restart"),
+                    _trace_runner_reinstantiation(
+                        candidate, root / candidate.value / "reinstantiation"
+                    ),
                 )
             )
     return ComparisonReport(
@@ -378,16 +410,25 @@ def run_comparison() -> ComparisonReport:
         real_data_authorized=False,
         host_system=platform.system(),
         host_machine=platform.machine(),
-        runtime_observations=inventory_runtimes(),
+        runtime_observations=runtime_observations,
         traces=tuple(traces),
     )
 
 
-def main(argv: Sequence[str] | None = None) -> int:
+def main(
+    argv: Sequence[str] | None = None,
+    *,
+    runtime_observations: tuple[RuntimeObservation, ...] | None = None,
+) -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--json", action="store_true", help="emit canonical JSON")
     args = parser.parse_args(argv)
-    report = run_comparison()
+    observations = (
+        inventory_runtimes()
+        if runtime_observations is None
+        else runtime_observations
+    )
+    report = run_comparison(observations)
     if args.json:
         print(report.canonical_bytes().decode())
     else:
