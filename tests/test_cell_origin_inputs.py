@@ -12,10 +12,14 @@ from evidence_inspector.cell_origin_inputs import (
     CellOriginInputError,
     CoordinateSystem,
     FractionUnit,
+    GenericCmhProbabilityColumnsV1,
+    GenericHardCallColumnsV2,
     HealthyTableS8Columns,
     MarkerBedColumns,
     ModkitExtractColumns,
     load_healthy_table_s8,
+    load_generic_cmh_probabilities_v1,
+    load_generic_hard_call_cpg_v2,
     load_loyfer_atlas_u_matrix,
     load_marker_bed,
     load_modkit_extract_calls,
@@ -24,6 +28,9 @@ from evidence_inspector.cell_origin_models import (
     CpgCallState,
     KATSMAN_METHATLAS_METHOD,
     LOYFER_UXM_METHOD,
+    ModProbabilityPolicy,
+    ModkitInputProvenanceV2,
+    ModkitSourceSchema,
 )
 
 MODKIT_COLUMNS = ModkitExtractColumns(
@@ -40,6 +47,31 @@ MODKIT_HEADER = (
     "read_id\tchrom\tref_position\tmod_strand\tmodified_primary_base\t"
     "call_code\tmodified_probability\tfail\n"
 )
+HARD_V2_COLUMNS = GenericHardCallColumnsV2(
+    fragment_id="read_id",
+    chromosome="chrom",
+    position0="ref_position",
+    modification_strand="mod_strand",
+    reference_mod_strand="ref_mod_strand",
+    modified_primary_base="modified_primary_base",
+    call_code="call_code",
+    selected_state_probability="call_probability",
+    fail="fail",
+)
+HARD_V2_HEADER = "\t".join(HARD_V2_COLUMNS.declared()) + "\n"
+PROBABILITY_V1_COLUMNS = GenericCmhProbabilityColumnsV1(
+    fragment_id="read_id",
+    chromosome="chrom",
+    position0="ref_position",
+    modification_strand="mod_strand",
+    reference_mod_strand="ref_mod_strand",
+    modified_primary_base="modified_primary_base",
+    canonical_probability="p_c",
+    methyl_probability="p_m",
+    hydroxymethyl_probability="p_h",
+    fail="fail",
+)
+PROBABILITY_V1_HEADER = "\t".join(PROBABILITY_V1_COLUMNS.declared()) + "\n"
 ATLAS_COLUMNS = AtlasUColumns(
     marker_id="marker",
     cell_type_columns=(("immune", "Immune"), ("liver", "Liver")),
@@ -56,6 +88,48 @@ HEALTHY_COLUMNS = HealthyTableS8Columns(
     cell_type_id="cell_type",
     sample_fraction_columns=(("healthy.1", "H1"), ("healthy.2", "H2")),
 )
+
+
+def hard_v2_provenance() -> ModkitInputProvenanceV2:
+    return ModkitInputProvenanceV2(
+        source_schema_id=ModkitSourceSchema.GENERIC_HARD_CALL_CPG_V2,
+        source_schema_version="2",
+        source_tool_id="unknown",
+        source_tool_version="unknown",
+        source_model_id="unknown",
+        source_model_version="unknown",
+        policy=ModProbabilityPolicy.HARD_CALL_COLLAPSED_M_H,
+        probability_threshold=None,
+        probability_threshold_source="source_unknown",
+        reference_id="reference.synthetic",
+        reference_sha256="a" * 64,
+        reference_context_provider_id="provider.synthetic.v1",
+    )
+
+
+def probability_v1_provenance(
+    threshold: float = 0.5,
+) -> ModkitInputProvenanceV2:
+    return ModkitInputProvenanceV2(
+        source_schema_id=ModkitSourceSchema.GENERIC_CMH_PROBABILITIES_V1,
+        source_schema_version="1",
+        source_tool_id="unknown",
+        source_tool_version="unknown",
+        source_model_id="unknown",
+        source_model_version="unknown",
+        policy=ModProbabilityPolicy.PRECALL_COMBINED_M_H,
+        probability_threshold=threshold,
+        probability_threshold_source="adapter_explicit",
+        reference_id="reference.synthetic",
+        reference_sha256="a" * 64,
+        reference_context_provider_id="provider.synthetic.v1",
+    )
+
+
+def cpg_provider(chromosome: str, start0: int, end0: int) -> str:
+    assert chromosome == "chr1"
+    assert end0 == start0 + 2
+    return "CG"
 
 
 def test_modkit_loader_filters_and_hashes_raw_fragment_ids() -> None:
@@ -83,6 +157,219 @@ def test_modkit_loader_filters_and_hashes_raw_fragment_ids() -> None:
     assert calls[0].fragment_digest != calls[2].fragment_digest
     assert "secret-read" not in repr(calls)
     assert all(len(call.fragment_digest) == 64 for call in calls)
+
+
+def test_v2_precombines_m_and_h_before_state_selection() -> None:
+    hard_text = HARD_V2_HEADER + (
+        "secret-read\tchr1\t100\t+\t+\tC\tC\t0.45\tfalse\n"
+    )
+    probability_text = PROBABILITY_V1_HEADER + (
+        "secret-read\tchr1\t100\t+\t+\tC\t0.45\t0.40\t0.15\tfalse\n"
+    )
+
+    hard = load_generic_hard_call_cpg_v2(
+        io.StringIO(hard_text),
+        columns=HARD_V2_COLUMNS,
+        provenance=hard_v2_provenance(),
+        fragment_hash_salt=b"test-salt",
+        reference_context_provider=cpg_provider,
+    )
+    combined = load_generic_cmh_probabilities_v1(
+        io.StringIO(probability_text),
+        columns=PROBABILITY_V1_COLUMNS,
+        provenance=probability_v1_provenance(),
+        fragment_hash_salt=b"test-salt",
+        reference_context_provider=cpg_provider,
+    )
+
+    assert hard.calls[0].state == CpgCallState.UNMETHYLATED
+    assert hard.calls[0].selected_state_probability == 0.45
+    assert hard.calls[0].policy == ModProbabilityPolicy.HARD_CALL_COLLAPSED_M_H
+    assert combined.calls[0].state == CpgCallState.METHYLATED
+    assert combined.calls[0].selected_state_probability == pytest.approx(0.55)
+    assert combined.calls[0].policy == ModProbabilityPolicy.PRECALL_COMBINED_M_H
+    assert "secret-read" not in repr(hard)
+    assert "secret-read" not in repr(combined)
+
+
+def test_v2_probability_ledger_reconciles_every_terminal_stage() -> None:
+    text = PROBABILITY_V1_HEADER + (
+        "failed\tchr1\t10\t+\t+\tC\t0.7\t0.2\t0.1\ttrue\n"
+        "adenine\tchr1\t20\t+\t+\tA\t0.7\t0.2\t0.1\tfalse\n"
+        "tie\tchr1\t30\t+\t+\tC\t0.5\t0.4\t0.1\tfalse\n"
+        "low\tchr1\t40\t+\t+\tC\t0.51\t0.30\t0.19\tfalse\n"
+        "plus\tchr1\t100\t+\t+\tC\t0.7\t0.2\t0.1\tfalse\n"
+        "minus\tchr1\t201\t+\t-\tC\t0.2\t0.7\t0.1\tfalse\n"
+    )
+
+    result = load_generic_cmh_probabilities_v1(
+        io.StringIO(text),
+        columns=PROBABILITY_V1_COLUMNS,
+        provenance=probability_v1_provenance(threshold=0.6),
+        fragment_hash_salt=b"test-salt",
+        reference_context_provider=cpg_provider,
+    )
+
+    ledger = result.ledger
+    assert ledger.total_rows == 6
+    assert ledger.source_failed_rows == 1
+    assert ledger.source_passed_rows == 5
+    assert ledger.excluded_non_c_rows == 1
+    assert ledger.candidate_c_rows == 4
+    assert ledger.probability_input_rows == 4
+    assert ledger.excluded_probability_tie_rows == 1
+    assert ledger.excluded_low_confidence_rows == 1
+    assert ledger.eligible_call_rows == 2
+    assert ledger.unmethylated_call_rows == 1
+    assert ledger.methylated_call_rows == 1
+    assert ledger.reference_plus_call_rows == 1
+    assert ledger.reference_minus_call_rows == 1
+    assert [call.canonical_cpg_position0 for call in result.calls] == [100, 200]
+
+
+def test_v2_hard_call_ledger_preserves_source_call_codes() -> None:
+    text = HARD_V2_HEADER + (
+        "c\tchr1\t100\t+\t+\tC\tC\t0.45\tfalse\n"
+        "m\tchr1\t200\t+\t+\tC\tm\t0.80\tfalse\n"
+        "h\tchr1\t301\t+\t-\tC\th\t0.70\tfalse\n"
+    )
+
+    result = load_generic_hard_call_cpg_v2(
+        io.StringIO(text),
+        columns=HARD_V2_COLUMNS,
+        provenance=hard_v2_provenance(),
+        fragment_hash_salt=b"test-salt",
+        reference_context_provider=cpg_provider,
+    )
+
+    assert result.ledger.hard_call_c_rows == 1
+    assert result.ledger.hard_call_m_rows == 1
+    assert result.ledger.hard_call_h_rows == 1
+    assert result.ledger.candidate_c_rows == 3
+    assert result.ledger.eligible_call_rows == 3
+    assert [call.state for call in result.calls] == [
+        CpgCallState.UNMETHYLATED,
+        CpgCallState.METHYLATED,
+        CpgCallState.METHYLATED,
+    ]
+
+
+def test_v2_canonicalizes_both_reference_strands_to_one_cpg_dyad() -> None:
+    text = HARD_V2_HEADER + (
+        "same-fragment\tchr1\t100\t+\t+\tC\tm\t0.9\tfalse\n"
+        "same-fragment\tchr1\t101\t+\t-\tC\tm\t0.9\tfalse\n"
+    )
+
+    result = load_generic_hard_call_cpg_v2(
+        io.StringIO(text),
+        columns=HARD_V2_COLUMNS,
+        provenance=hard_v2_provenance(),
+        fragment_hash_salt=b"test-salt",
+        reference_context_provider=cpg_provider,
+    )
+
+    assert [call.canonical_cpg_position0 for call in result.calls] == [100, 100]
+    assert len(result.calls) == 2
+    assert result.calls[0].reference_mod_strand.value == "+"
+    assert result.calls[1].reference_mod_strand.value == "-"
+
+
+@pytest.mark.parametrize(
+    ("row", "message", "provider"),
+    [
+        (
+            "r1\tchr1\t0\t+\t-\tC\tm\t0.9\tfalse\n",
+            "underflows",
+            cpg_provider,
+        ),
+        (
+            "r1\tchr1\t100\t+\t+\tC\tm\t0.9\tfalse\n",
+            "not a CpG dyad",
+            lambda chromosome, start0, end0: "CA",
+        ),
+    ],
+)
+def test_v2_reference_validation_fails_closed(
+    row: str,
+    message: str,
+    provider: object,
+) -> None:
+    with pytest.raises(CellOriginInputError, match=message):
+        load_generic_hard_call_cpg_v2(
+            io.StringIO(HARD_V2_HEADER + row),
+            columns=HARD_V2_COLUMNS,
+            provenance=hard_v2_provenance(),
+            fragment_hash_salt=b"test-salt",
+            reference_context_provider=provider,  # type: ignore[arg-type]
+        )
+
+
+def test_v2_exact_duplicates_fail_closed_but_opposite_strands_do_not() -> None:
+    duplicate = (
+        "same\tchr1\t100\t+\t+\tC\tm\t0.9\tfalse\n"
+        "same\tchr1\t100\t+\t+\tC\tm\t0.8\tfalse\n"
+    )
+
+    with pytest.raises(CellOriginInputError, match="duplicate exact"):
+        load_generic_hard_call_cpg_v2(
+            io.StringIO(HARD_V2_HEADER + duplicate),
+            columns=HARD_V2_COLUMNS,
+            provenance=hard_v2_provenance(),
+            fragment_hash_salt=b"test-salt",
+            reference_context_provider=cpg_provider,
+        )
+
+
+@pytest.mark.parametrize(
+    ("probabilities", "message"),
+    [
+        ("0.4\t0.3\t0.2", "sum to one"),
+        ("0.4\t0.7\t-0.1", r"within \[0, 1\]"),
+        ("nan\t0.5\t0.5", "finite"),
+    ],
+)
+def test_v2_probability_rows_fail_closed_on_invalid_values(
+    probabilities: str,
+    message: str,
+) -> None:
+    row = f"r1\tchr1\t100\t+\t+\tC\t{probabilities}\tfalse\n"
+
+    with pytest.raises(CellOriginInputError, match=message):
+        load_generic_cmh_probabilities_v1(
+            io.StringIO(PROBABILITY_V1_HEADER + row),
+            columns=PROBABILITY_V1_COLUMNS,
+            provenance=probability_v1_provenance(),
+            fragment_hash_salt=b"test-salt",
+            reference_context_provider=cpg_provider,
+        )
+
+
+def test_v2_zero_threshold_and_deterministic_repeat_are_explicit() -> None:
+    text = PROBABILITY_V1_HEADER + (
+        "r1\tchr1\t100\t+\t+\tC\t0.499999\t0.400001\t0.1\tfalse\n"
+    )
+    provenance = probability_v1_provenance(threshold=0.0)
+
+    first = load_generic_cmh_probabilities_v1(
+        io.StringIO(text),
+        columns=PROBABILITY_V1_COLUMNS,
+        provenance=provenance,
+        fragment_hash_salt=b"test-salt",
+        reference_context_provider=cpg_provider,
+    )
+    repeated = load_generic_cmh_probabilities_v1(
+        io.StringIO(text),
+        columns=PROBABILITY_V1_COLUMNS,
+        provenance=provenance,
+        fragment_hash_salt=b"test-salt",
+        reference_context_provider=cpg_provider,
+    )
+
+    assert first == repeated
+    assert first.calls[0].state == CpgCallState.METHYLATED
+    assert first.provenance.probability_threshold == 0.0
+    assert first.provenance.probability_tie_tolerance == 0.0
+    assert first.provenance.probability_sum_tolerance == 1e-6
 
 
 def test_modkit_loader_requires_explicit_coordinate_and_probability_units() -> None:

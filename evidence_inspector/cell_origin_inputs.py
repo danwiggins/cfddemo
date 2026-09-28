@@ -14,7 +14,7 @@ from dataclasses import dataclass
 from enum import StrEnum
 from os import PathLike
 from pathlib import Path
-from typing import IO, Any, Iterable, Iterator, Mapping, Sequence
+from typing import IO, Any, Callable, Iterable, Iterator, Mapping, Sequence
 
 from pydantic import Field, ValidationError, model_validator
 
@@ -26,12 +26,20 @@ from evidence_inspector.cell_origin_models import (
     GenomicMarker,
     LOYFER_UXM_METHOD,
     MethodDefinition,
+    ModProbabilityPolicy,
     ModkitCpgCall,
+    ModkitCpgCallV2,
+    ModkitIngestionLedgerV2,
+    ModkitInputProvenanceV2,
+    ModkitInputResultV2,
+    ModkitSourceSchema,
     Strand,
     StrictModel,
 )
 
 DEFAULT_MAX_ROWS = 1_000_000
+
+ReferenceContextProvider = Callable[[str, int, int], str]
 
 
 class CellOriginInputError(ValueError):
@@ -71,6 +79,68 @@ class ModkitExtractColumns:
             self.modified_primary_base,
             self.call_code,
             self.modified_probability,
+            self.fail,
+            *self.ignored,
+        )
+
+
+@dataclass(frozen=True)
+class GenericHardCallColumnsV2:
+    """Exact columns for the declared generic hard-call CpG schema."""
+
+    fragment_id: str
+    chromosome: str
+    position0: str
+    modification_strand: str
+    reference_mod_strand: str
+    modified_primary_base: str
+    call_code: str
+    selected_state_probability: str
+    fail: str
+    ignored: tuple[str, ...] = ()
+
+    def declared(self) -> tuple[str, ...]:
+        return (
+            self.fragment_id,
+            self.chromosome,
+            self.position0,
+            self.modification_strand,
+            self.reference_mod_strand,
+            self.modified_primary_base,
+            self.call_code,
+            self.selected_state_probability,
+            self.fail,
+            *self.ignored,
+        )
+
+
+@dataclass(frozen=True)
+class GenericCmhProbabilityColumnsV1:
+    """Exact columns for generic canonical-C, 5mC, and 5hmC probabilities."""
+
+    fragment_id: str
+    chromosome: str
+    position0: str
+    modification_strand: str
+    reference_mod_strand: str
+    modified_primary_base: str
+    canonical_probability: str
+    methyl_probability: str
+    hydroxymethyl_probability: str
+    fail: str
+    ignored: tuple[str, ...] = ()
+
+    def declared(self) -> tuple[str, ...]:
+        return (
+            self.fragment_id,
+            self.chromosome,
+            self.position0,
+            self.modification_strand,
+            self.reference_mod_strand,
+            self.modified_primary_base,
+            self.canonical_probability,
+            self.methyl_probability,
+            self.hydroxymethyl_probability,
             self.fail,
             *self.ignored,
         )
@@ -347,6 +417,421 @@ def _model_error(input_name: str, row_number: int, exc: Exception) -> None:
     raise CellOriginInputError(
         f"{input_name} failed schema validation at row {row_number}"
     ) from exc
+
+
+def _strand(value: Any, field: str, row_number: int) -> Strand:
+    text = _required_text(value, field, row_number)
+    try:
+        return Strand(text)
+    except ValueError as exc:
+        raise CellOriginInputError(
+            f"{field} must be + or - at row {row_number}"
+        ) from exc
+
+
+def _fragment_digest(raw_id: Any, salt: bytes, row_number: int) -> str:
+    raw = _required_text(raw_id, "fragment_id", row_number)
+    return hashlib.sha256(salt + b"\0" + raw.encode("utf-8")).hexdigest()
+
+
+def _validate_v2_common(
+    *,
+    fragment_hash_salt: bytes,
+    reference_context_provider: ReferenceContextProvider,
+) -> None:
+    if not isinstance(fragment_hash_salt, bytes) or not fragment_hash_salt:
+        raise CellOriginInputError("fragment_hash_salt must be nonempty bytes")
+    if not callable(reference_context_provider):
+        raise CellOriginInputError("reference context provider must be callable")
+
+
+def _canonical_cpg_position(
+    *,
+    chromosome: str,
+    original_position0: int,
+    reference_mod_strand: Strand,
+    reference_context_provider: ReferenceContextProvider,
+    row_number: int,
+) -> int:
+    if reference_mod_strand == Strand.PLUS:
+        canonical_position0 = original_position0
+    else:
+        if original_position0 == 0:
+            raise CellOriginInputError(
+                f"minus-strand CpG position underflows at row {row_number}"
+            )
+        canonical_position0 = original_position0 - 1
+    try:
+        context = reference_context_provider(
+            chromosome,
+            canonical_position0,
+            canonical_position0 + 2,
+        )
+    except Exception as exc:
+        raise CellOriginInputError(
+            f"reference context provider failed at row {row_number}"
+        ) from exc
+    if not isinstance(context, str) or context.upper() != "CG":
+        raise CellOriginInputError(
+            f"reference context is not a CpG dyad at row {row_number}"
+        )
+    return canonical_position0
+
+
+def _v2_call_key(call: ModkitCpgCallV2) -> tuple[str, str, int, Strand, Strand]:
+    return (
+        call.fragment_digest,
+        call.chromosome,
+        call.canonical_cpg_position0,
+        call.modification_strand,
+        call.reference_mod_strand,
+    )
+
+
+def _v2_result(
+    *,
+    provenance: ModkitInputProvenanceV2,
+    calls: Sequence[ModkitCpgCallV2],
+    counters: Mapping[str, int],
+) -> ModkitInputResultV2:
+    try:
+        ledger = ModkitIngestionLedgerV2(
+            policy=provenance.policy,
+            malformed_rows=0,
+            duplicate_rows=0,
+            **counters,
+        )
+        return ModkitInputResultV2(
+            schema_version="cell-origin-modkit-input.v2",
+            provenance=provenance,
+            ledger=ledger,
+            calls=tuple(calls),
+        )
+    except ValidationError as exc:
+        raise CellOriginInputError(
+            "generic CpG ingestion failed aggregate validation"
+        ) from exc
+
+
+def load_generic_hard_call_cpg_v2(
+    source: TextSource,
+    *,
+    columns: GenericHardCallColumnsV2,
+    provenance: ModkitInputProvenanceV2,
+    fragment_hash_salt: bytes,
+    reference_context_provider: ReferenceContextProvider,
+    max_rows: int = DEFAULT_MAX_ROWS,
+) -> ModkitInputResultV2:
+    """Load the declared generic hard-call schema without claiming Modkit parity."""
+
+    if provenance.policy != ModProbabilityPolicy.HARD_CALL_COLLAPSED_M_H:
+        raise CellOriginInputError("hard-call loader requires hard-call provenance")
+    if provenance.source_schema_id != ModkitSourceSchema.GENERIC_HARD_CALL_CPG_V2:
+        raise CellOriginInputError("hard-call loader requires its generic schema")
+    _validate_v2_common(
+        fragment_hash_salt=fragment_hash_salt,
+        reference_context_provider=reference_context_provider,
+    )
+    counters = {
+        "total_rows": 0,
+        "source_failed_rows": 0,
+        "source_passed_rows": 0,
+        "excluded_non_c_rows": 0,
+        "candidate_c_rows": 0,
+        "hard_call_c_rows": 0,
+        "hard_call_m_rows": 0,
+        "hard_call_h_rows": 0,
+        "probability_input_rows": 0,
+        "excluded_probability_tie_rows": 0,
+        "excluded_low_confidence_rows": 0,
+        "eligible_call_rows": 0,
+        "unmethylated_call_rows": 0,
+        "methylated_call_rows": 0,
+        "reference_plus_call_rows": 0,
+        "reference_minus_call_rows": 0,
+    }
+    calls: list[ModkitCpgCallV2] = []
+    seen: set[tuple[str, str, int, Strand, Strand]] = set()
+    with _open_text(source) as handle:
+        reader = csv.DictReader(handle, delimiter="\t")
+        _validate_declared_columns(reader.fieldnames or (), columns.declared())
+        for row_number, row in _bounded_rows(reader, max_rows=max_rows):
+            counters["total_rows"] += 1
+            if None in row:
+                raise CellOriginInputError(
+                    f"unexpected extra TSV fields at row {row_number}"
+                )
+            if _false_or_true(row[columns.fail], row_number):
+                counters["source_failed_rows"] += 1
+                continue
+            counters["source_passed_rows"] += 1
+            primary_base = _required_text(
+                row[columns.modified_primary_base],
+                "modified_primary_base",
+                row_number,
+            )
+            if primary_base != "C":
+                counters["excluded_non_c_rows"] += 1
+                continue
+            counters["candidate_c_rows"] += 1
+            call_code = _required_text(
+                row[columns.call_code], "call_code", row_number
+            )
+            if call_code not in {"C", "m", "h"}:
+                raise CellOriginInputError(
+                    f"unsupported C call code at row {row_number}"
+                )
+            counters[f"hard_call_{call_code.lower()}_rows"] += 1
+            chromosome = _required_text(
+                row[columns.chromosome], "chromosome", row_number
+            )
+            original_position0 = _integer(
+                row[columns.position0], "position0", row_number
+            )
+            modification_strand = _strand(
+                row[columns.modification_strand],
+                "modification_strand",
+                row_number,
+            )
+            reference_mod_strand = _strand(
+                row[columns.reference_mod_strand],
+                "reference_mod_strand",
+                row_number,
+            )
+            canonical_position0 = _canonical_cpg_position(
+                chromosome=chromosome,
+                original_position0=original_position0,
+                reference_mod_strand=reference_mod_strand,
+                reference_context_provider=reference_context_provider,
+                row_number=row_number,
+            )
+            try:
+                call = ModkitCpgCallV2(
+                    schema_version="cell-origin-cpg-call.v2",
+                    fragment_digest=_fragment_digest(
+                        row[columns.fragment_id],
+                        fragment_hash_salt,
+                        row_number,
+                    ),
+                    chromosome=chromosome,
+                    original_position0=original_position0,
+                    canonical_cpg_position0=canonical_position0,
+                    modification_strand=modification_strand,
+                    reference_mod_strand=reference_mod_strand,
+                    selected_state_probability=_fraction(
+                        row[columns.selected_state_probability],
+                        "selected_state_probability",
+                        row_number,
+                    ),
+                    state=(
+                        CpgCallState.UNMETHYLATED
+                        if call_code == "C"
+                        else CpgCallState.METHYLATED
+                    ),
+                    policy=provenance.policy,
+                )
+            except ValidationError as exc:
+                _model_error("generic hard call", row_number, exc)
+            key = _v2_call_key(call)
+            if key in seen:
+                raise CellOriginInputError(
+                    f"duplicate exact CpG observation at row {row_number}"
+                )
+            seen.add(key)
+            calls.append(call)
+            counters["eligible_call_rows"] += 1
+            counters[
+                "unmethylated_call_rows"
+                if call.state == CpgCallState.UNMETHYLATED
+                else "methylated_call_rows"
+            ] += 1
+            counters[
+                "reference_plus_call_rows"
+                if reference_mod_strand == Strand.PLUS
+                else "reference_minus_call_rows"
+            ] += 1
+    return _v2_result(provenance=provenance, calls=calls, counters=counters)
+
+
+def load_generic_cmh_probabilities_v1(
+    source: TextSource,
+    *,
+    columns: GenericCmhProbabilityColumnsV1,
+    provenance: ModkitInputProvenanceV2,
+    fragment_hash_salt: bytes,
+    reference_context_provider: ReferenceContextProvider,
+    max_rows: int = DEFAULT_MAX_ROWS,
+) -> ModkitInputResultV2:
+    """Combine generic C/m/h probabilities before selecting a CpG state."""
+
+    if provenance.policy != ModProbabilityPolicy.PRECALL_COMBINED_M_H:
+        raise CellOriginInputError(
+            "probability loader requires precall-combined provenance"
+        )
+    if (
+        provenance.source_schema_id
+        != ModkitSourceSchema.GENERIC_CMH_PROBABILITIES_V1
+    ):
+        raise CellOriginInputError("probability loader requires its generic schema")
+    threshold = provenance.probability_threshold
+    if threshold is None:
+        raise CellOriginInputError("probability loader requires an explicit threshold")
+    _validate_v2_common(
+        fragment_hash_salt=fragment_hash_salt,
+        reference_context_provider=reference_context_provider,
+    )
+    counters = {
+        "total_rows": 0,
+        "source_failed_rows": 0,
+        "source_passed_rows": 0,
+        "excluded_non_c_rows": 0,
+        "candidate_c_rows": 0,
+        "hard_call_c_rows": 0,
+        "hard_call_m_rows": 0,
+        "hard_call_h_rows": 0,
+        "probability_input_rows": 0,
+        "excluded_probability_tie_rows": 0,
+        "excluded_low_confidence_rows": 0,
+        "eligible_call_rows": 0,
+        "unmethylated_call_rows": 0,
+        "methylated_call_rows": 0,
+        "reference_plus_call_rows": 0,
+        "reference_minus_call_rows": 0,
+    }
+    calls: list[ModkitCpgCallV2] = []
+    seen: set[tuple[str, str, int, Strand, Strand]] = set()
+    with _open_text(source) as handle:
+        reader = csv.DictReader(handle, delimiter="\t")
+        _validate_declared_columns(reader.fieldnames or (), columns.declared())
+        for row_number, row in _bounded_rows(reader, max_rows=max_rows):
+            counters["total_rows"] += 1
+            if None in row:
+                raise CellOriginInputError(
+                    f"unexpected extra TSV fields at row {row_number}"
+                )
+            if _false_or_true(row[columns.fail], row_number):
+                counters["source_failed_rows"] += 1
+                continue
+            counters["source_passed_rows"] += 1
+            primary_base = _required_text(
+                row[columns.modified_primary_base],
+                "modified_primary_base",
+                row_number,
+            )
+            if primary_base != "C":
+                counters["excluded_non_c_rows"] += 1
+                continue
+            counters["candidate_c_rows"] += 1
+            counters["probability_input_rows"] += 1
+            chromosome = _required_text(
+                row[columns.chromosome], "chromosome", row_number
+            )
+            original_position0 = _integer(
+                row[columns.position0], "position0", row_number
+            )
+            modification_strand = _strand(
+                row[columns.modification_strand],
+                "modification_strand",
+                row_number,
+            )
+            reference_mod_strand = _strand(
+                row[columns.reference_mod_strand],
+                "reference_mod_strand",
+                row_number,
+            )
+            canonical_position0 = _canonical_cpg_position(
+                chromosome=chromosome,
+                original_position0=original_position0,
+                reference_mod_strand=reference_mod_strand,
+                reference_context_provider=reference_context_provider,
+                row_number=row_number,
+            )
+            canonical_probability = _fraction(
+                row[columns.canonical_probability],
+                "canonical_probability",
+                row_number,
+            )
+            methyl_probability = _fraction(
+                row[columns.methyl_probability],
+                "methyl_probability",
+                row_number,
+            )
+            hydroxymethyl_probability = _fraction(
+                row[columns.hydroxymethyl_probability],
+                "hydroxymethyl_probability",
+                row_number,
+            )
+            total_probability = (
+                canonical_probability
+                + methyl_probability
+                + hydroxymethyl_probability
+            )
+            if not math.isclose(
+                total_probability,
+                1.0,
+                rel_tol=0.0,
+                abs_tol=provenance.probability_sum_tolerance,
+            ):
+                raise CellOriginInputError(
+                    f"C/m/h probabilities must sum to one at row {row_number}"
+                )
+            combined_probability = methyl_probability + hydroxymethyl_probability
+            if combined_probability > 1.0:
+                raise CellOriginInputError(
+                    f"combined modification probability exceeds one at row {row_number}"
+                )
+            difference = combined_probability - canonical_probability
+            if abs(difference) <= provenance.probability_tie_tolerance:
+                counters["excluded_probability_tie_rows"] += 1
+                continue
+            selected_probability = max(
+                canonical_probability, combined_probability
+            )
+            if selected_probability <= 0.5 or selected_probability < threshold:
+                counters["excluded_low_confidence_rows"] += 1
+                continue
+            try:
+                call = ModkitCpgCallV2(
+                    schema_version="cell-origin-cpg-call.v2",
+                    fragment_digest=_fragment_digest(
+                        row[columns.fragment_id],
+                        fragment_hash_salt,
+                        row_number,
+                    ),
+                    chromosome=chromosome,
+                    original_position0=original_position0,
+                    canonical_cpg_position0=canonical_position0,
+                    modification_strand=modification_strand,
+                    reference_mod_strand=reference_mod_strand,
+                    selected_state_probability=selected_probability,
+                    state=(
+                        CpgCallState.METHYLATED
+                        if difference > 0.0
+                        else CpgCallState.UNMETHYLATED
+                    ),
+                    policy=provenance.policy,
+                )
+            except ValidationError as exc:
+                _model_error("generic C/m/h probability call", row_number, exc)
+            key = _v2_call_key(call)
+            if key in seen:
+                raise CellOriginInputError(
+                    f"duplicate exact CpG observation at row {row_number}"
+                )
+            seen.add(key)
+            calls.append(call)
+            counters["eligible_call_rows"] += 1
+            counters[
+                "unmethylated_call_rows"
+                if call.state == CpgCallState.UNMETHYLATED
+                else "methylated_call_rows"
+            ] += 1
+            counters[
+                "reference_plus_call_rows"
+                if reference_mod_strand == Strand.PLUS
+                else "reference_minus_call_rows"
+            ] += 1
+    return _v2_result(provenance=provenance, calls=calls, counters=counters)
 
 
 def load_modkit_extract_calls(
@@ -724,12 +1209,17 @@ __all__ = [
     "CellOriginInputError",
     "CoordinateSystem",
     "FractionUnit",
+    "GenericCmhProbabilityColumnsV1",
+    "GenericHardCallColumnsV2",
     "HealthySampleFraction",
     "HealthyTableS8",
     "HealthyTableS8Columns",
     "HealthyTableS8Row",
     "MarkerBedColumns",
     "ModkitExtractColumns",
+    "ReferenceContextProvider",
+    "load_generic_cmh_probabilities_v1",
+    "load_generic_hard_call_cpg_v2",
     "load_healthy_table_s8",
     "load_loyfer_atlas_u_matrix",
     "load_marker_bed",
