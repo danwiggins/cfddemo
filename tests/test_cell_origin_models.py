@@ -393,6 +393,28 @@ def test_hard_call_ledger_cannot_claim_probability_filtering() -> None:
         validate_json(ModkitIngestionLedgerV2, hard)
 
 
+def test_hard_call_ledger_binds_source_states_to_emitted_states() -> None:
+    forged = _modkit_ledger("hard_call_collapsed_m_h")
+    forged.update(
+        total_rows=1,
+        source_failed_rows=0,
+        source_passed_rows=1,
+        excluded_non_c_rows=0,
+        candidate_c_rows=1,
+        hard_call_c_rows=1,
+        hard_call_m_rows=0,
+        hard_call_h_rows=0,
+        eligible_call_rows=1,
+        unmethylated_call_rows=0,
+        methylated_call_rows=1,
+        reference_plus_call_rows=1,
+        reference_minus_call_rows=0,
+    )
+
+    with pytest.raises(ValidationError, match="C rows must equal"):
+        validate_json(ModkitIngestionLedgerV2, forged)
+
+
 def test_modkit_v2_result_reconciles_calls_without_collapsing_strands() -> None:
     calls = [
         _modkit_call(),
