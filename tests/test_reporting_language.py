@@ -20,6 +20,8 @@ def test_personalized_results_do_not_make_negative_or_contamination_claims() -> 
         "consistent with low high-molecular-weight gDNA contamination",
         "No shift toward the short",
         "No broad copy-number cancer signal detected",
+        "research-screening scope",
+        "tests for broad gains or losses",
     )
 
     for phrase in forbidden:

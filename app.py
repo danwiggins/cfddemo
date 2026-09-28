@@ -506,7 +506,7 @@ def _render_signal_overview(st: Any) -> None:
     st.write(
         "Cell-free DNA is a mixture of short fragments released by tissues across "
         "the body. A single methylation-aware sequencing run can expose three "
-        "different signals. This demo computes all three at research-screening scope."
+        "different signals. This demo computes three exploratory development readouts."
     )
     length, methylation, copy_number = st.columns(3)
     with length:
@@ -515,7 +515,7 @@ def _render_signal_overview(st: Any) -> None:
 <div class="story-card active">
   <div class="card-label">Built · Readout 1</div>
   <strong>Fragment length</strong>
-  <p>Healthy cfDNA forms a nucleosome ladder. Tumor-derived fragments often shift shorter.</p>
+  <p>Plots the measured raw query-sequence-length distribution without classifying the sample.</p>
 </div>
 """,
             unsafe_allow_html=True,
@@ -526,7 +526,7 @@ def _render_signal_overview(st: Any) -> None:
 <div class="story-card active">
   <div class="card-label">Built · Readout 2</div>
   <strong>Methylation barcode</strong>
-  <p>Cell types retain distinct CpG patterns, allowing a mixture to be decomposed by tissue.</p>
+  <p>Fits an atlas-conditioned source-composition estimate from measured CpG patterns.</p>
 </div>
 """,
             unsafe_allow_html=True,
@@ -537,7 +537,7 @@ def _render_signal_overview(st: Any) -> None:
 <div class="story-card active">
   <div class="card-label">Experimental · Readout 3</div>
   <strong>Chromosome dosage</strong>
-  <p>A conservative whole-chromosome screen tests for broad gains or losses. It is not a tumor-fraction caller.</p>
+  <p>Plots sample-internal chromosome medians against an unvalidated visualization boundary; it cannot determine gains or losses.</p>
 </div>
 """,
             unsafe_allow_html=True,
