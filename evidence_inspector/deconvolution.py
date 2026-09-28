@@ -1,9 +1,10 @@
 """Deterministic Loyfer fragment-UXM deconvolution.
 
-The observed value for each marker is its fragment-level U fraction.  NNLS is
-fit against the corresponding Loyfer atlas U column, weighting each row by the
-number of classified fragments that contributed to that observed fraction.
-The resulting nonnegative coefficients are normalized to canonical fractions.
+The observed value for each marker is its fragment-level U fraction. NNLS is
+fit against the corresponding Loyfer atlas U column. Historical v1 output is
+left unchanged and does not claim a row-scaling identity; v2 requires the
+scaling strategy explicitly. The resulting nonnegative coefficients are
+normalized to canonical fractions.
 
 Reference comparisons produced here are descriptive comparisons with an
 observed cohort.  They are not clinical normal intervals.
@@ -25,9 +26,12 @@ from evidence_inspector.cell_origin_models import (
     BootstrapResult,
     CellFractionEstimate,
     DeconvolutionOutput,
+    DeconvolutionOutputV2,
     LOYFER_UXM_METHOD,
     MarkerCountRow,
     NnlsDiagnostics,
+    NnlsDiagnosticsV2,
+    NnlsRowScale,
     RangeClassification,
     RangeComparison,
     ReferenceRangeRow,
@@ -176,6 +180,7 @@ def _solve_arrays(
     observed: np.ndarray,
     counts: np.ndarray,
     *,
+    row_scale: NnlsRowScale,
     tolerance: float,
     max_iterations: int,
 ) -> tuple[np.ndarray, int, bool, float]:
@@ -192,9 +197,20 @@ def _solve_arrays(
             "zero U-fraction signal cannot be normalized into cell fractions"
         )
 
-    row_scale = np.sqrt(counts)
-    weighted_matrix = matrix * row_scale[:, np.newaxis]
-    weighted_observed = observed * row_scale
+    try:
+        scale_mode = NnlsRowScale(row_scale)
+    except (TypeError, ValueError) as exc:
+        raise DeconvolutionError("unsupported NNLS row scale") from exc
+    if scale_mode == NnlsRowScale.REFERENCE_COUNT:
+        scale = counts
+    elif scale_mode == NnlsRowScale.SQRT_COUNT:
+        scale = np.sqrt(counts)
+    elif scale_mode == NnlsRowScale.UNWEIGHTED:
+        scale = np.ones_like(counts)
+    else:  # pragma: no cover - exhaustive guard for future enum members
+        raise DeconvolutionError("unsupported NNLS row scale")
+    weighted_matrix = matrix * scale[:, np.newaxis]
+    weighted_observed = observed * scale
     weights, iterations, converged = _active_set_nnls(
         weighted_matrix,
         weighted_observed,
@@ -223,6 +239,26 @@ def _result_id(
     return f"nnls.{digest[:24]}"
 
 
+def _result_id_v2(
+    marker_counts: Sequence[MarkerCountRow],
+    atlas: AtlasUMatrix,
+    row_scale: NnlsRowScale,
+) -> str:
+    payload = {
+        "atlas": atlas.model_dump(mode="json"),
+        "marker_counts": [
+            row.model_dump(mode="json") for row in marker_counts
+        ],
+        "method": LOYFER_UXM_METHOD.model_dump(mode="json"),
+        "nnls_row_scale": row_scale.value,
+        "schema_version": "cell-origin-deconvolution.v2",
+    }
+    digest = hashlib.sha256(
+        json.dumps(payload, sort_keys=True, separators=(",", ":")).encode()
+    ).hexdigest()
+    return f"nnls-v2.{digest[:24]}"
+
+
 def deconvolve_uxm(
     marker_counts: Sequence[MarkerCountRow],
     atlas: AtlasUMatrix,
@@ -231,13 +267,14 @@ def deconvolve_uxm(
     tolerance: float = DEFAULT_TOLERANCE,
     max_iterations: int = 10_000,
 ) -> DeconvolutionOutput:
-    """Run count-weighted NNLS against a Loyfer atlas U matrix."""
+    """Run the historical unlabeled v1 square-root-count UXM NNLS."""
 
     marker_ids, matrix, observed, counts = _aligned_arrays(marker_counts, atlas)
     weights, iterations, converged, residual_l2 = _solve_arrays(
         matrix,
         observed,
         counts,
+        row_scale=NnlsRowScale.SQRT_COUNT,
         tolerance=tolerance,
         max_iterations=max_iterations,
     )
@@ -276,6 +313,70 @@ def deconvolve_uxm(
             iterations=iterations,
             residual_l2=residual_l2,
             objective_value=0.5 * residual_l2 * residual_l2,
+        ),
+    )
+
+
+def deconvolve_uxm_v2(
+    marker_counts: Sequence[MarkerCountRow],
+    atlas: AtlasUMatrix,
+    *,
+    row_scale: NnlsRowScale,
+    tolerance: float = DEFAULT_TOLERANCE,
+    max_iterations: int = 10_000,
+) -> DeconvolutionOutputV2:
+    """Run UXM NNLS with an explicit, result-bound row-scaling strategy."""
+
+    try:
+        scale_mode = NnlsRowScale(row_scale)
+    except (TypeError, ValueError) as exc:
+        raise DeconvolutionError("unsupported NNLS row scale") from exc
+    marker_ids, matrix, observed, counts = _aligned_arrays(marker_counts, atlas)
+    weights, iterations, converged, residual_l2 = _solve_arrays(
+        matrix,
+        observed,
+        counts,
+        row_scale=scale_mode,
+        tolerance=tolerance,
+        max_iterations=max_iterations,
+    )
+    if not converged:
+        raise DeconvolutionError(
+            f"NNLS did not converge within {max_iterations} iterations"
+        )
+    weight_sum = float(np.sum(weights))
+    if not math.isfinite(weight_sum) or weight_sum <= tolerance:
+        raise DeconvolutionError(
+            "NNLS produced no positive weight to normalize"
+        )
+
+    fractions = weights / weight_sum
+    estimates = tuple(
+        CellFractionEstimate(
+            cell_type_id=cell_type_id,
+            raw_nnls_weight=float(weight),
+            fraction=float(fraction),
+        )
+        for cell_type_id, weight, fraction in zip(
+            atlas.cell_type_ids,
+            weights,
+            fractions,
+            strict=True,
+        )
+    )
+    return DeconvolutionOutputV2(
+        schema_version="cell-origin-deconvolution.v2",
+        result_id=_result_id_v2(marker_counts, atlas, scale_mode),
+        method=LOYFER_UXM_METHOD,
+        atlas_id=atlas.atlas_id,
+        marker_ids=marker_ids,
+        estimates=estimates,
+        diagnostics=NnlsDiagnosticsV2(
+            converged=True,
+            iterations=iterations,
+            residual_l2=residual_l2,
+            objective_value=0.5 * residual_l2 * residual_l2,
+            row_scale=scale_mode,
         ),
     )
 
@@ -334,6 +435,7 @@ def bootstrap_uxm(
                 matrix,
                 sampled_observed,
                 counts,
+                row_scale=NnlsRowScale.SQRT_COUNT,
                 tolerance=tolerance,
                 max_iterations=max_iterations,
             )

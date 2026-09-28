@@ -1,4 +1,4 @@
-"""Tests for count-weighted Loyfer UXM deconvolution."""
+"""Tests for versioned Loyfer UXM deconvolution objectives."""
 
 from __future__ import annotations
 
@@ -13,6 +13,7 @@ from evidence_inspector.cell_origin_models import (
     AtlasUValue,
     LOYFER_UXM_METHOD,
     MarkerCountRow,
+    NnlsRowScale,
     RangeClassification,
 )
 from evidence_inspector.deconvolution import (
@@ -21,6 +22,7 @@ from evidence_inspector.deconvolution import (
     bootstrap_uxm,
     compare_observed_cohort_ranges,
     deconvolve_uxm,
+    deconvolve_uxm_v2,
 )
 
 FIXTURES = Path(__file__).parent / "fixtures" / "cell_origin"
@@ -69,7 +71,7 @@ def test_hand_solvable_mixture_recovers_nonnegative_fractions() -> None:
     assert result.diagnostics.objective_value == pytest.approx(0.0, abs=1e-12)
 
 
-def test_count_weighting_changes_overdetermined_solution() -> None:
+def test_versioned_row_scales_match_independent_analytic_solutions() -> None:
     atlas = AtlasUMatrix(
         atlas_id="atlas.weighted.v1",
         method=LOYFER_UXM_METHOD,
@@ -91,13 +93,45 @@ def test_count_weighting_changes_overdetermined_solution() -> None:
         marker_count("m2", 10, 100),
     )
 
-    result = deconvolve_uxm(counts, atlas)
-
-    expected_raw_weight = (10 * 0.9 + 100 * 0.1) / 110
-    assert result.estimates[0].raw_nnls_weight == pytest.approx(
-        expected_raw_weight
+    historical_v1 = deconvolve_uxm(counts, atlas)
+    historical_v2 = deconvolve_uxm_v2(
+        counts,
+        atlas,
+        row_scale=NnlsRowScale.SQRT_COUNT,
     )
-    assert result.estimates[0].fraction == 1.0
+    reference = deconvolve_uxm_v2(
+        counts,
+        atlas,
+        row_scale=NnlsRowScale.REFERENCE_COUNT,
+    )
+    unweighted = deconvolve_uxm_v2(
+        counts,
+        atlas,
+        row_scale=NnlsRowScale.UNWEIGHTED,
+    )
+
+    expected_historical = (10 * 0.9 + 100 * 0.1) / 110
+    assert historical_v1.estimates[0].raw_nnls_weight == pytest.approx(
+        expected_historical
+    )
+    assert historical_v2.estimates[0].raw_nnls_weight == pytest.approx(
+        expected_historical
+    )
+    assert historical_v2.schema_version == "cell-origin-deconvolution.v2"
+    assert historical_v2.diagnostics.row_scale == NnlsRowScale.SQRT_COUNT
+    assert reference.estimates[0].raw_nnls_weight == pytest.approx(
+        (10**2 * 0.9 + 100**2 * 0.1) / (10**2 + 100**2)
+    )
+    assert reference.diagnostics.row_scale == NnlsRowScale.REFERENCE_COUNT
+    assert unweighted.estimates[0].raw_nnls_weight == pytest.approx(0.5)
+    assert unweighted.diagnostics.row_scale == NnlsRowScale.UNWEIGHTED
+    assert historical_v1.result_id != historical_v2.result_id
+    assert historical_v2.result_id != reference.result_id
+    assert reference.result_id != unweighted.result_id
+    assert all(
+        result.estimates[0].fraction == 1.0
+        for result in (historical_v1, historical_v2, reference, unweighted)
+    )
 
 
 def test_boundary_solution_keeps_zero_component() -> None:
@@ -193,6 +227,30 @@ def test_zero_signal_cannot_be_normalized() -> None:
 
     with pytest.raises(DeconvolutionError, match="zero U-fraction signal"):
         deconvolve_uxm(counts, fixture_atlas())
+
+
+def test_unknown_row_scale_fails_closed() -> None:
+    counts = (
+        marker_count("marker.immune.1", 4, 10),
+        marker_count("marker.liver.1", 6, 10),
+    )
+
+    with pytest.raises(DeconvolutionError, match="unsupported NNLS row scale"):
+        deconvolve_uxm_v2(
+            counts,
+            fixture_atlas(),
+            row_scale="invented",  # type: ignore[arg-type]
+        )
+
+
+def test_v2_row_scale_is_required() -> None:
+    counts = (
+        marker_count("marker.immune.1", 4, 10),
+        marker_count("marker.liver.1", 6, 10),
+    )
+
+    with pytest.raises(TypeError, match="row_scale"):
+        deconvolve_uxm_v2(counts, fixture_atlas())  # type: ignore[call-arg]
 
 
 def test_result_id_is_deterministic_and_input_bound() -> None:
