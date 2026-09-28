@@ -362,13 +362,14 @@ run_app(
     )
     assert any("Experimental · Readout 3" in value for value in markdown_values)
     assert any(
-        item.value.startswith("Result 3 — No broad copy-number")
+        item.value == "Result 3 — Exploratory whole-chromosome relative dosage QC"
         for item in app.subheader
     )
     assert "**How the fragment-length algorithm works**" in markdown_values
     assert "**Presentation source**" not in markdown_values
     assert any(
-        item.value.startswith("Result 1 — My cfDNA is clean") for item in app.subheader
+        item.value == "Result 1 — Measured fragment-length distribution"
+        for item in app.subheader
     )
 
     app.button[0].click().run()
@@ -384,7 +385,7 @@ run_app(
     assert "Current claim revision: 2" in {caption.value for caption in app.caption}
 
     app.button[0].click().run()
-    assert not app.warning
+    assert not any("Stale assessment" in warning.value for warning in app.warning)
     assert not app.exception
     assert "Claim revision 2" in {
         caption.value.split(" · ")[0] for caption in app.caption

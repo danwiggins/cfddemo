@@ -63,6 +63,15 @@ def execution_label(mode: ExecutionMode) -> str:
     }[mode]
 
 
+def _render_development_result_banner(st: Any) -> None:
+    """Keep development qualification and intended use visible with each result."""
+
+    st.warning(
+        "Development sample · Research use only (RUO) · Unqualified · "
+        "Not a diagnostic result"
+    )
+
+
 def _inject_design_system(st: Any) -> None:
     """Apply the deck's visual system to the standalone demo."""
 
@@ -646,10 +655,8 @@ def _render_fragmentomics_evidence(st: Any, case: Case) -> None:
         '<span id="readout-1"></span><p class="section-kicker">Readout 1 · Fragmentomics</p>',
         unsafe_allow_html=True,
     )
-    st.subheader(
-        "Result 1 — My cfDNA is clean, intact nucleosomal DNA: "
-        "no short-fragment cancer signal"
-    )
+    _render_development_result_banner(st)
+    st.subheader("Result 1 — Measured fragment-length distribution")
     st.caption(
         "cfDNA fragment-length distribution · ONT R10.4.1 · computed from the "
         "immutable BAM-derived artifact. Raw query-sequence length is shown; "
@@ -749,13 +756,12 @@ def _render_fragmentomics_evidence(st: Any, case: Case) -> None:
         """
 <div class="interpretation-card">
   <div class="card-label">How to read the result</div>
-  <strong>A nucleosome ladder is visible without a short-fragment shift</strong>
+  <strong>Describe the measured distribution without classifying the sample</strong>
   <p>
-    Textbook mono/di/tri peaks are 167 / 334 / 501 bp after the slide's assumed
-    45 bp adapter removal, equivalent to 212 / 379 / 546 bp on this raw chart.
-    Fewer than 1% of reads are longer than 1 kb, consistent with low
-    high-molecular-weight gDNA contamination. No shift toward the short
-    (~145 bp) population associated with tumor-derived cfDNA is visible.
+    This chart reports raw query-sequence lengths, their distribution, and the
+    measured long-fragment fraction. No protocol-matched comparator or validated
+    decision threshold is applied, so this view does not determine tumor
+    contribution or classify sample contamination.
   </p>
 </div>
 """,
@@ -834,11 +840,12 @@ def _render_cell_origin_evidence(st: Any) -> None:
         '<p class="section-kicker">Readout 2 · Methylation</p>',
         unsafe_allow_html=True,
     )
-    st.subheader("Which tissues contributed this cell-free DNA?")
+    _render_development_result_banner(st)
+    st.subheader("Estimated cfDNA source composition")
     st.caption(
         "Realigned Nanopore CpG calls → fragment U/X/M classification → "
-        "count-weighted NNLS. This is an analytical reconstruction, not a "
-        "diagnostic result."
+        "count-weighted NNLS. Estimates are conditioned on the registered atlas "
+        "and are not a diagnostic result."
     )
     st.markdown("**How the cell-origin algorithm works**")
     extract, match, classify, solve = st.columns(4)
@@ -999,9 +1006,11 @@ def _render_cell_origin_evidence(st: Any) -> None:
             theme=None,
         )
     with right:
-        st.markdown("**Sample versus healthy plasma donors**")
+        st.markdown(
+            "**Development estimate versus observed 23-donor reference cohort**"
+        )
         if not range_rows:
-            st.info("No method-matched healthy reference table is registered.")
+            st.info("No method-matched observed reference cohort is registered.")
         else:
             st.vega_lite_chart(
                 range_rows,
@@ -1037,12 +1046,12 @@ def _render_cell_origin_evidence(st: Any) -> None:
                                 "tooltip": [
                                     {
                                         "field": "healthy_min_percent",
-                                        "title": "Healthy minimum",
+                                        "title": "Observed cohort minimum",
                                         "format": ".1f",
                                     },
                                     {
                                         "field": "healthy_max_percent",
-                                        "title": "Healthy maximum",
+                                        "title": "Observed cohort maximum",
                                         "format": ".1f",
                                     },
                                 ],
@@ -1075,7 +1084,7 @@ def _render_cell_origin_evidence(st: Any) -> None:
                             "mark": {
                                 "type": "rule",
                                 "strokeWidth": 2,
-                                "color": "#B3262E",
+                                "color": "#6B6B7B",
                             },
                             "encoding": {
                                 "x": {"field": "sample_lower_percent"},
@@ -1093,26 +1102,7 @@ def _render_cell_origin_evidence(st: Any) -> None:
                             "encoding": {
                                 "x": {"field": "sample_percent"},
                                 "color": {
-                                    "field": "classification",
-                                    "type": "nominal",
-                                    "scale": {
-                                        "domain": ["within", "below", "above"],
-                                        "range": ["#1B7F79", "#B3262E", "#B3262E"],
-                                    },
-                                    "legend": {"title": None, "orient": "top"},
-                                },
-                                "shape": {
-                                    "field": "classification",
-                                    "type": "nominal",
-                                    "scale": {
-                                        "domain": ["within", "below", "above"],
-                                        "range": [
-                                            "circle",
-                                            "triangle-left",
-                                            "triangle-right",
-                                        ],
-                                    },
-                                    "legend": None,
+                                    "value": "#1B7F79",
                                 },
                                 "tooltip": [
                                     {"field": "label", "title": "Cell type"},
@@ -1123,7 +1113,7 @@ def _render_cell_origin_evidence(st: Any) -> None:
                                     },
                                     {
                                         "field": "classification",
-                                        "title": "Range check",
+                                        "title": "Position in observed range",
                                     },
                                 ],
                             },
@@ -1147,7 +1137,9 @@ def _render_cell_origin_evidence(st: Any) -> None:
     diagnostics = result.deconvolution.diagnostics
     st.caption(
         "Grey = observed min–max · pale teal = IQR · tick = median · "
-        "dot = regenerated sample · red whisker = bootstrap interval."
+        "dot = regenerated sample · dark whisker = bootstrap stability interval. "
+        "The 23-donor range is descriptive, method-specific context—not a "
+        "clinical reference interval."
     )
     st.caption(
         f"{len(bundle.charts.composition_rows)} cell types · "
@@ -1185,13 +1177,14 @@ def _render_copy_number_evidence(st: Any) -> None:
     largest = max(bundle.chromosomes, key=lambda row: abs(row.log2_ratio))
 
     st.markdown(
-        '<span id="readout-3"></span><p class="section-kicker">Readout 3 · Chromosome dosage</p>',
+        '<span id="readout-3"></span><p class="section-kicker">Readout 3 · Exploratory dosage QC</p>',
         unsafe_allow_html=True,
     )
-    st.subheader("Result 3 — No broad copy-number cancer signal detected")
+    _render_development_result_banner(st)
+    st.subheader("Result 3 — Exploratory whole-chromosome relative dosage QC")
     st.caption(
         "Primary read starts → 5 Mb autosomal bins → low-coverage bin exclusion "
-        "→ sample-internal chromosome medians. Experimental research screen only."
+        "→ sample-internal chromosome medians. Uncalibrated development QC only."
     )
     accepted, bins, spread, events = st.columns(4)
     accepted.metric(
@@ -1200,7 +1193,10 @@ def _render_copy_number_evidence(st: Any) -> None:
     )
     bins.metric("Window size", "5 Mb")
     spread.metric("Genome log₂ MAD", f"{bundle.genome_log2_mad:.3f}")
-    events.metric("Broad events", str(bundle.flagged_chromosome_count))
+    events.metric(
+        "Chromosomes outside visualization boundary",
+        str(bundle.flagged_chromosome_count),
+    )
 
     explanation, chart = st.columns((0.72, 1.28))
     with explanation:
@@ -1310,11 +1306,19 @@ def _render_copy_number_evidence(st: Any) -> None:
         )
         st.caption("Red dashed lines = conservative ±0.20 log₂ screen threshold.")
 
+    boundary_summary = (
+        "All autosomal medians remain inside the prespecified visualization boundary"
+        if bundle.flagged_chromosome_count == 0
+        else (
+            f"{bundle.flagged_chromosome_count} autosomal median(s) fall outside "
+            "the prespecified visualization boundary"
+        )
+    )
     st.markdown(
         f"""
 <div class="interpretation-card">
   <div class="card-label">How to read the result</div>
-  <strong>All autosomes remain inside the broad-event screen threshold</strong>
+  <strong>{boundary_summary}</strong>
   <p>
     The largest residual is {largest.chromosome} at {largest.log2_ratio:+.3f}
     log₂. Without a panel of normals, residual chromosome-specific coverage bias
@@ -1326,8 +1330,8 @@ def _render_copy_number_evidence(st: Any) -> None:
         unsafe_allow_html=True,
     )
     st.caption(
-        "This is not ichorCNA and not a clinical diagnostic. It is a deterministic "
-        "whole-chromosome dosage screen computed from the registered BAM."
+        "This is not ichorCNA. It is uncalibrated, development-unqualified relative "
+        "dosage QC computed from the registered BAM, not a diagnostic result."
     )
 
 
