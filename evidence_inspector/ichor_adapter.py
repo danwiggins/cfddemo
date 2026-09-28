@@ -161,16 +161,34 @@ class CanonicalBin(StrictModel):
         return self
 
 
+class CanonicalBinMask(StrictModel):
+    bin: CanonicalBin
+    reason: Literal[
+        "centromere_or_flank",
+        "low_mappability",
+        "invalid_gc",
+        "other_prespecified",
+    ]
+
+
 class CanonicalGrid(StrictModel):
     coordinate_system: Literal["zero_based_half_open"] = "zero_based_half_open"
+    contig_order: tuple[Identifier, ...] = Field(min_length=1)
     bins: tuple[CanonicalBin, ...] = Field(min_length=1)
+    masks: tuple[CanonicalBinMask, ...] = ()
     bin_definition_sha256: Sha256
 
     @model_validator(mode="after")
     def validate_grid(self) -> CanonicalGrid:
+        if len(self.contig_order) != len(set(self.contig_order)):
+            raise ValueError("canonical contig order must be unique")
+        order = {contig: index for index, contig in enumerate(self.contig_order)}
+        if any(row.contig not in order for row in self.bins):
+            raise ValueError("canonical bin references an undeclared contig")
         keys = [(row.contig, row.start, row.end) for row in self.bins]
-        if keys != sorted(keys) or len(keys) != len(set(keys)):
-            raise ValueError("canonical bins must be unique and sorted")
+        ordered_keys = sorted(keys, key=lambda row: (order[row[0]], row[1], row[2]))
+        if keys != ordered_keys or len(keys) != len(set(keys)):
+            raise ValueError("canonical bins must follow declared contig order")
         by_contig: dict[str, int] = {}
         for row in self.bins:
             previous_end = by_contig.get(row.contig)
@@ -179,6 +197,10 @@ class CanonicalGrid(StrictModel):
             by_contig[row.contig] = row.end
         if _canonical_sha256(self.bins) != self.bin_definition_sha256:
             raise ValueError("canonical bin-definition digest mismatch")
+        known = set(self.bins)
+        masked = [item.bin for item in self.masks]
+        if any(item not in known for item in masked) or len(masked) != len(set(masked)):
+            raise ValueError("canonical masks must uniquely reference grid bins")
         return self
 
 
@@ -217,15 +239,23 @@ class WigGridBinding(StrictModel):
         return self
 
 
-class ExclusionBedBinding(StrictModel):
-    role: Literal["exclusion_bed"] = "exclusion_bed"
+class CentromereTableBinding(StrictModel):
+    role: Literal["ichor_centromere_table"] = "ichor_centromere_table"
     identity: ArtifactIdentity
     assembly: Identifier
     contig_dictionary_sha256: Sha256
-    native_format: Literal["bed"] = "bed"
-    native_coordinates: Literal["zero_based_half_open"] = "zero_based_half_open"
+    native_format: Literal["ichor_centromere_tsv"] = "ichor_centromere_tsv"
+    required_columns: tuple[
+        Literal["Chr"], Literal["Start"], Literal["End"], Literal["GapType"]
+    ] = ("Chr", "Start", "End", "GapType")
+    native_coordinates: Literal["one_based_closed_granges"] = (
+        "one_based_closed_granges"
+    )
+    required_gap_type: Literal["centromere"] = "centromere"
     interval_set_sha256: Sha256
-    canonical_conversion: Literal["identity"] = "identity"
+    canonical_conversion: Literal["one_based_closed_to_zero_based_half_open"] = (
+        "one_based_closed_to_zero_based_half_open"
+    )
     source_url: str = Field(min_length=1, max_length=2048)
     declared_license_or_terms: str = Field(min_length=1, max_length=512)
 
@@ -252,7 +282,7 @@ class CnvAssetSet(StrictModel):
     raw_counts: WigGridBinding
     gc: WigGridBinding
     mappability: WigGridBinding | None
-    exclusion: ExclusionBedBinding
+    centromere: CentromereTableBinding
     panel_of_normals: PanelOfNormalsBinding | None
     canonical_grid: CanonicalGrid
 
@@ -269,7 +299,7 @@ class CnvAssetSet(StrictModel):
         all_assets: Iterable[object] = (
             self.reference,
             *binned,
-            self.exclusion,
+            self.centromere,
         )
         for asset in all_assets:
             if asset.assembly != self.reference.assembly:  # type: ignore[attr-defined]
@@ -285,6 +315,12 @@ class CnvAssetSet(StrictModel):
                 raise ValueError("binned asset is not on the canonical grid")
             if asset.bin_size_bp != self.raw_counts.bin_size_bp:
                 raise ValueError("binned asset sizes disagree")
+        if self.raw_counts.role != "raw_counts_wig":
+            raise ValueError("raw-count asset role is invalid")
+        if self.gc.role != "gc_wig":
+            raise ValueError("GC asset role is invalid")
+        if self.mappability is not None and self.mappability.role != "map_wig":
+            raise ValueError("mappability asset role is invalid")
         return self
 
 
@@ -415,6 +451,25 @@ class CnvRunRequest(StrictModel):
         has_pon = self.assets.panel_of_normals is not None
         if has_pon != (self.pon_mode == "protocol_matched_frozen"):
             raise ValueError("PoN mode and PoN asset presence disagree")
+        if not all(
+            (
+                self.counting_policy.exclude_unmapped,
+                self.counting_policy.exclude_secondary,
+                self.counting_policy.exclude_supplementary,
+                self.counting_policy.exclude_qc_failure,
+                self.counting_policy.exclude_duplicate,
+            )
+        ):
+            raise ValueError("v1 eligible-primary counting exclusions are fixed true")
+        if self.counting_policy.terminal_bin_policy != "exclude_partial":
+            raise ValueError("v1 ichor counting excludes partial terminal bins")
+        if self.counting_policy.contigs != self.assets.canonical_grid.contig_order:
+            raise ValueError("counting contigs do not match canonical grid order")
+        expected_contigs = tuple(
+            f"chr{chromosome}" for chromosome in self.parameters.chromosomes
+        )
+        if expected_contigs != self.counting_policy.contigs:
+            raise ValueError("model chromosomes do not match counting contigs")
         return self
 
 
@@ -469,9 +524,15 @@ class PreparedIchorRun(StrictModel):
             raise ValueError("argv must contain non-empty NUL-free arguments")
         if self.environment != tuple(sorted(self.environment)):
             raise ValueError("environment must be deterministically sorted")
+        if self.environment:
+            raise ValueError("v1 prepared environment is fixed empty")
         roles = [item.role for item in self.output_capabilities]
         if len(roles) != len(set(roles)):
             raise ValueError("output capability roles must be unique")
+        if self.argv != _expected_argv(self.request):
+            raise ValueError("prepared argv does not match the bound request")
+        if self.output_capabilities != _output_capabilities(self.request.sample_id):
+            raise ValueError("prepared output capabilities do not match pinned upstream")
         return self
 
 
@@ -531,9 +592,7 @@ def _output_capabilities(sample_id: str) -> tuple[OutputCapability, ...]:
     )
 
 
-def prepare_ichor_run(request: CnvRunRequest) -> PreparedIchorRun:
-    """Create a deterministic argv plan without executing external software."""
-
+def _expected_argv(request: CnvRunRequest) -> tuple[str, ...]:
     params = request.parameters
     argv = [
         "Rscript",
@@ -545,7 +604,7 @@ def prepare_ichor_run(request: CnvRunRequest) -> PreparedIchorRun:
         "--gcWig",
         "/assets/gc.wig",
         "--centromere",
-        "/assets/exclusions.bed",
+        "/assets/centromere.tsv",
         "--normal",
         _r_vector(params.normal_fraction_starts),
         "--ploidy",
@@ -589,10 +648,16 @@ def prepare_ichor_run(request: CnvRunRequest) -> PreparedIchorRun:
         argv.extend(("--mapWig", "/assets/map.wig"))
     if request.assets.panel_of_normals is not None:
         argv.extend(("--normalPanel", "/assets/pon.rds"))
+    return tuple(argv)
+
+
+def prepare_ichor_run(request: CnvRunRequest) -> PreparedIchorRun:
+    """Create a deterministic argv plan without executing external software."""
+
     return PreparedIchorRun(
         request=request,
         request_sha256=_canonical_sha256(request),
-        argv=tuple(argv),
+        argv=_expected_argv(request),
         output_capabilities=_output_capabilities(request.sample_id),
     )
 
@@ -614,6 +679,29 @@ class CorrectedBin(StrictModel):
     def increasing(self) -> CorrectedBin:
         if self.end <= self.start:
             raise ValueError("corrected bin end must exceed start")
+        return self
+
+
+class CorrectedBinStatus(StrictModel):
+    contig: Identifier
+    start: int = Field(ge=0)
+    end: int = Field(gt=0)
+    status: Literal["retained", "masked_prespecified"]
+    mask_reason: str | None = None
+    corrected_log2: FiniteFloat | None = None
+
+    @model_validator(mode="after")
+    def coherent_status(self) -> CorrectedBinStatus:
+        if self.end <= self.start:
+            raise ValueError("bin-status end must exceed start")
+        if self.status == "retained" and (
+            self.corrected_log2 is None or self.mask_reason is not None
+        ):
+            raise ValueError("retained bin requires a value and no mask reason")
+        if self.status == "masked_prespecified" and (
+            self.corrected_log2 is not None or self.mask_reason is None
+        ):
+            raise ValueError("masked bin requires a reason and no value")
         return self
 
 
@@ -652,6 +740,9 @@ class SelectedSolution(StrictModel):
     model_fraction: FiniteFloat = Field(ge=0, le=1)
     ploidy: FiniteFloat = Field(gt=0)
     matched_candidate_id: Identifier | None
+    selection_resolution: Literal[
+        "resolved_unique_rounded_match", "not_resolved_rounded_collision"
+    ]
 
 
 class CnvDevelopmentResult(StrictModel):
@@ -667,12 +758,11 @@ class CnvDevelopmentResult(StrictModel):
     request_sha256: Sha256
     pon_mode: Literal["none_development", "protocol_matched_frozen"]
     corrected_bins: tuple[CorrectedBin, ...]
+    bin_statuses: tuple[CorrectedBinStatus, ...]
     segments: tuple[CnaSegment, ...]
     candidates: tuple[CandidateSolution, ...]
     selected_solution: SelectedSolution
     identifiability: Literal[
-        "identifiable_within_development_model",
-        "competitive_solutions",
         "insufficient_altered_structure",
         "not_assessed",
     ]
@@ -688,6 +778,9 @@ class CnvDevelopmentResult(StrictModel):
         selected = self.selected_solution.matched_candidate_id
         if selected is not None and selected not in ids:
             raise ValueError("selected candidate is not present")
+        resolved = self.selected_solution.selection_resolution.startswith("resolved")
+        if resolved != (selected is not None):
+            raise ValueError("selected candidate and resolution disagree")
         artifact_roles = [item.role for item in self.artifacts]
         if artifact_roles != sorted(artifact_roles) or len(artifact_roles) != len(
             set(artifact_roles)
@@ -754,27 +847,75 @@ def _optional_fraction(value: str, label: str) -> float | None:
     return parsed
 
 
-def _parse_corrected(path: Path, grid: CanonicalGrid) -> tuple[CorrectedBin, ...]:
-    expected = {(row.contig, row.start, row.end) for row in grid.bins}
+def _parse_corrected(
+    path: Path,
+    grid: CanonicalGrid,
+) -> tuple[tuple[CorrectedBin, ...], tuple[CorrectedBinStatus, ...]]:
+    expected_order = {
+        (row.contig, row.start, row.end): index for index, row in enumerate(grid.bins)
+    }
+    masks = {
+        (item.bin.contig, item.bin.start, item.bin.end): item.reason
+        for item in grid.masks
+    }
     result: list[CorrectedBin] = []
+    observed_keys: list[tuple[str, int, int]] = []
     for row in _rows(path):
         try:
             contig = row["chr"]
             start = _integer(row["start"], "corrected start") - 1
             end = _integer(row["end"], "corrected end")
-            value = _finite(row["log2_TNratio_corrected"], "corrected log2")
+            raw_value = row["log2_TNratio_corrected"]
         except KeyError as exc:
             raise IchorOutputError("corrected-depth columns are invalid") from exc
-        if (contig, start, end) not in expected:
+        key = (contig, start, end)
+        if key not in expected_order:
             raise IchorOutputError("corrected-depth row is outside the canonical grid")
-        result.append(CorrectedBin(contig=contig, start=start, end=end, corrected_log2=value))
-    keys = [(row.contig, row.start, row.end) for row in result]
-    if keys != sorted(keys) or len(keys) != len(set(keys)):
-        raise IchorOutputError("corrected-depth rows must be unique and sorted")
-    return tuple(result)
+        if key in observed_keys:
+            raise IchorOutputError("corrected-depth rows must be unique")
+        observed_keys.append(key)
+        if key in masks:
+            if raw_value.strip().upper() not in {"NA", "NAN"}:
+                raise IchorOutputError("prespecified masked bin has a corrected value")
+            continue
+        value = _finite(raw_value, "corrected log2")
+        result.append(
+            CorrectedBin(contig=contig, start=start, end=end, corrected_log2=value)
+        )
+    positions = [expected_order[key] for key in observed_keys]
+    if positions != sorted(positions):
+        raise IchorOutputError("corrected-depth rows violate declared contig order")
+    retained_keys = {(row.contig, row.start, row.end) for row in result}
+    expected_retained = set(expected_order) - set(masks)
+    missing = expected_retained - retained_keys
+    if missing:
+        raise IchorOutputError("corrected-depth output has unexplained missing bins")
+    retained_values = {
+        (item.contig, item.start, item.end): item.corrected_log2 for item in result
+    }
+    statuses = tuple(
+        CorrectedBinStatus(
+            contig=row.contig,
+            start=row.start,
+            end=row.end,
+            status=(
+                "masked_prespecified"
+                if (row.contig, row.start, row.end) in masks
+                else "retained"
+            ),
+            mask_reason=masks.get((row.contig, row.start, row.end)),
+            corrected_log2=retained_values.get((row.contig, row.start, row.end)),
+        )
+        for row in grid.bins
+    )
+    return tuple(result), statuses
 
 
-def _parse_segments(path: Path, sample_id: str) -> tuple[CnaSegment, ...]:
+def _parse_segments(
+    path: Path,
+    sample_id: str,
+    grid: CanonicalGrid,
+) -> tuple[CnaSegment, ...]:
     result: list[CnaSegment] = []
     for row in _rows(path):
         try:
@@ -797,9 +938,12 @@ def _parse_segments(path: Path, sample_id: str) -> tuple[CnaSegment, ...]:
             )
         except KeyError as exc:
             raise IchorOutputError("segment columns are invalid") from exc
+    order = {contig: index for index, contig in enumerate(grid.contig_order)}
+    if any(row.contig not in order for row in result):
+        raise IchorOutputError("segment references an undeclared contig")
     keys = [(row.contig, row.start, row.end) for row in result]
-    if keys != sorted(keys):
-        raise IchorOutputError("segments must be sorted")
+    if keys != sorted(keys, key=lambda row: (order[row[0]], row[1], row[2])):
+        raise IchorOutputError("segments violate declared contig order")
     previous: dict[str, int] = {}
     for row in result:
         if row.start < previous.get(row.contig, 0):
@@ -813,6 +957,13 @@ def _parse_init(value: str) -> tuple[float, float]:
         raise IchorOutputError("candidate init field is invalid")
     normal, ploidy = value[1:].split("-p", 1)
     return _finite(normal, "initial normal"), _finite(ploidy, "initial ploidy")
+
+
+def _significant(value: float, digits: int) -> float:
+    if value == 0:
+        return 0.0
+    places = digits - 1 - math.floor(math.log10(abs(value)))
+    return round(value, places)
 
 
 def _parse_params(
@@ -880,15 +1031,26 @@ def _parse_params(
     matched = [
         item.candidate_id
         for item in candidates
-        if math.isclose(item.model_fraction, selected_fraction, abs_tol=5e-4)
-        and math.isclose(item.estimated_ploidy, selected_ploidy, abs_tol=5e-4)
+        if _significant(item.estimated_normal_fraction, 2)
+        == _significant(1 - selected_fraction, 2)
+        and _significant(item.estimated_ploidy, 4)
+        == _significant(selected_ploidy, 4)
     ]
+    if not matched:
+        raise IchorOutputError(
+            "selected summary contradicts every rounding-compatible candidate"
+        )
     return (
         SelectedSolution(
             sample_id=sample_id,
             model_fraction=selected_fraction,
             ploidy=selected_ploidy,
             matched_candidate_id=matched[0] if len(matched) == 1 else None,
+            selection_resolution=(
+                "resolved_unique_rounded_match"
+                if len(matched) == 1
+                else "not_resolved_rounded_collision"
+            ),
         ),
         tuple(candidates),
     )
@@ -937,13 +1099,14 @@ def validate_ichor_outputs(
         )
 
     try:
-        corrected = _parse_corrected(
+        corrected, bin_statuses = _parse_corrected(
             output_directory / str(role_paths["combined_corrected_depth"]),
             prepared.request.assets.canonical_grid,
         )
         segments = _parse_segments(
             output_directory / str(role_paths["segments_detailed"]),
             prepared.request.sample_id,
+            prepared.request.assets.canonical_grid,
         )
         selected, candidates = _parse_params(
             output_directory / str(role_paths["parameters_and_candidates"]),
@@ -951,11 +1114,13 @@ def validate_ichor_outputs(
         )
     except ValidationError as exc:
         raise IchorOutputError("upstream output violates the adapter contract") from exc
-    grid_bins = prepared.request.assets.canonical_grid.bins
+    coverage_count = {
+        (row.contig, row.start, row.end): 0 for row in corrected
+    }
     for segment in segments:
         covered = [
             row
-            for row in grid_bins
+            for row in corrected
             if row.contig == segment.contig
             and row.start >= segment.start
             and row.end <= segment.end
@@ -966,7 +1131,11 @@ def validate_ichor_outputs(
             or covered[-1].end != segment.end
             or len(covered) != segment.bin_count
         ):
-            raise IchorOutputError("segment does not align with the canonical bin grid")
+            raise IchorOutputError("segment does not align with retained corrected bins")
+        for row in covered:
+            coverage_count[(row.contig, row.start, row.end)] += 1
+    if any(count != 1 for count in coverage_count.values()):
+        raise IchorOutputError("segments do not cover each retained corrected bin once")
     neutral_calls = {"NEUT", "NEUTRAL"}
     altered = [item for item in segments if item.call.upper() not in neutral_calls]
     altered_bins = sum(item.bin_count for item in altered)
@@ -978,7 +1147,6 @@ def validate_ichor_outputs(
         and largest_altered <= prepared.request.parameters.minimum_segment_bins
         and altered_fraction <= prepared.request.parameters.altered_fraction_threshold
     )
-    competitive = selected.matched_candidate_id is None
     if insufficient_structure:
         status: Literal["complete", "insufficient_information"] = (
             "insufficient_information"
@@ -986,11 +1154,7 @@ def validate_ichor_outputs(
         identifiability = "insufficient_altered_structure"
     else:
         status = "complete"
-        identifiability = (
-            "competitive_solutions"
-            if competitive
-            else "not_assessed"
-        )
+        identifiability = "not_assessed"
     limitations = [
         "Pinned ichorCNA development output; not analytically qualified.",
         "Model fraction is conditional on copy-state, ploidy, and parameter assumptions.",
@@ -1005,6 +1169,7 @@ def validate_ichor_outputs(
         request_sha256=prepared.request_sha256,
         pon_mode=prepared.request.pon_mode,
         corrected_bins=corrected,
+        bin_statuses=bin_statuses,
         segments=segments,
         candidates=candidates,
         selected_solution=selected,
@@ -1017,12 +1182,13 @@ def validate_ichor_outputs(
 
 __all__ = [
     "CanonicalBin",
+    "CanonicalBinMask",
     "CanonicalGrid",
+    "CentromereTableBinding",
     "CnvAssetSet",
     "CnvDevelopmentResult",
     "CnvRunRequest",
     "CountingPolicy",
-    "ExclusionBedBinding",
     "ExternalComponentBinding",
     "HMMCOPY_COMMIT",
     "HMMCOPY_UTILS_COMMIT",

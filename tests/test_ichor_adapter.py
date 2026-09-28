@@ -13,15 +13,17 @@ from evidence_inspector.ichor_adapter import (
     ICHOR_COMMIT,
     ArtifactIdentity,
     CanonicalBin,
+    CanonicalBinMask,
     CanonicalGrid,
+    CentromereTableBinding,
     CnvAssetSet,
     CnvRunRequest,
     CountingPolicy,
-    ExclusionBedBinding,
     ExternalComponentBinding,
     IchorOutputError,
     IchorParameterSet,
     PanelOfNormalsBinding,
+    PreparedIchorRun,
     RawWigLineage,
     ReferenceFastaBinding,
     RuntimeBinding,
@@ -60,7 +62,7 @@ def _component(
     )
 
 
-def _grid() -> CanonicalGrid:
+def _grid(*, mask_last: bool = False) -> CanonicalGrid:
     bins = tuple(
         CanonicalBin(
             contig="chr1",
@@ -69,11 +71,20 @@ def _grid() -> CanonicalGrid:
         )
         for index in range(4)
     )
-    return CanonicalGrid(bins=bins, bin_definition_sha256=contract_sha256(bins))
+    return CanonicalGrid(
+        contig_order=("chr1",),
+        bins=bins,
+        masks=(
+            (CanonicalBinMask(bin=bins[-1], reason="centromere_or_flank"),)
+            if mask_last
+            else ()
+        ),
+        bin_definition_sha256=contract_sha256(bins),
+    )
 
 
-def _request(*, with_pon: bool = False) -> CnvRunRequest:
-    grid = _grid()
+def _request(*, with_pon: bool = False, mask_last: bool = False) -> CnvRunRequest:
+    grid = _grid(mask_last=mask_last)
     contigs = "d" * 64
     reference = ReferenceFastaBinding(
         identity=_artifact("reference.hg38", "1"),
@@ -117,12 +128,12 @@ def _request(*, with_pon: bool = False) -> CnvRunRequest:
         raw_counts=raw,
         gc=wig("gc_wig", "3"),
         mappability=wig("map_wig", "4"),
-        exclusion=ExclusionBedBinding(
-            identity=_artifact("asset.exclusion", "6"),
+        centromere=CentromereTableBinding(
+            identity=_artifact("asset.centromere", "6"),
             assembly="hg38",
             contig_dictionary_sha256=contigs,
             interval_set_sha256="7" * 64,
-            source_url="https://example.invalid/exclusion",
+            source_url="https://example.invalid/centromere",
             declared_license_or_terms="synthetic fixture only",
         ),
         panel_of_normals=pon,
@@ -167,6 +178,7 @@ def _request(*, with_pon: bool = False) -> CnvRunRequest:
         read_count_source="precomputed_bound_wig",
         pon_mode=("protocol_matched_frozen" if with_pon else "none_development"),
         parameters=IchorParameterSet(
+            chromosomes=(1,),
             normal_fraction_starts=(0.95, 0.99, 0.995, 0.999),
             ploidy_starts=(2.0,),
             max_copy_number=3,
@@ -212,6 +224,16 @@ def test_prepare_is_deterministic_and_separates_authorities() -> None:
     assert capabilities["map_only_corrected"] == "not_emitted_by_pinned_upstream"
     assert capabilities["pon_residual"] == "not_emitted_by_pinned_upstream"
 
+    changed_argv = first.model_dump(mode="python")
+    changed_argv["argv"] = (*changed_argv["argv"], "--estimatePloidy", "FALSE")
+    with pytest.raises(ValueError, match="argv does not match"):
+        PreparedIchorRun.model_validate(changed_argv)
+
+    changed_outputs = first.model_dump(mode="python")
+    changed_outputs["output_capabilities"][0]["role"] = "invented_output"
+    with pytest.raises(ValueError, match="capabilities do not match"):
+        PreparedIchorRun.model_validate(changed_outputs)
+
 
 def test_role_specific_coordinates_lineage_and_pon_are_bound() -> None:
     request = _request(with_pon=True)
@@ -219,7 +241,13 @@ def test_role_specific_coordinates_lineage_and_pon_are_bound() -> None:
 
     assert request.assets.reference.coordinate_semantics == "sequence"
     assert request.assets.raw_counts.native_coordinates == "one_based_fixed_step"
-    assert request.assets.exclusion.native_coordinates == "zero_based_half_open"
+    assert request.assets.centromere.required_columns == (
+        "Chr",
+        "Start",
+        "End",
+        "GapType",
+    )
+    assert request.assets.centromere.native_coordinates == "one_based_closed_granges"
     assert request.assets.panel_of_normals is not None
     assert request.assets.panel_of_normals.native_coordinates == "one_based_closed"
     assert "--normalPanel" in prepared.argv
@@ -233,6 +261,100 @@ def test_role_specific_coordinates_lineage_and_pon_are_bound() -> None:
     no_pon["assets"]["panel_of_normals"] = None
     with pytest.raises(ValueError, match="PoN mode"):
         CnvRunRequest.model_validate(no_pon)
+
+    swapped_role = request.model_dump(mode="python")
+    swapped_role["assets"]["raw_counts"]["role"] = "gc_wig"
+    with pytest.raises(ValueError, match="raw-count asset role"):
+        CnvRunRequest.model_validate(swapped_role)
+
+    non_primary = request.model_dump(mode="python")
+    non_primary["counting_policy"]["exclude_secondary"] = False
+    non_primary["raw_wig_lineage"]["counting_policy_sha256"] = contract_sha256(
+        CountingPolicy.model_validate(non_primary["counting_policy"])
+    )
+    with pytest.raises(ValueError, match="exclusions are fixed true"):
+        CnvRunRequest.model_validate(non_primary)
+
+    wrong_contigs = request.model_dump(mode="python")
+    wrong_contigs["counting_policy"]["contigs"] = ("chr2",)
+    wrong_contigs["raw_wig_lineage"]["counting_policy_sha256"] = contract_sha256(
+        CountingPolicy.model_validate(wrong_contigs["counting_policy"])
+    )
+    with pytest.raises(ValueError, match="canonical grid order"):
+        CnvRunRequest.model_validate(wrong_contigs)
+
+
+def test_source_derived_formats_and_natural_contig_order() -> None:
+    upstream = FIXTURES / "upstream"
+    centromere_lines = (
+        upstream / "GRCh38.centromere.first12.tsv"
+    ).read_text().splitlines()
+    assert centromere_lines[0].split("\t") == ["Chr", "Start", "End", "GapType"]
+    contigs = tuple(line.split("\t", 1)[0] for line in centromere_lines[1:])
+    assert contigs == tuple(f"chr{index}" for index in range(1, 13))
+    wig_header = (upstream / "gc_hg38_1000kb.first10.wig").read_text().splitlines()[0]
+    assert wig_header == "fixedStep chrom=chr1 start=1 step=1000000 span=1000000"
+
+    bins = tuple(
+        CanonicalBin(contig=contig, start=0, end=1_000_000)
+        for contig in contigs
+    )
+    grid = CanonicalGrid(
+        contig_order=contigs,
+        bins=bins,
+        bin_definition_sha256=contract_sha256(bins),
+    )
+    assert tuple(row.contig for row in grid.bins) == contigs
+
+
+def test_parser_accepts_native_chr1_through_chr12_order(tmp_path: Path) -> None:
+    contigs = tuple(f"chr{index}" for index in range(1, 13))
+    bins = tuple(
+        CanonicalBin(contig=contig, start=0, end=1_000_000)
+        for contig in contigs
+    )
+    grid = CanonicalGrid(
+        contig_order=contigs,
+        bins=bins,
+        bin_definition_sha256=contract_sha256(bins),
+    )
+    payload = _request().model_dump(mode="python")
+    payload["assets"]["canonical_grid"] = grid.model_dump(mode="python")
+    for role in ("raw_counts", "gc", "mappability"):
+        payload["assets"][role]["canonical_bin_definition_sha256"] = (
+            grid.bin_definition_sha256
+        )
+    payload["counting_policy"]["contigs"] = contigs
+    policy = CountingPolicy.model_validate(payload["counting_policy"])
+    payload["raw_wig_lineage"]["counting_policy_sha256"] = contract_sha256(policy)
+    payload["raw_wig_lineage"]["canonical_bin_definition_sha256"] = (
+        grid.bin_definition_sha256
+    )
+    payload["parameters"]["chromosomes"] = tuple(range(1, 13))
+    request = CnvRunRequest.model_validate(payload)
+
+    output = _fixture(tmp_path, "neutral")
+    corrected_header = "chr\tstart\tend\tlog2_TNratio_corrected\n"
+    (output / "sample.correctedDepth.txt").write_text(
+        corrected_header
+        + "".join(f"{contig}\t1\t1000000\t0\n" for contig in contigs)
+    )
+    segment_header = (
+        "ID\tchrom\tstart\tend\tnum.mark\tseg.median.logR\t"
+        "copy.number\tcall\tsubclone.status\n"
+    )
+    (output / "sample.seg.txt").write_text(
+        segment_header
+        + "".join(
+            f"sample\t{contig}\t1\t1000000\t1\t0\t2\tNEUT\tFALSE\n"
+            for contig in contigs
+        )
+    )
+
+    result = validate_ichor_outputs(prepare_ichor_run(request), output)
+
+    assert tuple(row.contig for row in result.corrected_bins) == contigs
+    assert tuple(row.contig for row in result.segments) == contigs
 
 
 def test_parse_neutral_fixture_returns_typed_insufficient_result(tmp_path: Path) -> None:
@@ -284,7 +406,44 @@ def test_candidate_na_is_typed_and_ambiguous_selected_match_is_not_overclaimed(
     assert result.candidates[0].fraction_genome_subclonal is None
     assert result.candidates[0].fraction_cna_subclonal is None
     assert result.selected_solution.matched_candidate_id is None
-    assert result.identifiability == "competitive_solutions"
+    assert result.selected_solution.selection_resolution == (
+        "not_resolved_rounded_collision"
+    )
+    assert result.identifiability == "not_assessed"
+
+
+def test_contradictory_selected_summary_is_rejected(tmp_path: Path) -> None:
+    output = _fixture(tmp_path, "arm_loss")
+    params = output / "sample.params.txt"
+    params.write_text(params.read_text().replace("sample\t0.1\t2", "sample\t0.7\t2"))
+
+    with pytest.raises(IchorOutputError, match="contradicts every"):
+        validate_ichor_outputs(prepare_ichor_run(_request()), output)
+
+
+def test_prespecified_mask_is_explicit_and_unexplained_omission_fails(
+    tmp_path: Path,
+) -> None:
+    masked_output = _fixture(tmp_path, "neutral")
+    corrected = masked_output / "sample.correctedDepth.txt"
+    corrected.write_text(
+        corrected.read_text().replace("chr1\t3000001\t4000000\t0.01\n", "")
+    )
+    segment = masked_output / "sample.seg.txt"
+    segment.write_text(segment.read_text().replace("4000000\t4", "3000000\t3"))
+
+    masked = validate_ichor_outputs(
+        prepare_ichor_run(_request(mask_last=True)), masked_output
+    )
+    assert masked.bin_statuses[-1].status == "masked_prespecified"
+    assert masked.bin_statuses[-1].mask_reason == "centromere_or_flank"
+    assert len(masked.corrected_bins) == 3
+
+    unexplained_output = _fixture(tmp_path, "arm_loss")
+    path = unexplained_output / "sample.correctedDepth.txt"
+    path.write_text(path.read_text().replace("chr1\t3000001\t4000000\t0.01\n", ""))
+    with pytest.raises(IchorOutputError, match="unexplained missing bins"):
+        validate_ichor_outputs(prepare_ichor_run(_request()), unexplained_output)
 
 
 @pytest.mark.parametrize(
@@ -295,6 +454,7 @@ def test_candidate_na_is_typed_and_ambiguous_selected_match_is_not_overclaimed(
         ("coordinate", "outside the canonical grid"),
         ("candidate", "candidate table is absent"),
         ("symlink", "regular non-symlink"),
+        ("segment_count", "retained corrected bins"),
     ),
 )
 def test_parser_fails_closed_on_malformed_outputs(
@@ -319,6 +479,14 @@ def test_parser_fails_closed_on_malformed_outputs(
         path = output / "sample.RData"
         path.unlink()
         path.symlink_to(output / "sample.seg")
+    elif mutation == "segment_count":
+        path = output / "sample.seg.txt"
+        path.write_text(
+            path.read_text().replace(
+                "sample\tchr1\t1\t2000000\t2\t",
+                "sample\tchr1\t1\t2000000\t1\t",
+            )
+        )
 
     with pytest.raises(IchorOutputError, match=match):
         validate_ichor_outputs(prepare_ichor_run(_request()), output)
