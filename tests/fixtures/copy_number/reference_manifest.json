@@ -1,0 +1,31 @@
+{
+  "reference_id": "synthetic-cnv-edge-v1",
+  "assembly": "synthetic-cnv",
+  "fasta_sha256": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+  "autosome_lengths": {
+    "chr1": 25,
+    "chr2": 20,
+    "chr3": 20,
+    "chr4": 20,
+    "chr5": 20,
+    "chr6": 20,
+    "chr7": 20,
+    "chr8": 20,
+    "chr9": 20,
+    "chr10": 20,
+    "chr11": 20,
+    "chr12": 20,
+    "chr13": 20,
+    "chr14": 20,
+    "chr15": 20,
+    "chr16": 20,
+    "chr17": 20,
+    "chr18": 20,
+    "chr19": 20,
+    "chr20": 20,
+    "chr21": 20,
+    "chr22": 20
+  },
+  "extra_contigs": {"chrUn": 10},
+  "contig_md5": "00000000000000000000000000000000"
+}
