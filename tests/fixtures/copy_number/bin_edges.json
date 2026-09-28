@@ -1,0 +1,12 @@
+{
+  "coordinate_system": "zero_based_half_open",
+  "window_size_bp": 10,
+  "cases": [
+    {"position": 0, "expected_start": 0, "expected_end": 10, "terminal_partial": false},
+    {"position": 9, "expected_start": 0, "expected_end": 10, "terminal_partial": false},
+    {"position": 10, "expected_start": 10, "expected_end": 20, "terminal_partial": false},
+    {"position": 19, "expected_start": 10, "expected_end": 20, "terminal_partial": false},
+    {"position": 20, "expected_start": 20, "expected_end": 25, "terminal_partial": true},
+    {"position": 24, "expected_start": 20, "expected_end": 25, "terminal_partial": true}
+  ]
+}

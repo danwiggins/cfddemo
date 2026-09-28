@@ -13,12 +13,20 @@ from evidence_inspector.cell_origin_models import (
     AtlasUMatrix,
     CellOriginInputBundle,
     CellOriginResult,
+    DeconvolutionOutput,
+    DeconvolutionOutputV2,
     FragmentMarkerObservation,
     GenomicMarker,
     KATSMAN_METHATLAS_METHOD,
     LOYFER_UXM_METHOD,
     MarkerCountRow,
     MethodDefinition,
+    ModkitCpgCall,
+    ModkitCpgCallV2,
+    ModkitIngestionLedgerV2,
+    ModkitInputProvenanceV2,
+    ModkitInputResultV2,
+    NnlsRowScale,
     RangeClassification,
     ReferenceRangeRow,
     UxmState,
@@ -27,6 +35,96 @@ from evidence_inspector.cell_origin_models import (
 )
 
 FIXTURES = Path(__file__).parent / "fixtures" / "cell_origin"
+V2_SOLVER_DIAGNOSTICS = {
+    "row_scale": "sqrt_count",
+    "solver_tolerance": 1e-12,
+    "max_iterations": 10_000,
+    "solver_implementation_id": "traceback.active-set-nnls.v1",
+}
+V2_ATLAS_SHA256 = "a" * 64
+
+
+def _modkit_provenance(
+    policy: str = "precall_combined_m_h",
+) -> dict[str, object]:
+    probability_input = policy == "precall_combined_m_h"
+    return {
+        "source_schema_id": (
+            "traceback.generic-cmh-probabilities.v1"
+            if probability_input
+            else "traceback.generic-hard-call-cpg.v2"
+        ),
+        "source_schema_version": "1" if probability_input else "2",
+        "source_tool_id": "unknown",
+        "source_tool_version": "unknown",
+        "source_model_id": "unknown",
+        "source_model_version": "unknown",
+        "policy": policy,
+        "probability_threshold": 0.7 if probability_input else None,
+        "probability_threshold_source": (
+            "adapter_explicit" if probability_input else "source_unknown"
+        ),
+        "tie_policy": "exclude_exact_ties",
+        "probability_tie_tolerance": 0.0,
+        "probability_sum_tolerance": 1e-6,
+        "reference_id": "reference.synthetic.v1",
+        "reference_sha256": "a" * 64,
+        "reference_context_provider_id": "fixture-reference-provider.v1",
+        "reference_context_validation_scope": "centered_cpg_dyad",
+        "coordinate_policy_id": "canonical-reference-forward-cpg-c.v1",
+        "duplicate_policy": "exact_observation_only",
+    }
+
+
+def _modkit_call(
+    *,
+    original_position0: int = 100,
+    canonical_cpg_position0: int = 100,
+    modification_strand: str = "+",
+    reference_mod_strand: str = "+",
+    selected_state_probability: float = 0.8,
+    state: str = "methylated",
+    policy: str = "precall_combined_m_h",
+) -> dict[str, object]:
+    return {
+        "schema_version": "cell-origin-cpg-call.v2",
+        "fragment_digest": "b" * 64,
+        "chromosome": "chr1",
+        "original_position0": original_position0,
+        "canonical_cpg_position0": canonical_cpg_position0,
+        "modification_strand": modification_strand,
+        "reference_mod_strand": reference_mod_strand,
+        "selected_state_probability": selected_state_probability,
+        "state": state,
+        "policy": policy,
+    }
+
+
+def _modkit_ledger(
+    policy: str = "precall_combined_m_h",
+) -> dict[str, object]:
+    probability_input = policy == "precall_combined_m_h"
+    return {
+        "policy": policy,
+        "total_rows": 5,
+        "source_failed_rows": 1,
+        "source_passed_rows": 4,
+        "excluded_non_c_rows": 1,
+        "candidate_c_rows": 3,
+        "hard_call_c_rows": 0 if probability_input else 1,
+        "hard_call_m_rows": 0 if probability_input else 1,
+        "hard_call_h_rows": 0 if probability_input else 1,
+        "probability_input_rows": 3 if probability_input else 0,
+        "excluded_probability_tie_rows": 1 if probability_input else 0,
+        "excluded_low_confidence_rows": 0,
+        "eligible_call_rows": 2 if probability_input else 3,
+        "unmethylated_call_rows": 1,
+        "methylated_call_rows": 1 if probability_input else 2,
+        "reference_plus_call_rows": 1,
+        "reference_minus_call_rows": 1 if probability_input else 2,
+        "malformed_rows": 0,
+        "duplicate_rows": 0,
+    }
 
 
 def fixture_bytes(name: str) -> bytes:
@@ -163,6 +261,229 @@ def test_fragment_observation_rejects_duplicate_cpg_locus() -> None:
         validate_json(FragmentMarkerObservation, payload)
 
 
+def test_v2_cpg_call_preserves_original_and_canonical_coordinates() -> None:
+    plus = validate_json(ModkitCpgCallV2, _modkit_call())
+    minus = validate_json(
+        ModkitCpgCallV2,
+        _modkit_call(
+            original_position0=101,
+            canonical_cpg_position0=100,
+            modification_strand="-",
+            reference_mod_strand="-",
+        )
+    )
+
+    assert plus.original_position0 == plus.canonical_cpg_position0
+    assert minus.original_position0 - 1 == minus.canonical_cpg_position0
+    assert minus.modification_strand == minus.reference_mod_strand
+
+    with pytest.raises(ValidationError, match="canonical CpG position"):
+        validate_json(
+            ModkitCpgCallV2,
+            _modkit_call(
+                original_position0=101,
+                canonical_cpg_position0=101,
+                reference_mod_strand="-",
+            )
+        )
+    with pytest.raises(ValidationError, match="underflow"):
+        validate_json(
+            ModkitCpgCallV2,
+            _modkit_call(
+                original_position0=0,
+                canonical_cpg_position0=0,
+                reference_mod_strand="-",
+            )
+        )
+
+
+def test_v1_and_v2_cpg_calls_cannot_be_relabelled() -> None:
+    v1 = fixture_payload("fragment_observation.json")["cpg_calls"][0]
+    assert validate_json(ModkitCpgCall, v1).position0 == 110
+    with pytest.raises(ValidationError):
+        validate_json(ModkitCpgCallV2, v1)
+    with pytest.raises(ValidationError):
+        validate_json(ModkitCpgCall, _modkit_call())
+
+    payload = _modkit_call()
+    payload["modified_probability"] = payload.pop("selected_state_probability")
+    with pytest.raises(ValidationError, match="selected_state_probability"):
+        validate_json(ModkitCpgCallV2, payload)
+
+
+def test_modkit_v2_provenance_binds_generic_schema_and_probability_policy() -> None:
+    combined = validate_json(ModkitInputProvenanceV2, _modkit_provenance())
+    assert combined.probability_threshold == 0.7
+    assert combined.probability_sum_tolerance == 1e-6
+
+    zero_threshold = _modkit_provenance()
+    zero_threshold["probability_threshold"] = 0.0
+    assert (
+        validate_json(
+            ModkitInputProvenanceV2, zero_threshold
+        ).probability_threshold
+        == 0.0
+    )
+
+    hard = validate_json(
+        ModkitInputProvenanceV2,
+        _modkit_provenance("hard_call_collapsed_m_h")
+    )
+    assert hard.probability_threshold is None
+
+    mismatched = _modkit_provenance()
+    mismatched["source_schema_id"] = "traceback.generic-hard-call-cpg.v2"
+    with pytest.raises(ValidationError, match="generic C/m/h schema"):
+        validate_json(ModkitInputProvenanceV2, mismatched)
+
+    threshold_claim = _modkit_provenance("hard_call_collapsed_m_h")
+    threshold_claim["probability_threshold"] = 0.7
+    with pytest.raises(ValidationError, match="cannot claim"):
+        validate_json(ModkitInputProvenanceV2, threshold_claim)
+
+    for field, value in (
+        ("probability_tie_tolerance", 1e-9),
+        ("probability_sum_tolerance", 1e-5),
+    ):
+        changed = _modkit_provenance()
+        changed[field] = value
+        with pytest.raises(ValidationError, match=field):
+            validate_json(ModkitInputProvenanceV2, changed)
+
+
+@pytest.mark.parametrize(
+    ("field", "value", "message"),
+    [
+        ("total_rows", 6, "total rows"),
+        ("source_passed_rows", 5, "total rows"),
+        ("candidate_c_rows", 4, "source-passed"),
+        ("eligible_call_rows", 3, "terminal buckets"),
+        ("reference_plus_call_rows", 2, "reference-strand counts"),
+        ("probability_input_rows", 2, "probability-input rows"),
+        ("malformed_rows", 1, "malformed_rows"),
+        ("duplicate_rows", 1, "duplicate_rows"),
+    ],
+)
+def test_modkit_v2_ledger_reconciles_every_stage(
+    field: str,
+    value: int,
+    message: str,
+) -> None:
+    payload = _modkit_ledger()
+    payload[field] = value
+    with pytest.raises(ValidationError, match=message):
+        validate_json(ModkitIngestionLedgerV2, payload)
+
+
+def test_hard_call_ledger_cannot_claim_probability_filtering() -> None:
+    hard = _modkit_ledger("hard_call_collapsed_m_h")
+    ledger = validate_json(ModkitIngestionLedgerV2, hard)
+    hard_state_rows = (
+        ledger.hard_call_c_rows
+        + ledger.hard_call_m_rows
+        + ledger.hard_call_h_rows
+    )
+    assert hard_state_rows == 3
+
+    hard["excluded_low_confidence_rows"] = 1
+    hard["eligible_call_rows"] = 2
+    hard["methylated_call_rows"] = 1
+    hard["reference_minus_call_rows"] = 1
+    with pytest.raises(ValidationError, match="cannot claim"):
+        validate_json(ModkitIngestionLedgerV2, hard)
+
+
+def test_hard_call_ledger_binds_source_states_to_emitted_states() -> None:
+    forged = _modkit_ledger("hard_call_collapsed_m_h")
+    forged.update(
+        total_rows=1,
+        source_failed_rows=0,
+        source_passed_rows=1,
+        excluded_non_c_rows=0,
+        candidate_c_rows=1,
+        hard_call_c_rows=1,
+        hard_call_m_rows=0,
+        hard_call_h_rows=0,
+        eligible_call_rows=1,
+        unmethylated_call_rows=0,
+        methylated_call_rows=1,
+        reference_plus_call_rows=1,
+        reference_minus_call_rows=0,
+    )
+
+    with pytest.raises(ValidationError, match="C rows must equal"):
+        validate_json(ModkitIngestionLedgerV2, forged)
+
+
+def test_modkit_v2_result_reconciles_calls_without_collapsing_strands() -> None:
+    calls = [
+        _modkit_call(),
+        _modkit_call(
+            original_position0=101,
+            canonical_cpg_position0=100,
+            modification_strand="+",
+            reference_mod_strand="-",
+            selected_state_probability=0.9,
+            state="unmethylated",
+        ),
+    ]
+    result = validate_json(
+        ModkitInputResultV2,
+        {
+            "schema_version": "cell-origin-modkit-input.v2",
+            "provenance": _modkit_provenance(),
+            "ledger": _modkit_ledger(),
+            "calls": calls,
+        }
+    )
+    assert len(result.calls) == 2
+    assert result.calls[0].canonical_cpg_position0 == (
+        result.calls[1].canonical_cpg_position0
+    )
+
+    duplicate = result.model_dump(mode="python")
+    duplicate["calls"] = list(duplicate["calls"])
+    duplicate["calls"][1] = duplicate["calls"][0]
+    duplicate["ledger"]["reference_plus_call_rows"] = 2
+    duplicate["ledger"]["reference_minus_call_rows"] = 0
+    duplicate["ledger"]["unmethylated_call_rows"] = 0
+    duplicate["ledger"]["methylated_call_rows"] = 2
+    duplicate["calls"] = tuple(duplicate["calls"])
+    with pytest.raises(ValidationError, match="exact call observations"):
+        ModkitInputResultV2.model_validate(duplicate)
+
+
+@pytest.mark.parametrize(
+    ("probability", "message"),
+    [
+        (0.5, "exact probability ties"),
+        (0.4, "must exceed 0.5"),
+        (0.6, "below the bound threshold"),
+    ],
+)
+def test_probability_calls_must_follow_bound_threshold_and_tie_policy(
+    probability: float,
+    message: str,
+) -> None:
+    payload = {
+        "schema_version": "cell-origin-modkit-input.v2",
+        "provenance": _modkit_provenance(),
+        "ledger": _modkit_ledger(),
+        "calls": [
+            _modkit_call(selected_state_probability=probability),
+            _modkit_call(
+                original_position0=101,
+                canonical_cpg_position0=100,
+                reference_mod_strand="-",
+                selected_state_probability=0.9,
+                state="unmethylated",
+            ),
+        ],
+    }
+    with pytest.raises(ValidationError, match=message):
+        validate_json(ModkitInputResultV2, payload)
+
+
 def test_marker_count_row_reconciles_uxm_and_denominator() -> None:
     row = MarkerCountRow(
         marker_id="marker.1",
@@ -248,6 +569,131 @@ def test_deconvolution_requires_canonical_normalized_fractions() -> None:
     payload["deconvolution"]["estimates"][0]["fraction"] = 0.2
     with pytest.raises(ValidationError, match="sum to 1"):
         validate_json(CellOriginResult, payload)
+
+
+def test_v2_deconvolution_requires_explicit_row_scale_and_schema() -> None:
+    v1 = fixture_payload("result.json")["deconvolution"]
+    with pytest.raises(ValidationError, match="schema_version|row_scale"):
+        validate_json(DeconvolutionOutputV2, v1)
+
+    missing_scale = {
+        **v1,
+        "schema_version": "cell-origin-deconvolution.v2",
+    }
+    with pytest.raises(ValidationError, match="row_scale"):
+        validate_json(DeconvolutionOutputV2, missing_scale)
+
+    wrong_schema = {
+        **v1,
+        "schema_version": "cell-origin-deconvolution.v1",
+        "diagnostics": {**v1["diagnostics"], **V2_SOLVER_DIAGNOSTICS},
+    }
+    with pytest.raises(ValidationError, match="cell-origin-deconvolution.v2"):
+        validate_json(DeconvolutionOutputV2, wrong_schema)
+
+
+@pytest.mark.parametrize("row_scale", list(NnlsRowScale))
+def test_v2_deconvolution_round_trips_each_row_scale(
+    row_scale: NnlsRowScale,
+) -> None:
+    payload = fixture_payload("result.json")["deconvolution"]
+    payload["schema_version"] = "cell-origin-deconvolution.v2"
+    payload["atlas_sha256"] = V2_ATLAS_SHA256
+    payload["diagnostics"].update(V2_SOLVER_DIAGNOSTICS)
+    payload["diagnostics"]["row_scale"] = row_scale.value
+
+    output = validate_json(DeconvolutionOutputV2, payload)
+
+    assert output.schema_version == "cell-origin-deconvolution.v2"
+    assert output.diagnostics.row_scale == row_scale
+    assert (
+        DeconvolutionOutputV2.model_validate_json(output.model_dump_json())
+        == output
+    )
+
+
+def test_v1_and_v2_deconvolution_boundaries_do_not_silently_coerce() -> None:
+    v1 = fixture_payload("result.json")["deconvolution"]
+    assert validate_json(DeconvolutionOutput, v1).diagnostics.converged
+
+    v2 = {
+        **v1,
+        "schema_version": "cell-origin-deconvolution.v2",
+        "atlas_sha256": V2_ATLAS_SHA256,
+        "diagnostics": {
+            **v1["diagnostics"],
+            **V2_SOLVER_DIAGNOSTICS,
+            "row_scale": "reference_count",
+        },
+    }
+    with pytest.raises(ValidationError, match="schema_version|row_scale"):
+        validate_json(DeconvolutionOutput, v2)
+
+    invalid_scale = {
+        **v1,
+        "schema_version": "cell-origin-deconvolution.v2",
+        "atlas_sha256": V2_ATLAS_SHA256,
+        "diagnostics": {
+            **v1["diagnostics"],
+            **V2_SOLVER_DIAGNOSTICS,
+            "row_scale": "variance_weighted",
+        },
+    }
+    with pytest.raises(ValidationError, match="row_scale"):
+        validate_json(DeconvolutionOutputV2, invalid_scale)
+
+
+@pytest.mark.parametrize(
+    "field",
+    ["solver_tolerance", "max_iterations", "solver_implementation_id"],
+)
+def test_v2_deconvolution_requires_effective_solver_configuration(
+    field: str,
+) -> None:
+    payload = fixture_payload("result.json")["deconvolution"]
+    payload["schema_version"] = "cell-origin-deconvolution.v2"
+    payload["atlas_sha256"] = V2_ATLAS_SHA256
+    payload["diagnostics"].update(V2_SOLVER_DIAGNOSTICS)
+    del payload["diagnostics"][field]
+
+    with pytest.raises(ValidationError, match=field):
+        validate_json(DeconvolutionOutputV2, payload)
+
+
+@pytest.mark.parametrize(
+    ("updates", "match"),
+    [
+        ({"solver_tolerance": 0.0}, "solver_tolerance"),
+        ({"solver_tolerance": float("nan")}, "solver_tolerance"),
+        ({"max_iterations": 0}, "max_iterations"),
+        ({"solver_implementation_id": "contains spaces"}, "solver_implementation_id"),
+    ],
+)
+def test_v2_deconvolution_rejects_invalid_solver_configuration(
+    updates: dict[str, object],
+    match: str,
+) -> None:
+    payload = fixture_payload("result.json")["deconvolution"]
+    payload["schema_version"] = "cell-origin-deconvolution.v2"
+    payload["atlas_sha256"] = V2_ATLAS_SHA256
+    payload["diagnostics"].update(V2_SOLVER_DIAGNOSTICS)
+    payload["diagnostics"].update(updates)
+
+    with pytest.raises(ValidationError, match=match):
+        validate_json(DeconvolutionOutputV2, payload)
+
+
+def test_v2_deconvolution_requires_valid_atlas_digest() -> None:
+    payload = fixture_payload("result.json")["deconvolution"]
+    payload["schema_version"] = "cell-origin-deconvolution.v2"
+    payload["diagnostics"].update(V2_SOLVER_DIAGNOSTICS)
+
+    with pytest.raises(ValidationError, match="atlas_sha256"):
+        validate_json(DeconvolutionOutputV2, payload)
+
+    payload["atlas_sha256"] = "not-a-sha256"
+    with pytest.raises(ValidationError, match="atlas_sha256"):
+        validate_json(DeconvolutionOutputV2, payload)
 
 
 def test_bootstrap_and_range_rows_are_bound_to_estimates() -> None:
