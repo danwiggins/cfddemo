@@ -583,8 +583,7 @@
       const all = Math.round(12000 * settings.depth);
       const accepted = Math.round(all * method.acceptedRate);
       const eligible = Math.round(accepted * method.eligibleRate);
-      const visibleFraction = Math.min(1, (settings.max - 80) / 620);
-      const displayed = Math.round(eligible * (0.72 + 0.28 * visibleFraction) * (resultState === "partial" ? 0.44 : 1));
+      const displayed = seriesFor(panel).reduce((sum, row) => sum + row.count, 0);
       return {all, accepted, eligible, displayed};
     }
 
@@ -707,6 +706,9 @@
       if (bState !== "complete") return {outcome: bState, delta: false, axis: false, summary: `Panel B is ${bState.replaceAll("_", " ")}. Deltas and synchronized axes are withheld until both results are complete.`};
       if (a.unavailable || b.unavailable) return {outcome: "unknown", delta: false, axis: false, summary: "Comparison unavailable because one selected method has no registered result."};
       if (a.quantity !== b.quantity) return {outcome: "different quantity", delta: false, axis: false, summary: "These methods measure different quantities. Charts remain separate and numerical deltas are withheld."};
+      if (a.unit !== b.unit) return {outcome: "different unit", delta: false, axis: false, summary: "These methods use different units. Charts remain separate and numerical deltas are withheld."};
+      const settingsA = panelSettings("A"), settingsB = panelSettings("B");
+      if (settingsA.depth !== settingsB.depth || settingsA.max !== settingsB.max) return {outcome: "different filter", delta: false, axis: false, summary: "The panels use different depth or display-range filters. Charts retain independent axes and numerical deltas are withheld."};
       return {outcome: "comparable", delta: true, axis: true, summary: "These methods share a registered quantity and unit. Exact count deltas are shown for the selected synthetic subset."};
     }
 
@@ -738,7 +740,7 @@
       const bins = [...new Set([...aRows.keys(), ...bRows.keys()])].sort((x,y) => x-y);
       byId("headA").textContent = `A · ${a.label}`;
       byId("headB").textContent = `B · ${b.label}`;
-      byId("tableNote").textContent = decision.delta ? "Delta is B minus A for the same registered quantity." : "Delta is withheld because the selected methods are unavailable or measure different quantities.";
+      byId("tableNote").textContent = decision.delta ? "Delta is B minus A for the same registered quantity, unit, and filter subset." : decision.summary;
       byId("exactRows").innerHTML = bins.map(bp => {
         const av = aRows.get(bp), bv = bRows.get(bp);
         const delta = decision.delta && av !== undefined && bv !== undefined ? fmt(bv-av) : "—";

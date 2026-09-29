@@ -6,7 +6,7 @@ Status: disposable E03 design fixture. This is not production UI and does not ch
 
 - Panel A and Panel B select methods independently. Method identity, quantity, unit, qualification, denominator, exclusions, strengths, limitations, and intended use remain visible.
 - Linked filters apply the same depth subset and display range to both panels. Unlinking reveals panel-local controls.
-- Crosshair synchronization and numerical deltas are enabled only when both panels are complete and the registered quantity and unit match. Different quantities retain independent axes and never show a delta.
+- Crosshair synchronization and numerical deltas are enabled only when both panels are complete and the registered quantity, unit, depth subset, and display range match. Different quantities, units, or filter subsets retain independent axes and never show a delta.
 - Every plotted bin is keyboard focusable. The accessible table is generated from the same in-memory series used by the SVG charts.
 - The provenance drawer traps focus, closes with Escape, restores focus to its trigger, and contains synthetic aggregate identities only.
 
@@ -19,8 +19,8 @@ The Panel B state selector exercises explicit `complete`, `loading`, `empty`, `p
 ## Responsive behavior
 
 - Desktop: side-by-side A/B panels and a five-column difference strip.
-- Tablet: filters wrap, panels stack, and difference fields reduce to two or three columns.
-- Mobile: one-column controls, two-column denominator blocks, large touch targets, and a full-width provenance drawer.
+- Wider tablet: filters wrap while panels remain side by side, and difference fields reduce to two or three columns.
+- Compact tablet and mobile at 768px or narrower: panels stack; mobile also uses one-column controls, two-column denominator blocks, large touch targets, and a full-width provenance drawer.
 - The layout uses fluid widths and no fixed text height, so browser zoom to 200% reflows without clipping. Reduced-motion mode removes transitions and smooth scrolling.
 
 ## Visual semantics
