@@ -2,12 +2,9 @@ Sample	Tumor Fraction	Ploidy
 sample	0	2
 
 sample
-Gender:	female
+Gender:	unknown
 Tumor Fraction:	0
 Ploidy:	2
 
 init	n_est	phi_est	BIC	Frac_genome_subclonal	Frac_CNA_subclonal	loglik
-n0.95-p2	1	2	NA	0	0	-50
-n0.99-p2	0.99	2	NA	0	0	-51
-n0.995-p2	0.98	2	NA	0	0	-52
-n0.999-p2	0.97	2	NA	0	0	-53
+n1-p2	1	2	NA	0	0	-50

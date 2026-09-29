@@ -1,0 +1,5 @@
+chr	start	end	log2_TNratio_corrected
+chr1	1	1000000	NA
+chr1	1000001	2000000	-0.01
+chr1	2000001	3000000	0.00
+chr1	3000001	4000000	0.01
