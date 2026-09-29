@@ -16,6 +16,7 @@ from evidence_inspector.cna_explorer import (
     ExplorerAvailability,
     ExplorerInputAuthority,
     QualificationState,
+    SegmentLayer,
     TrustState,
     build_cna_explorer_snapshot,
     cna_explorer_snapshot_bytes,
@@ -301,6 +302,51 @@ def test_native_missing_corrected_depth_never_becomes_zero(tmp_path: Path) -> No
         if item.source == CnaSource.SEGMENTED_CNA and item.bin_index == 0
     )
     assert segmented_bin.corrected_log2 is None
+
+
+@pytest.mark.parametrize(
+    "call",
+    ("HOMD", "HETD", "NEUT", "GAIN", "AMP", "HLAMP", "HLAMP2", "HLAMP25"),
+)
+def test_segment_layer_accepts_only_pinned_ichor_call_vocabulary(call: str) -> None:
+    layer = SegmentLayer(
+        segment_index=0,
+        contig="chr1",
+        start=0,
+        end=1_000_000,
+        native_span_bin_count=1,
+        retained_bin_count=1,
+        median_log2=0.0,
+        upstream_copy_number=2,
+        upstream_call=call,
+        subclone_status=False,
+    )
+    assert layer.upstream_call == call
+
+
+@pytest.mark.parametrize(
+    "embedded_path",
+    (
+        "artifact=/private/tmp/confidential.bam",
+        r"artifact=C:\private\confidential.bam",
+    ),
+    ids=("embedded-posix", "embedded-windows"),
+)
+def test_embedded_paths_in_upstream_segment_call_fail_closed(
+    tmp_path: Path, embedded_path: str
+) -> None:
+    dosage, segmented = _inputs(tmp_path)
+    payload = segmented.model_dump(mode="python")
+    payload["segments"][0]["call"] = embedded_path
+    changed = CnvDevelopmentResult.model_validate(payload)
+
+    with pytest.raises(ValidationError, match="upstream_call"):
+        build_cna_explorer_snapshot(
+            dosage,
+            changed,
+            dosage_authority=_authority(CnaSource.DOSAGE_QC),
+            segmented_authority=_authority(CnaSource.SEGMENTED_CNA),
+        )
 
 
 @pytest.mark.parametrize(

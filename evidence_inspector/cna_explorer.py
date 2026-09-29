@@ -54,8 +54,16 @@ Identifier = Annotated[
     ),
 ]
 FiniteFloat = Annotated[float, Field(allow_inf_nan=False)]
+IchorCall = Annotated[
+    str,
+    StringConstraints(
+        pattern=r"^(?:HOMD|HETD|NEUT|GAIN|AMP|HLAMP(?:[2-9]|1[0-9]|2[0-5])?)$"
+    ),
+]
 
-_ABSOLUTE_PATH = re.compile(r"(?:^|\s)(?:/[^\s]+|[A-Za-z]:\\[^\s]+)")
+_ABSOLUTE_PATH = re.compile(
+    r"(?:^|[\s=:(\[{'\"\\])" r"(?:/[^\s,;)\]}'\"]+|[A-Za-z]:[\\/][^\s,;)\]}'\"]+)"
+)
 _SEQUENCE = re.compile(r"(?<![A-Za-z])[ACGTN]{20,}(?![A-Za-z])", re.IGNORECASE)
 _SECRET = re.compile(
     r"(?:AWS_SECRET_ACCESS_KEY|PRIVATE_KEY|PASSWORD|SECRET|TOKEN)\s*=",
@@ -241,9 +249,12 @@ class BinLayer(_ClosedModel):
             raise ValueError("only dosage bins carry accepted-read counts")
         if dosage and self.corrected_log2 is not None:
             raise ValueError("dosage bins cannot carry corrected-depth values")
-        if not dosage and self.status == "masked_prespecified":
-            if self.corrected_log2 is not None:
-                raise ValueError("masked segmented bins cannot imply zero or a value")
+        if (
+            not dosage
+            and self.status == "masked_prespecified"
+            and self.corrected_log2 is not None
+        ):
+            raise ValueError("masked segmented bins cannot imply zero or a value")
         return self
 
 
@@ -303,7 +314,7 @@ class SegmentLayer(_ClosedModel):
     retained_bin_count: int = Field(gt=0)
     median_log2: FiniteFloat
     upstream_copy_number: int = Field(ge=0)
-    upstream_call: Annotated[str, StringConstraints(min_length=1, max_length=64)]
+    upstream_call: IchorCall
     subclone_status: bool
 
 
