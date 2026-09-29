@@ -53,8 +53,8 @@ sampled classified U/non-U fragment call within each marker; this does not
 preserve molecule linkage across markers and is not molecule-level resampling.
 Interval eligibility requires two expected observations in each percentile
 tail (80 successful resamples for a 95% interval), no solver failures, and
-positive observed width for that cell type. Degenerate resamples reduce the
-effective successful count. A zero-width or unavailable interval is reported as
+no undefined draws (failed or degenerate), and positive observed width for that
+cell type. A zero-width or unavailable interval is reported as
 `insufficient_information`, not as precise uncertainty. The historical v1
 bootstrap contract and estimator remain available for compatibility.
 

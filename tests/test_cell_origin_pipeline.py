@@ -9,9 +9,11 @@ from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
+from pydantic import ValidationError
 
 import evidence_inspector.cell_origin_pipeline as pipeline_module
 from evidence_inspector.cell_origin_pipeline import (
+    CellOriginResultBundle,
     PipelineConfig,
     _normalize_native_modkit,
     build_alignment_command_plan,
@@ -24,6 +26,7 @@ from evidence_inspector.cell_origin_models import (
     AtlasUValue,
     BootstrapInformationStatus,
     BootstrapResultV2,
+    DeconvolutionOutputV2,
     GenomicMarker,
     LOYFER_UXM_METHOD,
     MarkerCountRow,
@@ -224,3 +227,25 @@ def test_production_pipeline_publishes_v2_unavailable_uncertainty(
     assert chart.upper_fraction is None
     published = json.loads(config.output_path.read_text(encoding="utf-8"))
     assert published["charts"]["composition_rows"][0]["lower_fraction"] is None
+    reloaded = CellOriginResultBundle.model_validate_json(
+        config.output_path.read_bytes()
+    )
+    assert reloaded == bundle
+    assert isinstance(reloaded.result.deconvolution, DeconvolutionOutputV2)
+    assert reloaded.result.deconvolution.schema_version == (
+        "cell-origin-deconvolution.v2"
+    )
+    assert len(reloaded.result.deconvolution.atlas_sha256) == 64
+    assert reloaded.result.deconvolution.diagnostics.row_scale.value == (
+        "sqrt_count"
+    )
+    assert reloaded.result.bootstrap is not None
+    assert reloaded.result.bootstrap.diagnostics.nnls_row_scale == (
+        reloaded.result.deconvolution.diagnostics.row_scale
+    )
+
+    published["result"]["deconvolution"]["diagnostics"]["row_scale"] = (
+        "reference_count"
+    )
+    with pytest.raises(ValidationError, match="do not match deconvolution"):
+        CellOriginResultBundle.model_validate_json(json.dumps(published))

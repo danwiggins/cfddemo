@@ -553,7 +553,7 @@ def test_v2_bootstrap_all_degenerate_resamples_are_accounted(
     assert result.diagnostics.degenerate_resamples == 3
 
 
-def test_v2_bootstrap_partially_degenerate_counts_and_interval_are_calculable(
+def test_v2_bootstrap_partially_degenerate_fails_closed(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     atlas = fixture_atlas()
@@ -575,10 +575,45 @@ def test_v2_bootstrap_partially_degenerate_counts_and_interval_are_calculable(
         counts, atlas, source, replicates=81, random_seed=7
     )
 
-    assert result.information_status == BootstrapInformationStatus.AVAILABLE
+    assert result.information_status == (
+        BootstrapInformationStatus.INSUFFICIENT_INFORMATION
+    )
     assert result.diagnostics.successful_resamples == 80
     assert result.diagnostics.failed_resamples == 0
     assert result.diagnostics.degenerate_resamples == 1
+    assert result.diagnostics.observed_unusable_resample_fraction == pytest.approx(
+        1 / 81
+    )
+    assert not result.diagnostics.interval_eligibility_met
+    assert all(interval.lower_fraction is None for interval in result.intervals)
+
+
+def test_v2_bootstrap_eligible_interval_is_independently_calculable(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    atlas = fixture_atlas()
+    counts = (
+        marker_count("marker.immune.1", 40, 100),
+        marker_count("marker.liver.1", 60, 100),
+    )
+    source = deconvolve_uxm_v2(
+        counts, atlas, row_scale=NnlsRowScale.SQRT_COUNT
+    )
+    draws = [[40, 60]] * 40 + [[60, 40]] * 40
+    monkeypatch.setattr(
+        deconvolution_module.np.random,
+        "default_rng",
+        lambda _seed: _DrawSequence(draws),
+    )
+
+    result = bootstrap_uxm_v2(
+        counts, atlas, source, replicates=80, random_seed=7
+    )
+
+    assert result.information_status == BootstrapInformationStatus.AVAILABLE
+    assert result.diagnostics.successful_resamples == 80
+    assert result.diagnostics.degenerate_resamples == 0
+    assert result.diagnostics.interval_eligibility_met
     immune, liver = result.intervals
     assert immune.lower_fraction == pytest.approx(1 / 3)
     assert immune.upper_fraction == pytest.approx(2 / 3)
@@ -621,7 +656,7 @@ def test_v2_bootstrap_solver_failure_blocks_interval_availability(
     assert result.diagnostics.successful_resamples == 80
     assert result.diagnostics.failed_resamples == 1
     assert result.diagnostics.minimum_successful_resamples == 80
-    assert result.diagnostics.maximum_failed_resample_fraction == 0.0
+    assert result.diagnostics.maximum_unusable_resample_fraction == 0.0
     assert not result.diagnostics.interval_eligibility_met
     assert result.information_status == (
         BootstrapInformationStatus.INSUFFICIENT_INFORMATION

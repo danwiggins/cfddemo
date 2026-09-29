@@ -640,12 +640,12 @@ def bootstrap_uxm_v2(
     minimum_successful_resamples = math.ceil(
         minimum_tail_observations / alpha
     )
-    maximum_failed_resample_fraction = 0.0
-    observed_failed_resample_fraction = failed / replicates
+    maximum_unusable_resample_fraction = 0.0
+    observed_unusable_resample_fraction = (failed + degenerate) / replicates
     interval_eligibility_met = (
         len(samples) >= minimum_successful_resamples
-        and observed_failed_resample_fraction
-        <= maximum_failed_resample_fraction
+        and observed_unusable_resample_fraction
+        <= maximum_unusable_resample_fraction
     )
     if samples:
         sample_matrix = np.asarray(samples, dtype=np.float64)
@@ -718,8 +718,12 @@ def bootstrap_uxm_v2(
             minimum_tail_observations=minimum_tail_observations,
             tail_probability=alpha,
             minimum_successful_resamples=minimum_successful_resamples,
-            maximum_failed_resample_fraction=maximum_failed_resample_fraction,
-            observed_failed_resample_fraction=observed_failed_resample_fraction,
+            maximum_unusable_resample_fraction=(
+                maximum_unusable_resample_fraction
+            ),
+            observed_unusable_resample_fraction=(
+                observed_unusable_resample_fraction
+            ),
             interval_eligibility_met=interval_eligibility_met,
             nnls_row_scale=source_diagnostics.row_scale,
             solver_tolerance=effective_tolerance,

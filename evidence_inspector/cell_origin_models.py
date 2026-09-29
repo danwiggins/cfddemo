@@ -13,13 +13,15 @@ from __future__ import annotations
 
 import math
 from enum import StrEnum
-from typing import Annotated, Literal
+from typing import Annotated, Any, Literal
 
 from pydantic import (
     BaseModel,
     ConfigDict,
+    Discriminator,
     Field,
     StringConstraints,
+    Tag,
     field_validator,
     model_validator,
 )
@@ -735,6 +737,19 @@ class DeconvolutionOutputV2(DeconvolutionOutput):
     diagnostics: NnlsDiagnosticsV2
 
 
+def _deconvolution_version(value: Any) -> str:
+    if isinstance(value, dict):
+        return "v2" if "schema_version" in value else "v1"
+    return "v2" if isinstance(value, DeconvolutionOutputV2) else "v1"
+
+
+VersionedDeconvolutionOutput = Annotated[
+    Annotated[DeconvolutionOutputV2, Tag("v2")]
+    | Annotated[DeconvolutionOutput, Tag("v1")],
+    Discriminator(_deconvolution_version),
+]
+
+
 class BootstrapInterval(StrictModel):
     cell_type_id: Identifier
     estimate: CanonicalFraction
@@ -824,8 +839,8 @@ class BootstrapDiagnosticsV2(StrictModel):
     minimum_tail_observations: Literal[2] = 2
     tail_probability: float = Field(gt=0.0, lt=0.5, allow_inf_nan=False)
     minimum_successful_resamples: int = Field(ge=2)
-    maximum_failed_resample_fraction: Literal[0.0] = 0.0
-    observed_failed_resample_fraction: CanonicalFraction
+    maximum_unusable_resample_fraction: Literal[0.0] = 0.0
+    observed_unusable_resample_fraction: CanonicalFraction
     interval_eligibility_met: bool
     nnls_row_scale: NnlsRowScale
     solver_tolerance: float = Field(gt=0.0, allow_inf_nan=False)
@@ -840,20 +855,21 @@ class BootstrapDiagnosticsV2(StrictModel):
             + self.degenerate_resamples
         ):
             raise ValueError("bootstrap resample accounting must reconcile")
-        expected_failed_fraction = (
-            self.failed_resamples / self.requested_resamples
+        expected_unusable_fraction = (
+            (self.failed_resamples + self.degenerate_resamples)
+            / self.requested_resamples
         )
         if not math.isclose(
-            self.observed_failed_resample_fraction,
-            expected_failed_fraction,
+            self.observed_unusable_resample_fraction,
+            expected_unusable_fraction,
             rel_tol=0.0,
             abs_tol=1e-15,
         ):
-            raise ValueError("observed bootstrap failure fraction is inconsistent")
+            raise ValueError("observed bootstrap unusable fraction is inconsistent")
         expected_eligibility = (
             self.successful_resamples >= self.minimum_successful_resamples
-            and self.observed_failed_resample_fraction
-            <= self.maximum_failed_resample_fraction
+            and self.observed_unusable_resample_fraction
+            <= self.maximum_unusable_resample_fraction
         )
         if self.interval_eligibility_met != expected_eligibility:
             raise ValueError("bootstrap interval eligibility is inconsistent")
@@ -915,6 +931,19 @@ class BootstrapResultV2(StrictModel):
         if self.information_status != expected:
             raise ValueError("bootstrap information status does not match intervals")
         return self
+
+
+def _bootstrap_version(value: Any) -> str:
+    if isinstance(value, dict):
+        return "v2" if "schema_version" in value else "v1"
+    return "v2" if isinstance(value, BootstrapResultV2) else "v1"
+
+
+VersionedBootstrapResult = Annotated[
+    Annotated[BootstrapResultV2, Tag("v2")]
+    | Annotated[BootstrapResult, Tag("v1")],
+    Discriminator(_bootstrap_version),
+]
 
 
 class ReferenceRangeRow(StrictModel):
@@ -1041,8 +1070,8 @@ class CellOriginResult(StrictModel):
     result_id: Identifier
     method: MethodDefinition
     marker_counts: tuple[MarkerCountRow, ...] = Field(min_length=1)
-    deconvolution: DeconvolutionOutput
-    bootstrap: BootstrapResult | BootstrapResultV2 | None = None
+    deconvolution: VersionedDeconvolutionOutput
+    bootstrap: VersionedBootstrapResult | None = None
     range_comparison: RangeComparison | None = None
     provenance: CellOriginProvenance
     validation: ValidationReport
@@ -1070,6 +1099,25 @@ class CellOriginResult(StrictModel):
                 raise ValueError("bootstrap must bind to this deconvolution result")
             if {item.cell_type_id for item in self.bootstrap.intervals} != estimate_ids:
                 raise ValueError("bootstrap and deconvolution cell types must match")
+            if isinstance(self.bootstrap, BootstrapResultV2):
+                if not isinstance(self.deconvolution, DeconvolutionOutputV2):
+                    raise ValueError(
+                        "bootstrap v2 requires a deconvolution v2 source"
+                    )
+                bootstrap_solver = self.bootstrap.diagnostics
+                source_solver = self.deconvolution.diagnostics
+                if (
+                    bootstrap_solver.nnls_row_scale != source_solver.row_scale
+                    or bootstrap_solver.solver_tolerance
+                    != source_solver.solver_tolerance
+                    or bootstrap_solver.max_iterations
+                    != source_solver.max_iterations
+                    or bootstrap_solver.solver_implementation_id
+                    != source_solver.solver_implementation_id
+                ):
+                    raise ValueError(
+                        "bootstrap solver diagnostics do not match deconvolution"
+                    )
         if self.range_comparison is not None:
             if {
                 item.cell_type_id for item in self.range_comparison.rows
@@ -1137,6 +1185,8 @@ __all__ = [
     "ValidationCheck",
     "ValidationRecord",
     "ValidationReport",
+    "VersionedBootstrapResult",
+    "VersionedDeconvolutionOutput",
     "VerificationLevel",
     "classify_uxm",
 ]
