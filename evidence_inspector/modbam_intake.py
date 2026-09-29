@@ -240,13 +240,7 @@ class AlignmentDiskBudget(StrictModel):
             raise ValueError("workspace disk budget is insufficient")
         if output_required > self.available_output_bytes:
             raise ValueError("output disk budget is insufficient")
-        if (
-            self.workspace_device_id,
-            self.workspace_mount_sha256,
-        ) == (
-            self.output_device_id,
-            self.output_mount_sha256,
-        ):
+        if self.workspace_device_id == self.output_device_id:
             shared_required = workspace_required + output_required
             if shared_required > min(
                 self.available_workspace_bytes,

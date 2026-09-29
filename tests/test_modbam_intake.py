@@ -409,6 +409,31 @@ def test_sibling_directories_share_one_capacity_denominator(
         )
 
 
+def test_same_device_mount_aliases_share_one_capacity_denominator() -> None:
+    measurement = {
+        "measurement_method": "shutil.disk_usage.v1",
+        "workspace_device_id": 7,
+        "output_device_id": 7,
+        "workspace_mount_sha256": ZERO_SHA,
+        "output_mount_sha256": ONE_SHA,
+        "available_workspace_bytes": 100,
+        "available_output_bytes": 100,
+    }
+    measurement_sha256 = hashlib.sha256(
+        canonical_json_bytes(measurement)
+    ).hexdigest()
+
+    with pytest.raises(ValueError, match="shared-filesystem"):
+        AlignmentDiskBudget(
+            **measurement,
+            measurement_sha256=measurement_sha256,
+            combined_bam_bytes=30,
+            sort_temporary_bytes=30,
+            aligned_bam_bytes=30,
+            index_bytes=30,
+        )
+
+
 def test_incompatible_safe_headers_fail_without_copying_headers(tmp_path: Path) -> None:
     first = tmp_path / "one.bam"
     second = tmp_path / "two.bam"
