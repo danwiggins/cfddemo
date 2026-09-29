@@ -73,11 +73,19 @@ _SAFE_RESERVED_PREFIX_LEXEMES = {
 }
 
 
-def _reject_reserved_privacy_terms(value: str, *, field: str) -> str:
+def _reject_reserved_privacy_terms(
+    value: str, *, field: str, strict_prefix: bool = False
+) -> str:
     for segment in re.split(r"[^a-z0-9]+", value.lower()):
         if segment in _SAFE_RESERVED_PREFIX_LEXEMES:
             continue
-        if any(segment.startswith(prefix) for prefix in _RESERVED_LABEL_PREFIXES):
+        is_private = any(
+            segment == prefix
+            or (strict_prefix and segment.startswith(prefix))
+            or re.fullmatch(rf"{prefix}(?:id)?[0-9]+", segment) is not None
+            for prefix in _RESERVED_LABEL_PREFIXES
+        )
+        if is_private:
             raise ValueError(f"{field} contains a reserved privacy term")
     return value
 
@@ -89,7 +97,9 @@ def _safe_label(value: str) -> str:
 
 
 def _safe_controlled_token(value: str) -> str:
-    return _reject_reserved_privacy_terms(value, field="controlled identifier")
+    return _reject_reserved_privacy_terms(
+        value, field="controlled identifier", strict_prefix=True
+    )
 
 
 AccessibleLabel = Annotated[
@@ -408,12 +418,17 @@ class ResultViewSource(CompatibilityContract):
             compatibility_key_sha256=compatibility_key_sha256(
                 self.record.compatibility_key
             ),
-            execution_state=self.record.execution_state,
-            information_state=self.record.information_state,
-            trust_state=self.record.trust_state,
         )
         if bound != expected_bound:
             raise ValueError("compatibility binding does not match exact record")
+        if self.compatibility_decision.outcome != CompatibilityOutcome.UNKNOWN and (
+            self.record.execution_state != ExecutionState.COMPLETE
+            or self.record.information_state != InformationState.SUFFICIENT
+            or self.record.trust_state != TrustState.VERIFIED
+        ):
+            raise ValueError(
+                "compatibility decision is stale for current result state"
+            )
         if self.compatibility_identity != _compatibility_identity(
             self.compatibility_decision
         ):

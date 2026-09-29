@@ -400,9 +400,6 @@ class BoundMeasurementIdentity(CompatibilityContract):
     authority_head_sha256: Sha256
     authority_revision: int = Field(ge=0, le=10_000_000)
     compatibility_key_sha256: Sha256
-    execution_state: ExecutionState
-    information_state: InformationState
-    trust_state: TrustState
 
 
 class CompatibilityReplayBinding(CompatibilityContract):
@@ -618,9 +615,6 @@ def _bound_identity(record: VerifiedMeasurementRecord) -> BoundMeasurementIdenti
         compatibility_key_sha256=compatibility_key_sha256(
             record.compatibility_key
         ),
-        execution_state=record.execution_state,
-        information_state=record.information_state,
-        trust_state=record.trust_state,
     )
 
 

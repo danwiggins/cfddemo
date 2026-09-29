@@ -11,6 +11,7 @@ from pydantic import ValidationError
 from evidence_inspector.compatibility import (
     AllowedMethodDefinition,
     CompatibilityContractError,
+    CompatibilityDecision,
     CompatibilityMismatchKey,
     CompatibilityOutcome,
     CompatibilityPolicy,
@@ -301,9 +302,20 @@ def test_exact_identity_is_comparable_and_policy_controls_render_permissions() -
     assert decision.delta_allowed
     assert not decision.shared_axis_allowed
     assert decision.remediation_code == RemediationCode.NONE
-    assert decision.binding.left.execution_state == ExecutionState.COMPLETE
-    assert decision.binding.left.information_state == InformationState.SUFFICIENT
-    assert decision.binding.left.trust_state == TrustState.VERIFIED
+
+
+def test_v1_decision_wire_shape_remains_backward_compatible() -> None:
+    decision = decide_compatibility(_request(_record("alpha"), _record("beta")))
+    wire = canonical_compatibility_bytes(decision)
+
+    parsed = compatibility_contract_from_canonical_bytes(CompatibilityDecision, wire)
+
+    assert parsed == decision
+    assert not {
+        "execution_state",
+        "information_state",
+        "trust_state",
+    }.intersection(parsed.binding.left.model_fields_set)
 
 
 def test_swapped_sides_produce_identical_canonical_decision_and_digest() -> None:

@@ -506,7 +506,7 @@ def test_source_rejects_stale_comparable_decision_after_state_change(
         else _ledger()
     )
 
-    with pytest.raises(ValidationError, match="compatibility binding"):
+    with pytest.raises(ValidationError, match="compatibility decision is stale"):
         bind_result_view_source(
             record=changed,
             compatibility_decision=comparable,
@@ -667,8 +667,12 @@ def test_accessible_labels_reject_private_identifiers_and_paths(
     "label",
     (
         "Ready results",
+        "Reader status",
+        "Reading complete",
+        "Readable summary",
         "Readiness status",
         "Readout summary",
+        "Pathway aggregate",
         "Pathology marker aggregate",
         "Sampled aggregate",
         "Sequencer status",
