@@ -12,7 +12,7 @@ import os
 import shutil
 import sqlite3
 import stat
-import tempfile
+import uuid
 from collections.abc import Callable, Mapping, Sequence
 from datetime import datetime
 from enum import StrEnum
@@ -37,9 +37,11 @@ from evidence_inspector.method_registry import (
     MethodReference,
     MethodRegistry,
     QualificationState,
+    RevocationTarget,
     replay_current_capability,
 )
 from traceback_runner.bundles import VerifiedBundle, verify_bundle
+from traceback_runner.contracts import ResultBundleManifestV2
 from traceback_runner.filesystem import rename_directory_exclusive_at
 from traceback_runner.serialization import canonical_json_bytes
 from traceback_runner.signing import TrustStore
@@ -266,7 +268,6 @@ class CatalogPage(CatalogModel):
     schema_version: Literal["traceback.catalog-page.v1"] = (
         "traceback.catalog-page.v1"
     )
-    query: CatalogQuery
     results: tuple[CatalogResultRef, ...]
     next_cursor: ResultId | None = None
     empty: bool
@@ -285,6 +286,38 @@ def _qualification(value: QualificationState | None) -> CatalogQualificationStat
     if value is None:
         return CatalogQualificationState.UNKNOWN
     return CatalogQualificationState(value.value)
+
+
+def _capability_is_revoked(
+    registry: MethodRegistry,
+    capability: CurrentMethodCapability,
+) -> bool:
+    qualification_refs = {
+        item.record_ref
+        for item in registry.qualification_records
+        if item.method_ref == capability.method_ref
+    }
+    role_refs = {
+        item.assignment_ref
+        for item in registry.display_role_assignments
+        if item.method_ref == capability.method_ref
+        and item.authority_scope == capability.authority_scope
+    }
+    revoked_qualification = any(
+        item.target == RevocationTarget.QUALIFICATION
+        and item.qualification_record_ref in qualification_refs
+        and item.effective_at <= capability.as_of
+        for item in registry.revocations
+    )
+    revoked_role = any(
+        item.target == RevocationTarget.DISPLAY_ROLE
+        and item.display_role_assignment_ref in role_refs
+        and item.effective_at <= capability.as_of
+        for item in registry.revocations
+    )
+    return (
+        capability.qualification_state is None and revoked_qualification
+    ) or (capability.display_role is None and revoked_role)
 
 
 def _safe_relative(value: str) -> tuple[str, ...]:
@@ -315,6 +348,20 @@ def _stat_identity(value: os.stat_result) -> tuple[int, ...]:
         value.st_mtime_ns,
         value.st_ctime_ns,
     )
+
+
+def _inode_identity(value: os.stat_result) -> tuple[int, int]:
+    return value.st_dev, value.st_ino
+
+
+def _descriptor_path(descriptor: int) -> Path:
+    proc_path = Path("/proc/self/fd") / str(descriptor)
+    if Path("/proc/self/fd").is_dir():
+        return proc_path
+    import fcntl
+
+    raw = fcntl.fcntl(descriptor, 50, b"\0" * 1024)
+    return Path(raw.split(b"\0", 1)[0].decode())
 
 
 def _open_directory_at(parent_fd: int, name: str) -> int:
@@ -486,7 +533,7 @@ class ResultCatalog:
     ) -> None:
         if not import_roots or len(import_roots) > MAX_IMPORT_ROOTS:
             raise CatalogFilesystemError("catalog import root count is invalid")
-        self.root = Path(root)
+        self.root = Path(root).absolute()
         self.import_roots = {
             _ROOT_ID.validate_python(root_id): Path(path)
             for root_id, path in import_roots.items()
@@ -499,26 +546,144 @@ class ResultCatalog:
             raise CatalogFilesystemError("catalog root is unsafe")
         self.root.mkdir(parents=True, exist_ok=True)
         self.root.chmod(0o700)
+        root_flags = (
+            os.O_RDONLY
+            | getattr(os, "O_DIRECTORY", 0)
+            | getattr(os, "O_CLOEXEC", 0)
+            | getattr(os, "O_NOFOLLOW", 0)
+        )
+        try:
+            self._root_fd = os.open(self.root, root_flags)
+        except OSError:
+            raise CatalogFilesystemError("catalog root is unsafe") from None
+        self._root_identity = _inode_identity(os.fstat(self._root_fd))
         self.objects = self.root / "objects"
-        if self.objects.is_symlink() or (
-            self.objects.exists() and not self.objects.is_dir()
-        ):
-            raise CatalogFilesystemError("catalog object store is unsafe")
-        self.objects.mkdir(exist_ok=True)
-        self.objects.chmod(0o700)
+        try:
+            os.mkdir("objects", mode=0o700, dir_fd=self._root_fd)
+        except FileExistsError:
+            pass
+        try:
+            self._objects_fd = _open_directory_at(self._root_fd, "objects")
+        except OSError:
+            os.close(self._root_fd)
+            raise CatalogFilesystemError("catalog object store is unsafe") from None
+        self._objects_identity = _inode_identity(os.fstat(self._objects_fd))
+        os.fchmod(self._objects_fd, 0o700)
         self.database = self.root / "catalog.sqlite3"
-        if self.database.is_symlink() or (
-            self.database.exists() and not self.database.is_file()
-        ):
-            raise CatalogFilesystemError("catalog database is unsafe")
-        self._initialize()
+        self._database_fd: int | None = None
+        self._database_identity: tuple[int, int] | None = None
+        try:
+            database_stat = os.stat(
+                "catalog.sqlite3", dir_fd=self._root_fd, follow_symlinks=False
+            )
+        except FileNotFoundError:
+            pass
+        else:
+            if not stat.S_ISREG(database_stat.st_mode):
+                self.close()
+                raise CatalogFilesystemError("catalog database is unsafe")
+            self._database_identity = _inode_identity(database_stat)
+        try:
+            self._initialize()
+        except BaseException:
+            self.close()
+            raise
 
     def _fault(self, point: str) -> None:
         if self.fault_injector is not None:
             self.fault_injector(point)
 
+    @property
+    def _bound_objects(self) -> Path:
+        return _descriptor_path(self._objects_fd)
+
+    def close(self) -> None:
+        for attribute in ("_database_fd", "_objects_fd", "_root_fd"):
+            descriptor = getattr(self, attribute, None)
+            if descriptor is not None:
+                try:
+                    os.close(descriptor)
+                except (OSError, TypeError, AttributeError):
+                    pass
+                setattr(self, attribute, None)
+
+    def __del__(self) -> None:
+        self.close()
+
+    def _validate_storage(self) -> None:
+        try:
+            root_stat = os.stat(self.root, follow_symlinks=False)
+            if (
+                not stat.S_ISDIR(root_stat.st_mode)
+                or _inode_identity(root_stat) != self._root_identity
+            ):
+                raise CatalogFilesystemError("catalog root changed")
+            rebound_objects = _open_directory_at(self._root_fd, "objects")
+            try:
+                if _inode_identity(os.fstat(rebound_objects)) != self._objects_identity:
+                    raise CatalogFilesystemError("catalog object store changed")
+            finally:
+                os.close(rebound_objects)
+            if self._database_identity is not None:
+                database_stat = os.stat(
+                    "catalog.sqlite3",
+                    dir_fd=self._root_fd,
+                    follow_symlinks=False,
+                )
+                if (
+                    not stat.S_ISREG(database_stat.st_mode)
+                    or _inode_identity(database_stat) != self._database_identity
+                ):
+                    raise CatalogFilesystemError("catalog database changed")
+                if self._database_fd is not None and (
+                    _inode_identity(os.fstat(self._database_fd))
+                    != self._database_identity
+                ):
+                    raise CatalogFilesystemError("catalog database changed")
+        except CatalogError:
+            raise
+        except (OSError, TypeError):
+            raise CatalogFilesystemError("catalog storage changed") from None
+
     def _connect(self) -> sqlite3.Connection:
-        connection = sqlite3.connect(self.database, timeout=30, isolation_level=None)
+        self._validate_storage()
+        try:
+            connection = sqlite3.connect(
+                self.database, timeout=30, isolation_level=None
+            )
+            database_stat = os.stat(
+                "catalog.sqlite3", dir_fd=self._root_fd, follow_symlinks=False
+            )
+            if not stat.S_ISREG(database_stat.st_mode):
+                raise CatalogFilesystemError("catalog database is unsafe")
+            observed_identity = _inode_identity(database_stat)
+            if (
+                self._database_identity is not None
+                and observed_identity != self._database_identity
+            ):
+                raise CatalogFilesystemError("catalog database changed")
+            if self._database_fd is None:
+                database_flags = (
+                    os.O_RDONLY
+                    | getattr(os, "O_CLOEXEC", 0)
+                    | getattr(os, "O_NOFOLLOW", 0)
+                )
+                self._database_fd = os.open(
+                    "catalog.sqlite3", database_flags, dir_fd=self._root_fd
+                )
+            if (
+                not stat.S_ISREG(os.fstat(self._database_fd).st_mode)
+                or _inode_identity(os.fstat(self._database_fd)) != observed_identity
+            ):
+                raise CatalogFilesystemError("catalog database changed")
+            self._database_identity = observed_identity
+            self._validate_storage()
+        except BaseException as error:
+            if "connection" in locals():
+                connection.close()
+            if isinstance(error, CatalogError):
+                raise
+            raise CatalogFilesystemError("catalog database changed") from None
         for path in (
             self.database,
             Path(f"{self.database}-wal"),
@@ -532,7 +697,7 @@ class ResultCatalog:
         return connection
 
     def _initialize(self) -> None:
-        new = not self.database.exists()
+        new = self._database_identity is None
         with self._connect() as connection:
             if new:
                 connection.executescript(
@@ -585,6 +750,7 @@ class ResultCatalog:
                     raise CatalogUnsupportedSchema("catalog schema is unsupported")
                 connection.execute("PRAGMA journal_mode=WAL")
                 connection.execute("PRAGMA synchronous=FULL")
+        self._validate_storage()
 
     def _capture(self, root_id: str, relative_path: str) -> tuple[Path, str, str]:
         if root_id not in self.import_roots:
@@ -599,7 +765,10 @@ class ResultCatalog:
         )
         descriptors: list[int] = []
         path_bindings: list[tuple[int, str, tuple[int, ...]]] = []
-        temporary = Path(tempfile.mkdtemp(prefix=".catalog-", dir=self.objects))
+        self._validate_storage()
+        temporary_name = f".catalog-{uuid.uuid4().hex}"
+        os.mkdir(temporary_name, mode=0o700, dir_fd=self._objects_fd)
+        temporary = self._bound_objects / temporary_name
         try:
             root_fd = os.open(root_path, flags)
             descriptors.append(root_fd)
@@ -616,6 +785,7 @@ class ResultCatalog:
                 current_fd, temporary
             )
             self._fault("after_bundle_snapshot")
+            self._validate_storage()
             _verify_source_identities(current_fd, source_identities)
             for parent_fd, part, expected_identity in path_bindings:
                 rebound_fd = _open_directory_at(parent_fd, part)
@@ -633,10 +803,10 @@ class ResultCatalog:
                 raise CatalogFilesystemError("catalog import root changed")
             return temporary, bundle_sha256, manifest_sha256
         except CatalogError:
-            _remove_tree(temporary)
+            _remove_tree(self._bound_objects / temporary_name)
             raise
         except Exception:
-            _remove_tree(temporary)
+            _remove_tree(self._bound_objects / temporary_name)
             raise CatalogFilesystemError("catalog bundle import failed") from None
         finally:
             for descriptor in reversed(descriptors):
@@ -659,13 +829,24 @@ class ResultCatalog:
             expected_authority_head_sha256,
             capability,
         )
+        if _capability_is_revoked(registry, capability):
+            raise CatalogError("revoked method authority cannot be cataloged")
         temporary, bundle_sha256, manifest_sha256 = self._capture(
             root_id, relative_path
         )
-        published = False
-        object_path = self.objects / bundle_sha256
+        object_path = self._bound_objects / bundle_sha256
         try:
             verified = verify_bundle(temporary, self.trust_store)
+            if not isinstance(verified.manifest, ResultBundleManifestV2):
+                raise CatalogUnsupportedSchema("bundle schema is unsupported")
+            if (
+                verified.manifest.method.method_id
+                != capability.method_ref.method_id
+                or verified.manifest.method.version != capability.method_ref.version
+                or verified.manifest.method.method_definition_sha256
+                != capability.method_definition_sha256
+            ):
+                raise CatalogConflict("bundle method identity conflicts")
             reference = self._reference(
                 verified,
                 bundle_sha256=bundle_sha256,
@@ -674,16 +855,13 @@ class ResultCatalog:
             )
             _fsync_tree(temporary)
             _seal_tree(temporary)
-            parent_fd = os.open(
-                self.objects,
-                os.O_RDONLY | getattr(os, "O_DIRECTORY", 0),
-            )
+            self._validate_storage()
+            parent_fd = self._objects_fd
             try:
                 try:
                     rename_directory_exclusive_at(
                         parent_fd, temporary.name, object_path.name
                     )
-                    published = True
                     os.fsync(parent_fd)
                 except FileExistsError:
                     try:
@@ -703,7 +881,7 @@ class ResultCatalog:
                         raise CatalogConflict("catalog object identity conflicts")
                     _remove_tree(temporary)
             finally:
-                os.close(parent_fd)
+                self._validate_storage()
             self._fault("after_object_publish")
             with self._connect() as connection:
                 connection.execute("BEGIN IMMEDIATE")
@@ -731,6 +909,7 @@ class ResultCatalog:
                         ):
                             raise CatalogConflict("catalog identity conflict")
                         connection.commit()
+                        self._validate_storage()
                         return parsed
                     connection.execute(
                         """INSERT INTO results VALUES(?,?,?,?,?,?,?,?,?,?)""",
@@ -761,6 +940,7 @@ class ResultCatalog:
                         raise CatalogConflict("catalog alias identity conflict") from None
                     self._fault("before_catalog_commit")
                     connection.commit()
+                    self._validate_storage()
                 except BaseException:
                     connection.rollback()
                     raise
@@ -768,11 +948,6 @@ class ResultCatalog:
         except BaseException:
             if temporary.exists():
                 _remove_tree(temporary)
-            if published:
-                try:
-                    _remove_tree(object_path)
-                except OSError:
-                    pass
             raise
 
     @staticmethod
@@ -856,20 +1031,25 @@ class ResultCatalog:
         parameters.append(normalized.limit + 1)
         with self._connect() as connection:
             rows = connection.execute(sql, parameters).fetchall()
-            total = connection.execute("SELECT COUNT(*) FROM results").fetchone()[0]
+            catalog_has_results = bool(rows)
+            if not rows:
+                catalog_has_results = (
+                    connection.execute("SELECT 1 FROM results LIMIT 1").fetchone()
+                    is not None
+                )
+        self._validate_storage()
         has_more = len(rows) > normalized.limit
         selected = rows[: normalized.limit]
         results = tuple(
             CatalogResultRef.model_validate_json(row[0]) for row in selected
         )
         return CatalogPage(
-            query=normalized,
             results=results,
             next_cursor=results[-1].result_id if has_more and results else None,
             empty=not results,
             empty_reason=(
                 CatalogEmptyReason.NO_IMPORTED_RESULTS
-                if not results and total == 0
+                if not results and not catalog_has_results
                 else CatalogEmptyReason.NO_MATCHES if not results else None
             ),
         )

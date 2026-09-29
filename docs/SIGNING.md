@@ -22,7 +22,7 @@ upload exists in this path.
 `traceback_runner.bundles` provides:
 
 - `build_result_bundle(output_dir, measurement=..., provenance=...,
-  signing_key=...)`;
+  method=..., signing_key=...)`;
 - `verify_bundle(bundle_dir, trust_store)` for verified offline loading; and
 - `inspect_bundle(bundle_dir)` for explicitly unverified metadata inspection.
 
@@ -52,7 +52,8 @@ chart bytes are independent of signature bytes.
 
 The signed payload binds the supported bundle schema, development trust
 namespace, result-key purpose, exact filename inventory, and SHA-256 digest of
-the canonical checksum inventory. Verification recalculates hashes and sizes
+the canonical checksum inventory. Bundle v2 also binds the exact method ID,
+method version, and method-definition digest. Verification recalculates hashes and sizes
 from actual files, reparses every structured artifact with closed schemas,
 re-derives the chart and report, and checks measurement/provenance identity.
 It rejects missing or extra files, duplicate JSON keys, unsupported versions,
@@ -143,6 +144,7 @@ bundle = build_result_bundle(
     Path("synthetic-record"),
     measurement=allowlisted_measurement,
     provenance=allowlisted_provenance,
+    method=allowlisted_method_identity,
     signing_key=key,
 )
 public_trust = development_trust_bytes(key)

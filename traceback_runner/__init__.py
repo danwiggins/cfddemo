@@ -2,12 +2,14 @@
 
 from .contracts import (
     ApprovalState, ArtifactCommitment, ArtifactDigest, BundleContent,
+    BundleMethodIdentity,
     CompatibilityItem, CompatibilityManifest, CompletionState, ExecutionOptions,
     ExclusionCounts, ExportRunProvenance, FragmentMeasurement,
     FragmentMeasurementPolicy, HistogramBin, HistogramCount, InputKind,
     JobRecord, JobRequest, JobState, LocalArtifact, LocalRunPackage,
     PreflightCheck, PreflightOutcome, PreflightReport, ReceiptStatus,
-    ReferenceContig, RegisteredReference, ResultBundleManifest, RunnerContract, StageName, StageReceipt,
+    ReferenceContig, RegisteredReference, ResultBundleManifest,
+    ResultBundleManifestV2, RunnerContract, StageName, StageReceipt,
     WorkflowRelease, WorkflowStage, canonical_json_bytes,
     canonical_model_from_bytes, job_key, receipt_digest, sha256_bytes,
     validate_transition,
@@ -28,13 +30,14 @@ from .report_bundles import (
 
 __all__ = [
     "ApprovalState", "ArtifactCommitment", "ArtifactDigest", "BundleContent",
+    "BundleMethodIdentity",
     "CompatibilityItem", "CompatibilityManifest", "CompletionState",
     "ExecutionOptions", "ExclusionCounts", "ExportRunProvenance",
     "FragmentMeasurement", "FragmentMeasurementPolicy", "HistogramBin",
     "HistogramCount", "InputKind", "JobRecord", "JobRequest", "JobState",
     "LocalArtifact", "LocalRunPackage", "PreflightCheck", "PreflightOutcome",
     "PreflightReport", "ReceiptStatus", "ReferenceContig", "RegisteredReference",
-    "ResultBundleManifest", "RunnerContract",
+    "ResultBundleManifest", "ResultBundleManifestV2", "RunnerContract",
     "DevelopmentPlotData", "DevelopmentPlotSpec", "DevelopmentReportManifest",
     "DevelopmentReportProvenance", "DosagePlotRow", "ReportBundleError",
     "ReportBundleFilesystemError", "ReportBundleFormatError",

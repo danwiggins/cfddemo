@@ -16,14 +16,24 @@ The importer copies the bundle into catalog-owned storage, rechecks source
 identities, and invokes the existing bundle verifier against that immutable
 snapshot. It also replays the supplied current E01 method capability against the
 supplied registry and trusted authority head. A stale or revoked capability is
-not cataloged.
+not cataloged. The verified v2 bundle must bind the same method ID, version, and
+method-definition digest as that replayed capability; v1 or mismatched bundles
+are rejected rather than relabeled.
 
 Object publication is an exclusive atomic rename after file and directory
 flushes. The SQLite index uses WAL, full synchronous durability, and one
 immediate transaction for the public reference plus its private aliases. A
-failure before commit leaves no indexed partial result; a process-ending crash
-can leave only an unreferenced content-addressed object, which a retry verifies
-and safely adopts.
+failure before commit leaves no indexed partial result. Publication is
+monotonic: rollback never unlinks a published content-addressed object because
+another importer may already have adopted it. A failure can therefore leave an
+unreferenced object, which a retry verifies and safely adopts. Garbage
+collection is deliberately absent until it can coordinate reference proof with
+all importers under the same catalog lock.
+
+The catalog root, object directory, and database inode are retained and
+revalidated on operations. Staging creation and publication are relative to the
+bound object-directory descriptor, so path replacement cannot redirect accepted
+bytes.
 
 ## Read model
 
@@ -34,13 +44,15 @@ states; consumers must not infer one from another.
 
 Opaque display, run, and timepoint aliases live in a separate protected table.
 They are accepted only in their controlled formats and can select results, but
-the mapping is not returned in result references. No input path, bundle path,
-run token, or protected-identifier mapping enters the public reference.
+the mapping and private predicates are not returned in result references or
+serialized result pages. No input path, bundle path, run token, or
+protected-identifier mapping enters the public reference.
 
 Queries normalize and deduplicate bounded method/state filters. They support
 method, state, and exact opaque-alias selectors, deterministic result-ID order,
 keyset cursors, and a maximum page size of 100. Empty pages distinguish an empty
-catalog from a filtered query with no matches.
+catalog from a filtered query with no matches using a bounded existence probe,
+not a full-table count.
 
 ## Scope
 

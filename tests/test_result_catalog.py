@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import hashlib
 import os
+import threading
 import time
 from datetime import datetime, timezone
 from pathlib import Path
@@ -11,6 +12,8 @@ from pathlib import Path
 import pytest
 
 from evidence_inspector.method_registry import (
+    DisplayRole,
+    QualificationState,
     RegistryIdentityError,
     authority_head_sha256,
     registry_sha256,
@@ -20,25 +23,31 @@ from evidence_inspector.result_catalog import (
     CatalogAliases,
     CatalogConflict,
     CatalogEmptyReason,
+    CatalogError,
     CatalogFilesystemError,
     CatalogOrder,
     CatalogQuery,
     CatalogQualificationState,
     CatalogResultRef,
+    CatalogUnsupportedSchema,
     ExecutionState,
     InformationState,
     ResultCatalog,
     TrustState,
+    _copy_exact_bundle,
 )
-from tests.test_bundles import _bundle
+from tests.test_bundles import _bundle, _downgrade_to_v1
+from traceback_runner.bundles import verify_bundle
 from tests.test_method_registry import (
     T0,
     T1,
     T2,
-    _active_provider_registry,
+    _definition,
     _head,
+    _qualification,
     _registry,
     _revoke_qualification,
+    _role,
 )
 
 
@@ -50,7 +59,24 @@ ALIASES = CatalogAliases(
 
 
 def _authority():
-    registry, definition, qualification, role = _active_provider_registry()
+    definition = _definition(method_id="mth_fragment_aligned_reference_span")
+    qualification = _qualification(
+        definition.method_ref,
+        record_ref="qual_fragment_primary",
+        state=QualificationState.QUALIFIED,
+        effective_at=T0,
+    )
+    role = _role(
+        definition.method_ref,
+        assignment_ref="role_fragment_primary",
+        role=DisplayRole.PROVIDER_PRIMARY,
+        effective_at=T0,
+    )
+    registry = _registry(
+        definition,
+        qualifications=(qualification,),
+        roles=(role,),
+    )
     head = _head(registry)
     head_sha256 = authority_head_sha256(head)
     capability = resolve_current_capability(
@@ -64,10 +90,21 @@ def _authority():
     return registry, definition, qualification, role, head, head_sha256, capability
 
 
+def _bundle_method(capability) -> dict[str, str]:
+    return {
+        "method_id": capability.method_ref.method_id,
+        "version": capability.method_ref.version,
+        "method_definition_sha256": capability.method_definition_sha256,
+    }
+
+
 def _catalog(tmp_path: Path, *, fault=None):
     import_root = tmp_path / "imports"
-    import_root.mkdir()
-    bundle_path, _, trust_store = _bundle(import_root / "incoming")
+    import_root.mkdir(parents=True)
+    *_, capability = _authority()
+    bundle_path, _, trust_store = _bundle(
+        import_root / "incoming", method=_bundle_method(capability)
+    )
     catalog = ResultCatalog(
         tmp_path / "catalog",
         import_roots={"root_primary": import_root},
@@ -122,8 +159,7 @@ def test_import_is_idempotent_private_and_selectable(tmp_path: Path) -> None:
         "synthetic.run.v1",
     ):
         assert secret not in first.model_dump_json()
-    assert str(import_root) not in public
-    assert "synthetic.run.v1" not in public
+        assert secret not in public
 
 
 def test_empty_states_pagination_and_order_are_explicit(tmp_path: Path) -> None:
@@ -249,7 +285,23 @@ def test_conflict_and_crash_leave_no_partial_catalog_state(tmp_path: Path) -> No
     assert conflicting_aliases.run_alias not in str(error.value)
     assert catalog.query(CatalogQuery()).results == (first,)
 
-    _, second_key, _ = _bundle(import_root / "second")
+    _, mismatched_key, _ = _bundle(import_root / "mismatched")
+    catalog.trust_store.add_signing_key(mismatched_key)
+    with pytest.raises(CatalogConflict, match="method identity"):
+        _import(
+            catalog,
+            relative_path="mismatched/record",
+            aliases=CatalogAliases(
+                display_alias="dsp_11111111",
+                run_alias="rnx_22222222",
+                timepoint_alias="tpt_33333333",
+            ),
+        )
+
+    *_, capability = _authority()
+    _, second_key, _ = _bundle(
+        import_root / "second", method=_bundle_method(capability)
+    )
     catalog.trust_store.add_signing_key(second_key)
     with pytest.raises(CatalogConflict, match="identity conflict"):
         _import(
@@ -269,7 +321,10 @@ def test_conflict_and_crash_leave_no_partial_catalog_state(tmp_path: Path) -> No
 
     crash_root = tmp_path / "crash"
     crash_root.mkdir()
-    _, _, trust = _bundle(crash_root / "incoming")
+    *_, capability = _authority()
+    _, _, trust = _bundle(
+        crash_root / "incoming", method=_bundle_method(capability)
+    )
     crashing = ResultCatalog(
         tmp_path / "crash-catalog",
         import_roots={"root_primary": crash_root},
@@ -287,13 +342,107 @@ def test_conflict_and_crash_leave_no_partial_catalog_state(tmp_path: Path) -> No
     assert _import(reopened)
 
 
+def test_failed_publisher_never_unlinks_an_object_adopted_concurrently(
+    tmp_path: Path,
+) -> None:
+    import_root = tmp_path / "imports"
+    import_root.mkdir()
+    *_, capability = _authority()
+    _, _, trust = _bundle(
+        import_root / "incoming", method=_bundle_method(capability)
+    )
+    published = threading.Event()
+    adopted = threading.Event()
+
+    def pause_then_fail(point: str) -> None:
+        if point == "after_object_publish":
+            published.set()
+            assert adopted.wait(timeout=10)
+            raise OSError("synthetic losing publisher")
+
+    first = ResultCatalog(
+        tmp_path / "catalog",
+        import_roots={"root_primary": import_root},
+        trust_store=trust,
+        fault_injector=pause_then_fail,
+    )
+    second = ResultCatalog(
+        tmp_path / "catalog",
+        import_roots={"root_primary": import_root},
+        trust_store=trust,
+    )
+    errors: list[BaseException] = []
+
+    def losing_import() -> None:
+        try:
+            _import(first)
+        except BaseException as error:
+            errors.append(error)
+
+    worker = threading.Thread(target=losing_import)
+    worker.start()
+    assert published.wait(timeout=10)
+    committed = _import(second)
+    adopted.set()
+    worker.join(timeout=10)
+
+    assert not worker.is_alive()
+    assert len(errors) == 1
+    assert isinstance(errors[0], OSError)
+    object_path = second._bound_objects / committed.bundle_sha256
+    assert object_path.is_dir()
+    assert verify_bundle(object_path, trust).manifest.record_id == committed.bundle_record_id
+    assert second.query(CatalogQuery()).results == (committed,)
+
+
+def test_destination_and_database_replacement_fail_closed(tmp_path: Path) -> None:
+    catalog, _, _ = _catalog(tmp_path)
+    original_root = catalog.root
+    displaced_root = tmp_path / "displaced-catalog"
+
+    def replace_destination(point: str) -> None:
+        if point == "after_bundle_snapshot":
+            original_root.rename(displaced_root)
+            original_root.mkdir()
+
+    catalog.fault_injector = replace_destination
+    with pytest.raises(CatalogFilesystemError, match="catalog root changed"):
+        _import(catalog)
+    assert not list((displaced_root / "objects").glob("[0-9a-f]" * 64))
+    catalog.close()
+
+    database_catalog, _, _ = _catalog(tmp_path / "database-swap")
+    database_catalog.database.rename(database_catalog.root / "old-catalog.sqlite3")
+    database_catalog.database.touch()
+    with pytest.raises(CatalogFilesystemError, match="database changed"):
+        database_catalog.query(CatalogQuery())
+
+
+def test_published_object_digest_is_the_accepted_digest(tmp_path: Path) -> None:
+    catalog, _, _ = _catalog(tmp_path)
+    reference = _import(catalog)
+    object_path = catalog._bound_objects / reference.bundle_sha256
+    descriptor = os.open(
+        object_path,
+        os.O_RDONLY | getattr(os, "O_DIRECTORY", 0) | getattr(os, "O_NOFOLLOW", 0),
+    )
+    try:
+        observed, _, _ = _copy_exact_bundle(descriptor, None)
+    finally:
+        os.close(descriptor)
+    assert observed == reference.bundle_sha256
+    assert verify_bundle(object_path, catalog.trust_store).manifest.record_id == (
+        reference.bundle_record_id
+    )
+
+
 def test_unsupported_schema_and_stale_revoked_capability_fail_closed(
     tmp_path: Path,
 ) -> None:
     catalog, _, _ = _catalog(tmp_path)
     with catalog._connect() as connection:
         connection.execute("UPDATE metadata SET value='999' WHERE key='schema_version'")
-    with pytest.raises(Exception, match="unsupported"):
+    with pytest.raises(CatalogUnsupportedSchema, match="unsupported"):
         ResultCatalog(
             catalog.root,
             import_roots=catalog.import_roots,
@@ -325,6 +474,42 @@ def test_unsupported_schema_and_stale_revoked_capability_fail_closed(
             expected_authority_head_sha256=authority_head_sha256(revoked_head),
             capability=stale,
         )
+    revoked_capability = resolve_current_capability(
+        revoked,
+        revoked_head,
+        authority_head_sha256(revoked_head),
+        definition.method_ref,
+        authority_scope="scope_provider_west",
+        as_of=T2,
+    )
+    with pytest.raises(CatalogError, match="revoked method authority"):
+        _import(
+            catalog,
+            registry=revoked,
+            authority_head=revoked_head,
+            expected_authority_head_sha256=authority_head_sha256(revoked_head),
+            capability=revoked_capability,
+        )
+
+
+def test_catalog_rejects_verified_v1_bundle_without_method_binding(
+    tmp_path: Path,
+) -> None:
+    import_root = tmp_path / "imports"
+    import_root.mkdir()
+    *_, capability = _authority()
+    bundle, key, trust = _bundle(
+        import_root / "incoming", method=_bundle_method(capability)
+    )
+    _downgrade_to_v1(bundle, key)
+    catalog = ResultCatalog(
+        tmp_path / "catalog",
+        import_roots={"root_primary": import_root},
+        trust_store=trust,
+    )
+
+    with pytest.raises(CatalogUnsupportedSchema, match="bundle schema is unsupported"):
+        _import(catalog)
 
 
 def _synthetic_ref(index: int) -> CatalogResultRef:

@@ -431,6 +431,34 @@ class ResultBundleManifest(RunnerContract):
         return self
 
 
+class BundleMethodIdentity(RunnerContract):
+    """Exact scientific method identity bound into a signed result bundle."""
+
+    method_id: Identifier
+    version: Identifier
+    method_definition_sha256: Sha256
+
+
+class ResultBundleManifestV2(RunnerContract):
+    schema_version: Literal["traceback.result-bundle.v2"] = (
+        "traceback.result-bundle.v2"
+    )
+    record_id: Identifier
+    workflow_release_id: Identifier
+    measurement_schema_versions: tuple[Identifier, ...] = Field(min_length=1)
+    method: BundleMethodIdentity
+    contents: tuple[BundleContent, ...] = Field(min_length=1)
+    signing_key_id: Identifier
+    development_trust_only: Literal[True] = True
+
+    @model_validator(mode="after")
+    def ordered_contents(self) -> ResultBundleManifestV2:
+        paths = [item.relative_path for item in self.contents]
+        if paths != sorted(paths) or len(paths) != len(set(paths)):
+            raise ValueError("bundle contents must have unique sorted paths")
+        return self
+
+
 class CompatibilityItem(RunnerContract):
     category: Identifier
     item_id: Identifier
