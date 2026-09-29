@@ -572,7 +572,7 @@
       const resultState = resultStateFor(panel);
       if (method.unavailable || !["complete", "partial"].includes(resultState)) return [];
       const stateMax = resultState === "partial" ? Math.min(settings.max, 260) : settings.max;
-      return BINS.filter(bp => bp <= stateMax).map(bp => ({bp, count: baseCount(method, bp, settings.depth)}));
+      return BINS.filter(bp => bp + 19 <= stateMax).map(bp => ({bp, count: baseCount(method, bp, settings.depth)}));
     }
 
     function denominatorFor(panel) {
@@ -637,7 +637,9 @@
       const rows = seriesFor(panel);
       const width = 680, height = 310, left = 52, right = 14, top = 16, bottom = 42;
       const plotW = width - left - right, plotH = height - top - bottom;
-      const maxCount = Math.max(...rows.map(r => r.count), 1);
+      const comparison = comparisonDecision();
+      const scaleRows = comparison.axis ? [...seriesFor("A"), ...seriesFor("B")] : rows;
+      const maxCount = Math.max(...scaleRows.map(r => r.count), 1);
       const band = plotW / rows.length;
       const bars = rows.map((row, index) => {
         const h = (row.count / maxCount) * plotH;
@@ -657,7 +659,7 @@
       }).join("");
       const selectedIndex = rows.findIndex(r => r.bp === state[`selectedBin${panel}`]);
       const crosshair = selectedIndex >= 0 ? `<line class="crosshair" x1="${left+(selectedIndex+.5)*band}" y1="${top}" x2="${left+(selectedIndex+.5)*band}" y2="${top+plotH}"></line>` : "";
-      const axisMode = comparisonDecision().axis ? "Synchronized bin domain" : "Independent axis; cross-panel delta prohibited";
+      const axisMode = comparison.axis ? "Synchronized bin and count axes" : "Independent axis; cross-panel delta prohibited";
       const partialNote = resultState === "partial" ? `<p class="partial-note" role="status"><strong>PARTIAL</strong> · Only the completed partition is plotted. Denominator and exact values identify the incomplete boundary.</p>` : "";
       visual.innerHTML = `${partialNote}<div class="chart-wrap"><p class="chart-title">${method.definition} · ${axisMode}</p><svg class="chart" viewBox="0 0 ${width} ${height}" role="group" aria-label="Histogram of ${method.label}. ${axisMode}. Use Tab to inspect exact bars.">${yGrid}${bars}${crosshair}${xTicks}<text class="axis" x="${left+plotW/2}" y="${height-2}" text-anchor="middle">${method.label} (${method.unit})</text><text class="axis" transform="translate(13 ${top+plotH/2}) rotate(-90)" text-anchor="middle">Synthetic record count per 20 bp</text></svg></div>`;
       visual.querySelectorAll(".bar").forEach(bar => {
@@ -703,8 +705,8 @@
     function comparisonDecision() {
       const a = selectedMethod("A"), b = selectedMethod("B");
       const bState = resultStateFor("B");
-      if (bState !== "complete") return {outcome: bState, delta: false, axis: false, summary: `Panel B is ${bState.replaceAll("_", " ")}. Deltas and synchronized axes are withheld until both results are complete.`};
       if (a.unavailable || b.unavailable) return {outcome: "unknown", delta: false, axis: false, summary: "Comparison unavailable because one selected method has no registered result."};
+      if (bState !== "complete") return {outcome: bState, delta: false, axis: false, summary: `Panel B is ${bState.replaceAll("_", " ")}. Deltas and synchronized axes are withheld until both results are complete.`};
       if (a.quantity !== b.quantity) return {outcome: "different quantity", delta: false, axis: false, summary: "These methods measure different quantities. Charts remain separate and numerical deltas are withheld."};
       if (a.unit !== b.unit) return {outcome: "different unit", delta: false, axis: false, summary: "These methods use different units. Charts remain separate and numerical deltas are withheld."};
       const settingsA = panelSettings("A"), settingsB = panelSettings("B");
