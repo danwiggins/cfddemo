@@ -846,6 +846,29 @@ def test_reserved_private_identifiers_are_rejected(reserved_term: str) -> None:
         VerifiedMeasurementRecord.model_validate_json(json.dumps(payload))
 
 
+@pytest.mark.parametrize(
+    "safe_lexeme",
+    [
+        "runtime",
+        "runner",
+        "readout",
+        "readiness",
+        "pathology",
+        "sampled",
+        "sequencer",
+    ],
+)
+def test_safe_domain_lexemes_round_trip_canonical_json(
+    safe_lexeme: str,
+) -> None:
+    record = _record(safe_lexeme)
+    encoded = canonical_compatibility_bytes(record)
+
+    assert compatibility_contract_from_canonical_bytes(
+        VerifiedMeasurementRecord, encoded
+    ) == record
+
+
 def test_privacy_bounds_closed_models_and_canonical_input() -> None:
     record = _record("alpha")
     payload = record.model_dump(mode="json")

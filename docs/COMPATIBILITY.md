@@ -30,4 +30,7 @@ must replay exactly against the original selection request; a valid self-hash
 alone is insufficient.
 Canonical JSON and SHA-256 validation reject normalization drift or tampering.
 All contracts are closed and bounded and reject donor, sample, patient, run,
-read, sequence, and local-path identifier stems with any alphanumeric suffix.
+read, sequence, and local-path identifier stems, including concatenated or
+numbered forms. Exact safe domain lexemes (`runtime`, `runner`, `readout`,
+`readiness`, `pathology`, `sampled`, and `sequencer`) are explicitly allowed;
+arbitrary suffixes are not.

@@ -53,15 +53,29 @@ _RESERVED_PRIVACY_TERMS = {
     "path",
     "sequence",
 }
-_RESERVED_PRIVACY_IDENTIFIER = re.compile(
-    rf"^(?:{'|'.join(sorted(_RESERVED_PRIVACY_TERMS))})[a-z0-9]*$"
-)
+# Identifier segments beginning with a reserved privacy term fail closed unless
+# the complete segment is one of these ordinary domain lexemes. Keeping the
+# exceptions exact avoids treating arbitrary suffixes as safe identifiers.
+_SAFE_RESERVED_PREFIX_LEXEMES = {
+    "pathology",
+    "readiness",
+    "readout",
+    "runner",
+    "runtime",
+    "sampled",
+    "sequencer",
+}
 
 
 def _reject_private_token(value: str) -> str:
     segments = re.split(r"[^a-z0-9]+", value.lower())
-    if any(_RESERVED_PRIVACY_IDENTIFIER.fullmatch(item) for item in segments):
-        raise ValueError("controlled identifier contains a reserved privacy term")
+    for segment in segments:
+        if segment in _SAFE_RESERVED_PREFIX_LEXEMES:
+            continue
+        if any(segment.startswith(term) for term in _RESERVED_PRIVACY_TERMS):
+            raise ValueError(
+                "controlled identifier contains a reserved privacy term"
+            )
     if "/" in value or "\\" in value or "://" in value:
         raise ValueError("controlled identifier cannot contain a path or URI")
     return value
