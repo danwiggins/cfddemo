@@ -37,6 +37,12 @@ from traceback_runner.signing import (
     sign_bytes,
 )
 
+_METHOD = {
+    "method_id": "mth_fragment_aligned_reference_span",
+    "version": "1.0.0",
+    "method_definition_sha256": "c" * 64,
+}
+
 
 def _measurement(**updates: object) -> dict[str, object]:
     bins = synthetic_fragment_policy().bins
@@ -90,7 +96,7 @@ def _provenance(**updates: object) -> dict[str, object]:
     return value
 
 
-def _bundle(tmp_path: Path):
+def _bundle(tmp_path: Path, *, method: object = _METHOD):
     key = generate_development_keypair(KeyPurpose.RESULT)
     store = TrustStore()
     store.add_signing_key(key)
@@ -98,6 +104,7 @@ def _bundle(tmp_path: Path):
         tmp_path / "record",
         measurement=_measurement(),
         provenance=_provenance(),
+        method=method,
         signing_key=key,
     )
     return path, key, store
@@ -121,7 +128,27 @@ def _resign_with_provenance(
     checksums = _checksums_bytes(content)
     (path / CHECKSUMS_PATH).write_bytes(checksums)
     signature = sign_bytes(
-        canonical_json_bytes(_signing_payload(checksums)),
+        canonical_json_bytes(_signing_payload(checksums, manifest["schema_version"])),
+        key,
+        purpose=KeyPurpose.RESULT,
+    )
+    (path / "bundle.sig").write_bytes(canonical_json_bytes(signature))
+
+
+def _downgrade_to_v1(path: Path, key: DevelopmentSigningKey) -> None:
+    manifest = json.loads((path / MANIFEST_PATH).read_bytes())
+    manifest["schema_version"] = "traceback.result-bundle.v1"
+    manifest.pop("method")
+    (path / MANIFEST_PATH).write_bytes(canonical_json_bytes(manifest))
+    content = {
+        relative: (path / relative).read_bytes() for relative in _CHECKSUM_PATHS
+    }
+    checksums = _checksums_bytes(content)
+    (path / CHECKSUMS_PATH).write_bytes(checksums)
+    signature = sign_bytes(
+        canonical_json_bytes(
+            _signing_payload(checksums, "traceback.result-bundle.v1")
+        ),
         key,
         purpose=KeyPurpose.RESULT,
     )
@@ -178,6 +205,7 @@ def test_actual_synthetic_scan_bundles_and_verifies_losslessly(tmp_path: Path) -
                 }
             ],
         ),
+        method=_METHOD,
         signing_key=key,
     )
     verified = verify_bundle(bundle, trust)
@@ -199,11 +227,22 @@ def test_build_and_verify_canonical_bundle_without_embedded_trust_root(tmp_path:
 
     verified = verify_bundle(path, store)
 
+    assert verified.manifest.schema_version == "traceback.result-bundle.v2"
+    assert verified.manifest.method.model_dump(mode="json") == _METHOD
     assert verified.measurement.eligible_alignments == 3
     assert verified.signature.key_id == key.key_id
     assert "public" not in (path / "bundle.sig").read_text()
     assert "private" not in "".join(item.name for item in path.rglob("*"))
     assert inspect_bundle(path) == verified.manifest
+
+
+def test_verifier_retains_explicit_v1_read_compatibility(tmp_path: Path) -> None:
+    path, key, store = _bundle(tmp_path)
+    _downgrade_to_v1(path, key)
+
+    verified = verify_bundle(path, store)
+
+    assert verified.manifest.schema_version == "traceback.result-bundle.v1"
 
 
 def test_measurement_and_chart_bytes_are_deterministic_and_signature_separate(
@@ -215,12 +254,14 @@ def test_measurement_and_chart_bytes_are_deterministic_and_signature_separate(
         tmp_path / "first",
         measurement=_measurement(),
         provenance=_provenance(),
+        method=_METHOD,
         signing_key=first_key,
     )
     second = build_result_bundle(
         tmp_path / "second",
         measurement=_measurement(),
         provenance=_provenance(),
+        method=_METHOD,
         signing_key=second_key,
     )
 
@@ -274,6 +315,7 @@ def test_bundle_rejects_wrong_purpose_key_and_tampered_signature(tmp_path: Path)
             tmp_path / "wrong-purpose",
             measurement=_measurement(),
             provenance=_provenance(),
+            method=_METHOD,
             signing_key=release_key,
         )
 

@@ -414,6 +414,11 @@ def _demo_stages(signing_key: Any) -> tuple[Any, ...]:
             context.attempt_dir / "bundle",
             measurement=measurement,
             provenance=provenance,
+            method={
+                "method_id": "mth_fragment_aligned_reference_span",
+                "version": "1.0.0",
+                "method_definition_sha256": "c" * 64,
+            },
             signing_key=signing_key,
         )
         bundle_files = sorted(path for path in bundle.rglob("*") if path.is_file())
