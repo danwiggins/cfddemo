@@ -31,8 +31,12 @@ from .cell_origin_pipeline import (
 )
 from .compatibility import ExecutionState, InformationState, TrustState
 from .result_view import (
+    AttritionReason,
     CompatibilityContract,
+    CountValue,
+    DenominatorLedger,
     ResultViewRequest,
+    bind_result_view_source,
     build_result_view,
     result_filters_sha256,
 )
@@ -42,7 +46,10 @@ MAX_LIMITATIONS = 16
 MAX_MARKERS = 20_000
 MAX_NOTICES = 64
 MAX_PROVENANCE_ITEMS = 256
+MAX_RANGE_SOURCE_IDS_PER_ROW = 64
+MAX_TOTAL_RANGE_SOURCE_IDS = 96
 MAX_SAFE_TEXT_LENGTH = 512
+MAX_CANONICAL_ARTIFACT_BYTES = 4 * 1024 * 1024
 AXIS_LABEL = "estimated fraction among registered atlas contributors"
 
 Sha256 = Annotated[str, StringConstraints(pattern=r"^[0-9a-f]{64}$")]
@@ -212,6 +219,12 @@ class CellOriginExplorerReplayRequest(CompatibilityContract):
     @model_validator(mode="after")
     def exact_replay_source(self) -> CellOriginExplorerReplayRequest:
         _validate_result_view_identity(self.result_view_request)
+        if self.result_view_request != _sanitized_result_view_request(
+            self.result_view_request
+        ):
+            raise ValueError(
+                "replay result-view request contains non-canonical presentation text"
+            )
         status = _result_view_status(self.result_view_request)
         if status == ExplorerStatus.READY and self.source is None:
             raise ValueError("ready replay request requires a safe source")
@@ -399,11 +412,73 @@ class CellOriginExplorerArtifact(CompatibilityContract):
     def replay_exactly(self) -> CellOriginExplorerArtifact:
         if _build_replay_view(self.request) != self.view:
             raise ValueError("cell-origin explorer artifact does not replay exactly")
+        if len(canonical_json_bytes(self)) > MAX_CANONICAL_ARTIFACT_BYTES:
+            raise ValueError("cell-origin explorer artifact exceeds byte bound")
         return self
 
 
 def _digest(value: object) -> str:
     return hashlib.sha256(canonical_json_bytes(value)).hexdigest()
+
+
+def _sanitized_count(count: CountValue, label: str) -> CountValue:
+    return CountValue(
+        state=count.state,
+        value=count.value,
+        accessible_label=label,
+    )
+
+
+def _sanitized_denominator(denominator: DenominatorLedger) -> DenominatorLedger:
+    attrition = tuple(
+        AttritionReason(
+            stage=item.stage,
+            reason_code=item.reason_code,
+            accessible_label=f"{item.stage.value.title()} attrition",
+            count=_sanitized_count(
+                item.count,
+                f"{item.stage.value.title()} excluded records",
+            ),
+        )
+        for item in denominator.attrition
+    )
+    return DenominatorLedger(
+        input_records=_sanitized_count(
+            denominator.input_records,
+            "Input records",
+        ),
+        accepted_records=_sanitized_count(
+            denominator.accepted_records,
+            "Accepted records",
+        ),
+        eligible_records=_sanitized_count(
+            denominator.eligible_records,
+            "Eligible records",
+        ),
+        displayed_records=_sanitized_count(
+            denominator.displayed_records,
+            "Displayed records",
+        ),
+        attrition=attrition,
+    )
+
+
+def _sanitized_result_view_request(request: ResultViewRequest) -> ResultViewRequest:
+    sources = tuple(
+        bind_result_view_source(
+            record=source.record,
+            compatibility_decision=source.compatibility_decision,
+            denominator=_sanitized_denominator(source.denominator),
+            accessible_label="Cell-origin aggregate",
+            qc_label="Cell-origin technical QC",
+        )
+        for source in request.sources
+    )
+    return ResultViewRequest(
+        filter_id=request.filter_id,
+        sources=sources,
+        filters=request.filters,
+    )
 
 
 def _assert_private_data_absent(value: Any, *, field: str = "$") -> None:
@@ -475,6 +550,15 @@ def _validate_source_bounds(result: CellOriginResult) -> None:
         )
     ):
         raise ValueError("provenance collection exceeds explorer bound")
+    range_comparison = result.range_comparison
+    if range_comparison is not None:
+        if len(range_comparison.rows) > MAX_CONTRIBUTORS:
+            raise ValueError("range row count exceeds explorer bound")
+        source_id_counts = [len(row.source_ids) for row in range_comparison.rows]
+        if any(count > MAX_RANGE_SOURCE_IDS_PER_ROW for count in source_id_counts):
+            raise ValueError("range row source-ID count exceeds explorer bound")
+        if sum(source_id_counts) > MAX_TOTAL_RANGE_SOURCE_IDS:
+            raise ValueError("total range source-ID count exceeds explorer bound")
 
 
 def _validate_bundle_bounds(bundle: CellOriginResultBundle) -> None:
@@ -612,7 +696,9 @@ def _to_replay_request(
         else None
     )
     return CellOriginExplorerReplayRequest(
-        result_view_request=request.result_view_request,
+        result_view_request=_sanitized_result_view_request(
+            request.result_view_request
+        ),
         source=safe_source,
     )
 
@@ -789,12 +875,21 @@ def build_cell_origin_explorer_artifact(
 def canonical_cell_origin_explorer_bytes(
     artifact: CellOriginExplorerArtifact,
 ) -> bytes:
-    return canonical_json_bytes(artifact)
+    content = canonical_json_bytes(artifact)
+    if len(content) > MAX_CANONICAL_ARTIFACT_BYTES:
+        raise CellOriginExplorerError(
+            "cell-origin explorer artifact exceeds byte bound"
+        )
+    return content
 
 
 def cell_origin_explorer_from_canonical_bytes(
     content: bytes,
 ) -> CellOriginExplorerArtifact:
+    if len(content) > MAX_CANONICAL_ARTIFACT_BYTES:
+        raise CellOriginExplorerError(
+            "cell-origin explorer artifact exceeds byte bound"
+        )
     try:
         artifact = CellOriginExplorerArtifact.model_validate_json(content)
     except (ValidationError, ValueError, TypeError) as exc:
@@ -821,6 +916,9 @@ __all__ = [
     "ExplorerStatus",
     "FragmentDenominators",
     "LimitationId",
+    "MAX_CANONICAL_ARTIFACT_BYTES",
+    "MAX_RANGE_SOURCE_IDS_PER_ROW",
+    "MAX_TOTAL_RANGE_SOURCE_IDS",
     "MarkerSupport",
     "SolverDiagnostics",
     "build_cell_origin_explorer",

@@ -20,6 +20,9 @@ from evidence_inspector.cell_origin_explorer import (
     CellOriginExplorerRequest,
     ExplorerStatus,
     LimitationId,
+    MAX_CANONICAL_ARTIFACT_BYTES,
+    MAX_RANGE_SOURCE_IDS_PER_ROW,
+    MAX_TOTAL_RANGE_SOURCE_IDS,
     build_cell_origin_explorer,
     build_cell_origin_explorer_artifact,
     canonical_cell_origin_explorer_bytes,
@@ -600,6 +603,67 @@ def test_canonical_artifact_redacts_presentation_aliases_and_notices() -> None:
     assert b'"notices"' not in encoded
 
 
+@pytest.mark.parametrize(
+    ("field_path", "private_text"),
+    [
+        (("accessible_label",), "ACGTACGTACGTACGTACGTACGT"),
+        (("qc_label",), "source%2Fprivate%2Fcase.tsv"),
+        (("accessible_label",), "Alice Example"),
+        (
+            ("denominator", "input_records", "accessible_label"),
+            "nested%252Fprivate%252Fcase.tsv",
+        ),
+        (
+            ("denominator", "attrition", 0, "accessible_label"),
+            "Alice Example",
+        ),
+    ],
+)
+def test_canonical_artifact_redacts_all_e06_presentation_text(
+    field_path: tuple[object, ...],
+    private_text: str,
+) -> None:
+    payload = _request().model_dump(mode="json")
+    target: object = payload["result_view_request"]["sources"][0]
+    for part in field_path[:-1]:
+        target = target[part]  # type: ignore[index]
+    target[field_path[-1]] = private_text  # type: ignore[index]
+    request = CellOriginExplorerRequest.model_validate_json(json.dumps(payload))
+
+    encoded = canonical_cell_origin_explorer_bytes(
+        build_cell_origin_explorer_artifact(request)
+    )
+
+    assert private_text.encode() not in encoded
+    assert b"Cell-origin aggregate" in encoded
+    assert b"Cell-origin technical QC" in encoded
+
+
+@pytest.mark.parametrize(
+    "private_text",
+    [
+        "ACGTACGTACGTACGTACGTACGT",
+        "source%2Fprivate%2Fcase.tsv",
+        "Alice Example",
+    ],
+)
+def test_canonical_parser_rejects_unsanitized_e06_aliases(
+    private_text: str,
+) -> None:
+    payload = json.loads(
+        canonical_cell_origin_explorer_bytes(
+            build_cell_origin_explorer_artifact(_request())
+        )
+    )
+    payload["request"]["result_view_request"]["sources"][0][
+        "accessible_label"
+    ] = private_text
+    tampered = json.dumps(payload, sort_keys=True, separators=(",", ":")).encode()
+
+    with pytest.raises(CellOriginExplorerError, match="invalid"):
+        cell_origin_explorer_from_canonical_bytes(tampered)
+
+
 def test_non_ready_artifact_contains_no_result_values() -> None:
     artifact = build_cell_origin_explorer_artifact(
         _request(
@@ -654,6 +718,94 @@ def test_notice_collection_is_bounded() -> None:
     payload["bundle"]["notices"] = ["bounded synthetic notice"] * 2_000
     with pytest.raises(ValidationError, match="notice count"):
         CellOriginExplorerRequest.model_validate_json(json.dumps(payload))
+
+
+def _bundle_with_range_source_counts(
+    first_count: int,
+    second_count: int,
+) -> CellOriginResultBundle:
+    payload = _bundle().model_dump(mode="json")
+    rows = payload["result"]["range_comparison"]["rows"]
+    rows[0]["source_ids"] = [f"source.range-a-{index}" for index in range(first_count)]
+    rows[1]["source_ids"] = [f"source.range-b-{index}" for index in range(second_count)]
+    return CellOriginResultBundle.model_validate_json(json.dumps(payload))
+
+
+def test_nested_range_source_ids_accept_exact_total_boundary() -> None:
+    first_count = MAX_RANGE_SOURCE_IDS_PER_ROW - 16
+    second_count = MAX_TOTAL_RANGE_SOURCE_IDS - first_count
+    request = _request(
+        bundle=_bundle_with_range_source_counts(first_count, second_count)
+    )
+
+    artifact = build_cell_origin_explorer_artifact(request)
+
+    assert len(canonical_cell_origin_explorer_bytes(artifact)) < (
+        MAX_CANONICAL_ARTIFACT_BYTES
+    )
+
+
+def test_nested_range_source_ids_reject_per_row_overflow() -> None:
+    bundle = _bundle_with_range_source_counts(
+        MAX_RANGE_SOURCE_IDS_PER_ROW + 1,
+        1,
+    )
+    with pytest.raises(ValidationError, match="range row source-ID count"):
+        _request(bundle=bundle)
+
+
+def test_nested_range_source_ids_reject_total_overflow() -> None:
+    first_count = MAX_TOTAL_RANGE_SOURCE_IDS // 2 + 1
+    second_count = MAX_TOTAL_RANGE_SOURCE_IDS - first_count + 1
+    bundle = _bundle_with_range_source_counts(first_count, second_count)
+    with pytest.raises(ValidationError, match="total range source-ID count"):
+        _request(bundle=bundle)
+
+
+@pytest.mark.parametrize(
+    ("field", "items"),
+    [
+        (
+            "source_ids",
+            [f"source.provenance-{index}" for index in range(257)],
+        ),
+        (
+            "input_artifacts",
+            [
+                {
+                    "artifact_id": f"artifact.bound-{index}",
+                    "sha256": "a" * 64,
+                    "size_bytes": index,
+                }
+                for index in range(257)
+            ],
+        ),
+        (
+            "software_versions",
+            [
+                {
+                    "software_id": f"software.bound-{index}",
+                    "version": "1.0.0",
+                }
+                for index in range(257)
+            ],
+        ),
+    ],
+)
+def test_nested_provenance_collection_rejects_overflow(
+    field: str,
+    items: list[object],
+) -> None:
+    payload = _request().model_dump(mode="json")
+    payload["bundle"]["result"]["provenance"][field] = items
+    with pytest.raises(ValidationError, match="provenance collection"):
+        CellOriginExplorerRequest.model_validate_json(json.dumps(payload))
+
+
+def test_canonical_parser_rejects_oversized_input_before_json_parsing() -> None:
+    oversized = b"{" + b" " * MAX_CANONICAL_ARTIFACT_BYTES
+    with pytest.raises(CellOriginExplorerError, match="byte bound"):
+        cell_origin_explorer_from_canonical_bytes(oversized)
 
 
 def test_concatenated_read_contributor_id_fails_closed() -> None:
