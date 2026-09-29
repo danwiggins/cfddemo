@@ -10,12 +10,14 @@ import pytest
 from pydantic import ValidationError
 
 from evidence_inspector.compatibility import (
+    AllowedMethodDefinition,
     CompatibilityContractError,
     CompatibilityMismatchKey,
     CompatibilityOutcome,
     CompatibilityPolicy,
     CompatibilityPolicyReference,
     CompatibilityRequest,
+    CompatibilitySelection,
     CompatibilitySelectionRequest,
     ExecutionState,
     InformationState,
@@ -30,6 +32,7 @@ from evidence_inspector.compatibility import (
     compatibility_policy_sha256,
     decide_compatibility,
     replay_compatibility_decision,
+    replay_compatibility_selection,
     select_compatible_records,
 )
 from evidence_inspector.method_registry import (
@@ -104,6 +107,8 @@ def _method(
 def _capability(
     method: MethodDefinition,
     *,
+    registry_sha256: str = REGISTRY_SHA256,
+    registry_version: int = 2,
     authority_head_sha256: str = HEAD_SHA256,
     authority_revision: int = 4,
     qualification_state: QualificationState = (
@@ -111,8 +116,8 @@ def _capability(
     ),
 ) -> CurrentMethodCapability:
     return CurrentMethodCapability(
-        registry_sha256=REGISTRY_SHA256,
-        registry_version=2,
+        registry_sha256=registry_sha256,
+        registry_version=registry_version,
         authority_head_sha256=authority_head_sha256,
         authority_revision=authority_revision,
         method_definition_sha256=method_definition_sha256(method),
@@ -170,6 +175,8 @@ def _record(
     execution_state: ExecutionState = ExecutionState.COMPLETE,
     information_state: InformationState = InformationState.SUFFICIENT,
     trust_state: TrustState = TrustState.VERIFIED,
+    registry_sha256: str = REGISTRY_SHA256,
+    registry_version: int = 2,
     authority_head_sha256: str = HEAD_SHA256,
     authority_revision: int = 4,
     qualification_state: QualificationState = (
@@ -186,6 +193,8 @@ def _record(
         method_definition_sha256=method_definition_sha256(exact_method),
         current_capability=_capability(
             exact_method,
+            registry_sha256=registry_sha256,
+            registry_version=registry_version,
             authority_head_sha256=authority_head_sha256,
             authority_revision=authority_revision,
             qualification_state=qualification_state,
@@ -216,8 +225,16 @@ def _policy_for(
         first = grouped_records[0]
         methods = tuple(
             sorted(
-                {item.method.method_ref for item in grouped_records},
-                key=lambda item: (item.method_id, item.version),
+                {
+                    AllowedMethodDefinition(
+                        method_ref=item.method.method_ref,
+                        method_definition_sha256=(
+                            item.method_definition_sha256
+                        ),
+                    )
+                    for item in grouped_records
+                },
+                key=lambda item: item.sort_key,
             )
         )
         schemas = tuple(
@@ -231,7 +248,7 @@ def _policy_for(
                 measurement_family=first.compatibility_key.measurement_family,
                 quantity_id=first.compatibility_key.quantity_id,
                 unit=first.compatibility_key.unit,
-                allowed_methods=methods,
+                allowed_method_definitions=methods,
                 allowed_result_schemas=schemas,
                 delta_allowed_when_comparable=delta_allowed,
                 shared_axis_allowed_when_comparable=shared_axis_allowed,
@@ -240,6 +257,8 @@ def _policy_for(
     return CompatibilityPolicy(
         policy_id=policy_id,
         version=version,
+        registry_sha256=REGISTRY_SHA256,
+        registry_version=2,
         authority_head_sha256=HEAD_SHA256,
         authority_revision=4,
         measurement_policies=tuple(rules),
@@ -608,6 +627,13 @@ def test_stale_authority_and_policy_fail_closed() -> None:
     assert authority_decision.outcome == CompatibilityOutcome.UNKNOWN
     assert authority_decision.remediation_code == RemediationCode.REFRESH_AUTHORITY
 
+    stale_registry = _record(
+        "beta", registry_sha256="3" * 64, registry_version=3
+    )
+    registry_decision = decide_compatibility(_request(left, stale_registry))
+    assert registry_decision.outcome == CompatibilityOutcome.UNKNOWN
+    assert registry_decision.remediation_code == RemediationCode.REFRESH_AUTHORITY
+
     right = _record("beta")
     policy = _policy_for(left, right)
     policy_decision = decide_compatibility(
@@ -644,6 +670,26 @@ def test_unknown_method_and_result_schema_are_not_inferred() -> None:
     assert schema_decision.remediation_code == (
         RemediationCode.REGISTER_RESULT_SCHEMA
     )
+
+
+def test_policy_binds_exact_method_definition_not_only_reused_reference() -> None:
+    trusted_left = _record("alpha")
+    trusted_right = _record("beta")
+    policy = _policy_for(trusted_left, trusted_right)
+    forged_method = _method(parameter_digest="8" * 64)
+    forged_left = _record(
+        "alpha", method=forged_method, key=_key(forged_method)
+    )
+    forged_right = _record(
+        "beta", method=forged_method, key=_key(forged_method)
+    )
+
+    decision = decide_compatibility(
+        _request(forged_left, forged_right, policy=policy)
+    )
+
+    assert decision.outcome == CompatibilityOutcome.UNKNOWN
+    assert decision.remediation_code == RemediationCode.REGISTER_METHOD
 
 
 def test_decision_exact_json_round_trip_replay_and_tamper_rejection() -> None:
@@ -729,10 +775,61 @@ def test_selector_requires_explicit_anchor_without_mutation_or_primary_inference
         item.decision_sha256 for item in selection.decisions
     )
     assert len(selection.selection_sha256) == 64
+    assert replay_compatibility_selection(request, selection) == selection
+
+
+def test_selection_replay_rejects_stale_membership_and_invalid_inclusion() -> None:
+    alpha = _record("alpha")
+    beta = _record("beta")
+    gamma = _record(
+        "gamma",
+        key=_key(alpha.method, normalization="sem_normalization_beta"),
+    )
+    policy = _policy_for(alpha, beta, gamma)
+    request = CompatibilitySelectionRequest(
+        anchor_result_id=alpha.result_id,
+        records=(alpha, beta, gamma),
+        policy=policy,
+        trusted_policy_sha256=compatibility_policy_sha256(policy),
+        trusted_authority_head_sha256=HEAD_SHA256,
+    )
+    selection = select_compatible_records(request)
+    payload = selection.model_dump(mode="json")
+    payload["selected_result_ids"] = [
+        "result_alpha",
+        "result_beta",
+        "result_gamma",
+    ]
+    with pytest.raises(ValidationError, match="comparable decision outcomes"):
+        CompatibilitySelection.model_validate_json(json.dumps(payload))
+
+    delta = _record("delta")
+    stale_policy = _policy_for(alpha, beta, delta)
+    stale_request = CompatibilitySelectionRequest(
+        anchor_result_id=alpha.result_id,
+        records=(alpha, beta, delta),
+        policy=stale_policy,
+        trusted_policy_sha256=compatibility_policy_sha256(stale_policy),
+        trusted_authority_head_sha256=HEAD_SHA256,
+    )
+    stale_selection = select_compatible_records(stale_request)
+    with pytest.raises(CompatibilityContractError, match="canonical replay"):
+        replay_compatibility_selection(request, stale_selection)
 
 
 @pytest.mark.parametrize(
-    "reserved_term", ["donor", "sample", "run", "read", "path", "sequence"]
+    "reserved_term",
+    [
+        "donor",
+        "donor123",
+        "sample",
+        "sample123",
+        "patient123",
+        "run123",
+        "read123",
+        "sequence123",
+        "local_path123",
+    ],
 )
 def test_reserved_private_identifiers_are_rejected(reserved_term: str) -> None:
     record = _record("alpha")
@@ -759,7 +856,9 @@ def test_privacy_bounds_closed_models_and_canonical_input() -> None:
     policy = _policy_for(record, _record("beta"))
     rule = policy.measurement_policies[0]
     oversized = rule.model_dump(mode="json")
-    oversized["allowed_methods"] = oversized["allowed_methods"] * 65
+    oversized["allowed_method_definitions"] = (
+        oversized["allowed_method_definitions"] * 65
+    )
     with pytest.raises(ValidationError, match="64 items"):
         MeasurementCompatibilityPolicy.model_validate_json(
             json.dumps(oversized)

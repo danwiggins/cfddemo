@@ -53,11 +53,14 @@ _RESERVED_PRIVACY_TERMS = {
     "path",
     "sequence",
 }
+_RESERVED_PRIVACY_IDENTIFIER = re.compile(
+    rf"^(?:{'|'.join(sorted(_RESERVED_PRIVACY_TERMS))})[0-9]*$"
+)
 
 
 def _reject_private_token(value: str) -> str:
-    segments = set(re.split(r"[^a-z0-9]+", value.lower()))
-    if segments & _RESERVED_PRIVACY_TERMS:
+    segments = re.split(r"[^a-z0-9]+", value.lower())
+    if any(_RESERVED_PRIVACY_IDENTIFIER.fullmatch(item) for item in segments):
         raise ValueError("controlled identifier contains a reserved privacy term")
     if "/" in value or "\\" in value or "://" in value:
         raise ValueError("controlled identifier cannot contain a path or URI")
@@ -259,6 +262,21 @@ _OPTIONAL_DIMENSIONS = (
 )
 
 
+class AllowedMethodDefinition(CompatibilityContract):
+    """An exact policy-authorized method identity, not a mutable reference."""
+
+    method_ref: MethodReference
+    method_definition_sha256: Sha256
+
+    @property
+    def sort_key(self) -> tuple[str, str, str]:
+        return (
+            self.method_ref.method_id,
+            self.method_ref.version,
+            self.method_definition_sha256,
+        )
+
+
 class MeasurementCompatibilityPolicy(CompatibilityContract):
     schema_version: Literal["traceback.measurement-compatibility-policy.v1"] = (
         "traceback.measurement-compatibility-policy.v1"
@@ -266,7 +284,7 @@ class MeasurementCompatibilityPolicy(CompatibilityContract):
     measurement_family: MethodFamily
     quantity_id: QuantityId
     unit: UnitId
-    allowed_methods: tuple[MethodReference, ...] = Field(
+    allowed_method_definitions: tuple[AllowedMethodDefinition, ...] = Field(
         min_length=1, max_length=MAX_ALLOWED_IDENTITIES
     )
     allowed_result_schemas: tuple[ResultSchemaReference, ...] = Field(
@@ -282,13 +300,14 @@ class MeasurementCompatibilityPolicy(CompatibilityContract):
 
     @model_validator(mode="after")
     def deterministic_policy(self) -> MeasurementCompatibilityPolicy:
-        method_keys = [
-            (item.method_id, item.version) for item in self.allowed_methods
-        ]
-        if method_keys != sorted(method_keys) or len(method_keys) != len(
-            set(method_keys)
+        method_keys = [item.sort_key for item in self.allowed_method_definitions]
+        method_refs = [item[:2] for item in method_keys]
+        if method_keys != sorted(method_keys) or len(method_refs) != len(
+            set(method_refs)
         ):
-            raise ValueError("allowed method references must be uniquely sorted")
+            raise ValueError(
+                "allowed method definitions must be uniquely sorted"
+            )
         schema_keys = [
             (item.schema_id, item.version)
             for item in self.allowed_result_schemas
@@ -310,6 +329,8 @@ class CompatibilityPolicy(CompatibilityContract):
     )
     policy_id: PolicyId
     version: Version
+    registry_sha256: Sha256
+    registry_version: int = Field(ge=1, le=10_000_000)
     authority_head_sha256: Sha256
     authority_revision: int = Field(ge=0, le=10_000_000)
     measurement_policies: tuple[MeasurementCompatibilityPolicy, ...] = Field(
@@ -359,6 +380,10 @@ class BoundMeasurementIdentity(CompatibilityContract):
     method_ref: MethodReference
     method_definition_sha256: Sha256
     capability_sha256: Sha256
+    registry_sha256: Sha256
+    registry_version: int = Field(ge=1, le=10_000_000)
+    authority_head_sha256: Sha256
+    authority_revision: int = Field(ge=0, le=10_000_000)
     compatibility_key_sha256: Sha256
 
 
@@ -465,6 +490,36 @@ class CompatibilitySelection(CompatibilityContract):
         digests = [item.decision_sha256 for item in self.decisions]
         if digests != sorted(digests) or len(digests) != len(set(digests)):
             raise ValueError("selection decisions must be uniquely sorted")
+        peer_outcomes: dict[ResultId, CompatibilityOutcome] = {}
+        for decision in self.decisions:
+            bound_ids = (
+                decision.binding.left.result_id,
+                decision.binding.right.result_id,
+            )
+            if bound_ids.count(self.anchor_result_id) != 1:
+                raise ValueError(
+                    "every selection decision must bind the explicit anchor"
+                )
+            peer_id = next(
+                item for item in bound_ids if item != self.anchor_result_id
+            )
+            if peer_id in peer_outcomes:
+                raise ValueError("selection decisions must bind unique peers")
+            peer_outcomes[peer_id] = decision.outcome
+        expected_selected = tuple(
+            sorted(
+                (self.anchor_result_id,)
+                + tuple(
+                    peer_id
+                    for peer_id, outcome in peer_outcomes.items()
+                    if outcome == CompatibilityOutcome.COMPARABLE
+                )
+            )
+        )
+        if self.selected_result_ids != expected_selected:
+            raise ValueError(
+                "selected result IDs must match comparable decision outcomes"
+            )
         if self.selection_sha256 != _contract_digest(
             self, exclude={"selection_sha256"}
         ):
@@ -536,6 +591,12 @@ def _bound_identity(record: VerifiedMeasurementRecord) -> BoundMeasurementIdenti
         method_ref=record.method.method_ref,
         method_definition_sha256=record.method_definition_sha256,
         capability_sha256=_capability_sha256(record.current_capability),
+        registry_sha256=record.current_capability.registry_sha256,
+        registry_version=record.current_capability.registry_version,
+        authority_head_sha256=(
+            record.current_capability.authority_head_sha256
+        ),
+        authority_revision=record.current_capability.authority_revision,
         compatibility_key_sha256=compatibility_key_sha256(
             record.compatibility_key
         ),
@@ -776,7 +837,11 @@ def decide_compatibility(request: CompatibilityRequest) -> CompatibilityDecision
         request.policy.authority_head_sha256
         != request.trusted_authority_head_sha256
         or any(
-            record.current_capability.authority_head_sha256
+            record.current_capability.registry_sha256
+            != request.policy.registry_sha256
+            or record.current_capability.registry_version
+            != request.policy.registry_version
+            or record.current_capability.authority_head_sha256
             != request.trusted_authority_head_sha256
             or record.current_capability.authority_revision
             != request.policy.authority_revision
@@ -834,7 +899,11 @@ def decide_compatibility(request: CompatibilityRequest) -> CompatibilityDecision
         )
     assert rules[0] is not None and rules[1] is not None
     for record, rule in zip((left, right), rules, strict=True):
-        if record.method.method_ref not in rule.allowed_methods:
+        authorized_method = AllowedMethodDefinition(
+            method_ref=record.method.method_ref,
+            method_definition_sha256=record.method_definition_sha256,
+        )
+        if authorized_method not in rule.allowed_method_definitions:
             return _decision(
                 request,
                 outcome=CompatibilityOutcome.UNKNOWN,
@@ -928,7 +997,22 @@ def select_compatible_records(
     )
 
 
+def replay_compatibility_selection(
+    request: CompatibilitySelectionRequest,
+    selection: CompatibilitySelection,
+) -> CompatibilitySelection:
+    """Fail closed unless a selection exactly replays from its source request."""
+
+    expected = select_compatible_records(request)
+    if selection != expected:
+        raise CompatibilityContractError(
+            "compatibility selection does not match canonical replay"
+        )
+    return selection
+
+
 __all__ = [
+    "AllowedMethodDefinition",
     "CompatibilityContractError",
     "CompatibilityDecision",
     "CompatibilityMismatchKey",
@@ -952,5 +1036,6 @@ __all__ = [
     "compatibility_policy_sha256",
     "decide_compatibility",
     "replay_compatibility_decision",
+    "replay_compatibility_selection",
     "select_compatible_records",
 ]

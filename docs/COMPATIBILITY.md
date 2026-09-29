@@ -12,6 +12,10 @@ reference/grid/atlas/panel assets, normalization, coordinate and denominator
 semantics, and registered compatibility-policy version. Human labels are not
 identity.
 
+Policies authorize exact method-definition digests and exact registry
+digest/version identities, not reusable method references alone. Registry or
+authority drift therefore fails closed before a compatibility result is used.
+
 Decisions are one of `comparable`, `different_quantity`, `incompatible`, or
 `unknown`. Missing metadata, stale policy or authority, failed execution,
 insufficient information, and unverified, revoked, or unknown trust fail closed
@@ -20,7 +24,10 @@ Qualification remains independently recorded and does not imply compatibility.
 
 Canonical decisions contain sorted mismatch keys and missing fields, an exact
 remediation code, and replay bindings for both result/bundle identities, method
-references, method/capability/key digests, authority head, and policy digest.
+references, method/capability/key digests, registry identity, authority identity,
+and policy digest. Selections bind every decision to the explicit anchor and
+must replay exactly against the original selection request; a valid self-hash
+alone is insufficient.
 Canonical JSON and SHA-256 validation reject normalization drift or tampering.
-All contracts are closed and bounded and expose no donor, sample, run, read,
-sequence, local-path, or extension fields.
+All contracts are closed and bounded and reject donor, sample, patient, run,
+read, sequence, and local-path identifier stems, including numbered forms.
