@@ -31,10 +31,11 @@ from evidence_inspector.compatibility import (
     decide_compatibility,
 )
 from evidence_inspector.method_registry import MethodReference, Sha256
-from traceback_runner.bundles import VerifiedBundle
+from traceback_runner.bundles import BundleManifest, VerifiedBundle
 from traceback_runner.contracts import (
     FragmentMeasurement,
     ResultBundleManifest,
+    ResultBundleManifestV2,
     canonical_json_bytes,
 )
 from traceback_runner.export import FragmentLengthChart
@@ -275,7 +276,7 @@ class VerifiedFragmentSource(CompatibilityContract):
     record: VerifiedMeasurementRecord
     quantity: FragmentQuantity
     state: ExplorerSourceState
-    manifest: ResultBundleManifest | None
+    manifest: BundleManifest | None
     measurement: FragmentMeasurement | None
     chart: FragmentLengthChart | None
 
@@ -367,6 +368,13 @@ class VerifiedFragmentSource(CompatibilityContract):
                 canonical_json_bytes(self.manifest)
             ):
                 raise ValueError("E05 bundle identity does not bind E02 manifest")
+            if isinstance(self.manifest, ResultBundleManifestV2) and (
+                self.manifest.method.method_id != self.record.method.method_id
+                or self.manifest.method.version != self.record.method.version
+                or self.manifest.method.method_definition_sha256
+                != self.record.method_definition_sha256
+            ):
+                raise ValueError("E02 manifest method does not bind E05 method identity")
         _check_private_values(self.model_dump(mode="json"))
         return self
 
@@ -379,6 +387,9 @@ def fragment_source_from_verified_bundle(
     state: ExplorerSourceState = ExplorerSourceState.COMPLETE,
 ) -> VerifiedFragmentSource:
     """Drop the verified local path and retain only exact aggregate content."""
+
+    if not isinstance(bundle.manifest, ResultBundleManifestV2):
+        raise FragmentExplorerError("verified E02 bundle lacks exact method identity")
 
     return VerifiedFragmentSource(
         record=record,
