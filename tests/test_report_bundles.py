@@ -103,8 +103,7 @@ def _semantic_result(*, complete: bool = True):
     return compute_dosage_qc(scan)
 
 
-def _inputs(*, complete: bool = True) -> dict[str, bytes]:
-    result = _semantic_result(complete=complete)
+def _inputs_for_result(result) -> dict[str, bytes]:
     result_bytes = canonical_json_bytes(result)
     result_digest = sha256_bytes(result_bytes)
     rows = (
@@ -144,6 +143,10 @@ def _inputs(*, complete: bool = True) -> dict[str, bytes]:
             rows=rows,
         ),
     }
+
+
+def _inputs(*, complete: bool = True) -> dict[str, bytes]:
+    return _inputs_for_result(_semantic_result(complete=complete))
 
 
 def _build(tmp_path: Path, name: str = "report") -> Path:
@@ -270,7 +273,7 @@ def test_privacy_allowlist_rejects_paths_raw_ids_secrets_and_sequence(
     result = json.loads(inputs["result_bytes"])
     result["limitations"][0] = private_text
     inputs["result_bytes"] = canonical_json_bytes(result)
-    with pytest.raises(ReportBundleFormatError, match="forbidden"):
+    with pytest.raises(ReportBundleFormatError, match="forbidden|allowlist"):
         build_development_report_bundle(tmp_path / "private", **inputs)
 
 
@@ -280,7 +283,42 @@ def test_replay_reapplies_privacy_allowlist(tmp_path: Path) -> None:
     result = json.loads(result_path.read_bytes())
     result["limitations"][0] = "/private/provider/sample.bam"
     result_path.write_bytes(canonical_json_bytes(result))
-    with pytest.raises(ReportBundleFormatError, match="absolute local path"):
+    with pytest.raises(ReportBundleFormatError, match="absolute local path|allowlist"):
+        replay_development_report_bundle(bundle)
+
+
+@pytest.mark.parametrize(
+    "bypass_text",
+    (
+        "file:///private/provider/sample.bam",
+        "path=/private/provider/sample.bam",
+        "private read raw-read-123",
+    ),
+)
+def test_closed_limitation_allowlist_rejects_fully_rebound_private_content(
+    tmp_path: Path, bypass_text: str
+) -> None:
+    result = _semantic_result()
+    payload = result.model_dump(mode="python")
+    payload["limitations"] = (bypass_text, *payload["limitations"][1:])
+    rebound = _inputs_for_result(result.__class__.model_validate(payload))
+
+    with pytest.raises(ReportBundleFormatError, match="closed publication allowlist"):
+        build_development_report_bundle(tmp_path / "build-rejected", **rebound)
+
+    stored = {
+        RESULT_PATH: rebound["result_bytes"],
+        PLOT_DATA_PATH: rebound["plot_data_bytes"],
+        PLOT_SPEC_PATH: rebound["plot_spec_bytes"],
+        PROVENANCE_PATH: rebound["provenance_bytes"],
+        ACCESSIBLE_TABLE_PATH: rebound["accessible_table_bytes"],
+    }
+    stored[MANIFEST_PATH] = canonical_json_bytes(report_module._manifest_for(stored))
+    bundle = tmp_path / "replay-rejected"
+    bundle.mkdir()
+    for relative_path, content in stored.items():
+        (bundle / relative_path).write_bytes(content)
+    with pytest.raises(ReportBundleFormatError, match="closed publication allowlist"):
         replay_development_report_bundle(bundle)
 
 

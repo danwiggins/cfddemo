@@ -82,6 +82,16 @@ _RAW_IDENTIFIER = re.compile(
 _FORBIDDEN_FIELDS = frozenset(
     {"path", "local_path", "read_id", "read_ids", "query_name", "sample_label", "secret"}
 )
+_COMPLETE_LIMITATIONS = (
+    "Exploratory, uncalibrated whole-chromosome dosage quality control.",
+    "Not a cancer test and not a tumor-fraction estimate.",
+    "No GC or mappability correction, panel of normals, or segmentation model.",
+    "Descriptive dosage directions use an unvalidated visualization boundary.",
+)
+_INSUFFICIENT_LIMITATIONS = (
+    *_COMPLETE_LIMITATIONS,
+    "No dosage summary was computed for sparse chromosome coverage.",
+)
 
 
 class ReportBundleError(ValueError):
@@ -283,6 +293,15 @@ def _parse_result(content: bytes) -> DosageQcResultBundle | DosageQcInsufficient
         raise ReportBundleFormatError("result.json violates the dosage result union") from exc
     if canonical_json_bytes(result) != content:
         raise ReportBundleFormatError("result.json is not canonical JSON")
+    expected_limitations = (
+        _INSUFFICIENT_LIMITATIONS
+        if isinstance(result, DosageQcInsufficientResultBundle)
+        else _COMPLETE_LIMITATIONS
+    )
+    if result.limitations != expected_limitations:
+        raise ReportBundleFormatError(
+            "result limitations are not in the closed publication allowlist"
+        )
     _privacy_check(result.model_dump(mode="json"))
     return result
 
