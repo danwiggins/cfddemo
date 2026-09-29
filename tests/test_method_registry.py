@@ -21,6 +21,8 @@ from evidence_inspector.method_registry import (
     RegistryTransitionError,
     ToolReference,
     ToolRegistration,
+    capability_from_canonical_bytes,
+    canonical_contract_bytes,
     canonical_registry_bytes,
     effective_provider_primary,
     registry_from_canonical_bytes,
@@ -317,6 +319,9 @@ def test_capability_digest_and_semantics_replay_exactly() -> None:
         as_of=T1,
     )
 
+    encoded = canonical_contract_bytes(capability)
+
+    assert capability_from_canonical_bytes(encoded) == capability
     assert replay_method_capability(registry, capability) == capability
 
     changed_digest = capability.model_copy(update={"registry_sha256": "f" * 64})
@@ -326,6 +331,10 @@ def test_capability_digest_and_semantics_replay_exactly() -> None:
     changed_availability = capability.model_copy(update={"research_available": False})
     with pytest.raises(RegistryIdentityError, match="semantic replay"):
         replay_method_capability(registry, changed_availability)
+
+    indented = json.dumps(capability.model_dump(mode="json"), indent=2).encode()
+    with pytest.raises(RegistryIdentityError, match="not canonical"):
+        capability_from_canonical_bytes(indented)
 
 
 @pytest.mark.parametrize("mismatch", ("method", "version"))

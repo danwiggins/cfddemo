@@ -15,9 +15,10 @@ authority scope, and effective time. Provider availability additionally
 requires `qualified`, a matching authority scope, and an effective,
 non-revoked time window. No latest-version or research-role fallback exists.
 
-Registry snapshots are canonical JSON with deterministic SHA-256 identities.
-Capability decisions carry that digest and must replay exactly from the same
-registry, method reference, authority scope, and effective time.
+Registry snapshots and capability decisions use exact canonical JSON. Registry
+snapshots have deterministic SHA-256 identities. Capability decisions carry
+that digest and must replay exactly from the same registry, method reference,
+authority scope, and effective time.
 Transitions are append-only: published versions advance by one, chain to the
 prior digest, retain tool/asset/method identity, and may only add a bounded
 revocation timestamp to an existing method. Overlapping provider-primary

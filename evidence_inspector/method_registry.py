@@ -326,10 +326,10 @@ def _reject_nonfinite(value: Any, path: str = "$") -> None:
             _reject_nonfinite(item, f"{path}[{index}]")
 
 
-def canonical_registry_bytes(registry: MethodRegistry) -> bytes:
-    """Serialize a registry to deterministic, closed UTF-8 JSON."""
+def canonical_contract_bytes(contract: RegistryContract) -> bytes:
+    """Serialize a registry contract to deterministic, closed UTF-8 JSON."""
 
-    payload = registry.model_dump(mode="json", exclude_none=False)
+    payload = contract.model_dump(mode="json", exclude_none=False)
     _reject_nonfinite(payload)
     return json.dumps(
         payload,
@@ -338,6 +338,12 @@ def canonical_registry_bytes(registry: MethodRegistry) -> bytes:
         separators=(",", ":"),
         sort_keys=True,
     ).encode("utf-8")
+
+
+def canonical_registry_bytes(registry: MethodRegistry) -> bytes:
+    """Serialize a registry to deterministic, closed UTF-8 JSON."""
+
+    return canonical_contract_bytes(registry)
 
 
 def registry_sha256(registry: MethodRegistry) -> str:
@@ -366,6 +372,28 @@ def registry_from_canonical_bytes(content: bytes) -> MethodRegistry:
     if canonical_registry_bytes(registry) != content:
         raise RegistryIdentityError("registry JSON is not canonical")
     return registry
+
+
+def capability_from_canonical_bytes(content: bytes) -> MethodCapability:
+    """Load one capability only when its bytes and schema are exactly canonical."""
+
+    def reject_constant(token: str) -> None:
+        raise ValueError(f"non-finite JSON token: {token}")
+
+    try:
+        payload = json.loads(content, parse_constant=reject_constant)
+        capability = MethodCapability.model_validate(payload)
+    except (
+        UnicodeDecodeError,
+        json.JSONDecodeError,
+        ValidationError,
+        TypeError,
+        ValueError,
+    ) as exc:
+        raise RegistryIdentityError("capability JSON is invalid") from exc
+    if canonical_contract_bytes(capability) != content:
+        raise RegistryIdentityError("capability JSON is not canonical")
+    return capability
 
 
 def _registration_map(
