@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import json
 from datetime import datetime, timezone
-from typing import Any
 
 import pytest
 from pydantic import ValidationError
@@ -12,6 +11,7 @@ from pydantic import ValidationError
 from evidence_inspector.compatibility import (
     AllowedMethodDefinition,
     CompatibilityContractError,
+    CompatibilityDecision,
     CompatibilityMismatchKey,
     CompatibilityOutcome,
     CompatibilityPolicy,
@@ -304,6 +304,20 @@ def test_exact_identity_is_comparable_and_policy_controls_render_permissions() -
     assert decision.remediation_code == RemediationCode.NONE
 
 
+def test_v1_decision_wire_shape_remains_backward_compatible() -> None:
+    decision = decide_compatibility(_request(_record("alpha"), _record("beta")))
+    wire = canonical_compatibility_bytes(decision)
+
+    parsed = compatibility_contract_from_canonical_bytes(CompatibilityDecision, wire)
+
+    assert parsed == decision
+    assert not {
+        "execution_state",
+        "information_state",
+        "trust_state",
+    }.intersection(parsed.binding.left.model_fields_set)
+
+
 def test_swapped_sides_produce_identical_canonical_decision_and_digest() -> None:
     left = _record("alpha")
     right = _record("beta")
@@ -566,6 +580,10 @@ def test_missing_required_data_is_unknown_with_exact_missing_field() -> None:
     [
         (
             {"execution_state": ExecutionState.FAILED},
+            RemediationCode.RESOLVE_EXECUTION,
+        ),
+        (
+            {"execution_state": ExecutionState.NOT_RUN},
             RemediationCode.RESOLVE_EXECUTION,
         ),
         (
