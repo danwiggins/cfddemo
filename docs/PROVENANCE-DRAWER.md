@@ -12,8 +12,7 @@ of truth, and the canonical output retains a privacy-bounded replay request:
 
 - E01 `MethodDefinition`, `CurrentMethodCapability`, method asset references,
   registry identity, and authority-head identity;
-- E02 installed-asset verification plus the signed release envelope, public
-  trust document, role policy, authority head, expected binding, and exact
+- E02 installed-asset verification plus the signed release envelope and exact
   fresh active authorization decision;
 - E04 `CatalogResultRef` bundle, manifest, method, registry, and authority
   bindings;
@@ -21,15 +20,21 @@ of truth, and the canonical output retains a privacy-bounded replay request:
   `CompatibilityDecision`.
 
 Catalog and measurement identities must agree exactly. Every displayed
-scientific value is included in one canonical evidence payload whose digest
+scientific value is included in one result-signed canonical evidence payload
+that also binds the E04 result, bundle, and manifest identities. Its digest
 must equal the verified measurement's `result_sha256`; values cannot change
 while retaining the result identity. Method assets must have one uniquely
 sorted E02 proof each, with matching ID, version, content size and digest,
 registered reference digest, current reference digest, active lifecycle, valid
 integrity, release/version/package identity, and fresh authority. Compatibility
 is replayed from the original request; a valid decision from another request is
-rejected. Canonical parsing independently reruns the evidence binding, signed
-E02 authorization, E05 decision, freshness checks, and every derived row.
+rejected. Building and canonical parsing require a separate
+`DrawerVerificationContext`: independently supplied result trust roots, exact
+E04 catalog bindings, and E02 release authorizations containing the trusted
+policy, authority head, expected binding, and expected package digest. None of
+those trust assertions are accepted from serialized drawer bytes. Validation
+reruns the result signature, E02 authorization, E05 decision, freshness
+checks, and every derived row.
 
 Unknown compatibility, stale authority, revoked or invalid assets, unavailable
 results, incomplete denominator accounting, and any cross-contract mismatch

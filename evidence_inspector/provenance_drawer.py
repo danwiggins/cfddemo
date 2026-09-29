@@ -12,9 +12,10 @@ import hashlib
 import json
 import re
 import unicodedata
+from dataclasses import dataclass
 from datetime import datetime, timedelta
 from enum import StrEnum
-from typing import Annotated, Any, Literal, TypeVar
+from typing import Annotated, Any, Literal, Mapping, TypeVar
 from urllib.parse import unquote
 
 from pydantic import (
@@ -44,15 +45,16 @@ from evidence_inspector.method_registry import (
     canonical_contract_bytes,
 )
 from evidence_inspector.result_catalog import CatalogResultRef
-from traceback_runner.assets import AssetVerification, IntegrityStatus
+from traceback_runner.assets import (
+    AssetVerification,
+    IntegrityStatus,
+    ReleaseAuthorization,
+)
 from traceback_runner.qualification import (
     AssetAuthorizationDecision,
     AssetLifecycleStatus,
     AuthorityFailure,
     AuthorityStatus,
-    QualificationBinding,
-    QualificationTrustPolicy,
-    ReleaseAuthorityHead,
     ReleaseEvidenceEnvelope,
     verify_release_asset_authorization,
 )
@@ -66,15 +68,17 @@ from traceback_runner.serialization import (
     sha256_bytes,
 )
 from traceback_runner.signing import (
-    DevelopmentTrustDocument,
-    development_trust_document_bytes,
-    load_development_trust,
+    KeyPurpose,
+    SignatureEnvelope,
+    TrustStore,
+    verify_signature,
 )
 
 MAX_ASSETS = 16
 MAX_FILTERS = 16
 MAX_LIMITATIONS = 16
 MAX_DISPLAY_LENGTH = 512
+MAX_PERCENT_DECODE_LAYERS = 64
 # Derived from the two bounded sides: each signed E02 proof is capped at 48 KiB,
 # each filter/limitation at 1 KiB, plus 128 KiB for fixed replay contracts/rows.
 MAX_CANONICAL_DRAWER_BYTES = 128 * 1024 + 2 * (
@@ -99,16 +103,20 @@ _SAFE_RESERVED_PREFIX_LEXEMES = {
     "sampled",
     "sequencer",
 }
-_SEQUENCE = re.compile(r"(?i)^[acgturyswkmbdhvn\s._-]{12,}$")
+_SEQUENCE = re.compile(
+    r"(?i)(?<![a-z0-9])(?:[acgturyswkmbdhvn][\s._-]*){12,}(?![a-z0-9])"
+)
 
 
 def _reject_private_text(value: str) -> str:
     normalized = unicodedata.normalize("NFKC", value)
-    for _ in range(3):
+    for _ in range(MAX_PERCENT_DECODE_LAYERS):
         decoded = unquote(normalized)
         if decoded == normalized:
             break
         normalized = decoded
+    else:
+        raise ValueError("drawer text encoding did not converge")
     lowered = normalized.lower()
     if (
         "/" in normalized
@@ -118,7 +126,7 @@ def _reject_private_text(value: str) -> str:
         or lowered.startswith(("file:", "data:", "http:", "https:"))
     ):
         raise ValueError("drawer text cannot contain a path or URI")
-    if _SEQUENCE.fullmatch(normalized):
+    if _SEQUENCE.search(normalized):
         raise ValueError("drawer text cannot contain sequence-like content")
     for segment in re.split(r"[^a-z0-9]+", lowered):
         if segment in _SAFE_RESERVED_PREFIX_LEXEMES:
@@ -261,6 +269,39 @@ class MeasurementValue(CompatibilityContract):
         return self
 
 
+class DrawerEvidencePayload(CompatibilityContract):
+    schema_version: Literal["traceback.drawer-evidence-payload.v1"] = (
+        "traceback.drawer-evidence-payload.v1"
+    )
+    result_id: ResultId
+    bundle_sha256: Sha256
+    bundle_manifest_sha256: Sha256
+    measurement_value: MeasurementValue
+    denominator: DenominatorEvidence
+    counts: tuple[CountEvidence, ...] = Field(min_length=3, max_length=3)
+    filters: tuple[FilterEvidence, ...] = Field(min_length=1, max_length=MAX_FILTERS)
+    limitations: tuple[LimitationEvidence, ...] = Field(
+        min_length=1, max_length=MAX_LIMITATIONS
+    )
+
+
+class DrawerEvidenceEnvelope(CompatibilityContract):
+    schema_version: Literal["traceback.drawer-evidence-envelope.v1"] = (
+        "traceback.drawer-evidence-envelope.v1"
+    )
+    payload: DrawerEvidencePayload
+    signature: SignatureEnvelope
+
+
+@dataclass(frozen=True)
+class DrawerVerificationContext:
+    """Independent trust and authority inputs; never serialized in a drawer."""
+
+    result_trust_store: TrustStore
+    expected_results: Mapping[str, CatalogResultRef]
+    release_authorizations: Mapping[str, ReleaseAuthorization]
+
+
 class BoundAssetEvidence(CompatibilityContract):
     schema_version: Literal["traceback.drawer-bound-asset.v1"] = (
         "traceback.drawer-bound-asset.v1"
@@ -269,10 +310,6 @@ class BoundAssetEvidence(CompatibilityContract):
     verification: AssetVerification
     authorization: AssetAuthorizationDecision
     release_envelope: ReleaseEvidenceEnvelope
-    trust_document: DevelopmentTrustDocument
-    role_policy: QualificationTrustPolicy
-    authority_head: ReleaseAuthorityHead
-    expected_binding: QualificationBinding
 
     @model_validator(mode="after")
     def exact_active_asset(self) -> BoundAssetEvidence:
@@ -330,32 +367,7 @@ class BoundAssetEvidence(CompatibilityContract):
             authorization.authorized_reference.provenance.license_id,
         ):
             _reject_private_text(controlled)
-        if self.authorization != self.replay_authorization(
-            self.authorization.verified_as_of
-        ):
-            raise ValueError("asset authorization does not replay from signed evidence")
         return self
-
-    def replay_authorization(
-        self, evaluated_at: datetime | None
-    ) -> AssetAuthorizationDecision:
-        if evaluated_at is None:
-            raise ValueError("asset authorization has no verification time")
-        trust = load_development_trust(
-            development_trust_document_bytes(self.trust_document)
-        )
-        return verify_release_asset_authorization(
-            self.release_envelope,
-            trust,
-            self.role_policy,
-            self.authority_head,
-            expected_binding=self.expected_binding,
-            expected_package_sha256=self.authorization.package_sha256,
-            expected_asset_id=self.method_asset.asset_id,
-            expected_asset_version=self.method_asset.version,
-            expected_asset_reference_sha256=self.authorization.asset_reference_sha256,
-            now=evaluated_at,
-        )
 
 
 class SideEvidenceInput(CompatibilityContract):
@@ -377,6 +389,7 @@ class SideEvidenceInput(CompatibilityContract):
     )
     measurement_value: MeasurementValue
     evidence_payload_sha256: Sha256
+    evidence_envelope: DrawerEvidenceEnvelope
 
     @model_validator(mode="after")
     def exact_side_evidence(self) -> SideEvidenceInput:
@@ -478,7 +491,26 @@ def _validate_side_scientific_evidence(side: Any) -> None:
         or side.measurement_value.unit != measurement.method.unit
     ):
         raise ValueError("measurement value does not match method quantity")
-    expected_payload_sha256 = _side_evidence_payload_sha256(side)
+    manifest_sha256 = (
+        side.catalog_result.bundle_manifest_sha256
+        if isinstance(side, SideEvidenceInput)
+        else side.bundle_manifest_sha256
+    )
+    expected_payload = DrawerEvidencePayload(
+        result_id=measurement.result_id,
+        bundle_sha256=measurement.bundle_sha256,
+        bundle_manifest_sha256=manifest_sha256,
+        measurement_value=side.measurement_value,
+        denominator=side.denominator,
+        counts=side.counts,
+        filters=side.filters,
+        limitations=side.limitations,
+    )
+    if side.evidence_envelope.payload != expected_payload:
+        raise ValueError("signed evidence payload does not match displayed evidence")
+    if side.evidence_envelope.signature.purpose != KeyPurpose.RESULT:
+        raise ValueError("drawer evidence requires a result-purpose signature")
+    expected_payload_sha256 = _digest(expected_payload)
     if side.evidence_payload_sha256 != expected_payload_sha256:
         raise ValueError("evidence payload digest does not match exact evidence")
     if measurement.result_sha256 != expected_payload_sha256:
@@ -504,6 +536,7 @@ class SideEvidenceReplay(CompatibilityContract):
     )
     measurement_value: MeasurementValue
     evidence_payload_sha256: Sha256
+    evidence_envelope: DrawerEvidenceEnvelope
 
     @model_validator(mode="after")
     def exact_replay_evidence(self) -> SideEvidenceReplay:
@@ -557,8 +590,6 @@ def _validate_request_replay(request: Any) -> None:
                 or request.evaluated_at >= fresh_until
             ):
                 raise ValueError("asset authority is stale or not yet valid")
-            if asset.authorization != asset.replay_authorization(request.evaluated_at):
-                raise ValueError("asset authorization replay failed at evaluated_at")
 
 
 class DrawerReplayRequest(CompatibilityContract):
@@ -815,19 +846,10 @@ def _jsonable(value: Any) -> Any:
     return value
 
 
-def _side_evidence_payload_sha256(side: SideEvidenceInput) -> str:
+def _side_evidence_payload_sha256(side: Any) -> str:
     """Digest every caller-visible scientific value in the verified result."""
 
-    return _digest(
-        {
-            "schema_version": "traceback.drawer-evidence-payload.v1",
-            "measurement_value": side.measurement_value,
-            "denominator": side.denominator,
-            "counts": side.counts,
-            "filters": side.filters,
-            "limitations": side.limitations,
-        }
-    )
+    return _digest(side.evidence_envelope.payload)
 
 
 def _asset_identity(asset: BoundAssetEvidence) -> AssetLineageIdentity:
@@ -1050,7 +1072,10 @@ def _derive_drawer_payload(
     return payload
 
 
-def build_provenance_drawer(request: DrawerBuildRequest) -> ProvenanceDrawer:
+def build_provenance_drawer(
+    request: DrawerBuildRequest,
+    verification_context: DrawerVerificationContext,
+) -> ProvenanceDrawer:
     """Build one deterministic read model after exact replay and freshness checks."""
 
     try:
@@ -1059,6 +1084,10 @@ def build_provenance_drawer(request: DrawerBuildRequest) -> ProvenanceDrawer:
         )
     except (ValidationError, ValueError, TypeError) as exc:
         raise DrawerError("drawer build request is invalid") from exc
+    try:
+        _verify_external_authority(request, verification_context)
+    except (ValueError, KeyError) as exc:
+        raise DrawerError("drawer external verification failed") from exc
     replay_request = DrawerReplayRequest(
         evaluated_at=request.evaluated_at,
         left=_side_replay(request.left),
@@ -1085,6 +1114,7 @@ def _side_replay(side: SideEvidenceInput) -> SideEvidenceReplay:
         limitations=side.limitations,
         measurement_value=side.measurement_value,
         evidence_payload_sha256=side.evidence_payload_sha256,
+        evidence_envelope=side.evidence_envelope,
     )
 
 
@@ -1096,7 +1126,9 @@ def canonical_drawer_bytes(value: CompatibilityContract) -> bytes:
 
 
 def drawer_from_canonical_bytes(
-    model: type[DrawerT], content: bytes
+    model: type[DrawerT],
+    content: bytes,
+    verification_context: DrawerVerificationContext,
 ) -> DrawerT:
     limit = (
         MAX_CANONICAL_DRAWER_BYTES
@@ -1109,11 +1141,84 @@ def drawer_from_canonical_bytes(
         raw = json.loads(content)
         _validate_untrusted_strings(raw)
         parsed = model.model_validate_json(content)
+        if isinstance(parsed, ProvenanceDrawer):
+            _verify_external_authority(
+                parsed.replay_request, verification_context
+            )
     except (json.JSONDecodeError, ValidationError, ValueError, TypeError) as exc:
         raise DrawerError("drawer contract bytes are invalid or non-canonical") from exc
     if canonical_drawer_bytes(parsed) != content:
         raise DrawerError("drawer contract bytes are invalid or non-canonical")
     return parsed
+
+
+def _verify_external_authority(
+    request: DrawerBuildRequest | DrawerReplayRequest,
+    context: DrawerVerificationContext,
+) -> None:
+    for side in (request.left, request.right):
+        expected = context.expected_results.get(side.measurement.result_id)
+        if expected is None:
+            raise ValueError("result has no independently trusted catalog binding")
+        if isinstance(side, SideEvidenceInput) and expected != side.catalog_result:
+            raise ValueError("input differs from independent catalog authority")
+        manifest_sha256 = (
+            side.catalog_result.bundle_manifest_sha256
+            if isinstance(side, SideEvidenceInput)
+            else side.bundle_manifest_sha256
+        )
+        capability = side.measurement.current_capability
+        if (
+            expected.result_id != side.measurement.result_id
+            or expected.bundle_sha256 != side.measurement.bundle_sha256
+            or expected.bundle_manifest_sha256 != manifest_sha256
+            or expected.method_ref != side.measurement.method.method_ref
+            or expected.method_definition_sha256
+            != side.measurement.method_definition_sha256
+            or expected.registry_sha256 != capability.registry_sha256
+            or expected.registry_version != capability.registry_version
+            or expected.authority_head_sha256 != capability.authority_head_sha256
+            or expected.authority_revision != capability.authority_revision
+            or expected.authority_scope != capability.authority_scope
+            or expected.capability_as_of != capability.as_of
+            or expected.qualification_state.value
+            != capability.qualification_state.value
+            or expected.display_role != capability.display_role
+            or expected.research_inspectable != capability.research_inspectable
+            or expected.current_provider_eligible
+            != capability.current_provider_eligible
+        ):
+            raise ValueError("result does not match independent catalog authority")
+        verify_signature(
+            canonical_json_bytes(side.evidence_envelope.payload),
+            side.evidence_envelope.signature,
+            context.result_trust_store,
+            purpose=KeyPurpose.RESULT,
+        )
+        for asset in side.assets:
+            external = context.release_authorizations.get(
+                asset.authorization.asset_reference_sha256
+            )
+            if external is None:
+                raise ValueError("asset has no independent release authority")
+            if external.envelope != asset.release_envelope:
+                raise ValueError("asset envelope differs from independent authority")
+            replayed = verify_release_asset_authorization(
+                external.envelope,
+                external.trust_store,
+                external.role_policy,
+                external.authority_head,
+                expected_binding=external.expected_binding,
+                expected_package_sha256=external.expected_package_sha256,
+                expected_asset_id=asset.method_asset.asset_id,
+                expected_asset_version=asset.method_asset.version,
+                expected_asset_reference_sha256=(
+                    asset.authorization.asset_reference_sha256
+                ),
+                now=request.evaluated_at,
+            )
+            if replayed != asset.authorization:
+                raise ValueError("asset does not match independent release authority")
 
 
 def _validate_untrusted_strings(value: Any, *, field_name: str | None = None) -> None:
@@ -1143,9 +1248,12 @@ __all__ = [
     "DenominatorEvidence",
     "DifferenceState",
     "DrawerBuildRequest",
+    "DrawerEvidenceEnvelope",
+    "DrawerEvidencePayload",
     "DrawerError",
     "DrawerReplayRequest",
     "DrawerSideIdentity",
+    "DrawerVerificationContext",
     "FieldLineage",
     "FilterEvidence",
     "LimitationEvidence",

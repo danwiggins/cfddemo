@@ -20,6 +20,10 @@
     "full_iupac_sequence",
     "asset_authorization_reassertion",
     "oversized_canonical_input",
-    "duplicate_count_id"
+    "duplicate_count_id",
+    "self_signed_result_evidence",
+    "embedded_release_self_root",
+    "embedded_iupac_sequence",
+    "deep_percent_encoding"
   ]
 }

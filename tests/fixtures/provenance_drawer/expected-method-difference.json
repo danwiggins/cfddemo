@@ -1,9 +1,9 @@
 {
   "schema_version": "traceback.provenance-drawer-fixture.v1",
   "synthetic_only": true,
-  "canonical_bytes_sha256": "27cf95fa7b8c0241dcaf7113d82fdf64edba780cf45efa66955a5a5959c65174",
-  "drawer_sha256": "d33c7f8674399fb3183810a7d1db29c9e8d96b236809bd51d275cf905d7ac22f",
-  "compatibility_decision_sha256": "a187b451bb20a9d84c372fa873218efd4c64818f362e79aa1099005f6c3c3da7",
+  "canonical_bytes_sha256": "529db050cff99aa4a3aa28602ad660dd1140e137715183721ad96caa2f187fba",
+  "drawer_sha256": "3765e1966d3accd98b138a18a32b7c8a25ee1a77f291e217a7baa24216386634",
+  "compatibility_decision_sha256": "41f379ce34ebcb37ee4b667de97fc85467377b05bb5b1d0e65f0d44631f78097",
   "outcome": "incompatible",
   "mismatch_keys": [
     "method_definition_sha256",
