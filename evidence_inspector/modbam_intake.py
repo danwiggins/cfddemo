@@ -10,9 +10,11 @@ from __future__ import annotations
 import hashlib
 import os
 import re
+import shutil
 import stat
+import tempfile
 from pathlib import Path
-from typing import Annotated, Literal, Sequence
+from typing import Annotated, BinaryIO, Literal, Protocol, Sequence
 
 from pydantic import Field, StringConstraints, model_validator
 
@@ -22,6 +24,10 @@ INTAKE_SCHEMA_VERSION = "traceback.modbam-intake.v1"
 INTAKE_METHOD_ID = "traceback.modbam-intake.full-scan.v1"
 ALIGNMENT_PLAN_SCHEMA_VERSION = "traceback.modbam-alignment-plan.v1"
 ALIGNMENT_METHOD_ID = "traceback.modbam-align-grch38.preserve-mm-ml-mn.v1"
+SAMTOOLS_SORT_MEMORY_BYTES = 268_435_456
+_BAM_FIXED_OVERHEAD_BYTES = 1_048_576
+_ALIGNED_RECORD_OVERHEAD_BYTES = 512
+_INDEX_MINIMUM_BYTES = 1_048_576
 
 ShortText = Annotated[
     str, StringConstraints(strip_whitespace=True, min_length=1, max_length=128)
@@ -38,6 +44,12 @@ class ExactToolIdentity(StrictModel):
     name: Identifier
     version: ShortText
     executable_sha256: Sha256
+
+
+class RegisteredToolIdentity(ExactToolIdentity):
+    """Tool identity resolved from the same immutable execution registry."""
+
+    registry_record_sha256: Sha256
 
 
 class BasecallerIdentity(StrictModel):
@@ -73,6 +85,7 @@ class ModbamReadLedger(StrictModel):
     mapped_records: int = Field(ge=0)
     secondary_records: int = Field(ge=0)
     supplementary_records: int = Field(ge=0)
+    unsupported_layout_records: int = Field(ge=0)
     complete_tag_records: int = Field(ge=0)
     incomplete_tag_records: int = Field(ge=0)
     valid_tag_records: int = Field(ge=0)
@@ -88,6 +101,7 @@ class ModbamReadLedger(StrictModel):
             + self.mapped_records
             + self.secondary_records
             + self.supplementary_records
+            + self.unsupported_layout_records
         ):
             raise ValueError("record disposition ledger must reconcile")
         if self.total_records != self.complete_tag_records + self.incomplete_tag_records:
@@ -178,7 +192,9 @@ class RegisteredGrch38Asset(StrictModel):
     """Exact registered GRCh38 reference assets required by the plan."""
 
     asset_id: Identifier
+    version: Identifier
     assembly: Literal["GRCh38"] = "GRCh38"
+    registry_record_sha256: Sha256
     fasta_sha256: Sha256
     fai_sha256: Sha256
     minimap2_index_sha256: Sha256
@@ -188,6 +204,10 @@ class RegisteredGrch38Asset(StrictModel):
 class AlignmentDiskBudget(StrictModel):
     """Explicit byte ceilings checked before execution begins."""
 
+    measurement_method: Literal["shutil.disk_usage.v1"] = "shutil.disk_usage.v1"
+    workspace_mount_sha256: Sha256
+    output_mount_sha256: Sha256
+    measurement_sha256: Sha256
     combined_bam_bytes: int = Field(ge=1)
     sort_temporary_bytes: int = Field(ge=1)
     aligned_bam_bytes: int = Field(ge=1)
@@ -197,18 +217,88 @@ class AlignmentDiskBudget(StrictModel):
 
     @model_validator(mode="after")
     def validate_capacity(self) -> AlignmentDiskBudget:
+        expected_measurement = hashlib.sha256(
+            canonical_json_bytes(
+                {
+                    "measurement_method": self.measurement_method,
+                    "workspace_mount_sha256": self.workspace_mount_sha256,
+                    "output_mount_sha256": self.output_mount_sha256,
+                    "available_workspace_bytes": self.available_workspace_bytes,
+                    "available_output_bytes": self.available_output_bytes,
+                }
+            )
+        ).hexdigest()
+        if self.measurement_sha256 != expected_measurement:
+            raise ValueError("disk capacity measurement digest is invalid")
         workspace_required = self.combined_bam_bytes + self.sort_temporary_bytes
         output_required = self.aligned_bam_bytes + self.index_bytes
         if workspace_required > self.available_workspace_bytes:
             raise ValueError("workspace disk budget is insufficient")
         if output_required > self.available_output_bytes:
             raise ValueError("output disk budget is insufficient")
+        if self.workspace_mount_sha256 == self.output_mount_sha256:
+            shared_required = workspace_required + output_required
+            if shared_required > min(
+                self.available_workspace_bytes,
+                self.available_output_bytes,
+            ):
+                raise ValueError("shared-filesystem disk budget is insufficient")
         return self
+
+
+def measure_alignment_disk_budget(
+    workspace_path: str | Path,
+    output_path: str | Path,
+    *,
+    combined_bam_bytes: int,
+    sort_temporary_bytes: int,
+    aligned_bam_bytes: int,
+    index_bytes: int,
+) -> AlignmentDiskBudget:
+    """Measure local capacity while retaining only private mount fingerprints."""
+
+    workspace = Path(workspace_path).resolve(strict=True)
+    output = Path(output_path).resolve(strict=True)
+    available_workspace = shutil.disk_usage(workspace).free
+    available_output = shutil.disk_usage(output).free
+    workspace_digest = hashlib.sha256(os.fsencode(workspace)).hexdigest()
+    output_digest = hashlib.sha256(os.fsencode(output)).hexdigest()
+    payload = {
+        "measurement_method": "shutil.disk_usage.v1",
+        "workspace_mount_sha256": workspace_digest,
+        "output_mount_sha256": output_digest,
+        "available_workspace_bytes": available_workspace,
+        "available_output_bytes": available_output,
+    }
+    return AlignmentDiskBudget(
+        workspace_mount_sha256=workspace_digest,
+        output_mount_sha256=output_digest,
+        measurement_sha256=hashlib.sha256(canonical_json_bytes(payload)).hexdigest(),
+        combined_bam_bytes=combined_bam_bytes,
+        sort_temporary_bytes=sort_temporary_bytes,
+        aligned_bam_bytes=aligned_bam_bytes,
+        index_bytes=index_bytes,
+        available_workspace_bytes=available_workspace,
+        available_output_bytes=available_output,
+    )
+
+
+class AlignmentDiskMinimums(StrictModel):
+    """Conservative admission minima, not scientific or compression estimates."""
+
+    policy_id: Literal["traceback.modbam-disk-minimums.v1"] = (
+        "traceback.modbam-disk-minimums.v1"
+    )
+    combined_bam_bytes: int = Field(ge=1)
+    sort_temporary_bytes: int = Field(ge=1)
+    aligned_bam_bytes: int = Field(ge=1)
+    index_bytes: int = Field(ge=1)
+    samtools_sort_memory_bytes: Literal[268435456] = SAMTOOLS_SORT_MEMORY_BYTES
 
 
 class ExecutionStage(StrictModel):
     id: Identifier
-    tool: ExactToolIdentity
+    tool: RegisteredToolIdentity
     argv: tuple[str, ...] = Field(min_length=2)
     stdin_from_stage: Identifier | None = None
 
@@ -216,6 +306,25 @@ class ExecutionStage(StrictModel):
 class PostRunCheck(StrictModel):
     id: Identifier
     requirement: ShortText
+
+
+class AlignmentRegistryIdentity(StrictModel):
+    registry_id: Identifier
+    version: Identifier
+    immutable_snapshot_sha256: Sha256
+
+
+class AlignmentResourceRegistry(Protocol):
+    """Trusted resolver boundary for reference and executable attestations."""
+
+    @property
+    def identity(self) -> AlignmentRegistryIdentity: ...
+
+    def resolve_grch38(
+        self, asset_id: str, version: str
+    ) -> RegisteredGrch38Asset: ...
+
+    def resolve_tool(self, name: str, version: str) -> RegisteredToolIdentity: ...
 
 
 class ModbamAlignmentPlan(StrictModel):
@@ -228,10 +337,14 @@ class ModbamAlignmentPlan(StrictModel):
     method_id: Literal[
         "traceback.modbam-align-grch38.preserve-mm-ml-mn.v1"
     ] = ALIGNMENT_METHOD_ID
+    plan_sha256: Sha256
     input_manifest_sha256: Sha256
+    resource_registry: AlignmentRegistryIdentity
     expected_chunk_count: int = Field(ge=1)
+    expected_input_bytes: int = Field(ge=1)
     expected_record_count: int = Field(ge=1)
     reference: RegisteredGrch38Asset
+    disk_minimums: AlignmentDiskMinimums
     disk_budget: AlignmentDiskBudget
     estimated_peak_workspace_bytes: int = Field(ge=1)
     estimated_output_bytes: int = Field(ge=1)
@@ -241,6 +354,25 @@ class ModbamAlignmentPlan(StrictModel):
 
     @model_validator(mode="after")
     def reconcile_disk_estimates(self) -> ModbamAlignmentPlan:
+        plan_payload = self.model_dump(mode="json", exclude={"plan_sha256"})
+        if self.plan_sha256 != hashlib.sha256(
+            canonical_json_bytes(plan_payload)
+        ).hexdigest():
+            raise ValueError("alignment plan digest is invalid")
+        if self.disk_minimums != _disk_minimums(
+            self.expected_input_bytes, self.expected_record_count
+        ):
+            raise ValueError("disk minima do not match the sealed admission policy")
+        for field_name in (
+            "combined_bam_bytes",
+            "sort_temporary_bytes",
+            "aligned_bam_bytes",
+            "index_bytes",
+        ):
+            if getattr(self.disk_budget, field_name) < getattr(
+                self.disk_minimums, field_name
+            ):
+                raise ValueError("disk ceiling is below the derived minimum")
         if self.estimated_peak_workspace_bytes != (
             self.disk_budget.combined_bam_bytes
             + self.disk_budget.sort_temporary_bytes
@@ -250,17 +382,147 @@ class ModbamAlignmentPlan(StrictModel):
             self.disk_budget.aligned_bam_bytes + self.disk_budget.index_bytes
         ):
             raise ValueError("output estimate must reconcile with byte ceilings")
+        if [stage.id for stage in self.stages] != [
+            "combine_unaligned_chunks",
+            "emit_tagged_fastq",
+            "align_grch38",
+            "coordinate_sort",
+            "build_index",
+        ]:
+            raise ValueError("alignment stages must match the sealed five-stage topology")
+        combine, emit, align, sort_stage, index = self.stages
+        if any(
+            stage.tool.name != "samtools"
+            for stage in (combine, emit, sort_stage, index)
+        ) or align.tool.name != "minimap2":
+            raise ValueError("stage executable identity does not match sealed tool")
+        chunk_args = tuple(
+            f"/private/input/chunk-{order:04d}.bam"
+            for order in range(self.expected_chunk_count)
+        )
+        expected_argv = (
+            (
+                "/private/tools/samtools",
+                "cat",
+                "-o",
+                "/private/work/combined.unaligned.bam",
+                *chunk_args,
+            ),
+            (
+                "/private/tools/samtools",
+                "fastq",
+                "-T",
+                "MM,ML,MN",
+                "/private/work/combined.unaligned.bam",
+            ),
+            (
+                "/private/tools/minimap2",
+                "-a",
+                "-x",
+                "map-ont",
+                "--secondary=no",
+                "-y",
+                "/private/reference/grch38.mmi",
+                "-",
+            ),
+            (
+                "/private/tools/samtools",
+                "sort",
+                "-@",
+                "1",
+                "-m",
+                "256M",
+                "-T",
+                "/private/work/sort",
+                "-o",
+                "/private/output/aligned.sorted.bam",
+                "-",
+            ),
+            (
+                "/private/tools/samtools",
+                "index",
+                "-b",
+                "/private/output/aligned.sorted.bam",
+                "/private/output/aligned.sorted.bam.bai",
+            ),
+        )
+        if tuple(stage.argv for stage in self.stages) != expected_argv:
+            raise ValueError("alignment argv does not match the sealed method")
+        if tuple(stage.stdin_from_stage for stage in self.stages) != (
+            None,
+            None,
+            "emit_tagged_fastq",
+            "align_grch38",
+            None,
+        ):
+            raise ValueError("alignment pipe topology does not match the sealed method")
         return self
 
 
-def _sha256_path(path: Path) -> str:
+def _disk_minimums(input_bytes: int, record_count: int) -> AlignmentDiskMinimums:
+    """Derive v1 byte floors from input bytes and one-output-record policy."""
+
+    combined = input_bytes + _BAM_FIXED_OVERHEAD_BYTES
+    sort_temporary = input_bytes * 2 + _BAM_FIXED_OVERHEAD_BYTES
+    aligned = (
+        input_bytes * 2
+        + record_count * _ALIGNED_RECORD_OVERHEAD_BYTES
+        + _BAM_FIXED_OVERHEAD_BYTES
+    )
+    index = max(_INDEX_MINIMUM_BYTES, aligned // 32)
+    return AlignmentDiskMinimums(
+        combined_bam_bytes=combined,
+        sort_temporary_bytes=sort_temporary,
+        aligned_bam_bytes=aligned,
+        index_bytes=index,
+    )
+
+
+def _sha256_handle(handle: BinaryIO) -> str:
     digest = hashlib.sha256()
-    flags = os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0)
-    descriptor = os.open(path, flags)
-    with os.fdopen(descriptor, "rb") as handle:
-        for block in iter(lambda: handle.read(1024 * 1024), b""):
-            digest.update(block)
+    handle.seek(0)
+    for block in iter(lambda: handle.read(1024 * 1024), b""):
+        digest.update(block)
+    handle.seek(0)
     return digest.hexdigest()
+
+
+def _source_stat_identity(details: os.stat_result) -> tuple[int, ...]:
+    """Fields that must remain stable while a private snapshot is created."""
+
+    return (
+        details.st_dev,
+        details.st_ino,
+        details.st_mode,
+        details.st_size,
+        details.st_mtime_ns,
+        details.st_ctime_ns,
+    )
+
+
+def _snapshot_source(
+    source: BinaryIO,
+    snapshot: BinaryIO,
+    *,
+    max_bytes: int,
+) -> tuple[str, int]:
+    """Copy and hash one already-open source into an unlinked private file."""
+
+    digest = hashlib.sha256()
+    copied = 0
+    source.seek(0)
+    for block in iter(lambda: source.read(1024 * 1024), b""):
+        copied += len(block)
+        if copied > max_bytes:
+            raise ModbamIntakeError(
+                "intake rejected: a chunk violates its byte bound"
+            )
+        snapshot.write(block)
+        digest.update(block)
+    snapshot.flush()
+    os.fsync(snapshot.fileno())
+    snapshot.seek(0)
+    return digest.hexdigest(), copied
 
 
 _MM_PREFIX = re.compile(
@@ -364,148 +626,214 @@ def inspect_modbam_chunks(
 
     paths = tuple(Path(item) for item in input_paths)
     file_ids: set[tuple[int, int]] = set()
-    initial_stats: list[os.stat_result] = []
-    for path in paths:
-        try:
-            details = path.lstat()
-            if stat.S_ISLNK(details.st_mode) or not stat.S_ISREG(details.st_mode):
-                raise OSError
-            if not os.access(path, os.R_OK):
-                raise OSError
-            if details.st_size <= 0 or details.st_size > bounds.max_chunk_bytes:
-                raise ModbamIntakeError("intake rejected: a chunk violates its byte bound")
-            identity = (details.st_dev, details.st_ino)
-            if identity in file_ids:
-                raise ModbamIntakeError("intake rejected: duplicate file identity")
-            file_ids.add(identity)
-            initial_stats.append(details)
-        except ModbamIntakeError:
-            raise
-        except OSError:
-            raise ModbamIntakeError(
-                "intake rejected: a chunk is not a readable regular file"
-            ) from None
-
-    if sum(details.st_size for details in initial_stats) > bounds.max_total_bytes:
-        raise ModbamIntakeError("intake rejected: aggregate bytes exceed declared bound")
-
     chunks: list[PrivateModbamChunk] = []
     content_ids: set[str] = set()
     scanned_records = 0
+    aggregate_bytes = 0
     failure_counts: dict[str, int] = {}
     try:
         import pysam
 
         for order, path in enumerate(paths):
-            content_sha256 = _sha256_path(path)
-            if content_sha256 in content_ids:
-                raise ModbamIntakeError("intake rejected: duplicate content identity")
-            content_ids.add(content_sha256)
             flags = os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0)
-            descriptor = os.open(path, flags)
-            opened_stat = os.fstat(descriptor)
-            expected_stat = initial_stats[order]
-            if (
-                opened_stat.st_dev,
-                opened_stat.st_ino,
-                opened_stat.st_size,
-                opened_stat.st_mtime_ns,
-            ) != (
-                expected_stat.st_dev,
-                expected_stat.st_ino,
-                expected_stat.st_size,
-                expected_stat.st_mtime_ns,
-            ):
-                os.close(descriptor)
-                raise ModbamIntakeError("intake rejected: a chunk changed during validation")
-            with os.fdopen(descriptor, "rb") as raw_handle, pysam.AlignmentFile(
-                raw_handle, "rb", check_sq=False
-            ) as alignment:
+            try:
+                descriptor = os.open(path, flags)
+            except OSError:
+                raise ModbamIntakeError(
+                    "intake rejected: a chunk is not a readable regular file"
+                ) from None
+            with os.fdopen(descriptor, "rb") as source:
+                opened_stat = os.fstat(source.fileno())
                 try:
-                    safe_header, private_header_sha256 = _header_identities(alignment)
-                except (AttributeError, TypeError, ValueError):
-                    raise ModbamIntakeError(
-                        "intake rejected: BAMs are not uniformly unaligned "
-                        "with compatible safe headers"
-                    ) from None
-                counts = {
-                    "total_records": 0,
-                    "primary_unmapped_records": 0,
-                    "mapped_records": 0,
-                    "secondary_records": 0,
-                    "supplementary_records": 0,
-                    "complete_tag_records": 0,
-                    "incomplete_tag_records": 0,
-                    "valid_tag_records": 0,
-                    "invalid_tag_records": 0,
-                    "missing_mm_records": 0,
-                    "missing_ml_records": 0,
-                    "missing_mn_records": 0,
-                }
-                for record in alignment.fetch(until_eof=True):
-                    counts["total_records"] += 1
-                    scanned_records += 1
-                    if scanned_records > bounds.max_records:
-                        raise ModbamIntakeError(
-                            "intake rejected: record count exceeds declared bound"
-                        )
-                    if bool(record.is_secondary):
-                        counts["secondary_records"] += 1
-                    elif bool(record.is_supplementary):
-                        counts["supplementary_records"] += 1
-                    elif not bool(record.is_unmapped) or record.reference_id != -1:
-                        counts["mapped_records"] += 1
-                    else:
-                        counts["primary_unmapped_records"] += 1
-                    valid, present = _tags_valid(record)
-                    if all(present):
-                        counts["complete_tag_records"] += 1
-                        counts["valid_tag_records" if valid else "invalid_tag_records"] += 1
-                    else:
-                        counts["incomplete_tag_records"] += 1
-                    for tag, is_present in zip(("mm", "ml", "mn"), present, strict=True):
-                        if not is_present:
-                            counts[f"missing_{tag}_records"] += 1
-                final_stat = os.fstat(raw_handle.fileno())
-                if (
-                    final_stat.st_dev,
-                    final_stat.st_ino,
-                    final_stat.st_size,
-                    final_stat.st_mtime_ns,
-                ) != (
-                    opened_stat.st_dev,
-                    opened_stat.st_ino,
-                    opened_stat.st_size,
-                    opened_stat.st_mtime_ns,
-                ):
+                    named_stat = os.stat(path, follow_symlinks=False)
+                except OSError:
                     raise ModbamIntakeError(
                         "intake rejected: a chunk changed during validation"
+                    ) from None
+                if (
+                    not stat.S_ISREG(opened_stat.st_mode)
+                    or stat.S_ISLNK(named_stat.st_mode)
+                    or (named_stat.st_dev, named_stat.st_ino)
+                    != (opened_stat.st_dev, opened_stat.st_ino)
+                ):
+                    raise ModbamIntakeError(
+                        "intake rejected: a chunk is not a readable regular file"
                     )
-                ledger = ModbamReadLedger(**counts)
-                if ledger.total_records == 0:
-                    failure_counts["empty_chunks"] = failure_counts.get("empty_chunks", 0) + 1
-                if ledger.primary_unmapped_records != ledger.total_records:
-                    failure_counts["non_primary_unmapped_records"] = (
-                        failure_counts.get("non_primary_unmapped_records", 0)
-                        + ledger.total_records
-                        - ledger.primary_unmapped_records
+                if (
+                    opened_stat.st_size <= 0
+                    or opened_stat.st_size > bounds.max_chunk_bytes
+                ):
+                    raise ModbamIntakeError(
+                        "intake rejected: a chunk violates its byte bound"
                     )
-                if ledger.valid_tag_records != ledger.total_records:
-                    failure_counts["invalid_or_missing_tag_records"] = (
-                        failure_counts.get("invalid_or_missing_tag_records", 0)
-                        + ledger.total_records
-                        - ledger.valid_tag_records
+                identity = (opened_stat.st_dev, opened_stat.st_ino)
+                if identity in file_ids:
+                    raise ModbamIntakeError(
+                        "intake rejected: duplicate file identity"
                     )
-                chunks.append(
-                    PrivateModbamChunk(
-                        order=order,
-                        size_bytes=opened_stat.st_size,
-                        content_sha256=content_sha256,
-                        private_header_sha256=private_header_sha256,
-                        safe_header=safe_header,
-                        ledger=ledger,
+                file_ids.add(identity)
+                aggregate_bytes += opened_stat.st_size
+                if aggregate_bytes > bounds.max_total_bytes:
+                    raise ModbamIntakeError(
+                        "intake rejected: aggregate bytes exceed declared bound"
                     )
-                )
+
+                with tempfile.TemporaryFile(mode="w+b") as snapshot:
+                    content_sha256, copied_bytes = _snapshot_source(
+                        source,
+                        snapshot,
+                        max_bytes=bounds.max_chunk_bytes,
+                    )
+                    if (
+                        copied_bytes != opened_stat.st_size
+                        or _source_stat_identity(os.fstat(source.fileno()))
+                        != _source_stat_identity(opened_stat)
+                    ):
+                        raise ModbamIntakeError(
+                            "intake rejected: a chunk changed during validation"
+                        )
+                    if content_sha256 in content_ids:
+                        raise ModbamIntakeError(
+                            "intake rejected: duplicate content identity"
+                        )
+                    content_ids.add(content_sha256)
+                    snapshot_stat = os.fstat(snapshot.fileno())
+                    with pysam.AlignmentFile(
+                        snapshot,
+                        "rb",
+                        check_sq=False,
+                    ) as alignment:
+                        try:
+                            safe_header, private_header_sha256 = _header_identities(
+                                alignment
+                            )
+                        except (AttributeError, TypeError, ValueError):
+                            raise ModbamIntakeError(
+                                "intake rejected: BAMs are not uniformly unaligned "
+                                "with compatible safe headers"
+                            ) from None
+                        counts = {
+                            "total_records": 0,
+                            "primary_unmapped_records": 0,
+                            "mapped_records": 0,
+                            "secondary_records": 0,
+                            "supplementary_records": 0,
+                            "unsupported_layout_records": 0,
+                            "complete_tag_records": 0,
+                            "incomplete_tag_records": 0,
+                            "valid_tag_records": 0,
+                            "invalid_tag_records": 0,
+                            "missing_mm_records": 0,
+                            "missing_ml_records": 0,
+                            "missing_mn_records": 0,
+                        }
+                        for record in alignment.fetch(until_eof=True):
+                            counts["total_records"] += 1
+                            scanned_records += 1
+                            if scanned_records > bounds.max_records:
+                                raise ModbamIntakeError(
+                                    "intake rejected: record count exceeds "
+                                    "declared bound"
+                                )
+                            if bool(record.is_secondary):
+                                counts["secondary_records"] += 1
+                            elif bool(record.is_supplementary):
+                                counts["supplementary_records"] += 1
+                            elif (
+                                bool(record.is_reverse)
+                                or bool(record.is_paired)
+                                or record.next_reference_id != -1
+                                or record.next_reference_start != -1
+                                or record.template_length != 0
+                            ):
+                                counts["unsupported_layout_records"] += 1
+                            elif (
+                                not bool(record.is_unmapped)
+                                or record.reference_id != -1
+                            ):
+                                counts["mapped_records"] += 1
+                            else:
+                                counts["primary_unmapped_records"] += 1
+                            valid, present = _tags_valid(record)
+                            if all(present):
+                                counts["complete_tag_records"] += 1
+                                validity_key = (
+                                    "valid_tag_records"
+                                    if valid
+                                    else "invalid_tag_records"
+                                )
+                                counts[validity_key] += 1
+                            else:
+                                counts["incomplete_tag_records"] += 1
+                            for tag, is_present in zip(
+                                ("mm", "ml", "mn"),
+                                present,
+                                strict=True,
+                            ):
+                                if not is_present:
+                                    counts[f"missing_{tag}_records"] += 1
+
+                    final_snapshot_stat = os.fstat(snapshot.fileno())
+                    if (
+                        _source_stat_identity(final_snapshot_stat)
+                        != _source_stat_identity(snapshot_stat)
+                        or final_snapshot_stat.st_size != copied_bytes
+                        or _sha256_handle(snapshot) != content_sha256
+                    ):
+                        raise ModbamIntakeError(
+                            "intake rejected: private snapshot integrity failed"
+                        )
+                    if (
+                        _source_stat_identity(os.fstat(source.fileno()))
+                        != _source_stat_identity(opened_stat)
+                    ):
+                        raise ModbamIntakeError(
+                            "intake rejected: a chunk changed during validation"
+                        )
+                    try:
+                        final_named_stat = os.stat(path, follow_symlinks=False)
+                    except OSError:
+                        raise ModbamIntakeError(
+                            "intake rejected: a chunk changed during validation"
+                        ) from None
+                    if (
+                        stat.S_ISLNK(final_named_stat.st_mode)
+                        or (final_named_stat.st_dev, final_named_stat.st_ino)
+                        != (opened_stat.st_dev, opened_stat.st_ino)
+                    ):
+                        raise ModbamIntakeError(
+                            "intake rejected: a chunk changed during validation"
+                        )
+
+                    ledger = ModbamReadLedger(**counts)
+                    if ledger.total_records == 0:
+                        failure_counts["empty_chunks"] = (
+                            failure_counts.get("empty_chunks", 0) + 1
+                        )
+                    if ledger.primary_unmapped_records != ledger.total_records:
+                        failure_counts["non_primary_unmapped_records"] = (
+                            failure_counts.get("non_primary_unmapped_records", 0)
+                            + ledger.total_records
+                            - ledger.primary_unmapped_records
+                        )
+                    if ledger.valid_tag_records != ledger.total_records:
+                        failure_counts["invalid_or_missing_tag_records"] = (
+                            failure_counts.get(
+                                "invalid_or_missing_tag_records", 0
+                            )
+                            + ledger.total_records
+                            - ledger.valid_tag_records
+                        )
+                    chunks.append(
+                        PrivateModbamChunk(
+                            order=order,
+                            size_bytes=copied_bytes,
+                            content_sha256=content_sha256,
+                            private_header_sha256=private_header_sha256,
+                            safe_header=safe_header,
+                            ledger=ledger,
+                        )
+                    )
     except ModbamIntakeError:
         raise
     except Exception as exc:
@@ -548,18 +876,48 @@ def inspect_modbam_chunks(
 def build_grch38_alignment_plan(
     manifest: PrivateModbamManifest,
     *,
-    reference: RegisteredGrch38Asset,
-    samtools: ExactToolIdentity,
-    minimap2: ExactToolIdentity,
+    registry: AlignmentResourceRegistry,
+    reference_id: str,
+    reference_version: str,
+    samtools_version: str,
+    minimap2_version: str,
     disk_budget: AlignmentDiskBudget,
 ) -> ModbamAlignmentPlan:
     """Build, but do not execute, the exact tag-preserving alignment plan."""
 
-    total_bytes = sum(chunk.size_bytes for chunk in manifest.ordered_chunks)
-    if disk_budget.combined_bam_bytes < total_bytes:
+    reference = registry.resolve_grch38(reference_id, reference_version)
+    samtools = registry.resolve_tool("samtools", samtools_version)
+    minimap2 = registry.resolve_tool("minimap2", minimap2_version)
+    if (reference.asset_id, reference.version) != (
+        reference_id,
+        reference_version,
+    ):
         raise ModbamIntakeError(
-            "alignment plan rejected: combined BAM byte ceiling is below input bytes"
+            "alignment plan rejected: registry returned the wrong reference binding"
         )
+    if (samtools.name, samtools.version) != ("samtools", samtools_version):
+        raise ModbamIntakeError(
+            "alignment plan rejected: registry returned the wrong samtools binding"
+        )
+    if (minimap2.name, minimap2.version) != ("minimap2", minimap2_version):
+        raise ModbamIntakeError(
+            "alignment plan rejected: registry returned the wrong minimap2 binding"
+        )
+    total_bytes = sum(chunk.size_bytes for chunk in manifest.ordered_chunks)
+    record_count = sum(
+        chunk.ledger.total_records for chunk in manifest.ordered_chunks
+    )
+    disk_minimums = _disk_minimums(total_bytes, record_count)
+    for field_name in (
+        "combined_bam_bytes",
+        "sort_temporary_bytes",
+        "aligned_bam_bytes",
+        "index_bytes",
+    ):
+        if getattr(disk_budget, field_name) < getattr(disk_minimums, field_name):
+            raise ModbamIntakeError(
+                "alignment plan rejected: a disk ceiling is below its derived minimum"
+            )
     chunk_args = tuple(
         f"/private/input/chunk-{chunk.order:04d}.bam"
         for chunk in manifest.ordered_chunks
@@ -569,7 +927,7 @@ def build_grch38_alignment_plan(
             id="combine_unaligned_chunks",
             tool=samtools,
             argv=(
-                "samtools",
+                "/private/tools/samtools",
                 "cat",
                 "-o",
                 "/private/work/combined.unaligned.bam",
@@ -580,7 +938,7 @@ def build_grch38_alignment_plan(
             id="emit_tagged_fastq",
             tool=samtools,
             argv=(
-                "samtools",
+                "/private/tools/samtools",
                 "fastq",
                 "-T",
                 "MM,ML,MN",
@@ -592,10 +950,11 @@ def build_grch38_alignment_plan(
             tool=minimap2,
             stdin_from_stage="emit_tagged_fastq",
             argv=(
-                "minimap2",
+                "/private/tools/minimap2",
                 "-a",
                 "-x",
                 "map-ont",
+                "--secondary=no",
                 "-y",
                 "/private/reference/grch38.mmi",
                 "-",
@@ -606,8 +965,12 @@ def build_grch38_alignment_plan(
             tool=samtools,
             stdin_from_stage="align_grch38",
             argv=(
-                "samtools",
+                "/private/tools/samtools",
                 "sort",
+                "-@",
+                "1",
+                "-m",
+                "256M",
                 "-T",
                 "/private/work/sort",
                 "-o",
@@ -619,7 +982,7 @@ def build_grch38_alignment_plan(
             id="build_index",
             tool=samtools,
             argv=(
-                "samtools",
+                "/private/tools/samtools",
                 "index",
                 "-b",
                 "/private/output/aligned.sorted.bam",
@@ -659,11 +1022,23 @@ def build_grch38_alignment_plan(
         ),
         PostRunCheck(
             id="record_count",
-            requirement="Output primary-record count equals the manifest total.",
+            requirement=(
+                "Primary mapped plus primary unmapped output count equals the manifest total."
+            ),
         ),
         PostRunCheck(
             id="tag_count",
-            requirement="Every output primary record retains valid MM, ML, and MN tags.",
+            requirement="Every output record retains valid MM, ML, and MN tags.",
+        ),
+        PostRunCheck(
+            id="secondary_count",
+            requirement="Output secondary-record count is zero under --secondary=no.",
+        ),
+        PostRunCheck(
+            id="supplementary_accounting",
+            requirement=(
+                "Supplementary records are reported separately from the primary denominator."
+            ),
         ),
         PostRunCheck(
             id="reference_identity",
@@ -683,16 +1058,19 @@ def build_grch38_alignment_plan(
         ),
         PostRunCheck(
             id="record_partition",
-            requirement="Mapped plus unmapped output records equals the manifest total.",
+            requirement=(
+                "Total output equals primary mapped, primary unmapped, and supplementary."
+            ),
         ),
     )
-    return ModbamAlignmentPlan(
+    plan_fields = dict(
         input_manifest_sha256=manifest.manifest_sha256,
+        resource_registry=registry.identity,
         expected_chunk_count=len(manifest.ordered_chunks),
-        expected_record_count=sum(
-            chunk.ledger.total_records for chunk in manifest.ordered_chunks
-        ),
+        expected_input_bytes=total_bytes,
+        expected_record_count=record_count,
         reference=reference,
+        disk_minimums=disk_minimums,
         disk_budget=disk_budget,
         estimated_peak_workspace_bytes=(
             disk_budget.combined_bam_bytes + disk_budget.sort_temporary_bytes
@@ -704,12 +1082,66 @@ def build_grch38_alignment_plan(
         stages=stages,
         post_run_checks=checks,
     )
+    draft = ModbamAlignmentPlan.model_construct(
+        plan_sha256="0" * 64,
+        **plan_fields,
+    )
+    plan_sha256 = hashlib.sha256(
+        canonical_json_bytes(
+            draft.model_dump(mode="json", exclude={"plan_sha256"})
+        )
+    ).hexdigest()
+    return ModbamAlignmentPlan(plan_sha256=plan_sha256, **plan_fields)
+
+
+def validate_registered_alignment_plan(
+    plan: ModbamAlignmentPlan,
+    registry: AlignmentResourceRegistry,
+) -> ModbamAlignmentPlan:
+    """Re-resolve registry records before executing a serialized plan."""
+
+    if registry.identity != plan.resource_registry:
+        raise ModbamIntakeError(
+            "alignment plan rejected: registry snapshot identity changed"
+        )
+    reference = registry.resolve_grch38(
+        plan.reference.asset_id,
+        plan.reference.version,
+    )
+    samtools = registry.resolve_tool(
+        "samtools",
+        plan.stages[0].tool.version,
+    )
+    minimap2 = registry.resolve_tool(
+        "minimap2",
+        plan.stages[2].tool.version,
+    )
+    if reference != plan.reference:
+        raise ModbamIntakeError(
+            "alignment plan rejected: reference registry binding changed"
+        )
+    if any(
+        stage.tool != samtools
+        for stage in (
+            plan.stages[0],
+            plan.stages[1],
+            plan.stages[3],
+            plan.stages[4],
+        )
+    ) or plan.stages[2].tool != minimap2:
+        raise ModbamIntakeError(
+            "alignment plan rejected: tool registry binding changed"
+        )
+    return plan
 
 
 __all__ = [
     "ALIGNMENT_METHOD_ID",
     "INTAKE_METHOD_ID",
     "AlignmentDiskBudget",
+    "AlignmentDiskMinimums",
+    "AlignmentRegistryIdentity",
+    "AlignmentResourceRegistry",
     "BasecallerIdentity",
     "ExactToolIdentity",
     "IntakeResult",
@@ -718,7 +1150,10 @@ __all__ = [
     "ModbamIntakeError",
     "ModbamIntakeSummary",
     "PrivateModbamManifest",
+    "RegisteredToolIdentity",
     "RegisteredGrch38Asset",
     "build_grch38_alignment_plan",
     "inspect_modbam_chunks",
+    "measure_alignment_disk_budget",
+    "validate_registered_alignment_plan",
 ]

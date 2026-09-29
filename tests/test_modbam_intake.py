@@ -3,21 +3,31 @@
 from __future__ import annotations
 
 import os
+import random
 import shutil
+import subprocess
+import hashlib
 from array import array
 from pathlib import Path
 
 import pytest
 
+import evidence_inspector.modbam_intake as modbam_intake
+from evidence_inspector.models import canonical_json_bytes
 from evidence_inspector.modbam_intake import (
     AlignmentDiskBudget,
+    AlignmentRegistryIdentity,
     BasecallerIdentity,
     ExactToolIdentity,
+    ModbamAlignmentPlan,
     ModbamIntakeBounds,
     ModbamIntakeError,
     RegisteredGrch38Asset,
+    RegisteredToolIdentity,
     build_grch38_alignment_plan,
     inspect_modbam_chunks,
+    measure_alignment_disk_budget,
+    validate_registered_alignment_plan,
 )
 
 ZERO_SHA = "0" * 64
@@ -36,6 +46,41 @@ def _basecaller() -> BasecallerIdentity:
         model_id="synthetic-model",
         model_version="test-version",
     )
+
+
+class SyntheticAlignmentRegistry:
+    def __init__(self) -> None:
+        self.identity = AlignmentRegistryIdentity(
+            registry_id="synthetic-alignment-registry",
+            version="v1",
+            immutable_snapshot_sha256=ZERO_SHA,
+        )
+        self.reference = RegisteredGrch38Asset(
+            asset_id="reference.grch38.test",
+            version="v1",
+            registry_record_sha256=ONE_SHA,
+            fasta_sha256=ZERO_SHA,
+            fai_sha256=ONE_SHA,
+            minimap2_index_sha256=TWO_SHA,
+            sequence_dictionary_sha256=THREE_SHA,
+        )
+
+    def resolve_grch38(
+        self, asset_id: str, version: str
+    ) -> RegisteredGrch38Asset:
+        assert (asset_id, version) == (
+            self.reference.asset_id,
+            self.reference.version,
+        )
+        return self.reference
+
+    def resolve_tool(self, name: str, version: str) -> RegisteredToolIdentity:
+        return RegisteredToolIdentity(
+            name=name,
+            version=version,
+            executable_sha256=TWO_SHA if name == "samtools" else THREE_SHA,
+            registry_record_sha256=ONE_SHA,
+        )
 
 
 def _bounds(**updates: int) -> ModbamIntakeBounds:
@@ -59,6 +104,8 @@ def _write_bam(
     ml: tuple[int, ...] = (200, 190),
     mn_adjustment: int = 0,
     aligned: bool = False,
+    reverse: bool = False,
+    paired: bool = False,
 ) -> None:
     import pysam
 
@@ -77,7 +124,9 @@ def _write_bam(
                 record.reference_start = 1
                 record.cigarstring = f"{len(sequence)}M"
             else:
-                record.flag = 4
+                record.flag = 4 | (16 if reverse else 0)
+                if paired:
+                    record.flag |= 1 | 8
             if "MM" in include_tags:
                 record.set_tag("MM", mm)
             if "ML" in include_tags:
@@ -93,6 +142,17 @@ def _inspect(paths: list[Path], **bound_updates: int):
         bounds=_bounds(**bound_updates),
         scanner=_tool("pysam-scanner", ONE_SHA),
         basecaller=_basecaller(),
+    )
+
+
+def _disk_budget(tmp_path: Path, *, minimum: int = 10_000_000) -> AlignmentDiskBudget:
+    return measure_alignment_disk_budget(
+        tmp_path,
+        tmp_path,
+        combined_bam_bytes=minimum,
+        sort_temporary_bytes=minimum,
+        aligned_bam_bytes=minimum,
+        index_bytes=minimum,
     )
 
 
@@ -187,6 +247,72 @@ def test_rejects_aligned_input_instead_of_reinterpreting_it(tmp_path: Path) -> N
     assert path.name not in str(caught.value)
 
 
+@pytest.mark.parametrize("layout", ["reverse", "paired"])
+def test_rejects_unaligned_layouts_that_cannot_preserve_modification_tags(
+    tmp_path: Path,
+    layout: str,
+) -> None:
+    path = tmp_path / "unsupported-layout.bam"
+    _write_bam(
+        path,
+        reverse=layout == "reverse",
+        paired=layout == "paired",
+    )
+
+    with pytest.raises(ModbamIntakeError, match="non_primary_unmapped_records=1"):
+        _inspect([path])
+
+
+def test_pathname_swap_cannot_cross_bind_digest_and_scan(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    path = tmp_path / "source.bam"
+    replacement = tmp_path / "replacement.bam"
+    _write_bam(path)
+    _write_bam(replacement, sequences=("CCCCC",), mm="C+m?,0;", ml=(190,))
+    original_snapshot = modbam_intake._snapshot_source
+
+    def swap_after_snapshot(source, snapshot, *, max_bytes):
+        result = original_snapshot(source, snapshot, max_bytes=max_bytes)
+        os.replace(replacement, path)
+        return result
+
+    monkeypatch.setattr(modbam_intake, "_snapshot_source", swap_after_snapshot)
+    with pytest.raises(ModbamIntakeError, match="changed during validation") as caught:
+        _inspect([path])
+    assert path.name not in str(caught.value)
+
+
+def test_same_size_rewrite_with_restored_mtime_is_rejected(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    path = tmp_path / "source.bam"
+    _write_bam(path)
+    original_snapshot = modbam_intake._snapshot_source
+
+    def rewrite_after_snapshot(source, snapshot, *, max_bytes):
+        result = original_snapshot(source, snapshot, max_bytes=max_bytes)
+        before = path.stat()
+        with path.open("r+b") as handle:
+            handle.seek(-1, os.SEEK_END)
+            final_byte = handle.read(1)
+            handle.seek(-1, os.SEEK_END)
+            handle.write(bytes([final_byte[0] ^ 1]))
+            handle.flush()
+            os.fsync(handle.fileno())
+        os.utime(path, ns=(before.st_atime_ns, before.st_mtime_ns))
+        assert path.stat().st_size == before.st_size
+        assert path.stat().st_mtime_ns == before.st_mtime_ns
+        return result
+
+    monkeypatch.setattr(modbam_intake, "_snapshot_source", rewrite_after_snapshot)
+    with pytest.raises(ModbamIntakeError, match="changed during validation") as caught:
+        _inspect([path])
+    assert path.name not in str(caught.value)
+
+
 def test_rejects_duplicate_file_and_content_identities(tmp_path: Path) -> None:
     original = tmp_path / "one.bam"
     copied = tmp_path / "two.bam"
@@ -234,28 +360,16 @@ def test_alignment_plan_binds_tools_reference_disk_and_post_run_checks(
     path = tmp_path / "private.bam"
     _write_bam(path)
     manifest = _inspect([path]).private_manifest
-    reference = RegisteredGrch38Asset(
-        asset_id="reference.grch38.test",
-        fasta_sha256=ZERO_SHA,
-        fai_sha256=ONE_SHA,
-        minimap2_index_sha256=TWO_SHA,
-        sequence_dictionary_sha256=THREE_SHA,
-    )
     total_bytes = manifest.ordered_chunks[0].size_bytes
-    budget = AlignmentDiskBudget(
-        combined_bam_bytes=total_bytes,
-        sort_temporary_bytes=total_bytes * 2,
-        aligned_bam_bytes=total_bytes * 2,
-        index_bytes=1,
-        available_workspace_bytes=total_bytes * 3,
-        available_output_bytes=total_bytes * 2 + 1,
-    )
+    budget = _disk_budget(tmp_path)
 
     plan = build_grch38_alignment_plan(
         manifest,
-        reference=reference,
-        samtools=_tool("samtools", TWO_SHA),
-        minimap2=_tool("minimap2", THREE_SHA),
+        registry=SyntheticAlignmentRegistry(),
+        reference_id="reference.grch38.test",
+        reference_version="v1",
+        samtools_version="test-version",
+        minimap2_version="test-version",
         disk_budget=budget,
     )
 
@@ -269,8 +383,10 @@ def test_alignment_plan_binds_tools_reference_disk_and_post_run_checks(
     ]
     assert plan.stages[1].argv[2:4] == ("-T", "MM,ML,MN")
     assert "-y" in plan.stages[2].argv
-    assert plan.estimated_peak_workspace_bytes == total_bytes * 3
-    assert plan.estimated_output_bytes == total_bytes * 2 + 1
+    assert "--secondary=no" in plan.stages[2].argv
+    assert plan.expected_input_bytes == total_bytes
+    assert plan.estimated_peak_workspace_bytes == 20_000_000
+    assert plan.estimated_output_bytes == 20_000_000
     assert {check.id for check in plan.pre_run_checks} == {
         "input_identity",
         "tool_identity",
@@ -281,6 +397,8 @@ def test_alignment_plan_binds_tools_reference_disk_and_post_run_checks(
         "input_digest_recheck",
         "record_count",
         "tag_count",
+        "secondary_count",
+        "supplementary_accounting",
         "reference_identity",
         "sort_order",
         "index_integrity",
@@ -289,30 +407,144 @@ def test_alignment_plan_binds_tools_reference_disk_and_post_run_checks(
     serialized = plan.model_dump_json()
     assert str(tmp_path) not in serialized
     assert path.name not in serialized
+    assert validate_registered_alignment_plan(
+        ModbamAlignmentPlan.model_validate_json(serialized),
+        SyntheticAlignmentRegistry(),
+    ) == plan
+
+    for stage_index, argv_index, replacement in (
+        (1, 3, "MM,ML"),
+        (2, 4, "--secondary=yes"),
+        (2, 6, "/private/reference/unregistered.mmi"),
+    ):
+        payload = plan.model_dump(mode="json")
+        payload["stages"][stage_index]["argv"][argv_index] = replacement
+        with pytest.raises(ValueError, match="plan digest"):
+            ModbamAlignmentPlan.model_validate(payload)
+
+    payload = plan.model_dump(mode="json")
+    payload["stages"][3]["stdin_from_stage"] = "emit_tagged_fastq"
+    payload["plan_sha256"] = hashlib.sha256(
+        canonical_json_bytes(
+            {key: value for key, value in payload.items() if key != "plan_sha256"}
+        )
+    ).hexdigest()
+    with pytest.raises(ValueError, match="pipe topology"):
+        ModbamAlignmentPlan.model_validate(payload)
+
+    payload = plan.model_dump(mode="json")
+    payload["reference"]["fasta_sha256"] = THREE_SHA
+    payload["plan_sha256"] = hashlib.sha256(
+        canonical_json_bytes(
+            {key: value for key, value in payload.items() if key != "plan_sha256"}
+        )
+    ).hexdigest()
+    rebound = ModbamAlignmentPlan.model_validate(payload)
+    with pytest.raises(ModbamIntakeError, match="reference registry binding"):
+        validate_registered_alignment_plan(rebound, SyntheticAlignmentRegistry())
 
 
 def test_alignment_plan_rejects_understated_disk_ceiling(tmp_path: Path) -> None:
     path = tmp_path / "private.bam"
     _write_bam(path)
     manifest = _inspect([path]).private_manifest
-    with pytest.raises(ModbamIntakeError, match="below input bytes"):
+    with pytest.raises(ModbamIntakeError, match="derived minimum"):
         build_grch38_alignment_plan(
             manifest,
-            reference=RegisteredGrch38Asset(
-                asset_id="reference.grch38.test",
-                fasta_sha256=ZERO_SHA,
-                fai_sha256=ONE_SHA,
-                minimap2_index_sha256=TWO_SHA,
-                sequence_dictionary_sha256=THREE_SHA,
-            ),
-            samtools=_tool("samtools", TWO_SHA),
-            minimap2=_tool("minimap2", THREE_SHA),
-            disk_budget=AlignmentDiskBudget(
+            registry=SyntheticAlignmentRegistry(),
+            reference_id="reference.grch38.test",
+            reference_version="v1",
+            samtools_version="test-version",
+            minimap2_version="test-version",
+            disk_budget=measure_alignment_disk_budget(
+                tmp_path,
+                tmp_path,
                 combined_bam_bytes=1,
                 sort_temporary_bytes=1,
                 aligned_bam_bytes=1,
                 index_bytes=1,
-                available_workspace_bytes=2,
-                available_output_bytes=2,
             ),
         )
+
+
+@pytest.mark.skipif(
+    shutil.which("samtools") is None or shutil.which("minimap2") is None,
+    reason="local golden pipeline requires samtools and minimap2",
+)
+def test_real_alignment_pipeline_preserves_forward_mm_ml_mn_tags(
+    tmp_path: Path,
+) -> None:
+    import pysam
+
+    generator = random.Random(7)
+    reference_sequence = "".join(
+        generator.choice("ACGT") for _ in range(6_000)
+    )
+    read_sequence = reference_sequence[2_000:3_000]
+    reference = tmp_path / "reference.fa"
+    index = tmp_path / "reference.mmi"
+    unaligned = tmp_path / "unaligned.bam"
+    fastq = tmp_path / "tagged.fastq"
+    sam = tmp_path / "aligned.sam"
+    aligned = tmp_path / "aligned.sorted.bam"
+    reference.write_text(f">synthetic-contig\n{reference_sequence}\n")
+    _write_bam(
+        unaligned,
+        sequences=(read_sequence,),
+        mm="C+m?,0;",
+        ml=(211,),
+    )
+
+    subprocess.run(
+        ["minimap2", "-d", os.fspath(index), os.fspath(reference)],
+        check=True,
+        capture_output=True,
+    )
+    with fastq.open("wb") as output:
+        subprocess.run(
+            ["samtools", "fastq", "-T", "MM,ML,MN", os.fspath(unaligned)],
+            check=True,
+            stdout=output,
+            stderr=subprocess.PIPE,
+        )
+    with sam.open("wb") as output:
+        subprocess.run(
+            [
+                "minimap2",
+                "-a",
+                "-x",
+                "map-ont",
+                "--secondary=no",
+                "-y",
+                os.fspath(index),
+                os.fspath(fastq),
+            ],
+            check=True,
+            stdout=output,
+            stderr=subprocess.PIPE,
+        )
+    subprocess.run(
+        [
+            "samtools",
+            "sort",
+            "-@",
+            "1",
+            "-m",
+            "256M",
+            "-o",
+            os.fspath(aligned),
+            os.fspath(sam),
+        ],
+        check=True,
+        capture_output=True,
+    )
+
+    with pysam.AlignmentFile(aligned, "rb") as bam:
+        records = list(bam.fetch(until_eof=True))
+    assert len(records) == 1
+    record = records[0]
+    assert not record.is_reverse
+    assert not record.is_secondary
+    assert record.get_tag("MM") == "C+m?,0;"
+    assert tuple(record.get_tag("ML")) == (211,)
+    assert record.get_tag("MN") == len(read_sequence)
