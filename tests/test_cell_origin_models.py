@@ -11,6 +11,10 @@ from pydantic import TypeAdapter, ValidationError
 
 from evidence_inspector.cell_origin_models import (
     AtlasUMatrix,
+    BootstrapDiagnosticsV2,
+    BootstrapInformationStatus,
+    BootstrapIntervalV2,
+    BootstrapResultV2,
     CellOriginInputBundle,
     CellOriginResult,
     DeconvolutionOutput,
@@ -706,6 +710,70 @@ def test_bootstrap_and_range_rows_are_bound_to_estimates() -> None:
     payload["range_comparison"]["rows"][0]["classification"] = "within"
     with pytest.raises(ValidationError, match="inclusive range"):
         validate_json(CellOriginResult, payload)
+
+
+def test_v2_bootstrap_diagnostics_reconcile_all_resamples() -> None:
+    with pytest.raises(ValidationError, match="resample accounting"):
+        BootstrapDiagnosticsV2(
+            requested_resamples=5,
+            successful_resamples=2,
+            failed_resamples=1,
+            degenerate_resamples=1,
+            tail_probability=0.025,
+            minimum_successful_resamples=80,
+            observed_unusable_resample_fraction=0.4,
+            interval_eligibility_met=False,
+            nnls_row_scale=NnlsRowScale.SQRT_COUNT,
+            solver_tolerance=1e-12,
+            max_iterations=10_000,
+            solver_implementation_id="traceback.active-set-nnls.v1",
+        )
+
+
+def test_v2_bootstrap_rejects_zero_width_as_available_information() -> None:
+    with pytest.raises(ValidationError, match="positive width"):
+        BootstrapIntervalV2(
+            cell_type_id="immune",
+            estimate=0.5,
+            information_status=BootstrapInformationStatus.AVAILABLE,
+            lower_fraction=0.5,
+            upper_fraction=0.5,
+        )
+
+
+def test_v2_bootstrap_cannot_publish_available_interval_without_successes() -> None:
+    diagnostics = BootstrapDiagnosticsV2(
+        requested_resamples=80,
+        successful_resamples=0,
+        failed_resamples=0,
+        degenerate_resamples=80,
+        tail_probability=0.025,
+        minimum_successful_resamples=80,
+        observed_unusable_resample_fraction=1.0,
+        interval_eligibility_met=False,
+        nnls_row_scale=NnlsRowScale.SQRT_COUNT,
+        solver_tolerance=1e-12,
+        max_iterations=10_000,
+        solver_implementation_id="traceback.active-set-nnls.v1",
+    )
+    with pytest.raises(ValidationError, match="eligible successful resamples"):
+        BootstrapResultV2(
+            source_result_id="nnls.synthetic.v1",
+            replicates=80,
+            random_seed=7,
+            confidence_level=0.95,
+            information_status=BootstrapInformationStatus.AVAILABLE,
+            intervals=(
+                BootstrapIntervalV2(
+                    cell_type_id="immune",
+                    estimate=0.5,
+                    information_status=BootstrapInformationStatus.AVAILABLE,
+                    lower_fraction=0.4,
+                    upper_fraction=0.6,
+                ),
+            ),
+            diagnostics=diagnostics,
+        )
 
 
 @pytest.mark.parametrize(

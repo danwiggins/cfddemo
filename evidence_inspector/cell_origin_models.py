@@ -13,13 +13,15 @@ from __future__ import annotations
 
 import math
 from enum import StrEnum
-from typing import Annotated, Literal
+from typing import Annotated, Any, Literal
 
 from pydantic import (
     BaseModel,
     ConfigDict,
+    Discriminator,
     Field,
     StringConstraints,
+    Tag,
     field_validator,
     model_validator,
 )
@@ -735,6 +737,19 @@ class DeconvolutionOutputV2(DeconvolutionOutput):
     diagnostics: NnlsDiagnosticsV2
 
 
+def _deconvolution_version(value: Any) -> str:
+    if isinstance(value, dict):
+        return "v2" if "schema_version" in value else "v1"
+    return "v2" if isinstance(value, DeconvolutionOutputV2) else "v1"
+
+
+VersionedDeconvolutionOutput = Annotated[
+    Annotated[DeconvolutionOutputV2, Tag("v2")]
+    | Annotated[DeconvolutionOutput, Tag("v1")],
+    Discriminator(_deconvolution_version),
+]
+
+
 class BootstrapInterval(StrictModel):
     cell_type_id: Identifier
     estimate: CanonicalFraction
@@ -763,6 +778,172 @@ class BootstrapResult(StrictModel):
         if len(set(ids)) != len(ids):
             raise ValueError("bootstrap cell_type_id values must be unique")
         return self
+
+
+class BootstrapInformationStatus(StrEnum):
+    AVAILABLE = "available"
+    PARTIAL_INFORMATION = "partial_information"
+    INSUFFICIENT_INFORMATION = "insufficient_information"
+
+
+class BootstrapIntervalV2(StrictModel):
+    """One cell-type interval that never represents zero width as precision."""
+
+    cell_type_id: Identifier
+    estimate: CanonicalFraction
+    information_status: Literal[
+        BootstrapInformationStatus.AVAILABLE,
+        BootstrapInformationStatus.INSUFFICIENT_INFORMATION,
+    ]
+    lower_fraction: CanonicalFraction | None = None
+    upper_fraction: CanonicalFraction | None = None
+
+    @model_validator(mode="after")
+    def validate_information(self) -> BootstrapIntervalV2:
+        if self.information_status == BootstrapInformationStatus.AVAILABLE:
+            if self.lower_fraction is None or self.upper_fraction is None:
+                raise ValueError("available bootstrap interval requires bounds")
+            if self.lower_fraction >= self.upper_fraction:
+                raise ValueError(
+                    "available bootstrap interval must have positive width"
+                )
+            if not self.lower_fraction <= self.estimate <= self.upper_fraction:
+                raise ValueError("bootstrap interval must contain its estimate")
+        elif self.lower_fraction is not None or self.upper_fraction is not None:
+            raise ValueError(
+                "insufficient-information bootstrap interval cannot claim bounds"
+            )
+        return self
+
+
+class BootstrapDiagnosticsV2(StrictModel):
+    """Complete resample accounting and estimator identity."""
+
+    schema_version: Literal["cell-origin-bootstrap-diagnostics.v2"] = (
+        "cell-origin-bootstrap-diagnostics.v2"
+    )
+    requested_resamples: int = Field(ge=2)
+    successful_resamples: int = Field(ge=0)
+    failed_resamples: int = Field(ge=0)
+    degenerate_resamples: int = Field(ge=0)
+    resampling_unit: Literal["classified_fragment_call_within_marker"] = (
+        "classified_fragment_call_within_marker"
+    )
+    method_id: Literal["independent-marker-binomial-bootstrap.v1"] = (
+        "independent-marker-binomial-bootstrap.v1"
+    )
+    preserves_cross_marker_molecule_linkage: Literal[False] = False
+    limitation_id: Literal["cross-marker-molecule-linkage-not-preserved"] = (
+        "cross-marker-molecule-linkage-not-preserved"
+    )
+    minimum_tail_observations: Literal[2] = 2
+    tail_probability: float = Field(gt=0.0, lt=0.5, allow_inf_nan=False)
+    minimum_successful_resamples: int = Field(ge=2)
+    maximum_unusable_resample_fraction: Literal[0.0] = 0.0
+    observed_unusable_resample_fraction: CanonicalFraction
+    interval_eligibility_met: bool
+    nnls_row_scale: NnlsRowScale
+    solver_tolerance: float = Field(gt=0.0, allow_inf_nan=False)
+    max_iterations: int = Field(ge=1)
+    solver_implementation_id: Identifier
+
+    @model_validator(mode="after")
+    def reconcile_resamples(self) -> BootstrapDiagnosticsV2:
+        if self.requested_resamples != (
+            self.successful_resamples
+            + self.failed_resamples
+            + self.degenerate_resamples
+        ):
+            raise ValueError("bootstrap resample accounting must reconcile")
+        expected_unusable_fraction = (
+            (self.failed_resamples + self.degenerate_resamples)
+            / self.requested_resamples
+        )
+        if not math.isclose(
+            self.observed_unusable_resample_fraction,
+            expected_unusable_fraction,
+            rel_tol=0.0,
+            abs_tol=1e-15,
+        ):
+            raise ValueError("observed bootstrap unusable fraction is inconsistent")
+        expected_eligibility = (
+            self.successful_resamples >= self.minimum_successful_resamples
+            and self.observed_unusable_resample_fraction
+            <= self.maximum_unusable_resample_fraction
+        )
+        if self.interval_eligibility_met != expected_eligibility:
+            raise ValueError("bootstrap interval eligibility is inconsistent")
+        return self
+
+
+class BootstrapResultV2(StrictModel):
+    """Additive uncertainty result with explicit information availability."""
+
+    schema_version: Literal["cell-origin-bootstrap.v2"] = (
+        "cell-origin-bootstrap.v2"
+    )
+    source_result_id: Identifier
+    replicates: int = Field(ge=2)
+    random_seed: int = Field(ge=0)
+    confidence_level: CanonicalFraction
+    information_status: BootstrapInformationStatus
+    intervals: tuple[BootstrapIntervalV2, ...] = Field(min_length=1)
+    diagnostics: BootstrapDiagnosticsV2
+
+    @model_validator(mode="after")
+    def validate_result(self) -> BootstrapResultV2:
+        if not 0.0 < self.confidence_level < 1.0:
+            raise ValueError("confidence_level must be strictly between 0 and 1")
+        if self.replicates != self.diagnostics.requested_resamples:
+            raise ValueError("bootstrap diagnostics must match requested replicates")
+        expected_tail_probability = (1.0 - self.confidence_level) / 2.0
+        if not math.isclose(
+            self.diagnostics.tail_probability,
+            expected_tail_probability,
+            rel_tol=0.0,
+            abs_tol=1e-15,
+        ):
+            raise ValueError("bootstrap tail probability is inconsistent")
+        expected_minimum = math.ceil(
+            self.diagnostics.minimum_tail_observations
+            / self.diagnostics.tail_probability
+        )
+        if self.diagnostics.minimum_successful_resamples != expected_minimum:
+            raise ValueError("bootstrap tail-resolution threshold is inconsistent")
+        ids = [interval.cell_type_id for interval in self.intervals]
+        if len(set(ids)) != len(ids):
+            raise ValueError("bootstrap cell_type_id values must be unique")
+        available = sum(
+            interval.information_status == BootstrapInformationStatus.AVAILABLE
+            for interval in self.intervals
+        )
+        if available and not self.diagnostics.interval_eligibility_met:
+            raise ValueError(
+                "available intervals require eligible successful resamples"
+            )
+        expected = (
+            BootstrapInformationStatus.INSUFFICIENT_INFORMATION
+            if available == 0
+            else BootstrapInformationStatus.AVAILABLE
+            if available == len(self.intervals)
+            else BootstrapInformationStatus.PARTIAL_INFORMATION
+        )
+        if self.information_status != expected:
+            raise ValueError("bootstrap information status does not match intervals")
+        return self
+
+
+def _bootstrap_version(value: Any) -> str:
+    if isinstance(value, dict):
+        return "v2" if "schema_version" in value else "v1"
+    return "v2" if isinstance(value, BootstrapResultV2) else "v1"
+
+
+VersionedBootstrapResult = Annotated[
+    Annotated[BootstrapResultV2, Tag("v2")]
+    | Annotated[BootstrapResult, Tag("v1")],
+    Discriminator(_bootstrap_version),
+]
 
 
 class ReferenceRangeRow(StrictModel):
@@ -889,8 +1070,8 @@ class CellOriginResult(StrictModel):
     result_id: Identifier
     method: MethodDefinition
     marker_counts: tuple[MarkerCountRow, ...] = Field(min_length=1)
-    deconvolution: DeconvolutionOutput
-    bootstrap: BootstrapResult | None = None
+    deconvolution: VersionedDeconvolutionOutput
+    bootstrap: VersionedBootstrapResult | None = None
     range_comparison: RangeComparison | None = None
     provenance: CellOriginProvenance
     validation: ValidationReport
@@ -913,11 +1094,41 @@ class CellOriginResult(StrictModel):
         estimate_ids = {
             estimate.cell_type_id for estimate in self.deconvolution.estimates
         }
+        estimate_by_id = {
+            estimate.cell_type_id: estimate.fraction
+            for estimate in self.deconvolution.estimates
+        }
         if self.bootstrap is not None:
             if self.bootstrap.source_result_id != self.deconvolution.result_id:
                 raise ValueError("bootstrap must bind to this deconvolution result")
             if {item.cell_type_id for item in self.bootstrap.intervals} != estimate_ids:
                 raise ValueError("bootstrap and deconvolution cell types must match")
+            if any(
+                interval.estimate != estimate_by_id[interval.cell_type_id]
+                for interval in self.bootstrap.intervals
+            ):
+                raise ValueError(
+                    "bootstrap interval estimate does not match deconvolution"
+                )
+            if isinstance(self.bootstrap, BootstrapResultV2):
+                if not isinstance(self.deconvolution, DeconvolutionOutputV2):
+                    raise ValueError(
+                        "bootstrap v2 requires a deconvolution v2 source"
+                    )
+                bootstrap_solver = self.bootstrap.diagnostics
+                source_solver = self.deconvolution.diagnostics
+                if (
+                    bootstrap_solver.nnls_row_scale != source_solver.row_scale
+                    or bootstrap_solver.solver_tolerance
+                    != source_solver.solver_tolerance
+                    or bootstrap_solver.max_iterations
+                    != source_solver.max_iterations
+                    or bootstrap_solver.solver_implementation_id
+                    != source_solver.solver_implementation_id
+                ):
+                    raise ValueError(
+                        "bootstrap solver diagnostics do not match deconvolution"
+                    )
         if self.range_comparison is not None:
             if {
                 item.cell_type_id for item in self.range_comparison.rows
@@ -936,7 +1147,11 @@ __all__ = [
     "AtlasUMatrixRow",
     "AtlasUValue",
     "BootstrapInterval",
+    "BootstrapIntervalV2",
+    "BootstrapDiagnosticsV2",
+    "BootstrapInformationStatus",
     "BootstrapResult",
+    "BootstrapResultV2",
     "CanonicalFraction",
     "CellFractionEstimate",
     "CellOriginInputBundle",
@@ -981,6 +1196,8 @@ __all__ = [
     "ValidationCheck",
     "ValidationRecord",
     "ValidationReport",
+    "VersionedBootstrapResult",
+    "VersionedDeconvolutionOutput",
     "VerificationLevel",
     "classify_uxm",
 ]

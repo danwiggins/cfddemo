@@ -7,10 +7,14 @@ from pathlib import Path
 
 import pytest
 
+import evidence_inspector.deconvolution as deconvolution_module
 from evidence_inspector.cell_origin_models import (
     AtlasUMatrix,
     AtlasUMatrixRow,
     AtlasUValue,
+    BootstrapInformationStatus,
+    BootstrapResult,
+    BootstrapResultV2,
     LOYFER_UXM_METHOD,
     MarkerCountRow,
     NnlsRowScale,
@@ -21,6 +25,7 @@ from evidence_inspector.deconvolution import (
     NNLS_SOLVER_IMPLEMENTATION_ID,
     ObservedCohortRange,
     bootstrap_uxm,
+    bootstrap_uxm_v2,
     compare_observed_cohort_ranges,
     deconvolve_uxm,
     deconvolve_uxm_v2,
@@ -364,6 +369,404 @@ def test_seeded_bootstrap_is_reproducible_and_bound_to_source() -> None:
         item.lower_fraction <= item.estimate <= item.upper_fraction
         for item in first.intervals
     )
+
+
+def test_v2_bootstrap_seed_and_replay_are_deterministic() -> None:
+    atlas = fixture_atlas()
+    counts = (
+        marker_count("marker.immune.1", 40, 100),
+        marker_count("marker.liver.1", 60, 100),
+    )
+    source = deconvolve_uxm_v2(
+        counts, atlas, row_scale=NnlsRowScale.SQRT_COUNT
+    )
+
+    first = bootstrap_uxm_v2(
+        counts, atlas, source, replicates=100, random_seed=7
+    )
+    replay = bootstrap_uxm_v2(
+        counts, atlas, source, replicates=100, random_seed=7
+    )
+    changed = bootstrap_uxm_v2(
+        counts, atlas, source, replicates=100, random_seed=8
+    )
+
+    assert first == replay
+    assert BootstrapResultV2.model_validate_json(first.model_dump_json()) == first
+    assert first != changed
+    assert first.diagnostics.requested_resamples == 100
+    assert (
+        first.diagnostics.successful_resamples
+        + first.diagnostics.failed_resamples
+        + first.diagnostics.degenerate_resamples
+        == 100
+    )
+    assert not first.diagnostics.preserves_cross_marker_molecule_linkage
+
+
+def test_v2_bootstrap_uses_and_records_source_solver_configuration() -> None:
+    atlas = fixture_atlas()
+    counts = (
+        marker_count("marker.immune.1", 40, 100),
+        marker_count("marker.liver.1", 60, 100),
+    )
+    source = deconvolve_uxm_v2(
+        counts,
+        atlas,
+        row_scale=NnlsRowScale.REFERENCE_COUNT,
+        tolerance=1e-10,
+        max_iterations=321,
+    )
+
+    result = bootstrap_uxm_v2(
+        counts, atlas, source, replicates=100, random_seed=7
+    )
+
+    assert result.diagnostics.nnls_row_scale == NnlsRowScale.REFERENCE_COUNT
+    assert result.diagnostics.solver_tolerance == 1e-10
+    assert result.diagnostics.max_iterations == 321
+    assert (
+        result.diagnostics.solver_implementation_id
+        == NNLS_SOLVER_IMPLEMENTATION_ID
+    )
+
+
+@pytest.mark.parametrize(
+    ("kwargs", "message"),
+    (
+        ({"tolerance": 0.0}, "tolerance"),
+        ({"max_iterations": 0}, "max_iterations"),
+        ({"tolerance": 1e-9}, "must match"),
+        ({"max_iterations": 999}, "must match"),
+    ),
+)
+def test_v2_bootstrap_rejects_invalid_or_mismatched_solver_config_before_sampling(
+    monkeypatch: pytest.MonkeyPatch,
+    kwargs: dict[str, object],
+    message: str,
+) -> None:
+    atlas = fixture_atlas()
+    counts = (
+        marker_count("marker.immune.1", 40, 100),
+        marker_count("marker.liver.1", 60, 100),
+    )
+    source = deconvolve_uxm_v2(
+        counts, atlas, row_scale=NnlsRowScale.SQRT_COUNT
+    )
+
+    def sampling_must_not_start(_seed: int) -> object:
+        raise AssertionError("sampling started before configuration validation")
+
+    monkeypatch.setattr(
+        deconvolution_module.np.random,
+        "default_rng",
+        sampling_must_not_start,
+    )
+    with pytest.raises(DeconvolutionError, match=message):
+        bootstrap_uxm_v2(
+            counts,
+            atlas,
+            source,
+            replicates=100,
+            random_seed=7,
+            **kwargs,  # type: ignore[arg-type]
+        )
+
+
+def test_v2_bootstrap_rejects_unversioned_source() -> None:
+    atlas = fixture_atlas()
+    counts = (
+        marker_count("marker.immune.1", 40, 100),
+        marker_count("marker.liver.1", 60, 100),
+    )
+    legacy = deconvolve_uxm(counts, atlas)
+
+    with pytest.raises(DeconvolutionError, match="versioned deconvolution"):
+        bootstrap_uxm_v2(  # type: ignore[arg-type]
+            counts, atlas, legacy, replicates=100, random_seed=7
+        )
+
+
+def test_v2_bootstrap_rejects_changed_counts_before_sampling(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    atlas = fixture_atlas()
+    source_counts = (
+        marker_count("marker.immune.1", 40, 100),
+        marker_count("marker.liver.1", 60, 100),
+    )
+    changed_counts = (
+        marker_count("marker.immune.1", 41, 100),
+        source_counts[1],
+    )
+    source = deconvolve_uxm_v2(
+        source_counts, atlas, row_scale=NnlsRowScale.SQRT_COUNT
+    )
+
+    def sampling_must_not_start(_seed: int) -> object:
+        raise AssertionError("sampling started before source validation")
+
+    monkeypatch.setattr(
+        deconvolution_module.np.random,
+        "default_rng",
+        sampling_must_not_start,
+    )
+    with pytest.raises(DeconvolutionError, match="input identity"):
+        bootstrap_uxm_v2(
+            changed_counts, atlas, source, replicates=100, random_seed=7
+        )
+
+
+def test_v2_bootstrap_rejects_changed_atlas_before_sampling(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    atlas = fixture_atlas()
+    counts = (
+        marker_count("marker.immune.1", 40, 100),
+        marker_count("marker.liver.1", 60, 100),
+    )
+    source = deconvolve_uxm_v2(
+        counts, atlas, row_scale=NnlsRowScale.SQRT_COUNT
+    )
+    changed_payload = atlas.model_dump(mode="python")
+    changed_payload["rows"][0]["values"][0]["u_fraction"] = 0.79
+    changed_atlas = AtlasUMatrix.model_validate(changed_payload)
+
+    def sampling_must_not_start(_seed: int) -> object:
+        raise AssertionError("sampling started before source validation")
+
+    monkeypatch.setattr(
+        deconvolution_module.np.random,
+        "default_rng",
+        sampling_must_not_start,
+    )
+    with pytest.raises(DeconvolutionError, match="atlas digest"):
+        bootstrap_uxm_v2(
+            counts, changed_atlas, source, replicates=100, random_seed=7
+        )
+
+
+class _DrawSequence:
+    def __init__(self, draws: list[list[int]]) -> None:
+        self._draws = iter(draws)
+
+    def binomial(self, *_args: object, **_kwargs: object) -> object:
+        return deconvolution_module.np.asarray(next(self._draws), dtype=int)
+
+
+def test_v2_bootstrap_zero_success_reports_insufficient_information(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    atlas = fixture_atlas()
+    counts = (
+        marker_count("marker.immune.1", 40, 100),
+        marker_count("marker.liver.1", 60, 100),
+    )
+    source = deconvolve_uxm_v2(
+        counts, atlas, row_scale=NnlsRowScale.SQRT_COUNT
+    )
+
+    def fail_solve(*_args: object, **_kwargs: object) -> object:
+        raise DeconvolutionError("synthetic solver failure")
+
+    monkeypatch.setattr(deconvolution_module, "_solve_arrays", fail_solve)
+    result = bootstrap_uxm_v2(
+        counts, atlas, source, replicates=3, random_seed=7
+    )
+
+    assert result.information_status == (
+        BootstrapInformationStatus.INSUFFICIENT_INFORMATION
+    )
+    assert result.diagnostics.successful_resamples == 0
+    assert result.diagnostics.failed_resamples == 3
+    assert result.diagnostics.degenerate_resamples == 0
+    assert all(item.lower_fraction is None for item in result.intervals)
+
+
+def test_v2_bootstrap_all_degenerate_resamples_are_accounted(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    atlas = fixture_atlas()
+    counts = (
+        marker_count("marker.immune.1", 40, 100),
+        marker_count("marker.liver.1", 60, 100),
+    )
+    source = deconvolve_uxm_v2(
+        counts, atlas, row_scale=NnlsRowScale.SQRT_COUNT
+    )
+    monkeypatch.setattr(
+        deconvolution_module.np.random,
+        "default_rng",
+        lambda _seed: _DrawSequence([[0, 0], [0, 0], [0, 0]]),
+    )
+
+    result = bootstrap_uxm_v2(
+        counts, atlas, source, replicates=3, random_seed=7
+    )
+
+    assert result.information_status == (
+        BootstrapInformationStatus.INSUFFICIENT_INFORMATION
+    )
+    assert result.diagnostics.successful_resamples == 0
+    assert result.diagnostics.failed_resamples == 0
+    assert result.diagnostics.degenerate_resamples == 3
+
+
+def test_v2_bootstrap_partially_degenerate_fails_closed(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    atlas = fixture_atlas()
+    counts = (
+        marker_count("marker.immune.1", 40, 100),
+        marker_count("marker.liver.1", 60, 100),
+    )
+    source = deconvolve_uxm_v2(
+        counts, atlas, row_scale=NnlsRowScale.SQRT_COUNT
+    )
+    draws = [[0, 0]] + [[40, 60]] * 40 + [[60, 40]] * 40
+    monkeypatch.setattr(
+        deconvolution_module.np.random,
+        "default_rng",
+        lambda _seed: _DrawSequence(draws),
+    )
+
+    result = bootstrap_uxm_v2(
+        counts, atlas, source, replicates=81, random_seed=7
+    )
+
+    assert result.information_status == (
+        BootstrapInformationStatus.INSUFFICIENT_INFORMATION
+    )
+    assert result.diagnostics.successful_resamples == 80
+    assert result.diagnostics.failed_resamples == 0
+    assert result.diagnostics.degenerate_resamples == 1
+    assert result.diagnostics.observed_unusable_resample_fraction == pytest.approx(
+        1 / 81
+    )
+    assert not result.diagnostics.interval_eligibility_met
+    assert all(interval.lower_fraction is None for interval in result.intervals)
+
+
+def test_v2_bootstrap_eligible_interval_is_independently_calculable(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    atlas = fixture_atlas()
+    counts = (
+        marker_count("marker.immune.1", 40, 100),
+        marker_count("marker.liver.1", 60, 100),
+    )
+    source = deconvolve_uxm_v2(
+        counts, atlas, row_scale=NnlsRowScale.SQRT_COUNT
+    )
+    draws = [[40, 60]] * 40 + [[60, 40]] * 40
+    monkeypatch.setattr(
+        deconvolution_module.np.random,
+        "default_rng",
+        lambda _seed: _DrawSequence(draws),
+    )
+
+    result = bootstrap_uxm_v2(
+        counts, atlas, source, replicates=80, random_seed=7
+    )
+
+    assert result.information_status == BootstrapInformationStatus.AVAILABLE
+    assert result.diagnostics.successful_resamples == 80
+    assert result.diagnostics.degenerate_resamples == 0
+    assert result.diagnostics.interval_eligibility_met
+    immune, liver = result.intervals
+    assert immune.lower_fraction == pytest.approx(1 / 3)
+    assert immune.upper_fraction == pytest.approx(2 / 3)
+    assert liver.lower_fraction == pytest.approx(1 / 3)
+    assert liver.upper_fraction == pytest.approx(2 / 3)
+
+
+def test_v2_bootstrap_solver_failure_blocks_interval_availability(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    atlas = fixture_atlas()
+    counts = (
+        marker_count("marker.immune.1", 40, 100),
+        marker_count("marker.liver.1", 60, 100),
+    )
+    source = deconvolve_uxm_v2(
+        counts, atlas, row_scale=NnlsRowScale.SQRT_COUNT
+    )
+    draws = [[40, 60]] * 41 + [[60, 40]] * 40
+    monkeypatch.setattr(
+        deconvolution_module.np.random,
+        "default_rng",
+        lambda _seed: _DrawSequence(draws),
+    )
+    real_solve = deconvolution_module._solve_arrays
+    calls = 0
+
+    def fail_once(*args: object, **kwargs: object) -> object:
+        nonlocal calls
+        calls += 1
+        if calls == 1:
+            raise DeconvolutionError("synthetic solver failure")
+        return real_solve(*args, **kwargs)  # type: ignore[arg-type]
+
+    monkeypatch.setattr(deconvolution_module, "_solve_arrays", fail_once)
+    result = bootstrap_uxm_v2(
+        counts, atlas, source, replicates=81, random_seed=7
+    )
+
+    assert result.diagnostics.successful_resamples == 80
+    assert result.diagnostics.failed_resamples == 1
+    assert result.diagnostics.minimum_successful_resamples == 80
+    assert result.diagnostics.maximum_unusable_resample_fraction == 0.0
+    assert not result.diagnostics.interval_eligibility_met
+    assert result.information_status == (
+        BootstrapInformationStatus.INSUFFICIENT_INFORMATION
+    )
+
+
+def test_v2_sparse_single_fragment_does_not_claim_zero_width_precision() -> None:
+    atlas = AtlasUMatrix(
+        atlas_id="atlas.sparse.v1",
+        method=LOYFER_UXM_METHOD,
+        cell_type_ids=("only",),
+        rows=(
+            AtlasUMatrixRow(
+                marker_id="marker.only",
+                values=(AtlasUValue(cell_type_id="only", u_fraction=1.0),),
+            ),
+        ),
+        source_ids=("source.synthetic-atlas",),
+    )
+    counts = (marker_count("marker.only", 1, 1),)
+    source = deconvolve_uxm_v2(
+        counts, atlas, row_scale=NnlsRowScale.SQRT_COUNT
+    )
+
+    result = bootstrap_uxm_v2(
+        counts, atlas, source, replicates=10, random_seed=7
+    )
+
+    assert result.diagnostics.successful_resamples == 10
+    assert result.information_status == (
+        BootstrapInformationStatus.INSUFFICIENT_INFORMATION
+    )
+    assert result.intervals[0].lower_fraction is None
+    assert result.intervals[0].upper_fraction is None
+
+
+def test_legacy_bootstrap_result_remains_unchanged() -> None:
+    atlas = fixture_atlas()
+    counts = (
+        marker_count("marker.immune.1", 40, 100),
+        marker_count("marker.liver.1", 60, 100),
+    )
+    source = deconvolve_uxm(counts, atlas)
+
+    legacy = bootstrap_uxm(
+        counts, atlas, source, replicates=10, random_seed=7
+    )
+
+    assert isinstance(legacy, BootstrapResult)
+    assert "diagnostics" not in legacy.model_dump()
+    assert "schema_version" not in legacy.model_dump()
 
 
 def test_bootstrap_rejects_changed_source_alignment() -> None:
