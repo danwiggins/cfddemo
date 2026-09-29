@@ -56,21 +56,16 @@ MAX_FILTER_VALUES = 32
 
 _SQLITE_OPEN_LOCK = threading.RLock()
 
-_CATALOG_SCHEMA_OBJECTS = frozenset(
-    {
-        ("table", "metadata"),
-        ("table", "results"),
-        ("table", "opaque_aliases"),
-        ("index", "results_method"),
-        ("index", "results_states"),
-        ("index", "aliases_run"),
-        ("index", "aliases_timepoint"),
-    }
-)
 
-_CATALOG_SCHEMA_STATEMENTS = (
-    "CREATE TABLE metadata(key TEXT PRIMARY KEY, value TEXT NOT NULL)",
-    """CREATE TABLE results(
+def _normalize_schema_sql(statement: str) -> str:
+    return "".join(statement.split()).casefold()
+
+
+_CATALOG_SCHEMA_SQL = {
+    ("table", "metadata"): (
+        "CREATE TABLE metadata(key TEXT PRIMARY KEY, value TEXT NOT NULL)"
+    ),
+    ("table", "results"): """CREATE TABLE results(
         result_id TEXT PRIMARY KEY,
         bundle_sha256 TEXT NOT NULL UNIQUE,
         bundle_record_id TEXT NOT NULL UNIQUE,
@@ -82,23 +77,34 @@ _CATALOG_SCHEMA_STATEMENTS = (
         qualification_state TEXT NOT NULL,
         ref_json BLOB NOT NULL
     )""",
-    """CREATE TABLE opaque_aliases(
+    ("table", "opaque_aliases"): """CREATE TABLE opaque_aliases(
         result_id TEXT PRIMARY KEY REFERENCES results(result_id),
         display_alias TEXT NOT NULL UNIQUE,
         run_alias TEXT NOT NULL,
         timepoint_alias TEXT NOT NULL
     )""",
-    "CREATE INDEX results_method ON results(method_id, method_version, result_id)",
-    """CREATE INDEX results_states ON results(
+    ("index", "results_method"): (
+        "CREATE INDEX results_method ON results(method_id, method_version, result_id)"
+    ),
+    ("index", "results_states"): """CREATE INDEX results_states ON results(
         execution_state,
         information_state,
         trust_state,
         qualification_state,
         result_id
     )""",
-    "CREATE INDEX aliases_run ON opaque_aliases(run_alias, result_id)",
-    "CREATE INDEX aliases_timepoint ON opaque_aliases(timepoint_alias, result_id)",
-)
+    ("index", "aliases_run"): (
+        "CREATE INDEX aliases_run ON opaque_aliases(run_alias, result_id)"
+    ),
+    ("index", "aliases_timepoint"): (
+        "CREATE INDEX aliases_timepoint ON opaque_aliases(timepoint_alias, result_id)"
+    ),
+}
+
+_CATALOG_SCHEMA_SIGNATURE = {
+    key: _normalize_schema_sql(statement)
+    for key, statement in _CATALOG_SCHEMA_SQL.items()
+}
 
 _FIXED_FILES = (
     "bundle-manifest.json",
@@ -841,7 +847,7 @@ class ResultCatalog:
                     )
                 )
                 if not objects:
-                    for statement in _CATALOG_SCHEMA_STATEMENTS:
+                    for statement in _CATALOG_SCHEMA_SQL.values():
                         connection.execute(statement)
                     connection.execute(
                         "INSERT INTO metadata VALUES('schema_version', ?)",
@@ -864,14 +870,15 @@ class ResultCatalog:
     @staticmethod
     def _validate_schema(connection: sqlite3.Connection) -> None:
         try:
-            objects = frozenset(
-                (row[0], row[1])
+            schema = {
+                (row[0], row[1]): _normalize_schema_sql(row[2])
                 for row in connection.execute(
-                    """SELECT type, name FROM sqlite_master
+                    """SELECT type, name, sql FROM sqlite_master
                        WHERE name NOT LIKE 'sqlite_%'
                        ORDER BY type, name"""
                 )
-            )
+                if isinstance(row[2], str)
+            }
             row = connection.execute(
                 "SELECT value FROM metadata WHERE key='schema_version'"
             ).fetchone()
@@ -881,7 +888,7 @@ class ResultCatalog:
         except sqlite3.DatabaseError:
             raise CatalogUnsupportedSchema("catalog schema is unsupported") from None
         if (
-            objects != _CATALOG_SCHEMA_OBJECTS
+            schema != _CATALOG_SCHEMA_SIGNATURE
             or row is None
             or row[0] != str(CATALOG_SCHEMA_VERSION)
             or metadata_count != 1

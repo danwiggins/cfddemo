@@ -5,6 +5,7 @@ from __future__ import annotations
 import hashlib
 import os
 import shutil
+import sqlite3
 import threading
 import time
 from datetime import datetime, timezone
@@ -539,6 +540,103 @@ def test_published_object_digest_is_the_accepted_digest(tmp_path: Path) -> None:
     assert verify_bundle(object_path, catalog.trust_store).manifest.record_id == (
         reference.bundle_record_id
     )
+
+
+def _write_preexisting_catalog_schema(
+    database: Path, *, dropped_constraints: bool, wrong_indexes: bool
+) -> None:
+    if dropped_constraints:
+        tables = """
+            CREATE TABLE metadata(key TEXT, value TEXT);
+            CREATE TABLE results(
+                result_id TEXT,
+                bundle_sha256 TEXT NOT NULL,
+                bundle_record_id TEXT NOT NULL,
+                method_id TEXT NOT NULL,
+                method_version TEXT NOT NULL,
+                execution_state TEXT NOT NULL,
+                information_state TEXT NOT NULL,
+                trust_state TEXT NOT NULL,
+                qualification_state TEXT NOT NULL,
+                ref_json BLOB NOT NULL
+            );
+            CREATE TABLE opaque_aliases(
+                result_id TEXT,
+                display_alias TEXT NOT NULL,
+                run_alias TEXT NOT NULL,
+                timepoint_alias TEXT NOT NULL
+            );
+        """
+    else:
+        tables = """
+            CREATE TABLE metadata(key TEXT PRIMARY KEY, value TEXT NOT NULL);
+            CREATE TABLE results(
+                result_id TEXT PRIMARY KEY,
+                bundle_sha256 TEXT NOT NULL UNIQUE,
+                bundle_record_id TEXT NOT NULL UNIQUE,
+                method_id TEXT NOT NULL,
+                method_version TEXT NOT NULL,
+                execution_state TEXT NOT NULL,
+                information_state TEXT NOT NULL,
+                trust_state TEXT NOT NULL,
+                qualification_state TEXT NOT NULL,
+                ref_json BLOB NOT NULL
+            );
+            CREATE TABLE opaque_aliases(
+                result_id TEXT PRIMARY KEY REFERENCES results(result_id),
+                display_alias TEXT NOT NULL UNIQUE,
+                run_alias TEXT NOT NULL,
+                timepoint_alias TEXT NOT NULL
+            );
+        """
+    results_method = (
+        "CREATE UNIQUE INDEX results_method "
+        "ON results(method_version, method_id, result_id);"
+        if wrong_indexes
+        else "CREATE INDEX results_method "
+        "ON results(method_id, method_version, result_id);"
+    )
+    indexes = f"""
+        {results_method}
+        CREATE INDEX results_states ON results(
+            execution_state,
+            information_state,
+            trust_state,
+            qualification_state,
+            result_id
+        );
+        CREATE INDEX aliases_run ON opaque_aliases(run_alias, result_id);
+        CREATE INDEX aliases_timepoint ON opaque_aliases(timepoint_alias, result_id);
+        INSERT INTO metadata VALUES('schema_version', '1');
+    """
+    with sqlite3.connect(database) as connection:
+        connection.executescript(tables + indexes)
+
+
+@pytest.mark.parametrize(
+    ("dropped_constraints", "wrong_indexes"),
+    ((True, False), (False, True)),
+)
+def test_same_inventory_malformed_schema_fails_closed(
+    tmp_path: Path, dropped_constraints: bool, wrong_indexes: bool
+) -> None:
+    import_root = tmp_path / "imports"
+    import_root.mkdir()
+    _, _, trust = _bundle(import_root / "incoming")
+    catalog_root = tmp_path / "catalog"
+    catalog_root.mkdir()
+    _write_preexisting_catalog_schema(
+        catalog_root / "catalog.sqlite3",
+        dropped_constraints=dropped_constraints,
+        wrong_indexes=wrong_indexes,
+    )
+
+    with pytest.raises(CatalogUnsupportedSchema, match="unsupported"):
+        ResultCatalog(
+            catalog_root,
+            import_roots={"root_primary": import_root},
+            trust_store=trust,
+        )
 
 
 def test_unsupported_schema_and_stale_revoked_capability_fail_closed(

@@ -43,8 +43,10 @@ Fresh schema initialization holds that process-local critical section through
 completion and uses one SQLite `BEGIN EXCLUSIVE` transaction. The SQLite lock is
 the cross-process coordination boundary: one constructor creates the complete
 schema and commits it atomically; concurrent constructors then validate the
-exact committed table/index inventory and schema marker. Existing partial or
-extra schemas fail closed and are never repaired implicitly.
+exact committed table/index DDL and schema marker, including primary keys,
+nullability, uniqueness, foreign keys, and ordered index columns. Existing
+partial, altered, or extra schemas fail closed and are never repaired
+implicitly.
 
 ## Read model
 
