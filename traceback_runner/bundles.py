@@ -14,9 +14,11 @@ from pydantic import BaseModel, ConfigDict, StringConstraints
 
 from traceback_runner.contracts import (
     BundleContent,
+    BundleMethodIdentity,
     ExportRunProvenance,
     FragmentMeasurement,
     ResultBundleManifest,
+    ResultBundleManifestV2,
     canonical_json_bytes,
     canonical_model_from_bytes,
 )
@@ -103,7 +105,7 @@ _MAX_FILE_BYTES: dict[str, int] = {
 _MAX_TOTAL_BYTES = 36 * 1024 * 1024
 
 
-BundleManifest = ResultBundleManifest
+BundleManifest = ResultBundleManifest | ResultBundleManifestV2
 
 
 class BundleSigningPayload(_ClosedModel):
@@ -121,9 +123,24 @@ class BundleSigningPayload(_ClosedModel):
     checksums_sha256: Sha256
 
 
+class BundleSigningPayloadV2(_ClosedModel):
+    schema_version: Literal["traceback.bundle-signing-payload.v2"] = (
+        "traceback.bundle-signing-payload.v2"
+    )
+    bundle_schema_version: Literal["traceback.result-bundle.v2"] = (
+        "traceback.result-bundle.v2"
+    )
+    trust_namespace: Literal[TrustNamespace.DEVELOPMENT_SYNTHETIC] = (
+        TrustNamespace.DEVELOPMENT_SYNTHETIC
+    )
+    signing_purpose: Literal[KeyPurpose.RESULT] = KeyPurpose.RESULT
+    bundle_files: tuple[BundlePath, ...]
+    checksums_sha256: Sha256
+
+
 class VerifiedBundle(_ClosedModel):
     path: str
-    manifest: ResultBundleManifest
+    manifest: BundleManifest
     measurement: FragmentMeasurement
     chart: FragmentLengthChart
     provenance: ExportRunProvenance
@@ -145,11 +162,19 @@ def _checksums_bytes(files: Mapping[str, bytes]) -> bytes:
     )
 
 
-def _signing_payload(checksums: bytes) -> BundleSigningPayload:
-    return BundleSigningPayload(
-        bundle_files=tuple(sorted(_ALL_PATHS)),
-        checksums_sha256=_digest(checksums),
-    )
+def _signing_payload(
+    checksums: bytes,
+    bundle_schema_version: str,
+) -> BundleSigningPayload | BundleSigningPayloadV2:
+    values = {
+        "bundle_files": tuple(sorted(_ALL_PATHS)),
+        "checksums_sha256": _digest(checksums),
+    }
+    if bundle_schema_version == "traceback.result-bundle.v1":
+        return BundleSigningPayload(**values)
+    if bundle_schema_version == "traceback.result-bundle.v2":
+        return BundleSigningPayloadV2(**values)
+    raise BundleFormatError("unsupported result bundle schema")
 
 
 def build_result_bundle(
@@ -157,6 +182,7 @@ def build_result_bundle(
     *,
     measurement: FragmentMeasurement | Mapping[str, object],
     provenance: ExportRunProvenance | Mapping[str, object],
+    method: BundleMethodIdentity | Mapping[str, object],
     signing_key: DevelopmentSigningKey,
 ) -> Path:
     """Build one atomic, synthetic-only bundle from strict aggregate inputs."""
@@ -165,6 +191,7 @@ def build_result_bundle(
         raise BundleFormatError("result bundles require a result-purpose signing key")
     parsed_measurement = validate_measurement(measurement)
     parsed_provenance = validate_provenance(provenance)
+    parsed_method = BundleMethodIdentity.model_validate(method)
     measurement_content = _canonical_line_json(parsed_measurement)
     chart = chart_for_measurement(parsed_measurement, _digest(measurement_content))
     limitations = ExportLimitations()
@@ -178,14 +205,16 @@ def build_result_bundle(
     record_identity = canonical_json_bytes(
         {
             "measurement_sha256": _digest(measurement_content),
+            "method": parsed_method.model_dump(mode="json"),
             "provenance_sha256": _digest(content[PROVENANCE_PATH]),
         }
     )
     record_id = f"record-{_digest(record_identity)[:24]}"
-    manifest = ResultBundleManifest(
+    manifest = ResultBundleManifestV2(
         record_id=record_id,
         workflow_release_id=parsed_provenance.workflow_release_id,
         measurement_schema_versions=(parsed_measurement.schema_version,),
+        method=parsed_method,
         signing_key_id=signing_key.key_id,
         contents=tuple(
             BundleContent(relative_path=path, size_bytes=len(content[path]), sha256=_digest(content[path]))
@@ -195,7 +224,7 @@ def build_result_bundle(
     content[MANIFEST_PATH] = _canonical_line_json(manifest)
     checksums = _checksums_bytes(content)
     signature = sign_bytes(
-        canonical_json_bytes(_signing_payload(checksums)),
+        canonical_json_bytes(_signing_payload(checksums, manifest.schema_version)),
         signing_key,
         purpose=KeyPurpose.RESULT,
     )
@@ -289,6 +318,16 @@ def _parse_json(content: bytes, model: type[BaseModel], label: str) -> BaseModel
     return parsed
 
 
+def _parse_manifest(content: bytes) -> BundleManifest:
+    for model in (ResultBundleManifestV2, ResultBundleManifest):
+        try:
+            parsed = canonical_model_from_bytes(model, content)
+        except Exception:
+            continue
+        return parsed
+    raise BundleFormatError("invalid bundle manifest")
+
+
 def _parse_checksums(content: bytes) -> dict[str, str]:
     try:
         text = content.decode("ascii")
@@ -313,9 +352,8 @@ def verify_bundle(bundle_dir: str | Path, trust_store: TrustStore) -> VerifiedBu
 
     root = Path(bundle_dir)
     content = _read_exact_files(root)
-    manifest = _parse_json(content[MANIFEST_PATH], ResultBundleManifest, "bundle manifest")
+    manifest = _parse_manifest(content[MANIFEST_PATH])
     signature = _parse_json(content[SIGNATURE_PATH], SignatureEnvelope, "signature")
-    assert isinstance(manifest, ResultBundleManifest)
     assert isinstance(signature, SignatureEnvelope)
     if signature.key_id != manifest.signing_key_id:
         raise BundleIntegrityError("manifest and signature key identifiers differ")
@@ -333,7 +371,9 @@ def verify_bundle(bundle_dir: str | Path, trust_store: TrustStore) -> VerifiedBu
             raise BundleIntegrityError(f"manifest mismatch for {item.relative_path}")
 
     verify_signature(
-        canonical_json_bytes(_signing_payload(content[CHECKSUMS_PATH])),
+        canonical_json_bytes(
+            _signing_payload(content[CHECKSUMS_PATH], manifest.schema_version)
+        ),
         signature,
         trust_store,
         purpose=KeyPurpose.RESULT,
@@ -376,13 +416,11 @@ def verify_bundle(bundle_dir: str | Path, trust_store: TrustStore) -> VerifiedBu
     )
 
 
-def inspect_bundle(bundle_dir: str | Path) -> ResultBundleManifest:
+def inspect_bundle(bundle_dir: str | Path) -> BundleManifest:
     """Inspect an untrusted manifest without implying verification."""
 
     content = _read_exact_files(Path(bundle_dir))
-    manifest = _parse_json(content[MANIFEST_PATH], ResultBundleManifest, "bundle manifest")
-    assert isinstance(manifest, ResultBundleManifest)
-    return manifest
+    return _parse_manifest(content[MANIFEST_PATH])
 
 
 __all__ = [
