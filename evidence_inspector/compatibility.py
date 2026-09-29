@@ -54,7 +54,7 @@ _RESERVED_PRIVACY_TERMS = {
     "sequence",
 }
 _RESERVED_PRIVACY_IDENTIFIER = re.compile(
-    rf"^(?:{'|'.join(sorted(_RESERVED_PRIVACY_TERMS))})[0-9]*$"
+    rf"^(?:{'|'.join(sorted(_RESERVED_PRIVACY_TERMS))})[a-z0-9]*$"
 )
 
 

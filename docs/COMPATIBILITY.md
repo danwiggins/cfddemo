@@ -30,4 +30,4 @@ must replay exactly against the original selection request; a valid self-hash
 alone is insufficient.
 Canonical JSON and SHA-256 validation reject normalization drift or tampering.
 All contracts are closed and bounded and reject donor, sample, patient, run,
-read, sequence, and local-path identifier stems, including numbered forms.
+read, sequence, and local-path identifier stems with any alphanumeric suffix.

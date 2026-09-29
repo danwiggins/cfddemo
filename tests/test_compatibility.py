@@ -822,13 +822,20 @@ def test_selection_replay_rejects_stale_membership_and_invalid_inclusion() -> No
     [
         "donor",
         "donor123",
+        "donorabc",
         "sample",
         "sample123",
+        "sampleabc",
         "patient123",
+        "patientabc",
         "run123",
+        "runabc",
         "read123",
+        "readabc",
         "sequence123",
+        "sequenceabc",
         "local_path123",
+        "local_pathabc",
     ],
 )
 def test_reserved_private_identifiers_are_rejected(reserved_term: str) -> None:
