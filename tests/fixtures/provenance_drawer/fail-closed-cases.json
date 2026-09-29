@@ -24,6 +24,7 @@
     "self_signed_result_evidence",
     "embedded_release_self_root",
     "embedded_iupac_sequence",
-    "deep_percent_encoding"
+    "deep_percent_encoding",
+    "changed_embedded_compatibility_policy"
   ]
 }

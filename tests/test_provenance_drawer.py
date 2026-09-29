@@ -466,6 +466,13 @@ def _context(
             request.right.measurement.result_id: request.right.catalog_result,
         },
         release_authorizations=dict(_RELEASE_AUTHORIZATIONS),
+        expected_compatibility_policy=request.compatibility_request.policy,
+        expected_compatibility_policy_sha256=(
+            request.compatibility_request.trusted_policy_sha256
+        ),
+        expected_compatibility_authority_head_sha256=(
+            request.compatibility_request.trusted_authority_head_sha256
+        ),
     )
 
 
@@ -762,6 +769,7 @@ def test_failure_fixture_enumerates_the_adversarial_boundary() -> None:
         "embedded_release_self_root",
         "embedded_iupac_sequence",
         "deep_percent_encoding",
+        "changed_embedded_compatibility_policy",
     }
 
 
@@ -999,3 +1007,40 @@ def test_embedded_sequence_and_deep_percent_encoding_fail_closed(
         drawer_from_canonical_bytes(
             ProvenanceDrawer, _rehash_drawer_payload(payload), _context(request)
         )
+
+
+def test_self_consistent_changed_policy_is_rejected_by_external_authority() -> None:
+    request = _request()
+    policy = request.compatibility_request.policy
+    rule = policy.measurement_policies[0]
+    assert rule.delta_allowed_when_comparable is True
+    assert rule.shared_axis_allowed_when_comparable is True
+    changed_rule = rule.model_copy(
+        update={
+            "delta_allowed_when_comparable": False,
+            "shared_axis_allowed_when_comparable": False,
+        }
+    )
+    changed_policy = policy.model_copy(
+        update={"measurement_policies": (changed_rule,)}
+    )
+    changed_request = request.compatibility_request.model_copy(
+        update={
+            "policy": changed_policy,
+            "trusted_policy_sha256": compatibility_policy_sha256(changed_policy),
+        }
+    )
+    changed_decision = decide_compatibility(changed_request)
+    assert changed_decision.outcome.value == "comparable"
+    assert changed_decision.delta_allowed is False
+    assert changed_decision.shared_axis_allowed is False
+    forged = DrawerBuildRequest(
+        evaluated_at=request.evaluated_at,
+        left=request.left,
+        right=request.right,
+        compatibility_request=changed_request,
+        compatibility_decision=changed_decision,
+    )
+
+    with pytest.raises(DrawerError, match="external verification"):
+        build_provenance_drawer(forged, _context(request))

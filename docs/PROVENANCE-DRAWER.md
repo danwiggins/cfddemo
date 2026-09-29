@@ -32,9 +32,12 @@ rejected. Building and canonical parsing require a separate
 `DrawerVerificationContext`: independently supplied result trust roots, exact
 E04 catalog bindings, and E02 release authorizations containing the trusted
 policy, authority head, expected binding, and expected package digest. None of
-those trust assertions are accepted from serialized drawer bytes. Validation
-reruns the result signature, E02 authorization, E05 decision, freshness
-checks, and every derived row.
+those trust assertions are accepted from serialized drawer bytes. The context
+also supplies the exact E05 compatibility policy, its independently expected
+digest, and the compatibility authority-head digest. A self-consistent changed
+policy embedded in the drawer is rejected. Validation reruns the result
+signature, E02 authorization, E05 decision, freshness checks, and every
+derived row.
 
 Unknown compatibility, stale authority, revoked or invalid assets, unavailable
 results, incomplete denominator accounting, and any cross-contract mismatch

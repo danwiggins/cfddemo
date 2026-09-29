@@ -32,9 +32,11 @@ from evidence_inspector.compatibility import (
     CompatibilityDecision,
     CompatibilityMismatchKey,
     CompatibilityOutcome,
+    CompatibilityPolicy,
     CompatibilityRequest,
     RemediationCode,
     VerifiedMeasurementRecord,
+    compatibility_policy_sha256,
     replay_compatibility_decision,
 )
 from evidence_inspector.method_registry import (
@@ -300,6 +302,9 @@ class DrawerVerificationContext:
     result_trust_store: TrustStore
     expected_results: Mapping[str, CatalogResultRef]
     release_authorizations: Mapping[str, ReleaseAuthorization]
+    expected_compatibility_policy: CompatibilityPolicy
+    expected_compatibility_policy_sha256: Sha256
+    expected_compatibility_authority_head_sha256: Sha256
 
 
 class BoundAssetEvidence(CompatibilityContract):
@@ -1156,6 +1161,24 @@ def _verify_external_authority(
     request: DrawerBuildRequest | DrawerReplayRequest,
     context: DrawerVerificationContext,
 ) -> None:
+    expected_policy_sha256 = compatibility_policy_sha256(
+        context.expected_compatibility_policy
+    )
+    if (
+        context.expected_compatibility_policy_sha256
+        != expected_policy_sha256
+        or context.expected_compatibility_policy.authority_head_sha256
+        != context.expected_compatibility_authority_head_sha256
+        or request.compatibility_request.policy
+        != context.expected_compatibility_policy
+        or request.compatibility_request.trusted_policy_sha256
+        != expected_policy_sha256
+        or request.compatibility_request.trusted_authority_head_sha256
+        != context.expected_compatibility_authority_head_sha256
+    ):
+        raise ValueError(
+            "compatibility policy differs from independent authority"
+        )
     for side in (request.left, request.right):
         expected = context.expected_results.get(side.measurement.result_id)
         if expected is None:
