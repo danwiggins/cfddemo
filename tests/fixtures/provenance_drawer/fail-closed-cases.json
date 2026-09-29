@@ -1,0 +1,30 @@
+{
+  "schema_version": "traceback.provenance-drawer-failure-fixture.v1",
+  "synthetic_only": true,
+  "cases": [
+    "compatibility_replay_drift",
+    "unknown_compatibility",
+    "stale_asset_authority",
+    "revoked_asset",
+    "incomplete_counts",
+    "catalog_bundle_mismatch",
+    "field_lineage_mutation",
+    "private_identifier",
+    "local_path",
+    "sequence_like_text",
+    "noncanonical_bytes",
+    "source_evidence_mutation",
+    "compatibility_output_rewrite",
+    "canonical_freshness_drift",
+    "encoded_path",
+    "full_iupac_sequence",
+    "asset_authorization_reassertion",
+    "oversized_canonical_input",
+    "duplicate_count_id",
+    "self_signed_result_evidence",
+    "embedded_release_self_root",
+    "embedded_iupac_sequence",
+    "deep_percent_encoding",
+    "changed_embedded_compatibility_policy"
+  ]
+}
