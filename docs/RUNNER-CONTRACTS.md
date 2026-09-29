@@ -47,13 +47,18 @@ is fixed to `copy-number-dosage-qc.v2`, method
 `development_unqualified`; it never authorizes product release.
 
 The builder performs no plotting, scientific interpretation, runtime probing,
-or network access. It writes canonical JSON artifacts in a fixed inventory and
-atomically publishes a new directory without overwriting an existing one. The
-manifest commits to each artifact's exact byte size and SHA-256 digest, and its
-deterministic report identity binds the result to the plot data, plot spec,
-provenance, and accessible table. Verification and replay reject unknown schema
-identities, identity drift, extra or missing entries, symlinks, noncanonical
-JSON, and any digest or size mismatch.
+or network access. It parses the existing dosage-result union and closed typed
+plot/provenance contracts, then requires a canonical UTF-8 TSV table with a
+fixed schema and header. Every presentation artifact names the exact result
+digest and development identity. Publication fsyncs a private staged directory
+and uses the platform's atomic no-replace rename against a pinned parent.
+
+The manifest commits to each artifact's exact schema/media identity, byte size,
+and SHA-256 digest. Verification pins the bundle root once and replays the same
+semantic and privacy checks through descriptor-relative reads. Unknown schemas,
+identity drift, local paths, raw identifiers, binary tables, extra or missing
+entries, symlinks, noncanonical JSON, and any digest or size mismatch fail
+closed.
 
 ## Synthetic aligned reference-span policy
 
