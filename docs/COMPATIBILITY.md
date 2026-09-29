@@ -17,9 +17,9 @@ digest/version identities, not reusable method references alone. Registry or
 authority drift therefore fails closed before a compatibility result is used.
 
 Decisions are one of `comparable`, `different_quantity`, `incompatible`, or
-`unknown`. Missing metadata, stale policy or authority, failed execution,
-insufficient information, and unverified, revoked, or unknown trust fail closed
-as `unknown`; unknown decisions never permit deltas or a shared axis.
+`unknown`. Missing metadata, stale policy or authority, failed or not-run
+execution, insufficient information, and unverified, revoked, or unknown trust
+fail closed as `unknown`; unknown decisions never permit deltas or a shared axis.
 Qualification remains independently recorded and does not imply compatibility.
 
 Canonical decisions contain sorted mismatch keys and missing fields, an exact

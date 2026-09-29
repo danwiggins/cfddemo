@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import json
 from datetime import datetime, timezone
-from typing import Any
 
 import pytest
 from pydantic import ValidationError
@@ -566,6 +565,10 @@ def test_missing_required_data_is_unknown_with_exact_missing_field() -> None:
     [
         (
             {"execution_state": ExecutionState.FAILED},
+            RemediationCode.RESOLVE_EXECUTION,
+        ),
+        (
+            {"execution_state": ExecutionState.NOT_RUN},
             RemediationCode.RESOLVE_EXECUTION,
         ),
         (
