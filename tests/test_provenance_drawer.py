@@ -8,6 +8,8 @@ from datetime import timedelta
 from pathlib import Path
 
 import pytest
+from cryptography.hazmat.primitives import serialization
+from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
 from pydantic import ValidationError
 
 from evidence_inspector.compatibility import (
@@ -34,6 +36,7 @@ from evidence_inspector.provenance_drawer import (
     DrawerError,
     FilterEvidence,
     LimitationEvidence,
+    MAX_CANONICAL_DRAWER_BYTES,
     MeasurementValue,
     ProvenanceDrawer,
     SideEvidenceInput,
@@ -57,10 +60,18 @@ from tests.test_compatibility import (
 )
 from traceback_runner.assets import AssetVerification, IntegrityStatus
 from traceback_runner.qualification import (
-    AssetAuthorizationDecision,
+    ApproverRole,
     AssetLifecycleStatus,
     AuthorityFailure,
     AuthorityStatus,
+    AuthorityScope as ReleaseAuthorityScope,
+    GrantStatus,
+    QualificationTrustPolicy,
+    ReleaseAuthorityHead,
+    SignerRoleGrant,
+    qualification_binding,
+    sign_development_release_evidence,
+    verify_release_asset_authorization,
 )
 from traceback_runner.release_evidence import (
     AssetContentIdentity,
@@ -73,6 +84,13 @@ from traceback_runner.release_evidence import (
     domain_digest,
 )
 from traceback_runner.serialization import canonical_json_bytes
+from traceback_runner.signing import (
+    DevelopmentSigningKey,
+    KeyPurpose,
+    development_trust_bytes,
+    load_development_trust,
+)
+from tests.test_release_evidence import _package
 
 
 METHOD = _method()
@@ -95,7 +113,7 @@ def _result_id(bundle_sha256: str, method_sha256: str) -> str:
 def _record(
     name: str,
     bundle_digit: str,
-    result_digit: str,
+    result_sha256: str,
     *,
     method=METHOD,
 ) -> VerifiedMeasurementRecord:
@@ -103,7 +121,7 @@ def _record(
     method_sha256 = method_definition_sha256(method)
     return VerifiedMeasurementRecord(
         result_id=_result_id(bundle_sha256, method_sha256),
-        result_sha256=result_digit * 64,
+        result_sha256=result_sha256,
         bundle_id=f"bundle_{name}",
         bundle_sha256=bundle_sha256,
         method=method,
@@ -155,21 +173,61 @@ def _asset_proof(method_asset) -> BoundAssetEvidence:
         lifecycle=AssetLifecycle(status=AssetStatus.ACTIVE),
     )
     reference_sha256 = domain_digest(DigestDomain.ASSET_REFERENCE, reference)
-    authorization = AssetAuthorizationDecision(
-        authority_status=AuthorityStatus.VERIFIED,
-        lifecycle_status=AssetLifecycleStatus.ACTIVE,
-        failure=AuthorityFailure.NONE,
-        release_id="synthetic-release",
-        release_version="v1",
-        package_sha256=hashlib.sha256(
-            method_asset.asset_id.encode("ascii")
-        ).hexdigest(),
-        asset_id=method_asset.asset_id,
-        asset_version=method_asset.version,
-        asset_reference_sha256=reference_sha256,
-        verified_as_of=NOW - timedelta(hours=1),
-        fresh_until=NOW + timedelta(days=1),
-        authorized_reference=reference,
+    package = _package(asset=reference)
+    package_sha256 = domain_digest(DigestDomain.RELEASE_EVIDENCE, package)
+    binding = qualification_binding(package)
+    private_key = Ed25519PrivateKey.from_private_bytes(
+        hashlib.sha256(method_asset.asset_id.encode("ascii")).digest()
+    )
+    public = private_key.public_key().public_bytes(
+        encoding=serialization.Encoding.Raw,
+        format=serialization.PublicFormat.Raw,
+    )
+    key = DevelopmentSigningKey(
+        key_id=f"dev-release-{hashlib.sha256(public).hexdigest()[:24]}",
+        purpose=KeyPurpose.RELEASE,
+        private_key=private_key,
+    )
+    envelope = sign_development_release_evidence(
+        package, key, signer_role=ApproverRole.RELEASE_REVIEWER
+    )
+    policy = QualificationTrustPolicy(
+        policy_id="synthetic-policy",
+        version="v1",
+        issued_at=NOW - timedelta(days=1),
+        expires_at=NOW + timedelta(days=1),
+        grants=(
+            SignerRoleGrant(
+                scope=ReleaseAuthorityScope.RELEASE_EVIDENCE,
+                role=ApproverRole.RELEASE_REVIEWER,
+                key_id=key.key_id,
+                binding=binding,
+                valid_from=NOW - timedelta(days=1),
+                expires_at=NOW + timedelta(days=1),
+                status=GrantStatus.ACTIVE,
+            ),
+        ),
+    )
+    head = ReleaseAuthorityHead(
+        release_id=package.release_id,
+        release_version=package.version,
+        package_sha256=package_sha256,
+        as_of=NOW - timedelta(hours=1),
+        expires_at=NOW + timedelta(days=1),
+    )
+    trust_document_bytes = development_trust_bytes(key)
+    trust = load_development_trust(trust_document_bytes)
+    authorization = verify_release_asset_authorization(
+        envelope,
+        trust,
+        policy,
+        head,
+        expected_binding=binding,
+        expected_package_sha256=package_sha256,
+        expected_asset_id=method_asset.asset_id,
+        expected_asset_version=method_asset.version,
+        expected_asset_reference_sha256=reference_sha256,
+        now=NOW,
     )
     verification = AssetVerification(
         asset_id=method_asset.asset_id,
@@ -189,16 +247,15 @@ def _asset_proof(method_asset) -> BoundAssetEvidence:
         method_asset=method_asset,
         verification=verification,
         authorization=authorization,
+        release_envelope=envelope,
+        trust_document=json.loads(trust_document_bytes),
+        role_policy=policy,
+        authority_head=head,
+        expected_binding=binding,
     )
 
 
-def _side(
-    record: VerifiedMeasurementRecord,
-    name: str,
-    *,
-    eligible: int,
-    value: float,
-) -> SideEvidenceInput:
+def _evidence_parts(method, *, eligible: int, value: float) -> dict[str, object]:
     denominator = DenominatorEvidence(
         denominator_id="denom_complete_primary",
         semantics_id="sem_denominator_alpha",
@@ -222,43 +279,76 @@ def _side(
         )
         for role in CountRole
     )
+    measurement_value = MeasurementValue(
+        numeric_value=value,
+        display_value=f"{value:.12g} fraction",
+        quantity_id=method.quantity_id,
+        unit=method.unit,
+    )
+    filters = (
+        FilterEvidence(
+            filter_id="filter_primary_complete",
+            version="1.0.0",
+            definition_sha256="4" * 64,
+            denominator_sha256=denominator_sha256,
+            input_count=100,
+            retained_count=eligible,
+            excluded_count=excluded,
+        ),
+    )
+    limitations = (
+        LimitationEvidence(
+            limitation_id="limit_research_only",
+            version="1.0.0",
+            statement_sha256="5" * 64,
+            method_definition_sha256=method_definition_sha256(method),
+        ),
+    )
+    payload = {
+        "schema_version": "traceback.drawer-evidence-payload.v1",
+        "measurement_value": measurement_value.model_dump(mode="json"),
+        "denominator": denominator.model_dump(mode="json"),
+        "counts": [item.model_dump(mode="json") for item in counts],
+        "filters": [item.model_dump(mode="json") for item in filters],
+        "limitations": [item.model_dump(mode="json") for item in limitations],
+    }
+    return {
+        "denominator": denominator,
+        "counts": counts,
+        "filters": filters,
+        "limitations": limitations,
+        "measurement_value": measurement_value,
+        "evidence_payload_sha256": hashlib.sha256(
+            canonical_json_bytes(payload)
+        ).hexdigest(),
+    }
+
+
+def _side(
+    record: VerifiedMeasurementRecord,
+    name: str,
+    *,
+    eligible: int,
+    value: float,
+) -> SideEvidenceInput:
+    evidence = _evidence_parts(record.method, eligible=eligible, value=value)
     return SideEvidenceInput(
         catalog_result=_catalog(record, name),
         measurement=record,
         assets=tuple(_asset_proof(item) for item in record.method.assets),
-        denominator=denominator,
-        counts=counts,
-        filters=(
-            FilterEvidence(
-                filter_id="filter_primary_complete",
-                version="1.0.0",
-                definition_sha256="4" * 64,
-                denominator_sha256=denominator_sha256,
-                input_count=100,
-                retained_count=eligible,
-                excluded_count=excluded,
-            ),
-        ),
-        limitations=(
-            LimitationEvidence(
-                limitation_id="limit_research_only",
-                version="1.0.0",
-                statement_sha256="5" * 64,
-                method_definition_sha256=record.method_definition_sha256,
-            ),
-        ),
-        measurement_value=MeasurementValue(
-            numeric_value=value,
-            display_value=f"{value:.12g} fraction",
-            quantity_id=record.method.quantity_id,
-            unit=record.method.unit,
-        ),
+        **evidence,
     )
 
 
 def _request() -> DrawerBuildRequest:
-    left_record = _record("alpha", "a", "c")
-    right_record = _record("beta", "b", "d")
+    left_digest = _evidence_parts(METHOD, eligible=90, value=0.25)[
+        "evidence_payload_sha256"
+    ]
+    right_digest = _evidence_parts(METHOD, eligible=80, value=0.30)[
+        "evidence_payload_sha256"
+    ]
+    left_record = _record("alpha", "a", str(left_digest))
+    right_record = _record("beta", "b", str(right_digest))
     policy = _policy_for(left_record, right_record)
     compatibility_request = CompatibilityRequest(
         left=left_record,
@@ -278,12 +368,18 @@ def _request() -> DrawerBuildRequest:
 
 
 def _method_difference_request() -> DrawerBuildRequest:
-    left_record = _record("method_alpha", "6", "7")
     alternate_method = _method(version="2.0.0", parameter_digest="8" * 64)
+    left_digest = _evidence_parts(METHOD, eligible=90, value=0.25)[
+        "evidence_payload_sha256"
+    ]
+    right_digest = _evidence_parts(alternate_method, eligible=90, value=0.25)[
+        "evidence_payload_sha256"
+    ]
+    left_record = _record("method_alpha", "6", str(left_digest))
     right_record = _record(
         "method_beta",
         "9",
-        "0",
+        str(right_digest),
         method=alternate_method,
     )
     policy = _policy_for(left_record, right_record)
@@ -353,6 +449,12 @@ def test_every_visible_field_resolves_all_exact_identity_categories() -> None:
             assert lineage.authority_scope == side.authority_scope
             assert lineage.capability_as_of == side.capability_as_of
             assert lineage.asset_reference_sha256s
+            assert lineage.asset_verified_as_of == tuple(
+                item.verified_as_of for item in side.assets
+            )
+            assert lineage.asset_fresh_until == tuple(
+                item.fresh_until for item in side.assets
+            )
             assert lineage.denominator_sha256 == side.denominator_sha256
             assert lineage.count_sha256s == side.count_sha256s
             assert lineage.filter_sha256s == side.filter_sha256s
@@ -412,7 +514,7 @@ def test_replay_mutation_and_cross_contract_drift_fail_closed() -> None:
     drawer = build_provenance_drawer(request)
     payload = drawer.model_dump(mode="json")
     payload["fields"][0]["left_lineage"]["bundle_sha256"] = "f" * 64
-    with pytest.raises(ValidationError, match="lineage"):
+    with pytest.raises(ValidationError, match="replay"):
         ProvenanceDrawer.model_validate_json(canonical_json_bytes(payload))
 
     bypassed_side = request.left.model_copy(
@@ -461,6 +563,9 @@ def test_unknown_stale_revoked_and_incomplete_inputs_fail_closed() -> None:
     )
     with pytest.raises(ValidationError, match="incomplete, stale, or revoked"):
         BoundAssetEvidence(
+            **first_asset.model_dump(
+                exclude={"method_asset", "verification", "authorization"}
+            ),
             method_asset=first_asset.method_asset,
             verification=revoked_verification,
             authorization=first_asset.authorization,
@@ -471,6 +576,9 @@ def test_unknown_stale_revoked_and_incomplete_inputs_fail_closed() -> None:
     )
     with pytest.raises(ValidationError, match="reference digest"):
         BoundAssetEvidence(
+            **first_asset.model_dump(
+                exclude={"method_asset", "verification", "authorization"}
+            ),
             method_asset=first_asset.method_asset,
             verification=first_asset.verification.model_copy(
                 update={
@@ -533,8 +641,6 @@ def test_canonical_boundary_and_closed_schemas_reject_mutation() -> None:
         "ACGTACGTACGT",
         "synthetic.record.alpha",
         "synthetic.workflow.v1",
-        "Synthetic fixture authority.",
-        "synthetic-release",
     ):
         assert forbidden not in public
 
@@ -566,4 +672,120 @@ def test_failure_fixture_enumerates_the_adversarial_boundary() -> None:
         "local_path",
         "sequence_like_text",
         "noncanonical_bytes",
+        "source_evidence_mutation",
+        "compatibility_output_rewrite",
+        "canonical_freshness_drift",
+        "encoded_path",
+        "full_iupac_sequence",
+        "asset_authorization_reassertion",
+        "oversized_canonical_input",
+        "duplicate_count_id",
     }
+
+
+def _rehash_drawer_payload(payload: dict[str, object]) -> bytes:
+    payload["drawer_sha256"] = hashlib.sha256(
+        canonical_json_bytes(
+            {key: value for key, value in payload.items() if key != "drawer_sha256"}
+        )
+    ).hexdigest()
+    return canonical_json_bytes(payload)
+
+
+def test_canonical_source_evidence_mutation_cannot_retain_result_identity() -> None:
+    drawer = build_provenance_drawer(_request())
+    payload = drawer.model_dump(mode="json")
+    left = payload["replay_request"]["left"]
+    left["measurement_value"]["numeric_value"] = 0.99
+    left["measurement_value"]["display_value"] = "0.99 fraction"
+    left["counts"][1]["value"] = 0
+    left["counts"][2]["value"] = 100
+    left["filters"][0]["retained_count"] = 0
+    left["filters"][0]["excluded_count"] = 100
+    left["limitations"][0]["statement_sha256"] = "9" * 64
+
+    with pytest.raises(DrawerError, match="invalid"):
+        drawer_from_canonical_bytes(ProvenanceDrawer, _rehash_drawer_payload(payload))
+
+
+def test_canonical_compatibility_rewrite_and_derived_rows_fail_replay() -> None:
+    drawer = build_provenance_drawer(_method_difference_request())
+    payload = drawer.model_dump(mode="json")
+    payload["compatibility_outcome"] = "comparable"
+    payload["compatibility_mismatch_keys"] = []
+    payload["compatibility_remediation_code"] = "none"
+    for field in payload["fields"]:
+        if field["field"] == "compatibility_decision":
+            field["left"]["display_value"] = "comparable"
+            field["right"]["display_value"] = "comparable"
+
+    with pytest.raises(DrawerError, match="invalid"):
+        drawer_from_canonical_bytes(ProvenanceDrawer, _rehash_drawer_payload(payload))
+
+
+def test_canonical_parse_rechecks_capability_and_asset_freshness() -> None:
+    drawer = build_provenance_drawer(_request())
+    payload = drawer.model_dump(mode="json")
+    payload["evaluated_at"] = "2026-10-01T12:00:00Z"
+    payload["replay_request"]["evaluated_at"] = "2026-10-01T12:00:00Z"
+
+    with pytest.raises(DrawerError, match="invalid"):
+        drawer_from_canonical_bytes(ProvenanceDrawer, _rehash_drawer_payload(payload))
+
+
+@pytest.mark.parametrize(
+    "private_value",
+    (
+        "A" * 64,
+        "%2Fprivate%2Ftmp%2Fevidence",
+        "%252e%252e%252fprivate%252fresult",
+    ),
+)
+def test_canonical_privacy_scan_decodes_paths_and_rejects_full_iupac(
+    private_value: str,
+) -> None:
+    drawer = build_provenance_drawer(_request())
+    payload = drawer.model_dump(mode="json")
+    payload["fields"][0]["left"]["display_value"] = private_value
+    with pytest.raises(DrawerError, match="invalid"):
+        drawer_from_canonical_bytes(ProvenanceDrawer, _rehash_drawer_payload(payload))
+
+
+@pytest.mark.parametrize(
+    ("target", "replacement"),
+    (
+        ("content_size_bytes", 129),
+        ("release_version", "v2"),
+        ("package_sha256", "9" * 64),
+        ("fresh_until", "2026-09-29T12:00:00Z"),
+    ),
+)
+def test_authenticated_asset_fields_cannot_be_reasserted(
+    target: str, replacement: object
+) -> None:
+    drawer = build_provenance_drawer(_request())
+    payload = drawer.model_dump(mode="json")
+    asset = payload["replay_request"]["left"]["assets"][0]
+    if target == "content_size_bytes":
+        asset["verification"][target] = replacement
+    else:
+        asset["authorization"][target] = replacement
+    with pytest.raises(DrawerError, match="invalid"):
+        drawer_from_canonical_bytes(ProvenanceDrawer, _rehash_drawer_payload(payload))
+
+
+def test_schema_input_limit_is_enforced_before_json_parse() -> None:
+    content = b"{" + b" " * MAX_CANONICAL_DRAWER_BYTES + b"}"
+    with pytest.raises(DrawerError, match="schema input limit"):
+        drawer_from_canonical_bytes(ProvenanceDrawer, content)
+
+
+def test_duplicate_count_id_across_roles_is_rejected() -> None:
+    request = _request()
+    counts = list(request.left.counts)
+    counts[1] = counts[1].model_copy(update={"count_id": counts[0].count_id})
+    with pytest.raises(ValidationError, match="count IDs must be unique"):
+        SideEvidenceInput(
+            **request.left.model_dump(exclude={"counts"}),
+            counts=tuple(counts),
+        )

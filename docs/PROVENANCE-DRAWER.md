@@ -8,21 +8,28 @@ aggregate records and one E05 compatibility request and decision.
 ## Contract boundaries
 
 The builder consumes existing contracts rather than creating parallel sources
-of truth:
+of truth, and the canonical output retains a privacy-bounded replay request:
 
 - E01 `MethodDefinition`, `CurrentMethodCapability`, method asset references,
   registry identity, and authority-head identity;
-- E02 installed-asset verification and fresh active asset authorization;
+- E02 installed-asset verification plus the signed release envelope, public
+  trust document, role policy, authority head, expected binding, and exact
+  fresh active authorization decision;
 - E04 `CatalogResultRef` bundle, manifest, method, registry, and authority
   bindings;
 - E05 `VerifiedMeasurementRecord`, `CompatibilityRequest`, and replayed
   `CompatibilityDecision`.
 
-Catalog and measurement identities must agree exactly. Method assets must have
-one uniquely sorted E02 proof each, with matching ID, version, content digest,
+Catalog and measurement identities must agree exactly. Every displayed
+scientific value is included in one canonical evidence payload whose digest
+must equal the verified measurement's `result_sha256`; values cannot change
+while retaining the result identity. Method assets must have one uniquely
+sorted E02 proof each, with matching ID, version, content size and digest,
 registered reference digest, current reference digest, active lifecycle, valid
-integrity, and fresh authority. Compatibility is replayed from the original
-request; a valid decision from another request is rejected.
+integrity, release/version/package identity, and fresh authority. Compatibility
+is replayed from the original request; a valid decision from another request is
+rejected. Canonical parsing independently reruns the evidence binding, signed
+E02 authorization, E05 decision, freshness checks, and every derived row.
 
 Unknown compatibility, stale authority, revoked or invalid assets, unavailable
 results, incomplete denominator accounting, and any cross-contract mismatch
@@ -58,12 +65,16 @@ ordered, exhaustive partition of all ten rows.
 All contracts are immutable, closed, bounded, finite-number-only models.
 Canonical JSON is byte-stable, and both side provenance and the complete drawer
 carry validated SHA-256 identities. Canonical loading rejects whitespace or key
-ordering drift as well as semantic mutation.
+ordering drift as well as semantic mutation. A schema-owned byte ceiling is
+checked before JSON parsing, and every collection has an explicit item bound.
 
 The serialized read model contains controlled aggregate identifiers and
 digests only. It excludes catalog record IDs, workflow identifiers, aliases,
-local paths, raw source identifiers, and sequence. Controlled text rejects
-privacy-reserved identifier stems, paths, URIs, and sequence-like strings.
+local paths, raw source identifiers, and sequence. Controlled text is
+Unicode-normalized and repeatedly percent-decoded before rejecting
+privacy-reserved identifier stems, traversal, paths, URIs, and the full IUPAC
+sequence alphabet. Only typed digest and cryptographic encoding fields bypass
+text scanning.
 Measurement display is derived from the exact numeric value and registered
 unit, so callers cannot provide a conflicting label.
 
