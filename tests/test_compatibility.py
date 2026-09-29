@@ -301,6 +301,9 @@ def test_exact_identity_is_comparable_and_policy_controls_render_permissions() -
     assert decision.delta_allowed
     assert not decision.shared_axis_allowed
     assert decision.remediation_code == RemediationCode.NONE
+    assert decision.binding.left.execution_state == ExecutionState.COMPLETE
+    assert decision.binding.left.information_state == InformationState.SUFFICIENT
+    assert decision.binding.left.trust_state == TrustState.VERIFIED
 
 
 def test_swapped_sides_produce_identical_canonical_decision_and_digest() -> None:

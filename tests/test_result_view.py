@@ -484,6 +484,38 @@ def test_source_rejects_tampered_exact_bindings(
         ResultViewSource.model_validate_json(json.dumps(payload))
 
 
+@pytest.mark.parametrize(
+    "state_update",
+    (
+        {"execution_state": ExecutionState.NOT_RUN},
+        {"information_state": InformationState.INSUFFICIENT},
+        {"trust_state": TrustState.REVOKED},
+    ),
+)
+def test_source_rejects_stale_comparable_decision_after_state_change(
+    state_update: dict[str, object],
+) -> None:
+    anchor = _record("stale_anchor", "6")
+    original = _record("stale_peer", "7")
+    comparable = _decision(anchor, original)
+    assert comparable.outcome == CompatibilityOutcome.COMPARABLE
+    changed = original.model_copy(update=state_update)
+    denominator = (
+        _ledger(available=False)
+        if changed.execution_state == ExecutionState.NOT_RUN
+        else _ledger()
+    )
+
+    with pytest.raises(ValidationError, match="compatibility binding"):
+        bind_result_view_source(
+            record=changed,
+            compatibility_decision=comparable,
+            denominator=denominator,
+            accessible_label="Synthetic aggregate stale peer",
+            qc_label="State changed after decision",
+        )
+
+
 def test_missing_and_withheld_counts_cannot_carry_zero() -> None:
     for state in (CountState.MISSING, CountState.WITHHELD):
         with pytest.raises(ValidationError, match="cannot contain a value"):
@@ -492,6 +524,42 @@ def test_missing_and_withheld_counts_cannot_carry_zero() -> None:
                 value=0,
                 accessible_label="Count unavailable",
             )
+
+
+def test_not_run_rejects_fully_observed_denominator() -> None:
+    anchor = _record("notrun_anchor", "8")
+    record = _record(
+        "notrun_peer",
+        "9",
+        execution=ExecutionState.NOT_RUN,
+    )
+
+    with pytest.raises(ValidationError, match="not-run result requires missing"):
+        bind_result_view_source(
+            record=record,
+            compatibility_decision=_decision(anchor, record),
+            denominator=_ledger(),
+            accessible_label="Synthetic aggregate not run",
+            qc_label="Execution not run",
+        )
+
+
+def test_not_run_with_missing_denominator_remains_visible_state() -> None:
+    anchor = _record("visible_anchor", "a")
+    record = _record(
+        "visible_peer",
+        "b",
+        execution=ExecutionState.NOT_RUN,
+    )
+    source = _source(anchor, record)
+    view = build_result_view(
+        _request((source,), execution_states=(ExecutionState.NOT_RUN,))
+    )
+
+    assert view.surface_state == ViewSurfaceState.READY
+    assert view.visible_count == 1
+    assert view.rows[0].denominator.input_records.state == CountState.MISSING
+    assert view.rows[0].denominator.input_records.value is None
 
 
 def test_observed_denominator_and_attrition_must_reconcile() -> None:
@@ -572,9 +640,15 @@ def test_surface_fixtures_cover_ready_empty_loading_and_error(
     "label",
     (
         "Donor alpha",
+        "Donor_12345",
         "Patient result",
+        "patient007",
         "Sample identifier",
+        "sample_abc",
         "Read ID 42",
+        "read_id_42",
+        "sequence42",
+        "filename_backup",
         "file:///private/result",
         "local\\private\\result",
     ),
@@ -587,6 +661,23 @@ def test_accessible_labels_reject_private_identifiers_and_paths(
             state=CountState.MISSING,
             accessible_label=label,
         )
+
+
+@pytest.mark.parametrize(
+    "label",
+    (
+        "Ready results",
+        "Readiness status",
+        "Readout summary",
+        "Pathology marker aggregate",
+        "Sampled aggregate",
+        "Sequencer status",
+    ),
+)
+def test_accessible_labels_preserve_documented_safe_vocabulary(label: str) -> None:
+    value = CountValue(state=CountState.MISSING, accessible_label=label)
+
+    assert value.accessible_label == label
 
 
 def test_exact_result_id_rejects_reserved_private_stem() -> None:

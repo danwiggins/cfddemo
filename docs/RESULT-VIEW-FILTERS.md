@@ -32,6 +32,10 @@ record and compatibility decision:
 3. registry version/digest, authority revision/head, and capability digest; and
 4. result and bundle IDs plus their SHA-256 digests.
 
+The compatibility replay binding also captures the record's execution,
+information, and trust states. A decision created before any of those states
+changes is stale and cannot be reused by the result view.
+
 Normalized filters are sorted and deduplicated. Exact identity filters must be
 present in the request's bounded source set. The request digest binds the sources,
 filters, compatibility decisions, labels, and denominator ledgers. The view's
@@ -54,6 +58,10 @@ A count is explicitly `observed`, `missing`, or `withheld`. Missing and withheld
 counts cannot carry a numeric value, including zero. Filters preserve the ledger
 object unchanged; an empty filtered view reports zero visible rows but does not
 rewrite a scientific count.
+
+A `not_run` result requires every denominator stage and attrition count to be
+`missing`. It remains displayable as an explicit state, but cannot carry observed
+or withheld evidence counts.
 
 ## UI fixture states
 

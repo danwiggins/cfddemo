@@ -52,30 +52,44 @@ MAX_FILTER_IDENTITIES = 64
 MAX_ATTRITION_REASONS = 32
 MAX_LABEL_LENGTH = 160
 
+_RESERVED_LABEL_PREFIXES = (
+    "donor",
+    "filename",
+    "path",
+    "patient",
+    "read",
+    "sample",
+    "sequence",
+)
+_SAFE_RESERVED_PREFIX_LEXEMES = {
+    "pathology",
+    "readiness",
+    "readout",
+    "ready",
+    "runner",
+    "runtime",
+    "sampled",
+    "sequencer",
+}
+
+
+def _reject_reserved_privacy_terms(value: str, *, field: str) -> str:
+    for segment in re.split(r"[^a-z0-9]+", value.lower()):
+        if segment in _SAFE_RESERVED_PREFIX_LEXEMES:
+            continue
+        if any(segment.startswith(prefix) for prefix in _RESERVED_LABEL_PREFIXES):
+            raise ValueError(f"{field} contains a reserved privacy term")
+    return value
+
 
 def _safe_label(value: str) -> str:
     if "/" in value or "\\" in value or "://" in value:
         raise ValueError("accessible label cannot contain a path or URI")
-    if re.search(
-        r"\b(donor|patient|sample|sequence|read[ _-]?(?:id|identifier)|filename)\b",
-        value,
-        flags=re.IGNORECASE,
-    ):
-        raise ValueError("accessible label contains a reserved privacy term")
-    return value
+    return _reject_reserved_privacy_terms(value, field="accessible label")
 
 
 def _safe_controlled_token(value: str) -> str:
-    segments = re.split(r"[^a-z0-9]+", value.lower())
-    if any(
-        segment not in {"ready", "readiness", "readout"}
-        and segment.startswith(
-            ("donor", "patient", "sample", "read", "sequence", "path")
-        )
-        for segment in segments
-    ):
-        raise ValueError("controlled identifier contains a reserved privacy term")
-    return value
+    return _reject_reserved_privacy_terms(value, field="controlled identifier")
 
 
 AccessibleLabel = Annotated[
@@ -394,6 +408,9 @@ class ResultViewSource(CompatibilityContract):
             compatibility_key_sha256=compatibility_key_sha256(
                 self.record.compatibility_key
             ),
+            execution_state=self.record.execution_state,
+            information_state=self.record.information_state,
+            trust_state=self.record.trust_state,
         )
         if bound != expected_bound:
             raise ValueError("compatibility binding does not match exact record")
@@ -407,6 +424,18 @@ class ResultViewSource(CompatibilityContract):
             raise ValueError("authority filter identity does not match record")
         if self.result_identity != _result_identity(self.record):
             raise ValueError("result filter identity does not match record")
+        if self.record.execution_state == ExecutionState.NOT_RUN:
+            denominator_counts = (
+                self.denominator.input_records,
+                self.denominator.accepted_records,
+                self.denominator.eligible_records,
+                self.denominator.displayed_records,
+                *(reason.count for reason in self.denominator.attrition),
+            )
+            if any(count.state != CountState.MISSING for count in denominator_counts):
+                raise ValueError(
+                    "not-run result requires missing denominator and attrition counts"
+                )
         return self
 
 
