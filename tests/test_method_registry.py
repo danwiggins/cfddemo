@@ -1,35 +1,46 @@
-"""Exact contract tests for the versioned method registry."""
+"""Authority, replay, canonicalization, and privacy tests for E01."""
 
 from __future__ import annotations
 
+import copy
 import json
 from datetime import datetime, timezone
+from typing import Any
 
 import pytest
-from pydantic import ValidationError
+from pydantic import BaseModel, ValidationError
 
 from evidence_inspector.method_registry import (
     AssetReference,
     AssetRegistration,
+    AuthorityHead,
+    AuthorityRevocation,
+    CurrentMethodCapability,
     DisplayRole,
+    DisplayRoleAssignment,
+    HistoricalMethodCapability,
+    MethodDefinition,
     MethodFamily,
     MethodReference,
-    MethodRegistration,
     MethodRegistry,
+    QualificationRecord,
     QualificationState,
     RegistryIdentityError,
     RegistryTransitionError,
+    RevocationTarget,
     ToolReference,
     ToolRegistration,
-    capability_from_canonical_bytes,
+    authority_head_for_registry,
+    authority_head_sha256,
     canonical_contract_bytes,
-    canonical_registry_bytes,
+    contract_from_canonical_bytes,
     effective_provider_primary,
-    registry_from_canonical_bytes,
     registry_sha256,
-    replay_method_capability,
+    replay_current_capability,
+    replay_historical_capability,
     replay_registry_transition,
-    resolve_method_capability,
+    resolve_current_capability,
+    resolve_historical_capability,
 )
 
 UTC = timezone.utc
@@ -41,59 +52,121 @@ T3 = datetime(2026, 4, 1, tzinfo=UTC)
 
 def _tool() -> ToolRegistration:
     return ToolRegistration(
-        tool_id="fragment-counter", version="1.0.0", artifact_sha256="a" * 64
+        tool_id="tool_fragment_counter",
+        version="1.0.0",
+        artifact_sha256="a" * 64,
     )
 
 
 def _asset() -> AssetRegistration:
     return AssetRegistration(
-        asset_id="fragment-policy", version="1.0.0", content_sha256="b" * 64
+        asset_id="asset_fragment_policy",
+        version="1.0.0",
+        content_sha256="b" * 64,
     )
 
 
-def _method(
-    method_id: str,
-    version: str,
-    role: DisplayRole,
-    *,
-    qualification: QualificationState = QualificationState.DEVELOPMENT_UNQUALIFIED,
-    effective_at: datetime | None = None,
-    revoked_at: datetime | None = None,
-    authority_scope: str | None = None,
-    approval_ref: str | None = None,
-) -> MethodRegistration:
-    return MethodRegistration(
+def _definition(
+    method_id: str = "mth_fragment_raw_query_length",
+    version: str = "1.0.0",
+) -> MethodDefinition:
+    return MethodDefinition(
         method_id=method_id,
         version=version,
         family=MethodFamily.FRAGMENT_MEASUREMENT,
-        quantity_id="raw_query_length",
-        unit="base_pairs",
+        quantity_id="qty_fragment_raw_query_length",
+        unit="unit_base_pairs",
         parameter_schema_sha256="c" * 64,
         tools=(
             ToolReference(
-                tool_id="fragment-counter",
+                tool_id="tool_fragment_counter",
                 version="1.0.0",
                 artifact_sha256="a" * 64,
             ),
         ),
         assets=(
             AssetReference(
-                asset_id="fragment-policy",
+                asset_id="asset_fragment_policy",
                 version="1.0.0",
                 content_sha256="b" * 64,
             ),
         ),
-        qualification_state=qualification,
-        display_role=role,
+    )
+
+
+def _qualification(
+    method_ref: MethodReference,
+    *,
+    record_ref: str,
+    state: QualificationState,
+    effective_at: datetime,
+) -> QualificationRecord:
+    return QualificationRecord(
+        record_ref=record_ref,
+        method_ref=method_ref,
+        state=state,
         effective_at=effective_at,
-        revoked_at=revoked_at,
-        authority_scope=authority_scope,
-        approval_ref=approval_ref,
+        approval_ref=f"approval_{record_ref}",
+    )
+
+
+def _role(
+    method_ref: MethodReference,
+    *,
+    assignment_ref: str,
+    role: DisplayRole,
+    effective_at: datetime,
+    scope: str = "scope_provider_west",
+) -> DisplayRoleAssignment:
+    return DisplayRoleAssignment(
+        assignment_ref=assignment_ref,
+        method_ref=method_ref,
+        display_role=role,
+        authority_scope=scope,
+        effective_at=effective_at,
+        approval_ref=(
+            f"approval_{assignment_ref}"
+            if role == DisplayRole.PROVIDER_PRIMARY
+            else None
+        ),
+    )
+
+
+def _revoke_qualification(
+    record_ref: str,
+    *,
+    revocation_ref: str,
+    effective_at: datetime,
+) -> AuthorityRevocation:
+    return AuthorityRevocation(
+        revocation_ref=revocation_ref,
+        target=RevocationTarget.QUALIFICATION,
+        qualification_record_ref=record_ref,
+        effective_at=effective_at,
+        approval_ref=f"approval_{revocation_ref}",
+    )
+
+
+def _revoke_role(
+    assignment_ref: str,
+    *,
+    revocation_ref: str,
+    effective_at: datetime,
+) -> AuthorityRevocation:
+    return AuthorityRevocation(
+        revocation_ref=revocation_ref,
+        target=RevocationTarget.DISPLAY_ROLE,
+        display_role_assignment_ref=assignment_ref,
+        effective_at=effective_at,
+        approval_ref=f"approval_{revocation_ref}",
     )
 
 
 def _registry(
-    *methods: MethodRegistration,
+    *definitions: MethodDefinition,
+    qualifications: tuple[QualificationRecord, ...] = (),
+    roles: tuple[DisplayRoleAssignment, ...] = (),
+    revocations: tuple[AuthorityRevocation, ...] = (),
     version: int = 1,
     published_at: datetime = T0,
     previous: str | None = None,
@@ -101,272 +174,381 @@ def _registry(
     assets: tuple[AssetRegistration, ...] | None = None,
 ) -> MethodRegistry:
     return MethodRegistry(
-        registry_id="traceback-methods",
+        registry_id="registry_traceback_methods",
         registry_version=version,
+        authority_revision=len(qualifications) + len(roles) + len(revocations),
         published_at=published_at,
         previous_registry_sha256=previous,
         tools=tools or (_tool(),),
         assets=assets or (_asset(),),
-        methods=tuple(sorted(methods, key=lambda item: (item.method_id, item.version))),
+        method_definitions=tuple(
+            sorted(definitions, key=lambda item: (item.method_id, item.version))
+        ),
+        qualification_records=tuple(
+            sorted(qualifications, key=lambda item: item.record_ref)
+        ),
+        display_role_assignments=tuple(
+            sorted(roles, key=lambda item: item.assignment_ref)
+        ),
+        revocations=tuple(sorted(revocations, key=lambda item: item.revocation_ref)),
     )
 
 
-def _baseline() -> MethodRegistration:
-    return _method(
-        "fragment-raw-query-length",
-        "1.0.0",
-        DisplayRole.RESEARCH_BASELINE,
+def _active_provider_registry() -> (
+    tuple[MethodRegistry, MethodDefinition, QualificationRecord, DisplayRoleAssignment]
+):
+    definition = _definition()
+    qualification = _qualification(
+        definition.method_ref,
+        record_ref="qual_fragment_primary",
+        state=QualificationState.QUALIFIED,
+        effective_at=T0,
+    )
+    role = _role(
+        definition.method_ref,
+        assignment_ref="role_fragment_primary",
+        role=DisplayRole.PROVIDER_PRIMARY,
+        effective_at=T0,
+    )
+    return (
+        _registry(definition, qualifications=(qualification,), roles=(role,)),
+        definition,
+        qualification,
+        role,
     )
 
 
-def _primary(
-    method_id: str,
-    version: str,
-    effective_at: datetime,
-    revoked_at: datetime | None = None,
-    *,
-    qualification: QualificationState = QualificationState.QUALIFIED,
-) -> MethodRegistration:
-    return _method(
-        method_id,
-        version,
-        DisplayRole.PROVIDER_PRIMARY,
-        qualification=qualification,
-        effective_at=effective_at,
-        revoked_at=revoked_at,
-        authority_scope="provider-west",
-        approval_ref=f"approval-{method_id}-{version}",
+def _head(registry: MethodRegistry, issued_at: datetime = T0) -> AuthorityHead:
+    return authority_head_for_registry(registry, issued_at=issued_at)
+
+
+def test_registry_head_and_capabilities_round_trip_as_exact_canonical_json() -> None:
+    registry, definition, _, _ = _active_provider_registry()
+    head = _head(registry)
+    historical = resolve_historical_capability(
+        registry,
+        definition.method_ref,
+        authority_scope="scope_provider_west",
+        as_of=T1,
+    )
+    current = resolve_current_capability(
+        registry,
+        head,
+        authority_head_sha256(head),
+        definition.method_ref,
+        authority_scope="scope_provider_west",
+        as_of=T1,
     )
 
+    for model, value in (
+        (MethodRegistry, registry),
+        (AuthorityHead, head),
+        (HistoricalMethodCapability, historical),
+        (CurrentMethodCapability, current),
+    ):
+        encoded = canonical_contract_bytes(value)
+        assert contract_from_canonical_bytes(model, encoded) == value
+        indented = json.dumps(value.model_dump(mode="json"), indent=2).encode()
+        with pytest.raises(RegistryIdentityError, match="not canonical"):
+            contract_from_canonical_bytes(model, indented)
 
-def test_closed_models_canonical_digest_and_json_round_trip() -> None:
-    registry = _registry(_baseline())
-
-    encoded = canonical_registry_bytes(registry)
-
-    assert encoded == canonical_registry_bytes(registry)
     assert registry_sha256(registry) == registry_sha256(registry)
-    assert registry_from_canonical_bytes(encoded) == registry
-    assert json.loads(encoded)["schema_version"] == "traceback.method-registry.v1"
-
-    indented = json.dumps(registry.model_dump(mode="json"), indent=2).encode()
-    with pytest.raises(RegistryIdentityError, match="not canonical"):
-        registry_from_canonical_bytes(indented)
-
-    payload = registry.model_dump(mode="python")
-    payload["extensions"] = {"anything": True}
-    with pytest.raises(ValidationError, match="extra_forbidden"):
-        MethodRegistry.model_validate(payload)
+    assert current.authority_head_sha256 == authority_head_sha256(head)
+    assert current.method_definition_sha256 == historical.method_definition_sha256
 
 
-@pytest.mark.parametrize("missing", ("authority_scope", "approval_ref", "effective_at"))
-def test_provider_primary_requires_explicit_effective_authority(missing: str) -> None:
-    payload = _primary("provider-fragment", "1.0.0", T0).model_dump(mode="python")
-    payload[missing] = None
+def test_current_capability_requires_trusted_head_digest_and_revision() -> None:
+    registry, definition, _, _ = _active_provider_registry()
+    head = _head(registry)
 
-    with pytest.raises(ValidationError, match="provider_primary requires"):
-        MethodRegistration.model_validate(payload)
-
-
-def test_qualification_role_and_provider_capability_are_independent() -> None:
-    unqualified_primary = _primary(
-        "provider-fragment",
-        "1.0.0",
-        T0,
-        qualification=QualificationState.DEVELOPMENT_UNQUALIFIED,
-    )
-    qualified_baseline = _method(
-        "qualified-research",
-        "1.0.0",
-        DisplayRole.RESEARCH_BASELINE,
-        qualification=QualificationState.QUALIFIED,
-    )
-    registry = _registry(unqualified_primary, qualified_baseline)
-
-    primary_capability = resolve_method_capability(
-        registry,
-        unqualified_primary.method_ref,
-        authority_scope="provider-west",
-        as_of=T1,
-    )
-    research_capability = resolve_method_capability(
-        registry,
-        qualified_baseline.method_ref,
-        authority_scope="provider-west",
-        as_of=T1,
-    )
-
-    assert primary_capability.research_available is True
-    assert primary_capability.provider_available is False
-    assert primary_capability.effective_approval_ref is None
-    assert research_capability.research_available is True
-    assert research_capability.provider_available is False
-    assert (
-        effective_provider_primary(
+    with pytest.raises(RegistryIdentityError, match="digest mismatch"):
+        resolve_current_capability(
             registry,
-            family=MethodFamily.FRAGMENT_MEASUREMENT,
-            quantity_id="raw_query_length",
-            unit="base_pairs",
-            authority_scope="provider-west",
+            head,
+            "f" * 64,
+            definition.method_ref,
+            authority_scope="scope_provider_west",
             as_of=T1,
         )
-        is None
+
+    changed_head = head.model_copy(
+        update={"authority_revision": head.authority_revision + 1}
     )
-
-
-def test_revocation_and_effective_time_switch_provider_default_exactly() -> None:
-    first = _primary("provider-fragment-a", "1.0.0", T0, T2)
-    second = _primary("provider-fragment-b", "1.0.0", T2)
-    registry = _registry(first, second)
-
-    assert (
-        effective_provider_primary(
+    with pytest.raises(RegistryIdentityError, match="stale"):
+        resolve_current_capability(
             registry,
-            family=MethodFamily.FRAGMENT_MEASUREMENT,
-            quantity_id="raw_query_length",
-            unit="base_pairs",
-            authority_scope="provider-west",
+            changed_head,
+            authority_head_sha256(changed_head),
+            definition.method_ref,
+            authority_scope="scope_provider_west",
             as_of=T1,
         )
-        == first.method_ref
+
+
+def test_active_v1_is_rejected_against_revoked_v2_trusted_head() -> None:
+    active_v1, definition, _, role = _active_provider_registry()
+    revoked_v2 = _registry(
+        *active_v1.method_definitions,
+        qualifications=active_v1.qualification_records,
+        roles=active_v1.display_role_assignments,
+        revocations=(
+            _revoke_role(
+                role.assignment_ref,
+                revocation_ref="revoke_fragment_primary",
+                effective_at=T2,
+            ),
+        ),
+        version=2,
+        published_at=T2,
+        previous=registry_sha256(active_v1),
     )
-    assert (
-        effective_provider_primary(
-            registry,
-            family=MethodFamily.FRAGMENT_MEASUREMENT,
-            quantity_id="raw_query_length",
-            unit="base_pairs",
-            authority_scope="provider-west",
+    assert replay_registry_transition(active_v1, revoked_v2) == revoked_v2
+    trusted_v2_head = _head(revoked_v2, T2)
+
+    with pytest.raises(RegistryIdentityError, match="stale"):
+        resolve_current_capability(
+            active_v1,
+            trusted_v2_head,
+            authority_head_sha256(trusted_v2_head),
+            definition.method_ref,
+            authority_scope="scope_provider_west",
             as_of=T2,
         )
-        == second.method_ref
-    )
 
-    revoked = resolve_method_capability(
-        registry,
-        first.method_ref,
-        authority_scope="provider-west",
+    revoked = resolve_current_capability(
+        revoked_v2,
+        trusted_v2_head,
+        authority_head_sha256(trusted_v2_head),
+        definition.method_ref,
+        authority_scope="scope_provider_west",
         as_of=T2,
     )
-    assert revoked.research_available is False
-    assert revoked.provider_available is False
-    assert revoked.effective_approval_ref is None
-
-
-def test_future_wrong_scope_and_disabled_methods_never_become_defaults() -> None:
-    future = _primary("provider-fragment", "1.0.0", T2)
-    disabled = _method(
-        "disabled-fragment",
-        "1.0.0",
-        DisplayRole.DISABLED,
-        qualification=QualificationState.QUALIFIED,
-    )
-    registry = _registry(disabled, future)
-
-    future_capability = resolve_method_capability(
-        registry,
-        future.method_ref,
-        authority_scope="provider-west",
+    historical = resolve_historical_capability(
+        active_v1,
+        definition.method_ref,
+        authority_scope="scope_provider_west",
         as_of=T1,
     )
-    wrong_scope = resolve_method_capability(
-        registry,
-        future.method_ref,
-        authority_scope="provider-east",
-        as_of=T3,
+    assert revoked.current_provider_eligible is False
+    assert revoked.research_inspectable is True
+    assert historical.historical_provider_designated is True
+    assert historical.current_provider_eligible is False
+
+
+def test_late_added_provider_cannot_backdate_before_publication() -> None:
+    definition = _definition()
+    qualification = _qualification(
+        definition.method_ref,
+        record_ref="qual_fragment_primary",
+        state=QualificationState.QUALIFIED,
+        effective_at=T0,
     )
-    disabled_capability = resolve_method_capability(
-        registry,
-        disabled.method_ref,
-        authority_scope="provider-west",
-        as_of=T3,
+    previous = _registry(definition, qualifications=(qualification,))
+    backdated_role = _role(
+        definition.method_ref,
+        assignment_ref="role_fragment_primary",
+        role=DisplayRole.PROVIDER_PRIMARY,
+        effective_at=T1,
+    )
+    current = _registry(
+        definition,
+        qualifications=(qualification,),
+        roles=(backdated_role,),
+        version=2,
+        published_at=T2,
+        previous=registry_sha256(previous),
     )
 
-    assert future_capability.provider_available is False
-    assert wrong_scope.provider_available is False
-    assert disabled_capability.research_available is False
-    assert disabled_capability.provider_available is False
+    with pytest.raises(RegistryTransitionError, match="cannot predate publication"):
+        replay_registry_transition(previous, current)
 
 
-def test_overlapping_provider_authority_for_same_measurement_fails_closed() -> None:
-    with pytest.raises(ValidationError, match="authority windows overlap"):
-        _registry(
-            _primary("provider-fragment-a", "1.0.0", T0),
-            _primary("provider-fragment-b", "1.0.0", T1),
-        )
+def test_initial_authority_cannot_backdate_before_first_publication() -> None:
+    definition = _definition()
+    backdated = _role(
+        definition.method_ref,
+        assignment_ref="role_fragment_primary",
+        role=DisplayRole.PROVIDER_PRIMARY,
+        effective_at=T0,
+    )
+
+    with pytest.raises(ValidationError, match="cannot predate registry publication"):
+        _registry(definition, roles=(backdated,), published_at=T1)
 
 
-def test_one_quantity_cannot_split_duplicate_authority_by_unit() -> None:
-    second = _primary("provider-fragment-b", "1.0.0", T1)
-    payload = second.model_dump(mode="python")
-    payload["unit"] = "nucleotides"
-    conflicting_unit = MethodRegistration.model_validate(payload)
+def test_promotion_and_qualification_do_not_change_scientific_method_version() -> None:
+    definition = _definition()
+    development = _qualification(
+        definition.method_ref,
+        record_ref="qual_fragment_development",
+        state=QualificationState.DEVELOPMENT_UNQUALIFIED,
+        effective_at=T0,
+    )
+    baseline = _role(
+        definition.method_ref,
+        assignment_ref="role_fragment_baseline",
+        role=DisplayRole.RESEARCH_BASELINE,
+        effective_at=T0,
+    )
+    previous = _registry(definition, qualifications=(development,), roles=(baseline,))
+    qualified = _qualification(
+        definition.method_ref,
+        record_ref="qual_fragment_qualified",
+        state=QualificationState.QUALIFIED,
+        effective_at=T2,
+    )
+    primary = _role(
+        definition.method_ref,
+        assignment_ref="role_fragment_primary",
+        role=DisplayRole.PROVIDER_PRIMARY,
+        effective_at=T2,
+    )
+    current = _registry(
+        definition,
+        qualifications=(development, qualified),
+        roles=(baseline, primary),
+        revocations=(
+            _revoke_qualification(
+                development.record_ref,
+                revocation_ref="revoke_fragment_development",
+                effective_at=T2,
+            ),
+            _revoke_role(
+                baseline.assignment_ref,
+                revocation_ref="revoke_fragment_baseline",
+                effective_at=T2,
+            ),
+        ),
+        version=2,
+        published_at=T2,
+        previous=registry_sha256(previous),
+    )
 
-    with pytest.raises(ValidationError, match="conflicting units"):
-        _registry(
-            _primary("provider-fragment-a", "1.0.0", T0),
-            conflicting_unit,
-        )
+    assert replay_registry_transition(previous, current) == current
+    assert current.method_definitions == previous.method_definitions
+    head = _head(current, T2)
+    capability = resolve_current_capability(
+        current,
+        head,
+        authority_head_sha256(head),
+        definition.method_ref,
+        authority_scope="scope_provider_west",
+        as_of=T2,
+    )
+    assert capability.qualification_state == QualificationState.QUALIFIED
+    assert capability.display_role == DisplayRole.PROVIDER_PRIMARY
+    assert capability.current_provider_eligible is True
 
 
-def test_capability_digest_and_semantics_replay_exactly() -> None:
-    primary = _primary("provider-fragment", "1.0.0", T0)
-    registry = _registry(primary)
-    capability = resolve_method_capability(
+def test_qualification_and_display_role_are_independent_axes() -> None:
+    definition = _definition()
+    qualified = _qualification(
+        definition.method_ref,
+        record_ref="qual_fragment_qualified",
+        state=QualificationState.QUALIFIED,
+        effective_at=T0,
+    )
+    baseline = _role(
+        definition.method_ref,
+        assignment_ref="role_fragment_baseline",
+        role=DisplayRole.RESEARCH_BASELINE,
+        effective_at=T0,
+    )
+    registry = _registry(definition, qualifications=(qualified,), roles=(baseline,))
+    head = _head(registry)
+
+    capability = resolve_current_capability(
         registry,
-        primary.method_ref,
-        authority_scope="provider-west",
+        head,
+        authority_head_sha256(head),
+        definition.method_ref,
+        authority_scope="scope_provider_west",
         as_of=T1,
     )
 
-    encoded = canonical_contract_bytes(capability)
+    assert capability.qualification_state == QualificationState.QUALIFIED
+    assert capability.display_role == DisplayRole.RESEARCH_BASELINE
+    assert capability.research_inspectable is True
+    assert capability.current_provider_eligible is False
 
-    assert capability_from_canonical_bytes(encoded) == capability
-    assert replay_method_capability(registry, capability) == capability
 
-    changed_digest = capability.model_copy(update={"registry_sha256": "f" * 64})
-    with pytest.raises(RegistryIdentityError, match="digest mismatch"):
-        replay_method_capability(registry, changed_digest)
+def test_provider_primary_requires_opaque_approval_token() -> None:
+    definition = _definition()
+    payload = _role(
+        definition.method_ref,
+        assignment_ref="role_fragment_primary",
+        role=DisplayRole.PROVIDER_PRIMARY,
+        effective_at=T0,
+    ).model_dump(mode="python")
+    payload["approval_ref"] = None
+    with pytest.raises(ValidationError, match="requires an approval_ref"):
+        DisplayRoleAssignment.model_validate(payload)
 
-    changed_availability = capability.model_copy(update={"research_available": False})
-    with pytest.raises(RegistryIdentityError, match="semantic replay"):
-        replay_method_capability(registry, changed_availability)
+    payload["approval_ref"] = "donor-approval"
+    with pytest.raises(ValidationError):
+        DisplayRoleAssignment.model_validate(payload)
 
-    indented = json.dumps(capability.model_dump(mode="json"), indent=2).encode()
-    with pytest.raises(RegistryIdentityError, match="not canonical"):
-        capability_from_canonical_bytes(indented)
+
+def test_duplicate_provider_authority_for_measurement_scope_fails_closed() -> None:
+    first = _definition("mth_fragment_raw_query_length_a")
+    second = _definition("mth_fragment_raw_query_length_b")
+    qualifications = tuple(
+        _qualification(
+            item.method_ref,
+            record_ref=f"qual_provider_{index}",
+            state=QualificationState.QUALIFIED,
+            effective_at=T0,
+        )
+        for index, item in enumerate((first, second), start=1)
+    )
+    roles = tuple(
+        _role(
+            item.method_ref,
+            assignment_ref=f"role_provider_{index}",
+            role=DisplayRole.PROVIDER_PRIMARY,
+            effective_at=T0,
+        )
+        for index, item in enumerate((first, second), start=1)
+    )
+
+    with pytest.raises(
+        ValidationError, match="provider_primary authority windows overlap"
+    ):
+        _registry(first, second, qualifications=qualifications, roles=roles)
 
 
 @pytest.mark.parametrize("mismatch", ("method", "version"))
 def test_unknown_method_or_version_fails_closed(mismatch: str) -> None:
-    registry = _registry(_baseline())
+    registry = _registry(_definition())
     reference = MethodReference(
-        method_id=("unknown-method" if mismatch == "method" else _baseline().method_id),
+        method_id=(
+            "mth_unknown_method"
+            if mismatch == "method"
+            else "mth_fragment_raw_query_length"
+        ),
         version=("9.9.9" if mismatch == "version" else "1.0.0"),
     )
-
     with pytest.raises(RegistryIdentityError, match="not registered"):
-        resolve_method_capability(
+        resolve_historical_capability(
             registry,
             reference,
-            authority_scope="provider-west",
+            authority_scope="scope_provider_west",
             as_of=T1,
         )
 
 
 @pytest.mark.parametrize("kind", ("unknown_asset", "asset_digest", "tool_version"))
 def test_unknown_tool_and_asset_combinations_fail_closed(kind: str) -> None:
-    payload = _baseline().model_dump(mode="python")
+    payload = _definition().model_dump(mode="python")
     if kind == "unknown_asset":
-        payload["assets"][0]["asset_id"] = "not-registered"
+        payload["assets"][0]["asset_id"] = "asset_unknown"
     elif kind == "asset_digest":
         payload["assets"][0]["content_sha256"] = "d" * 64
     else:
         payload["tools"][0]["version"] = "9.9.9"
-    method = MethodRegistration.model_validate(payload)
-
+    definition = MethodDefinition.model_validate(payload)
     with pytest.raises(ValidationError, match="unknown or mismatched"):
-        _registry(method)
+        _registry(definition)
 
 
 @pytest.mark.parametrize(
@@ -375,48 +557,44 @@ def test_unknown_tool_and_asset_combinations_fail_closed(kind: str) -> None:
         "version_skip",
         "wrong_digest",
         "older_timestamp",
-        "removed_method",
-        "tampered_identity",
-        "cleared_revocation",
-        "backdated_revocation",
+        "removed_definition",
+        "tampered_definition",
+        "removed_qualification",
+        "tampered_assignment",
     ),
 )
-def test_registry_transition_rejects_invalid_changes_and_tampering(
+def test_registry_transition_rejects_removal_mutation_and_chain_tampering(
     mutation: str,
 ) -> None:
-    primary = _primary("provider-fragment", "1.0.0", T0)
-    previous = _registry(_baseline(), primary)
-    current_methods = list(previous.methods)
+    previous, definition, qualification, role = _active_provider_registry()
+    definitions = list(previous.method_definitions)
+    qualifications = list(previous.qualification_records)
+    roles = list(previous.display_role_assignments)
     version = 2
     published_at = T2
     previous_digest = registry_sha256(previous)
-
     if mutation == "version_skip":
         version = 3
     elif mutation == "wrong_digest":
         previous_digest = "f" * 64
     elif mutation == "older_timestamp":
         published_at = T0
-    elif mutation == "removed_method":
-        current_methods = [primary]
-    elif mutation == "tampered_identity":
-        payload = previous.methods[0].model_dump(mode="python")
-        payload["parameter_schema_sha256"] = "e" * 64
-        current_methods[0] = MethodRegistration.model_validate(payload)
-    elif mutation == "cleared_revocation":
-        previous = _registry(
-            _baseline().model_copy(update={"revoked_at": T1}),
-            primary,
+    elif mutation == "removed_definition":
+        definitions = [_definition("mth_fragment_aligned_span")]
+        qualifications = []
+        roles = []
+    elif mutation == "tampered_definition":
+        definitions[0] = definition.model_copy(
+            update={"parameter_schema_sha256": "d" * 64}
         )
-        previous_digest = registry_sha256(previous)
-        current_methods = [_baseline(), primary]
+    elif mutation == "removed_qualification":
+        qualifications = []
     else:
-        current_methods[0] = _baseline().model_copy(
-            update={"revoked_at": datetime(2025, 12, 1, tzinfo=UTC)}
-        )
-
+        roles[0] = role.model_copy(update={"approval_ref": "approval_changed"})
     current = _registry(
-        *current_methods,
+        *definitions,
+        qualifications=tuple(qualifications),
+        roles=tuple(roles),
         version=version,
         published_at=published_at,
         previous=previous_digest,
@@ -426,64 +604,196 @@ def test_registry_transition_rejects_invalid_changes_and_tampering(
         replay_registry_transition(previous, current)
 
 
-def test_registry_transition_replays_append_and_monotonic_revocation() -> None:
-    previous = _registry(_baseline())
-    revoked = _baseline().model_copy(update={"revoked_at": T1})
-    challenger = _method(
-        "fragment-aligned-reference-span",
-        "1.0.0",
-        DisplayRole.RESEARCH_CHALLENGER,
+def test_current_and_historical_capability_semantic_replay_rejects_tampering() -> None:
+    registry, definition, _, _ = _active_provider_registry()
+    head = _head(registry)
+    head_digest = authority_head_sha256(head)
+    current = resolve_current_capability(
+        registry,
+        head,
+        head_digest,
+        definition.method_ref,
+        authority_scope="scope_provider_west",
+        as_of=T1,
     )
-    current = _registry(
-        challenger,
-        revoked,
-        version=2,
-        published_at=T2,
-        previous=registry_sha256(previous),
+    historical = resolve_historical_capability(
+        registry,
+        definition.method_ref,
+        authority_scope="scope_provider_west",
+        as_of=T1,
+    )
+    assert replay_current_capability(registry, head, head_digest, current) == current
+    assert replay_historical_capability(registry, historical) == historical
+
+    changed_current = current.model_copy(update={"research_inspectable": False})
+    with pytest.raises(RegistryIdentityError, match="semantic replay"):
+        replay_current_capability(registry, head, head_digest, changed_current)
+    changed_historical = historical.model_copy(
+        update={"historical_provider_designated": False}
+    )
+    with pytest.raises(RegistryIdentityError, match="semantic replay"):
+        replay_historical_capability(registry, changed_historical)
+
+
+def test_effective_provider_primary_uses_only_current_head_authority() -> None:
+    registry, definition, _, _ = _active_provider_registry()
+    head = _head(registry)
+    assert (
+        effective_provider_primary(
+            registry,
+            head,
+            authority_head_sha256(head),
+            family=MethodFamily.FRAGMENT_MEASUREMENT,
+            quantity_id="qty_fragment_raw_query_length",
+            unit="unit_base_pairs",
+            authority_scope="scope_provider_west",
+            as_of=T1,
+        )
+        == definition.method_ref
     )
 
-    assert replay_registry_transition(previous, current) == current
-    assert registry_from_canonical_bytes(canonical_registry_bytes(current)) == current
+    assert (
+        effective_provider_primary(
+            registry,
+            head,
+            authority_head_sha256(head),
+            family=MethodFamily.FRAGMENT_MEASUREMENT,
+            quantity_id="qty_fragment_raw_query_length",
+            unit="unit_base_pairs",
+            authority_scope="scope_provider_east",
+            as_of=T1,
+        )
+        is None
+    )
+
+
+def _rich_registry() -> MethodRegistry:
+    definition = _definition()
+    qualification = _qualification(
+        definition.method_ref,
+        record_ref="qual_fragment_primary",
+        state=QualificationState.QUALIFIED,
+        effective_at=T0,
+    )
+    role = _role(
+        definition.method_ref,
+        assignment_ref="role_fragment_primary",
+        role=DisplayRole.PROVIDER_PRIMARY,
+        effective_at=T0,
+    )
+    return _registry(
+        definition,
+        qualifications=(qualification,),
+        roles=(role,),
+        revocations=(
+            _revoke_qualification(
+                qualification.record_ref,
+                revocation_ref="revoke_fragment_qualification",
+                effective_at=T2,
+            ),
+            _revoke_role(
+                role.assignment_ref,
+                revocation_ref="revoke_fragment_role",
+                effective_at=T2,
+            ),
+        ),
+    )
+
+
+def _string_paths(value: Any, path: tuple[Any, ...] = ()) -> list[tuple[Any, ...]]:
+    if isinstance(value, str):
+        return [path]
+    if isinstance(value, dict):
+        result: list[tuple[Any, ...]] = []
+        for key, item in value.items():
+            result.extend(_string_paths(item, (*path, key)))
+        return result
+    if isinstance(value, list):
+        result = []
+        for index, item in enumerate(value):
+            result.extend(_string_paths(item, (*path, index)))
+        return result
+    return []
+
+
+def _set_path(value: Any, path: tuple[Any, ...], replacement: str) -> None:
+    cursor = value
+    for part in path[:-1]:
+        cursor = cursor[part]
+    cursor[path[-1]] = replacement
+
+
+def _privacy_cases() -> list[tuple[type[BaseModel], dict[str, Any], tuple[Any, ...]]]:
+    registry, definition, _, _ = _active_provider_registry()
+    head = _head(registry)
+    capability = resolve_current_capability(
+        registry,
+        head,
+        authority_head_sha256(head),
+        definition.method_ref,
+        authority_scope="scope_provider_west",
+        as_of=T1,
+    )
+    values: tuple[tuple[type[BaseModel], BaseModel], ...] = (
+        (MethodRegistry, _rich_registry()),
+        (AuthorityHead, head),
+        (CurrentMethodCapability, capability),
+    )
+    cases: list[tuple[type[BaseModel], dict[str, Any], tuple[Any, ...]]] = []
+    for model, value in values:
+        payload = value.model_dump(mode="json")
+        for path in _string_paths(payload):
+            cases.append((model, payload, path))
+    return cases
+
+
+@pytest.mark.parametrize(
+    ("model", "payload", "path"),
+    _privacy_cases(),
+    ids=lambda value: value.__name__ if isinstance(value, type) else None,
+)
+def test_every_serialized_string_slot_rejects_privacy_sentinels(
+    model: type[BaseModel],
+    payload: dict[str, Any],
+    path: tuple[Any, ...],
+) -> None:
+    changed = copy.deepcopy(payload)
+    _set_path(changed, path, "sample_donor_patient_run_read_path_sequence")
+    with pytest.raises(ValidationError):
+        model.model_validate(changed)
 
 
 @pytest.mark.parametrize(
     ("field", "value"),
     (
-        ("donor_id", "donor-123"),
+        ("donor_id", "donor_123"),
         ("local_path", "/private/specimen.json"),
-        ("read_id", "read-123"),
+        ("read_id", "read_123"),
         ("sequence", "ACGTACGTACGTACGT"),
         ("input_sha256", "d" * 64),
         ("extensions", {"unsafe": True}),
     ),
 )
-def test_privacy_forbidden_fields_are_rejected(field: str, value: object) -> None:
-    payload = _baseline().model_dump(mode="python")
+def test_forbidden_privacy_and_extension_fields_are_rejected(
+    field: str, value: object
+) -> None:
+    payload = _definition().model_dump(mode="python")
     payload[field] = value
-
     with pytest.raises(ValidationError, match="extra_forbidden"):
-        MethodRegistration.model_validate(payload)
+        MethodDefinition.model_validate(payload)
 
 
-@pytest.mark.parametrize("method_id", ("donor-123", "ACGTACGTACGTACGT"))
-def test_privacy_sensitive_identifier_values_are_rejected(method_id: str) -> None:
-    payload = _baseline().model_dump(mode="python")
-    payload["method_id"] = method_id
-
-    with pytest.raises(ValidationError, match="donor identity|sequence-like"):
-        MethodRegistration.model_validate(payload)
-
-
-def test_canonical_registry_contains_only_allowlisted_contract_keys() -> None:
-    payload = json.loads(canonical_registry_bytes(_registry(_baseline())))
-    rendered = json.dumps(payload, sort_keys=True)
+def test_canonical_contract_contains_no_sensitive_or_unscoped_fields() -> None:
+    rendered = canonical_contract_bytes(_rich_registry()).decode()
     forbidden = (
         "donor_id",
-        "local_path",
+        "sample_id",
+        "patient_id",
+        "run_id",
         "read_id",
+        "local_path",
         "sequence",
         "input_sha256",
         "extensions",
     )
-
     assert all(token not in rendered for token in forbidden)
