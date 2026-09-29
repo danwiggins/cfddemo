@@ -294,29 +294,25 @@ class VerifiedFragmentSource(CompatibilityContract):
             raise ValueError("this source state requires complete verified content")
         if self.state not in data_states and has_any_numeric:
             raise ValueError("withheld source states cannot carry numerical content")
-
-        if self.state == ExplorerSourceState.COMPLETE and (
-            self.record.execution_state != ExecutionState.COMPLETE
-            or self.record.information_state != InformationState.SUFFICIENT
-            or self.record.trust_state != TrustState.VERIFIED
-        ):
-            raise ValueError("complete explorer source requires usable E05 state")
-        if self.state == ExplorerSourceState.FAILED and (
-            self.record.execution_state != ExecutionState.FAILED
-        ):
-            raise ValueError("failed source requires failed execution state")
-        if self.state == ExplorerSourceState.INSUFFICIENT and (
-            self.record.information_state == InformationState.SUFFICIENT
-        ):
-            raise ValueError("insufficient source requires insufficient information")
-        if self.state == ExplorerSourceState.REVOKED and (
-            self.record.trust_state != TrustState.REVOKED
-        ):
-            raise ValueError("revoked source requires revoked trust state")
-        if self.state == ExplorerSourceState.UNVERIFIED and (
-            self.record.trust_state == TrustState.VERIFIED
-        ):
-            raise ValueError("unverified source requires non-verified trust state")
+        if has_all_numeric:
+            if self.record.execution_state != ExecutionState.COMPLETE:
+                raise ValueError("verified numerical content requires completed execution")
+            if self.record.trust_state == TrustState.REVOKED:
+                expected_state = ExplorerSourceState.REVOKED
+            elif self.record.information_state != InformationState.SUFFICIENT:
+                expected_state = ExplorerSourceState.INSUFFICIENT
+            elif self.record.trust_state != TrustState.VERIFIED:
+                expected_state = ExplorerSourceState.UNVERIFIED
+            else:
+                expected_state = ExplorerSourceState.COMPLETE
+        elif self.record.execution_state == ExecutionState.FAILED:
+            expected_state = ExplorerSourceState.FAILED
+        else:
+            expected_state = ExplorerSourceState.UNAVAILABLE
+        if self.state != expected_state:
+            raise ValueError(
+                "source state must be derived from verified content and E05 state"
+            )
 
         expected_quantity_id = _QUANTITY_ID[self.quantity]
         if (
@@ -535,6 +531,7 @@ class FragmentExplorerView(CompatibilityContract):
     schema_version: Literal["traceback.fragment-explorer-view.v1"] = (
         "traceback.fragment-explorer-view.v1"
     )
+    request: FragmentExplorerRequest
     state: FragmentExplorerState
     compatibility: CompatibilityDecision
     left: ExplorerPanelView
@@ -551,6 +548,91 @@ class FragmentExplorerView(CompatibilityContract):
 
     @model_validator(mode="after")
     def exact_table_axes_and_digest(self) -> FragmentExplorerView:
+        if self.state != self.request.state:
+            raise ValueError("view state must match the embedded replay request")
+        sources = {
+            item.record.result_id: item for item in self.request.sources
+        }
+        selected_sources = (
+            sources[self.state.left.result_id],
+            sources[self.state.right.result_id],
+        )
+        decision_bindings = {
+            self.compatibility.binding.left.result_id: (
+                self.compatibility.binding.left
+            ),
+            self.compatibility.binding.right.result_id: (
+                self.compatibility.binding.right
+            ),
+        }
+        for selection, source in zip(
+            (self.state.left, self.state.right), selected_sources, strict=True
+        ):
+            binding = decision_bindings.get(selection.result_id)
+            if binding is None or binding.method_ref != selection.method_ref:
+                raise ValueError(
+                    "compatibility binding must match both state selections"
+                )
+            if (
+                binding.result_sha256 != source.record.result_sha256
+                or binding.bundle_id != source.record.bundle_id
+                or binding.bundle_sha256 != source.record.bundle_sha256
+                or binding.method_definition_sha256
+                != source.record.method_definition_sha256
+            ):
+                raise ValueError(
+                    "compatibility binding must match exact verified sources"
+                )
+        expected_compatibility = decide_compatibility(
+            CompatibilityRequest(
+                left=selected_sources[0].record,
+                right=selected_sources[1].record,
+                policy=self.request.policy,
+                trusted_policy_sha256=self.request.trusted_policy_sha256,
+                trusted_authority_head_sha256=(
+                    self.request.trusted_authority_head_sha256
+                ),
+            )
+        )
+        if self.compatibility != expected_compatibility:
+            raise ValueError(
+                "compatibility decision must replay from embedded sources"
+            )
+        expected_left = _panel_view(
+            PanelId.A,
+            self.state.left,
+            selected_sources[0],
+            self.state.controls_for(PanelId.A),
+        )
+        expected_right = _panel_view(
+            PanelId.B,
+            self.state.right,
+            selected_sources[1],
+            self.state.controls_for(PanelId.B),
+        )
+        expected_comparable_display = (
+            self.compatibility.outcome == CompatibilityOutcome.COMPARABLE
+            and expected_left.source_state == ExplorerSourceState.COMPLETE
+            and expected_right.source_state == ExplorerSourceState.COMPLETE
+            and self.state.filters_linked
+            and expected_left.controls == expected_right.controls
+            and _same_bin_layout(expected_left.rows, expected_right.rows)
+        )
+        expected_shared = (
+            expected_comparable_display
+            and self.compatibility.shared_axis_allowed
+        )
+        if expected_shared:
+            expected_axis = max(
+                expected_left.y_axis_max or 1,
+                expected_right.y_axis_max or 1,
+            )
+            expected_left = expected_left.model_copy(
+                update={"y_axis_max": expected_axis}
+            )
+            expected_right = expected_right.model_copy(
+                update={"y_axis_max": expected_axis}
+            )
         if self.left.panel != PanelId.A or self.right.panel != PanelId.B:
             raise ValueError("view panels must retain fixed A/B identities")
         if self.left.selection != self.state.left:
@@ -561,6 +643,20 @@ class FragmentExplorerView(CompatibilityContract):
             raise ValueError("left panel controls must match embedded state")
         if self.right.controls != self.state.controls_for(PanelId.B):
             raise ValueError("right panel controls must match embedded state")
+        if (
+            self.left.quantity != selected_sources[0].quantity
+            or self.left.source_state != selected_sources[0].state
+        ):
+            raise ValueError("left panel must match its exact verified source")
+        if (
+            self.right.quantity != selected_sources[1].quantity
+            or self.right.source_state != selected_sources[1].state
+        ):
+            raise ValueError("right panel must match its exact verified source")
+        if self.left != expected_left or self.right != expected_right:
+            raise ValueError(
+                "panel output must replay exactly from verified sources"
+            )
         expected_table = tuple(
             AccessibleTableRow(panel=panel.panel, **row.model_dump())
             for panel in (self.left, self.right)
@@ -568,22 +664,10 @@ class FragmentExplorerView(CompatibilityContract):
         )
         if self.accessible_rows != expected_table:
             raise ValueError("accessible table must exactly equal plotted series")
-        same_layout = _same_bin_layout(self.left.rows, self.right.rows)
-        comparable_display = (
-            self.compatibility.outcome == CompatibilityOutcome.COMPARABLE
-            and self.left.source_state == ExplorerSourceState.COMPLETE
-            and self.right.source_state == ExplorerSourceState.COMPLETE
-            and self.state.filters_linked
-            and self.left.controls == self.right.controls
-            and same_layout
-        )
-        if self.synchronized_comparison != comparable_display:
+        if self.synchronized_comparison != expected_comparable_display:
             raise ValueError(
                 "synchronized comparison must exactly follow linked compatibility"
             )
-        expected_shared = (
-            comparable_display and self.compatibility.shared_axis_allowed
-        )
         if self.shared_y_scale != expected_shared:
             raise ValueError("shared y scale must exactly follow compatibility")
         left_local_max = max(
@@ -611,7 +695,7 @@ class FragmentExplorerView(CompatibilityContract):
         ):
             raise ValueError("right y axis must match its exact display mode")
         expected_deltas: tuple[ExplorerDeltaRow, ...] = ()
-        if comparable_display and self.compatibility.delta_allowed:
+        if expected_comparable_display and self.compatibility.delta_allowed:
             expected_deltas = tuple(
                 ExplorerDeltaRow(
                     lower_inclusive=left_row.lower_inclusive,
@@ -772,6 +856,7 @@ def build_fragment_explorer_view(
         for row in panel.rows
     )
     payload: dict[str, Any] = {
+        "request": request,
         "state": request.state,
         "compatibility": compatibility,
         "left": left,

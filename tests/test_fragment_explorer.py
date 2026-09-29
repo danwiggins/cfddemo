@@ -571,14 +571,10 @@ def test_source_rejects_quantity_definition_chart_and_manifest_drift() -> None:
 @pytest.mark.parametrize(
     "state",
     [
-        ExplorerSourceState.LOADING,
-        ExplorerSourceState.EMPTY,
-        ExplorerSourceState.PARTIAL,
         ExplorerSourceState.FAILED,
         ExplorerSourceState.INSUFFICIENT,
         ExplorerSourceState.REVOKED,
         ExplorerSourceState.UNVERIFIED,
-        ExplorerSourceState.UNSUPPORTED,
         ExplorerSourceState.UNAVAILABLE,
     ],
 )
@@ -597,6 +593,26 @@ def test_non_complete_states_withhold_every_number(
     assert not view.shared_y_scale
     assert view.delta_rows == ()
     assert all(item.panel == PanelId.B for item in view.accessible_rows)
+
+
+@pytest.mark.parametrize(
+    "untraceable_state",
+    [
+        ExplorerSourceState.LOADING,
+        ExplorerSourceState.EMPTY,
+        ExplorerSourceState.PARTIAL,
+        ExplorerSourceState.UNSUPPORTED,
+    ],
+)
+def test_untraceable_source_states_fail_closed(
+    untraceable_state: ExplorerSourceState,
+) -> None:
+    source = _source("alpha", state=ExplorerSourceState.UNAVAILABLE)
+    payload = source.model_dump(mode="json")
+    payload["state"] = untraceable_state.value
+
+    with pytest.raises(ValidationError, match="must be derived"):
+        VerifiedFragmentSource.model_validate_json(json.dumps(payload))
 
 
 def test_policy_can_independently_withhold_delta_and_shared_axis() -> None:
@@ -685,7 +701,7 @@ def test_accessible_table_parity_and_replay_reject_self_consistent_drift() -> No
 
     payload = view.model_dump(mode="json")
     payload["left"]["y_axis_max"] += 1
-    with pytest.raises(ValidationError, match="left y axis"):
+    with pytest.raises(ValidationError, match="panel output"):
         FragmentExplorerView.model_validate_json(json.dumps(payload))
 
     payload = view.model_dump(mode="json")
@@ -713,6 +729,50 @@ def test_canonical_parse_rejects_state_panel_and_fraction_rebinding() -> None:
 
     payload = view.model_dump(mode="json")
     payload["left"]["selection"] = payload["right"]["selection"]
+    with pytest.raises(FragmentExplorerError, match="JSON is invalid"):
+        fragment_explorer_from_canonical_bytes(
+            FragmentExplorerView, _canonical_tampered_view(payload)
+        )
+
+
+def test_canonical_parse_rejects_unrelated_decision_and_source_relabels() -> None:
+    left = _source("alpha")
+    right = _source("beta")
+    view = build_fragment_explorer_view(_request(left, right))
+    gamma = _source("gamma")
+    omega = _source("omega")
+    unrelated = build_fragment_explorer_view(_request(gamma, omega))
+
+    payload = view.model_dump(mode="json")
+    payload["compatibility"] = unrelated.compatibility.model_dump(mode="json")
+    with pytest.raises(FragmentExplorerError, match="JSON is invalid"):
+        fragment_explorer_from_canonical_bytes(
+            FragmentExplorerView, _canonical_tampered_view(payload)
+        )
+
+    payload = view.model_dump(mode="json")
+    payload["left"]["quantity"] = FragmentQuantity.RAW_QUERY_LENGTH.value
+    with pytest.raises(FragmentExplorerError, match="JSON is invalid"):
+        fragment_explorer_from_canonical_bytes(
+            FragmentExplorerView, _canonical_tampered_view(payload)
+        )
+
+    payload = view.model_dump(mode="json")
+    payload["left"]["source_state"] = ExplorerSourceState.REVOKED.value
+    with pytest.raises(FragmentExplorerError, match="JSON is invalid"):
+        fragment_explorer_from_canonical_bytes(
+            FragmentExplorerView, _canonical_tampered_view(payload)
+        )
+
+    payload = view.model_dump(mode="json")
+    payload["left"]["rows"][0]["count"] += 1
+    payload["left"]["rows"][0]["fraction_numerator"] += 1
+    payload["left"]["denominator"]["displayed_alignments"] += 1
+    payload["left"]["denominator"]["outside_display_alignments"] -= 1
+    payload["accessible_rows"][0]["count"] += 1
+    payload["accessible_rows"][0]["fraction_numerator"] += 1
+    payload["delta_rows"][0]["left_count"] += 1
+    payload["delta_rows"][0]["count_delta_right_minus_left"] -= 1
     with pytest.raises(FragmentExplorerError, match="JSON is invalid"):
         fragment_explorer_from_canonical_bytes(
             FragmentExplorerView, _canonical_tampered_view(payload)

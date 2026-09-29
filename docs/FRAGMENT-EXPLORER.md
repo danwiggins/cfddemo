@@ -59,10 +59,12 @@ synchronized features fail closed.
 
 ## Withholding and accessibility
 
-Only `complete` sources expose numerical rows. `loading`, `empty`, `partial`,
-`failed`, `insufficient`, `revoked`, `unverified`, `unsupported`, and
-`unavailable` sources expose a typed withholding code and no rows, denominator,
-or numerical axis.
+Only `complete` sources expose numerical rows. `failed`, `insufficient`,
+`revoked`, `unverified`, and `unavailable` are derived from the exact E05 state
+and presence of verified E02 content; they expose a typed withholding code and
+no rows, denominator, or numerical axis. Untraceable presentation-only labels
+such as `loading`, `empty`, `partial`, and `unsupported` are rejected at this
+canonical boundary rather than self-authorized by a view digest.
 
 The accessible table is constructed from the same immutable `ExplorerBinRow`
 objects as the chart series. The view validator rejects any table/chart drift.
@@ -71,7 +73,10 @@ Missing or withheld values are absent rather than represented as zero.
 ## Canonical replay
 
 Use `build_fragment_explorer_state` and `build_fragment_explorer_view` to create
-self-digested contracts. `canonical_fragment_explorer_bytes` provides stable
-canonical JSON. `fragment_explorer_from_canonical_bytes` rejects normalization
-drift, and `replay_fragment_explorer_view` recomputes the full transformation
-from the original request before accepting an exported view.
+self-digested contracts. The exported view embeds its bounded request so
+canonical parsing can replay the E05 decision and bind panel result, bundle,
+method, quantity, unit, source state, and controls to exact verified sources.
+`canonical_fragment_explorer_bytes` provides stable canonical JSON.
+`fragment_explorer_from_canonical_bytes` rejects normalization drift, and
+`replay_fragment_explorer_view` recomputes the full transformation from the
+original request before accepting an exported view.
