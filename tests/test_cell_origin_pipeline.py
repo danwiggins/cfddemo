@@ -249,3 +249,12 @@ def test_production_pipeline_publishes_v2_unavailable_uncertainty(
     )
     with pytest.raises(ValidationError, match="do not match deconvolution"):
         CellOriginResultBundle.model_validate_json(json.dumps(published))
+
+    published["result"]["deconvolution"]["diagnostics"]["row_scale"] = (
+        "sqrt_count"
+    )
+    published["result"]["bootstrap"]["intervals"][0]["estimate"] = 0.5
+    with pytest.raises(
+        ValidationError, match="estimate does not match deconvolution"
+    ):
+        CellOriginResultBundle.model_validate_json(json.dumps(published))

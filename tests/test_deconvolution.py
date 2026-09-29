@@ -487,6 +487,65 @@ def test_v2_bootstrap_rejects_unversioned_source() -> None:
         )
 
 
+def test_v2_bootstrap_rejects_changed_counts_before_sampling(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    atlas = fixture_atlas()
+    source_counts = (
+        marker_count("marker.immune.1", 40, 100),
+        marker_count("marker.liver.1", 60, 100),
+    )
+    changed_counts = (
+        marker_count("marker.immune.1", 41, 100),
+        source_counts[1],
+    )
+    source = deconvolve_uxm_v2(
+        source_counts, atlas, row_scale=NnlsRowScale.SQRT_COUNT
+    )
+
+    def sampling_must_not_start(_seed: int) -> object:
+        raise AssertionError("sampling started before source validation")
+
+    monkeypatch.setattr(
+        deconvolution_module.np.random,
+        "default_rng",
+        sampling_must_not_start,
+    )
+    with pytest.raises(DeconvolutionError, match="input identity"):
+        bootstrap_uxm_v2(
+            changed_counts, atlas, source, replicates=100, random_seed=7
+        )
+
+
+def test_v2_bootstrap_rejects_changed_atlas_before_sampling(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    atlas = fixture_atlas()
+    counts = (
+        marker_count("marker.immune.1", 40, 100),
+        marker_count("marker.liver.1", 60, 100),
+    )
+    source = deconvolve_uxm_v2(
+        counts, atlas, row_scale=NnlsRowScale.SQRT_COUNT
+    )
+    changed_payload = atlas.model_dump(mode="python")
+    changed_payload["rows"][0]["values"][0]["u_fraction"] = 0.79
+    changed_atlas = AtlasUMatrix.model_validate(changed_payload)
+
+    def sampling_must_not_start(_seed: int) -> object:
+        raise AssertionError("sampling started before source validation")
+
+    monkeypatch.setattr(
+        deconvolution_module.np.random,
+        "default_rng",
+        sampling_must_not_start,
+    )
+    with pytest.raises(DeconvolutionError, match="atlas digest"):
+        bootstrap_uxm_v2(
+            counts, changed_atlas, source, replicates=100, random_seed=7
+        )
+
+
 class _DrawSequence:
     def __init__(self, draws: list[list[int]]) -> None:
         self._draws = iter(draws)

@@ -1094,11 +1094,22 @@ class CellOriginResult(StrictModel):
         estimate_ids = {
             estimate.cell_type_id for estimate in self.deconvolution.estimates
         }
+        estimate_by_id = {
+            estimate.cell_type_id: estimate.fraction
+            for estimate in self.deconvolution.estimates
+        }
         if self.bootstrap is not None:
             if self.bootstrap.source_result_id != self.deconvolution.result_id:
                 raise ValueError("bootstrap must bind to this deconvolution result")
             if {item.cell_type_id for item in self.bootstrap.intervals} != estimate_ids:
                 raise ValueError("bootstrap and deconvolution cell types must match")
+            if any(
+                interval.estimate != estimate_by_id[interval.cell_type_id]
+                for interval in self.bootstrap.intervals
+            ):
+                raise ValueError(
+                    "bootstrap interval estimate does not match deconvolution"
+                )
             if isinstance(self.bootstrap, BootstrapResultV2):
                 if not isinstance(self.deconvolution, DeconvolutionOutputV2):
                     raise ValueError(

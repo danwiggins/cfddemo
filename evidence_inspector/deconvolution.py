@@ -598,6 +598,18 @@ def bootstrap_uxm_v2(
         raise DeconvolutionError("bootstrap source marker order does not match")
     if tuple(item.cell_type_id for item in source.estimates) != atlas.cell_type_ids:
         raise DeconvolutionError("bootstrap source cell types do not match")
+    atlas_sha256 = _atlas_sha256(atlas)
+    if source.atlas_sha256 != atlas_sha256:
+        raise DeconvolutionError("bootstrap source atlas digest does not match")
+    expected_source_result_id = _result_id_v2(
+        marker_counts,
+        atlas_sha256,
+        source_diagnostics.row_scale,
+        tolerance=effective_tolerance,
+        max_iterations=effective_max_iterations,
+    )
+    if source.result_id != expected_source_result_id:
+        raise DeconvolutionError("bootstrap input identity does not match source")
 
     integer_counts = counts.astype(np.int64)
     rng = np.random.default_rng(random_seed)
