@@ -889,6 +889,10 @@ def test_verified_e02_adapter_drops_local_path_and_preserves_exact_content(
     tmp_path: Path,
 ) -> None:
     measurement = _measurement(FragmentQuantity.ALIGNED_REFERENCE_SPAN)
+    method = _method(
+        METHOD_SUFFIXES[FragmentQuantity.ALIGNED_REFERENCE_SPAN],
+        FragmentQuantity.ALIGNED_REFERENCE_SPAN,
+    )
     key = generate_development_keypair(KeyPurpose.RESULT)
     trust = TrustStore()
     trust.add_signing_key(key)
@@ -909,6 +913,11 @@ def test_verified_e02_adapter_drops_local_path_and_preserves_exact_content(
                     "provider_hmac_sha256": "c" * 64,
                 }
             ],
+        },
+        method={
+            "method_id": method.method_id,
+            "version": method.version,
+            "method_definition_sha256": method_definition_sha256(method),
         },
         signing_key=key,
     )
