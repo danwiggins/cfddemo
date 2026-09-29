@@ -12,12 +12,14 @@ import os
 import shutil
 import sqlite3
 import stat
+import threading
 import uuid
 from collections.abc import Callable, Mapping, Sequence
+from contextlib import contextmanager
 from datetime import datetime
 from enum import StrEnum
 from pathlib import Path, PurePosixPath
-from typing import Annotated, Literal
+from typing import Annotated, Iterator, Literal
 
 from pydantic import (
     BaseModel,
@@ -51,6 +53,8 @@ MAX_IMPORT_ROOTS = 8
 MAX_IMPORT_DEPTH = 4
 MAX_QUERY_LIMIT = 100
 MAX_FILTER_VALUES = 32
+
+_SQLITE_OPEN_LOCK = threading.Lock()
 
 _FIXED_FILES = (
     "bundle-manifest.json",
@@ -364,6 +368,26 @@ def _descriptor_path(descriptor: int) -> Path:
     return Path(raw.split(b"\0", 1)[0].decode())
 
 
+def _open_descriptor_numbers() -> frozenset[int]:
+    directory = Path("/proc/self/fd")
+    if not directory.is_dir():
+        directory = Path("/dev/fd")
+    try:
+        candidates = (
+            int(item.name) for item in directory.iterdir() if item.name.isdigit()
+        )
+        opened = []
+        for descriptor in candidates:
+            try:
+                os.fstat(descriptor)
+            except OSError:
+                continue
+            opened.append(descriptor)
+        return frozenset(opened)
+    except OSError:
+        raise CatalogFilesystemError("database descriptor proof is unavailable") from None
+
+
 def _open_directory_at(parent_fd: int, name: str) -> int:
     flags = (
         os.O_RDONLY
@@ -571,7 +595,10 @@ class ResultCatalog:
         os.fchmod(self._objects_fd, 0o700)
         self.database = self.root / "catalog.sqlite3"
         self._database_fd: int | None = None
+        self._sqlite_database_fd: int | None = None
         self._database_identity: tuple[int, int] | None = None
+        self._connection: sqlite3.Connection | None = None
+        self._connection_lock = threading.RLock()
         try:
             database_stat = os.stat(
                 "catalog.sqlite3", dir_fd=self._root_fd, follow_symlinks=False
@@ -598,6 +625,14 @@ class ResultCatalog:
         return _descriptor_path(self._objects_fd)
 
     def close(self) -> None:
+        connection = getattr(self, "_connection", None)
+        if connection is not None:
+            try:
+                connection.close()
+            except (sqlite3.Error, TypeError, AttributeError):
+                pass
+            self._connection = None
+            self._sqlite_database_fd = None
         for attribute in ("_database_fd", "_objects_fd", "_root_fd"):
             descriptor = getattr(self, attribute, None)
             if descriptor is not None:
@@ -640,16 +675,46 @@ class ResultCatalog:
                     != self._database_identity
                 ):
                     raise CatalogFilesystemError("catalog database changed")
+                if self._sqlite_database_fd is not None and (
+                    _inode_identity(os.fstat(self._sqlite_database_fd))
+                    != self._database_identity
+                ):
+                    raise CatalogFilesystemError("catalog connection changed")
         except CatalogError:
             raise
         except (OSError, TypeError):
             raise CatalogFilesystemError("catalog storage changed") from None
 
-    def _connect(self) -> sqlite3.Connection:
+    def _bind_database_descriptor(self) -> None:
+        if self._database_identity is None or self._database_fd is not None:
+            return
+        database_flags = (
+            os.O_RDONLY
+            | getattr(os, "O_CLOEXEC", 0)
+            | getattr(os, "O_NOFOLLOW", 0)
+        )
+        descriptor = os.open(
+            "catalog.sqlite3", database_flags, dir_fd=self._root_fd
+        )
+        metadata = os.fstat(descriptor)
+        if (
+            not stat.S_ISREG(metadata.st_mode)
+            or _inode_identity(metadata) != self._database_identity
+        ):
+            os.close(descriptor)
+            raise CatalogFilesystemError("catalog database changed")
+        self._database_fd = descriptor
+
+    def _open_sqlite_connection(self) -> sqlite3.Connection:
         self._validate_storage()
+        self._bind_database_descriptor()
+        descriptors_before = _open_descriptor_numbers()
         try:
             connection = sqlite3.connect(
-                self.database, timeout=30, isolation_level=None
+                self.database,
+                timeout=30,
+                isolation_level=None,
+                check_same_thread=False,
             )
             database_stat = os.stat(
                 "catalog.sqlite3", dir_fd=self._root_fd, follow_symlinks=False
@@ -662,15 +727,25 @@ class ResultCatalog:
                 and observed_identity != self._database_identity
             ):
                 raise CatalogFilesystemError("catalog database changed")
-            if self._database_fd is None:
-                database_flags = (
-                    os.O_RDONLY
-                    | getattr(os, "O_CLOEXEC", 0)
-                    | getattr(os, "O_NOFOLLOW", 0)
+            matching_descriptors = []
+            for descriptor in _open_descriptor_numbers() - descriptors_before:
+                try:
+                    metadata = os.fstat(descriptor)
+                except OSError:
+                    continue
+                if (
+                    stat.S_ISREG(metadata.st_mode)
+                    and _inode_identity(metadata) == observed_identity
+                ):
+                    matching_descriptors.append(descriptor)
+            if len(matching_descriptors) != 1:
+                raise CatalogFilesystemError(
+                    "catalog database connection identity is unproven"
                 )
-                self._database_fd = os.open(
-                    "catalog.sqlite3", database_flags, dir_fd=self._root_fd
-                )
+            self._sqlite_database_fd = matching_descriptors[0]
+            if self._database_identity is None:
+                self._database_identity = observed_identity
+                self._bind_database_descriptor()
             if (
                 not stat.S_ISREG(os.fstat(self._database_fd).st_mode)
                 or _inode_identity(os.fstat(self._database_fd)) != observed_identity
@@ -695,6 +770,18 @@ class ResultCatalog:
         connection.execute("PRAGMA foreign_keys=ON")
         connection.execute("PRAGMA busy_timeout=30000")
         return connection
+
+    @contextmanager
+    def _connect(self) -> Iterator[sqlite3.Connection]:
+        with self._connection_lock:
+            if self._connection is None:
+                with _SQLITE_OPEN_LOCK:
+                    self._connection = self._open_sqlite_connection()
+            self._validate_storage()
+            try:
+                yield self._connection
+            finally:
+                self._validate_storage()
 
     def _initialize(self) -> None:
         new = self._database_identity is None

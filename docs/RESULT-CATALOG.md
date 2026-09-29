@@ -33,7 +33,11 @@ all importers under the same catalog lock.
 The catalog root, object directory, and database inode are retained and
 revalidated on operations. Staging creation and publication are relative to the
 bound object-directory descriptor, so path replacement cannot redirect accepted
-bytes.
+bytes. SQLite uses one lock-serialized retained connection, and connection
+establishment is serialized across catalog instances in the process. At open,
+the catalog proves the newly opened SQLite descriptor has the same device/inode
+as the no-follow database binding; a transient pathname swap cannot substitute
+a database and hide the swap before the post-open check.
 
 ## Read model
 

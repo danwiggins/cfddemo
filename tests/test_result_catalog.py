@@ -4,12 +4,14 @@ from __future__ import annotations
 
 import hashlib
 import os
+import shutil
 import threading
 import time
 from datetime import datetime, timezone
 from pathlib import Path
 
 import pytest
+import evidence_inspector.result_catalog as catalog_module
 
 from evidence_inspector.method_registry import (
     DisplayRole,
@@ -416,6 +418,68 @@ def test_destination_and_database_replacement_fail_closed(tmp_path: Path) -> Non
     database_catalog.database.touch()
     with pytest.raises(CatalogFilesystemError, match="database changed"):
         database_catalog.query(CatalogQuery())
+
+
+def test_transient_connect_window_root_swap_cannot_open_attacker_database(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    original, _, import_root = _catalog(tmp_path)
+    original_root = original.root
+    original.close()
+    attacker_root = tmp_path / "attacker-catalog"
+    shutil.copytree(original_root, attacker_root)
+    attacker = ResultCatalog(
+        attacker_root,
+        import_roots={"root_primary": import_root},
+        trust_store=original.trust_store,
+    )
+    attacker_ref = _synthetic_ref(999)
+    with attacker._connect() as connection:
+        connection.execute(
+            "INSERT INTO results VALUES(?,?,?,?,?,?,?,?,?,?)",
+            (
+                attacker_ref.result_id,
+                attacker_ref.bundle_sha256,
+                attacker_ref.bundle_record_id,
+                attacker_ref.method_ref.method_id,
+                attacker_ref.method_ref.version,
+                attacker_ref.execution_state.value,
+                attacker_ref.information_state.value,
+                attacker_ref.trust_state.value,
+                attacker_ref.qualification_state.value,
+                attacker_ref.model_dump_json().encode(),
+            ),
+        )
+    attacker.close()
+
+    real_connect = catalog_module.sqlite3.connect
+    displaced_root = tmp_path / "displaced-original"
+
+    def swap_during_connect(*args, **kwargs):
+        original_root.rename(displaced_root)
+        attacker_root.rename(original_root)
+        try:
+            return real_connect(*args, **kwargs)
+        finally:
+            original_root.rename(attacker_root)
+            displaced_root.rename(original_root)
+
+    monkeypatch.setattr(catalog_module.sqlite3, "connect", swap_during_connect)
+    with pytest.raises(CatalogFilesystemError, match="identity is unproven"):
+        ResultCatalog(
+            original_root,
+            import_roots={"root_primary": import_root},
+            trust_store=original.trust_store,
+        )
+
+    monkeypatch.setattr(catalog_module.sqlite3, "connect", real_connect)
+    reopened = ResultCatalog(
+        original_root,
+        import_roots={"root_primary": import_root},
+        trust_store=original.trust_store,
+    )
+    assert reopened.query(CatalogQuery()).empty
 
 
 def test_published_object_digest_is_the_accepted_digest(tmp_path: Path) -> None:
