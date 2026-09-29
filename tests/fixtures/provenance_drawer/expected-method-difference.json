@@ -1,0 +1,26 @@
+{
+  "schema_version": "traceback.provenance-drawer-fixture.v1",
+  "synthetic_only": true,
+  "canonical_bytes_sha256": "ca2a071b896c713f48904f6eccdbac42bfab9512b736684d62a61e1d8a8fcc9f",
+  "drawer_sha256": "1c37fcae8adc342d802a5cea24a3cb3bb23c4d0725bf92475d56b2b3c7d6a88e",
+  "compatibility_decision_sha256": "2499c694ebc329ea1d51bf6f9b7fc725242b5ad13af4f9ce68a5738c4d23d30c",
+  "outcome": "incompatible",
+  "mismatch_keys": [
+    "method_definition_sha256",
+    "method_version"
+  ],
+  "changed_fields": [
+    "bundle",
+    "method_definition",
+    "capability_authority",
+    "limitations"
+  ],
+  "unchanged_fields": [
+    "measurement",
+    "assets",
+    "denominator",
+    "counts",
+    "filters",
+    "compatibility_decision"
+  ]
+}

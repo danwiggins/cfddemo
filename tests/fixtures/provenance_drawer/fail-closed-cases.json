@@ -1,0 +1,17 @@
+{
+  "schema_version": "traceback.provenance-drawer-failure-fixture.v1",
+  "synthetic_only": true,
+  "cases": [
+    "compatibility_replay_drift",
+    "unknown_compatibility",
+    "stale_asset_authority",
+    "revoked_asset",
+    "incomplete_counts",
+    "catalog_bundle_mismatch",
+    "field_lineage_mutation",
+    "private_identifier",
+    "local_path",
+    "sequence_like_text",
+    "noncanonical_bytes"
+  ]
+}
