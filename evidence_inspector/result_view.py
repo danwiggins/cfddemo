@@ -82,7 +82,10 @@ def _reject_reserved_privacy_terms(
         is_private = any(
             segment == prefix
             or (strict_prefix and segment.startswith(prefix))
-            or re.fullmatch(rf"{prefix}(?:id)?[0-9]+", segment) is not None
+            or (
+                segment.startswith(prefix)
+                and any(character.isdigit() for character in segment[len(prefix) :])
+            )
             for prefix in _RESERVED_LABEL_PREFIXES
         )
         if is_private:
