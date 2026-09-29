@@ -71,6 +71,15 @@ _ABSOLUTE_PATH = re.compile(
     r"[^\s,;)\]}'\"]+"
 )
 _ENCODED_PATH = re.compile(r"(?:%2f|%5c|file%3a)", re.IGNORECASE)
+_RELATIVE_FILE_PATH = re.compile(
+    r"(?:^|\s)[A-Za-z0-9_.-]+(?:[/\\][A-Za-z0-9_.-]+)+\.[A-Za-z0-9]{1,12}"
+    r"(?=$|[\s,;)])"
+)
+_RAW_IDENTIFIER = re.compile(
+    r"\b(?:donor|patient|read|sample|query)(?:[_:.-]?(?:id)?[_:.-]?)?"
+    r"[a-z0-9]*\d+[a-z0-9_.:-]*\b",
+    re.IGNORECASE,
+)
 _SEQUENCE = re.compile(r"(?<![A-Za-z])[ACGTN]{20,}(?![A-Za-z])", re.IGNORECASE)
 _SECRET = re.compile(
     r"(?:AWS_SECRET_ACCESS_KEY|PRIVATE_KEY|PASSWORD|SECRET|TOKEN)\s*=",
@@ -148,6 +157,8 @@ class CellOriginExplorerRequest(CompatibilityContract):
         ):
             raise ValueError("cell-origin explorer accepts only bootstrap v2")
         _validate_bundle_bounds(self.bundle)
+        _validate_bundle_denominators(self.bundle)
+        _validate_bundle_contributors(self.bundle)
         _assert_private_data_absent(self.bundle.model_dump(mode="json"))
         if result.result_id != record.result_id:
             raise ValueError("bundle result ID does not match E05 record")
@@ -157,8 +168,6 @@ class CellOriginExplorerRequest(CompatibilityContract):
             or atlas.content_sha256 != deconvolution.atlas_sha256
         ):
             raise ValueError("atlas identity does not match exact deconvolution")
-        _validate_bundle_denominators(self.bundle)
-        _validate_bundle_contributors(self.bundle)
         if _digest(result) != record.result_sha256:
             raise ValueError("result digest does not match E05 record")
         if _digest(self.bundle) != record.bundle_sha256:
@@ -413,6 +422,8 @@ def _assert_private_data_absent(value: Any, *, field: str = "$") -> None:
         or "://" in value
         or _ABSOLUTE_PATH.search(value)
         or _ENCODED_PATH.search(value)
+        or _RELATIVE_FILE_PATH.search(value)
+        or _RAW_IDENTIFIER.search(value)
         or (
             _SEQUENCE.search(value)
             and re.fullmatch(r"[0-9a-f]{64}", value) is None

@@ -636,7 +636,9 @@ def test_private_source_text_fails_closed_before_digest_validation() -> None:
     [
         "source at ~/private/case.tsv",
         "source at ../private/case.tsv",
+        "source at private/case.tsv",
         "source%2Fat%2Fprivate%2Fcase.tsv",
+        "technical read123 failed",
         "ACGTACGTACGTACGTACGTACGT",
     ],
 )
