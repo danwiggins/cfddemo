@@ -3,8 +3,6 @@
 from __future__ import annotations
 
 import argparse
-import ctypes
-import errno
 import hashlib
 import hmac
 import json
@@ -23,6 +21,7 @@ from pathlib import Path
 from typing import Any
 
 from .contracts import JobState
+from .filesystem import rename_directory_exclusive_at
 from .operator import build_job_view, support_payload
 from .protocol import render_protocol, synthetic_protocol_manifest
 from .serialization import canonical_json_bytes
@@ -461,20 +460,18 @@ def _signed_bundle_from_outputs(runner: Any, job_id: str) -> Path:
 
 def _rename_directory_exclusive(source: Path, destination: Path) -> None:
     """Atomic directory publication that cannot overwrite even an empty target."""
-    libc = ctypes.CDLL(None, use_errno=True)
-    if sys.platform == "darwin":
-        rename = libc.renamex_np
-        rename.argtypes = [ctypes.c_char_p, ctypes.c_char_p, ctypes.c_uint]
-        result = rename(os.fsencode(source), os.fsencode(destination), 0x4)  # RENAME_EXCL
-    elif sys.platform.startswith("linux") and hasattr(libc, "renameat2"):
-        rename = libc.renameat2
-        rename.argtypes = [ctypes.c_int, ctypes.c_char_p, ctypes.c_int, ctypes.c_char_p, ctypes.c_uint]
-        result = rename(-100, os.fsencode(source), -100, os.fsencode(destination), 1)  # AT_FDCWD, RENAME_NOREPLACE
-    else:
-        raise OSError(errno.ENOTSUP, "exclusive directory publication is unsupported")
-    if result != 0:
-        error = ctypes.get_errno()
-        raise OSError(error, os.strerror(error), str(destination))
+    if source.parent != destination.parent:
+        raise ValueError("exclusive directory publication requires one parent")
+    parent_fd = os.open(
+        source.parent,
+        os.O_RDONLY
+        | getattr(os, "O_DIRECTORY", 0)
+        | getattr(os, "O_NOFOLLOW", 0),
+    )
+    try:
+        rename_directory_exclusive_at(parent_fd, source.name, destination.name)
+    finally:
+        os.close(parent_fd)
 
 
 def _publish_verified_record(root: Path, verified: Any, source: Path) -> Path:

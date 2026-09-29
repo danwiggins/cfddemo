@@ -38,6 +38,28 @@ thresholds, or processing of real genomic data.
 `traceback_runner.fixtures` generates temporary synthetic BAM/index files and
 fake MinKNOW metadata. It never writes a checked-in sequence or signal file.
 
+## Development report bundles
+
+`traceback_runner.report_bundles` packages already-validated aggregate result,
+plot-data, plot-spec, provenance, and accessible-table bytes. The v1 contract
+is fixed to `copy-number-dosage-qc.v2`, method
+`sample-internal-whole-chromosome-dosage-qc`, and qualification state
+`development_unqualified`; it never authorizes product release.
+
+The builder performs no plotting, scientific interpretation, runtime probing,
+or network access. It parses the existing dosage-result union and closed typed
+plot/provenance contracts, then requires a canonical UTF-8 TSV table with a
+fixed schema and header. Every presentation artifact names the exact result
+digest and development identity. Publication fsyncs a private staged directory
+and uses the platform's atomic no-replace rename against a pinned parent.
+
+The manifest commits to each artifact's exact schema/media identity, byte size,
+and SHA-256 digest. Verification pins the bundle root once and replays the same
+semantic and privacy checks through descriptor-relative reads. Unknown schemas,
+identity drift, local paths, raw identifiers, binary tables, extra or missing
+entries, symlinks, noncanonical JSON, and any digest or size mismatch fail
+closed.
+
 ## Synthetic aligned reference-span policy
 
 The v1 synthetic policy counts reference bases consumed by CIGAR operations
