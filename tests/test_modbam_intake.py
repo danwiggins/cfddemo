@@ -27,6 +27,7 @@ from evidence_inspector.modbam_intake import (
     build_grch38_alignment_plan,
     inspect_modbam_chunks,
     measure_alignment_disk_budget,
+    validate_alignment_execution_readiness,
     validate_registered_alignment_plan,
 )
 
@@ -106,6 +107,9 @@ def _write_bam(
     aligned: bool = False,
     reverse: bool = False,
     paired: bool = False,
+    unaligned_reference_start: int = -1,
+    unaligned_cigar: bool = False,
+    unaligned_mapq: int = 0,
 ) -> None:
     import pysam
 
@@ -127,6 +131,10 @@ def _write_bam(
                 record.flag = 4 | (16 if reverse else 0)
                 if paired:
                     record.flag |= 1 | 8
+                record.reference_start = unaligned_reference_start
+                if unaligned_cigar:
+                    record.cigarstring = f"{len(sequence)}M"
+                record.mapping_quality = unaligned_mapq
             if "MM" in include_tags:
                 record.set_tag("MM", mm)
             if "ML" in include_tags:
@@ -263,6 +271,26 @@ def test_rejects_unaligned_layouts_that_cannot_preserve_modification_tags(
         _inspect([path])
 
 
+@pytest.mark.parametrize(
+    "field",
+    ["reference_start", "cigar", "mapq"],
+)
+def test_rejects_noncanonical_unaligned_core_fields(
+    tmp_path: Path,
+    field: str,
+) -> None:
+    path = tmp_path / "noncanonical-unmapped.bam"
+    _write_bam(
+        path,
+        unaligned_reference_start=1 if field == "reference_start" else -1,
+        unaligned_cigar=field == "cigar",
+        unaligned_mapq=1 if field == "mapq" else 0,
+    )
+
+    with pytest.raises(ModbamIntakeError, match="non_primary_unmapped_records=1"):
+        _inspect([path])
+
+
 def test_pathname_swap_cannot_cross_bind_digest_and_scan(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -344,6 +372,43 @@ def test_rejects_symlinks_and_all_declared_bounds(tmp_path: Path) -> None:
         _inspect([path], max_records=1)
 
 
+def test_capacity_measurement_sanitizes_missing_private_path(tmp_path: Path) -> None:
+    missing = tmp_path / "private-missing-workspace"
+    with pytest.raises(ModbamIntakeError) as caught:
+        measure_alignment_disk_budget(
+            missing,
+            tmp_path,
+            combined_bam_bytes=1,
+            sort_temporary_bytes=1,
+            aligned_bam_bytes=1,
+            index_bytes=1,
+        )
+    assert str(tmp_path) not in str(caught.value)
+    assert missing.name not in str(caught.value)
+
+
+def test_sibling_directories_share_one_capacity_denominator(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    workspace = tmp_path / "workspace"
+    output = tmp_path / "output"
+    workspace.mkdir()
+    output.mkdir()
+    usage = shutil._ntuple_diskusage(total=100, used=0, free=100)
+    monkeypatch.setattr(shutil, "disk_usage", lambda _: usage)
+
+    with pytest.raises(ValueError, match="shared-filesystem"):
+        measure_alignment_disk_budget(
+            workspace,
+            output,
+            combined_bam_bytes=30,
+            sort_temporary_bytes=30,
+            aligned_bam_bytes=30,
+            index_bytes=30,
+        )
+
+
 def test_incompatible_safe_headers_fail_without_copying_headers(tmp_path: Path) -> None:
     first = tmp_path / "one.bam"
     second = tmp_path / "two.bam"
@@ -411,6 +476,13 @@ def test_alignment_plan_binds_tools_reference_disk_and_post_run_checks(
         ModbamAlignmentPlan.model_validate_json(serialized),
         SyntheticAlignmentRegistry(),
     ) == plan
+    readiness = validate_alignment_execution_readiness(
+        plan,
+        SyntheticAlignmentRegistry(),
+        workspace_path=tmp_path,
+        output_path=tmp_path,
+    )
+    assert readiness.plan_sha256 == plan.plan_sha256
 
     for stage_index, argv_index, replacement in (
         (1, 3, "MM,ML"),
@@ -442,6 +514,44 @@ def test_alignment_plan_binds_tools_reference_disk_and_post_run_checks(
     rebound = ModbamAlignmentPlan.model_validate(payload)
     with pytest.raises(ModbamIntakeError, match="reference registry binding"):
         validate_registered_alignment_plan(rebound, SyntheticAlignmentRegistry())
+
+    payload = plan.model_dump(mode="json")
+    payload["post_run_checks"] = [
+        check
+        for check in payload["post_run_checks"]
+        if check["id"] != "secondary_count"
+    ]
+    payload["plan_sha256"] = hashlib.sha256(
+        canonical_json_bytes(
+            {key: value for key, value in payload.items() if key != "plan_sha256"}
+        )
+    ).hexdigest()
+    with pytest.raises(ValueError, match="postconditions"):
+        ModbamAlignmentPlan.model_validate(payload)
+
+    payload = plan.model_dump(mode="json")
+    for check in payload["pre_run_checks"]:
+        if check["id"] == "disk_capacity":
+            check["requirement"] = "Capacity was measured at some earlier time."
+    payload["plan_sha256"] = hashlib.sha256(
+        canonical_json_bytes(
+            {key: value for key, value in payload.items() if key != "plan_sha256"}
+        )
+    ).hexdigest()
+    with pytest.raises(ValueError, match="preconditions"):
+        ModbamAlignmentPlan.model_validate(payload)
+
+    payload = plan.model_dump(mode="json")
+    for check in payload["post_run_checks"]:
+        if check["id"] == "supplementary_accounting":
+            check["requirement"] = "Supplementary records are ignored."
+    payload["plan_sha256"] = hashlib.sha256(
+        canonical_json_bytes(
+            {key: value for key, value in payload.items() if key != "plan_sha256"}
+        )
+    ).hexdigest()
+    with pytest.raises(ValueError, match="postconditions"):
+        ModbamAlignmentPlan.model_validate(payload)
 
 
 def test_alignment_plan_rejects_understated_disk_ceiling(tmp_path: Path) -> None:

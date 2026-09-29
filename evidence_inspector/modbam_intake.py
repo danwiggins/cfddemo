@@ -205,6 +205,8 @@ class AlignmentDiskBudget(StrictModel):
     """Explicit byte ceilings checked before execution begins."""
 
     measurement_method: Literal["shutil.disk_usage.v1"] = "shutil.disk_usage.v1"
+    workspace_device_id: int = Field(ge=0)
+    output_device_id: int = Field(ge=0)
     workspace_mount_sha256: Sha256
     output_mount_sha256: Sha256
     measurement_sha256: Sha256
@@ -221,6 +223,8 @@ class AlignmentDiskBudget(StrictModel):
             canonical_json_bytes(
                 {
                     "measurement_method": self.measurement_method,
+                    "workspace_device_id": self.workspace_device_id,
+                    "output_device_id": self.output_device_id,
                     "workspace_mount_sha256": self.workspace_mount_sha256,
                     "output_mount_sha256": self.output_mount_sha256,
                     "available_workspace_bytes": self.available_workspace_bytes,
@@ -236,7 +240,13 @@ class AlignmentDiskBudget(StrictModel):
             raise ValueError("workspace disk budget is insufficient")
         if output_required > self.available_output_bytes:
             raise ValueError("output disk budget is insufficient")
-        if self.workspace_mount_sha256 == self.output_mount_sha256:
+        if (
+            self.workspace_device_id,
+            self.workspace_mount_sha256,
+        ) == (
+            self.output_device_id,
+            self.output_mount_sha256,
+        ):
             shared_required = workspace_required + output_required
             if shared_required > min(
                 self.available_workspace_bytes,
@@ -244,6 +254,27 @@ class AlignmentDiskBudget(StrictModel):
             ):
                 raise ValueError("shared-filesystem disk budget is insufficient")
         return self
+
+
+def _filesystem_identity(path: Path) -> tuple[int, str]:
+    """Return device and a path-free digest of its stable mount boundary."""
+
+    current = path
+    current_stat = os.stat(current)
+    if not stat.S_ISDIR(current_stat.st_mode):
+        raise NotADirectoryError
+    device_id = current_stat.st_dev
+    while current.parent != current:
+        if os.path.ismount(current):
+            break
+        parent = current.parent
+        if os.stat(parent).st_dev != device_id:
+            break
+        current = parent
+    digest = hashlib.sha256(
+        str(device_id).encode("ascii") + b"\0" + os.fsencode(current)
+    ).hexdigest()
+    return device_id, digest
 
 
 def measure_alignment_disk_budget(
@@ -257,20 +288,27 @@ def measure_alignment_disk_budget(
 ) -> AlignmentDiskBudget:
     """Measure local capacity while retaining only private mount fingerprints."""
 
-    workspace = Path(workspace_path).resolve(strict=True)
-    output = Path(output_path).resolve(strict=True)
-    available_workspace = shutil.disk_usage(workspace).free
-    available_output = shutil.disk_usage(output).free
-    workspace_digest = hashlib.sha256(os.fsencode(workspace)).hexdigest()
-    output_digest = hashlib.sha256(os.fsencode(output)).hexdigest()
+    try:
+        workspace = Path(workspace_path).resolve(strict=True)
+        output = Path(output_path).resolve(strict=True)
+        workspace_device, workspace_digest = _filesystem_identity(workspace)
+        output_device, output_digest = _filesystem_identity(output)
+        available_workspace = shutil.disk_usage(workspace).free
+        available_output = shutil.disk_usage(output).free
+    except (OSError, RuntimeError, ValueError):
+        raise ModbamIntakeError("disk capacity measurement failed") from None
     payload = {
         "measurement_method": "shutil.disk_usage.v1",
+        "workspace_device_id": workspace_device,
+        "output_device_id": output_device,
         "workspace_mount_sha256": workspace_digest,
         "output_mount_sha256": output_digest,
         "available_workspace_bytes": available_workspace,
         "available_output_bytes": available_output,
     }
     return AlignmentDiskBudget(
+        workspace_device_id=workspace_device,
+        output_device_id=output_device,
         workspace_mount_sha256=workspace_digest,
         output_mount_sha256=output_digest,
         measurement_sha256=hashlib.sha256(canonical_json_bytes(payload)).hexdigest(),
@@ -306,6 +344,86 @@ class ExecutionStage(StrictModel):
 class PostRunCheck(StrictModel):
     id: Identifier
     requirement: ShortText
+
+
+def _required_pre_run_checks() -> tuple[PostRunCheck, ...]:
+    return (
+        PostRunCheck(
+            id="input_identity",
+            requirement="Every private mount digest equals the ordered intake manifest.",
+        ),
+        PostRunCheck(
+            id="tool_identity",
+            requirement=(
+                "Samtools and minimap2 versions and executable digests equal this plan."
+            ),
+        ),
+        PostRunCheck(
+            id="reference_assets",
+            requirement=(
+                "FASTA, FAI, minimap2 index, and sequence-dictionary digests "
+                "equal the registered GRCh38 asset."
+            ),
+        ),
+        PostRunCheck(
+            id="disk_capacity",
+            requirement=(
+                "A fresh readiness receipt binds the same filesystems and sufficient "
+                "free bytes immediately before execution."
+            ),
+        ),
+    )
+
+
+def _required_post_run_checks() -> tuple[PostRunCheck, ...]:
+    return (
+        PostRunCheck(
+            id="input_digest_recheck",
+            requirement="Every chunk digest equals the private intake manifest.",
+        ),
+        PostRunCheck(
+            id="record_count",
+            requirement=(
+                "Primary mapped plus primary unmapped output count equals the manifest total."
+            ),
+        ),
+        PostRunCheck(
+            id="tag_count",
+            requirement="Every output record retains valid MM, ML, and MN tags.",
+        ),
+        PostRunCheck(
+            id="secondary_count",
+            requirement="Output secondary-record count is zero under --secondary=no.",
+        ),
+        PostRunCheck(
+            id="supplementary_accounting",
+            requirement=(
+                "Supplementary records are reported separately from the primary denominator."
+            ),
+        ),
+        PostRunCheck(
+            id="reference_identity",
+            requirement=(
+                "Output SQ dictionary digest equals the registered GRCh38 dictionary."
+            ),
+        ),
+        PostRunCheck(
+            id="sort_order",
+            requirement=(
+                "Output header declares coordinate sort and an independent order scan passes."
+            ),
+        ),
+        PostRunCheck(
+            id="index_integrity",
+            requirement="BAI opens and samtools quickcheck succeeds for the output BAM.",
+        ),
+        PostRunCheck(
+            id="record_partition",
+            requirement=(
+                "Total output equals primary mapped, primary unmapped, and supplementary."
+            ),
+        ),
+    )
 
 
 class AlignmentRegistryIdentity(StrictModel):
@@ -359,6 +477,10 @@ class ModbamAlignmentPlan(StrictModel):
             canonical_json_bytes(plan_payload)
         ).hexdigest():
             raise ValueError("alignment plan digest is invalid")
+        if self.pre_run_checks != _required_pre_run_checks():
+            raise ValueError("alignment preconditions do not match the sealed method")
+        if self.post_run_checks != _required_post_run_checks():
+            raise ValueError("alignment postconditions do not match the sealed method")
         if self.disk_minimums != _disk_minimums(
             self.expected_input_bytes, self.expected_record_count
         ):
@@ -457,6 +579,17 @@ class ModbamAlignmentPlan(StrictModel):
         ):
             raise ValueError("alignment pipe topology does not match the sealed method")
         return self
+
+
+class AlignmentExecutionReadiness(StrictModel):
+    """Fresh capacity and registry binding required immediately before execution."""
+
+    schema_version: Literal["traceback.modbam-execution-readiness.v1"] = (
+        "traceback.modbam-execution-readiness.v1"
+    )
+    plan_sha256: Sha256
+    capacity: AlignmentDiskBudget
+    ready: Literal[True] = True
 
 
 def _disk_minimums(input_bytes: int, record_count: int) -> AlignmentDiskMinimums:
@@ -742,6 +875,9 @@ def inspect_modbam_chunks(
                             elif (
                                 bool(record.is_reverse)
                                 or bool(record.is_paired)
+                                or record.reference_start != -1
+                                or record.cigartuples is not None
+                                or record.mapping_quality != 0
                                 or record.next_reference_id != -1
                                 or record.next_reference_start != -1
                                 or record.template_length != 0
@@ -990,79 +1126,8 @@ def build_grch38_alignment_plan(
             ),
         ),
     )
-    pre_run_checks = (
-        PostRunCheck(
-            id="input_identity",
-            requirement="Every private mount digest equals the ordered intake manifest.",
-        ),
-        PostRunCheck(
-            id="tool_identity",
-            requirement=(
-                "Samtools and minimap2 versions and executable digests equal this plan."
-            ),
-        ),
-        PostRunCheck(
-            id="reference_assets",
-            requirement=(
-                "FASTA, FAI, minimap2 index, and sequence-dictionary digests "
-                "equal the registered GRCh38 asset."
-            ),
-        ),
-        PostRunCheck(
-            id="disk_capacity",
-            requirement=(
-                "Measured free bytes meet both declared disk ceilings before execution."
-            ),
-        ),
-    )
-    checks = (
-        PostRunCheck(
-            id="input_digest_recheck",
-            requirement="Every chunk digest equals the private intake manifest.",
-        ),
-        PostRunCheck(
-            id="record_count",
-            requirement=(
-                "Primary mapped plus primary unmapped output count equals the manifest total."
-            ),
-        ),
-        PostRunCheck(
-            id="tag_count",
-            requirement="Every output record retains valid MM, ML, and MN tags.",
-        ),
-        PostRunCheck(
-            id="secondary_count",
-            requirement="Output secondary-record count is zero under --secondary=no.",
-        ),
-        PostRunCheck(
-            id="supplementary_accounting",
-            requirement=(
-                "Supplementary records are reported separately from the primary denominator."
-            ),
-        ),
-        PostRunCheck(
-            id="reference_identity",
-            requirement=(
-                "Output SQ dictionary digest equals the registered GRCh38 dictionary."
-            ),
-        ),
-        PostRunCheck(
-            id="sort_order",
-            requirement=(
-                "Output header declares coordinate sort and an independent order scan passes."
-            ),
-        ),
-        PostRunCheck(
-            id="index_integrity",
-            requirement="BAI opens and samtools quickcheck succeeds for the output BAM.",
-        ),
-        PostRunCheck(
-            id="record_partition",
-            requirement=(
-                "Total output equals primary mapped, primary unmapped, and supplementary."
-            ),
-        ),
-    )
+    pre_run_checks = _required_pre_run_checks()
+    checks = _required_post_run_checks()
     plan_fields = dict(
         input_manifest_sha256=manifest.manifest_sha256,
         resource_registry=registry.identity,
@@ -1135,11 +1200,55 @@ def validate_registered_alignment_plan(
     return plan
 
 
+def validate_alignment_execution_readiness(
+    plan: ModbamAlignmentPlan,
+    registry: AlignmentResourceRegistry,
+    *,
+    workspace_path: str | Path,
+    output_path: str | Path,
+) -> AlignmentExecutionReadiness:
+    """Re-resolve registry and remeasure capacity immediately before execution."""
+
+    validate_registered_alignment_plan(plan, registry)
+    try:
+        current = measure_alignment_disk_budget(
+            workspace_path,
+            output_path,
+            combined_bam_bytes=plan.disk_budget.combined_bam_bytes,
+            sort_temporary_bytes=plan.disk_budget.sort_temporary_bytes,
+            aligned_bam_bytes=plan.disk_budget.aligned_bam_bytes,
+            index_bytes=plan.disk_budget.index_bytes,
+        )
+    except (ModbamIntakeError, ValueError):
+        raise ModbamIntakeError("execution capacity validation failed") from None
+    planned_filesystems = (
+        plan.disk_budget.workspace_device_id,
+        plan.disk_budget.workspace_mount_sha256,
+        plan.disk_budget.output_device_id,
+        plan.disk_budget.output_mount_sha256,
+    )
+    current_filesystems = (
+        current.workspace_device_id,
+        current.workspace_mount_sha256,
+        current.output_device_id,
+        current.output_mount_sha256,
+    )
+    if current_filesystems != planned_filesystems:
+        raise ModbamIntakeError(
+            "execution capacity validation failed"
+        ) from None
+    return AlignmentExecutionReadiness(
+        plan_sha256=plan.plan_sha256,
+        capacity=current,
+    )
+
+
 __all__ = [
     "ALIGNMENT_METHOD_ID",
     "INTAKE_METHOD_ID",
     "AlignmentDiskBudget",
     "AlignmentDiskMinimums",
+    "AlignmentExecutionReadiness",
     "AlignmentRegistryIdentity",
     "AlignmentResourceRegistry",
     "BasecallerIdentity",
@@ -1155,5 +1264,6 @@ __all__ = [
     "build_grch38_alignment_plan",
     "inspect_modbam_chunks",
     "measure_alignment_disk_budget",
+    "validate_alignment_execution_readiness",
     "validate_registered_alignment_plan",
 ]
