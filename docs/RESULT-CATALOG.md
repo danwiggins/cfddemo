@@ -39,6 +39,13 @@ the catalog proves the newly opened SQLite descriptor has the same device/inode
 as the no-follow database binding; a transient pathname swap cannot substitute
 a database and hide the swap before the post-open check.
 
+Fresh schema initialization holds that process-local critical section through
+completion and uses one SQLite `BEGIN EXCLUSIVE` transaction. The SQLite lock is
+the cross-process coordination boundary: one constructor creates the complete
+schema and commits it atomically; concurrent constructors then validate the
+exact committed table/index inventory and schema marker. Existing partial or
+extra schemas fail closed and are never repaired implicitly.
+
 ## Read model
 
 `CatalogResultRef` contains immutable bundle, method, registry, and authority

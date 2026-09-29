@@ -482,6 +482,47 @@ def test_transient_connect_window_root_swap_cannot_open_attacker_database(
     assert reopened.query(CatalogQuery()).empty
 
 
+def test_simultaneous_fresh_catalog_constructors_are_atomic_and_usable(
+    tmp_path: Path,
+) -> None:
+    import_root = tmp_path / "imports"
+    import_root.mkdir()
+    *_, capability = _authority()
+    _, _, trust = _bundle(
+        import_root / "incoming", method=_bundle_method(capability)
+    )
+    catalog_root = tmp_path / "catalog"
+    barrier = threading.Barrier(2)
+    catalogs: list[ResultCatalog] = []
+    errors: list[BaseException] = []
+
+    def construct() -> None:
+        try:
+            barrier.wait(timeout=10)
+            catalogs.append(
+                ResultCatalog(
+                    catalog_root,
+                    import_roots={"root_primary": import_root},
+                    trust_store=trust,
+                )
+            )
+        except BaseException as error:
+            errors.append(error)
+
+    workers = [threading.Thread(target=construct) for _ in range(2)]
+    for worker in workers:
+        worker.start()
+    for worker in workers:
+        worker.join(timeout=10)
+
+    assert all(not worker.is_alive() for worker in workers)
+    assert errors == []
+    assert len(catalogs) == 2
+    assert all(catalog.query(CatalogQuery()).empty for catalog in catalogs)
+    imported = _import(catalogs[0])
+    assert catalogs[1].query(CatalogQuery()).results == (imported,)
+
+
 def test_published_object_digest_is_the_accepted_digest(tmp_path: Path) -> None:
     catalog, _, _ = _catalog(tmp_path)
     reference = _import(catalog)

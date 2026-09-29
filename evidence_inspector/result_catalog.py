@@ -54,7 +54,51 @@ MAX_IMPORT_DEPTH = 4
 MAX_QUERY_LIMIT = 100
 MAX_FILTER_VALUES = 32
 
-_SQLITE_OPEN_LOCK = threading.Lock()
+_SQLITE_OPEN_LOCK = threading.RLock()
+
+_CATALOG_SCHEMA_OBJECTS = frozenset(
+    {
+        ("table", "metadata"),
+        ("table", "results"),
+        ("table", "opaque_aliases"),
+        ("index", "results_method"),
+        ("index", "results_states"),
+        ("index", "aliases_run"),
+        ("index", "aliases_timepoint"),
+    }
+)
+
+_CATALOG_SCHEMA_STATEMENTS = (
+    "CREATE TABLE metadata(key TEXT PRIMARY KEY, value TEXT NOT NULL)",
+    """CREATE TABLE results(
+        result_id TEXT PRIMARY KEY,
+        bundle_sha256 TEXT NOT NULL UNIQUE,
+        bundle_record_id TEXT NOT NULL UNIQUE,
+        method_id TEXT NOT NULL,
+        method_version TEXT NOT NULL,
+        execution_state TEXT NOT NULL,
+        information_state TEXT NOT NULL,
+        trust_state TEXT NOT NULL,
+        qualification_state TEXT NOT NULL,
+        ref_json BLOB NOT NULL
+    )""",
+    """CREATE TABLE opaque_aliases(
+        result_id TEXT PRIMARY KEY REFERENCES results(result_id),
+        display_alias TEXT NOT NULL UNIQUE,
+        run_alias TEXT NOT NULL,
+        timepoint_alias TEXT NOT NULL
+    )""",
+    "CREATE INDEX results_method ON results(method_id, method_version, result_id)",
+    """CREATE INDEX results_states ON results(
+        execution_state,
+        information_state,
+        trust_state,
+        qualification_state,
+        result_id
+    )""",
+    "CREATE INDEX aliases_run ON opaque_aliases(run_alias, result_id)",
+    "CREATE INDEX aliases_timepoint ON opaque_aliases(timepoint_alias, result_id)",
+)
 
 _FIXED_FILES = (
     "bundle-manifest.json",
@@ -784,60 +828,65 @@ class ResultCatalog:
                 self._validate_storage()
 
     def _initialize(self) -> None:
-        new = self._database_identity is None
-        with self._connect() as connection:
-            if new:
-                connection.executescript(
-                    """
-                    PRAGMA journal_mode=WAL;
-                    PRAGMA synchronous=FULL;
-                    CREATE TABLE metadata(key TEXT PRIMARY KEY, value TEXT NOT NULL);
-                    INSERT INTO metadata VALUES('schema_version', '1');
-                    CREATE TABLE results(
-                        result_id TEXT PRIMARY KEY,
-                        bundle_sha256 TEXT NOT NULL UNIQUE,
-                        bundle_record_id TEXT NOT NULL UNIQUE,
-                        method_id TEXT NOT NULL,
-                        method_version TEXT NOT NULL,
-                        execution_state TEXT NOT NULL,
-                        information_state TEXT NOT NULL,
-                        trust_state TEXT NOT NULL,
-                        qualification_state TEXT NOT NULL,
-                        ref_json BLOB NOT NULL
-                    );
-                    CREATE TABLE opaque_aliases(
-                        result_id TEXT PRIMARY KEY REFERENCES results(result_id),
-                        display_alias TEXT NOT NULL UNIQUE,
-                        run_alias TEXT NOT NULL,
-                        timepoint_alias TEXT NOT NULL
-                    );
-                    CREATE INDEX results_method ON results(method_id, method_version, result_id);
-                    CREATE INDEX results_states ON results(
-                        execution_state,
-                        information_state,
-                        trust_state,
-                        qualification_state,
-                        result_id
-                    );
-                    CREATE INDEX aliases_run ON opaque_aliases(run_alias, result_id);
-                    CREATE INDEX aliases_timepoint ON opaque_aliases(timepoint_alias, result_id);
-                    """
+        with _SQLITE_OPEN_LOCK, self._connect() as connection:
+            connection.execute("PRAGMA synchronous=FULL")
+            connection.execute("BEGIN EXCLUSIVE")
+            try:
+                objects = frozenset(
+                    (row[0], row[1])
+                    for row in connection.execute(
+                        """SELECT type, name FROM sqlite_master
+                           WHERE name NOT LIKE 'sqlite_%'
+                           ORDER BY type, name"""
+                    )
                 )
-                os.chmod(self.database, 0o600)
-            else:
-                try:
-                    row = connection.execute(
-                        "SELECT value FROM metadata WHERE key='schema_version'"
-                    ).fetchone()
-                except sqlite3.DatabaseError:
+                if not objects:
+                    for statement in _CATALOG_SCHEMA_STATEMENTS:
+                        connection.execute(statement)
+                    connection.execute(
+                        "INSERT INTO metadata VALUES('schema_version', ?)",
+                        (str(CATALOG_SCHEMA_VERSION),),
+                    )
+                self._validate_schema(connection)
+                connection.commit()
+            except BaseException as error:
+                connection.rollback()
+                if isinstance(error, CatalogError):
+                    raise
+                if isinstance(error, sqlite3.DatabaseError):
                     raise CatalogUnsupportedSchema(
                         "catalog schema is unsupported"
                     ) from None
-                if row is None or row[0] != str(CATALOG_SCHEMA_VERSION):
-                    raise CatalogUnsupportedSchema("catalog schema is unsupported")
-                connection.execute("PRAGMA journal_mode=WAL")
-                connection.execute("PRAGMA synchronous=FULL")
+                raise
+            os.chmod(self.database, 0o600)
         self._validate_storage()
+
+    @staticmethod
+    def _validate_schema(connection: sqlite3.Connection) -> None:
+        try:
+            objects = frozenset(
+                (row[0], row[1])
+                for row in connection.execute(
+                    """SELECT type, name FROM sqlite_master
+                       WHERE name NOT LIKE 'sqlite_%'
+                       ORDER BY type, name"""
+                )
+            )
+            row = connection.execute(
+                "SELECT value FROM metadata WHERE key='schema_version'"
+            ).fetchone()
+            metadata_count = connection.execute(
+                "SELECT COUNT(*) FROM metadata"
+            ).fetchone()[0]
+        except sqlite3.DatabaseError:
+            raise CatalogUnsupportedSchema("catalog schema is unsupported") from None
+        if (
+            objects != _CATALOG_SCHEMA_OBJECTS
+            or row is None
+            or row[0] != str(CATALOG_SCHEMA_VERSION)
+            or metadata_count != 1
+        ):
+            raise CatalogUnsupportedSchema("catalog schema is unsupported")
 
     def _capture(self, root_id: str, relative_path: str) -> tuple[Path, str, str]:
         if root_id not in self.import_roots:
