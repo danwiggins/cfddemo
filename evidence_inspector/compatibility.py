@@ -135,6 +135,7 @@ class CompatibilityOutcome(StrEnum):
 class ExecutionState(StrEnum):
     COMPLETE = "complete"
     FAILED = "failed"
+    NOT_RUN = "not_run"
 
 
 class InformationState(StrEnum):
