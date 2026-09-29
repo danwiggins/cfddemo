@@ -48,6 +48,7 @@ T0 = datetime(2026, 1, 1, tzinfo=UTC)
 T1 = datetime(2026, 2, 1, tzinfo=UTC)
 T2 = datetime(2026, 3, 1, tzinfo=UTC)
 T3 = datetime(2026, 4, 1, tzinfo=UTC)
+OVERSIZED_VERSION = f"{'1' * 29}.1.1"
 
 
 def _tool() -> ToolRegistration:
@@ -220,6 +221,60 @@ def _active_provider_registry() -> (
 
 def _head(registry: MethodRegistry, issued_at: datetime = T0) -> AuthorityHead:
     return authority_head_for_registry(registry, issued_at=issued_at)
+
+
+@pytest.mark.parametrize(
+    ("model", "contract"),
+    (
+        (ToolRegistration, _tool()),
+        (AssetRegistration, _asset()),
+        (
+            ToolReference,
+            ToolReference(
+                tool_id="tool_fragment_counter",
+                version="1.0.0",
+                artifact_sha256="a" * 64,
+            ),
+        ),
+        (
+            AssetReference,
+            AssetReference(
+                asset_id="asset_fragment_policy",
+                version="1.0.0",
+                content_sha256="b" * 64,
+            ),
+        ),
+        (MethodReference, _definition().method_ref),
+        (MethodDefinition, _definition()),
+    ),
+    ids=(
+        "tool-registration",
+        "asset-registration",
+        "tool-reference",
+        "asset-reference",
+        "method-reference",
+        "method-definition",
+    ),
+)
+def test_identity_versions_reject_oversized_construction_and_canonical_load(
+    model: type[BaseModel], contract: BaseModel
+) -> None:
+    assert len(OVERSIZED_VERSION) == 33
+    payload = contract.model_dump(mode="json", exclude_none=False)
+    payload["version"] = OVERSIZED_VERSION
+
+    with pytest.raises(ValidationError, match="at most 32 characters"):
+        model.model_validate(payload)
+
+    encoded = json.dumps(
+        payload,
+        allow_nan=False,
+        ensure_ascii=False,
+        separators=(",", ":"),
+        sort_keys=True,
+    ).encode("utf-8")
+    with pytest.raises(RegistryIdentityError, match="contract JSON is invalid"):
+        contract_from_canonical_bytes(model, encoded)
 
 
 def test_registry_head_and_capabilities_round_trip_as_exact_canonical_json() -> None:

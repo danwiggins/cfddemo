@@ -70,7 +70,10 @@ ApprovalRef = _token(r"^approval_[a-z0-9]+(?:_[a-z0-9]+)*$")
 QualificationRef = _token(r"^qual_[a-z0-9]+(?:_[a-z0-9]+)*$")
 RoleAssignmentRef = _token(r"^role_[a-z0-9]+(?:_[a-z0-9]+)*$")
 RevocationRef = _token(r"^revoke_[a-z0-9]+(?:_[a-z0-9]+)*$")
-Version = Annotated[str, StringConstraints(pattern=r"^[0-9]+\.[0-9]+\.[0-9]+$")]
+Version = Annotated[
+    str,
+    StringConstraints(max_length=32, pattern=r"^[0-9]+\.[0-9]+\.[0-9]+$"),
+]
 Sha256 = Annotated[str, StringConstraints(pattern=r"^[0-9a-f]{64}$")]
 
 
