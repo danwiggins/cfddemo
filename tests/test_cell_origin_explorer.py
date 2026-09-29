@@ -27,6 +27,7 @@ from evidence_inspector.cell_origin_explorer import (
 )
 from evidence_inspector.cell_origin_models import CellOriginResult
 from evidence_inspector.cell_origin_pipeline import (
+    PALETTE,
     CellOriginResultBundle,
     ChartData,
     CompositionChartRow,
@@ -159,7 +160,7 @@ def _bundle(*, unavailable_second_interval: bool = False) -> CellOriginResultBun
                 ),
                 uncertainty_available=interval.lower_fraction is not None,
                 uncertainty_status=interval.information_status,
-                color="#112233",
+                color=PALETTE[(rank - 1) % len(PALETTE)],
                 show_by_default=True,
             )
         )
@@ -430,15 +431,21 @@ def test_bootstrap_not_run_is_distinct_and_has_no_whiskers() -> None:
 
 def test_exact_filter_exclusion_is_missing_without_numeric_rows() -> None:
     request = _request()
-    filtered_request = CellOriginExplorerRequest(
-        result_view_request=ResultViewRequest(
-            filter_id=request.result_view_request.filter_id,
-            sources=request.result_view_request.sources,
-            filters=normalize_result_filters(
-                execution_states=(ExecutionState.FAILED,)
-            ),
+    result_view_request = ResultViewRequest(
+        filter_id=request.result_view_request.filter_id,
+        sources=request.result_view_request.sources,
+        filters=normalize_result_filters(
+            execution_states=(ExecutionState.FAILED,)
         ),
-        bundle=request.bundle,
+    )
+    with pytest.raises(ValidationError, match="non-ready.*bundle"):
+        CellOriginExplorerRequest(
+            result_view_request=result_view_request,
+            bundle=request.bundle,
+        )
+    filtered_request = CellOriginExplorerRequest(
+        result_view_request=result_view_request,
+        bundle=None,
     )
 
     view = build_cell_origin_explorer(filtered_request)
@@ -471,6 +478,77 @@ def test_unavailable_states_never_emit_numeric_rows(
     assert view.dot_interval_rows == ()
     assert view.exact_table_rows == ()
     assert view.marker_support is None
+
+
+@pytest.mark.parametrize(
+    ("execution", "information", "trust"),
+    [
+        (ExecutionState.FAILED, InformationState.UNKNOWN, TrustState.VERIFIED),
+        (ExecutionState.NOT_RUN, InformationState.UNKNOWN, TrustState.VERIFIED),
+        (
+            ExecutionState.COMPLETE,
+            InformationState.INSUFFICIENT,
+            TrustState.VERIFIED,
+        ),
+        (ExecutionState.COMPLETE, InformationState.UNKNOWN, TrustState.VERIFIED),
+        (ExecutionState.COMPLETE, InformationState.SUFFICIENT, TrustState.REVOKED),
+    ],
+)
+def test_non_ready_requests_reject_full_bundle(
+    execution: ExecutionState,
+    information: InformationState,
+    trust: TrustState,
+) -> None:
+    request = _request(
+        execution=execution,
+        information=information,
+        trust=trust,
+    )
+    with pytest.raises(ValidationError, match="non-ready.*bundle"):
+        CellOriginExplorerRequest(
+            result_view_request=request.result_view_request,
+            bundle=_bundle(),
+        )
+
+
+@pytest.mark.parametrize(
+    ("field", "value", "message"),
+    [
+        ("rank", 2, "rank"),
+        ("percent", 99.0, "percent"),
+        ("lower_fraction", 0.4, "uncertainty"),
+        ("lower_percent", 40.0, "uncertainty"),
+        ("color", "#000000", "color"),
+        ("show_by_default", False, "visibility"),
+    ],
+)
+def test_rejects_every_derived_chart_field_mutation(
+    field: str, value: object, message: str
+) -> None:
+    payload = _request().model_dump(mode="json")
+    payload["bundle"]["charts"]["composition_rows"][0][field] = value
+    with pytest.raises(ValidationError, match=message):
+        CellOriginExplorerRequest.model_validate_json(json.dumps(payload))
+
+
+@pytest.mark.parametrize("mutation", ["upper", "status", "availability"])
+def test_rejects_coherent_but_unsigned_uncertainty_mutations(mutation: str) -> None:
+    payload = _request().model_dump(mode="json")
+    row = payload["bundle"]["charts"]["composition_rows"][0]
+    if mutation == "upper":
+        row["upper_fraction"] = 0.9
+        row["upper_percent"] = 90.0
+    else:
+        row["uncertainty_available"] = False
+        row["uncertainty_status"] = "insufficient_information"
+        row["lower_fraction"] = None
+        row["upper_fraction"] = None
+        row["lower_percent"] = None
+        row["upper_percent"] = None
+        if mutation == "availability":
+            row["uncertainty_status"] = "partial_information"
+    with pytest.raises(ValidationError):
+        CellOriginExplorerRequest.model_validate_json(json.dumps(payload))
 
 
 @pytest.mark.parametrize(
@@ -512,6 +590,30 @@ def test_canonical_artifact_replays_and_rejects_tampering() -> None:
         cell_origin_explorer_from_canonical_bytes(tampered)
 
 
+def test_canonical_artifact_redacts_presentation_aliases_and_notices() -> None:
+    artifact = build_cell_origin_explorer_artifact(_request())
+    encoded = canonical_cell_origin_explorer_bytes(artifact)
+
+    assert b"Presentation label" not in encoded
+    assert b"Synthetic-only fixture" not in encoded
+    assert b'"charts"' not in encoded
+    assert b'"notices"' not in encoded
+
+
+def test_non_ready_artifact_contains_no_result_values() -> None:
+    artifact = build_cell_origin_explorer_artifact(
+        _request(
+            execution=ExecutionState.FAILED,
+            information=InformationState.UNKNOWN,
+        )
+    )
+    encoded = canonical_cell_origin_explorer_bytes(artifact)
+
+    assert b'"source":null' in encoded
+    assert b'"estimates"' not in encoded
+    assert b"0.3333333333333333" not in encoded
+
+
 def test_output_contains_no_presentation_aliases_or_private_fields() -> None:
     view = build_cell_origin_explorer(_request())
     rendered = view.model_dump_json().lower()
@@ -526,6 +628,44 @@ def test_private_source_text_fails_closed_before_digest_validation() -> None:
     payload = _request().model_dump(mode="json")
     payload["bundle"]["notices"] = ["credential TOKEN=synthetic-placeholder"]
     with pytest.raises(ValidationError, match="private data"):
+        CellOriginExplorerRequest.model_validate_json(json.dumps(payload))
+
+
+@pytest.mark.parametrize(
+    "notice",
+    [
+        "source at ~/private/case.tsv",
+        "source at ../private/case.tsv",
+        "source%2Fat%2Fprivate%2Fcase.tsv",
+        "ACGTACGTACGTACGTACGTACGT",
+    ],
+)
+def test_private_notice_forms_fail_closed(notice: str) -> None:
+    payload = _request().model_dump(mode="json")
+    payload["bundle"]["notices"] = [notice]
+    with pytest.raises(ValidationError, match="private data"):
+        CellOriginExplorerRequest.model_validate_json(json.dumps(payload))
+
+
+def test_notice_collection_is_bounded() -> None:
+    payload = _request().model_dump(mode="json")
+    payload["bundle"]["notices"] = ["bounded synthetic notice"] * 2_000
+    with pytest.raises(ValidationError, match="notice count"):
+        CellOriginExplorerRequest.model_validate_json(json.dumps(payload))
+
+
+def test_concatenated_read_contributor_id_fails_closed() -> None:
+    payload = _request().model_dump(mode="json")
+
+    def replace(value: object) -> object:
+        if isinstance(value, dict):
+            return {key: replace(item) for key, item in value.items()}
+        if isinstance(value, list):
+            return [replace(item) for item in value]
+        return "read123" if value == "immune" else value
+
+    payload["bundle"] = replace(payload["bundle"])
+    with pytest.raises(ValidationError, match="reserved privacy term"):
         CellOriginExplorerRequest.model_validate_json(json.dumps(payload))
 
 

@@ -40,19 +40,30 @@ result and bundle. Its compatibility atlas asset ID and digest must equal the
 deconvolution v2 atlas ID and digest. Result ID, method definition, authority
 head, atlas, bundle, and filter identities are copied into the view binding.
 
+Raw bundle validation and canonical replay are deliberately separate. The raw
+request verifies every composition chart field against the signed result and
+bootstrap: contributor identity, deterministic rank, fraction, percent,
+interval bounds and percentages, uncertainty status and availability, palette,
+and default visibility. The canonical artifact then retains only the aggregate
+result, resource counts, and bundle digest needed for replay. Chart aliases,
+healthy-context presentation rows, and notices are not serialized.
+
 `failed`, `not_run`, `insufficient_information`, and `missing` are distinct
-states. They expose no numerical rows or derived QC values. A complete,
-sufficient, verified source without its exact bundle is invalid rather than
-silently displayed as missing.
+states. They expose no numerical rows or derived QC values, reject attached
+result bundles, and serialize a null replay source. A complete, sufficient,
+verified source without its exact bundle is invalid rather than silently
+displayed as missing.
 
 ## Validation and replay
 
 Construction fails closed for duplicate or missing contributors, chart/result
 disagreement, resource-count disagreement, unreconciled fragment-marker
 denominators, atlas mismatch, v1 deconvolution/bootstrap input, excess
-contributors, or reserved private terms in contributor IDs. Output contracts
-are frozen, reject unknown fields, reject non-finite values, and bound all
-collections.
+contributors, unbounded notices/provenance, or reserved private terms in
+contributor IDs. Privacy checks reject concatenated raw-ID prefixes, home,
+relative, absolute, URI, and encoded paths, sequence-like strings, secret-like
+text, and protected field names. Output contracts are frozen, reject unknown
+fields and non-finite values, and bound all collections and strings.
 
 Canonical artifacts contain both request and view. Parsing recomputes the view
 from the embedded source and requires exact equality, so changing values and

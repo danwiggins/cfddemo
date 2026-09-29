@@ -20,9 +20,15 @@ from traceback_runner.serialization import canonical_json_bytes
 from .cell_origin_models import (
     BootstrapInformationStatus,
     BootstrapResultV2,
+    CellOriginResult,
     DeconvolutionOutputV2,
 )
-from .cell_origin_pipeline import CellOriginResultBundle
+from .cell_origin_pipeline import (
+    DEFAULT_TOP_COMPOSITION_ROWS,
+    PALETTE,
+    CellOriginResultBundle,
+    ResourceSummary,
+)
 from .compatibility import ExecutionState, InformationState, TrustState
 from .result_view import (
     CompatibilityContract,
@@ -33,6 +39,10 @@ from .result_view import (
 
 MAX_CONTRIBUTORS = 512
 MAX_LIMITATIONS = 16
+MAX_MARKERS = 20_000
+MAX_NOTICES = 64
+MAX_PROVENANCE_ITEMS = 256
+MAX_SAFE_TEXT_LENGTH = 512
 AXIS_LABEL = "estimated fraction among registered atlas contributors"
 
 Sha256 = Annotated[str, StringConstraints(pattern=r"^[0-9a-f]{64}$")]
@@ -45,13 +55,22 @@ SafeIdentifier = Annotated[
     ),
 ]
 
-_PRIVATE_SEGMENT = re.compile(
-    r"(?:^|[^a-z0-9])(?:donor|patient|read|sample|sequence|path)(?:[^a-z0-9]|$)",
+_PRIVATE_PREFIX = re.compile(
+    r"^(?:donor|patient|read|sample|sequence|path)(?:[_:.-]?[a-z0-9].*)?$",
     re.IGNORECASE,
 )
+_SAFE_PRIVATE_PREFIX_LEXEMES = {
+    "pathology",
+    "readiness",
+    "readout",
+    "sampled",
+    "sequencer",
+}
 _ABSOLUTE_PATH = re.compile(
-    r"(?:^|[\s=:(\[{'\"\\])(?:/[^\s,;)\]}'\"]+|[A-Za-z]:[\\/][^\s,;)\]}'\"]+)"
+    r"(?:^|[\s=:(\[{'\"\\])(?:~[/\\]|\.\.?[/\\]|/|[A-Za-z]:[\\/])"
+    r"[^\s,;)\]}'\"]+"
 )
+_ENCODED_PATH = re.compile(r"(?:%2f|%5c|file%3a)", re.IGNORECASE)
 _SEQUENCE = re.compile(r"(?<![A-Za-z])[ACGTN]{20,}(?![A-Za-z])", re.IGNORECASE)
 _SECRET = re.compile(
     r"(?:AWS_SECRET_ACCESS_KEY|PRIVATE_KEY|PASSWORD|SECRET|TOKEN)\s*=",
@@ -107,25 +126,18 @@ class CellOriginExplorerRequest(CompatibilityContract):
 
     @model_validator(mode="after")
     def exact_single_source(self) -> CellOriginExplorerRequest:
-        if len(self.result_view_request.sources) != 1:
-            raise ValueError("cell-origin explorer requires exactly one E06 source")
+        _validate_result_view_identity(self.result_view_request)
         source = self.result_view_request.sources[0]
         record = source.record
-        if record.method.family.value != "cell_origin":
-            raise ValueError("E01 method family must be cell_origin")
-        if record.compatibility_key.atlas_asset is None:
-            raise ValueError("cell-origin compatibility identity requires an atlas")
+        status = _result_view_status(self.result_view_request)
         if self.bundle is None:
-            if (
-                record.execution_state == ExecutionState.COMPLETE
-                and record.information_state == InformationState.SUFFICIENT
-                and record.trust_state == TrustState.VERIFIED
-                and record.current_capability.research_inspectable
-            ):
+            if status == ExplorerStatus.READY:
                 raise ValueError(
                     "eligible cell-origin source requires its exact bundle"
                 )
             return self
+        if status != ExplorerStatus.READY:
+            raise ValueError("non-ready cell-origin source cannot carry a bundle")
 
         result = self.bundle.result
         deconvolution = result.deconvolution
@@ -135,6 +147,7 @@ class CellOriginExplorerRequest(CompatibilityContract):
             result.bootstrap, BootstrapResultV2
         ):
             raise ValueError("cell-origin explorer accepts only bootstrap v2")
+        _validate_bundle_bounds(self.bundle)
         _assert_private_data_absent(self.bundle.model_dump(mode="json"))
         if result.result_id != record.result_id:
             raise ValueError("bundle result ID does not match E05 record")
@@ -150,6 +163,70 @@ class CellOriginExplorerRequest(CompatibilityContract):
             raise ValueError("result digest does not match E05 record")
         if _digest(self.bundle) != record.bundle_sha256:
             raise ValueError("bundle digest does not match E05 record")
+        return self
+
+
+class CellOriginReplaySource(CompatibilityContract):
+    """Replay-safe scientific source with presentation prose removed."""
+
+    schema_version: Literal["traceback.cell-origin-replay-source.v1"] = (
+        "traceback.cell-origin-replay-source.v1"
+    )
+    result: CellOriginResult
+    resources: ResourceSummary
+    bound_bundle_sha256: Sha256
+
+    @model_validator(mode="after")
+    def safe_source(self) -> CellOriginReplaySource:
+        if not isinstance(self.result.deconvolution, DeconvolutionOutputV2):
+            raise ValueError("replay source requires deconvolution v2")
+        if self.result.bootstrap is not None and not isinstance(
+            self.result.bootstrap, BootstrapResultV2
+        ):
+            raise ValueError("replay source accepts only bootstrap v2")
+        _validate_source_bounds(self.result)
+        _assert_private_data_absent(self.model_dump(mode="json"))
+        _validate_source_denominators(self.result, self.resources)
+        _validate_source_contributors(self.result, self.resources)
+        return self
+
+
+class CellOriginExplorerReplayRequest(CompatibilityContract):
+    """Canonical replay request that never contains chart aliases or notices."""
+
+    schema_version: Literal["traceback.cell-origin-explorer-replay-request.v1"] = (
+        "traceback.cell-origin-explorer-replay-request.v1"
+    )
+    result_view_request: ResultViewRequest
+    source: CellOriginReplaySource | None = None
+
+    @model_validator(mode="after")
+    def exact_replay_source(self) -> CellOriginExplorerReplayRequest:
+        _validate_result_view_identity(self.result_view_request)
+        status = _result_view_status(self.result_view_request)
+        if status == ExplorerStatus.READY and self.source is None:
+            raise ValueError("ready replay request requires a safe source")
+        if status != ExplorerStatus.READY and self.source is not None:
+            raise ValueError("non-ready replay request cannot contain source values")
+        if self.source is None:
+            return self
+        record = self.result_view_request.sources[0].record
+        result = self.source.result
+        deconvolution = result.deconvolution
+        assert isinstance(deconvolution, DeconvolutionOutputV2)
+        atlas = record.compatibility_key.atlas_asset
+        assert atlas is not None
+        if result.result_id != record.result_id:
+            raise ValueError("replay result ID does not match E05 record")
+        if _digest(result) != record.result_sha256:
+            raise ValueError("replay result digest does not match E05 record")
+        if self.source.bound_bundle_sha256 != record.bundle_sha256:
+            raise ValueError("replay bundle digest does not match E05 record")
+        if (
+            atlas.asset_id != deconvolution.atlas_id
+            or atlas.content_sha256 != deconvolution.atlas_sha256
+        ):
+            raise ValueError("replay atlas identity does not match deconvolution")
         return self
 
 
@@ -306,12 +383,12 @@ class CellOriginExplorerArtifact(CompatibilityContract):
     schema_version: Literal["traceback.cell-origin-explorer-artifact.v1"] = (
         "traceback.cell-origin-explorer-artifact.v1"
     )
-    request: CellOriginExplorerRequest
+    request: CellOriginExplorerReplayRequest
     view: CellOriginExplorerView
 
     @model_validator(mode="after")
     def replay_exactly(self) -> CellOriginExplorerArtifact:
-        if build_cell_origin_explorer(self.request) != self.view:
+        if _build_replay_view(self.request) != self.view:
             raise ValueError("cell-origin explorer artifact does not replay exactly")
         return self
 
@@ -332,8 +409,10 @@ def _assert_private_data_absent(value: Any, *, field: str = "$") -> None:
         for index, item in enumerate(value):
             _assert_private_data_absent(item, field=f"{field}[{index}]")
     elif isinstance(value, str) and (
-        "://" in value
+        len(value) > MAX_SAFE_TEXT_LENGTH
+        or "://" in value
         or _ABSOLUTE_PATH.search(value)
+        or _ENCODED_PATH.search(value)
         or (
             _SEQUENCE.search(value)
             and re.fullmatch(r"[0-9a-f]{64}", value) is None
@@ -343,9 +422,71 @@ def _assert_private_data_absent(value: Any, *, field: str = "$") -> None:
         raise ValueError(f"cell-origin bundle contains private data at {field}")
 
 
-def _validate_bundle_denominators(bundle: CellOriginResultBundle) -> None:
-    result = bundle.result
-    resources = bundle.resources
+def _validate_result_view_identity(request: ResultViewRequest) -> None:
+    if len(request.sources) != 1:
+        raise ValueError("cell-origin explorer requires exactly one E06 source")
+    record = request.sources[0].record
+    if record.method.family.value != "cell_origin":
+        raise ValueError("E01 method family must be cell_origin")
+    if record.compatibility_key.atlas_asset is None:
+        raise ValueError("cell-origin compatibility identity requires an atlas")
+
+
+def _result_view_status(request: ResultViewRequest) -> ExplorerStatus:
+    record = request.sources[0].record
+    if record.execution_state == ExecutionState.FAILED:
+        return ExplorerStatus.FAILED
+    if record.execution_state == ExecutionState.NOT_RUN:
+        return ExplorerStatus.NOT_RUN
+    if record.information_state == InformationState.INSUFFICIENT:
+        return ExplorerStatus.INSUFFICIENT_INFORMATION
+    filtered = build_result_view(request)
+    if (
+        record.information_state != InformationState.SUFFICIENT
+        or record.trust_state != TrustState.VERIFIED
+        or not record.current_capability.research_inspectable
+        or filtered.visible_count != 1
+    ):
+        return ExplorerStatus.MISSING
+    return ExplorerStatus.READY
+
+
+def _validate_source_bounds(result: CellOriginResult) -> None:
+    if len(result.marker_counts) > MAX_MARKERS:
+        raise ValueError("marker count exceeds explorer bound")
+    provenance = result.provenance
+    if any(
+        len(items) > MAX_PROVENANCE_ITEMS
+        for items in (
+            provenance.input_artifacts,
+            provenance.source_ids,
+            provenance.software_versions,
+        )
+    ):
+        raise ValueError("provenance collection exceeds explorer bound")
+
+
+def _validate_bundle_bounds(bundle: CellOriginResultBundle) -> None:
+    _validate_source_bounds(bundle.result)
+    if len(bundle.notices) > MAX_NOTICES:
+        raise ValueError("notice count exceeds explorer bound")
+    if len(bundle.charts.composition_rows) > MAX_CONTRIBUTORS:
+        raise ValueError("composition chart exceeds explorer bound")
+    if len(bundle.charts.healthy_context_rows) > MAX_CONTRIBUTORS:
+        raise ValueError("healthy-context chart exceeds explorer bound")
+    if any(not notice or len(notice) > MAX_SAFE_TEXT_LENGTH for notice in bundle.notices):
+        raise ValueError("notice text exceeds explorer bound")
+    if any(
+        not row.label or len(row.label) > 160
+        for row in bundle.charts.composition_rows
+    ):
+        raise ValueError("composition label exceeds explorer bound")
+
+
+def _validate_source_denominators(
+    result: CellOriginResult,
+    resources: ResourceSummary,
+) -> None:
     provenance = result.provenance
     classified = sum(row.classified_fragment_count for row in result.marker_counts)
     if classified != provenance.classified_fragment_marker_count:
@@ -366,49 +507,106 @@ def _validate_bundle_denominators(bundle: CellOriginResultBundle) -> None:
         raise ValueError("registered marker denominator mismatch")
 
 
-def _validate_bundle_contributors(bundle: CellOriginResultBundle) -> None:
-    result = bundle.result
+def _validate_bundle_denominators(bundle: CellOriginResultBundle) -> None:
+    _validate_source_denominators(bundle.result, bundle.resources)
+
+
+def _safe_contributor_id(value: str) -> bool:
+    segments = re.split(r"[^a-z0-9]+", value.lower())
+    return all(
+        segment in _SAFE_PRIVATE_PREFIX_LEXEMES
+        or _PRIVATE_PREFIX.fullmatch(segment) is None
+        for segment in segments
+        if segment
+    )
+
+
+def _validate_source_contributors(
+    result: CellOriginResult,
+    resources: ResourceSummary,
+) -> None:
     estimates = result.deconvolution.estimates
     if len(estimates) > MAX_CONTRIBUTORS:
         raise ValueError("contributor count exceeds explorer bound")
     ids = [item.cell_type_id for item in estimates]
     if len(ids) != len(set(ids)):
         raise ValueError("contributors must be unique")
-    if any(_PRIVATE_SEGMENT.search(item) for item in ids):
+    if any(not _safe_contributor_id(item) for item in ids):
         raise ValueError("contributor identifier contains a reserved privacy term")
-    if bundle.resources.cell_type_count != len(estimates):
+    if resources.cell_type_count != len(estimates):
         raise ValueError("cell-type denominator mismatch")
+
+
+def _validate_bundle_contributors(bundle: CellOriginResultBundle) -> None:
+    result = bundle.result
+    estimates = result.deconvolution.estimates
+    _validate_source_contributors(result, bundle.resources)
+    ids = [item.cell_type_id for item in estimates]
     charts = bundle.charts.composition_rows
-    if {item.cell_type_id for item in charts} != set(ids) or len(charts) != len(ids):
+    if len(charts) != len(ids):
         raise ValueError("chart contributors do not match exact result")
-    by_id = {item.cell_type_id: item for item in charts}
-    for estimate in estimates:
-        chart = by_id[estimate.cell_type_id]
+    ordered = sorted(estimates, key=lambda item: (-item.fraction, item.cell_type_id))
+    bootstrap = result.bootstrap
+    intervals = (
+        {item.cell_type_id: item for item in bootstrap.intervals}
+        if isinstance(bootstrap, BootstrapResultV2)
+        else {}
+    )
+    for rank, (estimate, chart) in enumerate(zip(ordered, charts, strict=True), 1):
+        if chart.cell_type_id != estimate.cell_type_id:
+            raise ValueError("chart contributors do not match exact result")
+        if chart.rank != rank:
+            raise ValueError("chart rank does not match exact result")
         if chart.fraction != estimate.fraction:
             raise ValueError("chart estimate does not match exact result")
+        if chart.percent != estimate.fraction * 100.0:
+            raise ValueError("chart percent does not match exact result")
+        interval = intervals.get(estimate.cell_type_id)
+        expected_status = (
+            interval.information_status
+            if interval is not None
+            else BootstrapInformationStatus.INSUFFICIENT_INFORMATION
+        )
+        expected_lower = interval.lower_fraction if interval is not None else None
+        expected_upper = interval.upper_fraction if interval is not None else None
+        expected_available = expected_status == BootstrapInformationStatus.AVAILABLE
+        if (
+            chart.uncertainty_status != expected_status
+            or chart.uncertainty_available != expected_available
+            or chart.lower_fraction != expected_lower
+            or chart.upper_fraction != expected_upper
+            or chart.lower_percent
+            != (expected_lower * 100.0 if expected_lower is not None else None)
+            or chart.upper_percent
+            != (expected_upper * 100.0 if expected_upper is not None else None)
+        ):
+            raise ValueError("chart uncertainty does not match exact bootstrap")
+        if chart.color != PALETTE[(rank - 1) % len(PALETTE)]:
+            raise ValueError("chart color does not match deterministic palette")
+        if chart.show_by_default != (rank <= DEFAULT_TOP_COMPOSITION_ROWS):
+            raise ValueError("chart visibility does not match deterministic rank")
 
 
-def _status(request: CellOriginExplorerRequest) -> ExplorerStatus:
+def _to_replay_request(
+    request: CellOriginExplorerRequest,
+) -> CellOriginExplorerReplayRequest:
     record = request.result_view_request.sources[0].record
-    if record.execution_state == ExecutionState.FAILED:
-        return ExplorerStatus.FAILED
-    if record.execution_state == ExecutionState.NOT_RUN:
-        return ExplorerStatus.NOT_RUN
-    if record.information_state == InformationState.INSUFFICIENT:
-        return ExplorerStatus.INSUFFICIENT_INFORMATION
-    filtered = build_result_view(request.result_view_request)
-    if (
-        record.information_state != InformationState.SUFFICIENT
-        or record.trust_state != TrustState.VERIFIED
-        or not record.current_capability.research_inspectable
-        or filtered.visible_count != 1
-        or request.bundle is None
-    ):
-        return ExplorerStatus.MISSING
-    return ExplorerStatus.READY
+    safe_source = (
+        CellOriginReplaySource(
+            result=request.bundle.result,
+            resources=request.bundle.resources,
+            bound_bundle_sha256=record.bundle_sha256,
+        )
+        if request.bundle is not None
+        else None
+    )
+    return CellOriginExplorerReplayRequest(
+        result_view_request=request.result_view_request,
+        source=safe_source,
+    )
 
 
-def _binding(request: CellOriginExplorerRequest) -> ExplorerBinding:
+def _binding(request: CellOriginExplorerReplayRequest) -> ExplorerBinding:
     source = request.result_view_request.sources[0]
     record = source.record
     atlas = record.compatibility_key.atlas_asset
@@ -422,8 +620,8 @@ def _binding(request: CellOriginExplorerRequest) -> ExplorerBinding:
         method_version=record.method.version,
         method_definition_sha256=record.method_definition_sha256,
         cell_origin_method_sha256=(
-            _digest(request.bundle.result.method)
-            if request.bundle is not None
+            _digest(request.source.result.method)
+            if request.source is not None
             else None
         ),
         atlas_id=atlas.asset_id,
@@ -433,12 +631,10 @@ def _binding(request: CellOriginExplorerRequest) -> ExplorerBinding:
     )
 
 
-def build_cell_origin_explorer(
-    request: CellOriginExplorerRequest,
+def _build_replay_view(
+    request: CellOriginExplorerReplayRequest,
 ) -> CellOriginExplorerView:
-    """Build a deterministic view; unavailable states expose no numeric rows."""
-
-    status = _status(request)
+    status = _result_view_status(request.result_view_request)
     binding = _binding(request)
     request_sha = _digest(request)
     if status != ExplorerStatus.READY:
@@ -452,9 +648,9 @@ def build_cell_origin_explorer(
             request_sha256=request_sha,
         )
 
-    bundle = request.bundle
-    assert bundle is not None
-    result = bundle.result
+    source = request.source
+    assert source is not None
+    result = source.result
     deconvolution = result.deconvolution
     assert isinstance(deconvolution, DeconvolutionOutputV2)
     bootstrap = result.bootstrap
@@ -514,7 +710,7 @@ def build_cell_origin_explorer(
     if result.provenance.partial_input:
         limitations.add(LimitationId.PARTIAL_INPUT)
 
-    resources = bundle.resources
+    resources = source.resources
     provenance = result.provenance
     diagnostics = deconvolution.diagnostics
     return CellOriginExplorerView(
@@ -561,12 +757,21 @@ def build_cell_origin_explorer(
     )
 
 
+def build_cell_origin_explorer(
+    request: CellOriginExplorerRequest,
+) -> CellOriginExplorerView:
+    """Build a deterministic view; unavailable states expose no numeric rows."""
+
+    return _build_replay_view(_to_replay_request(request))
+
+
 def build_cell_origin_explorer_artifact(
     request: CellOriginExplorerRequest,
 ) -> CellOriginExplorerArtifact:
+    replay_request = _to_replay_request(request)
     return CellOriginExplorerArtifact(
-        request=request,
-        view=build_cell_origin_explorer(request),
+        request=replay_request,
+        view=_build_replay_view(replay_request),
     )
 
 
@@ -596,7 +801,9 @@ __all__ = [
     "CellOriginExplorerArtifact",
     "CellOriginExplorerError",
     "CellOriginExplorerRequest",
+    "CellOriginExplorerReplayRequest",
     "CellOriginExplorerView",
+    "CellOriginReplaySource",
     "DotIntervalRow",
     "ExactTableRow",
     "ExplorerBinding",
