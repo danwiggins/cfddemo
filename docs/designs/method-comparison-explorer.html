@@ -1,0 +1,815 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Traceback Method Comparison Explorer — Synthetic Prototype</title>
+  <style>
+    :root {
+      color-scheme: light;
+      --paper: #f4f1e9;
+      --surface: #fffdf8;
+      --surface-strong: #ffffff;
+      --ink: #172426;
+      --muted: #59686a;
+      --line: #cbd3cf;
+      --line-strong: #879895;
+      --teal: #147a75;
+      --teal-soft: #dceeea;
+      --cobalt: #315da8;
+      --cobalt-soft: #e3eaf7;
+      --amber: #956d16;
+      --amber-soft: #f7ebc9;
+      --slate: #667475;
+      --radius: 14px;
+      --shadow: 0 12px 32px rgb(28 49 50 / 8%);
+      font-family: Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+    }
+
+    * { box-sizing: border-box; }
+    html { scroll-behavior: smooth; }
+    body {
+      margin: 0;
+      background: var(--paper);
+      color: var(--ink);
+      line-height: 1.45;
+    }
+    button, select, input { font: inherit; }
+    button, select { min-height: 44px; }
+    button:focus-visible, select:focus-visible, input:focus-visible,
+    [tabindex="0"]:focus-visible, summary:focus-visible {
+      outline: 3px solid #e6a72e;
+      outline-offset: 3px;
+    }
+    .skip-link {
+      position: fixed;
+      top: 8px;
+      left: 8px;
+      z-index: 100;
+      padding: 10px 14px;
+      background: var(--ink);
+      color: white;
+      transform: translateY(-150%);
+    }
+    .skip-link:focus { transform: translateY(0); }
+    header {
+      border-bottom: 1px solid var(--line);
+      background: color-mix(in srgb, var(--paper) 92%, white);
+    }
+    .header-inner, main {
+      width: min(1460px, calc(100% - 40px));
+      margin: 0 auto;
+    }
+    .header-inner {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 24px;
+      min-height: 72px;
+    }
+    .brand { display: flex; align-items: baseline; gap: 12px; }
+    .brand strong { font-family: Georgia, serif; font-size: 1.45rem; }
+    .brand span { color: var(--muted); font-size: .9rem; }
+    .badge, .status-pill {
+      display: inline-flex;
+      align-items: center;
+      gap: 6px;
+      min-height: 28px;
+      padding: 4px 9px;
+      border: 1px solid currentColor;
+      border-radius: 999px;
+      font-size: .76rem;
+      font-weight: 700;
+      letter-spacing: .02em;
+    }
+    .badge.dev { color: var(--amber); background: var(--amber-soft); }
+    .badge.synthetic { color: var(--teal); background: var(--teal-soft); }
+    main { padding: 34px 0 64px; }
+    .eyebrow {
+      margin: 0 0 8px;
+      color: var(--teal);
+      font-size: .75rem;
+      font-weight: 800;
+      letter-spacing: .12em;
+      text-transform: uppercase;
+    }
+    h1, h2, h3 { font-family: Georgia, "Times New Roman", serif; line-height: 1.1; }
+    h1 { max-width: 900px; margin: 0; font-size: clamp(2rem, 4vw, 3.8rem); }
+    .lede { max-width: 850px; color: var(--muted); font-size: 1.05rem; }
+    .scope-row {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 8px;
+      margin: 20px 0 28px;
+    }
+    .toolbar, .panel, .difference-strip, .method-guide, .table-region {
+      border: 1px solid var(--line);
+      border-radius: var(--radius);
+      background: var(--surface);
+      box-shadow: var(--shadow);
+    }
+    .toolbar {
+      display: grid;
+      grid-template-columns: minmax(220px, 1fr) repeat(4, minmax(150px, auto));
+      gap: 16px;
+      align-items: end;
+      padding: 16px;
+      margin-bottom: 18px;
+    }
+    .field { display: grid; gap: 6px; }
+    .field label, .field-label { font-size: .8rem; font-weight: 800; color: var(--muted); }
+    select {
+      width: 100%;
+      border: 1px solid var(--line-strong);
+      border-radius: 8px;
+      background: white;
+      color: var(--ink);
+      padding: 8px 34px 8px 10px;
+    }
+    .toggle-wrap {
+      display: flex;
+      align-items: center;
+      min-height: 44px;
+      gap: 9px;
+      padding: 7px 10px;
+      border: 1px solid var(--line);
+      border-radius: 8px;
+      background: white;
+      font-weight: 700;
+      white-space: nowrap;
+    }
+    .toggle-wrap input { width: 20px; height: 20px; accent-color: var(--teal); }
+    .btn {
+      border: 1px solid var(--ink);
+      border-radius: 8px;
+      background: var(--ink);
+      color: white;
+      padding: 8px 14px;
+      cursor: pointer;
+      font-weight: 750;
+    }
+    .btn.secondary { background: transparent; color: var(--ink); }
+    .comparison-grid {
+      display: grid;
+      grid-template-columns: minmax(0, 1fr) minmax(0, 1fr);
+      gap: 18px;
+    }
+    .panel { min-width: 0; overflow: clip; }
+    .panel-a { --accent: var(--teal); --accent-soft: var(--teal-soft); }
+    .panel-b { --accent: var(--cobalt); --accent-soft: var(--cobalt-soft); }
+    .panel-head {
+      display: grid;
+      gap: 12px;
+      padding: 16px 18px;
+      border-bottom: 1px solid var(--line);
+      background: var(--surface-strong);
+    }
+    .panel-title-row { display: flex; justify-content: space-between; gap: 12px; align-items: center; }
+    .panel-label { color: var(--accent); font-size: .78rem; font-weight: 900; letter-spacing: .1em; text-transform: uppercase; }
+    .panel h2 { margin: 0; font-size: 1.25rem; }
+    .method-meta { display: flex; flex-wrap: wrap; gap: 7px; }
+    .method-meta .status-pill { color: var(--accent); background: var(--accent-soft); }
+    .local-filter {
+      display: grid;
+      grid-template-columns: 1fr 1fr;
+      gap: 10px;
+      padding: 12px 18px 0;
+    }
+    .local-filter[hidden] { display: none; }
+    .denominator {
+      display: grid;
+      grid-template-columns: repeat(4, 1fr);
+      gap: 1px;
+      margin: 14px 18px 0;
+      border: 1px solid var(--line);
+      border-radius: 9px;
+      overflow: hidden;
+      background: var(--line);
+    }
+    .denominator div { padding: 9px; background: white; }
+    .denominator span { display: block; color: var(--muted); font-size: .7rem; }
+    .denominator strong { font-variant-numeric: tabular-nums; font-size: .92rem; }
+    .attrition {
+      margin: 8px 18px 0;
+      color: var(--muted);
+      font-size: .76rem;
+      font-variant-numeric: tabular-nums;
+    }
+    .chart-wrap { padding: 12px 18px 8px; }
+    .chart-title { margin: 0 0 4px; font-size: .78rem; color: var(--muted); }
+    .partial-note { margin: 0 18px 8px; padding: 9px 11px; border-left: 4px solid var(--amber); background: var(--amber-soft); font-size: .8rem; }
+    .chart {
+      width: 100%;
+      min-height: 310px;
+      display: block;
+      border-bottom: 1px solid var(--line);
+      background: linear-gradient(to bottom, #fff, #fdfcf8);
+    }
+    .chart .grid { stroke: #dfe5e2; stroke-width: 1; }
+    .chart .axis { fill: var(--muted); font-size: 11px; }
+    .chart .bar { fill: var(--accent); opacity: .8; transition: opacity 160ms ease, transform 160ms ease; transform-origin: bottom; }
+    .chart .bar:hover, .chart .bar:focus, .chart .bar.selected { opacity: 1; stroke: var(--ink); stroke-width: 1.5; }
+    .chart .crosshair { stroke: var(--amber); stroke-width: 2; stroke-dasharray: 4 4; pointer-events: none; }
+    .chart-readout {
+      min-height: 48px;
+      margin: 0 18px 16px;
+      padding: 10px 12px;
+      background: var(--accent-soft);
+      border-left: 4px solid var(--accent);
+      font-size: .86rem;
+    }
+    .unavailable {
+      min-height: 310px;
+      margin: 12px 18px 8px;
+      padding: 30px;
+      display: grid;
+      place-content: center;
+      text-align: center;
+      border: 1px dashed var(--line-strong);
+      background: #f7f5ef;
+    }
+    .unavailable strong { font-family: Georgia, serif; font-size: 1.2rem; }
+    .result-state {
+      min-height: 310px;
+      margin: 12px 18px 8px;
+      padding: 30px;
+      display: grid;
+      place-content: center;
+      text-align: center;
+      border: 1px dashed var(--line-strong);
+      background: #f7f5ef;
+    }
+    .result-state[data-tone="attention"] { border-color: var(--amber); background: var(--amber-soft); }
+    .result-state strong { display: block; margin: 8px 0; font: 700 1.2rem/1.2 Georgia, serif; }
+    .result-state p { max-width: 46ch; margin: 0 auto; color: var(--muted); }
+    .state-code { font-size: .72rem; font-weight: 850; letter-spacing: .08em; text-transform: uppercase; }
+    .loading-mark { display: inline-block; font-size: 1.4rem; letter-spacing: .25em; }
+    .difference-strip {
+      margin-top: 18px;
+      padding: 18px;
+      border-left: 6px solid var(--amber);
+    }
+    .difference-head { display: flex; align-items: start; justify-content: space-between; gap: 16px; }
+    .difference-strip h2 { margin: 0 0 5px; font-size: 1.25rem; }
+    .difference-strip p { margin: 0; color: var(--muted); }
+    .difference-grid {
+      display: grid;
+      grid-template-columns: repeat(5, minmax(0, 1fr));
+      gap: 10px;
+      margin-top: 14px;
+    }
+    .difference-grid div { padding-top: 9px; border-top: 1px solid var(--line); }
+    .difference-grid span { display: block; color: var(--muted); font-size: .72rem; }
+    .difference-grid strong { display: block; margin-top: 3px; font-size: .84rem; }
+    .method-guide, .table-region { margin-top: 18px; padding: 18px; }
+    .method-guide h2, .table-region h2 { margin: 0 0 6px; font-size: 1.35rem; }
+    .guide-grid { display: grid; grid-template-columns: repeat(2, 1fr); gap: 14px; margin-top: 14px; }
+    .guide-card { border: 1px solid var(--line); border-radius: 10px; padding: 14px; background: white; }
+    .guide-card h3 { margin: 0 0 8px; font-size: 1.05rem; }
+    .guide-card dl { display: grid; grid-template-columns: 92px 1fr; gap: 7px 10px; margin: 0; font-size: .84rem; }
+    .guide-card dt { color: var(--muted); font-weight: 800; }
+    .guide-card dd { margin: 0; }
+    details summary { cursor: pointer; font-weight: 800; min-height: 44px; display: flex; align-items: center; }
+    .table-scroll { overflow-x: auto; }
+    table { width: 100%; border-collapse: collapse; font-size: .85rem; }
+    th, td { padding: 9px 10px; border-bottom: 1px solid var(--line); text-align: right; font-variant-numeric: tabular-nums; }
+    th:first-child, td:first-child { text-align: left; }
+    thead th { position: sticky; top: 0; background: var(--surface); color: var(--muted); }
+    .table-note { color: var(--muted); font-size: .82rem; }
+    .drawer-backdrop {
+      position: fixed;
+      inset: 0;
+      z-index: 40;
+      background: rgb(15 27 28 / 42%);
+    }
+    .drawer-backdrop[hidden], .drawer[hidden] { display: none; }
+    .drawer {
+      position: fixed;
+      inset: 0 0 0 auto;
+      z-index: 50;
+      width: min(560px, 100%);
+      overflow-y: auto;
+      padding: 24px;
+      border-left: 1px solid var(--line);
+      background: var(--surface);
+      box-shadow: -20px 0 50px rgb(20 35 36 / 18%);
+    }
+    .drawer-head { display: flex; justify-content: space-between; gap: 16px; align-items: start; }
+    .drawer h2 { margin: 0; }
+    .drawer dl { display: grid; grid-template-columns: 150px 1fr; gap: 10px 14px; margin-top: 24px; }
+    .drawer dt { color: var(--muted); font-weight: 800; }
+    .drawer dd { margin: 0; overflow-wrap: anywhere; }
+    .digest { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: .76rem; }
+    .sr-only { position: absolute; width: 1px; height: 1px; padding: 0; margin: -1px; overflow: hidden; clip: rect(0,0,0,0); white-space: nowrap; border: 0; }
+
+    @media (min-width: 1440px) {
+      .chart { min-height: 340px; }
+    }
+    @media (max-width: 1024px) {
+      .toolbar { grid-template-columns: repeat(3, 1fr); }
+      .difference-grid { grid-template-columns: repeat(3, 1fr); }
+    }
+    @media (max-width: 768px) {
+      .toolbar { grid-template-columns: 1fr 1fr; }
+      .comparison-grid { grid-template-columns: 1fr; }
+      .panel-head { position: sticky; top: 0; z-index: 5; }
+      .difference-grid { grid-template-columns: repeat(2, 1fr); }
+      .guide-grid { grid-template-columns: 1fr; }
+    }
+    @media (max-width: 420px) {
+      .header-inner, main { width: min(100% - 24px, 1460px); }
+      .header-inner { align-items: start; flex-direction: column; padding: 14px 0; gap: 8px; }
+      .toolbar { grid-template-columns: 1fr; }
+      .denominator { grid-template-columns: 1fr 1fr; }
+      .difference-head { flex-direction: column; }
+      .difference-grid { grid-template-columns: 1fr; }
+      .chart { min-height: 270px; }
+      .drawer dl { grid-template-columns: 1fr; }
+      .drawer dt { margin-top: 8px; }
+    }
+    @media (prefers-reduced-motion: reduce) {
+      *, *::before, *::after { scroll-behavior: auto !important; transition: none !important; animation: none !important; }
+    }
+  </style>
+</head>
+<body>
+  <a class="skip-link" href="#explorer">Skip to method comparison</a>
+  <header>
+    <div class="header-inner">
+      <div class="brand"><strong>Traceback</strong><span>Research result explorer</span></div>
+      <div class="scope-row" aria-label="Prototype status">
+        <span class="badge synthetic">Synthetic fixture only</span>
+        <span class="badge dev">Development · unqualified</span>
+      </div>
+    </div>
+  </header>
+
+  <main id="explorer">
+    <p class="eyebrow">Method comparison · fragment measurements</p>
+    <h1>See exactly what changes when the method changes.</h1>
+    <p class="lede">Compare two registered research methods without blending their answers. Counts, exclusions, definitions, and provenance remain visible. Different quantities are shown side by side, with numerical deltas withheld.</p>
+
+    <section class="toolbar" aria-label="Shared comparison filters">
+      <div class="field">
+        <label for="fixture">Local synthetic record</label>
+        <select id="fixture">
+          <option value="synthetic-fragment-001">Synthetic fragment fixture 001</option>
+        </select>
+      </div>
+      <div class="field">
+        <label for="sharedDepth">Shared depth subset</label>
+        <select id="sharedDepth">
+          <option value="1">100% · 12,000 records</option>
+          <option value="0.75">75% · seeded subset</option>
+          <option value="0.5">50% · seeded subset</option>
+        </select>
+      </div>
+      <div class="field">
+        <label for="sharedMax">Shared display range</label>
+        <select id="sharedMax">
+          <option value="400">80–400 bp</option>
+          <option value="500" selected>80–500 bp</option>
+          <option value="700">80–700 bp</option>
+        </select>
+      </div>
+      <div class="field">
+        <label for="panelBState">Panel B result state</label>
+        <select id="panelBState">
+          <option value="complete">Complete</option>
+          <option value="loading">Loading</option>
+          <option value="empty">Empty</option>
+          <option value="partial">Partial</option>
+          <option value="failed">Failed</option>
+          <option value="insufficient">Insufficient information</option>
+          <option value="revoked">Revoked</option>
+          <option value="unsupported">Unsupported</option>
+          <option value="unavailable">Unavailable</option>
+        </select>
+      </div>
+      <label class="toggle-wrap" for="linkFilters">
+        <input id="linkFilters" type="checkbox" checked>
+        Link panel filters
+      </label>
+    </section>
+
+    <div class="comparison-grid">
+      <article class="panel panel-a" id="panelA">
+        <div class="panel-head">
+          <div class="panel-title-row"><span class="panel-label">A · Baseline</span><span class="status-pill">Research baseline</span></div>
+          <div class="field">
+            <label for="methodA">Method A</label>
+            <select id="methodA" class="method-select" data-panel="A"></select>
+          </div>
+          <div class="method-meta" id="metaA"></div>
+        </div>
+        <div class="local-filter" id="localFiltersA" hidden>
+          <div class="field"><label for="depthA">Panel A depth</label><select id="depthA" class="local-depth"><option value="1">100%</option><option value="0.75">75%</option><option value="0.5">50%</option></select></div>
+          <div class="field"><label for="maxA">Panel A range</label><select id="maxA" class="local-max"><option value="400">80–400 bp</option><option value="500" selected>80–500 bp</option><option value="700">80–700 bp</option></select></div>
+        </div>
+        <div class="denominator" id="denominatorA"></div>
+        <p class="attrition" id="attritionA"></p>
+        <div id="visualA"></div>
+        <div class="chart-readout" id="readoutA" aria-live="polite">Focus or point to a bar for its exact value.</div>
+      </article>
+
+      <article class="panel panel-b" id="panelB">
+        <div class="panel-head">
+          <div class="panel-title-row"><span class="panel-label">B · Challenger</span><span class="status-pill">Research challenger</span></div>
+          <div class="field">
+            <label for="methodB">Method B</label>
+            <select id="methodB" class="method-select" data-panel="B"></select>
+          </div>
+          <div class="method-meta" id="metaB"></div>
+        </div>
+        <div class="local-filter" id="localFiltersB" hidden>
+          <div class="field"><label for="depthB">Panel B depth</label><select id="depthB" class="local-depth"><option value="1">100%</option><option value="0.75">75%</option><option value="0.5">50%</option></select></div>
+          <div class="field"><label for="maxB">Panel B range</label><select id="maxB" class="local-max"><option value="400">80–400 bp</option><option value="500" selected>80–500 bp</option><option value="700">80–700 bp</option></select></div>
+        </div>
+        <div class="denominator" id="denominatorB"></div>
+        <p class="attrition" id="attritionB"></p>
+        <div id="visualB"></div>
+        <div class="chart-readout" id="readoutB" aria-live="polite">Focus or point to a bar for its exact value.</div>
+      </article>
+    </div>
+
+    <section class="difference-strip" aria-labelledby="differenceTitle">
+      <div class="difference-head">
+        <div><p class="eyebrow">Comparison decision</p><h2 id="differenceTitle">What changed</h2><p id="comparabilitySummary"></p></div>
+        <button class="btn secondary" id="openProvenance" type="button">View provenance</button>
+      </div>
+      <div class="difference-grid" id="differenceGrid"></div>
+    </section>
+
+    <section class="method-guide" aria-labelledby="guideTitle">
+      <p class="eyebrow">Method guide</p>
+      <h2 id="guideTitle">Use each method for the question it actually answers.</h2>
+      <p class="lede">These are research measurement definitions. None establishes a health state or diagnosis.</p>
+      <div class="guide-grid" id="guideGrid"></div>
+    </section>
+
+    <section class="table-region" aria-labelledby="tableTitle">
+      <details open>
+        <summary id="tableTitle">Exact accessible values used by both charts</summary>
+        <p class="table-note" id="tableNote"></p>
+        <div class="table-scroll">
+          <table>
+            <caption class="sr-only">Exact synthetic fragment counts for panel A and panel B</caption>
+            <thead><tr><th scope="col">Bin start</th><th scope="col" id="headA">Panel A count</th><th scope="col" id="headB">Panel B count</th><th scope="col">Delta</th></tr></thead>
+            <tbody id="exactRows"></tbody>
+          </table>
+        </div>
+      </details>
+    </section>
+  </main>
+
+  <div class="drawer-backdrop" id="drawerBackdrop" hidden></div>
+  <aside class="drawer" id="provenanceDrawer" role="dialog" aria-modal="true" aria-labelledby="provenanceTitle" hidden>
+    <div class="drawer-head">
+      <div><p class="eyebrow">Evidence lineage</p><h2 id="provenanceTitle">Comparison provenance</h2></div>
+      <button class="btn secondary" id="closeProvenance" type="button" aria-label="Close provenance drawer">Close</button>
+    </div>
+    <p>All identifiers below are synthetic. The prototype stores no donor identity, local input path, sequence, read identifier, or external link.</p>
+    <dl id="provenanceFields"></dl>
+  </aside>
+
+  <script>
+    "use strict";
+
+    const METHODS = {
+      alignedReference: {
+        id: "fragment-aligned-reference-span.v1", label: "Aligned reference span v1",
+        quantity: "aligned_reference_span_bp", unit: "bp", status: "development_unqualified",
+        role: "research_baseline", acceptedRate: 0.81, eligibleRate: 0.96,
+        definition: "Reference bases consumed by accepted primary-alignment CIGAR operations.",
+        strengths: "Deterministic after alignment; explicit CIGAR and filter policy.",
+        limitations: "Depends on alignment and clipping; it is not physical fragment length.",
+        use: "Mapping-aware fragment QC and repeatable method development.",
+        shift: 8, spread: 1.02, digest: "6a7e03d5b13c4c5c9f8c29a1f02150ef9d620f2c312f1728f755ea0a83100411"
+      },
+      rawQuery: {
+        id: "fragment-raw-query-length.v1", label: "Raw query length v1",
+        quantity: "raw_query_length_bp", unit: "bp", status: "development_unqualified",
+        role: "research_challenger", acceptedRate: 0.93, eligibleRate: 0.99,
+        definition: "Sequence length recorded for each accepted input record before alignment interpretation.",
+        strengths: "Direct, fast, and independent of alignment coordinates.",
+        limitations: "Includes clipping and protocol effects; not a physical plasma-fragment measurement.",
+        use: "Sequencing-output QC and sensitivity comparison.",
+        shift: 21, spread: 1.12, digest: "81609ee14499240e508a90ac37078d310055e355f21afc4b43932e79c5af7392"
+      },
+      rawQueryStrict: {
+        id: "fragment-raw-query-length-mapq30.v1", label: "Raw query length · strict QC v1",
+        quantity: "raw_query_length_bp", unit: "bp", status: "development_unqualified",
+        role: "research_challenger", acceptedRate: 0.68, eligibleRate: 0.98,
+        definition: "Raw query length after a registered stricter technical-QC inclusion policy.",
+        strengths: "Tests whether the raw-length distribution depends on the QC inclusion policy.",
+        limitations: "Smaller denominator; still does not estimate biological fragment ends.",
+        use: "Prespecified filter sensitivity, with attrition shown.",
+        shift: 19, spread: 1.08, digest: "26c2bd24ab76510df366dd79a3e26bfa68beb871f9d7d97435e50ba2ccb05a4d"
+      },
+      alignedQuery: {
+        id: "fragment-aligned-query-length.v1", label: "Aligned query length v1",
+        quantity: "aligned_query_length_bp", unit: "bp", status: "development_unqualified",
+        role: "research_challenger", acceptedRate: 0.80, eligibleRate: 0.97,
+        definition: "Query bases retained by the registered primary-alignment and clipping policy.",
+        strengths: "Makes clipping-policy effects visible without converting to reference span.",
+        limitations: "Depends on aligner policy and differs from both raw length and reference span.",
+        use: "Alignment diagnostics and method comparison.",
+        shift: 13, spread: 1.05, digest: "83d22131b05d9c659b7251e10fb877dbcf640f3f3a899ec369cadfca55821a79"
+      },
+      biologicalUnavailable: {
+        id: "fragment-biological-ends.v0", label: "Biological-end estimate · unavailable",
+        quantity: "biological_fragment_length_bp", unit: "bp", status: "not_run",
+        role: "disabled", acceptedRate: 0, eligibleRate: 0,
+        definition: "A future protocol-specific estimate of biological molecule ends.",
+        strengths: "Could address the physical-fragment question after analytical validation.",
+        limitations: "No registered validated method or result exists for this fixture.",
+        use: "Do not use. The unavailable state prevents fixed adapter subtraction.",
+        unavailable: "No registered method and validated result are available.",
+        digest: null
+      }
+    };
+
+    const BINS = Array.from({length: 32}, (_, i) => 80 + i * 20);
+    const RESULT_STATES = {
+      loading: {label: "Loading", code: "LOADING", tone: "neutral", body: "The registered aggregate result is still being read. No prior value is retained or implied."},
+      empty: {label: "No eligible records", code: "EMPTY", tone: "neutral", body: "The run completed, but zero records met the registered measurement policy. This is an empty result, not a zero-valued measurement."},
+      failed: {label: "Result failed", code: "FAILED", tone: "attention", body: "The registered computation did not complete. Inspect provenance and retry the exact method bundle before comparing."},
+      insufficient: {label: "Insufficient information", code: "INSUFFICIENT", tone: "attention", body: "The available aggregate does not meet the registered information threshold. The value is withheld, not reported as zero."},
+      revoked: {label: "Result revoked", code: "REVOKED", tone: "attention", body: "This result identity was withdrawn after generation. It remains visible for audit but cannot be interpreted or compared."},
+      unsupported: {label: "Unsupported result", code: "UNSUPPORTED", tone: "neutral", body: "This prototype cannot render the registered result schema. No conversion or silent fallback is applied."},
+      unavailable: {label: "Result unavailable", code: "UNAVAILABLE", tone: "neutral", body: "No registered aggregate result is present for this panel and filter state."}
+    };
+    const state = { selectedBinA: null, selectedBinB: null, lastDrawerFocus: null };
+    const byId = id => document.getElementById(id);
+    const fmt = value => new Intl.NumberFormat("en-US").format(value);
+    const gaussian = (x, mean, sd) => Math.exp(-0.5 * ((x - mean) / sd) ** 2);
+
+    function baseCount(method, bp, depth) {
+      if (method.unavailable) return 0;
+      const shifted = bp - method.shift;
+      const shape = 1.00 * gaussian(shifted, 166, 24 * method.spread)
+        + 0.52 * gaussian(shifted, 326, 38 * method.spread)
+        + 0.10 * gaussian(shifted, 500, 85 * method.spread);
+      const ripple = 1 + 0.035 * Math.sin((bp + method.shift) / 17);
+      return Math.max(0, Math.round(910 * depth * shape * ripple));
+    }
+
+    function panelSettings(panel) {
+      const linked = byId("linkFilters").checked;
+      return {
+        depth: Number(byId(linked ? "sharedDepth" : `depth${panel}`).value),
+        max: Number(byId(linked ? "sharedMax" : `max${panel}`).value)
+      };
+    }
+
+    function selectedMethod(panel) { return METHODS[byId(`method${panel}`).value]; }
+
+    function resultStateFor(panel) { return panel === "B" ? byId("panelBState").value : "complete"; }
+
+    function seriesFor(panel) {
+      const method = selectedMethod(panel);
+      const settings = panelSettings(panel);
+      const resultState = resultStateFor(panel);
+      if (method.unavailable || !["complete", "partial"].includes(resultState)) return [];
+      const stateMax = resultState === "partial" ? Math.min(settings.max, 260) : settings.max;
+      return BINS.filter(bp => bp + 19 <= stateMax).map(bp => ({bp, count: baseCount(method, bp, settings.depth)}));
+    }
+
+    function denominatorFor(panel) {
+      const method = selectedMethod(panel);
+      const settings = panelSettings(panel);
+      const resultState = resultStateFor(panel);
+      if (method.unavailable || !["complete", "partial"].includes(resultState)) return {all: Math.round(12000 * settings.depth), accepted: null, eligible: null, displayed: null};
+      const all = Math.round(12000 * settings.depth);
+      const accepted = Math.round(all * method.acceptedRate);
+      const eligible = Math.round(accepted * method.eligibleRate);
+      const displayed = seriesFor(panel).reduce((sum, row) => sum + row.count, 0);
+      return {all, accepted, eligible, displayed};
+    }
+
+    function populateSelectors() {
+      for (const panel of ["A", "B"]) {
+        const select = byId(`method${panel}`);
+        Object.entries(METHODS).forEach(([key, method]) => {
+          const option = document.createElement("option");
+          option.value = key;
+          option.textContent = method.label;
+          select.append(option);
+        });
+      }
+      byId("methodA").value = "alignedReference";
+      byId("methodB").value = "rawQuery";
+    }
+
+    function renderMeta(panel, method) {
+      byId(`meta${panel}`).innerHTML = `
+        <span class="status-pill">${method.status.replaceAll("_", " ")}</span>
+        <span class="status-pill">${method.quantity.replaceAll("_", " ")}</span>
+        <span class="status-pill">${method.unit}</span>`;
+    }
+
+    function renderDenominator(panel) {
+      const d = denominatorFor(panel);
+      byId(`denominator${panel}`).innerHTML = [
+        ["All input", d.all], ["Accepted", d.accepted], ["Measurement eligible", d.eligible], ["Displayed", d.displayed]
+      ].map(([label, value]) => `<div><span>${label}</span><strong>${value === null ? "—" : fmt(value)}</strong></div>`).join("");
+      byId(`attrition${panel}`).textContent = d.accepted === null
+        ? "Attrition unavailable until this state exposes a valid denominator."
+        : `Excluded: ${fmt(d.all-d.accepted)} policy rejection · ${fmt(d.accepted-d.eligible)} measurement ineligible · ${fmt(d.eligible-d.displayed)} outside visible range or incomplete partition.`;
+    }
+
+    function renderChart(panel) {
+      const method = selectedMethod(panel);
+      const visual = byId(`visual${panel}`);
+      const resultState = resultStateFor(panel);
+      if (method.unavailable) {
+        visual.innerHTML = `<div class="unavailable" role="status"><div><span class="badge dev">Unavailable</span><p><strong>No numerical result is shown.</strong></p><p>${method.unavailable}</p><p>Missing information is not displayed as zero.</p></div></div>`;
+        byId(`readout${panel}`).textContent = "Unavailable: no plotted or tabulated values.";
+        return;
+      }
+      if (!["complete", "partial"].includes(resultState)) {
+        const copy = RESULT_STATES[resultState];
+        const loading = resultState === "loading" ? `<span class="loading-mark" aria-hidden="true">···</span>` : "";
+        visual.innerHTML = `<div class="result-state" data-tone="${copy.tone}" role="status" aria-live="polite"><div><span class="state-code">${copy.code}</span>${loading}<strong>${copy.label}</strong><p>${copy.body}</p></div></div>`;
+        byId(`readout${panel}`).textContent = `${copy.label}: exact plotted and tabulated values are withheld.`;
+        return;
+      }
+      const rows = seriesFor(panel);
+      const width = 680, height = 310, left = 52, right = 14, top = 16, bottom = 42;
+      const plotW = width - left - right, plotH = height - top - bottom;
+      const comparison = comparisonDecision();
+      const scaleRows = comparison.axis ? [...seriesFor("A"), ...seriesFor("B")] : rows;
+      const maxCount = Math.max(...scaleRows.map(r => r.count), 1);
+      const band = plotW / rows.length;
+      const bars = rows.map((row, index) => {
+        const h = (row.count / maxCount) * plotH;
+        const x = left + index * band + 1;
+        const y = top + plotH - h;
+        const selected = state[`selectedBin${panel}`] === row.bp ? " selected" : "";
+        return `<rect class="bar${selected}" data-bin="${row.bp}" data-panel="${panel}" x="${x.toFixed(2)}" y="${y.toFixed(2)}" width="${Math.max(2, band - 2).toFixed(2)}" height="${h.toFixed(2)}" tabindex="0" role="img" aria-label="${row.bp} to ${row.bp + 19} base pairs: ${fmt(row.count)} records"></rect>`;
+      }).join("");
+      const yGrid = [0, .25, .5, .75, 1].map(frac => {
+        const y = top + plotH * (1 - frac);
+        return `<line class="grid" x1="${left}" y1="${y}" x2="${width-right}" y2="${y}"></line><text class="axis" x="${left-7}" y="${y+4}" text-anchor="end">${fmt(Math.round(maxCount*frac))}</text>`;
+      }).join("");
+      const tickIndexes = [0, Math.floor((rows.length-1)/2), rows.length-1];
+      const xTicks = tickIndexes.map(i => {
+        const x = left + (i + .5) * band;
+        return `<text class="axis" x="${x}" y="${height-17}" text-anchor="middle">${rows[i].bp}</text>`;
+      }).join("");
+      const selectedIndex = rows.findIndex(r => r.bp === state[`selectedBin${panel}`]);
+      const crosshair = selectedIndex >= 0 ? `<line class="crosshair" x1="${left+(selectedIndex+.5)*band}" y1="${top}" x2="${left+(selectedIndex+.5)*band}" y2="${top+plotH}"></line>` : "";
+      const axisMode = comparison.axis ? "Synchronized bin and count axes" : "Independent axis; cross-panel delta prohibited";
+      const partialNote = resultState === "partial" ? `<p class="partial-note" role="status"><strong>PARTIAL</strong> · Only the completed partition is plotted. Denominator and exact values identify the incomplete boundary.</p>` : "";
+      visual.innerHTML = `${partialNote}<div class="chart-wrap"><p class="chart-title">${method.definition} · ${axisMode}</p><svg class="chart" viewBox="0 0 ${width} ${height}" role="group" aria-label="Histogram of ${method.label}. ${axisMode}. Use Tab to inspect exact bars.">${yGrid}${bars}${crosshair}${xTicks}<text class="axis" x="${left+plotW/2}" y="${height-2}" text-anchor="middle">${method.label} (${method.unit})</text><text class="axis" transform="translate(13 ${top+plotH/2}) rotate(-90)" text-anchor="middle">Synthetic record count per 20 bp</text></svg></div>`;
+      visual.querySelectorAll(".bar").forEach(bar => {
+        const activate = () => selectBin(panel, Number(bar.dataset.bin));
+        bar.addEventListener("mouseenter", activate);
+        bar.addEventListener("focus", activate);
+      });
+      updateReadout(panel);
+    }
+
+    function selectBin(sourcePanel, bp) {
+      const panels = comparisonDecision().axis && resultStateFor("B") === "complete" ? ["A", "B"] : [sourcePanel];
+      for (const panel of panels) state[`selectedBin${panel}`] = bp;
+      for (const panel of ["A", "B"]) {
+        const chart = byId(`visual${panel}`).querySelector("svg");
+        if (chart) {
+          const old = chart.querySelector(".crosshair");
+          if (old) old.remove();
+          const bars = [...chart.querySelectorAll(".bar")];
+          const selectedBp = state[`selectedBin${panel}`];
+          chart.querySelectorAll(".bar").forEach(bar => bar.classList.toggle("selected", Number(bar.dataset.bin) === selectedBp));
+          const active = bars.find(bar => Number(bar.dataset.bin) === selectedBp);
+          if (active) {
+            const line = document.createElementNS("http://www.w3.org/2000/svg", "line");
+            const x = Number(active.getAttribute("x")) + Number(active.getAttribute("width")) / 2;
+            line.setAttribute("class", "crosshair"); line.setAttribute("x1", x); line.setAttribute("x2", x); line.setAttribute("y1", 16); line.setAttribute("y2", 268);
+            chart.append(line);
+          }
+        }
+        updateReadout(panel);
+      }
+    }
+
+    function updateReadout(panel) {
+      const method = selectedMethod(panel);
+      const row = seriesFor(panel).find(item => item.bp === state[`selectedBin${panel}`]);
+      if (method.unavailable) return;
+      byId(`readout${panel}`).textContent = row
+        ? `${method.label}: ${row.bp}–${row.bp + 19} bp contains ${fmt(row.count)} synthetic records.`
+        : "Focus or point to a bar for its exact value.";
+    }
+
+    function comparisonDecision() {
+      const a = selectedMethod("A"), b = selectedMethod("B");
+      const bState = resultStateFor("B");
+      if (a.unavailable || b.unavailable) return {outcome: "unknown", delta: false, axis: false, summary: "Comparison unavailable because one selected method has no registered result."};
+      if (bState !== "complete") return {outcome: bState, delta: false, axis: false, summary: `Panel B is ${bState.replaceAll("_", " ")}. Deltas and synchronized axes are withheld until both results are complete.`};
+      if (a.quantity !== b.quantity) return {outcome: "different quantity", delta: false, axis: false, summary: "These methods measure different quantities. Charts remain separate and numerical deltas are withheld."};
+      if (a.unit !== b.unit) return {outcome: "different unit", delta: false, axis: false, summary: "These methods use different units. Charts remain separate and numerical deltas are withheld."};
+      const settingsA = panelSettings("A"), settingsB = panelSettings("B");
+      if (settingsA.depth !== settingsB.depth || settingsA.max !== settingsB.max) return {outcome: "different filter", delta: false, axis: false, summary: "The panels use different depth or display-range filters. Charts retain independent axes and numerical deltas are withheld."};
+      return {outcome: "comparable", delta: true, axis: true, summary: "These methods share a registered quantity and unit. Exact count deltas are shown for the selected synthetic subset."};
+    }
+
+    function renderDifference() {
+      const a = selectedMethod("A"), b = selectedMethod("B"), decision = comparisonDecision();
+      byId("comparabilitySummary").textContent = decision.summary;
+      const items = [
+        ["Decision", decision.outcome],
+        ["Definition", a.quantity === b.quantity ? "Same registered quantity" : `${a.quantity} ↔ ${b.quantity}`],
+        ["Inclusion", `${a.unavailable ? "unavailable" : `${Math.round(a.acceptedRate*100)}% accepted`} ↔ ${b.unavailable ? "unavailable" : `${Math.round(b.acceptedRate*100)}% accepted`}`],
+        ["Assets", "Same synthetic fixture; separate method digest"],
+        ["Delta / shared axis", decision.delta ? "Allowed for exact bins" : "Both withheld"]
+      ];
+      byId("differenceGrid").innerHTML = items.map(([label,value]) => `<div><span>${label}</span><strong>${value.replaceAll("_", " ")}</strong></div>`).join("");
+    }
+
+    function renderGuide() {
+      const chosen = [...new Set([byId("methodA").value, byId("methodB").value])];
+      byId("guideGrid").innerHTML = chosen.map(key => {
+        const method = METHODS[key];
+        return `<article class="guide-card"><h3>${method.label}</h3><dl><dt>Measures</dt><dd>${method.definition}</dd><dt>Strength</dt><dd>${method.strengths}</dd><dt>Limitation</dt><dd>${method.limitations}</dd><dt>When to use</dt><dd>${method.use}</dd></dl></article>`;
+      }).join("");
+    }
+
+    function renderTable() {
+      const a = selectedMethod("A"), b = selectedMethod("B"), decision = comparisonDecision();
+      const aRows = new Map(seriesFor("A").map(row => [row.bp, row.count]));
+      const bRows = new Map(seriesFor("B").map(row => [row.bp, row.count]));
+      const bins = [...new Set([...aRows.keys(), ...bRows.keys()])].sort((x,y) => x-y);
+      byId("headA").textContent = `A · ${a.label}`;
+      byId("headB").textContent = `B · ${b.label}`;
+      byId("tableNote").textContent = decision.delta ? "Delta is B minus A for the same registered quantity, unit, and filter subset." : decision.summary;
+      byId("exactRows").innerHTML = bins.map(bp => {
+        const av = aRows.get(bp), bv = bRows.get(bp);
+        const delta = decision.delta && av !== undefined && bv !== undefined ? fmt(bv-av) : "—";
+        return `<tr><th scope="row">${bp}–${bp+19} bp</th><td>${av === undefined ? "—" : fmt(av)}</td><td>${bv === undefined ? "—" : fmt(bv)}</td><td>${delta}</td></tr>`;
+      }).join("") || `<tr><th scope="row">No values</th><td>—</td><td>—</td><td>—</td></tr>`;
+    }
+
+    function renderProvenance() {
+      const a = selectedMethod("A"), b = selectedMethod("B"), decision = comparisonDecision();
+      const fields = [
+        ["Fixture", "synthetic-fragment-001"],
+        ["Input class", "Generated aggregate fixture; no sequence or donor data"],
+        ["Panel A method", a.id], ["Panel A digest", a.digest || "unavailable"],
+        ["Panel B method", b.id], ["Panel B digest", b.digest || "unavailable"],
+        ["Comparison", decision.outcome],
+        ["Filter binding", `${byId("linkFilters").checked ? "linked" : "independent"}; A=${JSON.stringify(panelSettings("A"))}; B=${JSON.stringify(panelSettings("B"))}`],
+        ["Plot specification", "traceback.synthetic-fragment-comparison-plot.v1"],
+        ["Panel B state", resultStateFor("B")],
+        ["Qualification", "Development only; no product release authorization"]
+      ];
+      byId("provenanceFields").innerHTML = fields.map(([term,value]) => `<dt>${term}</dt><dd class="${term.includes("digest") ? "digest" : ""}">${value}</dd>`).join("");
+    }
+
+    function render() {
+      const linked = byId("linkFilters").checked;
+      byId("localFiltersA").hidden = linked;
+      byId("localFiltersB").hidden = linked;
+      for (const panel of ["A", "B"]) {
+        const method = selectedMethod(panel);
+        renderMeta(panel, method);
+        renderDenominator(panel);
+        renderChart(panel);
+      }
+      renderDifference(); renderGuide(); renderTable(); renderProvenance();
+    }
+
+    function openDrawer() {
+      state.lastDrawerFocus = document.activeElement;
+      renderProvenance();
+      byId("drawerBackdrop").hidden = false;
+      byId("provenanceDrawer").hidden = false;
+      document.body.style.overflow = "hidden";
+      byId("closeProvenance").focus();
+    }
+    function closeDrawer() {
+      byId("drawerBackdrop").hidden = true;
+      byId("provenanceDrawer").hidden = true;
+      document.body.style.overflow = "";
+      if (state.lastDrawerFocus) state.lastDrawerFocus.focus();
+    }
+
+    populateSelectors();
+    document.querySelectorAll("select, input").forEach(control => control.addEventListener("change", () => { state.selectedBinA = null; state.selectedBinB = null; render(); }));
+    byId("openProvenance").addEventListener("click", openDrawer);
+    byId("closeProvenance").addEventListener("click", closeDrawer);
+    byId("drawerBackdrop").addEventListener("click", closeDrawer);
+    document.addEventListener("keydown", event => {
+      if (event.key === "Escape" && !byId("provenanceDrawer").hidden) closeDrawer();
+      if (event.key === "Tab" && !byId("provenanceDrawer").hidden) {
+        const focusable = [...byId("provenanceDrawer").querySelectorAll("button, [href], select, input, [tabindex]:not([tabindex='-1'])")];
+        if (!focusable.length) return;
+        const first = focusable[0], last = focusable[focusable.length-1];
+        if (event.shiftKey && document.activeElement === first) { event.preventDefault(); last.focus(); }
+        else if (!event.shiftKey && document.activeElement === last) { event.preventDefault(); first.focus(); }
+      }
+    });
+    render();
+  </script>
+</body>
+</html>
