@@ -103,6 +103,20 @@ def _digest(value: object) -> str:
     return hashlib.sha256(content).hexdigest()
 
 
+def _canonical_tampered_view(payload: dict[str, Any]) -> bytes:
+    unsigned = {key: value for key, value in payload.items() if key != "view_sha256"}
+    payload["view_sha256"] = hashlib.sha256(
+        json.dumps(
+            unsigned,
+            allow_nan=False,
+            ensure_ascii=False,
+            separators=(",", ":"),
+            sort_keys=True,
+        ).encode()
+    ).hexdigest()
+    return canonical_json_bytes(payload)
+
+
 def _asset(name: str, digit: str) -> AssetReference:
     return AssetReference(
         asset_id=f"asset_{name}",
@@ -438,6 +452,7 @@ def test_linked_view_has_exact_table_deltas_axes_and_replay() -> None:
     view = build_fragment_explorer_view(request)
 
     assert view.compatibility.outcome == CompatibilityOutcome.COMPARABLE
+    assert view.synchronized_comparison
     assert view.shared_y_scale
     assert view.left.y_axis_max == view.right.y_axis_max == 5
     assert [item.count_delta_right_minus_left for item in view.delta_rows] == [
@@ -499,6 +514,7 @@ def test_unlinked_filters_withhold_cross_panel_deltas_and_shared_axis() -> None:
     view = build_fragment_explorer_view(_request(left, right, state=state))
 
     assert not view.shared_y_scale
+    assert not view.synchronized_comparison
     assert view.delta_rows == ()
     assert view.left.y_axis_max == 3
     assert view.right.y_axis_max == 5
@@ -591,6 +607,27 @@ def test_policy_can_independently_withhold_delta_and_shared_axis() -> None:
     view = build_fragment_explorer_view(_request(left, right, policy=policy))
 
     assert view.compatibility.outcome == CompatibilityOutcome.COMPARABLE
+    assert view.synchronized_comparison
+    assert not view.shared_y_scale
+    assert view.delta_rows == ()
+
+
+def test_equal_panel_local_controls_remain_unlinked_and_unsynchronized() -> None:
+    left = _source("alpha")
+    right = _source("beta")
+    controls = ExplorerControls(bin_start_inclusive=0, bin_end_exclusive=3)
+    state = _state(
+        left,
+        right,
+        left_controls=controls,
+        right_controls=controls,
+    )
+
+    view = build_fragment_explorer_view(_request(left, right, state=state))
+
+    assert view.compatibility.outcome == CompatibilityOutcome.COMPARABLE
+    assert not view.state.filters_linked
+    assert not view.synchronized_comparison
     assert not view.shared_y_scale
     assert view.delta_rows == ()
 
@@ -667,6 +704,44 @@ def test_accessible_table_parity_and_replay_reject_self_consistent_drift() -> No
     changed_view = build_fragment_explorer_view(changed_request)
     with pytest.raises(FragmentExplorerError, match="canonical replay"):
         replay_fragment_explorer_view(request, changed_view)
+
+
+def test_canonical_parse_rejects_state_panel_and_fraction_rebinding() -> None:
+    left = _source("alpha")
+    right = _source("beta")
+    view = build_fragment_explorer_view(_request(left, right))
+
+    payload = view.model_dump(mode="json")
+    payload["left"]["selection"] = payload["right"]["selection"]
+    with pytest.raises(FragmentExplorerError, match="JSON is invalid"):
+        fragment_explorer_from_canonical_bytes(
+            FragmentExplorerView, _canonical_tampered_view(payload)
+        )
+
+    payload = view.model_dump(mode="json")
+    payload["left"]["panel"] = "b"
+    payload["right"]["panel"] = "a"
+    for row in payload["accessible_rows"]:
+        row["panel"] = "b" if row["panel"] == "a" else "a"
+    with pytest.raises(FragmentExplorerError, match="JSON is invalid"):
+        fragment_explorer_from_canonical_bytes(
+            FragmentExplorerView, _canonical_tampered_view(payload)
+        )
+
+    payload = view.model_dump(mode="json")
+    payload["left"]["controls"]["bin_end_exclusive"] = 2
+    with pytest.raises(FragmentExplorerError, match="JSON is invalid"):
+        fragment_explorer_from_canonical_bytes(
+            FragmentExplorerView, _canonical_tampered_view(payload)
+        )
+
+    payload = view.model_dump(mode="json")
+    payload["left"]["rows"][0]["fraction_denominator"] += 1
+    payload["accessible_rows"][0]["fraction_denominator"] += 1
+    with pytest.raises(FragmentExplorerError, match="JSON is invalid"):
+        fragment_explorer_from_canonical_bytes(
+            FragmentExplorerView, _canonical_tampered_view(payload)
+        )
 
 
 def test_explicit_method_selection_is_required_and_never_auto_repaired() -> None:

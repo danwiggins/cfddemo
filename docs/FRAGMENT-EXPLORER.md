@@ -50,9 +50,12 @@ requires one object for each panel. These are display filters only:
 - exclusions remain separate and reconcile with `records_scanned`;
 - an empty display uses a safe axis maximum of one, never a fabricated count.
 
-Shared y-scale and exact right-minus-left deltas require complete panels, equal
-controls, identical bin boundaries, an E05 `comparable` outcome, and the
-corresponding E05 policy permission. Otherwise both features fail closed.
+Synchronized comparison, shared y-scale, crosshair eligibility, and exact
+right-minus-left deltas require linked filters, complete panels, equal controls,
+identical bin boundaries, and an E05 `comparable` outcome. Shared axes and
+deltas additionally require their corresponding E05 policy permission. Equal
+panel-local controls in unlinked mode remain independent. Otherwise the
+synchronized features fail closed.
 
 ## Withholding and accessibility
 

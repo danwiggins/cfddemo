@@ -486,6 +486,14 @@ class ExplorerPanelView(CompatibilityContract):
                 self.denominator.displayed_alignments
             ):
                 raise ValueError("panel rows must reconcile displayed total")
+            if any(
+                item.fraction_denominator
+                != self.denominator.eligible_alignments
+                for item in self.rows
+            ):
+                raise ValueError(
+                    "row fractions must use the panel eligible denominator"
+                )
         elif (
             self.rows
             or self.denominator is not None
@@ -531,6 +539,7 @@ class FragmentExplorerView(CompatibilityContract):
     compatibility: CompatibilityDecision
     left: ExplorerPanelView
     right: ExplorerPanelView
+    synchronized_comparison: bool
     shared_y_scale: bool
     accessible_rows: tuple[AccessibleTableRow, ...] = Field(
         max_length=MAX_EXPLORER_BINS * 2
@@ -542,6 +551,16 @@ class FragmentExplorerView(CompatibilityContract):
 
     @model_validator(mode="after")
     def exact_table_axes_and_digest(self) -> FragmentExplorerView:
+        if self.left.panel != PanelId.A or self.right.panel != PanelId.B:
+            raise ValueError("view panels must retain fixed A/B identities")
+        if self.left.selection != self.state.left:
+            raise ValueError("left panel selection must match embedded state")
+        if self.right.selection != self.state.right:
+            raise ValueError("right panel selection must match embedded state")
+        if self.left.controls != self.state.controls_for(PanelId.A):
+            raise ValueError("left panel controls must match embedded state")
+        if self.right.controls != self.state.controls_for(PanelId.B):
+            raise ValueError("right panel controls must match embedded state")
         expected_table = tuple(
             AccessibleTableRow(panel=panel.panel, **row.model_dump())
             for panel in (self.left, self.right)
@@ -554,9 +573,14 @@ class FragmentExplorerView(CompatibilityContract):
             self.compatibility.outcome == CompatibilityOutcome.COMPARABLE
             and self.left.source_state == ExplorerSourceState.COMPLETE
             and self.right.source_state == ExplorerSourceState.COMPLETE
+            and self.state.filters_linked
             and self.left.controls == self.right.controls
             and same_layout
         )
+        if self.synchronized_comparison != comparable_display:
+            raise ValueError(
+                "synchronized comparison must exactly follow linked compatibility"
+            )
         expected_shared = (
             comparable_display and self.compatibility.shared_axis_allowed
         )
@@ -719,6 +743,7 @@ def build_fragment_explorer_view(
         compatibility.outcome == CompatibilityOutcome.COMPARABLE
         and left.source_state == ExplorerSourceState.COMPLETE
         and right.source_state == ExplorerSourceState.COMPLETE
+        and request.state.filters_linked
         and left.controls == right.controls
         and exact_layout
     )
@@ -751,6 +776,7 @@ def build_fragment_explorer_view(
         "compatibility": compatibility,
         "left": left,
         "right": right,
+        "synchronized_comparison": comparable_display,
         "shared_y_scale": shared_y_scale,
         "accessible_rows": accessible,
         "delta_rows": deltas,
