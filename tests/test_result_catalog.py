@@ -483,6 +483,51 @@ def test_transient_connect_window_root_swap_cannot_open_attacker_database(
     assert reopened.query(CatalogQuery()).empty
 
 
+def test_sqlite_descriptor_proof_accepts_reused_fd_number(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    original, _, import_root = _catalog(tmp_path)
+    original_root = original.root
+    trust_store = original.trust_store
+    original.close()
+    real_snapshot = catalog_module._open_descriptor_identities
+    calls = 0
+    reused_descriptor: int | None = None
+    prior_identity: tuple[int, int, int] | None = None
+
+    def force_reuse() -> dict[int, tuple[int, int, int]]:
+        nonlocal calls, reused_descriptor, prior_identity
+        calls += 1
+        if calls == 1:
+            reused_descriptor = os.open(
+                tmp_path,
+                os.O_RDONLY | getattr(os, "O_DIRECTORY", 0),
+            )
+            snapshot = real_snapshot()
+            prior_identity = snapshot[reused_descriptor]
+            os.close(reused_descriptor)
+            return snapshot
+        snapshot = real_snapshot()
+        assert reused_descriptor is not None
+        assert prior_identity is not None
+        assert snapshot[reused_descriptor] != prior_identity
+        return snapshot
+
+    monkeypatch.setattr(
+        catalog_module, "_open_descriptor_identities", force_reuse
+    )
+    reopened = ResultCatalog(
+        original_root,
+        import_roots={"root_primary": import_root},
+        trust_store=trust_store,
+    )
+
+    assert calls >= 2
+    assert reopened.query(CatalogQuery()).empty
+    reopened.close()
+
+
 def test_simultaneous_fresh_catalog_constructors_are_atomic_and_usable(
     tmp_path: Path,
 ) -> None:

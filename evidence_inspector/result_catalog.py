@@ -418,7 +418,11 @@ def _descriptor_path(descriptor: int) -> Path:
     return Path(raw.split(b"\0", 1)[0].decode())
 
 
-def _open_descriptor_numbers() -> frozenset[int]:
+def _descriptor_identity(value: os.stat_result) -> tuple[int, int, int]:
+    return stat.S_IFMT(value.st_mode), value.st_dev, value.st_ino
+
+
+def _open_descriptor_identities() -> dict[int, tuple[int, int, int]]:
     directory = Path("/proc/self/fd")
     if not directory.is_dir():
         directory = Path("/dev/fd")
@@ -426,14 +430,14 @@ def _open_descriptor_numbers() -> frozenset[int]:
         candidates = (
             int(item.name) for item in directory.iterdir() if item.name.isdigit()
         )
-        opened = []
+        opened = {}
         for descriptor in candidates:
             try:
-                os.fstat(descriptor)
+                identity = _descriptor_identity(os.fstat(descriptor))
             except OSError:
                 continue
-            opened.append(descriptor)
-        return frozenset(opened)
+            opened[descriptor] = identity
+        return opened
     except OSError:
         raise CatalogFilesystemError("database descriptor proof is unavailable") from None
 
@@ -675,6 +679,15 @@ class ResultCatalog:
         return _descriptor_path(self._objects_fd)
 
     def close(self) -> None:
+        connection_lock = getattr(self, "_connection_lock", None)
+        if connection_lock is None:
+            with _SQLITE_OPEN_LOCK:
+                self._close_unlocked()
+            return
+        with connection_lock, _SQLITE_OPEN_LOCK:
+            self._close_unlocked()
+
+    def _close_unlocked(self) -> None:
         connection = getattr(self, "_connection", None)
         if connection is not None:
             try:
@@ -758,7 +771,7 @@ class ResultCatalog:
     def _open_sqlite_connection(self) -> sqlite3.Connection:
         self._validate_storage()
         self._bind_database_descriptor()
-        descriptors_before = _open_descriptor_numbers()
+        descriptors_before = _open_descriptor_identities()
         try:
             connection = sqlite3.connect(
                 self.database,
@@ -778,7 +791,11 @@ class ResultCatalog:
             ):
                 raise CatalogFilesystemError("catalog database changed")
             matching_descriptors = []
-            for descriptor in _open_descriptor_numbers() - descriptors_before:
+            for descriptor, identity in _open_descriptor_identities().items():
+                if descriptors_before.get(descriptor) == identity:
+                    continue
+                if identity != (stat.S_IFREG, *observed_identity):
+                    continue
                 try:
                     metadata = os.fstat(descriptor)
                 except OSError:
@@ -786,6 +803,7 @@ class ResultCatalog:
                 if (
                     stat.S_ISREG(metadata.st_mode)
                     and _inode_identity(metadata) == observed_identity
+                    and _descriptor_identity(metadata) == identity
                 ):
                     matching_descriptors.append(descriptor)
             if len(matching_descriptors) != 1:
@@ -834,7 +852,7 @@ class ResultCatalog:
                 self._validate_storage()
 
     def _initialize(self) -> None:
-        with _SQLITE_OPEN_LOCK, self._connect() as connection:
+        with self._connection_lock, _SQLITE_OPEN_LOCK, self._connect() as connection:
             connection.execute("PRAGMA synchronous=FULL")
             connection.execute("BEGIN EXCLUSIVE")
             try:

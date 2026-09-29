@@ -35,9 +35,11 @@ revalidated on operations. Staging creation and publication are relative to the
 bound object-directory descriptor, so path replacement cannot redirect accepted
 bytes. SQLite uses one lock-serialized retained connection, and connection
 establishment is serialized across catalog instances in the process. At open,
-the catalog proves the newly opened SQLite descriptor has the same device/inode
-as the no-follow database binding; a transient pathname swap cannot substitute
-a database and hide the swap before the post-open check.
+the catalog snapshots each open descriptor's type/device/inode identity and
+proves the newly opened SQLite descriptor matches the no-follow database
+binding. Descriptor-number reuse is accepted only when the identity changed,
+and catalog close is serialized with connection proof. A transient pathname
+swap cannot substitute a database and hide the swap before the post-open check.
 
 Fresh schema initialization holds that process-local critical section through
 completion and uses one SQLite `BEGIN EXCLUSIVE` transaction. The SQLite lock is
