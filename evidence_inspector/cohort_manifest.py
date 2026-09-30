@@ -23,15 +23,12 @@ from pydantic_core import TzInfo
 
 from evidence_inspector.method_registry import (
     RegistryContract,
-    RegistryIdentityError,
     Sha256,
     canonical_contract_bytes,
-    contract_from_canonical_bytes,
 )
 from evidence_inspector.provider_linkage import (
     MAX_REVISIONS,
     ApprovalId,
-    ApprovalPurpose,
     AnalysisRecordId,
     Base64Signature,
     CollectionToken,
@@ -42,7 +39,6 @@ from evidence_inspector.provider_linkage import (
     Nonce,
     PrincipalId,
     ProviderNamespace,
-    ProviderIssuerTrust,
     ProviderRole,
     ProviderTrustSnapshot,
     RunToken,
@@ -63,11 +59,17 @@ from evidence_inspector.provider_linkage_store import (
 from evidence_inspector.provider_linkage_store import (
     capture_expected_trust_pins as _capture_expected_trust_pins,
 )
+from evidence_inspector.safe_ingress import (
+    bounded_json_loads,
+    contract_type_graph,
+    exact_model_bytes,
+)
 
 MAX_MEMBERS = 100_000
 MAX_TRUSTED_GRAPH_DEPTH = 64
 MAX_TRUSTED_GRAPH_NODES = 8_000_000
-MAX_TRUSTED_SCALAR_CHARS = 4_096
+MAX_TRUSTED_SCALAR_BYTES = 16_384
+MAX_COHORT_MANIFEST_BYTES = 512 * 1024 * 1024
 # Whole UTC seconds representable by Python's datetime range, years 1..9999.
 MIN_TIME_COORDINATE = -62_135_596_800
 MAX_TIME_COORDINATE = 253_402_300_799
@@ -523,6 +525,12 @@ class CohortManifest(RegistryContract):
         if self.time_axis.kind == TimeAxisKind.COLLECTION_TIME:
             if self.time_origins:
                 raise ValueError("collection-time manifests cannot declare origins")
+            if self.time_axis.origin_authority_sha256 != time_origin_authority_sha256(
+                ()
+            ):
+                raise ValueError(
+                    "collection-time axes require the canonical empty origin authority"
+                )
         else:
             if self.time_axis.origin_authority_sha256 != time_origin_authority_sha256(
                 self.time_origins
@@ -725,44 +733,17 @@ class CohortManifest(RegistryContract):
         return self
 
 
-_TRUSTED_MODEL_TYPES = frozenset(
-    {
-        ProviderDataAuthorityPayload,
-        ProviderDataGrantPayload,
-        SignedProviderDataGrant,
-        SignedProviderDataAuthority,
-        TimeAxis,
-        CollectionEventReference,
-        TimeOriginReference,
-        PolicyDigests,
-        MeasurementAnchor,
-        ProviderAuthorityReference,
-        CohortMember,
-        CohortManifest,
-        ProviderTrustSnapshot,
-        ProviderIssuerTrust,
-    }
-)
-_TRUSTED_ENUM_TYPES = frozenset(
-    {
-        TechnicalReplicateRule,
-        ReanalysisRule,
-        MemberLineageRole,
-        TimeAxisKind,
-        ProviderDataAuthorityPurpose,
-        ProviderRole,
-        IssuerStatus,
-        ApprovalPurpose,
-        UnitOfAnalysis,
-    }
+_TRUSTED_MODEL_TYPES, _TRUSTED_ENUM_TYPES = contract_type_graph(
+    CohortManifest,
+    ProviderTrustSnapshot,
 )
 
 
 def _require_trusted_graph(value: object) -> None:
     """Reject caller-owned executable object shape before any serialization."""
 
-    # Stack entries are (object, depth, exit_marker, tuple_bound). The explicit
-    # traversal prevents caller-created cycles from reaching Python recursion.
+    # Retain the D05-specific diagnostics while exact_model_bytes below remains
+    # the authoritative closed-graph and expanded-cost check.
     stack: list[tuple[object, int, bool, int | None]] = [(value, 0, False, None)]
     active: set[int] = set()
     visited: set[int] = set()
@@ -778,13 +759,21 @@ def _require_trusted_graph(value: object) -> None:
             raise ValueError("cohort authority graph exceeds its node budget")
         if depth > MAX_TRUSTED_GRAPH_DEPTH:
             raise ValueError("cohort authority graph exceeds its depth budget")
-        if item is None or item_type in {int, bool}:
+        if item is None or item_type is bool:
+            continue
+        if item_type is int:
+            if item.bit_length() > 64:
+                raise ValueError("cohort manifest is not canonical")
             continue
         if item_type is str:
             scalar_bound = (
-                MAX_TRUSTED_SCALAR_CHARS if tuple_bound is None else tuple_bound
+                MAX_TRUSTED_SCALAR_BYTES if tuple_bound is None else tuple_bound
             )
-            if len(item) > scalar_bound:
+            try:
+                encoded_length = len(item.encode("utf-8"))
+            except UnicodeError:
+                raise ValueError("cohort manifest is not canonical") from None
+            if len(item) > scalar_bound or encoded_length > scalar_bound:
                 raise ValueError("cohort authority graph scalar is oversized")
             continue
         if item_type is datetime:
@@ -810,15 +799,23 @@ def _require_trusted_graph(value: object) -> None:
                 stack.append((child, depth + 1, False, None))
             continue
         values = object.__getattribute__(item, "__dict__")
-        fields = item_type.model_fields
-        if type(values) is not dict or set(values) != set(fields):
-            raise TypeError("cohort authority graph has an invalid model shape")
+        fields = vars(item_type).get("__pydantic_fields__")
+        extra = object.__getattribute__(item, "__pydantic_extra__")
+        private = object.__getattribute__(item, "__pydantic_private__")
+        if (
+            type(values) is not dict
+            or type(fields) is not dict
+            or set(values) != set(fields)
+            or (extra is not None and (type(extra) is not dict or extra))
+            or (private is not None and (type(private) is not dict or private))
+        ):
+            raise ValueError("cohort manifest is not canonical")
         for name in reversed(tuple(fields)):
             field = fields[name]
             maximum = next(
                 (
                     constraint.max_length
-                    for constraint in field.metadata
+                    for constraint in object.__getattribute__(field, "metadata")
                     if getattr(constraint, "max_length", None) is not None
                 ),
                 None,
@@ -827,8 +824,21 @@ def _require_trusted_graph(value: object) -> None:
 
 
 def _trusted_contract_bytes(value: RegistryContract) -> bytes:
+    value_type = type(value)
+    if value_type not in _TRUSTED_MODEL_TYPES:
+        raise TypeError("cohort authority graph contains an untrusted object type")
     _require_trusted_graph(value)
-    return canonical_contract_bytes(value)
+    return exact_model_bytes(
+        value,
+        value_type,
+        model_types=_TRUSTED_MODEL_TYPES,
+        enum_types=_TRUSTED_ENUM_TYPES,
+        max_bytes=MAX_COHORT_MANIFEST_BYTES,
+        max_nodes=MAX_TRUSTED_GRAPH_NODES,
+        max_depth=MAX_TRUSTED_GRAPH_DEPTH,
+        max_collection_items=MAX_MEMBERS,
+        max_string_bytes=MAX_TRUSTED_SCALAR_BYTES,
+    )
 
 
 def cohort_manifest_bytes(manifest: CohortManifest) -> bytes:
@@ -839,10 +849,17 @@ def cohort_manifest_bytes(manifest: CohortManifest) -> bytes:
 
 def cohort_manifest_from_bytes(content: bytes) -> CohortManifest:
     try:
-        decoded = json.loads(content)
-    except (UnicodeDecodeError, json.JSONDecodeError):
-        decoded = None
-    if isinstance(decoded, dict) and decoded.get("schema_version") == (
+        decoded = bounded_json_loads(
+            content,
+            max_bytes=MAX_COHORT_MANIFEST_BYTES,
+            max_depth=MAX_TRUSTED_GRAPH_DEPTH,
+            max_nodes=MAX_TRUSTED_GRAPH_NODES,
+            max_collection_items=MAX_MEMBERS,
+            max_string_bytes=MAX_TRUSTED_SCALAR_BYTES,
+        )
+    except (TypeError, ValueError):
+        raise ValueError("cohort manifest is not canonical") from None
+    if type(decoded) is dict and decoded.get("schema_version") == (
         "traceback.cohort-manifest.v1"
     ):
         raise ValueError(
@@ -850,9 +867,12 @@ def cohort_manifest_from_bytes(content: bytes) -> CohortManifest:
             "linkage proposal time; rebuild v2 from collection-event authority"
         )
     try:
-        return contract_from_canonical_bytes(CohortManifest, content)
-    except RegistryIdentityError as exc:
-        raise ValueError("cohort manifest is not canonical") from exc
+        manifest = CohortManifest.model_validate(decoded)
+        if cohort_manifest_bytes(manifest) != content:
+            raise ValueError("cohort manifest bytes are not canonical")
+        return manifest
+    except (TypeError, ValueError):
+        raise ValueError("cohort manifest is not canonical") from None
 
 
 def cohort_manifest_sha256(manifest: CohortManifest) -> str:
@@ -1001,6 +1021,17 @@ def _substantive_sha256(manifest: CohortManifest) -> str:
         "provider_authorities",
     ):
         payload.pop(key)
+    payload["collection_events"] = [
+        collection_event_statement_sha256(event)
+        for event in manifest.collection_events
+    ]
+    payload["time_origins"] = [
+        time_origin_statement_sha256(origin) for origin in manifest.time_origins
+    ]
+    payload["time_axis"].pop("origin_authority_sha256")
+    for member in payload["members"]:
+        member.pop("collection_event_sha256")
+        member.pop("time_coordinate_sha256")
     return _domain_sha256(b"traceback-cohort-substance-v1", payload)
 
 
