@@ -9,6 +9,7 @@ from typing import ClassVar
 import pytest
 from pydantic import ValidationError
 
+import evidence_inspector.sensitivity_comparison as sensitivity
 from evidence_inspector.cell_origin_explorer import (
     build_cell_origin_explorer_artifact,
     canonical_cell_origin_explorer_bytes,
@@ -215,12 +216,14 @@ def _complete_estimates(offset: float = 0.0) -> tuple[SamplingEstimate, ...]:
     )
 
 
-def _study_bundle() -> SensitivityStudyBundle:
+def _study_bundle(
+    edge_policy: EdgeInclusionPolicy = EdgeInclusionPolicy.MOLECULE_MIDPOINT_HALF_OPEN,
+) -> SensitivityStudyBundle:
     source = _source()
-    family = _family()
+    family = _family().model_copy(update={"edge_inclusion_policy": edge_policy})
     parameters = _parameter_sets(source)
     registration = register_sensitivity_study(
-        registration_id="registration.synthetic",
+        registration_id=f"registration.synthetic.{edge_policy.value}",
         source=source,
         subset_family=family,
         parameter_sets=parameters,
@@ -1063,6 +1066,63 @@ def test_every_e11_public_model_boundary_rejects_virtual_dispatch() -> None:
         )
 
 
+def test_e11_rejects_top_level_nested_extra_and_private_state_without_hooks(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    bundle = _study_bundle()
+    serializer_calls = 0
+
+    class SerializerGuard:
+        def to_python(self, *args: object, **kwargs: object) -> object:
+            nonlocal serializer_calls
+            serializer_calls += 1
+            raise AssertionError("forged state reached pinned serializer")
+
+    class EvilProxy:
+        calls = 0
+
+        def __str__(self) -> str:
+            type(self).calls += 1
+            return "/Users/alice/private.bam"
+
+        def __iter__(self):
+            type(self).calls += 1
+            raise AssertionError("forged proxy was traversed")
+
+    monkeypatch.setattr(
+        SensitivityStudyBundle,
+        "__pydantic_serializer__",
+        SerializerGuard(),
+    )
+    proxy = EvilProxy()
+    forged_top = bundle.model_copy(update={"hidden_private_path": proxy})
+    with pytest.raises(SensitivityContractError):
+        build_sensitivity_comparison_artifact(forged_top)
+
+    forged_outcome = bundle.outcomes[0].model_copy(
+        update={"hidden_private_path": "/Users/alice/private.bam"}
+    )
+    forged_nested = bundle.model_copy(
+        update={"outcomes": (forged_outcome, *bundle.outcomes[1:])}
+    )
+    with pytest.raises(SensitivityContractError):
+        build_sensitivity_comparison_artifact(forged_nested)
+
+    cycle: list[object] = []
+    cycle.append(cycle)
+    forged_private = bundle.model_copy()
+    object.__setattr__(forged_private, "__pydantic_private__", {"cycle": cycle})
+    with pytest.raises(SensitivityContractError):
+        build_sensitivity_comparison_artifact(forged_private)
+
+    forged_extra = bundle.model_copy()
+    object.__setattr__(forged_extra, "__pydantic_extra__", {"proxy": proxy})
+    with pytest.raises(SensitivityContractError):
+        build_sensitivity_comparison_artifact(forged_extra)
+    assert EvilProxy.calls == 0
+    assert serializer_calls == 0
+
+
 def test_public_object_boundaries_preflight_scalars_and_collections() -> None:
     bundle = _study_bundle()
     giant_registration = bundle.registration.model_copy(
@@ -1099,18 +1159,88 @@ def test_public_object_boundaries_preflight_scalars_and_collections() -> None:
         whole_molecule_membership_sha256((digest,) * (MAX_MEMBERSHIP_DIGESTS + 1))
 
 
+def test_registration_id_is_bounded_before_model_digest(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    digest_calls = 0
+
+    def unexpected_digest(*args: object, **kwargs: object) -> str:
+        nonlocal digest_calls
+        digest_calls += 1
+        raise AssertionError("registration digest must not run")
+
+    monkeypatch.setattr(sensitivity, "_model_digest", unexpected_digest)
+    source = _source()
+    with pytest.raises(SensitivityContractError, match="registration ID"):
+        register_sensitivity_study(
+            registration_id="x" * 10_000_000,
+            source=source,
+            subset_family=_family(),
+            parameter_sets=_parameter_sets(source),
+        )
+    assert digest_calls == 0
+
+
+@pytest.mark.parametrize(
+    "private_id",
+    ("patient123", "/Users/alice/private.bam", "Alice Example"),
+)
+def test_digest_ids_are_privacy_safe_before_digest_entry(
+    private_id: str, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    bundle = _study_bundle()
+    complete = next(item for item in bundle.outcomes if item.binding is not None)
+    binding = complete.binding
+    assert binding is not None
+    digest_calls = 0
+
+    def unexpected_digest(*args: object, **kwargs: object) -> str:
+        nonlocal digest_calls
+        digest_calls += 1
+        raise AssertionError("invalid identifier reached digest helper")
+
+    monkeypatch.setattr(sensitivity, "_digest", unexpected_digest)
+    with pytest.raises(SensitivityContractError):
+        sensitivity_result_sha256(
+            result_id=private_id,
+            key=complete.key,
+            attrition=complete.attrition,
+            subset_sha256=complete.subset_sha256,
+            parameters_sha256=binding.parameters_sha256,
+            estimates=complete.estimates,
+        )
+
+    bundle_arguments = {
+        "bundle_id": binding.bundle_id,
+        "result_sha256": binding.result_sha256,
+        "method_ref": binding.method_ref,
+        "method_definition_sha256": binding.method_definition_sha256,
+        "atlas_id": binding.atlas_id,
+        "atlas_sha256": binding.atlas_sha256,
+        "filter_sha256": binding.filter_sha256,
+        "seed": binding.seed,
+        "subset_sha256": binding.subset_sha256,
+        "parameters_sha256": binding.parameters_sha256,
+    }
+    with pytest.raises(SensitivityContractError):
+        sensitivity_bundle_sha256(**{**bundle_arguments, "bundle_id": private_id})
+    with pytest.raises(SensitivityContractError):
+        sensitivity_bundle_sha256(**{**bundle_arguments, "atlas_id": private_id})
+    assert digest_calls == 0
+
+
 @pytest.mark.parametrize("policy", tuple(EdgeInclusionPolicy))
 def test_every_edge_policy_is_bound_and_replays(policy: EdgeInclusionPolicy) -> None:
-    source = _source()
-    family = _family().model_copy(update={"edge_inclusion_policy": policy})
-    registration = register_sensitivity_study(
-        registration_id=f"registration.edge.{policy.value}",
-        source=source,
-        subset_family=family,
-        parameter_sets=_parameter_sets(source),
+    artifact = build_sensitivity_comparison_artifact(_study_bundle(policy))
+    canonical = canonical_sensitivity_comparison_bytes(artifact)
+    replayed = sensitivity_comparison_from_canonical_bytes(canonical)
+    assert replayed == artifact
+    assert replayed.bundle.registration.subset_family.edge_inclusion_policy == policy
+    assert replayed.view.edge_inclusion_policy == policy
+    assert all(
+        receipt.subset_sha256
+        for receipt in replayed.bundle.registration.subset_receipts
     )
-    assert registration.subset_family.edge_inclusion_policy == policy
-    assert all(receipt.subset_sha256 for receipt in registration.subset_receipts)
 
 
 def test_cross_policy_receipt_and_view_tamper_fail_replay() -> None:

@@ -7,6 +7,7 @@ import errno
 import hashlib
 import os
 import stat
+import tracemalloc
 from pathlib import Path
 from typing import ClassVar
 
@@ -14,6 +15,7 @@ import pytest
 from pydantic import ValidationError
 
 import evidence_inspector.portable_view as portable
+import evidence_inspector.safe_ingress as safe_ingress
 from evidence_inspector.cell_origin_explorer import build_cell_origin_explorer_artifact
 from evidence_inspector.cna_explorer import CnaSource
 from evidence_inspector.compatibility import CompatibilityOutcome, TrustState
@@ -1205,6 +1207,70 @@ def test_build_rejects_top_level_and_nested_hooks_without_dispatch(
     assert HookedIdentity.calls == 0
 
 
+def test_e13_rejects_top_level_nested_extra_and_private_state_without_hooks(
+    integrated_request: PortableViewBuildRequest,
+    trust_context: PortableTrustContext,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    serializer_calls = 0
+
+    class SerializerGuard:
+        def to_python(self, *args: object, **kwargs: object) -> object:
+            nonlocal serializer_calls
+            serializer_calls += 1
+            raise AssertionError("forged state reached pinned serializer")
+
+    class EvilProxy:
+        calls = 0
+
+        def __str__(self) -> str:
+            type(self).calls += 1
+            return "/Users/alice/private.bam"
+
+        def __iter__(self):
+            type(self).calls += 1
+            raise AssertionError("forged proxy was traversed")
+
+    monkeypatch.setattr(
+        PortableViewBuildRequest,
+        "__pydantic_serializer__",
+        SerializerGuard(),
+    )
+    proxy = EvilProxy()
+    forged_top = integrated_request.model_copy(
+        update={"hidden_private_path": "/Users/alice/private.bam"}
+    )
+    with pytest.raises(PortableViewContractError):
+        build_portable_view(forged_top, trust_context=trust_context)
+
+    identity = integrated_request.source_identities[0]
+    forged_identity = identity.model_copy(update={"hidden_proxy": proxy})
+    forged_nested = integrated_request.model_copy(
+        update={
+            "source_identities": (
+                forged_identity,
+                *integrated_request.source_identities[1:],
+            )
+        }
+    )
+    with pytest.raises(PortableViewContractError):
+        build_portable_view(forged_nested, trust_context=trust_context)
+
+    cycle: list[object] = []
+    cycle.append(cycle)
+    forged_private = integrated_request.model_copy()
+    object.__setattr__(forged_private, "__pydantic_private__", {"cycle": cycle})
+    with pytest.raises(PortableViewContractError):
+        build_portable_view(forged_private, trust_context=trust_context)
+
+    forged_extra = integrated_request.model_copy()
+    object.__setattr__(forged_extra, "__pydantic_extra__", {"proxy": proxy})
+    with pytest.raises(PortableViewContractError):
+        build_portable_view(forged_extra, trust_context=trust_context)
+    assert EvilProxy.calls == 0
+    assert serializer_calls == 0
+
+
 def test_portable_ingress_preflights_large_scalars_collections_and_integers(
     integrated_request: PortableViewBuildRequest,
     trust_context: PortableTrustContext,
@@ -1262,6 +1328,73 @@ def test_portable_ingress_preflights_large_scalars_collections_and_integers(
     assert callback_calls == 0
 
 
+def test_table_capture_rejects_cycles_and_alias_expansion_before_serialization(
+    integrated_request: PortableViewBuildRequest,
+    trust_context: PortableTrustContext,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    view, _ = build_portable_view(integrated_request, trust_context=trust_context)
+    source_table = next(item for item in view.tables if item.rows)
+    source_row = source_table.rows[0]
+
+    cyclic_row = source_row.model_copy()
+    object.__getattribute__(cyclic_row, "__dict__")["cells"] = (cyclic_row,)
+    cyclic_table = source_table.model_copy(update={"rows": (cyclic_row,)})
+    with pytest.raises(PortableViewContractError):
+        portable.accessible_table_bytes((cyclic_table,))
+
+    repeated_table = source_table.model_copy(update={"rows": (source_row,) * 130_000})
+    serializer_calls = 0
+
+    class SerializerGuard:
+        def to_python(self, *args: object, **kwargs: object) -> object:
+            nonlocal serializer_calls
+            serializer_calls += 1
+            raise AssertionError("oversized alias graph reached pinned serializer")
+
+    monkeypatch.setattr(
+        portable.ExactMeasurementTable,
+        "__pydantic_serializer__",
+        SerializerGuard(),
+    )
+    tracemalloc.start()
+    try:
+        with pytest.raises(PortableViewContractError):
+            portable.accessible_table_bytes((repeated_table,))
+        _, peak_bytes = tracemalloc.get_traced_memory()
+    finally:
+        tracemalloc.stop()
+    assert serializer_calls == 0
+    assert peak_bytes < 8 * 1024 * 1024
+
+    unique_rows = tuple(
+        source_row.model_copy(update={"row_index": index, "row_key": f"row_{index}"})
+        for index in range(32)
+    )
+    unique_table = source_table.model_copy(update={"rows": unique_rows})
+    with pytest.raises(TypeError):
+        safe_ingress.exact_model_bytes(
+            unique_table,
+            portable.ExactMeasurementTable,
+            model_types=portable._PORTABLE_MODEL_TYPES,
+            enum_types=portable._PORTABLE_ENUM_TYPES,
+            max_bytes=portable.MAX_VIEW_BYTES,
+            max_nodes=128,
+        )
+    assert serializer_calls == 0
+
+
+def test_accessible_table_enforces_streaming_byte_ceiling(
+    integrated_request: PortableViewBuildRequest,
+    trust_context: PortableTrustContext,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    view, _ = build_portable_view(integrated_request, trust_context=trust_context)
+    monkeypatch.setattr(portable, "MAX_TABLE_BYTES", len(portable._TABLE_HEADER) + 1)
+    with pytest.raises(PortableViewContractError, match="byte bound"):
+        portable.accessible_table_bytes(view.tables)
+
+
 def test_exact_binary_and_path_types_reject_without_hooks(
     integrated_request: PortableViewBuildRequest,
     trust_context: PortableTrustContext,
@@ -1296,6 +1429,32 @@ def test_exact_binary_and_path_types_reject_without_hooks(
     with pytest.raises(PortableViewContractError):
         verify_portable_view(hostile_path, trust_context=trust_context)  # type: ignore[arg-type]
     assert HostilePath.calls == 0
+
+
+def test_publish_captures_path_before_verifier_can_mutate_original(
+    integrated_request: PortableViewBuildRequest,
+    trust_context: PortableTrustContext,
+    tmp_path: Path,
+) -> None:
+    view, table = build_portable_view(integrated_request, trust_context=trust_context)
+    stable_path = tmp_path / "stable"
+    caller_path = Path(stable_path)
+    redirected_path = tmp_path / "redirected"
+
+    def verifier() -> tuple[PortableSourceIdentity, ...]:
+        object.__setattr__(caller_path, "_parts", list(redirected_path.parts))
+        object.__setattr__(caller_path, "_str", str(redirected_path))
+        return view.source_identities
+
+    publish_portable_view(
+        caller_path,
+        view=view,
+        accessible_table=table,
+        trust_context=trust_context,
+        source_identity_verifier=verifier,
+    )
+    assert stable_path.is_dir()
+    assert not redirected_path.exists()
 
 
 def test_source_verifier_runs_once_and_return_is_exact_captured(

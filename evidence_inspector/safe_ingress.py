@@ -15,6 +15,7 @@ from pydantic_core import TzInfo
 
 DEFAULT_MAX_DEPTH = 128
 DEFAULT_MAX_NODES = 2_000_000
+DEFAULT_MAX_EXPANDED_NODES = DEFAULT_MAX_NODES
 DEFAULT_MAX_COLLECTION_ITEMS = 500_000
 DEFAULT_MAX_STRING_BYTES = 1_024
 DEFAULT_MAX_BINARY_BYTES = 64 * 1024 * 1024
@@ -68,6 +69,27 @@ def contract_type_graph(
     return frozenset(models), frozenset(enums)
 
 
+def _closed_model_state(
+    value: object, value_type: type[BaseModel]
+) -> tuple[dict[str, object], dict[str, object]] | None:
+    try:
+        state = object.__getattribute__(value, "__dict__")
+        extra = object.__getattribute__(value, "__pydantic_extra__")
+        private = object.__getattribute__(value, "__pydantic_private__")
+    except (AttributeError, TypeError):
+        return None
+    fields = vars(value_type).get("__pydantic_fields__")
+    if type(state) is not dict or type(fields) is not dict:
+        return None
+    if any(type(key) is not str for key in state) or set(state) != set(fields):
+        return None
+    if extra is not None and (type(extra) is not dict or len(extra) != 0):
+        return None
+    if private is not None and (type(private) is not dict or len(private) != 0):
+        return None
+    return state, fields
+
+
 def graph_is_safe(
     root: object,
     *,
@@ -82,12 +104,16 @@ def graph_is_safe(
 ) -> bool:
     """Inspect exact object state without invoking caller-owned hooks."""
 
-    # value, depth, schema max length inherited from the containing field
-    stack: list[tuple[object, int, int | None]] = [(root, 0, None)]
-    seen: set[int] = set()
+    # value, depth, schema max length inherited from the containing field,
+    # and whether this is the matching traversal-exit marker.
+    stack: list[tuple[object, int, int | None, bool]] = [(root, 0, None, False)]
+    active: set[int] = set()
     nodes = 0
     while stack:
-        value, depth, schema_max = stack.pop()
+        value, depth, schema_max, exiting = stack.pop()
+        if exiting:
+            active.remove(id(value))
+            continue
         nodes += 1
         if nodes > max_nodes or depth > max_depth:
             return False
@@ -121,40 +147,131 @@ def graph_is_safe(
         if value_type in enum_types:
             continue
         identity = id(value)
-        if identity in seen:
-            continue
-        seen.add(identity)
+        if identity in active:
+            return False
+        active.add(identity)
+        stack.append((value, depth, schema_max, True))
         if value_type in model_types:
-            try:
-                state = object.__getattribute__(value, "__dict__")
-            except (AttributeError, TypeError):
+            closed_state = _closed_model_state(value, value_type)
+            if closed_state is None:
                 return False
-            fields = vars(value_type).get("__pydantic_fields__")
-            if type(state) is not dict or type(fields) is not dict:
-                return False
-            if any(type(key) is not str for key in state) or not set(fields) <= set(
-                state
-            ):
-                return False
+            state, fields = closed_state
             for name, field in fields.items():
                 maximum = _field_limit(field, "max_length")
-                stack.append((state[name], depth + 1, maximum))
+                stack.append((state[name], depth + 1, maximum, False))
             continue
         if value_type in {tuple, list}:
             limit = min(max_collection_items, schema_max or max_collection_items)
             if len(value) > limit:
                 return False
-            stack.extend((item, depth + 1, None) for item in value)
+            stack.extend((item, depth + 1, None, False) for item in value)
             continue
         if value_type is dict:
             limit = min(max_collection_items, schema_max or max_collection_items)
             if len(value) > limit:
                 return False
-            stack.extend((item, depth + 1, None) for item in value)
-            stack.extend((item, depth + 1, None) for item in value.values())
+            stack.extend((item, depth + 1, None, False) for item in value)
+            stack.extend((item, depth + 1, None, False) for item in value.values())
             continue
         return False
     return True
+
+
+def expanded_json_size_is_safe(
+    root: object,
+    *,
+    model_types: frozenset[type[BaseModel]],
+    enum_types: frozenset[type[Enum]],
+    max_bytes: int,
+    max_depth: int = DEFAULT_MAX_DEPTH,
+    max_nodes: int = DEFAULT_MAX_EXPANDED_NODES,
+) -> bool:
+    """Bound expanded JSON cost while charging every DAG alias occurrence."""
+
+    memo: dict[int, tuple[int, int]] = {}
+    active: set[int] = set()
+    exceeded = max_bytes + 1
+    nodes = 0
+
+    def string_bound(value: str) -> int:
+        # A JSON string uses at most a six-byte escape for each code point.
+        return 2 + 6 * len(value)
+
+    def cost(value: object, depth: int) -> int:
+        nonlocal nodes
+        nodes += 1
+        if nodes > max_nodes:
+            return exceeded
+        if depth > max_depth:
+            return exceeded
+        value_type = type(value)
+        if value is None:
+            return 4
+        if value_type is bool:
+            return 5
+        if value_type is int:
+            digits = max(1, value.bit_length() * 30103 // 100000 + 1)
+            return digits + int(value < 0)
+        if value_type is float:
+            return 32
+        if value_type is str:
+            return string_bound(value)
+        if value_type is bytes:
+            return 2 + 6 * len(value)
+        if value_type is datetime:
+            return 66
+        if value_type in enum_types:
+            return cost(object.__getattribute__(value, "_value_"), depth + 1)
+
+        identity = id(value)
+        cached = memo.get(identity)
+        if cached is not None:
+            cached_cost, cached_nodes = cached
+            nodes += cached_nodes - 1
+            if nodes > max_nodes:
+                return exceeded
+            return cached_cost
+        if identity in active:
+            return exceeded
+        subtree_start = nodes
+        active.add(identity)
+        try:
+            if value_type in model_types:
+                closed_state = _closed_model_state(value, value_type)
+                if closed_state is None:
+                    return exceeded
+                state, fields = closed_state
+                total = 2
+                for index, name in enumerate(fields):
+                    total += (1 if index else 0) + string_bound(name) + 1
+                    total += cost(state[name], depth + 1)
+                    if total > max_bytes:
+                        return exceeded
+            elif value_type in {tuple, list}:
+                total = 2
+                for index, item in enumerate(value):
+                    total += (1 if index else 0) + cost(item, depth + 1)
+                    if total > max_bytes:
+                        return exceeded
+            elif value_type is dict:
+                total = 2
+                for index, (key, item) in enumerate(value.items()):
+                    key_cost = cost(key, depth + 1)
+                    total += (1 if index else 0) + key_cost + 2
+                    total += cost(item, depth + 1)
+                    if total > max_bytes:
+                        return exceeded
+            else:
+                return exceeded
+        finally:
+            active.remove(identity)
+        memo[identity] = (total, nodes - subtree_start + 1)
+        return total
+
+    try:
+        return cost(root, 0) <= max_bytes
+    except (AttributeError, TypeError, ValueError):
+        return False
 
 
 def exact_model_bytes(
@@ -164,12 +281,24 @@ def exact_model_bytes(
     model_types: frozenset[type[BaseModel]],
     enum_types: frozenset[type[Enum]],
     max_bytes: int,
+    max_nodes: int = DEFAULT_MAX_EXPANDED_NODES,
 ) -> bytes:
-    if type(value) is not expected_type or not graph_is_safe(
-        value,
-        model_types=model_types,
-        enum_types=enum_types,
-        max_binary_bytes=max_bytes,
+    if (
+        type(value) is not expected_type
+        or not expanded_json_size_is_safe(
+            value,
+            model_types=model_types,
+            enum_types=enum_types,
+            max_bytes=max_bytes,
+            max_nodes=max_nodes,
+        )
+        or not graph_is_safe(
+            value,
+            model_types=model_types,
+            enum_types=enum_types,
+            max_binary_bytes=max_bytes,
+            max_nodes=max_nodes,
+        )
     ):
         raise TypeError("contract object graph is invalid")
     payload = expected_type.__pydantic_serializer__.to_python(
@@ -232,11 +361,15 @@ def safe_local_path(value: object, *, max_length: int = 4096) -> Path:
             raise TypeError("local path is invalid")
         return Path(value)
     if type(value) is _EXACT_PATH_TYPE:
-        parts = object.__getattribute__(value, "_parts")
-        if type(parts) is not list or any(type(item) is not str for item in parts):
+        raw_parts = object.__getattribute__(value, "_parts")
+        if type(raw_parts) is not list:
             raise TypeError("local path is invalid")
-        rendered = str(value)
+        captured_parts = tuple(raw_parts)
+        if any(type(item) is not str for item in captured_parts):
+            raise TypeError("local path is invalid")
+        captured = Path(*captured_parts)
+        rendered = str(captured)
         if len(rendered) > max_length or "\x00" in rendered:
             raise TypeError("local path is invalid")
-        return value
+        return captured
     raise TypeError("local path type is invalid")

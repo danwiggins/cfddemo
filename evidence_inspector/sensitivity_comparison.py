@@ -621,6 +621,7 @@ def register_sensitivity_study(
     subset_family: WholeMoleculeSubsetFamily,
     parameter_sets: tuple[RegisteredParameterSet, ...],
 ) -> SensitivityRegistration:
+    registration_id = _bounded_safe_id(registration_id, "registration ID")
     source = _capture(source, SensitivitySource)
     subset_family = _capture(subset_family, WholeMoleculeSubsetFamily)
     parameter_sets = _capture_model_tuple(
@@ -770,7 +771,7 @@ def sensitivity_result_sha256(
     parameters_sha256: str,
     estimates: tuple[SamplingEstimate, ...],
 ) -> str:
-    result_id = _bounded_string(result_id, "result ID")
+    result_id = _bounded_safe_id(result_id, "result ID")
     key = _capture(key, RegisteredRunKey)
     attrition = _capture(attrition, RunAttrition)
     subset_sha256 = _sha256_string(subset_sha256, "subset digest")
@@ -804,13 +805,13 @@ def sensitivity_bundle_sha256(
     subset_sha256: str,
     parameters_sha256: str,
 ) -> str:
-    bundle_id = _bounded_string(bundle_id, "bundle ID")
+    bundle_id = _bounded_safe_id(bundle_id, "bundle ID")
+    atlas_id = _bounded_safe_id(atlas_id, "atlas ID")
     result_sha256 = _sha256_string(result_sha256, "result digest")
     method_ref = _capture(method_ref, MethodReference)
     method_definition_sha256 = _sha256_string(
         method_definition_sha256, "method-definition digest"
     )
-    atlas_id = _bounded_string(atlas_id, "atlas ID")
     atlas_sha256 = _sha256_string(atlas_sha256, "atlas digest")
     filter_sha256 = _sha256_string(filter_sha256, "filter digest")
     if type(seed) is not int or seed < 0 or seed > 2**63 - 1:
@@ -1377,6 +1378,15 @@ def _bounded_string(value: object, label: str) -> str:
     if type(value) is not str or len(value) > 128:
         raise SensitivityContractError(f"{label} is invalid")
     return value
+
+
+def _bounded_safe_id(value: object, label: str) -> str:
+    identifier = _bounded_string(value, label)
+    try:
+        _require_safe_token(identifier, field=label)
+    except ValueError as exc:
+        raise SensitivityContractError(f"{label} is invalid") from exc
+    return identifier
 
 
 def _sha256_string(value: object, label: str) -> str:

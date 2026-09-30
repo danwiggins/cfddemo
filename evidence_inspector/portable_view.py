@@ -67,6 +67,8 @@ MAX_SOURCE_IDENTITIES = 128
 MAX_TABLES = 32
 MAX_ROWS = 500_000
 MAX_CELLS = 32
+MAX_TOTAL_ROWS = MAX_ROWS
+MAX_TOTAL_CELLS = MAX_ROWS * MAX_CELLS
 MAX_LIMITATIONS = 128
 MAX_TABLE_BYTES = 64 * 1024 * 1024
 MAX_VIEW_BYTES = 32 * 1024 * 1024
@@ -716,9 +718,51 @@ def _capture_portable(value: object, expected_type: type[ModelT], max_bytes: int
 def _capture_tables(value: object) -> tuple[ExactMeasurementTable, ...]:
     if type(value) is not tuple or len(value) > MAX_TABLES:
         raise PortableViewContractError("portable table collection exceeds its bound")
-    return tuple(
-        _capture_portable(item, ExactMeasurementTable, MAX_VIEW_BYTES) for item in value
-    )
+    total_rows = 0
+    total_cells = 0
+    for table in value:
+        if type(table) is not ExactMeasurementTable:
+            raise PortableViewContractError("portable table input is invalid")
+        state = object.__getattribute__(table, "__dict__")
+        rows = state.get("rows") if type(state) is dict else None
+        if type(rows) is not tuple:
+            raise PortableViewContractError("portable table rows are invalid")
+        total_rows += len(rows)
+        if total_rows > MAX_TOTAL_ROWS:
+            raise PortableViewContractError(
+                "portable table rows exceed aggregate bound"
+            )
+        for row in rows:
+            if type(row) is not ExactTableRow:
+                raise PortableViewContractError("portable table row is invalid")
+            row_state = object.__getattribute__(row, "__dict__")
+            cells = row_state.get("cells") if type(row_state) is dict else None
+            if type(cells) is not tuple:
+                raise PortableViewContractError("portable table cells are invalid")
+            total_cells += len(cells)
+            if total_cells > MAX_TOTAL_CELLS:
+                raise PortableViewContractError(
+                    "portable table cells exceed aggregate bound"
+                )
+
+    captured: list[ExactMeasurementTable] = []
+    total_bytes = 0
+    for item in value:
+        table = _capture_portable(item, ExactMeasurementTable, MAX_VIEW_BYTES)
+        table_bytes = exact_model_bytes(
+            table,
+            ExactMeasurementTable,
+            model_types=_PORTABLE_MODEL_TYPES,
+            enum_types=_PORTABLE_ENUM_TYPES,
+            max_bytes=MAX_VIEW_BYTES,
+        )
+        total_bytes += len(table_bytes)
+        if total_bytes > MAX_VIEW_BYTES:
+            raise PortableViewContractError(
+                "portable tables exceed aggregate byte bound"
+            )
+        captured.append(table)
+    return tuple(captured)
 
 
 def _capture_source_identities(value: object) -> tuple[PortableSourceIdentity, ...]:
@@ -1612,7 +1656,7 @@ def accessible_table_bytes(tables: tuple[ExactMeasurementTable, ...]) -> bytes:
     """Return the canonical long-form exact-value table bytes."""
 
     tables = _capture_tables(tables)
-    lines = [_TABLE_HEADER]
+    content = bytearray(_TABLE_HEADER.encode("utf-8"))
     for table in tables:
         for row in table.rows:
             for cell in row.cells:
@@ -1642,11 +1686,13 @@ def accessible_table_bytes(tables: tuple[ExactMeasurementTable, ...]) -> bytes:
                     raise PortableViewContractError(
                         "accessible table cell is not TSV-safe"
                     )
-                lines.append("\t".join(rendered) + "\n")
-    content = "".join(lines).encode("utf-8")
-    if len(content) > MAX_TABLE_BYTES:
-        raise PortableViewContractError("accessible table exceeds byte bound")
-    return content
+                line = ("\t".join(rendered) + "\n").encode("utf-8")
+                if len(content) + len(line) > MAX_TABLE_BYTES:
+                    raise PortableViewContractError(
+                        "accessible table exceeds byte bound"
+                    )
+                content.extend(line)
+    return bytes(content)
 
 
 def replay_portable_view(
