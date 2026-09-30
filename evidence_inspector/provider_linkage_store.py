@@ -95,6 +95,10 @@ class ActiveLinkageSnapshot(RegistryContract):
         return self
 
 
+def committed_linkage_receipt_sha256(receipt: CommittedLinkageReceipt) -> str:
+    return hashlib.sha256(canonical_contract_bytes(receipt)).hexdigest()
+
+
 def _normalize_schema_sql(statement: str) -> str:
     return "".join(statement.split()).casefold()
 
@@ -817,4 +821,5 @@ __all__ = [
     "ProviderLinkageStoreError",
     "ProviderLinkageStoreSchemaError",
     "ProviderLinkageStoreUnsafe",
+    "committed_linkage_receipt_sha256",
 ]
