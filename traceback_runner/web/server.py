@@ -49,6 +49,7 @@ STATE_FILE_MODE = 0o600
 _STABLE_LOCK_ROOT = Path("/tmp").resolve(strict=True)
 _JOB_ROUTE = re.compile(r"^/api/v1/jobs/(job_[0-9a-f]{32})$")
 _EXPLORER_RESULT_ROUTE = re.compile(r"^/api/v1/explorer/results/(result_[0-9a-f]{40})$")
+_EXPLORER_COMPARE_ROUTE = "/api/v1/explorer/compare"
 _COOKIE_NAME = re.compile(r"^[!#$%&'*+\-.^_`|~0-9A-Za-z]+$")
 _COOKIE_VALUE = re.compile(r"^[A-Za-z0-9_-]{0,256}$")
 _SECURITY_HEADERS = {
@@ -649,7 +650,10 @@ class _Handler(http.server.BaseHTTPRequestHandler):
         if parsed.fragment:
             self._json(404, {"error": {"code": "TBX-WEB-404"}})
             return
-        if parsed.query and parsed.path != "/api/v1/explorer/catalog":
+        if parsed.query and parsed.path not in {
+            "/api/v1/explorer/catalog",
+            _EXPLORER_COMPARE_ROUTE,
+        }:
             self._json(404, {"error": {"code": "TBX-WEB-404"}})
             return
         asset = self.application.assets.get(parsed.path)
@@ -704,6 +708,30 @@ class _Handler(http.server.BaseHTTPRequestHandler):
                     query_payload["cursor"] = parameters["cursor"][0]
                 page = self.application.explorer.query(CatalogQuery(**query_payload))
                 self._json(200, page.model_dump(mode="json"))
+                return
+            if parsed.path == _EXPLORER_COMPARE_ROUTE:
+                self.application.boundary.authorize(request)
+                if self.application.explorer is None:
+                    raise ApiProblem(404, self.application.kernel.not_found_problem)
+                parameters = parse_qs(
+                    parsed.query,
+                    keep_blank_values=False,
+                    strict_parsing=True,
+                    max_num_fields=2,
+                )
+                if set(parameters) != {"left", "right"} or any(
+                    len(values) != 1 for values in parameters.values()
+                ):
+                    raise ValueError("comparison requires singular left and right")
+                result_pattern = re.compile(r"^result_[0-9a-f]{40}$")
+                left = parameters["left"][0]
+                right = parameters["right"][0]
+                if not result_pattern.fullmatch(left) or not result_pattern.fullmatch(
+                    right
+                ):
+                    raise ValueError("comparison result identity is invalid")
+                comparison = self.application.explorer.compare(left, right)
+                self._json(200, comparison.model_dump(mode="json"))
                 return
             explorer_match = _EXPLORER_RESULT_ROUTE.fullmatch(parsed.path)
             if explorer_match is not None:

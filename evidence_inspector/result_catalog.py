@@ -27,6 +27,7 @@ from pydantic import (
     Field,
     StringConstraints,
     TypeAdapter,
+    ValidationError,
     field_validator,
     model_validator,
 )
@@ -145,19 +146,11 @@ _MAX_FILE_BYTES = {
 _MAX_TOTAL_BYTES = 36 * 1024 * 1024
 
 Sha256 = Annotated[str, StringConstraints(pattern=r"^[0-9a-f]{64}$")]
-ResultId = Annotated[
-    str, StringConstraints(pattern=r"^result_[0-9a-f]{40}$")
-]
-RootId = Annotated[
-    str, StringConstraints(pattern=r"^root_[a-z0-9]+(?:_[a-z0-9]+)*$")
-]
-DisplayAlias = Annotated[
-    str, StringConstraints(pattern=r"^dsp_[a-z0-9]{8,32}$")
-]
+ResultId = Annotated[str, StringConstraints(pattern=r"^result_[0-9a-f]{40}$")]
+RootId = Annotated[str, StringConstraints(pattern=r"^root_[a-z0-9]+(?:_[a-z0-9]+)*$")]
+DisplayAlias = Annotated[str, StringConstraints(pattern=r"^dsp_[a-z0-9]{8,32}$")]
 RunAlias = Annotated[str, StringConstraints(pattern=r"^rnx_[a-z0-9]{8,32}$")]
-TimepointAlias = Annotated[
-    str, StringConstraints(pattern=r"^tpt_[a-z0-9]{8,32}$")
-]
+TimepointAlias = Annotated[str, StringConstraints(pattern=r"^tpt_[a-z0-9]{8,32}$")]
 
 _ROOT_ID = TypeAdapter(RootId)
 
@@ -319,9 +312,7 @@ class CatalogEmptyReason(StrEnum):
 
 
 class CatalogPage(CatalogModel):
-    schema_version: Literal["traceback.catalog-page.v1"] = (
-        "traceback.catalog-page.v1"
-    )
+    schema_version: Literal["traceback.catalog-page.v1"] = "traceback.catalog-page.v1"
     results: tuple[CatalogResultRef, ...]
     next_cursor: ResultId | None = None
     empty: bool
@@ -333,6 +324,27 @@ class CatalogPage(CatalogModel):
             raise ValueError("empty state must match result count")
         if self.empty != (self.empty_reason is not None):
             raise ValueError("empty reason must appear exactly for empty pages")
+        return self
+
+
+class CatalogVerificationContext(CatalogModel):
+    """Current authority inputs required to re-verify one catalog result."""
+
+    registry: MethodRegistry
+    authority_head: AuthorityHead
+    expected_authority_head_sha256: Sha256
+    capability: CurrentMethodCapability
+
+    @model_validator(mode="after")
+    def current_authority_replays(self) -> CatalogVerificationContext:
+        replay_current_capability(
+            self.registry,
+            self.authority_head,
+            self.expected_authority_head_sha256,
+            self.capability,
+        )
+        if _capability_is_revoked(self.registry, self.capability):
+            raise ValueError("catalog verification authority is revoked")
         return self
 
 
@@ -369,9 +381,9 @@ def _capability_is_revoked(
         and item.effective_at <= capability.as_of
         for item in registry.revocations
     )
-    return (
-        capability.qualification_state is None and revoked_qualification
-    ) or (capability.display_role is None and revoked_role)
+    return (capability.qualification_state is None and revoked_qualification) or (
+        capability.display_role is None and revoked_role
+    )
 
 
 def _safe_relative(value: str) -> tuple[str, ...]:
@@ -439,7 +451,9 @@ def _open_descriptor_identities() -> dict[int, tuple[int, int, int]]:
             opened[descriptor] = identity
         return opened
     except OSError:
-        raise CatalogFilesystemError("database descriptor proof is unavailable") from None
+        raise CatalogFilesystemError(
+            "database descriptor proof is unavailable"
+        ) from None
 
 
 def _open_directory_at(parent_fd: int, name: str) -> int:
@@ -535,7 +549,10 @@ def _copy_exact_bundle(
                 if output is not None:
                     output.close()
             after = os.fstat(descriptor)
-            if _stat_identity(before) != _stat_identity(after) or copied != before.st_size:
+            if (
+                _stat_identity(before) != _stat_identity(after)
+                or copied != before.st_size
+            ):
                 raise CatalogFilesystemError("bundle changed during import")
             total += copied
             source_identities[relative] = _stat_identity(after)
@@ -752,13 +769,9 @@ class ResultCatalog:
         if self._database_identity is None or self._database_fd is not None:
             return
         database_flags = (
-            os.O_RDONLY
-            | getattr(os, "O_CLOEXEC", 0)
-            | getattr(os, "O_NOFOLLOW", 0)
+            os.O_RDONLY | getattr(os, "O_CLOEXEC", 0) | getattr(os, "O_NOFOLLOW", 0)
         )
-        descriptor = os.open(
-            "catalog.sqlite3", database_flags, dir_fd=self._root_fd
-        )
+        descriptor = os.open("catalog.sqlite3", database_flags, dir_fd=self._root_fd)
         metadata = os.fstat(descriptor)
         if (
             not stat.S_ISREG(metadata.st_mode)
@@ -956,11 +969,10 @@ class ResultCatalog:
                 finally:
                     os.close(rebound_fd)
             final_root = os.stat(root_path, follow_symlinks=False)
-            if (
-                stat.S_ISLNK(final_root.st_mode)
-                or (final_root.st_dev, final_root.st_ino)
-                != (root_stat.st_dev, root_stat.st_ino)
-            ):
+            if stat.S_ISLNK(final_root.st_mode) or (
+                final_root.st_dev,
+                final_root.st_ino,
+            ) != (root_stat.st_dev, root_stat.st_ino):
                 raise CatalogFilesystemError("catalog import root changed")
             return temporary, bundle_sha256, manifest_sha256
         except CatalogError:
@@ -1001,8 +1013,7 @@ class ResultCatalog:
             if not isinstance(verified.manifest, ResultBundleManifestV2):
                 raise CatalogUnsupportedSchema("bundle schema is unsupported")
             if (
-                verified.manifest.method.method_id
-                != capability.method_ref.method_id
+                verified.manifest.method.method_id != capability.method_ref.method_id
                 or verified.manifest.method.version != capability.method_ref.version
                 or verified.manifest.method.method_definition_sha256
                 != capability.method_definition_sha256
@@ -1063,10 +1074,15 @@ class ResultCatalog:
                                FROM opaque_aliases WHERE result_id=?""",
                             (parsed.result_id,),
                         ).fetchone()
-                        if parsed != reference or alias_row is None or tuple(alias_row) != (
-                            aliases.display_alias,
-                            aliases.run_alias,
-                            aliases.timepoint_alias,
+                        if (
+                            parsed != reference
+                            or alias_row is None
+                            or tuple(alias_row)
+                            != (
+                                aliases.display_alias,
+                                aliases.run_alias,
+                                aliases.timepoint_alias,
+                            )
                         ):
                             raise CatalogConflict("catalog identity conflict")
                         connection.commit()
@@ -1098,7 +1114,9 @@ class ResultCatalog:
                             ),
                         )
                     except sqlite3.IntegrityError:
-                        raise CatalogConflict("catalog alias identity conflict") from None
+                        raise CatalogConflict(
+                            "catalog alias identity conflict"
+                        ) from None
                     self._fault("before_catalog_commit")
                     connection.commit()
                     self._validate_storage()
@@ -1149,7 +1167,9 @@ class ResultCatalog:
 
     def query(self, query: CatalogQuery | Mapping[str, object]) -> CatalogPage:
         normalized = (
-            query if isinstance(query, CatalogQuery) else CatalogQuery.model_validate(query)
+            query
+            if isinstance(query, CatalogQuery)
+            else CatalogQuery.model_validate(query)
         )
         clauses: list[str] = []
         parameters: list[object] = []
@@ -1211,9 +1231,60 @@ class ResultCatalog:
             empty_reason=(
                 CatalogEmptyReason.NO_IMPORTED_RESULTS
                 if not results and not catalog_has_results
-                else CatalogEmptyReason.NO_MATCHES if not results else None
+                else CatalogEmptyReason.NO_MATCHES
+                if not results
+                else None
             ),
         )
+
+    def get_verified(
+        self,
+        result_id: str,
+        context: CatalogVerificationContext,
+    ) -> CatalogResultRef:
+        """Reload and re-verify E04 storage, bundle trust, and live authority."""
+
+        context = CatalogVerificationContext.model_validate_json(
+            canonical_json_bytes(context)
+        )
+        with self._connect() as connection:
+            row = connection.execute(
+                "SELECT ref_json FROM results WHERE result_id=?", (result_id,)
+            ).fetchone()
+        if row is None:
+            raise KeyError("catalog result is unavailable")
+        content = bytes(row[0])
+        try:
+            stored = CatalogResultRef.model_validate_json(content)
+        except (ValidationError, ValueError, TypeError) as exc:
+            raise CatalogError("catalog result reference is invalid") from exc
+        if canonical_json_bytes(stored) != content:
+            raise CatalogError("catalog result reference is not canonical")
+        replay_current_capability(
+            context.registry,
+            context.authority_head,
+            context.expected_authority_head_sha256,
+            context.capability,
+        )
+        if _capability_is_revoked(context.registry, context.capability):
+            raise CatalogError("catalog result authority is revoked")
+        if context.capability.method_ref != stored.method_ref:
+            raise CatalogError("catalog result authority is stale")
+        try:
+            verified = verify_bundle(
+                self._bound_objects / stored.bundle_sha256, self.trust_store
+            )
+        except Exception:
+            raise CatalogError("catalog result bundle is no longer verified") from None
+        current = self._reference(
+            verified,
+            bundle_sha256=stored.bundle_sha256,
+            manifest_sha256=stored.bundle_manifest_sha256,
+            capability=context.capability,
+        )
+        if current != stored:
+            raise CatalogError("catalog result authority or bundle identity changed")
+        return current
 
     @staticmethod
     def _append_method_filter(
@@ -1224,7 +1295,9 @@ class ResultCatalog:
         if not methods:
             return
         clauses.append(
-            "(" + " OR ".join("(r.method_id=? AND r.method_version=?)" for _ in methods) + ")"
+            "("
+            + " OR ".join("(r.method_id=? AND r.method_version=?)" for _ in methods)
+            + ")"
         )
         for method in methods:
             parameters.extend((method.method_id, method.version))
@@ -1242,6 +1315,7 @@ __all__ = [
     "CatalogQuery",
     "CatalogResultRef",
     "CatalogUnsupportedSchema",
+    "CatalogVerificationContext",
     "ExecutionState",
     "InformationState",
     "ResultCatalog",

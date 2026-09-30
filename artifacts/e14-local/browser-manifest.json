@@ -1,0 +1,51 @@
+{
+  "schema_version": "traceback.e14-local-browser-evidence.v1",
+  "captured_at": "2026-09-30T03:50:35Z",
+  "approval_state": "local_unapproved",
+  "base_commit": "1644db99b52d158393d19c404591cf359f2cd7b5",
+  "source_sha256": {
+    "traceback_runner/web/static/app.js": "661d35f10a379ec83b5d12bf1a6347d4e96bb107055bd248281d2b6075086a07",
+    "traceback_runner/web/static/index.html": "d349f9bd4daf83725c194a0e612b8186865e62135a3d9a5f644b2e16d23187fb",
+    "traceback_runner/web/static/styles.css": "0cd60f6cb0ff49312663aaf14e6706597250d00b5672eac2f2856beff3ba20ce"
+  },
+  "http_navigation_ms": {
+    "dns": 0,
+    "tcp": 0,
+    "ttfb": 1,
+    "download": 0,
+    "dom_parse": 5,
+    "dom_ready": 9,
+    "load": 10,
+    "total": 10
+  },
+  "application_render": {
+    "render_state": "ready",
+    "duration_ms": 46.09999990463257,
+    "article_count": 2,
+    "details_count": 16,
+    "exact_row_count": 2,
+    "comparison_state": "unknown",
+    "comparison_blocked_reason": "select two distinct results",
+    "console_message_count": 0
+  },
+  "memory": {
+    "browse_daemon_rss_bytes": 76546048,
+    "browse_daemon_heap_used_bytes": 28206694,
+    "renderer_js_heap_bytes": 3145728,
+    "dom_node_count": 620,
+    "chromium_process_count": 4,
+    "chromium_process_rss_bytes": null,
+    "unavailable_reason": "The browser probe does not collect per-Chromium-process RSS or native and GPU allocation breakdowns."
+  },
+  "screenshot": {
+    "captured": true,
+    "sha256": "0847df558be31dc48cb66065b90d57c6b78d5ac84effb28a3d806f2b71344425",
+    "size_bytes": 258178,
+    "retained_in_repository": false
+  },
+  "limitations": [
+    "This is local unapproved evidence and does not enable release capability.",
+    "The fixture exposes one verified E04 result, so exact pair comparison is correctly blocked as unknown.",
+    "The 10000 verified-import and 100000 process-RSS claims remain unavailable."
+  ]
+}

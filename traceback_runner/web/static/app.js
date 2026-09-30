@@ -9,6 +9,8 @@
   const panels = byId("panels");
   const provenance = byId("provenance");
   const compatibility = byId("compatibility");
+  const renderStartedAt = performance.now();
+  window.__tracebackRenderMetrics = { startedAtMs: renderStartedAt, readyAtMs: null, durationMs: null };
 
   const requestJson = async (path) => {
     const response = await fetch(path, { credentials: "same-origin" });
@@ -24,6 +26,20 @@
     cell.textContent = value;
     row.append(cell);
   };
+  const displayValue = (value) => {
+    if (value === null || value === undefined) return "missing";
+    if (typeof value === "object") return JSON.stringify(value, null, 2);
+    return String(value);
+  };
+  const renderArtifact = (article, label, value) => {
+    const details = document.createElement("details");
+    const summary = document.createElement("summary");
+    summary.textContent = label;
+    const pre = document.createElement("pre");
+    pre.textContent = displayValue(value);
+    details.append(summary, pre);
+    article.append(details);
+  };
   const renderDocument = (label, documentPayload) => {
     const model = documentPayload.models;
     const row = model.result_view.rows.find((item) => item.result_identity.result_id === model.catalog_ref.result_id);
@@ -38,6 +54,13 @@
       ? "Release explorer eligible"
       : "Research inspection only; release explorer and export are disabled";
     article.append(title, state, gate);
+    renderArtifact(article, "E07 fragment values, units, uncertainty, and missingness", model.fragment);
+    renderArtifact(article, "E08 cell-origin values, units, uncertainty, and missingness", model.cell_origin);
+    renderArtifact(article, "E09 CNA values, units, uncertainty, and missingness", model.cna);
+    renderArtifact(article, "E11 provenance identities and differences", model.provenance);
+    renderArtifact(article, "E13 sensitivity values, units, uncertainty, and missingness", model.sensitivity);
+    renderArtifact(article, "E10 portable exact tables", model.portable);
+    renderArtifact(article, "E12 longitudinal", model.longitudinal_state);
     panels.append(article);
     const tableRow = document.createElement("tr");
     const heading = document.createElement("th");
@@ -81,18 +104,22 @@
     if (ids.some((id) => !id)) return;
     try {
       const documents = await Promise.all(ids.map((id) => requestJson(`/api/v1/explorer/results/${id}`)));
-      const models = documents.map((item, index) => renderDocument(index === 0 ? "A" : "B", item));
-      const fragment = models.find((item) => item.fragment)?.fragment;
-      if (fragment) {
-        compatibility.textContent = fragment.synchronized_comparison
-          ? `${fragment.compatibility.outcome}; synchronized comparison`
-          : `${fragment.compatibility.outcome}; deltas withheld`;
+      documents.forEach((item, index) => renderDocument(index === 0 ? "A" : "B", item));
+      if (ids[0] === ids[1]) {
+        compatibility.textContent = "unknown; comparison blocked: select two distinct results";
+        compatibility.dataset.comparisonState = "unknown";
       } else {
-        const sameMethod = models[0].catalog_ref.method_ref.method_id === models[1].catalog_ref.method_ref.method_id;
-        compatibility.textContent = sameMethod
-          ? "Same registered method; no E07 comparison registered"
-          : "Different registered methods; no compatibility decision registered";
+        const query = new URLSearchParams({ left: ids[0], right: ids[1] });
+        const comparison = await requestJson(`/api/v1/explorer/compare?${query}`);
+        compatibility.textContent = comparison.synchronized
+          ? `${comparison.outcome}; exact pair and filter context synchronized${comparison.delta_available ? "; deltas available" : "; no deltas"}`
+          : `${comparison.outcome}; comparison blocked: ${comparison.blocked_reason}`;
+        compatibility.dataset.comparisonState = comparison.outcome;
       }
+      document.documentElement.dataset.renderState = "ready";
+      const readyAtMs = performance.now();
+      window.__tracebackRenderMetrics.readyAtMs = readyAtMs;
+      window.__tracebackRenderMetrics.durationMs = readyAtMs - renderStartedAt;
     } catch (_) {
       panels.replaceChildren();
       exactRows.replaceChildren();
@@ -121,6 +148,12 @@
     right.replaceChildren(...options.map((item) => item.cloneNode(true)));
     if (right.options.length > 1) right.selectedIndex = 1;
     status.textContent = registered.length ? `${registered.length} local result views ready` : "No registered result views match the active filters";
+    if (!registered.length) {
+      document.documentElement.dataset.renderState = "empty";
+      const readyAtMs = performance.now();
+      window.__tracebackRenderMetrics.readyAtMs = readyAtMs;
+      window.__tracebackRenderMetrics.durationMs = readyAtMs - renderStartedAt;
+    }
     await renderSelection();
   };
   const renderJobs = async () => {

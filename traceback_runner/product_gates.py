@@ -676,7 +676,7 @@ class ProductGateReport(RunnerContract):
 
 
 def _synthetic_catalog_ref(index: int) -> CatalogResultRef:
-    """A valid synthetic E04 reference; never a private stand-in record."""
+    """Create an E04-shaped fixture row; this is not a verified import."""
 
     bundle_sha256 = f"{index + 1:064x}"
     method_definition_sha256 = "c" * 64
@@ -713,8 +713,8 @@ def _synthetic_catalog_ref(index: int) -> CatalogResultRef:
 
 
 @contextmanager
-def _real_catalog(count: int) -> Iterator[ResultCatalog]:
-    """Populate the actual immutable catalog schema in bounded batches."""
+def _fixture_catalog(count: int) -> Iterator[ResultCatalog]:
+    """Populate private-SQL fixture rows; never report these as verified imports."""
 
     with tempfile.TemporaryDirectory(prefix="traceback-e14-catalog-") as directory:
         root = Path(directory)
@@ -764,9 +764,17 @@ def _nearest_rank_p95(samples: Sequence[int]) -> int:
 def _explorer_query(catalog: ResultCatalog, query: CatalogQuery) -> object:
     """Exercise the same E04-to-browser projection as the loopback API."""
 
-    from traceback_runner.web.explorer import IntegratedExplorerSource
+    from traceback_runner.web.explorer import (
+        CanonicalExplorerArtifactRepository,
+        CatalogAuthorityIndex,
+        IntegratedExplorerSource,
+    )
 
-    return IntegratedExplorerSource(catalog=catalog).query(query)
+    return IntegratedExplorerSource(
+        catalog=catalog,
+        authority=CatalogAuthorityIndex(()),
+        artifacts=CanonicalExplorerArtifactRepository(()),
+    ).query(query)
 
 
 def _measure_filter(
@@ -1101,13 +1109,13 @@ def run_foundation_gates(
     probe_payload = REGISTERED_NETWORK_PAYLOAD
 
     with deny_external_network() as network_attempts:
-        with _real_catalog(CATALOG_RECORDS) as catalog:
+        with _fixture_catalog(CATALOG_RECORDS) as catalog:
             filter_measurement = _measure_filter(catalog, CATALOG_RECORDS)
             render_measurement = _measure_initial_render(catalog, CATALOG_RECORDS)
 
         tracemalloc.start()
         try:
-            with _real_catalog(STRESS_RECORDS) as stress_catalog:
+            with _fixture_catalog(STRESS_RECORDS) as stress_catalog:
                 stress_page = _explorer_query(stress_catalog, CatalogQuery(limit=100))
                 _catalog_page_bytes(stress_page)
             _, peak_bytes = tracemalloc.get_traced_memory()
@@ -1214,12 +1222,11 @@ def run_foundation_gates(
         ),
         GateEvidence(
             gate_id=GateId.FILTER_PERFORMANCE,
-            status=(
-                EvidenceStatus.OBSERVED_LOCAL_UNAPPROVED
-                if filter_measurement.target_met
-                else EvidenceStatus.OBSERVED_FAIL
+            status=EvidenceStatus.FIXTURE_ONLY,
+            detail=(
+                "Private-SQL timing over 10000 E04-shaped fixture rows only; "
+                "10000 verified E04 imports are unavailable"
             ),
-            detail="Measured locally against 10000 synthetic records; approved-host rerun required",
             evidence_sha256=filter_sha256,
         ),
         GateEvidence(
@@ -1229,12 +1236,11 @@ def run_foundation_gates(
         ),
         GateEvidence(
             gate_id=GateId.INITIAL_RENDER,
-            status=(
-                EvidenceStatus.OBSERVED_LOCAL_UNAPPROVED
-                if render_measurement.target_met
-                else EvidenceStatus.OBSERVED_FAIL
+            status=EvidenceStatus.FIXTURE_ONLY,
+            detail=(
+                "Python projection serialization only; HTTP, JavaScript, layout, "
+                "and DOM-ready browser timing are unavailable"
             ),
-            detail="Measured local projection serialization; approved-host browser evidence required",
             evidence_sha256=render_sha256,
         ),
         GateEvidence(
@@ -1267,12 +1273,11 @@ def run_foundation_gates(
         ),
         GateEvidence(
             gate_id=GateId.STRESS_MEMORY,
-            status=(
-                EvidenceStatus.OBSERVED_LOCAL_UNAPPROVED
-                if memory.target_met
-                else EvidenceStatus.OBSERVED_FAIL
+            status=EvidenceStatus.FIXTURE_ONLY,
+            detail=(
+                "tracemalloc peak for 100000 private-SQL fixture rows only; process RSS, "
+                "SQLite and native allocations, and browser memory are unavailable"
             ),
-            detail="Measured peak Python allocations for the 100000-record stress fixture",
             evidence_sha256=memory_sha256,
         ),
     )
