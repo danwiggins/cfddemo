@@ -28,6 +28,7 @@ limitation and never changes source values, denominators, or eligibility.
 | Requirement | Authoritative input | E12 check and projection | Acceptance evidence |
 | --- | --- | --- | --- |
 | Authorized cohort selection | Exact `CohortRegistry`; `resolve_history()` result with registry ID, epoch, state version/head, selector, manifest digest | Resolve under the live registry; reject caller-built manifest, browser alias, stale head, or changed linkage authority | Selector resolves current registered history; rollback, stale selector, caller manifest, and head race fail closed |
+| Authorized reader | Prerequisite protected `ReaderAuthorizationRegistry` containing externally provider-authorized, signed and revocable `longitudinal_reader` grants; independently pinned registry ID, epoch, expected head and B01 session binding | Every selector, workspace and source-detail route resolves the opaque session credential to one current, unexpired reader grant under the live registry. The builder receives the live registry plus the session credential, never a caller-authored role, principal, grant, scope or approval digest | Missing, forged, expired, revoked, wrong-role, wrong-scope, stale-head, registry-replacement and grant-revocation races fail with `permission_denied` before protected selector or workspace reads; synthetic tests use only a checked-in synthetic provider authority |
 | Subject/draw linkage | Live `ProviderLinkageStore` receipts retained by D05 and D03 | Never infer identity from result aliases, dates, method labels, or adjacency; revalidate through D05/D03 APIs | Wrong subject, corrected linkage, tombstone, stale receipt, cross-store receipt, and authority advance suppress all comparisons |
 | Biological timepoint | D05 v2 signed collection event, `CohortManifest.time_axis`, and `CohortMember.biological_timepoint_id/time_coordinate` | Derive one public timepoint ordinal and a stable signed-seconds offset from the first biological coordinate; expose controlled axis kind, `seconds` unit, definition digest, and relative/absolute semantics, but never the protected handle, collection token, or absolute collection timestamp | Sibling specimens share a point only as policy permits; technical rerun/reanalysis remains at its source collection coordinate; unequal intervals retain unequal numeric spacing |
 | Technical rerun and reanalysis distinction | D05 lineage role/source edge plus the prerequisite live D04 bounded record-history snapshot | Source table carries controlled `biological_draw`, `technical_replicate`, or `reanalysis` role; only a manifest denominator contributor counts as a biological unit | Reanalysis twice is idempotent; superseded source remains immutable/history-only; active replacement does not create a timepoint or denominator |
@@ -64,6 +65,12 @@ The module owns the protected-to-public boundary and contains these contracts:
   policy ID/digest, D07 envelope ID/digest, family coordinate,
   projection-policy bytes or digest, manifest or linkage identifier, and never
   carries a release flag.
+- The browser session credential and protected reader authorization are not
+  fields of `LongitudinalWorkspaceRequest` and never enter its replay or public
+  bytes. They are separate boundary inputs resolved through the live
+  `ReaderAuthorizationRegistry`; no route or builder accepts a role name,
+  principal, grant object, scope list, signature, or approval digest from the
+  caller.
 - `ProtectedLongitudinalRow`: exact manifest-member commitment, lineage role,
   denominator contribution, protected timepoint commitment and coordinate,
   D04 record-history identity, D06 binding/status, E06 source, the applicable
@@ -149,6 +156,8 @@ The construction entry point should be one pinned unbound function:
 build_longitudinal_workspace(
     request,
     *,
+    reader_authorization_registry,
+    reader_session_credential,
     cohort_registry,
     cohort_record_catalog,
     supersession_store,
@@ -166,7 +175,10 @@ build_longitudinal_workspace(
 Every caller-owned contract is captured as exact bounded canonical bytes before
 any authority operation. The function requires exact concrete store classes,
 invokes captured unbound methods, and performs no caller callback. It resolves
-D05 through the registry, resolves the approved anchor policy/D07 envelope and
+the opaque session credential to one current externally provider-authorized
+`longitudinal_reader` grant and exact allowed cohort/measurement scope through
+the live reader registry before any protected selection or artifact read. It
+then resolves D05 through the registry, resolves the approved anchor policy/D07 envelope and
 the approved projection policy through their independently pinned registries,
 derives the bounded anchor-candidate page from the registered policy and live
 authority, resolves the request's explicit opaque approved-anchor selector from
@@ -179,7 +191,7 @@ authority, and obtains D10 derived from that exact D09 population and replayed
 D03 decision set. Construction and return require the composable authority-
 fence prerequisite below; the builder is prohibited until that prerequisite
 merges. Under that protocol it acquires the live D01 linkage, D04 history, D05
-cohort, D06 record/catalog, E04 catalog, the protected E06 result-view-source
+cohort, reader-authorization, D06 record/catalog, E04 catalog, the protected E06 result-view-source
 registry, D03 decision, D07
 comparison, D09 summary, D10 context, family-source, anchor-policy and
 projection-policy read fences in their fixed global order, captures every
@@ -200,6 +212,39 @@ groups. If that measurement has no reviewed source projection, E12 names the
 missing projection as a prerequisite and renders no standalone numeric value.
 Registered bridges remain review-only and do not create translated values.
 Cohort statistics beyond D09 and automatic batch correction remain out of scope.
+
+### Protected reader-authorization prerequisite
+
+B01 session possession proves only local transport authentication. Before any
+E12 selector or builder route lands, add a durable bounded
+`ReaderAuthorizationRegistry` whose immutable grants bind registry ID/epoch,
+opaque grant selector, external provider-authority ID and key version, exact
+`longitudinal_reader` role, allowed cohort-registry and measurement scopes,
+issued/expiry times, revocation state, and a canonical provider signature.
+There is no wildcard role or caller-selected scope. Production startup requires
+an independently retained registry ID, epoch and expected head plus configured
+provider trust authority; a missing registry or grant disables E12. Checked-in
+synthetic keys and grants are accepted only when the entire installed run is in
+the explicit synthetic profile and cannot authorize another profile.
+
+Bootstrap uses a separate opaque one-use launch credential mapped server-side
+to a grant selector. Successful exchange stores only the exact grant commitment
+and reader-registry head in server-side session state. Every E12 read and save
+resolves that commitment again under the registry fence and fails before other
+protected reads if it is missing, expired, revoked, out of scope, signed by an
+untrusted key, or no longer at the expected authority head. Grant add/revoke,
+provider-key rotation and session resolution share the same cross-process
+fence; revocation cannot land between final authorization revalidation and the
+returned selector, workspace, source detail or save receipt.
+
+The registry has closed exact schemas, bounded grant/session indexes, canonical
+append-only grant and revocation records, rollback detection, descriptor-safe
+storage, no-overwrite publication, backup/restore identity, and typed safe
+errors. Tests cover forged grants and signatures, wrong role/scope/provider,
+expiry edges, revocation and key rotation, stale/rollback heads, registry/root
+replacement, class/instance/private-state hooks, oversized inputs, concurrent
+bootstrap/read/save versus revoke, crash recovery, and absence of reader,
+provider and scope identifiers from every public byte, error, log and route.
 
 ### D04 record-history prerequisite
 
@@ -246,7 +291,8 @@ whose non-reentrant cross-operation guard rejects nested entry, and E04 exposes
 no composable read fence. D08 must not simulate an atomic snapshot by nesting
 those public APIs or by reading and later comparing unlocked heads. Before the
 workspace builder or saved-comparison publication can land, add reviewed
-authority-fence adapters in prerequisite PRs for D01, D04, D05, D06, E04, the
+authority-fence adapters in prerequisite PRs for D01, D04, D05, the protected
+reader-authorization registry, D06, E04, the
 protected result-view-source registry with current E06 replay verification, D03,
 D07, D09, D10, family-source, anchor-policy and projection-policy stores.
 
@@ -280,13 +326,14 @@ The registry has a closed exact schema and these contracts:
 
 - `LongitudinalComparisonRegistryMetadataV1`: registry ID, registry epoch,
   storage identity, schema version, bound cohort-registry ID/epoch,
-  D04-ledger ID/epoch, D06 catalog authority, E06 result-view-source registry
-  ID/epoch, and creation digest;
+  D04-ledger ID/epoch, reader-authorization registry ID/epoch, D06 catalog
+  authority, E06 result-view-source registry ID/epoch, and creation digest;
 - `SavedLongitudinalComparisonV1`: immutable canonical selection, exact family
   source-value projection request, cohort/manifest/policy/measurement/anchor,
-  D03/D07/D09/D10/D04/source commitments, exact E06 source-registry selector,
-  version and state head, normalized filters, workspace replay digest, creation
-  time, literal local/synthetic/nonrelease states, and content digest;
+  D03/D07/D09/D10/D04/source commitments, protected reader-grant commitment,
+  exact E06 source-registry selector, version and state head, normalized
+  filters, workspace replay digest, creation time, literal
+  local/synthetic/nonrelease states, and content digest;
 - `SavedComparisonJournalEntryV1`: sequence, predecessor head, safe opaque
   selector, saved-object digest, exact dependency-head vector, and entry digest;
 - `SavedComparisonRegistrationReceiptV1`: registry ID/epoch, state version/head,
@@ -303,8 +350,9 @@ when the backup bound would be exceeded. Integer tokens, nesting depth, graph
 nodes, strings and collections also use explicit pre-serialization limits.
 
 Publication holds one exclusive registry lock plus final read fences for every
-mutable identity persisted in the object: D01 linkage, D04 history, D05 cohort,
-D06 record/catalog, E04 catalog, E06 result-view-source registry, D03 decision,
+mutable identity persisted in the object or authorizing the operation: D01
+linkage, D04 history, D05 cohort, reader authorization, D06 record/catalog, E04
+catalog, E06 result-view-source registry, D03 decision,
 D07 comparison, D09
 summary, D10 context, family-source artifact, anchor-policy authority and
 projection-policy authority.
@@ -317,7 +365,8 @@ is idempotent. The same selector/version with different bytes, digest collision,
 or changed authority is a conflict and never overwrites an object.
 
 All dependent operations use one documented lock order:
-`D01 linkage -> D04 history -> D05 cohort registry -> D06 cohort record catalog
+`D01 linkage -> D04 history -> D05 cohort registry -> reader-authorization registry
+-> D06 cohort record catalog
 -> E04 catalog -> E06 result-view-source registry -> D03 decision -> D07 comparison -> D09 summary
 -> D10 context -> family-source artifacts -> anchor-policy registry
 -> projection-policy registry
@@ -369,7 +418,16 @@ the selection/persistence journey complete.
 Extend `IntegratedExplorerSource` with one exact optional longitudinal source
 adapter after the read model exists. Add bounded routes for selector listing,
 workspace projection, and source-detail projection. Reuse B01 session, Host,
-Origin, CSRF, and no-network controls. The HTML order is:
+Origin, CSRF, and no-network controls only after extending B01 bootstrap/session
+creation to bind each session to one live protected reader grant. A bare B01
+session is transport authentication, not longitudinal authorization. Bootstrap
+cannot mint the longitudinal capability from a caller role string: it resolves
+an opaque one-use launch credential against the pinned
+`ReaderAuthorizationRegistry`, verifies the external provider signature,
+expiry, revocation and cohort/measurement scope, and seals the exact grant and
+registry-head commitments into server-side session state. Every longitudinal
+route replays that binding under the registry read fence before selector or
+workspace access. The HTML order is:
 
 1. comparison identity/version and authority state;
 2. compatibility outcome, exact reasons, and permitted next action;
@@ -513,6 +571,11 @@ tests and extend `tests/web/test_integrated_explorer.py` for the HTTP/DOM layer.
     unequal time intervals; desktop/tablet/mobile drawer behavior; 4.5:1
     contrast; 44-pixel targets; reduced motion; 200% reflow/reachability; no
     external requests; and literal disabled release and export controls.
+    They also prove a normal B01 session without a current externally authorized
+    `longitudinal_reader` grant, a caller-injected role, wrong-scope grant,
+    expired/revoked grant, stale registry head, registry replacement, and
+    revocation during final return all yield `permission_denied` with no
+    selector, protected read, workspace payload, log or partial response.
 13. Public bytes retain controlled axis kind, `seconds` unit, definition digest,
     coordinate semantics, and stable signed offsets while excluding absolute
     collection timestamps and protected timepoint handles.
@@ -617,6 +680,13 @@ caller assertions and is therefore prohibited:
   `live_d09_registry_verified=false`; it cannot be used as live D09 authority.
   It also requires an authority-backed D03 decision-to-outcome binding rather
   than a second caller-owned dictionary.
+- B01 authenticates a local browser session but has no externally authorized
+  longitudinal reader-role authority. Add a protected, durable and bounded
+  `ReaderAuthorizationRegistry` whose grants are provider-signed, scoped,
+  expiring and revocable; bind bootstrap/session state to one live grant; add
+  its composable read fence; and require live replay before every selector,
+  builder, source-detail and save operation. A caller role string, local session
+  alone, or checked-in synthetic grant cannot authorize non-synthetic access.
 - D04 lacks a bounded authoritative history/status read. `active_snapshot()`
   returns leaves and `comparison_status()` returns invalidation only. The D04
   history API above must merge before D08 promises superseded source rows.
@@ -647,7 +717,8 @@ caller assertions and is therefore prohibited:
   and reopen journey.
 
 The merge order is D06 correction, D04 history API, corrected D09, corrected
-D10, protected D03/D07 decision/comparison discovery, protected anchor-policy
+D10, protected reader-authorization registry plus B01 session binding,
+protected D03/D07 decision/comparison discovery, protected anchor-policy
 and projection-policy registries, protected E06 result-view-source discovery,
 family-specific measurement-source adapters,
 composable authority-fence adapters/coordinator, D08 read model, durable
