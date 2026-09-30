@@ -26,6 +26,7 @@ FAULT_POINTS = frozenset(
         "after_visibility_commit",
         "before_read_return",
         "before_status_return",
+        "before_live_reader_return",
     }
 )
 

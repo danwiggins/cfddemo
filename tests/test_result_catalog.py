@@ -38,11 +38,13 @@ from evidence_inspector.result_catalog import (
     CatalogQuery,
     CatalogResultRef,
     CatalogUnsupportedSchema,
+    CatalogVerificationContext,
     ExecutionState,
     InformationState,
     ResultCatalog,
     TrustState,
     _copy_exact_bundle,
+    bind_catalog_live_reader,
 )
 from tests.test_bundles import _bundle, _downgrade_to_v1
 from tests.test_method_registry import (
@@ -105,7 +107,10 @@ def _bundle_method(capability) -> dict[str, str]:
     }
 
 
-def _catalog(tmp_path: Path):
+def _catalog(
+    tmp_path: Path,
+    fault_controller: DeterministicFaultController | None = None,
+):
     import_root = tmp_path / "imports"
     import_root.mkdir(parents=True)
     *_, capability = _authority()
@@ -116,6 +121,7 @@ def _catalog(tmp_path: Path):
         tmp_path / "catalog",
         import_roots={"root_primary": import_root},
         trust_store=trust_store,
+        **({"fault_controller": fault_controller} if fault_controller else {}),
     )
     return catalog, bundle_path, import_root
 
@@ -168,6 +174,16 @@ def _prepare(catalog: ResultCatalog):
     )
 
 
+def _verification_context() -> CatalogVerificationContext:
+    registry, _, _, _, head, head_sha256, capability = _authority()
+    return CatalogVerificationContext(
+        registry=registry,
+        authority_head=head,
+        expected_authority_head_sha256=head_sha256,
+        capability=capability,
+    )
+
+
 def test_prepared_publication_is_hidden_until_atomic_adoption(
     tmp_path: Path,
 ) -> None:
@@ -180,6 +196,65 @@ def test_prepared_publication_is_hidden_until_atomic_adoption(
     catalog.adopt_prepared_import(prepared)
     assert catalog.query(CatalogQuery()).results == (prepared.reference,)
     catalog.finish_prepared_import(prepared)
+
+
+def test_live_reader_never_exposes_pending_coordinated_result(tmp_path: Path) -> None:
+    catalog, _, _ = _catalog(tmp_path)
+    prepared = _prepare(catalog)
+    catalog.stage_prepared_import(prepared)
+    reader = bind_catalog_live_reader(catalog)
+    with pytest.raises(KeyError, match="unavailable"):
+        reader.get_verified(prepared.reference.result_id, _verification_context())
+    assert catalog.query(CatalogQuery()).empty
+    catalog.adopt_prepared_import(prepared)
+    assert (
+        reader.get_verified(prepared.reference.result_id, _verification_context())
+        == prepared.reference
+    )
+
+
+def test_live_reader_fences_recovery_until_verified_return(tmp_path: Path) -> None:
+    controller = DeterministicFaultController(
+        "before_live_reader_return", action=FaultAction.PAUSE
+    )
+    catalog, _, _ = _catalog(tmp_path, controller)
+    prepared = _prepare(catalog)
+    catalog.stage_prepared_import(prepared)
+    catalog.adopt_prepared_import(prepared)
+    reader = bind_catalog_live_reader(catalog)
+    returned: list[CatalogResultRef] = []
+    recovery_done = threading.Event()
+
+    read_thread = threading.Thread(
+        target=lambda: returned.append(
+            reader.get_verified(prepared.reference.result_id, _verification_context())
+        )
+    )
+    read_thread.start()
+    assert controller.wait_until_reached()
+
+    def recover() -> None:
+        catalog.recover_pending_publication(
+            publication_id=prepared.publication_id,
+            reference=prepared.reference,
+            recovery_scope_sha256=prepared.recovery_scope_sha256,
+            retain_adopted=False,
+        )
+        recovery_done.set()
+
+    recovery_thread = threading.Thread(target=recover)
+    recovery_thread.start()
+    assert not recovery_done.wait(timeout=0.1)
+    controller.release()
+    read_thread.join(timeout=10)
+    recovery_thread.join(timeout=10)
+    assert not read_thread.is_alive() and not recovery_thread.is_alive()
+    assert returned == [prepared.reference]
+    assert recovery_done.is_set()
+    with pytest.raises(KeyError, match="unavailable"):
+        bind_catalog_live_reader(catalog).get_verified(
+            prepared.reference.result_id, _verification_context()
+        )
 
 
 def test_recovery_rejects_hostile_scalar_subclasses_before_dispatch(

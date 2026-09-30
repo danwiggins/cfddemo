@@ -1039,6 +1039,9 @@ class CohortRecordCatalog:
             ("publication_for_recovery", _PINNED_RESULT_PUBLICATION),
             ("recovery_publications", _PINNED_RESULT_RECOVERY_ROWS),
             ("verify_prepared_object", _PINNED_RESULT_VERIFY_PREPARED),
+            ("register_coordinated_candidate", _PINNED_RESULT_REGISTER_CANDIDATE),
+            ("coordinated_candidates", _PINNED_RESULT_CANDIDATES),
+            ("finish_coordinated_candidate", _PINNED_RESULT_FINISH_CANDIDATE),
         ):
             if name in vars(catalog) or getattr(ResultCatalog, name) is not pinned:
                 raise CohortImportError("result catalog authority changed")
@@ -2061,6 +2064,13 @@ _COHORT_PINNED_FINGERPRINTS = MappingProxyType(
         "active_snapshot": _authority_value_fingerprint(
             _PINNED_MANIFEST_ACTIVE_SNAPSHOT
         ),
+        "register_candidate": _authority_value_fingerprint(
+            _PINNED_RESULT_REGISTER_CANDIDATE
+        ),
+        "candidates": _authority_value_fingerprint(_PINNED_RESULT_CANDIDATES),
+        "finish_candidate": _authority_value_fingerprint(
+            _PINNED_RESULT_FINISH_CANDIDATE
+        ),
         **{
             f"store:{name}": _authority_value_fingerprint(value)
             for name, value in _PINNED_MANIFEST_STORE_CALLABLES.items()
@@ -2103,6 +2113,12 @@ def _assert_cohort_runtime(
         != _COHORT_PINNED_FINGERPRINTS["result_assert"]
         or _authority_value_fingerprint(_PINNED_MANIFEST_ACTIVE_SNAPSHOT)
         != _COHORT_PINNED_FINGERPRINTS["active_snapshot"]
+        or _authority_value_fingerprint(_PINNED_RESULT_REGISTER_CANDIDATE)
+        != _COHORT_PINNED_FINGERPRINTS["register_candidate"]
+        or _authority_value_fingerprint(_PINNED_RESULT_CANDIDATES)
+        != _COHORT_PINNED_FINGERPRINTS["candidates"]
+        or _authority_value_fingerprint(_PINNED_RESULT_FINISH_CANDIDATE)
+        != _COHORT_PINNED_FINGERPRINTS["finish_candidate"]
         or any(
             _authority_value_fingerprint(value)
             != _COHORT_PINNED_FINGERPRINTS[f"store:{name}"]
@@ -2149,6 +2165,9 @@ _COHORT_ALIAS_SEAL = MappingProxyType(
             "_CC_VALIDATE_ROOT",
             "_CC_WRITE_PENDING",
             "_CC_WRITE_ROLLBACK",
+            "_PINNED_RESULT_REGISTER_CANDIDATE",
+            "_PINNED_RESULT_CANDIDATES",
+            "_PINNED_RESULT_FINISH_CANDIDATE",
         )
     }
 )

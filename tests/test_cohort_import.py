@@ -1179,6 +1179,31 @@ def test_class_validator_shadow_is_rejected_without_execution(
     assert values[1].query(CatalogQuery()).empty
 
 
+@pytest.mark.parametrize(
+    "alias",
+    (
+        "_PINNED_RESULT_REGISTER_CANDIDATE",
+        "_PINNED_RESULT_CANDIDATES",
+        "_PINNED_RESULT_FINISH_CANDIDATE",
+    ),
+)
+def test_candidate_authority_alias_shadow_is_rejected_without_execution(
+    tmp_path: Path, live, monkeypatch: pytest.MonkeyPatch, alias: str
+) -> None:
+    values = _setup(tmp_path, live)
+    executed: list[str] = []
+
+    def malicious(*_args, **_kwargs):
+        executed.append(alias)
+        raise AssertionError("candidate authority hook executed")
+
+    monkeypatch.setattr(cohort_import_module, alias, malicious)
+    with pytest.raises(CohortImportError, match="module authority"):
+        _import(values)
+    assert executed == []
+    assert values[1].query(CatalogQuery()).empty
+
+
 def test_stale_linkage_cannot_be_bypassed_by_validator_code_mutation(
     tmp_path: Path, live
 ) -> None:
