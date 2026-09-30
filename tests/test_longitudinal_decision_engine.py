@@ -122,6 +122,75 @@ def test_every_outcome_has_one_safe_action_and_strict_rendering_gate() -> None:
         assert decision.bridge_execution_state == "not_executed"
 
 
+@pytest.mark.parametrize("claimed_outcome", tuple(LongitudinalOutcome))
+def test_parse_rejects_top_level_outcome_contradicting_all_explanations(
+    claimed_outcome: LongitudinalOutcome,
+) -> None:
+    dimension = ComparisonDimension.PREANALYTICS_POLICY
+    anchor = _record("1")
+    member = _record("2", changed=dimension)
+    value = _changed_value(member, dimension)
+    explanation_outcome = (
+        LongitudinalOutcome.REQUIRES_REANALYSIS
+        if claimed_outcome == LongitudinalOutcome.QUALIFIED_COMPATIBLE
+        else LongitudinalOutcome.QUALIFIED_COMPATIBLE
+    )
+    decision = _decide(
+        anchor,
+        member,
+        _policy(anchor, {dimension: (value, explanation_outcome)}),
+    )
+    reasons = {
+        LongitudinalOutcome.EQUIVALENT: LongitudinalReason.EXACT_MATCH,
+        LongitudinalOutcome.QUALIFIED_COMPATIBLE: (
+            LongitudinalReason.QUALIFIED_ENVELOPE
+        ),
+        LongitudinalOutcome.REQUIRES_REANALYSIS: (
+            LongitudinalReason.REANALYSIS_REQUIRED
+        ),
+        LongitudinalOutcome.REGISTERED_BRIDGE: LongitudinalReason.BRIDGE_AVAILABLE,
+        LongitudinalOutcome.INCOMPATIBLE: LongitudinalReason.DISALLOWED_MISMATCH,
+        LongitudinalOutcome.UNKNOWN: LongitudinalReason.UNKNOWN_DIMENSION,
+    }
+    actions = {
+        LongitudinalOutcome.EQUIVALENT: LongitudinalNextAction.USE_DIRECT_COMPARISON,
+        LongitudinalOutcome.QUALIFIED_COMPATIBLE: (
+            LongitudinalNextAction.USE_QUALIFIED_COMPARISON
+        ),
+        LongitudinalOutcome.REQUIRES_REANALYSIS: (
+            LongitudinalNextAction.REQUEST_REANALYSIS
+        ),
+        LongitudinalOutcome.REGISTERED_BRIDGE: (
+            LongitudinalNextAction.REVIEW_REGISTERED_BRIDGE
+        ),
+        LongitudinalOutcome.INCOMPATIBLE: (
+            LongitudinalNextAction.START_SEPARATE_SERIES
+        ),
+        LongitudinalOutcome.UNKNOWN: LongitudinalNextAction.RESOLVE_UNKNOWN_INPUTS,
+    }
+    eligible = claimed_outcome in {
+        LongitudinalOutcome.EQUIVALENT,
+        LongitudinalOutcome.QUALIFIED_COMPATIBLE,
+    }
+    payload = decision.model_dump(mode="json")
+    payload.update(
+        {
+            "outcome": claimed_outcome.value,
+            "reason_codes": [reasons[claimed_outcome].value],
+            "next_action": actions[claimed_outcome].value,
+            "delta_allowed": eligible,
+            "connecting_trend_allowed": eligible,
+            "bridge_refs": [],
+        }
+    )
+
+    with pytest.raises(
+        ValidationError,
+        match="explanation aggregation|unknown reason",
+    ):
+        LongitudinalMemberDecision.model_validate_json(json.dumps(payload))
+
+
 def test_every_outcome_rejects_reason_set_substitution() -> None:
     dimension = ComparisonDimension.PREANALYTICS_POLICY
     anchor = _record("1")
