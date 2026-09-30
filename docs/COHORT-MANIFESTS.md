@@ -19,6 +19,13 @@ linkage event during live validation. Reanalysis and technical-replicate source
 chains must remain within the same biological lineage and cannot contain
 cycles.
 
+Integer domains are finite. Linkage revisions use the upstream linkage
+revision maximum, store authority versions use the protected approval-ledger
+capacity, and time coordinates use whole UTC seconds within Python's
+representable year 1 through 9999 range. Oversized integers fail canonical,
+history, and live-store validation even if a caller recomputes the time
+commitment.
+
 Each declared analysis unit contributes exactly one denominator. A subject
 unit can contain multiple collections and specimens; a collection unit can
 contain sibling specimens. Within one exact subject/collection/specimen

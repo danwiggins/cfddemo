@@ -25,6 +25,8 @@ from evidence_inspector.method_registry import (
     contract_from_canonical_bytes,
 )
 from evidence_inspector.provider_linkage import (
+    MAX_CONSUMED_APPROVALS,
+    MAX_REVISIONS,
     AnalysisRecordId,
     CollectionToken,
     LinkageId,
@@ -42,6 +44,9 @@ from evidence_inspector.provider_linkage_store import (
 )
 
 MAX_MEMBERS = 100_000
+# Whole UTC seconds representable by Python's datetime range, years 1..9999.
+MIN_TIME_COORDINATE = -62_135_596_800
+MAX_TIME_COORDINATE = 253_402_300_799
 CohortId = Annotated[str, StringConstraints(pattern=r"^cohort_[0-9a-f]{32}$")]
 _PINNED_ACTIVE_SNAPSHOT = ProviderLinkageStore.active_snapshot
 _PINNED_VERIFY_CURRENT_RECEIPT = ProviderLinkageStore.verify_current_receipt
@@ -117,14 +122,14 @@ class ProviderAuthorityReference(RegistryContract):
     store_epoch_sha256: Sha256
     storage_identity_sha256: Sha256
     trust_pins_sha256: Sha256
-    state_version: int = Field(ge=1)
+    state_version: int = Field(ge=1, le=MAX_CONSUMED_APPROVALS, strict=True)
     state_head_sha256: Sha256
 
 
 class CohortMember(RegistryContract):
     provider_namespace: ProviderNamespace
     linkage_id: LinkageId
-    linkage_revision: int = Field(ge=1)
+    linkage_revision: int = Field(ge=1, le=MAX_REVISIONS, strict=True)
     linkage_revision_sha256: Sha256
     committed_receipt_sha256: Sha256
     subject_token: SubjectToken
@@ -140,7 +145,9 @@ class CohortMember(RegistryContract):
     )
     denominator_contribution: bool
     linkage_event_sha256: Sha256
-    time_coordinate: int
+    time_coordinate: int = Field(
+        ge=MIN_TIME_COORDINATE, le=MAX_TIME_COORDINATE, strict=True
+    )
     time_coordinate_sha256: Sha256
 
 
@@ -554,6 +561,8 @@ def validate_manifest_against_linkage_store(
 
 
 __all__ = [
+    "MAX_TIME_COORDINATE",
+    "MIN_TIME_COORDINATE",
     "CohortManifest",
     "CohortMember",
     "MeasurementAnchor",

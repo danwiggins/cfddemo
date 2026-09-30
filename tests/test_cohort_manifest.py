@@ -698,3 +698,110 @@ def test_mixed_replicate_reanalysis_dependency_cycle_rejects(live) -> None:
         ValidationError, match="combined analysis dependency graph contains a cycle"
     ):
         _manifest(authority, (draw, technical, reanalysis))
+
+
+def _oversized_manifest_variants(
+    manifest: CohortManifest,
+) -> tuple[CohortManifest, ...]:
+    member = manifest.members[0]
+    oversized_time = 10**1000
+    time_digest = _domain_sha256(
+        b"traceback-cohort-time-coordinate-v1",
+        {
+            "collection_token": member.collection_token,
+            "linkage_event_sha256": member.linkage_event_sha256,
+            "time_axis": manifest.time_axis.model_dump(mode="json"),
+            "time_coordinate": oversized_time,
+        },
+    )
+    return (
+        manifest.model_copy(
+            update={
+                "provider_authorities": (
+                    manifest.provider_authorities[0].model_copy(
+                        update={"state_version": 10**1000}
+                    ),
+                )
+            }
+        ),
+        manifest.model_copy(
+            update={
+                "members": (member.model_copy(update={"linkage_revision": 10**1000}),)
+            }
+        ),
+        manifest.model_copy(
+            update={
+                "members": (
+                    member.model_copy(
+                        update={
+                            "time_coordinate": oversized_time,
+                            "time_coordinate_sha256": time_digest,
+                        }
+                    ),
+                )
+            }
+        ),
+    )
+
+
+def test_integer_boundaries_accept_documented_maxima(live) -> None:
+    from evidence_inspector.cohort_manifest import (
+        MAX_TIME_COORDINATE,
+        MIN_TIME_COORDINATE,
+    )
+    from evidence_inspector.provider_linkage import (
+        MAX_CONSUMED_APPROVALS,
+        MAX_REVISIONS,
+    )
+
+    _, _, authority, member = live
+    ProviderAuthorityReference.model_validate(
+        {**authority.model_dump(mode="python"), "state_version": MAX_CONSUMED_APPROVALS}
+    )
+    CohortMember.model_validate(
+        {**member.model_dump(mode="python"), "linkage_revision": MAX_REVISIONS}
+    )
+    for coordinate in (MIN_TIME_COORDINATE, MAX_TIME_COORDINATE):
+        _retime(member, coordinate)
+
+
+@pytest.mark.parametrize("variant_index", range(3))
+def test_canonical_parser_rejects_oversized_integer_domains(
+    live, variant_index: int
+) -> None:
+    _, _, authority, member = live
+    variant = _oversized_manifest_variants(_manifest(authority, (member,)))[
+        variant_index
+    ]
+    payload = variant.model_dump(mode="json")
+    encoded = json.dumps(
+        payload, sort_keys=True, separators=(",", ":"), ensure_ascii=False
+    ).encode()
+    with pytest.raises(ValueError, match="not canonical"):
+        cohort_manifest_from_bytes(encoded)
+
+
+@pytest.mark.parametrize("variant_index", range(3))
+def test_live_boundary_rejects_oversized_integer_model_copies(
+    live, variant_index: int
+) -> None:
+    store, _, authority, member = live
+    variant = _oversized_manifest_variants(_manifest(authority, (member,)))[
+        variant_index
+    ]
+    with pytest.raises(ValueError, match="not canonical"):
+        validate_manifest_against_linkage_store(
+            variant, store, expected_trust_snapshot_sha256_by_provider=_pins()
+        )
+
+
+@pytest.mark.parametrize("variant_index", range(3))
+def test_history_boundary_rejects_oversized_integer_model_copies(
+    live, variant_index: int
+) -> None:
+    _, _, authority, member = live
+    variant = _oversized_manifest_variants(_manifest(authority, (member,)))[
+        variant_index
+    ]
+    with pytest.raises(ValueError, match="not canonical"):
+        validate_manifest_history((variant,))
