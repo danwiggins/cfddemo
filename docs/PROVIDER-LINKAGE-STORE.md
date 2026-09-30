@@ -9,7 +9,7 @@ aliquot, run, analysis and measurement tokens.
 
 `ProviderLinkageStore.commit_authorized_revision` begins an immediate
 transaction, replays the external signatures against the store's independently
-provisioned provider trust pins and construction-pinned clock, extends exactly one immutable
+provisioned provider trust pins and package-owned authority-time source, extends exactly one immutable
 revision chain, consumes every approval ID and nonce, validates the complete
 history, advances the state version/head and commits. A conflict rolls the whole
 transaction back. An exact retry returns the existing receipt without advancing
@@ -17,14 +17,16 @@ state. Approval IDs and nonces occupy one global replay namespace, so reuse for
 different bytes or a different provider is rejected by database constraints,
 including across processes and restarts.
 
-The clock callable identity is retained outside caller-mutable store attributes.
-Each operation captures one whole-second UTC value under the store lock, advances
-a persisted monotonic authority-time floor in a serialized transaction, then
-requires that exact floor in the record transaction. Replacing the instance
-clock, rolling the same callback backward, reopening with an earlier clock, or
-mutating authority methods during the callback cannot revive expired approval.
-The captured validator and internal storage call chain do not dynamically
-dispatch through caller-shadowable instance methods.
+Arbitrary clock callbacks are not authority inputs and are never executed. The
+store accepts only the exact package-owned `AuthorityTimeSource`; subclasses are
+rejected before use. Each operation captures one whole-second UTC value under
+the store lock, advances a persisted monotonic authority-time floor in a
+serialized transaction, then requires those exact canonical floor bytes in the
+record transaction. Replacing the instance source, rolling fixed source state
+backward, reopening with an earlier source, or poisoning parser, serializer,
+registry, floor, or validator aliases cannot revive expired approval. The
+captured validator and internal storage call chain do not dynamically dispatch
+through caller-shadowable instance methods.
 
 The store validates the full append-only history, not only active rows:
 

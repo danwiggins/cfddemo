@@ -14,6 +14,7 @@ from pathlib import Path
 
 import pytest
 
+import evidence_inspector.provider_linkage_store as linkage_store_module
 from evidence_inspector.provider_linkage import (
     ApprovalPurpose,
     AuthorizedLinkageRevision,
@@ -28,6 +29,7 @@ from evidence_inspector.provider_linkage import (
     provider_trust_snapshot_sha256,
 )
 from evidence_inspector.provider_linkage_store import (
+    AuthorityTimeSource,
     CommittedLinkageReceipt,
     ProviderLinkageStore,
     ProviderLinkageStoreConflict,
@@ -60,7 +62,7 @@ def _store(root: Path) -> ProviderLinkageStore:
     return ProviderLinkageStore(
         root,
         expected_trust_snapshot_sha256_by_provider=_pins(),
-        clock=lambda: NOW,
+        time_source=AuthorityTimeSource.fixed(NOW),
     )
 
 
@@ -88,7 +90,7 @@ def _process_commit(
     store = ProviderLinkageStore(
         root,
         expected_trust_snapshot_sha256_by_provider=_pins(),
-        clock=lambda: NOW,
+        time_source=AuthorityTimeSource.fixed(NOW),
     )
     try:
         ready.put("ready")
@@ -135,22 +137,21 @@ def test_authority_time_floor_is_monotonic_and_persists_across_reopen(
     tmp_path: Path,
 ) -> None:
     root = tmp_path / "protected"
-    current_time = [NOW]
-
-    def clock() -> datetime:
-        return current_time[0]
+    time_source = AuthorityTimeSource.fixed(NOW)
 
     store = ProviderLinkageStore(
         root,
         expected_trust_snapshot_sha256_by_provider=_pins(),
-        clock=clock,
+        time_source=time_source,
     )
     try:
         receipt = store.commit_authorized_revision(_record())
-        current_time[0] = AFTER + timedelta(hours=1)
+        time_source.advance_to(AFTER + timedelta(hours=1))
         with pytest.raises(ProviderLinkageStoreConflict, match="not current"):
             store.active_snapshot()
-        current_time[0] = NOW
+        with pytest.raises(ValueError, match="cannot move backwards"):
+            time_source.advance_to(NOW)
+        time_source._current = NOW  # type: ignore[attr-defined]
         with pytest.raises(ProviderLinkageStoreUnsafe, match="moved backwards"):
             store.active_snapshot()
     finally:
@@ -159,7 +160,7 @@ def test_authority_time_floor_is_monotonic_and_persists_across_reopen(
     reopened = ProviderLinkageStore(
         root,
         expected_trust_snapshot_sha256_by_provider=_pins(),
-        clock=clock,
+        time_source=time_source,
     )
     try:
         with pytest.raises(ProviderLinkageStoreUnsafe, match="moved backwards"):
@@ -167,6 +168,41 @@ def test_authority_time_floor_is_monotonic_and_persists_across_reopen(
         assert receipt.state_version == 1
     finally:
         reopened.close()
+
+
+def test_persisted_floor_survives_registry_and_parser_poisoning(
+    tmp_path: Path,
+) -> None:
+    root = tmp_path / "protected"
+    time_source = AuthorityTimeSource.fixed(NOW)
+    store = ProviderLinkageStore(
+        root,
+        expected_trust_snapshot_sha256_by_provider=_pins(),
+        time_source=time_source,
+    )
+    identity = id(store)
+    original_parser = linkage_store_module._authority_time_from_text
+    original_entry = linkage_store_module._STORE_TIME_SOURCES[identity]
+    try:
+        store.commit_authorized_revision(_record())
+        time_source.advance_to(AFTER + timedelta(hours=1))
+        with pytest.raises(ProviderLinkageStoreConflict, match="not current"):
+            store.active_snapshot()
+        persisted_entry = linkage_store_module._STORE_TIME_SOURCES[identity]
+        time_source._current = NOW  # type: ignore[attr-defined]
+        linkage_store_module._STORE_TIME_SOURCES[identity] = (
+            persisted_entry[0],
+            time_source,
+            None,
+        )
+        linkage_store_module._authority_time_from_text = lambda _: NOW
+
+        with pytest.raises(ProviderLinkageStoreUnsafe, match="moved backwards"):
+            store.active_snapshot()
+    finally:
+        linkage_store_module._authority_time_from_text = original_parser
+        linkage_store_module._STORE_TIME_SOURCES[identity] = original_entry
+        store.close()
 
 
 def test_v1_store_metadata_migrates_once_to_persisted_authority_floor(
@@ -314,7 +350,7 @@ def test_approval_and_nonce_replay_namespace_is_global_across_providers(
             PROVIDER: provider_trust_snapshot_sha256(_trust()),
             other_provider: trust_sha256,
         },
-        clock=lambda: NOW,
+        time_source=AuthorityTimeSource.fixed(NOW),
     )
     try:
         store.commit_authorized_revision(first)
@@ -548,17 +584,17 @@ def test_record_bytes_and_digest_are_bound_into_state_head_and_receipt(
 def test_expired_authority_disables_commit_and_active_projection(
     tmp_path: Path,
 ) -> None:
-    current = [NOW]
+    time_source = AuthorityTimeSource.fixed(NOW)
     root = tmp_path / "protected"
     store = ProviderLinkageStore(
         root,
         expected_trust_snapshot_sha256_by_provider=_pins(),
-        clock=lambda: current[0],
+        time_source=time_source,
     )
     try:
         receipt = store.commit_authorized_revision(_record())
         store.verify_current_receipt(receipt)
-        current[0] = _trust().expires_at
+        time_source.advance_to(_trust().expires_at)
         with pytest.raises(ProviderLinkageStoreConflict, match="not current"):
             store.active_snapshot()
     finally:
@@ -849,18 +885,33 @@ def test_relative_or_symlink_root_is_rejected(tmp_path: Path) -> None:
         _store(alias)
 
 
-def test_invalid_trust_pin_or_clock_is_rejected(tmp_path: Path) -> None:
+def test_invalid_trust_pin_or_time_source_is_rejected(tmp_path: Path) -> None:
     with pytest.raises(ProviderLinkageStoreUnsafe, match="trust pins are invalid"):
         ProviderLinkageStore(
             tmp_path / "invalid-pins",
             expected_trust_snapshot_sha256_by_provider={"free text": "0" * 64},
         )
-    with pytest.raises(ProviderLinkageStoreUnsafe, match="clock is invalid"):
-        ProviderLinkageStore(
-            tmp_path / "invalid-clock",
+    with pytest.raises(ProviderLinkageStoreUnsafe, match="time source is invalid"):
+        AuthorityTimeSource.fixed(NOW.replace(tzinfo=None))
+
+
+def test_legacy_arbitrary_clock_callback_is_not_an_authority_input(
+    tmp_path: Path,
+) -> None:
+    calls = 0
+
+    def attacking_clock() -> datetime:
+        nonlocal calls
+        calls += 1
+        return NOW
+
+    with pytest.raises(TypeError, match="unexpected keyword argument 'clock'"):
+        ProviderLinkageStore(  # type: ignore[call-arg]
+            tmp_path / "callback-clock",
             expected_trust_snapshot_sha256_by_provider=_pins(),
-            clock=lambda: NOW.replace(tzinfo=None),
+            clock=attacking_clock,
         )
+    assert calls == 0
 
 
 def test_receipt_schema_rejects_free_text_identity() -> None:

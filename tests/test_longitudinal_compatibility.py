@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import hashlib
 import json
-from collections.abc import Callable, Iterator
+from collections.abc import Iterator
 from contextlib import contextmanager
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
@@ -77,8 +77,10 @@ from evidence_inspector.provider_linkage import (
     provider_trust_snapshot_sha256,
 )
 from evidence_inspector.provider_linkage_store import (
+    AuthorityTimeSource,
     ProviderLinkageStore,
     ProviderLinkageStoreConflict,
+    ProviderLinkageStoreUnsafe,
 )
 from tests.test_provider_linkage import (
     PROVIDER,
@@ -469,13 +471,13 @@ def _decide(
 @contextmanager
 def _activated_records(
     *records: LongitudinalRecord,
-    clock: Callable[[], datetime] | None = None,
+    time_source: AuthorityTimeSource | None = None,
 ) -> Iterator[tuple[tuple[LongitudinalRecord, ...], ProviderLinkageStore]]:
     with TemporaryDirectory(prefix="traceback-linkage-test-") as directory:
         store = ProviderLinkageStore(
             Path(directory),
             expected_trust_snapshot_sha256_by_provider={PROVIDER: TRUST_SHA256},
-            clock=clock or (lambda: NOW),
+            time_source=time_source or AuthorityTimeSource.fixed(NOW),
         )
         try:
             for record in records:
@@ -598,7 +600,7 @@ def test_live_store_receipts_are_required_and_replayed(tmp_path: Path) -> None:
     store = ProviderLinkageStore(
         tmp_path / "protected",
         expected_trust_snapshot_sha256_by_provider={PROVIDER: TRUST_SHA256},
-        clock=lambda: NOW,
+        time_source=AuthorityTimeSource.fixed(NOW),
     )
     try:
         store.commit_authorized_revision(anchor.authorized_linkage)
@@ -711,7 +713,7 @@ def test_fake_or_cross_store_verifier_cannot_enable_comparison(
         other_store = ProviderLinkageStore(
             tmp_path / "other-store",
             expected_trust_snapshot_sha256_by_provider={PROVIDER: TRUST_SHA256},
-            clock=lambda: NOW,
+            time_source=AuthorityTimeSource.fixed(NOW),
         )
         try:
             assert records[0].authorized_linkage is not None
@@ -905,12 +907,12 @@ def test_expired_store_internal_callable_shadow_cannot_restore_authority(
     anchor = _record("1")
     member = _record("2")
     policy = _policy(anchor)
-    current_time = [NOW]
-    with _activated_records(anchor, member, clock=lambda: current_time[0]) as (
+    time_source = AuthorityTimeSource.fixed(NOW)
+    with _activated_records(anchor, member, time_source=time_source) as (
         records,
         store,
     ):
-        current_time[0] = NOW + timedelta(hours=2)
+        time_source.advance_to(NOW + timedelta(hours=2))
         normal = decide_longitudinal_member(
             records[0],
             records[1],
@@ -956,7 +958,7 @@ def test_expired_store_internal_callable_shadow_cannot_restore_authority(
 
 
 @pytest.mark.parametrize("surface", ("member", "series"))
-@pytest.mark.parametrize("failure", ("clock", "validator"))
+@pytest.mark.parametrize("failure", ("time_source", "validator"))
 def test_exact_store_authority_runtime_failure_returns_constant_unknown(
     monkeypatch: pytest.MonkeyPatch,
     surface: str,
@@ -966,23 +968,16 @@ def test_exact_store_authority_runtime_failure_returns_constant_unknown(
     member = _record("2")
     policy = _policy(anchor)
 
-    calls = 0
-
-    def fail_after_activation() -> datetime:
-        nonlocal calls
-        calls += 1
-        if calls <= 4:
-            return NOW
-        raise RuntimeError("synthetic authority failure")
-
     def fail_validator(*_args: object, **_kwargs: object) -> None:
         raise RuntimeError("synthetic authority failure")
 
-    with _activated_records(
-        anchor,
-        member,
-        clock=fail_after_activation if failure == "clock" else None,
-    ) as (records, store):
+    time_source = AuthorityTimeSource.fixed(NOW)
+    with _activated_records(anchor, member, time_source=time_source) as (
+        records,
+        store,
+    ):
+        if failure == "time_source":
+            time_source.set_failure("runtime")
         if failure == "validator":
             monkeypatch.setattr(
                 ProviderLinkageStore,
@@ -1024,47 +1019,42 @@ def test_store_process_control_failure_is_not_masked() -> None:
     member = _record("2")
     policy = _policy(anchor)
 
-    calls = 0
-
-    def interrupt_after_activation() -> datetime:
-        nonlocal calls
-        calls += 1
-        if calls <= 4:
-            return NOW
-        raise KeyboardInterrupt
-
-    with (
-        _activated_records(anchor, member, clock=interrupt_after_activation) as (
-            records,
-            store,
-        ),
-        pytest.raises(KeyboardInterrupt),
-    ):
-        decide_longitudinal_member(
-            records[0],
-            records[1],
-            policy,
-            expected_policy_sha256=longitudinal_anchor_policy_sha256(policy),
-            expected_authority_head_sha256=HEAD_SHA256,
-            expected_linkage_trust_snapshot_sha256_by_provider={PROVIDER: TRUST_SHA256},
-            linkage_store=store,
-        )
-
-
-@pytest.mark.parametrize("surface", ("member", "series"))
-def test_replacing_clock_cannot_revive_expired_linkage_authority(surface: str) -> None:
-    anchor = _record("1")
-    member = _record("2")
-    policy = _policy(anchor)
-    current_time = [NOW]
-    with _activated_records(anchor, member, clock=lambda: current_time[0]) as (
+    time_source = AuthorityTimeSource.fixed(NOW)
+    with _activated_records(anchor, member, time_source=time_source) as (
         records,
         store,
     ):
-        current_time[0] = NOW + timedelta(hours=2)
+        time_source.set_failure("interrupt")
+        with pytest.raises(KeyboardInterrupt):
+            decide_longitudinal_member(
+                records[0],
+                records[1],
+                policy,
+                expected_policy_sha256=longitudinal_anchor_policy_sha256(policy),
+                expected_authority_head_sha256=HEAD_SHA256,
+                expected_linkage_trust_snapshot_sha256_by_provider={
+                    PROVIDER: TRUST_SHA256
+                },
+                linkage_store=store,
+            )
+
+
+@pytest.mark.parametrize("surface", ("member", "series"))
+def test_replacing_time_source_cannot_revive_expired_linkage_authority(
+    surface: str,
+) -> None:
+    anchor = _record("1")
+    member = _record("2")
+    policy = _policy(anchor)
+    time_source = AuthorityTimeSource.fixed(NOW)
+    with _activated_records(anchor, member, time_source=time_source) as (
+        records,
+        store,
+    ):
+        time_source.advance_to(NOW + timedelta(hours=2))
         with pytest.raises(ProviderLinkageStoreConflict):
             store.active_snapshot()
-        store._clock = lambda: NOW  # type: ignore[attr-defined]
+        store._time_source = AuthorityTimeSource.fixed(NOW)  # type: ignore[attr-defined]
         if surface == "member":
             revived = decide_longitudinal_member(
                 records[0],
@@ -1094,97 +1084,43 @@ def test_replacing_clock_cannot_revive_expired_linkage_authority(surface: str) -
 
 
 @pytest.mark.parametrize("surface", ("member", "series"))
-def test_clock_cannot_install_self_removing_validator_during_snapshot(
+@pytest.mark.parametrize(
+    "poison_target",
+    (
+        "_authority_time_from_text",
+        "_authority_time_text",
+        "_capture_pinned_store_now",
+        "_require_authority_time_floor",
+        "_STORE_TIME_SOURCES",
+        "_PINNED_VALIDATE_CURRENT_AUTHORITY",
+    ),
+)
+def test_floor_runtime_poisoning_cannot_revive_expired_authority(
     surface: str,
+    poison_target: str,
 ) -> None:
     anchor = _record("1")
     member = _record("2")
     policy = _policy(anchor)
-    calls = 0
-    shadow_calls = 0
-    store_holder: list[ProviderLinkageStore] = []
-
-    def self_removing_noop(*_args: object, **_kwargs: object) -> None:
-        nonlocal shadow_calls
-        shadow_calls += 1
-        if shadow_calls == 2:
-            vars(store_holder[0]).pop("_validate_current_authority", None)
-
-    def attacking_clock() -> datetime:
-        nonlocal calls
-        calls += 1
-        if calls <= 4:
-            return NOW
-        store_holder[0]._validate_current_authority = (  # type: ignore[method-assign]
-            self_removing_noop
-        )
-        return NOW + timedelta(hours=2)
-
-    with _activated_records(anchor, member, clock=attacking_clock) as (
+    time_source = AuthorityTimeSource.fixed(NOW)
+    with _activated_records(anchor, member, time_source=time_source) as (
         records,
         store,
     ):
-        store_holder.append(store)
-        if surface == "member":
-            decision = decide_longitudinal_member(
-                records[0],
-                records[1],
-                policy,
-                expected_policy_sha256=longitudinal_anchor_policy_sha256(policy),
-                expected_authority_head_sha256=HEAD_SHA256,
-                expected_linkage_trust_snapshot_sha256_by_provider={
-                    PROVIDER: TRUST_SHA256
-                },
-                linkage_store=store,
-            )
-            _assert_closed_decision(decision)
-        else:
-            series = decide_longitudinal_series(
-                records[0],
-                (records[1],),
-                policy,
-                expected_policy_sha256=longitudinal_anchor_policy_sha256(policy),
-                expected_authority_head_sha256=HEAD_SHA256,
-                expected_linkage_trust_snapshot_sha256_by_provider={
-                    PROVIDER: TRUST_SHA256
-                },
-                linkage_store=store,
-            )
-            _assert_closed_decision(series.decisions[0])
-        assert shadow_calls == 0
-        assert "_validate_current_authority" in vars(store)
-        vars(store).pop("_validate_current_authority")
-        assert "_validate_current_authority" not in vars(store)
-
-
-@pytest.mark.parametrize("surface", ("member", "series"))
-def test_clock_cannot_replace_pinned_validator_alias_during_snapshot(
-    surface: str,
-) -> None:
-    anchor = _record("1")
-    member = _record("2")
-    policy = _policy(anchor)
-    calls = 0
-    shadow_calls = 0
-    original = linkage_store_module._PINNED_VALIDATE_CURRENT_AUTHORITY
-
-    def noop(*_args: object, **_kwargs: object) -> None:
-        nonlocal shadow_calls
-        shadow_calls += 1
-
-    def attacking_clock() -> datetime:
-        nonlocal calls
-        calls += 1
-        if calls <= 4:
-            return NOW
-        linkage_store_module._PINNED_VALIDATE_CURRENT_AUTHORITY = noop
-        return NOW + timedelta(hours=2)
-
-    try:
-        with _activated_records(anchor, member, clock=attacking_clock) as (
-            records,
-            store,
-        ):
+        time_source.advance_to(NOW + timedelta(hours=2))
+        with pytest.raises(ProviderLinkageStoreConflict):
+            store.active_snapshot()
+        original = getattr(linkage_store_module, poison_target)
+        original_time = time_source._current  # type: ignore[attr-defined]
+        try:
+            time_source._current = NOW  # type: ignore[attr-defined]
+            if poison_target == "_STORE_TIME_SOURCES":
+                entry = original[id(store)]
+                poisoned = dict(original)
+                poisoned[id(store)] = (entry[0], time_source, None)
+            else:
+                poisoned = lambda *_args, **_kwargs: NOW
+            setattr(linkage_store_module, poison_target, poisoned)
             if surface == "member":
                 decision = decide_longitudinal_member(
                     records[0],
@@ -1211,9 +1147,43 @@ def test_clock_cannot_replace_pinned_validator_alias_during_snapshot(
                     linkage_store=store,
                 )
                 _assert_closed_decision(series.decisions[0])
-            assert shadow_calls == 0
-    finally:
-        linkage_store_module._PINNED_VALIDATE_CURRENT_AUTHORITY = original
+        finally:
+            setattr(linkage_store_module, poison_target, original)
+            time_source._current = original_time  # type: ignore[attr-defined]
+
+
+@pytest.mark.parametrize(
+    "poison_target",
+    (
+        "_authority_time_from_text",
+        "_authority_time_text",
+        "_capture_pinned_store_now",
+        "_require_authority_time_floor",
+        "_STORE_TIME_SOURCES",
+        "_PINNED_VALIDATE_CURRENT_AUTHORITY",
+    ),
+)
+def test_arbitrary_time_source_subclass_is_rejected_without_execution(
+    tmp_path: Path,
+    poison_target: str,
+) -> None:
+    calls = 0
+
+    class AttackingTimeSource(AuthorityTimeSource):
+        def read(self) -> datetime:
+            nonlocal calls
+            calls += 1
+            setattr(linkage_store_module, poison_target, object())
+            return NOW
+
+    attacking_source = AttackingTimeSource.fixed(NOW)
+    with pytest.raises(ProviderLinkageStoreUnsafe, match="time source type"):
+        ProviderLinkageStore(
+            tmp_path / poison_target,
+            expected_trust_snapshot_sha256_by_provider={PROVIDER: TRUST_SHA256},
+            time_source=attacking_source,
+        )
+    assert calls == 0
 
 
 @pytest.mark.parametrize("surface", ("member", "series"))
@@ -1223,7 +1193,6 @@ def test_concurrent_self_restoring_class_shadow_cannot_affect_snapshot(
     anchor = _record("1")
     member = _record("2")
     policy = _policy(anchor)
-    calls = 0
     shadow_calls = 0
     counter_lock = Lock()
     installed = Event()
@@ -1246,22 +1215,17 @@ def test_concurrent_self_restoring_class_shadow_cannot_affect_snapshot(
         installed.set()
         restored.wait(timeout=5)
 
-    def attacking_clock() -> datetime:
-        nonlocal calls
-        calls += 1
-        if calls <= 4:
-            return NOW
-        worker = Thread(target=install_shadow, daemon=True)
-        worker_holder.append(worker)
-        worker.start()
-        assert installed.wait(timeout=5)
-        return NOW + timedelta(hours=2)
-
     try:
-        with _activated_records(anchor, member, clock=attacking_clock) as (
+        time_source = AuthorityTimeSource.fixed(NOW)
+        with _activated_records(anchor, member, time_source=time_source) as (
             records,
             store,
         ):
+            time_source.advance_to(NOW + timedelta(hours=2))
+            worker = Thread(target=install_shadow, daemon=True)
+            worker_holder.append(worker)
+            worker.start()
+            assert installed.wait(timeout=5)
             if surface == "member":
                 decision = decide_longitudinal_member(
                     records[0],

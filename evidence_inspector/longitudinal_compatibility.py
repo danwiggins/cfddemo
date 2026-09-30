@@ -54,11 +54,12 @@ from evidence_inspector.provider_linkage import (
 from evidence_inspector.provider_linkage_store import (
     MAX_PROVIDER_TRUST_PINS,
     ActiveLinkageSnapshot,
+    AuthorityTimeSource,
     CommittedLinkageReceipt,
     ProviderLinkageStore,
     ProviderLinkageStoreError,
     committed_linkage_receipt_sha256,
-    provider_linkage_store_clock_is_pinned,
+    provider_linkage_store_time_source_is_pinned,
 )
 
 _PINNED_VERIFY_CURRENT_RECEIPT = ProviderLinkageStore.verify_current_receipt
@@ -68,7 +69,7 @@ _PINNED_STORE_CALLABLES = {
     for name in vars(ProviderLinkageStore)
     if callable(getattr(ProviderLinkageStore, name))
 }
-_PINNED_CLOCK_IDENTITY_CHECK = provider_linkage_store_clock_is_pinned
+_PINNED_TIME_SOURCE_IDENTITY_CHECK = provider_linkage_store_time_source_is_pinned
 _STORE_BOUNDARY_ERRORS = (
     ProviderLinkageStoreError,
     sqlite3.Error,
@@ -806,7 +807,7 @@ def _validate_store_input(
                 for name, pinned in _PINNED_STORE_CALLABLES.items()
             )
             or any(name in ProviderLinkageStore.__dict__ for name in vars(store))
-            or not _PINNED_CLOCK_IDENTITY_CHECK(store)
+            or not _PINNED_TIME_SOURCE_IDENTITY_CHECK(store)
         )
     except _STORE_BOUNDARY_ERRORS:
         raise ValueError("linkage store authority input is invalid") from None
@@ -814,7 +815,7 @@ def _validate_store_input(
         raise ValueError("linkage store authority input is invalid")
     state = vars(store)
     required = {
-        "_clock",
+        "_time_source",
         "_connection",
         "_database_fd",
         "_database_identity",
@@ -843,7 +844,7 @@ def _validate_store_input(
             for name in ("_root_identity", "_database_identity")
         )
         or type(state["_trust_pins"]) is not dict
-        or not callable(state["_clock"])
+        or type(state["_time_source"]) is not AuthorityTimeSource
         or any(
             type(state[name]) is not str
             for name in (
@@ -866,7 +867,7 @@ def _validate_store_input(
                 for name, pinned in _PINNED_STORE_CALLABLES.items()
             )
             or any(name in ProviderLinkageStore.__dict__ for name in vars(store))
-            or not _PINNED_CLOCK_IDENTITY_CHECK(store)
+            or not _PINNED_TIME_SOURCE_IDENTITY_CHECK(store)
         )
     except _STORE_BOUNDARY_ERRORS:
         raise ValueError("linkage store authority changed during snapshot") from None
