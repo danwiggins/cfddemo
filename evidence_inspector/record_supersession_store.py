@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import base64
 import ctypes
+import fcntl
 import hashlib
 import os
 import secrets
@@ -160,9 +161,25 @@ def _captured_storage_root(root: str | Path) -> Path:
     return Path(*parts).absolute()
 
 
-def _open_anchored_sqlite_connection(descriptor: int) -> sqlite3.Connection:
+def _root_descriptor_is_valid(
+    descriptor: int, expected_identity: tuple[int, int]
+) -> bool:
+    metadata = _safe_fstat(descriptor)
+    return bool(
+        metadata is not None
+        and stat.S_ISDIR(metadata.st_mode)
+        and (metadata.st_dev, metadata.st_ino) == expected_identity
+        and stat.S_IMODE(metadata.st_mode) == 0o700
+        and metadata.st_uid == os.geteuid()
+    )
+
+
+def _open_anchored_sqlite_connection(
+    descriptor: int, expected_identity: tuple[int, int]
+) -> sqlite3.Connection:
     function = _PINNED_PTHREAD_FCHDIR
     if function is None:
+        os.close(descriptor)
         raise RecordSupersessionUnsafe(
             "thread-local record ledger anchoring is unavailable"
         )
@@ -173,23 +190,38 @@ def _open_anchored_sqlite_connection(descriptor: int) -> sqlite3.Connection:
     def open_on_fresh_thread() -> None:
         connection: sqlite3.Connection | None = None
         try:
+            if not _root_descriptor_is_valid(descriptor, expected_identity):
+                raise OSError("record ledger root descriptor changed")
             if function(descriptor) != 0:
                 raise OSError("thread-local directory anchor failed")
+            if not _root_descriptor_is_valid(descriptor, expected_identity):
+                raise OSError("record ledger root descriptor changed")
             connection = sqlite3.connect(
                 "record-supersession.sqlite3",
                 timeout=5.0,
                 isolation_level=None,
                 check_same_thread=False,
             )
+            if not _root_descriptor_is_valid(descriptor, expected_identity):
+                raise OSError("record ledger root descriptor changed")
             connection.execute("PRAGMA busy_timeout=5000")
             connection.execute("PRAGMA foreign_keys=ON")
             connection.execute("PRAGMA synchronous=FULL")
             connection.execute("PRAGMA journal_mode=WAL")
             connection.execute("SELECT COUNT(*) FROM sqlite_master").fetchone()
+            if not _root_descriptor_is_valid(descriptor, expected_identity):
+                raise OSError("record ledger root descriptor changed")
         except BaseException:  # noqa: BLE001 - worker must always publish or clean up
             if connection is not None:
                 connection.close()
             connection = None
+        finally:
+            try:
+                os.close(descriptor)
+            except OSError:
+                if connection is not None:
+                    connection.close()
+                connection = None
         with publication_lock:
             if abandoned.is_set():
                 if connection is not None:
@@ -206,7 +238,13 @@ def _open_anchored_sqlite_connection(descriptor: int) -> sqlite3.Connection:
         name="record-ledger-sqlite-open",
         daemon=True,
     )
-    worker.start()
+    try:
+        worker.start()
+    except BaseException:  # noqa: BLE001 - duplicated descriptor must not leak
+        os.close(descriptor)
+        raise RecordSupersessionUnsafe(
+            "record ledger connection worker could not start"
+        ) from None
     try:
         connection = result.get(timeout=_SQLITE_WORKER_TIMEOUT_SECONDS)
     except Empty:
@@ -911,6 +949,7 @@ class RecordSupersessionStore:
             raise RecordSupersessionUnsafe("linkage store implementation changed")
         self.root = _captured_storage_root(root)
         self.linkage_store = linkage_store
+        self._closed = False
         try:
             self.root.mkdir(parents=True, exist_ok=False, mode=0o700)
         except FileExistsError:
@@ -988,14 +1027,18 @@ class RecordSupersessionStore:
             raise
 
     def close(self) -> None:
-        for attribute in ("_database_fd", "_root_fd"):
-            descriptor = getattr(self, attribute, None)
-            if descriptor is not None:
-                try:
-                    os.close(descriptor)
-                except (OSError, TypeError):
-                    pass
-                setattr(self, attribute, None)
+        with _SQLITE_OPEN_LOCK:
+            if getattr(self, "_closed", True):
+                return
+            self._closed = True
+            for attribute in ("_database_fd", "_root_fd"):
+                descriptor = getattr(self, attribute, None)
+                if descriptor is not None:
+                    try:
+                        os.close(descriptor)
+                    except (OSError, TypeError):
+                        pass
+                    setattr(self, attribute, None)
 
     def __del__(self) -> None:
         self.close()
@@ -1154,9 +1197,22 @@ class RecordSupersessionStore:
         sidecar_bindings: dict[str, tuple[int, tuple[int, int]]] = {}
         _SQLITE_OPEN_LOCK.acquire()
         try:
+            if self._closed or self._root_fd is None:
+                raise RecordSupersessionUnsafe("record ledger is closed")
             self._validate_storage()
             before = _open_descriptor_identities()
-            connection = _open_anchored_sqlite_connection(self._root_fd)
+            try:
+                operation_root_fd = fcntl.fcntl(self._root_fd, fcntl.F_DUPFD_CLOEXEC, 0)
+            except OSError:
+                raise RecordSupersessionUnsafe(
+                    "record ledger root descriptor is unavailable"
+                ) from None
+            if not _root_descriptor_is_valid(operation_root_fd, self._root_identity):
+                os.close(operation_root_fd)
+                raise RecordSupersessionUnsafe("record ledger root descriptor changed")
+            connection = _open_anchored_sqlite_connection(
+                operation_root_fd, self._root_identity
+            )
             observed = os.stat(
                 "record-supersession.sqlite3",
                 dir_fd=self._root_fd,
@@ -1196,7 +1252,8 @@ class RecordSupersessionStore:
                         connection.close()
                         for descriptor, _ in sidecar_bindings.values():
                             os.close(descriptor)
-                self._validate_storage()
+                if not self._closed:
+                    self._validate_storage()
             finally:
                 _SQLITE_OPEN_LOCK.release()
 

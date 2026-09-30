@@ -1235,8 +1235,13 @@ def test_timed_out_sqlite_worker_closes_late_connection_and_exits(
 
     monkeypatch.setattr(supersession_module.sqlite3, "connect", delayed_connect)
     monkeypatch.setattr(supersession_module, "_SQLITE_WORKER_TIMEOUT_SECONDS", 0.01)
+    descriptor = supersession_module.fcntl.fcntl(
+        ledger._root_fd, supersession_module.fcntl.F_DUPFD_CLOEXEC, 0
+    )
     with pytest.raises(RecordSupersessionUnsafe, match="timed out"):
-        supersession_module._open_anchored_sqlite_connection(ledger._root_fd)
+        supersession_module._open_anchored_sqlite_connection(
+            descriptor, ledger._root_identity
+        )
     release.set()
     assert closed.wait(timeout=2)
     for _ in range(100):
@@ -1261,12 +1266,75 @@ def test_sqlite_worker_cleans_up_after_unexpected_base_exception(
         raise KeyboardInterrupt
 
     monkeypatch.setattr(supersession_module.sqlite3, "connect", fail_connect)
+    descriptor = supersession_module.fcntl.fcntl(
+        ledger._root_fd, supersession_module.fcntl.F_DUPFD_CLOEXEC, 0
+    )
     with pytest.raises(RecordSupersessionUnsafe, match="initialization failed"):
-        supersession_module._open_anchored_sqlite_connection(ledger._root_fd)
+        supersession_module._open_anchored_sqlite_connection(
+            descriptor, ledger._root_identity
+        )
     assert not any(
         item.name == "record-ledger-sqlite-open"
         for item in supersession_module.threading.enumerate()
     )
+
+
+def test_close_cannot_reuse_worker_root_fd_or_mutate_attacker_directory(
+    durable, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    _, ledger, _, first, _ = durable
+    ledger.commit_record(first)
+    attacker = tmp_path / "attacker-directory"
+    attacker.mkdir(mode=0o750)
+    entered = Event()
+    release = Event()
+    worker_descriptors: list[int] = []
+    original_anchor = supersession_module._PINNED_PTHREAD_FCHDIR
+    assert original_anchor is not None
+
+    def paused_anchor(descriptor):
+        worker_descriptors.append(descriptor)
+        entered.set()
+        if not release.wait(timeout=3):
+            raise AssertionError("worker anchor was not released")
+        return original_anchor(descriptor)
+
+    monkeypatch.setattr(supersession_module, "_PINNED_PTHREAD_FCHDIR", paused_anchor)
+    attacker_fd: int | None = None
+    try:
+        with ThreadPoolExecutor(max_workers=2) as pool:
+            snapshot_future = pool.submit(ledger.active_snapshot)
+            assert entered.wait(timeout=2)
+            close_future = pool.submit(ledger.close)
+            with pytest.raises(FutureTimeout):
+                close_future.result(timeout=0.1)
+            attacker_fd = os.open(
+                attacker,
+                os.O_RDONLY
+                | getattr(os, "O_DIRECTORY", 0)
+                | getattr(os, "O_CLOEXEC", 0),
+            )
+            assert worker_descriptors
+            assert attacker_fd != worker_descriptors[0]
+            release.set()
+            snapshot_future.result(timeout=3)
+            close_future.result(timeout=3)
+        assert supersession_module._safe_fstat(worker_descriptors[0]) is None
+        assert attacker.stat().st_mode & 0o777 == 0o750
+        assert tuple(attacker.iterdir()) == ()
+        with pytest.raises(RecordSupersessionUnsafe, match="closed"):
+            ledger.active_snapshot()
+        assert not any(
+            item.name == "record-ledger-sqlite-open"
+            for item in supersession_module.threading.enumerate()
+        )
+    finally:
+        release.set()
+        if attacker_fd is not None:
+            os.close(attacker_fd)
+        monkeypatch.setattr(
+            supersession_module, "_PINNED_PTHREAD_FCHDIR", original_anchor
+        )
 
 
 def test_database_path_substitution_during_connect_fails_closed(
