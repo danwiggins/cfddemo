@@ -1005,6 +1005,37 @@ def test_unverified_sensitive_key_id_never_enters_output() -> None:
     assert b"patient_private_key" not in canonical_contract_bytes(result)
 
 
+@pytest.mark.parametrize(
+    "private_key_id",
+    (
+        "patient_private_key",
+        "donor_private_key",
+        "path_private_key",
+        "patient%5fprivate%5fkey",
+    ),
+)
+def test_comparison_parser_and_hash_reject_private_signing_key_ids(
+    private_key_id: str,
+) -> None:
+    anchor = _record("1")
+    member = _record("2")
+    policy = _policy(anchor)
+    outside = _compare(
+        anchor,
+        member,
+        policy,
+        _decide(anchor, member, policy),
+        _observation(anchor, 0.5),
+        _observation(member, 0.55),
+        _envelope(anchor, limit=0.01),
+    )
+    tampered = outside.model_copy(
+        update={"measurement_signing_key_ids": (private_key_id,)}
+    )
+    with pytest.raises(ValueError, match="measurement_signing_key_ids"):
+        repeatability_comparison_sha256(tampered)
+
+
 def test_caller_timezone_is_zero_hook_rejected_before_authority() -> None:
     class CallerTimezone(tzinfo):
         calls = 0

@@ -105,6 +105,10 @@ UncertaintyMethodId = _token("uncertainty_")
 DenominatorSemanticsId = _token("denominator_")
 MeasurementEvidenceId = _token("measurement_evidence_")
 MeasurementReceiptId = _token("measurement_receipt_")
+ResultSigningKeyId = Annotated[
+    str,
+    StringConstraints(pattern=r"^dev-result-[0-9a-f]{24}$"),
+]
 
 
 class RepeatabilityFactor(StrEnum):
@@ -328,7 +332,7 @@ class RepeatabilityComparison(CompatibilityContract):
     anchor_measurement_receipt_sha256: Sha256 | None
     member_measurement_receipt_sha256: Sha256 | None
     result_trust_sha256: Sha256 | None
-    measurement_signing_key_ids: tuple[str, ...] = Field(max_length=2)
+    measurement_signing_key_ids: tuple[ResultSigningKeyId, ...] = Field(max_length=2)
     factor_transition_sha256s: tuple[Sha256, ...] = Field(max_length=MAX_FACTORS)
     evaluated_at: datetime
     availability: ComparisonAvailability
@@ -1179,6 +1183,7 @@ __all__ = [
     "RepeatabilityEnvelope",
     "RepeatabilityFactor",
     "RepeatabilityReason",
+    "ResultSigningKeyId",
     "compare_repeatability",
     "measurement_evidence_payload_sha256",
     "measurement_evidence_receipt_sha256",
