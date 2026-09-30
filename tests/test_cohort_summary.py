@@ -9,6 +9,7 @@ from datetime import UTC, datetime
 import pytest
 from pydantic import ValidationError
 
+import evidence_inspector.cohort_summary as cohort_summary_module
 from evidence_inspector.cohort_manifest import (
     CohortManifest,
     CohortMember,
@@ -20,6 +21,9 @@ from evidence_inspector.cohort_manifest import (
     TechnicalReplicateRule,
     TimeAxis,
     TimeAxisKind,
+    biological_timepoint_id,
+    collection_event_reference_sha256,
+    time_origin_authority_sha256,
 )
 from evidence_inspector.cohort_summary import (
     CohortDenominatorPolicy,
@@ -28,10 +32,15 @@ from evidence_inspector.cohort_summary import (
     CohortSummaryState,
     MemberDisposition,
     MemberDispositionReason,
+    RegisteredCohortDenominatorSummary,
     build_cohort_denominator_summary,
+    build_registered_cohort_denominator_summary,
     cohort_denominator_summary_bytes,
     cohort_denominator_summary_from_bytes,
+    registered_cohort_denominator_summary_bytes,
+    registered_cohort_denominator_summary_from_bytes,
 )
+from evidence_inspector.cohort_registry import CohortRegistry
 from evidence_inspector.compatibility import (
     AllowedMethodDefinition,
     CompatibilityOutcome,
@@ -59,7 +68,10 @@ from evidence_inspector.method_registry import (
     canonical_contract_bytes,
     method_definition_sha256,
 )
-from evidence_inspector.provider_linkage import UnitOfAnalysis
+from evidence_inspector.provider_linkage import (
+    UnitOfAnalysis,
+    provider_trust_snapshot_sha256,
+)
 from evidence_inspector.result_catalog import (
     CatalogQualificationState,
     CatalogResultRef,
@@ -72,6 +84,11 @@ from evidence_inspector.result_view import (
     DenominatorLedger,
     bind_result_view_source,
 )
+from tests.test_cohort_import import _import as _import_cohort_record
+from tests.test_cohort_import import _setup as _setup_cohort_records
+from tests.test_cohort_manifest import _collection_event, _trust
+from tests.test_cohort_manifest import live as _cohort_live
+from tests.test_provider_linkage_store import _pins
 
 NOW = datetime(2026, 9, 29, 12, 0, tzinfo=UTC)
 HEAD = "a" * 64
@@ -98,18 +115,26 @@ TIME_AXIS = TimeAxis(
     kind=TimeAxisKind.COLLECTION_TIME,
     definition_sha256="4" * 64,
     unit_sha256="5" * 64,
-    origin_authority_sha256="6" * 64,
+    origin_authority_sha256=time_origin_authority_sha256(()),
 )
 
 
 def _member(digit: str, time_coordinate: int) -> CohortMember:
     collection = _token("collection", digit)
-    event = hex((int(digit, 16) + 5) % 16)[2:] * 64
+    event = _collection_event(
+        provider_namespace=_token("provider", "a"),
+        subject_token=_token("subject", "a"),
+        collection_token=collection,
+        collected_at=datetime.fromtimestamp(time_coordinate, tz=UTC),
+    )
+    event_sha256 = collection_event_reference_sha256(event)
+    timepoint_id = biological_timepoint_id(event)
     coordinate_sha256 = _domain_sha256(
         b"traceback-cohort-time-coordinate-v1",
         {
             "collection_token": collection,
-            "linkage_event_sha256": event,
+            "collection_event_sha256": event_sha256,
+            "biological_timepoint_id": timepoint_id,
             "time_axis": TIME_AXIS.model_dump(mode="json"),
             "time_coordinate": time_coordinate,
         },
@@ -128,13 +153,33 @@ def _member(digit: str, time_coordinate: int) -> CohortMember:
         lineage_role=MemberLineageRole.BIOLOGICAL_DRAW,
         analysis_unit_token=collection,
         denominator_contribution=True,
-        linkage_event_sha256=event,
+        collection_event_sha256=event_sha256,
+        biological_timepoint_id=timepoint_id,
         time_coordinate=time_coordinate,
         time_coordinate_sha256=coordinate_sha256,
     )
 
 
 def _manifest(*members: CohortMember) -> CohortManifest:
+    provider_namespace = _token("provider", "a")
+    trust = _trust().model_copy(update={"provider_namespace": provider_namespace})
+    events = tuple(
+        _collection_event(
+            provider_namespace=member.provider_namespace,
+            subject_token=member.subject_token,
+            collection_token=member.collection_token,
+            collected_at=datetime.fromtimestamp(member.time_coordinate, tz=UTC),
+            trust=trust,
+        )
+        for member in {
+            (
+                item.provider_namespace,
+                item.subject_token,
+                item.collection_token,
+            ): item
+            for item in members
+        }.values()
+    )
     return CohortManifest(
         cohort_id="cohort_" + "f" * 32,
         version=1,
@@ -152,8 +197,9 @@ def _manifest(*members: CohortMember) -> CohortManifest:
         ),
         provider_authorities=(
             ProviderAuthorityReference(
-                provider_namespace=_token("provider", "a"),
-                trust_snapshot_sha256="a" * 64,
+                provider_namespace=provider_namespace,
+                trust_snapshot_sha256=provider_trust_snapshot_sha256(trust),
+                trust_snapshot_json=canonical_contract_bytes(trust).decode("utf-8"),
                 store_id="store_" + "b" * 32,
                 store_epoch_sha256="c" * 64,
                 storage_identity_sha256="d" * 64,
@@ -161,6 +207,16 @@ def _manifest(*members: CohortMember) -> CohortManifest:
                 state_version=1,
                 state_head_sha256="f" * 64,
             ),
+        ),
+        collection_events=tuple(
+            sorted(
+                events,
+                key=lambda event: (
+                    event.provider_namespace,
+                    event.subject_token,
+                    event.collection_token,
+                ),
+            )
         ),
         members=tuple(members),
     )
@@ -173,16 +229,7 @@ def _related_member(
     time_coordinate: int,
     role: MemberLineageRole,
 ) -> CohortMember:
-    candidate = _member(digit, time_coordinate)
-    coordinate_sha256 = _domain_sha256(
-        b"traceback-cohort-time-coordinate-v1",
-        {
-            "collection_token": source.collection_token,
-            "linkage_event_sha256": candidate.linkage_event_sha256,
-            "time_axis": TIME_AXIS.model_dump(mode="json"),
-            "time_coordinate": time_coordinate,
-        },
-    )
+    candidate = _member(digit, source.time_coordinate)
     return candidate.model_copy(
         update={
             "subject_token": source.subject_token,
@@ -201,7 +248,10 @@ def _related_member(
                 else None
             ),
             "denominator_contribution": False,
-            "time_coordinate_sha256": coordinate_sha256,
+            "collection_event_sha256": source.collection_event_sha256,
+            "biological_timepoint_id": source.biological_timepoint_id,
+            "time_coordinate": source.time_coordinate,
+            "time_coordinate_sha256": source.time_coordinate_sha256,
         }
     )
 
@@ -330,13 +380,14 @@ def _record(
 
 
 def _compatibility_policy(record: VerifiedMeasurementRecord) -> CompatibilityPolicy:
+    capability = record.current_capability
     return CompatibilityPolicy(
         policy_id="policy_longitudinal_alpha",
         version="1.0.0",
-        registry_sha256=REGISTRY,
-        registry_version=2,
-        authority_head_sha256=HEAD,
-        authority_revision=4,
+        registry_sha256=capability.registry_sha256,
+        registry_version=capability.registry_version,
+        authority_head_sha256=capability.authority_head_sha256,
+        authority_revision=capability.authority_revision,
         measurement_policies=(
             MeasurementCompatibilityPolicy(
                 measurement_family=record.method.family,
@@ -427,7 +478,9 @@ def _source(
             right=peer,
             policy=policy,
             trusted_policy_sha256=compatibility_policy_sha256(policy),
-            trusted_authority_head_sha256=HEAD,
+            trusted_authority_head_sha256=(
+                record.current_capability.authority_head_sha256
+            ),
         )
     )
     return bind_result_view_source(
@@ -437,6 +490,53 @@ def _source(
         accessible_label="Research aggregate",
         qc_label="Qualified research result",
     )
+
+
+def _bound_source(values, catalog_result: CatalogResultRef):
+    method = values[7].method_definitions[0]
+    capability = values[10]
+    asset = method.assets[0]
+    record = VerifiedMeasurementRecord(
+        result_id=catalog_result.result_id,
+        result_sha256="d" * 64,
+        bundle_id="bundle_registered_summary",
+        bundle_sha256=catalog_result.bundle_sha256,
+        method=method,
+        method_definition_sha256=catalog_result.method_definition_sha256,
+        current_capability=capability,
+        execution_state=ExecutionState.COMPLETE,
+        information_state=InformationState.SUFFICIENT,
+        trust_state=TrustState.VERIFIED,
+        compatibility_key=MeasurementCompatibilityKey(
+            measurement_family=method.family,
+            quantity_id=method.quantity_id,
+            unit=method.unit,
+            result_schema=ResultSchemaReference(
+                schema_id="schema_registered_summary", version="1.0.0"
+            ),
+            reference_asset=asset,
+            grid_asset=asset,
+            atlas_asset=asset,
+            panel_asset=asset,
+            normalization_semantics_id="sem_normalization_registered",
+            coordinate_semantics_id="sem_coordinate_registered",
+            denominator_semantics_id="sem_denominator_registered",
+            registered_policy=CompatibilityPolicyReference(
+                policy_id="policy_longitudinal_alpha", version="1.0.0"
+            ),
+        ),
+    )
+    peer_values = record.model_dump(mode="python")
+    peer_values.update(
+        {
+            "result_id": "result_registered_summary_peer",
+            "result_sha256": "e" * 64,
+            "bundle_id": "bundle_registered_summary_peer",
+            "bundle_sha256": "f" * 64,
+        }
+    )
+    peer = VerifiedMeasurementRecord.model_validate(peer_values)
+    return _source(record, peer)
 
 
 def _catalog(record: VerifiedMeasurementRecord) -> CatalogResultRef:
@@ -639,6 +739,30 @@ def test_collapsed_lineage_cannot_be_reclassified_as_population_evidence(
         )
 
 
+def test_collapsed_lineage_result_source_cannot_be_silently_ignored() -> None:
+    draw = _member("a", 100)
+    replicate = _related_member(
+        draw,
+        digit="b",
+        time_coordinate=110,
+        role=MemberLineageRole.TECHNICAL_REPLICATE,
+    )
+    left, right = _record("a"), _record("b")
+    source = _source(left, right)
+    evidence = (
+        CohortMemberEvidence(
+            member_sha256=_member_sha256(replicate),
+            disposition=MemberDisposition.EXCLUDED,
+            reason=MemberDispositionReason.TECHNICAL_REPLICATE_COLLAPSED,
+        ),
+    )
+    with pytest.raises(ValueError, match="not consumed"):
+        cohort_summary_module._require_all_result_sources_consumed(
+            evidence,
+            {source.record.result_id: source},
+        )
+
+
 @pytest.mark.parametrize("state", (CountState.MISSING, CountState.WITHHELD))
 def test_included_member_requires_fully_observed_e06_ledger(state: CountState) -> None:
     member = _member("a", 100)
@@ -833,3 +957,111 @@ def test_summary_model_rejects_forged_count_and_identity() -> None:
     values["population_sha256"] = forged_sha256
     with pytest.raises(ValidationError, match="dispositions"):
         CohortDenominatorSummary.model_validate(values)
+
+
+@pytest.fixture
+def live_catalog(tmp_path):
+    generator = _cohort_live.__wrapped__(tmp_path)
+    value = next(generator)
+    try:
+        yield value
+    finally:
+        with pytest.raises(StopIteration):
+            next(generator)
+
+
+def test_registered_summary_derives_missing_and_included_from_live_d05_d06(
+    tmp_path, live_catalog
+) -> None:
+    values = _setup_cohort_records(tmp_path / "records", live_catalog)
+    manifest = values[2]
+    policy = _policy(
+        inclusion_sha256=manifest.policies.inclusion_sha256,
+        exclusion_sha256=manifest.policies.exclusion_sha256,
+        missingness_sha256=manifest.policies.missingness_sha256,
+    )
+    registry = CohortRegistry(
+        tmp_path / "registry",
+        linkage_store=live_catalog[0],
+        expected_trust_snapshot_sha256_by_provider=_pins(),
+    )
+    try:
+        registry.register(manifest)
+        selector = registry.list_selectors().records[0]
+        missing = build_registered_cohort_denominator_summary(
+            registry=registry,
+            selector_id=selector.selector_id,
+            cohort_version=selector.cohort_version,
+            record_catalog=values[0],
+            policy=policy,
+            result_sources=(),
+        )
+        assert missing.population.unavailable_denominator_units == 1
+        assert missing.population.included_denominator_units == 0
+
+        binding = _import_cohort_record(values)
+        source = _bound_source(values, binding.result)
+        included = build_registered_cohort_denominator_summary(
+            registry=registry,
+            selector_id=selector.selector_id,
+            cohort_version=selector.cohort_version,
+            record_catalog=values[0],
+            policy=policy,
+            result_sources=(source,),
+        )
+        assert included.population.included_denominator_units == 1
+        assert included.population.unavailable_denominator_units == 0
+        content = registered_cohort_denominator_summary_bytes(included)
+        assert (
+            registered_cohort_denominator_summary_from_bytes(content) == included
+        )
+        assert RegisteredCohortDenominatorSummary.model_validate_json(content) == included
+        duplicate = content[:-1] + b',"summary_sha256":"' + b"0" * 64 + b'"}'
+        huge_integer = content.replace(
+            b'"cohort_version":1',
+            b'"cohort_version":' + b"9" * 100_000,
+            1,
+        )
+        assert huge_integer != content
+        for hostile in (
+            duplicate,
+            huge_integer,
+            b"[" * 2_000 + b"0" + b"]" * 2_000,
+        ):
+            with pytest.raises(ValueError, match="not canonical"):
+                registered_cohort_denominator_summary_from_bytes(hostile)
+
+        poisoned_policy = policy.model_copy()
+        object.__setattr__(
+            poisoned_policy,
+            "__pydantic_private__",
+            {"protected_identity": manifest.members[0].subject_token},
+        )
+        with pytest.raises(ValueError, match="input is not canonical"):
+            build_registered_cohort_denominator_summary(
+                registry=registry,
+                selector_id=selector.selector_id,
+                cohort_version=selector.cohort_version,
+                record_catalog=values[0],
+                policy=poisoned_policy,
+                result_sources=(),
+            )
+        public = content.decode("utf-8")
+        # The opaque cohort ID is the public comparison identity. Protected
+        # provider linkage tokens, member commitments, and record lineage must
+        # remain absent from this aggregate projection.
+        for forbidden in (
+            manifest.members[0].provider_namespace,
+            manifest.members[0].subject_token,
+            manifest.members[0].collection_token,
+            manifest.members[0].specimen_token,
+            manifest.members[0].analysis_record_id,
+            manifest.members[0].run_token,
+            _member_sha256(manifest.members[0]),
+            binding.result.result_id,
+        ):
+            assert forbidden not in public
+    finally:
+        registry.close()
+        values[0].close()
+        values[1].close()

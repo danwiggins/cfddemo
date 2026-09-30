@@ -30,11 +30,20 @@ Summary rows contain only canonical member commitments, controlled lineage
 roles, result artifact IDs/digests, ledger digests, and typed dispositions.
 They do not serialize provider, subject, collection, specimen, run, or analysis
 tokens; accessible labels and other free text from E06 inputs are also omitted.
-The population ID is derived from the complete canonical summary content.
+The population ID is derived from the complete canonical summary content. This
+row-bearing v1 contract is a protected derivation artifact, not a public
+aggregate projection.
 
-This pure contract does not prove that a supplied manifest is still current in
-the live protected linkage store or that a supplied catalog reference was read
-from a live catalog. E12 integration must obtain the manifest through D05 live
-store validation, obtain result references through the protected catalog, and
-recheck those authorities before exposing a cohort/timepoint comparison. No
-delta or connecting trend is part of this D09 artifact.
+`build_registered_cohort_denominator_summary` obtains the exact manifest history
+through the protected D05 registry, derives each record state from D06, and
+rechecks both snapshots after derivation. Its v2 output binds those registry,
+linkage, catalog, policy, manifest, and protected-population digests, but embeds
+only reconciled aggregate counts. Per-member commitments, result IDs, provider
+tokens, and other record lineage remain outside that aggregate boundary.
+Every supplied E06 source must be consumed exactly once by an eligible selected
+member; sources for collapsed, withheld, missing, or unrelated records are
+rejected instead of being silently omitted from output identity.
+
+This D09 integration still does not authorize a delta or connecting trend. E12
+must additionally bind the selected comparison anchor and reject stale,
+unknown, or incompatible comparison evidence before rendering either.

@@ -18,10 +18,15 @@ from pydantic import Field, StringConstraints, ValidationError, model_validator
 
 from evidence_inspector.cohort_manifest import (
     CohortManifest,
+    CohortMember,
     MemberLineageRole,
     cohort_manifest_bytes,
     cohort_manifest_from_bytes,
     cohort_manifest_sha256,
+)
+from evidence_inspector.cohort_registry import (
+    CohortRegistry,
+    RegisteredCohortHistory,
 )
 from evidence_inspector.compatibility import (
     CompatibilityOutcome,
@@ -42,6 +47,12 @@ from evidence_inspector.result_catalog import (
     CatalogQualificationState,
     CatalogResultRef,
 )
+from evidence_inspector.cohort_import import (
+    CohortManifestRecordStatus,
+    CohortMemberRecordStatus,
+    CohortRecordAvailability,
+    CohortRecordCatalog,
+)
 from evidence_inspector.result_view import (
     CountState,
     ResultViewReplayError,
@@ -49,8 +60,18 @@ from evidence_inspector.result_view import (
     canonical_result_view_bytes,
     result_view_contract_from_canonical_bytes,
 )
+from evidence_inspector.safe_ingress import (
+    bounded_json_loads,
+    contract_type_graph,
+    exact_model_bytes,
+)
 
 MAX_COHORT_SUMMARY_MEMBERS = 100_000
+MAX_REGISTERED_SUMMARY_BYTES = 64 * 1024
+MAX_REGISTERED_SUMMARY_DEPTH = 32
+MAX_REGISTERED_SUMMARY_NODES = 10_000
+_PINNED_RESOLVE_HISTORY = CohortRegistry.resolve_history
+_PINNED_RECORD_STATUS = CohortRecordCatalog.record_status_for_manifest
 DenominatorPolicyId = Annotated[
     str,
     StringConstraints(
@@ -90,6 +111,10 @@ class MissingValueRule(StrEnum):
     EXPLICIT_UNAVAILABLE = "explicit_unavailable"
 
 
+class InclusionRule(StrEnum):
+    ALL_ELIGIBLE_BIOLOGICAL_MEMBERS = "all_eligible_biological_members"
+
+
 class CohortDenominatorPolicy(RegistryContract):
     """Exact D09 policy identity; policy content is supplied, never inferred."""
 
@@ -111,12 +136,20 @@ class CohortDenominatorPolicy(RegistryContract):
     missing_value_rule: Literal[MissingValueRule.EXPLICIT_UNAVAILABLE] = (
         MissingValueRule.EXPLICIT_UNAVAILABLE
     )
+    inclusion_rule: Literal[InclusionRule.ALL_ELIGIBLE_BIOLOGICAL_MEMBERS] = (
+        InclusionRule.ALL_ELIGIBLE_BIOLOGICAL_MEMBERS
+    )
     require_complete: Literal[True] = True
     require_sufficient: Literal[True] = True
     require_verified: Literal[True] = True
     require_qualified: Literal[True] = True
     require_provider_eligible: Literal[True] = True
     require_comparable: Literal[True] = True
+
+
+_POLICY_MODEL_TYPES, _POLICY_ENUM_TYPES = contract_type_graph(
+    CohortDenominatorPolicy
+)
 
 
 def cohort_denominator_policy_sha256(policy: CohortDenominatorPolicy) -> str:
@@ -347,6 +380,109 @@ class CohortDenominatorSummary(RegistryContract):
         return self
 
 
+class CohortPopulationProjection(RegistryContract):
+    """Aggregate-only projection; protected member rows never cross this boundary."""
+
+    schema_version: Literal["traceback.cohort-population-projection.v1"] = (
+        "traceback.cohort-population-projection.v1"
+    )
+    cohort_id: str = Field(pattern=r"^cohort_[0-9a-f]{32}$")
+    cohort_version: int = Field(ge=1, le=100_000, strict=True)
+    cohort_manifest_sha256: Sha256
+    denominator_policy_id: DenominatorPolicyId
+    denominator_policy_sha256: Sha256
+    inclusion_sha256: Sha256
+    exclusion_sha256: Sha256
+    missingness_sha256: Sha256
+    population_id: str = Field(pattern=r"^population_[0-9a-f]{40}$")
+    population_sha256: Sha256
+    state: CohortSummaryState
+    declared_members: int = Field(ge=1, le=MAX_COHORT_SUMMARY_MEMBERS, strict=True)
+    included_members: int = Field(ge=0, le=MAX_COHORT_SUMMARY_MEMBERS, strict=True)
+    excluded_members: int = Field(ge=0, le=MAX_COHORT_SUMMARY_MEMBERS, strict=True)
+    unavailable_members: int = Field(ge=0, le=MAX_COHORT_SUMMARY_MEMBERS, strict=True)
+    declared_denominator_units: int = Field(
+        ge=1, le=MAX_COHORT_SUMMARY_MEMBERS, strict=True
+    )
+    included_denominator_units: int = Field(
+        ge=0, le=MAX_COHORT_SUMMARY_MEMBERS, strict=True
+    )
+    excluded_denominator_units: int = Field(
+        ge=0, le=MAX_COHORT_SUMMARY_MEMBERS, strict=True
+    )
+    unavailable_denominator_units: int = Field(
+        ge=0, le=MAX_COHORT_SUMMARY_MEMBERS, strict=True
+    )
+
+    @model_validator(mode="after")
+    def reconcile_aggregate_counts(self) -> CohortPopulationProjection:
+        if self.declared_members != (
+            self.included_members
+            + self.excluded_members
+            + self.unavailable_members
+        ):
+            raise ValueError("projected member counts do not reconcile")
+        if self.declared_denominator_units != (
+            self.included_denominator_units
+            + self.excluded_denominator_units
+            + self.unavailable_denominator_units
+        ):
+            raise ValueError("projected denominator counts do not reconcile")
+        expected_state = (
+            CohortSummaryState.NO_INCLUDED_UNITS
+            if self.included_denominator_units == 0
+            else CohortSummaryState.ONE_INCLUDED_UNIT
+            if self.included_denominator_units == 1
+            else CohortSummaryState.MULTIPLE_INCLUDED_UNITS
+        )
+        if self.state != expected_state:
+            raise ValueError("projected state does not match included denominator")
+        return self
+
+
+class RegisteredCohortDenominatorSummary(RegistryContract):
+    """D09 population bound to live D05 registry and D06 catalog state."""
+
+    schema_version: Literal["traceback.registered-cohort-denominator-summary.v2"] = (
+        "traceback.registered-cohort-denominator-summary.v2"
+    )
+    registry_id: str = Field(pattern=r"^cohort_registry_[0-9a-f]{32}$")
+    registry_epoch_sha256: Sha256
+    registry_state_version: int = Field(
+        ge=1, le=MAX_COHORT_SUMMARY_MEMBERS, strict=True
+    )
+    registry_state_head_sha256: Sha256
+    selector_id: str = Field(pattern=r"^cohort_selector_[0-9a-f]{40}$")
+    cohort_version: int = Field(ge=1, le=100_000, strict=True)
+    cohort_manifest_sha256: Sha256
+    linkage_snapshot_sha256: Sha256
+    catalog_authority_sha256: Sha256
+    record_status_sha256: Sha256
+    population: CohortPopulationProjection
+    summary_sha256: Sha256
+    synthetic_only: Literal[True] = True
+    clinical_use_authorized: Literal[False] = False
+    scientific_qualification_claimed: Literal[False] = False
+
+    @model_validator(mode="after")
+    def exact_cross_system_identity(self) -> RegisteredCohortDenominatorSummary:
+        if (
+            self.population.cohort_version != self.cohort_version
+            or self.population.cohort_manifest_sha256
+            != self.cohort_manifest_sha256
+        ):
+            raise ValueError("registered summary population identity is inconsistent")
+        placeholder = self.model_copy(update={"summary_sha256": "0" * 64})
+        if self.summary_sha256 != _sha256(placeholder):
+            raise ValueError("registered summary digest is invalid")
+        return self
+
+
+_REGISTERED_SUMMARY_MODEL_TYPES, _REGISTERED_SUMMARY_ENUM_TYPES = (
+    contract_type_graph(RegisteredCohortDenominatorSummary)
+)
+
+
 def _count_states(source: ResultViewSource) -> tuple[CountState, ...]:
     ledger = source.denominator
     return (
@@ -470,6 +606,269 @@ def _validate_included(evidence: CohortMemberEvidence) -> None:
         or not catalog.current_provider_eligible
     ):
         raise ValueError("included evidence does not satisfy every eligibility gate")
+
+
+def _replay_source(source: object) -> ResultViewSource:
+    if type(source) is not ResultViewSource:
+        raise TypeError("cohort result source type is invalid")
+    try:
+        return result_view_contract_from_canonical_bytes(
+            ResultViewSource, canonical_result_view_bytes(source)
+        )
+    except (ResultViewReplayError, TypeError, ValueError):
+        raise ValueError("cohort result source is invalid") from None
+
+
+def _derived_disposition(
+    *,
+    member: CohortMember,
+    status: CohortMemberRecordStatus,
+    source: ResultViewSource | None,
+) -> CohortMemberEvidence:
+    member_sha256 = status.member_sha256
+    if member.lineage_role is MemberLineageRole.TECHNICAL_REPLICATE:
+        return CohortMemberEvidence(
+            member_sha256=member_sha256,
+            disposition=MemberDisposition.EXCLUDED,
+            reason=MemberDispositionReason.TECHNICAL_REPLICATE_COLLAPSED,
+        )
+    if member.lineage_role is MemberLineageRole.REANALYSIS:
+        return CohortMemberEvidence(
+            member_sha256=member_sha256,
+            disposition=MemberDisposition.EXCLUDED,
+            reason=MemberDispositionReason.REANALYSIS_COLLAPSED,
+        )
+    if status.availability is CohortRecordAvailability.MISSING:
+        return CohortMemberEvidence(
+            member_sha256=member_sha256,
+            disposition=MemberDisposition.UNAVAILABLE,
+            reason=MemberDispositionReason.NO_VERIFIED_CATALOG_RESULT,
+        )
+    if status.availability is CohortRecordAvailability.WITHHELD:
+        return CohortMemberEvidence(
+            member_sha256=member_sha256,
+            disposition=MemberDisposition.UNAVAILABLE,
+            reason=MemberDispositionReason.TRUST_REVOKED,
+        )
+    binding = status.binding
+    if binding is None:
+        raise ValueError("available cohort status has no exact binding")
+    if source is None:
+        return CohortMemberEvidence(
+            member_sha256=member_sha256,
+            disposition=MemberDisposition.UNAVAILABLE,
+            reason=MemberDispositionReason.NO_RESULT_VIEW_EVIDENCE,
+            catalog_result=binding.result,
+        )
+    _validate_catalog_binding(binding.result, source)
+    record = source.record
+    capability = record.current_capability
+    states = _count_states(source)
+    reason: MemberDispositionReason | None = None
+    if record.execution_state is ExecutionState.FAILED:
+        reason = MemberDispositionReason.EXECUTION_FAILED
+    elif record.execution_state is ExecutionState.NOT_RUN:
+        reason = MemberDispositionReason.NOT_RUN
+    elif record.information_state is InformationState.INSUFFICIENT:
+        reason = MemberDispositionReason.INFORMATION_INSUFFICIENT
+    elif record.information_state is InformationState.UNKNOWN:
+        reason = MemberDispositionReason.INFORMATION_UNKNOWN
+    elif record.trust_state is TrustState.UNVERIFIED:
+        reason = MemberDispositionReason.TRUST_UNVERIFIED
+    elif record.trust_state is TrustState.REVOKED:
+        reason = MemberDispositionReason.TRUST_REVOKED
+    elif record.trust_state is TrustState.UNKNOWN:
+        reason = MemberDispositionReason.TRUST_UNKNOWN
+    elif capability.qualification_state is not QualificationState.QUALIFIED:
+        reason = MemberDispositionReason.QUALIFICATION_UNAVAILABLE
+    elif not capability.current_provider_eligible:
+        reason = MemberDispositionReason.PROVIDER_ELIGIBILITY_UNAVAILABLE
+    elif source.compatibility_decision.outcome is not CompatibilityOutcome.COMPARABLE:
+        reason = MemberDispositionReason.COMPATIBILITY_NOT_ESTABLISHED
+    elif CountState.MISSING in states:
+        reason = MemberDispositionReason.DENOMINATOR_MISSING
+    elif CountState.WITHHELD in states:
+        reason = MemberDispositionReason.DENOMINATOR_WITHHELD
+    if reason is None:
+        evidence = CohortMemberEvidence(
+            member_sha256=member_sha256,
+            disposition=MemberDisposition.INCLUDED,
+            reason=MemberDispositionReason.INCLUDED_BY_POLICY,
+            catalog_result=binding.result,
+            result_source=source,
+        )
+        _validate_included(evidence)
+        return evidence
+    return CohortMemberEvidence(
+        member_sha256=member_sha256,
+        disposition=MemberDisposition.UNAVAILABLE,
+        reason=reason,
+        catalog_result=binding.result,
+        result_source=source,
+    )
+
+
+def _require_all_result_sources_consumed(
+    evidence: tuple[CohortMemberEvidence, ...],
+    sources_by_result_id: dict[str, ResultViewSource],
+) -> None:
+    consumed = {
+        item.result_source.record.result_id
+        for item in evidence
+        if item.result_source is not None
+    }
+    if consumed != set(sources_by_result_id):
+        raise ValueError(
+            "cohort result source is not consumed by the selected population"
+        )
+
+
+def _validate_record_status(
+    history: RegisteredCohortHistory,
+    status: CohortManifestRecordStatus,
+) -> CohortManifest:
+    manifest = history.manifests[-1]
+    if (
+        status.cohort_id != manifest.cohort_id
+        or status.cohort_version != manifest.version
+        or status.cohort_manifest_sha256 != history.selected_manifest_sha256
+        or len(status.members) != len(manifest.members)
+    ):
+        raise ValueError("cohort catalog status does not bind selected manifest")
+    for member, member_status in zip(
+        manifest.members, status.members, strict=True
+    ):
+        if (
+            member_status.provider_namespace != member.provider_namespace
+            or member_status.analysis_record_id != member.analysis_record_id
+            or member_status.member_sha256 != _sha256(member)
+        ):
+            raise ValueError("cohort catalog status member binding is invalid")
+    return manifest
+
+
+def build_registered_cohort_denominator_summary(
+    *,
+    registry: CohortRegistry,
+    selector_id: str,
+    cohort_version: int,
+    record_catalog: CohortRecordCatalog,
+    policy: CohortDenominatorPolicy,
+    result_sources: tuple[ResultViewSource, ...],
+) -> RegisteredCohortDenominatorSummary:
+    """Derive one D09 population from exact live D05/D06 authority state."""
+
+    if type(registry) is not CohortRegistry:
+        raise TypeError("cohort registry type is invalid")
+    if type(record_catalog) is not CohortRecordCatalog:
+        raise TypeError("cohort record catalog type is invalid")
+    if (
+        "resolve_history" in vars(registry)
+        or CohortRegistry.__dict__.get("resolve_history") is not _PINNED_RESOLVE_HISTORY
+        or "record_status_for_manifest" in vars(record_catalog)
+        or CohortRecordCatalog.__dict__.get("record_status_for_manifest")
+        is not _PINNED_RECORD_STATUS
+    ):
+        raise TypeError("cohort summary authority callable changed")
+    if type(policy) is not CohortDenominatorPolicy:
+        raise TypeError("cohort denominator policy type is invalid")
+    if type(result_sources) is not tuple:
+        raise TypeError("cohort result sources must be one exact tuple")
+    if len(result_sources) > MAX_COHORT_SUMMARY_MEMBERS:
+        raise ValueError("cohort result source count exceeds its bound")
+    try:
+        policy_content = exact_model_bytes(
+            policy,
+            CohortDenominatorPolicy,
+            model_types=_POLICY_MODEL_TYPES,
+            enum_types=_POLICY_ENUM_TYPES,
+            max_bytes=64 * 1024,
+        )
+        replayed_policy = CohortDenominatorPolicy.model_validate_json(policy_content)
+        replayed_sources = tuple(_replay_source(item) for item in result_sources)
+    except (TypeError, ValueError):
+        raise ValueError("cohort summary input is not canonical") from None
+    sources_by_result_id = {
+        item.record.result_id: item for item in replayed_sources
+    }
+    if len(sources_by_result_id) != len(replayed_sources):
+        raise ValueError("cohort result sources cannot be duplicated")
+
+    initial_history = _PINNED_RESOLVE_HISTORY(
+        registry, selector_id, cohort_version
+    )
+    initial_status = _PINNED_RECORD_STATUS(
+        record_catalog, initial_history.manifests
+    )
+    manifest = _validate_record_status(initial_history, initial_status)
+    available_result_ids = {
+        item.binding.result.result_id
+        for item in initial_status.members
+        if item.binding is not None
+    }
+    if not set(sources_by_result_id).issubset(available_result_ids):
+        raise ValueError("cohort result source is not an available catalog result")
+    evidence = tuple(
+        _derived_disposition(
+            member=member,
+            status=member_status,
+            source=(
+                sources_by_result_id.get(member_status.binding.result.result_id)
+                if member_status.binding is not None
+                else None
+            ),
+        )
+        for member, member_status in zip(
+            manifest.members, initial_status.members, strict=True
+        )
+    )
+    _require_all_result_sources_consumed(evidence, sources_by_result_id)
+    population = build_cohort_denominator_summary(
+        manifest=manifest,
+        policy=replayed_policy,
+        evidence=evidence,
+    )
+    population_projection = CohortPopulationProjection(
+        **population.model_dump(
+            mode="python",
+            exclude={
+                "schema_version",
+                "rows",
+                "synthetic_only",
+                "clinical_use_authorized",
+                "scientific_qualification_claimed",
+            },
+        )
+    )
+
+    final_history = _PINNED_RESOLVE_HISTORY(registry, selector_id, cohort_version)
+    final_status = _PINNED_RECORD_STATUS(record_catalog, final_history.manifests)
+    if final_history != initial_history or final_status != initial_status:
+        raise ValueError("cohort summary authority changed during derivation")
+    payload = {
+        "registry_id": final_history.registry_id,
+        "registry_epoch_sha256": final_history.registry_epoch_sha256,
+        "registry_state_version": final_history.state_version,
+        "registry_state_head_sha256": final_history.state_head_sha256,
+        "selector_id": selector_id,
+        "cohort_version": cohort_version,
+        "cohort_manifest_sha256": final_history.selected_manifest_sha256,
+        "linkage_snapshot_sha256": final_status.linkage_snapshot_sha256,
+        "catalog_authority_sha256": final_status.catalog_authority_sha256,
+        "record_status_sha256": final_status.status_sha256,
+        "population": population_projection,
+    }
+    placeholder = RegisteredCohortDenominatorSummary.model_construct(
+        **payload,
+        summary_sha256="0" * 64,
+        synthetic_only=True,
+        clinical_use_authorized=False,
+        scientific_qualification_claimed=False,
+    )
+    return RegisteredCohortDenominatorSummary(
+        **payload,
+        summary_sha256=_sha256(placeholder),
+    )
 
 
 def _row(
@@ -668,20 +1067,65 @@ def cohort_denominator_summary_from_bytes(
         raise ValueError("cohort denominator summary is not canonical") from exc
 
 
+def registered_cohort_denominator_summary_bytes(
+    summary: RegisteredCohortDenominatorSummary,
+) -> bytes:
+    return exact_model_bytes(
+        summary,
+        RegisteredCohortDenominatorSummary,
+        model_types=_REGISTERED_SUMMARY_MODEL_TYPES,
+        enum_types=_REGISTERED_SUMMARY_ENUM_TYPES,
+        max_bytes=MAX_REGISTERED_SUMMARY_BYTES,
+        max_nodes=MAX_REGISTERED_SUMMARY_NODES,
+        max_depth=MAX_REGISTERED_SUMMARY_DEPTH,
+        max_collection_items=MAX_COHORT_SUMMARY_MEMBERS,
+        max_string_bytes=4_096,
+    )
+
+
+def registered_cohort_denominator_summary_from_bytes(
+    content: bytes,
+) -> RegisteredCohortDenominatorSummary:
+    try:
+        decoded = bounded_json_loads(
+            content,
+            max_bytes=MAX_REGISTERED_SUMMARY_BYTES,
+            max_depth=MAX_REGISTERED_SUMMARY_DEPTH,
+            max_nodes=MAX_REGISTERED_SUMMARY_NODES,
+            max_collection_items=MAX_COHORT_SUMMARY_MEMBERS,
+            max_string_bytes=4_096,
+        )
+        summary = RegisteredCohortDenominatorSummary.model_validate(decoded)
+        if registered_cohort_denominator_summary_bytes(summary) != content:
+            raise ValueError("registered cohort denominator summary is not canonical")
+        return summary
+    except (TypeError, ValueError):
+        raise ValueError(
+            "registered cohort denominator summary is not canonical"
+        ) from None
+
+
 __all__ = [
     "MAX_COHORT_SUMMARY_MEMBERS",
+    "MAX_REGISTERED_SUMMARY_BYTES",
     "CohortDenominatorPolicy",
     "CohortDenominatorSummary",
+    "CohortPopulationProjection",
     "CohortMemberEvidence",
     "CohortSummaryRow",
     "CohortSummaryState",
     "DenominatorBasis",
+    "InclusionRule",
     "MemberDisposition",
     "MemberDispositionReason",
     "MissingValueRule",
     "UnavailableUnitRule",
+    "RegisteredCohortDenominatorSummary",
     "build_cohort_denominator_summary",
+    "build_registered_cohort_denominator_summary",
     "cohort_denominator_policy_sha256",
     "cohort_denominator_summary_bytes",
     "cohort_denominator_summary_from_bytes",
+    "registered_cohort_denominator_summary_bytes",
+    "registered_cohort_denominator_summary_from_bytes",
 ]
