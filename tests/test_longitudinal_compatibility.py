@@ -902,6 +902,108 @@ def test_truncated_dimensions_return_unknown_without_strict_zip_failure(
     assert not decision.connecting_trend_allowed
 
 
+@pytest.mark.parametrize("entrypoint", ("member", "series"))
+@pytest.mark.parametrize(
+    "malformation",
+    (
+        "policy_rules",
+        "result_id",
+        "capability_none",
+        "revision_type",
+        "dimension_type",
+        "expected_policy",
+        "authority_head",
+        "trust_pins",
+        "store_type",
+    ),
+)
+def test_malformed_copied_shape_returns_constant_safe_unknown(
+    entrypoint: str,
+    malformation: str,
+) -> None:
+    anchor = _record("1")
+    member = _record("2")
+    policy = _policy(anchor)
+    with _activated_records(anchor, member) as (records, store):
+        active_anchor, active_member = records
+        expected_policy: object = longitudinal_anchor_policy_sha256(policy)
+        authority_head: object = HEAD_SHA256
+        trust_pins: object = {PROVIDER: TRUST_SHA256}
+        store_input: object = store
+        if malformation == "policy_rules":
+            policy = policy.model_copy(update={"rules": policy.rules[:-1]})
+        elif malformation == "result_id":
+            active_member = active_member.model_copy(
+                update={
+                    "measurement": active_member.measurement.model_copy(
+                        update={"result_id": "x"}
+                    )
+                }
+            )
+        elif malformation == "capability_none":
+            active_member = active_member.model_copy(
+                update={
+                    "measurement": active_member.measurement.model_copy(
+                        update={"current_capability": None}
+                    )
+                }
+            )
+        elif malformation == "revision_type":
+            active_member = active_member.model_copy(
+                update={"linkage_revision": "invalid"}
+            )
+        elif malformation == "dimension_type":
+            active_member = active_member.model_copy(
+                update={
+                    "comparison_key": active_member.comparison_key.model_copy(
+                        update={
+                            "dimensions": (
+                                "invalid",
+                                *active_member.comparison_key.dimensions[1:],
+                            )
+                        }
+                    )
+                }
+            )
+        elif malformation == "expected_policy":
+            expected_policy = "invalid"
+        elif malformation == "authority_head":
+            authority_head = object()
+        elif malformation == "trust_pins":
+            trust_pins = {"invalid": "invalid"}
+        else:
+            store_input = object()
+
+        if entrypoint == "member":
+            decision = decide_longitudinal_member(
+                active_anchor,
+                active_member,
+                policy,
+                expected_policy_sha256=expected_policy,  # type: ignore[arg-type]
+                expected_authority_head_sha256=authority_head,  # type: ignore[arg-type]
+                expected_linkage_trust_snapshot_sha256_by_provider=trust_pins,  # type: ignore[arg-type]
+                linkage_store=store_input,  # type: ignore[arg-type]
+            )
+        else:
+            series = decide_longitudinal_series(
+                active_anchor,
+                (active_member,),
+                policy,
+                expected_policy_sha256=expected_policy,  # type: ignore[arg-type]
+                expected_authority_head_sha256=authority_head,  # type: ignore[arg-type]
+                expected_linkage_trust_snapshot_sha256_by_provider=trust_pins,  # type: ignore[arg-type]
+                linkage_store=store_input,  # type: ignore[arg-type]
+            )
+            decision = series.decisions[0]
+            assert series.anchor_result_id == "result_invalid_input"
+
+    assert decision.anchor_result_id == "result_invalid_input"
+    assert decision.member_result_id == "result_invalid_input"
+    assert decision.outcome == LongitudinalOutcome.UNKNOWN
+    assert not decision.delta_allowed
+    assert not decision.connecting_trend_allowed
+
+
 def test_decision_boundary_replays_every_nested_record_binding() -> None:
     anchor = _record("1")
     member = _record("2")

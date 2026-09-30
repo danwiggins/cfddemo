@@ -9,13 +9,22 @@ invalid authority never permits deltas or connecting trends.
 from __future__ import annotations
 
 import hashlib
+import json
 import re
 import unicodedata
 from enum import StrEnum
 from typing import Annotated, Literal
 from urllib.parse import unquote
 
-from pydantic import AfterValidator, Field, StringConstraints, model_validator
+from pydantic import (
+    AfterValidator,
+    Field,
+    StringConstraints,
+    TypeAdapter,
+    ValidationError,
+    model_validator,
+)
+from pydantic_core import PydanticSerializationError
 
 from evidence_inspector.compatibility import (
     BundleId,
@@ -36,6 +45,7 @@ from evidence_inspector.method_registry import (
 from evidence_inspector.provider_linkage import (
     AuthorizedLinkageRevision,
     LinkageRevision,
+    ProviderNamespace,
     linkage_revision_sha256,
     provider_trust_snapshot_sha256,
 )
@@ -48,6 +58,8 @@ from evidence_inspector.provider_linkage_store import (
 
 _PINNED_VERIFY_CURRENT_RECEIPT = ProviderLinkageStore.verify_current_receipt
 _PINNED_ACTIVE_SNAPSHOT = ProviderLinkageStore.active_snapshot
+_SHA256_ADAPTER = TypeAdapter(Sha256)
+_TRUST_PINS_ADAPTER = TypeAdapter(dict[ProviderNamespace, Sha256])
 
 MAX_DIMENSIONS = 16
 MAX_ALLOWANCES_PER_DIMENSION = 32
@@ -661,68 +673,189 @@ def longitudinal_member_decision_sha256(
     return hashlib.sha256(canonical_contract_bytes(decision)).hexdigest()
 
 
-def _longitudinal_record_invalid(record: LongitudinalRecord) -> bool:
-    """Replay every nested binding instead of trusting an existing model instance."""
+_INVALID_INPUT_SHA256 = hashlib.sha256(
+    b"traceback-longitudinal-invalid-input.v1"
+).hexdigest()
+_INVALID_INPUT_RESULT_ID = "result_invalid_input"
+_INVALID_INPUT_POLICY_ID = "longpolicy_invalid_input"
+_INVALID_INPUT_MEMBER_DECISION = LongitudinalMemberDecision(
+    anchor_result_id=_INVALID_INPUT_RESULT_ID,
+    member_result_id=_INVALID_INPUT_RESULT_ID,
+    anchor_result_sha256=_INVALID_INPUT_SHA256,
+    member_result_sha256=_INVALID_INPUT_SHA256,
+    anchor_bundle_sha256=_INVALID_INPUT_SHA256,
+    member_bundle_sha256=_INVALID_INPUT_SHA256,
+    anchor_record_sha256=_INVALID_INPUT_SHA256,
+    member_record_sha256=_INVALID_INPUT_SHA256,
+    anchor_linkage_revision_sha256=_INVALID_INPUT_SHA256,
+    member_linkage_revision_sha256=_INVALID_INPUT_SHA256,
+    anchor_linkage_receipt_sha256=None,
+    member_linkage_receipt_sha256=None,
+    authority_head_sha256=_INVALID_INPUT_SHA256,
+    authority_revision=0,
+    anchor_key_sha256=_INVALID_INPUT_SHA256,
+    member_key_sha256=_INVALID_INPUT_SHA256,
+    policy_id=_INVALID_INPUT_POLICY_ID,
+    policy_version="0.0.0",
+    policy_sha256=_INVALID_INPUT_SHA256,
+    engine_version="0.0.0",
+    outcome=LongitudinalOutcome.UNKNOWN,
+    reason_codes=(
+        LongitudinalReason.LINKAGE_AUTHORITY_INVALID,
+        LongitudinalReason.RESULT_STATE_INVALID,
+    ),
+    evaluated_dimensions=ALL_COMPARISON_DIMENSIONS,
+    mismatch_dimensions=(),
+    unknown_dimensions=tuple(sorted(ALL_COMPARISON_DIMENSIONS, key=str)),
+    evidence_refs=(),
+    bridge_refs=(),
+    delta_allowed=False,
+    connecting_trend_allowed=False,
+)
+_INVALID_INPUT_SERIES_DECISION = LongitudinalSeriesDecision(
+    anchor_result_id=_INVALID_INPUT_RESULT_ID,
+    policy_sha256=_INVALID_INPUT_SHA256,
+    member_result_ids=(_INVALID_INPUT_RESULT_ID,),
+    decisions=(_INVALID_INPUT_MEMBER_DECISION,),
+    decision_sha256s=(
+        longitudinal_member_decision_sha256(_INVALID_INPUT_MEMBER_DECISION),
+    ),
+)
 
-    try:
-        encoded = canonical_contract_bytes(record)
-        replayed = LongitudinalRecord.model_validate_json(encoded)
-    except (AttributeError, TypeError, ValueError):
-        return True
-    return canonical_contract_bytes(replayed) != encoded
+
+def _replay_record(record: object) -> LongitudinalRecord:
+    encoded = _strict_validation_bytes(record)
+    replayed = LongitudinalRecord.model_validate_json(encoded)
+    if canonical_contract_bytes(replayed) != encoded:
+        raise ValueError("longitudinal record is not canonical")
+    return replayed
 
 
-def _invalid_record_decision(
-    anchor: LongitudinalRecord,
-    member: LongitudinalRecord,
-    policy: LongitudinalAnchorPolicy,
-    *,
-    anchor_key_sha256: str,
-    member_key_sha256: str,
-    policy_sha256: str,
-    expected_authority_head_sha256: str,
-) -> LongitudinalMemberDecision:
-    """Return one deterministic closed decision without traversing invalid models."""
+def _replay_policy(policy: object) -> LongitudinalAnchorPolicy:
+    encoded = _strict_validation_bytes(policy)
+    replayed = LongitudinalAnchorPolicy.model_validate_json(encoded)
+    if canonical_contract_bytes(replayed) != encoded:
+        raise ValueError("longitudinal policy is not canonical")
+    return replayed
 
-    return LongitudinalMemberDecision(
-        anchor_result_id=anchor.measurement.result_id,
-        member_result_id=member.measurement.result_id,
-        anchor_result_sha256=anchor.measurement.result_sha256,
-        member_result_sha256=member.measurement.result_sha256,
-        anchor_bundle_sha256=anchor.measurement.bundle_sha256,
-        member_bundle_sha256=member.measurement.bundle_sha256,
-        anchor_record_sha256=longitudinal_record_sha256(anchor),
-        member_record_sha256=longitudinal_record_sha256(member),
-        anchor_linkage_revision_sha256=linkage_revision_sha256(anchor.linkage_revision),
-        member_linkage_revision_sha256=linkage_revision_sha256(member.linkage_revision),
-        anchor_linkage_receipt_sha256=(
-            committed_linkage_receipt_sha256(anchor.activation_receipt)
-            if isinstance(anchor.activation_receipt, CommittedLinkageReceipt)
-            else None
-        ),
-        member_linkage_receipt_sha256=(
-            committed_linkage_receipt_sha256(member.activation_receipt)
-            if isinstance(member.activation_receipt, CommittedLinkageReceipt)
-            else None
-        ),
-        authority_head_sha256=expected_authority_head_sha256,
-        authority_revision=anchor.measurement.current_capability.authority_revision,
-        anchor_key_sha256=anchor_key_sha256,
-        member_key_sha256=member_key_sha256,
-        policy_id=policy.policy_id,
-        policy_version=policy.version,
-        policy_sha256=policy_sha256,
-        engine_version=policy.engine_version,
-        outcome=LongitudinalOutcome.UNKNOWN,
-        reason_codes=(LongitudinalReason.RESULT_STATE_INVALID,),
-        evaluated_dimensions=ALL_COMPARISON_DIMENSIONS,
-        mismatch_dimensions=(),
-        unknown_dimensions=tuple(sorted(ALL_COMPARISON_DIMENSIONS, key=str)),
-        evidence_refs=(),
-        bridge_refs=(),
-        delta_allowed=False,
-        connecting_trend_allowed=False,
+
+def _strict_validation_bytes(contract: object) -> bytes:
+    payload = contract.model_dump(  # type: ignore[attr-defined]
+        mode="json",
+        exclude_none=False,
+        warnings="error",
     )
+    return json.dumps(
+        payload,
+        allow_nan=False,
+        ensure_ascii=False,
+        separators=(",", ":"),
+        sort_keys=True,
+    ).encode("utf-8")
+
+
+def _validate_store_input(store: object) -> ProviderLinkageStore | None:
+    if store is None:
+        return None
+    if (
+        type(store) is not ProviderLinkageStore
+        or ProviderLinkageStore.verify_current_receipt
+        is not _PINNED_VERIFY_CURRENT_RECEIPT
+        or ProviderLinkageStore.active_snapshot is not _PINNED_ACTIVE_SNAPSHOT
+        or any(name in ProviderLinkageStore.__dict__ for name in vars(store))
+    ):
+        raise ValueError("linkage store authority input is invalid")
+    return store
+
+
+def _validate_member_inputs(
+    anchor: object,
+    member: object,
+    policy: object,
+    expected_policy_sha256: object,
+    expected_authority_head_sha256: object,
+    expected_linkage_trust_snapshot_sha256_by_provider: object,
+    linkage_store: object,
+) -> (
+    tuple[
+        LongitudinalRecord,
+        LongitudinalRecord,
+        LongitudinalAnchorPolicy,
+        str,
+        str,
+        dict[str, str],
+        ProviderLinkageStore | None,
+    ]
+    | None
+):
+    try:
+        if type(expected_linkage_trust_snapshot_sha256_by_provider) is not dict:
+            raise TypeError("linkage trust pins must be an exact dictionary")
+        return (
+            _replay_record(anchor),
+            _replay_record(member),
+            _replay_policy(policy),
+            _SHA256_ADAPTER.validate_python(expected_policy_sha256),
+            _SHA256_ADAPTER.validate_python(expected_authority_head_sha256),
+            _TRUST_PINS_ADAPTER.validate_python(
+                expected_linkage_trust_snapshot_sha256_by_provider
+            ),
+            _validate_store_input(linkage_store),
+        )
+    except (
+        ValidationError,
+        PydanticSerializationError,
+        TypeError,
+        ValueError,
+        AttributeError,
+    ):
+        return None
+
+
+def _validate_series_inputs(
+    anchor: object,
+    members: object,
+    policy: object,
+    expected_policy_sha256: object,
+    expected_authority_head_sha256: object,
+    expected_linkage_trust_snapshot_sha256_by_provider: object,
+    linkage_store: object,
+) -> (
+    tuple[
+        LongitudinalRecord,
+        tuple[LongitudinalRecord, ...],
+        LongitudinalAnchorPolicy,
+        str,
+        str,
+        dict[str, str],
+        ProviderLinkageStore | None,
+    ]
+    | None
+):
+    try:
+        if type(members) is not tuple or not 1 <= len(members) <= MAX_SERIES_MEMBERS:
+            raise TypeError("series members must be one bounded exact tuple")
+        if type(expected_linkage_trust_snapshot_sha256_by_provider) is not dict:
+            raise TypeError("linkage trust pins must be an exact dictionary")
+        return (
+            _replay_record(anchor),
+            tuple(_replay_record(item) for item in members),
+            _replay_policy(policy),
+            _SHA256_ADAPTER.validate_python(expected_policy_sha256),
+            _SHA256_ADAPTER.validate_python(expected_authority_head_sha256),
+            _TRUST_PINS_ADAPTER.validate_python(
+                expected_linkage_trust_snapshot_sha256_by_provider
+            ),
+            _validate_store_input(linkage_store),
+        )
+    except (
+        ValidationError,
+        PydanticSerializationError,
+        TypeError,
+        ValueError,
+        AttributeError,
+    ):
+        return None
 
 
 def _linkage_authority_invalid(
@@ -793,19 +926,29 @@ def decide_longitudinal_member(
 ) -> LongitudinalMemberDecision:
     """Evaluate one member against the pinned anchor, never against a neighbor."""
 
+    validated = _validate_member_inputs(
+        anchor,
+        member,
+        policy,
+        expected_policy_sha256,
+        expected_authority_head_sha256,
+        expected_linkage_trust_snapshot_sha256_by_provider,
+        linkage_store,
+    )
+    if validated is None:
+        return _INVALID_INPUT_MEMBER_DECISION
+    (
+        anchor,
+        member,
+        policy,
+        expected_policy_sha256,
+        expected_authority_head_sha256,
+        expected_linkage_trust_snapshot_sha256_by_provider,
+        linkage_store,
+    ) = validated
     anchor_key_sha256 = longitudinal_comparison_key_sha256(anchor.comparison_key)
     member_key_sha256 = longitudinal_comparison_key_sha256(member.comparison_key)
     policy_sha256 = longitudinal_anchor_policy_sha256(policy)
-    if _longitudinal_record_invalid(anchor) or _longitudinal_record_invalid(member):
-        return _invalid_record_decision(
-            anchor,
-            member,
-            policy,
-            anchor_key_sha256=anchor_key_sha256,
-            member_key_sha256=member_key_sha256,
-            policy_sha256=policy_sha256,
-            expected_authority_head_sha256=expected_authority_head_sha256,
-        )
     reasons: set[LongitudinalReason] = set()
     mismatches: list[ComparisonDimension] = []
     unknowns: list[ComparisonDimension] = []
@@ -988,8 +1131,26 @@ def decide_longitudinal_series(
 ) -> LongitudinalSeriesDecision:
     """Evaluate canonical immutable membership against one explicit anchor."""
 
-    if not 1 <= len(members) <= MAX_SERIES_MEMBERS:
-        raise ValueError("series membership count is out of bounds")
+    validated = _validate_series_inputs(
+        anchor,
+        members,
+        policy,
+        expected_policy_sha256,
+        expected_authority_head_sha256,
+        expected_linkage_trust_snapshot_sha256_by_provider,
+        linkage_store,
+    )
+    if validated is None:
+        return _INVALID_INPUT_SERIES_DECISION
+    (
+        anchor,
+        members,
+        policy,
+        expected_policy_sha256,
+        expected_authority_head_sha256,
+        expected_linkage_trust_snapshot_sha256_by_provider,
+        linkage_store,
+    ) = validated
     member_ids = tuple(item.measurement.result_id for item in members)
     if member_ids != tuple(sorted(set(member_ids))):
         raise ValueError("series members must be uniquely sorted by result ID")
