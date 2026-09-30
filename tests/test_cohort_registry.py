@@ -10,7 +10,10 @@ from pathlib import Path
 
 import pytest
 
-from evidence_inspector.cohort_manifest import cohort_manifest_sha256
+from evidence_inspector.cohort_manifest import (
+    cohort_manifest_bytes,
+    cohort_manifest_sha256,
+)
 from evidence_inspector.cohort_registry import (
     CohortAuthorityState,
     CohortRegistry,
@@ -160,6 +163,7 @@ def test_two_instances_in_one_process_serialize_publication(
         registry.root,
         linkage_store=live[0],
         expected_trust_snapshot_sha256_by_provider=_pins(),
+        expected_state_head_sha256="0" * 64,
     )
     manifest = _first(live)
     try:
@@ -246,7 +250,7 @@ def test_bound_control_file_substitution_fails_closed(
 def test_exact_crash_temporary_is_recovered_on_reopen(
     registry: CohortRegistry, live
 ) -> None:
-    registry.register(_first(live))
+    receipt = registry.register(_first(live))
     root = registry.root
     registry.close()
     temporary = root / "objects" / (".tmp-" + "a" * 32)
@@ -256,6 +260,7 @@ def test_exact_crash_temporary_is_recovered_on_reopen(
         root,
         linkage_store=live[0],
         expected_trust_snapshot_sha256_by_provider=_pins(),
+        expected_state_head_sha256=receipt.state_head_sha256,
     )
     try:
         assert not temporary.exists()
@@ -299,6 +304,7 @@ def test_backup_restore_rehearsal_preserves_exact_identity_and_state(
         backup,
         linkage_store=live[0],
         expected_trust_snapshot_sha256_by_provider=_pins(),
+        expected_state_head_sha256=before.state_head_sha256,
     )
     try:
         after = restored.list_selectors()
@@ -313,6 +319,7 @@ def test_invalid_backup_rejects_before_creating_restore_target(
 ) -> None:
     registry.register(_first(live))
     content = registry.backup_bytes()
+    expected_head = cohort_registry_backup_from_bytes(content).state_head_sha256
     target = tmp_path / "must-not-exist"
     with pytest.raises(CohortRegistryConflict, match="invalid"):
         CohortRegistry.restore(
@@ -320,6 +327,7 @@ def test_invalid_backup_rejects_before_creating_restore_target(
             content + b" ",
             linkage_store=live[0],
             expected_trust_snapshot_sha256_by_provider=_pins(),
+            expected_state_head_sha256=expected_head,
         )
     assert not target.exists()
 
@@ -369,3 +377,98 @@ def test_closed_registry_and_cursor_bounds_are_sanitized(registry, live) -> None
     registry.close()
     with pytest.raises(CohortRegistryUnsafe, match="closed"):
         registry.list_selectors()
+
+
+def test_exact_uncommitted_object_is_adopted_after_crash(
+    registry: CohortRegistry, live
+) -> None:
+    manifest = _first(live)
+    digest = cohort_manifest_sha256(manifest)
+    path = registry.root / "objects" / f"{digest}.json"
+    path.write_bytes(cohort_manifest_bytes(manifest))
+    path.chmod(0o600)
+    receipt = registry.register(manifest)
+    assert receipt.manifest_sha256 == digest
+    assert receipt.state_version == 1
+
+
+def test_committed_object_deletion_and_journal_rollback_fail_closed(
+    registry: CohortRegistry, live
+) -> None:
+    receipt = registry.register(_first(live))
+    root = registry.root
+    object_path = root / "objects" / f"{receipt.manifest_sha256}.json"
+    object_content = object_path.read_bytes()
+    object_path.unlink()
+    with pytest.raises(CohortRegistryUnsafe, match="committed object is missing"):
+        registry.list_selectors()
+    registry.close()
+
+    object_path.write_bytes(object_content)
+    object_path.chmod(0o600)
+    (root / "registry-journal.jsonl").write_bytes(b"")
+    with pytest.raises(CohortRegistryUnsafe, match="expected head"):
+        CohortRegistry(
+            root,
+            linkage_store=live[0],
+            expected_trust_snapshot_sha256_by_provider=_pins(),
+            expected_state_head_sha256=receipt.state_head_sha256,
+        )
+
+
+def test_old_valid_backup_cannot_authenticate_as_current_state(
+    registry: CohortRegistry, live, tmp_path: Path
+) -> None:
+    first = _first(live)
+    first_receipt = registry.register(first)
+    old_backup = registry.backup_bytes()
+    current_receipt = registry.register(_second(first, live))
+    target = tmp_path / "rollback-restore"
+    with pytest.raises(CohortRegistryConflict, match="expected head"):
+        CohortRegistry.restore(
+            target,
+            old_backup,
+            linkage_store=live[0],
+            expected_trust_snapshot_sha256_by_provider=_pins(),
+            expected_state_head_sha256=current_receipt.state_head_sha256,
+        )
+    assert first_receipt.state_head_sha256 != current_receipt.state_head_sha256
+    assert not target.exists()
+
+
+def test_instance_callable_shadow_is_rejected(registry: CohortRegistry, live) -> None:
+    registry.register(_first(live))
+    vars(registry)["_load_state"] = lambda: ({}, "0" * 64)
+    try:
+        with pytest.raises(CohortRegistryUnsafe, match="callable changed"):
+            registry.list_selectors()
+    finally:
+        del vars(registry)["_load_state"]
+
+
+def test_class_callable_replacement_is_rejected(
+    registry: CohortRegistry, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(CohortRegistry, "_load_state", lambda self: ({}, "0" * 64))
+    with pytest.raises(CohortRegistryUnsafe, match="callable changed"):
+        registry.list_selectors()
+
+
+def test_existing_empty_registry_requires_protected_expected_head(
+    registry: CohortRegistry, live
+) -> None:
+    root = registry.root
+    registry.close()
+    with pytest.raises(CohortRegistryUnsafe, match="expected head is required"):
+        CohortRegistry(
+            root,
+            linkage_store=live[0],
+            expected_trust_snapshot_sha256_by_provider=_pins(),
+        )
+    reopened = CohortRegistry(
+        root,
+        linkage_store=live[0],
+        expected_trust_snapshot_sha256_by_provider=_pins(),
+        expected_state_head_sha256="0" * 64,
+    )
+    reopened.close()

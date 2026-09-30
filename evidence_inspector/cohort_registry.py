@@ -18,10 +18,12 @@ from collections.abc import Iterator, Mapping
 from contextlib import contextmanager
 from enum import StrEnum
 from pathlib import Path
+from types import MappingProxyType
 from typing import Annotated, Literal
 
 from pydantic import Field, StringConstraints
 
+import evidence_inspector.cohort_manifest as cohort_manifest_module
 from evidence_inspector.cohort_manifest import (
     CohortManifest,
     capture_expected_trust_pins,
@@ -46,6 +48,12 @@ MAX_BACKUP_BYTES = 256 * 1024 * 1024
 MAX_PATH_CHARS = 4096
 MAX_PATH_PARTS = 256
 _REGISTRY_PROCESS_LOCK = threading.RLock()
+EMPTY_REGISTRY_HEAD_SHA256 = "0" * 64
+_PINNED_AUTHORITY_READ_FENCE = ProviderLinkageStore.authority_read_fence
+_PINNED_ACTIVE_SNAPSHOT = ProviderLinkageStore.active_snapshot
+_PINNED_VALIDATE_MANIFEST_IN_FENCE = (
+    cohort_manifest_module._validate_manifest_against_linkage_store_in_fence
+)
 
 RegistryId = Annotated[
     str, StringConstraints(pattern=r"^cohort_registry_[0-9a-f]{32}$")
@@ -83,6 +91,19 @@ class CohortRegistryMetadata(RegistryContract):
     linkage_store_epoch_sha256: Sha256
     linkage_storage_identity_sha256: Sha256
     linkage_trust_pins_sha256: Sha256
+
+
+class CohortRegistryJournalEntry(RegistryContract):
+    schema_version: Literal["traceback.cohort-registry-journal-entry.v1"] = (
+        "traceback.cohort-registry-journal-entry.v1"
+    )
+    sequence: int = Field(ge=1, le=MAX_REGISTERED_MANIFESTS, strict=True)
+    previous_entry_sha256: Sha256
+    cohort_id: str = Field(pattern=r"^cohort_[0-9a-f]{32}$")
+    cohort_version: int = Field(ge=1, le=100_000, strict=True)
+    manifest_sha256: Sha256
+    previous_manifest_sha256: Sha256 | None
+    entry_sha256: Sha256
 
 
 class CohortRegistrationReceipt(RegistryContract):
@@ -169,6 +190,9 @@ class CohortRegistryBackup(RegistryContract):
     metadata: CohortRegistryMetadata
     state_version: int = Field(ge=0, le=MAX_REGISTERED_MANIFESTS)
     state_head_sha256: Sha256
+    journal: tuple[CohortRegistryJournalEntry, ...] = Field(
+        max_length=MAX_REGISTERED_MANIFESTS
+    )
     objects: tuple[CohortRegistryBackupObject, ...] = Field(
         max_length=MAX_REGISTERED_MANIFESTS
     )
@@ -255,6 +279,35 @@ def _publish_file(directory_fd: int, name: str, content: bytes) -> None:
         os.fsync(directory_fd)
 
 
+def _read_exact_object(directory_fd: int, digest: str) -> bytes:
+    descriptor: int | None = None
+    try:
+        descriptor = os.open(
+            f"{digest}.json",
+            os.O_RDONLY
+            | getattr(os, "O_CLOEXEC", 0)
+            | getattr(os, "O_NOFOLLOW", 0),
+            dir_fd=directory_fd,
+        )
+        observed = os.fstat(descriptor)
+        if (
+            not stat.S_ISREG(observed.st_mode)
+            or stat.S_IMODE(observed.st_mode) != 0o600
+            or observed.st_uid != os.geteuid()
+            or observed.st_nlink != 1
+        ):
+            raise CohortRegistryUnsafe("cohort registry object is unsafe")
+        content = _read_bounded(descriptor, MAX_MANIFEST_BYTES)
+    except OSError:
+        raise CohortRegistryUnsafe("cohort registry object is unsafe") from None
+    finally:
+        if descriptor is not None:
+            os.close(descriptor)
+    if hashlib.sha256(content).hexdigest() != digest:
+        raise CohortRegistryUnsafe("cohort registry object digest is invalid")
+    return content
+
+
 def _selector_id(epoch: str, cohort_id: str) -> str:
     digest = hashlib.sha256(
         b"traceback-cohort-selector-v1\0"
@@ -265,19 +318,41 @@ def _selector_id(epoch: str, cohort_id: str) -> str:
     return f"cohort_selector_{digest[:40]}"
 
 
-def _state_head(manifests: tuple[tuple[str, bytes], ...]) -> str:
-    digest = hashlib.sha256(b"traceback-cohort-registry-state-v1\0")
-    for manifest_sha256, content in manifests:
-        digest.update(manifest_sha256.encode("ascii") + b"\0")
-        digest.update(len(content).to_bytes(8, "big") + content)
-    return digest.hexdigest()
+def _journal_entry_sha256(entry: CohortRegistryJournalEntry) -> str:
+    placeholder = entry.model_copy(update={"entry_sha256": "0" * 64})
+    return hashlib.sha256(
+        b"traceback-cohort-registry-journal-v1\0"
+        + canonical_contract_bytes(placeholder)
+    ).hexdigest()
+
+
+def _build_journal_entry(
+    *,
+    sequence: int,
+    previous_entry_sha256: str,
+    manifest: CohortManifest,
+    manifest_sha256: str,
+) -> CohortRegistryJournalEntry:
+    placeholder = CohortRegistryJournalEntry.model_construct(
+        sequence=sequence,
+        previous_entry_sha256=previous_entry_sha256,
+        cohort_id=manifest.cohort_id,
+        cohort_version=manifest.version,
+        manifest_sha256=manifest_sha256,
+        previous_manifest_sha256=manifest.previous_manifest_sha256,
+        entry_sha256="0" * 64,
+    )
+    return CohortRegistryJournalEntry(
+        **placeholder.model_dump(mode="python", exclude={"entry_sha256"}),
+        entry_sha256=_journal_entry_sha256(placeholder),
+    )
 
 
 def _validate_backup(backup: CohortRegistryBackup) -> None:
-    if backup.state_version != len(backup.objects):
+    if backup.state_version != len(backup.journal):
         raise CohortRegistryConflict("cohort registry backup count is invalid")
-    pairs: list[tuple[str, bytes]] = []
     cohorts: dict[str, list[CohortManifest]] = {}
+    manifests_by_digest: dict[str, CohortManifest] = {}
     previous_digest = ""
     for item in backup.objects:
         if item.manifest_sha256 <= previous_digest:
@@ -292,7 +367,7 @@ def _validate_backup(backup: CohortRegistryBackup) -> None:
             ) from None
         if hashlib.sha256(content).hexdigest() != item.manifest_sha256:
             raise CohortRegistryConflict("cohort registry backup digest is invalid")
-        pairs.append((item.manifest_sha256, content))
+        manifests_by_digest[item.manifest_sha256] = manifest
         cohorts.setdefault(manifest.cohort_id, []).append(manifest)
     try:
         for history in cohorts.values():
@@ -300,7 +375,26 @@ def _validate_backup(backup: CohortRegistryBackup) -> None:
             validate_manifest_history(tuple(history))
     except (TypeError, ValueError):
         raise CohortRegistryConflict("cohort registry backup history is invalid") from None
-    if _state_head(tuple(pairs)) != backup.state_head_sha256:
+    entries_by_digest = {item.manifest_sha256: item for item in backup.journal}
+    if len(entries_by_digest) != len(backup.journal) or set(entries_by_digest) != {
+        item.manifest_sha256 for item in backup.objects
+    }:
+        raise CohortRegistryConflict("cohort registry backup journal is invalid")
+    previous = EMPTY_REGISTRY_HEAD_SHA256
+    for sequence, entry in enumerate(backup.journal, start=1):
+        manifest = manifests_by_digest[entry.manifest_sha256]
+        if (
+            entry.sequence != sequence
+            or entry.previous_entry_sha256 != previous
+            or entry.entry_sha256 != _journal_entry_sha256(entry)
+            or entry.cohort_id != manifest.cohort_id
+            or entry.cohort_version != manifest.version
+            or entry.previous_manifest_sha256
+            != manifest.previous_manifest_sha256
+        ):
+            raise CohortRegistryConflict("cohort registry backup journal is invalid")
+        previous = entry.entry_sha256
+    if previous != backup.state_head_sha256:
         raise CohortRegistryConflict("cohort registry backup state is invalid")
 
 
@@ -324,7 +418,9 @@ class CohortRegistry:
         *,
         linkage_store: ProviderLinkageStore,
         expected_trust_snapshot_sha256_by_provider: Mapping[str, str],
+        expected_state_head_sha256: str | None = None,
     ) -> None:
+        _require_registry_integrity(self)
         if type(linkage_store) is not ProviderLinkageStore:
             raise TypeError("cohort registry requires the exact linkage store type")
         self.root = _snapshot_path(root)
@@ -333,7 +429,7 @@ class CohortRegistry:
             expected_trust_snapshot_sha256_by_provider
         )
         if (
-            self._linkage_store.active_snapshot().trust_pins_sha256
+            _PINNED_ACTIVE_SNAPSHOT(self._linkage_store).trust_pins_sha256
             != trust_pins_sha256(self._trust_pins)
         ):
             raise CohortRegistryUnsafe("cohort registry trust pins are invalid")
@@ -341,6 +437,7 @@ class CohortRegistry:
         self._objects_fd: int | None = None
         self._lock_fd: int | None = None
         self._metadata_fd: int | None = None
+        self._journal_fd: int | None = None
         self._process_lock = threading.RLock()
         try:
             try:
@@ -398,20 +495,81 @@ class CohortRegistry:
             ):
                 raise CohortRegistryUnsafe("cohort registry lock is unsafe")
             self._lock_identity = (lock_metadata.st_dev, lock_metadata.st_ino)
-            with self._lock(exclusive=True):
-                self._metadata = self._load_or_create_metadata()
-                self._recover_temporary_objects()
-                self._load_state()
+            self._journal_fd = os.open(
+                "registry-journal.jsonl",
+                os.O_RDWR
+                | os.O_CREAT
+                | os.O_APPEND
+                | getattr(os, "O_CLOEXEC", 0)
+                | getattr(os, "O_NOFOLLOW", 0),
+                0o600,
+                dir_fd=self._root_fd,
+            )
+            journal_metadata = os.fstat(self._journal_fd)
+            if (
+                not stat.S_ISREG(journal_metadata.st_mode)
+                or stat.S_IMODE(journal_metadata.st_mode) != 0o600
+                or journal_metadata.st_uid != os.geteuid()
+            ):
+                raise CohortRegistryUnsafe("cohort registry journal is unsafe")
+            self._journal_identity = (
+                journal_metadata.st_dev,
+                journal_metadata.st_ino,
+            )
+            with _PINNED_AUTHORITY_READ_FENCE(self._linkage_store):
+                with _CR_LOCK(self, exclusive=True):
+                    try:
+                        os.stat(
+                            "registry-metadata.json",
+                            dir_fd=self._root_fd,
+                            follow_symlinks=False,
+                        )
+                    except FileNotFoundError:
+                        metadata_existed = False
+                    except OSError:
+                        raise CohortRegistryUnsafe(
+                            "cohort registry metadata is unsafe"
+                        ) from None
+                    else:
+                        metadata_existed = True
+                    self._metadata = _CR_LOAD_OR_CREATE_METADATA(self)
+                    _CR_RECOVER_TEMPORARY_OBJECTS(self)
+                    loaded, head = _CR_LOAD_STATE(self, check_trusted_head=False)
+                    if expected_state_head_sha256 is None:
+                        if metadata_existed:
+                            raise CohortRegistryUnsafe(
+                                "cohort registry expected head is required"
+                            )
+                    elif (
+                        type(expected_state_head_sha256) is not str
+                        or len(expected_state_head_sha256) != 64
+                        or any(
+                            character not in "0123456789abcdef"
+                            for character in expected_state_head_sha256
+                        )
+                        or expected_state_head_sha256 != head
+                    ):
+                        raise CohortRegistryUnsafe(
+                            "cohort registry expected head is invalid"
+                        )
+                    self._trusted_head_sha256 = head
         except BaseException:
-            self.close()
+            _CR_CLOSE(self)
             raise
 
     def close(self) -> None:
+        _require_registry_integrity(self)
         lock = getattr(self, "_process_lock", None)
         if lock is None:
             return
         with lock:
-            for name in ("_metadata_fd", "_lock_fd", "_objects_fd", "_root_fd"):
+            for name in (
+                "_journal_fd",
+                "_metadata_fd",
+                "_lock_fd",
+                "_objects_fd",
+                "_root_fd",
+            ):
                 descriptor = getattr(self, name, None)
                 if descriptor is not None:
                     try:
@@ -421,13 +579,17 @@ class CohortRegistry:
                     setattr(self, name, None)
 
     def __enter__(self) -> CohortRegistry:
+        _require_registry_integrity(self)
         return self
 
     def __exit__(self, *_: object) -> None:
-        self.close()
+        _CR_CLOSE(self)
 
     def __del__(self) -> None:
-        self.close()
+        try:
+            _CR_CLOSE(self)
+        except Exception:
+            pass
 
     @contextmanager
     def _lock(self, *, exclusive: bool) -> Iterator[None]:
@@ -437,9 +599,9 @@ class CohortRegistry:
         with _REGISTRY_PROCESS_LOCK, self._process_lock:
             fcntl.flock(descriptor, fcntl.LOCK_EX if exclusive else fcntl.LOCK_SH)
             try:
-                self._validate_storage()
+                _CR_VALIDATE_STORAGE(self)
                 yield
-                self._validate_storage()
+                _CR_VALIDATE_STORAGE(self)
             finally:
                 fcntl.flock(descriptor, fcntl.LOCK_UN)
 
@@ -448,6 +610,7 @@ class CohortRegistry:
             self._root_fd is None
             or self._objects_fd is None
             or self._lock_fd is None
+            or self._journal_fd is None
         ):
             raise CohortRegistryUnsafe("cohort registry is closed")
         try:
@@ -461,6 +624,12 @@ class CohortRegistry:
                 ".registry.lock", dir_fd=self._root_fd, follow_symlinks=False
             )
             lock_bound = os.fstat(self._lock_fd)
+            journal_path = os.stat(
+                "registry-journal.jsonl",
+                dir_fd=self._root_fd,
+                follow_symlinks=False,
+            )
+            journal_bound = os.fstat(self._journal_fd)
         except OSError:
             raise CohortRegistryUnsafe("cohort registry storage changed") from None
         if (
@@ -479,6 +648,13 @@ class CohortRegistry:
             or (lock_bound.st_dev, lock_bound.st_ino) != self._lock_identity
             or stat.S_IMODE(lock_bound.st_mode) != 0o600
             or lock_bound.st_uid != os.geteuid()
+            or not stat.S_ISREG(journal_path.st_mode)
+            or (journal_path.st_dev, journal_path.st_ino)
+            != self._journal_identity
+            or (journal_bound.st_dev, journal_bound.st_ino)
+            != self._journal_identity
+            or stat.S_IMODE(journal_bound.st_mode) != 0o600
+            or journal_bound.st_uid != os.geteuid()
         ):
             raise CohortRegistryUnsafe("cohort registry storage changed")
         if self._metadata_fd is not None:
@@ -540,7 +716,7 @@ class CohortRegistry:
                 dir_fd=self._root_fd,
             )
         except FileNotFoundError:
-            snapshot = self._linkage_store.active_snapshot()
+            snapshot = _PINNED_ACTIVE_SNAPSHOT(self._linkage_store)
             metadata = CohortRegistryMetadata(
                 registry_id=f"cohort_registry_{secrets.token_hex(16)}",
                 registry_epoch_sha256=secrets.token_hex(32),
@@ -550,14 +726,15 @@ class CohortRegistry:
                 linkage_trust_pins_sha256=snapshot.trust_pins_sha256,
             )
             try:
-                self._publish(
+                _CR_PUBLISH(
+                    self,
                     self._root_fd,
                     "registry-metadata.json",
                     canonical_contract_bytes(metadata),
                 )
             except FileExistsError:
                 pass
-            return self._load_or_create_metadata()
+            return _CR_LOAD_OR_CREATE_METADATA(self)
         try:
             observed = os.fstat(descriptor)
             if (
@@ -577,7 +754,7 @@ class CohortRegistry:
             raise CohortRegistryUnsafe("cohort registry metadata is invalid") from None
         self._metadata_fd = descriptor
         self._metadata_identity = (observed.st_dev, observed.st_ino)
-        snapshot = self._linkage_store.active_snapshot()
+        snapshot = _PINNED_ACTIVE_SNAPSHOT(self._linkage_store)
         if (
             metadata.linkage_store_id,
             metadata.linkage_store_epoch_sha256,
@@ -594,8 +771,62 @@ class CohortRegistry:
             raise CohortRegistryUnsafe("cohort registry linkage authority changed")
         return metadata
 
+    def _load_journal(self) -> tuple[CohortRegistryJournalEntry, ...]:
+        descriptor = self._journal_fd
+        if descriptor is None:
+            raise CohortRegistryUnsafe("cohort registry is closed")
+        try:
+            os.lseek(descriptor, 0, os.SEEK_SET)
+            content = _read_bounded(descriptor, MAX_BACKUP_BYTES)
+        except OSError:
+            raise CohortRegistryUnsafe("cohort registry journal is unavailable") from None
+        if content and not content.endswith(b"\n"):
+            raise CohortRegistryUnsafe("cohort registry journal is incomplete")
+        entries: list[CohortRegistryJournalEntry] = []
+        previous = EMPTY_REGISTRY_HEAD_SHA256
+        seen_manifests: set[str] = set()
+        seen_versions: set[tuple[str, int]] = set()
+        for sequence, line in enumerate(content.splitlines(), start=1):
+            if sequence > MAX_REGISTERED_MANIFESTS:
+                raise CohortRegistryUnsafe("cohort registry journal bound exceeded")
+            try:
+                entry = contract_from_canonical_bytes(
+                    CohortRegistryJournalEntry, line
+                )
+            except Exception:
+                raise CohortRegistryUnsafe(
+                    "cohort registry journal is invalid"
+                ) from None
+            version_key = (entry.cohort_id, entry.cohort_version)
+            if (
+                entry.sequence != sequence
+                or entry.previous_entry_sha256 != previous
+                or entry.entry_sha256 != _journal_entry_sha256(entry)
+                or entry.manifest_sha256 in seen_manifests
+                or version_key in seen_versions
+            ):
+                raise CohortRegistryUnsafe("cohort registry journal is invalid")
+            entries.append(entry)
+            previous = entry.entry_sha256
+            seen_manifests.add(entry.manifest_sha256)
+            seen_versions.add(version_key)
+        return tuple(entries)
+
+    def _append_journal(self, entry: CohortRegistryJournalEntry) -> None:
+        descriptor = self._journal_fd
+        if descriptor is None:
+            raise CohortRegistryUnsafe("cohort registry is closed")
+        content = canonical_contract_bytes(entry) + b"\n"
+        try:
+            _write_all(descriptor, content)
+            os.fsync(descriptor)
+        except OSError:
+            raise CohortRegistryUnsafe("cohort registry journal append failed") from None
+
     def _load_state(
         self,
+        *,
+        check_trusted_head: bool = True,
     ) -> tuple[dict[str, tuple[CohortManifest, bytes]], str]:
         if self._objects_fd is None:
             raise CohortRegistryUnsafe("cohort registry is closed")
@@ -650,8 +881,27 @@ class CohortRegistry:
                     "cohort registry manifest is invalid"
                 ) from None
             loaded[digest] = (manifest, content)
+        journal = _CR_LOAD_JOURNAL(self)
+        committed: dict[str, tuple[CohortManifest, bytes]] = {}
+        for entry in journal:
+            item = loaded.get(entry.manifest_sha256)
+            if item is None:
+                raise CohortRegistryUnsafe(
+                    "cohort registry committed object is missing"
+                )
+            manifest, _ = item
+            if (
+                entry.cohort_id != manifest.cohort_id
+                or entry.cohort_version != manifest.version
+                or entry.previous_manifest_sha256
+                != manifest.previous_manifest_sha256
+            ):
+                raise CohortRegistryUnsafe(
+                    "cohort registry journal binding is invalid"
+                )
+            committed[entry.manifest_sha256] = item
         cohorts: dict[str, list[CohortManifest]] = {}
-        for manifest, _ in loaded.values():
+        for manifest, _ in committed.values():
             cohorts.setdefault(manifest.cohort_id, []).append(manifest)
         try:
             for history in cohorts.values():
@@ -659,10 +909,18 @@ class CohortRegistry:
                 validate_manifest_history(tuple(history))
         except (TypeError, ValueError):
             raise CohortRegistryUnsafe("cohort registry history is invalid") from None
-        ordered = tuple((digest, loaded[digest][1]) for digest in sorted(loaded))
-        return loaded, _state_head(ordered)
+        head = journal[-1].entry_sha256 if journal else EMPTY_REGISTRY_HEAD_SHA256
+        if check_trusted_head and head != self._trusted_head_sha256:
+            trusted_head = self._trusted_head_sha256
+            if trusted_head != EMPTY_REGISTRY_HEAD_SHA256 and not any(
+                entry.entry_sha256 == trusted_head for entry in journal
+            ):
+                raise CohortRegistryUnsafe("cohort registry state rollback detected")
+            self._trusted_head_sha256 = head
+        return committed, head
 
     def register(self, manifest: CohortManifest) -> CohortRegistrationReceipt:
+        _require_registry_integrity(self)
         try:
             content = cohort_manifest_bytes(manifest)
             captured = cohort_manifest_from_bytes(content)
@@ -676,62 +934,88 @@ class CohortRegistry:
             raise CohortRegistryConflict(
                 "cohort manifest is not current and valid"
             ) from None
-        with self._lock(exclusive=True):
-            self._recover_temporary_objects()
-            loaded, _ = self._load_state()
-            histories: dict[str, list[CohortManifest]] = {}
-            for existing, _ in loaded.values():
-                histories.setdefault(existing.cohort_id, []).append(existing)
-            history = sorted(
-                histories.get(captured.cohort_id, []), key=lambda item: item.version
-            )
-            if digest in loaded:
-                if loaded[digest][1] != content:
-                    raise CohortRegistryConflict("cohort manifest digest conflicts")
-            else:
-                if len(loaded) >= MAX_REGISTERED_MANIFESTS:
-                    raise CohortRegistryConflict("cohort registry is full")
-                try:
-                    validate_manifest_history(tuple((*history, captured)))
-                    validate_manifest_against_linkage_store(
-                        captured,
-                        self._linkage_store,
-                        expected_trust_snapshot_sha256_by_provider=self._trust_pins,
+        with _PINNED_AUTHORITY_READ_FENCE(self._linkage_store):
+            try:
+                _PINNED_VALIDATE_MANIFEST_IN_FENCE(
+                    captured,
+                    self._linkage_store,
+                    expected_trust_snapshot_sha256_by_provider=self._trust_pins,
+                )
+            except Exception:
+                raise CohortRegistryConflict(
+                    "cohort manifest is not current and valid"
+                ) from None
+            with _CR_LOCK(self, exclusive=True):
+                _CR_RECOVER_TEMPORARY_OBJECTS(self)
+                loaded, head = _CR_LOAD_STATE(self)
+                histories: dict[str, list[CohortManifest]] = {}
+                for existing, _ in loaded.values():
+                    histories.setdefault(existing.cohort_id, []).append(existing)
+                history = sorted(
+                    histories.get(captured.cohort_id, []),
+                    key=lambda item: item.version,
+                )
+                if digest in loaded:
+                    if loaded[digest][1] != content:
+                        raise CohortRegistryConflict(
+                            "cohort manifest digest conflicts"
+                        )
+                else:
+                    if len(loaded) >= MAX_REGISTERED_MANIFESTS:
+                        raise CohortRegistryConflict("cohort registry is full")
+                    try:
+                        validate_manifest_history(tuple((*history, captured)))
+                    except Exception:
+                        raise CohortRegistryConflict(
+                            "cohort manifest cannot extend current registry history"
+                        ) from None
+                    assert self._objects_fd is not None
+                    try:
+                        _CR_PUBLISH(
+                            self, self._objects_fd, f"{digest}.json", content
+                        )
+                    except FileExistsError:
+                        existing = _read_exact_object(self._objects_fd, digest)
+                        if existing != content:
+                            raise CohortRegistryConflict(
+                                "cohort manifest publication conflicts"
+                            ) from None
+                    entry = _build_journal_entry(
+                        sequence=len(loaded) + 1,
+                        previous_entry_sha256=head,
+                        manifest=captured,
+                        manifest_sha256=digest,
                     )
-                except Exception:
-                    raise CohortRegistryConflict(
-                        "cohort manifest cannot extend current registry history"
-                    ) from None
-                assert self._objects_fd is not None
-                try:
-                    self._publish(self._objects_fd, f"{digest}.json", content)
-                except FileExistsError:
-                    raise CohortRegistryConflict(
-                        "cohort manifest publication conflicts"
-                    ) from None
-            final, head = self._load_state()
-            if digest not in final or final[digest][1] != content:
-                raise CohortRegistryUnsafe("cohort manifest publication is unproven")
-            return CohortRegistrationReceipt(
-                registry_id=self._metadata.registry_id,
-                registry_epoch_sha256=self._metadata.registry_epoch_sha256,
-                state_version=len(final),
-                state_head_sha256=head,
-                cohort_id=captured.cohort_id,
-                cohort_version=captured.version,
-                manifest_sha256=digest,
-                previous_manifest_sha256=captured.previous_manifest_sha256,
-            )
+                    _CR_APPEND_JOURNAL(self, entry)
+                    self._trusted_head_sha256 = entry.entry_sha256
+                final, final_head = _CR_LOAD_STATE(self)
+                if digest not in final or final[digest][1] != content:
+                    raise CohortRegistryUnsafe(
+                        "cohort manifest publication is unproven"
+                    )
+                return CohortRegistrationReceipt(
+                    registry_id=self._metadata.registry_id,
+                    registry_epoch_sha256=self._metadata.registry_epoch_sha256,
+                    state_version=len(final),
+                    state_head_sha256=final_head,
+                    cohort_id=captured.cohort_id,
+                    cohort_version=captured.version,
+                    manifest_sha256=digest,
+                    previous_manifest_sha256=captured.previous_manifest_sha256,
+                )
 
     def backup_bytes(self) -> bytes:
         """Return one protected, canonical, consistent registry backup bundle."""
 
-        with self._lock(exclusive=False):
-            loaded, head = self._load_state()
+        _require_registry_integrity(self)
+        with _CR_LOCK(self, exclusive=False):
+            loaded, head = _CR_LOAD_STATE(self)
+            journal = _CR_LOAD_JOURNAL(self)
             backup = CohortRegistryBackup(
                 metadata=self._metadata,
                 state_version=len(loaded),
                 state_head_sha256=head,
+                journal=journal,
                 objects=tuple(
                     CohortRegistryBackupObject(
                         manifest_sha256=digest,
@@ -755,16 +1039,25 @@ class CohortRegistry:
         *,
         linkage_store: ProviderLinkageStore,
         expected_trust_snapshot_sha256_by_provider: Mapping[str, str],
+        expected_state_head_sha256: str,
     ) -> CohortRegistry:
         """Restore a verified bundle into one new private registry root."""
 
+        _require_registry_class_integrity(cls)
         if type(linkage_store) is not ProviderLinkageStore:
             raise TypeError("cohort registry requires the exact linkage store type")
         backup = cohort_registry_backup_from_bytes(backup_content)
+        if (
+            type(expected_state_head_sha256) is not str
+            or expected_state_head_sha256 != backup.state_head_sha256
+        ):
+            raise CohortRegistryConflict(
+                "cohort registry backup expected head is invalid"
+            )
         pins = capture_expected_trust_pins(
             expected_trust_snapshot_sha256_by_provider
         )
-        snapshot = linkage_store.active_snapshot()
+        snapshot = _PINNED_ACTIVE_SNAPSHOT(linkage_store)
         if snapshot.trust_pins_sha256 != trust_pins_sha256(pins) or (
             backup.metadata.linkage_store_id,
             backup.metadata.linkage_store_epoch_sha256,
@@ -861,6 +1154,10 @@ class CohortRegistry:
                     f"{item.manifest_sha256}.json",
                     item.manifest_json.encode("utf-8"),
                 )
+            journal_content = b"".join(
+                canonical_contract_bytes(entry) + b"\n" for entry in backup.journal
+            )
+            _publish_file(root_fd, "registry-journal.jsonl", journal_content)
             os.fsync(objects_fd)
             os.fsync(root_fd)
             os.fsync(parent_fd)
@@ -878,16 +1175,18 @@ class CohortRegistry:
                         os.close(descriptor)
                     except OSError:
                         pass
-        return cls(
+        return _CR_CONSTRUCT(
             target,
             linkage_store=linkage_store,
             expected_trust_snapshot_sha256_by_provider=pins,
+            expected_state_head_sha256=expected_state_head_sha256,
         )
 
     def resolve(
         self, selector_id: str, cohort_version: int
     ) -> RegisteredCohortManifest:
-        history = self.resolve_history(selector_id, cohort_version)
+        _require_registry_integrity(self)
+        history = _CR_RESOLVE_HISTORY(self, selector_id, cohort_version)
         return RegisteredCohortManifest(
             registry_id=history.registry_id,
             registry_epoch_sha256=history.registry_epoch_sha256,
@@ -900,6 +1199,7 @@ class CohortRegistry:
     def resolve_history(
         self, selector_id: str, cohort_version: int
     ) -> RegisteredCohortHistory:
+        _require_registry_integrity(self)
         if (
             type(selector_id) is not str
             or len(selector_id) != 56
@@ -908,43 +1208,44 @@ class CohortRegistry:
             or not 1 <= cohort_version <= 100_000
         ):
             raise CohortRegistryConflict("cohort selector is invalid")
-        with self._lock(exclusive=False):
-            loaded, head = self._load_state()
-            matches = [
-                (manifest.version, digest, manifest)
-                for digest, (manifest, _) in loaded.items()
-                if manifest.version <= cohort_version
-                and _selector_id(
-                    self._metadata.registry_epoch_sha256, manifest.cohort_id
+        with _PINNED_AUTHORITY_READ_FENCE(self._linkage_store):
+            with _CR_LOCK(self, exclusive=False):
+                loaded, head = _CR_LOAD_STATE(self)
+                matches = [
+                    (manifest.version, digest, manifest)
+                    for digest, (manifest, _) in loaded.items()
+                    if manifest.version <= cohort_version
+                    and _selector_id(
+                        self._metadata.registry_epoch_sha256, manifest.cohort_id
+                    )
+                    == selector_id
+                ]
+                matches.sort(key=lambda item: item[0])
+                if (
+                    len(matches) != cohort_version
+                    or [item[0] for item in matches]
+                    != list(range(1, cohort_version + 1))
+                ):
+                    raise CohortRegistryConflict("cohort selector is unavailable")
+                _, digest, manifest = matches[-1]
+                try:
+                    _PINNED_VALIDATE_MANIFEST_IN_FENCE(
+                        manifest,
+                        self._linkage_store,
+                        expected_trust_snapshot_sha256_by_provider=self._trust_pins,
+                    )
+                except Exception:
+                    raise CohortRegistryConflict(
+                        "cohort selector authority is stale"
+                    ) from None
+                return RegisteredCohortHistory(
+                    registry_id=self._metadata.registry_id,
+                    registry_epoch_sha256=self._metadata.registry_epoch_sha256,
+                    state_version=len(loaded),
+                    state_head_sha256=head,
+                    selected_manifest_sha256=digest,
+                    manifests=tuple(item[2] for item in matches),
                 )
-                == selector_id
-            ]
-            matches.sort(key=lambda item: item[0])
-            if (
-                len(matches) != cohort_version
-                or [item[0] for item in matches]
-                != list(range(1, cohort_version + 1))
-            ):
-                raise CohortRegistryConflict("cohort selector is unavailable")
-            _, digest, manifest = matches[-1]
-            try:
-                validate_manifest_against_linkage_store(
-                    manifest,
-                    self._linkage_store,
-                    expected_trust_snapshot_sha256_by_provider=self._trust_pins,
-                )
-            except Exception:
-                raise CohortRegistryConflict(
-                    "cohort selector authority is stale"
-                ) from None
-            return RegisteredCohortHistory(
-                registry_id=self._metadata.registry_id,
-                registry_epoch_sha256=self._metadata.registry_epoch_sha256,
-                state_version=len(loaded),
-                state_head_sha256=head,
-                selected_manifest_sha256=digest,
-                manifests=tuple(item[2] for item in matches),
-            )
 
     def list_selectors(
         self,
@@ -953,6 +1254,7 @@ class CohortRegistry:
         after_version: int | None = None,
         limit: int = 50,
     ) -> CohortSelectorPage:
+        _require_registry_integrity(self)
         if type(limit) is not int or not 1 <= limit <= MAX_SELECTOR_PAGE:
             raise CohortRegistryConflict("cohort selector page bound is invalid")
         if (after_selector_id is None) != (after_version is None):
@@ -965,72 +1267,179 @@ class CohortRegistry:
             or not 1 <= after_version <= 100_000
         ):
             raise CohortRegistryConflict("cohort selector cursor is invalid")
-        with self._lock(exclusive=False):
-            loaded, head = self._load_state()
-            ordered = sorted(
-                (
-                    _selector_id(
-                        self._metadata.registry_epoch_sha256, manifest.cohort_id
-                    ),
-                    manifest.version,
-                    digest,
-                    manifest,
-                )
-                for digest, (manifest, _) in loaded.items()
-            )
-            if after_selector_id is not None:
-                cursor = (after_selector_id, after_version)
-                ordered = [item for item in ordered if item[:2] > cursor]
-            selected = ordered[:limit]
-            rows: list[CohortSelectorRecord] = []
-            for selector_id, version, digest, manifest in selected:
-                try:
-                    validate_manifest_against_linkage_store(
+        with _PINNED_AUTHORITY_READ_FENCE(self._linkage_store):
+            with _CR_LOCK(self, exclusive=False):
+                loaded, head = _CR_LOAD_STATE(self)
+                ordered = sorted(
+                    (
+                        _selector_id(
+                            self._metadata.registry_epoch_sha256,
+                            manifest.cohort_id,
+                        ),
+                        manifest.version,
+                        digest,
                         manifest,
-                        self._linkage_store,
-                        expected_trust_snapshot_sha256_by_provider=self._trust_pins,
                     )
-                except Exception:
-                    authority_state = CohortAuthorityState.STALE
-                else:
-                    authority_state = CohortAuthorityState.CURRENT
-                rows.append(
-                    CohortSelectorRecord(
-                        selector_id=selector_id,
-                        cohort_version=version,
-                        manifest_sha256=digest,
-                        authority_state=authority_state,
-                        member_count=len(manifest.members),
-                        denominator_count=sum(
-                            member.denominator_contribution
-                            for member in manifest.members
-                        ),
-                        inclusion_policy_sha256=manifest.policies.inclusion_sha256,
-                        exclusion_policy_sha256=manifest.policies.exclusion_sha256,
-                        missingness_policy_sha256=manifest.policies.missingness_sha256,
-                        measurement_definition_sha256=(
-                            manifest.measurement_anchor.measurement_definition_sha256
-                        ),
-                        anchor_definition_sha256=(
-                            manifest.measurement_anchor.anchor_definition_sha256
-                        ),
-                        anchor_authority_sha256=(
-                            manifest.measurement_anchor.authority_sha256
-                        ),
-                    )
+                    for digest, (manifest, _) in loaded.items()
                 )
-            more = len(ordered) > len(selected)
-            return CohortSelectorPage(
-                registry_id=self._metadata.registry_id,
-                registry_epoch_sha256=self._metadata.registry_epoch_sha256,
-                state_version=len(loaded),
-                state_head_sha256=head,
-                records=tuple(rows),
-                next_after_selector_id=(
-                    rows[-1].selector_id if more and rows else None
-                ),
-                next_after_version=(rows[-1].cohort_version if more and rows else None),
-            )
+                if after_selector_id is not None:
+                    cursor = (after_selector_id, after_version)
+                    ordered = [item for item in ordered if item[:2] > cursor]
+                selected = ordered[:limit]
+                rows: list[CohortSelectorRecord] = []
+                for selector_id, version, digest, manifest in selected:
+                    try:
+                        _PINNED_VALIDATE_MANIFEST_IN_FENCE(
+                            manifest,
+                            self._linkage_store,
+                            expected_trust_snapshot_sha256_by_provider=self._trust_pins,
+                        )
+                    except Exception:
+                        authority_state = CohortAuthorityState.STALE
+                    else:
+                        authority_state = CohortAuthorityState.CURRENT
+                    rows.append(
+                        CohortSelectorRecord(
+                            selector_id=selector_id,
+                            cohort_version=version,
+                            manifest_sha256=digest,
+                            authority_state=authority_state,
+                            member_count=len(manifest.members),
+                            denominator_count=sum(
+                                member.denominator_contribution
+                                for member in manifest.members
+                            ),
+                            inclusion_policy_sha256=(
+                                manifest.policies.inclusion_sha256
+                            ),
+                            exclusion_policy_sha256=(
+                                manifest.policies.exclusion_sha256
+                            ),
+                            missingness_policy_sha256=(
+                                manifest.policies.missingness_sha256
+                            ),
+                            measurement_definition_sha256=(
+                                manifest.measurement_anchor.measurement_definition_sha256
+                            ),
+                            anchor_definition_sha256=(
+                                manifest.measurement_anchor.anchor_definition_sha256
+                            ),
+                            anchor_authority_sha256=(
+                                manifest.measurement_anchor.authority_sha256
+                            ),
+                        )
+                    )
+                more = len(ordered) > len(selected)
+                return CohortSelectorPage(
+                    registry_id=self._metadata.registry_id,
+                    registry_epoch_sha256=self._metadata.registry_epoch_sha256,
+                    state_version=len(loaded),
+                    state_head_sha256=head,
+                    records=tuple(rows),
+                    next_after_selector_id=(
+                        rows[-1].selector_id if more and rows else None
+                    ),
+                    next_after_version=(
+                        rows[-1].cohort_version if more and rows else None
+                    ),
+                )
+
+
+_REGISTRY_METHOD_SEAL = MappingProxyType(
+    {
+        name: CohortRegistry.__dict__[name]
+        for name in (
+            "__init__",
+            "__enter__",
+            "__exit__",
+            "_lock",
+            "_validate_storage",
+            "_publish",
+            "_recover_temporary_objects",
+            "_load_or_create_metadata",
+            "_load_journal",
+            "_append_journal",
+            "_load_state",
+            "register",
+            "backup_bytes",
+            "restore",
+            "resolve",
+            "resolve_history",
+            "list_selectors",
+            "close",
+        )
+    }
+)
+
+
+def _require_registry_class_integrity(cls: type[object]) -> None:
+    if cls is not CohortRegistry or any(
+        CohortRegistry.__dict__.get(name) is not expected
+        for name, expected in _REGISTRY_METHOD_SEAL.items()
+    ):
+        raise CohortRegistryUnsafe("cohort registry callable changed")
+
+
+def _require_registry_integrity(registry: CohortRegistry) -> None:
+    _require_registry_class_integrity(type(registry))
+    if any(name in vars(registry) for name in _REGISTRY_METHOD_SEAL):
+        raise CohortRegistryUnsafe("cohort registry callable changed")
+    authority_sources = {
+        "_PINNED_AUTHORITY_READ_FENCE": ProviderLinkageStore.authority_read_fence,
+        "_PINNED_ACTIVE_SNAPSHOT": ProviderLinkageStore.active_snapshot,
+        "_PINNED_VALIDATE_MANIFEST_IN_FENCE": (
+            cohort_manifest_module._validate_manifest_against_linkage_store_in_fence
+        ),
+    }
+    if any(
+        globals().get(name) is not expected
+        or authority_sources[name] is not expected
+        for name, expected in _REGISTRY_AUTHORITY_SEAL.items()
+    ) or any(
+        globals().get(name) is not expected
+        for name, expected in _REGISTRY_ALIAS_SEAL.items()
+    ):
+        raise CohortRegistryUnsafe("cohort registry authority callable changed")
+
+
+_CR_CONSTRUCT = CohortRegistry
+_CR_CLOSE = CohortRegistry.close
+_CR_LOCK = CohortRegistry._lock
+_CR_VALIDATE_STORAGE = CohortRegistry._validate_storage
+_CR_PUBLISH = CohortRegistry._publish
+_CR_RECOVER_TEMPORARY_OBJECTS = CohortRegistry._recover_temporary_objects
+_CR_LOAD_OR_CREATE_METADATA = CohortRegistry._load_or_create_metadata
+_CR_LOAD_JOURNAL = CohortRegistry._load_journal
+_CR_APPEND_JOURNAL = CohortRegistry._append_journal
+_CR_LOAD_STATE = CohortRegistry._load_state
+_CR_RESOLVE_HISTORY = CohortRegistry.resolve_history
+_REGISTRY_AUTHORITY_SEAL = MappingProxyType(
+    {
+        "_PINNED_AUTHORITY_READ_FENCE": _PINNED_AUTHORITY_READ_FENCE,
+        "_PINNED_ACTIVE_SNAPSHOT": _PINNED_ACTIVE_SNAPSHOT,
+        "_PINNED_VALIDATE_MANIFEST_IN_FENCE": (
+            _PINNED_VALIDATE_MANIFEST_IN_FENCE
+        ),
+    }
+)
+_REGISTRY_ALIAS_SEAL = MappingProxyType(
+    {
+        name: globals()[name]
+        for name in (
+            "_CR_CONSTRUCT",
+            "_CR_CLOSE",
+            "_CR_LOCK",
+            "_CR_VALIDATE_STORAGE",
+            "_CR_PUBLISH",
+            "_CR_RECOVER_TEMPORARY_OBJECTS",
+            "_CR_LOAD_OR_CREATE_METADATA",
+            "_CR_LOAD_JOURNAL",
+            "_CR_APPEND_JOURNAL",
+            "_CR_LOAD_STATE",
+            "_CR_RESOLVE_HISTORY",
+        )
+    }
+)
 
 
 __all__ = [
