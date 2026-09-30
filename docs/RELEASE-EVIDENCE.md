@@ -86,15 +86,25 @@ failed measurements remain unmet gates.
 The synthetic privacy gate is adversarial rather than an absence check. It
 injects each forbidden identifier, path, and sequence class through catalog
 serialization, problem responses, and screenshot/accessibility contracts and
-requires all three real paths to reject it. Persisted evidence binds the exact
+through the authenticated packaged HTTP query boundary. It requires every path
+to reject safely and the HTTP response not to reflect the sentinel. Persisted evidence binds the exact
 sentinel class and digest, every path result, harness version, run, and host.
 The network gate actively probes
 `connect_ex` and `sendto` while the process guard also denies connect,
-create-connection, DNS lookup, and connected-socket send variants. These local
+create-connection, DNS lookup, and connected-socket send variants. The guard
+allows only the exact ephemeral loopback port used by the packaged local
+service; its repeated authenticated catalog response must be byte-identical.
+These local
 evidence records bind exact operation names, target digests, denial results,
 harness version, run, and host. These local
 results still do not replace approved-host, accessibility, screenshot, or
 five-provider evidence.
+
+The local report separately records keyboard-only, screen-reader, 200 percent
+zoom, reviewed screenshots and the five-provider task matrix as unmet when no
+observed evidence is present. It also binds the current E12
+`unavailable_not_implemented` state to release explorer/export controls fixed
+false. Fixture metadata and local browser checks cannot upgrade those states.
 
 ## Asset installation boundary
 
