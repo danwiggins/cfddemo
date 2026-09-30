@@ -63,6 +63,8 @@ collection and distinct technical reruns remain valid. Wrong-subject and
 wrong-collection corrections must replace their descendant biological tokens so
 the hierarchy never acquires two parents.
 
-Durable SQLite schema, concurrency, backup/restore, retention execution,
-derived-record invalidation and supersession-cycle enforcement belong to the
-later D04/D05 persistence PR. This contract does not claim they exist.
+This D01 contract does not itself persist record supersession. The additive
+D04 `RecordSupersessionStore` consumes this store's live active projection to
+provide append-only result supersession, reanalysis-chain enforcement, and
+derived-comparison invalidation. Retention execution and provider backup and
+restore remain separate deployment responsibilities.

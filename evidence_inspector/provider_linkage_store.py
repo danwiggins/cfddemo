@@ -37,7 +37,7 @@ from evidence_inspector.provider_linkage import (
     validate_linkage_history,
 )
 
-SCHEMA_VERSION = 2
+SCHEMA_VERSION = 3
 MAX_PROVIDER_TRUST_PINS = 256
 _SQLITE_OPEN_LOCK = threading.RLock()
 _RLOCK_TYPE = type(threading.RLock())
@@ -224,6 +224,9 @@ class ActiveLinkageSnapshot(RegistryContract):
     trust_pins_sha256: Sha256
     revisions: tuple[LinkageRevision, ...] = Field(max_length=MAX_REVISIONS)
     receipts: tuple[CommittedLinkageReceipt, ...] = Field(max_length=MAX_REVISIONS)
+    activation_receipts: tuple[CommittedLinkageReceipt, ...] = Field(
+        max_length=MAX_REVISIONS
+    )
 
     @model_validator(mode="after")
     def exact_parallel_order(self) -> ActiveLinkageSnapshot:
@@ -235,7 +238,15 @@ class ActiveLinkageSnapshot(RegistryContract):
             (item.provider_namespace, item.linkage_id, item.revision)
             for item in self.receipts
         ]
-        if revision_keys != receipt_keys or revision_keys != sorted(revision_keys):
+        activation_keys = [
+            (item.provider_namespace, item.linkage_id, item.revision)
+            for item in self.activation_receipts
+        ]
+        if (
+            revision_keys != receipt_keys
+            or revision_keys != activation_keys
+            or revision_keys != sorted(revision_keys)
+        ):
             raise ValueError("active linkage snapshot ordering is invalid")
         return self
 
@@ -248,7 +259,7 @@ def _normalize_schema_sql(statement: str) -> str:
     return "".join(statement.split()).casefold()
 
 
-_SCHEMA_SQL = {
+_SCHEMA_V2_SQL = {
     ("table", "metadata"): (
         "CREATE TABLE metadata(key TEXT PRIMARY KEY, value TEXT NOT NULL)"
     ),
@@ -278,6 +289,22 @@ _SCHEMA_SQL = {
     ("index", "linkage_revision_order"): """CREATE INDEX linkage_revision_order
         ON linkage_revisions(provider_namespace, linkage_id, revision)""",
 }
+_SCHEMA_V2_SIGNATURE = {
+    key: _normalize_schema_sql(value) for key, value in _SCHEMA_V2_SQL.items()
+}
+_SCHEMA_SQL = dict(_SCHEMA_V2_SQL)
+_SCHEMA_SQL[("table", "linkage_revisions")] = """CREATE TABLE linkage_revisions(
+        provider_namespace TEXT NOT NULL,
+        linkage_id TEXT NOT NULL,
+        revision INTEGER NOT NULL,
+        revision_sha256 TEXT NOT NULL UNIQUE,
+        authorized_record_sha256 TEXT NOT NULL UNIQUE,
+        operation TEXT NOT NULL,
+        record_json BLOB NOT NULL,
+        activation_state_version INTEGER NOT NULL DEFAULT 0,
+        activation_state_head_sha256 TEXT NOT NULL DEFAULT '0000000000000000000000000000000000000000000000000000000000000000',
+        PRIMARY KEY(provider_namespace, linkage_id, revision)
+    )"""
 _SCHEMA_SIGNATURE = {
     key: _normalize_schema_sql(value) for key, value in _SCHEMA_SQL.items()
 }
@@ -720,18 +747,80 @@ class ProviderLinkageStore:
                             )
                             if isinstance(row[2], str)
                         }
-                        if schema != _SCHEMA_SIGNATURE:
+                        if schema == _SCHEMA_SIGNATURE:
+                            authority_time = _pinned_time_source_value(self)
+                            connection.execute(
+                                "INSERT INTO metadata VALUES(?, ?)",
+                                (
+                                    "authority_time_floor",
+                                    _authority_time_text(authority_time),
+                                ),
+                            )
+                            connection.execute(
+                                "UPDATE metadata SET value=? WHERE key='schema_version'",
+                                (str(SCHEMA_VERSION),),
+                            )
+                            metadata = dict(
+                                connection.execute("SELECT key, value FROM metadata")
+                            )
+                        elif schema != _SCHEMA_V2_SIGNATURE:
                             raise ProviderLinkageStoreSchemaError(
                                 "linkage store schema is unsupported"
                             )
-                        authority_time = _pinned_time_source_value(self)
+                        else:
+                            authority_time = _pinned_time_source_value(self)
+                            connection.execute(
+                                "INSERT INTO metadata VALUES(?, ?)",
+                                (
+                                    "authority_time_floor",
+                                    _authority_time_text(authority_time),
+                                ),
+                            )
+                            connection.execute(
+                                "UPDATE metadata SET value=? WHERE key='schema_version'",
+                                ("2",),
+                            )
+                            metadata = dict(
+                                connection.execute("SELECT key, value FROM metadata")
+                            )
+                    if metadata.get("schema_version") == "2":
+                        schema = {
+                            (row[0], row[1]): _normalize_schema_sql(row[2])
+                            for row in connection.execute(
+                                """SELECT type, name, sql FROM sqlite_master
+                                   WHERE name NOT LIKE 'sqlite_%'
+                                   ORDER BY type, name"""
+                            )
+                            if isinstance(row[2], str)
+                        }
+                        if schema != _SCHEMA_V2_SIGNATURE:
+                            raise ProviderLinkageStoreSchemaError(
+                                "linkage store schema is unsupported"
+                            )
                         connection.execute(
-                            "INSERT INTO metadata VALUES(?, ?)",
-                            (
-                                "authority_time_floor",
-                                _authority_time_text(authority_time),
-                            ),
+                            "ALTER TABLE linkage_revisions ADD COLUMN "
+                            "activation_state_version INTEGER NOT NULL DEFAULT 0"
                         )
+                        connection.execute(
+                            "ALTER TABLE linkage_revisions ADD COLUMN "
+                            "activation_state_head_sha256 TEXT NOT NULL DEFAULT "
+                            f"'{'0' * 64}'"
+                        )
+                        rows = connection.execute(
+                            "SELECT rowid FROM linkage_revisions ORDER BY rowid"
+                        ).fetchall()
+                        for state_version, row in enumerate(rows, start=1):
+                            connection.execute(
+                                """UPDATE linkage_revisions
+                                   SET activation_state_version=?,
+                                       activation_state_head_sha256=?
+                                   WHERE rowid=?""",
+                                (
+                                    state_version,
+                                    _PINNED_STATE_HEAD(connection, int(row[0])),
+                                    int(row[0]),
+                                ),
+                            )
                         connection.execute(
                             "UPDATE metadata SET value=? WHERE key='schema_version'",
                             (str(SCHEMA_VERSION),),
@@ -860,7 +949,10 @@ class ProviderLinkageStore:
             ) from None
 
     @staticmethod
-    def _state_head(connection: sqlite3.Connection) -> str:
+    def _state_head(
+        connection: sqlite3.Connection,
+        max_revision_rowid: int | None = None,
+    ) -> str:
         metadata = dict(connection.execute("SELECT key, value FROM metadata"))
         payload = {
             "store_id": metadata["store_id"],
@@ -880,16 +972,22 @@ class ProviderLinkageStore:
                     """SELECT provider_namespace, linkage_id, revision,
                               revision_sha256, authorized_record_sha256, operation
                        FROM linkage_revisions
-                       ORDER BY provider_namespace, linkage_id, revision"""
+                       WHERE (? IS NULL OR rowid <= ?)
+                       ORDER BY provider_namespace, linkage_id, revision""",
+                    (max_revision_rowid, max_revision_rowid),
                 )
             ],
             "consumptions": [
                 tuple(row)
                 for row in connection.execute(
-                    """SELECT provider_namespace, approval_id, nonce,
-                              revision_sha256, trust_snapshot_sha256
-                       FROM approval_consumptions
-                       ORDER BY provider_namespace, approval_id"""
+                    """SELECT c.provider_namespace, c.approval_id, c.nonce,
+                              c.revision_sha256, c.trust_snapshot_sha256
+                       FROM approval_consumptions AS c
+                       JOIN linkage_revisions AS r
+                         ON r.revision_sha256 = c.revision_sha256
+                       WHERE (? IS NULL OR r.rowid <= ?)
+                       ORDER BY c.provider_namespace, c.approval_id""",
+                    (max_revision_rowid, max_revision_rowid),
                 )
             ],
         }
@@ -926,6 +1024,18 @@ class ProviderLinkageStore:
                 "linkage store trust state is invalid"
             )
         records = _PINNED_LOAD_RECORDS(connection)
+        activation_rows = connection.execute(
+            """SELECT rowid, activation_state_version,
+                      activation_state_head_sha256
+               FROM linkage_revisions ORDER BY rowid"""
+        ).fetchall()
+        for expected_version, row in enumerate(activation_rows, start=1):
+            if row[1] != expected_version or row[2] != _PINNED_STATE_HEAD(
+                connection, int(row[0])
+            ):
+                raise ProviderLinkageStoreSchemaError(
+                    "linkage consumption history or activation proof is invalid"
+                )
         validate_linkage_history(
             records,
             expected_trust_snapshot_sha256_by_provider=self._trust_pins,
@@ -1050,8 +1160,16 @@ class ProviderLinkageStore:
                             "linkage revision does not extend committed state"
                         )
 
+                state_version = (
+                    int(
+                        connection.execute(
+                            "SELECT value FROM metadata WHERE key='state_version'"
+                        ).fetchone()[0]
+                    )
+                    + 1
+                )
                 connection.execute(
-                    """INSERT INTO linkage_revisions VALUES(?, ?, ?, ?, ?, ?, ?)""",
+                    """INSERT INTO linkage_revisions VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?)""",
                     (
                         revision.provider_namespace,
                         revision.linkage_id,
@@ -1060,6 +1178,8 @@ class ProviderLinkageStore:
                         authorized_record_sha256,
                         revision.operation.value,
                         serialized,
+                        state_version,
+                        "0" * 64,
                     ),
                 )
                 trust_sha256 = provider_trust_snapshot_sha256(record.trust_snapshot)
@@ -1081,15 +1201,18 @@ class ProviderLinkageStore:
                     records,
                     expected_trust_snapshot_sha256_by_provider=self._trust_pins,
                 )
-                state_version = (
-                    int(
-                        connection.execute(
-                            "SELECT value FROM metadata WHERE key='state_version'"
-                        ).fetchone()[0]
-                    )
-                    + 1
-                )
                 state_head = _PINNED_STATE_HEAD(connection)
+                connection.execute(
+                    """UPDATE linkage_revisions
+                       SET activation_state_head_sha256=?
+                       WHERE provider_namespace=? AND linkage_id=? AND revision=?""",
+                    (
+                        state_head,
+                        revision.provider_namespace,
+                        revision.linkage_id,
+                        revision.revision,
+                    ),
+                )
                 connection.execute(
                     "UPDATE metadata SET value=? WHERE key='state_version'",
                     (str(state_version),),
@@ -1191,6 +1314,14 @@ class ProviderLinkageStore:
         authorized_record_sha256: str,
     ) -> CommittedLinkageReceipt:
         metadata = dict(connection.execute("SELECT key, value FROM metadata"))
+        activation = connection.execute(
+            """SELECT activation_state_version, activation_state_head_sha256
+               FROM linkage_revisions
+               WHERE provider_namespace=? AND linkage_id=? AND revision=?""",
+            (revision.provider_namespace, revision.linkage_id, revision.revision),
+        ).fetchone()
+        if activation is None:
+            raise ProviderLinkageStoreSchemaError("linkage activation proof is absent")
         return CommittedLinkageReceipt(
             provider_namespace=revision.provider_namespace,
             store_id=metadata["store_id"],
@@ -1201,108 +1332,149 @@ class ProviderLinkageStore:
             revision=revision.revision,
             linkage_revision_sha256=linkage_revision_sha256(revision),
             authorized_record_sha256=authorized_record_sha256,
-            state_version=int(metadata["state_version"]),
-            state_head_sha256=metadata["state_head_sha256"],
+            state_version=int(activation[0]),
+            state_head_sha256=activation[1],
         )
 
-    def active_snapshot(self) -> ActiveLinkageSnapshot:
-        """Read and revalidate one current, deterministic active projection."""
+    def _active_snapshot_in_transaction(
+        self,
+        connection: sqlite3.Connection,
+        *,
+        evaluated_at: datetime,
+        authority_time_floor: str,
+    ) -> ActiveLinkageSnapshot:
+        """Build an active projection inside a caller-owned transaction."""
 
-        connect_store = _PINNED_CONNECT
-        capture_store_now = _capture_pinned_store_now
-        require_authority_time_floor = _require_authority_time_floor
-        validate_committed_state = _PINNED_VALIDATE_COMMITTED_STATE
-        validate_current_authority = _PINNED_VALIDATE_CURRENT_AUTHORITY
-        authorize_revision = _PINNED_AUTHORIZE_LINKAGE_REVISION
-        with connect_store(self) as connection:
-            trust_pins = dict(self._trust_pins)
-            evaluated_at, authority_time_floor = capture_store_now(self, connection)
-            nested_transaction = connection.in_transaction
-            if nested_transaction:
-                connection.execute("SAVEPOINT active_snapshot")
-            else:
-                connection.execute("BEGIN")
-            try:
-                require_authority_time_floor(connection, authority_time_floor)
-                records = validate_committed_state(self, connection)
-                metadata = dict(connection.execute("SELECT key, value FROM metadata"))
-                latest: dict[tuple[str, str], LinkageRevision] = {}
-                latest_records: dict[tuple[str, str], AuthorizedLinkageRevision] = {}
-                for record in records:
-                    key = (
-                        record.revision.provider_namespace,
-                        record.revision.linkage_id,
-                    )
-                    latest[key] = record.revision
-                    latest_records[key] = record
-                for key, latest_record in latest_records.items():
-                    if latest[key].operation != LinkageOperation.TOMBSTONE:
-                        validate_current_authority(
-                            self,
-                            latest_record,
-                            evaluated_at=evaluated_at,
-                            expected_trust_by_provider=trust_pins,
-                            authorize_revision=authorize_revision,
-                        )
-                revisions = tuple(
-                    sorted(
-                        (
-                            revision
-                            for revision in latest.values()
-                            if revision.operation != LinkageOperation.TOMBSTONE
-                        ),
-                        key=lambda item: (
-                            item.provider_namespace,
-                            item.linkage_id,
-                            item.revision,
-                        ),
-                    )
+        trust_pins = dict(self._trust_pins)
+        _require_authority_time_floor(connection, authority_time_floor)
+        records = _PINNED_VALIDATE_COMMITTED_STATE(self, connection)
+        metadata = dict(connection.execute("SELECT key, value FROM metadata"))
+        latest: dict[tuple[str, str], LinkageRevision] = {}
+        latest_records: dict[tuple[str, str], AuthorizedLinkageRevision] = {}
+        for record in records:
+            key = (record.revision.provider_namespace, record.revision.linkage_id)
+            latest[key] = record.revision
+            latest_records[key] = record
+        for key, latest_record in latest_records.items():
+            if latest[key].operation != LinkageOperation.TOMBSTONE:
+                _PINNED_VALIDATE_CURRENT_AUTHORITY(
+                    self,
+                    latest_record,
+                    evaluated_at=evaluated_at,
+                    expected_trust_by_provider=trust_pins,
+                    authorize_revision=_PINNED_AUTHORIZE_LINKAGE_REVISION,
                 )
-                state_version = int(metadata["state_version"])
-                state_head = metadata["state_head_sha256"]
-                snapshot = ActiveLinkageSnapshot(
-                    state_version=state_version,
-                    state_head_sha256=state_head,
+        revisions = tuple(
+            sorted(
+                (
+                    revision
+                    for revision in latest.values()
+                    if revision.operation != LinkageOperation.TOMBSTONE
+                ),
+                key=lambda item: (
+                    item.provider_namespace,
+                    item.linkage_id,
+                    item.revision,
+                ),
+            )
+        )
+        state_version = int(metadata["state_version"])
+        state_head = metadata["state_head_sha256"]
+        activation_coordinates = {
+            (row[0], row[1], row[2]): (int(row[3]), row[4])
+            for row in connection.execute(
+                """SELECT provider_namespace, linkage_id, revision,
+                          activation_state_version, activation_state_head_sha256
+                   FROM linkage_revisions"""
+            )
+        }
+        return ActiveLinkageSnapshot(
+            state_version=state_version,
+            state_head_sha256=state_head,
+            store_id=metadata["store_id"],
+            store_epoch_sha256=metadata["store_epoch_sha256"],
+            storage_identity_sha256=metadata["storage_identity_sha256"],
+            trust_pins_sha256=metadata["trust_pins_sha256"],
+            revisions=revisions,
+            receipts=tuple(
+                CommittedLinkageReceipt(
+                    provider_namespace=item.provider_namespace,
                     store_id=metadata["store_id"],
                     store_epoch_sha256=metadata["store_epoch_sha256"],
                     storage_identity_sha256=metadata["storage_identity_sha256"],
                     trust_pins_sha256=metadata["trust_pins_sha256"],
-                    revisions=revisions,
-                    receipts=tuple(
-                        CommittedLinkageReceipt(
-                            provider_namespace=item.provider_namespace,
-                            store_id=metadata["store_id"],
-                            store_epoch_sha256=metadata["store_epoch_sha256"],
-                            storage_identity_sha256=metadata["storage_identity_sha256"],
-                            trust_pins_sha256=metadata["trust_pins_sha256"],
-                            linkage_id=item.linkage_id,
-                            revision=item.revision,
-                            linkage_revision_sha256=linkage_revision_sha256(item),
-                            authorized_record_sha256=hashlib.sha256(
-                                _record_bytes(
-                                    latest_records[
-                                        (item.provider_namespace, item.linkage_id)
-                                    ]
-                                )
-                            ).hexdigest(),
-                            state_version=state_version,
-                            state_head_sha256=state_head,
+                    linkage_id=item.linkage_id,
+                    revision=item.revision,
+                    linkage_revision_sha256=linkage_revision_sha256(item),
+                    authorized_record_sha256=hashlib.sha256(
+                        _record_bytes(
+                            latest_records[(item.provider_namespace, item.linkage_id)]
                         )
-                        for item in revisions
-                    ),
+                    ).hexdigest(),
+                    state_version=state_version,
+                    state_head_sha256=state_head,
                 )
-                if nested_transaction:
-                    connection.execute("RELEASE SAVEPOINT active_snapshot")
-                else:
-                    connection.commit()
-                return snapshot
+                for item in revisions
+            ),
+            activation_receipts=tuple(
+                CommittedLinkageReceipt(
+                    provider_namespace=item.provider_namespace,
+                    store_id=metadata["store_id"],
+                    store_epoch_sha256=metadata["store_epoch_sha256"],
+                    storage_identity_sha256=metadata["storage_identity_sha256"],
+                    trust_pins_sha256=metadata["trust_pins_sha256"],
+                    linkage_id=item.linkage_id,
+                    revision=item.revision,
+                    linkage_revision_sha256=linkage_revision_sha256(item),
+                    authorized_record_sha256=hashlib.sha256(
+                        _record_bytes(
+                            latest_records[(item.provider_namespace, item.linkage_id)]
+                        )
+                    ).hexdigest(),
+                    state_version=activation_coordinates[
+                        (item.provider_namespace, item.linkage_id, item.revision)
+                    ][0],
+                    state_head_sha256=activation_coordinates[
+                        (item.provider_namespace, item.linkage_id, item.revision)
+                    ][1],
+                )
+                for item in revisions
+            ),
+        )
+
+    @contextmanager
+    def fenced_active_snapshot(self) -> Iterator[ActiveLinkageSnapshot]:
+        """Fence linkage writers while a dependent durable commit completes."""
+
+        connect_store = _PINNED_CONNECT
+        capture_store_now = _capture_pinned_store_now
+        with connect_store(self) as connection:
+            evaluated_at, authority_time_floor = capture_store_now(self, connection)
+            nested_transaction = connection.in_transaction
+            if nested_transaction:
+                connection.execute("SAVEPOINT fenced_active_snapshot")
+            else:
+                connection.execute("BEGIN IMMEDIATE")
+            try:
+                snapshot = _PINNED_ACTIVE_SNAPSHOT_IN_TRANSACTION(
+                    self,
+                    connection,
+                    evaluated_at=evaluated_at,
+                    authority_time_floor=authority_time_floor,
+                )
+                yield snapshot
             except BaseException:
                 if nested_transaction:
-                    connection.execute("ROLLBACK TO SAVEPOINT active_snapshot")
-                    connection.execute("RELEASE SAVEPOINT active_snapshot")
+                    connection.execute("ROLLBACK TO SAVEPOINT fenced_active_snapshot")
+                    connection.execute("RELEASE SAVEPOINT fenced_active_snapshot")
                 else:
                     connection.rollback()
                 raise
+            else:
+                if nested_transaction:
+                    connection.execute("RELEASE SAVEPOINT fenced_active_snapshot")
+                else:
+                    connection.rollback()
 
     @contextmanager
     def authority_read_fence(self) -> Iterator[None]:
@@ -1325,15 +1497,56 @@ class ProviderLinkageStore:
                 connection.rollback()
                 raise
 
+    def active_snapshot(self) -> ActiveLinkageSnapshot:
+        """Read and revalidate one current, deterministic active projection."""
+
+        with _PINNED_FENCED_ACTIVE_SNAPSHOT(self) as snapshot:
+            return snapshot
+
+    def authorized_history_in_fence(self) -> tuple[AuthorizedLinkageRevision, ...]:
+        """Return validated authority history while this store's fence is held."""
+
+        connection = self._connection
+        if connection is None or not connection.in_transaction:
+            raise ProviderLinkageStoreUnsafe("linkage authority fence is absent")
+        return _PINNED_VALIDATE_COMMITTED_STATE(self, connection)
+
+    def authority_time_in_fence(self) -> datetime:
+        """Return the pinned authoritative evaluation time under the fence."""
+
+        connection = self._connection
+        if connection is None or not connection.in_transaction:
+            raise ProviderLinkageStoreUnsafe("linkage authority fence is absent")
+        row = connection.execute(
+            "SELECT value FROM metadata WHERE key='authority_time_floor'"
+        ).fetchone()
+        if row is None:
+            raise ProviderLinkageStoreUnsafe("linkage authority time is absent")
+        return _authority_time_from_text(row[0])
+
+    def activation_receipt_history_in_fence(
+        self,
+    ) -> tuple[CommittedLinkageReceipt, ...]:
+        """Return immutable activation receipts for validated durable history."""
+
+        connection = self._connection
+        if connection is None or not connection.in_transaction:
+            raise ProviderLinkageStoreUnsafe("linkage authority fence is absent")
+        records = _PINNED_VALIDATE_COMMITTED_STATE(self, connection)
+        return tuple(
+            _PINNED_RECEIPT(
+                connection,
+                record.revision,
+                hashlib.sha256(_record_bytes(record)).hexdigest(),
+            )
+            for record in records
+        )
+
     def verify_current_receipt(self, receipt: CommittedLinkageReceipt) -> None:
         """Require an exact receipt for the current active store head."""
 
         snapshot = _PINNED_ACTIVE_SNAPSHOT(self)
-        if (
-            receipt.state_version != snapshot.state_version
-            or receipt.state_head_sha256 != snapshot.state_head_sha256
-            or receipt not in snapshot.receipts
-        ):
+        if receipt not in snapshot.receipts:
             raise ProviderLinkageStoreConflict(
                 "linkage receipt is not current and active"
             )
@@ -1587,6 +1800,15 @@ _PINNED_VALIDATE_COMMITTED_STATE = ProviderLinkageStore._validate_committed_stat
 _PINNED_VALIDATE_CURRENT_AUTHORITY = ProviderLinkageStore._validate_current_authority
 _PINNED_VERIFY_CONSUMPTIONS = ProviderLinkageStore._verify_consumptions
 _PINNED_RECEIPT = ProviderLinkageStore._receipt
+_PINNED_ACTIVE_SNAPSHOT_IN_TRANSACTION = (
+    ProviderLinkageStore._active_snapshot_in_transaction
+)
+_PINNED_FENCED_ACTIVE_SNAPSHOT = ProviderLinkageStore.fenced_active_snapshot
+_PINNED_AUTHORIZED_HISTORY_IN_FENCE = ProviderLinkageStore.authorized_history_in_fence
+_PINNED_AUTHORITY_TIME_IN_FENCE = ProviderLinkageStore.authority_time_in_fence
+_PINNED_ACTIVATION_RECEIPT_HISTORY_IN_FENCE = (
+    ProviderLinkageStore.activation_receipt_history_in_fence
+)
 _PINNED_ACTIVE_SNAPSHOT = ProviderLinkageStore.active_snapshot
 _PROCESS_INTEGRITY_FUNCTIONS = (
     _authority_time_from_text,
@@ -1600,6 +1822,11 @@ _PROCESS_INTEGRITY_FUNCTIONS = (
     AuthorityTimeSource.set_failure,
     ProviderLinkageStore.commit_authorized_revision,
     ProviderLinkageStore._validate_current_authority,
+    ProviderLinkageStore._active_snapshot_in_transaction,
+    ProviderLinkageStore.fenced_active_snapshot,
+    ProviderLinkageStore.authorized_history_in_fence,
+    ProviderLinkageStore.authority_time_in_fence,
+    ProviderLinkageStore.activation_receipt_history_in_fence,
     ProviderLinkageStore.active_snapshot,
     ProviderLinkageStore.authority_read_fence,
     ProviderLinkageStore.authority_read_fence.__wrapped__,
@@ -1693,6 +1920,11 @@ def provider_linkage_store_process_integrity_is_valid() -> bool:
                 AuthorityTimeSource.set_failure,
                 ProviderLinkageStore.commit_authorized_revision,
                 ProviderLinkageStore._validate_current_authority,
+                ProviderLinkageStore._active_snapshot_in_transaction,
+                ProviderLinkageStore.fenced_active_snapshot,
+                ProviderLinkageStore.authorized_history_in_fence,
+                ProviderLinkageStore.authority_time_in_fence,
+                ProviderLinkageStore.activation_receipt_history_in_fence,
                 ProviderLinkageStore.active_snapshot,
                 ProviderLinkageStore.authority_read_fence,
                 ProviderLinkageStore.authority_read_fence.__wrapped__,
