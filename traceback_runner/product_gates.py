@@ -7,7 +7,6 @@ a manual accessibility audit, and fixtures are not a five-provider study.
 
 from __future__ import annotations
 
-import json
 import platform
 import socket
 import sys
@@ -513,6 +512,28 @@ class ProductGateReport(RunnerContract):
                 and not measurement.target_met
             ):
                 raise ValueError("performance gate cannot pass a failed measurement")
+        registered_output = canonical_json_bytes(
+            {
+                "host_run": self.host_run.model_dump(mode="json"),
+                "filter": self.filter_performance.model_dump(mode="json"),
+                "render": self.initial_render.model_dump(mode="json"),
+                "memory": self.stress_memory.model_dump(mode="json"),
+                "screenshot_manifest_sha256": self.screenshot_manifest_sha256,
+            }
+        )
+        expected_privacy = _privacy_sentinel_probe(
+            tuple(REGISTERED_PRIVACY_SENTINELS.items()),
+            run_id=self.host_run.run_id,
+            host_run_sha256=sha256_bytes(canonical_json_bytes(self.host_run)),
+            output_payload_sha256=sha256_bytes(registered_output),
+            serialized_output_clean=_privacy_clean(
+                registered_output, tuple(REGISTERED_PRIVACY_SENTINELS.values())
+            ),
+        )
+        if self.privacy_sentinel_evidence != expected_privacy:
+            raise ValueError(
+                "privacy evidence must replay the registered probes and output"
+            )
         exact_gate_evidence = {
             GateId.NO_EXTERNAL_NETWORK: self.network_denial_evidence,
             GateId.PRIVACY_SENTINELS: self.privacy_sentinel_evidence,
@@ -1023,7 +1044,7 @@ def run_foundation_gates(
             "filter": filter_measurement.model_dump(mode="json"),
             "render": render_measurement.model_dump(mode="json"),
             "memory": memory.model_dump(mode="json"),
-            "screenshots": json.loads(manifest_bytes),
+            "screenshot_manifest_sha256": sha256_bytes(manifest_bytes),
         }
     )
     serialized_output_clean = _privacy_clean(

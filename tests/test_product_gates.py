@@ -206,6 +206,18 @@ def _all_green_report(report: ProductGateReport) -> ProductGateReport:
     host_sha256 = sha256_bytes(canonical_json_bytes(payload["host_run"]))
     payload["network_denial_evidence"]["host_run_sha256"] = host_sha256
     payload["privacy_sentinel_evidence"]["host_run_sha256"] = host_sha256
+    registered_output = canonical_json_bytes(
+        {
+            "host_run": payload["host_run"],
+            "filter": payload["filter_performance"],
+            "render": payload["initial_render"],
+            "memory": payload["stress_memory"],
+            "screenshot_manifest_sha256": payload["screenshot_manifest_sha256"],
+        }
+    )
+    payload["privacy_sentinel_evidence"]["output_payload_sha256"] = sha256_bytes(
+        registered_output
+    )
     payload["capability_enabled"] = False
     for index, item in enumerate(payload["gate_evidence"], start=1):
         item["status"] = EvidenceStatus.OBSERVED_PASS
@@ -549,6 +561,11 @@ def test_external_evidence_contracts_fail_closed(
         "https:evil.example",
         "%252FVolumes%252Fprivate%252Fraw-input.bam",
         "A C G T A C G T A C G T A C G T A C G T A C G T",
+        "%25252525252FVolumes%25252525252Fprivate",
+        "javascript:alert(1)",
+        "data:text/plain,private",
+        "wss:evil.example",
+        "A,C(G)T-A_C.G T,A(C)G-T_A C.G,T-A,C(G)T-A_C.GT",
     ),
 )
 def test_safe_operator_grammar_rejects_review_bypasses_in_gate_surfaces(
@@ -569,3 +586,17 @@ def test_safe_operator_grammar_rejects_review_bypasses_in_gate_surfaces(
             screen_reader_names=(unsafe,),
             non_color_status_text=("Blocked",),
         )
+
+
+def test_privacy_output_digest_cannot_be_resealed_by_caller(
+    report: ProductGateReport,
+) -> None:
+    payload = report.model_dump(mode="json")
+    payload["privacy_sentinel_evidence"]["output_payload_sha256"] = "f" * 64
+    for item in payload["gate_evidence"]:
+        if item["gate_id"] == GateId.PRIVACY_SENTINELS:
+            item["evidence_sha256"] = sha256_bytes(
+                canonical_json_bytes(payload["privacy_sentinel_evidence"])
+            )
+    with pytest.raises(ValidationError, match="replay the registered probes"):
+        ProductGateReport.model_validate(payload)

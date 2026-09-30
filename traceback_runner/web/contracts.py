@@ -21,13 +21,20 @@ def _safe_operator_text(value: str) -> str:
     if _SAFE_OPERATOR_TEXT.fullmatch(value) is None:
         raise ValueError("operator text contains characters outside the safe grammar")
     decoded = value
-    for _ in range(4):
+    converged = False
+    for _ in range(len(value) + 1):
         next_value = unquote(decoded)
         if next_value == decoded:
+            converged = True
             break
         decoded = next_value
+    if not converged:
+        raise ValueError("operator text percent decoding did not converge")
     lowered = decoded.casefold()
-    if re.search(r"(?:^|\s)(?:https?|file|ftp)\s*:", lowered) or "//" in decoded:
+    dangerous_schemes = (
+        "data|file|ftp|gopher|http|https|javascript|nfs|smb|ssh|telnet|ws|wss"
+    )
+    if re.search(rf"(?:^|\s)(?:{dangerous_schemes})\s*:", lowered) or "//" in decoded:
         raise ValueError("operator text cannot contain a URL")
     if "/" in decoded or "\\" in decoded or ".." in decoded:
         raise ValueError("operator text cannot contain a path")
@@ -43,7 +50,7 @@ def _safe_operator_text(value: str) -> str:
         flags=re.IGNORECASE,
     ):
         raise ValueError("operator text cannot contain a UUID-like identifier")
-    nucleotide_candidate = re.sub(r"[\s._-]", "", decoded)
+    nucleotide_candidate = re.sub(r"[^A-Za-z0-9]", "", decoded)
     if len(nucleotide_candidate) >= 24 and re.fullmatch(
         r"[ACGTRYSWKMBDHVN]+", nucleotide_candidate, flags=re.IGNORECASE
     ):

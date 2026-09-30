@@ -365,6 +365,11 @@ def test_problem_docs_path_is_bounded_to_bundled_markdown(path: str) -> None:
         "https:evil.example",
         "%252FVolumes%252Fprivate%252Fraw-input.bam",
         "A C G T A C G T A C G T A C G T A C G T A C G T",
+        "%25252525252FVolumes%25252525252Fprivate",
+        "javascript:alert(1)",
+        "data:text/plain,private",
+        "wss:evil.example",
+        "A,C(G)T-A_C.G T,A(C)G-T_A C.G,T-A,C(G)T-A_C.GT",
     ),
 )
 def test_safe_operator_grammar_rejects_review_bypasses_in_every_web_shape(
