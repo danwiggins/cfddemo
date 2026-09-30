@@ -39,7 +39,7 @@ and binds the exact ledger and linkage identities, versions, and heads;
 continuation fails closed after any append or authority change instead of
 silently omitting newly sorted history. The limit is closed to 1 through 1,000.
 Every row includes the immutable record, its content digest, original activation
-receipt, successor edge, and durable stale-comparison warnings. Rows are explicitly
+receipt, successor edge, and its bounded stale-comparison warnings. Rows are explicitly
 `superseded`, `active`, or `authority_invalid`. A record with a successor is
 always historical. A leaf is active exactly when its own current linkage and
 activation receipt match live authority; a stale ancestor does not invalidate
@@ -61,7 +61,7 @@ page never lists more than 1,000 warnings. A row is truncated exactly when its
 count exceeds its listed statuses. The listed prefix length is structurally
 checked; the count itself is proven by live replay. A record in more than
 1,000 stale comparisons therefore remains readable at every limit, and
-pagination always passes it. Earlier ledgers could raise when a page's warnings
+pagination always passes it. Earlier code could raise when a page's warnings
 exceeded 1,000, which made such a record permanently unreadable after any
 linkage write.
 
