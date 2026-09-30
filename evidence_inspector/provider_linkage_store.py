@@ -48,7 +48,7 @@ StoreId = Annotated[str, StringConstraints(pattern=r"^store_[0-9a-f]{32}$")]
 _STORE_ID = TypeAdapter(StoreId)
 
 
-def _capture_expected_trust_pins(
+def capture_expected_trust_pins(
     value: Mapping[str, str],
 ) -> dict[str, str]:
     """Capture one bounded mapping pass without trusting its size or views."""
@@ -365,7 +365,7 @@ class ProviderLinkageStore:
             selected_time_source = time_source
         else:
             raise ProviderLinkageStoreUnsafe("authority time source type is invalid")
-        trust_pins = _capture_expected_trust_pins(
+        trust_pins = capture_expected_trust_pins(
             expected_trust_snapshot_sha256_by_provider
         )
         requested_root = Path(root)
@@ -1679,6 +1679,7 @@ __all__ = [
     "ProviderLinkageStoreError",
     "ProviderLinkageStoreSchemaError",
     "ProviderLinkageStoreUnsafe",
+    "capture_expected_trust_pins",
     "committed_linkage_receipt_sha256",
     "provider_linkage_store_process_integrity_is_valid",
     "provider_linkage_store_time_source_is_pinned",

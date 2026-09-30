@@ -669,7 +669,7 @@ def test_live_store_trust_pin_capture_rejects_duplicate_before_second_lookup(
             return digest
 
     pins = DuplicatePins()
-    with pytest.raises(ValueError, match="duplicate"):
+    with pytest.raises(ValueError, match="invalid"):
         validate_manifest_against_linkage_store(
             manifest, store, expected_trust_snapshot_sha256_by_provider=pins
         )

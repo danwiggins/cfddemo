@@ -15,7 +15,7 @@ from enum import StrEnum
 from itertools import pairwise
 from typing import Annotated, Literal
 
-from pydantic import Field, StringConstraints, TypeAdapter, model_validator
+from pydantic import Field, StringConstraints, model_validator
 
 from evidence_inspector.method_registry import (
     RegistryContract,
@@ -37,10 +37,13 @@ from evidence_inspector.provider_linkage import (
     linkage_revision_sha256,
 )
 from evidence_inspector.provider_linkage_store import (
-    MAX_PROVIDER_TRUST_PINS,
     CommittedLinkageReceipt,
     ProviderLinkageStore,
+    ProviderLinkageStoreUnsafe,
     committed_linkage_receipt_sha256,
+)
+from evidence_inspector.provider_linkage_store import (
+    capture_expected_trust_pins as _capture_expected_trust_pins,
 )
 
 MAX_MEMBERS = 100_000
@@ -55,8 +58,6 @@ _PINNED_STORE_CALLABLES = {
     for name in vars(ProviderLinkageStore)
     if callable(getattr(ProviderLinkageStore, name))
 }
-_PROVIDER_NAMESPACE = TypeAdapter(ProviderNamespace)
-_SHA256 = TypeAdapter(Sha256)
 
 
 def _utc_second(value: datetime, field: str = "created_at") -> datetime:
@@ -73,43 +74,11 @@ def _domain_sha256(domain: bytes, value: object) -> str:
 
 
 def capture_expected_trust_pins(pins: Mapping[str, str]) -> dict[str, str]:
-    """Capture hostile mappings once with an explicit max+1 iterator bound."""
-
+    """Expose D02's bounded one-pass capture with the D05 error contract."""
     try:
-        iterator = iter(pins)
-    except Exception as exc:
+        return _capture_expected_trust_pins(pins)
+    except ProviderLinkageStoreUnsafe as exc:
         raise ValueError("provider trust pins are invalid") from exc
-    captured: dict[str, str] = {}
-    for index in range(MAX_PROVIDER_TRUST_PINS + 1):
-        try:
-            raw_provider = next(iterator)
-        except StopIteration:
-            break
-        except Exception as exc:
-            raise ValueError("provider trust pins are invalid") from exc
-        if index == MAX_PROVIDER_TRUST_PINS:
-            raise ValueError("provider trust pin count is invalid")
-        if type(raw_provider) is not str:
-            raise ValueError("provider trust pins are invalid")
-        try:
-            provider = _PROVIDER_NAMESPACE.validate_python(raw_provider)
-        except Exception as exc:
-            raise ValueError("provider trust pins are invalid") from exc
-        if provider in captured:
-            raise ValueError("provider trust pins contain a duplicate provider")
-        try:
-            raw_digest = pins[raw_provider]
-        except Exception as exc:
-            raise ValueError("provider trust pins are invalid") from exc
-        if type(raw_digest) is not str:
-            raise ValueError("provider trust pins are invalid")
-        try:
-            captured[provider] = _SHA256.validate_python(raw_digest)
-        except Exception as exc:
-            raise ValueError("provider trust pins are invalid") from exc
-    if not captured:
-        raise ValueError("provider trust pins are required")
-    return captured
 
 
 def _captured_trust_pins_sha256(pins: dict[str, str]) -> str:
