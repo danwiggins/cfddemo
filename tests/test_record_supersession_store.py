@@ -5,6 +5,7 @@ from __future__ import annotations
 import base64
 import os
 import sqlite3
+import sys
 import time
 from concurrent.futures import ThreadPoolExecutor
 from concurrent.futures import TimeoutError as FutureTimeout
@@ -1171,13 +1172,18 @@ def test_paused_sqlite_connect_never_redirects_unrelated_thread_cwd_or_io(
             release.set()
             future.result(timeout=3)
             assert opening_thread and opening_thread[0] != caller_thread
-            assert operation_thread and opening_thread[0] != operation_thread[0]
+            assert operation_thread
+            if sys.platform == "darwin":
+                assert opening_thread[0] != operation_thread[0]
+            else:
+                assert opening_thread[0] == operation_thread[0]
     finally:
         release.set()
         os.chdir(original_cwd)
         monkeypatch.setattr(supersession_module.sqlite3, "connect", original_connect)
 
 
+@pytest.mark.skipif(sys.platform != "darwin", reason="Darwin pthread cwd contract")
 def test_sqlite_worker_preserves_callers_existing_thread_directory_override(
     durable, tmp_path: Path
 ) -> None:
@@ -1209,6 +1215,7 @@ def test_sqlite_worker_preserves_callers_existing_thread_directory_override(
     assert Path.cwd() == process_cwd
 
 
+@pytest.mark.skipif(sys.platform != "darwin", reason="Darwin worker contract")
 def test_timed_out_sqlite_worker_closes_late_connection_and_exits(
     durable, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -1257,6 +1264,7 @@ def test_timed_out_sqlite_worker_closes_late_connection_and_exits(
     )
 
 
+@pytest.mark.skipif(sys.platform != "darwin", reason="Darwin worker contract")
 def test_sqlite_worker_cleans_up_after_unexpected_base_exception(
     durable, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -1279,6 +1287,7 @@ def test_sqlite_worker_cleans_up_after_unexpected_base_exception(
     )
 
 
+@pytest.mark.skipif(sys.platform != "darwin", reason="Darwin worker contract")
 def test_close_cannot_reuse_worker_root_fd_or_mutate_attacker_directory(
     durable, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
@@ -1335,6 +1344,151 @@ def test_close_cannot_reuse_worker_root_fd_or_mutate_attacker_directory(
         monkeypatch.setattr(
             supersession_module, "_PINNED_PTHREAD_FCHDIR", original_anchor
         )
+
+
+def test_platform_anchor_dispatch_and_unsupported_failure(
+    durable, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _, ledger, _, _, _ = durable
+    calls: list[tuple[str, int, tuple[int, int]]] = []
+
+    def fake_darwin(descriptor, identity):
+        calls.append(("darwin", descriptor, identity))
+        os.close(descriptor)
+        return object(), None
+
+    def fake_linux(descriptor, identity):
+        calls.append(("linux", descriptor, identity))
+        return object(), descriptor
+
+    monkeypatch.setattr(
+        supersession_module,
+        "_open_darwin_anchored_sqlite_connection",
+        fake_darwin,
+    )
+    monkeypatch.setattr(
+        supersession_module,
+        "_open_linux_anchored_sqlite_connection",
+        fake_linux,
+    )
+    descriptor = supersession_module.fcntl.fcntl(
+        ledger._root_fd, supersession_module.fcntl.F_DUPFD_CLOEXEC, 0
+    )
+    monkeypatch.setattr(supersession_module.sys, "platform", "darwin")
+    _, retained = supersession_module._open_anchored_sqlite_connection(
+        descriptor, ledger._root_identity
+    )
+    assert retained is None
+    descriptor = supersession_module.fcntl.fcntl(
+        ledger._root_fd, supersession_module.fcntl.F_DUPFD_CLOEXEC, 0
+    )
+    monkeypatch.setattr(supersession_module.sys, "platform", "linux")
+    _, retained = supersession_module._open_anchored_sqlite_connection(
+        descriptor, ledger._root_identity
+    )
+    assert retained == descriptor
+    os.close(retained)
+    assert [item[0] for item in calls] == ["darwin", "linux"]
+
+    descriptor = supersession_module.fcntl.fcntl(
+        ledger._root_fd, supersession_module.fcntl.F_DUPFD_CLOEXEC, 0
+    )
+    monkeypatch.setattr(supersession_module.sys, "platform", "unsupported")
+    with pytest.raises(RecordSupersessionUnsafe, match="unsupported"):
+        supersession_module._open_anchored_sqlite_connection(
+            descriptor, ledger._root_identity
+        )
+    assert supersession_module._safe_fstat(descriptor) is None
+
+
+@pytest.mark.skipif(sys.platform != "linux", reason="Linux proc-fd contract")
+def test_linux_proc_fd_anchor_is_retained_until_sqlite_close(
+    durable, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _, ledger, _, first, _ = durable
+    ledger.commit_record(first)
+    original_connect = sqlite3.connect
+    observed_descriptor: list[int] = []
+    closed = Event()
+
+    class TrackedConnection:
+        def __init__(self, connection, descriptor):
+            self.connection = connection
+            self.descriptor = descriptor
+
+        def execute(self, *args, **kwargs):
+            assert supersession_module._safe_fstat(self.descriptor) is not None
+            return self.connection.execute(*args, **kwargs)
+
+        def close(self):
+            assert supersession_module._safe_fstat(self.descriptor) is not None
+            self.connection.close()
+            closed.set()
+
+    def tracking_connect(database, *args, **kwargs):
+        parts = Path(database).parts
+        assert parts[:4] == ("/", "proc", "self", "fd")
+        descriptor = int(parts[4])
+        observed_descriptor.append(descriptor)
+        return TrackedConnection(
+            original_connect(database, *args, **kwargs), descriptor
+        )
+
+    monkeypatch.setattr(supersession_module.sqlite3, "connect", tracking_connect)
+    assert ledger.active_snapshot().records == (first,)
+    assert closed.is_set()
+    assert observed_descriptor
+    assert supersession_module._safe_fstat(observed_descriptor[0]) is None
+
+
+@pytest.mark.skipif(sys.platform != "linux", reason="Linux proc-fd contract")
+def test_linux_close_cannot_reuse_retained_proc_anchor(
+    durable, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    _, ledger, _, first, _ = durable
+    ledger.commit_record(first)
+    original_connect = sqlite3.connect
+    entered = Event()
+    release = Event()
+    retained_descriptors: list[int] = []
+    attacker = tmp_path / "linux-attacker"
+    attacker.mkdir(mode=0o750)
+
+    def paused_connect(database, *args, **kwargs):
+        retained_descriptors.append(int(Path(database).parts[4]))
+        entered.set()
+        if not release.wait(timeout=3):
+            raise AssertionError("Linux proc anchor was not released")
+        return original_connect(database, *args, **kwargs)
+
+    monkeypatch.setattr(supersession_module.sqlite3, "connect", paused_connect)
+    attacker_fd: int | None = None
+    try:
+        with ThreadPoolExecutor(max_workers=2) as pool:
+            snapshot_future = pool.submit(ledger.active_snapshot)
+            assert entered.wait(timeout=2)
+            close_future = pool.submit(ledger.close)
+            with pytest.raises(FutureTimeout):
+                close_future.result(timeout=0.1)
+            attacker_fd = os.open(
+                attacker,
+                os.O_RDONLY
+                | getattr(os, "O_DIRECTORY", 0)
+                | getattr(os, "O_CLOEXEC", 0),
+            )
+            assert retained_descriptors
+            assert attacker_fd != retained_descriptors[0]
+            release.set()
+            snapshot_future.result(timeout=3)
+            close_future.result(timeout=3)
+        assert supersession_module._safe_fstat(retained_descriptors[0]) is None
+        assert tuple(attacker.iterdir()) == ()
+        with pytest.raises(RecordSupersessionUnsafe, match="closed"):
+            ledger.active_snapshot()
+    finally:
+        release.set()
+        if attacker_fd is not None:
+            os.close(attacker_fd)
 
 
 def test_database_path_substitution_during_connect_fails_closed(

@@ -174,9 +174,9 @@ def _root_descriptor_is_valid(
     )
 
 
-def _open_anchored_sqlite_connection(
+def _open_darwin_anchored_sqlite_connection(
     descriptor: int, expected_identity: tuple[int, int]
-) -> sqlite3.Connection:
+) -> tuple[sqlite3.Connection, None]:
     function = _PINNED_PTHREAD_FCHDIR
     if function is None:
         os.close(descriptor)
@@ -264,7 +264,65 @@ def _open_anchored_sqlite_connection(
         if connection is not None:
             connection.close()
         raise RecordSupersessionUnsafe("record ledger connection initialization failed")
-    return connection
+    return connection, None
+
+
+def _open_linux_anchored_sqlite_connection(
+    descriptor: int, expected_identity: tuple[int, int]
+) -> tuple[sqlite3.Connection, int]:
+    connection: sqlite3.Connection | None = None
+    try:
+        if not _root_descriptor_is_valid(descriptor, expected_identity):
+            raise OSError("record ledger root descriptor changed")
+        proc_root = f"/proc/self/fd/{descriptor}"
+        proc_metadata = os.stat(proc_root, follow_symlinks=True)
+        if (
+            not stat.S_ISDIR(proc_metadata.st_mode)
+            or (proc_metadata.st_dev, proc_metadata.st_ino) != expected_identity
+        ):
+            raise OSError("proc descriptor anchor changed")
+        connection = sqlite3.connect(
+            f"{proc_root}/record-supersession.sqlite3",
+            timeout=5.0,
+            isolation_level=None,
+            check_same_thread=False,
+        )
+        if not _root_descriptor_is_valid(descriptor, expected_identity):
+            raise OSError("record ledger root descriptor changed")
+        connection.execute("PRAGMA busy_timeout=5000")
+        connection.execute("PRAGMA foreign_keys=ON")
+        connection.execute("PRAGMA synchronous=FULL")
+        connection.execute("PRAGMA journal_mode=WAL")
+        connection.execute("SELECT COUNT(*) FROM sqlite_master").fetchone()
+        if not _root_descriptor_is_valid(descriptor, expected_identity):
+            raise OSError("record ledger root descriptor changed")
+        return connection, descriptor
+    except BaseException:  # noqa: BLE001 - owned descriptor must always close
+        if connection is not None:
+            try:
+                connection.close()
+            except BaseException:  # noqa: BLE001,S110 - preserve sanitized failure
+                pass
+        try:
+            os.close(descriptor)
+        except OSError:
+            pass
+        raise RecordSupersessionUnsafe(
+            "Linux record ledger connection initialization failed"
+        ) from None
+
+
+def _open_anchored_sqlite_connection(
+    descriptor: int, expected_identity: tuple[int, int]
+) -> tuple[sqlite3.Connection, int | None]:
+    if sys.platform == "darwin":
+        return _open_darwin_anchored_sqlite_connection(descriptor, expected_identity)
+    if sys.platform == "linux":
+        return _open_linux_anchored_sqlite_connection(descriptor, expected_identity)
+    os.close(descriptor)
+    raise RecordSupersessionUnsafe(
+        "record ledger connection anchoring is unsupported on this platform"
+    )
 
 
 class SupersessionStatement(RegistryContract):
@@ -915,9 +973,14 @@ def _safe_fstat(descriptor: int) -> os.stat_result | None:
 
 
 def _open_descriptor_identities() -> dict[int, tuple[int, int, int]]:
-    try:
-        names = os.listdir("/dev/fd")
-    except OSError:
+    names: list[str] | None = None
+    for directory in ("/dev/fd", "/proc/self/fd"):
+        try:
+            names = os.listdir(directory)
+            break
+        except OSError:
+            continue
+    if names is None:
         return {}
     result: dict[int, tuple[int, int, int]] = {}
     for name in names:
@@ -1194,6 +1257,7 @@ class RecordSupersessionStore:
     @contextmanager
     def _connect(self) -> Iterator[sqlite3.Connection]:
         connection: sqlite3.Connection | None = None
+        retained_root_fd: int | None = None
         sidecar_bindings: dict[str, tuple[int, tuple[int, int]]] = {}
         _SQLITE_OPEN_LOCK.acquire()
         try:
@@ -1210,7 +1274,7 @@ class RecordSupersessionStore:
             if not _root_descriptor_is_valid(operation_root_fd, self._root_identity):
                 os.close(operation_root_fd)
                 raise RecordSupersessionUnsafe("record ledger root descriptor changed")
-            connection = _open_anchored_sqlite_connection(
+            connection, retained_root_fd = _open_anchored_sqlite_connection(
                 operation_root_fd, self._root_identity
             )
             observed = os.stat(
@@ -1249,9 +1313,13 @@ class RecordSupersessionStore:
                         if sidecar_bindings:
                             self._validate_storage(sidecar_bindings)
                     finally:
-                        connection.close()
-                        for descriptor, _ in sidecar_bindings.values():
-                            os.close(descriptor)
+                        try:
+                            connection.close()
+                        finally:
+                            for descriptor, _ in sidecar_bindings.values():
+                                os.close(descriptor)
+                            if retained_root_fd is not None:
+                                os.close(retained_root_fd)
                 if not self._closed:
                     self._validate_storage()
             finally:
