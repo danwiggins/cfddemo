@@ -182,6 +182,9 @@ def test_persisted_floor_survives_registry_and_parser_poisoning(
     )
     identity = id(store)
     original_parser = linkage_store_module._authority_time_from_text
+    original_capture_defaults = (
+        linkage_store_module._capture_pinned_store_now.__defaults__
+    )
     original_entry = linkage_store_module._STORE_TIME_SOURCES[identity]
     try:
         store.commit_authorized_revision(_record())
@@ -196,11 +199,19 @@ def test_persisted_floor_survives_registry_and_parser_poisoning(
             None,
         )
         linkage_store_module._authority_time_from_text = lambda _: NOW
+        linkage_store_module._capture_pinned_store_now.__defaults__ = (
+            lambda _: NOW,
+            lambda _: (AFTER + timedelta(hours=1)).isoformat(),
+            lambda _: NOW,
+        )
 
         with pytest.raises(ProviderLinkageStoreUnsafe, match="moved backwards"):
             store.active_snapshot()
     finally:
         linkage_store_module._authority_time_from_text = original_parser
+        linkage_store_module._capture_pinned_store_now.__defaults__ = (
+            original_capture_defaults
+        )
         linkage_store_module._STORE_TIME_SOURCES[identity] = original_entry
         store.close()
 

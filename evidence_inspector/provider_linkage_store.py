@@ -1287,15 +1287,6 @@ _STORE_TIME_SOURCES: dict[
         datetime | None,
     ],
 ] = {}
-_TIME_SOURCE_BOUNDARY_ERRORS = (
-    OSError,
-    RuntimeError,
-    ValueError,
-    TypeError,
-    LookupError,
-    ArithmeticError,
-    AssertionError,
-)
 
 
 def _register_store_time_source(
@@ -1331,14 +1322,9 @@ def _registered_store_time_source(
         return current[1]
 
 
-def _pinned_time_source_value(
-    store: ProviderLinkageStore,
-    _registry: object = _STORE_TIME_SOURCES,
-    _registry_lock: object = _STORE_TIME_SOURCE_LOCK,
-    _read: object = AuthorityTimeSource.read,
-) -> datetime:
-    with _registry_lock:  # type: ignore[attr-defined]
-        expected = _registry.get(id(store))  # type: ignore[attr-defined]
+def _pinned_time_source_value(store: ProviderLinkageStore) -> datetime:
+    with _STORE_TIME_SOURCE_LOCK:
+        expected = _STORE_TIME_SOURCES.get(id(store))
         if expected is None or expected[0]() is not store:
             raise ProviderLinkageStoreUnsafe(
                 "linkage store time source identity is absent"
@@ -1346,20 +1332,32 @@ def _pinned_time_source_value(
         reference, time_source, previous = expected
     if type(time_source) is not AuthorityTimeSource:
         raise ProviderLinkageStoreUnsafe("linkage store time source type is invalid")
-    try:
-        evaluated_at = _read(time_source)  # type: ignore[operator]
-    except _TIME_SOURCE_BOUNDARY_ERRORS:
-        raise ProviderLinkageStoreUnsafe(
-            "linkage store time source is invalid"
-        ) from None
+    lock = time_source._lock
+    if type(lock) is not _RLOCK_TYPE:
+        raise ProviderLinkageStoreUnsafe("linkage store time source is invalid")
+    with lock:
+        mode = time_source._mode
+        current_time = time_source._current
+        failure = time_source._failure
+    if failure == "runtime":
+        raise ProviderLinkageStoreUnsafe("linkage store time source is invalid")
+    if failure == "interrupt":
+        raise KeyboardInterrupt
+    evaluated_at = (
+        datetime.now(UTC).replace(microsecond=0)
+        if mode == "system"
+        else current_time
+        if mode == "fixed"
+        else None
+    )
     if (
         type(evaluated_at) is not datetime
         or evaluated_at.utcoffset() != timedelta(0)
         or evaluated_at.microsecond
     ):
         raise ProviderLinkageStoreUnsafe("linkage store time source is invalid")
-    with _registry_lock:  # type: ignore[attr-defined]
-        current = _registry.get(id(store))  # type: ignore[attr-defined]
+    with _STORE_TIME_SOURCE_LOCK:
+        current = _STORE_TIME_SOURCES.get(id(store))
         if current != expected or current[0]() is not store:
             raise ProviderLinkageStoreUnsafe(
                 "linkage store time source identity changed"
@@ -1368,16 +1366,13 @@ def _pinned_time_source_value(
             raise ProviderLinkageStoreUnsafe(
                 "linkage store time source moved backwards"
             )
-        _registry[id(store)] = (reference, time_source, evaluated_at)  # type: ignore[index]
+        _STORE_TIME_SOURCES[id(store)] = (reference, time_source, evaluated_at)
     return evaluated_at
 
 
 def _capture_pinned_store_now(
     store: ProviderLinkageStore,
     connection: sqlite3.Connection,
-    _parse_time: object = _authority_time_from_text,
-    _serialize_time: object = _authority_time_text,
-    _read_time_source: object = _pinned_time_source_value,
 ) -> tuple[datetime, str]:
     connection.execute("BEGIN IMMEDIATE")
     try:
@@ -1388,13 +1383,82 @@ def _capture_pinned_store_now(
             raise ProviderLinkageStoreSchemaError(
                 "linkage store authority time is absent"
             )
-        persisted = _parse_time(row[0])  # type: ignore[operator]
-        evaluated_at = _read_time_source(store)  # type: ignore[operator]
+        raw_floor = row[0]
+        if type(raw_floor) is not str:
+            raise ProviderLinkageStoreSchemaError(
+                "linkage store authority time is invalid"
+            )
+        try:
+            persisted = datetime.fromisoformat(raw_floor)
+        except ValueError:
+            raise ProviderLinkageStoreSchemaError(
+                "linkage store authority time is invalid"
+            ) from None
+        if (
+            type(persisted) is not datetime
+            or persisted.utcoffset() != timedelta(0)
+            or persisted.microsecond
+            or persisted.isoformat() != raw_floor
+        ):
+            raise ProviderLinkageStoreSchemaError(
+                "linkage store authority time is invalid"
+            )
+
+        with _STORE_TIME_SOURCE_LOCK:
+            expected = _STORE_TIME_SOURCES.get(id(store))
+            if expected is None or expected[0]() is not store:
+                raise ProviderLinkageStoreUnsafe(
+                    "linkage store time source identity is absent"
+                )
+            reference, time_source, previous = expected
+        if type(time_source) is not AuthorityTimeSource:
+            raise ProviderLinkageStoreUnsafe(
+                "linkage store time source type is invalid"
+            )
+        source_lock = time_source._lock
+        if type(source_lock) is not _RLOCK_TYPE:
+            raise ProviderLinkageStoreUnsafe("linkage store time source is invalid")
+        with source_lock:
+            mode = time_source._mode
+            current_time = time_source._current
+            failure = time_source._failure
+        if failure == "runtime":
+            raise ProviderLinkageStoreUnsafe("linkage store time source is invalid")
+        if failure == "interrupt":
+            raise KeyboardInterrupt
+        evaluated_at = (
+            datetime.now(UTC).replace(microsecond=0)
+            if mode == "system"
+            else current_time
+            if mode == "fixed"
+            else None
+        )
+        if (
+            type(evaluated_at) is not datetime
+            or evaluated_at.utcoffset() != timedelta(0)
+            or evaluated_at.microsecond
+        ):
+            raise ProviderLinkageStoreUnsafe("linkage store time source is invalid")
+        with _STORE_TIME_SOURCE_LOCK:
+            current = _STORE_TIME_SOURCES.get(id(store))
+            if current != expected or current[0]() is not store:
+                raise ProviderLinkageStoreUnsafe(
+                    "linkage store time source identity changed"
+                )
+            if previous is not None and evaluated_at < previous:
+                raise ProviderLinkageStoreUnsafe(
+                    "linkage store time source moved backwards"
+                )
+            _STORE_TIME_SOURCES[id(store)] = (
+                reference,
+                time_source,
+                evaluated_at,
+            )
         if evaluated_at < persisted:
             raise ProviderLinkageStoreUnsafe(
                 "linkage store time source moved backwards"
             )
-        expected_floor = _serialize_time(evaluated_at)  # type: ignore[operator]
+        expected_floor = evaluated_at.isoformat()
         if evaluated_at > persisted:
             connection.execute(
                 "UPDATE metadata SET value=? WHERE key='authority_time_floor'",
@@ -1452,47 +1516,101 @@ _PINNED_VALIDATE_CURRENT_AUTHORITY = ProviderLinkageStore._validate_current_auth
 _PINNED_VERIFY_CONSUMPTIONS = ProviderLinkageStore._verify_consumptions
 _PINNED_RECEIPT = ProviderLinkageStore._receipt
 _PINNED_ACTIVE_SNAPSHOT = ProviderLinkageStore.active_snapshot
+_AUTHORITY_RUNTIME_FUNCTIONS = (
+    _authority_time_from_text,
+    _authority_time_text,
+    _pinned_time_source_value,
+    _capture_pinned_store_now,
+    _require_authority_time_floor,
+    _system_authority_time,
+    AuthorityTimeSource.read,
+    AuthorityTimeSource.advance_to,
+    AuthorityTimeSource.set_failure,
+    ProviderLinkageStore.commit_authorized_revision,
+    ProviderLinkageStore._validate_current_authority,
+    ProviderLinkageStore.active_snapshot,
+)
+_AUTHORITY_RUNTIME_FUNCTION_STATES = tuple(
+    (
+        function.__code__,
+        function.__defaults__,
+        (
+            tuple(sorted(function.__kwdefaults__.items()))
+            if function.__kwdefaults__ is not None
+            else None
+        ),
+        (
+            tuple((id(cell), id(cell.cell_contents)) for cell in function.__closure__)
+            if function.__closure__ is not None
+            else None
+        ),
+    )
+    for function in _AUTHORITY_RUNTIME_FUNCTIONS
+)
+_PINNED_STORE_TIME_SOURCES = _STORE_TIME_SOURCES
+_PINNED_STORE_TIME_SOURCE_LOCK = _STORE_TIME_SOURCE_LOCK
 
 
 def provider_linkage_store_time_source_is_pinned(
     store: ProviderLinkageStore,
-    _expected_registry: object = _STORE_TIME_SOURCES,
-    _expected_registry_lock: object = _STORE_TIME_SOURCE_LOCK,
-    _expected_parse: object = _authority_time_from_text,
-    _expected_serialize: object = _authority_time_text,
-    _expected_capture: object = _capture_pinned_store_now,
-    _expected_require: object = _require_authority_time_floor,
-    _expected_read: object = AuthorityTimeSource.read,
-    _expected_advance: object = AuthorityTimeSource.advance_to,
-    _expected_set_failure: object = AuthorityTimeSource.set_failure,
 ) -> bool:
     """Return whether the exact time-source runtime still matches construction."""
 
     try:
         current = vars(store).get("_time_source")
-        with _expected_registry_lock:  # type: ignore[attr-defined]
-            entry = _expected_registry.get(id(store))  # type: ignore[attr-defined]
+        with _PINNED_STORE_TIME_SOURCE_LOCK:
+            entry = _PINNED_STORE_TIME_SOURCES.get(id(store))
+        observed_function_states = tuple(
+            (
+                function.__code__,
+                function.__defaults__,
+                (
+                    tuple(sorted(function.__kwdefaults__.items()))
+                    if function.__kwdefaults__ is not None
+                    else None
+                ),
+                (
+                    tuple(
+                        (id(cell), id(cell.cell_contents))
+                        for cell in function.__closure__
+                    )
+                    if function.__closure__ is not None
+                    else None
+                ),
+            )
+            for function in _AUTHORITY_RUNTIME_FUNCTIONS
+        )
         return (
             type(current) is AuthorityTimeSource
             and type(_STORE_TIME_SOURCE_LOCK) is _RLOCK_TYPE
-            and _STORE_TIME_SOURCE_LOCK is _expected_registry_lock
-            and _STORE_TIME_SOURCES is _expected_registry
+            and _STORE_TIME_SOURCE_LOCK is _PINNED_STORE_TIME_SOURCE_LOCK
+            and _STORE_TIME_SOURCES is _PINNED_STORE_TIME_SOURCES
             and entry is not None
             and entry[0]() is store
             and entry[1] is current
             and type(entry[2]) is datetime
             and entry[2].utcoffset() == timedelta(0)
             and entry[2].microsecond == 0
-            and _authority_time_from_text is _expected_parse
-            and _authority_time_text is _expected_serialize
-            and _capture_pinned_store_now is _expected_capture
-            and _require_authority_time_floor is _expected_require
-            and AuthorityTimeSource.read is _expected_read
-            and AuthorityTimeSource.advance_to is _expected_advance
-            and AuthorityTimeSource.set_failure is _expected_set_failure
-            and _PINNED_AUTHORITY_TIME_SOURCE_READ is _expected_read
-            and _PINNED_AUTHORITY_TIME_SOURCE_ADVANCE is _expected_advance
-            and _PINNED_AUTHORITY_TIME_SOURCE_SET_FAILURE is _expected_set_failure
+            and _AUTHORITY_RUNTIME_FUNCTIONS
+            == (
+                _authority_time_from_text,
+                _authority_time_text,
+                _pinned_time_source_value,
+                _capture_pinned_store_now,
+                _require_authority_time_floor,
+                _system_authority_time,
+                AuthorityTimeSource.read,
+                AuthorityTimeSource.advance_to,
+                AuthorityTimeSource.set_failure,
+                ProviderLinkageStore.commit_authorized_revision,
+                ProviderLinkageStore._validate_current_authority,
+                ProviderLinkageStore.active_snapshot,
+            )
+            and observed_function_states == _AUTHORITY_RUNTIME_FUNCTION_STATES
+            and _PINNED_AUTHORITY_TIME_SOURCE_READ is AuthorityTimeSource.read
+            and _PINNED_AUTHORITY_TIME_SOURCE_ADVANCE is AuthorityTimeSource.advance_to
+            and _PINNED_AUTHORITY_TIME_SOURCE_SET_FAILURE
+            is AuthorityTimeSource.set_failure
             and _PINNED_AUTHORIZE_LINKAGE_REVISION is authorize_linkage_revision
             and _PINNED_VALIDATE_CURRENT_AUTHORITY
             is ProviderLinkageStore._validate_current_authority

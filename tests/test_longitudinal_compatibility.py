@@ -1091,6 +1091,8 @@ def test_replacing_time_source_cannot_revive_expired_linkage_authority(
         "_authority_time_text",
         "_capture_pinned_store_now",
         "_require_authority_time_floor",
+        "_pinned_time_source_value",
+        "_system_authority_time",
         "_STORE_TIME_SOURCES",
         "_PINNED_VALIDATE_CURRENT_AUTHORITY",
     ),
@@ -1119,7 +1121,11 @@ def test_floor_runtime_poisoning_cannot_revive_expired_authority(
                 poisoned = dict(original)
                 poisoned[id(store)] = (entry[0], time_source, None)
             else:
-                poisoned = lambda *_args, **_kwargs: NOW
+                poison_value = NOW
+
+                def poisoned(*_args: object, **_kwargs: object) -> datetime:
+                    return poison_value
+
             setattr(linkage_store_module, poison_target, poisoned)
             if surface == "member":
                 decision = decide_longitudinal_member(
@@ -1152,6 +1158,144 @@ def test_floor_runtime_poisoning_cannot_revive_expired_authority(
             time_source._current = original_time  # type: ignore[attr-defined]
 
 
+@pytest.mark.parametrize("surface", ("member", "series"))
+@pytest.mark.parametrize(
+    "function_name",
+    (
+        "_authority_time_from_text",
+        "_authority_time_text",
+        "_pinned_time_source_value",
+        "_capture_pinned_store_now",
+        "_require_authority_time_floor",
+    ),
+)
+@pytest.mark.parametrize("attribute", ("__defaults__", "__kwdefaults__", "__code__"))
+def test_authority_function_mutation_cannot_revive_expired_authority(
+    surface: str,
+    function_name: str,
+    attribute: str,
+) -> None:
+    anchor = _record("1")
+    member = _record("2")
+    policy = _policy(anchor)
+    time_source = AuthorityTimeSource.fixed(NOW)
+    with _activated_records(anchor, member, time_source=time_source) as (
+        records,
+        store,
+    ):
+        time_source.advance_to(NOW + timedelta(hours=2))
+        with pytest.raises(ProviderLinkageStoreConflict):
+            store.active_snapshot()
+        function = getattr(linkage_store_module, function_name)
+        original = getattr(function, attribute)
+
+        def poisoned(*_args: object, **_kwargs: object) -> datetime:
+            return NOW
+
+        replacement = {
+            "__defaults__": (lambda *_: NOW,),
+            "__kwdefaults__": {"poison": lambda *_: NOW},
+            "__code__": poisoned.__code__,
+        }[attribute]
+        try:
+            setattr(function, attribute, replacement)
+            if surface == "member":
+                decision = decide_longitudinal_member(
+                    records[0],
+                    records[1],
+                    policy,
+                    expected_policy_sha256=longitudinal_anchor_policy_sha256(policy),
+                    expected_authority_head_sha256=HEAD_SHA256,
+                    expected_linkage_trust_snapshot_sha256_by_provider={
+                        PROVIDER: TRUST_SHA256
+                    },
+                    linkage_store=store,
+                )
+                _assert_closed_decision(decision)
+            else:
+                series = decide_longitudinal_series(
+                    records[0],
+                    (records[1],),
+                    policy,
+                    expected_policy_sha256=longitudinal_anchor_policy_sha256(policy),
+                    expected_authority_head_sha256=HEAD_SHA256,
+                    expected_linkage_trust_snapshot_sha256_by_provider={
+                        PROVIDER: TRUST_SHA256
+                    },
+                    linkage_store=store,
+                )
+                _assert_closed_decision(series.decisions[0])
+        finally:
+            setattr(function, attribute, original)
+
+
+@pytest.mark.parametrize("surface", ("member", "series"))
+def test_concurrent_capture_defaults_mutation_cannot_revive_expired_authority(
+    surface: str,
+) -> None:
+    anchor = _record("1")
+    member = _record("2")
+    policy = _policy(anchor)
+    time_source = AuthorityTimeSource.fixed(NOW)
+    installed = Event()
+    restore = Event()
+    function = linkage_store_module._capture_pinned_store_now
+    original = function.__defaults__
+
+    def mutate_and_restore() -> None:
+        function.__defaults__ = (
+            lambda _: NOW,
+            lambda _: (NOW + timedelta(hours=2)).isoformat(),
+            lambda _: NOW,
+        )
+        installed.set()
+        restore.wait(timeout=5)
+        function.__defaults__ = original
+
+    worker = Thread(target=mutate_and_restore, daemon=True)
+    try:
+        with _activated_records(anchor, member, time_source=time_source) as (
+            records,
+            store,
+        ):
+            time_source.advance_to(NOW + timedelta(hours=2))
+            with pytest.raises(ProviderLinkageStoreConflict):
+                store.active_snapshot()
+            worker.start()
+            assert installed.wait(timeout=5)
+            if surface == "member":
+                decision = decide_longitudinal_member(
+                    records[0],
+                    records[1],
+                    policy,
+                    expected_policy_sha256=longitudinal_anchor_policy_sha256(policy),
+                    expected_authority_head_sha256=HEAD_SHA256,
+                    expected_linkage_trust_snapshot_sha256_by_provider={
+                        PROVIDER: TRUST_SHA256
+                    },
+                    linkage_store=store,
+                )
+                _assert_closed_decision(decision)
+            else:
+                series = decide_longitudinal_series(
+                    records[0],
+                    (records[1],),
+                    policy,
+                    expected_policy_sha256=longitudinal_anchor_policy_sha256(policy),
+                    expected_authority_head_sha256=HEAD_SHA256,
+                    expected_linkage_trust_snapshot_sha256_by_provider={
+                        PROVIDER: TRUST_SHA256
+                    },
+                    linkage_store=store,
+                )
+                _assert_closed_decision(series.decisions[0])
+    finally:
+        restore.set()
+        worker.join(timeout=5)
+        function.__defaults__ = original
+        assert not worker.is_alive()
+
+
 @pytest.mark.parametrize(
     "poison_target",
     (
@@ -1159,6 +1303,8 @@ def test_floor_runtime_poisoning_cannot_revive_expired_authority(
         "_authority_time_text",
         "_capture_pinned_store_now",
         "_require_authority_time_floor",
+        "_pinned_time_source_value",
+        "_system_authority_time",
         "_STORE_TIME_SOURCES",
         "_PINNED_VALIDATE_CURRENT_AUTHORITY",
     ),

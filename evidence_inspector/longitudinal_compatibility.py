@@ -70,6 +70,12 @@ _PINNED_STORE_CALLABLES = {
     if callable(getattr(ProviderLinkageStore, name))
 }
 _PINNED_TIME_SOURCE_IDENTITY_CHECK = provider_linkage_store_time_source_is_pinned
+_PINNED_TIME_SOURCE_IDENTITY_CHECK_STATE = (
+    _PINNED_TIME_SOURCE_IDENTITY_CHECK.__code__,
+    _PINNED_TIME_SOURCE_IDENTITY_CHECK.__defaults__,
+    _PINNED_TIME_SOURCE_IDENTITY_CHECK.__kwdefaults__,
+    _PINNED_TIME_SOURCE_IDENTITY_CHECK.__closure__,
+)
 _STORE_BOUNDARY_ERRORS = (
     ProviderLinkageStoreError,
     sqlite3.Error,
@@ -807,6 +813,13 @@ def _validate_store_input(
                 for name, pinned in _PINNED_STORE_CALLABLES.items()
             )
             or any(name in ProviderLinkageStore.__dict__ for name in vars(store))
+            or (
+                _PINNED_TIME_SOURCE_IDENTITY_CHECK.__code__,
+                _PINNED_TIME_SOURCE_IDENTITY_CHECK.__defaults__,
+                _PINNED_TIME_SOURCE_IDENTITY_CHECK.__kwdefaults__,
+                _PINNED_TIME_SOURCE_IDENTITY_CHECK.__closure__,
+            )
+            != _PINNED_TIME_SOURCE_IDENTITY_CHECK_STATE
             or not _PINNED_TIME_SOURCE_IDENTITY_CHECK(store)
         )
     except _STORE_BOUNDARY_ERRORS:
@@ -867,6 +880,13 @@ def _validate_store_input(
                 for name, pinned in _PINNED_STORE_CALLABLES.items()
             )
             or any(name in ProviderLinkageStore.__dict__ for name in vars(store))
+            or (
+                _PINNED_TIME_SOURCE_IDENTITY_CHECK.__code__,
+                _PINNED_TIME_SOURCE_IDENTITY_CHECK.__defaults__,
+                _PINNED_TIME_SOURCE_IDENTITY_CHECK.__kwdefaults__,
+                _PINNED_TIME_SOURCE_IDENTITY_CHECK.__closure__,
+            )
+            != _PINNED_TIME_SOURCE_IDENTITY_CHECK_STATE
             or not _PINNED_TIME_SOURCE_IDENTITY_CHECK(store)
         )
     except _STORE_BOUNDARY_ERRORS:
