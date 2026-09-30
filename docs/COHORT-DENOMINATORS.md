@@ -44,30 +44,43 @@ row-bearing v1 contract is a protected derivation artifact, not a public
 aggregate projection.
 
 `build_registered_cohort_denominator_summary` obtains the exact manifest history
-through the protected D05 registry and derives each record state inside D06's
-supported composite authority fence. The fence holds live linkage, D05 registry,
-D06 catalog/root, result-catalog connection, and shared result-trust authority
-through canonical capture of the returned object. Its v2 output binds those registry,
-linkage, catalog, policy, manifest, and protected-population digests, but embeds
-only reconciled aggregate counts. Per-member commitments, result IDs, provider
-tokens, and other record lineage remain outside that aggregate boundary.
-Every supplied E06 source must be consumed exactly once by an eligible selected
-member; sources for collapsed, withheld, missing, or unrelated records are
-rejected instead of being silently omitted from output identity.
+through the protected D05 registry and derives each row inside D06's supported
+composite authority fence. The fence holds live linkage, D05 registry, D06
+catalog/root, result-catalog connection, and shared result-trust authority
+through canonical capture of the returned object. Its v3 output binds those
+registry, linkage, catalog, policy, manifest, and protected-population digests,
+but embeds only reconciled aggregate counts. Per-member commitments, result IDs,
+provider tokens, and other record lineage remain outside that aggregate boundary.
+
+The registered path accepts no caller-authored result, compatibility, ledger, or
+comparison evidence. D09 depends only on D05 and D06, so every registered row is
+derived from fenced authority in fixed precedence: collapsed technical
+replicates and reanalyses; members selected by the inclusion or exclusion policy;
+D06 `missing` (`no_verified_catalog_result`); D06 `withheld` for a revoked result
+key; then, for an available D06 binding, the qualification and provider
+eligibility recorded on its `CatalogResultRef`. D06 indexes only complete,
+development-signature-verified results whose method definition equals the
+manifest measurement definition, and it re-verifies each bundle against live
+trust inside the fence. An available, qualified, provider-eligible member is
+`included`. Qualification and eligibility are those D06 bound at import
+(`capability_as_of`), not a fresh capability lookup.
+
+E05 cross-result comparability, E06 denominator-ledger completeness, and
+D02/D03/D07 comparison eligibility are not evaluated in the registered path.
+Nothing in the current system derives a result digest or compatibility key from a
+verified bundle, so caller-supplied evidence of that kind could choose the
+counts. E12 must obtain that evidence through protected result-view and D03/D07
+discovery registries and must not treat a D09 `included` count as comparison
+eligibility.
+
+The row-bearing v1 builder remains a protected derivation over supplied member
+evidence. It requires the exact disposition policy. Lineage and policy selections
+mandate their collapsed or policy-exclusion reason, so a selected member cannot
+be reported as included or unavailable. A policy-exclusion label without the
+matching selection is rejected.
 
 All object boundaries use bounded, zero-hook graph capture before authority
 work. Byte parsers impose byte, depth, node, collection, string, and integer
 bounds before validation and require an exact canonical round trip.
 
-When protected `CohortComparisonReplay` input is supplied, D09 replays the full
-D02/D03 series against the live provider-linkage store and recomputes every D07
-comparison. Its linkage snapshot must equal the snapshot held by the D06 fence,
-and every D03 result ID, result digest, bundle digest, and method definition must
-equal its D06/E06 source. D07 eligibility is recorded separately from population
-disposition, so missing, failed, insufficient, incompatible, unknown, bridge,
-reanalysis, evidence-unavailable, and outside-envelope states never rewrite D09
-denominator counts.
-
-This D09 integration still does not authorize rendering a delta or connecting
-trend. E12 must consume the replayed eligibility state and independently reject
-stale, unknown, incompatible, or otherwise unavailable comparison evidence.
+This D09 integration does not authorize rendering a delta or connecting a trend.

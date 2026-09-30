@@ -10,7 +10,6 @@ Epic D qualification gate passed.
 from __future__ import annotations
 
 import hashlib
-from datetime import datetime
 from enum import StrEnum
 from typing import Annotated, Literal
 
@@ -38,23 +37,6 @@ from evidence_inspector.method_registry import (
     RegistryContract,
     Sha256,
 )
-from evidence_inspector.longitudinal_compatibility import (
-    LongitudinalAnchorPolicy,
-    LongitudinalRecord,
-    LongitudinalSeriesDecision,
-    longitudinal_anchor_policy_sha256,
-    replay_longitudinal_series_decision,
-)
-from evidence_inspector.provider_linkage_store import ProviderLinkageStore
-from evidence_inspector.repeatability_comparison import (
-    ComparisonAvailability,
-    ComparisonObservation,
-    RepeatabilityClassification,
-    RepeatabilityComparison,
-    RepeatabilityEnvelope,
-    compare_repeatability,
-    repeatability_comparison_sha256,
-)
 from evidence_inspector.result_catalog import (
     CatalogQualificationState,
     CatalogResultRef,
@@ -77,7 +59,6 @@ from evidence_inspector.safe_ingress import (
     contract_type_graph,
     exact_model_bytes,
 )
-from traceback_runner.signing import DevelopmentTrustDocument
 
 MAX_COHORT_SUMMARY_MEMBERS = 100_000
 MAX_REGISTERED_SUMMARY_BYTES = 64 * 1024
@@ -251,94 +232,6 @@ def _validate_disposition_policy(
     )
     if not selected.issubset(members):
         raise ValueError("disposition policy contains a non-member commitment")
-
-
-class CohortRepeatabilityReplay(RegistryContract):
-    """Protected exact D07 replay inputs for one D03 member decision."""
-
-    schema_version: Literal["traceback.cohort-repeatability-replay.v1"] = (
-        "traceback.cohort-repeatability-replay.v1"
-    )
-    member_result_id: ResultId
-    expected: RepeatabilityComparison
-    anchor_observation: ComparisonObservation
-    member_observation: ComparisonObservation
-    envelope: RepeatabilityEnvelope | None
-    evaluated_at: datetime
-    result_trust_document: DevelopmentTrustDocument
-    expected_result_trust_sha256: Sha256
-    expected_envelope_sha256: Sha256
-    expected_evidence_sha256: Sha256
-    expected_protocol_sha256: Sha256
-    expected_repeatability_authority_sha256: Sha256
-
-
-class CohortComparisonReplay(RegistryContract):
-    """Protected D02/D03/D07 replay request; never crosses the public boundary."""
-
-    schema_version: Literal["traceback.cohort-comparison-replay.v1"] = (
-        "traceback.cohort-comparison-replay.v1"
-    )
-    anchor: LongitudinalRecord
-    members: tuple[LongitudinalRecord, ...] = Field(
-        min_length=1, max_length=MAX_COHORT_SUMMARY_MEMBERS
-    )
-    policy: LongitudinalAnchorPolicy
-    expected_series: LongitudinalSeriesDecision
-    expected_policy_sha256: Sha256
-    expected_authority_head_sha256: Sha256
-    expected_linkage_trust_snapshot_sha256_by_provider: dict[str, Sha256] = Field(
-        min_length=1, max_length=64
-    )
-    repeatability: tuple[CohortRepeatabilityReplay, ...] = Field(
-        default=(), max_length=MAX_COHORT_SUMMARY_MEMBERS
-    )
-
-    @model_validator(mode="after")
-    def exact_replay_membership(self) -> CohortComparisonReplay:
-        member_ids = tuple(item.member_result_id for item in self.repeatability)
-        if member_ids != self.expected_series.member_result_ids:
-            raise ValueError("D07 replay membership must match D03 series order")
-        return self
-
-
-class ComparisonEligibility(StrEnum):
-    NOT_EVALUATED = "not_evaluated"
-    AVAILABLE = "available"
-    MISSING_DRAW = "missing_draw"
-    FAILED_MEASUREMENT = "failed_measurement"
-    INSUFFICIENT_MEASUREMENT = "insufficient_measurement"
-    INCOMPATIBLE = "incompatible"
-    UNKNOWN = "unknown"
-    REQUIRES_REANALYSIS = "requires_reanalysis"
-    REGISTERED_BRIDGE = "registered_bridge"
-    EVIDENCE_UNAVAILABLE = "evidence_unavailable"
-    OUTSIDE_ENVELOPE = "outside_envelope"
-
-
-_COMPARISON_ELIGIBILITY_BY_CLASSIFICATION = {
-    RepeatabilityClassification.EXACT_SAME_VALUE: ComparisonEligibility.AVAILABLE,
-    RepeatabilityClassification.NOISY_WITHIN_ENVELOPE: ComparisonEligibility.AVAILABLE,
-    RepeatabilityClassification.OUTSIDE_ENVELOPE: ComparisonEligibility.OUTSIDE_ENVELOPE,
-    RepeatabilityClassification.MISSING_DRAW: ComparisonEligibility.MISSING_DRAW,
-    RepeatabilityClassification.FAILED_MEASUREMENT: (
-        ComparisonEligibility.FAILED_MEASUREMENT
-    ),
-    RepeatabilityClassification.INSUFFICIENT_MEASUREMENT: (
-        ComparisonEligibility.INSUFFICIENT_MEASUREMENT
-    ),
-    RepeatabilityClassification.INCOMPATIBLE: ComparisonEligibility.INCOMPATIBLE,
-    RepeatabilityClassification.UNKNOWN: ComparisonEligibility.UNKNOWN,
-    RepeatabilityClassification.REQUIRES_REANALYSIS: (
-        ComparisonEligibility.REQUIRES_REANALYSIS
-    ),
-    RepeatabilityClassification.REGISTERED_BRIDGE: (
-        ComparisonEligibility.REGISTERED_BRIDGE
-    ),
-    RepeatabilityClassification.EVIDENCE_UNAVAILABLE: (
-        ComparisonEligibility.EVIDENCE_UNAVAILABLE
-    ),
-}
 
 
 def cohort_denominator_policy_sha256(policy: CohortDenominatorPolicy) -> str:
@@ -646,16 +539,11 @@ class CohortPopulationProjection(RegistryContract):
         return self
 
 
-class ComparisonEligibilityCount(RegistryContract):
-    state: ComparisonEligibility
-    count: int = Field(ge=1, le=MAX_COHORT_SUMMARY_MEMBERS, strict=True)
-
-
 class RegisteredCohortDenominatorSummary(RegistryContract):
     """D09 population bound to live D05 registry and D06 catalog state."""
 
-    schema_version: Literal["traceback.registered-cohort-denominator-summary.v2"] = (
-        "traceback.registered-cohort-denominator-summary.v2"
+    schema_version: Literal["traceback.registered-cohort-denominator-summary.v3"] = (
+        "traceback.registered-cohort-denominator-summary.v3"
     )
     registry_id: str = Field(pattern=r"^cohort_registry_[0-9a-f]{32}$")
     registry_epoch_sha256: Sha256
@@ -671,10 +559,6 @@ class RegisteredCohortDenominatorSummary(RegistryContract):
     record_status_sha256: Sha256
     record_status_policy_sha256: Sha256
     population: CohortPopulationProjection
-    comparison_replay_sha256: Sha256 | None = None
-    comparison_eligibility: tuple[ComparisonEligibilityCount, ...] = Field(
-        default=(), max_length=len(ComparisonEligibility)
-    )
     summary_sha256: Sha256
     synthetic_only: Literal[True] = True
     clinical_use_authorized: Literal[False] = False
@@ -688,13 +572,6 @@ class RegisteredCohortDenominatorSummary(RegistryContract):
             != self.cohort_manifest_sha256
         ):
             raise ValueError("registered summary population identity is inconsistent")
-        states = tuple(item.state for item in self.comparison_eligibility)
-        if states != tuple(sorted(set(states), key=lambda item: item.value)):
-            raise ValueError("comparison eligibility states must be uniquely sorted")
-        if (self.comparison_replay_sha256 is None) != (
-            len(self.comparison_eligibility) == 0
-        ):
-            raise ValueError("comparison replay identity and counts must be paired")
         placeholder = self.model_copy(update={"summary_sha256": "0" * 64})
         if self.summary_sha256 != _sha256_exact(
             placeholder, RegisteredCohortDenominatorSummary
@@ -848,143 +725,6 @@ def _validate_included(evidence: CohortMemberEvidence) -> None:
         raise ValueError("included evidence does not satisfy every eligibility gate")
 
 
-def _replay_source(source: object) -> ResultViewSource:
-    try:
-        replayed = _replay_exact(source, ResultViewSource)
-        assert type(replayed) is ResultViewSource
-        return replayed
-    except (AssertionError, TypeError, ValueError):
-        raise ValueError("cohort result source is invalid") from None
-
-
-def _derived_disposition(
-    *,
-    member: CohortMember,
-    status: CohortMemberRecordStatus,
-    source: ResultViewSource | None,
-    disposition_policy: CohortDispositionPolicy,
-) -> CohortMemberEvidence:
-    member_sha256 = status.member_sha256
-    if member.lineage_role is MemberLineageRole.TECHNICAL_REPLICATE:
-        return CohortMemberEvidence(
-            member_sha256=member_sha256,
-            disposition=MemberDisposition.EXCLUDED,
-            reason=MemberDispositionReason.TECHNICAL_REPLICATE_COLLAPSED,
-        )
-    if member.lineage_role is MemberLineageRole.REANALYSIS:
-        return CohortMemberEvidence(
-            member_sha256=member_sha256,
-            disposition=MemberDisposition.EXCLUDED,
-            reason=MemberDispositionReason.REANALYSIS_COLLAPSED,
-        )
-    if member_sha256 in disposition_policy.inclusion.member_sha256s:
-        return CohortMemberEvidence(
-            member_sha256=member_sha256,
-            disposition=MemberDisposition.EXCLUDED,
-            reason=MemberDispositionReason.EXCLUDED_BY_INCLUSION_POLICY,
-        )
-    if member_sha256 in disposition_policy.exclusion.member_sha256s:
-        return CohortMemberEvidence(
-            member_sha256=member_sha256,
-            disposition=MemberDisposition.EXCLUDED,
-            reason=MemberDispositionReason.EXCLUDED_BY_EXCLUSION_POLICY,
-        )
-    if status.availability is CohortRecordAvailability.MISSING:
-        return CohortMemberEvidence(
-            member_sha256=member_sha256,
-            disposition=MemberDisposition.UNAVAILABLE,
-            reason=MemberDispositionReason.NO_VERIFIED_CATALOG_RESULT,
-        )
-    if status.availability is CohortRecordAvailability.WITHHELD:
-        if status.withheld_reason is not CohortRecordWithheldReason.RESULT_KEY_REVOKED:
-            raise ValueError("cohort withheld reason is unsupported")
-        return CohortMemberEvidence(
-            member_sha256=member_sha256,
-            disposition=MemberDisposition.UNAVAILABLE,
-            reason=MemberDispositionReason.RESULT_WITHHELD_KEY_REVOKED,
-            record_availability=status.availability,
-            record_withheld_reason=status.withheld_reason,
-        )
-    binding = status.binding
-    if binding is None:
-        raise ValueError("available cohort status has no exact binding")
-    if source is None:
-        return CohortMemberEvidence(
-            member_sha256=member_sha256,
-            disposition=MemberDisposition.UNAVAILABLE,
-            reason=MemberDispositionReason.NO_RESULT_VIEW_EVIDENCE,
-            catalog_result=binding.result,
-        )
-    _validate_catalog_binding(binding.result, source)
-    record = source.record
-    capability = record.current_capability
-    states = _count_states(source)
-    reason: MemberDispositionReason | None = None
-    if record.execution_state is ExecutionState.FAILED:
-        reason = MemberDispositionReason.EXECUTION_FAILED
-    elif record.execution_state is ExecutionState.NOT_RUN:
-        reason = MemberDispositionReason.NOT_RUN
-    elif record.information_state is InformationState.INSUFFICIENT:
-        reason = MemberDispositionReason.INFORMATION_INSUFFICIENT
-    elif record.information_state is InformationState.UNKNOWN:
-        reason = MemberDispositionReason.INFORMATION_UNKNOWN
-    elif record.trust_state is TrustState.UNVERIFIED:
-        reason = MemberDispositionReason.TRUST_UNVERIFIED
-    elif record.trust_state is TrustState.REVOKED:
-        reason = MemberDispositionReason.TRUST_REVOKED
-    elif record.trust_state is TrustState.UNKNOWN:
-        reason = MemberDispositionReason.TRUST_UNKNOWN
-    elif capability.qualification_state is not QualificationState.QUALIFIED:
-        reason = MemberDispositionReason.QUALIFICATION_UNAVAILABLE
-    elif not capability.current_provider_eligible:
-        reason = MemberDispositionReason.PROVIDER_ELIGIBILITY_UNAVAILABLE
-    elif (
-        source.compatibility_decision.outcome
-        is CompatibilityOutcome.DIFFERENT_QUANTITY
-    ):
-        reason = MemberDispositionReason.COMPATIBILITY_DIFFERENT_QUANTITY
-    elif source.compatibility_decision.outcome is CompatibilityOutcome.INCOMPATIBLE:
-        reason = MemberDispositionReason.COMPATIBILITY_INCOMPATIBLE
-    elif source.compatibility_decision.outcome is CompatibilityOutcome.UNKNOWN:
-        reason = MemberDispositionReason.COMPATIBILITY_UNKNOWN
-    elif CountState.MISSING in states:
-        reason = MemberDispositionReason.DENOMINATOR_MISSING
-    elif CountState.WITHHELD in states:
-        reason = MemberDispositionReason.DENOMINATOR_WITHHELD
-    if reason is None:
-        evidence = CohortMemberEvidence(
-            member_sha256=member_sha256,
-            disposition=MemberDisposition.INCLUDED,
-            reason=MemberDispositionReason.INCLUDED_BY_POLICY,
-            catalog_result=binding.result,
-            result_source=source,
-        )
-        _validate_included(evidence)
-        return evidence
-    return CohortMemberEvidence(
-        member_sha256=member_sha256,
-        disposition=MemberDisposition.UNAVAILABLE,
-        reason=reason,
-        catalog_result=binding.result,
-        result_source=source,
-    )
-
-
-def _require_all_result_sources_consumed(
-    evidence: tuple[CohortMemberEvidence, ...],
-    sources_by_result_id: dict[str, ResultViewSource],
-) -> None:
-    consumed = {
-        item.result_source.record.result_id
-        for item in evidence
-        if item.result_source is not None
-    }
-    if consumed != set(sources_by_result_id):
-        raise ValueError(
-            "cohort result source is not consumed by the selected population"
-        )
-
-
 def _validate_record_status(
     history: RegisteredCohortHistory,
     status: CohortManifestRecordStatus,
@@ -1014,142 +754,65 @@ def _validate_record_status(
     return manifest
 
 
-def _replay_comparisons(
+def _registered_row(
     *,
-    request: object,
-    linkage_store: ProviderLinkageStore,
-) -> tuple[
-    CohortComparisonReplay,
-    LongitudinalSeriesDecision,
-    tuple[RepeatabilityComparison, ...],
-    str,
-    tuple[ComparisonEligibilityCount, ...],
-]:
-    captured = _replay_exact(request, CohortComparisonReplay)
-    if type(captured) is not CohortComparisonReplay:
-        raise ValueError("cohort comparison replay input is invalid")
-    if longitudinal_anchor_policy_sha256(captured.policy) != captured.expected_policy_sha256:
-        raise ValueError("D02 anchor policy identity is invalid")
-    series = replay_longitudinal_series_decision(
-        captured.expected_series,
-        captured.anchor,
-        captured.members,
-        captured.policy,
-        expected_policy_sha256=captured.expected_policy_sha256,
-        expected_authority_head_sha256=captured.expected_authority_head_sha256,
-        expected_linkage_trust_snapshot_sha256_by_provider=dict(
-            captured.expected_linkage_trust_snapshot_sha256_by_provider
-        ),
-        linkage_store=linkage_store,
-    )
-    records = {captured.anchor.measurement.result_id: captured.anchor}
-    records.update({item.measurement.result_id: item for item in captured.members})
-    if len(records) != len(captured.members) + 1:
-        raise ValueError("D03 replay contains duplicate result identities")
-    decisions = {item.member_result_id: item for item in series.decisions}
-    replay_inputs = {item.member_result_id: item for item in captured.repeatability}
-    if len(replay_inputs) != len(captured.repeatability):
-        raise ValueError("D07 replay inputs cannot be duplicated")
-    if set(replay_inputs) != set(series.member_result_ids):
-        raise ValueError("D07 replay must cover every D03 member exactly once")
-    counts: dict[ComparisonEligibility, int] = {}
-    comparisons: list[RepeatabilityComparison] = []
-    for member_result_id in series.member_result_ids:
-        replay = replay_inputs[member_result_id]
-        actual = compare_repeatability(
-            captured.anchor,
-            records[member_result_id],
-            captured.policy,
-            decisions[member_result_id],
-            replay.anchor_observation,
-            replay.member_observation,
-            replay.envelope,
-            evaluated_at=replay.evaluated_at,
-            expected_policy_sha256=captured.expected_policy_sha256,
-            expected_authority_head_sha256=captured.expected_authority_head_sha256,
-            expected_linkage_trust_snapshot_sha256_by_provider=dict(
-                captured.expected_linkage_trust_snapshot_sha256_by_provider
-            ),
-            linkage_store=linkage_store,
-            result_trust_document=replay.result_trust_document,
-            expected_result_trust_sha256=replay.expected_result_trust_sha256,
-            expected_envelope_sha256=replay.expected_envelope_sha256,
-            expected_evidence_sha256=replay.expected_evidence_sha256,
-            expected_protocol_sha256=replay.expected_protocol_sha256,
-            expected_repeatability_authority_sha256=(
-                replay.expected_repeatability_authority_sha256
-            ),
-        )
-        if (
-            actual != replay.expected
-            or repeatability_comparison_sha256(actual)
-            != repeatability_comparison_sha256(replay.expected)
-        ):
-            raise ValueError("stored D07 comparison does not replay exactly")
-        comparisons.append(actual)
-        eligibility = _COMPARISON_ELIGIBILITY_BY_CLASSIFICATION[
-            actual.classification
-        ]
-        if (
-            eligibility is ComparisonEligibility.AVAILABLE
-        ) != (actual.availability is ComparisonAvailability.AVAILABLE):
-            raise ValueError("D07 comparison availability is inconsistent")
-        if actual.classification in {
-            RepeatabilityClassification.INCOMPATIBLE,
-            RepeatabilityClassification.UNKNOWN,
-        } and actual.trend_allowed:
-            raise ValueError("non-comparable D07 state cannot allow a trend")
-        counts[eligibility] = counts.get(eligibility, 0) + 1
-    return (
-        captured,
-        series,
-        tuple(comparisons),
-        hashlib.sha256(_exact_bytes(captured, CohortComparisonReplay)).hexdigest(),
-        tuple(
-            ComparisonEligibilityCount(state=state, count=count)
-            for state, count in sorted(counts.items(), key=lambda item: item[0].value)
-        ),
-    )
+    ordinal: int,
+    member: CohortMember,
+    status: CohortMemberRecordStatus,
+    disposition_policy: CohortDispositionPolicy,
+) -> CohortSummaryRow:
+    """Derive one row from fenced D05 lineage/policy and D06 record status only."""
 
-
-def _validate_comparison_bindings(
-    *,
-    request: CohortComparisonReplay,
-    series: LongitudinalSeriesDecision,
-    comparisons: tuple[RepeatabilityComparison, ...],
-    manifest: CohortManifest,
-    status: CohortManifestRecordStatus,
-    sources_by_result_id: dict[str, ResultViewSource],
-) -> None:
-    if (
-        request.expected_policy_sha256
-        != manifest.measurement_anchor.anchor_definition_sha256
-        or series.linkage_snapshot_sha256 != status.linkage_snapshot_sha256
-    ):
-        raise ValueError("D02/D03 authority does not bind the cohort manifest")
-    records = {request.anchor.measurement.result_id: request.anchor}
-    records.update({item.measurement.result_id: item for item in request.members})
-    if set(records) != set(sources_by_result_id):
-        raise ValueError("D03 replay membership does not match D06 cohort results")
-    for result_id, record in records.items():
-        source = sources_by_result_id.get(result_id)
-        if source is None:
-            raise ValueError("D03 replay result is not an available D06 member result")
-        measurement = record.measurement
-        if (
-            source.record.result_id != measurement.result_id
-            or source.record.result_sha256 != measurement.result_sha256
-            or source.record.bundle_sha256 != measurement.bundle_sha256
-            or source.record.method_definition_sha256
-            != measurement.method_definition_sha256
-        ):
-            raise ValueError("D03 replay does not bind the exact D06 result source")
-    if tuple(item.member_record_sha256 for item in comparisons) != tuple(
-        item.expected.member_record_sha256 for item in request.repeatability
-    ):
-        # This branch is intentionally unreachable for canonical replay inputs;
-        # keep comparison order and membership explicit at the D09 boundary.
-        raise ValueError("D07 replay membership changed")
+    catalog: CatalogResultRef | None = None
+    if member.lineage_role is MemberLineageRole.TECHNICAL_REPLICATE:
+        disposition = MemberDisposition.EXCLUDED
+        reason = MemberDispositionReason.TECHNICAL_REPLICATE_COLLAPSED
+    elif member.lineage_role is MemberLineageRole.REANALYSIS:
+        disposition = MemberDisposition.EXCLUDED
+        reason = MemberDispositionReason.REANALYSIS_COLLAPSED
+    elif status.member_sha256 in disposition_policy.inclusion.member_sha256s:
+        disposition = MemberDisposition.EXCLUDED
+        reason = MemberDispositionReason.EXCLUDED_BY_INCLUSION_POLICY
+    elif status.member_sha256 in disposition_policy.exclusion.member_sha256s:
+        disposition = MemberDisposition.EXCLUDED
+        reason = MemberDispositionReason.EXCLUDED_BY_EXCLUSION_POLICY
+    elif status.availability is CohortRecordAvailability.MISSING:
+        disposition = MemberDisposition.UNAVAILABLE
+        reason = MemberDispositionReason.NO_VERIFIED_CATALOG_RESULT
+    elif status.availability is CohortRecordAvailability.WITHHELD:
+        if status.withheld_reason is not CohortRecordWithheldReason.RESULT_KEY_REVOKED:
+            raise ValueError("cohort withheld reason is unsupported")
+        disposition = MemberDisposition.UNAVAILABLE
+        reason = MemberDispositionReason.RESULT_WITHHELD_KEY_REVOKED
+    else:
+        if status.binding is None:
+            raise ValueError("available cohort status has no exact binding")
+        # D06 indexes only complete, development-signature-verified results
+        # whose method equals the manifest measurement definition, and it
+        # re-verifies the bundle against live trust inside the fence.
+        catalog = status.binding.result
+        disposition = MemberDisposition.UNAVAILABLE
+        if catalog.qualification_state is not CatalogQualificationState.QUALIFIED:
+            reason = MemberDispositionReason.QUALIFICATION_UNAVAILABLE
+        elif not catalog.current_provider_eligible:
+            reason = MemberDispositionReason.PROVIDER_ELIGIBILITY_UNAVAILABLE
+        else:
+            disposition = MemberDisposition.INCLUDED
+            reason = MemberDispositionReason.INCLUDED_BY_POLICY
+    return CohortSummaryRow(
+        ordinal=ordinal,
+        member_sha256=status.member_sha256,
+        lineage_role=member.lineage_role,
+        denominator_contribution=member.denominator_contribution,
+        disposition=disposition,
+        reason=reason,
+        catalog_result_sha256=(
+            _sha256_exact(catalog, CatalogResultRef) if catalog is not None else None
+        ),
+        result_id=catalog.result_id if catalog is not None else None,
+        result_source_sha256=None,
+        denominator_ledger_sha256=None,
+    )
 
 
 def build_registered_cohort_denominator_summary(
@@ -1160,11 +823,13 @@ def build_registered_cohort_denominator_summary(
     record_catalog: CohortRecordCatalog,
     policy: CohortDenominatorPolicy,
     disposition_policy: CohortDispositionPolicy,
-    result_sources: tuple[ResultViewSource, ...],
-    comparison_replay: CohortComparisonReplay | None = None,
-    linkage_store: ProviderLinkageStore | None = None,
 ) -> RegisteredCohortDenominatorSummary:
-    """Derive one D09 population from exact live D05/D06 authority state."""
+    """Derive one D09 population from exact live D05/D06 authority state only.
+
+    No caller-authored result, compatibility, ledger, or comparison evidence
+    is accepted: every disposition comes from the fenced D05 manifest and
+    policy and the fenced D06 record status.
+    """
 
     if type(registry) is not CohortRegistry:
         raise TypeError("cohort registry type is invalid")
@@ -1185,97 +850,41 @@ def build_registered_cohort_denominator_summary(
         raise TypeError("cohort denominator policy type is invalid")
     if type(disposition_policy) is not CohortDispositionPolicy:
         raise TypeError("cohort disposition policy type is invalid")
-    if type(result_sources) is not tuple:
-        raise TypeError("cohort result sources must be one exact tuple")
-    if len(result_sources) > MAX_COHORT_SUMMARY_MEMBERS:
-        raise ValueError("cohort result source count exceeds its bound")
-    if (comparison_replay is None) != (linkage_store is None):
-        raise ValueError("comparison replay requires its exact live linkage authority")
-    if linkage_store is not None and type(linkage_store) is not ProviderLinkageStore:
-        raise TypeError("comparison linkage authority type is invalid")
     try:
         policy_content = _exact_bytes(
             policy, CohortDenominatorPolicy, max_bytes=64 * 1024
         )
         replayed_policy = CohortDenominatorPolicy.model_validate_json(policy_content)
         replayed_disposition_policy = _replay_disposition_policy(disposition_policy)
-        replayed_sources = tuple(_replay_source(item) for item in result_sources)
     except (TypeError, ValueError):
         raise ValueError("cohort summary input is not canonical") from None
-    sources_by_result_id = {
-        item.record.result_id: item for item in replayed_sources
-    }
-    if len(sources_by_result_id) != len(replayed_sources):
-        raise ValueError("cohort result sources cannot be duplicated")
-    replayed_comparison: CohortComparisonReplay | None = None
-    replayed_series: LongitudinalSeriesDecision | None = None
-    replayed_repeatability: tuple[RepeatabilityComparison, ...] = ()
-    comparison_sha256: str | None = None
-    comparison_eligibility: tuple[ComparisonEligibilityCount, ...] = ()
-    if comparison_replay is not None:
-        assert linkage_store is not None
-        (
-            replayed_comparison,
-            replayed_series,
-            replayed_repeatability,
-            comparison_sha256,
-            comparison_eligibility,
-        ) = _replay_comparisons(
-            request=comparison_replay,
-            linkage_store=linkage_store,
-        )
 
     with _PINNED_RECORD_STATUS_FENCE(
         record_catalog,
         selector_id,
         cohort_version,
         expected_registry=registry,
-        expected_linkage_store=linkage_store,
     ) as (history, status):
         manifest = _validate_record_status(history, status)
-        if replayed_comparison is not None:
-            assert replayed_series is not None
-            _validate_comparison_bindings(
-                request=replayed_comparison,
-                series=replayed_series,
-                comparisons=replayed_repeatability,
-                manifest=manifest,
-                status=status,
-                sources_by_result_id=sources_by_result_id,
-            )
+        _validate_policy_binds_manifest(replayed_policy, manifest)
         _validate_disposition_policy(
             policy=replayed_policy,
             manifest=manifest,
             disposition_policy=replayed_disposition_policy,
         )
-        available_result_ids = {
-            item.binding.result.result_id
-            for item in status.members
-            if item.binding is not None
-        }
-        if not set(sources_by_result_id).issubset(available_result_ids):
-            raise ValueError("cohort result source is not an available catalog result")
-        evidence = tuple(
-            _derived_disposition(
+        rows = tuple(
+            _registered_row(
+                ordinal=ordinal,
                 member=member,
                 status=member_status,
-                source=(
-                    sources_by_result_id.get(member_status.binding.result.result_id)
-                    if member_status.binding is not None
-                    else None
-                ),
                 disposition_policy=replayed_disposition_policy,
             )
-            for member, member_status in zip(
-                manifest.members, status.members, strict=True
+            for ordinal, (member, member_status) in enumerate(
+                zip(manifest.members, status.members, strict=True)
             )
         )
-        _require_all_result_sources_consumed(evidence, sources_by_result_id)
-        population = build_cohort_denominator_summary(
-            manifest=manifest,
-            policy=replayed_policy,
-            disposition_policy=replayed_disposition_policy,
-            evidence=evidence,
+        population = _summary_from_rows(
+            manifest=manifest, policy=replayed_policy, rows=rows
         )
         population_values = population.model_dump(
             mode="python",
@@ -1301,8 +910,6 @@ def build_registered_cohort_denominator_summary(
             "record_status_sha256": status.status_sha256,
             "record_status_policy_sha256": status.record_status_policy_sha256,
             "population": population_projection,
-            "comparison_replay_sha256": comparison_sha256,
-            "comparison_eligibility": comparison_eligibility,
         }
         placeholder = RegisteredCohortDenominatorSummary.model_construct(
             **payload,
@@ -1351,50 +958,38 @@ def _row(
     )
 
 
-def _replay_evidence(item: object) -> CohortMemberEvidence:
-    try:
-        replayed = _replay_exact(item, CohortMemberEvidence)
-        assert type(replayed) is CohortMemberEvidence
-        return replayed
-    except (AssertionError, ValidationError, TypeError, ValueError):
-        raise ValueError("cohort member evidence is invalid") from None
+_DERIVED_EXCLUSION_REASONS = frozenset(
+    {
+        MemberDispositionReason.TECHNICAL_REPLICATE_COLLAPSED,
+        MemberDispositionReason.REANALYSIS_COLLAPSED,
+        MemberDispositionReason.EXCLUDED_BY_INCLUSION_POLICY,
+        MemberDispositionReason.EXCLUDED_BY_EXCLUSION_POLICY,
+    }
+)
 
 
-def build_cohort_denominator_summary(
+def _policy_required_reason(
     *,
-    manifest: CohortManifest,
-    policy: CohortDenominatorPolicy,
-    disposition_policy: CohortDispositionPolicy | None = None,
-    evidence: tuple[CohortMemberEvidence, ...],
-) -> CohortDenominatorSummary:
-    """Build a canonical summary after exact coverage and eligibility checks."""
+    member: CohortMember,
+    member_sha256: str,
+    disposition_policy: CohortDispositionPolicy,
+) -> MemberDispositionReason | None:
+    """Return the exclusion that lineage or policy mandates, in fixed precedence."""
 
-    if type(manifest) is not CohortManifest:
-        raise TypeError("cohort manifest type is invalid")
-    if type(policy) is not CohortDenominatorPolicy:
-        raise TypeError("cohort denominator policy type is invalid")
-    if type(evidence) is not tuple:
-        raise TypeError("cohort evidence must be one exact tuple")
-    try:
-        manifest = CohortManifest.model_validate_json(
-            _exact_bytes(manifest, CohortManifest)
-        )
-    except (TypeError, ValueError):
-        raise ValueError("cohort summary input is not canonical") from None
-    if len(evidence) != len(manifest.members):
-        raise ValueError("evidence must cover every manifest member exactly once")
-    try:
-        policy = CohortDenominatorPolicy.model_validate_json(
-            _exact_bytes(policy, CohortDenominatorPolicy)
-        )
-        disposition_policy = (
-            _replay_disposition_policy(disposition_policy)
-            if disposition_policy is not None
-            else None
-        )
-        evidence = tuple(_replay_evidence(item) for item in evidence)
-    except (TypeError, ValueError):
-        raise ValueError("cohort summary input is not canonical") from None
+    if member.lineage_role is MemberLineageRole.TECHNICAL_REPLICATE:
+        return MemberDispositionReason.TECHNICAL_REPLICATE_COLLAPSED
+    if member.lineage_role is MemberLineageRole.REANALYSIS:
+        return MemberDispositionReason.REANALYSIS_COLLAPSED
+    if member_sha256 in disposition_policy.inclusion.member_sha256s:
+        return MemberDispositionReason.EXCLUDED_BY_INCLUSION_POLICY
+    if member_sha256 in disposition_policy.exclusion.member_sha256s:
+        return MemberDispositionReason.EXCLUDED_BY_EXCLUSION_POLICY
+    return None
+
+
+def _validate_policy_binds_manifest(
+    policy: CohortDenominatorPolicy, manifest: CohortManifest
+) -> None:
     if (
         policy.inclusion_sha256,
         policy.exclusion_sha256,
@@ -1405,59 +1000,14 @@ def build_cohort_denominator_summary(
         manifest.policies.missingness_sha256,
     ):
         raise ValueError("denominator policy does not bind manifest policies")
-    if disposition_policy is not None:
-        _validate_disposition_policy(
-            policy=policy,
-            manifest=manifest,
-            disposition_policy=disposition_policy,
-        )
-    by_digest = {item.member_sha256: item for item in evidence}
-    if len(by_digest) != len(evidence):
-        raise ValueError("member evidence cannot be duplicated")
-    member_digests = tuple(
-        _sha256_exact(member, CohortMember) for member in manifest.members
-    )
-    if set(by_digest) != set(member_digests):
-        raise ValueError("member evidence does not match exact manifest membership")
 
-    rows: list[CohortSummaryRow] = []
-    for ordinal, (member, member_sha256) in enumerate(
-        zip(manifest.members, member_digests, strict=True)
-    ):
-        item = by_digest[member_sha256]
-        if item.catalog_result is not None and item.result_source is not None:
-            _validate_catalog_binding(item.catalog_result, item.result_source)
-        if item.disposition == MemberDisposition.INCLUDED:
-            _validate_included(item)
-        elif item.disposition == MemberDisposition.UNAVAILABLE:
-            if not _unavailability_reason_matches(item):
-                raise ValueError(
-                    "unavailable reason is not supported by exact evidence"
-                )
-        elif item.reason == MemberDispositionReason.TECHNICAL_REPLICATE_COLLAPSED:
-            if member.lineage_role != MemberLineageRole.TECHNICAL_REPLICATE:
-                raise ValueError("technical-replicate reason does not match lineage")
-        elif (
-            item.reason == MemberDispositionReason.REANALYSIS_COLLAPSED
-            and member.lineage_role != MemberLineageRole.REANALYSIS
-        ):
-            raise ValueError("reanalysis reason does not match lineage")
-        elif item.reason in {
-            MemberDispositionReason.EXCLUDED_BY_INCLUSION_POLICY,
-            MemberDispositionReason.EXCLUDED_BY_EXCLUSION_POLICY,
-        }:
-            if disposition_policy is None:
-                raise ValueError("policy exclusion requires exact policy evidence")
-            expected_members = (
-                disposition_policy.inclusion.member_sha256s
-                if item.reason
-                is MemberDispositionReason.EXCLUDED_BY_INCLUSION_POLICY
-                else disposition_policy.exclusion.member_sha256s
-            )
-            if item.member_sha256 not in expected_members:
-                raise ValueError("policy exclusion is not supported by exact policy")
-        rows.append(_row(ordinal=ordinal, member=member, evidence=item))
 
+def _summary_from_rows(
+    *,
+    manifest: CohortManifest,
+    policy: CohortDenominatorPolicy,
+    rows: tuple[CohortSummaryRow, ...],
+) -> CohortDenominatorSummary:
     included_members = sum(
         row.disposition == MemberDisposition.INCLUDED for row in rows
     )
@@ -1504,7 +1054,7 @@ def build_cohort_denominator_summary(
         "included_denominator_units": included_units,
         "excluded_denominator_units": excluded_units,
         "unavailable_denominator_units": unavailable_units,
-        "rows": tuple(rows),
+        "rows": rows,
     }
     placeholder = CohortDenominatorSummary.model_construct(
         **payload,
@@ -1520,6 +1070,93 @@ def build_cohort_denominator_summary(
         population_id=f"population_{population_sha256[:40]}",
         population_sha256=population_sha256,
     )
+
+
+
+def _replay_evidence(item: object) -> CohortMemberEvidence:
+    try:
+        replayed = _replay_exact(item, CohortMemberEvidence)
+        assert type(replayed) is CohortMemberEvidence
+        return replayed
+    except (AssertionError, ValidationError, TypeError, ValueError):
+        raise ValueError("cohort member evidence is invalid") from None
+
+
+def build_cohort_denominator_summary(
+    *,
+    manifest: CohortManifest,
+    policy: CohortDenominatorPolicy,
+    disposition_policy: CohortDispositionPolicy,
+    evidence: tuple[CohortMemberEvidence, ...],
+) -> CohortDenominatorSummary:
+    """Build a canonical summary after exact coverage and eligibility checks."""
+
+    if type(manifest) is not CohortManifest:
+        raise TypeError("cohort manifest type is invalid")
+    if type(policy) is not CohortDenominatorPolicy:
+        raise TypeError("cohort denominator policy type is invalid")
+    if type(evidence) is not tuple:
+        raise TypeError("cohort evidence must be one exact tuple")
+    try:
+        manifest = CohortManifest.model_validate_json(
+            _exact_bytes(manifest, CohortManifest)
+        )
+    except (TypeError, ValueError):
+        raise ValueError("cohort summary input is not canonical") from None
+    if len(evidence) != len(manifest.members):
+        raise ValueError("evidence must cover every manifest member exactly once")
+    try:
+        policy = CohortDenominatorPolicy.model_validate_json(
+            _exact_bytes(policy, CohortDenominatorPolicy)
+        )
+        disposition_policy = _replay_disposition_policy(disposition_policy)
+        evidence = tuple(_replay_evidence(item) for item in evidence)
+    except (TypeError, ValueError):
+        raise ValueError("cohort summary input is not canonical") from None
+    _validate_policy_binds_manifest(policy, manifest)
+    _validate_disposition_policy(
+        policy=policy,
+        manifest=manifest,
+        disposition_policy=disposition_policy,
+    )
+    by_digest = {item.member_sha256: item for item in evidence}
+    if len(by_digest) != len(evidence):
+        raise ValueError("member evidence cannot be duplicated")
+    member_digests = tuple(
+        _sha256_exact(member, CohortMember) for member in manifest.members
+    )
+    if set(by_digest) != set(member_digests):
+        raise ValueError("member evidence does not match exact manifest membership")
+
+    rows: list[CohortSummaryRow] = []
+    for ordinal, (member, member_sha256) in enumerate(
+        zip(manifest.members, member_digests, strict=True)
+    ):
+        item = by_digest[member_sha256]
+        required_reason = _policy_required_reason(
+            member=member,
+            member_sha256=member_sha256,
+            disposition_policy=disposition_policy,
+        )
+        if required_reason is not None:
+            # Collapsed lineage and policy selections are derived, never chosen:
+            # a selected member cannot be reported included or unavailable.
+            if item.reason is not required_reason:
+                raise ValueError("member disposition contradicts the exact policy")
+        elif item.reason in _DERIVED_EXCLUSION_REASONS:
+            raise ValueError("exclusion reason is not supported by the exact policy")
+        if item.catalog_result is not None and item.result_source is not None:
+            _validate_catalog_binding(item.catalog_result, item.result_source)
+        if item.disposition == MemberDisposition.INCLUDED:
+            _validate_included(item)
+        elif item.disposition == MemberDisposition.UNAVAILABLE:
+            if not _unavailability_reason_matches(item):
+                raise ValueError(
+                    "unavailable reason is not supported by exact evidence"
+                )
+        rows.append(_row(ordinal=ordinal, member=member, evidence=item))
+
+    return _summary_from_rows(manifest=manifest, policy=policy, rows=tuple(rows))
 
 
 def cohort_denominator_summary_bytes(summary: CohortDenominatorSummary) -> bytes:
@@ -1591,14 +1228,10 @@ __all__ = [
     "CohortDenominatorSummary",
     "CohortDispositionPolicy",
     "CohortMemberExclusionSet",
-    "CohortComparisonReplay",
-    "CohortRepeatabilityReplay",
     "CohortPopulationProjection",
     "CohortMemberEvidence",
     "CohortSummaryRow",
     "CohortSummaryState",
-    "ComparisonEligibility",
-    "ComparisonEligibilityCount",
     "DenominatorBasis",
     "InclusionRule",
     "MemberDisposition",
