@@ -5,6 +5,7 @@ from __future__ import annotations
 import base64
 import hashlib
 import json
+import threading
 from dataclasses import dataclass
 from enum import StrEnum
 from typing import Annotated, Literal
@@ -150,15 +151,17 @@ class TrustStore:
     """Offline key registry with local revocation state."""
 
     def __init__(self, keys: tuple[TrustedKey, ...] = ()) -> None:
+        self._lock = threading.RLock()
         self._keys: dict[str, TrustedKey] = {}
         for key in keys:
             self.add(key)
 
     def add(self, key: TrustedKey) -> None:
-        existing = self._keys.get(key.key_id)
-        if existing is not None and existing != key:
-            raise SigningError(f"conflicting trust entry for key {key.key_id!r}")
-        self._keys[key.key_id] = key
+        with self._lock:
+            existing = self._keys.get(key.key_id)
+            if existing is not None and existing != key:
+                raise SigningError(f"conflicting trust entry for key {key.key_id!r}")
+            self._keys[key.key_id] = key
 
     def add_signing_key(self, key: DevelopmentSigningKey) -> None:
         self.add(
@@ -171,22 +174,24 @@ class TrustStore:
         )
 
     def revoke(self, key_id: str) -> None:
-        key = self._keys.get(key_id)
-        if key is None:
-            raise UnknownKeyError(f"unknown signing key {key_id!r}")
-        self._keys[key_id] = TrustedKey(
-            key_id=key.key_id,
-            purpose=key.purpose,
-            public_key_bytes=key.public_key_bytes,
-            namespace=key.namespace,
-            revoked=True,
-        )
+        with self._lock:
+            key = self._keys.get(key_id)
+            if key is None:
+                raise UnknownKeyError(f"unknown signing key {key_id!r}")
+            self._keys[key_id] = TrustedKey(
+                key_id=key.key_id,
+                purpose=key.purpose,
+                public_key_bytes=key.public_key_bytes,
+                namespace=key.namespace,
+                revoked=True,
+            )
 
     def resolve(self, key_id: str) -> TrustedKey:
-        try:
-            return self._keys[key_id]
-        except KeyError as exc:
-            raise UnknownKeyError(f"unknown signing key {key_id!r}") from exc
+        with self._lock:
+            try:
+                return self._keys[key_id]
+            except KeyError as exc:
+                raise UnknownKeyError(f"unknown signing key {key_id!r}") from exc
 
 
 def _development_key_id(public_key_bytes: bytes, purpose: KeyPurpose) -> str:

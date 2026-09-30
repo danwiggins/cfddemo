@@ -978,18 +978,19 @@ class ResultCatalog:
         _RC_VALIDATE_STORAGE(self)
         _RC_VALIDATE_VERIFICATION_AUTHORITY(self)
         try:
-            keys = tuple(
-                {
-                    "key_id": key.key_id,
-                    "purpose": key.purpose.value,
-                    "namespace": key.namespace.value,
-                    "public_key_hex": key.public_key_bytes.hex(),
-                    "revoked": key.revoked,
-                }
-                for key in sorted(
-                    self.trust_store._keys.values(), key=lambda item: item.key_id
+            with self.trust_store._lock:
+                keys = tuple(
+                    {
+                        "key_id": key.key_id,
+                        "purpose": key.purpose.value,
+                        "namespace": key.namespace.value,
+                        "public_key_hex": key.public_key_bytes.hex(),
+                        "revoked": key.revoked,
+                    }
+                    for key in sorted(
+                        self.trust_store._keys.values(), key=lambda item: item.key_id
+                    )
                 )
-            )
         except Exception:  # noqa: BLE001 - normalize hostile trust-store state
             raise CatalogError("catalog trust store is unsupported") from None
         trust_sha256 = hashlib.sha256(

@@ -552,6 +552,8 @@ class CohortRecordCatalog:
             "_result_catalog",
             "_result_catalog_identity",
             "_result_trust_store",
+            "_result_trust_lock",
+            "_result_trust_lock_identity",
             "_result_reader_registry",
             "_catalog_storage_identity_sha256",
             "_catalog_reader_identity_sha256",
@@ -661,6 +663,8 @@ class CohortRecordCatalog:
         self._result_catalog = result_catalog
         self._result_catalog_identity = id(result_catalog)
         self._result_trust_store = result_catalog.trust_store
+        self._result_trust_lock = result_catalog.trust_store._lock
+        self._result_trust_lock_identity = id(result_catalog.trust_store._lock)
         self._result_reader_registry = result_catalog.reader_registry
         self._catalog_storage_identity_sha256 = authority.storage_identity_sha256
         self._catalog_reader_identity_sha256 = authority.reader_registry_sha256
@@ -1289,6 +1293,8 @@ class CohortRecordCatalog:
             type(catalog) is not ResultCatalog
             or id(catalog) != self._result_catalog_identity
             or catalog.trust_store is not self._result_trust_store
+            or catalog.trust_store._lock is not self._result_trust_lock
+            or id(catalog.trust_store._lock) != self._result_trust_lock_identity
             or catalog.reader_registry is not self._result_reader_registry
             or catalog._connection_lock is not self._catalog_connection_lock
             or id(catalog._connection_lock)
@@ -1436,6 +1442,8 @@ class CohortRecordCatalog:
             _PINNED_REGISTRY_REQUIRE_INTEGRITY(registry)
             stack.enter_context(_PINNED_LINKAGE_AUTHORITY_FENCE(self._linkage_store))
             stack.enter_context(_PINNED_REGISTRY_LOCK(registry, exclusive=False))
+            stack.enter_context(self._catalog_connection_lock)
+            stack.enter_context(self._result_trust_lock)
             history = _CC_RESOLVE_REGISTERED_HISTORY_IN_FENCE(
                 self, selector_id, cohort_version
             )
@@ -2739,6 +2747,8 @@ def _cohort_instance_snapshot(catalog: CohortRecordCatalog) -> tuple[object, ...
         id(state.get("_result_catalog")),
         state.get("_result_catalog_identity"),
         id(state.get("_result_trust_store")),
+        id(state.get("_result_trust_lock")),
+        state.get("_result_trust_lock_identity"),
         id(state.get("_result_reader_registry")),
         state.get("_catalog_storage_identity_sha256"),
         state.get("_catalog_reader_identity_sha256"),

@@ -379,6 +379,49 @@ def test_final_read_and_idempotent_return_hold_linkage_fence_through_return(
         values[0].record_status_for_manifest(selector_id, cohort_version)
 
 
+@pytest.mark.parametrize(
+    ("point", "operation"),
+    (
+        ("before_read_return", "read"),
+        ("before_status_return", "status"),
+        ("before_idempotent_return", "idempotent"),
+    ),
+)
+def test_final_return_holds_result_trust_fence_through_return(
+    tmp_path: Path, live, point: str, operation: str
+) -> None:
+    controller = DeterministicFaultController(point, action=FaultAction.PAUSE)
+    values = _setup(tmp_path, live, controller)
+    _import(values)
+    call = {
+        "read": lambda: _bindings(values),
+        "status": lambda: _status(values),
+        "idempotent": lambda: _import(values),
+    }[operation]
+    mutation_started = threading.Event()
+
+    def revoke() -> None:
+        mutation_started.set()
+        values[6].revoke(values[5].key_id)
+
+    with ThreadPoolExecutor(max_workers=2) as executor:
+        reading = executor.submit(call)
+        assert controller.wait_until_reached()
+        mutation = executor.submit(revoke)
+        assert mutation_started.wait(timeout=10)
+        assert not mutation.done()
+        controller.release()
+        reading.result(timeout=10)
+        mutation.result(timeout=10)
+
+    withheld = _status(values)
+    assert withheld.members[0].availability is CohortRecordAvailability.WITHHELD
+    assert (
+        withheld.members[0].withheld_reason
+        is CohortRecordWithheldReason.RESULT_KEY_REVOKED
+    )
+
+
 @pytest.mark.parametrize("operation", ("read", "status"))
 def test_read_return_rechecks_exact_binding_after_concurrent_removal(
     tmp_path: Path, live, operation: str
@@ -1202,22 +1245,35 @@ def test_binding_bytes_are_canonical_and_permissions_private(
         "after_visibility_commit",
     ),
 )
-def test_authority_change_at_every_publication_window_compensates(
+def test_trust_revocation_waits_at_every_publication_window(
     tmp_path: Path, live, point: str
 ) -> None:
     controller = DeterministicFaultController(point, action=FaultAction.PAUSE)
     values = _setup(tmp_path / point, live, controller)
-    error = _paused_error(
-        controller,
-        lambda: _import(values),
-        lambda: values[6].revoke(values[5].key_id),
-    )
-    assert "authority changed" in str(error) or "revoked" in str(error)
+    mutation_started = threading.Event()
+
+    def revoke() -> None:
+        mutation_started.set()
+        values[6].revoke(values[5].key_id)
+
+    with ThreadPoolExecutor(max_workers=2) as executor:
+        importing = executor.submit(_import, values)
+        assert controller.wait_until_reached()
+        mutation = executor.submit(revoke)
+        assert mutation_started.wait(timeout=10)
+        assert not mutation.done()
+        controller.release()
+        binding = importing.result(timeout=10)
+        mutation.result(timeout=10)
+
     assert controller.fired
-    assert values[1].query(CatalogQuery()).empty
-    inventory = tuple((tmp_path / point / "cohort-records").iterdir())
-    assert inventory == ()
-    assert tuple((tmp_path / point / "results/objects").iterdir())
+    assert values[1].query(CatalogQuery()).results == (binding.result,)
+    status = _status(values)
+    assert status.members[0].availability is CohortRecordAvailability.WITHHELD
+    assert (
+        status.members[0].withheld_reason
+        is CohortRecordWithheldReason.RESULT_KEY_REVOKED
+    )
 
 
 def test_failed_visible_import_compensates_before_recovery_can_read(
