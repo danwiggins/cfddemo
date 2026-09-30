@@ -28,13 +28,19 @@ from evidence_inspector.cohort_manifest import (
 from evidence_inspector.cohort_summary import (
     CohortDenominatorPolicy,
     CohortDenominatorSummary,
+    CohortComparisonReplay,
+    CohortDispositionPolicy,
     CohortMemberEvidence,
+    CohortMemberExclusionSet,
+    CohortRepeatabilityReplay,
+    ComparisonEligibility,
     CohortSummaryState,
     MemberDisposition,
     MemberDispositionReason,
     RegisteredCohortDenominatorSummary,
     build_cohort_denominator_summary,
     build_registered_cohort_denominator_summary,
+    cohort_member_exclusion_set_sha256,
     cohort_denominator_summary_bytes,
     cohort_denominator_summary_from_bytes,
     registered_cohort_denominator_summary_bytes,
@@ -57,6 +63,14 @@ from evidence_inspector.compatibility import (
     compatibility_policy_sha256,
     decide_compatibility,
 )
+from evidence_inspector.longitudinal_compatibility import (
+    decide_longitudinal_series,
+    longitudinal_anchor_policy_sha256,
+)
+from evidence_inspector.repeatability_comparison import (
+    compare_repeatability,
+    repeatability_envelope_sha256,
+)
 from evidence_inspector.method_registry import (
     AssetReference,
     CurrentMethodCapability,
@@ -76,6 +90,11 @@ from evidence_inspector.result_catalog import (
     CatalogQualificationState,
     CatalogResultRef,
 )
+from evidence_inspector.cohort_import import (
+    CohortMemberRecordStatus,
+    CohortRecordAvailability,
+    CohortRecordWithheldReason,
+)
 from evidence_inspector.result_view import (
     AttritionReason,
     AttritionStage,
@@ -89,14 +108,43 @@ from tests.test_cohort_import import _setup as _setup_cohort_records
 from tests.test_cohort_manifest import _collection_event, _trust
 from tests.test_cohort_manifest import live as _cohort_live
 from tests.test_provider_linkage_store import _pins
+from tests.test_compatibility import (
+    _key as _e05_key,
+    _method as _e05_method,
+    _record as _e05_record,
+    _request as _e05_request,
+)
+from tests.test_longitudinal_compatibility import (
+    HEAD_SHA256 as D03_HEAD_SHA256,
+    PROVIDER as D03_PROVIDER,
+    TRUST_SHA256 as D03_TRUST_SHA256,
+    _activated_records as _activated_d03_records,
+    _policy as _d03_policy,
+    _record as _d03_record,
+)
+from tests.test_repeatability_comparison import (
+    AUTHORITY_SHA256 as D07_AUTHORITY_SHA256,
+    EVIDENCE_SHA256 as D07_EVIDENCE_SHA256,
+    PROTOCOL_SHA256 as D07_PROTOCOL_SHA256,
+    RESULT_TRUST_DOCUMENT as D07_RESULT_TRUST_DOCUMENT,
+    RESULT_TRUST_SHA256 as D07_RESULT_TRUST_SHA256,
+    _envelope as _d07_envelope,
+    _observation as _d07_observation,
+)
 
 NOW = datetime(2026, 9, 29, 12, 0, tzinfo=UTC)
 HEAD = "a" * 64
 REGISTRY = "b" * 64
+EMPTY_MEMBER_POLICY = CohortMemberExclusionSet()
 POLICIES = PolicyDigests(
-    inclusion_sha256="1" * 64,
-    exclusion_sha256="2" * 64,
+    inclusion_sha256=cohort_member_exclusion_set_sha256(EMPTY_MEMBER_POLICY),
+    exclusion_sha256=cohort_member_exclusion_set_sha256(EMPTY_MEMBER_POLICY),
     missingness_sha256="3" * 64,
+)
+EMPTY_DISPOSITION_POLICY = CohortDispositionPolicy(
+    inclusion=EMPTY_MEMBER_POLICY,
+    exclusion=EMPTY_MEMBER_POLICY,
+    missingness_sha256=POLICIES.missingness_sha256,
 )
 
 
@@ -219,6 +267,39 @@ def _manifest(*members: CohortMember) -> CohortManifest:
             )
         ),
         members=tuple(members),
+    )
+
+
+def _manifest_with_disposition(
+    *members: CohortMember,
+    inclusion: tuple[str, ...] = (),
+    exclusion: tuple[str, ...] = (),
+) -> tuple[CohortManifest, CohortDispositionPolicy, CohortDenominatorPolicy]:
+    inclusion_policy = CohortMemberExclusionSet(
+        member_sha256s=tuple(sorted(inclusion))
+    )
+    exclusion_policy = CohortMemberExclusionSet(
+        member_sha256s=tuple(sorted(exclusion))
+    )
+    policies = PolicyDigests(
+        inclusion_sha256=cohort_member_exclusion_set_sha256(inclusion_policy),
+        exclusion_sha256=cohort_member_exclusion_set_sha256(exclusion_policy),
+        missingness_sha256=POLICIES.missingness_sha256,
+    )
+    manifest = _manifest(*members).model_copy(update={"policies": policies})
+    disposition_policy = CohortDispositionPolicy(
+        inclusion=inclusion_policy,
+        exclusion=exclusion_policy,
+        missingness_sha256=policies.missingness_sha256,
+    )
+    return (
+        manifest,
+        disposition_policy,
+        _policy(
+            inclusion_sha256=policies.inclusion_sha256,
+            exclusion_sha256=policies.exclusion_sha256,
+            missingness_sha256=policies.missingness_sha256,
+        ),
     )
 
 
@@ -625,7 +706,10 @@ def test_deterministic_summary_reconciles_members_units_and_exact_ledgers() -> N
 
 def test_zero_and_one_included_unit_states_are_explicit() -> None:
     first, second = _member("a", 100), _member("b", 200)
-    manifest = _manifest(first, second)
+    second_sha256 = _member_sha256(second)
+    manifest, disposition_policy, denominator_policy = _manifest_with_disposition(
+        first, second, exclusion=(second_sha256,)
+    )
     left, right = _record("a"), _record("b")
     unavailable = CohortMemberEvidence(
         member_sha256=_member_sha256(first),
@@ -638,7 +722,10 @@ def test_zero_and_one_included_unit_states_are_explicit() -> None:
         reason=MemberDispositionReason.EXCLUDED_BY_EXCLUSION_POLICY,
     )
     empty = build_cohort_denominator_summary(
-        manifest=manifest, policy=_policy(), evidence=(unavailable, excluded)
+        manifest=manifest,
+        policy=denominator_policy,
+        disposition_policy=disposition_policy,
+        evidence=(unavailable, excluded),
     )
     assert empty.state == CohortSummaryState.NO_INCLUDED_UNITS
     assert empty.declared_denominator_units == 2
@@ -647,7 +734,8 @@ def test_zero_and_one_included_unit_states_are_explicit() -> None:
 
     one = build_cohort_denominator_summary(
         manifest=manifest,
-        policy=_policy(),
+        policy=denominator_policy,
+        disposition_policy=disposition_policy,
         evidence=(_included(first, left, right), excluded),
     )
     assert one.state == CohortSummaryState.ONE_INCLUDED_UNIT
@@ -716,6 +804,10 @@ def test_collapsed_lineage_cannot_be_reclassified_as_population_evidence(
         role=role,
     )
     left, right = _record("a"), _record("b")
+    draw_sha256 = _member_sha256(draw)
+    manifest, disposition_policy, denominator_policy = _manifest_with_disposition(
+        draw, derived, exclusion=(draw_sha256,)
+    )
     draw_evidence = CohortMemberEvidence(
         member_sha256=_member_sha256(draw),
         disposition=MemberDisposition.EXCLUDED,
@@ -733,8 +825,9 @@ def test_collapsed_lineage_cannot_be_reclassified_as_population_evidence(
 
     with pytest.raises(ValidationError, match="collapsed exclusions"):
         build_cohort_denominator_summary(
-            manifest=_manifest(draw, derived),
-            policy=_policy(),
+            manifest=manifest,
+            policy=denominator_policy,
+            disposition_policy=disposition_policy,
             evidence=(draw_evidence, derived_evidence),
         )
 
@@ -851,6 +944,315 @@ def test_policy_and_exact_member_coverage_are_mandatory() -> None:
         )
 
 
+@pytest.mark.parametrize(
+    ("policy_axis", "reason"),
+    (
+        ("inclusion", MemberDispositionReason.EXCLUDED_BY_INCLUSION_POLICY),
+        ("exclusion", MemberDispositionReason.EXCLUDED_BY_EXCLUSION_POLICY),
+    ),
+)
+def test_registered_policy_derives_exclusions_instead_of_trusting_labels(
+    policy_axis: str, reason: MemberDispositionReason
+) -> None:
+    member = _member("a", 100)
+    member_sha256 = _member_sha256(member)
+    kwargs = {policy_axis: (member_sha256,)}
+    manifest, disposition_policy, denominator_policy = _manifest_with_disposition(
+        member, **kwargs
+    )
+    status = CohortMemberRecordStatus(
+        provider_namespace=member.provider_namespace,
+        analysis_record_id=member.analysis_record_id,
+        member_sha256=member_sha256,
+        availability=CohortRecordAvailability.MISSING,
+    )
+    evidence = cohort_summary_module._derived_disposition(
+        member=member,
+        status=status,
+        source=None,
+        disposition_policy=disposition_policy,
+    )
+    assert evidence.disposition is MemberDisposition.EXCLUDED
+    assert evidence.reason is reason
+    summary = build_cohort_denominator_summary(
+        manifest=manifest,
+        policy=denominator_policy,
+        disposition_policy=disposition_policy,
+        evidence=(evidence,),
+    )
+    assert summary.excluded_members == 1
+    assert summary.excluded_denominator_units == 1
+
+    tampered = disposition_policy.model_copy(
+        update={policy_axis: CohortMemberExclusionSet()}
+    )
+    with pytest.raises(ValueError, match="does not bind manifest"):
+        build_cohort_denominator_summary(
+            manifest=manifest,
+            policy=denominator_policy,
+            disposition_policy=tampered,
+            evidence=(evidence,),
+        )
+
+
+def test_policy_overlap_fails_closed_without_precedence_or_double_counting() -> None:
+    member_sha256 = _member_sha256(_member("a", 100))
+    selected = CohortMemberExclusionSet(member_sha256s=(member_sha256,))
+    with pytest.raises(ValidationError, match="must be disjoint"):
+        CohortDispositionPolicy(
+            inclusion=selected,
+            exclusion=selected,
+            missingness_sha256=POLICIES.missingness_sha256,
+        )
+
+
+def test_d06_withheld_reason_remains_distinct_from_result_view_trust_revocation() -> None:
+    member = _member("a", 100)
+    evidence = cohort_summary_module._derived_disposition(
+        member=member,
+        status=CohortMemberRecordStatus(
+            provider_namespace=member.provider_namespace,
+            analysis_record_id=member.analysis_record_id,
+            member_sha256=_member_sha256(member),
+            availability=CohortRecordAvailability.WITHHELD,
+            withheld_reason=CohortRecordWithheldReason.RESULT_KEY_REVOKED,
+        ),
+        source=None,
+        disposition_policy=EMPTY_DISPOSITION_POLICY,
+    )
+    assert evidence.reason is MemberDispositionReason.RESULT_WITHHELD_KEY_REVOKED
+    summary = build_cohort_denominator_summary(
+        manifest=_manifest(member),
+        policy=_policy(),
+        disposition_policy=EMPTY_DISPOSITION_POLICY,
+        evidence=(evidence,),
+    )
+    assert summary.rows[0].reason is MemberDispositionReason.RESULT_WITHHELD_KEY_REVOKED
+
+
+@pytest.mark.parametrize(
+    ("kind", "reason"),
+    (
+        (
+            "different_quantity",
+            MemberDispositionReason.COMPATIBILITY_DIFFERENT_QUANTITY,
+        ),
+        ("incompatible", MemberDispositionReason.COMPATIBILITY_INCOMPATIBLE),
+        ("unknown", MemberDispositionReason.COMPATIBILITY_UNKNOWN),
+    ),
+)
+def test_compatibility_unavailability_states_have_distinct_serialized_identity(
+    kind: str, reason: MemberDispositionReason
+) -> None:
+    left = _e05_record("a" * 40)
+    catalog_identity = hashlib.sha256(
+        json.dumps(
+            {
+                "bundle_sha256": left.bundle_sha256,
+                "method_definition_sha256": left.method_definition_sha256,
+            },
+            sort_keys=True,
+            separators=(",", ":"),
+        ).encode("ascii")
+    ).hexdigest()
+    left = left.model_copy(update={"result_id": f"result_{catalog_identity[:40]}"})
+    if kind == "different_quantity":
+        method = _e05_method(
+            method_id="mth_fragment_quantity_beta", quantity_id="qty_fragment_count"
+        )
+        right = _e05_record(
+            "b" * 40,
+            method=method,
+            key=_e05_key(method),
+        )
+    elif kind == "incompatible":
+        method = _e05_method(method_id="mth_fragment_unit_beta", unit="unit_count")
+        right = _e05_record(
+            "b" * 40,
+            method=method,
+            key=_e05_key(method),
+        )
+    else:
+        right = _e05_record(
+            "b" * 40,
+            authority_head_sha256="1" * 64,
+            authority_revision=3,
+        )
+    decision = decide_compatibility(_e05_request(left, right))
+    expected_outcome = {
+        "different_quantity": CompatibilityOutcome.DIFFERENT_QUANTITY,
+        "incompatible": CompatibilityOutcome.INCOMPATIBLE,
+        "unknown": CompatibilityOutcome.UNKNOWN,
+    }[kind]
+    assert decision.outcome is expected_outcome
+    source = bind_result_view_source(
+        record=left,
+        compatibility_decision=decision,
+        denominator=_ledger(),
+        accessible_label="Research aggregate",
+        qc_label="Qualified research result",
+    )
+    member = _member("a", 100)
+    summary = build_cohort_denominator_summary(
+        manifest=_manifest(member),
+        policy=_policy(),
+        disposition_policy=EMPTY_DISPOSITION_POLICY,
+        evidence=(
+            CohortMemberEvidence(
+                member_sha256=_member_sha256(member),
+                disposition=MemberDisposition.UNAVAILABLE,
+                reason=reason,
+                catalog_result=_catalog(left),
+                result_source=source,
+            ),
+        ),
+    )
+    content = cohort_denominator_summary_bytes(summary)
+    assert f'"reason":"{reason.value}"'.encode() in content
+
+
+def test_all_object_boundaries_reject_hooks_private_state_and_cycles() -> None:
+    calls = 0
+
+    class HostilePolicy(CohortDenominatorPolicy):
+        def model_dump(self, *args, **kwargs):
+            nonlocal calls
+            calls += 1
+            raise AssertionError("caller hook executed")
+
+    member = _member("a", 100)
+    hostile = HostilePolicy(**_policy().model_dump(mode="python"))
+    with pytest.raises(TypeError, match="policy type"):
+        build_cohort_denominator_summary(
+            manifest=_manifest(member),
+            policy=hostile,
+            evidence=(
+                CohortMemberEvidence(
+                    member_sha256=_member_sha256(member),
+                    disposition=MemberDisposition.UNAVAILABLE,
+                    reason=MemberDispositionReason.NO_VERIFIED_CATALOG_RESULT,
+                ),
+            ),
+        )
+    assert calls == 0
+
+    poisoned = CohortMemberEvidence(
+        member_sha256=_member_sha256(member),
+        disposition=MemberDisposition.UNAVAILABLE,
+        reason=MemberDispositionReason.NO_VERIFIED_CATALOG_RESULT,
+    )
+    object.__setattr__(poisoned, "__pydantic_extra__", {"secret": "not serialized"})
+    with pytest.raises(ValueError, match="not canonical"):
+        build_cohort_denominator_summary(
+            manifest=_manifest(member), policy=_policy(), evidence=(poisoned,)
+        )
+
+    cyclic = _policy().model_copy()
+    object.__getattribute__(cyclic, "__dict__")["definition_sha256"] = cyclic
+    with pytest.raises(ValueError, match="not canonical"):
+        build_cohort_denominator_summary(
+            manifest=_manifest(member),
+            policy=cyclic,
+            evidence=(
+                CohortMemberEvidence(
+                    member_sha256=_member_sha256(member),
+                    disposition=MemberDisposition.UNAVAILABLE,
+                    reason=MemberDispositionReason.NO_VERIFIED_CATALOG_RESULT,
+                ),
+            ),
+        )
+
+
+def test_d02_d03_d07_replay_is_live_and_preserves_comparison_state() -> None:
+    raw_anchor, raw_member = _d03_record("1"), _d03_record("2")
+    policy = _d03_policy(raw_anchor)
+    policy_sha256 = longitudinal_anchor_policy_sha256(policy)
+    with _activated_d03_records(raw_anchor, raw_member) as (records, store):
+        anchor, member = records
+        pins = {D03_PROVIDER: D03_TRUST_SHA256}
+        series = decide_longitudinal_series(
+            anchor,
+            (member,),
+            policy,
+            expected_policy_sha256=policy_sha256,
+            expected_authority_head_sha256=D03_HEAD_SHA256,
+            expected_linkage_trust_snapshot_sha256_by_provider=pins,
+            linkage_store=store,
+        )
+        envelope = _d07_envelope(anchor)
+        anchor_observation = _d07_observation(anchor, 0.5)
+        member_observation = _d07_observation(member, 0.5)
+        comparison = compare_repeatability(
+            anchor,
+            member,
+            policy,
+            series.decisions[0],
+            anchor_observation,
+            member_observation,
+            envelope,
+            evaluated_at=NOW,
+            expected_policy_sha256=policy_sha256,
+            expected_authority_head_sha256=D03_HEAD_SHA256,
+            expected_linkage_trust_snapshot_sha256_by_provider=pins,
+            linkage_store=store,
+            result_trust_document=D07_RESULT_TRUST_DOCUMENT,
+            expected_result_trust_sha256=D07_RESULT_TRUST_SHA256,
+            expected_envelope_sha256=repeatability_envelope_sha256(envelope),
+            expected_evidence_sha256=D07_EVIDENCE_SHA256,
+            expected_protocol_sha256=D07_PROTOCOL_SHA256,
+            expected_repeatability_authority_sha256=D07_AUTHORITY_SHA256,
+        )
+        request = CohortComparisonReplay(
+            anchor=anchor,
+            members=(member,),
+            policy=policy,
+            expected_series=series,
+            expected_policy_sha256=policy_sha256,
+            expected_authority_head_sha256=D03_HEAD_SHA256,
+            expected_linkage_trust_snapshot_sha256_by_provider=pins,
+            repeatability=(
+                CohortRepeatabilityReplay(
+                    member_result_id=member.measurement.result_id,
+                    expected=comparison,
+                    anchor_observation=anchor_observation,
+                    member_observation=member_observation,
+                    envelope=envelope,
+                    evaluated_at=NOW,
+                    result_trust_document=D07_RESULT_TRUST_DOCUMENT,
+                    expected_result_trust_sha256=D07_RESULT_TRUST_SHA256,
+                    expected_envelope_sha256=repeatability_envelope_sha256(envelope),
+                    expected_evidence_sha256=D07_EVIDENCE_SHA256,
+                    expected_protocol_sha256=D07_PROTOCOL_SHA256,
+                    expected_repeatability_authority_sha256=D07_AUTHORITY_SHA256,
+                ),
+            ),
+        )
+        captured, replayed, comparisons, digest, counts = (
+            cohort_summary_module._replay_comparisons(
+                request=request, linkage_store=store
+            )
+        )
+        assert captured == request
+        assert replayed == series
+        assert comparisons == (comparison,)
+        assert len(digest) == 64
+        assert tuple((item.state, item.count) for item in counts) == (
+            (ComparisonEligibility.AVAILABLE, 1),
+        )
+
+        relabelled = request.model_copy(
+            update={
+                "expected_series": series.model_copy(
+                    update={"policy_sha256": "f" * 64}
+                )
+            }
+        )
+        with pytest.raises(ValueError):
+            cohort_summary_module._replay_comparisons(
+                request=relabelled, linkage_store=store
+            )
+
+
 def test_unavailable_reason_must_be_proven_by_exact_evidence() -> None:
     member = _member("a", 100)
     left, right = _record("a"), _record("b")
@@ -917,6 +1319,13 @@ def test_summary_canonical_parser_rejects_tampering_and_unknown_fields() -> None
         cohort_denominator_summary_from_bytes(
             cohort_denominator_summary_bytes(summary) + b"\n"
         )
+    for hostile in (
+        b"[" * 2_000 + b"0" + b"]" * 2_000,
+        b'{"schema_version":"traceback.cohort-denominator-summary.v1",'
+        b'"schema_version":"traceback.cohort-denominator-summary.v1"}',
+    ):
+        with pytest.raises(ValueError, match="not canonical"):
+            cohort_denominator_summary_from_bytes(hostile)
 
 
 def test_summary_model_rejects_forged_count_and_identity() -> None:
@@ -973,18 +1382,16 @@ def live_catalog(tmp_path):
 def test_registered_summary_derives_missing_and_included_from_live_d05_d06(
     tmp_path, live_catalog
 ) -> None:
-    values = _setup_cohort_records(tmp_path / "records", live_catalog)
+    setup = list(_setup_cohort_records(tmp_path / "records", live_catalog))
+    setup[2] = setup[2].model_copy(update={"policies": POLICIES})
+    values = tuple(setup)
     manifest = values[2]
     policy = _policy(
         inclusion_sha256=manifest.policies.inclusion_sha256,
         exclusion_sha256=manifest.policies.exclusion_sha256,
         missingness_sha256=manifest.policies.missingness_sha256,
     )
-    registry = CohortRegistry(
-        tmp_path / "registry",
-        linkage_store=live_catalog[0],
-        expected_trust_snapshot_sha256_by_provider=_pins(),
-    )
+    registry = values[11]
     try:
         registry.register(manifest)
         selector = registry.list_selectors().records[0]
@@ -994,6 +1401,7 @@ def test_registered_summary_derives_missing_and_included_from_live_d05_d06(
             cohort_version=selector.cohort_version,
             record_catalog=values[0],
             policy=policy,
+            disposition_policy=EMPTY_DISPOSITION_POLICY,
             result_sources=(),
         )
         assert missing.population.unavailable_denominator_units == 1
@@ -1007,6 +1415,7 @@ def test_registered_summary_derives_missing_and_included_from_live_d05_d06(
             cohort_version=selector.cohort_version,
             record_catalog=values[0],
             policy=policy,
+            disposition_policy=EMPTY_DISPOSITION_POLICY,
             result_sources=(source,),
         )
         assert included.population.included_denominator_units == 1
@@ -1044,6 +1453,7 @@ def test_registered_summary_derives_missing_and_included_from_live_d05_d06(
                 cohort_version=selector.cohort_version,
                 record_catalog=values[0],
                 policy=poisoned_policy,
+                disposition_policy=EMPTY_DISPOSITION_POLICY,
                 result_sources=(),
             )
         public = content.decode("utf-8")
@@ -1062,6 +1472,5 @@ def test_registered_summary_derives_missing_and_included_from_live_d05_d06(
         ):
             assert forbidden not in public
     finally:
-        registry.close()
         values[0].close()
         values[1].close()
