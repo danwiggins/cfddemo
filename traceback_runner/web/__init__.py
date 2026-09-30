@@ -21,6 +21,8 @@ from .contracts import (
     ProblemDetail,
     ProblemOwner,
 )
+from .server import LocalWebServerError, RunningLocalWebService
+from .source import JobStoreProjectionSource
 
 __all__ = [
     "ActionKind",
@@ -29,10 +31,13 @@ __all__ = [
     "BrowserRequest",
     "JobAction",
     "JobProjection",
+    "JobStoreProjectionSource",
     "LocalWebBoundary",
+    "LocalWebServerError",
     "LoopbackServerConfig",
     "ProblemDetail",
     "ProblemOwner",
+    "RunningLocalWebService",
     "SessionGrant",
     "build_loopback_config",
 ]
