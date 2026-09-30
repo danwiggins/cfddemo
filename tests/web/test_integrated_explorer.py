@@ -5,6 +5,7 @@ from __future__ import annotations
 import importlib.util
 import inspect
 import json
+import shutil
 import sys
 from pathlib import Path
 from types import SimpleNamespace
@@ -14,6 +15,7 @@ from pydantic import ValidationError
 
 import evidence_inspector.result_catalog as catalog_module
 import traceback_runner.web.explorer as explorer_module
+import traceback_runner.web.server as server_module
 from evidence_inspector.compatibility import (
     ExecutionState,
     InformationState,
@@ -271,6 +273,32 @@ def test_explorer_pins_bundle_verifier_against_module_global_substitution(
         catalog.close()
 
 
+def test_explorer_pins_descriptor_resolver_against_alternate_object_store(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    catalog, ref, _, _, explorer = _installed(tmp_path)
+    object_path = catalog.objects / ref.bundle_sha256
+    alternate_objects = tmp_path / "alternate-objects"
+    alternate_objects.mkdir()
+    shutil.copytree(object_path, alternate_objects / ref.bundle_sha256)
+    report = object_path / "report.html"
+    original = report.read_bytes()
+    report.chmod(0o600)
+    report.write_bytes(bytes((original[0] ^ 1,)) + original[1:])
+    try:
+        with pytest.raises(ValueError, match="checksum mismatch"):
+            explorer.get(ref.result_id)
+        monkeypatch.setattr(
+            catalog_module,
+            "_descriptor_path",
+            lambda descriptor: alternate_objects,
+        )
+        with pytest.raises(CatalogFilesystemError, match="reader binding changed"):
+            explorer.get(ref.result_id)
+    finally:
+        catalog.close()
+
+
 def test_model_copy_poison_is_rejected_before_repository_sink(tmp_path: Path) -> None:
     catalog, _, _, artifact, _ = _installed(tmp_path)
     try:
@@ -521,6 +549,82 @@ def test_real_catalog_api_is_authorized_canonical_and_release_disabled(
                 headers={"Cookie": cookie},
             )
             assert compare_status == 400
+    finally:
+        catalog.close()
+
+
+def test_http_routes_ignore_substituted_dispatch_globals_and_bind_result_id(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    catalog, ref, _, _, explorer = _installed(tmp_path)
+    cached = explorer.get(ref.result_id)
+    monkeypatch.setattr(
+        server_module,
+        "_EXPLORER_GET",
+        lambda source, result_id: cached,
+        raising=False,
+    )
+    monkeypatch.setattr(
+        server_module,
+        "_EXPLORER_QUERY",
+        lambda source, query: (_ for _ in ()).throw(AssertionError("substituted")),
+        raising=False,
+    )
+    monkeypatch.setattr(
+        server_module,
+        "_EXPLORER_COMPARE",
+        lambda source, left, right: (_ for _ in ()).throw(
+            AssertionError("substituted")
+        ),
+        raising=False,
+    )
+    store = JobStore(tmp_path / "jobs.sqlite3")
+    try:
+        with RunningLocalWebService.start(
+            store=store,
+            state_directory=tmp_path / "state",
+            explorer=explorer,
+        ) as service:
+            cookie, _ = _exchange(service)
+            headers = {"Cookie": cookie}
+            missing = f"result_{'0' * 40}"
+            status, _, _ = _request(
+                service,
+                "GET",
+                f"/api/v1/explorer/results/{missing}",
+                headers=headers,
+            )
+            assert status == 404
+            object.__setattr__(
+                service.server.application,
+                "explorer_get",
+                lambda source, result_id: cached,
+            )
+            status, _, _ = _request(
+                service,
+                "GET",
+                f"/api/v1/explorer/results/result_{'1' * 40}",
+                headers=headers,
+            )
+            assert status == 400
+            assert (
+                _request(
+                    service,
+                    "GET",
+                    "/api/v1/explorer/catalog?limit=1",
+                    headers=headers,
+                )[0]
+                == 200
+            )
+            assert (
+                _request(
+                    service,
+                    "GET",
+                    f"/api/v1/explorer/compare?left={ref.result_id}&right={ref.result_id}",
+                    headers=headers,
+                )[0]
+                == 400
+            )
     finally:
         catalog.close()
 

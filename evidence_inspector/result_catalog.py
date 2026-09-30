@@ -1297,6 +1297,10 @@ def _assert_live_catalog_reader(reader: CatalogLiveReader) -> None:
         or _CATALOG_QUERY is not reader._query_catalog
         or _CATALOG_REFERENCE is not reader._reference_verified
         or _VERIFY_CATALOG_BUNDLE is not reader._verify_bundle
+        or _capability_is_revoked is not reader._capability_revoked
+        or canonical_json_bytes is not reader._canonicalize
+        or _descriptor_path is not reader._descriptor_resolver
+        or replay_current_capability is not reader._replay_capability
         or catalog.root != reader._root_path
         or catalog.objects != reader._objects_path
         or catalog.database != reader._database_path
@@ -1323,17 +1327,22 @@ class CatalogLiveReader:
 
     __slots__ = (
         "_assert_live",
+        "_canonicalize",
+        "_capability_revoked",
         "_catalog",
         "_connection",
         "_connection_lock",
         "_database_fd",
         "_database_identity",
         "_database_path",
+        "_descriptor_resolver",
         "_objects_fd",
         "_objects_identity",
         "_objects_path",
         "_query_catalog",
         "_reference_verified",
+        "_replay_capability",
+        "_result_ref_from_json",
         "_root_fd",
         "_root_identity",
         "_root_path",
@@ -1343,6 +1352,7 @@ class CatalogLiveReader:
         "_trust_snapshot",
         "_trust_store",
         "_validate_storage",
+        "_verification_context_from_json",
         "_verify_bundle",
     )
 
@@ -1351,11 +1361,23 @@ class CatalogLiveReader:
         catalog: ResultCatalog,
         *,
         _assert_live: Callable[[CatalogLiveReader], None] = _assert_live_catalog_reader,
+        _canonicalize: Callable[[object], bytes] = canonical_json_bytes,
+        _capability_revoked: Callable[
+            [MethodRegistry, CurrentMethodCapability], bool
+        ] = _capability_is_revoked,
+        _descriptor_resolver: Callable[[int], Path] = _descriptor_path,
         _query_catalog: Callable[[ResultCatalog, CatalogQuery], CatalogPage] = (
             _CATALOG_QUERY
         ),
         _reference_verified: Callable[..., CatalogResultRef] = _CATALOG_REFERENCE,
+        _replay_capability: Callable[..., None] = replay_current_capability,
+        _result_ref_from_json: Callable[..., CatalogResultRef] = (
+            CatalogResultRef.model_validate_json
+        ),
         _validate_storage: Callable[[ResultCatalog], None] = _CATALOG_VALIDATE_STORAGE,
+        _verification_context_from_json: Callable[..., CatalogVerificationContext] = (
+            CatalogVerificationContext.model_validate_json
+        ),
         _verify_bundle: Callable[[Path, TrustStore], VerifiedBundle] = (
             _VERIFY_CATALOG_BUNDLE
         ),
@@ -1363,17 +1385,22 @@ class CatalogLiveReader:
         if type(catalog) is not ResultCatalog:
             raise TypeError("live catalog reader requires an exact ResultCatalog")
         self._assert_live = _assert_live
+        self._canonicalize = _canonicalize
         self._catalog = catalog
+        self._capability_revoked = _capability_revoked
         self._root_path = catalog.root
         self._objects_path = catalog.objects
         self._database_path = catalog.database
         self._root_identity = catalog._root_identity
         self._objects_identity = catalog._objects_identity
         self._database_identity = catalog._database_identity
+        self._descriptor_resolver = _descriptor_resolver
         self._root_fd = catalog._root_fd
         self._objects_fd = catalog._objects_fd
         self._query_catalog = _query_catalog
         self._reference_verified = _reference_verified
+        self._replay_capability = _replay_capability
+        self._result_ref_from_json = _result_ref_from_json
         self._database_fd = catalog._database_fd
         self._sqlite_database_fd = catalog._sqlite_database_fd
         self._connection_lock = catalog._connection_lock
@@ -1382,6 +1409,7 @@ class CatalogLiveReader:
         self._trust_snapshot = tuple(sorted(catalog.trust_store._keys.items()))
         self._connection = catalog._connection
         self._validate_storage = _validate_storage
+        self._verification_context_from_json = _verification_context_from_json
         self._verify_bundle = _verify_bundle
         self._assert_live(self)
         self._sealed = True
@@ -1406,8 +1434,8 @@ class CatalogLiveReader:
         context: CatalogVerificationContext,
     ) -> CatalogResultRef:
         self._assert_live(self)
-        normalized_context = CatalogVerificationContext.model_validate_json(
-            canonical_json_bytes(context)
+        normalized_context = self._verification_context_from_json(
+            self._canonicalize(context)
         )
         with self._connection_lock:
             self._assert_live(self)
@@ -1420,18 +1448,18 @@ class CatalogLiveReader:
             raise KeyError("catalog result is unavailable")
         content = bytes(row[0])
         try:
-            stored = CatalogResultRef.model_validate_json(content)
+            stored = self._result_ref_from_json(content)
         except (ValidationError, ValueError, TypeError) as exc:
             raise CatalogError("catalog result reference is invalid") from exc
-        if canonical_json_bytes(stored) != content:
+        if self._canonicalize(stored) != content:
             raise CatalogError("catalog result reference is not canonical")
-        replay_current_capability(
+        self._replay_capability(
             normalized_context.registry,
             normalized_context.authority_head,
             normalized_context.expected_authority_head_sha256,
             normalized_context.capability,
         )
-        if _capability_is_revoked(
+        if self._capability_revoked(
             normalized_context.registry, normalized_context.capability
         ):
             raise CatalogError("catalog result authority is revoked")
@@ -1439,7 +1467,7 @@ class CatalogLiveReader:
             raise CatalogError("catalog result authority is stale")
         self._assert_live(self)
         verified = self._verify_bundle(
-            _descriptor_path(self._objects_fd) / stored.bundle_sha256,
+            self._descriptor_resolver(self._objects_fd) / stored.bundle_sha256,
             self._trust_store,
         )
         current = self._reference_verified(

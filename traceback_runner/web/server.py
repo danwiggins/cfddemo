@@ -105,7 +105,7 @@ def _build_explorer_dispatch(
     return query, get, compare
 
 
-_EXPLORER_QUERY, _EXPLORER_GET, _EXPLORER_COMPARE = _build_explorer_dispatch(
+_EXPLORER_DISPATCH = _build_explorer_dispatch(
     IntegratedExplorerSource,
     IntegratedExplorerSource.query,
     IntegratedExplorerSource.get,
@@ -498,6 +498,9 @@ class _Application:
     boundary: LocalWebBoundary
     assets: dict[str, tuple[str, bytes]]
     explorer: IntegratedExplorerSource | None = None
+    explorer_query: Callable[..., object] | None = None
+    explorer_get: Callable[..., object] | None = None
+    explorer_compare: Callable[..., object] | None = None
 
 
 class _LoopbackHttpServer(http.server.ThreadingHTTPServer):
@@ -754,7 +757,10 @@ class _Handler(http.server.BaseHTTPRequestHandler):
                     )
                 if "cursor" in parameters:
                     query_payload["cursor"] = parameters["cursor"][0]
-                page = _EXPLORER_QUERY(
+                explorer_query = self.application.explorer_query
+                if explorer_query is None:
+                    raise TypeError("explorer query boundary is unavailable")
+                page = explorer_query(
                     self.application.explorer, CatalogQuery(**query_payload)
                 )
                 payload = page.model_dump(mode="json")
@@ -782,7 +788,15 @@ class _Handler(http.server.BaseHTTPRequestHandler):
                     right
                 ):
                     raise ValueError("comparison result identity is invalid")
-                comparison = _EXPLORER_COMPARE(self.application.explorer, left, right)
+                explorer_compare = self.application.explorer_compare
+                if explorer_compare is None:
+                    raise TypeError("explorer comparison boundary is unavailable")
+                comparison = explorer_compare(self.application.explorer, left, right)
+                if (
+                    comparison.left_result_id != left
+                    or comparison.right_result_id != right
+                ):
+                    raise ValueError("comparison response identity changed")
                 payload = prepare_explorer_comparison_response(
                     self.application.explorer, comparison
                 )
@@ -793,14 +807,20 @@ class _Handler(http.server.BaseHTTPRequestHandler):
                 self.application.boundary.authorize(request)
                 if self.application.explorer is None:
                     raise ApiProblem(404, self.application.kernel.not_found_problem)
+                requested_result_id = explorer_match.group(1)
+                explorer_get = self.application.explorer_get
+                if explorer_get is None:
+                    raise TypeError("explorer detail boundary is unavailable")
                 try:
-                    document = _EXPLORER_GET(
-                        self.application.explorer, explorer_match.group(1)
+                    document = explorer_get(
+                        self.application.explorer, requested_result_id
                     )
                 except KeyError as exc:
                     raise ApiProblem(
                         404, self.application.kernel.not_found_problem
                     ) from exc
+                if document.models.catalog_ref.result_id != requested_result_id:
+                    raise ValueError("detail response identity changed")
                 payload = prepare_explorer_document_response(
                     self.application.explorer, document
                 )
@@ -902,6 +922,9 @@ class RunningLocalWebService:
         state_directory: Path,
         ipv6: bool = False,
         explorer: IntegratedExplorerSource | None = None,
+        _explorer_dispatch: tuple[
+            Callable[..., object], Callable[..., object], Callable[..., object]
+        ] = _EXPLORER_DISPATCH,
     ) -> Self:
         state_directory = state_directory.absolute()
         startup_anchor: _StartupAnchor | None = None
@@ -954,8 +977,15 @@ class RunningLocalWebService:
                 source=source,
                 not_found_problem=problem,
             )
+            explorer_query, explorer_get, explorer_compare = _explorer_dispatch
             server.application = _Application(
-                kernel, boundary, _packaged_assets(), explorer
+                kernel,
+                boundary,
+                _packaged_assets(),
+                explorer,
+                explorer_query,
+                explorer_get,
+                explorer_compare,
             )
 
             def validate_security_boundary() -> None:
