@@ -46,6 +46,9 @@ from evidence_inspector.provider_linkage_store import (
     committed_linkage_receipt_sha256,
 )
 
+_PINNED_VERIFY_CURRENT_RECEIPT = ProviderLinkageStore.verify_current_receipt
+_PINNED_ACTIVE_SNAPSHOT = ProviderLinkageStore.active_snapshot
+
 MAX_DIMENSIONS = 16
 MAX_ALLOWANCES_PER_DIMENSION = 32
 MAX_SERIES_MEMBERS = 1_000
@@ -669,6 +672,59 @@ def _longitudinal_record_invalid(record: LongitudinalRecord) -> bool:
     return canonical_contract_bytes(replayed) != encoded
 
 
+def _invalid_record_decision(
+    anchor: LongitudinalRecord,
+    member: LongitudinalRecord,
+    policy: LongitudinalAnchorPolicy,
+    *,
+    anchor_key_sha256: str,
+    member_key_sha256: str,
+    policy_sha256: str,
+    expected_authority_head_sha256: str,
+) -> LongitudinalMemberDecision:
+    """Return one deterministic closed decision without traversing invalid models."""
+
+    return LongitudinalMemberDecision(
+        anchor_result_id=anchor.measurement.result_id,
+        member_result_id=member.measurement.result_id,
+        anchor_result_sha256=anchor.measurement.result_sha256,
+        member_result_sha256=member.measurement.result_sha256,
+        anchor_bundle_sha256=anchor.measurement.bundle_sha256,
+        member_bundle_sha256=member.measurement.bundle_sha256,
+        anchor_record_sha256=longitudinal_record_sha256(anchor),
+        member_record_sha256=longitudinal_record_sha256(member),
+        anchor_linkage_revision_sha256=linkage_revision_sha256(anchor.linkage_revision),
+        member_linkage_revision_sha256=linkage_revision_sha256(member.linkage_revision),
+        anchor_linkage_receipt_sha256=(
+            committed_linkage_receipt_sha256(anchor.activation_receipt)
+            if isinstance(anchor.activation_receipt, CommittedLinkageReceipt)
+            else None
+        ),
+        member_linkage_receipt_sha256=(
+            committed_linkage_receipt_sha256(member.activation_receipt)
+            if isinstance(member.activation_receipt, CommittedLinkageReceipt)
+            else None
+        ),
+        authority_head_sha256=expected_authority_head_sha256,
+        authority_revision=anchor.measurement.current_capability.authority_revision,
+        anchor_key_sha256=anchor_key_sha256,
+        member_key_sha256=member_key_sha256,
+        policy_id=policy.policy_id,
+        policy_version=policy.version,
+        policy_sha256=policy_sha256,
+        engine_version=policy.engine_version,
+        outcome=LongitudinalOutcome.UNKNOWN,
+        reason_codes=(LongitudinalReason.RESULT_STATE_INVALID,),
+        evaluated_dimensions=ALL_COMPARISON_DIMENSIONS,
+        mismatch_dimensions=(),
+        unknown_dimensions=tuple(sorted(ALL_COMPARISON_DIMENSIONS, key=str)),
+        evidence_refs=(),
+        bridge_refs=(),
+        delta_allowed=False,
+        connecting_trend_allowed=False,
+    )
+
+
 def _linkage_authority_invalid(
     record: LongitudinalRecord,
     *,
@@ -688,6 +744,9 @@ def _linkage_authority_invalid(
         or expected_trust is None
         or provider_trust_snapshot_sha256(authorized.trust_snapshot) != expected_trust
         or not authorized.authorization.linkage_authorized
+        or ProviderLinkageStore.verify_current_receipt
+        is not _PINNED_VERIFY_CURRENT_RECEIPT
+        or ProviderLinkageStore.active_snapshot is not _PINNED_ACTIVE_SNAPSHOT
         or any(name in ProviderLinkageStore.__dict__ for name in vars(linkage_store))
     )
     if invalid:
@@ -695,7 +754,7 @@ def _linkage_authority_invalid(
     assert receipt is not None
     assert type(linkage_store) is ProviderLinkageStore
     try:
-        ProviderLinkageStore.verify_current_receipt(linkage_store, receipt)
+        _PINNED_VERIFY_CURRENT_RECEIPT(linkage_store, receipt)
     except ProviderLinkageStoreError:
         return True
     return False
@@ -733,15 +792,22 @@ def decide_longitudinal_member(
     anchor_key_sha256 = longitudinal_comparison_key_sha256(anchor.comparison_key)
     member_key_sha256 = longitudinal_comparison_key_sha256(member.comparison_key)
     policy_sha256 = longitudinal_anchor_policy_sha256(policy)
+    if _longitudinal_record_invalid(anchor) or _longitudinal_record_invalid(member):
+        return _invalid_record_decision(
+            anchor,
+            member,
+            policy,
+            anchor_key_sha256=anchor_key_sha256,
+            member_key_sha256=member_key_sha256,
+            policy_sha256=policy_sha256,
+            expected_authority_head_sha256=expected_authority_head_sha256,
+        )
     reasons: set[LongitudinalReason] = set()
     mismatches: list[ComparisonDimension] = []
     unknowns: list[ComparisonDimension] = []
     evidence: set[str] = set()
     bridges: set[str] = set()
     dispositions: set[LongitudinalOutcome] = set()
-
-    if _longitudinal_record_invalid(anchor) or _longitudinal_record_invalid(member):
-        reasons.add(LongitudinalReason.RESULT_STATE_INVALID)
 
     if policy_sha256 != expected_policy_sha256:
         reasons.add(LongitudinalReason.POLICY_IDENTITY_INVALID)

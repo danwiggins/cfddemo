@@ -839,6 +839,69 @@ def test_exact_store_instance_method_shadow_cannot_bypass_authority(
     assert LongitudinalReason.LINKAGE_AUTHORITY_INVALID in decision.reason_codes
 
 
+@pytest.mark.parametrize(
+    "shadowed_method", ("verify_current_receipt", "active_snapshot")
+)
+def test_store_class_method_shadow_cannot_bypass_authority(
+    monkeypatch: pytest.MonkeyPatch,
+    shadowed_method: str,
+) -> None:
+    anchor = _record("1")
+    member = _record("2")
+    policy = _policy(anchor)
+    with _activated_records(anchor, member) as (records, store):
+        monkeypatch.setattr(ProviderLinkageStore, shadowed_method, lambda *_: None)
+        decision = decide_longitudinal_member(
+            records[0],
+            records[1],
+            policy,
+            expected_policy_sha256=longitudinal_anchor_policy_sha256(policy),
+            expected_authority_head_sha256=HEAD_SHA256,
+            expected_linkage_trust_snapshot_sha256_by_provider={PROVIDER: TRUST_SHA256},
+            linkage_store=store,
+        )
+
+    assert decision.outcome == LongitudinalOutcome.UNKNOWN
+    assert not decision.delta_allowed
+    assert not decision.connecting_trend_allowed
+    assert LongitudinalReason.LINKAGE_AUTHORITY_INVALID in decision.reason_codes
+
+
+@pytest.mark.parametrize("target", ("anchor", "member"))
+def test_truncated_dimensions_return_unknown_without_strict_zip_failure(
+    target: str,
+) -> None:
+    anchor = _record("1")
+    member = _record("2")
+    policy = _policy(anchor)
+    with _activated_records(anchor, member) as (records, store):
+        active_anchor, active_member = records
+        selected = active_anchor if target == "anchor" else active_member
+        truncated = selected.model_copy(
+            update={
+                "comparison_key": selected.comparison_key.model_copy(
+                    update={"dimensions": selected.comparison_key.dimensions[:-1]}
+                )
+            }
+        )
+        decision = decide_longitudinal_member(
+            truncated if target == "anchor" else active_anchor,
+            truncated if target == "member" else active_member,
+            policy,
+            expected_policy_sha256=longitudinal_anchor_policy_sha256(policy),
+            expected_authority_head_sha256=HEAD_SHA256,
+            expected_linkage_trust_snapshot_sha256_by_provider={PROVIDER: TRUST_SHA256},
+            linkage_store=store,
+        )
+
+    assert decision.outcome == LongitudinalOutcome.UNKNOWN
+    assert decision.unknown_dimensions == tuple(
+        sorted(ALL_COMPARISON_DIMENSIONS, key=str)
+    )
+    assert not decision.delta_allowed
+    assert not decision.connecting_trend_allowed
+
+
 def test_decision_boundary_replays_every_nested_record_binding() -> None:
     anchor = _record("1")
     member = _record("2")
