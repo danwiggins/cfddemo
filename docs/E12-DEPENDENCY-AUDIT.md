@@ -43,8 +43,9 @@ method labels, or adjacency.
    remain an explicit persistence follow-up; immutable bytes alone do not make
    a cohort discoverable or published.
 5. **D09 denominator/missingness:** bind declared denominator, inclusion,
-   missingness and unavailable-record policy to the comparison identity and
-   reconcile it with E06 ledgers.
+   missingness and unavailable-record policy to the comparison identity from
+   D05/D06 authority only. E06 ledger reconciliation and E05/D07 comparison
+   eligibility move to E12's protected result-view and D03/D07 registries.
 6. **E12 integration:** add protected cohort/timepoint selectors and a pure read
    model that separates biological collections from technical reruns. It emits
    no delta or connected trend unless linkage, membership, compatibility and

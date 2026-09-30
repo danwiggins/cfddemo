@@ -5,7 +5,7 @@ scientific qualification, provider authorization, or clinical-use gates passed.
 
 `CohortDenominatorSummary` binds one immutable D05 manifest digest to one
 versioned denominator policy. The policy repeats the manifest inclusion,
-exclusion, and missingness digests and adds an explicit denominator-definition
+exclusion, and missingness digests and adds an explicit caller-declared denominator-definition
 digest. Its only supported basis is the manifest's declared denominator
 contributors. Unavailable contributors remain in the declared denominator and
 missing values remain typed unavailable; neither can be rewritten as zero.
@@ -25,8 +25,9 @@ and reanalyses remain visible only as their matching typed collapsed exclusions;
 they cannot be reclassified as included or unavailable, and cannot inflate the
 biological denominator established by D05.
 
-An included record must bind the same exact result in an E04 catalog reference
-and E06 result-view source. The result must be complete, sufficient, verified,
+In the protected v1 builder only, an included record must bind the same exact
+result in an E04 catalog reference and E06 result-view source; the registered
+path below derives rows from D05/D06 authority instead. The result must be complete, sufficient, verified,
 qualified, currently provider-eligible, E05-comparable, and have a completely
 observed reconciled E06 denominator ledger. Failed, not-run, insufficient,
 untrusted, unqualified, non-comparable, missing, and withheld cases use closed

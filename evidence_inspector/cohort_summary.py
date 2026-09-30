@@ -1,8 +1,8 @@
 """Deterministic D09 cohort denominators and missingness summaries.
 
 This is a protected, synthetic/local comparison-population contract.  It binds
-an immutable D05 manifest to independently indexed E04/D06 result references
-and exact E06 denominator ledgers.  It does not expose provider-local linkage
+an immutable D05 manifest to fenced D06 record status (registered path) or to
+supplied E04 references and E06 ledgers (protected v1 builder).  It does not expose provider-local linkage
 tokens, infer missing linkage, calculate a scientific delta, or claim that an
 Epic D qualification gate passed.
 """
@@ -764,18 +764,14 @@ def _registered_row(
     """Derive one row from fenced D05 lineage/policy and D06 record status only."""
 
     catalog: CatalogResultRef | None = None
-    if member.lineage_role is MemberLineageRole.TECHNICAL_REPLICATE:
+    required_reason = _policy_required_reason(
+        member=member,
+        member_sha256=status.member_sha256,
+        disposition_policy=disposition_policy,
+    )
+    if required_reason is not None:
         disposition = MemberDisposition.EXCLUDED
-        reason = MemberDispositionReason.TECHNICAL_REPLICATE_COLLAPSED
-    elif member.lineage_role is MemberLineageRole.REANALYSIS:
-        disposition = MemberDisposition.EXCLUDED
-        reason = MemberDispositionReason.REANALYSIS_COLLAPSED
-    elif status.member_sha256 in disposition_policy.inclusion.member_sha256s:
-        disposition = MemberDisposition.EXCLUDED
-        reason = MemberDispositionReason.EXCLUDED_BY_INCLUSION_POLICY
-    elif status.member_sha256 in disposition_policy.exclusion.member_sha256s:
-        disposition = MemberDisposition.EXCLUDED
-        reason = MemberDispositionReason.EXCLUDED_BY_EXCLUSION_POLICY
+        reason = required_reason
     elif status.availability is CohortRecordAvailability.MISSING:
         disposition = MemberDisposition.UNAVAILABLE
         reason = MemberDispositionReason.NO_VERIFIED_CATALOG_RESULT
