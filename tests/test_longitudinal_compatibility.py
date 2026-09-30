@@ -1004,6 +1004,107 @@ def test_malformed_copied_shape_returns_constant_safe_unknown(
     assert not decision.connecting_trend_allowed
 
 
+@pytest.mark.parametrize("entrypoint", ("member", "series"))
+@pytest.mark.parametrize("store_state", ("uninitialized", "lock_none"))
+def test_malformed_exact_store_returns_constant_safe_unknown(
+    entrypoint: str,
+    store_state: str,
+) -> None:
+    anchor = _record("1")
+    member = _record("2")
+    policy = _policy(anchor)
+    with _activated_records(anchor, member) as (records, store):
+        active_anchor, active_member = records
+        original_lock = store._lock
+        if store_state == "uninitialized":
+            store_input = object.__new__(ProviderLinkageStore)
+        else:
+            store._lock = None  # type: ignore[assignment]
+            store_input = store
+        try:
+            if entrypoint == "member":
+                decision = decide_longitudinal_member(
+                    active_anchor,
+                    active_member,
+                    policy,
+                    expected_policy_sha256=longitudinal_anchor_policy_sha256(policy),
+                    expected_authority_head_sha256=HEAD_SHA256,
+                    expected_linkage_trust_snapshot_sha256_by_provider={
+                        PROVIDER: TRUST_SHA256
+                    },
+                    linkage_store=store_input,
+                )
+            else:
+                series = decide_longitudinal_series(
+                    active_anchor,
+                    (active_member,),
+                    policy,
+                    expected_policy_sha256=longitudinal_anchor_policy_sha256(policy),
+                    expected_authority_head_sha256=HEAD_SHA256,
+                    expected_linkage_trust_snapshot_sha256_by_provider={
+                        PROVIDER: TRUST_SHA256
+                    },
+                    linkage_store=store_input,
+                )
+                decision = series.decisions[0]
+        finally:
+            store._lock = original_lock
+
+    assert decision.anchor_result_id == "result_invalid_input"
+    assert decision.outcome == LongitudinalOutcome.UNKNOWN
+    assert not decision.delta_allowed
+    assert not decision.connecting_trend_allowed
+
+
+@pytest.mark.parametrize("entrypoint", ("member", "series"))
+@pytest.mark.parametrize("pin_state", ("extra", "missing", "oversized"))
+def test_trust_pin_set_must_exactly_match_required_providers(
+    entrypoint: str,
+    pin_state: str,
+) -> None:
+    anchor = _record("1")
+    member = _record("2")
+    policy = _policy(anchor)
+    if pin_state == "extra":
+        pins = {
+            PROVIDER: TRUST_SHA256,
+            _token("provider", "f"): "f" * 64,
+        }
+    elif pin_state == "missing":
+        pins = {}
+    else:
+        pins = {f"provider_{index:032x}": "f" * 64 for index in range(2_000)}
+        pins[PROVIDER] = TRUST_SHA256
+    with _activated_records(anchor, member) as (records, store):
+        active_anchor, active_member = records
+        if entrypoint == "member":
+            decision = decide_longitudinal_member(
+                active_anchor,
+                active_member,
+                policy,
+                expected_policy_sha256=longitudinal_anchor_policy_sha256(policy),
+                expected_authority_head_sha256=HEAD_SHA256,
+                expected_linkage_trust_snapshot_sha256_by_provider=pins,
+                linkage_store=store,
+            )
+        else:
+            series = decide_longitudinal_series(
+                active_anchor,
+                (active_member,),
+                policy,
+                expected_policy_sha256=longitudinal_anchor_policy_sha256(policy),
+                expected_authority_head_sha256=HEAD_SHA256,
+                expected_linkage_trust_snapshot_sha256_by_provider=pins,
+                linkage_store=store,
+            )
+            decision = series.decisions[0]
+
+    assert decision.anchor_result_id == "result_invalid_input"
+    assert decision.outcome == LongitudinalOutcome.UNKNOWN
+    assert not decision.delta_allowed
+    assert not decision.connecting_trend_allowed
+
+
 def test_decision_boundary_replays_every_nested_record_binding() -> None:
     anchor = _record("1")
     member = _record("2")

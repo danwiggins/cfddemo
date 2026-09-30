@@ -11,6 +11,8 @@ from __future__ import annotations
 import hashlib
 import json
 import re
+import sqlite3
+import threading
 import unicodedata
 from enum import StrEnum
 from typing import Annotated, Literal
@@ -50,6 +52,8 @@ from evidence_inspector.provider_linkage import (
     provider_trust_snapshot_sha256,
 )
 from evidence_inspector.provider_linkage_store import (
+    MAX_PROVIDER_TRUST_PINS,
+    ActiveLinkageSnapshot,
     CommittedLinkageReceipt,
     ProviderLinkageStore,
     ProviderLinkageStoreError,
@@ -58,6 +62,7 @@ from evidence_inspector.provider_linkage_store import (
 
 _PINNED_VERIFY_CURRENT_RECEIPT = ProviderLinkageStore.verify_current_receipt
 _PINNED_ACTIVE_SNAPSHOT = ProviderLinkageStore.active_snapshot
+_RLOCK_TYPE = type(threading.RLock())
 _SHA256_ADAPTER = TypeAdapter(Sha256)
 _TRUST_PINS_ADAPTER = TypeAdapter(dict[ProviderNamespace, Sha256])
 
@@ -758,9 +763,20 @@ def _strict_validation_bytes(contract: object) -> bytes:
     ).encode("utf-8")
 
 
-def _validate_store_input(store: object) -> ProviderLinkageStore | None:
+def _trust_pins_sha256(pins: dict[str, str]) -> str:
+    encoded = json.dumps(
+        sorted(pins.items()),
+        separators=(",", ":"),
+        ensure_ascii=True,
+    ).encode("ascii")
+    return hashlib.sha256(b"traceback-linkage-trust-pins-v1\0" + encoded).hexdigest()
+
+
+def _validate_store_input(
+    store: object,
+) -> tuple[ProviderLinkageStore | None, ActiveLinkageSnapshot | None]:
     if store is None:
-        return None
+        return None, None
     if (
         type(store) is not ProviderLinkageStore
         or ProviderLinkageStore.verify_current_receipt
@@ -769,7 +785,54 @@ def _validate_store_input(store: object) -> ProviderLinkageStore | None:
         or any(name in ProviderLinkageStore.__dict__ for name in vars(store))
     ):
         raise ValueError("linkage store authority input is invalid")
-    return store
+    state = vars(store)
+    required = {
+        "_clock",
+        "_connection",
+        "_database_fd",
+        "_database_identity",
+        "_lock",
+        "_root_fd",
+        "_root_identity",
+        "_sqlite_database_fd",
+        "_storage_identity",
+        "_store_epoch_sha256",
+        "_store_id",
+        "_trust_pins",
+        "_trust_pins_digest",
+    }
+    if (
+        not required <= set(state)
+        or type(state["_lock"]) is not _RLOCK_TYPE
+        or type(state["_connection"]) is not sqlite3.Connection
+        or any(
+            type(state[name]) is not int or state[name] < 0
+            for name in ("_root_fd", "_database_fd", "_sqlite_database_fd")
+        )
+        or any(
+            type(state[name]) is not tuple
+            or len(state[name]) != 2
+            or any(type(value) is not int for value in state[name])
+            for name in ("_root_identity", "_database_identity")
+        )
+        or type(state["_trust_pins"]) is not dict
+        or not callable(state["_clock"])
+        or any(
+            type(state[name]) is not str
+            for name in (
+                "_storage_identity",
+                "_store_epoch_sha256",
+                "_store_id",
+                "_trust_pins_digest",
+            )
+        )
+    ):
+        raise ValueError("linkage store internal authority state is invalid")
+    try:
+        snapshot = _PINNED_ACTIVE_SNAPSHOT(store)
+    except (ProviderLinkageStoreError, sqlite3.Error, AttributeError, TypeError):
+        raise ValueError("linkage store live authority state is invalid") from None
+    return store, snapshot
 
 
 def _validate_member_inputs(
@@ -789,22 +852,43 @@ def _validate_member_inputs(
         str,
         dict[str, str],
         ProviderLinkageStore | None,
+        ActiveLinkageSnapshot | None,
     ]
     | None
 ):
     try:
-        if type(expected_linkage_trust_snapshot_sha256_by_provider) is not dict:
+        store, snapshot = _validate_store_input(linkage_store)
+        if (
+            type(expected_linkage_trust_snapshot_sha256_by_provider) is not dict
+            or not 1
+            <= len(expected_linkage_trust_snapshot_sha256_by_provider)
+            <= MAX_PROVIDER_TRUST_PINS
+        ):
             raise TypeError("linkage trust pins must be an exact dictionary")
+        replayed_anchor = _replay_record(anchor)
+        replayed_member = _replay_record(member)
+        pins = _TRUST_PINS_ADAPTER.validate_python(
+            expected_linkage_trust_snapshot_sha256_by_provider
+        )
+        required_providers = {
+            replayed_anchor.linkage_revision.provider_namespace,
+            replayed_member.linkage_revision.provider_namespace,
+        }
+        if set(pins) != required_providers:
+            raise ValueError("linkage trust pins do not match required providers")
+        if snapshot is not None and snapshot.trust_pins_sha256 != _trust_pins_sha256(
+            pins
+        ):
+            raise ValueError("live linkage store trust pins do not match exact input")
         return (
-            _replay_record(anchor),
-            _replay_record(member),
+            replayed_anchor,
+            replayed_member,
             _replay_policy(policy),
             _SHA256_ADAPTER.validate_python(expected_policy_sha256),
             _SHA256_ADAPTER.validate_python(expected_authority_head_sha256),
-            _TRUST_PINS_ADAPTER.validate_python(
-                expected_linkage_trust_snapshot_sha256_by_provider
-            ),
-            _validate_store_input(linkage_store),
+            pins,
+            store,
+            snapshot,
         )
     except (
         ValidationError,
@@ -833,24 +917,45 @@ def _validate_series_inputs(
         str,
         dict[str, str],
         ProviderLinkageStore | None,
+        ActiveLinkageSnapshot | None,
     ]
     | None
 ):
     try:
+        store, snapshot = _validate_store_input(linkage_store)
         if type(members) is not tuple or not 1 <= len(members) <= MAX_SERIES_MEMBERS:
             raise TypeError("series members must be one bounded exact tuple")
-        if type(expected_linkage_trust_snapshot_sha256_by_provider) is not dict:
+        if (
+            type(expected_linkage_trust_snapshot_sha256_by_provider) is not dict
+            or not 1
+            <= len(expected_linkage_trust_snapshot_sha256_by_provider)
+            <= MAX_PROVIDER_TRUST_PINS
+        ):
             raise TypeError("linkage trust pins must be an exact dictionary")
+        replayed_anchor = _replay_record(anchor)
+        replayed_members = tuple(_replay_record(item) for item in members)
+        pins = _TRUST_PINS_ADAPTER.validate_python(
+            expected_linkage_trust_snapshot_sha256_by_provider
+        )
+        required_providers = {
+            replayed_anchor.linkage_revision.provider_namespace,
+            *(item.linkage_revision.provider_namespace for item in replayed_members),
+        }
+        if set(pins) != required_providers:
+            raise ValueError("linkage trust pins do not match required providers")
+        if snapshot is not None and snapshot.trust_pins_sha256 != _trust_pins_sha256(
+            pins
+        ):
+            raise ValueError("live linkage store trust pins do not match exact input")
         return (
-            _replay_record(anchor),
-            tuple(_replay_record(item) for item in members),
+            replayed_anchor,
+            replayed_members,
             _replay_policy(policy),
             _SHA256_ADAPTER.validate_python(expected_policy_sha256),
             _SHA256_ADAPTER.validate_python(expected_authority_head_sha256),
-            _TRUST_PINS_ADAPTER.validate_python(
-                expected_linkage_trust_snapshot_sha256_by_provider
-            ),
-            _validate_store_input(linkage_store),
+            pins,
+            store,
+            snapshot,
         )
     except (
         ValidationError,
@@ -866,38 +971,33 @@ def _linkage_authority_invalid(
     record: LongitudinalRecord,
     *,
     expected_linkage_trust_snapshot_sha256_by_provider: dict[str, str],
-    linkage_store: ProviderLinkageStore | None,
+    linkage_snapshot: ActiveLinkageSnapshot | None,
 ) -> bool:
     authorized = record.authorized_linkage
     receipt = record.activation_receipt
+    expected_pins_sha256 = _trust_pins_sha256(
+        expected_linkage_trust_snapshot_sha256_by_provider
+    )
     expected_trust = expected_linkage_trust_snapshot_sha256_by_provider.get(
         record.linkage_revision.provider_namespace
     )
     invalid = (
         authorized is None
         or receipt is None
-        or linkage_store is None
-        or type(linkage_store) is not ProviderLinkageStore
+        or linkage_snapshot is None
         or expected_trust is None
         or provider_trust_snapshot_sha256(authorized.trust_snapshot) != expected_trust
         or not authorized.authorization.linkage_authorized
-        or ProviderLinkageStore.verify_current_receipt
-        is not _PINNED_VERIFY_CURRENT_RECEIPT
-        or ProviderLinkageStore.active_snapshot is not _PINNED_ACTIVE_SNAPSHOT
-        or any(name in ProviderLinkageStore.__dict__ for name in vars(linkage_store))
+        or receipt.trust_pins_sha256 != expected_pins_sha256
+        or linkage_snapshot.trust_pins_sha256 != expected_pins_sha256
     )
     if invalid:
         return True
     assert receipt is not None
-    assert type(linkage_store) is ProviderLinkageStore
-    try:
-        snapshot = _PINNED_ACTIVE_SNAPSHOT(linkage_store)
-    except ProviderLinkageStoreError:
-        return True
     return (
-        receipt.state_version != snapshot.state_version
-        or receipt.state_head_sha256 != snapshot.state_head_sha256
-        or receipt not in snapshot.receipts
+        receipt.state_version != linkage_snapshot.state_version
+        or receipt.state_head_sha256 != linkage_snapshot.state_head_sha256
+        or receipt not in linkage_snapshot.receipts
     )
 
 
@@ -949,6 +1049,7 @@ def decide_longitudinal_member(
         expected_authority_head_sha256,
         expected_linkage_trust_snapshot_sha256_by_provider,
         linkage_store,
+        linkage_snapshot,
     ) = validated
     anchor_key_sha256 = longitudinal_comparison_key_sha256(anchor.comparison_key)
     member_key_sha256 = longitudinal_comparison_key_sha256(member.comparison_key)
@@ -969,13 +1070,13 @@ def decide_longitudinal_member(
         expected_linkage_trust_snapshot_sha256_by_provider=(
             expected_linkage_trust_snapshot_sha256_by_provider
         ),
-        linkage_store=linkage_store,
+        linkage_snapshot=linkage_snapshot,
     ) or _linkage_authority_invalid(
         member,
         expected_linkage_trust_snapshot_sha256_by_provider=(
             expected_linkage_trust_snapshot_sha256_by_provider
         ),
-        linkage_store=linkage_store,
+        linkage_snapshot=linkage_snapshot,
     )
     if linkage_invalid:
         reasons.add(LongitudinalReason.LINKAGE_AUTHORITY_INVALID)
@@ -1154,6 +1255,7 @@ def decide_longitudinal_series(
         expected_authority_head_sha256,
         expected_linkage_trust_snapshot_sha256_by_provider,
         linkage_store,
+        _linkage_snapshot,
     ) = validated
     member_ids = tuple(item.measurement.result_id for item in members)
     if member_ids != tuple(sorted(set(member_ids))):
