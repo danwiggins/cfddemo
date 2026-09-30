@@ -30,6 +30,16 @@ unreferenced object, which a retry verifies and safely adopts. Garbage
 collection is deliberately absent until it can coordinate reference proof with
 all importers under the same catalog lock.
 
+Coordinators that must publish a second local index use the prepared-import
+protocol. Preparation verifies and retains the immutable object without adding
+a visible row. Staging adds a durable `pending` row that queries and reference
+verification exclude. Adoption changes that exact publication to `adopted`
+inside one immediate transaction with caller authority checks before and after
+the visibility update. Compensation removes only the exact publication's index
+references and never removes the content-addressed object. A v1 catalog is
+expanded transactionally to this v2 publication table after its original schema
+has been verified exactly.
+
 The catalog root, object directory, and database inode are retained and
 revalidated on operations. Staging creation and publication are relative to the
 bound object-directory descriptor, so path replacement cannot redirect accepted

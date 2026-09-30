@@ -13,8 +13,9 @@ import hashlib
 import os
 import stat
 import threading
-from collections.abc import Mapping, Sequence
+from collections.abc import Callable, Mapping, Sequence
 from pathlib import Path
+from types import MappingProxyType
 from typing import Annotated, Literal
 
 from pydantic import Field, StringConstraints, TypeAdapter, model_validator
@@ -42,9 +43,13 @@ from evidence_inspector.provider_linkage import AnalysisRecordId, ProviderNamesp
 from evidence_inspector.provider_linkage_store import ProviderLinkageStore
 from evidence_inspector.result_catalog import (
     CatalogAliases,
+    CatalogAuthoritySnapshot,
     CatalogResultRef,
+    PreparedCatalogImport,
+    PublicationId,
     ResultBundleReaderRegistry,
     ResultCatalog,
+    catalog_authority_sha256,
 )
 from traceback_runner.serialization import canonical_json_bytes
 
@@ -59,6 +64,14 @@ _PROCESS_LOCK = threading.RLock()
 _PINNED_RESULT_IMPORT = ResultCatalog.import_bundle
 _PINNED_RESULT_VERIFY = ResultCatalog.verify_reference
 _PINNED_RESULT_QUERY = ResultCatalog.query
+_PINNED_RESULT_AUTHORITY = ResultCatalog.authority_snapshot
+_PINNED_RESULT_PREPARE = ResultCatalog.prepare_bundle_import
+_PINNED_RESULT_STAGE = ResultCatalog.stage_prepared_import
+_PINNED_RESULT_ADOPT = ResultCatalog.adopt_prepared_import
+_PINNED_RESULT_FINISH = ResultCatalog.finish_prepared_import
+_PINNED_RESULT_COMPENSATE = ResultCatalog.compensate_prepared_import
+_PINNED_RESULT_RECOVER = ResultCatalog.recover_pending_publication
+_PINNED_RESULT_VERIFY_PREPARED = ResultCatalog.verify_prepared_object
 _PINNED_READER_SELECT = ResultBundleReaderRegistry.select
 _PINNED_VALIDATE_MANIFEST = validate_manifest_against_linkage_store
 
@@ -78,8 +91,8 @@ class CohortImportFilesystemError(CohortImportError):
 class CohortRecordBinding(RegistryContract):
     """Immutable link from one trusted aggregate record to one D05 member."""
 
-    schema_version: Literal["traceback.cohort-record-binding.v1"] = (
-        "traceback.cohort-record-binding.v1"
+    schema_version: Literal["traceback.cohort-record-binding.v2"] = (
+        "traceback.cohort-record-binding.v2"
     )
     binding_id: BindingId
     cohort_id: str = Field(pattern=r"^cohort_[0-9a-f]{32}$")
@@ -92,6 +105,11 @@ class CohortRecordBinding(RegistryContract):
     denominator_contribution: bool
     measurement_anchor_sha256: Sha256
     result: CatalogResultRef
+    publication_id: PublicationId
+    catalog_authority_sha256: Sha256
+    catalog_storage_identity_sha256: Sha256
+    result_trust_snapshot_sha256: Sha256
+    catalog_result_preexisting: bool
     reader_registry_sha256: Sha256
     reader_id: str = Field(pattern=r"^reader_[a-z0-9]+(?:_[a-z0-9]+)*$")
     reader_minimum_version: int = Field(ge=1, le=1_000)
@@ -106,6 +124,8 @@ class CohortRecordBinding(RegistryContract):
             provider_namespace=self.provider_namespace,
             analysis_record_id=self.analysis_record_id,
             result_id=self.result.result_id,
+            publication_id=self.publication_id,
+            catalog_authority_sha256=self.catalog_authority_sha256,
         )
         if self.binding_id != expected:
             raise ValueError("cohort record binding identity is invalid")
@@ -124,6 +144,8 @@ def _binding_id(
     provider_namespace: str,
     analysis_record_id: str,
     result_id: str,
+    publication_id: str,
+    catalog_authority_sha256: str,
 ) -> str:
     payload = canonical_json_bytes(
         {
@@ -131,11 +153,13 @@ def _binding_id(
             "provider_namespace": provider_namespace,
             "analysis_record_id": analysis_record_id,
             "result_id": result_id,
+            "publication_id": publication_id,
+            "catalog_authority_sha256": catalog_authority_sha256,
         }
     )
     return (
         "binding_"
-        + hashlib.sha256(b"traceback-cohort-record-binding-v1\0" + payload).hexdigest()
+        + hashlib.sha256(b"traceback-cohort-record-binding-v2\0" + payload).hexdigest()
     )
 
 
@@ -190,6 +214,27 @@ def _canonical_contract(
 class CohortRecordCatalog:
     """Append-only protected binding index over the immutable result catalog."""
 
+    _PINNED_FIELDS = frozenset(
+        {
+            "_result_catalog",
+            "_result_catalog_identity",
+            "_result_trust_store",
+            "_result_reader_registry",
+            "_catalog_storage_identity_sha256",
+            "_catalog_reader_identity_sha256",
+            "_linkage_store",
+            "_linkage_store_identity",
+            "_expected_trust_snapshot_sha256_by_provider",
+            "_reader_registry",
+            "_reader_registry_bytes",
+        }
+    )
+
+    def __setattr__(self, name: str, value: object) -> None:
+        if name in self._PINNED_FIELDS and name in vars(self):
+            raise AttributeError(f"{name} is read-only")
+        super().__setattr__(name, value)
+
     def __init__(
         self,
         root: str | Path,
@@ -198,13 +243,21 @@ class CohortRecordCatalog:
         linkage_store: ProviderLinkageStore,
         expected_trust_snapshot_sha256_by_provider: Mapping[str, str],
         reader_registry: ResultBundleReaderRegistry,
+        fault_injector: Callable[[str], None] | None = None,
     ) -> None:
         if type(result_catalog) is not ResultCatalog:
             raise TypeError("cohort import requires the exact result catalog type")
         for name, pinned in (
-            ("import_bundle", _PINNED_RESULT_IMPORT),
             ("verify_reference", _PINNED_RESULT_VERIFY),
             ("query", _PINNED_RESULT_QUERY),
+            ("authority_snapshot", _PINNED_RESULT_AUTHORITY),
+            ("prepare_bundle_import", _PINNED_RESULT_PREPARE),
+            ("stage_prepared_import", _PINNED_RESULT_STAGE),
+            ("adopt_prepared_import", _PINNED_RESULT_ADOPT),
+            ("finish_prepared_import", _PINNED_RESULT_FINISH),
+            ("compensate_prepared_import", _PINNED_RESULT_COMPENSATE),
+            ("recover_pending_publication", _PINNED_RESULT_RECOVER),
+            ("verify_prepared_object", _PINNED_RESULT_VERIFY_PREPARED),
         ):
             if (
                 name in vars(result_catalog)
@@ -239,11 +292,19 @@ class CohortRecordCatalog:
             raise CohortImportError("provider trust pins are invalid") from exc
         if not pins or len(pins) > 256:
             raise CohortImportError("provider trust pin count is invalid")
-        self.result_catalog = result_catalog
-        self.linkage_store = linkage_store
-        self.expected_trust_snapshot_sha256_by_provider = pins
-        self.reader_registry = normalized_registry
+        authority = _PINNED_RESULT_AUTHORITY(result_catalog)
+        self._result_catalog = result_catalog
+        self._result_catalog_identity = id(result_catalog)
+        self._result_trust_store = result_catalog.trust_store
+        self._result_reader_registry = result_catalog.reader_registry
+        self._catalog_storage_identity_sha256 = authority.storage_identity_sha256
+        self._catalog_reader_identity_sha256 = authority.reader_registry_sha256
+        self._linkage_store = linkage_store
+        self._linkage_store_identity = id(linkage_store)
+        self._expected_trust_snapshot_sha256_by_provider = MappingProxyType(pins)
+        self._reader_registry = normalized_registry
         self._reader_registry_bytes = canonical_json_bytes(normalized_registry)
+        self._fault_injector = fault_injector
         self.root = Path(root).absolute()
         if self.root.is_symlink() or (self.root.exists() and not self.root.is_dir()):
             raise CohortImportFilesystemError("cohort record index root is unsafe")
@@ -269,6 +330,11 @@ class CohortRecordCatalog:
                 "cohort record index root ownership is unsafe"
             )
         self._root_identity = (metadata.st_dev, metadata.st_ino)
+        try:
+            self._recover_pending()
+        except BaseException:
+            self.close()
+            raise
 
     def close(self) -> None:
         descriptor = getattr(self, "_root_fd", None)
@@ -303,27 +369,259 @@ class CohortRecordCatalog:
             raise CohortImportFilesystemError("cohort record index root changed")
 
     def _validate_reader_registry(self) -> None:
+        self._validate_catalog_authority()
         if (
-            type(self.reader_registry) is not ResultBundleReaderRegistry
-            or "select" in vars(self.reader_registry)
+            type(self._reader_registry) is not ResultBundleReaderRegistry
+            or "select" in vars(self._reader_registry)
             or ResultBundleReaderRegistry.select is not _PINNED_READER_SELECT
         ):
             raise CohortImportError("cohort import reader registry is invalid")
         try:
-            current = canonical_json_bytes(self.reader_registry)
+            current = canonical_json_bytes(self._reader_registry)
             reparsed = ResultBundleReaderRegistry.model_validate_json(current)
-        except Exception:
+        except Exception:  # noqa: BLE001 - normalize hostile model state
             raise CohortImportError(
                 "cohort import reader registry is invalid"
             ) from None
         if (
             current != self._reader_registry_bytes
-            or reparsed != self.reader_registry
-            or reparsed != self.result_catalog.reader_registry
+            or reparsed != self._reader_registry
+            or reparsed != self._result_catalog.reader_registry
         ):
             raise CohortImportError("cohort import reader registry changed")
 
+    def _read_pending(self, name: str) -> CohortRecordBinding:
+        parts = name.split(".")
+        if (
+            len(parts) != 4
+            or parts[0] != ""
+            or parts[1] != "pending"
+            or not parts[2].startswith("publication_")
+            or len(parts[2]) != 76
+            or any(char not in "0123456789abcdef" for char in parts[2][12:])
+            or parts[3] != "json"
+        ):
+            raise CohortImportFilesystemError("pending cohort publication is invalid")
+        flags = (
+            os.O_RDONLY
+            | getattr(os, "O_CLOEXEC", 0)
+            | getattr(os, "O_NOFOLLOW", 0)
+            | getattr(os, "O_NONBLOCK", 0)
+        )
+        descriptor = -1
+        try:
+            descriptor = os.open(name, flags, dir_fd=self._root_fd)
+            before = os.fstat(descriptor)
+            if (
+                not stat.S_ISREG(before.st_mode)
+                or before.st_size > MAX_BINDING_BYTES
+                or before.st_uid != os.geteuid()
+                or before.st_nlink not in (1, 2)
+                or stat.S_IMODE(before.st_mode) != 0o600
+            ):
+                raise CohortImportFilesystemError(
+                    "pending cohort publication is invalid"
+                )
+            with os.fdopen(descriptor, "rb") as stream:
+                content = stream.read(MAX_BINDING_BYTES + 1)
+                after = os.fstat(stream.fileno())
+                descriptor = -1
+            if (
+                len(content) > MAX_BINDING_BYTES
+                or len(content) != before.st_size
+                or _file_identity(before) != _file_identity(after)
+            ):
+                raise CohortImportFilesystemError(
+                    "pending cohort publication is invalid"
+                )
+            binding = contract_from_canonical_bytes(CohortRecordBinding, content)
+        except CohortImportFilesystemError:
+            raise
+        except Exception:  # noqa: BLE001 - normalize hostile file content
+            raise CohortImportFilesystemError(
+                "pending cohort publication is invalid"
+            ) from None
+        finally:
+            if descriptor >= 0:
+                os.close(descriptor)
+        if binding.publication_id != parts[2]:
+            raise CohortImportFilesystemError("pending cohort publication is invalid")
+        return binding
+
+    def _recover_pending(self) -> None:
+        """Reconcile durable journals without ever removing shared objects."""
+
+        with _PROCESS_LOCK:
+            self._validate_root()
+            fcntl.flock(self._root_fd, fcntl.LOCK_EX)
+            try:
+                pending_names = tuple(
+                    sorted(
+                        name
+                        for name in os.listdir(self._root_fd)
+                        if name.startswith(".pending.")
+                    )
+                )
+                for pending_name in pending_names:
+                    try:
+                        binding = self._read_pending(pending_name)
+                    except CohortImportFilesystemError:
+                        try:
+                            metadata = os.stat(
+                                pending_name,
+                                dir_fd=self._root_fd,
+                                follow_symlinks=False,
+                            )
+                        except OSError:
+                            raise CohortImportFilesystemError(
+                                "pending cohort publication is invalid"
+                            ) from None
+                        if (
+                            stat.S_ISREG(metadata.st_mode)
+                            and metadata.st_uid == os.geteuid()
+                            and metadata.st_nlink == 1
+                            and stat.S_IMODE(metadata.st_mode) == 0o600
+                            and metadata.st_size <= MAX_BINDING_BYTES
+                        ):
+                            # Staging begins only after a canonical journal fsync.
+                            # A single-link malformed file is therefore a crashed
+                            # pre-stage write and has no catalog row to compensate.
+                            os.unlink(pending_name, dir_fd=self._root_fd)
+                            os.fsync(self._root_fd)
+                            continue
+                        raise
+                    final_name = (
+                        f"{binding.cohort_manifest_sha256}.{binding.binding_id}.json"
+                    )
+                    state = _PINNED_RESULT_RECOVER(
+                        self._result_catalog,
+                        publication_id=binding.publication_id,
+                        reference=binding.result,
+                    )
+                    keep = state == "adopted"
+                    if state == "absent" and binding.catalog_result_preexisting:
+                        try:
+                            authority = self._validate_catalog_authority()
+                            keep = (
+                                authority.storage_identity_sha256
+                                == binding.catalog_storage_identity_sha256
+                                and authority.trust_snapshot_sha256
+                                == binding.result_trust_snapshot_sha256
+                            )
+                            if keep:
+                                _PINNED_RESULT_VERIFY(
+                                    self._result_catalog, binding.result
+                                )
+                        except Exception:  # noqa: BLE001 - invalid recovery authority
+                            keep = False
+                    final_exists = False
+                    try:
+                        os.stat(final_name, dir_fd=self._root_fd, follow_symlinks=False)
+                        final_exists = True
+                    except FileNotFoundError:
+                        pass
+                    if keep and final_exists:
+                        pending_stat = os.stat(
+                            pending_name,
+                            dir_fd=self._root_fd,
+                            follow_symlinks=False,
+                        )
+                        final_stat = os.stat(
+                            final_name,
+                            dir_fd=self._root_fd,
+                            follow_symlinks=False,
+                        )
+                        keep = (
+                            (pending_stat.st_dev, pending_stat.st_ino)
+                            == (final_stat.st_dev, final_stat.st_ino)
+                            and pending_stat.st_nlink == 2
+                            and final_stat.st_nlink == 2
+                        )
+                    if keep and final_exists:
+                        os.unlink(pending_name, dir_fd=self._root_fd)
+                        os.fsync(self._root_fd)
+                        if self._read(final_name) != binding:
+                            raise CohortImportConflict(
+                                "recovered cohort publication conflicts"
+                            )
+                        continue
+                    if state == "adopted":
+                        _PINNED_RESULT_RECOVER(
+                            self._result_catalog,
+                            publication_id=binding.publication_id,
+                            reference=binding.result,
+                            retain_adopted=False,
+                        )
+                    if final_exists:
+                        os.unlink(final_name, dir_fd=self._root_fd)
+                    os.unlink(pending_name, dir_fd=self._root_fd)
+                    os.fsync(self._root_fd)
+                self._validate_root()
+            finally:
+                fcntl.flock(self._root_fd, fcntl.LOCK_UN)
+
+    def _validate_catalog_authority(self) -> CatalogAuthoritySnapshot:
+        catalog = self._result_catalog
+        if (
+            type(catalog) is not ResultCatalog
+            or id(catalog) != self._result_catalog_identity
+            or catalog.trust_store is not self._result_trust_store
+            or catalog.reader_registry is not self._result_reader_registry
+        ):
+            raise CohortImportError("result catalog authority changed")
+        for name, pinned in (
+            ("verify_reference", _PINNED_RESULT_VERIFY),
+            ("query", _PINNED_RESULT_QUERY),
+            ("authority_snapshot", _PINNED_RESULT_AUTHORITY),
+            ("prepare_bundle_import", _PINNED_RESULT_PREPARE),
+            ("stage_prepared_import", _PINNED_RESULT_STAGE),
+            ("adopt_prepared_import", _PINNED_RESULT_ADOPT),
+            ("finish_prepared_import", _PINNED_RESULT_FINISH),
+            ("compensate_prepared_import", _PINNED_RESULT_COMPENSATE),
+            ("recover_pending_publication", _PINNED_RESULT_RECOVER),
+            ("verify_prepared_object", _PINNED_RESULT_VERIFY_PREPARED),
+        ):
+            if name in vars(catalog) or getattr(ResultCatalog, name) is not pinned:
+                raise CohortImportError("result catalog authority changed")
+        if (
+            type(self._linkage_store) is not ProviderLinkageStore
+            or id(self._linkage_store) != self._linkage_store_identity
+        ):
+            raise CohortImportError("provider linkage authority changed")
+        authority = _PINNED_RESULT_AUTHORITY(catalog)
+        if (
+            authority.storage_identity_sha256 != self._catalog_storage_identity_sha256
+            or authority.reader_registry_sha256 != self._catalog_reader_identity_sha256
+        ):
+            raise CohortImportError("result catalog authority changed")
+        return authority
+
+    def _fault(self, point: str) -> None:
+        if self._fault_injector is not None:
+            self._fault_injector(point)
+
+    def _validate_manifest(
+        self, manifest: CohortManifest, *, changed: bool = False
+    ) -> None:
+        self._validate_catalog_authority()
+        try:
+            _PINNED_VALIDATE_MANIFEST(
+                manifest,
+                self._linkage_store,
+                expected_trust_snapshot_sha256_by_provider=(
+                    self._expected_trust_snapshot_sha256_by_provider
+                ),
+            )
+        except Exception as exc:
+            message = (
+                "cohort manifest changed during import"
+                if changed
+                else "cohort manifest is not current and trusted"
+            )
+            raise CohortImportError(message) from exc
+
     def _read(self, name: str) -> CohortRecordBinding:
+        self._validate_root()
         parts = name.split(".")
         if (
             len(parts) != 3
@@ -373,7 +671,7 @@ class CohortRecordCatalog:
             binding = contract_from_canonical_bytes(CohortRecordBinding, content)
         except CohortImportFilesystemError:
             raise
-        except Exception:
+        except Exception:  # noqa: BLE001 - normalize hostile file content
             raise CohortImportFilesystemError(
                 "cohort record binding file is invalid"
             ) from None
@@ -382,6 +680,7 @@ class CohortRecordCatalog:
                 os.close(descriptor)
         if name != (f"{binding.cohort_manifest_sha256}.{binding.binding_id}.json"):
             raise CohortImportFilesystemError("cohort record binding name is invalid")
+        self._validate_root()
         return binding
 
     def _names_unlocked(self) -> tuple[str, ...]:
@@ -405,6 +704,88 @@ class CohortRecordCatalog:
                 )
         return names
 
+    @staticmethod
+    def _binding_equivalent(
+        existing: CohortRecordBinding, candidate: CohortRecordBinding
+    ) -> bool:
+        ignored = {"binding_id", "publication_id", "catalog_result_preexisting"}
+        return existing.model_dump(exclude=ignored) == candidate.model_dump(
+            exclude=ignored
+        )
+
+    def _write_pending(self, name: str, content: bytes) -> None:
+        self._validate_root()
+        flags = (
+            os.O_WRONLY
+            | os.O_CREAT
+            | os.O_EXCL
+            | getattr(os, "O_CLOEXEC", 0)
+            | getattr(os, "O_NOFOLLOW", 0)
+        )
+        try:
+            descriptor = os.open(name, flags, 0o600, dir_fd=self._root_fd)
+        except FileExistsError:
+            raise CohortImportConflict("pending cohort publication conflicts") from None
+        try:
+            with os.fdopen(descriptor, "wb", closefd=False) as stream:
+                stream.write(content)
+                stream.flush()
+                os.fchmod(stream.fileno(), 0o600)
+                os.fsync(stream.fileno())
+            os.fsync(self._root_fd)
+        except BaseException:
+            try:
+                os.unlink(name, dir_fd=self._root_fd)
+            except OSError:
+                pass
+            raise
+        finally:
+            os.close(descriptor)
+        self._validate_root()
+
+    def _revalidate_publication(
+        self,
+        manifest: CohortManifest,
+        prepared: PreparedCatalogImport,
+        binding: CohortRecordBinding,
+        final_name: str | None,
+        *,
+        changed: bool,
+    ) -> None:
+        self._validate_root()
+        authority = self._validate_catalog_authority()
+        if (
+            authority != prepared.authority
+            or catalog_authority_sha256(authority) != binding.catalog_authority_sha256
+            or authority.storage_identity_sha256
+            != binding.catalog_storage_identity_sha256
+            or authority.trust_snapshot_sha256 != binding.result_trust_snapshot_sha256
+        ):
+            raise CohortImportConflict("result catalog authority changed")
+        self._validate_manifest(manifest, changed=changed)
+        _PINNED_RESULT_VERIFY_PREPARED(self._result_catalog, prepared)
+        if final_name is not None:
+            pending_name = f".pending.{binding.publication_id}.json"
+            if self._read_pending(pending_name) != binding:
+                raise CohortImportConflict("cohort record binding changed")
+            try:
+                pending_stat = os.stat(
+                    pending_name, dir_fd=self._root_fd, follow_symlinks=False
+                )
+                final_stat = os.stat(
+                    final_name, dir_fd=self._root_fd, follow_symlinks=False
+                )
+            except OSError:
+                raise CohortImportConflict("cohort record binding changed") from None
+            if (
+                (pending_stat.st_dev, pending_stat.st_ino)
+                != (final_stat.st_dev, final_stat.st_ino)
+                or pending_stat.st_nlink != 2
+                or final_stat.st_nlink != 2
+            ):
+                raise CohortImportConflict("cohort record binding changed")
+        self._validate_root()
+
     def import_bundle(
         self,
         *,
@@ -418,7 +799,7 @@ class CohortRecordCatalog:
         expected_authority_head_sha256: str,
         capability: CurrentMethodCapability,
     ) -> CohortRecordBinding:
-        """Verify, import, and bind one aggregate record; no caller trust shortcut."""
+        """Verify and atomically bind one aggregate record to current D05 authority."""
 
         history = _canonical_history(manifest_history)
         manifest = history[-1]
@@ -437,18 +818,7 @@ class CohortRecordCatalog:
         assert isinstance(registry, MethodRegistry)
         assert isinstance(authority_head, AuthorityHead)
         assert isinstance(capability, CurrentMethodCapability)
-        try:
-            _PINNED_VALIDATE_MANIFEST(
-                manifest,
-                self.linkage_store,
-                expected_trust_snapshot_sha256_by_provider=(
-                    self.expected_trust_snapshot_sha256_by_provider
-                ),
-            )
-        except Exception as exc:
-            raise CohortImportError(
-                "cohort manifest is not current and trusted"
-            ) from exc
+        self._validate_manifest(manifest)
         members = tuple(
             member
             for member in manifest.members
@@ -465,7 +835,6 @@ class CohortRecordCatalog:
             raise CohortImportError(
                 "record method does not match cohort measurement anchor"
             )
-
         aliases = CatalogAliases(
             display_alias=_opaque_alias(
                 "dsp",
@@ -480,120 +849,183 @@ class CohortRecordCatalog:
             timepoint_alias=_opaque_alias(
                 "tpt",
                 b"traceback-cohort-timepoint-alias-v1",
-                (
-                    member.provider_namespace,
-                    member.collection_token,
-                ),
+                (member.provider_namespace, member.collection_token),
             ),
         )
-        reference = _PINNED_RESULT_IMPORT(
-            self.result_catalog,
-            root_id=root_id,
-            relative_path=relative_path,
-            registry=registry,
-            authority_head=authority_head,
-            expected_authority_head_sha256=expected_authority_head_sha256,
-            capability=capability,
-            aliases=aliases,
-        )
-        _, reader = _PINNED_RESULT_VERIFY(self.result_catalog, reference)
+        prepared: PreparedCatalogImport | None = None
+        binding: CohortRecordBinding | None = None
+        temporary_name: str | None = None
+        final_name: str | None = None
+        final_published = False
         try:
-            _PINNED_VALIDATE_MANIFEST(
-                manifest,
-                self.linkage_store,
-                expected_trust_snapshot_sha256_by_provider=(
-                    self.expected_trust_snapshot_sha256_by_provider
-                ),
+            prepared = _PINNED_RESULT_PREPARE(
+                self._result_catalog,
+                root_id=root_id,
+                relative_path=relative_path,
+                registry=registry,
+                authority_head=authority_head,
+                expected_authority_head_sha256=expected_authority_head_sha256,
+                capability=capability,
+                aliases=aliases,
             )
-        except Exception as exc:
-            raise CohortImportError("cohort manifest changed during import") from exc
-
-        manifest_digest = cohort_manifest_sha256(manifest)
-        binding = CohortRecordBinding(
-            binding_id=_binding_id(
+            self._fault("after_preflight")
+            authority = self._validate_catalog_authority()
+            if authority != prepared.authority:
+                raise CohortImportConflict("result catalog authority changed")
+            self._validate_manifest(manifest, changed=True)
+            _, reader = _PINNED_RESULT_VERIFY_PREPARED(self._result_catalog, prepared)
+            manifest_digest = cohort_manifest_sha256(manifest)
+            binding = CohortRecordBinding(
+                binding_id=_binding_id(
+                    cohort_manifest_sha256=manifest_digest,
+                    provider_namespace=member.provider_namespace,
+                    analysis_record_id=member.analysis_record_id,
+                    result_id=prepared.reference.result_id,
+                    publication_id=prepared.publication_id,
+                    catalog_authority_sha256=prepared.authority_sha256,
+                ),
+                cohort_id=manifest.cohort_id,
+                cohort_version=manifest.version,
                 cohort_manifest_sha256=manifest_digest,
                 provider_namespace=member.provider_namespace,
                 analysis_record_id=member.analysis_record_id,
-                result_id=reference.result_id,
-            ),
-            cohort_id=manifest.cohort_id,
-            cohort_version=manifest.version,
-            cohort_manifest_sha256=manifest_digest,
-            provider_namespace=member.provider_namespace,
-            analysis_record_id=member.analysis_record_id,
-            member_sha256=_member_sha256(member),
-            lineage_role=member.lineage_role,
-            denominator_contribution=member.denominator_contribution,
-            measurement_anchor_sha256=manifest.measurement_anchor.measurement_definition_sha256,
-            result=reference,
-            reader_registry_sha256=_reader_registry_sha256(self.reader_registry),
-            reader_id=reader.reader_id,
-            reader_minimum_version=reader.minimum_version,
-            reader_maximum_version=reader.maximum_version,
-        )
-        content = canonical_contract_bytes(binding)
-        name = f"{manifest_digest}.{binding.binding_id}.json"
-        with _PROCESS_LOCK:
-            self._validate_root()
-            fcntl.flock(self._root_fd, fcntl.LOCK_EX)
-            try:
-                names = self._names_unlocked()
-                existing = tuple(
-                    self._read(existing_name)
-                    for existing_name in names
-                    if existing_name.startswith(f"{manifest_digest}.")
-                )
-                for item in existing:
-                    same_member = (
-                        item.cohort_manifest_sha256 == binding.cohort_manifest_sha256
-                        and item.provider_namespace == binding.provider_namespace
-                        and item.analysis_record_id == binding.analysis_record_id
-                    )
-                    same_result = (
-                        item.cohort_manifest_sha256 == binding.cohort_manifest_sha256
-                        and item.result.result_id == binding.result.result_id
-                    )
-                    if same_member or same_result:
-                        if item == binding:
-                            return item
-                        raise CohortImportConflict("cohort record binding conflicts")
-                if len(names) >= MAX_BINDINGS:
-                    raise CohortImportFilesystemError(
-                        "cohort record index exceeds its bound"
-                    )
-                flags = (
-                    os.O_WRONLY
-                    | os.O_CREAT
-                    | os.O_EXCL
-                    | getattr(os, "O_CLOEXEC", 0)
-                    | getattr(os, "O_NOFOLLOW", 0)
-                )
+                member_sha256=_member_sha256(member),
+                lineage_role=member.lineage_role,
+                denominator_contribution=member.denominator_contribution,
+                measurement_anchor_sha256=(
+                    manifest.measurement_anchor.measurement_definition_sha256
+                ),
+                result=prepared.reference,
+                publication_id=prepared.publication_id,
+                catalog_authority_sha256=prepared.authority_sha256,
+                catalog_storage_identity_sha256=(
+                    prepared.authority.storage_identity_sha256
+                ),
+                result_trust_snapshot_sha256=(prepared.authority.trust_snapshot_sha256),
+                catalog_result_preexisting=prepared.already_visible,
+                reader_registry_sha256=_reader_registry_sha256(self._reader_registry),
+                reader_id=reader.reader_id,
+                reader_minimum_version=reader.minimum_version,
+                reader_maximum_version=reader.maximum_version,
+            )
+            content = canonical_contract_bytes(binding)
+            final_name = f"{manifest_digest}.{binding.binding_id}.json"
+            temporary_name = f".pending.{prepared.publication_id}.json"
+            with _PROCESS_LOCK:
+                self._validate_root()
+                fcntl.flock(self._root_fd, fcntl.LOCK_EX)
                 try:
-                    descriptor = os.open(name, flags, 0o600, dir_fd=self._root_fd)
-                except FileExistsError:
-                    if self._read(name) == binding:
-                        return binding
-                    raise CohortImportConflict(
-                        "cohort record binding conflicts"
-                    ) from None
-                try:
-                    with os.fdopen(descriptor, "wb", closefd=False) as stream:
-                        stream.write(content)
-                        stream.flush()
-                        os.fchmod(stream.fileno(), 0o600)
-                        os.fsync(stream.fileno())
-                    os.fsync(self._root_fd)
-                except BaseException:
+                    names = self._names_unlocked()
+                    existing = tuple(
+                        self._read(name)
+                        for name in names
+                        if name.startswith(f"{manifest_digest}.")
+                    )
+                    for item in existing:
+                        same_member = (
+                            item.provider_namespace == binding.provider_namespace
+                            and item.analysis_record_id == binding.analysis_record_id
+                        )
+                        same_result = item.result.result_id == binding.result.result_id
+                        if same_member or same_result:
+                            if self._binding_equivalent(item, binding):
+                                _PINNED_RESULT_COMPENSATE(
+                                    self._result_catalog, prepared
+                                )
+                                return item
+                            raise CohortImportConflict(
+                                "cohort record binding conflicts"
+                            )
+                    if len(names) >= MAX_BINDINGS:
+                        raise CohortImportFilesystemError(
+                            "cohort record index exceeds its bound"
+                        )
+                    self._write_pending(temporary_name, content)
+                    _PINNED_RESULT_STAGE(self._result_catalog, prepared)
+                    self._fault("after_result_stage")
+                    self._revalidate_publication(
+                        manifest, prepared, binding, None, changed=True
+                    )
+                    self._fault("before_binding_publish")
+                    self._revalidate_publication(
+                        manifest, prepared, binding, None, changed=True
+                    )
+                    self._validate_root()
                     try:
-                        os.unlink(name, dir_fd=self._root_fd)
-                    except OSError:
-                        pass
-                    raise
+                        os.link(
+                            temporary_name,
+                            final_name,
+                            src_dir_fd=self._root_fd,
+                            dst_dir_fd=self._root_fd,
+                            follow_symlinks=False,
+                        )
+                    except FileExistsError:
+                        raise CohortImportConflict(
+                            "cohort record binding conflicts"
+                        ) from None
+                    final_published = True
+                    os.fsync(self._root_fd)
+                    self._validate_root()
+                    self._fault("after_binding_publish")
+                    self._revalidate_publication(
+                        manifest, prepared, binding, final_name, changed=True
+                    )
+
+                    def revalidate(point: str) -> None:
+                        self._fault(point)
+                        self._revalidate_publication(
+                            manifest, prepared, binding, final_name, changed=True
+                        )
+
+                    _PINNED_RESULT_ADOPT(
+                        self._result_catalog,
+                        prepared,
+                        revalidate=revalidate,
+                    )
+                    self._fault("after_visibility_commit")
+                    self._revalidate_publication(
+                        manifest, prepared, binding, final_name, changed=True
+                    )
+                    _PINNED_RESULT_VERIFY(self._result_catalog, prepared.reference)
+                    os.unlink(temporary_name, dir_fd=self._root_fd)
+                    temporary_name = None
+                    os.fsync(self._root_fd)
+                    self._validate_root()
+                    if self._read(final_name) != binding:
+                        raise CohortImportConflict("cohort record binding changed")
+                    _PINNED_RESULT_FINISH(self._result_catalog, prepared)
+                    prepared = None
+                    return binding
                 finally:
-                    os.close(descriptor)
-            finally:
-                fcntl.flock(self._root_fd, fcntl.LOCK_UN)
-        return binding
+                    fcntl.flock(self._root_fd, fcntl.LOCK_UN)
+        except BaseException:
+            cleanup_errors: list[BaseException] = []
+            if prepared is not None:
+                try:
+                    _PINNED_RESULT_COMPENSATE(self._result_catalog, prepared)
+                except Exception as exc:  # noqa: BLE001 - surface failed compensation
+                    cleanup_errors.append(exc)
+            if final_published and final_name is not None:
+                try:
+                    os.unlink(final_name, dir_fd=self._root_fd)
+                    os.fsync(self._root_fd)
+                except FileNotFoundError:
+                    pass
+                except OSError as exc:
+                    cleanup_errors.append(exc)
+            if temporary_name is not None:
+                try:
+                    os.unlink(temporary_name, dir_fd=self._root_fd)
+                    os.fsync(self._root_fd)
+                except FileNotFoundError:
+                    pass
+                except OSError as exc:
+                    cleanup_errors.append(exc)
+            if cleanup_errors:
+                raise CohortImportError(
+                    "cohort import compensation failed"
+                ) from cleanup_errors[0]
+            raise
 
     def bindings_for_manifest(
         self, manifest_history: Sequence[CohortManifest]
@@ -603,18 +1035,8 @@ class CohortRecordCatalog:
         history = _canonical_history(manifest_history)
         manifest = history[-1]
         self._validate_reader_registry()
-        try:
-            _PINNED_VALIDATE_MANIFEST(
-                manifest,
-                self.linkage_store,
-                expected_trust_snapshot_sha256_by_provider=(
-                    self.expected_trust_snapshot_sha256_by_provider
-                ),
-            )
-        except Exception as exc:
-            raise CohortImportError(
-                "cohort manifest is not current and trusted"
-            ) from exc
+        self._validate_manifest(manifest)
+        authority = self._validate_catalog_authority()
         digest = cohort_manifest_sha256(manifest)
         members = {
             (item.provider_namespace, item.analysis_record_id): item
@@ -649,10 +1071,22 @@ class CohortRecordCatalog:
                     "cohort record binding conflicts with manifest"
                 )
             if binding.reader_registry_sha256 != _reader_registry_sha256(
-                self.reader_registry
+                self._reader_registry
             ):
                 raise CohortImportConflict("cohort record reader registry changed")
-            _, reader = _PINNED_RESULT_VERIFY(self.result_catalog, binding.result)
+            bound_authority = CatalogAuthoritySnapshot(
+                storage_identity_sha256=binding.catalog_storage_identity_sha256,
+                trust_snapshot_sha256=binding.result_trust_snapshot_sha256,
+                reader_registry_sha256=authority.reader_registry_sha256,
+            )
+            if (
+                binding.catalog_authority_sha256
+                != catalog_authority_sha256(bound_authority)
+                or binding.catalog_storage_identity_sha256
+                != authority.storage_identity_sha256
+            ):
+                raise CohortImportConflict("cohort record catalog authority changed")
+            _, reader = _PINNED_RESULT_VERIFY(self._result_catalog, binding.result)
             if (
                 reader.reader_id != binding.reader_id
                 or reader.minimum_version != binding.reader_minimum_version
@@ -674,10 +1108,10 @@ class CohortRecordCatalog:
 
 
 __all__ = [
+    "MAX_BINDINGS",
     "CohortImportConflict",
     "CohortImportError",
     "CohortImportFilesystemError",
     "CohortRecordBinding",
     "CohortRecordCatalog",
-    "MAX_BINDINGS",
 ]

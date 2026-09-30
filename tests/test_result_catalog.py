@@ -8,12 +8,12 @@ import shutil
 import sqlite3
 import threading
 import time
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from pathlib import Path
 
 import pytest
-import evidence_inspector.result_catalog as catalog_module
 
+import evidence_inspector.result_catalog as catalog_module
 from evidence_inspector.method_registry import (
     DisplayRole,
     QualificationState,
@@ -29,8 +29,8 @@ from evidence_inspector.result_catalog import (
     CatalogError,
     CatalogFilesystemError,
     CatalogOrder,
-    CatalogQuery,
     CatalogQualificationState,
+    CatalogQuery,
     CatalogResultRef,
     CatalogUnsupportedSchema,
     ExecutionState,
@@ -40,7 +40,6 @@ from evidence_inspector.result_catalog import (
     _copy_exact_bundle,
 )
 from tests.test_bundles import _bundle, _downgrade_to_v1
-from traceback_runner.bundles import verify_bundle
 from tests.test_method_registry import (
     T0,
     T1,
@@ -52,7 +51,7 @@ from tests.test_method_registry import (
     _revoke_qualification,
     _role,
 )
-
+from traceback_runner.bundles import verify_bundle
 
 ALIASES = CatalogAliases(
     display_alias="dsp_aaaaaaaa",
@@ -130,6 +129,47 @@ def _import(catalog: ResultCatalog, **updates):
     }
     values.update(updates)
     return catalog.import_bundle(**values)
+
+
+def _prepare(catalog: ResultCatalog):
+    registry, _, _, _, head, head_sha256, capability = _authority()
+    return catalog.prepare_bundle_import(
+        root_id="root_primary",
+        relative_path="incoming/record",
+        registry=registry,
+        authority_head=head,
+        expected_authority_head_sha256=head_sha256,
+        capability=capability,
+        aliases=ALIASES,
+    )
+
+
+def test_prepared_publication_is_hidden_until_atomic_adoption(
+    tmp_path: Path,
+) -> None:
+    catalog, _, _ = _catalog(tmp_path)
+    prepared = _prepare(catalog)
+    catalog.stage_prepared_import(prepared)
+    assert catalog.query(CatalogQuery()).empty
+    with pytest.raises(CatalogConflict, match="not indexed"):
+        catalog.verify_reference(prepared.reference)
+    windows: list[str] = []
+    catalog.adopt_prepared_import(prepared, revalidate=windows.append)
+    assert windows == ["before_visibility", "after_visibility_staged"]
+    assert catalog.query(CatalogQuery()).results == (prepared.reference,)
+    catalog.finish_prepared_import(prepared)
+
+
+def test_prepared_publication_compensation_retains_shared_object(
+    tmp_path: Path,
+) -> None:
+    catalog, _, _ = _catalog(tmp_path)
+    prepared = _prepare(catalog)
+    object_path = tmp_path / "catalog/objects" / prepared.reference.bundle_sha256
+    catalog.stage_prepared_import(prepared)
+    catalog.compensate_prepared_import(prepared)
+    assert catalog.query(CatalogQuery()).empty
+    assert object_path.is_dir()
 
 
 def test_import_is_idempotent_private_and_selectable(tmp_path: Path) -> None:
@@ -325,9 +365,7 @@ def test_conflict_and_crash_leave_no_partial_catalog_state(tmp_path: Path) -> No
     crash_root = tmp_path / "crash"
     crash_root.mkdir()
     *_, capability = _authority()
-    _, _, trust = _bundle(
-        crash_root / "incoming", method=_bundle_method(capability)
-    )
+    _, _, trust = _bundle(crash_root / "incoming", method=_bundle_method(capability))
     crashing = ResultCatalog(
         tmp_path / "crash-catalog",
         import_roots={"root_primary": crash_root},
@@ -351,9 +389,7 @@ def test_failed_publisher_never_unlinks_an_object_adopted_concurrently(
     import_root = tmp_path / "imports"
     import_root.mkdir()
     *_, capability = _authority()
-    _, _, trust = _bundle(
-        import_root / "incoming", method=_bundle_method(capability)
-    )
+    _, _, trust = _bundle(import_root / "incoming", method=_bundle_method(capability))
     published = threading.Event()
     adopted = threading.Event()
 
@@ -379,7 +415,7 @@ def test_failed_publisher_never_unlinks_an_object_adopted_concurrently(
     def losing_import() -> None:
         try:
             _import(first)
-        except BaseException as error:
+        except BaseException as error:  # noqa: BLE001 - collect thread outcome
             errors.append(error)
 
     worker = threading.Thread(target=losing_import)
@@ -394,7 +430,10 @@ def test_failed_publisher_never_unlinks_an_object_adopted_concurrently(
     assert isinstance(errors[0], OSError)
     object_path = second._bound_objects / committed.bundle_sha256
     assert object_path.is_dir()
-    assert verify_bundle(object_path, trust).manifest.record_id == committed.bundle_record_id
+    assert (
+        verify_bundle(object_path, trust).manifest.record_id
+        == committed.bundle_record_id
+    )
     assert second.query(CatalogQuery()).results == (committed,)
 
 
@@ -514,9 +553,7 @@ def test_sqlite_descriptor_proof_accepts_reused_fd_number(
         assert snapshot[reused_descriptor] != prior_identity
         return snapshot
 
-    monkeypatch.setattr(
-        catalog_module, "_open_descriptor_identities", force_reuse
-    )
+    monkeypatch.setattr(catalog_module, "_open_descriptor_identities", force_reuse)
     reopened = ResultCatalog(
         original_root,
         import_roots={"root_primary": import_root},
@@ -534,9 +571,7 @@ def test_simultaneous_fresh_catalog_constructors_are_atomic_and_usable(
     import_root = tmp_path / "imports"
     import_root.mkdir()
     *_, capability = _authority()
-    _, _, trust = _bundle(
-        import_root / "incoming", method=_bundle_method(capability)
-    )
+    _, _, trust = _bundle(import_root / "incoming", method=_bundle_method(capability))
     catalog_root = tmp_path / "catalog"
     barrier = threading.Barrier(2)
     catalogs: list[ResultCatalog] = []
@@ -552,7 +587,7 @@ def test_simultaneous_fresh_catalog_constructors_are_atomic_and_usable(
                     trust_store=trust,
                 )
             )
-        except BaseException as error:
+        except BaseException as error:  # noqa: BLE001 - collect thread outcome
             errors.append(error)
 
     workers = [threading.Thread(target=construct) for _ in range(2)]
@@ -786,7 +821,7 @@ def _synthetic_ref(index: int) -> CatalogResultRef:
         authority_head_sha256="e" * 64,
         authority_revision=2,
         authority_scope="scope_provider_west",
-        capability_as_of=datetime(2026, 2, 1, tzinfo=timezone.utc),
+        capability_as_of=datetime(2026, 2, 1, tzinfo=UTC),
         qualification_state=CatalogQualificationState.QUALIFIED,
         display_role="provider_primary",
         research_inspectable=True,

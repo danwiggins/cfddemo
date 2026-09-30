@@ -8,8 +8,8 @@ from datetime import timedelta
 from pathlib import Path
 
 import pytest
-import evidence_inspector.cohort_import as cohort_import_module
 
+import evidence_inspector.cohort_import as cohort_import_module
 from evidence_inspector.cohort_import import (
     CohortImportConflict,
     CohortImportError,
@@ -18,10 +18,10 @@ from evidence_inspector.cohort_import import (
 )
 from evidence_inspector.cohort_manifest import MeasurementAnchor
 from evidence_inspector.result_catalog import (
+    DEFAULT_RESULT_BUNDLE_READER_REGISTRY,
     CatalogError,
     CatalogQuery,
     CatalogUnsupportedSchema,
-    DEFAULT_RESULT_BUNDLE_READER_REGISTRY,
     ResultBundleReader,
     ResultBundleReaderRegistry,
     ResultCatalog,
@@ -406,7 +406,7 @@ def test_index_root_replacement_and_foreign_inventory_fail_closed(
     (tmp_path / "foreign/cohort-records/note.txt").write_text("unsafe")
     with pytest.raises(CohortImportFilesystemError, match="inventory"):
         _import(foreign)
-    assert foreign[1].query(CatalogQuery()).results  # verification preceded bind
+    assert foreign[1].query(CatalogQuery()).empty
 
 
 def test_conflicting_second_bundle_for_same_member_is_rejected(
@@ -563,7 +563,7 @@ def test_result_catalog_rejects_reader_and_trust_authority_substitution(
             expected_trust_snapshot_sha256_by_provider=_pins(),
             reader_registry=DEFAULT_RESULT_BUNDLE_READER_REGISTRY,
         )
-    values[1].import_bundle = lambda **_: None  # type: ignore[method-assign]
+    values[1].prepare_bundle_import = lambda **_: None  # type: ignore[method-assign]
     with pytest.raises(TypeError, match="shadowed"):
         CohortRecordCatalog(
             tmp_path / "shadow-index",
@@ -606,12 +606,12 @@ def test_live_trust_and_reader_method_shadowing_fail_before_verification(
             ),
         ),
     )
-    with pytest.raises(CohortImportError, match="reader registry changed"):
+    with pytest.raises(CatalogUnsupportedSchema, match="reader registry changed"):
         _import(content_shadow)
     assert content_shadow[1].query(CatalogQuery()).empty
 
     cohort_shadow = _setup(tmp_path / "cohort-reader-shadow", live)
-    object.__setattr__(cohort_shadow[0].reader_registry, "readers", ())
+    object.__setattr__(cohort_shadow[0]._reader_registry, "readers", ())
     with pytest.raises(CohortImportError, match="reader registry"):
         _import(cohort_shadow)
     assert cohort_shadow[1].query(CatalogQuery()).empty
@@ -626,6 +626,171 @@ def test_binding_bytes_are_canonical_and_permissions_private(
     assert path.read_bytes() == canonical_json_bytes(binding)
     assert stat_mode(path) == 0o600
     assert stat_mode(path.parent) == 0o700
+
+
+@pytest.mark.parametrize(
+    "point",
+    (
+        "after_preflight",
+        "after_result_stage",
+        "before_binding_publish",
+        "after_binding_publish",
+        "before_visibility",
+        "after_visibility_staged",
+        "after_visibility_commit",
+    ),
+)
+def test_authority_change_at_every_publication_window_compensates(
+    tmp_path: Path, live, point: str
+) -> None:
+    values = _setup(tmp_path / point, live)
+    fired = False
+
+    def fault(observed: str) -> None:
+        nonlocal fired
+        if observed == point and not fired:
+            fired = True
+            values[6].revoke(values[5].key_id)
+
+    values[0]._fault_injector = fault
+    with pytest.raises(Exception, match="authority changed|revoked"):
+        _import(values)
+    assert fired
+    assert values[1].query(CatalogQuery()).empty
+    inventory = tuple((tmp_path / point / "cohort-records").iterdir())
+    assert inventory == ()
+    assert tuple((tmp_path / point / "results/objects").iterdir())
+
+
+@pytest.mark.parametrize("point", ("before_binding_publish", "after_binding_publish"))
+def test_root_replacement_during_publication_compensates(
+    tmp_path: Path, live, point: str
+) -> None:
+    values = _setup(tmp_path / point, live)
+    root = tmp_path / point / "cohort-records"
+    displaced = tmp_path / point / "displaced"
+    fired = False
+
+    def fault(observed: str) -> None:
+        nonlocal fired
+        if observed == point and not fired:
+            fired = True
+            root.rename(displaced)
+            root.mkdir(mode=0o700)
+
+    values[0]._fault_injector = fault
+    with pytest.raises(CohortImportFilesystemError, match="root changed"):
+        _import(values)
+    assert fired
+    assert values[1].query(CatalogQuery()).empty
+    assert tuple(displaced.iterdir()) == ()
+    assert tuple(root.iterdir()) == ()
+
+
+def test_result_catalog_object_substitution_is_rejected_before_import(
+    tmp_path: Path, live
+) -> None:
+    victim = _setup(tmp_path / "victim", live)
+    attacker = _setup(tmp_path / "attacker", live)
+    object.__setattr__(victim[0], "_result_catalog", attacker[1])
+    with pytest.raises(CohortImportError, match="authority changed"):
+        _import(victim)
+    assert victim[1].query(CatalogQuery()).empty
+    assert attacker[1].query(CatalogQuery()).empty
+
+
+def test_linkage_advance_before_visibility_compensates(tmp_path: Path, live) -> None:
+    values = _setup(tmp_path, live)
+    revision = _known_run_revision(
+        linkage_id="linkage_" + "e" * 32,
+        subject="subject_" + "e" * 32,
+        collection="collection_" + "e" * 32,
+        specimen="specimen_" + "e" * 32,
+        analysis="analysis_" + "e" * 32,
+        measurement="measurement_" + "e" * 32,
+        source="projection_" + "e" * 32,
+        run_digit="e",
+    )
+    authorized, _ = _consume(revision, (_create_approval(revision, "e"),))
+    fired = False
+
+    def fault(point: str) -> None:
+        nonlocal fired
+        if point == "before_visibility" and not fired:
+            fired = True
+            live[0].commit_authorized_revision(authorized)
+
+    values[0]._fault_injector = fault
+    with pytest.raises(CohortImportError, match="changed during import"):
+        _import(values)
+    assert fired
+    assert values[1].query(CatalogQuery()).empty
+    assert tuple((tmp_path / "cohort-records").iterdir()) == ()
+
+
+@pytest.mark.parametrize(
+    ("point", "visible"),
+    (("after_result_stage", False), ("after_visibility_commit", True)),
+)
+def test_crash_recovery_reconciles_journal_and_catalog_publication(
+    tmp_path: Path, live, point: str, visible: bool
+) -> None:
+    values = _setup(tmp_path, live)
+    pid = os.fork()
+    if pid == 0:  # pragma: no cover - abrupt crash path cannot report assertions
+        values[0]._fault_injector = lambda observed: (
+            os._exit(71) if observed == point else None
+        )
+        _import(values)
+        os._exit(72)
+    _, status = os.waitpid(pid, 0)
+    assert os.waitstatus_to_exitcode(status) == 71
+    values[0].close()
+    values[1].close()
+    results = ResultCatalog(
+        tmp_path / "results",
+        import_roots={"root_primary": tmp_path / "imports"},
+        trust_store=values[6],
+        reader_registry=DEFAULT_RESULT_BUNDLE_READER_REGISTRY,
+    )
+    cohorts = CohortRecordCatalog(
+        tmp_path / "cohort-records",
+        result_catalog=results,
+        linkage_store=live[0],
+        expected_trust_snapshot_sha256_by_provider=_pins(),
+        reader_registry=DEFAULT_RESULT_BUNDLE_READER_REGISTRY,
+    )
+    try:
+        page = results.query(CatalogQuery())
+        bindings = cohorts.bindings_for_manifest((values[2],))
+        assert bool(page.results) is visible
+        assert bool(bindings) is visible
+        assert not tuple((tmp_path / "cohort-records").glob(".pending.*"))
+    finally:
+        cohorts.close()
+        results.close()
+
+
+def test_crash_recovery_removes_partial_pre_stage_journal(tmp_path: Path, live) -> None:
+    values = _setup(tmp_path, live)
+    values[0].close()
+    partial = (
+        tmp_path / "cohort-records" / (".pending.publication_" + "f" * 64 + ".json")
+    )
+    partial.write_bytes(b'{"partial":')
+    partial.chmod(0o600)
+    recovered = CohortRecordCatalog(
+        tmp_path / "cohort-records",
+        result_catalog=values[1],
+        linkage_store=live[0],
+        expected_trust_snapshot_sha256_by_provider=_pins(),
+        reader_registry=DEFAULT_RESULT_BUNDLE_READER_REGISTRY,
+    )
+    try:
+        assert not partial.exists()
+        assert values[1].query(CatalogQuery()).empty
+    finally:
+        recovered.close()
 
 
 def stat_mode(path: Path) -> int:

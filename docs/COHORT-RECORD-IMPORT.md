@@ -8,10 +8,11 @@ bounded by the result catalog's fixed eight-file inventory and 36 MiB total
 limit, and verified against independently provisioned offline result-key trust.
 The signature purpose, current key revocation state, manifest/content digests,
 derived chart/report, method identity, and current method authority are checked
-before the result row is indexed.
+before a result can become visible in the index.
 
-The cohort layer then binds that verified result to one exact member of the
-canonical D05 manifest history. It rechecks the manifest against the live
+The cohort layer pins the exact result-catalog object, storage identity, trust
+store, and reader authority, then binds that verified result to one exact member
+of the canonical D05 manifest history. It rechecks the manifest against the live
 protected linkage store and independently pinned provider trust both before and
 after bundle verification. The bundle method definition must equal the cohort's
 measurement anchor. Opaque result-catalog aliases are deterministically derived
@@ -19,8 +20,10 @@ from protected provider, analysis, run, and collection tokens so the same result
 can be reused across immutable cohort versions without exposing those tokens in
 the public result reference.
 
-Bindings are canonical, append-only files in a mode-0700 local directory; each
-file is mode 0600 and capped at 128 KiB. The catalog supports at most 100,000
+Bindings carry the digest-bound catalog storage, trust snapshot, reader
+authority, and publication identity. They are canonical, append-only files in a
+mode-0700 local directory; each file is mode 0600 and capped at 128 KiB. The
+catalog supports at most 100,000
 bindings. Duplicate exact imports are idempotent, while a different result for
 the same member and manifest or the same result assigned to another member in
 that manifest is a conflict. Reads recheck the live D05 authority, the exact
@@ -28,6 +31,16 @@ binding bytes, the configured reader-registry digest, the stored immutable
 bundle, and current result-key trust. A later linkage change or key revocation
 therefore withholds the binding rather than turning stale evidence into an
 available longitudinal record.
+
+Publication is coordinated across SQLite and the binding directory. The result
+row is first durable but hidden in `pending` state. A same-directory mode-0600
+journal is flushed, hard-linked to the final name without overwrite, and the
+directory is flushed. D05 linkage, result trust, catalog storage, and exact
+binding bytes are revalidated immediately before and after the in-transaction
+visibility change. Any failure compensates the exact publication row and
+binding while retaining the shared content-addressed object. Startup recovery
+uses the journal to remove an unadopted publication or finish an already adopted
+one; an empty or partial final binding is never accepted.
 
 This implementation remains synthetic and local. The binding index contains
 protected analysis and provider identifiers and must stay inside provider
@@ -44,7 +57,8 @@ its separate dependency and qualification gates pass.
 - Invalid/stale D05 histories, nonmembers, wrong measurement anchors, and
   shadowed catalog/reader authority fail before cohort binding.
 - Index corruption, unexpected files, root replacement, stale linkage, or
-  current trust failure blocks reads with a sanitized error.
+  current trust failure blocks reads with a sanitized error. Root identity is
+  rechecked immediately before and after final publication.
 - Rollback stops new D06 imports and returns to the prior application release.
   Existing immutable result objects and binding bytes remain retained for
   offline verification; they are not rewritten to make rollback succeed.
