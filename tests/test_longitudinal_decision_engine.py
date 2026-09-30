@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import subprocess
 import sys
 import threading
 from typing import ClassVar
@@ -883,6 +884,51 @@ def test_series_receipt_membership_uses_one_index_and_one_anchor_check(
     assert CountingReceipts.contains_calls == 0
 
 
+@pytest.mark.parametrize("member_count", (3, 1_000))
+def test_series_snapshot_digest_is_computed_once_independent_of_members(
+    monkeypatch: pytest.MonkeyPatch,
+    member_count: int,
+) -> None:
+    anchor = _record("1")
+    member = _record("2")
+    policy = _policy(anchor)
+    with _activated_records(anchor, member) as (records, store):
+        snapshot = store.active_snapshot()
+        active_anchor, active_member = records
+        members = tuple(
+            active_member.model_copy(
+                update={
+                    "measurement": active_member.measurement.model_copy(
+                        update={"result_id": f"result_{index:016x}"}
+                    )
+                }
+            )
+            for index in range(member_count)
+        )
+        snapshot_serializations = 0
+        original = longitudinal_module.canonical_contract_bytes
+
+        def counted(value: object) -> bytes:
+            nonlocal snapshot_serializations
+            if type(value) is type(snapshot):
+                snapshot_serializations += 1
+            return original(value)  # type: ignore[arg-type]
+
+        monkeypatch.setattr(longitudinal_module, "canonical_contract_bytes", counted)
+        series = longitudinal_module._evaluate_longitudinal_series(
+            active_anchor,
+            members,
+            policy,
+            expected_policy_sha256=longitudinal_anchor_policy_sha256(policy),
+            expected_authority_head_sha256=HEAD_SHA256,
+            expected_linkage_trust_snapshot_sha256_by_provider={PROVIDER: TRUST_SHA256},
+            linkage_store=store,
+            linkage_snapshot=snapshot,
+        )
+    assert len(series.decisions) == member_count
+    assert snapshot_serializations == 1
+
+
 def test_series_member_count_boundary_and_storeless_order_fail_closed() -> None:
     anchor = _record("1")
     member = _record("2")
@@ -1346,6 +1392,77 @@ def test_nested_caller_contract_subclass_is_zero_hook_rejected(
                     **arguments,
                 )
     assert CallerMeasurement.calls == 0
+
+
+def test_preimport_nested_subclass_is_zero_hook_rejected_in_fresh_process() -> None:
+    script = r"""
+from typing import ClassVar
+from evidence_inspector.compatibility import VerifiedMeasurementRecord
+
+class PreloadedCallerMeasurement(VerifiedMeasurementRecord):
+    calls: ClassVar[int] = 0
+    def __getattribute__(self, name: str) -> object:
+        type(self).calls += 1
+        return super().__getattribute__(name)
+
+PreloadedCallerMeasurement.__module__ = "evidence_inspector.caller_preloaded"
+
+import evidence_inspector.longitudinal_compatibility as lc
+from evidence_inspector.method_registry import canonical_contract_bytes
+from tests.test_longitudinal_compatibility import (
+    HEAD_SHA256, PROVIDER, TRUST_SHA256, _activated_records, _policy, _record
+)
+
+anchor = _record("1")
+member = _record("2")
+policy = _policy(anchor)
+with _activated_records(anchor, member) as (records, store):
+    active_anchor, active_member = records
+    arguments = {
+        "expected_policy_sha256": lc.longitudinal_anchor_policy_sha256(policy),
+        "expected_authority_head_sha256": HEAD_SHA256,
+        "expected_linkage_trust_snapshot_sha256_by_provider": {PROVIDER: TRUST_SHA256},
+        "linkage_store": store,
+    }
+    genuine = lc.decide_longitudinal_member(
+        active_anchor, active_member, policy, **arguments
+    )
+    forged = PreloadedCallerMeasurement.model_validate_json(
+        canonical_contract_bytes(active_anchor.measurement)
+    )
+    poisoned = active_anchor.model_copy()
+    object.__setattr__(poisoned, "measurement", forged)
+    PreloadedCallerMeasurement.calls = 0
+    member_result = lc.decide_longitudinal_member(
+        poisoned, active_member, policy, **arguments
+    )
+    series_result = lc.decide_longitudinal_series(
+        poisoned, (active_member,), policy, **arguments
+    )
+    replay_failed = False
+    try:
+        lc.replay_longitudinal_member_decision(
+            genuine, poisoned, active_member, policy, **arguments
+        )
+    except lc.LongitudinalDecisionReplayError:
+        replay_failed = True
+
+assert PreloadedCallerMeasurement not in lc._TRUSTED_CONTRACT_TYPES
+assert PreloadedCallerMeasurement.calls == 0
+assert member_result.outcome == lc.LongitudinalOutcome.UNKNOWN
+assert not member_result.delta_allowed
+assert series_result.decisions[0].outcome == lc.LongitudinalOutcome.UNKNOWN
+assert not series_result.decisions[0].delta_allowed
+assert replay_failed
+"""
+    completed = subprocess.run(
+        [sys.executable, "-c", script],
+        check=False,
+        capture_output=True,
+        text=True,
+        timeout=30,
+    )
+    assert completed.returncode == 0, completed.stderr
 
 
 @pytest.mark.parametrize("entrypoint", ("member", "series"))

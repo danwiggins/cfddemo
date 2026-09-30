@@ -32,23 +32,52 @@ from pydantic_core import PydanticSerializationError
 from evidence_inspector.compatibility import (
     BundleId,
     CompatibilityContract,
+    CompatibilityPolicyReference,
+    ExecutionState,
+    InformationState,
+    MeasurementCompatibilityKey,
     ResultId,
+    ResultSchemaReference,
+    TrustState,
     VerifiedMeasurementRecord,
     compatibility_key_sha256,
 )
 from evidence_inspector.method_registry import (
+    AssetReference,
+    CurrentMethodCapability,
+    DisplayRole,
+    MethodDefinition,
+    MethodFamily,
     MethodReference,
+    QualificationState,
     QuantityId,
     RegistryContract,
     Sha256,
+    ToolReference,
     UnitId,
     Version,
     canonical_contract_bytes,
 )
 from evidence_inspector.provider_linkage import (
+    ApprovalPurpose,
     AuthorizedLinkageRevision,
+    BiologicalLineage,
+    IssuerStatus,
+    LinkageAuthorityReason,
+    LinkageAuthorizationDecision,
+    LinkageOperation,
+    LinkageReasonCode,
     LinkageRevision,
+    OptionalLineageState,
+    OptionalOpaqueToken,
+    ProviderApprovalPayload,
+    ProviderIssuerTrust,
     ProviderNamespace,
+    ProviderRole,
+    ProviderTrustSnapshot,
+    SignedProviderApproval,
+    TechnicalLineage,
+    UnitOfAnalysis,
     linkage_revision_sha256,
     provider_trust_snapshot_sha256,
 )
@@ -1115,20 +1144,63 @@ def _exact_contract_bytes(
     ).encode("utf-8")
 
 
-def _exact_subclass_closure(root: type[object]) -> frozenset[type[object]]:
-    captured: set[type[object]] = set()
-    pending = [root]
-    while pending:
-        current = pending.pop()
-        for child in current.__subclasses__():
-            if child not in captured:
-                captured.add(child)
-                pending.append(child)
-    return frozenset(captured)
-
-
-_TRUSTED_CONTRACT_TYPES = _exact_subclass_closure(RegistryContract)
-_TRUSTED_ENUM_TYPES = _exact_subclass_closure(StrEnum)
+_TRUSTED_CONTRACT_TYPES = frozenset(
+    (
+        AssetReference,
+        AuthorizedLinkageRevision,
+        BiologicalLineage,
+        CommittedLinkageReceipt,
+        ComparisonDimensionValue,
+        CompatibilityPolicyReference,
+        CurrentMethodCapability,
+        DimensionAllowance,
+        DimensionAnchorRule,
+        DimensionDecisionExplanation,
+        LinkageAuthorizationDecision,
+        LinkageRevision,
+        LongitudinalAnchorPolicy,
+        LongitudinalComparisonKey,
+        LongitudinalMemberDecision,
+        LongitudinalRecord,
+        LongitudinalSeriesDecision,
+        MeasurementCompatibilityKey,
+        MethodDefinition,
+        MethodReference,
+        OptionalOpaqueToken,
+        ProviderApprovalPayload,
+        ProviderIssuerTrust,
+        ProviderTrustSnapshot,
+        ResultSchemaReference,
+        SignedProviderApproval,
+        TechnicalLineage,
+        ToolReference,
+        VerifiedMeasurementRecord,
+    )
+)
+_TRUSTED_ENUM_TYPES = frozenset(
+    (
+        ApprovalPurpose,
+        ComparisonDimension,
+        DimensionDecisionDisposition,
+        DimensionValueState,
+        DisplayRole,
+        ExecutionState,
+        InformationState,
+        IssuerStatus,
+        LinkageAuthorityReason,
+        LinkageOperation,
+        LinkageReasonCode,
+        LongitudinalNextAction,
+        LongitudinalOutcome,
+        LongitudinalReason,
+        MethodFamily,
+        OptionalLineageState,
+        ProviderRole,
+        QualificationState,
+        TrustState,
+        UnitOfAnalysis,
+    )
+)
 
 
 def _contract_graph_is_trusted(root: object) -> bool:
@@ -1694,6 +1766,7 @@ def _evaluate_longitudinal_member(
     expected_linkage_trust_snapshot_sha256_by_provider: dict[str, str],
     linkage_store: ProviderLinkageStore | None,
     linkage_snapshot: ActiveLinkageSnapshot | None,
+    linkage_snapshot_sha256: str | None = None,
     linkage_receipt_index: frozenset[bytes] | None = None,
     anchor_linkage_invalid: bool | None = None,
 ) -> LongitudinalMemberDecision:
@@ -1907,11 +1980,7 @@ def _evaluate_longitudinal_member(
         linkage_snapshot_state_head_sha256=(
             linkage_snapshot.state_head_sha256 if linkage_snapshot is not None else None
         ),
-        linkage_snapshot_sha256=(
-            hashlib.sha256(canonical_contract_bytes(linkage_snapshot)).hexdigest()
-            if linkage_snapshot is not None
-            else None
-        ),
+        linkage_snapshot_sha256=linkage_snapshot_sha256,
         authority_head_sha256=expected_authority_head_sha256,
         authority_revision=anchor.measurement.current_capability.authority_revision,
         anchor_key_sha256=anchor_key_sha256,
@@ -1993,6 +2062,7 @@ def _member_decision_matches_inputs(
     member: LongitudinalRecord,
     policy: LongitudinalAnchorPolicy,
     linkage_snapshot: ActiveLinkageSnapshot | None,
+    linkage_snapshot_sha256: str | None,
 ) -> bool:
     return (
         type(decision) is LongitudinalMemberDecision
@@ -2030,12 +2100,7 @@ def _member_decision_matches_inputs(
         == (
             linkage_snapshot.state_head_sha256 if linkage_snapshot is not None else None
         )
-        and decision.linkage_snapshot_sha256
-        == (
-            hashlib.sha256(canonical_contract_bytes(linkage_snapshot)).hexdigest()
-            if linkage_snapshot is not None
-            else None
-        )
+        and decision.linkage_snapshot_sha256 == linkage_snapshot_sha256
         and decision.authority_head_sha256
         == anchor.measurement.current_capability.authority_head_sha256
         and decision.authority_revision
@@ -2071,6 +2136,11 @@ def _decide_longitudinal_member(
     if not _runtime_integrity_is_valid():  # type: ignore[operator]
         return _invalid_input_member_decision()
     try:
+        snapshot_sha256 = (
+            hashlib.sha256(canonical_contract_bytes(validated[7])).hexdigest()
+            if validated[7] is not None
+            else None
+        )
         decision = _member_evaluator(  # type: ignore[operator]
             validated[0],
             validated[1],
@@ -2080,11 +2150,17 @@ def _decide_longitudinal_member(
             expected_linkage_trust_snapshot_sha256_by_provider=validated[5],
             linkage_store=validated[6],
             linkage_snapshot=validated[7],
+            linkage_snapshot_sha256=snapshot_sha256,
         )
         if (
             not _runtime_integrity_is_valid()  # type: ignore[operator]
             or not _member_decision_matches_inputs(
-                decision, validated[0], validated[1], validated[2], validated[7]
+                decision,
+                validated[0],
+                validated[1],
+                validated[2],
+                validated[7],
+                snapshot_sha256,
             )
         ):
             return _invalid_input_member_decision()
@@ -2166,6 +2242,11 @@ def _evaluate_longitudinal_series(
         if linkage_snapshot is not None
         else frozenset()
     )
+    snapshot_sha256 = (
+        hashlib.sha256(canonical_contract_bytes(linkage_snapshot)).hexdigest()
+        if linkage_snapshot is not None
+        else None
+    )
     anchor_linkage_invalid = _linkage_authority_invalid(
         anchor,
         expected_linkage_trust_snapshot_sha256_by_provider=(
@@ -2186,6 +2267,7 @@ def _evaluate_longitudinal_series(
             ),
             linkage_store=linkage_store,
             linkage_snapshot=linkage_snapshot,
+            linkage_snapshot_sha256=snapshot_sha256,
             linkage_receipt_index=receipt_index,
             anchor_linkage_invalid=anchor_linkage_invalid,
         )
@@ -2193,16 +2275,16 @@ def _evaluate_longitudinal_series(
     )
     if any(
         not _member_decision_matches_inputs(
-            decision, anchor, member, policy, linkage_snapshot
+            decision,
+            anchor,
+            member,
+            policy,
+            linkage_snapshot,
+            snapshot_sha256,
         )
         for decision, member in zip(decisions, members, strict=True)
     ):
         return _invalid_input_series_decision()
-    snapshot_sha256 = (
-        hashlib.sha256(canonical_contract_bytes(linkage_snapshot)).hexdigest()
-        if linkage_snapshot is not None
-        else None
-    )
     relevant_receipts_by_sha256 = {
         committed_linkage_receipt_sha256(receipt): receipt
         for record in (anchor, *members)
