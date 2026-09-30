@@ -5,11 +5,12 @@ from __future__ import annotations
 import base64
 import os
 import sqlite3
+import time
 from concurrent.futures import ThreadPoolExecutor
 from concurrent.futures import TimeoutError as FutureTimeout
 from datetime import datetime, timedelta, tzinfo
 from pathlib import Path
-from threading import Event
+from threading import Event, get_ident
 
 import pytest
 from pydantic import ValidationError
@@ -1139,8 +1140,12 @@ def test_paused_sqlite_connect_never_redirects_unrelated_thread_cwd_or_io(
     host = tmp_path / "unrelated-host"
     host.mkdir(mode=0o700)
     original_cwd = Path.cwd()
+    caller_thread = get_ident()
+    opening_thread: list[int] = []
+    operation_thread: list[int] = []
 
     def paused_connect(database, *args, **kwargs):
+        opening_thread.append(get_ident())
         entered.set()
         if not release.wait(timeout=3):
             raise AssertionError("paused connect was not released")
@@ -1148,9 +1153,14 @@ def test_paused_sqlite_connect_never_redirects_unrelated_thread_cwd_or_io(
 
     monkeypatch.setattr(supersession_module.sqlite3, "connect", paused_connect)
     os.chdir(host)
+
+    def run_snapshot():
+        operation_thread.append(get_ident())
+        return ledger.active_snapshot()
+
     try:
         with ThreadPoolExecutor(max_workers=1) as pool:
-            future = pool.submit(ledger.active_snapshot)
+            future = pool.submit(run_snapshot)
             assert entered.wait(timeout=2)
             assert Path.cwd() == host
             Path("unrelated-relative-output.txt").write_text("outside-ledger")
@@ -1160,10 +1170,103 @@ def test_paused_sqlite_connect_never_redirects_unrelated_thread_cwd_or_io(
             assert not (ledger.root / "unrelated-relative-output.txt").exists()
             release.set()
             future.result(timeout=3)
+            assert opening_thread and opening_thread[0] != caller_thread
+            assert operation_thread and opening_thread[0] != operation_thread[0]
     finally:
         release.set()
         os.chdir(original_cwd)
         monkeypatch.setattr(supersession_module.sqlite3, "connect", original_connect)
+
+
+def test_sqlite_worker_preserves_callers_existing_thread_directory_override(
+    durable, tmp_path: Path
+) -> None:
+    _, ledger, _, first, _ = durable
+    ledger.commit_record(first)
+    caller_root = tmp_path / "caller-thread-root"
+    caller_root.mkdir(mode=0o700)
+    descriptor = os.open(
+        caller_root,
+        os.O_RDONLY | getattr(os, "O_DIRECTORY", 0) | getattr(os, "O_CLOEXEC", 0),
+    )
+    function = supersession_module._PINNED_PTHREAD_FCHDIR
+    assert function is not None
+    process_cwd = Path.cwd()
+    try:
+        assert function(descriptor) == 0
+        assert Path.cwd() == caller_root
+        snapshot = ledger.active_snapshot()
+        assert snapshot.records == (first,)
+        assert Path.cwd() == caller_root
+        Path("caller-relative-output.txt").write_text("caller-owned")
+        assert (caller_root / "caller-relative-output.txt").read_text() == (
+            "caller-owned"
+        )
+        assert not (ledger.root / "caller-relative-output.txt").exists()
+    finally:
+        assert function(-1) == 0
+        os.close(descriptor)
+    assert Path.cwd() == process_cwd
+
+
+def test_timed_out_sqlite_worker_closes_late_connection_and_exits(
+    durable, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _, ledger, _, _, _ = durable
+    original_connect = sqlite3.connect
+    release = Event()
+    closed = Event()
+
+    class TrackedConnection:
+        def __init__(self, connection):
+            self.connection = connection
+
+        def execute(self, *args, **kwargs):
+            return self.connection.execute(*args, **kwargs)
+
+        def close(self):
+            self.connection.close()
+            closed.set()
+
+    def delayed_connect(database, *args, **kwargs):
+        if not release.wait(timeout=2):
+            raise AssertionError("delayed connection was not released")
+        return TrackedConnection(original_connect(database, *args, **kwargs))
+
+    monkeypatch.setattr(supersession_module.sqlite3, "connect", delayed_connect)
+    monkeypatch.setattr(supersession_module, "_SQLITE_WORKER_TIMEOUT_SECONDS", 0.01)
+    with pytest.raises(RecordSupersessionUnsafe, match="timed out"):
+        supersession_module._open_anchored_sqlite_connection(ledger._root_fd)
+    release.set()
+    assert closed.wait(timeout=2)
+    for _ in range(100):
+        if not any(
+            item.name == "record-ledger-sqlite-open"
+            for item in supersession_module.threading.enumerate()
+        ):
+            break
+        time.sleep(0.01)
+    assert not any(
+        item.name == "record-ledger-sqlite-open"
+        for item in supersession_module.threading.enumerate()
+    )
+
+
+def test_sqlite_worker_cleans_up_after_unexpected_base_exception(
+    durable, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _, ledger, _, _, _ = durable
+
+    def fail_connect(*args, **kwargs):
+        raise KeyboardInterrupt
+
+    monkeypatch.setattr(supersession_module.sqlite3, "connect", fail_connect)
+    with pytest.raises(RecordSupersessionUnsafe, match="initialization failed"):
+        supersession_module._open_anchored_sqlite_connection(ledger._root_fd)
+    assert not any(
+        item.name == "record-ledger-sqlite-open"
+        for item in supersession_module.threading.enumerate()
+    )
 
 
 def test_database_path_substitution_during_connect_fails_closed(

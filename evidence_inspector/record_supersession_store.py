@@ -23,6 +23,7 @@ from dataclasses import dataclass
 from datetime import UTC, datetime
 from enum import StrEnum
 from pathlib import Path
+from queue import Empty, Full, Queue
 from typing import Annotated, Literal
 
 from cryptography.exceptions import InvalidSignature
@@ -96,6 +97,7 @@ _PYDANTIC_UTC = TzInfo(0)
 _PLATFORM_PATH_TYPE = type(Path())
 _MAX_STORAGE_PATH_CHARS = 4096
 _MAX_STORAGE_PATH_PARTS = 256
+_SQLITE_WORKER_TIMEOUT_SECONDS = 10.0
 
 
 def _load_pthread_fchdir():
@@ -158,20 +160,73 @@ def _captured_storage_root(root: str | Path) -> Path:
     return Path(*parts).absolute()
 
 
-@contextmanager
-def _thread_anchored_directory(descriptor: int) -> Iterator[None]:
+def _open_anchored_sqlite_connection(descriptor: int) -> sqlite3.Connection:
     function = _PINNED_PTHREAD_FCHDIR
-    if function is None or function(descriptor) != 0:
+    if function is None:
         raise RecordSupersessionUnsafe(
             "thread-local record ledger anchoring is unavailable"
         )
-    try:
-        yield
-    finally:
-        if function(-1) != 0:
-            raise RecordSupersessionUnsafe(
-                "thread-local record ledger anchoring could not be cleared"
+    result: Queue[sqlite3.Connection | None] = Queue(maxsize=1)
+    abandoned = threading.Event()
+    publication_lock = threading.Lock()
+
+    def open_on_fresh_thread() -> None:
+        connection: sqlite3.Connection | None = None
+        try:
+            if function(descriptor) != 0:
+                raise OSError("thread-local directory anchor failed")
+            connection = sqlite3.connect(
+                "record-supersession.sqlite3",
+                timeout=5.0,
+                isolation_level=None,
+                check_same_thread=False,
             )
+            connection.execute("PRAGMA busy_timeout=5000")
+            connection.execute("PRAGMA foreign_keys=ON")
+            connection.execute("PRAGMA synchronous=FULL")
+            connection.execute("PRAGMA journal_mode=WAL")
+            connection.execute("SELECT COUNT(*) FROM sqlite_master").fetchone()
+        except BaseException:  # noqa: BLE001 - worker must always publish or clean up
+            if connection is not None:
+                connection.close()
+            connection = None
+        with publication_lock:
+            if abandoned.is_set():
+                if connection is not None:
+                    connection.close()
+                return
+            try:
+                result.put_nowait(connection)
+            except Full:
+                if connection is not None:
+                    connection.close()
+
+    worker = threading.Thread(
+        target=open_on_fresh_thread,
+        name="record-ledger-sqlite-open",
+        daemon=True,
+    )
+    worker.start()
+    try:
+        connection = result.get(timeout=_SQLITE_WORKER_TIMEOUT_SECONDS)
+    except Empty:
+        with publication_lock:
+            abandoned.set()
+            try:
+                late_connection = result.get_nowait()
+            except Empty:
+                late_connection = None
+            if late_connection is not None:
+                late_connection.close()
+        raise RecordSupersessionUnsafe(
+            "record ledger connection initialization timed out"
+        ) from None
+    worker.join(timeout=1.0)
+    if worker.is_alive() or connection is None:
+        if connection is not None:
+            connection.close()
+        raise RecordSupersessionUnsafe("record ledger connection initialization failed")
+    return connection
 
 
 class SupersessionStatement(RegistryContract):
@@ -1101,17 +1156,7 @@ class RecordSupersessionStore:
         try:
             self._validate_storage()
             before = _open_descriptor_identities()
-            with _thread_anchored_directory(self._root_fd):
-                connection = sqlite3.connect(
-                    "record-supersession.sqlite3",
-                    timeout=5.0,
-                    isolation_level=None,
-                )
-                connection.execute("PRAGMA busy_timeout=5000")
-                connection.execute("PRAGMA foreign_keys=ON")
-                connection.execute("PRAGMA synchronous=FULL")
-                connection.execute("PRAGMA journal_mode=WAL")
-                connection.execute("SELECT COUNT(*) FROM sqlite_master").fetchone()
+            connection = _open_anchored_sqlite_connection(self._root_fd)
             observed = os.stat(
                 "record-supersession.sqlite3",
                 dir_fd=self._root_fd,
