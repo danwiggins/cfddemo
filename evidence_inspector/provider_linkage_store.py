@@ -1524,6 +1524,24 @@ class ProviderLinkageStore:
             raise ProviderLinkageStoreUnsafe("linkage authority time is absent")
         return _authority_time_from_text(row[0])
 
+    def activation_receipt_history_in_fence(
+        self,
+    ) -> tuple[CommittedLinkageReceipt, ...]:
+        """Return immutable activation receipts for validated durable history."""
+
+        connection = self._connection
+        if connection is None or not connection.in_transaction:
+            raise ProviderLinkageStoreUnsafe("linkage authority fence is absent")
+        records = _PINNED_VALIDATE_COMMITTED_STATE(self, connection)
+        return tuple(
+            _PINNED_RECEIPT(
+                connection,
+                record.revision,
+                hashlib.sha256(_record_bytes(record)).hexdigest(),
+            )
+            for record in records
+        )
+
     def verify_current_receipt(self, receipt: CommittedLinkageReceipt) -> None:
         """Require an exact receipt for the current active store head."""
 
@@ -1788,6 +1806,9 @@ _PINNED_ACTIVE_SNAPSHOT_IN_TRANSACTION = (
 _PINNED_FENCED_ACTIVE_SNAPSHOT = ProviderLinkageStore.fenced_active_snapshot
 _PINNED_AUTHORIZED_HISTORY_IN_FENCE = ProviderLinkageStore.authorized_history_in_fence
 _PINNED_AUTHORITY_TIME_IN_FENCE = ProviderLinkageStore.authority_time_in_fence
+_PINNED_ACTIVATION_RECEIPT_HISTORY_IN_FENCE = (
+    ProviderLinkageStore.activation_receipt_history_in_fence
+)
 _PINNED_ACTIVE_SNAPSHOT = ProviderLinkageStore.active_snapshot
 _PROCESS_INTEGRITY_FUNCTIONS = (
     _authority_time_from_text,
@@ -1805,6 +1826,7 @@ _PROCESS_INTEGRITY_FUNCTIONS = (
     ProviderLinkageStore.fenced_active_snapshot,
     ProviderLinkageStore.authorized_history_in_fence,
     ProviderLinkageStore.authority_time_in_fence,
+    ProviderLinkageStore.activation_receipt_history_in_fence,
     ProviderLinkageStore.active_snapshot,
     ProviderLinkageStore.authority_read_fence,
     ProviderLinkageStore.authority_read_fence.__wrapped__,
@@ -1902,6 +1924,7 @@ def provider_linkage_store_process_integrity_is_valid() -> bool:
                 ProviderLinkageStore.fenced_active_snapshot,
                 ProviderLinkageStore.authorized_history_in_fence,
                 ProviderLinkageStore.authority_time_in_fence,
+                ProviderLinkageStore.activation_receipt_history_in_fence,
                 ProviderLinkageStore.active_snapshot,
                 ProviderLinkageStore.authority_read_fence,
                 ProviderLinkageStore.authority_read_fence.__wrapped__,

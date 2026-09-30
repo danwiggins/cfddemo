@@ -248,6 +248,58 @@ def _resign(approval, *, issued_at, expires_at):
     )
 
 
+def _correct_first_linkage(linkage, first):
+    current = next(
+        item
+        for item in linkage.active_snapshot().revisions
+        if item.linkage_id == first.linkage_id
+    )
+    correction = _revision(
+        linkage_id=current.linkage_id,
+        revision=2,
+        operation=LinkageOperation.CORRECT,
+        reason=LinkageReasonCode.TECHNICAL_LINEAGE_CORRECTION,
+        previous=current,
+        subject=current.biological.subject_token,
+        collection=current.biological.collection_token,
+        specimen=current.biological.specimen_token,
+        analysis=current.technical.analysis_record_id,
+        measurement=_token("measurement", "d"),
+    )
+    authorized, _ = _consume(
+        correction,
+        _correction_approvals(correction),
+        previous=current,
+    )
+    linkage.commit_authorized_revision(authorized)
+
+
+def _tombstone_first_linkage(linkage, first):
+    current = next(
+        item
+        for item in linkage.active_snapshot().revisions
+        if item.linkage_id == first.linkage_id
+    )
+    tombstone = _revision(
+        linkage_id=current.linkage_id,
+        revision=2,
+        operation=LinkageOperation.TOMBSTONE,
+        reason=LinkageReasonCode.RETENTION_TOMBSTONE,
+        previous=current,
+        subject=current.biological.subject_token,
+        collection=current.biological.collection_token,
+        specimen=current.biological.specimen_token,
+        analysis=current.technical.analysis_record_id,
+        measurement=current.technical.measurement_id,
+    )
+    authorized, _ = _consume(
+        tombstone,
+        _correction_approvals(tombstone, purpose=ApprovalPurpose.TOMBSTONE_LINKAGE),
+        previous=current,
+    )
+    linkage.commit_authorized_revision(authorized)
+
+
 def test_exact_retry_active_selection_and_canonical_replay(durable) -> None:
     _, ledger, _, first, second = durable
     first_receipt = ledger.commit_record(first)
@@ -704,3 +756,53 @@ def test_database_path_substitution_during_connect_fails_closed(
                 path.unlink()
         if backup.exists():
             os.replace(backup, ledger.database)
+
+
+def test_same_key_correction_preserves_history_and_stales_comparison(durable) -> None:
+    linkage, ledger, _, first, second = durable
+    ledger.commit_record(first)
+    ledger.commit_record(second)
+    comparison = _comparison(first, second, ledger.active_snapshot())
+    ledger.register_comparison(comparison)
+    _correct_first_linkage(linkage, first)
+    snapshot = ledger.active_snapshot()
+    assert first not in snapshot.records
+    status = ledger.comparison_status(comparison.comparison_id)
+    assert status.state == ComparisonState.STALE
+    assert InvalidationReason.LINKAGE_CHANGED_OR_TOMBSTONED in status.reasons
+
+
+def test_resealed_historical_receipt_tamper_fails_after_correction(durable) -> None:
+    linkage, ledger, _, first, _ = durable
+    ledger.commit_record(first)
+    _correct_first_linkage(linkage, first)
+    forged = first.model_copy(update={"activation_receipt_sha256": "f" * 64})
+    with sqlite3.connect(ledger.database) as connection:
+        connection.execute(
+            "UPDATE records SET record_sha256=?, record_json=? WHERE record_id=?",
+            (record_sha256(forged), canonical_contract_bytes(forged), first.record_id),
+        )
+        connection.execute(
+            "UPDATE metadata SET value=? WHERE key='state_head_sha256'",
+            (RecordSupersessionStore._state_head(connection),),
+        )
+    with pytest.raises(RecordSupersessionUnsafe, match="authority binding"):
+        ledger.active_snapshot()
+
+
+def test_resealed_historical_receipt_tamper_fails_after_tombstone(durable) -> None:
+    linkage, ledger, _, first, _ = durable
+    ledger.commit_record(first)
+    _tombstone_first_linkage(linkage, first)
+    forged = first.model_copy(update={"activation_receipt_sha256": "f" * 64})
+    with sqlite3.connect(ledger.database) as connection:
+        connection.execute(
+            "UPDATE records SET record_sha256=?, record_json=? WHERE record_id=?",
+            (record_sha256(forged), canonical_contract_bytes(forged), first.record_id),
+        )
+        connection.execute(
+            "UPDATE metadata SET value=? WHERE key='state_head_sha256'",
+            (RecordSupersessionStore._state_head(connection),),
+        )
+    with pytest.raises(RecordSupersessionUnsafe, match="authority binding"):
+        ledger.active_snapshot()
