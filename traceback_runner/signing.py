@@ -7,7 +7,7 @@ import hashlib
 import json
 from dataclasses import dataclass
 from enum import StrEnum
-from typing import Literal
+from typing import Annotated, Literal
 
 from cryptography.exceptions import InvalidSignature
 from cryptography.hazmat.primitives import serialization
@@ -16,7 +16,6 @@ from cryptography.hazmat.primitives.asymmetric.ed25519 import (
     Ed25519PublicKey,
 )
 from pydantic import BaseModel, ConfigDict, StringConstraints
-from typing_extensions import Annotated
 
 
 class SigningError(ValueError):
@@ -50,6 +49,7 @@ class KeyPurpose(StrEnum):
 
 class TrustNamespace(StrEnum):
     DEVELOPMENT_SYNTHETIC = "development-synthetic"
+    EXTERNAL_RELEASE = "external-release"
 
 
 KeyId = Annotated[
@@ -117,7 +117,9 @@ class DevelopmentSigningKey:
     def __post_init__(self) -> None:
         expected = _development_key_id(self.public_key_bytes(), self.purpose)
         if self.key_id != expected:
-            raise SigningError("development key identifier does not match its public key")
+            raise SigningError(
+                "development key identifier does not match its public key"
+            )
 
     def public_key_bytes(self) -> bytes:
         return self.private_key.public_key().public_bytes(
@@ -137,7 +139,9 @@ class TrustedKey:
     def __post_init__(self) -> None:
         if len(self.public_key_bytes) != 32:
             raise ValueError("Ed25519 public keys must be exactly 32 bytes")
-        expected = _development_key_id(self.public_key_bytes, self.purpose)
+        expected = trusted_key_id(
+            self.public_key_bytes, self.purpose, namespace=self.namespace
+        )
         if self.key_id != expected:
             raise SigningError("trusted key identifier does not match its public key")
 
@@ -186,8 +190,24 @@ class TrustStore:
 
 
 def _development_key_id(public_key_bytes: bytes, purpose: KeyPurpose) -> str:
+    return trusted_key_id(
+        public_key_bytes,
+        purpose,
+        namespace=TrustNamespace.DEVELOPMENT_SYNTHETIC,
+    )
+
+
+def trusted_key_id(
+    public_key_bytes: bytes,
+    purpose: KeyPurpose,
+    *,
+    namespace: TrustNamespace,
+) -> str:
+    """Derive a namespace-bound public key identifier."""
+
     fingerprint = hashlib.sha256(public_key_bytes).hexdigest()[:24]
-    return f"dev-{purpose.value}-{fingerprint}"
+    prefix = "dev" if namespace == TrustNamespace.DEVELOPMENT_SYNTHETIC else "external"
+    return f"{prefix}-{purpose.value}-{fingerprint}"
 
 
 def generate_development_keypair(purpose: KeyPurpose) -> DevelopmentSigningKey:
@@ -353,5 +373,6 @@ __all__ = [
     "generate_development_keypair",
     "load_development_trust",
     "sign_bytes",
+    "trusted_key_id",
     "verify_signature",
 ]
