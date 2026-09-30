@@ -438,9 +438,7 @@ def _next_action_for_outcome(
     outcome: LongitudinalOutcome,
 ) -> LongitudinalNextAction:
     return {
-        LongitudinalOutcome.EQUIVALENT: (
-            LongitudinalNextAction.USE_DIRECT_COMPARISON
-        ),
+        LongitudinalOutcome.EQUIVALENT: (LongitudinalNextAction.USE_DIRECT_COMPARISON),
         LongitudinalOutcome.QUALIFIED_COMPATIBLE: (
             LongitudinalNextAction.USE_QUALIFIED_COMPARISON
         ),
@@ -453,9 +451,7 @@ def _next_action_for_outcome(
         LongitudinalOutcome.INCOMPATIBLE: (
             LongitudinalNextAction.START_SEPARATE_SERIES
         ),
-        LongitudinalOutcome.UNKNOWN: (
-            LongitudinalNextAction.RESOLVE_UNKNOWN_INPUTS
-        ),
+        LongitudinalOutcome.UNKNOWN: (LongitudinalNextAction.RESOLVE_UNKNOWN_INPUTS),
     }[outcome]
 
 
@@ -487,9 +483,7 @@ class DimensionDecisionExplanation(CompatibilityContract):
         evidence_complete = (
             self.evidence_ref is not None and self.evidence_sha256 is not None
         )
-        evidence_partial = (self.evidence_ref is None) != (
-            self.evidence_sha256 is None
-        )
+        evidence_partial = (self.evidence_ref is None) != (self.evidence_sha256 is None)
         if unknown != (self.disposition == DimensionDecisionDisposition.UNKNOWN):
             raise ValueError("unknown dimension must have unknown disposition")
         if not unknown and exact != (
@@ -603,12 +597,8 @@ class LongitudinalMemberDecision(CompatibilityContract):
     unknown_dimensions: tuple[ComparisonDimension, ...] = Field(
         max_length=len(ALL_COMPARISON_DIMENSIONS)
     )
-    evidence_refs: tuple[EvidenceRef, ...] = Field(
-        max_length=MAX_DECISION_EVIDENCE
-    )
-    bridge_refs: tuple[BridgeRef, ...] = Field(
-        max_length=MAX_DECISION_EVIDENCE
-    )
+    evidence_refs: tuple[EvidenceRef, ...] = Field(max_length=MAX_DECISION_EVIDENCE)
+    bridge_refs: tuple[BridgeRef, ...] = Field(max_length=MAX_DECISION_EVIDENCE)
     next_action: LongitudinalNextAction
     bridge_execution_state: Literal["not_executed"]
     delta_allowed: bool
@@ -1419,9 +1409,7 @@ def decide_longitudinal_member(
                     member_state=member_value.state,
                     anchor_value_sha256=anchor_digest,
                     member_value_sha256=member_digest,
-                    disposition=(
-                        DimensionDecisionDisposition.DISALLOWED_MISMATCH
-                    ),
+                    disposition=(DimensionDecisionDisposition.DISALLOWED_MISMATCH),
                 )
             )
             continue
