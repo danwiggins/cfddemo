@@ -496,16 +496,25 @@ def _correction_delta_matches_reason(
     )
     if current.operation == LinkageOperation.TOMBSTONE:
         return not any(changes)
+    if current.reason_code == LinkageReasonCode.WRONG_SUBJECT:
+        return (
+            subject_changed
+            and collection_changed
+            and specimen_changed
+            and not technical_changed
+            and not source_changed
+            and not unit_changed
+        )
+    if current.reason_code == LinkageReasonCode.WRONG_COLLECTION:
+        return (
+            not subject_changed
+            and collection_changed
+            and specimen_changed
+            and not technical_changed
+            and not source_changed
+            and not unit_changed
+        )
     expected = {
-        LinkageReasonCode.WRONG_SUBJECT: (True, False, False, False, False, False),
-        LinkageReasonCode.WRONG_COLLECTION: (
-            False,
-            True,
-            False,
-            False,
-            False,
-            False,
-        ),
         LinkageReasonCode.WRONG_SPECIMEN: (
             False,
             False,
@@ -677,7 +686,7 @@ def authorize_linkage_revision(
         trust_snapshot_sha256=trust_sha256,
         evaluated_at=evaluated_at,
         linkage_authorized=True,
-        comparison_linkage_eligible=revision.operation != LinkageOperation.TOMBSTONE,
+        comparison_linkage_eligible=False,
         reason_codes=(LinkageAuthorityReason.AUTHORIZED,),
         approval_ids=tuple(sorted(approval_ids)),
         principal_ids=tuple(sorted(principals)),
@@ -694,12 +703,32 @@ def authorize_and_consume_linkage_revision(
     evaluated_at: datetime,
     consumption_ledger: ProviderApprovalConsumptionLedger,
 ) -> tuple[AuthorizedLinkageRevision, ProviderApprovalConsumptionLedger]:
-    """Authorize and return an append-only replay-fence update.
+    """Refuse activation until the protected transactional store is present."""
 
-    A durable caller must commit the authorized record and returned consumption
-    ledger atomically. Until D04 supplies that transaction, this helper and the
-    pure projection remain contract evidence rather than an enabled capability.
-    """
+    del (
+        revision,
+        previous_revision,
+        approvals,
+        trust_snapshot,
+        expected_trust_snapshot_sha256,
+        evaluated_at,
+        consumption_ledger,
+    )
+    raise RuntimeError(
+        "durable atomic linkage persistence is required before approval consumption"
+    )
+
+
+def prepare_authorized_linkage_revision(
+    revision: LinkageRevision,
+    *,
+    previous_revision: LinkageRevision | None,
+    approvals: tuple[SignedProviderApproval, ...],
+    trust_snapshot: ProviderTrustSnapshot,
+    expected_trust_snapshot_sha256: str,
+    evaluated_at: datetime,
+) -> AuthorizedLinkageRevision:
+    """Build proof bytes for a future store transaction without activating them."""
 
     decision = authorize_linkage_revision(
         revision,
@@ -711,94 +740,13 @@ def authorize_and_consume_linkage_revision(
     )
     if not decision.linkage_authorized:
         raise ValueError("linkage authority verification failed")
-    record = AuthorizedLinkageRevision(
+    return AuthorizedLinkageRevision(
         revision=revision,
         previous_revision=previous_revision,
         trust_snapshot=trust_snapshot,
         approvals=approvals,
         authorization=decision,
     )
-    trust_sha256 = provider_trust_snapshot_sha256(trust_snapshot)
-    existing_by_approval = {
-        (item.provider_namespace, item.approval_id): item
-        for item in consumption_ledger.entries
-    }
-    existing_by_nonce = {
-        (item.provider_namespace, item.nonce): item
-        for item in consumption_ledger.entries
-    }
-    additions: list[ApprovalConsumption] = []
-    for approval in approvals:
-        candidate = ApprovalConsumption(
-            provider_namespace=revision.provider_namespace,
-            approval_id=approval.payload.approval_id,
-            nonce=approval.payload.nonce,
-            proposed_revision_sha256=linkage_revision_sha256(revision),
-            trust_snapshot_sha256=trust_sha256,
-        )
-        known_approval = existing_by_approval.get(
-            (candidate.provider_namespace, candidate.approval_id)
-        )
-        known_nonce = existing_by_nonce.get(
-            (candidate.provider_namespace, candidate.nonce)
-        )
-        if known_approval is not None or known_nonce is not None:
-            if known_approval != candidate or known_nonce != candidate:
-                raise ValueError("approval or nonce was already consumed")
-            continue
-        additions.append(candidate)
-    entries = tuple(
-        sorted(
-            (*consumption_ledger.entries, *additions),
-            key=lambda item: (
-                item.provider_namespace,
-                item.approval_id,
-                item.nonce,
-            ),
-        )
-    )
-    return record, ProviderApprovalConsumptionLedger(entries=entries)
-
-
-def _verify_consumed_authorization(
-    record: AuthorizedLinkageRevision,
-    consumption_ledger: ProviderApprovalConsumptionLedger,
-    expected_trust_snapshot_sha256: str,
-) -> None:
-    trust_sha256 = provider_trust_snapshot_sha256(record.trust_snapshot)
-    if trust_sha256 != expected_trust_snapshot_sha256:
-        raise ValueError("authorized linkage trust snapshot is not independently pinned")
-    replay = authorize_linkage_revision(
-        record.revision,
-        previous_revision=record.previous_revision,
-        approvals=record.approvals,
-        trust_snapshot=record.trust_snapshot,
-        expected_trust_snapshot_sha256=expected_trust_snapshot_sha256,
-        evaluated_at=record.authorization.evaluated_at,
-    )
-    if replay != record.authorization or not replay.linkage_authorized:
-        raise ValueError("authorized linkage proof does not replay")
-    consumptions = {
-        (
-            item.provider_namespace,
-            item.approval_id,
-            item.nonce,
-            item.proposed_revision_sha256,
-            item.trust_snapshot_sha256,
-        )
-        for item in consumption_ledger.entries
-    }
-    revision_sha256 = linkage_revision_sha256(record.revision)
-    for approval in record.approvals:
-        expected = (
-            record.revision.provider_namespace,
-            approval.payload.approval_id,
-            approval.payload.nonce,
-            revision_sha256,
-            trust_sha256,
-        )
-        if expected not in consumptions:
-            raise ValueError("authorized linkage approval was not consumed")
 
 
 def project_active_linkages(
@@ -807,12 +755,25 @@ def project_active_linkages(
     consumption_ledger: ProviderApprovalConsumptionLedger,
     expected_trust_snapshot_sha256_by_provider: Mapping[str, str],
 ) -> tuple[LinkageRevision, ...]:
-    """Project current active revisions while retaining append-only input history."""
+    """Refuse active projection from caller-supplied, non-durable state."""
+
+    del ledger, consumption_ledger, expected_trust_snapshot_sha256_by_provider
+    raise RuntimeError(
+        "durable atomic linkage persistence is required before active projection"
+    )
+
+
+def validate_linkage_history(
+    ledger: Sequence[AuthorizedLinkageRevision],
+    *,
+    expected_trust_snapshot_sha256_by_provider: Mapping[str, str],
+) -> None:
+    """Validate bounded append-only history without asserting active authority."""
 
     if len(ledger) > MAX_REVISIONS:
         raise ValueError("linkage ledger exceeds its revision bound")
     if not ledger:
-        return ()
+        return
     grouped: dict[tuple[str, str], list[LinkageRevision]] = {}
     for record in ledger:
         expected_trust = expected_trust_snapshot_sha256_by_provider.get(
@@ -820,15 +781,22 @@ def project_active_linkages(
         )
         if expected_trust is None:
             raise ValueError("linkage provider trust pin is absent")
-        _verify_consumed_authorization(
-            record,
-            consumption_ledger,
-            expected_trust,
+        trust_sha256 = provider_trust_snapshot_sha256(record.trust_snapshot)
+        if trust_sha256 != expected_trust:
+            raise ValueError("authorized linkage trust snapshot is not independently pinned")
+        replay = authorize_linkage_revision(
+            record.revision,
+            previous_revision=record.previous_revision,
+            approvals=record.approvals,
+            trust_snapshot=record.trust_snapshot,
+            expected_trust_snapshot_sha256=expected_trust,
+            evaluated_at=record.authorization.evaluated_at,
         )
+        if replay != record.authorization or not replay.linkage_authorized:
+            raise ValueError("authorized linkage proof does not replay")
         grouped.setdefault(
             (record.revision.provider_namespace, record.revision.linkage_id), []
         ).append(record.revision)
-    active: list[LinkageRevision] = []
     for revisions in grouped.values():
         ordered = sorted(revisions, key=lambda item: item.revision)
         if ordered[0].revision != 1:
@@ -840,15 +808,21 @@ def project_active_linkages(
                 or current.provider_namespace != previous.provider_namespace
             ):
                 raise ValueError("linkage ledger revision chain is invalid")
-        if ordered[-1].operation != LinkageOperation.TOMBSTONE:
-            active.append(ordered[-1])
-
-    collection_lineage: dict[tuple[str, str], BiologicalLineage] = {}
+    collection_parents: dict[tuple[str, str], str] = {}
     specimen_parents: dict[tuple[str, str], tuple[str, str]] = {}
     aliquot_parents: dict[tuple[str, str], tuple[str, str, str]] = {}
-    analysis_keys: set[tuple[str, str]] = set()
-    measurement_keys: set[tuple[str, str]] = set()
-    for revision in active:
+    analysis_owners: dict[tuple[str, str], tuple[str, int]] = {}
+    measurement_owners: dict[tuple[str, str], tuple[str, int]] = {}
+    ordered_records = sorted(
+        ledger,
+        key=lambda item: (
+            item.revision.provider_namespace,
+            item.revision.linkage_id,
+            item.revision.revision,
+        ),
+    )
+    for record in ordered_records:
+        revision = record.revision
         collection_key = (
             revision.provider_namespace,
             revision.biological.collection_token,
@@ -861,13 +835,11 @@ def project_active_linkages(
             revision.provider_namespace,
             revision.technical.measurement_id,
         )
-        known_lineage = collection_lineage.setdefault(
-            collection_key, revision.biological
+        known_subject = collection_parents.setdefault(
+            collection_key, revision.biological.subject_token
         )
-        if known_lineage != revision.biological:
-            raise ValueError(
-                "active projection contains conflicting collection lineage"
-            )
+        if known_subject != revision.biological.subject_token:
+            raise ValueError("linkage history contains conflicting collection parent")
         specimen_key = (
             revision.provider_namespace,
             revision.biological.specimen_token,
@@ -877,7 +849,7 @@ def project_active_linkages(
             revision.biological.collection_token,
         )
         if specimen_parents.setdefault(specimen_key, specimen_parent) != specimen_parent:
-            raise ValueError("active projection contains conflicting specimen lineage")
+            raise ValueError("linkage history contains conflicting specimen parent")
         if revision.biological.aliquot.token is not None:
             aliquot_key = (
                 revision.provider_namespace,
@@ -892,16 +864,24 @@ def project_active_linkages(
                 aliquot_parents.setdefault(aliquot_key, aliquot_parent)
                 != aliquot_parent
             ):
-                raise ValueError("active projection contains conflicting aliquot lineage")
-        if analysis_key in analysis_keys:
-            raise ValueError("active projection contains a duplicate analysis record")
-        if measurement_key in measurement_keys:
-            raise ValueError("active projection contains a duplicate measurement")
-        analysis_keys.add(analysis_key)
-        measurement_keys.add(measurement_key)
-    return tuple(
-        sorted(active, key=lambda item: (item.provider_namespace, item.linkage_id))
-    )
+                raise ValueError("linkage history contains conflicting aliquot parent")
+        analysis_owner = analysis_owners.get(analysis_key)
+        if analysis_owner is not None and (
+            analysis_owner[0] != revision.linkage_id
+            or analysis_owner[1] != revision.revision - 1
+        ):
+            raise ValueError("linkage history contains a reused analysis record")
+        analysis_owners[analysis_key] = (revision.linkage_id, revision.revision)
+        measurement_owner = measurement_owners.get(measurement_key)
+        if measurement_owner is not None and (
+            measurement_owner[0] != revision.linkage_id
+            or measurement_owner[1] != revision.revision - 1
+        ):
+            raise ValueError("linkage history contains a reused measurement")
+        measurement_owners[measurement_key] = (
+            revision.linkage_id,
+            revision.revision,
+        )
 
 
 __all__ = [
@@ -929,6 +909,8 @@ __all__ = [
     "authorize_and_consume_linkage_revision",
     "authorize_linkage_revision",
     "linkage_revision_sha256",
+    "prepare_authorized_linkage_revision",
     "project_active_linkages",
     "provider_trust_snapshot_sha256",
+    "validate_linkage_history",
 ]

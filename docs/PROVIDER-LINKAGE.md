@@ -35,33 +35,33 @@ field class; a subject relink labeled as a technical correction is rejected. A
 local B session or two clicks by one principal cannot satisfy dual approval.
 
 When trust or approval input is absent, both `linkage_authorized` and
-`comparison_linkage_eligible` are false. A true linkage eligibility flag means
-only that protected identity authority passed; E05/Epic D scientific
-compatibility, immutable membership, missingness and denominator gates remain
-independent requirements.
+`comparison_linkage_eligible` are false. A valid signed approval proof may set
+`linkage_authorized`, but D01 always leaves `comparison_linkage_eligible` false:
+only the later protected transactional store can consume approvals and activate
+a revision. Scientific compatibility, immutable membership, missingness and
+denominator gates remain independent requirements.
 
 ## Replay fence and append-only projection
 
-`authorize_and_consume_linkage_revision` returns a self-contained authorized
-record plus an append-only approval-consumption ledger. Approval IDs and nonces
-are single-use across revisions; an exact retry is idempotent. Active projection
-replays every signature and decision, requires an independently supplied trust
-pin for every provider, and refuses any approval absent from the consumption
-ledger. A self-consistent authorization object is not authority.
-
-The consumption ledger is a pure contract in D01. Durable atomic commit of the
-authorized revision and consumption entries remains disabled until D04 supplies
-the protected transactional store. Callers must not treat an in-memory ledger as
-a production replay fence.
+`prepare_authorized_linkage_revision` produces self-contained proof bytes for a
+future protected transaction. It does not consume an approval or activate a
+link. The legacy-shaped `authorize_and_consume_linkage_revision` and
+`project_active_linkages` entry points fail closed unconditionally in D01. A
+caller-created consumption ledger, including one containing perfectly matching
+rows, therefore cannot become authority. Durable cross-process replay fencing,
+idempotent exact retry and active projection remain disabled until the protected
+transactional store atomically commits them.
 
 Every correction is a new `LinkageRevision` binding the digest of its immediate
-predecessor. Historical revisions remain unchanged. The pure active projection
-selects only the latest valid revision, rejects broken chains, conflicting
-collection/specimen/aliquot parentage, duplicate analysis or measurement
-identities, and ledgers above the explicit bound. It allows distinct technical
-analyses of the same biological collection when their analysis and measurement
-identities remain distinct, and omits a tombstoned chain without deleting its
-history.
+predecessor. Historical revisions remain unchanged. Structural history
+validation rejects broken chains, collection-to-subject,
+specimen-to-collection/subject, and aliquot-to-specimen/collection/subject
+conflicts. Analysis and measurement identifiers remain unique across the full
+append-only history, including after tombstone; corrections may retain them only
+within the same linkage chain. Sibling specimens and aliquots under one
+collection and distinct technical reruns remain valid. Wrong-subject and
+wrong-collection corrections must replace their descendant biological tokens so
+the hierarchy never acquires two parents.
 
 Durable SQLite schema, concurrency, backup/restore, retention execution,
 derived-record invalidation and supersession-cycle enforcement belong to the

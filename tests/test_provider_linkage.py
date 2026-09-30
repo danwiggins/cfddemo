@@ -12,6 +12,7 @@ from pydantic import ValidationError
 
 from evidence_inspector.provider_linkage import (
     MAX_REVISIONS,
+    ApprovalConsumption,
     ApprovalPurpose,
     BiologicalLineage,
     IssuerStatus,
@@ -34,8 +35,10 @@ from evidence_inspector.provider_linkage import (
     authorize_and_consume_linkage_revision,
     authorize_linkage_revision,
     linkage_revision_sha256,
+    prepare_authorized_linkage_revision,
     project_active_linkages,
     provider_trust_snapshot_sha256,
+    validate_linkage_history,
 )
 
 T0 = datetime(2026, 9, 29, 10, 0, tzinfo=UTC)
@@ -212,15 +215,15 @@ def _consume(
     ledger: ProviderApprovalConsumptionLedger | None = None,
 ):
     trust = trust or _trust()
-    return authorize_and_consume_linkage_revision(
+    record = prepare_authorized_linkage_revision(
         revision,
         previous_revision=previous,
         approvals=approvals,
         trust_snapshot=trust,
         expected_trust_snapshot_sha256=provider_trust_snapshot_sha256(trust),
         evaluated_at=NOW,
-        consumption_ledger=ledger or ProviderApprovalConsumptionLedger(),
     )
+    return record, ledger or ProviderApprovalConsumptionLedger()
 
 
 def _create_approval(
@@ -260,22 +263,30 @@ def _correction_approvals(
 
 
 def _project(records, ledger):
-    return project_active_linkages(
+    del ledger
+    validate_linkage_history(
         records,
-        consumption_ledger=ledger,
         expected_trust_snapshot_sha256_by_provider={
             PROVIDER: provider_trust_snapshot_sha256(_trust())
         },
     )
 
 
-def test_create_binds_external_trust_approval_and_consumption() -> None:
+def test_create_binds_external_trust_but_remains_inactive_without_store() -> None:
     revision = _revision()
     record, ledger = _consume(revision, (_create_approval(revision, "c"),))
 
     assert record.authorization.linkage_authorized
-    assert len(ledger.entries) == 1
-    assert _project((record,), ledger) == (revision,)
+    assert not record.authorization.comparison_linkage_eligible
+    assert ledger.entries == ()
+    with pytest.raises(RuntimeError, match="durable atomic linkage persistence"):
+        project_active_linkages(
+            (record,),
+            consumption_ledger=ledger,
+            expected_trust_snapshot_sha256_by_provider={
+                PROVIDER: provider_trust_snapshot_sha256(_trust())
+            },
+        )
 
 
 def test_absent_authority_disables_linkage_and_comparison() -> None:
@@ -306,10 +317,10 @@ def test_authorized_decision_cannot_omit_trust_or_approvals() -> None:
         )
 
 
-def test_projection_requires_trust_pin_and_consumed_approvals() -> None:
+def test_activation_api_rejects_caller_supplied_consumption_state() -> None:
     revision = _revision()
     record, ledger = _consume(revision, (_create_approval(revision, "c"),))
-    with pytest.raises(ValueError, match="was not consumed"):
+    with pytest.raises(RuntimeError, match="durable atomic linkage persistence"):
         project_active_linkages(
             (record,),
             consumption_ledger=ProviderApprovalConsumptionLedger(),
@@ -317,31 +328,52 @@ def test_projection_requires_trust_pin_and_consumed_approvals() -> None:
                 PROVIDER: provider_trust_snapshot_sha256(_trust())
             },
         )
-    with pytest.raises(ValueError, match="independently pinned"):
+    with pytest.raises(RuntimeError, match="durable atomic linkage persistence"):
+        authorize_and_consume_linkage_revision(
+            revision,
+            previous_revision=None,
+            approvals=record.approvals,
+            trust_snapshot=record.trust_snapshot,
+            expected_trust_snapshot_sha256=provider_trust_snapshot_sha256(_trust()),
+            evaluated_at=NOW,
+            consumption_ledger=ledger,
+        )
+
+    forged = ProviderApprovalConsumptionLedger(
+        entries=(
+            ApprovalConsumption(
+                provider_namespace=PROVIDER,
+                approval_id=record.approvals[0].payload.approval_id,
+                nonce=record.approvals[0].payload.nonce,
+                proposed_revision_sha256=linkage_revision_sha256(revision),
+                trust_snapshot_sha256=provider_trust_snapshot_sha256(_trust()),
+            ),
+        )
+    )
+    with pytest.raises(RuntimeError, match="durable atomic linkage persistence"):
         project_active_linkages(
             (record,),
-            consumption_ledger=ledger,
-            expected_trust_snapshot_sha256_by_provider={PROVIDER: "0" * 64},
+            consumption_ledger=forged,
+            expected_trust_snapshot_sha256_by_provider={
+                PROVIDER: provider_trust_snapshot_sha256(_trust())
+            },
         )
 
 
-def test_consumption_is_idempotent_only_for_same_exact_revision() -> None:
+def test_caller_cannot_reset_replay_state_between_calls() -> None:
     first = _revision()
     approval = _create_approval(first, "c")
-    first_record, ledger = _consume(first, (approval,))
-    repeated_record, repeated_ledger = _consume(first, (approval,), ledger=ledger)
-    assert repeated_record == first_record
-    assert repeated_ledger == ledger
-
-    other = _revision(
-        linkage_id=_token("linkage", "f"),
-        collection=_token("collection", "f"),
-        specimen=_token("specimen", "f"),
-        analysis=_token("analysis", "f"),
-        measurement=_token("measurement", "f"),
-    )
-    with pytest.raises(ValueError, match="already consumed"):
-        _consume(other, (_create_approval(other, "c"),), ledger=ledger)
+    for supplied in (ProviderApprovalConsumptionLedger(), ProviderApprovalConsumptionLedger()):
+        with pytest.raises(RuntimeError, match="durable atomic linkage persistence"):
+            authorize_and_consume_linkage_revision(
+                first,
+                previous_revision=None,
+                approvals=(approval,),
+                trust_snapshot=_trust(),
+                expected_trust_snapshot_sha256=provider_trust_snapshot_sha256(_trust()),
+                evaluated_at=NOW,
+                consumption_ledger=supplied,
+            )
 
 
 def test_wrong_subject_correction_requires_distinct_principals() -> None:
@@ -352,6 +384,8 @@ def test_wrong_subject_correction_requires_distinct_principals() -> None:
         reason=LinkageReasonCode.WRONG_SUBJECT,
         previous=original,
         subject=_token("subject", "d"),
+        collection=_token("collection", "d"),
+        specimen=_token("specimen", "d"),
     )
     linker, reviewer = _correction_approvals(correction)
     repeated = _approval(
@@ -445,10 +479,20 @@ def test_approval_must_follow_and_bind_pinned_trust() -> None:
 @pytest.mark.parametrize(
     ("reason", "updates"),
     (
-        (LinkageReasonCode.WRONG_SUBJECT, {"subject": _token("subject", "d")}),
+        (
+            LinkageReasonCode.WRONG_SUBJECT,
+            {
+                "subject": _token("subject", "d"),
+                "collection": _token("collection", "d"),
+                "specimen": _token("specimen", "d"),
+            },
+        ),
         (
             LinkageReasonCode.WRONG_COLLECTION,
-            {"collection": _token("collection", "d")},
+            {
+                "collection": _token("collection", "d"),
+                "specimen": _token("specimen", "d"),
+            },
         ),
         (
             LinkageReasonCode.WRONG_SPECIMEN,
@@ -496,7 +540,7 @@ def test_correction_reason_matches_exact_field_delta(
     ).reason_codes
 
 
-def test_projection_retains_history_and_uses_latest_revision() -> None:
+def test_history_retains_original_and_validates_correction_chain() -> None:
     first = _revision()
     first_record, ledger = _consume(first, (_create_approval(first, "c"),))
     correction = _revision(
@@ -505,6 +549,8 @@ def test_projection_retains_history_and_uses_latest_revision() -> None:
         reason=LinkageReasonCode.WRONG_SUBJECT,
         previous=first,
         subject=_token("subject", "d"),
+        collection=_token("collection", "d"),
+        specimen=_token("specimen", "d"),
     )
     correction_record, ledger = _consume(
         correction,
@@ -512,7 +558,7 @@ def test_projection_retains_history_and_uses_latest_revision() -> None:
         previous=first,
         ledger=ledger,
     )
-    assert _project((first_record, correction_record), ledger) == (correction,)
+    assert _project((first_record, correction_record), ledger) is None
     assert first_record.revision.biological.subject_token == SUBJECT
 
 
@@ -527,9 +573,59 @@ def test_same_collection_allows_distinct_technical_reruns() -> None:
     rerun_record, ledger = _consume(
         rerun, (_create_approval(rerun, "e"),), ledger=ledger
     )
-    active = _project((first_record, rerun_record), ledger)
-    assert len(active) == 2
-    assert {item.biological.collection_token for item in active} == {COLLECTION}
+    assert _project((first_record, rerun_record), ledger) is None
+
+
+def test_same_collection_allows_sibling_specimens_and_aliquots() -> None:
+    first = _revision(aliquot=_known("aliquot", "c"))
+    first_record, ledger = _consume(first, (_create_approval(first, "c"),))
+    sibling = _revision(
+        linkage_id=_token("linkage", "d"),
+        specimen=_token("specimen", "d"),
+        aliquot=_known("aliquot", "e"),
+        analysis=_token("analysis", "d"),
+        measurement=_token("measurement", "d"),
+    )
+    sibling_record, ledger = _consume(
+        sibling, (_create_approval(sibling, "e"),), ledger=ledger
+    )
+
+    assert _project((first_record, sibling_record), ledger) is None
+
+
+@pytest.mark.parametrize("reused", ("analysis", "measurement"))
+def test_history_never_reassigns_technical_ids_after_tombstone(reused: str) -> None:
+    first = _revision()
+    first_record, ledger = _consume(first, (_create_approval(first, "c"),))
+    tombstone = _revision(
+        revision=2,
+        operation=LinkageOperation.TOMBSTONE,
+        reason=LinkageReasonCode.RETENTION_TOMBSTONE,
+        previous=first,
+    )
+    tombstone_record, ledger = _consume(
+        tombstone,
+        _correction_approvals(
+            tombstone, purpose=ApprovalPurpose.TOMBSTONE_LINKAGE
+        ),
+        previous=first,
+        ledger=ledger,
+    )
+    replacement = _revision(
+        linkage_id=_token("linkage", "f"),
+        collection=_token("collection", "f"),
+        specimen=_token("specimen", "f"),
+        analysis=(ANALYSIS if reused == "analysis" else _token("analysis", "f")),
+        measurement=(
+            MEASUREMENT if reused == "measurement" else _token("measurement", "f")
+        ),
+    )
+    replacement_record, ledger = _consume(
+        replacement, (_create_approval(replacement, "f"),), ledger=ledger
+    )
+
+    with pytest.raises(ValueError, match=f"reused {reused}"):
+        _project((first_record, tombstone_record, replacement_record), ledger)
 
 
 @pytest.mark.parametrize(
@@ -541,7 +637,7 @@ def test_same_collection_allows_distinct_technical_reruns() -> None:
                 "analysis": _token("analysis", "d"),
                 "measurement": _token("measurement", "d"),
             },
-            "conflicting collection lineage",
+            "conflicting collection parent",
         ),
         (
             {
@@ -549,9 +645,9 @@ def test_same_collection_allows_distinct_technical_reruns() -> None:
                 "analysis": _token("analysis", "d"),
                 "measurement": _token("measurement", "d"),
             },
-            "conflicting specimen lineage",
+            "conflicting specimen parent",
         ),
-        ({"analysis": _token("analysis", "d")}, "duplicate measurement"),
+        ({"analysis": _token("analysis", "d")}, "reused measurement"),
     ),
 )
 def test_projection_rejects_parent_conflicts_and_measurement_reuse(
@@ -581,11 +677,11 @@ def test_projection_rejects_aliquot_parent_conflict() -> None:
     second_record, ledger = _consume(
         second, (_create_approval(second, "e"),), ledger=ledger
     )
-    with pytest.raises(ValueError, match="conflicting aliquot lineage"):
+    with pytest.raises(ValueError, match="conflicting aliquot parent"):
         _project((first_record, second_record), ledger)
 
 
-def test_tombstone_removes_projection_and_cannot_be_revived() -> None:
+def test_tombstone_history_validates_and_cannot_be_revived() -> None:
     first = _revision()
     first_record, ledger = _consume(first, (_create_approval(first, "c"),))
     tombstone = _revision(
@@ -602,7 +698,7 @@ def test_tombstone_removes_projection_and_cannot_be_revived() -> None:
         previous=first,
         ledger=ledger,
     )
-    assert _project((first_record, tombstone_record), ledger) == ()
+    assert _project((first_record, tombstone_record), ledger) is None
 
     attempted_revival = _revision(
         revision=3,

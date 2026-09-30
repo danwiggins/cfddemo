@@ -25,17 +25,21 @@ method labels, or adjacency.
 1. **D01 linkage/authority foundation (this PR):** closed provider-local
    biological and technical lineage contracts, independently pinned provider
    trust, exact signed approvals, dual-principal correction, append-only
-   revision projection, and fail-closed comparison-linkage eligibility.
-2. **D02 compatibility-key/anchor:** add the complete Epic D measurement policy
+   history validation, and fail-closed activation/comparison eligibility. D01
+   deliberately cannot consume approvals or project active linkage.
+2. **D01/D04 protected transactional store:** atomically consume approval IDs
+   and nonces with immutable revisions, preserve full-history identity and
+   parent constraints, and expose active linkage only from committed state.
+3. **D02 compatibility-key/anchor:** add the complete Epic D measurement policy
    key and six outcomes. Every member is evaluated against one pinned anchor;
    `unknown` and invalid decisions suppress deltas and connecting trends.
-3. **D04/D05 ledger and immutable membership:** durable no-follow local store,
-   correction/supersession chain, cycle/idempotency/concurrency protection,
+4. **D04/D05 supersession and immutable membership:** correction/supersession
+   chain, cycle/idempotency/concurrency protection,
    immutable member ordering, unit-of-analysis and technical-replicate rules.
-4. **D09 denominator/missingness:** bind declared denominator, inclusion,
+5. **D09 denominator/missingness:** bind declared denominator, inclusion,
    missingness and unavailable-record policy to the comparison identity and
    reconcile it with E06 ledgers.
-5. **E12 integration:** add protected cohort/timepoint selectors and a pure read
+6. **E12 integration:** add protected cohort/timepoint selectors and a pure read
    model that separates biological collections from technical reruns. It emits
    no delta or connected trend unless linkage, membership, compatibility and
    denominator gates all pass.
