@@ -11,14 +11,18 @@ derived chart/report, method identity, and current method authority are checked
 before a result can become visible in the index.
 
 The cohort layer pins the exact result-catalog object, storage identity, trust
-store, and reader authority, then binds that verified result to one exact member
-of the canonical D05 manifest history. It rechecks the manifest against the live
-protected linkage store and independently pinned provider trust both before and
-after bundle verification. The bundle method definition must equal the cohort's
-measurement anchor. Opaque result-catalog aliases are deterministically derived
-from protected provider, analysis, run, and collection tokens so the same result
-can be reused across immutable cohort versions without exposing those tokens in
-the public result reference.
+store, reader authority, live D05 registry, and linkage store. Import and read
+APIs accept only a registry selector and cohort version; they resolve the exact
+registered history under one linkage/registry authority fence and never accept
+a caller-built manifest sequence. Each verified result is bound to one exact
+registered member, the registry ID/epoch/state head, the current linkage
+snapshot, and the inclusion, exclusion, missingness, and record-status policy
+digests. The manifest is rechecked against independently pinned provider trust
+before and after bundle verification. The bundle method definition must equal
+the cohort's measurement anchor. Opaque result-catalog aliases are
+deterministically derived from protected provider, analysis, run, and
+collection tokens so the same result can be reused across immutable cohort
+versions without exposing those tokens in the public result reference.
 
 Bindings carry the digest-bound catalog storage, trust snapshot, reader
 authority, and publication identity. They are canonical, append-only files in a
@@ -32,15 +36,18 @@ bundle, and current result-key trust. A later linkage change or key revocation
 therefore withholds the binding rather than turning stale evidence into an
 available longitudinal record.
 
-`record_status_for_manifest()` returns a bounded canonical status artifact with
-exactly one item in D05 member order. Each item is `available` with a live
-verified binding, `missing`, or `withheld` with a typed safe reason and no result
-details. The artifact binds the cohort/version/manifest digest, current linkage
-snapshot, current catalog/trust authority, complete member coverage, and its
-own canonical digest. Structural corruption, a wrong member identity, or an
-unverifiable catalog still fails the whole read. The existing
-`bindings_for_manifest()` API remains strict for callers that require all
-selected records to verify.
+`record_status_for_manifest(selector_id, cohort_version)` returns a bounded
+canonical status artifact with exactly one item in D05 member order. Each item
+is `available` with a live verified binding, `missing`, or `withheld` with a
+typed safe reason and no result details. An available binding is the protected,
+authority-fenced bridge from the D05 member commitment to the exact E04
+`CatalogResultRef`; those two digests are distinct and must never be equated.
+The artifact binds the registry identity/state head, cohort/version/manifest
+digest, current linkage snapshot, current catalog/trust authority, complete
+member coverage, and its own canonical digest. Structural corruption, a wrong
+member identity, or an unverifiable catalog still fails the whole read.
+`bindings_for_manifest(selector_id, cohort_version)` remains strict for callers
+that require every selected record to verify.
 
 Publication is coordinated across SQLite and the binding directory. The result
 row is first durable but hidden in `pending` state. A same-directory mode-0600
@@ -75,7 +82,12 @@ owner cleanup removes only the catalog reference and retains the immutable
 content-addressed object bytes. Direct, non-coordinated catalog imports are not
 deleted by binding-root recovery.
 
-Import and read paths invoke captured unbound authority functions and verify the
+Caller-supplied method registry, authority head, and current capability are
+captured with exact-type, bounded, zero-hook traversal before any catalog or
+publication operation. Subclasses, instance shadows, private or extra state,
+cycles, aliases, excessive depth, and oversized graphs fail without executing a
+caller serializer or producing a catalog side effect. Import and read paths
+invoke captured unbound authority functions and verify the
 entire reachable catalog, trust-store, linkage-store, verifier, storage, class,
 instance, and module-alias call chain. Replacing a validator cannot turn stale
 D05 membership or a revoked result key into accepted evidence, including a

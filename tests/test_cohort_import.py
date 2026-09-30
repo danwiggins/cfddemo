@@ -23,7 +23,8 @@ from evidence_inspector.cohort_import import (
     CohortRecordCatalog,
     CohortRecordWithheldReason,
 )
-from evidence_inspector.cohort_manifest import MeasurementAnchor
+from evidence_inspector.cohort_manifest import MeasurementAnchor, cohort_manifest_sha256
+from evidence_inspector.cohort_registry import CohortRegistry, CohortRegistryConflict
 from evidence_inspector.fault_controller import (
     FAULT_POINTS,
     NO_FAULTS,
@@ -31,7 +32,12 @@ from evidence_inspector.fault_controller import (
     FaultAction,
     InjectedFault,
 )
-from evidence_inspector.method_registry import canonical_contract_bytes
+from evidence_inspector.method_registry import (
+    AuthorityHead,
+    CurrentMethodCapability,
+    MethodRegistry,
+    canonical_contract_bytes,
+)
 from evidence_inspector.result_catalog import (
     DEFAULT_RESULT_BUNDLE_READER_REGISTRY,
     CatalogError,
@@ -122,10 +128,16 @@ def _setup(tmp_path: Path, live, fault_controller=NO_FAULTS):
         trust_store=trust,
         reader_registry=DEFAULT_RESULT_BUNDLE_READER_REGISTRY,
     )
+    cohort_registry = CohortRegistry(
+        tmp_path / "cohort-registry",
+        linkage_store=store,
+        expected_trust_snapshot_sha256_by_provider=_pins(),
+    )
     cohorts = CohortRecordCatalog(
         tmp_path / "cohort-records",
         result_catalog=results,
         linkage_store=store,
+        cohort_registry=cohort_registry,
         expected_trust_snapshot_sha256_by_provider=_pins(),
         reader_registry=DEFAULT_RESULT_BUNDLE_READER_REGISTRY,
         fault_controller=fault_controller,
@@ -142,6 +154,7 @@ def _setup(tmp_path: Path, live, fault_controller=NO_FAULTS):
         head,
         head_sha256,
         capability,
+        cohort_registry,
     )
 
 
@@ -177,9 +190,16 @@ def _import(values, **updates):
         head,
         head_sha256,
         capability,
+        _,
     ) = values
+    manifest_history = updates.pop("manifest_history", (manifest,))
+    selection = updates.pop("selection", None)
+    selector_id, cohort_version = (
+        _selection(values, manifest_history) if selection is None else selection
+    )
     request = {
-        "manifest_history": (manifest,),
+        "selector_id": selector_id,
+        "cohort_version": cohort_version,
         "provider_namespace": member.provider_namespace,
         "analysis_record_id": member.analysis_record_id,
         "root_id": "root_primary",
@@ -191,6 +211,33 @@ def _import(values, **updates):
     }
     request.update(updates)
     return cohorts.import_bundle(**request)
+
+
+def _selection(values, manifest_history=None):
+    history = tuple(manifest_history or (values[2],))
+    cohort_registry = values[11]
+    for manifest in history:
+        cohort_registry.register(manifest)
+    digest = cohort_manifest_sha256(history[-1])
+    rows = cohort_registry.list_selectors(limit=100).records
+    selected = tuple(
+        row
+        for row in rows
+        if row.cohort_version == history[-1].version
+        and row.manifest_sha256 == digest
+    )
+    assert len(selected) == 1
+    return selected[0].selector_id, selected[0].cohort_version
+
+
+def _bindings(values, manifest_history=None):
+    selector_id, cohort_version = _selection(values, manifest_history)
+    return values[0].bindings_for_manifest(selector_id, cohort_version).bindings
+
+
+def _status(values, manifest_history=None):
+    selector_id, cohort_version = _selection(values, manifest_history)
+    return values[0].record_status_for_manifest(selector_id, cohort_version)
 
 
 def _binding_path(root: Path, binding) -> Path:
@@ -218,7 +265,7 @@ def test_verified_bundle_is_idempotently_bound_to_exact_live_member(
     values = _setup(tmp_path, live)
     binding = _import(values)
     assert _import(values) == binding
-    assert values[0].bindings_for_manifest((values[2],)) == (binding,)
+    assert _bindings(values) == (binding,)
     assert values[1].query(CatalogQuery()).results == (binding.result,)
     assert binding.analysis_record_id == values[3].analysis_record_id
     assert binding.member_sha256
@@ -230,23 +277,54 @@ def test_verified_bundle_is_idempotently_bound_to_exact_live_member(
     assert "subject_" not in serialized
 
 
+def test_protected_status_replays_exact_member_to_verified_result_bridge(
+    tmp_path: Path, live
+) -> None:
+    values = _setup(tmp_path, live)
+    binding = _import(values)
+    selector_id, cohort_version = _selection(values)
+
+    receipt = values[0].bindings_for_manifest(selector_id, cohort_version)
+    status = values[0].record_status_for_manifest(selector_id, cohort_version)
+    member_status = status.members[0]
+
+    assert receipt.bindings == (binding,)
+    assert member_status.member_sha256 == binding.member_sha256
+    assert member_status.binding == binding
+    assert member_status.binding.result.result_id == binding.result.result_id
+    assert member_status.binding.result.bundle_sha256 == binding.result.bundle_sha256
+    assert (
+        member_status.binding.result.bundle_manifest_sha256
+        == binding.result.bundle_manifest_sha256
+    )
+    assert binding.member_sha256 != binding.result.bundle_sha256
+    assert receipt.registry_id == status.registry_id == binding.registry_id
+    assert (
+        receipt.registry_state_head_sha256
+        == status.registry_state_head_sha256
+        == binding.registry_state_head_sha256
+    )
+    assert receipt.linkage_snapshot_sha256 == binding.linkage_snapshot_sha256
+    assert receipt.catalog_authority_sha256 == binding.catalog_authority_sha256
+
+
 def test_manifest_record_status_preserves_missing_available_and_withheld_member(
     tmp_path: Path, live
 ) -> None:
     values = _setup(tmp_path, live)
-    missing = values[0].record_status_for_manifest((values[2],))
+    missing = _status(values)
     assert len(missing.members) == 1
     assert missing.members[0].availability is CohortRecordAvailability.MISSING
     assert missing.members[0].binding is None
 
     binding = _import(values)
-    available = values[0].record_status_for_manifest((values[2],))
+    available = _status(values)
     assert available.members[0].availability is CohortRecordAvailability.AVAILABLE
     assert available.members[0].binding == binding
     assert available.status_sha256 != missing.status_sha256
 
     values[6].revoke(values[5].key_id)
-    withheld = values[0].record_status_for_manifest((values[2],))
+    withheld = _status(values)
     item = withheld.members[0]
     assert item.availability is CohortRecordAvailability.WITHHELD
     assert item.withheld_reason is CohortRecordWithheldReason.RESULT_KEY_REVOKED
@@ -268,21 +346,80 @@ def test_manifest_record_status_preserves_missing_available_and_withheld_member(
         ("before_idempotent_return", "idempotent"),
     ),
 )
-def test_final_read_and_idempotent_return_reject_linkage_toctou(
+def test_final_read_and_idempotent_return_hold_linkage_fence_through_return(
+    tmp_path: Path, live, point: str, operation: str
+) -> None:
+    controller = DeterministicFaultController(point, action=FaultAction.PAUSE)
+    values = _setup(tmp_path, live, controller)
+    _import(values)
+    selector_id, cohort_version = _selection(values)
+    call = {
+        "read": lambda: _bindings(values),
+        "status": lambda: _status(values),
+        "idempotent": lambda: _import(values),
+    }[operation]
+    digit = {"read": "d", "status": "e", "idempotent": "f"}[operation]
+    mutation_started = threading.Event()
+
+    def mutate() -> None:
+        mutation_started.set()
+        _advance_linkage(live, digit)
+
+    with ThreadPoolExecutor(max_workers=2) as executor:
+        reading = executor.submit(call)
+        assert controller.wait_until_reached()
+        mutation = executor.submit(mutate)
+        assert mutation_started.wait(timeout=10)
+        assert not mutation.done()
+        controller.release()
+        reading.result(timeout=10)
+        mutation.result(timeout=10)
+
+    with pytest.raises(CohortImportError, match="current|changed|linkage"):
+        values[0].record_status_for_manifest(selector_id, cohort_version)
+
+
+@pytest.mark.parametrize(
+    ("point", "operation"),
+    (
+        ("before_read_return", "read"),
+        ("before_status_return", "status"),
+        ("before_idempotent_return", "idempotent"),
+    ),
+)
+def test_final_return_holds_result_trust_fence_through_return(
     tmp_path: Path, live, point: str, operation: str
 ) -> None:
     controller = DeterministicFaultController(point, action=FaultAction.PAUSE)
     values = _setup(tmp_path, live, controller)
     _import(values)
     call = {
-        "read": lambda: values[0].bindings_for_manifest((values[2],)),
-        "status": lambda: values[0].record_status_for_manifest((values[2],)),
+        "read": lambda: _bindings(values),
+        "status": lambda: _status(values),
         "idempotent": lambda: _import(values),
     }[operation]
-    digit = {"read": "d", "status": "e", "idempotent": "f"}[operation]
-    error = _paused_error(controller, call, lambda: _advance_linkage(live, digit))
-    assert isinstance(error, CohortImportError)
-    assert "changed" in str(error) or "current" in str(error)
+    mutation_started = threading.Event()
+
+    def revoke() -> None:
+        mutation_started.set()
+        values[6].revoke(values[5].key_id)
+
+    with ThreadPoolExecutor(max_workers=2) as executor:
+        reading = executor.submit(call)
+        assert controller.wait_until_reached()
+        mutation = executor.submit(revoke)
+        assert mutation_started.wait(timeout=10)
+        assert not mutation.done()
+        controller.release()
+        reading.result(timeout=10)
+        mutation.result(timeout=10)
+
+    withheld = _status(values)
+    assert withheld.members[0].availability is CohortRecordAvailability.WITHHELD
+    assert (
+        withheld.members[0].withheld_reason
+        is CohortRecordWithheldReason.RESULT_KEY_REVOKED
+    )
 
 
 @pytest.mark.parametrize("operation", ("read", "status"))
@@ -301,11 +438,11 @@ def test_read_return_rechecks_exact_binding_after_concurrent_removal(
     if operation == "read":
 
         def call():
-            return values[0].bindings_for_manifest((values[2],))
+            return _bindings(values)
     else:
 
         def call():
-            return values[0].record_status_for_manifest((values[2],))
+            return _status(values)
 
     error = _paused_error(controller, call, final.unlink)
     assert isinstance(error, CohortImportError)
@@ -332,7 +469,7 @@ def test_same_verified_record_can_bind_to_a_new_manifest_version(
     second_binding = _import(values, manifest_history=(previous, second))
     assert second_binding.result == first.result
     assert second_binding.binding_id != first.binding_id
-    assert values[0].bindings_for_manifest((previous, second)) == (second_binding,)
+    assert _bindings(values, (previous, second)) == (second_binding,)
 
 
 def test_binding_count_limit_rejects_without_replacing_existing_record(
@@ -355,7 +492,7 @@ def test_binding_count_limit_rejects_without_replacing_existing_record(
     monkeypatch.setattr(cohort_import_module, "MAX_BINDINGS", 1)
     with pytest.raises(CohortImportFilesystemError, match="bound"):
         _import(values, manifest_history=(previous, second))
-    assert values[0].bindings_for_manifest((previous,)) == (first,)
+    assert _bindings(values, (previous,)) == (first,)
 
 
 def test_import_has_no_network_path(
@@ -449,7 +586,7 @@ def test_nonmember_and_wrong_measurement_anchor_reject_before_result_index(
             )
         }
     )
-    with pytest.raises(CohortImportError, match="measurement anchor"):
+    with pytest.raises(CohortRegistryConflict, match="registry history|current and valid"):
         _import(values, manifest_history=(wrong_anchor,))
     assert values[1].query(CatalogQuery()).empty
 
@@ -461,7 +598,7 @@ def test_revocation_after_import_withholds_binding_on_read(
     _import(values)
     values[6].revoke(values[5].key_id)
     with pytest.raises(RevokedKeyError):
-        values[0].bindings_for_manifest((values[2],))
+        _bindings(values)
 
 
 def test_linkage_store_advance_withholds_stale_manifest_binding(
@@ -469,6 +606,7 @@ def test_linkage_store_advance_withholds_stale_manifest_binding(
 ) -> None:
     values = _setup(tmp_path, live)
     _import(values)
+    selector_id, cohort_version = _selection(values)
     revision = _known_run_revision(
         linkage_id="linkage_" + "d" * 32,
         subject="subject_" + "d" * 32,
@@ -482,7 +620,7 @@ def test_linkage_store_advance_withholds_stale_manifest_binding(
     authorized, _ = _consume(revision, (_create_approval(revision, "d"),))
     live[0].commit_authorized_revision(authorized)
     with pytest.raises(CohortImportError, match="current and trusted"):
-        values[0].bindings_for_manifest((values[2],))
+        values[0].bindings_for_manifest(selector_id, cohort_version)
 
 
 def test_binding_file_tamper_and_symlink_fail_closed(tmp_path: Path, live) -> None:
@@ -491,7 +629,7 @@ def test_binding_file_tamper_and_symlink_fail_closed(tmp_path: Path, live) -> No
     path = _binding_path(tmp_path / "tampered/cohort-records", binding)
     path.write_bytes(path.read_bytes() + b" ")
     with pytest.raises(CohortImportFilesystemError, match="invalid"):
-        tampered[0].bindings_for_manifest((tampered[2],))
+        _bindings(tampered)
 
     symlinked = _setup(tmp_path / "index-symlink", live)
     binding = _import(symlinked)
@@ -500,7 +638,7 @@ def test_binding_file_tamper_and_symlink_fail_closed(tmp_path: Path, live) -> No
     path.rename(target)
     path.symlink_to(target)
     with pytest.raises(CohortImportFilesystemError, match="invalid"):
-        symlinked[0].bindings_for_manifest((symlinked[2],))
+        _bindings(symlinked)
 
     semantic = _setup(tmp_path / "semantic", live)
     binding = _import(semantic)
@@ -509,21 +647,21 @@ def test_binding_file_tamper_and_symlink_fail_closed(tmp_path: Path, live) -> No
     payload["denominator_contribution"] = not binding.denominator_contribution
     path.write_bytes(canonical_json_bytes(payload))
     with pytest.raises(CohortImportConflict, match="manifest"):
-        semantic[0].bindings_for_manifest((semantic[2],))
+        _bindings(semantic)
 
     exposed = _setup(tmp_path / "exposed", live)
     binding = _import(exposed)
     path = _binding_path(tmp_path / "exposed/cohort-records", binding)
     path.chmod(0o644)
     with pytest.raises(CohortImportFilesystemError, match="invalid"):
-        exposed[0].bindings_for_manifest((exposed[2],))
+        _bindings(exposed)
 
     linked = _setup(tmp_path / "hardlink", live)
     binding = _import(linked)
     path = _binding_path(tmp_path / "hardlink/cohort-records", binding)
     os.link(path, tmp_path / "hardlink-copy")
     with pytest.raises(CohortImportFilesystemError, match="invalid"):
-        linked[0].bindings_for_manifest((linked[2],))
+        _bindings(linked)
 
 
 def test_index_root_replacement_and_foreign_inventory_fail_closed(
@@ -560,7 +698,7 @@ def test_conflicting_second_bundle_for_same_member_is_rejected(
     assert second_path.exists()
     with pytest.raises(Exception, match="identity conflict|binding conflicts"):
         _import(values, relative_path="second/record")
-    assert values[0].bindings_for_manifest((values[2],)) == (first,)
+    assert _bindings(values) == (first,)
 
 
 def test_reader_registry_range_is_explicit_and_cannot_be_substituted(
@@ -582,6 +720,7 @@ def test_reader_registry_range_is_explicit_and_cannot_be_substituted(
             tmp_path / "other-index",
             result_catalog=values[1],
             linkage_store=live[0],
+            cohort_registry=values[11],
             expected_trust_snapshot_sha256_by_provider=_pins(),
             reader_registry=unsupported,
         )
@@ -597,6 +736,7 @@ def test_reader_registry_range_is_explicit_and_cannot_be_substituted(
             tmp_path / "fake-index",
             result_catalog=values[1],
             linkage_store=live[0],
+            cohort_registry=values[11],
             expected_trust_snapshot_sha256_by_provider=_pins(),
             reader_registry=fake,
         )
@@ -639,16 +779,25 @@ def test_unsupported_reader_range_rejects_before_result_index(
         authority_sha256="a" * 64,
     )
     manifest = _manifest(authority, (member,), measurement_anchor=anchor)
+    cohort_registry = CohortRegistry(
+        tmp_path / "cohort-registry",
+        linkage_store=store,
+        expected_trust_snapshot_sha256_by_provider=_pins(),
+    )
+    cohort_registry.register(manifest)
+    selector = cohort_registry.list_selectors().records[0]
     cohorts = CohortRecordCatalog(
         tmp_path / "cohort-records",
         result_catalog=results,
         linkage_store=store,
+        cohort_registry=cohort_registry,
         expected_trust_snapshot_sha256_by_provider=_pins(),
         reader_registry=unsupported,
     )
     with pytest.raises(CatalogUnsupportedSchema, match="unsupported"):
         cohorts.import_bundle(
-            manifest_history=(manifest,),
+            selector_id=selector.selector_id,
+            cohort_version=selector.cohort_version,
             provider_namespace=member.provider_namespace,
             analysis_record_id=member.analysis_record_id,
             root_id="root_primary",
@@ -677,7 +826,85 @@ def test_model_copy_authority_and_reference_corruption_fail_closed(
         payload = binding.model_dump(mode="json")
         payload["result"] = corrupted.model_dump(mode="json")
         path.write_bytes(canonical_json_bytes(payload))
-        values[0].bindings_for_manifest((values[2],))
+        _bindings(values)
+
+
+@pytest.mark.parametrize(
+    ("expected_type", "value_index", "argument"),
+    (
+        (MethodRegistry, 7, "registry"),
+        (AuthorityHead, 8, "authority_head"),
+        (CurrentMethodCapability, 10, "capability"),
+    ),
+)
+def test_import_authority_subclasses_reject_without_caller_hooks_or_side_effects(
+    tmp_path: Path,
+    live,
+    expected_type,
+    value_index: int,
+    argument: str,
+) -> None:
+    values = _setup(tmp_path, live)
+    selection = _selection(values)
+    hook_calls = 0
+
+    def hostile_dump(self, *args, **kwargs):
+        nonlocal hook_calls
+        del self, args, kwargs
+        hook_calls += 1
+        raise AssertionError("caller-owned serializer executed")
+
+    hostile_type = type(
+        f"Hostile{expected_type.__name__}",
+        (expected_type,),
+        {"model_dump": hostile_dump},
+    )
+    hostile = hostile_type.model_validate(values[value_index].model_dump(mode="python"))
+    hook_calls = 0
+
+    with pytest.raises(CohortImportError, match="authority contract"):
+        _import(values, selection=selection, **{argument: hostile})
+
+    assert hook_calls == 0
+    assert values[1].query(CatalogQuery()).empty
+    assert tuple((tmp_path / "cohort-records").iterdir()) == ()
+
+
+@pytest.mark.parametrize(
+    "mutation",
+    ("private", "instance_shadow", "dag", "cycle", "deep", "oversized"),
+)
+def test_import_authority_graphs_fail_closed_before_catalog_side_effects(
+    tmp_path: Path, live, mutation: str
+) -> None:
+    values = _setup(tmp_path, live)
+    selection = _selection(values)
+    corrupted = values[7].model_copy()
+    state = object.__getattribute__(corrupted, "__dict__")
+    if mutation == "private":
+        object.__setattr__(corrupted, "__pydantic_private__", {"trap": object()})
+    elif mutation == "instance_shadow":
+        state["model_dump"] = lambda *args, **kwargs: (_ for _ in ()).throw(
+            AssertionError("instance serializer executed")
+        )
+    elif mutation == "dag":
+        definition = corrupted.method_definitions[0]
+        state["method_definitions"] = (definition, definition)
+    elif mutation == "cycle":
+        state["method_definitions"] = (corrupted,)
+    elif mutation == "deep":
+        nested: object = "0" * 64
+        for _ in range(100):
+            nested = [nested]
+        state["previous_registry_sha256"] = nested
+    else:
+        state["registry_id"] = "r" * 20_000
+
+    with pytest.raises(CohortImportError, match="authority contract"):
+        _import(values, selection=selection, registry=corrupted)
+
+    assert values[1].query(CatalogQuery()).empty
+    assert tuple((tmp_path / "cohort-records").iterdir()) == ()
 
 
 def test_result_catalog_rejects_reader_and_trust_authority_substitution(
@@ -687,11 +914,17 @@ def test_result_catalog_rejects_reader_and_trust_authority_substitution(
         pass
 
     fake = object.__new__(FakeResultCatalog)
+    cohort_registry = CohortRegistry(
+        tmp_path / "cohort-registry",
+        linkage_store=live[0],
+        expected_trust_snapshot_sha256_by_provider=_pins(),
+    )
     with pytest.raises(TypeError, match="exact result"):
         CohortRecordCatalog(
             tmp_path / "fake-result-index",
             result_catalog=fake,
             linkage_store=live[0],
+            cohort_registry=cohort_registry,
             expected_trust_snapshot_sha256_by_provider=_pins(),
             reader_registry=DEFAULT_RESULT_BUNDLE_READER_REGISTRY,
         )
@@ -712,6 +945,7 @@ def test_fault_controller_rejects_callbacks_subclasses_and_replacement(
             tmp_path / "callback-index",
             result_catalog=values[1],
             linkage_store=live[0],
+            cohort_registry=values[11],
             expected_trust_snapshot_sha256_by_provider=_pins(),
             reader_registry=DEFAULT_RESULT_BUNDLE_READER_REGISTRY,
             fault_controller=malicious,  # type: ignore[arg-type]
@@ -733,6 +967,7 @@ def test_fault_controller_rejects_callbacks_subclasses_and_replacement(
             tmp_path / "shadow-index",
             result_catalog=values[1],
             linkage_store=live[0],
+            cohort_registry=values[11],
             expected_trust_snapshot_sha256_by_provider=_pins(),
             reader_registry=DEFAULT_RESULT_BUNDLE_READER_REGISTRY,
         )
@@ -843,6 +1078,7 @@ def test_fault_controller_internal_replacement_never_dispatches_or_creates_root(
                 target,
                 result_catalog=source[1],
                 linkage_store=live[0],
+                cohort_registry=source[11],
                 expected_trust_snapshot_sha256_by_provider=_pins(),
                 reader_registry=DEFAULT_RESULT_BUNDLE_READER_REGISTRY,
                 fault_controller=controller,
@@ -907,6 +1143,7 @@ def test_cohort_constructor_bounds_hostile_trust_mapping_before_root_creation(
             target,
             result_catalog=values[1],
             linkage_store=live[0],
+            cohort_registry=values[11],
             expected_trust_snapshot_sha256_by_provider=pins,
             reader_registry=DEFAULT_RESULT_BUNDLE_READER_REGISTRY,
         )
@@ -921,6 +1158,7 @@ def test_cohort_constructor_bounds_hostile_trust_mapping_before_root_creation(
             target,
             result_catalog=values[1],
             linkage_store=live[0],
+            cohort_registry=values[11],
             expected_trust_snapshot_sha256_by_provider={
                 ProviderString("provider_" + "1" * 32): "0" * 64
             },
@@ -1007,22 +1245,35 @@ def test_binding_bytes_are_canonical_and_permissions_private(
         "after_visibility_commit",
     ),
 )
-def test_authority_change_at_every_publication_window_compensates(
+def test_trust_revocation_waits_at_every_publication_window(
     tmp_path: Path, live, point: str
 ) -> None:
     controller = DeterministicFaultController(point, action=FaultAction.PAUSE)
     values = _setup(tmp_path / point, live, controller)
-    error = _paused_error(
-        controller,
-        lambda: _import(values),
-        lambda: values[6].revoke(values[5].key_id),
-    )
-    assert "authority changed" in str(error) or "revoked" in str(error)
+    mutation_started = threading.Event()
+
+    def revoke() -> None:
+        mutation_started.set()
+        values[6].revoke(values[5].key_id)
+
+    with ThreadPoolExecutor(max_workers=2) as executor:
+        importing = executor.submit(_import, values)
+        assert controller.wait_until_reached()
+        mutation = executor.submit(revoke)
+        assert mutation_started.wait(timeout=10)
+        assert not mutation.done()
+        controller.release()
+        binding = importing.result(timeout=10)
+        mutation.result(timeout=10)
+
     assert controller.fired
-    assert values[1].query(CatalogQuery()).empty
-    inventory = tuple((tmp_path / point / "cohort-records").iterdir())
-    assert inventory == ()
-    assert tuple((tmp_path / point / "results/objects").iterdir())
+    assert values[1].query(CatalogQuery()).results == (binding.result,)
+    status = _status(values)
+    assert status.members[0].availability is CohortRecordAvailability.WITHHELD
+    assert (
+        status.members[0].withheld_reason
+        is CohortRecordWithheldReason.RESULT_KEY_REVOKED
+    )
 
 
 def test_failed_visible_import_compensates_before_recovery_can_read(
@@ -1040,11 +1291,13 @@ def test_failed_visible_import_compensates_before_recovery_can_read(
             tmp_path / "cohort-records",
             result_catalog=values[1],
             linkage_store=live[0],
+            cohort_registry=values[11],
             expected_trust_snapshot_sha256_by_provider=_pins(),
             reader_registry=DEFAULT_RESULT_BUNDLE_READER_REGISTRY,
         )
         try:
-            return recovered.record_status_for_manifest((values[2],))
+            selector_id, cohort_version = _selection(values)
+            return recovered.record_status_for_manifest(selector_id, cohort_version)
         finally:
             recovered.close()
 
@@ -1091,7 +1344,7 @@ def test_result_catalog_object_substitution_is_rejected_before_import(
     victim = _setup(tmp_path / "victim", live)
     attacker = _setup(tmp_path / "attacker", live)
     object.__setattr__(victim[0], "_result_catalog", attacker[1])
-    with pytest.raises(CohortImportError, match="authority changed"):
+    with pytest.raises(CohortImportError, match="authority (state )?changed"):
         _import(victim)
     assert victim[1].query(CatalogQuery()).empty
     assert attacker[1].query(CatalogQuery()).empty
@@ -1101,6 +1354,7 @@ def test_stale_linkage_cannot_be_bypassed_by_instance_validator_shadow(
     tmp_path: Path, live
 ) -> None:
     values = _setup(tmp_path, live)
+    selection = _selection(values)
     revision = _known_run_revision(
         linkage_id="linkage_" + "a" * 32,
         subject="subject_" + "a" * 32,
@@ -1119,7 +1373,7 @@ def test_stale_linkage_cannot_be_bypassed_by_instance_validator_shadow(
 
     object.__setattr__(values[0], "_validate_manifest", self_restoring)
     with pytest.raises(CohortImportError, match="authority callable"):
-        _import(values)
+        _import(values, selection=selection)
     assert values[1].query(CatalogQuery()).empty
     assert tuple((tmp_path / "cohort-records").iterdir()) == ()
 
@@ -1161,7 +1415,7 @@ def test_read_revalidation_rejects_self_restoring_and_module_shadows(
         (CatalogError, CohortImportError),
         match="authority changed|module authority|verification authority",
     ):
-        values[0].bindings_for_manifest((values[2],))
+        _bindings(values)
 
 
 def test_class_validator_shadow_is_rejected_without_execution(
@@ -1240,6 +1494,7 @@ def test_stale_linkage_cannot_be_bypassed_by_validator_code_mutation(
     tmp_path: Path, live
 ) -> None:
     values = _setup(tmp_path, live)
+    selection = _selection(values)
     revision = _known_run_revision(
         linkage_id="linkage_" + "b" * 32,
         subject="subject_" + "b" * 32,
@@ -1260,7 +1515,7 @@ def test_stale_linkage_cannot_be_bypassed_by_validator_code_mutation(
     try:
         CohortRecordCatalog._validate_manifest.__code__ = bypass.__code__
         with pytest.raises(CohortImportError, match="authority callable"):
-            _import(values)
+            _import(values, selection=selection)
     finally:
         CohortRecordCatalog._validate_manifest.__code__ = original
     assert values[1].query(CatalogQuery()).empty
@@ -1300,7 +1555,9 @@ def test_revocation_cannot_be_bypassed_by_authority_code_mutation(
     assert values[1].query(CatalogQuery()).empty
 
 
-def test_linkage_advance_before_visibility_compensates(tmp_path: Path, live) -> None:
+def test_linkage_advance_before_visibility_waits_for_authority_fence(
+    tmp_path: Path, live
+) -> None:
     controller = DeterministicFaultController(
         "before_visibility", action=FaultAction.PAUSE
     )
@@ -1316,15 +1573,28 @@ def test_linkage_advance_before_visibility_compensates(tmp_path: Path, live) -> 
         run_digit="e",
     )
     authorized, _ = _consume(revision, (_create_approval(revision, "e"),))
-    error = _paused_error(
-        controller,
-        lambda: _import(values),
-        lambda: live[0].commit_authorized_revision(authorized),
-    )
-    assert isinstance(error, CohortImportError)
-    assert "changed during import" in str(error)
-    assert values[1].query(CatalogQuery()).empty
-    assert tuple((tmp_path / "cohort-records").iterdir()) == ()
+    selector_id, cohort_version = _selection(values)
+    mutation_started = threading.Event()
+
+    def mutate() -> None:
+        mutation_started.set()
+        live[0].commit_authorized_revision(authorized)
+
+    with ThreadPoolExecutor(max_workers=2) as executor:
+        importing = executor.submit(
+            _import, values, selection=(selector_id, cohort_version)
+        )
+        assert controller.wait_until_reached()
+        mutation = executor.submit(mutate)
+        assert mutation_started.wait(timeout=10)
+        assert not mutation.done()
+        controller.release()
+        binding = importing.result(timeout=10)
+        mutation.result(timeout=10)
+
+    assert values[1].query(CatalogQuery()).results == (binding.result,)
+    with pytest.raises(CohortImportError, match="current|changed|linkage"):
+        values[0].bindings_for_manifest(selector_id, cohort_version)
 
 
 @pytest.mark.parametrize(
@@ -1357,12 +1627,13 @@ def test_crash_recovery_reconciles_journal_and_catalog_publication(
         tmp_path / "cohort-records",
         result_catalog=results,
         linkage_store=live[0],
+            cohort_registry=values[11],
         expected_trust_snapshot_sha256_by_provider=_pins(),
         reader_registry=DEFAULT_RESULT_BUNDLE_READER_REGISTRY,
     )
     try:
         page = results.query(CatalogQuery())
-        bindings = cohorts.bindings_for_manifest((values[2],))
+        bindings = _bindings((cohorts, results, *values[2:]))
         assert bool(page.results) is visible
         assert bool(bindings) is visible
         assert not tuple((tmp_path / "cohort-records").glob(".pending.*"))
@@ -1404,11 +1675,12 @@ def test_adopted_pending_without_marker_rolls_back_as_incomplete(
         tmp_path / "cohort-records",
         result_catalog=results,
         linkage_store=live[0],
+            cohort_registry=values[11],
         expected_trust_snapshot_sha256_by_provider=_pins(),
         reader_registry=DEFAULT_RESULT_BUNDLE_READER_REGISTRY,
     )
     try:
-        recovered = cohorts.record_status_for_manifest((values[2],))
+        recovered = _status((cohorts, results, *values[2:]))
         assert recovered.members[0].availability is CohortRecordAvailability.MISSING
         assert results.query(CatalogQuery()).empty
         assert tuple((tmp_path / "cohort-records").iterdir()) == ()
@@ -1439,6 +1711,7 @@ def test_marker_recovers_exact_candidate_and_preserves_committed_peer(
         tmp_path / "cohort-records",
         result_catalog=values[1],
         linkage_store=live[0],
+            cohort_registry=values[11],
         expected_trust_snapshot_sha256_by_provider=_pins(),
         reader_registry=DEFAULT_RESULT_BUNDLE_READER_REGISTRY,
         fault_controller=DeterministicFaultController(
@@ -1470,6 +1743,7 @@ def test_marker_recovers_exact_candidate_and_preserves_committed_peer(
             tmp_path / "cohort-records",
             result_catalog=results,
             linkage_store=live[0],
+            cohort_registry=values[11],
             expected_trust_snapshot_sha256_by_provider=_pins(),
             reader_registry=DEFAULT_RESULT_BUNDLE_READER_REGISTRY,
         )
@@ -1478,8 +1752,9 @@ def test_marker_recovers_exact_candidate_and_preserves_committed_peer(
     for _ in range(2):
         cohorts, results = reopen()
         try:
-            assert cohorts.bindings_for_manifest((previous,)) == (first,)
-            second_status = cohorts.record_status_for_manifest((previous, second))
+            reopened_values = (cohorts, results, *values[2:])
+            assert _bindings(reopened_values, (previous,)) == (first,)
+            second_status = _status(reopened_values, (previous, second))
             assert (
                 second_status.members[0].availability
                 is CohortRecordAvailability.MISSING
@@ -1515,6 +1790,7 @@ def test_swapped_marker_cannot_delete_committed_peer_or_publish_candidate(
         tmp_path / "cohort-records",
         result_catalog=values[1],
         linkage_store=live[0],
+            cohort_registry=values[11],
         expected_trust_snapshot_sha256_by_provider=_pins(),
         reader_registry=DEFAULT_RESULT_BUNDLE_READER_REGISTRY,
         fault_controller=DeterministicFaultController(
@@ -1559,13 +1835,15 @@ def test_swapped_marker_cannot_delete_committed_peer_or_publish_candidate(
         tmp_path / "cohort-records",
         result_catalog=results,
         linkage_store=live[0],
+            cohort_registry=values[11],
         expected_trust_snapshot_sha256_by_provider=_pins(),
         reader_registry=DEFAULT_RESULT_BUNDLE_READER_REGISTRY,
     )
     try:
-        assert cohorts.bindings_for_manifest((previous,)) == (first,)
+        reopened_values = (cohorts, results, *values[2:])
+        assert _bindings(reopened_values, (previous,)) == (first,)
         assert (
-            cohorts.record_status_for_manifest((previous, second))
+            _status(reopened_values, (previous, second))
             .members[0]
             .availability
             is CohortRecordAvailability.MISSING
@@ -1623,11 +1901,12 @@ def test_failed_cleanup_preserves_durable_rollback_intent(
         tmp_path / "cohort-records",
         result_catalog=results,
         linkage_store=live[0],
+            cohort_registry=values[11],
         expected_trust_snapshot_sha256_by_provider=_pins(),
         reader_registry=DEFAULT_RESULT_BUNDLE_READER_REGISTRY,
     )
     try:
-        status = cohorts.record_status_for_manifest((values[2],))
+        status = _status((cohorts, results, *values[2:]))
         assert status.members[0].availability is CohortRecordAvailability.MISSING
         assert results.query(CatalogQuery()).empty
         assert tuple((tmp_path / "cohort-records").iterdir()) == ()
@@ -1692,11 +1971,12 @@ def test_marker_and_final_unlink_failure_cannot_commit_failed_import(
         tmp_path / "cohort-records",
         result_catalog=results,
         linkage_store=live[0],
+            cohort_registry=values[11],
         expected_trust_snapshot_sha256_by_provider=_pins(),
         reader_registry=DEFAULT_RESULT_BUNDLE_READER_REGISTRY,
     )
     try:
-        status = cohorts.record_status_for_manifest((values[2],))
+        status = _status((cohorts, results, *values[2:]))
         assert status.members[0].availability is CohortRecordAvailability.MISSING
         assert results.query(CatalogQuery()).empty
         assert tuple((tmp_path / "cohort-records").iterdir()) == ()
@@ -1720,6 +2000,7 @@ def test_crash_recovery_removes_partial_pre_stage_journal(tmp_path: Path, live) 
         tmp_path / "cohort-records",
         result_catalog=values[1],
         linkage_store=live[0],
+            cohort_registry=values[11],
         expected_trust_snapshot_sha256_by_provider=_pins(),
         reader_registry=DEFAULT_RESULT_BUNDLE_READER_REGISTRY,
     )
@@ -1780,6 +2061,7 @@ def test_corrupt_or_missing_real_journal_cannot_strand_pending_row(
         tmp_path / "cohort-records",
         result_catalog=results,
         linkage_store=live[0],
+            cohort_registry=values[11],
         expected_trust_snapshot_sha256_by_provider=_pins(),
         reader_registry=DEFAULT_RESULT_BUNDLE_READER_REGISTRY,
     )
@@ -1789,7 +2071,7 @@ def test_corrupt_or_missing_real_journal_cannot_strand_pending_row(
         assert bool(results.query(CatalogQuery()).results) is retained_adopted
         assert bool(tuple((tmp_path / "cohort-records").iterdir())) is retained_adopted
         binding = _import(recovered_values)
-        assert cohorts.bindings_for_manifest((values[2],)) == (binding,)
+        assert _bindings(recovered_values) == (binding,)
     finally:
         cohorts.close()
         results.close()
@@ -1827,6 +2109,7 @@ def test_concurrent_restart_recovery_is_idempotent(tmp_path: Path, live) -> None
                     tmp_path / "cohort-records",
                     result_catalog=result,
                     linkage_store=live[0],
+            cohort_registry=values[11],
                     expected_trust_snapshot_sha256_by_provider=_pins(),
                     reader_registry=DEFAULT_RESULT_BUNDLE_READER_REGISTRY,
                 )
@@ -1851,6 +2134,7 @@ def test_concurrent_restart_recovery_is_idempotent(tmp_path: Path, live) -> None
         tmp_path / "cohort-records",
         result_catalog=results,
         linkage_store=live[0],
+            cohort_registry=values[11],
         expected_trust_snapshot_sha256_by_provider=_pins(),
         reader_registry=DEFAULT_RESULT_BUNDLE_READER_REGISTRY,
     )
@@ -1858,7 +2142,7 @@ def test_concurrent_restart_recovery_is_idempotent(tmp_path: Path, live) -> None
         recovered_values = (cohorts, results, *values[2:])
         assert results.query(CatalogQuery()).empty
         binding = _import(recovered_values)
-        assert cohorts.bindings_for_manifest((values[2],)) == (binding,)
+        assert _bindings(recovered_values) == (binding,)
     finally:
         cohorts.close()
         results.close()
@@ -1894,6 +2178,7 @@ def test_recovery_scope_cannot_compensate_another_binding_root(
         tmp_path / "other-cohort-records",
         result_catalog=results,
         linkage_store=live[0],
+            cohort_registry=values[11],
         expected_trust_snapshot_sha256_by_provider=_pins(),
         reader_registry=DEFAULT_RESULT_BUNDLE_READER_REGISTRY,
     )
@@ -1905,6 +2190,7 @@ def test_recovery_scope_cannot_compensate_another_binding_root(
         tmp_path / "cohort-records",
         result_catalog=results,
         linkage_store=live[0],
+            cohort_registry=values[11],
         expected_trust_snapshot_sha256_by_provider=_pins(),
         reader_registry=DEFAULT_RESULT_BUNDLE_READER_REGISTRY,
     )
@@ -1928,6 +2214,7 @@ def test_shared_result_retains_each_coordinator_owner_until_last_cleanup(
             root,
             result_catalog=values[1],
             linkage_store=live[0],
+            cohort_registry=values[11],
             expected_trust_snapshot_sha256_by_provider=_pins(),
             reader_registry=DEFAULT_RESULT_BUNDLE_READER_REGISTRY,
         )
@@ -1952,6 +2239,7 @@ def test_shared_result_retains_each_coordinator_owner_until_last_cleanup(
                 root,
                 result_catalog=values[1],
                 linkage_store=live[0],
+            cohort_registry=values[11],
                 expected_trust_snapshot_sha256_by_provider=_pins(),
                 reader_registry=DEFAULT_RESULT_BUNDLE_READER_REGISTRY,
             )
@@ -1960,7 +2248,8 @@ def test_shared_result_retains_each_coordinator_owner_until_last_cleanup(
             assert bool(values[1].query(CatalogQuery()).results) is visible
             if visible:
                 remaining = catalogs[index + 1]
-                assert remaining.bindings_for_manifest((values[2],)) == (
+                remaining_values = (remaining, *values[1:])
+                assert _bindings(remaining_values) == (
                     bindings[index + 1],
                 )
     finally:

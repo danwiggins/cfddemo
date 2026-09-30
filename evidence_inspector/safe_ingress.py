@@ -101,6 +101,7 @@ def graph_is_safe(
     max_string_bytes: int = DEFAULT_MAX_STRING_BYTES,
     max_binary_bytes: int = DEFAULT_MAX_BINARY_BYTES,
     max_int_bits: int = DEFAULT_MAX_INT_BITS,
+    allow_aliases: bool = True,
 ) -> bool:
     """Inspect exact object state without invoking caller-owned hooks."""
 
@@ -108,6 +109,7 @@ def graph_is_safe(
     # and whether this is the matching traversal-exit marker.
     stack: list[tuple[object, int, int | None, bool]] = [(root, 0, None, False)]
     active: set[int] = set()
+    seen: set[int] = set()
     nodes = 0
     while stack:
         value, depth, schema_max, exiting = stack.pop()
@@ -151,8 +153,9 @@ def graph_is_safe(
         if value_type in enum_types:
             continue
         identity = id(value)
-        if identity in active:
+        if identity in active or (not allow_aliases and identity in seen):
             return False
+        seen.add(identity)
         active.add(identity)
         stack.append((value, depth, schema_max, True))
         if value_type in model_types:
@@ -311,6 +314,7 @@ def exact_model_bytes(
     max_collection_items: int = DEFAULT_MAX_COLLECTION_ITEMS,
     max_string_bytes: int = DEFAULT_MAX_STRING_BYTES,
     max_int_bits: int = DEFAULT_MAX_INT_BITS,
+    allow_aliases: bool = True,
 ) -> bytes:
     if (
         type(value) is not expected_type
@@ -332,6 +336,7 @@ def exact_model_bytes(
             max_collection_items=max_collection_items,
             max_string_bytes=max_string_bytes,
             max_int_bits=max_int_bits,
+            allow_aliases=allow_aliases,
         )
     ):
         raise TypeError("contract object graph is invalid")
