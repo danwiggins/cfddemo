@@ -96,5 +96,9 @@ external rollback anchor remain deployment requirements. Until those are
 qualified, this work is research-only and does not claim Epic D evidence or
 provider production readiness.
 
+The additive D04 record ledger is documented in
+`docs/RECORD-SUPERSESSION.md`. It binds this store's exact live projection;
+supersession state never edits linkage history or public result artifacts.
+
 No free-text identities, donor data, paths, read IDs, sequences or clinical
 claims are accepted by or emitted from the public contracts.
