@@ -74,9 +74,10 @@ the external-release namespace and an independently provisioned authority-head
 policy. Every external artifact must match its separately pinned signer and
 authority-head digest. A caller-created development signer cannot establish
 release authority. Approved-host evidence binds the exact run, host profile,
-filter/render measurements, and memory measurement. Verification also requires
-an independently supplied, non-revoked trust store at an injected, aware
-verification time within each artifact's validity window. The external
+filter/render measurements, and memory measurement. No authenticated policy installation boundary exists in this sprint, so caller-supplied
+trust stores, keys, policies, and signed artifacts remain untrusted and the external
+release gates remain disabled. A future boundary must load and authenticate the policy
+independently of the release-gate caller. The external
 contracts additionally require five representative users, keyboard plus
 screen-reader plus 200 percent zoom audits, and reviewed browser captures.
 Missing trust, bad signatures, digest mismatches, incomplete evidence, and

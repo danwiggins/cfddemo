@@ -359,6 +359,12 @@ def test_problem_docs_path_is_bounded_to_bundled_markdown(path: str) -> None:
         "source_identifier:private-0001",
         "path:/Volumes/private/raw-input.bam",
         "path=/private/raw-input.bam",
+        "source id private-0001",
+        "source identifier private-0001",
+        "Patient id private-0001",
+        "https:evil.example",
+        "%252FVolumes%252Fprivate%252Fraw-input.bam",
+        "A C G T A C G T A C G T A C G T A C G T A C G T",
     ),
 )
 def test_safe_operator_grammar_rejects_review_bypasses_in_every_web_shape(
@@ -366,15 +372,15 @@ def test_safe_operator_grammar_rejects_review_bypasses_in_every_web_shape(
 ) -> None:
     problem = _problem().model_dump(mode="json")
     problem["problem"] = unsafe
-    with pytest.raises(ValidationError, match="safe grammar|private identifier"):
+    with pytest.raises(ValidationError, match="operator text"):
         ProblemDetail.model_validate(problem)
 
     action = _job().actions[0].model_dump(mode="json")
     action["label"] = unsafe
-    with pytest.raises(ValidationError, match="safe grammar|private identifier"):
+    with pytest.raises(ValidationError, match="operator text"):
         JobAction.model_validate(action)
 
     projection = _job().model_dump(mode="json")
     projection["headline"] = unsafe
-    with pytest.raises(ValidationError, match="safe grammar|private identifier"):
+    with pytest.raises(ValidationError, match="operator text"):
         JobProjection.model_validate(projection)

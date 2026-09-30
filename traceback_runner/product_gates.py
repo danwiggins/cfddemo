@@ -33,12 +33,8 @@ from pydantic import (
 from traceback_runner.contracts import RunnerContract
 from traceback_runner.serialization import canonical_json_bytes, sha256_bytes
 from traceback_runner.signing import (
-    KeyPurpose,
     SignatureEnvelope,
-    SigningError,
-    TrustNamespace,
     TrustStore,
-    verify_signature,
 )
 from traceback_runner.web.contracts import ProblemDetail, ProblemOwner, SafeText
 
@@ -100,6 +96,16 @@ class NetworkProbeOperation(StrEnum):
     SENDTO = "sendto"
 
 
+REGISTERED_PRIVACY_SENTINELS = {
+    PrivacySentinelClass.DONOR_IDENTIFIER: b"donor_id=private-0001",
+    PrivacySentinelClass.READ_IDENTIFIER: b"read_id=private-read-0001",
+    PrivacySentinelClass.ABSOLUTE_PATH: b"/Users/private/raw-input.bam",
+    PrivacySentinelClass.RAW_SEQUENCE: b"ACGTACGTACGTACGTACGTACGTACGTACGT",
+}
+REGISTERED_NETWORK_TARGET = ("127.0.0.1", 9)
+REGISTERED_NETWORK_PAYLOAD = b"privacy-safe-probe"
+
+
 class PrivacyPathObservation(RunnerContract):
     sentinel_class: PrivacySentinelClass
     sentinel_sha256: Sha256
@@ -141,6 +147,13 @@ class PrivacySentinelEvidence(RunnerContract):
             per_class.setdefault(item.sentinel_class, set()).add(item.sentinel_sha256)
         if any(len(digests) != 1 for digests in per_class.values()):
             raise ValueError("each sentinel class must bind one exact sentinel digest")
+        for sentinel_class, value in REGISTERED_PRIVACY_SENTINELS.items():
+            if per_class.get(sentinel_class) != {sha256_bytes(value)}:
+                raise ValueError("privacy evidence must bind registered sentinels")
+        if not self.serialized_output_clean or not all(
+            item.rejected for item in self.observations
+        ):
+            raise ValueError("registered privacy probes must all reject")
         return self
 
 
@@ -189,6 +202,26 @@ class NetworkDenialEvidence(RunnerContract):
             raise ValueError(
                 "network evidence must persist both guarded probe attempts"
             )
+        expected_target = sha256_bytes(repr(REGISTERED_NETWORK_TARGET).encode())
+        expected = {
+            NetworkProbeOperation.CONNECT_EX: None,
+            NetworkProbeOperation.SENDTO: sha256_bytes(REGISTERED_NETWORK_PAYLOAD),
+        }
+        if any(
+            not item.denial_observed
+            or not item.guard_recorded
+            or item.target != "127.0.0.1:9"
+            or item.payload_sha256 != expected[item.operation]
+            for item in self.observations
+        ):
+            raise ValueError("network evidence must bind registered probe results")
+        if tuple(
+            (item.operation, item.target_sha256) for item in self.intercepted_attempts
+        ) != tuple(
+            (operation.value, expected_target)
+            for operation in sorted(NetworkProbeOperation, key=str)
+        ):
+            raise ValueError("network evidence must bind exact registered attempts")
         return self
 
 
@@ -826,53 +859,13 @@ def derive_release_gate(
 ) -> ReleaseGateDecision:
     """Derive capability state from measurements and independently verified evidence."""
 
+    # No authenticated installation boundary exists yet. Caller-provided trust
+    # material and policy objects cannot establish independent release authority.
     verified: dict[GateId, VerifiedExternalEvidence] = {}
     accepted_envelopes: list[SignedExternalEvidence] = []
     current = now
     if current is not None and (current.tzinfo is None or current.utcoffset() is None):
         raise ValueError("release-gate time must be timezone-aware")
-    pinned = (
-        {item.gate_id: item for item in authority_policy.pinned_heads}
-        if authority_policy is not None
-        else {}
-    )
-    policy_current = (
-        authority_policy is not None
-        and current is not None
-        and authority_policy.issued_at <= current < authority_policy.expires_at
-    )
-    if trust_store is not None and policy_current:
-        for envelope in signed_external_evidence:
-            try:
-                verify_signature(
-                    canonical_json_bytes(envelope.evidence),
-                    envelope.signature,
-                    trust_store,
-                    purpose=KeyPurpose.RELEASE,
-                    namespace=TrustNamespace.EXTERNAL_RELEASE,
-                )
-            except SigningError:
-                continue
-            if envelope.evidence.authority_key_id != envelope.signature.key_id:
-                continue
-            expected = pinned.get(envelope.evidence.gate_id)
-            if (
-                expected is None
-                or expected.authority_key_id != envelope.evidence.authority_key_id
-                or expected.authority_head_sha256
-                != envelope.evidence.authority_head_sha256
-            ):
-                continue
-            if (
-                not envelope.evidence.verified_at
-                <= current
-                < envelope.evidence.expires_at
-            ):
-                continue
-            if envelope.evidence.gate_id in verified:
-                raise ValueError("signed external evidence must be unique by gate")
-            verified[envelope.evidence.gate_id] = envelope.evidence
-            accepted_envelopes.append(envelope)
     if set(verified) - _EXTERNAL_GATES:
         raise ValueError("verified evidence contains a non-external gate")
     evidence = {item.gate_id: item for item in report.gate_evidence}
@@ -936,15 +929,7 @@ def run_foundation_gates(
 
     manifest, manifest_bytes = load_screenshot_manifest(screenshot_manifest_path)
     del manifest
-    sentinels = (
-        (PrivacySentinelClass.DONOR_IDENTIFIER, b"donor_id=private-0001"),
-        (PrivacySentinelClass.READ_IDENTIFIER, b"read_id=private-read-0001"),
-        (PrivacySentinelClass.ABSOLUTE_PATH, b"/Users/private/raw-input.bam"),
-        (
-            PrivacySentinelClass.RAW_SEQUENCE,
-            b"ACGTACGTACGTACGTACGTACGTACGTACGT",
-        ),
-    )
+    sentinels = tuple(REGISTERED_PRIVACY_SENTINELS.items())
     host_run = HostRunEvidence(
         run_id=run_id,
         captured_at=captured_at or datetime.now(UTC),
@@ -956,7 +941,7 @@ def run_foundation_gates(
     )
     host_run_sha256 = sha256_bytes(canonical_json_bytes(host_run))
     network_probe_results: list[tuple[NetworkProbeOperation, bool, bool]] = []
-    probe_payload = b"privacy-safe-probe"
+    probe_payload = REGISTERED_NETWORK_PAYLOAD
 
     with deny_external_network() as network_attempts:
         records = _synthetic_records(CATALOG_RECORDS)
@@ -978,11 +963,13 @@ def run_foundation_gates(
             for operation_name, operation in (
                 (
                     NetworkProbeOperation.CONNECT_EX,
-                    lambda: probe_socket.connect_ex(("127.0.0.1", 9)),
+                    lambda: probe_socket.connect_ex(REGISTERED_NETWORK_TARGET),
                 ),
                 (
                     NetworkProbeOperation.SENDTO,
-                    lambda: probe_socket.sendto(probe_payload, ("127.0.0.1", 9)),
+                    lambda: probe_socket.sendto(
+                        probe_payload, REGISTERED_NETWORK_TARGET
+                    ),
                 ),
             ):
                 before = len(network_attempts)

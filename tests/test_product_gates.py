@@ -118,7 +118,10 @@ def test_persisted_adversarial_evidence_digest_binds_exact_results(
 ) -> None:
     payload = report.model_dump(mode="json")
     mutation(payload[evidence_field])  # type: ignore[operator]
-    with pytest.raises(ValidationError, match="exact observations"):
+    with pytest.raises(
+        ValidationError,
+        match="(?:exact observations|registered .* probes|registered probe results)",
+    ):
         ProductGateReport.model_validate(payload)
 
 
@@ -403,8 +406,13 @@ def test_release_gate_requires_independently_verified_exact_external_evidence(
         authority_policy=policy,
         now=datetime(2026, 9, 29, 12, tzinfo=UTC),
     )
-    assert approved.capability_enabled
-    assert approved.unmet_gates == ()
+    assert not approved.capability_enabled
+    assert set(approved.unmet_gates) >= {
+        GateId.ACCESSIBILITY,
+        GateId.APPROVED_HOST,
+        GateId.FIVE_PROVIDER_STUDY,
+        GateId.SCREENSHOTS,
+    }
 
     mismatched_head_policy = policy.model_copy(
         update={
@@ -535,18 +543,24 @@ def test_external_evidence_contracts_fail_closed(
         "source_identifier:private-0001",
         "path:/Volumes/private/raw-input.bam",
         "path=/private/raw-input.bam",
+        "source id private-0001",
+        "source identifier private-0001",
+        "Patient id private-0001",
+        "https:evil.example",
+        "%252FVolumes%252Fprivate%252Fraw-input.bam",
+        "A C G T A C G T A C G T A C G T A C G T A C G T",
     ),
 )
 def test_safe_operator_grammar_rejects_review_bypasses_in_gate_surfaces(
     unsafe: str,
 ) -> None:
-    with pytest.raises(ValidationError, match="safe grammar|private identifier"):
+    with pytest.raises(ValidationError, match="operator text"):
         GateEvidence(
             gate_id=GateId.ACCESSIBILITY,
             status=EvidenceStatus.REQUIRED_EXTERNAL,
             detail=unsafe,
         )
-    with pytest.raises(ValidationError, match="safe grammar|private identifier"):
+    with pytest.raises(ValidationError, match="operator text"):
         AccessibilityFixture(
             fixture_id="unsafe-fixture",
             viewport_width_px=1280,

@@ -7,6 +7,7 @@ from datetime import datetime
 from enum import StrEnum
 from pathlib import PurePosixPath
 from typing import Annotated, Literal
+from urllib.parse import unquote
 
 from pydantic import AfterValidator, Field, StringConstraints, model_validator
 
@@ -19,23 +20,37 @@ _SAFE_OPERATOR_TEXT = re.compile(r"^[A-Za-z0-9][A-Za-z0-9 .,'()%;:!?+_-]*$")
 def _safe_operator_text(value: str) -> str:
     if _SAFE_OPERATOR_TEXT.fullmatch(value) is None:
         raise ValueError("operator text contains characters outside the safe grammar")
+    decoded = value
+    for _ in range(4):
+        next_value = unquote(decoded)
+        if next_value == decoded:
+            break
+        decoded = next_value
+    lowered = decoded.casefold()
+    if re.search(r"(?:^|\s)(?:https?|file|ftp)\s*:", lowered) or "//" in decoded:
+        raise ValueError("operator text cannot contain a URL")
+    if "/" in decoded or "\\" in decoded or ".." in decoded:
+        raise ValueError("operator text cannot contain a path")
     if re.search(
-        r"\b(?:source|donor|patient|sample|read|path)[_-]?(?:id|identifier)?\s*:\s*\S+",
-        value,
+        r"\b(?:source|donor|patient|sample|read|path)[ _-]*(?:id|identifier)\b",
+        decoded,
         flags=re.IGNORECASE,
     ):
         raise ValueError("operator text cannot contain a private identifier")
     if re.search(
         r"\b[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}\b",
-        value,
+        decoded,
         flags=re.IGNORECASE,
     ):
         raise ValueError("operator text cannot contain a UUID-like identifier")
-    if re.search(r"\b[ACGTRYSWKMBDHVN]{24,}\b", value, flags=re.IGNORECASE):
+    nucleotide_candidate = re.sub(r"[\s._-]", "", decoded)
+    if len(nucleotide_candidate) >= 24 and re.fullmatch(
+        r"[ACGTRYSWKMBDHVN]+", nucleotide_candidate, flags=re.IGNORECASE
+    ):
         raise ValueError("operator text cannot contain a raw nucleotide sequence")
     if re.search(
         r"(?:authorization|api[_ -]?key|secret|password|token)\s*[:=]\s*\S+",
-        value,
+        decoded,
         flags=re.IGNORECASE,
     ):
         raise ValueError("operator text cannot contain a credential")
