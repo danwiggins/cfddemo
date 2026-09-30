@@ -12,7 +12,9 @@ python -m traceback_runner.product_gates \
 ```
 
 The command writes one canonical JSON report to stdout. It does not write a
-result artifact, open a socket, invoke AWS, or ingest biological data.
+result artifact, invoke AWS, contact a non-loopback address, or ingest
+biological data. It starts the packaged service on one random literal-loopback
+port so the service path is part of the local evidence.
 
 ## What the harness measures
 
@@ -21,7 +23,11 @@ result artifact, open a socket, invoke AWS, or ingest biological data.
 - Python peak allocation while generating and filtering the 100,000-record
   stress fixture;
 - process-level socket denial during the complete run;
-- absence of seeded private identifier, local path, and sequence sentinels;
+- byte-identical repeated responses from the authenticated packaged catalog
+  route, with release explorer/export disabled and E12 explicitly unavailable;
+- rejection of seeded private identifier, local path, and sequence sentinels at
+  model boundaries and the authenticated HTTP query boundary without echoing
+  them in the response;
 - canonical synthetic screenshot metadata for desktop, mobile, keyboard
   order, screen-reader names, non-color state text, and 200% zoom; and
 - exact run, timestamp, Python, operating system, machine, and processor
@@ -31,18 +37,31 @@ The three scale/performance entries remain `fixture_only`. The catalog populatio
 uses private SQL rather than 10,000 verified E04 imports, the render measurement
 ends at Python serialization rather than browser DOM readiness, and `tracemalloc`
 does not measure process RSS, SQLite/native allocations, or browser memory.
-Screenshot and accessibility entries are also `fixture_only`: metadata is not a
-reviewed browser capture or manual assistive-technology audit.
+The packaged-service result is an `observed_pass` local prerequisite. It is not
+a browser render or approved-host measurement. Screenshot and accessibility
+metadata is retained as a fixture, while the actual keyboard, screen-reader,
+200 percent zoom and reviewed-capture requirements are each recorded as
+`unmet_no_observed_evidence`.
 
 ## Gates that remain external
 
-The report always includes all nine gate identities. The following remain
+The report always includes all ten gate identities plus five separate external
+requirement states. The following remain
 unpassed until evidence is supplied by the named work:
 
 - approved-host filter p95 and initial browser render evidence;
 - reviewed browser screenshots at required viewports and 200% zoom;
 - keyboard-only and screen-reader audit evidence; and
 - the five-provider task study.
+
+The provider-study artifact requires exactly five participants and the frozen
+25-outcome task matrix. It enforces the specified five-of-five identification,
+four-of-five uncoached recovery, five-of-five no-upload-belief, and five-minute
+doctor/demo/verify thresholds. This schema does not create study evidence.
+
+E12 remains `unavailable_not_implemented`. The report binds that missing
+dependency and all five unmet external requirements into a release-control
+record whose explorer, export and capability fields are fixed false.
 
 An external gate cannot be marked `observed_pass` without an evidence
 reference. `capability_enabled` is derived from all gate statuses and is false

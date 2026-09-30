@@ -8,6 +8,8 @@ a manual accessibility audit, and fixtures are not a five-provider study.
 from __future__ import annotations
 
 import hashlib
+import ipaddress
+import json
 import platform
 import socket
 import sys
@@ -21,6 +23,7 @@ from enum import StrEnum
 from pathlib import Path
 from threading import RLock
 from typing import Annotated, Literal
+from urllib.parse import quote
 
 from pydantic import (
     Field,
@@ -42,14 +45,17 @@ from traceback_runner.signing import (
     SignatureEnvelope,
     TrustStore,
 )
+from traceback_runner.store import JobStore
 from traceback_runner.web.contracts import ProblemDetail, ProblemOwner, SafeText
+from traceback_runner.web.server import RunningLocalWebService
 
 CATALOG_RECORDS = 10_000
 STRESS_RECORDS = 100_000
 FILTER_P95_TARGET_US = 250_000
 INITIAL_RENDER_TARGET_US = 2_000_000
 MAX_SYNTHETIC_PEAK_BYTES = 256 * 1024 * 1024
-HARNESS_VERSION = "traceback-product-gates.v2"
+HARNESS_VERSION = "traceback-product-gates.v3"
+MAX_LOCAL_HTTP_RESPONSE_BYTES = 2 * 1024 * 1024
 
 SafeToken = Annotated[
     str,
@@ -74,6 +80,7 @@ class GateId(StrEnum):
     SCREENSHOTS = "screenshots"
     APPROVED_HOST = "approved_host"
     FIVE_PROVIDER_STUDY = "five_provider_study"
+    LOCAL_SERVICE_DETERMINISM = "local_service_determinism"
 
 
 class EvidenceStatus(StrEnum):
@@ -82,6 +89,28 @@ class EvidenceStatus(StrEnum):
     OBSERVED_LOCAL_UNAPPROVED = "observed_local_unapproved"
     FIXTURE_ONLY = "fixture_only"
     REQUIRED_EXTERNAL = "required_external"
+
+
+class ExternalRequirementId(StrEnum):
+    KEYBOARD_ONLY = "keyboard_only"
+    SCREEN_READER = "screen_reader"
+    ZOOM_200 = "zoom_200"
+    REVIEWED_SCREENSHOTS = "reviewed_screenshots"
+    FIVE_PROVIDER_TASKS = "five_provider_tasks"
+
+
+class ExternalRequirementState(StrEnum):
+    UNMET_NO_OBSERVED_EVIDENCE = "unmet_no_observed_evidence"
+    OBSERVED_FAIL = "observed_fail"
+    OBSERVED_PASS = "observed_pass"
+
+
+class ProviderTaskId(StrEnum):
+    IDENTIFY_JOB_STATE_OWNER_ACTION = "identify_job_state_owner_action"
+    RECOVER_LOW_DISK = "recover_low_disk"
+    RECOVER_INTERRUPTION = "recover_interruption"
+    SAVE_VERIFY_WITHOUT_UPLOAD_BELIEF = "save_verify_without_upload_belief"
+    DOCTOR_DEMO_VERIFY = "doctor_demo_verify"
 
 
 class PrivacySentinelClass(StrEnum):
@@ -119,17 +148,28 @@ class PrivacyPathObservation(RunnerContract):
     rejected: bool
 
 
+class ServicePrivacyObservation(RunnerContract):
+    sentinel_class: PrivacySentinelClass
+    sentinel_sha256: Sha256
+    status_code: Literal[400]
+    response_sha256: Sha256
+    sentinel_absent: Literal[True] = True
+
+
 class PrivacySentinelEvidence(RunnerContract):
-    schema_version: Literal["traceback.privacy-sentinel-evidence.v1"] = (
-        "traceback.privacy-sentinel-evidence.v1"
+    schema_version: Literal["traceback.privacy-sentinel-evidence.v2"] = (
+        "traceback.privacy-sentinel-evidence.v2"
     )
-    harness_version: Literal["traceback-product-gates.v2"] = HARNESS_VERSION
+    harness_version: Literal["traceback-product-gates.v3"] = HARNESS_VERSION
     run_id: SafeToken
     host_run_sha256: Sha256
     output_payload_sha256: Sha256
     serialized_output_clean: bool
     observations: tuple[PrivacyPathObservation, ...] = Field(
         min_length=12, max_length=12
+    )
+    local_service_observations: tuple[ServicePrivacyObservation, ...] = Field(
+        min_length=4, max_length=4
     )
 
     @model_validator(mode="after")
@@ -156,6 +196,19 @@ class PrivacySentinelEvidence(RunnerContract):
         for sentinel_class, value in REGISTERED_PRIVACY_SENTINELS.items():
             if per_class.get(sentinel_class) != {sha256_bytes(value)}:
                 raise ValueError("privacy evidence must bind registered sentinels")
+        service_keys = tuple(
+            item.sentinel_class for item in self.local_service_observations
+        )
+        if service_keys != tuple(sorted(PrivacySentinelClass, key=str)):
+            raise ValueError(
+                "privacy evidence must bind every local-service sentinel probe"
+            )
+        if any(
+            item.sentinel_sha256
+            != sha256_bytes(REGISTERED_PRIVACY_SENTINELS[item.sentinel_class])
+            for item in self.local_service_observations
+        ):
+            raise ValueError("local-service privacy probes must bind registered sentinels")
         if not self.serialized_output_clean or not all(
             item.rejected for item in self.observations
         ):
@@ -185,12 +238,13 @@ class NetworkInterceptObservation(RunnerContract):
 
 
 class NetworkDenialEvidence(RunnerContract):
-    schema_version: Literal["traceback.network-denial-evidence.v1"] = (
-        "traceback.network-denial-evidence.v1"
+    schema_version: Literal["traceback.network-denial-evidence.v2"] = (
+        "traceback.network-denial-evidence.v2"
     )
-    harness_version: Literal["traceback-product-gates.v2"] = HARNESS_VERSION
+    harness_version: Literal["traceback-product-gates.v3"] = HARNESS_VERSION
     run_id: SafeToken
     host_run_sha256: Sha256
+    local_service_sha256: Sha256
     observations: tuple[NetworkProbeObservation, ...] = Field(
         min_length=2, max_length=2
     )
@@ -242,6 +296,83 @@ class HostRunEvidence(RunnerContract):
     machine: SafeText
     processor: SafeText
     approved_host_reference: SafeToken | None = None
+
+
+class LocalServiceEvidence(RunnerContract):
+    """Observed synthetic journey through the packaged loopback HTTP service."""
+
+    schema_version: Literal["traceback.local-service-gate-evidence.v1"] = (
+        "traceback.local-service-gate-evidence.v1"
+    )
+    request_path: Literal["/api/v1/explorer/catalog?limit=100"] = (
+        "/api/v1/explorer/catalog?limit=100"
+    )
+    unauthorized_status: Literal[401]
+    bootstrap_status: Literal[200]
+    authenticated_status: Literal[200]
+    repeated_status: Literal[200]
+    result_count: Literal[100]
+    response_sha256: Sha256
+    repeated_response_sha256: Sha256
+    packaged_assets_sha256: Sha256
+    privacy_rejection_response_sha256: tuple[Sha256, ...] = Field(
+        min_length=4, max_length=4
+    )
+    deterministic: Literal[True] = True
+    outbound_network_enabled: Literal[False] = False
+    release_explorer_allowed: Literal[False] = False
+    release_export_allowed: Literal[False] = False
+    e12_state: Literal["unavailable_not_implemented"] = (
+        "unavailable_not_implemented"
+    )
+
+    @model_validator(mode="after")
+    def exact_local_service_result(self) -> LocalServiceEvidence:
+        if self.response_sha256 != self.repeated_response_sha256:
+            raise ValueError("local service response must reproduce byte-identically")
+        if self.privacy_rejection_response_sha256 != tuple(
+            sorted(self.privacy_rejection_response_sha256)
+        ):
+            raise ValueError(
+                "local-service privacy response digests must be sorted"
+            )
+        return self
+
+
+class ExternalRequirementEvidence(RunnerContract):
+    requirement_id: ExternalRequirementId
+    state: ExternalRequirementState
+    detail: SafeText
+    evidence_sha256: Sha256 | None = None
+
+    @model_validator(mode="after")
+    def evidence_matches_state(self) -> ExternalRequirementEvidence:
+        if (
+            self.state == ExternalRequirementState.UNMET_NO_OBSERVED_EVIDENCE
+            and self.evidence_sha256 is not None
+        ):
+            raise ValueError(
+                "unmet external requirements cannot carry observed evidence"
+            )
+        if self.state != ExternalRequirementState.UNMET_NO_OBSERVED_EVIDENCE and (
+            self.evidence_sha256 is None
+        ):
+            raise ValueError("observed external status requires exact evidence")
+        return self
+
+
+class ReleaseControlEvidence(RunnerContract):
+    schema_version: Literal["traceback.e14-release-control-evidence.v1"] = (
+        "traceback.e14-release-control-evidence.v1"
+    )
+    local_service_sha256: Sha256
+    external_requirements_sha256: Sha256
+    e12_dependency_state: Literal["blocked_unavailable_not_implemented"] = (
+        "blocked_unavailable_not_implemented"
+    )
+    release_explorer_allowed: Literal[False] = False
+    release_export_allowed: Literal[False] = False
+    capability_enabled: Literal[False] = False
 
 
 class PerformanceMeasurement(RunnerContract):
@@ -353,10 +484,12 @@ class AccessibilityAuditArtifact(RunnerContract):
 
 class ProviderTaskOutcome(RunnerContract):
     participant_id: SafeToken
-    task_id: SafeToken
+    task_id: ProviderTaskId
     completed: bool
     duration_seconds: int = Field(ge=0, le=86_400)
     error_count: int = Field(ge=0, le=1_000)
+    coaching_required: bool
+    believed_data_uploaded: bool
 
 
 class FiveProviderStudyArtifact(RunnerContract):
@@ -366,18 +499,59 @@ class FiveProviderStudyArtifact(RunnerContract):
     conducted_at: datetime
     protocol_sha256: Sha256
     browser_capture_artifact_sha256: Sha256
-    outcomes: tuple[ProviderTaskOutcome, ...] = Field(min_length=5, max_length=500)
+    outcomes: tuple[ProviderTaskOutcome, ...] = Field(min_length=25, max_length=25)
 
     @model_validator(mode="after")
     def five_distinct_participants(self) -> FiveProviderStudyArtifact:
         if self.conducted_at.tzinfo is None or self.conducted_at.utcoffset() is None:
             raise ValueError("provider study time must be timezone-aware")
-        participants = {item.participant_id for item in self.outcomes}
-        if len(participants) < 5:
-            raise ValueError("provider study requires five distinct participants")
+        participants = sorted({item.participant_id for item in self.outcomes})
+        if len(participants) != 5:
+            raise ValueError("provider study requires exactly five participants")
         keys = [(item.participant_id, item.task_id) for item in self.outcomes]
         if keys != sorted(keys) or len(keys) != len(set(keys)):
             raise ValueError("provider task outcomes must be uniquely sorted")
+        if set(keys) != {
+            (participant, task)
+            for participant in participants
+            for task in ProviderTaskId
+        }:
+            raise ValueError("provider study must contain the complete frozen task matrix")
+        by_task = {
+            task: tuple(item for item in self.outcomes if item.task_id == task)
+            for task in ProviderTaskId
+        }
+        identify = by_task[ProviderTaskId.IDENTIFY_JOB_STATE_OWNER_ACTION]
+        if not all(item.completed and item.duration_seconds <= 10 for item in identify):
+            raise ValueError("all five participants must identify state within ten seconds")
+        recovery = (
+            *by_task[ProviderTaskId.RECOVER_LOW_DISK],
+            *by_task[ProviderTaskId.RECOVER_INTERRUPTION],
+        )
+        recovered_by_participant = {
+            participant: all(
+                item.completed and not item.coaching_required
+                for item in recovery
+                if item.participant_id == participant
+            )
+            for participant in participants
+        }
+        if sum(recovered_by_participant.values()) < 4:
+            raise ValueError(
+                "at least four participants must recover both seeded failures without coaching"
+            )
+        saved = by_task[ProviderTaskId.SAVE_VERIFY_WITHOUT_UPLOAD_BELIEF]
+        if not all(
+            item.completed and not item.believed_data_uploaded for item in saved
+        ):
+            raise ValueError(
+                "all five participants must save and verify without upload belief"
+            )
+        installed = by_task[ProviderTaskId.DOCTOR_DEMO_VERIFY]
+        if not all(item.completed and item.duration_seconds <= 300 for item in installed):
+            raise ValueError(
+                "all five participants must complete doctor demo verify within five minutes"
+            )
         return self
 
 
@@ -561,16 +735,21 @@ class ReleaseGateDecision(RunnerContract):
 
 
 class ProductGateReport(RunnerContract):
-    schema_version: Literal["traceback.product-gate-report.v1"] = (
-        "traceback.product-gate-report.v1"
+    schema_version: Literal["traceback.product-gate-report.v2"] = (
+        "traceback.product-gate-report.v2"
     )
     host_run: HostRunEvidence
     filter_performance: PerformanceMeasurement
     initial_render: PerformanceMeasurement
     stress_memory: MemoryMeasurement
     screenshot_manifest_sha256: Sha256
+    local_service_evidence: LocalServiceEvidence
     network_denial_evidence: NetworkDenialEvidence
     privacy_sentinel_evidence: PrivacySentinelEvidence
+    external_requirements: tuple[ExternalRequirementEvidence, ...] = Field(
+        min_length=5, max_length=5
+    )
+    release_control_evidence: ReleaseControlEvidence
     gate_evidence: tuple[GateEvidence, ...]
     capability_enabled: Literal[False] = False
 
@@ -582,6 +761,22 @@ class ProductGateReport(RunnerContract):
         if set(ids) != set(GateId):
             raise ValueError("gate report must include every E14 gate")
         by_id = {item.gate_id: item for item in self.gate_evidence}
+        requirement_ids = [item.requirement_id for item in self.external_requirements]
+        if (
+            requirement_ids != sorted(requirement_ids, key=str)
+            or len(set(requirement_ids)) != len(requirement_ids)
+            or set(requirement_ids) != set(ExternalRequirementId)
+        ):
+            raise ValueError(
+                "external requirement evidence must be complete and uniquely sorted"
+            )
+        if any(
+            item.state != ExternalRequirementState.UNMET_NO_OBSERVED_EVIDENCE
+            for item in self.external_requirements
+        ):
+            raise ValueError(
+                "the local foundation report cannot claim observed external evidence"
+            )
         measured = {
             GateId.FILTER_PERFORMANCE: self.filter_performance,
             GateId.INITIAL_RENDER: self.initial_render,
@@ -607,6 +802,9 @@ class ProductGateReport(RunnerContract):
                 "render": self.initial_render.model_dump(mode="json"),
                 "memory": self.stress_memory.model_dump(mode="json"),
                 "screenshot_manifest_sha256": self.screenshot_manifest_sha256,
+                "local_service_sha256": sha256_bytes(
+                    canonical_json_bytes(self.local_service_evidence)
+                ),
             }
         )
         expected_privacy = _privacy_sentinel_probe(
@@ -617,12 +815,25 @@ class ProductGateReport(RunnerContract):
             serialized_output_clean=_privacy_clean(
                 registered_output, tuple(REGISTERED_PRIVACY_SENTINELS.values())
             ),
+            local_service_observations=(
+                self.privacy_sentinel_evidence.local_service_observations
+            ),
         )
         if self.privacy_sentinel_evidence != expected_privacy:
             raise ValueError(
                 "privacy evidence must replay the registered probes and output"
             )
+        if tuple(
+            sorted(
+                item.response_sha256
+                for item in self.privacy_sentinel_evidence.local_service_observations
+            )
+        ) != self.local_service_evidence.privacy_rejection_response_sha256:
+            raise ValueError(
+                "privacy evidence must bind the exact local-service rejection responses"
+            )
         exact_gate_evidence = {
+            GateId.LOCAL_SERVICE_DETERMINISM: self.local_service_evidence,
             GateId.NO_EXTERNAL_NETWORK: self.network_denial_evidence,
             GateId.PRIVACY_SENTINELS: self.privacy_sentinel_evidence,
         }
@@ -633,6 +844,11 @@ class ProductGateReport(RunnerContract):
                 raise ValueError(
                     "gate evidence digest must bind its exact observations"
                 )
+        if (
+            by_id[GateId.LOCAL_SERVICE_DETERMINISM].status
+            != EvidenceStatus.OBSERVED_PASS
+        ):
+            raise ValueError("deterministic local service must be an observed local pass")
         network_pass = all(
             item.denial_observed and item.guard_recorded
             for item in self.network_denial_evidence.observations
@@ -667,6 +883,23 @@ class ProductGateReport(RunnerContract):
         } != {host_sha256}:
             raise ValueError(
                 "privacy and network evidence must bind the exact host run"
+            )
+        local_service_sha256 = sha256_bytes(
+            canonical_json_bytes(self.local_service_evidence)
+        )
+        if self.network_denial_evidence.local_service_sha256 != local_service_sha256:
+            raise ValueError("network evidence must bind the local service journey")
+        external_sha256 = sha256_bytes(
+            canonical_json_bytes(
+                [item.model_dump(mode="json") for item in self.external_requirements]
+            )
+        )
+        if self.release_control_evidence != ReleaseControlEvidence(
+            local_service_sha256=local_service_sha256,
+            external_requirements_sha256=external_sha256,
+        ):
+            raise ValueError(
+                "release controls must bind missing E12 and external evidence"
             )
         if (by_id[GateId.APPROVED_HOST].status == EvidenceStatus.OBSERVED_PASS) != (
             self.host_run.approved_host_reference is not None
@@ -833,8 +1066,10 @@ def _catalog_page_bytes(page: object) -> bytes:
 
 
 @contextmanager
-def deny_external_network() -> Iterator[list[tuple[str, str]]]:
-    """Deny socket connections in this Python process during an offline run."""
+def deny_external_network(
+    *, allowed_loopback_ports: Sequence[int] = ()
+) -> Iterator[list[tuple[str, str]]]:
+    """Deny egress while optionally preserving exact loopback service ports."""
 
     attempts: list[tuple[str, str]] = []
     method_names = (
@@ -859,23 +1094,54 @@ def deny_external_network() -> Iterator[list[tuple[str, str]]]:
         "gethostbyaddr",
     )
     original_resolvers = {name: getattr(socket, name) for name in resolver_names}
+    allowed_ports = frozenset(allowed_loopback_ports)
+
+    def allowed_address(address: object) -> bool:
+        if not isinstance(address, tuple) or len(address) < 2:
+            return False
+        try:
+            return (
+                int(address[1]) in allowed_ports
+                and ipaddress.ip_address(str(address[0])).is_loopback
+            )
+        except (TypeError, ValueError):
+            return False
+
+    def allowed_connected_socket(instance: socket.socket) -> bool:
+        try:
+            return allowed_address(instance.getpeername()) or allowed_address(
+                instance.getsockname()
+            )
+        except OSError:
+            return False
 
     def blocked_socket_operation(name: str):
-        def deny(instance: socket.socket, *args: object, **kwargs: object) -> None:
-            del instance, kwargs
+        original = original_methods[name]
+
+        def deny(instance: socket.socket, *args: object, **kwargs: object) -> object:
             address = args[-1] if args else "connected-socket"
+            if name in {"connect", "connect_ex"} and allowed_address(address):
+                return original(instance, *args, **kwargs)
+            if name == "sendto" and allowed_address(address):
+                return original(instance, *args, **kwargs)
+            if name not in {"connect", "connect_ex", "sendto"} and (
+                allowed_connected_socket(instance)
+            ):
+                return original(instance, *args, **kwargs)
             attempts.append((name, repr(address)))
             raise RuntimeError("external network disabled by E14 harness")
 
         return deny
 
-    def blocked_create_connection(*args: object, **kwargs: object) -> None:
-        del kwargs
+    def blocked_create_connection(*args: object, **kwargs: object) -> object:
+        if args and allowed_address(args[0]):
+            return original_create_connection(*args, **kwargs)
         attempts.append(("create_connection", repr(args[0] if args else "unknown")))
         raise RuntimeError("external network disabled by E14 harness")
 
-    def blocked_getaddrinfo(*args: object, **kwargs: object) -> None:
-        del kwargs
+    def blocked_getaddrinfo(*args: object, **kwargs: object) -> object:
+        if len(args) >= 2 and allowed_address((args[0], args[1])):
+            return original_resolvers["getaddrinfo"](*args, **kwargs)
         attempts.append(("resolver", repr(args[0] if args else "unknown")))
         raise RuntimeError("external network disabled by E14 harness")
 
@@ -893,6 +1159,209 @@ def deny_external_network() -> Iterator[list[tuple[str, str]]]:
             socket.create_connection = original_create_connection
             for name, original in original_resolvers.items():
                 setattr(socket, name, original)
+
+
+def _local_http_request(
+    service: RunningLocalWebService,
+    method: str,
+    path: str,
+    *,
+    headers: dict[str, str] | None = None,
+    payload: dict[str, object] | None = None,
+) -> tuple[int, dict[str, str], bytes]:
+    """Make one bounded literal-loopback request without DNS or HTTP helpers."""
+
+    body = canonical_json_bytes(payload) if payload is not None else b""
+    request_headers = {
+        "Connection": "close",
+        "Host": service.config.authority,
+        **(headers or {}),
+    }
+    if body:
+        request_headers["Content-Length"] = str(len(body))
+        request_headers["Content-Type"] = "application/json"
+    request = (
+        f"{method} {path} HTTP/1.1\r\n".encode("ascii")
+        + b"".join(
+            f"{name}: {value}\r\n".encode("ascii")
+            for name, value in request_headers.items()
+        )
+        + b"\r\n"
+        + body
+    )
+    client = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    client.settimeout(3)
+    received = bytearray()
+    try:
+        client.connect((service.config.bind_host, service.config.port))
+        client.sendall(request)
+        while True:
+            chunk = client.recv(64 * 1024)
+            if not chunk:
+                break
+            received.extend(chunk)
+            if len(received) > MAX_LOCAL_HTTP_RESPONSE_BYTES:
+                raise ValueError("local service response exceeded the E14 byte bound")
+    finally:
+        client.close()
+    head, separator, response_body = bytes(received).partition(b"\r\n\r\n")
+    if not separator:
+        raise ValueError("local service returned a malformed HTTP response")
+    lines = head.split(b"\r\n")
+    try:
+        status = int(lines[0].split(b" ", 2)[1])
+        response_headers = {
+            name.decode("ascii").casefold(): value.decode("ascii").strip()
+            for line in lines[1:]
+            for name, value in (line.split(b":", 1),)
+        }
+    except (IndexError, UnicodeDecodeError, ValueError) as exc:
+        raise ValueError("local service returned malformed HTTP metadata") from exc
+    return status, response_headers, response_body
+
+
+@contextmanager
+def _fixture_local_service(
+    catalog: ResultCatalog,
+) -> Iterator[RunningLocalWebService]:
+    from traceback_runner.web.explorer import (
+        CanonicalExplorerArtifactRepository,
+        CatalogAuthorityIndex,
+        IntegratedExplorerSource,
+    )
+
+    with tempfile.TemporaryDirectory(prefix="traceback-e14-service-") as directory:
+        root = Path(directory)
+        store = JobStore(root / "jobs.sqlite3")
+        explorer = IntegratedExplorerSource(
+            catalog=catalog,
+            authority=CatalogAuthorityIndex(()),
+            artifacts=CanonicalExplorerArtifactRepository(()),
+        )
+        with RunningLocalWebService.start(
+            store=store,
+            state_directory=root / "state",
+            explorer=explorer,
+        ) as service:
+            yield service
+
+
+def _run_local_service_journey(
+    service: RunningLocalWebService,
+    sentinels: Sequence[tuple[PrivacySentinelClass, bytes]],
+) -> tuple[LocalServiceEvidence, tuple[ServicePrivacyObservation, ...]]:
+    request_path = "/api/v1/explorer/catalog?limit=100"
+    unauthorized, _, unauthorized_body = _local_http_request(
+        service, "GET", request_path
+    )
+    if unauthorized != 401 or not _privacy_clean(
+        unauthorized_body, tuple(value for _, value in sentinels)
+    ):
+        raise ValueError("unauthorized local catalog probe did not fail closed")
+    bootstrap_status, bootstrap_headers, bootstrap_body = _local_http_request(
+        service,
+        "POST",
+        "/api/v1/session/bootstrap",
+        headers={"Origin": service.base_url},
+        payload={"bootstrap": service.bootstrap_code},
+    )
+    if bootstrap_status != 200:
+        raise ValueError("local service bootstrap failed")
+    bootstrap_payload = json.loads(bootstrap_body)
+    if set(bootstrap_payload) != {"csrf_token"}:
+        raise ValueError("local service bootstrap response changed")
+    try:
+        cookie = bootstrap_headers["set-cookie"].split(";", 1)[0]
+    except KeyError as exc:
+        raise ValueError("local service bootstrap omitted its session cookie") from exc
+    authorized_headers = {"Cookie": cookie}
+    first_status, _, first_body = _local_http_request(
+        service,
+        "GET",
+        request_path,
+        headers=authorized_headers,
+    )
+    second_status, _, second_body = _local_http_request(
+        service,
+        "GET",
+        request_path,
+        headers=authorized_headers,
+    )
+    first_payload = json.loads(first_body)
+    if (
+        first_status != 200
+        or second_status != 200
+        or first_body != second_body
+        or canonical_json_bytes(first_payload) != first_body.rstrip(b"\n")
+        or len(first_payload.get("results", ())) != 100
+    ):
+        raise ValueError("local catalog projection was not deterministic")
+    eligibilities = tuple(
+        item.get("eligibility", {}) for item in first_payload["results"]
+    )
+    if any(
+        item.get("release_explorer_allowed") is not False
+        or item.get("release_export_allowed") is not False
+        or item.get("release_state") != "disabled_no_installed_authority"
+        for item in eligibilities
+    ):
+        raise ValueError("local service exposed a release capability")
+
+    asset_digests: list[tuple[str, str]] = []
+    for path in ("/", "/assets/app.js", "/assets/styles.css"):
+        status, _, content = _local_http_request(service, "GET", path)
+        if status != 200:
+            raise ValueError("packaged local asset was unavailable")
+        lowered = content.lower()
+        if b"http://" in lowered or b"https://" in lowered or b"//cdn" in lowered:
+            raise ValueError("packaged local asset referenced external content")
+        asset_digests.append((path, sha256_bytes(content)))
+
+    privacy_observations: list[ServicePrivacyObservation] = []
+    for sentinel_class, sentinel in sentinels:
+        encoded = quote(sentinel.decode("ascii"), safe="")
+        status, _, content = _local_http_request(
+            service,
+            "GET",
+            (
+                "/api/v1/explorer/catalog?limit=1&method_id="
+                f"{encoded}&method_version=1.0.0"
+            ),
+            headers=authorized_headers,
+        )
+        if status != 400 or not _privacy_clean(content, (sentinel,)):
+            raise ValueError("local service privacy probe did not reject safely")
+        privacy_observations.append(
+            ServicePrivacyObservation(
+                sentinel_class=sentinel_class,
+                sentinel_sha256=sha256_bytes(sentinel),
+                status_code=status,
+                response_sha256=sha256_bytes(content),
+            )
+        )
+
+    from traceback_runner.web.explorer import ExplorerArtifactRecord
+
+    e12_state = ExplorerArtifactRecord.model_fields["longitudinal_state"].default
+    return (
+        LocalServiceEvidence(
+            unauthorized_status=unauthorized,
+            bootstrap_status=bootstrap_status,
+            authenticated_status=first_status,
+            repeated_status=second_status,
+            result_count=len(first_payload["results"]),
+            response_sha256=sha256_bytes(first_body),
+            repeated_response_sha256=sha256_bytes(second_body),
+            packaged_assets_sha256=sha256_bytes(
+                canonical_json_bytes(tuple(asset_digests))
+            ),
+            privacy_rejection_response_sha256=tuple(
+                sorted(item.response_sha256 for item in privacy_observations)
+            ),
+            e12_state=e12_state,
+        ),
+        tuple(sorted(privacy_observations, key=lambda item: str(item.sentinel_class))),
+    )
 
 
 def load_screenshot_manifest(path: Path) -> tuple[ScreenshotManifest, bytes]:
@@ -915,6 +1384,7 @@ def _privacy_sentinel_probe(
     host_run_sha256: str,
     output_payload_sha256: str,
     serialized_output_clean: bool,
+    local_service_observations: tuple[ServicePrivacyObservation, ...] | None = None,
 ) -> PrivacySentinelEvidence:
     """Inject every sentinel through catalog, problem, and screenshot contracts."""
 
@@ -995,6 +1465,23 @@ def _privacy_sentinel_probe(
         host_run_sha256=host_run_sha256,
         output_payload_sha256=output_payload_sha256,
         serialized_output_clean=serialized_output_clean,
+        local_service_observations=(
+            local_service_observations
+            if local_service_observations is not None
+            else tuple(
+                ServicePrivacyObservation(
+                    sentinel_class=sentinel_class,
+                    sentinel_sha256=sha256_bytes(sentinel),
+                    status_code=400,
+                    response_sha256=sha256_bytes(
+                        b"synthetic-local-service-probe:" + sentinel
+                    ),
+                )
+                for sentinel_class, sentinel in sorted(
+                    sentinels, key=lambda item: str(item[0])
+                )
+            )
+        ),
         observations=tuple(
             sorted(
                 observations,
@@ -1108,49 +1595,61 @@ def run_foundation_gates(
     network_probe_results: list[tuple[NetworkProbeOperation, bool, bool]] = []
     probe_payload = REGISTERED_NETWORK_PAYLOAD
 
-    with deny_external_network() as network_attempts:
-        with _fixture_catalog(CATALOG_RECORDS) as catalog:
-            filter_measurement = _measure_filter(catalog, CATALOG_RECORDS)
-            render_measurement = _measure_initial_render(catalog, CATALOG_RECORDS)
+    with _fixture_catalog(CATALOG_RECORDS) as catalog:
+        with _fixture_local_service(catalog) as service:
+            with deny_external_network(
+                allowed_loopback_ports=(service.config.port,)
+            ) as network_attempts:
+                filter_measurement = _measure_filter(catalog, CATALOG_RECORDS)
+                render_measurement = _measure_initial_render(
+                    catalog, CATALOG_RECORDS
+                )
+                local_service_evidence, service_privacy = (
+                    _run_local_service_journey(service, sentinels)
+                )
 
-        tracemalloc.start()
-        try:
-            with _fixture_catalog(STRESS_RECORDS) as stress_catalog:
-                stress_page = _explorer_query(stress_catalog, CatalogQuery(limit=100))
-                _catalog_page_bytes(stress_page)
-            _, peak_bytes = tracemalloc.get_traced_memory()
-        finally:
-            tracemalloc.stop()
-        probe_socket = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
-        try:
-            for operation_name, operation in (
-                (
-                    NetworkProbeOperation.CONNECT_EX,
-                    lambda: probe_socket.connect_ex(REGISTERED_NETWORK_TARGET),
-                ),
-                (
-                    NetworkProbeOperation.SENDTO,
-                    lambda: probe_socket.sendto(
-                        probe_payload, REGISTERED_NETWORK_TARGET
-                    ),
-                ),
-            ):
-                before = len(network_attempts)
+                tracemalloc.start()
                 try:
-                    operation()
-                except RuntimeError:
-                    denial_observed = True
-                else:
-                    denial_observed = False
-                guard_recorded = any(
-                    name == operation_name.value
-                    for name, _ in network_attempts[before:]
-                )
-                network_probe_results.append(
-                    (operation_name, denial_observed, guard_recorded)
-                )
-        finally:
-            probe_socket.close()
+                    with _fixture_catalog(STRESS_RECORDS) as stress_catalog:
+                        stress_page = _explorer_query(
+                            stress_catalog, CatalogQuery(limit=100)
+                        )
+                        _catalog_page_bytes(stress_page)
+                    _, peak_bytes = tracemalloc.get_traced_memory()
+                finally:
+                    tracemalloc.stop()
+                probe_socket = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+                try:
+                    for operation_name, operation in (
+                        (
+                            NetworkProbeOperation.CONNECT_EX,
+                            lambda: probe_socket.connect_ex(
+                                REGISTERED_NETWORK_TARGET
+                            ),
+                        ),
+                        (
+                            NetworkProbeOperation.SENDTO,
+                            lambda: probe_socket.sendto(
+                                probe_payload, REGISTERED_NETWORK_TARGET
+                            ),
+                        ),
+                    ):
+                        before = len(network_attempts)
+                        try:
+                            operation()
+                        except RuntimeError:
+                            denial_observed = True
+                        else:
+                            denial_observed = False
+                        guard_recorded = any(
+                            name == operation_name.value
+                            for name, _ in network_attempts[before:]
+                        )
+                        network_probe_results.append(
+                            (operation_name, denial_observed, guard_recorded)
+                        )
+                finally:
+                    probe_socket.close()
 
     memory = MemoryMeasurement(
         peak_bytes=peak_bytes,
@@ -1159,6 +1658,9 @@ def run_foundation_gates(
     network_denial_evidence = NetworkDenialEvidence(
         run_id=run_id,
         host_run_sha256=host_run_sha256,
+        local_service_sha256=sha256_bytes(
+            canonical_json_bytes(local_service_evidence)
+        ),
         observations=tuple(
             NetworkProbeObservation(
                 operation=operation,
@@ -1187,6 +1689,9 @@ def run_foundation_gates(
             "render": render_measurement.model_dump(mode="json"),
             "memory": memory.model_dump(mode="json"),
             "screenshot_manifest_sha256": sha256_bytes(manifest_bytes),
+            "local_service_sha256": sha256_bytes(
+                canonical_json_bytes(local_service_evidence)
+            ),
         }
     )
     serialized_output_clean = _privacy_clean(
@@ -1199,6 +1704,7 @@ def run_foundation_gates(
         host_run_sha256=host_run_sha256,
         output_payload_sha256=sha256_bytes(privacy_payload),
         serialized_output_clean=serialized_output_clean,
+        local_service_observations=service_privacy,
     )
     privacy_pass = serialized_output_clean and all(
         item.rejected for item in privacy_sentinel_evidence.observations
@@ -1208,12 +1714,55 @@ def run_foundation_gates(
     memory_sha256 = sha256_bytes(canonical_json_bytes(memory))
     network_sha256 = sha256_bytes(canonical_json_bytes(network_denial_evidence))
     privacy_sha256 = sha256_bytes(canonical_json_bytes(privacy_sentinel_evidence))
+    local_service_sha256 = sha256_bytes(
+        canonical_json_bytes(local_service_evidence)
+    )
+    external_requirements = tuple(
+        sorted(
+            (
+                ExternalRequirementEvidence(
+                    requirement_id=ExternalRequirementId.KEYBOARD_ONLY,
+                    state=ExternalRequirementState.UNMET_NO_OBSERVED_EVIDENCE,
+                    detail="Keyboard-only task audit has not been observed",
+                ),
+                ExternalRequirementEvidence(
+                    requirement_id=ExternalRequirementId.SCREEN_READER,
+                    state=ExternalRequirementState.UNMET_NO_OBSERVED_EVIDENCE,
+                    detail="Screen-reader task audit has not been observed",
+                ),
+                ExternalRequirementEvidence(
+                    requirement_id=ExternalRequirementId.ZOOM_200,
+                    state=ExternalRequirementState.UNMET_NO_OBSERVED_EVIDENCE,
+                    detail="200 percent zoom and reflow audit has not been observed",
+                ),
+                ExternalRequirementEvidence(
+                    requirement_id=ExternalRequirementId.REVIEWED_SCREENSHOTS,
+                    state=ExternalRequirementState.UNMET_NO_OBSERVED_EVIDENCE,
+                    detail="Reviewed browser captures have not been supplied",
+                ),
+                ExternalRequirementEvidence(
+                    requirement_id=ExternalRequirementId.FIVE_PROVIDER_TASKS,
+                    state=ExternalRequirementState.UNMET_NO_OBSERVED_EVIDENCE,
+                    detail="Five-provider frozen task matrix has not been observed",
+                ),
+            ),
+            key=lambda item: str(item.requirement_id),
+        )
+    )
+    release_control_evidence = ReleaseControlEvidence(
+        local_service_sha256=local_service_sha256,
+        external_requirements_sha256=sha256_bytes(
+            canonical_json_bytes(
+                [item.model_dump(mode="json") for item in external_requirements]
+            )
+        ),
+    )
 
     evidence = (
         GateEvidence(
             gate_id=GateId.ACCESSIBILITY,
-            status=EvidenceStatus.FIXTURE_ONLY,
-            detail="Keyboard, screen-reader, and 200 percent zoom metadata only; manual audit required",
+            status=EvidenceStatus.REQUIRED_EXTERNAL,
+            detail="Keyboard, screen-reader, and 200 percent zoom audits remain unmet",
         ),
         GateEvidence(
             gate_id=GateId.APPROVED_HOST,
@@ -1244,6 +1793,15 @@ def run_foundation_gates(
             evidence_sha256=render_sha256,
         ),
         GateEvidence(
+            gate_id=GateId.LOCAL_SERVICE_DETERMINISM,
+            status=EvidenceStatus.OBSERVED_PASS,
+            detail=(
+                "Packaged loopback catalog repeated byte-identically with release "
+                "controls disabled"
+            ),
+            evidence_sha256=local_service_sha256,
+        ),
+        GateEvidence(
             gate_id=GateId.NO_EXTERNAL_NETWORK,
             status=(
                 EvidenceStatus.OBSERVED_PASS
@@ -1253,7 +1811,10 @@ def run_foundation_gates(
                 )
                 else EvidenceStatus.OBSERVED_FAIL
             ),
-            detail="Socket connect_ex and sendto probes were denied during the complete harness run",
+            detail=(
+                "Socket connect_ex and sendto probes were denied during the complete "
+                "harness run"
+            ),
             evidence_sha256=network_sha256,
         ),
         GateEvidence(
@@ -1263,13 +1824,16 @@ def run_foundation_gates(
                 if privacy_pass
                 else EvidenceStatus.OBSERVED_FAIL
             ),
-            detail="Every forbidden class was injected through catalog, response, and screenshot paths and rejected",
+            detail=(
+                "Every forbidden class was rejected by catalog, problem, screenshot, "
+                "and packaged HTTP paths"
+            ),
             evidence_sha256=privacy_sha256,
         ),
         GateEvidence(
             gate_id=GateId.SCREENSHOTS,
-            status=EvidenceStatus.FIXTURE_ONLY,
-            detail="Synthetic screenshot state metadata only; reviewed browser captures required",
+            status=EvidenceStatus.REQUIRED_EXTERNAL,
+            detail="Synthetic metadata is present but reviewed browser captures remain unmet",
         ),
         GateEvidence(
             gate_id=GateId.STRESS_MEMORY,
@@ -1287,8 +1851,11 @@ def run_foundation_gates(
         initial_render=render_measurement,
         stress_memory=memory,
         screenshot_manifest_sha256=sha256_bytes(manifest_bytes),
+        local_service_evidence=local_service_evidence,
         network_denial_evidence=network_denial_evidence,
         privacy_sentinel_evidence=privacy_sentinel_evidence,
+        external_requirements=external_requirements,
+        release_control_evidence=release_control_evidence,
         gate_evidence=tuple(sorted(evidence, key=lambda item: str(item.gate_id))),
     )
 

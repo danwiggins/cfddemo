@@ -19,11 +19,16 @@ from traceback_runner.product_gates import (
     STRESS_RECORDS,
     AccessibilityFixture,
     EvidenceStatus,
+    ExternalRequirementId,
+    ExternalRequirementState,
+    FiveProviderStudyArtifact,
     GateEvidence,
     GateId,
     PinnedAuthorityHead,
     PrivacySentinelClass,
     ProductGateReport,
+    ProviderTaskId,
+    ProviderTaskOutcome,
     ReleaseGateAuthorityPolicy,
     ScreenshotManifest,
     SignedExternalEvidence,
@@ -78,9 +83,35 @@ def test_external_gates_remain_unpassed_and_capability_disabled(
     assert (
         evidence[GateId.FIVE_PROVIDER_STUDY].status == EvidenceStatus.REQUIRED_EXTERNAL
     )
-    assert evidence[GateId.ACCESSIBILITY].status == EvidenceStatus.FIXTURE_ONLY
-    assert evidence[GateId.SCREENSHOTS].status == EvidenceStatus.FIXTURE_ONLY
+    assert evidence[GateId.ACCESSIBILITY].status == EvidenceStatus.REQUIRED_EXTERNAL
+    assert evidence[GateId.SCREENSHOTS].status == EvidenceStatus.REQUIRED_EXTERNAL
+    requirements = {item.requirement_id: item for item in report.external_requirements}
+    assert set(requirements) == set(ExternalRequirementId)
+    assert all(
+        item.state == ExternalRequirementState.UNMET_NO_OBSERVED_EVIDENCE
+        and item.evidence_sha256 is None
+        for item in requirements.values()
+    )
     assert not report.capability_enabled
+
+
+def test_local_service_journey_is_deterministic_and_release_stays_disabled(
+    report: ProductGateReport,
+) -> None:
+    service = report.local_service_evidence
+    evidence = {item.gate_id: item for item in report.gate_evidence}
+    assert service.response_sha256 == service.repeated_response_sha256
+    assert service.result_count == 100
+    assert service.e12_state == "unavailable_not_implemented"
+    assert not service.release_explorer_allowed
+    assert not service.release_export_allowed
+    assert evidence[GateId.LOCAL_SERVICE_DETERMINISM].status == (
+        EvidenceStatus.OBSERVED_PASS
+    )
+    assert report.release_control_evidence.e12_dependency_state == (
+        "blocked_unavailable_not_implemented"
+    )
+    assert not report.release_control_evidence.capability_enabled
 
 
 def test_no_network_and_privacy_sentinel_gates_are_observed(
@@ -213,6 +244,9 @@ def _all_green_report(report: ProductGateReport) -> ProductGateReport:
             "render": payload["initial_render"],
             "memory": payload["stress_memory"],
             "screenshot_manifest_sha256": payload["screenshot_manifest_sha256"],
+            "local_service_sha256": sha256_bytes(
+                canonical_json_bytes(payload["local_service_evidence"])
+            ),
         }
     )
     payload["privacy_sentinel_evidence"]["output_payload_sha256"] = sha256_bytes(
@@ -603,3 +637,87 @@ def test_privacy_output_digest_cannot_be_resealed_by_caller(
             )
     with pytest.raises(ValidationError, match="replay the registered probes"):
         ProductGateReport.model_validate(payload)
+
+
+@pytest.mark.parametrize(
+    ("field", "value"),
+    (
+        ("release_explorer_allowed", True),
+        ("release_export_allowed", True),
+        ("e12_state", "available"),
+    ),
+)
+def test_local_service_cannot_upgrade_release_or_e12(
+    report: ProductGateReport, field: str, value: object
+) -> None:
+    payload = report.model_dump(mode="json")
+    payload["local_service_evidence"][field] = value
+    with pytest.raises(ValidationError):
+        ProductGateReport.model_validate(payload)
+
+
+def _provider_study() -> FiveProviderStudyArtifact:
+    outcomes = tuple(
+        sorted(
+            (
+                ProviderTaskOutcome(
+                    participant_id=f"provider-{participant}",
+                    task_id=task,
+                    completed=True,
+                    duration_seconds=(
+                        10
+                        if task == ProviderTaskId.IDENTIFY_JOB_STATE_OWNER_ACTION
+                        else 300
+                        if task == ProviderTaskId.DOCTOR_DEMO_VERIFY
+                        else 30
+                    ),
+                    error_count=0,
+                    coaching_required=False,
+                    believed_data_uploaded=False,
+                )
+                for participant in range(1, 6)
+                for task in ProviderTaskId
+            ),
+            key=lambda item: (item.participant_id, item.task_id.value),
+        )
+    )
+    return FiveProviderStudyArtifact(
+        conducted_at=datetime(2026, 9, 29, tzinfo=UTC),
+        protocol_sha256="1" * 64,
+        browser_capture_artifact_sha256="2" * 64,
+        outcomes=outcomes,
+    )
+
+
+def test_five_provider_artifact_enforces_frozen_tasks_and_thresholds() -> None:
+    study = _provider_study()
+    assert len(study.outcomes) == 25
+
+    payload = study.model_dump(mode="json")
+    identify = next(
+        item
+        for item in payload["outcomes"]
+        if item["task_id"] == ProviderTaskId.IDENTIFY_JOB_STATE_OWNER_ACTION
+    )
+    identify["duration_seconds"] = 11
+    with pytest.raises(ValidationError, match="within ten seconds"):
+        FiveProviderStudyArtifact.model_validate(payload)
+
+    payload = study.model_dump(mode="json")
+    for item in payload["outcomes"]:
+        if item["participant_id"] in {"provider-1", "provider-2"} and item[
+            "task_id"
+        ] == ProviderTaskId.RECOVER_LOW_DISK:
+            item["coaching_required"] = True
+    with pytest.raises(ValidationError, match="four participants"):
+        FiveProviderStudyArtifact.model_validate(payload)
+
+    payload = study.model_dump(mode="json")
+    saved = next(
+        item
+        for item in payload["outcomes"]
+        if item["task_id"] == ProviderTaskId.SAVE_VERIFY_WITHOUT_UPLOAD_BELIEF
+    )
+    saved["believed_data_uploaded"] = True
+    with pytest.raises(ValidationError, match="without upload belief"):
+        FiveProviderStudyArtifact.model_validate(payload)

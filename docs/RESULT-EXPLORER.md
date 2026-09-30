@@ -62,15 +62,25 @@ The checked-in foundation harness uses private-SQL E04-shaped fixture rows. Its
 they are not verified imports, HTTP/browser render evidence, process RSS, SQLite
 or native allocation evidence, or browser-process memory.
 
+The harness also runs the packaged loopback service under the process socket
+guard. It proves that an unauthenticated catalog request is denied, the
+authenticated 100-row response repeats byte-identically, bundled assets contain
+no remote references, every catalog row keeps release explorer/export disabled,
+and hostile sentinel filters fail without reflection. That is local service
+evidence, not approved-host or browser evidence.
+
 The local browser manifest records actual HTTP navigation, JavaScript DOM-ready,
 DOM structure, console, screenshot digest, daemon RSS, and renderer JavaScript
 heap observations. It is explicitly local and unapproved. Per-Chromium-process
 RSS and the required 10,000 verified imports remain unavailable.
 
 Parsed content-addressed contracts exist for browser captures, accessibility
-audits, and five-provider task outcomes. Synthetic fixtures and local browser
-checks do not satisfy those gates. Accessibility, reviewed browser captures,
-the approved host run, and the five-provider study remain external requirements.
+audits, and the exact five-provider task matrix. Synthetic fixtures and local
+browser checks do not satisfy those gates. Keyboard-only operation,
+screen-reader operation, 200 percent zoom/reflow, reviewed browser captures,
+the approved host run, and the five-provider study remain explicitly unmet
+external requirements. E12 is still unavailable, so the evidence report binds
+that missing dependency to disabled release explorer/export controls.
 
 ## Validation
 
