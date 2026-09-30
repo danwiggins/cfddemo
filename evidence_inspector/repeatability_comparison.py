@@ -12,7 +12,7 @@ import re
 import unicodedata
 from datetime import UTC, datetime
 from enum import StrEnum
-from typing import Annotated, Literal
+from typing import Annotated, Literal, TypeVar
 from urllib.parse import unquote
 
 from pydantic import AfterValidator, Field, StringConstraints, model_validator
@@ -21,6 +21,7 @@ from evidence_inspector.compatibility import (
     CompatibilityContract,
     ExecutionState,
     InformationState,
+    ResultId,
 )
 from evidence_inspector.longitudinal_compatibility import (
     ComparisonDimension,
@@ -43,6 +44,13 @@ from evidence_inspector.method_registry import (
     canonical_contract_bytes,
 )
 from evidence_inspector.provider_linkage_store import ProviderLinkageStore
+from traceback_runner.signing import (
+    KeyPurpose,
+    SignatureEnvelope,
+    SigningError,
+    TrustStore,
+    verify_signature,
+)
 
 MAX_FACTORS = 4
 
@@ -81,6 +89,8 @@ RepeatabilityProtocolId = _token("protocol_")
 RepeatabilityAuthorityId = _token("authority_")
 UncertaintyMethodId = _token("uncertainty_")
 DenominatorSemanticsId = _token("denominator_")
+MeasurementEvidenceId = _token("measurement_evidence_")
+MeasurementReceiptId = _token("measurement_receipt_")
 
 
 class RepeatabilityFactor(StrEnum):
@@ -95,6 +105,9 @@ ALL_REPEATABILITY_FACTORS = tuple(RepeatabilityFactor)
 
 class FactorEnvelope(CompatibilityContract):
     factor: RepeatabilityFactor
+    anchor_condition_sha256: Sha256
+    member_condition_sha256: Sha256
+    condition_policy_sha256: Sha256
     maximum_absolute_contribution: float = Field(ge=0.0)
 
 
@@ -147,23 +160,59 @@ class ObservationState(StrEnum):
     MISSING_DRAW = "missing_draw"
 
 
-class ComparisonObservation(CompatibilityContract):
-    """A numeric observation or an explicit absent draw, bound to one D02 record."""
+class MeasurementCondition(CompatibilityContract):
+    factor: RepeatabilityFactor
+    condition_sha256: Sha256
+    condition_policy_sha256: Sha256
 
+
+class MeasurementDenominator(CompatibilityContract):
+    total_count: int = Field(ge=1, le=1_000_000_000)
+    included_count: int = Field(ge=1, le=1_000_000_000)
+    excluded_count: int = Field(ge=0, le=1_000_000_000)
+
+    @model_validator(mode="after")
+    def reconciled(self) -> MeasurementDenominator:
+        if self.included_count + self.excluded_count != self.total_count:
+            raise ValueError("measurement denominator counts must reconcile exactly")
+        return self
+
+
+class MeasurementEvidencePayload(CompatibilityContract):
+    """Canonical numeric evidence signed by the result authority."""
+
+    schema_version: Literal["traceback.comparison-measurement-evidence.v1"]
+    evidence_id: MeasurementEvidenceId
     record_sha256: Sha256
+    result_id: ResultId
+    result_sha256: Sha256
+    bundle_sha256: Sha256
+    method_ref: MethodReference
+    method_definition_sha256: Sha256
+    quantity_id: QuantityId
+    unit: UnitId
+    uncertainty_method_sha256: Sha256
+    denominator_semantics_sha256: Sha256
+    conditions: tuple[MeasurementCondition, ...] = Field(
+        min_length=MAX_FACTORS, max_length=MAX_FACTORS
+    )
     state: ObservationState
     value: float | None
     uncertainty_lower: float | None
     uncertainty_upper: float | None
-    denominator_count: int | None = Field(default=None, ge=1, le=1_000_000_000)
+    denominator: MeasurementDenominator | None
 
     @model_validator(mode="after")
-    def coherent_observation(self) -> ComparisonObservation:
+    def coherent_observation(self) -> MeasurementEvidencePayload:
+        if tuple(item.factor for item in self.conditions) != ALL_REPEATABILITY_FACTORS:
+            raise ValueError(
+                "measurement evidence must contain every condition in order"
+            )
         numeric = (
             self.value,
             self.uncertainty_lower,
             self.uncertainty_upper,
-            self.denominator_count,
+            self.denominator,
         )
         if self.state == ObservationState.MISSING_DRAW:
             if any(item is not None for item in numeric):
@@ -181,6 +230,29 @@ class ComparisonObservation(CompatibilityContract):
         return self
 
 
+class MeasurementEvidenceReceipt(CompatibilityContract):
+    schema_version: Literal["traceback.comparison-measurement-receipt.v1"]
+    receipt_id: MeasurementReceiptId
+    evidence_sha256: Sha256
+    signature: SignatureEnvelope
+
+
+class ComparisonObservation(CompatibilityContract):
+    """Signed evidence plus an exact receipt; never a caller-authored numeric value."""
+
+    schema_version: Literal["traceback.comparison-observation.v1"]
+    evidence: MeasurementEvidencePayload
+    receipt: MeasurementEvidenceReceipt
+
+    @model_validator(mode="after")
+    def receipt_binds_evidence(self) -> ComparisonObservation:
+        if self.receipt.evidence_sha256 != measurement_evidence_payload_sha256(
+            self.evidence
+        ):
+            raise ValueError("measurement receipt does not bind exact evidence")
+        return self
+
+
 class ComparisonAvailability(StrEnum):
     AVAILABLE = "available"
     UNAVAILABLE = "unavailable"
@@ -191,9 +263,12 @@ class RepeatabilityClassification(StrEnum):
     NOISY_WITHIN_ENVELOPE = "noisy_within_envelope"
     OUTSIDE_ENVELOPE = "outside_envelope"
     MISSING_DRAW = "missing_draw"
-    FAILED_OR_INSUFFICIENT_MEASUREMENT = "failed_or_insufficient_measurement"
-    INCOMPATIBLE_OR_UNKNOWN = "incompatible_or_unknown"
-    REQUIRES_REANALYSIS_OR_BRIDGE = "requires_reanalysis_or_bridge"
+    FAILED_MEASUREMENT = "failed_measurement"
+    INSUFFICIENT_MEASUREMENT = "insufficient_measurement"
+    INCOMPATIBLE = "incompatible"
+    UNKNOWN = "unknown"
+    REQUIRES_REANALYSIS = "requires_reanalysis"
+    REGISTERED_BRIDGE = "registered_bridge"
     EVIDENCE_UNAVAILABLE = "evidence_unavailable"
 
 
@@ -202,13 +277,18 @@ class RepeatabilityReason(StrEnum):
     WITHIN_PREAPPROVED_ENVELOPE = "within_preapproved_envelope"
     OUTSIDE_PREAPPROVED_ENVELOPE = "outside_preapproved_envelope"
     MISSING_DRAW = "missing_draw"
-    MEASUREMENT_FAILED_OR_INSUFFICIENT = "measurement_failed_or_insufficient"
-    D03_INCOMPATIBLE_OR_UNKNOWN = "d03_incompatible_or_unknown"
-    D03_REANALYSIS_OR_BRIDGE_REQUIRED = "d03_reanalysis_or_bridge_required"
+    MEASUREMENT_FAILED = "measurement_failed"
+    MEASUREMENT_INSUFFICIENT = "measurement_insufficient"
+    D03_INCOMPATIBLE = "d03_incompatible"
+    D03_UNKNOWN = "d03_unknown"
+    D03_REANALYSIS_REQUIRED = "d03_reanalysis_required"
+    D03_REGISTERED_BRIDGE = "d03_registered_bridge"
     EVIDENCE_MISSING = "evidence_missing"
     EVIDENCE_IDENTITY_MISMATCH = "evidence_identity_mismatch"
     EVIDENCE_STALE = "evidence_stale"
     MEASUREMENT_IDENTITY_MISMATCH = "measurement_identity_mismatch"
+    MEASUREMENT_SIGNATURE_INVALID = "measurement_signature_invalid"
+    FACTOR_TRANSITION_UNREGISTERED = "factor_transition_unregistered"
 
 
 class RepeatabilityComparison(CompatibilityContract):
@@ -221,6 +301,11 @@ class RepeatabilityComparison(CompatibilityContract):
     repeatability_evidence_sha256: Sha256 | None
     repeatability_protocol_sha256: Sha256 | None
     repeatability_authority_sha256: Sha256 | None
+    anchor_measurement_evidence_sha256: Sha256 | None
+    member_measurement_evidence_sha256: Sha256 | None
+    anchor_measurement_receipt_sha256: Sha256 | None
+    member_measurement_receipt_sha256: Sha256 | None
+    factor_transition_sha256s: tuple[Sha256, ...] = Field(max_length=MAX_FACTORS)
     evaluated_at: datetime
     availability: ComparisonAvailability
     classification: RepeatabilityClassification
@@ -266,19 +351,26 @@ class RepeatabilityComparison(CompatibilityContract):
             raise ValueError("only an available comparison permits a trend")
         if self.reason_codes != tuple(sorted(set(self.reason_codes), key=str)):
             raise ValueError("comparison reasons must be uniquely sorted")
-        if available and self.classification not in {
+        classification_available = self.classification in {
             RepeatabilityClassification.EXACT_SAME_VALUE,
             RepeatabilityClassification.NOISY_WITHIN_ENVELOPE,
-        }:
-            raise ValueError("available comparison has invalid classification")
+        }
+        if available != classification_available:
+            raise ValueError("comparison availability does not match classification")
         evidence_identities = (
             self.repeatability_envelope_sha256,
             self.repeatability_evidence_sha256,
             self.repeatability_protocol_sha256,
             self.repeatability_authority_sha256,
+            self.anchor_measurement_evidence_sha256,
+            self.member_measurement_evidence_sha256,
+            self.anchor_measurement_receipt_sha256,
+            self.member_measurement_receipt_sha256,
         )
         if available and any(item is None for item in evidence_identities):
             raise ValueError("available comparison requires exact evidence identities")
+        if available != (len(self.factor_transition_sha256s) == MAX_FACTORS):
+            raise ValueError("available comparison requires every factor transition")
         if available:
             assert self.anchor_value is not None
             assert self.member_value is not None
@@ -298,9 +390,12 @@ class RepeatabilityComparison(CompatibilityContract):
             RepeatabilityClassification.NOISY_WITHIN_ENVELOPE: RepeatabilityReason.WITHIN_PREAPPROVED_ENVELOPE,
             RepeatabilityClassification.OUTSIDE_ENVELOPE: RepeatabilityReason.OUTSIDE_PREAPPROVED_ENVELOPE,
             RepeatabilityClassification.MISSING_DRAW: RepeatabilityReason.MISSING_DRAW,
-            RepeatabilityClassification.FAILED_OR_INSUFFICIENT_MEASUREMENT: RepeatabilityReason.MEASUREMENT_FAILED_OR_INSUFFICIENT,
-            RepeatabilityClassification.INCOMPATIBLE_OR_UNKNOWN: RepeatabilityReason.D03_INCOMPATIBLE_OR_UNKNOWN,
-            RepeatabilityClassification.REQUIRES_REANALYSIS_OR_BRIDGE: RepeatabilityReason.D03_REANALYSIS_OR_BRIDGE_REQUIRED,
+            RepeatabilityClassification.FAILED_MEASUREMENT: RepeatabilityReason.MEASUREMENT_FAILED,
+            RepeatabilityClassification.INSUFFICIENT_MEASUREMENT: RepeatabilityReason.MEASUREMENT_INSUFFICIENT,
+            RepeatabilityClassification.INCOMPATIBLE: RepeatabilityReason.D03_INCOMPATIBLE,
+            RepeatabilityClassification.UNKNOWN: RepeatabilityReason.D03_UNKNOWN,
+            RepeatabilityClassification.REQUIRES_REANALYSIS: RepeatabilityReason.D03_REANALYSIS_REQUIRED,
+            RepeatabilityClassification.REGISTERED_BRIDGE: RepeatabilityReason.D03_REGISTERED_BRIDGE,
         }.get(self.classification)
         if expected_reason is not None and self.reason_codes != (expected_reason,):
             raise ValueError("comparison classification has invalid exact reason")
@@ -313,6 +408,8 @@ class RepeatabilityComparison(CompatibilityContract):
                     RepeatabilityReason.EVIDENCE_IDENTITY_MISMATCH,
                     RepeatabilityReason.EVIDENCE_STALE,
                     RepeatabilityReason.MEASUREMENT_IDENTITY_MISMATCH,
+                    RepeatabilityReason.MEASUREMENT_SIGNATURE_INVALID,
+                    RepeatabilityReason.FACTOR_TRANSITION_UNREGISTERED,
                 }
             )
         ):
@@ -320,12 +417,39 @@ class RepeatabilityComparison(CompatibilityContract):
         return self
 
 
+ContractT = TypeVar("ContractT", bound=CompatibilityContract)
+
+
+def _replay_contract(model: type[ContractT], contract: ContractT) -> ContractT:
+    encoded = canonical_contract_bytes(contract)
+    replayed = model.model_validate_json(encoded)
+    if replayed != contract or canonical_contract_bytes(replayed) != encoded:
+        raise ValueError("contract does not replay canonically")
+    return replayed
+
+
+def measurement_evidence_payload_sha256(
+    evidence: MeasurementEvidencePayload,
+) -> str:
+    replayed = _replay_contract(MeasurementEvidencePayload, evidence)
+    return hashlib.sha256(canonical_contract_bytes(replayed)).hexdigest()
+
+
+def measurement_evidence_receipt_sha256(
+    receipt: MeasurementEvidenceReceipt,
+) -> str:
+    replayed = _replay_contract(MeasurementEvidenceReceipt, receipt)
+    return hashlib.sha256(canonical_contract_bytes(replayed)).hexdigest()
+
+
 def repeatability_envelope_sha256(envelope: RepeatabilityEnvelope) -> str:
-    return hashlib.sha256(canonical_contract_bytes(envelope)).hexdigest()
+    replayed = _replay_contract(RepeatabilityEnvelope, envelope)
+    return hashlib.sha256(canonical_contract_bytes(replayed)).hexdigest()
 
 
 def repeatability_comparison_sha256(comparison: RepeatabilityComparison) -> str:
-    return hashlib.sha256(canonical_contract_bytes(comparison)).hexdigest()
+    replayed = _replay_contract(RepeatabilityComparison, comparison)
+    return hashlib.sha256(canonical_contract_bytes(replayed)).hexdigest()
 
 
 def _result(
@@ -341,12 +465,27 @@ def _result(
     anchor_observation: ComparisonObservation,
     member_observation: ComparisonObservation,
     available: bool,
+    factor_transition_sha256s: tuple[str, ...] = (),
 ) -> RepeatabilityComparison:
     numeric = available
-    anchor_value = anchor_observation.value if numeric else None
-    member_value = member_observation.value if numeric else None
+    anchor_evidence = anchor_observation.evidence
+    member_evidence = member_observation.evidence
+    anchor_value = anchor_evidence.value if numeric else None
+    member_value = member_evidence.value if numeric else None
     assert not numeric or (anchor_value is not None and member_value is not None)
-    return RepeatabilityComparison(
+    try:
+        anchor_evidence_sha256 = measurement_evidence_payload_sha256(anchor_evidence)
+        member_evidence_sha256 = measurement_evidence_payload_sha256(member_evidence)
+        anchor_receipt_sha256 = measurement_evidence_receipt_sha256(
+            anchor_observation.receipt
+        )
+        member_receipt_sha256 = measurement_evidence_receipt_sha256(
+            member_observation.receipt
+        )
+    except (AttributeError, TypeError, ValueError):
+        anchor_evidence_sha256 = member_evidence_sha256 = None
+        anchor_receipt_sha256 = member_receipt_sha256 = None
+    comparison = RepeatabilityComparison(
         schema_version="traceback.repeatability-comparison.v1",
         anchor_record_sha256=longitudinal_record_sha256(anchor),
         member_record_sha256=longitudinal_record_sha256(member),
@@ -360,6 +499,11 @@ def _result(
         repeatability_authority_sha256=(
             envelope.authority_sha256 if envelope else None
         ),
+        anchor_measurement_evidence_sha256=anchor_evidence_sha256,
+        member_measurement_evidence_sha256=member_evidence_sha256,
+        anchor_measurement_receipt_sha256=anchor_receipt_sha256,
+        member_measurement_receipt_sha256=member_receipt_sha256,
+        factor_transition_sha256s=factor_transition_sha256s,
         evaluated_at=evaluated_at,
         availability=(
             ComparisonAvailability.AVAILABLE
@@ -372,22 +516,26 @@ def _result(
         member_value=member_value,
         delta=(member_value - anchor_value if numeric else None),
         anchor_uncertainty_lower=(
-            anchor_observation.uncertainty_lower if numeric else None
+            anchor_evidence.uncertainty_lower if numeric else None
         ),
         anchor_uncertainty_upper=(
-            anchor_observation.uncertainty_upper if numeric else None
+            anchor_evidence.uncertainty_upper if numeric else None
         ),
         member_uncertainty_lower=(
-            member_observation.uncertainty_lower if numeric else None
+            member_evidence.uncertainty_lower if numeric else None
         ),
         member_uncertainty_upper=(
-            member_observation.uncertainty_upper if numeric else None
+            member_evidence.uncertainty_upper if numeric else None
         ),
         anchor_denominator_count=(
-            anchor_observation.denominator_count if numeric else None
+            anchor_evidence.denominator.included_count
+            if numeric and anchor_evidence.denominator
+            else None
         ),
         member_denominator_count=(
-            member_observation.denominator_count if numeric else None
+            member_evidence.denominator.included_count
+            if numeric and member_evidence.denominator
+            else None
         ),
         maximum_absolute_delta=(
             envelope.maximum_absolute_delta if numeric and envelope else None
@@ -396,6 +544,7 @@ def _result(
         interpretation="descriptive_technical_difference_only_no_causal_or_clinical_meaning",
         automatic_correction_applied=False,
     )
+    return _replay_contract(RepeatabilityComparison, comparison)
 
 
 def compare_repeatability(
@@ -412,6 +561,7 @@ def compare_repeatability(
     expected_authority_head_sha256: str,
     expected_linkage_trust_snapshot_sha256_by_provider: dict[str, str],
     linkage_store: ProviderLinkageStore | None,
+    result_trust_store: TrustStore,
     expected_envelope_sha256: str,
     expected_evidence_sha256: str,
     expected_protocol_sha256: str,
@@ -443,16 +593,41 @@ def compare_repeatability(
         "anchor_observation": anchor_observation,
         "member_observation": member_observation,
     }
-    if anchor_observation.record_sha256 != longitudinal_record_sha256(
-        anchor
-    ) or member_observation.record_sha256 != longitudinal_record_sha256(member):
+    try:
+        anchor_observation = _replay_contract(ComparisonObservation, anchor_observation)
+        member_observation = _replay_contract(ComparisonObservation, member_observation)
+    except (AttributeError, TypeError, ValueError):
         return _result(
             **common,
             classification=RepeatabilityClassification.EVIDENCE_UNAVAILABLE,
-            reasons={RepeatabilityReason.MEASUREMENT_IDENTITY_MISMATCH},
+            reasons={RepeatabilityReason.EVIDENCE_IDENTITY_MISMATCH},
+            available=False,
+        )
+    common["anchor_observation"] = anchor_observation
+    common["member_observation"] = member_observation
+    try:
+        for observation in (anchor_observation, member_observation):
+            verify_signature(
+                canonical_contract_bytes(observation.evidence),
+                observation.receipt.signature,
+                result_trust_store,
+                purpose=KeyPurpose.RESULT,
+            )
+    except SigningError:
+        return _result(
+            **common,
+            classification=RepeatabilityClassification.EVIDENCE_UNAVAILABLE,
+            reasons={RepeatabilityReason.MEASUREMENT_SIGNATURE_INVALID},
             available=False,
         )
     measurements = (anchor.measurement, member.measurement)
+    if any(item.execution_state == ExecutionState.FAILED for item in measurements):
+        return _result(
+            **common,
+            classification=RepeatabilityClassification.FAILED_MEASUREMENT,
+            reasons={RepeatabilityReason.MEASUREMENT_FAILED},
+            available=False,
+        )
     if any(
         item.execution_state != ExecutionState.COMPLETE
         or item.information_state != InformationState.SUFFICIENT
@@ -460,13 +635,13 @@ def compare_repeatability(
     ):
         return _result(
             **common,
-            classification=RepeatabilityClassification.FAILED_OR_INSUFFICIENT_MEASUREMENT,
-            reasons={RepeatabilityReason.MEASUREMENT_FAILED_OR_INSUFFICIENT},
+            classification=RepeatabilityClassification.INSUFFICIENT_MEASUREMENT,
+            reasons={RepeatabilityReason.MEASUREMENT_INSUFFICIENT},
             available=False,
         )
     if (
-        anchor_observation.state == ObservationState.MISSING_DRAW
-        or member_observation.state == ObservationState.MISSING_DRAW
+        anchor_observation.evidence.state == ObservationState.MISSING_DRAW
+        or member_observation.evidence.state == ObservationState.MISSING_DRAW
     ):
         return _result(
             **common,
@@ -474,24 +649,32 @@ def compare_repeatability(
             reasons={RepeatabilityReason.MISSING_DRAW},
             available=False,
         )
-    if decision.outcome in {
-        LongitudinalOutcome.REQUIRES_REANALYSIS,
-        LongitudinalOutcome.REGISTERED_BRIDGE,
-    }:
+    if decision.outcome == LongitudinalOutcome.REQUIRES_REANALYSIS:
         return _result(
             **common,
-            classification=RepeatabilityClassification.REQUIRES_REANALYSIS_OR_BRIDGE,
-            reasons={RepeatabilityReason.D03_REANALYSIS_OR_BRIDGE_REQUIRED},
+            classification=RepeatabilityClassification.REQUIRES_REANALYSIS,
+            reasons={RepeatabilityReason.D03_REANALYSIS_REQUIRED},
             available=False,
         )
-    if decision.outcome not in {
-        LongitudinalOutcome.EQUIVALENT,
-        LongitudinalOutcome.QUALIFIED_COMPATIBLE,
-    }:
+    if decision.outcome == LongitudinalOutcome.REGISTERED_BRIDGE:
         return _result(
             **common,
-            classification=RepeatabilityClassification.INCOMPATIBLE_OR_UNKNOWN,
-            reasons={RepeatabilityReason.D03_INCOMPATIBLE_OR_UNKNOWN},
+            classification=RepeatabilityClassification.REGISTERED_BRIDGE,
+            reasons={RepeatabilityReason.D03_REGISTERED_BRIDGE},
+            available=False,
+        )
+    if decision.outcome == LongitudinalOutcome.INCOMPATIBLE:
+        return _result(
+            **common,
+            classification=RepeatabilityClassification.INCOMPATIBLE,
+            reasons={RepeatabilityReason.D03_INCOMPATIBLE},
+            available=False,
+        )
+    if decision.outcome == LongitudinalOutcome.UNKNOWN:
+        return _result(
+            **common,
+            classification=RepeatabilityClassification.UNKNOWN,
+            reasons={RepeatabilityReason.D03_UNKNOWN},
             available=False,
         )
     if envelope is None:
@@ -501,7 +684,18 @@ def compare_repeatability(
             reasons={RepeatabilityReason.EVIDENCE_MISSING},
             available=False,
         )
-    evidence_digest = repeatability_envelope_sha256(envelope)
+    try:
+        envelope = _replay_contract(RepeatabilityEnvelope, envelope)
+        evidence_digest = repeatability_envelope_sha256(envelope)
+    except (AttributeError, TypeError, ValueError):
+        common["envelope"] = None
+        return _result(
+            **common,
+            classification=RepeatabilityClassification.EVIDENCE_UNAVAILABLE,
+            reasons={RepeatabilityReason.EVIDENCE_IDENTITY_MISMATCH},
+            available=False,
+        )
+    common["envelope"] = envelope
     if (
         evidence_digest != expected_envelope_sha256
         or envelope.evidence_sha256 != expected_evidence_sha256
@@ -526,8 +720,12 @@ def compare_repeatability(
             reasons={RepeatabilityReason.EVIDENCE_STALE},
             available=False,
         )
-    for record in (anchor, member):
+    for record, observation in (
+        (anchor, anchor_observation),
+        (member, member_observation),
+    ):
         key = record.comparison_key
+        evidence = observation.evidence
         dimensions = {item.dimension: item for item in key.dimensions}
         uncertainty = dimensions[ComparisonDimension.UNCERTAINTY_METHOD]
         denominator = dimensions[ComparisonDimension.DENOMINATOR_SEMANTICS]
@@ -540,6 +738,17 @@ def compare_repeatability(
             or uncertainty.content_sha256 != envelope.uncertainty_method_sha256
             or denominator.state != DimensionValueState.KNOWN
             or denominator.content_sha256 != envelope.denominator_semantics_sha256
+            or evidence.record_sha256 != longitudinal_record_sha256(record)
+            or evidence.result_id != record.measurement.result_id
+            or evidence.result_sha256 != record.measurement.result_sha256
+            or evidence.bundle_sha256 != record.measurement.bundle_sha256
+            or evidence.method_ref != key.method_ref
+            or evidence.method_definition_sha256 != key.method_definition_sha256
+            or evidence.quantity_id != key.quantity_id
+            or evidence.unit != key.unit
+            or evidence.uncertainty_method_sha256 != envelope.uncertainty_method_sha256
+            or evidence.denominator_semantics_sha256
+            != envelope.denominator_semantics_sha256
         ):
             return _result(
                 **common,
@@ -547,15 +756,59 @@ def compare_repeatability(
                 reasons={RepeatabilityReason.MEASUREMENT_IDENTITY_MISMATCH},
                 available=False,
             )
-    assert anchor_observation.value is not None
-    assert member_observation.value is not None
-    delta = member_observation.value - anchor_observation.value
+        preanalytics = dimensions[ComparisonDimension.PREANALYTICS_POLICY]
+        preanalytics_condition = evidence.conditions[
+            ALL_REPEATABILITY_FACTORS.index(RepeatabilityFactor.PREANALYTICS)
+        ]
+        if (
+            preanalytics.state != DimensionValueState.KNOWN
+            or preanalytics.content_sha256
+            != preanalytics_condition.condition_policy_sha256
+        ):
+            return _result(
+                **common,
+                classification=RepeatabilityClassification.EVIDENCE_UNAVAILABLE,
+                reasons={RepeatabilityReason.MEASUREMENT_IDENTITY_MISMATCH},
+                available=False,
+            )
+    transition_sha256s: list[str] = []
+    for factor_envelope, anchor_condition, member_condition in zip(
+        envelope.factor_envelopes,
+        anchor_observation.evidence.conditions,
+        member_observation.evidence.conditions,
+        strict=True,
+    ):
+        if (
+            factor_envelope.factor != anchor_condition.factor
+            or factor_envelope.factor != member_condition.factor
+            or factor_envelope.anchor_condition_sha256
+            != anchor_condition.condition_sha256
+            or factor_envelope.member_condition_sha256
+            != member_condition.condition_sha256
+            or factor_envelope.condition_policy_sha256
+            != anchor_condition.condition_policy_sha256
+            or factor_envelope.condition_policy_sha256
+            != member_condition.condition_policy_sha256
+        ):
+            return _result(
+                **common,
+                classification=RepeatabilityClassification.EVIDENCE_UNAVAILABLE,
+                reasons={RepeatabilityReason.FACTOR_TRANSITION_UNREGISTERED},
+                available=False,
+            )
+        transition_sha256s.append(
+            hashlib.sha256(canonical_contract_bytes(factor_envelope)).hexdigest()
+        )
+    assert anchor_observation.evidence.value is not None
+    assert member_observation.evidence.value is not None
+    delta = member_observation.evidence.value - anchor_observation.evidence.value
     if delta == 0.0:
         return _result(
             **common,
             classification=RepeatabilityClassification.EXACT_SAME_VALUE,
             reasons={RepeatabilityReason.EXACT_SAME_VALUE},
             available=True,
+            factor_transition_sha256s=tuple(transition_sha256s),
         )
     if abs(delta) <= envelope.maximum_absolute_delta:
         return _result(
@@ -563,6 +816,7 @@ def compare_repeatability(
             classification=RepeatabilityClassification.NOISY_WITHIN_ENVELOPE,
             reasons={RepeatabilityReason.WITHIN_PREAPPROVED_ENVELOPE},
             available=True,
+            factor_transition_sha256s=tuple(transition_sha256s),
         )
     return _result(
         **common,
@@ -577,6 +831,10 @@ __all__ = [
     "ComparisonAvailability",
     "ComparisonObservation",
     "FactorEnvelope",
+    "MeasurementCondition",
+    "MeasurementDenominator",
+    "MeasurementEvidencePayload",
+    "MeasurementEvidenceReceipt",
     "ObservationState",
     "RepeatabilityClassification",
     "RepeatabilityComparison",
@@ -584,6 +842,8 @@ __all__ = [
     "RepeatabilityFactor",
     "RepeatabilityReason",
     "compare_repeatability",
+    "measurement_evidence_payload_sha256",
+    "measurement_evidence_receipt_sha256",
     "repeatability_comparison_sha256",
     "repeatability_envelope_sha256",
 ]

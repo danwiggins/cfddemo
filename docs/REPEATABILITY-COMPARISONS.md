@@ -13,8 +13,10 @@ is emitted only when all of these checks pass:
    current method authority, current provider-linkage trust, and the live D04
    linkage-store receipt.
 2. D03 classifies the member as `equivalent` or `qualified_compatible`.
-3. Both observations bind the exact D02 records and both measurements are
-   complete and sufficient.
+3. Both observations are canonical result-authority-signed evidence receipts
+   binding the exact D02 record, E05 result and bundle bytes, value, uncertainty
+   method and bounds, and reconciled total/included/excluded denominator counts.
+   Both measurements must be complete and sufficient.
 4. The repeatability envelope matches the independently pinned envelope,
    evidence, protocol, and authority digests and is valid at evaluation time.
 5. Method reference and digest, quantity, unit, uncertainty method, and
@@ -23,17 +25,20 @@ is emitted only when all of these checks pass:
    combined envelope.
 
 The envelope must explicitly cover between-day, operator, lot, and
-preanalytical factors in canonical order. Their individual bounds document the
-qualified evidence; D07 does not invent a rule for combining them. The approved
-combined absolute-delta bound is the only numerical admission rule.
+preanalytical factors in canonical order. Each signed observation binds its
+actual condition and condition-policy identity for all four factors. Each
+anchor-to-member transition must exactly match the corresponding registered
+factor transition before the approved combined absolute-delta rule can be used.
+D07 does not infer a missing condition or invent a transition/composition rule.
 
 ## Unavailable states
 
-`outside_envelope`, `missing_draw`, `failed_or_insufficient_measurement`,
-`incompatible_or_unknown`, `requires_reanalysis_or_bridge`, and
-`evidence_unavailable` remain distinct. Every unavailable result suppresses both
-source values, the delta, uncertainty, denominators, envelope magnitude, and
-trend permission. Missing draws are never represented as zero.
+`outside_envelope`, `missing_draw`, `failed_measurement`,
+`insufficient_measurement`, `incompatible`, `unknown`, `requires_reanalysis`,
+`registered_bridge`, and `evidence_unavailable` remain distinct. Every
+unavailable result suppresses both source values, the delta, uncertainty,
+denominators, envelope magnitude, and trend permission. Missing draws are never
+represented as zero.
 
 Every comparison is anchored directly to the same policy and anchor record.
 Adjacent within-envelope differences cannot be chained to admit a member whose
@@ -41,7 +46,10 @@ anchor-relative difference is outside the envelope.
 
 ## Privacy and replay
 
-Contracts are immutable, closed, versioned, bounded, and canonically hashed.
+Contracts are immutable, closed, versioned, bounded, canonically replayed, and
+then hashed. Canonical replay occurs at envelope, observation, evidence-receipt,
+comparison evaluation, and comparison digest boundaries, so unchecked
+`model_copy` mutations cannot create authority.
 Controlled identifiers reject path-like and identity-bearing vocabulary. The
 comparison artifact binds the exact records, anchor policy, replayed D03
 decision, repeatability envelope, and evaluation time without carrying local

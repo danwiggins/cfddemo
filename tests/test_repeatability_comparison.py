@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import hashlib
 import json
 from datetime import timedelta
 
@@ -22,11 +23,17 @@ from evidence_inspector.repeatability_comparison import (
     ComparisonAvailability,
     ComparisonObservation,
     FactorEnvelope,
+    MeasurementCondition,
+    MeasurementDenominator,
+    MeasurementEvidencePayload,
+    MeasurementEvidenceReceipt,
     ObservationState,
     RepeatabilityClassification,
     RepeatabilityEnvelope,
+    RepeatabilityFactor,
     RepeatabilityReason,
     compare_repeatability,
+    measurement_evidence_payload_sha256,
     repeatability_comparison_sha256,
     repeatability_envelope_sha256,
 )
@@ -40,10 +47,46 @@ from tests.test_longitudinal_compatibility import (
     _policy,
     _record,
 )
+from traceback_runner.signing import (
+    KeyPurpose,
+    TrustStore,
+    generate_development_keypair,
+    sign_bytes,
+)
 
 EVIDENCE_SHA256 = "b" * 64
 PROTOCOL_SHA256 = "c" * 64
 AUTHORITY_SHA256 = "e" * 64
+SIGNING_KEY = generate_development_keypair(KeyPurpose.RESULT)
+RESULT_TRUST_STORE = TrustStore()
+RESULT_TRUST_STORE.add_signing_key(SIGNING_KEY)
+
+
+def _condition_policy(record, factor: RepeatabilityFactor) -> str:
+    if factor == RepeatabilityFactor.PREANALYTICS:
+        dimension = record.comparison_key.dimensions[
+            list(ComparisonDimension).index(ComparisonDimension.PREANALYTICS_POLICY)
+        ]
+        assert dimension.content_sha256 is not None
+        return dimension.content_sha256
+    return {
+        RepeatabilityFactor.BETWEEN_DAY: "1" * 64,
+        RepeatabilityFactor.OPERATOR: "2" * 64,
+        RepeatabilityFactor.LOT: "3" * 64,
+    }[factor]
+
+
+def _conditions(record) -> tuple[MeasurementCondition, ...]:
+    return tuple(
+        MeasurementCondition(
+            factor=factor,
+            condition_sha256=hashlib.sha256(
+                f"condition:{factor.value}:alpha".encode()
+            ).hexdigest(),
+            condition_policy_sha256=_condition_policy(record, factor),
+        )
+        for factor in ALL_REPEATABILITY_FACTORS
+    )
 
 
 def _envelope(anchor, *, limit: float = 0.1) -> RepeatabilityEnvelope:
@@ -78,22 +121,87 @@ def _envelope(anchor, *, limit: float = 0.1) -> RepeatabilityEnvelope:
         denominator_semantics_id="denominator_fragments_alpha",
         denominator_semantics_sha256=denominator_sha256,
         factor_envelopes=tuple(
-            FactorEnvelope(factor=factor, maximum_absolute_contribution=0.04)
-            for factor in ALL_REPEATABILITY_FACTORS
+            FactorEnvelope(
+                factor=condition.factor,
+                anchor_condition_sha256=condition.condition_sha256,
+                member_condition_sha256=condition.condition_sha256,
+                condition_policy_sha256=condition.condition_policy_sha256,
+                maximum_absolute_contribution=0.04,
+            )
+            for condition in _conditions(anchor)
         ),
         maximum_absolute_delta=limit,
         combination_rule="preapproved_combined_absolute_delta.v1",
     )
 
 
-def _observation(record, value: float) -> ComparisonObservation:
-    return ComparisonObservation(
+def _observation(
+    record,
+    value: float | None,
+    *,
+    state: ObservationState = ObservationState.AVAILABLE,
+    denominator: MeasurementDenominator | None = None,
+    conditions: tuple[MeasurementCondition, ...] | None = None,
+) -> ComparisonObservation:
+    key = record.comparison_key
+    dimensions = {item.dimension: item for item in key.dimensions}
+    uncertainty_sha256 = dimensions[
+        ComparisonDimension.UNCERTAINTY_METHOD
+    ].content_sha256
+    denominator_sha256 = dimensions[
+        ComparisonDimension.DENOMINATOR_SEMANTICS
+    ].content_sha256
+    assert uncertainty_sha256 is not None
+    assert denominator_sha256 is not None
+    denominator = denominator or (
+        MeasurementDenominator(
+            total_count=110,
+            included_count=100,
+            excluded_count=10,
+        )
+        if state == ObservationState.AVAILABLE
+        else None
+    )
+    evidence = MeasurementEvidencePayload(
+        schema_version="traceback.comparison-measurement-evidence.v1",
+        evidence_id=(
+            "measurement_evidence_"
+            + record.measurement.result_id.removeprefix("result_")
+        ),
         record_sha256=longitudinal_record_sha256(record),
-        state=ObservationState.AVAILABLE,
+        result_id=record.measurement.result_id,
+        result_sha256=record.measurement.result_sha256,
+        bundle_sha256=record.measurement.bundle_sha256,
+        method_ref=key.method_ref,
+        method_definition_sha256=key.method_definition_sha256,
+        quantity_id=key.quantity_id,
+        unit=key.unit,
+        uncertainty_method_sha256=uncertainty_sha256,
+        denominator_semantics_sha256=denominator_sha256,
+        conditions=conditions or _conditions(record),
+        state=state,
         value=value,
-        uncertainty_lower=value - 0.02,
-        uncertainty_upper=value + 0.02,
-        denominator_count=100,
+        uncertainty_lower=value - 0.02 if value is not None else None,
+        uncertainty_upper=value + 0.02 if value is not None else None,
+        denominator=denominator,
+    )
+    receipt = MeasurementEvidenceReceipt(
+        schema_version="traceback.comparison-measurement-receipt.v1",
+        receipt_id=(
+            "measurement_receipt_"
+            + record.measurement.result_id.removeprefix("result_")
+        ),
+        evidence_sha256=measurement_evidence_payload_sha256(evidence),
+        signature=sign_bytes(
+            canonical_contract_bytes(evidence),
+            SIGNING_KEY,
+            purpose=KeyPurpose.RESULT,
+        ),
+    )
+    return ComparisonObservation(
+        schema_version="traceback.comparison-observation.v1",
+        evidence=evidence,
+        receipt=receipt,
     )
 
 
@@ -107,16 +215,21 @@ def _compare(
     envelope,
     **overrides,
 ):
+    try:
+        envelope_sha256 = (
+            repeatability_envelope_sha256(envelope)
+            if envelope is not None
+            else "f" * 64
+        )
+    except (AttributeError, TypeError, ValueError):
+        envelope_sha256 = "f" * 64
+    observation_mutator = overrides.pop("observation_mutator", None)
     arguments = {
         "evaluated_at": NOW,
         "expected_policy_sha256": longitudinal_anchor_policy_sha256(policy),
         "expected_authority_head_sha256": HEAD_SHA256,
         "expected_linkage_trust_snapshot_sha256_by_provider": {PROVIDER: TRUST_SHA256},
-        "expected_envelope_sha256": (
-            repeatability_envelope_sha256(envelope)
-            if envelope is not None
-            else "f" * 64
-        ),
+        "expected_envelope_sha256": envelope_sha256,
         "expected_evidence_sha256": EVIDENCE_SHA256,
         "expected_protocol_sha256": PROTOCOL_SHA256,
         "expected_repeatability_authority_sha256": AUTHORITY_SHA256,
@@ -124,6 +237,7 @@ def _compare(
     with _activated_records(anchor, member) as (records, store):
         anchor, member = records
         arguments["linkage_store"] = store
+        arguments["result_trust_store"] = RESULT_TRUST_STORE
         arguments.update(overrides)
         decision = decide_longitudinal_member(
             anchor,
@@ -137,12 +251,27 @@ def _compare(
             linkage_store=store,
         )
         assert decision.outcome == expected_decision.outcome
-        anchor_observation = anchor_observation.model_copy(
-            update={"record_sha256": longitudinal_record_sha256(anchor)}
+        anchor_observation = _observation(
+            anchor,
+            anchor_observation.evidence.value,
+            state=anchor_observation.evidence.state,
+            denominator=anchor_observation.evidence.denominator,
+            conditions=anchor_observation.evidence.conditions,
         )
-        member_observation = member_observation.model_copy(
-            update={"record_sha256": longitudinal_record_sha256(member)}
+        member_observation = _observation(
+            member,
+            member_observation.evidence.value,
+            state=member_observation.evidence.state,
+            denominator=member_observation.evidence.denominator,
+            conditions=member_observation.evidence.conditions,
         )
+        if observation_mutator is not None:
+            anchor_observation, member_observation = observation_mutator(
+                anchor,
+                member,
+                anchor_observation,
+                member_observation,
+            )
         return compare_repeatability(
             anchor,
             member,
@@ -205,6 +334,9 @@ def test_exact_and_inclusive_envelope_edge_are_available(
     assert result.repeatability_evidence_sha256 == EVIDENCE_SHA256
     assert result.repeatability_protocol_sha256 == PROTOCOL_SHA256
     assert result.repeatability_authority_sha256 == AUTHORITY_SHA256
+    assert result.anchor_measurement_evidence_sha256 is not None
+    assert result.member_measurement_receipt_sha256 is not None
+    assert len(result.factor_transition_sha256s) == 4
     assert repeatability_comparison_sha256(result)
 
 
@@ -278,6 +410,178 @@ def test_any_evidence_substitution_is_unavailable(override, reason) -> None:
     assert result.delta is None
 
 
+@pytest.mark.parametrize("mutation", ("value", "denominator", "uncertainty"))
+def test_signed_measurement_payload_rejects_numeric_substitution(mutation: str) -> None:
+    anchor = _record("1")
+    member = _record("2")
+    policy = _policy(anchor)
+    decision = _decide(anchor, member, policy)
+
+    def mutate(_anchor, _member, anchor_observation, member_observation):
+        evidence = member_observation.evidence
+        if mutation == "value":
+            evidence = evidence.model_copy(
+                update={
+                    "value": 50.0,
+                    "uncertainty_lower": 49.0,
+                    "uncertainty_upper": 51.0,
+                }
+            )
+        elif mutation == "denominator":
+            evidence = evidence.model_copy(
+                update={
+                    "denominator": MeasurementDenominator(
+                        total_count=1_000_000_000,
+                        included_count=999_999_999,
+                        excluded_count=1,
+                    )
+                }
+            )
+        else:
+            evidence = evidence.model_copy(update={"uncertainty_lower": None})
+        return (
+            anchor_observation,
+            member_observation.model_copy(update={"evidence": evidence}),
+        )
+
+    result = _compare(
+        anchor,
+        member,
+        policy,
+        decision,
+        _observation(anchor, 0.5),
+        _observation(member, 0.55),
+        _envelope(anchor),
+        observation_mutator=mutate,
+    )
+
+    assert result.availability == ComparisonAvailability.UNAVAILABLE
+    assert result.reason_codes == (RepeatabilityReason.EVIDENCE_IDENTITY_MISMATCH,)
+    assert result.delta is None
+
+
+def test_unregistered_factor_transition_is_unavailable_even_with_valid_signature() -> (
+    None
+):
+    anchor = _record("1")
+    member = _record("2")
+    policy = _policy(anchor)
+    decision = _decide(anchor, member, policy)
+
+    def mutate(_anchor, active_member, anchor_observation, member_observation):
+        conditions = list(member_observation.evidence.conditions)
+        conditions[1] = conditions[1].model_copy(update={"condition_sha256": "9" * 64})
+        return (
+            anchor_observation,
+            _observation(
+                active_member,
+                member_observation.evidence.value,
+                denominator=member_observation.evidence.denominator,
+                conditions=tuple(conditions),
+            ),
+        )
+
+    result = _compare(
+        anchor,
+        member,
+        policy,
+        decision,
+        _observation(anchor, 0.5),
+        _observation(member, 0.55),
+        _envelope(anchor),
+        observation_mutator=mutate,
+    )
+
+    assert result.availability == ComparisonAvailability.UNAVAILABLE
+    assert result.reason_codes == (RepeatabilityReason.FACTOR_TRANSITION_UNREGISTERED,)
+    assert result.factor_transition_sha256s == ()
+
+
+def test_rehashed_numeric_evidence_still_requires_valid_authority_signature() -> None:
+    anchor = _record("1")
+    member = _record("2")
+    policy = _policy(anchor)
+    decision = _decide(anchor, member, policy)
+
+    def mutate(_anchor, _member, anchor_observation, member_observation):
+        evidence = member_observation.evidence.model_copy(
+            update={
+                "value": 50.0,
+                "uncertainty_lower": 49.0,
+                "uncertainty_upper": 51.0,
+            }
+        )
+        receipt = member_observation.receipt.model_copy(
+            update={"evidence_sha256": measurement_evidence_payload_sha256(evidence)}
+        )
+        return (
+            anchor_observation,
+            ComparisonObservation(
+                schema_version="traceback.comparison-observation.v1",
+                evidence=evidence,
+                receipt=receipt,
+            ),
+        )
+
+    result = _compare(
+        anchor,
+        member,
+        policy,
+        decision,
+        _observation(anchor, 0.5),
+        _observation(member, 0.55),
+        _envelope(anchor),
+        observation_mutator=mutate,
+    )
+
+    assert result.availability == ComparisonAvailability.UNAVAILABLE
+    assert result.reason_codes == (RepeatabilityReason.MEASUREMENT_SIGNATURE_INVALID,)
+    assert result.delta is None
+
+
+def test_model_copy_cannot_bypass_canonical_envelope_or_comparison_validation() -> None:
+    anchor = _record("1")
+    member = _record("2")
+    policy = _policy(anchor)
+    decision = _decide(anchor, member, policy)
+    malformed = _envelope(anchor).model_copy(update={"factor_envelopes": ()})
+
+    unavailable = _compare(
+        anchor,
+        member,
+        policy,
+        decision,
+        _observation(anchor, 0.5),
+        _observation(member, 0.55),
+        malformed,
+    )
+
+    assert unavailable.availability == ComparisonAvailability.UNAVAILABLE
+    assert unavailable.reason_codes == (RepeatabilityReason.EVIDENCE_IDENTITY_MISMATCH,)
+
+    valid = _compare(
+        anchor,
+        member,
+        policy,
+        decision,
+        _observation(anchor, 0.5),
+        _observation(member, 0.55),
+        _envelope(anchor),
+    )
+    forged = valid.model_copy(update={"delta": 99.0})
+    with pytest.raises(ValidationError, match="delta does not match"):
+        repeatability_comparison_sha256(forged)
+
+
+def test_denominator_must_reconcile_before_signing() -> None:
+    with pytest.raises(ValidationError, match="reconcile exactly"):
+        MeasurementDenominator(
+            total_count=100,
+            included_count=99,
+            excluded_count=2,
+        )
+
+
 def test_missing_or_stale_evidence_is_unavailable() -> None:
     anchor = _record("1")
     member = _record("2")
@@ -308,14 +612,7 @@ def test_missing_draw_is_distinct_and_never_uses_zero_placeholder() -> None:
     member = _record("2")
     policy = _policy(anchor)
     decision = _decide(anchor, member, policy)
-    missing = ComparisonObservation(
-        record_sha256=longitudinal_record_sha256(member),
-        state=ObservationState.MISSING_DRAW,
-        value=None,
-        uncertainty_lower=None,
-        uncertainty_upper=None,
-        denominator_count=None,
-    )
+    missing = _observation(member, None, state=ObservationState.MISSING_DRAW)
 
     result = _compare(
         anchor,
@@ -362,10 +659,12 @@ def test_failed_or_insufficient_measurement_is_distinct(execution, information) 
         _envelope(anchor),
     )
 
-    assert (
-        result.classification
-        == RepeatabilityClassification.FAILED_OR_INSUFFICIENT_MEASUREMENT
+    expected = (
+        RepeatabilityClassification.FAILED_MEASUREMENT
+        if execution == ExecutionState.FAILED
+        else RepeatabilityClassification.INSUFFICIENT_MEASUREMENT
     )
+    assert result.classification == expected
     assert result.delta is None
 
 
@@ -374,15 +673,19 @@ def test_failed_or_insufficient_measurement_is_distinct(execution, information) 
     (
         (
             LongitudinalOutcome.INCOMPATIBLE,
-            RepeatabilityClassification.INCOMPATIBLE_OR_UNKNOWN,
+            RepeatabilityClassification.INCOMPATIBLE,
+        ),
+        (
+            LongitudinalOutcome.UNKNOWN,
+            RepeatabilityClassification.UNKNOWN,
         ),
         (
             LongitudinalOutcome.REQUIRES_REANALYSIS,
-            RepeatabilityClassification.REQUIRES_REANALYSIS_OR_BRIDGE,
+            RepeatabilityClassification.REQUIRES_REANALYSIS,
         ),
         (
             LongitudinalOutcome.REGISTERED_BRIDGE,
-            RepeatabilityClassification.REQUIRES_REANALYSIS_OR_BRIDGE,
+            RepeatabilityClassification.REGISTERED_BRIDGE,
         ),
     ),
 )
@@ -390,11 +693,15 @@ def test_noneligible_d03_states_remain_distinct_and_suppressed(
     outcome, classification
 ) -> None:
     anchor = _record("1")
-    member = _record("2", changed=ComparisonDimension.ASSAY_PROTOCOL)
+    member = (
+        _record("2", unknown=ComparisonDimension.ASSAY_PROTOCOL)
+        if outcome == LongitudinalOutcome.UNKNOWN
+        else _record("2", changed=ComparisonDimension.ASSAY_PROTOCOL)
+    )
     member_value = member.comparison_key.dimensions[0]
     allowances = (
         None
-        if outcome == LongitudinalOutcome.INCOMPATIBLE
+        if outcome in {LongitudinalOutcome.INCOMPATIBLE, LongitudinalOutcome.UNKNOWN}
         else {ComparisonDimension.ASSAY_PROTOCOL: (member_value, outcome)}
     )
     policy = _policy(anchor, allowances)
@@ -502,14 +809,13 @@ def test_contracts_are_canonical_bounded_and_private_safe() -> None:
                 "factor_envelopes": tuple(reversed(envelope.factor_envelopes)),
             }
         )
+    observation = _observation(anchor, 0.5)
     with pytest.raises(ValidationError, match="missing draw cannot contain numeric"):
-        ComparisonObservation(
-            record_sha256="1" * 64,
-            state=ObservationState.MISSING_DRAW,
-            value=0.0,
-            uncertainty_lower=None,
-            uncertainty_upper=None,
-            denominator_count=None,
+        MeasurementEvidencePayload.model_validate(
+            {
+                **observation.evidence.model_dump(),
+                "state": ObservationState.MISSING_DRAW,
+            }
         )
     payload = envelope.model_dump(mode="json")
     del payload["schema_version"]
