@@ -2,8 +2,10 @@
 
 from __future__ import annotations
 
+import base64
 import errno
 import hashlib
+import os
 from pathlib import Path
 
 import pytest
@@ -15,9 +17,14 @@ from evidence_inspector.cna_explorer import CnaSource
 from evidence_inspector.compatibility import CompatibilityOutcome, TrustState
 from evidence_inspector.fragment_explorer import build_fragment_explorer_view
 from evidence_inspector.portable_view import (
+    AccessibilityMetadata,
+    ExactCell,
+    ExactValueState,
     MeasurementKind,
     PortableSourceIdentity,
     PortableSurfaceState,
+    PortableTrustContext,
+    PortableVersions,
     PortableViewBuildRequest,
     PortableViewConflictError,
     PortableViewPermissionError,
@@ -128,6 +135,17 @@ def _cna_identity(
     method_sha256 = digit * 64
     manifest = _manifest(kind.value, method_id, "1.0.0", method_sha256)
     compatibility = drawer.replay_request.compatibility_request
+    source = {
+        MeasurementKind.CNA_DOSAGE: CnaSource.DOSAGE_QC,
+        MeasurementKind.CNA_SEGMENTED: CnaSource.SEGMENTED_CNA,
+    }[kind]
+    asset_sha256s = tuple(
+        sorted(
+            item.content_sha256
+            for item in snapshot.layers.assets  # type: ignore[attr-defined,union-attr]
+            if item.source == source
+        )
+    )
     return (
         PortableSourceIdentity(
             measurement_kind=kind,
@@ -140,7 +158,7 @@ def _cna_identity(
             method_id=method_id,
             method_version="1.0.0",
             method_definition_sha256=method_sha256,
-            asset_sha256s=(("e" if digit == "7" else "f") * 64,),
+            asset_sha256s=asset_sha256s,
             capability_sha256=("1" if digit == "7" else "2") * 64,
             compatibility_decision_sha256=drawer.compatibility_decision_sha256,
             compatibility_policy_sha256=compatibility.trusted_policy_sha256,
@@ -248,11 +266,26 @@ def integrated_request(tmp_path: Path) -> PortableViewBuildRequest:
     )
 
 
+@pytest.fixture
+def trust_context(integrated_request: PortableViewBuildRequest) -> PortableTrustContext:
+    return PortableTrustContext(
+        expected_source_identities=integrated_request.source_identities,
+        expected_bundle_manifest_sha256s=tuple(
+            sorted(_digest(item) for item in integrated_request.bundle_manifests)
+        ),
+    )
+
+
 def test_integrated_view_is_exact_accessible_and_byte_deterministic(
     integrated_request: PortableViewBuildRequest,
+    trust_context: PortableTrustContext,
 ) -> None:
-    first, first_table = build_portable_view(integrated_request)
-    second, second_table = build_portable_view(integrated_request)
+    first, first_table = build_portable_view(
+        integrated_request, trust_context=trust_context
+    )
+    second, second_table = build_portable_view(
+        integrated_request, trust_context=trust_context
+    )
 
     assert first == second
     assert first_table == second_table
@@ -270,7 +303,38 @@ def test_integrated_view_is_exact_accessible_and_byte_deterministic(
     assert first.synthetic_local_only and not first.product_release_authorized
     assert first_table.startswith(b"table_schema\tmeasurement_kind")
     assert b"Presentation label" not in first_table
-    replay_portable_view(integrated_request, first, first_table)
+    tables = {item.table_id: item for item in first.tables}
+    assert {
+        "table_cna_bins_dosage_qc",
+        "table_cna_bins_segmented_cna",
+        "table_cna_masks",
+        "table_cna_insufficiency_dosage_qc",
+        "table_cna_insufficiency_segmented_cna",
+        "table_cna_coordinate_grid_dosage_qc",
+        "table_cna_coordinate_grid_segmented_cna",
+        "table_cna_assets_dosage_qc",
+        "table_cna_assets_segmented_cna",
+        "table_cna_method_dosage_qc",
+        "table_cna_method_segmented_cna",
+    } <= set(tables)
+    assert {cell.column_id for cell in tables["table_cna_segments"].rows[0].cells} >= {
+        "native_span_bins",
+        "segment_index",
+        "source",
+    }
+    assert {
+        cell.column_id for cell in tables["table_cna_model_candidates"].rows[0].cells
+    } >= {
+        "candidate_index",
+        "initial_ploidy",
+        "estimated_normal_fraction",
+        "fraction_genome_subclonal",
+        "fraction_cna_subclonal",
+        "bic",
+    }
+    replay_portable_view(
+        integrated_request, first, first_table, trust_context=trust_context
+    )
 
 
 @pytest.mark.parametrize(
@@ -286,6 +350,7 @@ def test_integrated_view_is_exact_accessible_and_byte_deterministic(
 )
 def test_non_ready_states_withhold_all_exact_rows(
     integrated_request: PortableViewBuildRequest,
+    trust_context: PortableTrustContext,
     surface_state: ViewSurfaceState,
     error_code: SurfaceErrorCode | None,
     expected: PortableSurfaceState,
@@ -298,7 +363,7 @@ def test_non_ready_states_withhold_all_exact_rows(
         error_message=("Unable to load portable view" if error_code else None),
     )
     request = integrated_request.model_copy(update={"surface_fixture": fixture})
-    view, table = build_portable_view(request)
+    view, table = build_portable_view(request, trust_context=trust_context)
     assert view.surface_state == expected
     assert not view.tables
     assert table.count(b"\n") == 1
@@ -306,6 +371,7 @@ def test_non_ready_states_withhold_all_exact_rows(
 
 def test_empty_state_withholds_all_exact_rows(
     integrated_request: PortableViewBuildRequest,
+    trust_context: PortableTrustContext,
 ) -> None:
     source_request = cell_request().result_view_request
     filters = normalize_result_filters(trust_states=(TrustState.REVOKED,))
@@ -321,7 +387,7 @@ def test_empty_state_withholds_all_exact_rows(
     request = integrated_request.model_copy(
         update={"surface_fixture": fixture, "filters": filters}
     )
-    view, table = build_portable_view(request)
+    view, table = build_portable_view(request, trust_context=trust_context)
     assert view.surface_state == PortableSurfaceState.EMPTY
     assert not view.tables
     assert table.count(b"\n") == 1
@@ -329,9 +395,11 @@ def test_empty_state_withholds_all_exact_rows(
 
 def test_partial_stale_revoked_and_incompatible_states_are_explicit(
     integrated_request: PortableViewBuildRequest,
+    trust_context: PortableTrustContext,
 ) -> None:
     partial, _ = build_portable_view(
-        integrated_request.model_copy(update={"cna_snapshot": None})
+        integrated_request.model_copy(update={"cna_snapshot": None}),
+        trust_context=trust_context,
     )
     assert partial.surface_state == PortableSurfaceState.PARTIAL
 
@@ -345,7 +413,11 @@ def test_partial_stale_revoked_and_incompatible_states_are_explicit(
         update={"trust_state": TrustState.UNVERIFIED}
     )
     stale, _ = build_portable_view(
-        integrated_request.model_copy(update={"source_identities": tuple(identities)})
+        integrated_request.model_copy(update={"source_identities": tuple(identities)}),
+        trust_context=PortableTrustContext(
+            expected_source_identities=tuple(identities),
+            expected_bundle_manifest_sha256s=trust_context.expected_bundle_manifest_sha256s,
+        ),
     )
     assert stale.surface_state == PortableSurfaceState.STALE
     assert not stale.tables
@@ -357,7 +429,11 @@ def test_partial_stale_revoked_and_incompatible_states_are_explicit(
         }
     )
     revoked, _ = build_portable_view(
-        integrated_request.model_copy(update={"source_identities": tuple(identities)})
+        integrated_request.model_copy(update={"source_identities": tuple(identities)}),
+        trust_context=PortableTrustContext(
+            expected_source_identities=tuple(identities),
+            expected_bundle_manifest_sha256s=trust_context.expected_bundle_manifest_sha256s,
+        ),
     )
     assert revoked.surface_state == PortableSurfaceState.REVOKED
     assert revoked.compatibility.delta_state == "not_allowed_incompatible"
@@ -365,17 +441,20 @@ def test_partial_stale_revoked_and_incompatible_states_are_explicit(
 
 
 def test_publication_is_atomic_no_overwrite_and_verifiable(
-    integrated_request: PortableViewBuildRequest, tmp_path: Path
+    integrated_request: PortableViewBuildRequest,
+    trust_context: PortableTrustContext,
+    tmp_path: Path,
 ) -> None:
-    view, table = build_portable_view(integrated_request)
+    view, table = build_portable_view(integrated_request, trust_context=trust_context)
     destination = tmp_path / "portable-alpha"
     publish_portable_view(
         destination,
         view=view,
         accessible_table=table,
+        trust_context=trust_context,
         source_identity_verifier=lambda: view.source_identities,
     )
-    verified = verify_portable_view(destination)
+    verified = verify_portable_view(destination, trust_context=trust_context)
     assert verified.view == view
     assert verified.accessible_table_bytes == table
     assert {item.name for item in destination.iterdir()} == {
@@ -388,14 +467,17 @@ def test_publication_is_atomic_no_overwrite_and_verifiable(
             destination,
             view=view,
             accessible_table=table,
+            trust_context=trust_context,
             source_identity_verifier=lambda: view.source_identities,
         )
 
 
 def test_source_change_and_destination_race_fail_closed_without_stage_leaks(
-    integrated_request: PortableViewBuildRequest, tmp_path: Path
+    integrated_request: PortableViewBuildRequest,
+    trust_context: PortableTrustContext,
+    tmp_path: Path,
 ) -> None:
-    view, table = build_portable_view(integrated_request)
+    view, table = build_portable_view(integrated_request, trust_context=trust_context)
     parent = tmp_path / "publish"
     parent.mkdir()
     with pytest.raises(PortableViewTamperError):
@@ -403,6 +485,7 @@ def test_source_change_and_destination_race_fail_closed_without_stage_leaks(
             parent / "source-change",
             view=view,
             accessible_table=table,
+            trust_context=trust_context,
             source_identity_verifier=lambda: (),
         )
 
@@ -417,6 +500,7 @@ def test_source_change_and_destination_race_fail_closed_without_stage_leaks(
             destination,
             view=view,
             accessible_table=table,
+            trust_context=trust_context,
             source_identity_verifier=race,
         )
     assert not any(item.name.startswith(".race.") for item in parent.iterdir())
@@ -424,9 +508,11 @@ def test_source_change_and_destination_race_fail_closed_without_stage_leaks(
 
 
 def test_root_swap_and_symlink_tamper_fail_closed(
-    integrated_request: PortableViewBuildRequest, tmp_path: Path
+    integrated_request: PortableViewBuildRequest,
+    trust_context: PortableTrustContext,
+    tmp_path: Path,
 ) -> None:
-    view, table = build_portable_view(integrated_request)
+    view, table = build_portable_view(integrated_request, trust_context=trust_context)
     parent = tmp_path / "parent"
     parent.mkdir()
     moved = tmp_path / "moved"
@@ -441,6 +527,7 @@ def test_root_swap_and_symlink_tamper_fail_closed(
             parent / "artifact",
             view=view,
             accessible_table=table,
+            trust_context=trust_context,
             source_identity_verifier=swap_root,
         )
 
@@ -449,13 +536,14 @@ def test_root_swap_and_symlink_tamper_fail_closed(
         published,
         view=view,
         accessible_table=table,
+        trust_context=trust_context,
         source_identity_verifier=lambda: view.source_identities,
     )
     table_path = published / "accessible-table.tsv"
     table_path.unlink()
     table_path.symlink_to(tmp_path / "outside.tsv")
     with pytest.raises(PortableViewTamperError):
-        verify_portable_view(published)
+        verify_portable_view(published, trust_context=trust_context)
 
 
 @pytest.mark.parametrize(
@@ -467,12 +555,13 @@ def test_root_swap_and_symlink_tamper_fail_closed(
 )
 def test_typed_publish_errors_and_cleanup(
     integrated_request: PortableViewBuildRequest,
+    trust_context: PortableTrustContext,
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
     error: OSError,
     expected: type[Exception],
 ) -> None:
-    view, table = build_portable_view(integrated_request)
+    view, table = build_portable_view(integrated_request, trust_context=trust_context)
 
     def fail_rename(*args: object, **kwargs: object) -> None:
         raise error
@@ -484,6 +573,7 @@ def test_typed_publish_errors_and_cleanup(
             destination,
             view=view,
             accessible_table=table,
+            trust_context=trust_context,
             source_identity_verifier=lambda: view.source_identities,
         )
     assert not destination.exists()
@@ -492,10 +582,16 @@ def test_typed_publish_errors_and_cleanup(
 
 def test_mutation_bounds_and_privacy_fail_closed(
     integrated_request: PortableViewBuildRequest,
+    trust_context: PortableTrustContext,
 ) -> None:
-    view, table = build_portable_view(integrated_request)
+    view, table = build_portable_view(integrated_request, trust_context=trust_context)
     with pytest.raises(PortableViewTamperError):
-        replay_portable_view(integrated_request, view, table + b"tamper")
+        replay_portable_view(
+            integrated_request,
+            view,
+            table + b"tamper",
+            trust_context=trust_context,
+        )
     with pytest.raises(ValidationError):
         PortableSourceIdentity.model_validate(
             {
@@ -510,3 +606,129 @@ def test_mutation_bounds_and_privacy_fail_closed(
                 "asset_sha256s": tuple(f"{index:064x}" for index in range(257)),
             }
         )
+
+
+def test_encoded_private_identifiers_are_rejected_but_typed_digests_are_allowed(
+    integrated_request: PortableViewBuildRequest,
+) -> None:
+    identity = integrated_request.source_identities[0]
+    encoded = (
+        base64.urlsafe_b64encode(b"sample_id:synthetic-secret").decode().rstrip("=")
+    )
+    nested = base64.urlsafe_b64encode(encoded.encode()).decode().rstrip("=")
+    for private_value in (encoded, nested):
+        with pytest.raises(ValidationError):
+            PortableSourceIdentity.model_validate(
+                {**identity.model_dump(mode="json"), "source_id": private_value}
+            )
+    cell = ExactCell(
+        column_id="artifact_sha256",
+        value_state=ExactValueState.OBSERVED,
+        sha256_value="a" * 64,
+        unit_id="sha256",
+    )
+    assert cell.sha256_value == "a" * 64
+
+
+def test_self_consistent_rewrite_is_rejected_by_external_trust(
+    integrated_request: PortableViewBuildRequest,
+    trust_context: PortableTrustContext,
+) -> None:
+    identities = list(integrated_request.source_identities)
+    index = next(
+        index
+        for index, item in enumerate(identities)
+        if item.measurement_kind == MeasurementKind.CNA_DOSAGE
+    )
+    identities[index] = identities[index].model_copy(update={"result_sha256": "9" * 64})
+    rewritten = integrated_request.model_copy(
+        update={"source_identities": tuple(identities)}
+    )
+    with pytest.raises(PortableViewTamperError):
+        build_portable_view(rewritten, trust_context=trust_context)
+
+
+def test_accessibility_and_versions_are_exact_fixed_sets() -> None:
+    with pytest.raises(ValidationError):
+        AccessibilityMetadata(focus_order=("status", "tables", "filters", "provenance"))
+    with pytest.raises(ValidationError):
+        PortableVersions(plot_data_schemas=("traceback.fragment-explorer-view.v1",))
+    with pytest.raises(ValidationError):
+        PortableVersions(plot_spec_schemas=("traceback.fragment-explorer-spec.v1",))
+
+
+@pytest.mark.parametrize("mutation", ["rewrite", "hardlink", "symlink", "fifo"])
+def test_callback_staged_file_mutation_fails_and_cleans_up(
+    integrated_request: PortableViewBuildRequest,
+    trust_context: PortableTrustContext,
+    tmp_path: Path,
+    mutation: str,
+) -> None:
+    view, table = build_portable_view(integrated_request, trust_context=trust_context)
+    parent = tmp_path / mutation
+    parent.mkdir()
+    destination = parent / "artifact"
+    outside = tmp_path / f"outside-{mutation}"
+    outside.write_bytes(b"outside")
+
+    def mutate() -> tuple[PortableSourceIdentity, ...]:
+        stage = next(
+            item
+            for item in parent.iterdir()
+            if item.is_dir() and item.name.startswith(".artifact.")
+        )
+        target = stage / "view.json"
+        if mutation == "rewrite":
+            target.write_bytes(b"{}")
+        else:
+            target.unlink()
+            if mutation == "hardlink":
+                os.link(outside, target)
+            elif mutation == "symlink":
+                target.symlink_to(outside)
+            else:
+                os.mkfifo(target)
+        return view.source_identities
+
+    with pytest.raises(PortableViewTamperError):
+        publish_portable_view(
+            destination,
+            view=view,
+            accessible_table=table,
+            trust_context=trust_context,
+            source_identity_verifier=mutate,
+        )
+    assert not destination.exists()
+    assert not any(item.name.startswith(".artifact.") for item in parent.iterdir())
+
+
+def test_verify_rechecks_named_root_and_rejects_swap(
+    integrated_request: PortableViewBuildRequest,
+    trust_context: PortableTrustContext,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    view, table = build_portable_view(integrated_request, trust_context=trust_context)
+    root = tmp_path / "root"
+    publish_portable_view(
+        root,
+        view=view,
+        accessible_table=table,
+        trust_context=trust_context,
+        source_identity_verifier=lambda: view.source_identities,
+    )
+    moved = tmp_path / "moved-root"
+    original = portable._parse_canonical
+    swapped = False
+
+    def swap_then_parse(*args: object, **kwargs: object) -> object:
+        nonlocal swapped
+        if not swapped:
+            swapped = True
+            root.rename(moved)
+            root.mkdir()
+        return original(*args, **kwargs)
+
+    monkeypatch.setattr(portable, "_parse_canonical", swap_then_parse)
+    with pytest.raises(PortableViewTamperError):
+        verify_portable_view(root, trust_context=trust_context)

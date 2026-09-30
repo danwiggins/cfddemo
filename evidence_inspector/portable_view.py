@@ -7,6 +7,8 @@ access, scientific computation, or clinical interpretation.
 
 from __future__ import annotations
 
+import base64
+import binascii
 import json
 import os
 import re
@@ -16,6 +18,7 @@ from collections.abc import Callable, Iterable
 from enum import StrEnum
 from pathlib import Path
 from typing import Annotated, Any, Literal, TypeVar
+from urllib.parse import unquote
 
 from pydantic import (
     AfterValidator,
@@ -64,15 +67,51 @@ MAX_TOTAL_BYTES = MAX_TABLE_BYTES + MAX_VIEW_BYTES + MAX_MANIFEST_BYTES
 
 Sha256 = Annotated[str, StringConstraints(pattern=r"^[0-9a-f]{64}$")]
 
+_PRIVATE_IDENTIFIER = re.compile(
+    r"(?:^|[^A-Za-z0-9])(?:"
+    r"(?:donor|patient|read|sample|query)[_-]?id\s*[:=._-]\s*[^\s]+"
+    r"|(?:donor|patient|sample)\s*[:=]\s*[^\s]+"
+    r")",
+    re.IGNORECASE,
+)
+_BASE64_TOKEN = re.compile(r"^[A-Za-z0-9_-]+={0,2}$")
+
+
+def _decoded_private_identifier(value: str) -> bool:
+    """Detect private identifiers through bounded URL/base64 nesting."""
+
+    pending = [value]
+    seen: set[str] = set()
+    for _ in range(5):
+        next_round: list[str] = []
+        for candidate in pending:
+            if candidate in seen:
+                continue
+            seen.add(candidate)
+            if _PRIVATE_IDENTIFIER.search(candidate):
+                return True
+            decoded_url = unquote(candidate)
+            if decoded_url != candidate:
+                next_round.append(decoded_url)
+            if len(candidate) >= 8 and _BASE64_TOKEN.fullmatch(candidate):
+                padded = candidate + "=" * (-len(candidate) % 4)
+                try:
+                    decoded = base64.urlsafe_b64decode(padded).decode("utf-8")
+                except (binascii.Error, UnicodeDecodeError, ValueError):
+                    pass
+                else:
+                    if decoded and all(char.isprintable() for char in decoded):
+                        next_round.append(decoded)
+        pending = next_round
+        if not pending:
+            break
+    return False
+
 
 def _safe_token(value: str) -> str:
     if "/" in value or "\\" in value or "://" in value:
         raise ValueError("controlled token cannot contain a path or URI")
-    if re.search(
-        r"\b(?:donor|patient|read|sample|query)[_-]?id\s*[:=]",
-        value,
-        re.IGNORECASE,
-    ):
+    if _decoded_private_identifier(value):
         raise ValueError("controlled token cannot contain a raw identifier")
     if re.search(r"(?<![A-Za-z])[ACGTN]{20,}(?![A-Za-z])", value, re.IGNORECASE):
         raise ValueError("controlled token cannot contain sequence-like text")
@@ -200,6 +239,35 @@ class PortableSourceIdentity(_ClosedModel):
         return self
 
 
+class PortableTrustContext(_ClosedModel):
+    """Independent expected identities supplied by a trusted local caller."""
+
+    schema_version: Literal["traceback.portable-trust-context.v1"] = (
+        "traceback.portable-trust-context.v1"
+    )
+    expected_source_identities: tuple[PortableSourceIdentity, ...] = Field(
+        max_length=MAX_SOURCE_IDENTITIES
+    )
+    expected_bundle_manifest_sha256s: tuple[Sha256, ...] = Field(
+        max_length=MAX_SOURCE_IDENTITIES
+    )
+
+    @model_validator(mode="after")
+    def canonical_expectations(self) -> PortableTrustContext:
+        keys = [item.sort_key for item in self.expected_source_identities]
+        if keys != sorted(keys) or len(keys) != len(set(keys)):
+            raise ValueError("trusted source identities must be uniquely sorted")
+        if self.expected_bundle_manifest_sha256s != tuple(
+            sorted(set(self.expected_bundle_manifest_sha256s))
+        ):
+            raise ValueError("trusted manifest digests must be uniquely sorted")
+        if {
+            item.bundle_manifest_sha256 for item in self.expected_source_identities
+        } != set(self.expected_bundle_manifest_sha256s):
+            raise ValueError("trusted source and manifest identities must be exact")
+        return self
+
+
 class PortableVersions(_ClosedModel):
     view_schema: Literal["traceback.portable-local-view.v1"] = (
         "traceback.portable-local-view.v1"
@@ -241,10 +309,20 @@ class PortableVersions(_ClosedModel):
 
     @model_validator(mode="after")
     def canonical_versions(self) -> PortableVersions:
-        if self.plot_data_schemas != tuple(sorted(set(self.plot_data_schemas))):
-            raise ValueError("plot-data versions must be uniquely sorted")
-        if self.plot_spec_schemas != tuple(sorted(set(self.plot_spec_schemas))):
-            raise ValueError("plot-spec versions must be uniquely sorted")
+        required_data = (
+            "traceback.cell-origin-explorer-view.v1",
+            "traceback.cna-explorer-chart.v1",
+            "traceback.fragment-explorer-view.v1",
+        )
+        required_specs = (
+            "traceback.cell-origin-explorer-spec.v1",
+            "traceback.cna-explorer-spec.v1",
+            "traceback.fragment-explorer-spec.v1",
+        )
+        if self.plot_data_schemas != required_data:
+            raise ValueError("plot-data versions must be the complete required set")
+        if self.plot_spec_schemas != required_specs:
+            raise ValueError("plot-spec versions must be the complete required set")
         return self
 
 
@@ -257,7 +335,12 @@ class AccessibilityMetadata(_ClosedModel):
         "explicit_column_headers"
     )
     keyboard_navigation: Literal["native_table_navigation"] = "native_table_navigation"
-    focus_order: tuple[Literal["status", "filters", "tables", "provenance"], ...] = (
+    focus_order: tuple[
+        Literal["status"],
+        Literal["filters"],
+        Literal["tables"],
+        Literal["provenance"],
+    ] = (
         "status",
         "filters",
         "tables",
@@ -277,6 +360,7 @@ class ExactCell(_ClosedModel):
     integer_value: int | None = None
     decimal_value: float | None = Field(default=None, allow_inf_nan=False)
     token_value: ControlledToken | None = None
+    sha256_value: Sha256 | None = None
     boolean_value: bool | None = None
     numerator: int | None = None
     denominator: int | None = Field(default=None, gt=0)
@@ -288,6 +372,7 @@ class ExactCell(_ClosedModel):
             self.integer_value,
             self.decimal_value,
             self.token_value,
+            self.sha256_value,
             self.boolean_value,
         )
         present = sum(value is not None for value in values)
@@ -426,15 +511,22 @@ class PortableViewBuildRequest(_ClosedModel):
                 if (
                     identity is None
                     or identity.result_sha256 != row.result_identity.result_sha256
+                    or identity.bundle_id != row.result_identity.bundle_id
                     or identity.bundle_sha256 != row.result_identity.bundle_sha256
+                    or identity.method_id != row.method_identity.method_ref.method_id
+                    or identity.method_version != row.method_identity.method_ref.version
                     or identity.method_definition_sha256
                     != row.method_identity.method_definition_sha256
+                    or identity.capability_sha256
+                    != row.authority_identity.capability_sha256
                     or identity.compatibility_decision_sha256
                     != row.compatibility_identity.decision_sha256
                     or identity.compatibility_policy_sha256
                     != row.compatibility_identity.policy_sha256
                     or identity.compatibility_authority_head_sha256
                     != row.compatibility_identity.authority_head_sha256
+                    or identity.compatibility_outcome
+                    != row.compatibility_identity.outcome
                     or identity.trust_state != row.trust_state
                 ):
                     raise ValueError("E06 row does not match exact portable identity")
@@ -463,6 +555,7 @@ class PortableLocalView(_ClosedModel):
     tables: tuple[ExactMeasurementTable, ...] = Field(max_length=MAX_TABLES)
     accessible_table_sha256: Sha256
     request_sha256: Sha256
+    trust_context_sha256: Sha256
     view_sha256: Sha256
     synthetic_local_only: Literal[True] = True
     product_release_authorized: Literal[False] = False
@@ -588,7 +681,7 @@ def _validate_private_strings(value: Any, *, field_name: str = "") -> None:
         for item in value:
             _validate_private_strings(item, field_name=field_name)
     elif isinstance(value, str):
-        digest_slot = field_name.endswith(("sha256", "sha256s"))
+        digest_slot = field_name.endswith(("sha256", "sha256s", "sha256_value"))
         if not digest_slot:
             _safe_token(value)
 
@@ -616,6 +709,8 @@ def _cell(
         values["integer_value"] = value
     elif isinstance(value, float):
         values["decimal_value"] = value
+    elif isinstance(value, str) and unit_id == "sha256":
+        values["sha256_value"] = value
     elif isinstance(value, str):
         values["token_value"] = value
     return ExactCell(
@@ -770,6 +865,30 @@ def _cna_tables(
         return ()
     dosage_identity = _identity_for_kind(identities, MeasurementKind.CNA_DOSAGE)
     segmented_identity = _identity_for_kind(identities, MeasurementKind.CNA_SEGMENTED)
+    by_source = {
+        CnaSource.DOSAGE_QC: (MeasurementKind.CNA_DOSAGE, dosage_identity),
+        CnaSource.SEGMENTED_CNA: (MeasurementKind.CNA_SEGMENTED, segmented_identity),
+    }
+    limitation_ids = tuple(
+        sorted(f"limitation_{_digest(item)[:24]}" for item in snapshot.limitations)
+    )
+
+    def table(
+        table_id: str,
+        source: CnaSource,
+        rows: tuple[ExactTableRow, ...],
+    ) -> ExactMeasurementTable:
+        kind, identity = by_source[source]
+        return ExactMeasurementTable(
+            table_id=table_id,
+            measurement_kind=kind,
+            source_contract_sha256=identity.source_contract_sha256,
+            source_state=PortableSurfaceState.SUCCESS,
+            rows=rows,
+            denominator_sha256s=(),
+            limitation_ids=limitation_ids,
+        )
+
     dosage_rows = tuple(
         _row(
             index,
@@ -779,11 +898,13 @@ def _cna_tables(
                 _cell("chromosome", item.chromosome, "category"),
                 _cell("direction", item.dosage_direction, "category"),
                 _cell("log2_ratio", item.log2_ratio, "log2_ratio"),
+                _cell("ordinal", item.ordinal, "ordinal"),
                 _cell(
                     "relative_diploid_dosage",
                     item.relative_diploid_dosage,
                     "relative_dosage",
                 ),
+                _cell("source", item.source.value, "category"),
             ),
         )
         for index, item in enumerate(snapshot.layers.dosage_chromosomes)
@@ -798,7 +919,10 @@ def _cna_tables(
                 _cell("copy_number", item.upstream_copy_number, "copies"),
                 _cell("end", item.end, "base_pairs"),
                 _cell("median_log2", item.median_log2, "log2_ratio"),
+                _cell("native_span_bins", item.native_span_bin_count, "bins"),
                 _cell("retained_bins", item.retained_bin_count, "bins"),
+                _cell("segment_index", item.segment_index, "ordinal"),
+                _cell("source", item.source.value, "category"),
                 _cell("start", item.start, "base_pairs"),
                 _cell("subclone_status", item.subclone_status, "boolean"),
             ),
@@ -810,16 +934,35 @@ def _cna_tables(
             index,
             f"cna_candidate_{index}",
             (
+                _cell("bic", item.bic, "score"),
+                _cell("candidate_index", item.candidate_index, "ordinal"),
                 _cell("candidate_id", item.candidate_id, "category"),
+                _cell(
+                    "estimated_normal_fraction",
+                    item.estimated_normal_fraction,
+                    "fraction",
+                ),
                 _cell("estimated_ploidy", item.estimated_ploidy, "copies"),
+                _cell(
+                    "fraction_cna_subclonal",
+                    item.fraction_cna_subclonal,
+                    "fraction",
+                ),
+                _cell(
+                    "fraction_genome_subclonal",
+                    item.fraction_genome_subclonal,
+                    "fraction",
+                ),
                 _cell(
                     "initial_normal_fraction",
                     item.initial_normal_fraction,
                     "fraction",
                 ),
+                _cell("initial_ploidy", item.initial_ploidy, "copies"),
                 _cell("log_likelihood", item.log_likelihood, "score"),
                 _cell("model_fraction", item.upstream_model_fraction, "fraction"),
                 _cell("selected", item.selected, "boolean"),
+                _cell("source", item.source.value, "category"),
             ),
         )
         for index, item in enumerate(snapshot.layers.candidates)
@@ -829,52 +972,208 @@ def _cna_tables(
             index,
             f"cna_corrected_{index}",
             (
+                _cell("bin_index", item.bin_index, "ordinal"),
                 _cell("contig", item.contig, "category"),
                 _cell("corrected_log2", item.corrected_log2, "log2_ratio"),
                 _cell("end", item.end, "base_pairs"),
+                _cell("source", item.source.value, "category"),
                 _cell("start", item.start, "base_pairs"),
                 _cell("value_state", item.value_state, "category"),
             ),
         )
         for index, item in enumerate(snapshot.layers.corrected_depth)
     )
-    return (
-        ExactMeasurementTable(
-            table_id="table_cna_dosage_chromosomes",
-            measurement_kind=MeasurementKind.CNA_DOSAGE,
-            source_contract_sha256=dosage_identity.source_contract_sha256,
-            source_state=PortableSurfaceState.SUCCESS,
-            rows=dosage_rows,
-            denominator_sha256s=(),
-            limitation_ids=("exploratory_non_clinical",),
-        ),
-        ExactMeasurementTable(
-            table_id="table_cna_corrected_depth",
-            measurement_kind=MeasurementKind.CNA_SEGMENTED,
-            source_contract_sha256=segmented_identity.source_contract_sha256,
-            source_state=PortableSurfaceState.SUCCESS,
-            rows=corrected_rows,
-            denominator_sha256s=(),
-            limitation_ids=("native_missing_preserved",),
-        ),
-        ExactMeasurementTable(
-            table_id="table_cna_model_candidates",
-            measurement_kind=MeasurementKind.CNA_SEGMENTED,
-            source_contract_sha256=segmented_identity.source_contract_sha256,
-            source_state=PortableSurfaceState.SUCCESS,
-            rows=candidate_rows,
-            denominator_sha256s=(),
-            limitation_ids=("development_model_values",),
-        ),
-        ExactMeasurementTable(
-            table_id="table_cna_segments",
-            measurement_kind=MeasurementKind.CNA_SEGMENTED,
-            source_contract_sha256=segmented_identity.source_contract_sha256,
-            source_state=PortableSurfaceState.SUCCESS,
-            rows=segment_rows,
-            denominator_sha256s=(),
-            limitation_ids=("upstream_segment_calls",),
-        ),
+    tables = [
+        table("table_cna_dosage_chromosomes", CnaSource.DOSAGE_QC, dosage_rows),
+        table("table_cna_corrected_depth", CnaSource.SEGMENTED_CNA, corrected_rows),
+        table("table_cna_model_candidates", CnaSource.SEGMENTED_CNA, candidate_rows),
+        table("table_cna_segments", CnaSource.SEGMENTED_CNA, segment_rows),
+    ]
+    for source in CnaSource:
+        source_name = source.value
+        bin_rows = tuple(
+            _row(
+                index,
+                f"cna_bin_{source_name}_{index}",
+                (
+                    _cell(
+                        "accepted_read_start_count",
+                        item.accepted_read_start_count,
+                        "records",
+                    ),
+                    _cell("bin_index", item.bin_index, "ordinal"),
+                    _cell("contig", item.contig, "category"),
+                    _cell("corrected_log2", item.corrected_log2, "log2_ratio"),
+                    _cell("end", item.end, "base_pairs"),
+                    _cell("source", item.source.value, "category"),
+                    _cell("start", item.start, "base_pairs"),
+                    _cell("status", item.status, "category"),
+                ),
+            )
+            for index, item in enumerate(
+                value for value in snapshot.layers.bins if value.source == source
+            )
+        )
+        tables.append(table(f"table_cna_bins_{source_name}", source, bin_rows))
+
+        grid = next(
+            item for item in snapshot.layers.coordinate_grids if item.source == source
+        )
+        grid_rows = tuple(
+            _row(
+                index,
+                f"cna_grid_{source_name}_{index}",
+                (
+                    _cell("bin_count", grid.bin_count, "bins"),
+                    _cell(
+                        "bin_definition_sha256",
+                        grid.bin_definition_sha256,
+                        "sha256",
+                    ),
+                    _cell("contig", contig, "category"),
+                    _cell("contig_ordinal", index, "ordinal"),
+                    _cell("coordinate_system", grid.coordinate_system, "category"),
+                    _cell("source", grid.source.value, "category"),
+                ),
+            )
+            for index, contig in enumerate(grid.contig_order)
+        )
+        tables.append(
+            table(f"table_cna_coordinate_grid_{source_name}", source, grid_rows)
+        )
+
+        asset_rows = tuple(
+            _row(
+                index,
+                f"cna_asset_{source_name}_{index}",
+                (
+                    _cell("content_sha256", item.content_sha256, "sha256"),
+                    _cell("role", item.role, "category"),
+                    _cell("source", item.source.value, "category"),
+                ),
+            )
+            for index, item in enumerate(
+                value for value in snapshot.layers.assets if value.source == source
+            )
+        )
+        tables.append(table(f"table_cna_assets_{source_name}", source, asset_rows))
+
+        method = next(item for item in snapshot.layers.methods if item.source == source)
+        method_rows = (
+            _row(
+                0,
+                f"cna_method_{source_name}",
+                (
+                    _cell(
+                        "authority_execution_state",
+                        method.authority_execution_state.value,
+                        "category",
+                    ),
+                    _cell(
+                        "authority_qualification_state",
+                        method.authority_qualification_state.value,
+                        "category",
+                    ),
+                    _cell(
+                        "authority_trust_state",
+                        method.authority_trust_state.value,
+                        "category",
+                    ),
+                    _cell(
+                        "diagnostic_interpretation_allowed",
+                        method.diagnostic_interpretation_allowed,
+                        "boolean",
+                    ),
+                    _cell(
+                        "embedded_qualification_status",
+                        method.embedded_qualification_status,
+                        "category",
+                    ),
+                    _cell("method_id", method.method_id, "category"),
+                    _cell(
+                        "product_release_authorized",
+                        method.product_release_authorized,
+                        "boolean",
+                    ),
+                    _cell(
+                        "research_inspectable", method.research_inspectable, "boolean"
+                    ),
+                    _cell(
+                        "result_schema_version",
+                        method.result_schema_version,
+                        "version",
+                    ),
+                    _cell("source", method.source.value, "category"),
+                ),
+            ),
+        )
+        tables.append(table(f"table_cna_method_{source_name}", source, method_rows))
+
+        insufficiency = next(
+            item for item in snapshot.layers.insufficiency if item.source == source
+        )
+        reason_digests = tuple(_digest(item) for item in insufficiency.reasons) or (
+            None,
+        )
+        insufficiency_rows = tuple(
+            _row(
+                index,
+                f"cna_insufficiency_{source_name}_{index}",
+                (
+                    _cell(
+                        "missing_values_are_zero",
+                        insufficiency.missing_values_are_zero,
+                        "boolean",
+                    ),
+                    _cell("reason_count", len(insufficiency.reasons), "records"),
+                    _cell("reason_sha256", reason_sha256, "sha256"),
+                    _cell("source", insufficiency.source.value, "category"),
+                    _cell(
+                        "tumor_or_clinical_interpretation_allowed",
+                        insufficiency.tumor_or_clinical_interpretation_allowed,
+                        "boolean",
+                    ),
+                    _cell(
+                        "upstream_status",
+                        insufficiency.upstream_status,
+                        "category",
+                    ),
+                ),
+            )
+            for index, reason_sha256 in enumerate(reason_digests)
+        )
+        tables.append(
+            table(
+                f"table_cna_insufficiency_{source_name}",
+                source,
+                insufficiency_rows,
+            )
+        )
+
+    mask_rows = tuple(
+        _row(
+            index,
+            f"cna_mask_{index}",
+            (
+                _cell("bin_index", item.bin_index, "ordinal"),
+                _cell("contig", item.contig, "category"),
+                _cell("end", item.end, "base_pairs"),
+                _cell("reason", item.reason, "category"),
+                _cell("source", item.source.value, "category"),
+                _cell(
+                    "source_artifact_sha256",
+                    item.source_artifact_sha256,
+                    "sha256",
+                ),
+                _cell("source_value", item.source_value, "log2_ratio"),
+                _cell("start", item.start, "base_pairs"),
+            ),
+        )
+        for index, item in enumerate(snapshot.layers.masks)
+    )
+    tables.append(table("table_cna_masks", CnaSource.SEGMENTED_CNA, mask_rows))
+    return tuple(
+        sorted(tables, key=lambda item: (item.measurement_kind.value, item.table_id))
     )
 
 
@@ -888,16 +1187,27 @@ def _source_contract_bindings(request: PortableViewBuildRequest) -> None:
             identity = _identity_for_result(identities, source.record.result_id)
             if (
                 identity.measurement_kind != MeasurementKind.FRAGMENT
+                or identity.bundle_id != source.record.bundle_id
                 or identity.result_sha256 != source.record.result_sha256
                 or identity.bundle_sha256 != source.record.bundle_sha256
+                or identity.method_id != source.record.method.method_id
+                or identity.method_version != source.record.method.version
                 or identity.method_definition_sha256
                 != source.record.method_definition_sha256
+                or identity.asset_sha256s
+                != tuple(
+                    sorted(item.content_sha256 for item in source.record.method.assets)
+                )
+                or identity.capability_sha256
+                != _digest(source.record.current_capability)
                 or identity.compatibility_decision_sha256
                 != view.compatibility.decision_sha256
                 or identity.compatibility_policy_sha256
                 != view.request.trusted_policy_sha256
                 or identity.compatibility_authority_head_sha256
                 != view.request.trusted_authority_head_sha256
+                or identity.compatibility_outcome != view.compatibility.outcome
+                or identity.trust_state != source.record.trust_state
             ):
                 raise PortableViewContractError("fragment source binding is inexact")
     if request.cell_origin_artifact is not None:
@@ -934,6 +1244,29 @@ def _source_contract_bindings(request: PortableViewBuildRequest) -> None:
             or segmented.result_sha256 != bindings[CnaSource.SEGMENTED_CNA]
         ):
             raise PortableViewContractError("CNA result binding is inexact")
+        for source, identity in (
+            (CnaSource.DOSAGE_QC, dosage),
+            (CnaSource.SEGMENTED_CNA, segmented),
+        ):
+            expected_assets = (
+                tuple(
+                    sorted(
+                        item.content_sha256
+                        for item in snapshot.layers.assets
+                        if item.source == source
+                    )
+                )
+                if snapshot.layers is not None
+                else ()
+            )
+            method = next(item for item in snapshot.methods if item.source == source)
+            if (
+                identity.asset_sha256s != expected_assets
+                or identity.method_id != method.method_id
+            ):
+                raise PortableViewContractError(
+                    "CNA method or asset binding is inexact"
+                )
     if request.provenance_drawer is not None:
         drawer = request.provenance_drawer
         compatibility_request = drawer.replay_request.compatibility_request
@@ -949,6 +1282,20 @@ def _source_contract_bindings(request: PortableViewBuildRequest) -> None:
             raise PortableViewContractError(
                 "provenance drawer compatibility is not source-bound"
             )
+
+
+def _trusted_bindings(
+    request: PortableViewBuildRequest, trust_context: PortableTrustContext
+) -> None:
+    if request.source_identities != trust_context.expected_source_identities:
+        raise PortableViewTamperError(
+            "portable source identities differ from independent trust context"
+        )
+    manifest_sha256s = tuple(sorted(_digest(item) for item in request.bundle_manifests))
+    if manifest_sha256s != trust_context.expected_bundle_manifest_sha256s:
+        raise PortableViewTamperError(
+            "portable manifests differ from independent trust context"
+        )
 
 
 def _derive_state(request: PortableViewBuildRequest) -> PortableSurfaceState:
@@ -1051,6 +1398,8 @@ def _derive_tables(
 
 def build_portable_view(
     request: PortableViewBuildRequest,
+    *,
+    trust_context: PortableTrustContext,
 ) -> tuple[PortableLocalView, bytes]:
     """Build one deterministic local view and its canonical accessible TSV."""
 
@@ -1058,7 +1407,13 @@ def build_portable_view(
         request = PortableViewBuildRequest.model_validate_json(
             canonical_json_bytes(request)
         )
+        trust_context = PortableTrustContext.model_validate_json(
+            canonical_json_bytes(trust_context)
+        )
+        _trusted_bindings(request, trust_context)
         _source_contract_bindings(request)
+    except PortableViewTamperError:
+        raise
     except (ValidationError, ValueError, KeyError) as exc:
         raise PortableViewContractError("portable view inputs are invalid") from exc
     state = _derive_state(request)
@@ -1093,6 +1448,7 @@ def build_portable_view(
         "tables": tables,
         "accessible_table_sha256": table_sha256,
         "request_sha256": _digest(request),
+        "trust_context_sha256": _digest(trust_context),
     }
     seed = PortableLocalView.model_construct(**payload, view_sha256="0" * 64)
     view = PortableLocalView(
@@ -1105,7 +1461,8 @@ def build_portable_view(
 _TABLE_HEADER = (
     "table_schema\tmeasurement_kind\ttable_id\tsource_contract_sha256\t"
     "source_state\trow_index\trow_key\tcolumn_id\tvalue_state\tinteger_value\t"
-    "decimal_value\ttoken_value\tboolean_value\tnumerator\tdenominator\tunit_id\n"
+    "decimal_value\ttoken_value\tsha256_value\tboolean_value\tnumerator\t"
+    "denominator\tunit_id\n"
 )
 
 
@@ -1139,6 +1496,7 @@ def accessible_table_bytes(tables: tuple[ExactMeasurementTable, ...]) -> bytes:
                     cell.integer_value,
                     cell.decimal_value,
                     cell.token_value,
+                    cell.sha256_value,
                     cell.boolean_value,
                     cell.numerator,
                     cell.denominator,
@@ -1162,10 +1520,14 @@ def replay_portable_view(
     request: PortableViewBuildRequest,
     expected_view: PortableLocalView,
     expected_table_bytes: bytes,
+    *,
+    trust_context: PortableTrustContext,
 ) -> PortableLocalView:
     """Fail closed unless view and table replay byte-identically."""
 
-    actual_view, actual_table = build_portable_view(request)
+    actual_view, actual_table = build_portable_view(
+        request, trust_context=trust_context
+    )
     if actual_view != expected_view or actual_table != expected_table_bytes:
         raise PortableViewTamperError("portable view does not replay byte-identically")
     return actual_view
@@ -1251,6 +1613,19 @@ def _same_directory(path: Path, descriptor: int) -> None:
         raise PortableViewTamperError("portable parent changed during publication")
 
 
+def _same_directory_at(parent_fd: int, name: str, descriptor: int) -> None:
+    try:
+        named = os.stat(name, dir_fd=parent_fd, follow_symlinks=False)
+    except OSError as exc:
+        raise PortableViewTamperError("portable staging root changed") from exc
+    pinned = os.fstat(descriptor)
+    if not stat.S_ISDIR(named.st_mode) or (named.st_dev, named.st_ino) != (
+        pinned.st_dev,
+        pinned.st_ino,
+    ):
+        raise PortableViewTamperError("portable staging root changed")
+
+
 def _cleanup(parent_fd: int, stage_name: str | None, stage_fd: int | None) -> None:
     if stage_name is None:
         return
@@ -1269,11 +1644,72 @@ def _cleanup(parent_fd: int, stage_name: str | None, stage_fd: int | None) -> No
 SourceIdentityVerifier = Callable[[], tuple[PortableSourceIdentity, ...]]
 
 
+def _verify_staged_content(stage_fd: int, expected: dict[str, bytes]) -> None:
+    for name in _FILES:
+        descriptor: int | None = None
+        try:
+            descriptor = os.open(
+                name,
+                os.O_RDONLY
+                | getattr(os, "O_NOFOLLOW", 0)
+                | getattr(os, "O_NONBLOCK", 0),
+                dir_fd=stage_fd,
+            )
+            metadata = os.fstat(descriptor)
+            if not stat.S_ISREG(metadata.st_mode) or metadata.st_nlink != 1:
+                raise PortableViewTamperError(
+                    "staged artifact is not a single-link regular file"
+                )
+            expected_bytes = expected[name]
+            if metadata.st_size != len(expected_bytes):
+                raise PortableViewTamperError("staged artifact size changed")
+            chunks: list[bytes] = []
+            remaining = len(expected_bytes) + 1
+            while remaining:
+                chunk = os.read(descriptor, remaining)
+                if not chunk:
+                    break
+                chunks.append(chunk)
+                remaining -= len(chunk)
+            observed = b"".join(chunks)
+            if observed != expected_bytes or sha256_bytes(observed) != sha256_bytes(
+                expected_bytes
+            ):
+                raise PortableViewTamperError("staged artifact content changed")
+            os.fsync(descriptor)
+        except PortableViewError:
+            raise
+        except OSError as exc:
+            raise PortableViewTamperError(
+                "staged artifact could not be descriptor-verified"
+            ) from exc
+        finally:
+            if descriptor is not None:
+                os.close(descriptor)
+    try:
+        os.fsync(stage_fd)
+    except OSError as exc:
+        raise PortableViewStorageError("portable staging could not be synced") from exc
+
+
+def _verify_trusted_view(
+    view: PortableLocalView, trust_context: PortableTrustContext
+) -> None:
+    if view.source_identities != trust_context.expected_source_identities:
+        raise PortableViewTamperError("view sources differ from trust context")
+    if (
+        view.bundle_manifest_sha256s != trust_context.expected_bundle_manifest_sha256s
+        or view.trust_context_sha256 != _digest(trust_context)
+    ):
+        raise PortableViewTamperError("view manifests differ from trust context")
+
+
 def publish_portable_view(
     destination: str | Path,
     *,
     view: PortableLocalView,
     accessible_table: bytes,
+    trust_context: PortableTrustContext,
     source_identity_verifier: SourceIdentityVerifier,
 ) -> Path:
     """Durably publish after immediate source re-verification, without overwrite."""
@@ -1283,6 +1719,7 @@ def publish_portable_view(
         r"[a-z0-9][a-z0-9._-]{0,127}", destination.name
     ):
         raise PortableViewContractError("portable destination name is not controlled")
+    _verify_trusted_view(view, trust_context)
     if accessible_table_bytes(view.tables) != accessible_table:
         raise PortableViewTamperError("accessible table bytes do not match exact view")
     if sha256_bytes(accessible_table) != view.accessible_table_sha256:
@@ -1385,6 +1822,8 @@ def publish_portable_view(
             ) from exc
         if observed != view.source_identities:
             raise PortableViewTamperError("source identity changed before publication")
+        _verify_staged_content(stage_fd, content)
+        _same_directory_at(parent_fd, stage_name, stage_fd)
         _same_directory(destination.parent, parent_fd)
         try:
             rename_directory_exclusive_at(parent_fd, stage_name, destination.name)
@@ -1432,10 +1871,13 @@ def _parse_canonical(model: type[ModelT], content: bytes, label: str) -> ModelT:
     return parsed
 
 
-def verify_portable_view(root: str | Path) -> VerifiedPortableView:
+def verify_portable_view(
+    root: str | Path, *, trust_context: PortableTrustContext
+) -> VerifiedPortableView:
     """Read through a pinned directory and replay every stored commitment."""
 
-    root_fd = _open_directory(Path(root))
+    root_path = Path(root)
+    root_fd = _open_directory(root_path)
     try:
         try:
             inventory = set(os.listdir(root_fd))
@@ -1453,7 +1895,9 @@ def verify_portable_view(root: str | Path) -> VerifiedPortableView:
             try:
                 descriptor = os.open(
                     name,
-                    os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0),
+                    os.O_RDONLY
+                    | getattr(os, "O_NOFOLLOW", 0)
+                    | getattr(os, "O_NONBLOCK", 0),
                     dir_fd=root_fd,
                 )
             except OSError as exc:
@@ -1464,6 +1908,7 @@ def verify_portable_view(root: str | Path) -> VerifiedPortableView:
                 metadata = os.fstat(stream.fileno())
                 if (
                     not stat.S_ISREG(metadata.st_mode)
+                    or metadata.st_nlink != 1
                     or metadata.st_size > limits[name]
                 ):
                     raise PortableViewTamperError(
@@ -1476,12 +1921,14 @@ def verify_portable_view(root: str | Path) -> VerifiedPortableView:
             PortableViewManifest, content[MANIFEST_PATH], "portable manifest"
         )
         view = _parse_canonical(PortableLocalView, content[VIEW_PATH], "portable view")
+        _verify_trusted_view(view, trust_context)
         if accessible_table_bytes(view.tables) != content[TABLE_PATH]:
             raise PortableViewTamperError("accessible table does not replay from view")
         if sha256_bytes(content[TABLE_PATH]) != view.accessible_table_sha256:
             raise PortableViewTamperError("accessible table digest mismatch")
         if manifest != _manifest_for(content[VIEW_PATH], content[TABLE_PATH], view):
             raise PortableViewTamperError("portable manifest does not replay")
+        _same_directory(root_path, root_fd)
         return VerifiedPortableView(
             manifest=manifest,
             view=view,
@@ -1503,6 +1950,7 @@ __all__ = [
     "PortableLocalView",
     "PortableSourceIdentity",
     "PortableSurfaceState",
+    "PortableTrustContext",
     "PortableVersions",
     "PortableViewBuildRequest",
     "PortableViewConflictError",
