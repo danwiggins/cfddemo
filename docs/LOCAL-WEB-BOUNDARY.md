@@ -29,6 +29,8 @@ demo is not this service.
   occur under one lock. Bootstrap and session TTLs, active-session count, and
   token-generation attempts have hard upper bounds. Capacity or entropy
   failure denies the exchange instead of weakening the credential.
+- Production credential issuance has no caller-supplied token factory or test
+  bypass. Tests replace the private OS randomness source at the module boundary.
 - Authorization happens before an opaque object lookup. An unauthenticated
   guessed ID receives the same safe denial as any other missing session and
   reveals no object state.
@@ -47,7 +49,9 @@ state, safe stage text, update time, revision, stale state, owner, next action,
 optional problem, and revision-bound actions. Unknown fields are rejected and
 stale projections cannot enable mutations.
 
-These objects contain no source path (including `/Volumes`), filename, raw
+Operator text must match a finite display-text grammar before the privacy
+checks run; path separators, assignment syntax, and URL syntax are outside that
+grammar. These objects contain no source path (including `/Volumes`), filename, raw
 sequence, read or person identifier, UUID-like identifier, credential,
 unrestricted tool output, or external URL. Documentation references are
 normalized `docs/.../*.md` bundle paths with no traversal, query, fragment, or

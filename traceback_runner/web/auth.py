@@ -123,8 +123,6 @@ class BootstrapBroker:
         self,
         *,
         now: Callable[[], float] = time.monotonic,
-        token_factory: Callable[[], str] | None = None,
-        allow_test_token_factory: bool = False,
         bootstrap_ttl_seconds: int = 60,
         session_ttl_seconds: int = 8 * 60 * 60,
         max_active_sessions: int = 32,
@@ -138,10 +136,7 @@ class BootstrapBroker:
             raise ValueError("active session limit must be between 1 and 256")
         if not 1 <= token_attempt_limit <= 16:
             raise ValueError("token attempt limit must be between 1 and 16")
-        if token_factory is not None and not allow_test_token_factory:
-            raise ValueError("custom credential generators are test-only")
         self._now = now
-        self._token_factory = token_factory or (lambda: secrets.token_urlsafe(32))
         self._bootstrap_ttl = bootstrap_ttl_seconds
         self._session_ttl = session_ttl_seconds
         self._max_active_sessions = max_active_sessions
@@ -165,7 +160,7 @@ class BootstrapBroker:
 
     def _issue_unique_token(self, forbidden: set[bytes]) -> tuple[str, bytes]:
         for _ in range(self._token_attempt_limit):
-            token = self._token_factory()
+            token = secrets.token_urlsafe(32)
             if not self._strong_token(token):
                 continue
             digest = self._digest(token)

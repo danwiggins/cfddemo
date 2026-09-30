@@ -4,7 +4,6 @@ from __future__ import annotations
 
 from concurrent.futures import ThreadPoolExecutor
 from datetime import UTC, datetime
-from itertools import count
 
 import pytest
 from pydantic import ValidationError
@@ -67,11 +66,8 @@ def _job(*, stale: bool = False) -> JobProjection:
 
 
 def _boundary() -> tuple[LocalWebBoundary, BootstrapBroker]:
-    tokens = count()
     broker = BootstrapBroker(
         now=lambda: 100.0,
-        token_factory=lambda: f"secret-token-{next(tokens):032d}",
-        allow_test_token_factory=True,
     )
     return LocalWebBoundary(build_loopback_config(port=8765), broker), broker
 
@@ -147,16 +143,18 @@ def test_bootstrap_exchange_is_atomic_under_concurrency() -> None:
     assert outcomes.count("denied") == 63
 
 
-def test_credential_strength_ttl_attempts_and_session_count_are_bounded() -> None:
-    with pytest.raises(ValueError, match="test-only"):
-        BootstrapBroker(token_factory=lambda: "credential-" + "0" * 64)
+def test_credential_strength_ttl_attempts_and_session_count_are_bounded(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     weak = BootstrapBroker(
-        token_factory=lambda: "short",
-        allow_test_token_factory=True,
         token_attempt_limit=2,
+    )
+    monkeypatch.setattr(
+        "traceback_runner.web.auth.secrets.token_urlsafe", lambda _: "short"
     )
     with pytest.raises(RuntimeError, match="strong unique credential"):
         weak.issue_bootstrap(authority="127.0.0.1:8765")
+    monkeypatch.undo()
 
     for kwargs in (
         {"bootstrap_ttl_seconds": 301},
@@ -167,11 +165,8 @@ def test_credential_strength_ttl_attempts_and_session_count_are_bounded() -> Non
         with pytest.raises(ValueError):
             BootstrapBroker(**kwargs)
 
-    tokens = count()
     broker = BootstrapBroker(
         now=lambda: 100.0,
-        token_factory=lambda: f"credential-{next(tokens):064d}",
-        allow_test_token_factory=True,
         max_active_sessions=1,
     )
     boundary = LocalWebBoundary(build_loopback_config(port=8765), broker)
@@ -352,3 +347,34 @@ def test_problem_docs_path_is_bounded_to_bundled_markdown(path: str) -> None:
     payload["docs_path"] = path
     with pytest.raises(ValidationError, match="documentation path|String should match"):
         ProblemDetail.model_validate(payload)
+
+
+@pytest.mark.parametrize(
+    "unsafe",
+    (
+        "../../private/raw-input.bam",
+        "Open docs/../../private/raw-input.bam",
+        "//evil.example/private",
+        "source_id=private-0001",
+        "source_identifier:private-0001",
+        "path:/Volumes/private/raw-input.bam",
+        "path=/private/raw-input.bam",
+    ),
+)
+def test_safe_operator_grammar_rejects_review_bypasses_in_every_web_shape(
+    unsafe: str,
+) -> None:
+    problem = _problem().model_dump(mode="json")
+    problem["problem"] = unsafe
+    with pytest.raises(ValidationError, match="safe grammar|private identifier"):
+        ProblemDetail.model_validate(problem)
+
+    action = _job().actions[0].model_dump(mode="json")
+    action["label"] = unsafe
+    with pytest.raises(ValidationError, match="safe grammar|private identifier"):
+        JobAction.model_validate(action)
+
+    projection = _job().model_dump(mode="json")
+    projection["headline"] = unsafe
+    with pytest.raises(ValidationError, match="safe grammar|private identifier"):
+        JobProjection.model_validate(projection)

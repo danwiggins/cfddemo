@@ -36,6 +36,7 @@ from traceback_runner.signing import (
     KeyPurpose,
     SignatureEnvelope,
     SigningError,
+    TrustNamespace,
     TrustStore,
     verify_signature,
 )
@@ -46,6 +47,7 @@ STRESS_RECORDS = 100_000
 FILTER_P95_TARGET_US = 250_000
 INITIAL_RENDER_TARGET_US = 2_000_000
 MAX_SYNTHETIC_PEAK_BYTES = 256 * 1024 * 1024
+HARNESS_VERSION = "traceback-product-gates.v2"
 
 SafeToken = Annotated[
     str,
@@ -78,6 +80,116 @@ class EvidenceStatus(StrEnum):
     OBSERVED_LOCAL_UNAPPROVED = "observed_local_unapproved"
     FIXTURE_ONLY = "fixture_only"
     REQUIRED_EXTERNAL = "required_external"
+
+
+class PrivacySentinelClass(StrEnum):
+    DONOR_IDENTIFIER = "donor_identifier"
+    READ_IDENTIFIER = "read_identifier"
+    ABSOLUTE_PATH = "absolute_path"
+    RAW_SEQUENCE = "raw_sequence"
+
+
+class PrivacyProbePath(StrEnum):
+    CATALOG = "catalog"
+    PROBLEM_RESPONSE = "problem_response"
+    SCREENSHOT = "screenshot"
+
+
+class NetworkProbeOperation(StrEnum):
+    CONNECT_EX = "connect_ex"
+    SENDTO = "sendto"
+
+
+class PrivacyPathObservation(RunnerContract):
+    sentinel_class: PrivacySentinelClass
+    sentinel_sha256: Sha256
+    path: PrivacyProbePath
+    rejected: bool
+
+
+class PrivacySentinelEvidence(RunnerContract):
+    schema_version: Literal["traceback.privacy-sentinel-evidence.v1"] = (
+        "traceback.privacy-sentinel-evidence.v1"
+    )
+    harness_version: Literal["traceback-product-gates.v2"] = HARNESS_VERSION
+    run_id: SafeToken
+    host_run_sha256: Sha256
+    output_payload_sha256: Sha256
+    serialized_output_clean: bool
+    observations: tuple[PrivacyPathObservation, ...] = Field(
+        min_length=12, max_length=12
+    )
+
+    @model_validator(mode="after")
+    def complete_probe_matrix(self) -> PrivacySentinelEvidence:
+        keys = tuple(
+            (item.sentinel_class.value, item.path.value) for item in self.observations
+        )
+        expected = tuple(
+            sorted(
+                (sentinel.value, path.value)
+                for sentinel in PrivacySentinelClass
+                for path in PrivacyProbePath
+            )
+        )
+        if keys != expected:
+            raise ValueError(
+                "privacy evidence must contain the complete sorted probe matrix"
+            )
+        per_class: dict[PrivacySentinelClass, set[str]] = {}
+        for item in self.observations:
+            per_class.setdefault(item.sentinel_class, set()).add(item.sentinel_sha256)
+        if any(len(digests) != 1 for digests in per_class.values()):
+            raise ValueError("each sentinel class must bind one exact sentinel digest")
+        return self
+
+
+class NetworkProbeObservation(RunnerContract):
+    operation: NetworkProbeOperation
+    target: Literal["127.0.0.1:9"] = "127.0.0.1:9"
+    denial_observed: bool
+    guard_recorded: bool
+    payload_sha256: Sha256 | None = None
+
+    @model_validator(mode="after")
+    def payload_matches_operation(self) -> NetworkProbeObservation:
+        if (self.operation == NetworkProbeOperation.SENDTO) != (
+            self.payload_sha256 is not None
+        ):
+            raise ValueError("only sendto evidence binds the exact probe payload")
+        return self
+
+
+class NetworkInterceptObservation(RunnerContract):
+    operation: SafeToken
+    target_sha256: Sha256
+
+
+class NetworkDenialEvidence(RunnerContract):
+    schema_version: Literal["traceback.network-denial-evidence.v1"] = (
+        "traceback.network-denial-evidence.v1"
+    )
+    harness_version: Literal["traceback-product-gates.v2"] = HARNESS_VERSION
+    run_id: SafeToken
+    host_run_sha256: Sha256
+    observations: tuple[NetworkProbeObservation, ...] = Field(
+        min_length=2, max_length=2
+    )
+    intercepted_attempts: tuple[NetworkInterceptObservation, ...] = Field(
+        min_length=2, max_length=64
+    )
+
+    @model_validator(mode="after")
+    def exact_network_probes(self) -> NetworkDenialEvidence:
+        operations = tuple(item.operation for item in self.observations)
+        if operations != tuple(sorted(NetworkProbeOperation, key=str)):
+            raise ValueError("network evidence must bind connect_ex and sendto")
+        intercepted = {item.operation for item in self.intercepted_attempts}
+        if not {operation.value for operation in NetworkProbeOperation} <= intercepted:
+            raise ValueError(
+                "network evidence must persist both guarded probe attempts"
+            )
+        return self
 
 
 class HostRunEvidence(RunnerContract):
@@ -193,6 +305,11 @@ class VerifiedExternalEvidence(RunnerContract):
     screen_reader_audit_passed: bool | None = None
     zoom_200_audit_passed: bool | None = None
     reviewed_browser_captures: bool | None = None
+    measured_run_id: SafeToken | None = None
+    host_run_sha256: Sha256 | None = None
+    filter_performance_sha256: Sha256 | None = None
+    initial_render_sha256: Sha256 | None = None
+    stress_memory_sha256: Sha256 | None = None
 
     @model_validator(mode="after")
     def exact_external_requirement(self) -> VerifiedExternalEvidence:
@@ -202,8 +319,18 @@ class VerifiedExternalEvidence(RunnerContract):
         if self.expires_at <= self.verified_at:
             raise ValueError("external evidence must expire after verification")
         if self.gate_id == GateId.APPROVED_HOST:
-            if self.approved_host_reference is None:
-                raise ValueError("approved-host evidence must bind the host reference")
+            required = (
+                self.approved_host_reference,
+                self.measured_run_id,
+                self.host_run_sha256,
+                self.filter_performance_sha256,
+                self.initial_render_sha256,
+                self.stress_memory_sha256,
+            )
+            if any(value is None for value in required):
+                raise ValueError(
+                    "approved-host evidence must bind the host and exact measured run"
+                )
         elif self.gate_id == GateId.FIVE_PROVIDER_STUDY:
             if self.representative_users is None or self.representative_users < 5:
                 raise ValueError(
@@ -238,11 +365,56 @@ class SignedExternalEvidence(RunnerContract):
     signature: SignatureEnvelope
 
 
+class PinnedAuthorityHead(RunnerContract):
+    gate_id: GateId
+    authority_key_id: SafeToken
+    authority_head_sha256: Sha256
+
+    @model_validator(mode="after")
+    def external_gate_only(self) -> PinnedAuthorityHead:
+        if self.gate_id not in {
+            GateId.ACCESSIBILITY,
+            GateId.APPROVED_HOST,
+            GateId.FIVE_PROVIDER_STUDY,
+            GateId.SCREENSHOTS,
+        }:
+            raise ValueError("authority heads may pin only external gates")
+        return self
+
+
+class ReleaseGateAuthorityPolicy(RunnerContract):
+    schema_version: Literal["traceback.release-gate-authority-policy.v1"] = (
+        "traceback.release-gate-authority-policy.v1"
+    )
+    policy_id: SafeToken
+    issued_at: datetime
+    expires_at: datetime
+    pinned_heads: tuple[PinnedAuthorityHead, ...] = Field(min_length=4, max_length=4)
+
+    @model_validator(mode="after")
+    def complete_pinned_authority(self) -> ReleaseGateAuthorityPolicy:
+        for value in (self.issued_at, self.expires_at):
+            if value.tzinfo is None or value.utcoffset() is None:
+                raise ValueError("authority policy times must be timezone-aware")
+        if self.expires_at <= self.issued_at:
+            raise ValueError("authority policy must expire after issuance")
+        keys = tuple(
+            (item.gate_id.value, item.authority_key_id) for item in self.pinned_heads
+        )
+        if (
+            keys != tuple(sorted(keys))
+            or len({item.gate_id for item in self.pinned_heads}) != 4
+        ):
+            raise ValueError("authority policy must uniquely pin every external gate")
+        return self
+
+
 class ReleaseGateDecision(RunnerContract):
     schema_version: Literal["traceback.release-gate-decision.v1"] = (
         "traceback.release-gate-decision.v1"
     )
     report_sha256: Sha256
+    authority_policy_sha256: Sha256 | None = None
     trusted_external_evidence_sha256: tuple[Sha256, ...] = Field(max_length=4)
     capability_enabled: bool
     unmet_gates: tuple[GateId, ...] = Field(max_length=len(GateId))
@@ -263,6 +435,8 @@ class ReleaseGateDecision(RunnerContract):
             raise ValueError(
                 "enabled capability requires all four trusted external artifacts"
             )
+        if self.capability_enabled and self.authority_policy_sha256 is None:
+            raise ValueError("enabled capability requires a pinned authority policy")
         return self
 
 
@@ -275,6 +449,8 @@ class ProductGateReport(RunnerContract):
     initial_render: PerformanceMeasurement
     stress_memory: MemoryMeasurement
     screenshot_manifest_sha256: Sha256
+    network_denial_evidence: NetworkDenialEvidence
+    privacy_sentinel_evidence: PrivacySentinelEvidence
     gate_evidence: tuple[GateEvidence, ...]
     capability_enabled: Literal[False] = False
 
@@ -287,13 +463,69 @@ class ProductGateReport(RunnerContract):
             raise ValueError("gate report must include every E14 gate")
         by_id = {item.gate_id: item for item in self.gate_evidence}
         measured = {
-            GateId.FILTER_PERFORMANCE: self.filter_performance.target_met,
-            GateId.INITIAL_RENDER: self.initial_render.target_met,
-            GateId.STRESS_MEMORY: self.stress_memory.target_met,
+            GateId.FILTER_PERFORMANCE: self.filter_performance,
+            GateId.INITIAL_RENDER: self.initial_render,
+            GateId.STRESS_MEMORY: self.stress_memory,
         }
-        for gate_id, target_met in measured.items():
-            if by_id[gate_id].status == EvidenceStatus.OBSERVED_PASS and not target_met:
+        for gate_id, measurement in measured.items():
+            evidence = by_id[gate_id]
+            if evidence.evidence_sha256 != sha256_bytes(
+                canonical_json_bytes(measurement)
+            ):
+                raise ValueError(
+                    "measurement evidence digest must bind the exact measurement"
+                )
+            if (
+                evidence.status == EvidenceStatus.OBSERVED_PASS
+                and not measurement.target_met
+            ):
                 raise ValueError("performance gate cannot pass a failed measurement")
+        exact_gate_evidence = {
+            GateId.NO_EXTERNAL_NETWORK: self.network_denial_evidence,
+            GateId.PRIVACY_SENTINELS: self.privacy_sentinel_evidence,
+        }
+        for gate_id, evidence_record in exact_gate_evidence.items():
+            if by_id[gate_id].evidence_sha256 != sha256_bytes(
+                canonical_json_bytes(evidence_record)
+            ):
+                raise ValueError(
+                    "gate evidence digest must bind its exact observations"
+                )
+        network_pass = all(
+            item.denial_observed and item.guard_recorded
+            for item in self.network_denial_evidence.observations
+        ) and tuple(
+            item.operation for item in self.network_denial_evidence.intercepted_attempts
+        ) == tuple(operation.value for operation in NetworkProbeOperation)
+        expected_network_status = (
+            EvidenceStatus.OBSERVED_PASS
+            if network_pass
+            else EvidenceStatus.OBSERVED_FAIL
+        )
+        if by_id[GateId.NO_EXTERNAL_NETWORK].status != expected_network_status:
+            raise ValueError("network gate status must be derived from exact probes")
+        privacy_pass = self.privacy_sentinel_evidence.serialized_output_clean and all(
+            item.rejected for item in self.privacy_sentinel_evidence.observations
+        )
+        expected_privacy_status = (
+            EvidenceStatus.OBSERVED_PASS
+            if privacy_pass
+            else EvidenceStatus.OBSERVED_FAIL
+        )
+        if by_id[GateId.PRIVACY_SENTINELS].status != expected_privacy_status:
+            raise ValueError("privacy gate status must be derived from exact probes")
+        if self.network_denial_evidence.run_id != self.host_run.run_id:
+            raise ValueError("network evidence must bind this host run")
+        if self.privacy_sentinel_evidence.run_id != self.host_run.run_id:
+            raise ValueError("privacy evidence must bind this host run")
+        host_sha256 = sha256_bytes(canonical_json_bytes(self.host_run))
+        if {
+            self.network_denial_evidence.host_run_sha256,
+            self.privacy_sentinel_evidence.host_run_sha256,
+        } != {host_sha256}:
+            raise ValueError(
+                "privacy and network evidence must bind the exact host run"
+            )
         if (by_id[GateId.APPROVED_HOST].status == EvidenceStatus.OBSERVED_PASS) != (
             self.host_run.approved_host_reference is not None
         ):
@@ -399,10 +631,10 @@ def _catalog_page_bytes(records: Sequence[_SyntheticCatalogRecord]) -> bytes:
 
 
 @contextmanager
-def deny_external_network() -> Iterator[list[str]]:
+def deny_external_network() -> Iterator[list[tuple[str, str]]]:
     """Deny socket connections in this Python process during an offline run."""
 
-    attempts: list[str] = []
+    attempts: list[tuple[str, str]] = []
     method_names = (
         "connect",
         "connect_ex",
@@ -426,27 +658,28 @@ def deny_external_network() -> Iterator[list[str]]:
     )
     original_resolvers = {name: getattr(socket, name) for name in resolver_names}
 
-    def blocked_socket_operation(
-        instance: socket.socket, *args: object, **kwargs: object
-    ) -> None:
-        del instance, kwargs
-        address = args[-1] if args else "connected-socket"
-        attempts.append(repr(address))
-        raise RuntimeError("external network disabled by E14 harness")
+    def blocked_socket_operation(name: str):
+        def deny(instance: socket.socket, *args: object, **kwargs: object) -> None:
+            del instance, kwargs
+            address = args[-1] if args else "connected-socket"
+            attempts.append((name, repr(address)))
+            raise RuntimeError("external network disabled by E14 harness")
+
+        return deny
 
     def blocked_create_connection(*args: object, **kwargs: object) -> None:
         del kwargs
-        attempts.append(repr(args[0] if args else "unknown"))
+        attempts.append(("create_connection", repr(args[0] if args else "unknown")))
         raise RuntimeError("external network disabled by E14 harness")
 
     def blocked_getaddrinfo(*args: object, **kwargs: object) -> None:
         del kwargs
-        attempts.append(repr(args[0] if args else "unknown"))
+        attempts.append(("resolver", repr(args[0] if args else "unknown")))
         raise RuntimeError("external network disabled by E14 harness")
 
     with _NETWORK_GUARD_LOCK:
         for name in original_methods:
-            setattr(socket.socket, name, blocked_socket_operation)
+            setattr(socket.socket, name, blocked_socket_operation(name))
         socket.create_connection = blocked_create_connection
         for name in original_resolvers:
             setattr(socket, name, blocked_getaddrinfo)
@@ -473,12 +706,20 @@ def _privacy_clean(payload: bytes, sentinels: Sequence[bytes]) -> bool:
     return all(sentinel.lower() not in folded for sentinel in sentinels)
 
 
-def _privacy_sentinel_probe(sentinels: Sequence[bytes]) -> bool:
+def _privacy_sentinel_probe(
+    sentinels: Sequence[tuple[PrivacySentinelClass, bytes]],
+    *,
+    run_id: str,
+    host_run_sha256: str,
+    output_payload_sha256: str,
+    serialized_output_clean: bool,
+) -> PrivacySentinelEvidence:
     """Inject every sentinel through catalog, problem, and screenshot contracts."""
 
-    for sentinel in sentinels:
+    observations: list[PrivacyPathObservation] = []
+    for sentinel_class, sentinel in sentinels:
         value = sentinel.decode("ascii")
-        rejected_paths = 0
+        sentinel_sha256 = sha256_bytes(sentinel)
         poisoned_record = _SyntheticCatalogRecord(
             result_id=value,
             method_id="fragment_span",
@@ -488,7 +729,17 @@ def _privacy_sentinel_probe(sentinels: Sequence[bytes]) -> bool:
         try:
             _catalog_page_bytes((poisoned_record,))
         except ValidationError:
-            rejected_paths += 1
+            catalog_rejected = True
+        else:
+            catalog_rejected = False
+        observations.append(
+            PrivacyPathObservation(
+                sentinel_class=sentinel_class,
+                sentinel_sha256=sentinel_sha256,
+                path=PrivacyProbePath.CATALOG,
+                rejected=catalog_rejected,
+            )
+        )
 
         try:
             ProblemDetail(
@@ -504,7 +755,17 @@ def _privacy_sentinel_probe(sentinels: Sequence[bytes]) -> bool:
                 repeated_work="No work was repeated",
             )
         except ValidationError:
-            rejected_paths += 1
+            problem_rejected = True
+        else:
+            problem_rejected = False
+        observations.append(
+            PrivacyPathObservation(
+                sentinel_class=sentinel_class,
+                sentinel_sha256=sentinel_sha256,
+                path=PrivacyProbePath.PROBLEM_RESPONSE,
+                rejected=problem_rejected,
+            )
+        )
 
         try:
             ScreenshotManifest(
@@ -520,11 +781,29 @@ def _privacy_sentinel_probe(sentinels: Sequence[bytes]) -> bool:
                 )
             )
         except ValidationError:
-            rejected_paths += 1
-
-        if rejected_paths != 3:
-            return False
-    return bool(sentinels)
+            screenshot_rejected = True
+        else:
+            screenshot_rejected = False
+        observations.append(
+            PrivacyPathObservation(
+                sentinel_class=sentinel_class,
+                sentinel_sha256=sentinel_sha256,
+                path=PrivacyProbePath.SCREENSHOT,
+                rejected=screenshot_rejected,
+            )
+        )
+    return PrivacySentinelEvidence(
+        run_id=run_id,
+        host_run_sha256=host_run_sha256,
+        output_payload_sha256=output_payload_sha256,
+        serialized_output_clean=serialized_output_clean,
+        observations=tuple(
+            sorted(
+                observations,
+                key=lambda item: (item.sentinel_class.value, item.path.value),
+            )
+        ),
+    )
 
 
 _EXTERNAL_GATES = frozenset(
@@ -542,6 +821,7 @@ def derive_release_gate(
     *,
     signed_external_evidence: Sequence[SignedExternalEvidence] = (),
     trust_store: TrustStore | None = None,
+    authority_policy: ReleaseGateAuthorityPolicy | None = None,
     now: datetime | None = None,
 ) -> ReleaseGateDecision:
     """Derive capability state from measurements and independently verified evidence."""
@@ -551,7 +831,17 @@ def derive_release_gate(
     current = now
     if current is not None and (current.tzinfo is None or current.utcoffset() is None):
         raise ValueError("release-gate time must be timezone-aware")
-    if trust_store is not None and current is not None:
+    pinned = (
+        {item.gate_id: item for item in authority_policy.pinned_heads}
+        if authority_policy is not None
+        else {}
+    )
+    policy_current = (
+        authority_policy is not None
+        and current is not None
+        and authority_policy.issued_at <= current < authority_policy.expires_at
+    )
+    if trust_store is not None and policy_current:
         for envelope in signed_external_evidence:
             try:
                 verify_signature(
@@ -559,10 +849,19 @@ def derive_release_gate(
                     envelope.signature,
                     trust_store,
                     purpose=KeyPurpose.RELEASE,
+                    namespace=TrustNamespace.EXTERNAL_RELEASE,
                 )
             except SigningError:
                 continue
             if envelope.evidence.authority_key_id != envelope.signature.key_id:
+                continue
+            expected = pinned.get(envelope.evidence.gate_id)
+            if (
+                expected is None
+                or expected.authority_key_id != envelope.evidence.authority_key_id
+                or expected.authority_head_sha256
+                != envelope.evidence.authority_head_sha256
+            ):
                 continue
             if (
                 not envelope.evidence.verified_at
@@ -601,6 +900,14 @@ def derive_release_gate(
     if (
         host is None
         or host.approved_host_reference != report.host_run.approved_host_reference
+        or host.measured_run_id != report.host_run.run_id
+        or host.host_run_sha256 != sha256_bytes(canonical_json_bytes(report.host_run))
+        or host.filter_performance_sha256
+        != sha256_bytes(canonical_json_bytes(report.filter_performance))
+        or host.initial_render_sha256
+        != sha256_bytes(canonical_json_bytes(report.initial_render))
+        or host.stress_memory_sha256
+        != sha256_bytes(canonical_json_bytes(report.stress_memory))
     ):
         unmet.add(GateId.APPROVED_HOST)
     trusted_digests = tuple(
@@ -608,6 +915,11 @@ def derive_release_gate(
     )
     return ReleaseGateDecision(
         report_sha256=sha256_bytes(canonical_json_bytes(report)),
+        authority_policy_sha256=(
+            sha256_bytes(canonical_json_bytes(authority_policy))
+            if authority_policy is not None
+            else None
+        ),
         trusted_external_evidence_sha256=trusted_digests,
         capability_enabled=not unmet,
         unmet_gates=tuple(sorted(unmet, key=str)),
@@ -625,11 +937,26 @@ def run_foundation_gates(
     manifest, manifest_bytes = load_screenshot_manifest(screenshot_manifest_path)
     del manifest
     sentinels = (
-        b"donor_id=private-0001",
-        b"read_id=private-read-0001",
-        b"/Users/private/raw-input.bam",
-        b"ACGTACGTACGTACGTACGTACGTACGTACGT",
+        (PrivacySentinelClass.DONOR_IDENTIFIER, b"donor_id=private-0001"),
+        (PrivacySentinelClass.READ_IDENTIFIER, b"read_id=private-read-0001"),
+        (PrivacySentinelClass.ABSOLUTE_PATH, b"/Users/private/raw-input.bam"),
+        (
+            PrivacySentinelClass.RAW_SEQUENCE,
+            b"ACGTACGTACGTACGTACGTACGTACGTACGT",
+        ),
     )
+    host_run = HostRunEvidence(
+        run_id=run_id,
+        captured_at=captured_at or datetime.now(UTC),
+        python_version=platform.python_version(),
+        operating_system=platform.system() or "unknown-os",
+        machine=platform.machine() or "unknown-machine",
+        processor=platform.processor() or "unknown-processor",
+        approved_host_reference=None,
+    )
+    host_run_sha256 = sha256_bytes(canonical_json_bytes(host_run))
+    network_probe_results: list[tuple[NetworkProbeOperation, bool, bool]] = []
+    probe_payload = b"privacy-safe-probe"
 
     with deny_external_network() as network_attempts:
         records = _synthetic_records(CATALOG_RECORDS)
@@ -648,14 +975,30 @@ def run_foundation_gates(
         del stress_records
         probe_socket = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
         try:
-            for operation in (
-                lambda: probe_socket.connect_ex(("127.0.0.1", 9)),
-                lambda: probe_socket.sendto(b"privacy-safe-probe", ("127.0.0.1", 9)),
+            for operation_name, operation in (
+                (
+                    NetworkProbeOperation.CONNECT_EX,
+                    lambda: probe_socket.connect_ex(("127.0.0.1", 9)),
+                ),
+                (
+                    NetworkProbeOperation.SENDTO,
+                    lambda: probe_socket.sendto(probe_payload, ("127.0.0.1", 9)),
+                ),
             ):
+                before = len(network_attempts)
                 try:
                     operation()
                 except RuntimeError:
-                    pass
+                    denial_observed = True
+                else:
+                    denial_observed = False
+                guard_recorded = any(
+                    name == operation_name.value
+                    for name, _ in network_attempts[before:]
+                )
+                network_probe_results.append(
+                    (operation_name, denial_observed, guard_recorded)
+                )
         finally:
             probe_socket.close()
 
@@ -663,14 +1006,29 @@ def run_foundation_gates(
         peak_bytes=peak_bytes,
         target_met=peak_bytes <= MAX_SYNTHETIC_PEAK_BYTES,
     )
-    host_run = HostRunEvidence(
+    network_denial_evidence = NetworkDenialEvidence(
         run_id=run_id,
-        captured_at=captured_at or datetime.now(UTC),
-        python_version=platform.python_version(),
-        operating_system=platform.system() or "unknown-os",
-        machine=platform.machine() or "unknown-machine",
-        processor=platform.processor() or "unknown-processor",
-        approved_host_reference=None,
+        host_run_sha256=host_run_sha256,
+        observations=tuple(
+            NetworkProbeObservation(
+                operation=operation,
+                denial_observed=denied,
+                guard_recorded=recorded,
+                payload_sha256=(
+                    sha256_bytes(probe_payload)
+                    if operation == NetworkProbeOperation.SENDTO
+                    else None
+                ),
+            )
+            for operation, denied, recorded in network_probe_results
+        ),
+        intercepted_attempts=tuple(
+            NetworkInterceptObservation(
+                operation=name,
+                target_sha256=sha256_bytes(target.encode("utf-8")),
+            )
+            for name, target in network_attempts
+        ),
     )
     privacy_payload = canonical_json_bytes(
         {
@@ -681,20 +1039,25 @@ def run_foundation_gates(
             "screenshots": json.loads(manifest_bytes),
         }
     )
-    privacy_pass = _privacy_sentinel_probe(sentinels) and _privacy_clean(
-        privacy_payload, sentinels
+    serialized_output_clean = _privacy_clean(
+        privacy_payload,
+        tuple(sentinel for _, sentinel in sentinels),
+    )
+    privacy_sentinel_evidence = _privacy_sentinel_probe(
+        sentinels,
+        run_id=run_id,
+        host_run_sha256=host_run_sha256,
+        output_payload_sha256=sha256_bytes(privacy_payload),
+        serialized_output_clean=serialized_output_clean,
+    )
+    privacy_pass = serialized_output_clean and all(
+        item.rejected for item in privacy_sentinel_evidence.observations
     )
     filter_sha256 = sha256_bytes(canonical_json_bytes(filter_measurement))
     render_sha256 = sha256_bytes(canonical_json_bytes(render_measurement))
     memory_sha256 = sha256_bytes(canonical_json_bytes(memory))
-    network_sha256 = sha256_bytes(
-        canonical_json_bytes({"blocked_operations": len(network_attempts)})
-    )
-    privacy_sha256 = sha256_bytes(
-        canonical_json_bytes(
-            {"sentinel_classes": len(sentinels), "real_paths_per_sentinel": 3}
-        )
-    )
+    network_sha256 = sha256_bytes(canonical_json_bytes(network_denial_evidence))
+    privacy_sha256 = sha256_bytes(canonical_json_bytes(privacy_sentinel_evidence))
 
     evidence = (
         GateEvidence(
@@ -736,7 +1099,10 @@ def run_foundation_gates(
             gate_id=GateId.NO_EXTERNAL_NETWORK,
             status=(
                 EvidenceStatus.OBSERVED_PASS
-                if len(network_attempts) == 2
+                if all(
+                    item.denial_observed and item.guard_recorded
+                    for item in network_denial_evidence.observations
+                )
                 else EvidenceStatus.OBSERVED_FAIL
             ),
             detail="Socket connect_ex and sendto probes were denied during the complete harness run",
@@ -774,6 +1140,8 @@ def run_foundation_gates(
         initial_render=render_measurement,
         stress_memory=memory,
         screenshot_manifest_sha256=sha256_bytes(manifest_bytes),
+        network_denial_evidence=network_denial_evidence,
+        privacy_sentinel_evidence=privacy_sentinel_evidence,
         gate_evidence=tuple(sorted(evidence, key=lambda item: str(item.gate_id))),
     )
 

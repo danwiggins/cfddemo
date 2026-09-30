@@ -13,17 +13,14 @@ from pydantic import AfterValidator, Field, StringConstraints, model_validator
 from traceback_runner.contracts import JobState, RunnerContract
 
 MAX_ACTIONS = 8
+_SAFE_OPERATOR_TEXT = re.compile(r"^[A-Za-z0-9][A-Za-z0-9 .,'()%;:!?+_-]*$")
 
 
 def _safe_operator_text(value: str) -> str:
-    if re.search(r"(?:^|[\s(])/(?:Users|home|Volumes|private|var|tmp|opt|etc)/", value):
-        raise ValueError("operator text cannot contain an absolute path")
-    if re.search(r"[A-Za-z]:\\", value) or "\\\\" in value:
-        raise ValueError("operator text cannot contain an absolute path")
-    if re.search(r"\b(?:https?|file)://\S+", value, flags=re.IGNORECASE):
-        raise ValueError("operator text cannot contain an external URL")
+    if _SAFE_OPERATOR_TEXT.fullmatch(value) is None:
+        raise ValueError("operator text contains characters outside the safe grammar")
     if re.search(
-        r"(?:donor|patient|sample|read)[_-]?(?:id|identifier)?\s*[:=._-]\s*\S+",
+        r"\b(?:source|donor|patient|sample|read|path)[_-]?(?:id|identifier)?\s*:\s*\S+",
         value,
         flags=re.IGNORECASE,
     ):

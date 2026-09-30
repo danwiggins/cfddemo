@@ -2,22 +2,29 @@
 
 from __future__ import annotations
 
+import base64
 import json
 import socket
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
 import pytest
+from cryptography.hazmat.primitives import serialization
+from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
 from pydantic import ValidationError
 
 from traceback_runner.product_gates import (
     CATALOG_RECORDS,
     FILTER_P95_TARGET_US,
     STRESS_RECORDS,
+    AccessibilityFixture,
     EvidenceStatus,
     GateEvidence,
     GateId,
+    PinnedAuthorityHead,
+    PrivacySentinelClass,
     ProductGateReport,
+    ReleaseGateAuthorityPolicy,
     ScreenshotManifest,
     SignedExternalEvidence,
     VerifiedExternalEvidence,
@@ -28,12 +35,16 @@ from traceback_runner.product_gates import (
     load_screenshot_manifest,
     run_foundation_gates,
 )
-from traceback_runner.serialization import canonical_json_bytes
+from traceback_runner.serialization import canonical_json_bytes, sha256_bytes
 from traceback_runner.signing import (
     KeyPurpose,
+    SignatureEnvelope,
+    TrustedKey,
+    TrustNamespace,
     TrustStore,
     generate_development_keypair,
     sign_bytes,
+    trusted_key_id,
 )
 
 FIXTURE = Path("tests/fixtures/product_gates/screenshot_manifest.json")
@@ -87,6 +98,30 @@ def test_no_network_and_privacy_sentinel_gates_are_observed(
         assert forbidden not in payload
 
 
+@pytest.mark.parametrize(
+    ("evidence_field", "mutation"),
+    (
+        (
+            "privacy_sentinel_evidence",
+            lambda item: item["observations"][0].__setitem__("rejected", False),
+        ),
+        (
+            "network_denial_evidence",
+            lambda item: item["observations"][0].__setitem__("denial_observed", False),
+        ),
+    ),
+)
+def test_persisted_adversarial_evidence_digest_binds_exact_results(
+    report: ProductGateReport,
+    evidence_field: str,
+    mutation: object,
+) -> None:
+    payload = report.model_dump(mode="json")
+    mutation(payload[evidence_field])  # type: ignore[operator]
+    with pytest.raises(ValidationError, match="exact observations"):
+        ProductGateReport.model_validate(payload)
+
+
 def test_network_guard_blocks_socket_connections_and_restores_them() -> None:
     originals = {
         "connect": socket.socket.connect,
@@ -112,14 +147,22 @@ def test_network_guard_blocks_socket_connections_and_restores_them() -> None:
 
 def test_privacy_scanner_detects_every_seeded_forbidden_class() -> None:
     sentinels = (
-        b"donor_id=private-0001",
-        b"read_id=private-read-0001",
-        b"/Users/private/raw-input.bam",
-        b"ACGTACGTACGTACGTACGTACGTACGTACGT",
+        (PrivacySentinelClass.DONOR_IDENTIFIER, b"donor_id=private-0001"),
+        (PrivacySentinelClass.READ_IDENTIFIER, b"read_id=private-read-0001"),
+        (PrivacySentinelClass.ABSOLUTE_PATH, b"/Users/private/raw-input.bam"),
+        (PrivacySentinelClass.RAW_SEQUENCE, b"ACGTACGTACGTACGTACGTACGTACGTACGT"),
     )
-    for sentinel in sentinels:
-        assert not _privacy_clean(b"safe-prefix:" + sentinel, sentinels)
-    assert _privacy_sentinel_probe(sentinels)
+    values = tuple(value for _, value in sentinels)
+    for _, sentinel in sentinels:
+        assert not _privacy_clean(b"safe-prefix:" + sentinel, values)
+    evidence = _privacy_sentinel_probe(
+        sentinels,
+        run_id="privacy_probe_run",
+        host_run_sha256="a" * 64,
+        output_payload_sha256="b" * 64,
+        serialized_output_clean=True,
+    )
+    assert all(item.rejected for item in evidence.observations)
 
 
 def test_screenshot_fixture_is_canonical_synthetic_accessibility_metadata() -> None:
@@ -157,10 +200,28 @@ def test_capability_cannot_be_enabled_with_required_external_gates(
 def _all_green_report(report: ProductGateReport) -> ProductGateReport:
     payload = report.model_dump(mode="json")
     payload["host_run"]["approved_host_reference"] = "approved-host-1"
+    host_sha256 = sha256_bytes(canonical_json_bytes(payload["host_run"]))
+    payload["network_denial_evidence"]["host_run_sha256"] = host_sha256
+    payload["privacy_sentinel_evidence"]["host_run_sha256"] = host_sha256
     payload["capability_enabled"] = False
     for index, item in enumerate(payload["gate_evidence"], start=1):
         item["status"] = EvidenceStatus.OBSERVED_PASS
-        item["evidence_sha256"] = f"{index:064x}"
+        gate_id = GateId(item["gate_id"])
+        if gate_id in {
+            GateId.ACCESSIBILITY,
+            GateId.APPROVED_HOST,
+            GateId.FIVE_PROVIDER_STUDY,
+            GateId.SCREENSHOTS,
+        }:
+            item["evidence_sha256"] = f"{index:064x}"
+        elif gate_id == GateId.NO_EXTERNAL_NETWORK:
+            item["evidence_sha256"] = sha256_bytes(
+                canonical_json_bytes(payload["network_denial_evidence"])
+            )
+        elif gate_id == GateId.PRIVACY_SENTINELS:
+            item["evidence_sha256"] = sha256_bytes(
+                canonical_json_bytes(payload["privacy_sentinel_evidence"])
+            )
     return ProductGateReport.model_validate(payload)
 
 
@@ -188,6 +249,17 @@ def _verified_external(
             gate_id=GateId.APPROVED_HOST,
             artifact_sha256=evidence[GateId.APPROVED_HOST].evidence_sha256,
             approved_host_reference="approved-host-1",
+            measured_run_id=report.host_run.run_id,
+            host_run_sha256=sha256_bytes(canonical_json_bytes(report.host_run)),
+            filter_performance_sha256=sha256_bytes(
+                canonical_json_bytes(report.filter_performance)
+            ),
+            initial_render_sha256=sha256_bytes(
+                canonical_json_bytes(report.initial_render)
+            ),
+            stress_memory_sha256=sha256_bytes(
+                canonical_json_bytes(report.stress_memory)
+            ),
             **shared,
         ),
         VerifiedExternalEvidence(
@@ -205,6 +277,75 @@ def _verified_external(
     )
 
 
+def _authority_policy(
+    evidence: tuple[VerifiedExternalEvidence, ...],
+) -> ReleaseGateAuthorityPolicy:
+    return ReleaseGateAuthorityPolicy(
+        policy_id="release-gate-policy-1",
+        issued_at=datetime(2026, 9, 28, tzinfo=UTC),
+        expires_at=datetime(2026, 10, 1, tzinfo=UTC),
+        pinned_heads=tuple(
+            sorted(
+                (
+                    PinnedAuthorityHead(
+                        gate_id=item.gate_id,
+                        authority_key_id=item.authority_key_id,
+                        authority_head_sha256=item.authority_head_sha256,
+                    )
+                    for item in evidence
+                ),
+                key=lambda item: (item.gate_id.value, item.authority_key_id),
+            )
+        ),
+    )
+
+
+def _external_signing_material() -> tuple[Ed25519PrivateKey, str, TrustStore]:
+    private_key = Ed25519PrivateKey.generate()
+    public_bytes = private_key.public_key().public_bytes(
+        encoding=serialization.Encoding.Raw,
+        format=serialization.PublicFormat.Raw,
+    )
+    key_id = trusted_key_id(
+        public_bytes,
+        KeyPurpose.RELEASE,
+        namespace=TrustNamespace.EXTERNAL_RELEASE,
+    )
+    store = TrustStore(
+        (
+            TrustedKey(
+                key_id=key_id,
+                purpose=KeyPurpose.RELEASE,
+                public_key_bytes=public_bytes,
+                namespace=TrustNamespace.EXTERNAL_RELEASE,
+            ),
+        )
+    )
+    return private_key, key_id, store
+
+
+def _sign_external(
+    evidence: tuple[VerifiedExternalEvidence, ...],
+    *,
+    private_key: Ed25519PrivateKey,
+    key_id: str,
+) -> list[SignedExternalEvidence]:
+    return [
+        SignedExternalEvidence(
+            evidence=item,
+            signature=SignatureEnvelope(
+                namespace=TrustNamespace.EXTERNAL_RELEASE,
+                purpose=KeyPurpose.RELEASE,
+                key_id=key_id,
+                signature_base64=base64.b64encode(
+                    private_key.sign(canonical_json_bytes(item))
+                ).decode("ascii"),
+            ),
+        )
+        for item in evidence
+    ]
+
+
 def test_release_gate_requires_independently_verified_exact_external_evidence(
     report: ProductGateReport,
 ) -> None:
@@ -218,36 +359,97 @@ def test_release_gate_requires_independently_verified_exact_external_evidence(
         GateId.SCREENSHOTS,
     }
 
-    key = generate_development_keypair(KeyPurpose.RELEASE)
-    store = TrustStore()
-    store.add_signing_key(key)
-    verified = list(_verified_external(green, authority_key_id=key.key_id))
-    signed = [
+    development_key = generate_development_keypair(KeyPurpose.RELEASE)
+    development_store = TrustStore()
+    development_store.add_signing_key(development_key)
+    development_evidence = _verified_external(
+        green, authority_key_id=development_key.key_id
+    )
+    development_signed = [
         SignedExternalEvidence(
             evidence=item,
             signature=sign_bytes(
-                canonical_json_bytes(item), key, purpose=KeyPurpose.RELEASE
+                canonical_json_bytes(item),
+                development_key,
+                purpose=KeyPurpose.RELEASE,
             ),
         )
-        for item in verified
+        for item in development_evidence
     ]
-    missing_clock = derive_release_gate(
-        green, signed_external_evidence=signed, trust_store=store
+    self_provisioned_development = derive_release_gate(
+        green,
+        signed_external_evidence=development_signed,
+        trust_store=development_store,
+        authority_policy=_authority_policy(development_evidence),
+        now=datetime(2026, 9, 29, 12, tzinfo=UTC),
     )
-    assert not missing_clock.capability_enabled
-    approved = derive_release_gate(
+    assert not self_provisioned_development.capability_enabled
+
+    private_key, key_id, store = _external_signing_material()
+    verified = _verified_external(green, authority_key_id=key_id)
+    policy = _authority_policy(verified)
+    signed = _sign_external(verified, private_key=private_key, key_id=key_id)
+    missing_policy = derive_release_gate(
         green,
         signed_external_evidence=signed,
         trust_store=store,
         now=datetime(2026, 9, 29, 12, tzinfo=UTC),
     )
+    assert not missing_policy.capability_enabled
+    approved = derive_release_gate(
+        green,
+        signed_external_evidence=signed,
+        trust_store=store,
+        authority_policy=policy,
+        now=datetime(2026, 9, 29, 12, tzinfo=UTC),
+    )
     assert approved.capability_enabled
     assert approved.unmet_gates == ()
+
+    mismatched_head_policy = policy.model_copy(
+        update={
+            "pinned_heads": tuple(
+                item.model_copy(update={"authority_head_sha256": "f" * 64})
+                if item.gate_id == GateId.ACCESSIBILITY
+                else item
+                for item in policy.pinned_heads
+            )
+        }
+    )
+    head_mismatch = derive_release_gate(
+        green,
+        signed_external_evidence=signed,
+        trust_store=store,
+        authority_policy=mismatched_head_policy,
+        now=datetime(2026, 9, 29, 12, tzinfo=UTC),
+    )
+    assert not head_mismatch.capability_enabled
+    assert GateId.ACCESSIBILITY in head_mismatch.unmet_gates
+
+    wrong_run_evidence = tuple(
+        item.model_copy(update={"filter_performance_sha256": "e" * 64})
+        if item.gate_id == GateId.APPROVED_HOST
+        else item
+        for item in verified
+    )
+    wrong_run_signed = _sign_external(
+        wrong_run_evidence, private_key=private_key, key_id=key_id
+    )
+    wrong_run = derive_release_gate(
+        green,
+        signed_external_evidence=wrong_run_signed,
+        trust_store=store,
+        authority_policy=policy,
+        now=datetime(2026, 9, 29, 12, tzinfo=UTC),
+    )
+    assert not wrong_run.capability_enabled
+    assert GateId.APPROVED_HOST in wrong_run.unmet_gates
 
     expired = derive_release_gate(
         green,
         signed_external_evidence=signed,
         trust_store=store,
+        authority_policy=policy,
         now=datetime(2026, 9, 30, tzinfo=UTC),
     )
     assert not expired.capability_enabled
@@ -264,6 +466,7 @@ def test_release_gate_requires_independently_verified_exact_external_evidence(
         green,
         signed_external_evidence=signed,
         trust_store=store,
+        authority_policy=policy,
         now=datetime(2026, 9, 29, 12, tzinfo=UTC),
     )
     assert not mismatched.capability_enabled
@@ -285,6 +488,9 @@ def test_release_gate_rejects_failed_measurement_even_with_green_status(
     for item in payload["gate_evidence"]:
         if item["gate_id"] == GateId.FILTER_PERFORMANCE:
             item["status"] = EvidenceStatus.OBSERVED_PASS
+            item["evidence_sha256"] = sha256_bytes(
+                canonical_json_bytes(payload["filter_performance"])
+            )
     with pytest.raises(ValidationError, match="cannot pass a failed measurement"):
         ProductGateReport.model_validate(payload)
 
@@ -301,7 +507,7 @@ def test_release_gate_rejects_failed_measurement_even_with_green_status(
             "keyboard, screen-reader",
         ),
         ({"gate_id": GateId.SCREENSHOTS}, "reviewed browser captures"),
-        ({"gate_id": GateId.APPROVED_HOST}, "bind the host reference"),
+        ({"gate_id": GateId.APPROVED_HOST}, "bind the host and exact measured run"),
     ),
 )
 def test_external_evidence_contracts_fail_closed(
@@ -316,4 +522,36 @@ def test_external_evidence_contracts_fail_closed(
             verified_at=datetime(2026, 9, 29, tzinfo=UTC),
             expires_at=datetime(2026, 9, 30, tzinfo=UTC),
             **kwargs,
+        )
+
+
+@pytest.mark.parametrize(
+    "unsafe",
+    (
+        "../../private/raw-input.bam",
+        "Open docs/../../private/raw-input.bam",
+        "//evil.example/private",
+        "source_id=private-0001",
+        "source_identifier:private-0001",
+        "path:/Volumes/private/raw-input.bam",
+        "path=/private/raw-input.bam",
+    ),
+)
+def test_safe_operator_grammar_rejects_review_bypasses_in_gate_surfaces(
+    unsafe: str,
+) -> None:
+    with pytest.raises(ValidationError, match="safe grammar|private identifier"):
+        GateEvidence(
+            gate_id=GateId.ACCESSIBILITY,
+            status=EvidenceStatus.REQUIRED_EXTERNAL,
+            detail=unsafe,
+        )
+    with pytest.raises(ValidationError, match="safe grammar|private identifier"):
+        AccessibilityFixture(
+            fixture_id="unsafe-fixture",
+            viewport_width_px=1280,
+            zoom_percent=200,
+            keyboard_order=("queue",),
+            screen_reader_names=(unsafe,),
+            non_color_status_text=("Blocked",),
         )

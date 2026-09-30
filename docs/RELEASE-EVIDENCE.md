@@ -70,8 +70,13 @@ editing gate statuses or attaching an arbitrary reference can never enable a
 capability. `derive_release_gate` enables only when all measured targets pass,
 every gate is an observed pass, the exact approved host is bound, and the four
 external artifacts match independently supplied Ed25519-signed evidence under
-an independently supplied, non-revoked release trust store at an injected,
-aware verification time within each artifact's validity window. The external
+the external-release namespace and an independently provisioned authority-head
+policy. Every external artifact must match its separately pinned signer and
+authority-head digest. A caller-created development signer cannot establish
+release authority. Approved-host evidence binds the exact run, host profile,
+filter/render measurements, and memory measurement. Verification also requires
+an independently supplied, non-revoked trust store at an injected, aware
+verification time within each artifact's validity window. The external
 contracts additionally require five representative users, keyboard plus
 screen-reader plus 200 percent zoom audits, and reviewed browser captures.
 Missing trust, bad signatures, digest mismatches, incomplete evidence, and
@@ -80,9 +85,13 @@ failed measurements remain unmet gates.
 The synthetic privacy gate is adversarial rather than an absence check. It
 injects each forbidden identifier, path, and sequence class through catalog
 serialization, problem responses, and screenshot/accessibility contracts and
-requires all three real paths to reject it. The network gate actively probes
+requires all three real paths to reject it. Persisted evidence binds the exact
+sentinel class and digest, every path result, harness version, run, and host.
+The network gate actively probes
 `connect_ex` and `sendto` while the process guard also denies connect,
 create-connection, DNS lookup, and connected-socket send variants. These local
+evidence records bind exact operation names, target digests, denial results,
+harness version, run, and host. These local
 results still do not replace approved-host, accessibility, screenshot, or
 five-provider evidence.
 
