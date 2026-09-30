@@ -27,6 +27,7 @@ from evidence_inspector.cohort_manifest import (
     CohortManifest,
     CohortMember,
     MemberLineageRole,
+    capture_expected_trust_pins,
     cohort_manifest_bytes,
     cohort_manifest_from_bytes,
     cohort_manifest_sha256,
@@ -361,16 +362,11 @@ class CohortRecordCatalog:
         if normalized_registry != result_catalog.reader_registry:
             raise CohortImportError("result catalog reader registry does not match")
         try:
-            pins = {
-                _PROVIDER_NAMESPACE.validate_python(provider): _SHA256.validate_python(
-                    digest
-                )
-                for provider, digest in expected_trust_snapshot_sha256_by_provider.items()
-            }
-        except Exception as exc:
+            pins = capture_expected_trust_pins(
+                expected_trust_snapshot_sha256_by_provider
+            )
+        except ValueError as exc:
             raise CohortImportError("provider trust pins are invalid") from exc
-        if not pins or len(pins) > 256:
-            raise CohortImportError("provider trust pin count is invalid")
         authority = _PINNED_RESULT_AUTHORITY(result_catalog)
         self._result_catalog = result_catalog
         self._result_catalog_identity = id(result_catalog)

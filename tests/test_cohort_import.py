@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 import os
 import threading
+from collections.abc import Iterator, Mapping
 from concurrent.futures import ThreadPoolExecutor
 from datetime import timedelta
 from pathlib import Path
@@ -701,6 +702,60 @@ def test_fault_controller_rejects_callbacks_subclasses_and_replacement(
             expected_trust_snapshot_sha256_by_provider=_pins(),
             reader_registry=DEFAULT_RESULT_BUNDLE_READER_REGISTRY,
         )
+
+
+def test_cohort_constructor_bounds_hostile_trust_mapping_before_root_creation(
+    tmp_path: Path, live
+) -> None:
+    values = _setup(tmp_path / "source", live)
+    target = tmp_path / "must-not-exist"
+
+    class InfinitePins(Mapping[str, str]):
+        def __init__(self) -> None:
+            self.lookups = 0
+
+        def __iter__(self) -> Iterator[str]:
+            index = 0
+            while True:
+                yield f"provider_{index:032x}"
+                index += 1
+
+        def __len__(self) -> int:
+            return 1
+
+        def __getitem__(self, key: str) -> str:
+            self.lookups += 1
+            return "0" * 64
+
+        def items(self):
+            raise AssertionError("items view must not be used")
+
+    pins = InfinitePins()
+    with pytest.raises(CohortImportError, match="trust pins are invalid"):
+        CohortRecordCatalog(
+            target,
+            result_catalog=values[1],
+            linkage_store=live[0],
+            expected_trust_snapshot_sha256_by_provider=pins,
+            reader_registry=DEFAULT_RESULT_BUNDLE_READER_REGISTRY,
+        )
+    assert pins.lookups == 256
+    assert not target.exists()
+
+    class ProviderString(str):
+        pass
+
+    with pytest.raises(CohortImportError, match="trust pins are invalid"):
+        CohortRecordCatalog(
+            target,
+            result_catalog=values[1],
+            linkage_store=live[0],
+            expected_trust_snapshot_sha256_by_provider={
+                ProviderString("provider_" + "1" * 32): "0" * 64
+            },
+            reader_registry=DEFAULT_RESULT_BUNDLE_READER_REGISTRY,
+        )
+    assert not target.exists()
 
 
 def test_live_trust_and_reader_method_shadowing_fail_before_verification(

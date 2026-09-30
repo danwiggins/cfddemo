@@ -15,7 +15,7 @@ from enum import StrEnum
 from itertools import pairwise
 from typing import Annotated, Literal
 
-from pydantic import Field, StringConstraints, model_validator
+from pydantic import Field, StringConstraints, TypeAdapter, model_validator
 
 from evidence_inspector.method_registry import (
     RegistryContract,
@@ -37,6 +37,7 @@ from evidence_inspector.provider_linkage import (
     linkage_revision_sha256,
 )
 from evidence_inspector.provider_linkage_store import (
+    MAX_PROVIDER_TRUST_PINS,
     CommittedLinkageReceipt,
     ProviderLinkageStore,
     committed_linkage_receipt_sha256,
@@ -54,6 +55,8 @@ _PINNED_STORE_CALLABLES = {
     for name in vars(ProviderLinkageStore)
     if callable(getattr(ProviderLinkageStore, name))
 }
+_PROVIDER_NAMESPACE = TypeAdapter(ProviderNamespace)
+_SHA256 = TypeAdapter(Sha256)
 
 
 def _utc_second(value: datetime, field: str = "created_at") -> datetime:
@@ -69,8 +72,52 @@ def _domain_sha256(domain: bytes, value: object) -> str:
     return hashlib.sha256(domain + b"\0" + encoded).hexdigest()
 
 
-def trust_pins_sha256(pins: Mapping[str, str]) -> str:
+def capture_expected_trust_pins(pins: Mapping[str, str]) -> dict[str, str]:
+    """Capture hostile mappings once with an explicit max+1 iterator bound."""
+
+    try:
+        iterator = iter(pins)
+    except Exception as exc:
+        raise ValueError("provider trust pins are invalid") from exc
+    captured: dict[str, str] = {}
+    for index in range(MAX_PROVIDER_TRUST_PINS + 1):
+        try:
+            raw_provider = next(iterator)
+        except StopIteration:
+            break
+        except Exception as exc:
+            raise ValueError("provider trust pins are invalid") from exc
+        if index == MAX_PROVIDER_TRUST_PINS:
+            raise ValueError("provider trust pin count is invalid")
+        if type(raw_provider) is not str:
+            raise ValueError("provider trust pins are invalid")
+        try:
+            provider = _PROVIDER_NAMESPACE.validate_python(raw_provider)
+        except Exception as exc:
+            raise ValueError("provider trust pins are invalid") from exc
+        if provider in captured:
+            raise ValueError("provider trust pins contain a duplicate provider")
+        try:
+            raw_digest = pins[raw_provider]
+        except Exception as exc:
+            raise ValueError("provider trust pins are invalid") from exc
+        if type(raw_digest) is not str:
+            raise ValueError("provider trust pins are invalid")
+        try:
+            captured[provider] = _SHA256.validate_python(raw_digest)
+        except Exception as exc:
+            raise ValueError("provider trust pins are invalid") from exc
+    if not captured:
+        raise ValueError("provider trust pins are required")
+    return captured
+
+
+def _captured_trust_pins_sha256(pins: dict[str, str]) -> str:
     return _domain_sha256(b"traceback-linkage-trust-pins-v1", sorted(pins.items()))
+
+
+def trust_pins_sha256(pins: Mapping[str, str]) -> str:
+    return _captured_trust_pins_sha256(capture_expected_trust_pins(pins))
 
 
 class TechnicalReplicateRule(StrEnum):
@@ -471,6 +518,9 @@ def validate_manifest_against_linkage_store(
     expected_trust_snapshot_sha256_by_provider: Mapping[str, str],
 ) -> None:
     manifest = cohort_manifest_from_bytes(cohort_manifest_bytes(manifest))
+    expected_pins = capture_expected_trust_pins(
+        expected_trust_snapshot_sha256_by_provider
+    )
     if type(store) is not ProviderLinkageStore:
         raise TypeError("cohort validation requires the exact live linkage store type")
     for name, pinned in _PINNED_STORE_CALLABLES.items():
@@ -480,9 +530,9 @@ def validate_manifest_against_linkage_store(
     authorities = {
         item.provider_namespace: item for item in manifest.provider_authorities
     }
-    if set(expected_trust_snapshot_sha256_by_provider) != set(authorities):
+    if set(expected_pins) != set(authorities):
         raise ValueError("provider authority set is not independently pinned")
-    recomputed_pins = trust_pins_sha256(expected_trust_snapshot_sha256_by_provider)
+    recomputed_pins = _captured_trust_pins_sha256(expected_pins)
     if snapshot.trust_pins_sha256 != recomputed_pins:
         raise ValueError("live store trust pins do not match independent pins")
     common = (
@@ -494,10 +544,7 @@ def validate_manifest_against_linkage_store(
         snapshot.state_head_sha256,
     )
     for provider, authority in authorities.items():
-        if (
-            authority.trust_snapshot_sha256
-            != expected_trust_snapshot_sha256_by_provider[provider]
-        ):
+        if authority.trust_snapshot_sha256 != expected_pins[provider]:
             raise ValueError("provider trust authority does not match independent pin")
         if (
             authority.store_id,
@@ -584,6 +631,7 @@ __all__ = [
     "TimeAxisKind",
     "build_cohort_manifest",
     "build_cohort_member",
+    "capture_expected_trust_pins",
     "cohort_manifest_bytes",
     "cohort_manifest_from_bytes",
     "cohort_manifest_sha256",

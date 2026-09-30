@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+from collections.abc import Iterator, Mapping
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
@@ -608,6 +609,71 @@ def test_live_store_boundary_rejects_class_callable_shadow(live, monkeypatch) ->
         validate_manifest_against_linkage_store(
             manifest, store, expected_trust_snapshot_sha256_by_provider=_pins()
         )
+
+
+def test_live_store_trust_pins_are_captured_once_without_mapping_views(live) -> None:
+    store, _, authority, member = live
+    manifest = _manifest(authority, (member,))
+    provider, digest = next(iter(_pins().items()))
+
+    class OneShotPins(Mapping[str, str]):
+        def __init__(self) -> None:
+            self.iterations = 0
+            self.lookups = 0
+
+        def __iter__(self) -> Iterator[str]:
+            self.iterations += 1
+            if self.iterations > 1:
+                raise AssertionError("mapping was reiterated")
+            yield provider
+
+        def __len__(self) -> int:
+            raise AssertionError("length must not be consulted")
+
+        def __getitem__(self, key: str) -> str:
+            assert key == provider
+            self.lookups += 1
+            if self.lookups > 1:
+                raise AssertionError("value was looked up twice")
+            return digest
+
+        def items(self):
+            raise AssertionError("items view must not be used")
+
+    pins = OneShotPins()
+    validate_manifest_against_linkage_store(
+        manifest, store, expected_trust_snapshot_sha256_by_provider=pins
+    )
+    assert pins.iterations == pins.lookups == 1
+
+
+def test_live_store_trust_pin_capture_rejects_duplicate_before_second_lookup(
+    live,
+) -> None:
+    store, _, authority, member = live
+    manifest = _manifest(authority, (member,))
+    provider, digest = next(iter(_pins().items()))
+
+    class DuplicatePins(Mapping[str, str]):
+        lookups = 0
+
+        def __iter__(self):
+            yield provider
+            yield provider
+
+        def __len__(self) -> int:
+            return 2
+
+        def __getitem__(self, key: str) -> str:
+            self.lookups += 1
+            return digest
+
+    pins = DuplicatePins()
+    with pytest.raises(ValueError, match="duplicate"):
+        validate_manifest_against_linkage_store(
+            manifest, store, expected_trust_snapshot_sha256_by_provider=pins
+        )
+    assert pins.lookups == 1
 
 
 def test_live_boundary_revalidates_model_copy_mutations(live) -> None:
