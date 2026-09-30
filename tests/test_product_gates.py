@@ -565,6 +565,9 @@ def test_external_evidence_contracts_fail_closed(
         "javascript:alert(1)",
         "data:text/plain,private",
         "wss:evil.example",
+        "Open(https:evil.example)",
+        "Open,javascript:alert(1)",
+        "URL.data:text",
         "A,C(G)T-A_C.G T,A(C)G-T_A C.G,T-A,C(G)T-A_C.GT",
     ),
 )

@@ -34,7 +34,10 @@ def _safe_operator_text(value: str) -> str:
     dangerous_schemes = (
         "data|file|ftp|gopher|http|https|javascript|nfs|smb|ssh|telnet|ws|wss"
     )
-    if re.search(rf"(?:^|\s)(?:{dangerous_schemes})\s*:", lowered) or "//" in decoded:
+    if (
+        re.search(rf"(?<![A-Za-z0-9_])(?:{dangerous_schemes})\s*:", lowered)
+        or "//" in decoded
+    ):
         raise ValueError("operator text cannot contain a URL")
     if "/" in decoded or "\\" in decoded or ".." in decoded:
         raise ValueError("operator text cannot contain a path")
