@@ -1239,6 +1239,66 @@ def test_nested_caller_proxy_cannot_mutate_evaluator_after_authority_capture(
     assert not decision.delta_allowed
 
 
+@pytest.mark.parametrize("entrypoint", ("member", "series", "replay"))
+def test_nested_caller_contract_subclass_is_zero_hook_rejected(
+    entrypoint: str,
+) -> None:
+    anchor = _record("1")
+    member = _record("2")
+    policy = _policy(anchor)
+    with _activated_records(anchor, member) as (records, store):
+        active_anchor, active_member = records
+        arguments = {
+            "expected_policy_sha256": longitudinal_anchor_policy_sha256(policy),
+            "expected_authority_head_sha256": HEAD_SHA256,
+            "expected_linkage_trust_snapshot_sha256_by_provider": {
+                PROVIDER: TRUST_SHA256
+            },
+            "linkage_store": store,
+        }
+        genuine = decide_longitudinal_member(
+            active_anchor, active_member, policy, **arguments
+        )
+        measurement_type = type(active_anchor.measurement)
+
+        class CallerMeasurement(measurement_type):
+            calls: ClassVar[int] = 0
+
+            def __getattribute__(self, name: str) -> object:
+                type(self).calls += 1
+                return super().__getattribute__(name)
+
+        CallerMeasurement.__module__ = "evidence_inspector.caller_supplied"
+        forged_measurement = CallerMeasurement.model_validate_json(
+            canonical_contract_bytes(active_anchor.measurement)
+        )
+        poisoned_anchor = active_anchor.model_copy()
+        object.__setattr__(poisoned_anchor, "measurement", forged_measurement)
+        CallerMeasurement.calls = 0
+        if entrypoint == "member":
+            rejected = decide_longitudinal_member(
+                poisoned_anchor, active_member, policy, **arguments
+            )
+            assert rejected.outcome == LongitudinalOutcome.UNKNOWN
+            assert not rejected.delta_allowed
+        elif entrypoint == "series":
+            rejected_series = decide_longitudinal_series(
+                poisoned_anchor, (active_member,), policy, **arguments
+            )
+            assert rejected_series.decisions[0].outcome == LongitudinalOutcome.UNKNOWN
+            assert not rejected_series.decisions[0].delta_allowed
+        else:
+            with pytest.raises(LongitudinalDecisionReplayError, match="replay exactly"):
+                replay_longitudinal_member_decision(
+                    genuine,
+                    poisoned_anchor,
+                    active_member,
+                    policy,
+                    **arguments,
+                )
+    assert CallerMeasurement.calls == 0
+
+
 @pytest.mark.parametrize("entrypoint", ("member", "series"))
 def test_second_store_concurrent_commit_is_bound_as_of_and_breaks_replay(
     entrypoint: str,

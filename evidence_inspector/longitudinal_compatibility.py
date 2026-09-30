@@ -1093,6 +1093,22 @@ def _exact_contract_bytes(
     ).encode("utf-8")
 
 
+def _exact_subclass_closure(root: type[object]) -> frozenset[type[object]]:
+    captured: set[type[object]] = set()
+    pending = [root]
+    while pending:
+        current = pending.pop()
+        for child in current.__subclasses__():
+            if child not in captured:
+                captured.add(child)
+                pending.append(child)
+    return frozenset(captured)
+
+
+_TRUSTED_CONTRACT_TYPES = _exact_subclass_closure(RegistryContract)
+_TRUSTED_ENUM_TYPES = _exact_subclass_closure(StrEnum)
+
+
 def _contract_graph_is_trusted(root: object) -> bool:
     """Reject caller-owned nested proxies without invoking their hooks."""
 
@@ -1106,10 +1122,8 @@ def _contract_graph_is_trusted(root: object) -> bool:
         if identity in seen:
             continue
         seen.add(identity)
-        if isinstance(value, RegistryContract):
-            value_type = type(value)
-            if not value_type.__module__.startswith("evidence_inspector."):
-                return False
+        value_type = type(value)
+        if value_type in _TRUSTED_CONTRACT_TYPES:
             try:
                 state = object.__getattribute__(value, "__dict__")
             except (AttributeError, TypeError):
@@ -1121,9 +1135,7 @@ def _contract_graph_is_trusted(root: object) -> bool:
                 return False
             stack.extend(state[name] for name in fields)
             continue
-        if isinstance(value, StrEnum):
-            if not type(value).__module__.startswith("evidence_inspector."):
-                return False
+        if value_type in _TRUSTED_ENUM_TYPES:
             continue
         if type(value) is tuple:
             stack.extend(value)
