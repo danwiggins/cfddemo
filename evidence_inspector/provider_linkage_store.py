@@ -601,7 +601,10 @@ class ProviderLinkageStore:
         connection: sqlite3.Connection,
     ) -> tuple[AuthorizedLinkageRevision, ...]:
         rows = connection.execute(
-            """SELECT record_json, authorized_record_sha256 FROM linkage_revisions
+            """SELECT provider_namespace, linkage_id, revision,
+                      revision_sha256, authorized_record_sha256, operation,
+                      record_json
+               FROM linkage_revisions
                ORDER BY provider_namespace, linkage_id, revision"""
         ).fetchall()
         if len(rows) > MAX_REVISIONS:
@@ -609,12 +612,24 @@ class ProviderLinkageStore:
         try:
             records = []
             for row in rows:
-                raw = bytes(row[0])
-                if hashlib.sha256(raw).hexdigest() != row[1]:
+                raw = bytes(row[6])
+                if hashlib.sha256(raw).hexdigest() != row[4]:
                     raise ValueError("record digest mismatch")
                 record = AuthorizedLinkageRevision.model_validate_json(raw)
                 if _record_bytes(record) != raw:
                     raise ValueError("record bytes are not canonical")
+                revision = record.revision
+                if (
+                    tuple(row[:4])
+                    != (
+                        revision.provider_namespace,
+                        revision.linkage_id,
+                        revision.revision,
+                        linkage_revision_sha256(revision),
+                    )
+                    or row[5] != revision.operation.value
+                ):
+                    raise ValueError("record index does not match canonical bytes")
                 records.append(record)
             return tuple(records)
         except (ValueError, TypeError):
@@ -641,7 +656,7 @@ class ProviderLinkageStore:
                 tuple(row)
                 for row in connection.execute(
                     """SELECT provider_namespace, linkage_id, revision,
-                              revision_sha256, authorized_record_sha256
+                              revision_sha256, authorized_record_sha256, operation
                        FROM linkage_revisions
                        ORDER BY provider_namespace, linkage_id, revision"""
                 )
@@ -661,6 +676,59 @@ class ProviderLinkageStore:
         ).encode("ascii")
         return hashlib.sha256(b"traceback-linkage-state-v1\0" + encoded).hexdigest()
 
+    def _validate_committed_state(
+        self,
+        connection: sqlite3.Connection,
+    ) -> tuple[AuthorizedLinkageRevision, ...]:
+        """Reject any mutation of already committed append-only state."""
+
+        self._validate_schema(connection)
+        metadata = dict(connection.execute("SELECT key, value FROM metadata"))
+        observed_pins = dict(
+            connection.execute(
+                "SELECT provider_namespace, trust_snapshot_sha256 FROM trust_pins"
+            )
+        )
+        if observed_pins != self._trust_pins:
+            raise ProviderLinkageStoreSchemaError(
+                "linkage store trust state is invalid"
+            )
+        records = self._load_records(connection)
+        validate_linkage_history(
+            records,
+            expected_trust_snapshot_sha256_by_provider=self._trust_pins,
+        )
+        expected_consumptions = sorted(
+            (
+                record.revision.provider_namespace,
+                approval.payload.approval_id,
+                approval.payload.nonce,
+                linkage_revision_sha256(record.revision),
+                provider_trust_snapshot_sha256(record.trust_snapshot),
+            )
+            for record in records
+            for approval in record.approvals
+        )
+        observed_consumptions = sorted(
+            tuple(row)
+            for row in connection.execute(
+                """SELECT provider_namespace, approval_id, nonce,
+                          revision_sha256, trust_snapshot_sha256
+                   FROM approval_consumptions"""
+            )
+        )
+        if observed_consumptions != expected_consumptions:
+            raise ProviderLinkageStoreSchemaError(
+                "linkage store consumption history is invalid"
+            )
+        if int(metadata["state_version"]) != len(records) or metadata[
+            "state_head_sha256"
+        ] != self._state_head(connection):
+            raise ProviderLinkageStoreSchemaError(
+                "linkage store committed state is invalid"
+            )
+        return records
+
     def commit_authorized_revision(
         self,
         record: AuthorizedLinkageRevision,
@@ -674,7 +742,7 @@ class ProviderLinkageStore:
         with self._connect() as connection:
             connection.execute("BEGIN IMMEDIATE")
             try:
-                self._validate_schema(connection)
+                self._validate_committed_state(connection)
                 self._validate_current_authority(record)
                 existing = connection.execute(
                     """SELECT revision_sha256, authorized_record_sha256, record_json
@@ -783,7 +851,7 @@ class ProviderLinkageStore:
                     "UPDATE metadata SET value=? WHERE key='state_head_sha256'",
                     (state_head,),
                 )
-                self._validate_schema(connection)
+                self._validate_committed_state(connection)
                 receipt = CommittedLinkageReceipt(
                     provider_namespace=revision.provider_namespace,
                     linkage_id=revision.linkage_id,
@@ -888,17 +956,8 @@ class ProviderLinkageStore:
         with self._connect() as connection:
             connection.execute("BEGIN")
             try:
-                self._validate_schema(connection)
-                records = self._load_records(connection)
-                validate_linkage_history(
-                    records,
-                    expected_trust_snapshot_sha256_by_provider=self._trust_pins,
-                )
+                records = self._validate_committed_state(connection)
                 metadata = dict(connection.execute("SELECT key, value FROM metadata"))
-                if metadata["state_head_sha256"] != self._state_head(connection):
-                    raise ProviderLinkageStoreSchemaError(
-                        "linkage store state head is invalid"
-                    )
                 latest: dict[tuple[str, str], LinkageRevision] = {}
                 latest_records: dict[tuple[str, str], AuthorizedLinkageRevision] = {}
                 for record in records:

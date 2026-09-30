@@ -588,6 +588,81 @@ def test_live_trigger_cannot_delete_consumption_and_reopen_replay(
         store.close()
 
 
+def test_deleted_consumption_cannot_be_healed_by_next_commit(
+    tmp_path: Path,
+) -> None:
+    root = tmp_path / "protected"
+    first = _record("c")
+    other_revision = _revision(
+        linkage_id=_token("linkage", "d"),
+        collection=_token("collection", "d"),
+        specimen=_token("specimen", "d"),
+        analysis=_token("analysis", "d"),
+        measurement=_token("measurement", "d"),
+    )
+    other, _ = _consume(
+        other_revision,
+        (_create_approval(other_revision, "c"),),
+    )
+    store = _store(root)
+    receipt = store.commit_authorized_revision(first)
+    approval = first.approvals[0]
+    connection = sqlite3.connect(root / "linkage.sqlite3")
+    connection.execute("DELETE FROM approval_consumptions")
+    connection.commit()
+    connection.close()
+    try:
+        with pytest.raises(
+            ProviderLinkageStoreSchemaError, match="consumption history"
+        ):
+            store.commit_authorized_revision(other)
+
+        connection = sqlite3.connect(root / "linkage.sqlite3")
+        connection.execute(
+            "INSERT INTO approval_consumptions VALUES(?, ?, ?, ?, ?)",
+            (
+                first.revision.provider_namespace,
+                approval.payload.approval_id,
+                approval.payload.nonce,
+                receipt.linkage_revision_sha256,
+                provider_trust_snapshot_sha256(first.trust_snapshot),
+            ),
+        )
+        connection.commit()
+        connection.close()
+        store.verify_current_receipt(receipt)
+    finally:
+        store.close()
+
+
+@pytest.mark.parametrize(
+    "mutation",
+    ("delete_revision", "alter_revision_index", "alter_operation"),
+)
+def test_deleted_or_altered_revision_history_fails_closed(
+    tmp_path: Path,
+    mutation: str,
+) -> None:
+    root = tmp_path / "protected"
+    store = _store(root)
+    store.commit_authorized_revision(_record("c"))
+    connection = sqlite3.connect(root / "linkage.sqlite3")
+    if mutation == "delete_revision":
+        connection.execute("DELETE FROM approval_consumptions")
+        connection.execute("DELETE FROM linkage_revisions")
+    elif mutation == "alter_revision_index":
+        connection.execute("UPDATE linkage_revisions SET revision=2")
+    else:
+        connection.execute("UPDATE linkage_revisions SET operation='tombstone'")
+    connection.commit()
+    connection.close()
+    try:
+        with pytest.raises(ProviderLinkageStoreSchemaError):
+            store.active_snapshot()
+    finally:
+        store.close()
+
+
 def test_relative_or_symlink_root_is_rejected(tmp_path: Path) -> None:
     with pytest.raises(ProviderLinkageStoreUnsafe, match="absolute"):
         _store(Path("relative"))
