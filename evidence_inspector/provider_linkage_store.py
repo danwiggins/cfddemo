@@ -358,17 +358,27 @@ class ProviderLinkageStore:
             raise ProviderLinkageStoreUnsafe("linkage store storage changed") from None
 
     def _storage_identity_sha256(self) -> str:
-        if self._database_identity is None:
+        database_descriptor = (
+            self._database_fd
+            if self._database_fd is not None
+            else self._sqlite_database_fd
+        )
+        if database_descriptor is None:
             raise ProviderLinkageStoreUnsafe(
                 "linkage store database identity is absent"
             )
+        try:
+            root_identity = _inode_identity(os.fstat(self._root_fd))
+            database_identity = _inode_identity(os.fstat(database_descriptor))
+        except (OSError, TypeError):
+            raise ProviderLinkageStoreUnsafe("linkage store storage changed") from None
         framed = b"\0".join(
             (
                 b"traceback-linkage-storage-identity-v1",
-                str(self._root_identity[0]).encode("ascii"),
-                str(self._root_identity[1]).encode("ascii"),
-                str(self._database_identity[0]).encode("ascii"),
-                str(self._database_identity[1]).encode("ascii"),
+                str(root_identity[0]).encode("ascii"),
+                str(root_identity[1]).encode("ascii"),
+                str(database_identity[0]).encode("ascii"),
+                str(database_identity[1]).encode("ascii"),
             )
         )
         return hashlib.sha256(framed).hexdigest()
@@ -684,6 +694,15 @@ class ProviderLinkageStore:
 
         self._validate_schema(connection)
         metadata = dict(connection.execute("SELECT key, value FROM metadata"))
+        if (
+            metadata["store_id"] != self._store_id
+            or metadata["store_epoch_sha256"] != self._store_epoch_sha256
+            or metadata["storage_identity_sha256"] != self._storage_identity_sha256()
+            or metadata["trust_pins_sha256"] != _trust_pins_sha256(self._trust_pins)
+        ):
+            raise ProviderLinkageStoreSchemaError(
+                "linkage store identity state is invalid"
+            )
         observed_pins = dict(
             connection.execute(
                 "SELECT provider_namespace, trust_snapshot_sha256 FROM trust_pins"

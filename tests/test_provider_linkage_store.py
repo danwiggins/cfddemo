@@ -32,6 +32,7 @@ from evidence_inspector.provider_linkage_store import (
     ProviderLinkageStoreConflict,
     ProviderLinkageStoreSchemaError,
     ProviderLinkageStoreUnsafe,
+    _trust_pins_sha256,
 )
 from tests.test_provider_linkage import (
     AFTER,
@@ -66,6 +67,13 @@ def _record(digit: str = "c"):
     revision = _revision()
     record, _ = _consume(revision, (_create_approval(revision, digit),))
     return record
+
+
+def _reseal_state_head(connection: sqlite3.Connection) -> None:
+    connection.execute(
+        "UPDATE metadata SET value=? WHERE key='state_head_sha256'",
+        (ProviderLinkageStore._state_head(connection),),
+    )
 
 
 def _process_commit(
@@ -487,6 +495,85 @@ def test_root_or_database_substitution_fails_closed(tmp_path: Path) -> None:
     root.mkdir(mode=0o700)
     try:
         with pytest.raises(ProviderLinkageStoreUnsafe, match="root changed"):
+            store.active_snapshot()
+    finally:
+        store.close()
+
+
+def test_database_substitution_fails_closed(tmp_path: Path) -> None:
+    root = tmp_path / "protected"
+    store = _store(root)
+    database = root / "linkage.sqlite3"
+    moved = root / "linkage.sqlite3.moved"
+    database.rename(moved)
+    sqlite3.connect(database).close()
+    database.chmod(0o600)
+    try:
+        with pytest.raises(ProviderLinkageStoreUnsafe, match="database changed"):
+            store.active_snapshot()
+    finally:
+        store.close()
+
+
+@pytest.mark.parametrize(
+    "key",
+    (
+        "store_id",
+        "store_epoch_sha256",
+        "storage_identity_sha256",
+        "trust_pins_sha256",
+    ),
+)
+def test_resealed_persisted_store_identity_mutation_fails_closed(
+    tmp_path: Path,
+    key: str,
+) -> None:
+    root = tmp_path / "protected"
+    store = _store(root)
+    store.commit_authorized_revision(_record())
+    connection = sqlite3.connect(root / "linkage.sqlite3")
+    current = connection.execute(
+        "SELECT value FROM metadata WHERE key=?",
+        (key,),
+    ).fetchone()[0]
+    candidates = (
+        ("store_" + "0" * 32, "store_" + "1" * 32)
+        if key == "store_id"
+        else ("0" * 64, "1" * 64)
+    )
+    replacement = next(value for value in candidates if value != current)
+    connection.execute(
+        "UPDATE metadata SET value=? WHERE key=?",
+        (replacement, key),
+    )
+    _reseal_state_head(connection)
+    connection.commit()
+    connection.close()
+    try:
+        with pytest.raises(ProviderLinkageStoreSchemaError, match="identity state"):
+            store.active_snapshot()
+    finally:
+        store.close()
+
+
+def test_resealed_persisted_trust_pin_drift_fails_closed(tmp_path: Path) -> None:
+    root = tmp_path / "protected"
+    store = _store(root)
+    store.commit_authorized_revision(_record())
+    connection = sqlite3.connect(root / "linkage.sqlite3")
+    connection.execute(
+        "UPDATE trust_pins SET trust_snapshot_sha256=?",
+        ("4" * 64,),
+    )
+    connection.execute(
+        "UPDATE metadata SET value=? WHERE key='trust_pins_sha256'",
+        (_trust_pins_sha256({PROVIDER: "4" * 64}),),
+    )
+    _reseal_state_head(connection)
+    connection.commit()
+    connection.close()
+    try:
+        with pytest.raises(ProviderLinkageStoreSchemaError):
             store.active_snapshot()
     finally:
         store.close()
