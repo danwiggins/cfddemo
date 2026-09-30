@@ -638,9 +638,50 @@ class PortableViewManifest(_ClosedModel):
 
 
 class VerifiedPortableView(_ClosedModel):
+    authority_kind: Literal["content_addressed_descriptor_snapshot"] = (
+        "content_addressed_descriptor_snapshot"
+    )
+    filesystem_projection_current: Literal[False] = False
     manifest: PortableViewManifest
     view: PortableLocalView
     accessible_table_bytes: bytes
+    trust_context_sha256: Sha256
+    snapshot_sha256: Sha256
+
+    @model_validator(mode="after")
+    def exact_snapshot(self) -> VerifiedPortableView:
+        table_sha256 = sha256_bytes(self.accessible_table_bytes)
+        if (
+            table_sha256 != self.view.accessible_table_sha256
+            or table_sha256 != self.manifest.accessible_table_sha256
+            or self.manifest.view_sha256
+            != sha256_bytes(canonical_json_bytes(self.view))
+            or self.trust_context_sha256 != self.view.trust_context_sha256
+        ):
+            raise ValueError("verified snapshot bindings disagree")
+        expected = _digest(
+            {
+                "manifest": self.manifest,
+                "view": self.view,
+                "accessible_table_sha256": table_sha256,
+                "trust_context_sha256": self.trust_context_sha256,
+            }
+        )
+        if self.snapshot_sha256 != expected:
+            raise ValueError("verified snapshot digest does not match content")
+        return self
+
+
+@dataclass(frozen=True)
+class PublishedPortableView:
+    """An authoritative snapshot plus a non-authoritative mutable projection."""
+
+    untrusted_projection_path: Path
+    snapshot: VerifiedPortableView
+
+    @property
+    def filesystem_projection_current(self) -> Literal[False]:
+        return False
 
 
 def _digest(value: Any, *, exclude: set[str] | None = None) -> str:
@@ -661,6 +702,28 @@ def _jsonable(value: Any) -> Any:
     if isinstance(value, (list, tuple)):
         return [_jsonable(item) for item in value]
     return value
+
+
+def _verified_snapshot(
+    manifest: PortableViewManifest,
+    view: PortableLocalView,
+    accessible_table: bytes,
+    trust_context: PortableTrustContext,
+) -> VerifiedPortableView:
+    trust_context_sha256 = _digest(trust_context)
+    snapshot_content = {
+        "manifest": manifest,
+        "view": view,
+        "accessible_table_sha256": sha256_bytes(accessible_table),
+        "trust_context_sha256": trust_context_sha256,
+    }
+    return VerifiedPortableView(
+        manifest=manifest,
+        view=view,
+        accessible_table_bytes=accessible_table,
+        trust_context_sha256=trust_context_sha256,
+        snapshot_sha256=_digest(snapshot_content),
+    )
 
 
 def _validate_private_strings(value: Any, *, field_name: str = "") -> None:
@@ -1983,8 +2046,8 @@ def publish_portable_view(
     accessible_table: bytes,
     trust_context: PortableTrustContext,
     source_identity_verifier: SourceIdentityVerifier,
-) -> Path:
-    """Durably publish after immediate source re-verification, without overwrite."""
+) -> PublishedPortableView:
+    """Publish a projection and return its authoritative immutable snapshot."""
 
     destination = Path(destination)
     if destination.name in {"", ".", ".."} or not re.fullmatch(
@@ -2129,7 +2192,12 @@ def publish_portable_view(
             stage_name = quarantine_name
             raise
         published = True
-        return destination
+        return PublishedPortableView(
+            untrusted_projection_path=destination,
+            snapshot=_verified_snapshot(
+                manifest, view, accessible_table, trust_context
+            ),
+        )
     finally:
         if not published:
             _cleanup(parent_fd, stage_name, stage_fd)
@@ -2160,7 +2228,7 @@ def _parse_canonical(model: type[ModelT], content: bytes, label: str) -> ModelT:
 def verify_portable_view(
     root: str | Path, *, trust_context: PortableTrustContext
 ) -> VerifiedPortableView:
-    """Read through a pinned directory and replay every stored commitment."""
+    """Capture an authoritative snapshot without attesting path currency."""
 
     root_path = Path(root)
     root_fd = _open_directory(root_path)
@@ -2188,10 +2256,11 @@ def verify_portable_view(
             raise PortableViewTamperError("portable manifest does not replay")
         _validate_pinned_names(root_fd, pinned, content, sync=False)
         _same_directory(root_path, root_fd)
-        return VerifiedPortableView(
-            manifest=manifest,
-            view=view,
-            accessible_table_bytes=content[TABLE_PATH],
+        return _verified_snapshot(
+            manifest,
+            view,
+            content[TABLE_PATH],
+            trust_context,
         )
     finally:
         _close_pinned(pinned)
@@ -2217,6 +2286,7 @@ __all__ = [
     "PortableViewContractError",
     "PortableViewError",
     "PortableViewManifest",
+    "PublishedPortableView",
     "PortableViewPermissionError",
     "PortableViewStorageError",
     "PortableViewTamperError",

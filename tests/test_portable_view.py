@@ -448,7 +448,7 @@ def test_publication_is_atomic_no_overwrite_and_verifiable(
 ) -> None:
     view, table = build_portable_view(integrated_request, trust_context=trust_context)
     destination = tmp_path / "portable-alpha"
-    publish_portable_view(
+    published = publish_portable_view(
         destination,
         view=view,
         accessible_table=table,
@@ -456,6 +456,11 @@ def test_publication_is_atomic_no_overwrite_and_verifiable(
         source_identity_verifier=lambda: view.source_identities,
     )
     verified = verify_portable_view(destination, trust_context=trust_context)
+    assert published.untrusted_projection_path == destination
+    assert published.filesystem_projection_current is False
+    assert published.snapshot == verified
+    assert verified.authority_kind == "content_addressed_descriptor_snapshot"
+    assert verified.filesystem_projection_current is False
     assert verified.view == view
     assert verified.accessible_table_bytes == table
     assert {item.name for item in destination.iterdir()} == {
@@ -959,6 +964,140 @@ def test_verify_final_vector_catches_in_place_manifest_mutation_at_table_open(
     with pytest.raises(PortableViewTamperError):
         verify_portable_view(root, trust_context=trust_context)
     assert mutated
+
+
+def _mutate_projection_after_final_inventory(
+    root: Path, race: str, replacement: Path | None
+) -> None:
+    root.chmod(0o700)
+    if race == "restore_manifest":
+        manifest = root / "manifest.json"
+        manifest.chmod(0o600)
+        payload = bytearray(manifest.read_bytes())
+        payload[-2] = ord("0") if payload[-2] != ord("0") else ord("1")
+        manifest.write_bytes(payload)
+        manifest.chmod(0o400)
+    elif race == "insert_extra":
+        (root / "extra").write_bytes(b"late unverified file")
+        (root / "extra").chmod(0o400)
+    elif race == "replace_view":
+        assert replacement is not None
+        os.replace(replacement, root / "view.json")
+        (root / "view.json").chmod(0o400)
+    else:  # pragma: no cover - test helper contract
+        raise AssertionError(race)
+    root.chmod(0o500)
+
+
+@pytest.mark.parametrize("race", ["restore_manifest", "insert_extra", "replace_view"])
+def test_publish_returns_snapshot_not_current_projection_during_terminal_race(
+    integrated_request: PortableViewBuildRequest,
+    trust_context: PortableTrustContext,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    race: str,
+) -> None:
+    view, table = build_portable_view(integrated_request, trust_context=trust_context)
+    destination = tmp_path / "artifact"
+    replacement = tmp_path / "replacement-view.json"
+    replacement.write_bytes(canonical_json_bytes(view))
+    replacement_payload = bytearray(replacement.read_bytes())
+    replacement_payload[-2] = (
+        ord("0") if replacement_payload[-2] != ord("0") else ord("1")
+    )
+    replacement.write_bytes(replacement_payload)
+    original_stat = portable.os.stat
+    original_rename = portable.rename_directory_exclusive_at
+    installed = False
+    mutated = False
+
+    def mark_installed(parent_fd: int, source: str, target: str) -> None:
+        nonlocal installed
+        original_rename(parent_fd, source, target)
+        if target == destination.name:
+            installed = True
+
+    def mutate_after_inventory(
+        path: object,
+        *,
+        dir_fd: int | None = None,
+        follow_symlinks: bool = True,
+    ) -> os.stat_result:
+        nonlocal mutated
+        if installed and path == "accessible-table.tsv" and not mutated:
+            mutated = True
+            _mutate_projection_after_final_inventory(
+                destination, race, replacement if race == "replace_view" else None
+            )
+        return original_stat(path, dir_fd=dir_fd, follow_symlinks=follow_symlinks)
+
+    monkeypatch.setattr(portable, "rename_directory_exclusive_at", mark_installed)
+    monkeypatch.setattr(portable.os, "stat", mutate_after_inventory)
+    published = publish_portable_view(
+        destination,
+        view=view,
+        accessible_table=table,
+        trust_context=trust_context,
+        source_identity_verifier=lambda: view.source_identities,
+    )
+    assert mutated
+    assert published.untrusted_projection_path == destination
+    assert published.filesystem_projection_current is False
+    assert published.snapshot.view == view
+    assert published.snapshot.accessible_table_bytes == table
+    with pytest.raises(PortableViewTamperError):
+        verify_portable_view(destination, trust_context=trust_context)
+
+
+@pytest.mark.parametrize("race", ["restore_manifest", "insert_extra", "replace_view"])
+def test_verify_returns_snapshot_not_current_projection_during_terminal_race(
+    integrated_request: PortableViewBuildRequest,
+    trust_context: PortableTrustContext,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    race: str,
+) -> None:
+    view, table = build_portable_view(integrated_request, trust_context=trust_context)
+    root = tmp_path / "root"
+    publish_portable_view(
+        root,
+        view=view,
+        accessible_table=table,
+        trust_context=trust_context,
+        source_identity_verifier=lambda: view.source_identities,
+    )
+    replacement = tmp_path / "replacement-view.json"
+    replacement.write_bytes(canonical_json_bytes(view))
+    replacement_payload = bytearray(replacement.read_bytes())
+    replacement_payload[-2] = (
+        ord("0") if replacement_payload[-2] != ord("0") else ord("1")
+    )
+    replacement.write_bytes(replacement_payload)
+    original_stat = portable.os.stat
+    mutated = False
+
+    def mutate_after_inventory(
+        path: object,
+        *,
+        dir_fd: int | None = None,
+        follow_symlinks: bool = True,
+    ) -> os.stat_result:
+        nonlocal mutated
+        if path == "accessible-table.tsv" and dir_fd is not None and not mutated:
+            mutated = True
+            _mutate_projection_after_final_inventory(
+                root, race, replacement if race == "replace_view" else None
+            )
+        return original_stat(path, dir_fd=dir_fd, follow_symlinks=follow_symlinks)
+
+    monkeypatch.setattr(portable.os, "stat", mutate_after_inventory)
+    verified = verify_portable_view(root, trust_context=trust_context)
+    assert mutated
+    assert verified.filesystem_projection_current is False
+    assert verified.view == view
+    assert verified.accessible_table_bytes == table
+    with pytest.raises(PortableViewTamperError):
+        verify_portable_view(root, trust_context=trust_context)
 
 
 @pytest.mark.parametrize(
