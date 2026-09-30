@@ -35,8 +35,12 @@ from .auth import (
     LocalWebBoundary,
     build_loopback_config,
 )
-from .contracts import ProblemDetail, ProblemOwner
-from .explorer import IntegratedExplorerSource
+from .contracts import ProblemDetail, ProblemOwner, validate_public_projection
+from .explorer import (
+    IntegratedExplorerSource,
+    prepare_explorer_comparison_response,
+    prepare_explorer_document_response,
+)
 from .source import JobStoreProjectionSource
 
 MAX_REQUEST_BYTES = 4096
@@ -707,7 +711,9 @@ class _Handler(http.server.BaseHTTPRequestHandler):
                 if "cursor" in parameters:
                     query_payload["cursor"] = parameters["cursor"][0]
                 page = self.application.explorer.query(CatalogQuery(**query_payload))
-                self._json(200, page.model_dump(mode="json"))
+                payload = page.model_dump(mode="json")
+                validate_public_projection(payload)
+                self._json(200, payload)
                 return
             if parsed.path == _EXPLORER_COMPARE_ROUTE:
                 self.application.boundary.authorize(request)
@@ -731,7 +737,10 @@ class _Handler(http.server.BaseHTTPRequestHandler):
                 ):
                     raise ValueError("comparison result identity is invalid")
                 comparison = self.application.explorer.compare(left, right)
-                self._json(200, comparison.model_dump(mode="json"))
+                payload = prepare_explorer_comparison_response(
+                    self.application.explorer, comparison
+                )
+                self._json(200, payload)
                 return
             explorer_match = _EXPLORER_RESULT_ROUTE.fullmatch(parsed.path)
             if explorer_match is not None:
@@ -744,7 +753,10 @@ class _Handler(http.server.BaseHTTPRequestHandler):
                     raise ApiProblem(
                         404, self.application.kernel.not_found_problem
                     ) from exc
-                self._json(200, document.model_dump(mode="json"))
+                payload = prepare_explorer_document_response(
+                    self.application.explorer, document
+                )
+                self._json(200, payload)
                 return
             match = _JOB_ROUTE.fullmatch(parsed.path)
             if match is not None:

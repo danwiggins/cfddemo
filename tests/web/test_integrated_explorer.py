@@ -6,6 +6,7 @@ import importlib.util
 import inspect
 import json
 import sys
+from types import SimpleNamespace
 from pathlib import Path
 
 import pytest
@@ -19,10 +20,17 @@ from evidence_inspector.compatibility import (
     TrustState,
     VerifiedMeasurementRecord,
 )
-from evidence_inspector.result_catalog import CatalogQuery, CatalogVerificationContext
+from evidence_inspector.result_catalog import (
+    CatalogFilesystemError,
+    CatalogQuery,
+    CatalogVerificationContext,
+    ResultCatalog,
+)
 from evidence_inspector.result_view import build_result_view
 from tests.web.test_loopback_server import _exchange, _request
 from traceback_runner.serialization import canonical_json_bytes
+from traceback_runner.serialization import sha256_bytes
+from traceback_runner.bundles import verify_bundle
 from traceback_runner.store import JobStore
 from traceback_runner.web.explorer import (
     CanonicalExplorerArtifactRepository,
@@ -30,6 +38,7 @@ from traceback_runner.web.explorer import (
     CatalogAuthorityIndex,
     ExplorerArtifactRecord,
     IntegratedExplorerSource,
+    _fragment_matches_selected_documents,
     explorer_eligibility,
 )
 from traceback_runner.web.server import RunningLocalWebService
@@ -144,6 +153,46 @@ def test_detail_reloads_real_e04_authority_and_rejects_fabrication(
         catalog.close()
 
 
+def test_detail_rejects_closed_shadowed_or_substituted_catalog(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    catalog, ref, _, _, explorer = _installed(tmp_path)
+    catalog.close()
+    catalog.get_verified = lambda result_id, context: ref  # type: ignore[method-assign]
+    with pytest.raises(CatalogFilesystemError):
+        explorer.get(ref.result_id)
+
+    catalog, ref, _, _, explorer = _installed(tmp_path / "instance-shadow")
+    try:
+        catalog._connect = lambda: None  # type: ignore[method-assign]
+        with pytest.raises(CatalogFilesystemError, match="method is shadowed"):
+            explorer.get(ref.result_id)
+    finally:
+        catalog.close()
+
+    class SubstituteCatalog(ResultCatalog):
+        pass
+
+    with pytest.raises(TypeError, match="exact ResultCatalog"):
+        IntegratedExplorerSource(
+            catalog=object.__new__(SubstituteCatalog),
+            authority=explorer._authority,
+            artifacts=explorer._artifacts,
+        )
+
+    catalog, ref, _, _, explorer = _installed(tmp_path / "class-shadow")
+    try:
+        monkeypatch.setattr(
+            ResultCatalog,
+            "get_verified",
+            lambda self, result_id, context: ref,
+        )
+        with pytest.raises(CatalogFilesystemError, match="class changed"):
+            explorer.get(ref.result_id)
+    finally:
+        catalog.close()
+
+
 def test_model_copy_poison_is_rejected_before_repository_sink(tmp_path: Path) -> None:
     catalog, _, _, artifact, _ = _installed(tmp_path)
     try:
@@ -153,6 +202,120 @@ def test_model_copy_poison_is_rejected_before_repository_sink(tmp_path: Path) ->
         poisoned = artifact.model_copy(update={"result_view": poisoned_view})
         with pytest.raises((ValidationError, ValueError)):
             CanonicalExplorerArtifactRepository((poisoned,))
+    finally:
+        catalog.close()
+
+
+@pytest.mark.parametrize(
+    "private_text",
+    (
+        "source%2Fprivate%2Fcase.tsv",
+        "%252FUsers%252Fcase%252Finput.tsv",
+        "C:%5CUsers%5CCase%5Cinput.tsv",
+        "%5C%5Cserver%5Cshare%5Ccase.tsv",
+        "file%3A%2F%2F%2Ftmp%2Fcase.tsv",
+        "source%E2%88%95private%E2%88%95case.tsv",
+        "SoUrCe%2fPrIvAtE%2fcase.tsv",
+        "Patient Identifier 42",
+        "ACGTRYSWKMBDHVNACGTRYSWKMBDHVN",
+    ),
+)
+def test_nested_public_projection_rejects_encoded_private_text(
+    tmp_path: Path, private_text: str
+) -> None:
+    catalog, _, _, artifact, _ = _installed(tmp_path)
+    try:
+        source = artifact.result_view_request.sources[0].model_copy(
+            update={"accessible_label": private_text}
+        )
+        request = artifact.result_view_request.model_copy(update={"sources": (source,)})
+        row = artifact.result_view.rows[0].model_copy(
+            update={"accessible_label": private_text}
+        )
+        view = artifact.result_view.model_copy(update={"rows": (row,)})
+        poisoned = artifact.model_copy(
+            update={"result_view_request": request, "result_view": view}
+        )
+        with pytest.raises((ValidationError, ValueError)):
+            CanonicalExplorerArtifactRepository((poisoned,))
+    finally:
+        catalog.close()
+
+
+def test_fragment_pair_cross_binding_rejects_stale_same_id_peer(
+    tmp_path: Path,
+) -> None:
+    catalog, ref, _, artifact, _ = _installed(tmp_path)
+    try:
+        record = artifact.result_view_request.sources[0].record
+        manifest = verify_bundle(
+            catalog.objects / ref.bundle_sha256, catalog.trust_store
+        ).manifest
+        second_manifest = manifest.model_copy(
+            update={"record_id": "record-pair-second"}
+        )
+        second_ref = ref.model_copy(
+            update={
+                "result_id": f"result_{'2' * 40}",
+                "bundle_record_id": second_manifest.record_id,
+                "bundle_manifest_sha256": sha256_bytes(
+                    canonical_json_bytes(second_manifest)
+                ),
+                "bundle_sha256": "3" * 64,
+            }
+        )
+        second_record = record.model_copy(
+            update={
+                "result_id": second_ref.result_id,
+                "result_sha256": "4" * 64,
+                "bundle_id": "bundle_pair_second",
+                "bundle_sha256": second_ref.bundle_sha256,
+            }
+        )
+        left = SimpleNamespace(
+            models=SimpleNamespace(
+                catalog_ref=ref,
+                result_view_request=SimpleNamespace(
+                    sources=(SimpleNamespace(record=record),)
+                ),
+            )
+        )
+        right = SimpleNamespace(
+            models=SimpleNamespace(
+                catalog_ref=second_ref,
+                result_view_request=SimpleNamespace(
+                    sources=(SimpleNamespace(record=second_record),)
+                ),
+            )
+        )
+        fragment = SimpleNamespace(
+            state=SimpleNamespace(
+                left=SimpleNamespace(
+                    result_id=ref.result_id, method_ref=ref.method_ref
+                ),
+                right=SimpleNamespace(
+                    result_id=second_ref.result_id, method_ref=second_ref.method_ref
+                ),
+            ),
+            request=SimpleNamespace(
+                sources=(
+                    SimpleNamespace(record=record, manifest=manifest),
+                    SimpleNamespace(record=second_record, manifest=second_manifest),
+                )
+            ),
+        )
+        assert _fragment_matches_selected_documents(fragment, left, right)
+        stale = second_record.model_copy(update={"result_sha256": "5" * 64})
+        stale_fragment = SimpleNamespace(
+            state=fragment.state,
+            request=SimpleNamespace(
+                sources=(
+                    SimpleNamespace(record=record, manifest=manifest),
+                    SimpleNamespace(record=stale, manifest=second_manifest),
+                )
+            ),
+        )
+        assert not _fragment_matches_selected_documents(stale_fragment, left, right)
     finally:
         catalog.close()
 
@@ -197,6 +360,42 @@ def test_real_catalog_api_is_authorized_canonical_and_release_disabled(
             assert compare_status == 400
     finally:
         catalog.close()
+
+
+def test_api_boundary_rejects_encoded_private_projection(tmp_path: Path) -> None:
+    class UnsafeDocument:
+        @staticmethod
+        def model_dump(*, mode: str) -> dict[str, object]:
+            assert mode == "json"
+            return {
+                "models": {
+                    "result_view": {
+                        "rows": [{"accessible_label": "source%2Fprivate%2Fcase.tsv"}]
+                    }
+                }
+            }
+
+    class UnsafeExplorer:
+        @staticmethod
+        def get(result_id: str) -> UnsafeDocument:
+            assert result_id.startswith("result_")
+            return UnsafeDocument()
+
+    store = JobStore(tmp_path / "jobs.sqlite3")
+    with RunningLocalWebService.start(
+        store=store,
+        state_directory=tmp_path / "state",
+        explorer=UnsafeExplorer(),  # type: ignore[arg-type]
+    ) as service:
+        cookie, _ = _exchange(service)
+        status, _, body = _request(
+            service,
+            "GET",
+            f"/api/v1/explorer/results/result_{'1' * 40}",
+            headers={"Cookie": cookie},
+        )
+        assert status == 400
+        assert b"source" not in body
 
 
 def test_packaged_dom_uses_exact_pair_endpoint_and_explicit_states() -> None:

@@ -3,10 +3,12 @@
 from __future__ import annotations
 
 import re
+import unicodedata
+from collections.abc import Mapping, Sequence
 from datetime import datetime
 from enum import StrEnum
 from pathlib import PurePosixPath
-from typing import Annotated, Literal
+from typing import Annotated, Any, Literal
 from urllib.parse import unquote
 
 from pydantic import AfterValidator, Field, StringConstraints, model_validator
@@ -15,21 +17,93 @@ from traceback_runner.contracts import JobState, RunnerContract
 
 MAX_ACTIONS = 8
 _SAFE_OPERATOR_TEXT = re.compile(r"^[A-Za-z0-9][A-Za-z0-9 .,'()%;:!?+_-]*$")
+_IUPAC_SEQUENCE = re.compile(r"^[ACGTRYSWKMBDHVN]{24,}$", re.IGNORECASE)
+_SHA256_TEXT = re.compile(r"^[0-9a-f]{64}$")
+_MD5_TEXT = re.compile(r"^[0-9a-f]{32}$")
+_UNICODE_SEPARATORS = str.maketrans(
+    {
+        "∕": "/",
+        "⁄": "/",
+        "／": "/",
+        "⧸": "/",
+        "⧹": "\\",
+        "＼": "\\",
+    }
+)
+_DIGEST_FIELDS = ("sha256", "sha256s", "md5", "md5s")
+
+
+def _decoded_public_text(value: str) -> str:
+    decoded = unicodedata.normalize("NFKC", value).translate(_UNICODE_SEPARATORS)
+    for _ in range(8):
+        next_value = unicodedata.normalize("NFKC", unquote(decoded)).translate(
+            _UNICODE_SEPARATORS
+        )
+        if next_value == decoded:
+            return decoded
+        decoded = next_value
+    raise ValueError("public text percent decoding did not converge")
+
+
+def validate_public_text(value: str) -> str:
+    """Reject paths, identifiers, credentials, and biological sequence text."""
+
+    decoded = _decoded_public_text(value)
+    lowered = decoded.casefold()
+    dangerous_schemes = (
+        "data|file|ftp|gopher|http|https|javascript|nfs|smb|ssh|telnet|ws|wss"
+    )
+    if re.search(rf"(?<![A-Za-z0-9_])(?:{dangerous_schemes})\s*:", lowered):
+        raise ValueError("public text cannot contain a URI")
+    if (
+        "/" in decoded
+        or "\\" in decoded
+        or ".." in decoded
+        or re.search(r"(?i)(?:^|\s)[a-z]:[/\\]", decoded)
+        or any(root in lowered for root in ("/users/", "/home/", "/volumes/"))
+    ):
+        raise ValueError("public text cannot contain a path")
+    if re.search(
+        r"\b(?:source|donor|patient|sample|read|query|path)[ _-]*(?:id|identifier)\b",
+        decoded,
+        flags=re.IGNORECASE,
+    ):
+        raise ValueError("public text cannot contain a private identifier")
+    if re.search(
+        r"(?:authorization|api[_ -]?key|secret|password|token)\s*[:=]\s*\S+",
+        decoded,
+        flags=re.IGNORECASE,
+    ):
+        raise ValueError("public text cannot contain a credential")
+    nucleotide_candidate = re.sub(r"[^A-Za-z]", "", decoded)
+    if _IUPAC_SEQUENCE.fullmatch(nucleotide_candidate):
+        raise ValueError("public text cannot contain a raw nucleotide sequence")
+    return value
+
+
+def validate_public_projection(value: Any, *, field_name: str = "") -> None:
+    """Recursively enforce the public-text boundary, except typed digests."""
+
+    if isinstance(value, Mapping):
+        for key, nested in value.items():
+            validate_public_projection(nested, field_name=str(key))
+    elif isinstance(value, Sequence) and not isinstance(value, (str, bytes, bytearray)):
+        for nested in value:
+            validate_public_projection(nested, field_name=field_name)
+    elif isinstance(value, str):
+        normalized_field = field_name.casefold()
+        digest_field = normalized_field.endswith(_DIGEST_FIELDS)
+        typed_digest = digest_field and bool(
+            _SHA256_TEXT.fullmatch(value) or _MD5_TEXT.fullmatch(value)
+        )
+        if not typed_digest:
+            validate_public_text(value)
 
 
 def _safe_operator_text(value: str) -> str:
     if _SAFE_OPERATOR_TEXT.fullmatch(value) is None:
         raise ValueError("operator text contains characters outside the safe grammar")
-    decoded = value
-    converged = False
-    for _ in range(len(value) + 1):
-        next_value = unquote(decoded)
-        if next_value == decoded:
-            converged = True
-            break
-        decoded = next_value
-    if not converged:
-        raise ValueError("operator text percent decoding did not converge")
+    decoded = _decoded_public_text(value)
     lowered = decoded.casefold()
     dangerous_schemes = (
         "data|file|ftp|gopher|http|https|javascript|nfs|smb|ssh|telnet|ws|wss"
@@ -53,11 +127,10 @@ def _safe_operator_text(value: str) -> str:
         flags=re.IGNORECASE,
     ):
         raise ValueError("operator text cannot contain a UUID-like identifier")
-    nucleotide_candidate = re.sub(r"[^A-Za-z0-9]", "", decoded)
-    if len(nucleotide_candidate) >= 24 and re.fullmatch(
-        r"[ACGTRYSWKMBDHVN]+", nucleotide_candidate, flags=re.IGNORECASE
-    ):
-        raise ValueError("operator text cannot contain a raw nucleotide sequence")
+    try:
+        validate_public_text(value)
+    except ValueError as exc:
+        raise ValueError(str(exc).replace("public text", "operator text")) from exc
     if re.search(
         r"(?:authorization|api[_ -]?key|secret|password|token)\s*[:=]\s*\S+",
         decoded,

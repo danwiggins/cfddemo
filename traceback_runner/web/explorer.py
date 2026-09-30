@@ -2,8 +2,7 @@
 
 from __future__ import annotations
 
-import re
-from collections.abc import Sequence
+from collections.abc import Callable, Sequence
 from typing import Literal
 
 from pydantic import Field, model_validator
@@ -27,6 +26,7 @@ from evidence_inspector.result_catalog import (
     CatalogResultRef,
     CatalogVerificationContext,
     ResultCatalog,
+    bind_catalog_live_reader,
 )
 from evidence_inspector.result_view import (
     ResultView,
@@ -40,31 +40,12 @@ from evidence_inspector.sensitivity_comparison import (
     sensitivity_comparison_from_canonical_bytes,
 )
 from traceback_runner.contracts import RunnerContract
-from traceback_runner.serialization import canonical_json_bytes
+from traceback_runner.contracts import ResultBundleManifestV2
+from traceback_runner.serialization import canonical_json_bytes, sha256_bytes
+from traceback_runner.web.contracts import validate_public_projection
 
 MAX_EXPLORER_PAGE_SIZE = 100
 MAX_EXPLORER_ARTIFACT_BYTES = 64 * 1024 * 1024
-_PRIVATE_BYTES = re.compile(
-    rb'(?:/Users/|/Volumes/|/home/|"(?:donor|patient|read|sample)[_ -]?id"\s*:\s*"[^"]+'
-    rb")",
-    re.IGNORECASE,
-)
-_SEQUENCE = re.compile(r"^[ACGTN]{24,}$", re.IGNORECASE)
-
-
-def _reject_private_values(value: object, *, field_name: str = "") -> None:
-    if isinstance(value, dict):
-        for key, nested in value.items():
-            _reject_private_values(nested, field_name=str(key))
-    elif isinstance(value, (list, tuple)):
-        for nested in value:
-            _reject_private_values(nested, field_name=field_name)
-    elif (
-        isinstance(value, str)
-        and not field_name.endswith(("sha256", "md5"))
-        and _SEQUENCE.fullmatch(value)
-    ):
-        raise ValueError("explorer artifact contains sequence-like private data")
 
 
 def _flatten_strings(value: object) -> set[str]:
@@ -203,9 +184,9 @@ class CanonicalExplorerArtifactRepository:
             portable=portable,
         )
         content = canonical_json_bytes(replayed)
-        if len(content) > MAX_EXPLORER_ARTIFACT_BYTES or _PRIVATE_BYTES.search(content):
+        if len(content) > MAX_EXPLORER_ARTIFACT_BYTES:
             raise ValueError("explorer artifact violates its public byte boundary")
-        _reject_private_values(replayed.model_dump(mode="json"))
+        validate_public_projection(replayed.model_dump(mode="json"))
         return replayed
 
     def contains(self, result_id: str) -> bool:
@@ -423,7 +404,60 @@ def _bind_record_to_catalog(
     )
 
 
+def _fragment_matches_selected_documents(
+    fragment: FragmentExplorerView,
+    left: ExplorerDocument,
+    right: ExplorerDocument,
+) -> bool:
+    if (
+        fragment.state.left.result_id != left.models.catalog_ref.result_id
+        or fragment.state.right.result_id != right.models.catalog_ref.result_id
+    ):
+        return False
+    documents = (left, right)
+    selections = (fragment.state.left, fragment.state.right)
+    sources_by_id = {item.record.result_id: item for item in fragment.request.sources}
+    for document, selection in zip(documents, selections, strict=True):
+        ref = document.models.catalog_ref
+        e06_source = next(
+            item
+            for item in document.models.result_view_request.sources
+            if item.record.result_id == ref.result_id
+        )
+        fragment_source = sources_by_id.get(ref.result_id)
+        if fragment_source is None:
+            return False
+        manifest = fragment_source.manifest
+        if (
+            not isinstance(manifest, ResultBundleManifestV2)
+            or fragment_source.record != e06_source.record
+            or selection.method_ref != ref.method_ref
+            or manifest.record_id != ref.bundle_record_id
+            or manifest.workflow_release_id != ref.workflow_release_id
+            or sha256_bytes(canonical_json_bytes(manifest))
+            != ref.bundle_manifest_sha256
+            or manifest.method.method_id != ref.method_ref.method_id
+            or manifest.method.version != ref.method_ref.version
+            or manifest.method.method_definition_sha256 != ref.method_definition_sha256
+        ):
+            return False
+    return True
+
+
+def _reverify_document(
+    get_verified: Callable[[str, CatalogVerificationContext], CatalogResultRef],
+    authority: CatalogAuthorityIndex,
+    document: ExplorerDocument,
+) -> None:
+    result_id = document.models.catalog_ref.result_id
+    current = get_verified(result_id, authority.context_for(result_id))
+    if current != document.models.catalog_ref:
+        raise ValueError("catalog result changed before explorer response")
+
+
 class IntegratedExplorerSource:
+    __slots__ = ("_artifacts", "_authority", "_get_verified", "_query")
+
     def __init__(
         self,
         *,
@@ -431,12 +465,14 @@ class IntegratedExplorerSource:
         authority: CatalogAuthorityIndex,
         artifacts: CanonicalExplorerArtifactRepository,
     ) -> None:
-        self._catalog = catalog
+        reader = bind_catalog_live_reader(catalog)
+        self._get_verified = reader.get_verified
+        self._query = reader.query
         self._authority = authority
         self._artifacts = artifacts
 
     def query(self, query: CatalogQuery) -> ExplorerCatalogProjection:
-        page: CatalogPage = self._catalog.query(query)
+        page: CatalogPage = self._query(query)
         return ExplorerCatalogProjection(
             results=tuple(
                 ExplorerCatalogItem(
@@ -456,14 +492,17 @@ class IntegratedExplorerSource:
 
     def get(self, result_id: str) -> ExplorerDocument:
         context = self._authority.context_for(result_id)
-        ref = self._catalog.get_verified(result_id, context)
+        ref = self._get_verified(result_id, context)
         record = self._artifacts.load(result_id)
         models = _bind_record_to_catalog(ref, record)
         document = ExplorerDocument(
             models=models,
             eligibility=explorer_eligibility(ref),
         )
-        return ExplorerDocument.model_validate_json(canonical_json_bytes(document))
+        replayed = ExplorerDocument.model_validate_json(canonical_json_bytes(document))
+        validate_public_projection(replayed.model_dump(mode="json"))
+        _reverify_document(self._get_verified, self._authority, replayed)
+        return replayed
 
     def compare(self, left_result_id: str, right_result_id: str) -> ExplorerComparison:
         if left_result_id == right_result_id:
@@ -474,7 +513,7 @@ class IntegratedExplorerSource:
             left.models.result_view.filters_sha256
             != right.models.result_view.filters_sha256
         ):
-            return ExplorerComparison(
+            comparison = ExplorerComparison(
                 left_result_id=left_result_id,
                 right_result_id=right_result_id,
                 outcome="unknown",
@@ -482,25 +521,32 @@ class IntegratedExplorerSource:
                 delta_available=False,
                 blocked_reason="Selected results use different exact filter contexts",
             )
+            _reverify_document(self._get_verified, self._authority, left)
+            _reverify_document(self._get_verified, self._authority, right)
+            return comparison
         candidates = [
             item
             for item in (left.models.fragment, right.models.fragment)
             if item is not None
         ]
-        fragment = None
+        canonical_candidates: dict[bytes, FragmentExplorerView] = {}
         for candidate in candidates:
-            selected = {
+            orientation = (
                 candidate.state.left.result_id,
                 candidate.state.right.result_id,
-            }
-            if selected == {left_result_id, right_result_id}:
-                if fragment is not None and canonical_json_bytes(
-                    fragment
-                ) != canonical_json_bytes(candidate):
-                    raise ValueError("comparison artifacts disagree")
-                fragment = candidate
+            )
+            if orientation == (right_result_id, left_result_id):
+                raise ValueError("comparison artifact orientation is reversed")
+            if orientation != (left_result_id, right_result_id):
+                continue
+            if not _fragment_matches_selected_documents(candidate, left, right):
+                raise ValueError("comparison artifact is not cross-bound to selections")
+            canonical_candidates[canonical_json_bytes(candidate)] = candidate
+        if len(canonical_candidates) > 1:
+            raise ValueError("comparison artifacts are ambiguous")
+        fragment = next(iter(canonical_candidates.values()), None)
         if fragment is None:
-            return ExplorerComparison(
+            comparison = ExplorerComparison(
                 left_result_id=left_result_id,
                 right_result_id=right_result_id,
                 outcome="unknown",
@@ -508,6 +554,9 @@ class IntegratedExplorerSource:
                 delta_available=False,
                 blocked_reason="No exact registered compatibility decision",
             )
+            _reverify_document(self._get_verified, self._authority, left)
+            _reverify_document(self._get_verified, self._authority, right)
+            return comparison
         outcome = fragment.compatibility.outcome
         if outcome == CompatibilityOutcome.COMPARABLE:
             projected = "comparable"
@@ -518,7 +567,7 @@ class IntegratedExplorerSource:
         synchronized = bool(
             projected == "comparable" and fragment.synchronized_comparison
         )
-        return ExplorerComparison(
+        comparison = ExplorerComparison(
             left_result_id=left_result_id,
             right_result_id=right_result_id,
             outcome=projected,
@@ -531,3 +580,38 @@ class IntegratedExplorerSource:
             ),
             fragment=fragment,
         )
+        validate_public_projection(comparison.model_dump(mode="json"))
+        _reverify_document(self._get_verified, self._authority, left)
+        _reverify_document(self._get_verified, self._authority, right)
+        return comparison
+
+
+def prepare_explorer_document_response(
+    source: IntegratedExplorerSource,
+    document: ExplorerDocument,
+) -> dict[str, object]:
+    """Reverify live authority immediately before HTTP serialization."""
+
+    if type(source) is not IntegratedExplorerSource:
+        raise TypeError("explorer response requires the installed source")
+    replayed = ExplorerDocument.model_validate_json(canonical_json_bytes(document))
+    _reverify_document(source._get_verified, source._authority, replayed)
+    payload = replayed.model_dump(mode="json")
+    validate_public_projection(payload)
+    return payload
+
+
+def prepare_explorer_comparison_response(
+    source: IntegratedExplorerSource,
+    comparison: ExplorerComparison,
+) -> dict[str, object]:
+    """Reload both selected documents immediately before comparison response."""
+
+    if type(source) is not IntegratedExplorerSource:
+        raise TypeError("explorer response requires the installed source")
+    source.get(comparison.left_result_id)
+    source.get(comparison.right_result_id)
+    replayed = ExplorerComparison.model_validate_json(canonical_json_bytes(comparison))
+    payload = replayed.model_dump(mode="json")
+    validate_public_projection(payload)
+    return payload

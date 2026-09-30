@@ -14,6 +14,19 @@ E06 request and view are replayed and bound back to the exact current E04 identi
 Browser responses do not include import roots, bundle paths, private alias maps,
 or raw input values.
 
+The explorer binds an exact open `ResultCatalog` installation and captures its
+unbound verification chain. Closed, substituted, subclassed, instance-shadowed,
+or class-shadowed readers fail before detail projection. The binding includes the
+root, database, object directory, connection, and trust-store identities. Runtime
+replacement of installed module bytecode is a process-integrity concern and is
+outside this boundary.
+
+All nested public strings pass the shared web privacy validator during canonical
+artifact ingestion and again immediately before HTTP serialization. It repeatedly
+percent-decodes and Unicode-normalizes text and rejects paths, URIs, traversal,
+reserved identifier stems, credentials, and full-IUPAC sequence strings. Only
+schema-typed digest values receive the digest exemption.
+
 The renderer is packaged HTML, CSS, and JavaScript. It has no external assets or
 network dependencies. It presents:
 
