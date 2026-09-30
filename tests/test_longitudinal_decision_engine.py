@@ -20,15 +20,16 @@ from evidence_inspector.longitudinal_compatibility import (
     LongitudinalOutcome,
     LongitudinalReason,
     LongitudinalSeriesDecision,
+    decide_longitudinal_member,
     decide_longitudinal_series,
     longitudinal_anchor_policy_sha256,
     replay_longitudinal_member_decision,
 )
 from tests.test_longitudinal_compatibility import (
     HEAD_SHA256,
-    LINKAGE_STORE,
     PROVIDER,
     TRUST_SHA256,
+    _activated_records,
     _decide,
     _policy,
     _record,
@@ -36,9 +37,7 @@ from tests.test_longitudinal_compatibility import (
 
 
 def _changed_value(record, dimension: ComparisonDimension):
-    return record.comparison_key.dimensions[
-        ALL_COMPARISON_DIMENSIONS.index(dimension)
-    ]
+    return record.comparison_key.dimensions[ALL_COMPARISON_DIMENSIONS.index(dimension)]
 
 
 def test_every_outcome_has_one_safe_action_and_strict_rendering_gate() -> None:
@@ -47,9 +46,7 @@ def test_every_outcome_has_one_safe_action_and_strict_rendering_gate() -> None:
     changed = _record("2", changed=dimension)
     changed_value = _changed_value(changed, dimension)
     decisions = {
-        LongitudinalOutcome.EQUIVALENT: _decide(
-            anchor, _record("2"), _policy(anchor)
-        ),
+        LongitudinalOutcome.EQUIVALENT: _decide(anchor, _record("2"), _policy(anchor)),
         LongitudinalOutcome.QUALIFIED_COMPATIBLE: _decide(
             anchor,
             changed,
@@ -89,9 +86,7 @@ def test_every_outcome_has_one_safe_action_and_strict_rendering_gate() -> None:
                 },
             ),
         ),
-        LongitudinalOutcome.INCOMPATIBLE: _decide(
-            anchor, changed, _policy(anchor)
-        ),
+        LongitudinalOutcome.INCOMPATIBLE: _decide(anchor, changed, _policy(anchor)),
         LongitudinalOutcome.UNKNOWN: _decide(
             anchor,
             _record("2", unknown=ComparisonDimension.UNCERTAINTY_METHOD),
@@ -99,9 +94,7 @@ def test_every_outcome_has_one_safe_action_and_strict_rendering_gate() -> None:
         ),
     }
     expected_actions = {
-        LongitudinalOutcome.EQUIVALENT: (
-            LongitudinalNextAction.USE_DIRECT_COMPARISON
-        ),
+        LongitudinalOutcome.EQUIVALENT: (LongitudinalNextAction.USE_DIRECT_COMPARISON),
         LongitudinalOutcome.QUALIFIED_COMPATIBLE: (
             LongitudinalNextAction.USE_QUALIFIED_COMPARISON
         ),
@@ -114,9 +107,7 @@ def test_every_outcome_has_one_safe_action_and_strict_rendering_gate() -> None:
         LongitudinalOutcome.INCOMPATIBLE: (
             LongitudinalNextAction.START_SEPARATE_SERIES
         ),
-        LongitudinalOutcome.UNKNOWN: (
-            LongitudinalNextAction.RESOLVE_UNKNOWN_INPUTS
-        ),
+        LongitudinalOutcome.UNKNOWN: (LongitudinalNextAction.RESOLVE_UNKNOWN_INPUTS),
     }
     assert set(decisions) == set(LongitudinalOutcome)
     for outcome, decision in decisions.items():
@@ -224,9 +215,7 @@ def test_mismatch_explanation_binds_exact_values_evidence_and_bridge() -> None:
     explanation = decision.dimension_explanations[0]
     assert explanation.dimension == dimension
     assert explanation.anchor_value_sha256 != explanation.member_value_sha256
-    assert explanation.disposition == (
-        DimensionDecisionDisposition.REGISTERED_BRIDGE
-    )
+    assert explanation.disposition == (DimensionDecisionDisposition.REGISTERED_BRIDGE)
     assert explanation.evidence_ref == "evidence_assay_protocol_alpha"
     assert explanation.evidence_sha256 == "a" * 64
     assert explanation.bridge_ref == "bridge_assay_protocol_alpha"
@@ -276,17 +265,18 @@ def test_v1_or_incomplete_decision_cannot_be_relabelled_as_d03() -> None:
         with pytest.raises(ValidationError, match=field):
             LongitudinalMemberDecision.model_validate_json(json.dumps(payload))
 
-    series = decide_longitudinal_series(
-        anchor,
-        (_record("2"),),
-        _policy(anchor),
-        expected_policy_sha256=longitudinal_anchor_policy_sha256(_policy(anchor)),
-        expected_authority_head_sha256=HEAD_SHA256,
-        expected_linkage_trust_snapshot_sha256_by_provider={
-            PROVIDER: TRUST_SHA256
-        },
-        linkage_store=LINKAGE_STORE,
-    )
+    member = _record("2")
+    policy = _policy(anchor)
+    with _activated_records(anchor, member) as (records, store):
+        series = decide_longitudinal_series(
+            records[0],
+            (records[1],),
+            policy,
+            expected_policy_sha256=longitudinal_anchor_policy_sha256(policy),
+            expected_authority_head_sha256=HEAD_SHA256,
+            expected_linkage_trust_snapshot_sha256_by_provider={PROVIDER: TRUST_SHA256},
+            linkage_store=store,
+        )
     series_payload = series.model_dump(mode="json")
     series_payload.pop("schema_version")
     with pytest.raises(ValidationError, match="schema_version"):
@@ -319,20 +309,17 @@ def test_series_is_anchor_direct_and_does_not_inherit_adjacent_compatibility() -
     assert _decide(middle, last, adjacent_policy).outcome == (
         LongitudinalOutcome.QUALIFIED_COMPATIBLE
     )
-    series = decide_longitudinal_series(
-        anchor,
-        (middle, last),
-        middle_policy,
-        expected_policy_sha256=longitudinal_anchor_policy_sha256(middle_policy),
-        expected_authority_head_sha256=HEAD_SHA256,
-        expected_linkage_trust_snapshot_sha256_by_provider={
-            PROVIDER: TRUST_SHA256
-        },
-        linkage_store=LINKAGE_STORE,
-    )
-    assert series.decisions[0].outcome == (
-        LongitudinalOutcome.QUALIFIED_COMPATIBLE
-    )
+    with _activated_records(anchor, middle, last) as (records, store):
+        series = decide_longitudinal_series(
+            records[0],
+            (records[1], records[2]),
+            middle_policy,
+            expected_policy_sha256=longitudinal_anchor_policy_sha256(middle_policy),
+            expected_authority_head_sha256=HEAD_SHA256,
+            expected_linkage_trust_snapshot_sha256_by_provider={PROVIDER: TRUST_SHA256},
+            linkage_store=store,
+        )
+    assert series.decisions[0].outcome == (LongitudinalOutcome.QUALIFIED_COMPATIBLE)
     assert series.decisions[1].outcome == LongitudinalOutcome.INCOMPATIBLE
 
 
@@ -341,41 +328,44 @@ def test_exact_e05_e01_and_lineage_authority_replay_rejects_tampering() -> None:
     member = _record("2")
     policy = _policy(anchor)
     policy_sha256 = longitudinal_anchor_policy_sha256(policy)
-    decision = _decide(anchor, member, policy)
-    pins = {
-        "expected_policy_sha256": policy_sha256,
-        "expected_authority_head_sha256": HEAD_SHA256,
-        "expected_linkage_trust_snapshot_sha256_by_provider": {
-            PROVIDER: TRUST_SHA256
-        },
-        "linkage_store": LINKAGE_STORE,
-    }
-    assert replay_longitudinal_member_decision(
-        decision, anchor, member, policy, **pins
-    ) == decision
-
-    tampered = decision.model_copy(update={"member_result_sha256": "f" * 64})
-    with pytest.raises(LongitudinalDecisionReplayError, match="replay exactly"):
-        replay_longitudinal_member_decision(
-            tampered, anchor, member, policy, **pins
+    with _activated_records(anchor, member) as (records, store):
+        anchor, member = records
+        pins = {
+            "expected_policy_sha256": policy_sha256,
+            "expected_authority_head_sha256": HEAD_SHA256,
+            "expected_linkage_trust_snapshot_sha256_by_provider": {
+                PROVIDER: TRUST_SHA256
+            },
+            "linkage_store": store,
+        }
+        decision = decide_longitudinal_member(anchor, member, policy, **pins)
+        assert (
+            replay_longitudinal_member_decision(
+                decision, anchor, member, policy, **pins
+            )
+            == decision
         )
 
-    stale_pins = {
-        **pins,
-        "expected_linkage_trust_snapshot_sha256_by_provider": {
-            PROVIDER: "f" * 64
-        },
-    }
-    with pytest.raises(LongitudinalDecisionReplayError, match="replay exactly"):
-        replay_longitudinal_member_decision(
-            decision, anchor, member, policy, **stale_pins
-        )
+        tampered = decision.model_copy(update={"member_result_sha256": "f" * 64})
+        with pytest.raises(LongitudinalDecisionReplayError, match="replay exactly"):
+            replay_longitudinal_member_decision(
+                tampered, anchor, member, policy, **pins
+            )
 
-    no_store_pins = {**pins, "linkage_store": None}
-    with pytest.raises(LongitudinalDecisionReplayError, match="replay exactly"):
-        replay_longitudinal_member_decision(
-            decision, anchor, member, policy, **no_store_pins
-        )
+        stale_pins = {
+            **pins,
+            "expected_linkage_trust_snapshot_sha256_by_provider": {PROVIDER: "f" * 64},
+        }
+        with pytest.raises(LongitudinalDecisionReplayError, match="replay exactly"):
+            replay_longitudinal_member_decision(
+                decision, anchor, member, policy, **stale_pins
+            )
+
+        no_store_pins = {**pins, "linkage_store": None}
+        with pytest.raises(LongitudinalDecisionReplayError, match="replay exactly"):
+            replay_longitudinal_member_decision(
+                decision, anchor, member, policy, **no_store_pins
+            )
 
 
 def test_explanations_actions_and_bridge_execution_fail_closed_on_tamper() -> None:
@@ -453,9 +443,7 @@ def test_mixed_bridge_disposition_is_explained_but_never_actionable() -> None:
     assert decision.next_action == LongitudinalNextAction.START_SEPARATE_SERIES
     assert decision.bridge_refs == ()
     bridge_explanation = next(
-        item
-        for item in decision.dimension_explanations
-        if item.dimension == first
+        item for item in decision.dimension_explanations if item.dimension == first
     )
     assert bridge_explanation.bridge_ref == "bridge_assay_protocol_alpha"
     assert decision.bridge_execution_state == "not_executed"
