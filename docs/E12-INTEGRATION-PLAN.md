@@ -35,7 +35,7 @@ limitation and never changes source values, denominators, or eligibility.
 | Immutable source/result identity | D06 binding, E04 catalog ref, E06 `ResultViewSource` | Bind result, bundle, method/version, capability, compatibility, denominator ledger, and source replay digest | Altering any identity or denominator field rejects the workspace; one result cannot represent two members |
 | One pinned anchor and six outcomes | Live-replayed D03 v3 series decision | Evaluate every member against the same pinned anchor; expose exact outcome/reasons/action | Property test every compatibility-key dimension; adjacency cannot bridge an anchor mismatch; old policy schema fails closed |
 | Standalone source values | Closed versioned family adapter over an applicable replayed E07 `FragmentExplorerView`, E08 `CellOriginExplorerArtifact`, or E09 `CnaExplorerSnapshot`, bound through the exact E04 result and E06 source authority | Bind the requested D02 measurement definition, quantity, unit, and one exact family coordinate before projecting values. A missing adapter is an explicit prerequisite/unavailable source-value state; D07 observations or comparison inputs never substitute for it | Wrong family/panel/bin/statistic/contributor/chromosome/segment, ambiguous or multiple match, quantity/unit mismatch, table/chart drift, and value-ranked selection reject the row |
-| Approved anchor and projection selection | Prerequisite protected `AnchorPolicyRegistry` and `ProjectionPolicyRegistry`, each with independently pinned registry ID, epoch, expected head and bounded selector/version | Resolve one registered D03 anchor policy/D07 envelope and one registered family/statistic/coordinate policy; the browser request carries only the two selector/version pairs and cannot author or hash either policy | Caller-created anchor/policy/envelope or projection subsets, value-ranked policies, stale selectors, rollback, registry replacement, head race and unregistered coordinates fail closed before member or source-artifact reads |
+| Approved anchor and projection selection | Prerequisite protected `AnchorPolicyRegistry` and `ProjectionPolicyRegistry`, each with independently pinned registry ID, epoch, expected head and bounded selector/version | Resolve one registered D03 anchor policy/D07 envelope, one approved anchor within that policy's live candidate page, and one registered family/statistic/coordinate policy; the browser request carries only those three selector/version pairs and cannot author or hash a policy or anchor identity | Caller-created anchor/policy/envelope or projection subsets, value-ranked policies, stale selectors, rollback, registry replacement, head race and unregistered coordinates fail closed before member or source-artifact reads |
 | Delta and trend suppression | D03 outcome plus D07 comparison replay | Only `equivalent` or `qualified_compatible` with D07 `available` may expose D07 comparison values, comparison denominators, delta, comparison interval, shared axis, or connecting segment. Independently verified E07/E08/E09 standalone values and D09 counts remain visible in their own fields | `requires_reanalysis`, `registered_bridge`, `incompatible`, `unknown`, outside-envelope, missing, failed, insufficient, or stale comparison states contain no D07 numeric fields or segment; valid measurement-specific source rows remain visible as separate series |
 | Repeatability uncertainty | D07 signed observations, result trust, registered envelope/evidence/protocol/authority | Copy D07 fields only from an available replayed D07 comparison; for every unavailable D07 result, preserve the contract's exact suppression of both comparison values, both comparison denominators, delta, and uncertainty | Same-value, noisy, missing, incompatible, unregistered factor transition, revoked key, and stale evidence cases remain distinct |
 | Denominators and missingness | Registry-bound D09 summary over D05/D06/E06 | Show declared/included/excluded/unavailable members and denominator units; preserve missing and withheld as states | All counts reconcile for zero eligible, one eligible, partial, and full cohorts; filters never rewrite scientific counts |
@@ -170,7 +170,7 @@ D05 through the registry, resolves the approved anchor policy/D07 envelope and
 the approved projection policy through their independently pinned registries,
 derives the bounded anchor-candidate page from the registered policy and live
 authority, resolves the request's explicit opaque approved-anchor selector from
-that exact page, obtains D06 status for the same selector/version,
+that exact page, obtains D06 status for the cohort selector/version,
 reads D04 active and bounded history state, obtains the D09 summary from its
 live registry/catalog authority, replays each applicable E07/E08/E09 artifact
 from durable family-source discovery against its exact E04/E06 source, replays
@@ -179,7 +179,8 @@ authority, and obtains D10 derived from that exact D09 population and replayed
 D03 decision set. Construction and return require the composable authority-
 fence prerequisite below; the builder is prohibited until that prerequisite
 merges. Under that protocol it acquires the live D01 linkage, D04 history, D05
-cohort, D06 record/catalog, E04 catalog, E06 source, D03 decision, D07
+cohort, D06 record/catalog, E04 catalog, the protected E06 result-view-source
+registry, D03 decision, D07
 comparison, D09 summary, D10 context, family-source, anchor-policy and
 projection-policy read fences in their fixed global order, captures every
 ID/epoch/version/head and canonical input, builds only from those snapshots,
@@ -278,12 +279,13 @@ The registry has a closed exact schema and these contracts:
 
 - `LongitudinalComparisonRegistryMetadataV1`: registry ID, registry epoch,
   storage identity, schema version, bound cohort-registry ID/epoch,
-  D04-ledger ID/epoch, D06 catalog authority, and creation digest;
+  D04-ledger ID/epoch, D06 catalog authority, E06 result-view-source registry
+  ID/epoch, and creation digest;
 - `SavedLongitudinalComparisonV1`: immutable canonical selection, exact family
   source-value projection request, cohort/manifest/policy/measurement/anchor,
-  D03/D07/D09/D10/D04/source commitments, normalized filters, workspace replay
-  digest, creation time, literal local/synthetic/nonrelease states, and content
-  digest;
+  D03/D07/D09/D10/D04/source commitments, exact E06 source-registry selector,
+  version and state head, normalized filters, workspace replay digest, creation
+  time, literal local/synthetic/nonrelease states, and content digest;
 - `SavedComparisonJournalEntryV1`: sequence, predecessor head, safe opaque
   selector, saved-object digest, exact dependency-head vector, and entry digest;
 - `SavedComparisonRegistrationReceiptV1`: registry ID/epoch, state version/head,
@@ -301,7 +303,8 @@ nodes, strings and collections also use explicit pre-serialization limits.
 
 Publication holds one exclusive registry lock plus final read fences for every
 mutable identity persisted in the object: D01 linkage, D04 history, D05 cohort,
-D06 record/catalog, E04 catalog, E06 source, D03 decision, D07 comparison, D09
+D06 record/catalog, E04 catalog, E06 result-view-source registry, D03 decision,
+D07 comparison, D09
 summary, D10 context, family-source artifact, anchor-policy authority and
 projection-policy authority.
 It canonicalizes and bounds all input before opening a
@@ -314,7 +317,7 @@ or changed authority is a conflict and never overwrites an object.
 
 All dependent operations use one documented lock order:
 `D01 linkage -> D04 history -> D05 cohort registry -> D06 cohort record catalog
--> E04 catalog -> E06 source -> D03 decision -> D07 comparison -> D09 summary
+-> E04 catalog -> E06 result-view-source registry -> D03 decision -> D07 comparison -> D09 summary
 -> D10 context -> family-source artifacts -> anchor-policy registry
 -> projection-policy registry
 -> saved-comparison registry`. No callback, renderer, parser hook or network
@@ -489,9 +492,12 @@ tests and extend `tests/web/test_integrated_explorer.py` for the HTTP/DOM layer.
    trust-store mutation, and catalog mutation during construction return typed
    safe boundary errors rather than scientific unavailable states or mixed
    authority.
-8. A caller-built manifest, status, D09 summary, D03 outcome/digest pair, D07
-   comparison, private/extra Pydantic state, subclass, proxy, mutable sequence,
-   oversized graph, and instance/class method shadow fail before publication.
+8. A caller-built manifest, status, E06 `ResultViewSource`, D09 summary, D03
+   outcome/digest pair, D07 comparison, private/extra Pydantic state, subclass,
+   proxy, mutable sequence, oversized graph, and instance/class method shadow
+   fail before publication. Result-view-source registry wrong selector,
+   cross-result/member binding, tamper, stale/rollback head and mutation during
+   final return fail with a typed safe boundary error and no workspace payload.
 9. Permuting caller input order yields byte-identical output; changing a filter,
    policy, member, decision, comparison, source, denominator, or covariate
    commitment changes the replay digest.
@@ -520,7 +526,9 @@ tests and extend `tests/web/test_integrated_explorer.py` for the HTTP/DOM layer.
     bounded-input error.
 16. The anchor selector contains only live policy-approved candidates, caps at
     1,000, requires an explicit choice, and rejects injected, stale, unapproved,
-    over-bound, or free-form record identities.
+    over-bound, free-form, cross-policy and cross-registry record selectors.
+    Candidate-page mutation between selection, build and final return fails
+    closed rather than silently selecting a different anchor.
 17. Saved comparison bytes are immutable, content-addressed, idempotent for an
     exact retry, and reopen only after exact live replay. Tamper, root swap,
     stale authority, and cohort-version advance preserve historical bytes and
