@@ -4,15 +4,17 @@ from __future__ import annotations
 
 import hashlib
 import json
-from collections.abc import Iterator
+from collections.abc import Callable, Iterator
 from contextlib import contextmanager
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from tempfile import TemporaryDirectory
+from threading import Event, Lock, Thread
 
 import pytest
 from pydantic import ValidationError
 
+import evidence_inspector.provider_linkage_store as linkage_store_module
 from evidence_inspector.compatibility import (
     CompatibilityPolicyReference,
     ExecutionState,
@@ -76,6 +78,7 @@ from evidence_inspector.provider_linkage import (
 )
 from evidence_inspector.provider_linkage_store import (
     ProviderLinkageStore,
+    ProviderLinkageStoreConflict,
 )
 from tests.test_provider_linkage import (
     PROVIDER,
@@ -466,12 +469,13 @@ def _decide(
 @contextmanager
 def _activated_records(
     *records: LongitudinalRecord,
+    clock: Callable[[], datetime] | None = None,
 ) -> Iterator[tuple[tuple[LongitudinalRecord, ...], ProviderLinkageStore]]:
     with TemporaryDirectory(prefix="traceback-linkage-test-") as directory:
         store = ProviderLinkageStore(
             Path(directory),
             expected_trust_snapshot_sha256_by_provider={PROVIDER: TRUST_SHA256},
-            clock=lambda: NOW,
+            clock=clock or (lambda: NOW),
         )
         try:
             for record in records:
@@ -901,8 +905,12 @@ def test_expired_store_internal_callable_shadow_cannot_restore_authority(
     anchor = _record("1")
     member = _record("2")
     policy = _policy(anchor)
-    with _activated_records(anchor, member) as (records, store):
-        store._clock = lambda: NOW + timedelta(hours=2)  # type: ignore[attr-defined]
+    current_time = [NOW]
+    with _activated_records(anchor, member, clock=lambda: current_time[0]) as (
+        records,
+        store,
+    ):
+        current_time[0] = NOW + timedelta(hours=2)
         normal = decide_longitudinal_member(
             records[0],
             records[1],
@@ -958,15 +966,28 @@ def test_exact_store_authority_runtime_failure_returns_constant_unknown(
     member = _record("2")
     policy = _policy(anchor)
 
-    def fail(*_: object) -> None:
+    calls = 0
+
+    def fail_after_activation() -> datetime:
+        nonlocal calls
+        calls += 1
+        if calls <= 4:
+            return NOW
         raise RuntimeError("synthetic authority failure")
 
-    with _activated_records(anchor, member) as (records, store):
-        if failure == "clock":
-            store._clock = fail  # type: ignore[attr-defined]
-        else:
+    def fail_validator(*_args: object, **_kwargs: object) -> None:
+        raise RuntimeError("synthetic authority failure")
+
+    with _activated_records(
+        anchor,
+        member,
+        clock=fail_after_activation if failure == "clock" else None,
+    ) as (records, store):
+        if failure == "validator":
             monkeypatch.setattr(
-                ProviderLinkageStore, "_validate_current_authority", fail
+                ProviderLinkageStore,
+                "_validate_current_authority",
+                fail_validator,
             )
         if surface == "member":
             decision = decide_longitudinal_member(
@@ -1003,13 +1024,49 @@ def test_store_process_control_failure_is_not_masked() -> None:
     member = _record("2")
     policy = _policy(anchor)
 
-    def interrupt() -> datetime:
+    calls = 0
+
+    def interrupt_after_activation() -> datetime:
+        nonlocal calls
+        calls += 1
+        if calls <= 4:
+            return NOW
         raise KeyboardInterrupt
 
-    with _activated_records(anchor, member) as (records, store):
-        store._clock = interrupt  # type: ignore[attr-defined]
-        with pytest.raises(KeyboardInterrupt):
-            decide_longitudinal_member(
+    with (
+        _activated_records(anchor, member, clock=interrupt_after_activation) as (
+            records,
+            store,
+        ),
+        pytest.raises(KeyboardInterrupt),
+    ):
+        decide_longitudinal_member(
+            records[0],
+            records[1],
+            policy,
+            expected_policy_sha256=longitudinal_anchor_policy_sha256(policy),
+            expected_authority_head_sha256=HEAD_SHA256,
+            expected_linkage_trust_snapshot_sha256_by_provider={PROVIDER: TRUST_SHA256},
+            linkage_store=store,
+        )
+
+
+@pytest.mark.parametrize("surface", ("member", "series"))
+def test_replacing_clock_cannot_revive_expired_linkage_authority(surface: str) -> None:
+    anchor = _record("1")
+    member = _record("2")
+    policy = _policy(anchor)
+    current_time = [NOW]
+    with _activated_records(anchor, member, clock=lambda: current_time[0]) as (
+        records,
+        store,
+    ):
+        current_time[0] = NOW + timedelta(hours=2)
+        with pytest.raises(ProviderLinkageStoreConflict):
+            store.active_snapshot()
+        store._clock = lambda: NOW  # type: ignore[attr-defined]
+        if surface == "member":
+            revived = decide_longitudinal_member(
                 records[0],
                 records[1],
                 policy,
@@ -1020,6 +1077,224 @@ def test_store_process_control_failure_is_not_masked() -> None:
                 },
                 linkage_store=store,
             )
+            _assert_closed_decision(revived)
+        else:
+            revived_series = decide_longitudinal_series(
+                records[0],
+                (records[1],),
+                policy,
+                expected_policy_sha256=longitudinal_anchor_policy_sha256(policy),
+                expected_authority_head_sha256=HEAD_SHA256,
+                expected_linkage_trust_snapshot_sha256_by_provider={
+                    PROVIDER: TRUST_SHA256
+                },
+                linkage_store=store,
+            )
+            _assert_closed_decision(revived_series.decisions[0])
+
+
+@pytest.mark.parametrize("surface", ("member", "series"))
+def test_clock_cannot_install_self_removing_validator_during_snapshot(
+    surface: str,
+) -> None:
+    anchor = _record("1")
+    member = _record("2")
+    policy = _policy(anchor)
+    calls = 0
+    shadow_calls = 0
+    store_holder: list[ProviderLinkageStore] = []
+
+    def self_removing_noop(*_args: object, **_kwargs: object) -> None:
+        nonlocal shadow_calls
+        shadow_calls += 1
+        if shadow_calls == 2:
+            vars(store_holder[0]).pop("_validate_current_authority", None)
+
+    def attacking_clock() -> datetime:
+        nonlocal calls
+        calls += 1
+        if calls <= 4:
+            return NOW
+        store_holder[0]._validate_current_authority = (  # type: ignore[method-assign]
+            self_removing_noop
+        )
+        return NOW + timedelta(hours=2)
+
+    with _activated_records(anchor, member, clock=attacking_clock) as (
+        records,
+        store,
+    ):
+        store_holder.append(store)
+        if surface == "member":
+            decision = decide_longitudinal_member(
+                records[0],
+                records[1],
+                policy,
+                expected_policy_sha256=longitudinal_anchor_policy_sha256(policy),
+                expected_authority_head_sha256=HEAD_SHA256,
+                expected_linkage_trust_snapshot_sha256_by_provider={
+                    PROVIDER: TRUST_SHA256
+                },
+                linkage_store=store,
+            )
+            _assert_closed_decision(decision)
+        else:
+            series = decide_longitudinal_series(
+                records[0],
+                (records[1],),
+                policy,
+                expected_policy_sha256=longitudinal_anchor_policy_sha256(policy),
+                expected_authority_head_sha256=HEAD_SHA256,
+                expected_linkage_trust_snapshot_sha256_by_provider={
+                    PROVIDER: TRUST_SHA256
+                },
+                linkage_store=store,
+            )
+            _assert_closed_decision(series.decisions[0])
+        assert shadow_calls == 0
+        assert "_validate_current_authority" in vars(store)
+        vars(store).pop("_validate_current_authority")
+        assert "_validate_current_authority" not in vars(store)
+
+
+@pytest.mark.parametrize("surface", ("member", "series"))
+def test_clock_cannot_replace_pinned_validator_alias_during_snapshot(
+    surface: str,
+) -> None:
+    anchor = _record("1")
+    member = _record("2")
+    policy = _policy(anchor)
+    calls = 0
+    shadow_calls = 0
+    original = linkage_store_module._PINNED_VALIDATE_CURRENT_AUTHORITY
+
+    def noop(*_args: object, **_kwargs: object) -> None:
+        nonlocal shadow_calls
+        shadow_calls += 1
+
+    def attacking_clock() -> datetime:
+        nonlocal calls
+        calls += 1
+        if calls <= 4:
+            return NOW
+        linkage_store_module._PINNED_VALIDATE_CURRENT_AUTHORITY = noop
+        return NOW + timedelta(hours=2)
+
+    try:
+        with _activated_records(anchor, member, clock=attacking_clock) as (
+            records,
+            store,
+        ):
+            if surface == "member":
+                decision = decide_longitudinal_member(
+                    records[0],
+                    records[1],
+                    policy,
+                    expected_policy_sha256=longitudinal_anchor_policy_sha256(policy),
+                    expected_authority_head_sha256=HEAD_SHA256,
+                    expected_linkage_trust_snapshot_sha256_by_provider={
+                        PROVIDER: TRUST_SHA256
+                    },
+                    linkage_store=store,
+                )
+                _assert_closed_decision(decision)
+            else:
+                series = decide_longitudinal_series(
+                    records[0],
+                    (records[1],),
+                    policy,
+                    expected_policy_sha256=longitudinal_anchor_policy_sha256(policy),
+                    expected_authority_head_sha256=HEAD_SHA256,
+                    expected_linkage_trust_snapshot_sha256_by_provider={
+                        PROVIDER: TRUST_SHA256
+                    },
+                    linkage_store=store,
+                )
+                _assert_closed_decision(series.decisions[0])
+            assert shadow_calls == 0
+    finally:
+        linkage_store_module._PINNED_VALIDATE_CURRENT_AUTHORITY = original
+
+
+@pytest.mark.parametrize("surface", ("member", "series"))
+def test_concurrent_self_restoring_class_shadow_cannot_affect_snapshot(
+    surface: str,
+) -> None:
+    anchor = _record("1")
+    member = _record("2")
+    policy = _policy(anchor)
+    calls = 0
+    shadow_calls = 0
+    counter_lock = Lock()
+    installed = Event()
+    restored = Event()
+    original = ProviderLinkageStore._validate_current_authority
+    worker_holder: list[Thread] = []
+
+    def self_restoring_noop(*_args: object, **_kwargs: object) -> None:
+        nonlocal shadow_calls
+        with counter_lock:
+            shadow_calls += 1
+            if shadow_calls == 2:
+                ProviderLinkageStore._validate_current_authority = original
+                restored.set()
+
+    def install_shadow() -> None:
+        ProviderLinkageStore._validate_current_authority = (  # type: ignore[method-assign]
+            self_restoring_noop
+        )
+        installed.set()
+        restored.wait(timeout=5)
+
+    def attacking_clock() -> datetime:
+        nonlocal calls
+        calls += 1
+        if calls <= 4:
+            return NOW
+        worker = Thread(target=install_shadow, daemon=True)
+        worker_holder.append(worker)
+        worker.start()
+        assert installed.wait(timeout=5)
+        return NOW + timedelta(hours=2)
+
+    try:
+        with _activated_records(anchor, member, clock=attacking_clock) as (
+            records,
+            store,
+        ):
+            if surface == "member":
+                decision = decide_longitudinal_member(
+                    records[0],
+                    records[1],
+                    policy,
+                    expected_policy_sha256=longitudinal_anchor_policy_sha256(policy),
+                    expected_authority_head_sha256=HEAD_SHA256,
+                    expected_linkage_trust_snapshot_sha256_by_provider={
+                        PROVIDER: TRUST_SHA256
+                    },
+                    linkage_store=store,
+                )
+                _assert_closed_decision(decision)
+            else:
+                series = decide_longitudinal_series(
+                    records[0],
+                    (records[1],),
+                    policy,
+                    expected_policy_sha256=longitudinal_anchor_policy_sha256(policy),
+                    expected_authority_head_sha256=HEAD_SHA256,
+                    expected_linkage_trust_snapshot_sha256_by_provider={
+                        PROVIDER: TRUST_SHA256
+                    },
+                    linkage_store=store,
+                )
+                _assert_closed_decision(series.decisions[0])
+    finally:
+        ProviderLinkageStore._validate_current_authority = original
+        restored.set()
+        for worker in worker_holder:
+            worker.join(timeout=5)
+        assert ProviderLinkageStore._validate_current_authority is original
+        assert not any(worker.is_alive() for worker in worker_holder)
 
 
 @pytest.mark.parametrize("target", ("anchor", "member"))

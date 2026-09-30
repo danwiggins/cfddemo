@@ -9,9 +9,10 @@ import secrets
 import sqlite3
 import stat
 import threading
+import weakref
 from collections.abc import Callable, Iterator, Mapping
 from contextlib import contextmanager
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Annotated, Literal, Self
 
@@ -25,6 +26,7 @@ from evidence_inspector.method_registry import (
 from evidence_inspector.provider_linkage import (
     MAX_REVISIONS,
     AuthorizedLinkageRevision,
+    LinkageAuthorizationDecision,
     LinkageId,
     LinkageOperation,
     LinkageRevision,
@@ -35,11 +37,12 @@ from evidence_inspector.provider_linkage import (
     validate_linkage_history,
 )
 
-SCHEMA_VERSION = 1
+SCHEMA_VERSION = 2
 MAX_PROVIDER_TRUST_PINS = 256
 _SQLITE_OPEN_LOCK = threading.RLock()
 _PROVIDER_NAMESPACE = TypeAdapter(ProviderNamespace)
 _SHA256 = TypeAdapter(Sha256)
+_PINNED_AUTHORIZE_LINKAGE_REVISION = authorize_linkage_revision
 StoreId = Annotated[str, StringConstraints(pattern=r"^store_[0-9a-f]{32}$")]
 _STORE_ID = TypeAdapter(StoreId)
 
@@ -186,6 +189,36 @@ def _trust_pins_sha256(pins: Mapping[str, str]) -> str:
     return hashlib.sha256(b"traceback-linkage-trust-pins-v1\0" + encoded).hexdigest()
 
 
+def _authority_time_text(value: datetime) -> str:
+    if (
+        type(value) is not datetime
+        or value.utcoffset() != timedelta(0)
+        or value.microsecond
+    ):
+        raise ProviderLinkageStoreUnsafe("linkage store clock is invalid")
+    return value.isoformat()
+
+
+def _authority_time_from_text(value: object) -> datetime:
+    if type(value) is not str:
+        raise ProviderLinkageStoreSchemaError("linkage store authority time is invalid")
+    try:
+        parsed = datetime.fromisoformat(value)
+    except ValueError:
+        raise ProviderLinkageStoreSchemaError(
+            "linkage store authority time is invalid"
+        ) from None
+    try:
+        canonical = _authority_time_text(parsed)
+    except ProviderLinkageStoreUnsafe:
+        raise ProviderLinkageStoreSchemaError(
+            "linkage store authority time is invalid"
+        ) from None
+    if canonical != value:
+        raise ProviderLinkageStoreSchemaError("linkage store authority time is invalid")
+    return parsed
+
+
 class ProviderLinkageStore:
     """SQLite-backed approval consumption and immutable linkage history."""
 
@@ -248,6 +281,7 @@ class ProviderLinkageStore:
                 "provider trust pins are invalid"
             ) from None
         self._clock = clock or (lambda: datetime.now(UTC).replace(microsecond=0))
+        _register_store_clock(self, self._clock)
         try:
             metadata = os.stat(
                 "linkage.sqlite3", dir_fd=self._root_fd, follow_symlinks=False
@@ -290,6 +324,7 @@ class ProviderLinkageStore:
                     except (OSError, TypeError, AttributeError):
                         pass
                     setattr(self, attribute, None)
+            _unregister_store_clock(self)
 
     def __enter__(self) -> Self:
         return self
@@ -423,8 +458,8 @@ class ProviderLinkageStore:
         self._database_fd = descriptor
 
     def _open_connection(self) -> sqlite3.Connection:
-        self._validate_storage()
-        self._bind_database_descriptor()
+        _PINNED_VALIDATE_STORAGE(self)
+        _PINNED_BIND_DATABASE_DESCRIPTOR(self)
         before = _open_descriptor_identities()
         try:
             connection = sqlite3.connect(
@@ -456,15 +491,15 @@ class ProviderLinkageStore:
             if self._database_identity is None:
                 os.fchmod(self._sqlite_database_fd, 0o600)
                 self._database_identity = observed
-                self._bind_database_descriptor()
-            self._validate_storage()
+                _PINNED_BIND_DATABASE_DESCRIPTOR(self)
+            _PINNED_VALIDATE_STORAGE(self)
         except BaseException as error:
             if "connection" in locals():
                 connection.close()
             if isinstance(error, ProviderLinkageStoreError):
                 raise
             raise ProviderLinkageStoreUnsafe("linkage store database changed") from None
-        self._secure_database_files()
+        _PINNED_SECURE_DATABASE_FILES(self)
         connection.row_factory = sqlite3.Row
         connection.execute("PRAGMA foreign_keys=ON")
         connection.execute("PRAGMA busy_timeout=30000")
@@ -475,17 +510,17 @@ class ProviderLinkageStore:
         with self._lock:
             if self._connection is None:
                 with _SQLITE_OPEN_LOCK:
-                    self._connection = self._open_connection()
-            self._validate_storage()
+                    self._connection = _PINNED_OPEN_CONNECTION(self)
+            _PINNED_VALIDATE_STORAGE(self)
             try:
                 yield self._connection
             finally:
-                self._validate_storage()
+                _PINNED_VALIDATE_STORAGE(self)
 
     def _initialize(self) -> None:
-        with self._lock, _SQLITE_OPEN_LOCK, self._connect() as connection:
+        with self._lock, _SQLITE_OPEN_LOCK, _PINNED_CONNECT(self) as connection:
             connection.execute("PRAGMA journal_mode=WAL")
-            self._secure_database_files()
+            _PINNED_SECURE_DATABASE_FILES(self)
             connection.execute("PRAGMA synchronous=FULL")
             connection.execute("BEGIN EXCLUSIVE")
             try:
@@ -498,6 +533,7 @@ class ProviderLinkageStore:
                     )
                 )
                 if not objects:
+                    authority_time = _pinned_clock_value(self)
                     for statement in _SCHEMA_SQL.values():
                         connection.execute(statement)
                     connection.executemany(
@@ -510,11 +546,15 @@ class ProviderLinkageStore:
                             ("store_epoch_sha256", secrets.token_hex(32)),
                             (
                                 "storage_identity_sha256",
-                                self._storage_identity_sha256(),
+                                _PINNED_STORAGE_IDENTITY_SHA256(self),
                             ),
                             (
                                 "trust_pins_sha256",
                                 _trust_pins_sha256(self._trust_pins),
+                            ),
+                            (
+                                "authority_time_floor",
+                                _authority_time_text(authority_time),
                             ),
                         ),
                     )
@@ -524,9 +564,51 @@ class ProviderLinkageStore:
                     )
                     connection.execute(
                         "UPDATE metadata SET value=? WHERE key='state_head_sha256'",
-                        (self._state_head(connection),),
+                        (_PINNED_STATE_HEAD(connection),),
                     )
-                self._validate_schema(connection)
+                else:
+                    metadata = dict(
+                        connection.execute("SELECT key, value FROM metadata")
+                    )
+                    v1_keys = {
+                        "schema_version",
+                        "state_version",
+                        "state_head_sha256",
+                        "store_id",
+                        "store_epoch_sha256",
+                        "storage_identity_sha256",
+                        "trust_pins_sha256",
+                    }
+                    if (
+                        set(metadata) == v1_keys
+                        and metadata.get("schema_version") == "1"
+                    ):
+                        schema = {
+                            (row[0], row[1]): _normalize_schema_sql(row[2])
+                            for row in connection.execute(
+                                """SELECT type, name, sql FROM sqlite_master
+                                   WHERE name NOT LIKE 'sqlite_%'
+                                   ORDER BY type, name"""
+                            )
+                            if isinstance(row[2], str)
+                        }
+                        if schema != _SCHEMA_SIGNATURE:
+                            raise ProviderLinkageStoreSchemaError(
+                                "linkage store schema is unsupported"
+                            )
+                        authority_time = _pinned_clock_value(self)
+                        connection.execute(
+                            "INSERT INTO metadata VALUES(?, ?)",
+                            (
+                                "authority_time_floor",
+                                _authority_time_text(authority_time),
+                            ),
+                        )
+                        connection.execute(
+                            "UPDATE metadata SET value=? WHERE key='schema_version'",
+                            (str(SCHEMA_VERSION),),
+                        )
+                _PINNED_VALIDATE_SCHEMA(connection)
                 observed_pins = dict(
                     connection.execute(
                         "SELECT provider_namespace, trust_snapshot_sha256 FROM trust_pins"
@@ -539,7 +621,7 @@ class ProviderLinkageStore:
                 metadata = dict(connection.execute("SELECT key, value FROM metadata"))
                 if metadata[
                     "storage_identity_sha256"
-                ] != self._storage_identity_sha256() or metadata[
+                ] != _PINNED_STORAGE_IDENTITY_SHA256(self) or metadata[
                     "trust_pins_sha256"
                 ] != _trust_pins_sha256(self._trust_pins):
                     raise ProviderLinkageStoreConflict(
@@ -588,6 +670,7 @@ class ProviderLinkageStore:
                 "store_epoch_sha256",
                 "storage_identity_sha256",
                 "trust_pins_sha256",
+                "authority_time_floor",
             }
             or metadata["schema_version"] != str(SCHEMA_VERSION)
         ):
@@ -599,6 +682,7 @@ class ProviderLinkageStore:
             _SHA256.validate_python(metadata["store_epoch_sha256"])
             _SHA256.validate_python(metadata["storage_identity_sha256"])
             _SHA256.validate_python(metadata["trust_pins_sha256"])
+            _authority_time_from_text(metadata["authority_time_floor"])
         except (ValueError, TypeError):
             raise ProviderLinkageStoreSchemaError(
                 "linkage store metadata is invalid"
@@ -692,12 +776,13 @@ class ProviderLinkageStore:
     ) -> tuple[AuthorizedLinkageRevision, ...]:
         """Reject any mutation of already committed append-only state."""
 
-        self._validate_schema(connection)
+        _PINNED_VALIDATE_SCHEMA(connection)
         metadata = dict(connection.execute("SELECT key, value FROM metadata"))
         if (
             metadata["store_id"] != self._store_id
             or metadata["store_epoch_sha256"] != self._store_epoch_sha256
-            or metadata["storage_identity_sha256"] != self._storage_identity_sha256()
+            or metadata["storage_identity_sha256"]
+            != _PINNED_STORAGE_IDENTITY_SHA256(self)
             or metadata["trust_pins_sha256"] != _trust_pins_sha256(self._trust_pins)
         ):
             raise ProviderLinkageStoreSchemaError(
@@ -712,7 +797,7 @@ class ProviderLinkageStore:
             raise ProviderLinkageStoreSchemaError(
                 "linkage store trust state is invalid"
             )
-        records = self._load_records(connection)
+        records = _PINNED_LOAD_RECORDS(connection)
         validate_linkage_history(
             records,
             expected_trust_snapshot_sha256_by_provider=self._trust_pins,
@@ -742,7 +827,7 @@ class ProviderLinkageStore:
             )
         if int(metadata["state_version"]) != len(records) or metadata[
             "state_head_sha256"
-        ] != self._state_head(connection):
+        ] != _PINNED_STATE_HEAD(connection):
             raise ProviderLinkageStoreSchemaError(
                 "linkage store committed state is invalid"
             )
@@ -754,15 +839,26 @@ class ProviderLinkageStore:
     ) -> CommittedLinkageReceipt:
         """Atomically consume approvals and commit one immutable revision."""
 
+        validate_current_authority = _PINNED_VALIDATE_CURRENT_AUTHORITY
+        authorize_revision = _PINNED_AUTHORIZE_LINKAGE_REVISION
         revision = record.revision
         revision_sha256 = linkage_revision_sha256(revision)
         serialized = _record_bytes(record)
         authorized_record_sha256 = hashlib.sha256(serialized).hexdigest()
-        with self._connect() as connection:
+        with _PINNED_CONNECT(self) as connection:
+            trust_pins = dict(self._trust_pins)
+            evaluated_at = _capture_pinned_store_now(self, connection)
             connection.execute("BEGIN IMMEDIATE")
             try:
-                self._validate_committed_state(connection)
-                self._validate_current_authority(record)
+                _require_authority_time_floor(connection, evaluated_at)
+                _PINNED_VALIDATE_COMMITTED_STATE(self, connection)
+                validate_current_authority(
+                    self,
+                    record,
+                    evaluated_at=evaluated_at,
+                    expected_trust_by_provider=trust_pins,
+                    authorize_revision=authorize_revision,
+                )
                 existing = connection.execute(
                     """SELECT revision_sha256, authorized_record_sha256, record_json
                        FROM linkage_revisions
@@ -782,8 +878,8 @@ class ProviderLinkageStore:
                         raise ProviderLinkageStoreConflict(
                             "linkage revision conflicts with committed state"
                         )
-                    self._verify_consumptions(connection, record, revision_sha256)
-                    receipt = self._receipt(
+                    _PINNED_VERIFY_CONSUMPTIONS(connection, record, revision_sha256)
+                    receipt = _PINNED_RECEIPT(
                         connection,
                         revision,
                         authorized_record_sha256,
@@ -847,8 +943,8 @@ class ProviderLinkageStore:
                             trust_sha256,
                         ),
                     )
-                self._verify_consumptions(connection, record, revision_sha256)
-                records = self._load_records(connection)
+                _PINNED_VERIFY_CONSUMPTIONS(connection, record, revision_sha256)
+                records = _PINNED_LOAD_RECORDS(connection)
                 validate_linkage_history(
                     records,
                     expected_trust_snapshot_sha256_by_provider=self._trust_pins,
@@ -861,7 +957,7 @@ class ProviderLinkageStore:
                     )
                     + 1
                 )
-                state_head = self._state_head(connection)
+                state_head = _PINNED_STATE_HEAD(connection)
                 connection.execute(
                     "UPDATE metadata SET value=? WHERE key='state_version'",
                     (str(state_version),),
@@ -870,7 +966,7 @@ class ProviderLinkageStore:
                     "UPDATE metadata SET value=? WHERE key='state_head_sha256'",
                     (state_head,),
                 )
-                self._validate_committed_state(connection)
+                _PINNED_VALIDATE_COMMITTED_STATE(self, connection)
                 receipt = CommittedLinkageReceipt(
                     provider_namespace=revision.provider_namespace,
                     linkage_id=revision.linkage_id,
@@ -907,18 +1003,24 @@ class ProviderLinkageStore:
     def _validate_current_authority(
         self,
         record: AuthorizedLinkageRevision,
+        *,
+        evaluated_at: datetime,
+        expected_trust_by_provider: Mapping[str, str],
+        authorize_revision: Callable[..., LinkageAuthorizationDecision],
     ) -> None:
-        expected_trust = self._trust_pins.get(record.revision.provider_namespace)
+        expected_trust = expected_trust_by_provider.get(
+            record.revision.provider_namespace
+        )
         if expected_trust is None:
             raise ProviderLinkageStoreConflict("linkage provider trust pin is absent")
         try:
-            decision = authorize_linkage_revision(
+            decision = authorize_revision(
                 record.revision,
                 previous_revision=record.previous_revision,
                 approvals=record.approvals,
                 trust_snapshot=record.trust_snapshot,
                 expected_trust_snapshot_sha256=expected_trust,
-                evaluated_at=self._clock(),
+                evaluated_at=evaluated_at,
             )
         except (TypeError, ValueError):
             raise ProviderLinkageStoreUnsafe("linkage store clock is invalid") from None
@@ -972,10 +1074,15 @@ class ProviderLinkageStore:
     def active_snapshot(self) -> ActiveLinkageSnapshot:
         """Read and revalidate one current, deterministic active projection."""
 
-        with self._connect() as connection:
+        validate_current_authority = _PINNED_VALIDATE_CURRENT_AUTHORITY
+        authorize_revision = _PINNED_AUTHORIZE_LINKAGE_REVISION
+        with _PINNED_CONNECT(self) as connection:
+            trust_pins = dict(self._trust_pins)
+            evaluated_at = _capture_pinned_store_now(self, connection)
             connection.execute("BEGIN")
             try:
-                records = self._validate_committed_state(connection)
+                _require_authority_time_floor(connection, evaluated_at)
+                records = _PINNED_VALIDATE_COMMITTED_STATE(self, connection)
                 metadata = dict(connection.execute("SELECT key, value FROM metadata"))
                 latest: dict[tuple[str, str], LinkageRevision] = {}
                 latest_records: dict[tuple[str, str], AuthorizedLinkageRevision] = {}
@@ -988,7 +1095,13 @@ class ProviderLinkageStore:
                     latest_records[key] = record
                 for key, latest_record in latest_records.items():
                     if latest[key].operation != LinkageOperation.TOMBSTONE:
-                        self._validate_current_authority(latest_record)
+                        validate_current_authority(
+                            self,
+                            latest_record,
+                            evaluated_at=evaluated_at,
+                            expected_trust_by_provider=trust_pins,
+                            authorize_revision=authorize_revision,
+                        )
                 revisions = tuple(
                     sorted(
                         (
@@ -1045,7 +1158,7 @@ class ProviderLinkageStore:
     def verify_current_receipt(self, receipt: CommittedLinkageReceipt) -> None:
         """Require an exact receipt for the current active store head."""
 
-        snapshot = self.active_snapshot()
+        snapshot = _PINNED_ACTIVE_SNAPSHOT(self)
         if (
             receipt.state_version != snapshot.state_version
             or receipt.state_head_sha256 != snapshot.state_head_sha256
@@ -1054,6 +1167,159 @@ class ProviderLinkageStore:
             raise ProviderLinkageStoreConflict(
                 "linkage receipt is not current and active"
             )
+
+
+_STORE_CLOCK_LOCK = threading.RLock()
+_STORE_CLOCKS: dict[
+    int,
+    tuple[
+        weakref.ReferenceType[ProviderLinkageStore],
+        Callable[[], datetime],
+        datetime | None,
+    ],
+] = {}
+_CLOCK_BOUNDARY_ERRORS = (
+    OSError,
+    RuntimeError,
+    ValueError,
+    TypeError,
+    LookupError,
+    ArithmeticError,
+    AssertionError,
+)
+
+
+def _register_store_clock(
+    store: ProviderLinkageStore, clock: Callable[[], datetime]
+) -> None:
+    identity = id(store)
+
+    def discard(reference: weakref.ReferenceType[ProviderLinkageStore]) -> None:
+        with _STORE_CLOCK_LOCK:
+            current = _STORE_CLOCKS.get(identity)
+            if current is not None and current[0] is reference:
+                _STORE_CLOCKS.pop(identity, None)
+
+    reference = weakref.ref(store, discard)
+    with _STORE_CLOCK_LOCK:
+        _STORE_CLOCKS[identity] = (reference, clock, None)
+
+
+def _unregister_store_clock(store: ProviderLinkageStore) -> None:
+    with _STORE_CLOCK_LOCK:
+        current = _STORE_CLOCKS.get(id(store))
+        if current is not None and current[0]() is store:
+            _STORE_CLOCKS.pop(id(store), None)
+
+
+def _registered_store_clock(
+    store: ProviderLinkageStore,
+) -> Callable[[], datetime] | None:
+    with _STORE_CLOCK_LOCK:
+        current = _STORE_CLOCKS.get(id(store))
+        if current is None or current[0]() is not store:
+            return None
+        return current[1]
+
+
+def _pinned_clock_value(store: ProviderLinkageStore) -> datetime:
+    clock = _registered_store_clock(store)
+    if clock is None:
+        raise ProviderLinkageStoreUnsafe("linkage store clock identity is absent")
+    try:
+        evaluated_at = clock()
+    except _CLOCK_BOUNDARY_ERRORS:
+        raise ProviderLinkageStoreUnsafe("linkage store clock is invalid") from None
+    if (
+        type(evaluated_at) is not datetime
+        or evaluated_at.utcoffset() != timedelta(0)
+        or evaluated_at.microsecond
+    ):
+        raise ProviderLinkageStoreUnsafe("linkage store clock is invalid")
+    with _STORE_CLOCK_LOCK:
+        current = _STORE_CLOCKS.get(id(store))
+        if current is None or current[0]() is not store or current[1] is not clock:
+            raise ProviderLinkageStoreUnsafe("linkage store clock identity changed")
+        if current[2] is not None and evaluated_at < current[2]:
+            raise ProviderLinkageStoreUnsafe("linkage store clock moved backwards")
+        _STORE_CLOCKS[id(store)] = (current[0], clock, evaluated_at)
+    return evaluated_at
+
+
+def _capture_pinned_store_now(
+    store: ProviderLinkageStore,
+    connection: sqlite3.Connection,
+) -> datetime:
+    evaluated_at = _pinned_clock_value(store)
+    connection.execute("BEGIN IMMEDIATE")
+    try:
+        row = connection.execute(
+            "SELECT value FROM metadata WHERE key='authority_time_floor'"
+        ).fetchone()
+        if row is None:
+            raise ProviderLinkageStoreSchemaError(
+                "linkage store authority time is absent"
+            )
+        persisted = _authority_time_from_text(row[0])
+        if evaluated_at < persisted:
+            raise ProviderLinkageStoreUnsafe("linkage store clock moved backwards")
+        if evaluated_at > persisted:
+            connection.execute(
+                "UPDATE metadata SET value=? WHERE key='authority_time_floor'",
+                (_authority_time_text(evaluated_at),),
+            )
+        connection.commit()
+    except BaseException as error:
+        connection.rollback()
+        if isinstance(error, ProviderLinkageStoreError):
+            raise
+        if isinstance(error, sqlite3.DatabaseError):
+            raise ProviderLinkageStoreSchemaError(
+                "linkage store authority time update failed"
+            ) from None
+        raise
+    return evaluated_at
+
+
+def _require_authority_time_floor(
+    connection: sqlite3.Connection,
+    evaluated_at: datetime,
+) -> None:
+    row = connection.execute(
+        "SELECT value FROM metadata WHERE key='authority_time_floor'"
+    ).fetchone()
+    if row is None:
+        raise ProviderLinkageStoreSchemaError("linkage store authority time is absent")
+    if _authority_time_from_text(row[0]) != evaluated_at:
+        raise ProviderLinkageStoreUnsafe(
+            "linkage store authority time changed before state validation"
+        )
+
+
+def provider_linkage_store_clock_is_pinned(store: ProviderLinkageStore) -> bool:
+    """Return whether the live store still carries its construction-time clock."""
+
+    try:
+        current = vars(store).get("_clock")
+    except TypeError:
+        return False
+    return _registered_store_clock(store) is current
+
+
+_PINNED_VALIDATE_STORAGE = ProviderLinkageStore._validate_storage
+_PINNED_STORAGE_IDENTITY_SHA256 = ProviderLinkageStore._storage_identity_sha256
+_PINNED_SECURE_DATABASE_FILES = ProviderLinkageStore._secure_database_files
+_PINNED_BIND_DATABASE_DESCRIPTOR = ProviderLinkageStore._bind_database_descriptor
+_PINNED_OPEN_CONNECTION = ProviderLinkageStore._open_connection
+_PINNED_CONNECT = ProviderLinkageStore._connect
+_PINNED_VALIDATE_SCHEMA = ProviderLinkageStore._validate_schema
+_PINNED_LOAD_RECORDS = ProviderLinkageStore._load_records
+_PINNED_STATE_HEAD = ProviderLinkageStore._state_head
+_PINNED_VALIDATE_COMMITTED_STATE = ProviderLinkageStore._validate_committed_state
+_PINNED_VALIDATE_CURRENT_AUTHORITY = ProviderLinkageStore._validate_current_authority
+_PINNED_VERIFY_CONSUMPTIONS = ProviderLinkageStore._verify_consumptions
+_PINNED_RECEIPT = ProviderLinkageStore._receipt
+_PINNED_ACTIVE_SNAPSHOT = ProviderLinkageStore.active_snapshot
 
 
 __all__ = [
@@ -1065,4 +1331,5 @@ __all__ = [
     "ProviderLinkageStoreSchemaError",
     "ProviderLinkageStoreUnsafe",
     "committed_linkage_receipt_sha256",
+    "provider_linkage_store_clock_is_pinned",
 ]

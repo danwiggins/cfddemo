@@ -6,6 +6,7 @@ import base64
 import os
 import sqlite3
 from concurrent.futures import ThreadPoolExecutor
+from datetime import datetime, timedelta
 from multiprocessing import get_all_start_methods, get_context
 from multiprocessing.queues import Queue
 from multiprocessing.synchronize import Event as EventType
@@ -128,6 +129,93 @@ def test_fresh_store_has_verified_empty_snapshot(tmp_path: Path) -> None:
     assert snapshot.state_version == 0
     assert snapshot.revisions == ()
     assert snapshot.receipts == ()
+
+
+def test_authority_time_floor_is_monotonic_and_persists_across_reopen(
+    tmp_path: Path,
+) -> None:
+    root = tmp_path / "protected"
+    current_time = [NOW]
+
+    def clock() -> datetime:
+        return current_time[0]
+
+    store = ProviderLinkageStore(
+        root,
+        expected_trust_snapshot_sha256_by_provider=_pins(),
+        clock=clock,
+    )
+    try:
+        receipt = store.commit_authorized_revision(_record())
+        current_time[0] = AFTER + timedelta(hours=1)
+        with pytest.raises(ProviderLinkageStoreConflict, match="not current"):
+            store.active_snapshot()
+        current_time[0] = NOW
+        with pytest.raises(ProviderLinkageStoreUnsafe, match="moved backwards"):
+            store.active_snapshot()
+    finally:
+        store.close()
+
+    reopened = ProviderLinkageStore(
+        root,
+        expected_trust_snapshot_sha256_by_provider=_pins(),
+        clock=clock,
+    )
+    try:
+        with pytest.raises(ProviderLinkageStoreUnsafe, match="moved backwards"):
+            reopened.active_snapshot()
+        assert receipt.state_version == 1
+    finally:
+        reopened.close()
+
+
+def test_v1_store_metadata_migrates_once_to_persisted_authority_floor(
+    tmp_path: Path,
+) -> None:
+    root = tmp_path / "protected"
+    with _store(root):
+        pass
+    connection = sqlite3.connect(root / "linkage.sqlite3")
+    connection.execute("DELETE FROM metadata WHERE key='authority_time_floor'")
+    connection.execute("UPDATE metadata SET value='1' WHERE key='schema_version'")
+    connection.commit()
+    connection.close()
+
+    with _store(root) as reopened:
+        assert reopened.active_snapshot().state_version == 0
+
+    connection = sqlite3.connect(root / "linkage.sqlite3")
+    metadata = dict(connection.execute("SELECT key, value FROM metadata"))
+    connection.close()
+    assert metadata["schema_version"] == "2"
+    assert metadata["authority_time_floor"] == NOW.isoformat()
+
+
+@pytest.mark.parametrize(
+    "invalid_floor",
+    (
+        "not-a-time",
+        NOW.replace(tzinfo=None).isoformat(),
+        NOW.replace(microsecond=1).isoformat(),
+        NOW.isoformat().replace("+00:00", "Z"),
+    ),
+)
+def test_malformed_persisted_authority_time_floor_is_rejected(
+    tmp_path: Path,
+    invalid_floor: str,
+) -> None:
+    root = tmp_path / "protected"
+    _store(root).close()
+    connection = sqlite3.connect(root / "linkage.sqlite3")
+    connection.execute(
+        "UPDATE metadata SET value=? WHERE key='authority_time_floor'",
+        (invalid_floor,),
+    )
+    connection.commit()
+    connection.close()
+
+    with pytest.raises(ProviderLinkageStoreSchemaError, match="authority time"):
+        _store(root)
 
 
 def test_exact_retry_is_idempotent_without_advancing_state(tmp_path: Path) -> None:
@@ -767,16 +855,12 @@ def test_invalid_trust_pin_or_clock_is_rejected(tmp_path: Path) -> None:
             tmp_path / "invalid-pins",
             expected_trust_snapshot_sha256_by_provider={"free text": "0" * 64},
         )
-    store = ProviderLinkageStore(
-        tmp_path / "invalid-clock",
-        expected_trust_snapshot_sha256_by_provider=_pins(),
-        clock=lambda: NOW.replace(tzinfo=None),
-    )
-    try:
-        with pytest.raises(ProviderLinkageStoreUnsafe, match="clock is invalid"):
-            store.commit_authorized_revision(_record())
-    finally:
-        store.close()
+    with pytest.raises(ProviderLinkageStoreUnsafe, match="clock is invalid"):
+        ProviderLinkageStore(
+            tmp_path / "invalid-clock",
+            expected_trust_snapshot_sha256_by_provider=_pins(),
+            clock=lambda: NOW.replace(tzinfo=None),
+        )
 
 
 def test_receipt_schema_rejects_free_text_identity() -> None:

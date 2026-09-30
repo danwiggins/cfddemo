@@ -58,6 +58,7 @@ from evidence_inspector.provider_linkage_store import (
     ProviderLinkageStore,
     ProviderLinkageStoreError,
     committed_linkage_receipt_sha256,
+    provider_linkage_store_clock_is_pinned,
 )
 
 _PINNED_VERIFY_CURRENT_RECEIPT = ProviderLinkageStore.verify_current_receipt
@@ -67,6 +68,7 @@ _PINNED_STORE_CALLABLES = {
     for name in vars(ProviderLinkageStore)
     if callable(getattr(ProviderLinkageStore, name))
 }
+_PINNED_CLOCK_IDENTITY_CHECK = provider_linkage_store_clock_is_pinned
 _STORE_BOUNDARY_ERRORS = (
     ProviderLinkageStoreError,
     sqlite3.Error,
@@ -804,6 +806,7 @@ def _validate_store_input(
                 for name, pinned in _PINNED_STORE_CALLABLES.items()
             )
             or any(name in ProviderLinkageStore.__dict__ for name in vars(store))
+            or not _PINNED_CLOCK_IDENTITY_CHECK(store)
         )
     except _STORE_BOUNDARY_ERRORS:
         raise ValueError("linkage store authority input is invalid") from None
@@ -856,6 +859,19 @@ def _validate_store_input(
         snapshot = _PINNED_ACTIVE_SNAPSHOT(store)
     except _STORE_BOUNDARY_ERRORS:
         raise ValueError("linkage store live authority state is invalid") from None
+    try:
+        authority_changed = (
+            any(
+                getattr(ProviderLinkageStore, name, None) is not pinned
+                for name, pinned in _PINNED_STORE_CALLABLES.items()
+            )
+            or any(name in ProviderLinkageStore.__dict__ for name in vars(store))
+            or not _PINNED_CLOCK_IDENTITY_CHECK(store)
+        )
+    except _STORE_BOUNDARY_ERRORS:
+        raise ValueError("linkage store authority changed during snapshot") from None
+    if authority_changed:
+        raise ValueError("linkage store authority changed during snapshot")
     return store, snapshot
 
 
