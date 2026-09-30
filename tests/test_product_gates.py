@@ -120,6 +120,9 @@ def test_no_network_and_privacy_sentinel_gates_are_observed(
     evidence = {item.gate_id: item for item in report.gate_evidence}
     assert evidence[GateId.NO_EXTERNAL_NETWORK].status == EvidenceStatus.OBSERVED_PASS
     assert evidence[GateId.PRIVACY_SENTINELS].status == EvidenceStatus.OBSERVED_PASS
+    assert {
+        item.target for item in report.network_denial_evidence.observations
+    } == {"192.0.2.1:443"}
     payload = canonical_json_bytes(report)
     for forbidden in (
         b"private-read-0001",
@@ -162,21 +165,59 @@ def test_network_guard_blocks_socket_connections_and_restores_them() -> None:
         "connect_ex": socket.socket.connect_ex,
         "sendto": socket.socket.sendto,
     }
-    with deny_external_network() as attempts:
+    with deny_external_network(allowed_loopback_ports=(443,)) as attempts:
         with pytest.raises(RuntimeError, match="network disabled"):
             socket.create_connection(("192.0.2.1", 443), timeout=0.01)
         probe = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
         try:
             with pytest.raises(RuntimeError, match="network disabled"):
-                probe.connect_ex(("127.0.0.1", 9))
+                probe.connect_ex(("192.0.2.1", 443))
             with pytest.raises(RuntimeError, match="network disabled"):
-                probe.sendto(b"probe", ("127.0.0.1", 9))
+                probe.sendto(b"probe", ("192.0.2.1", 443))
         finally:
             probe.close()
         assert len(attempts) == 3
     assert socket.socket.connect is originals["connect"]
     assert socket.socket.connect_ex is originals["connect_ex"]
     assert socket.socket.sendto is originals["sendto"]
+
+
+def test_network_guard_rejects_registered_non_loopback_before_socket_call(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    underlying_calls = {"connect_ex": 0, "sendto": 0}
+
+    def unexpected_connect_ex(
+        sock: socket.socket, address: tuple[str, int]
+    ) -> int:
+        del sock, address
+        underlying_calls["connect_ex"] += 1
+        raise AssertionError("guard delegated a denied connect_ex call")
+
+    def unexpected_sendto(
+        sock: socket.socket, payload: bytes, address: tuple[str, int]
+    ) -> int:
+        del sock, payload, address
+        underlying_calls["sendto"] += 1
+        raise AssertionError("guard delegated a denied sendto call")
+
+    monkeypatch.setattr(socket.socket, "connect_ex", unexpected_connect_ex)
+    monkeypatch.setattr(socket.socket, "sendto", unexpected_sendto)
+    with deny_external_network() as attempts:
+        probe = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+        try:
+            with pytest.raises(RuntimeError, match="network disabled"):
+                probe.connect_ex(("192.0.2.1", 443))
+            with pytest.raises(RuntimeError, match="network disabled"):
+                probe.sendto(b"probe", ("192.0.2.1", 443))
+        finally:
+            probe.close()
+
+    assert underlying_calls == {"connect_ex": 0, "sendto": 0}
+    assert [operation for operation, _target in attempts] == [
+        "connect_ex",
+        "sendto",
+    ]
 
 
 def test_privacy_scanner_detects_every_seeded_forbidden_class() -> None:
@@ -231,7 +272,7 @@ def test_capability_cannot_be_enabled_with_required_external_gates(
         ProductGateReport.model_validate(payload)
 
 
-def _all_green_report(report: ProductGateReport) -> ProductGateReport:
+def _attempted_all_green_payload(report: ProductGateReport) -> dict[str, object]:
     payload = report.model_dump(mode="json")
     payload["host_run"]["approved_host_reference"] = "approved-host-1"
     host_sha256 = sha256_bytes(canonical_json_bytes(payload["host_run"]))
@@ -252,6 +293,12 @@ def _all_green_report(report: ProductGateReport) -> ProductGateReport:
     payload["privacy_sentinel_evidence"]["output_payload_sha256"] = sha256_bytes(
         registered_output
     )
+    for index, item in enumerate(payload["external_requirements"], start=1):
+        item["state"] = ExternalRequirementState.OBSERVED_PASS
+        item["evidence_sha256"] = f"{index:064x}"
+    payload["release_control_evidence"]["external_requirements_sha256"] = (
+        sha256_bytes(canonical_json_bytes(payload["external_requirements"]))
+    )
     payload["capability_enabled"] = False
     for index, item in enumerate(payload["gate_evidence"], start=1):
         item["status"] = EvidenceStatus.OBSERVED_PASS
@@ -271,13 +318,27 @@ def _all_green_report(report: ProductGateReport) -> ProductGateReport:
             item["evidence_sha256"] = sha256_bytes(
                 canonical_json_bytes(payload["privacy_sentinel_evidence"])
             )
-    return ProductGateReport.model_validate(payload)
+    return payload
+
+
+def test_foundation_rejects_self_asserted_all_green_external_evidence(
+    report: ProductGateReport,
+) -> None:
+    with pytest.raises(
+        ValidationError,
+        match="(?:cannot claim observed external evidence|cannot self-assert)",
+    ):
+        ProductGateReport.model_validate(_attempted_all_green_payload(report))
 
 
 def _verified_external(
     report: ProductGateReport, *, authority_key_id: str
 ) -> tuple[VerifiedExternalEvidence, ...]:
     evidence = {item.gate_id: item for item in report.gate_evidence}
+    artifact_sha256 = {
+        gate_id: item.evidence_sha256 or f"{index:064x}"
+        for index, (gate_id, item) in enumerate(evidence.items(), start=1)
+    }
     shared = {
         "authority_head_sha256": "a" * 64,
         "authority_key_id": authority_key_id,
@@ -288,7 +349,7 @@ def _verified_external(
     return (
         VerifiedExternalEvidence(
             gate_id=GateId.ACCESSIBILITY,
-            artifact_sha256=evidence[GateId.ACCESSIBILITY].evidence_sha256,
+            artifact_sha256=artifact_sha256[GateId.ACCESSIBILITY],
             keyboard_audit_passed=True,
             screen_reader_audit_passed=True,
             zoom_200_audit_passed=True,
@@ -296,7 +357,7 @@ def _verified_external(
         ),
         VerifiedExternalEvidence(
             gate_id=GateId.APPROVED_HOST,
-            artifact_sha256=evidence[GateId.APPROVED_HOST].evidence_sha256,
+            artifact_sha256=artifact_sha256[GateId.APPROVED_HOST],
             approved_host_reference="approved-host-1",
             measured_run_id=report.host_run.run_id,
             host_run_sha256=sha256_bytes(canonical_json_bytes(report.host_run)),
@@ -313,13 +374,13 @@ def _verified_external(
         ),
         VerifiedExternalEvidence(
             gate_id=GateId.FIVE_PROVIDER_STUDY,
-            artifact_sha256=evidence[GateId.FIVE_PROVIDER_STUDY].evidence_sha256,
+            artifact_sha256=artifact_sha256[GateId.FIVE_PROVIDER_STUDY],
             representative_users=5,
             **shared,
         ),
         VerifiedExternalEvidence(
             gate_id=GateId.SCREENSHOTS,
-            artifact_sha256=evidence[GateId.SCREENSHOTS].evidence_sha256,
+            artifact_sha256=artifact_sha256[GateId.SCREENSHOTS],
             reviewed_browser_captures=True,
             **shared,
         ),
@@ -398,21 +459,23 @@ def _sign_external(
 def test_release_gate_requires_independently_verified_exact_external_evidence(
     report: ProductGateReport,
 ) -> None:
-    green = _all_green_report(report)
-    untrusted = derive_release_gate(green)
+    untrusted = derive_release_gate(report)
     assert not untrusted.capability_enabled
     assert set(untrusted.unmet_gates) == {
         GateId.ACCESSIBILITY,
         GateId.APPROVED_HOST,
+        GateId.FILTER_PERFORMANCE,
         GateId.FIVE_PROVIDER_STUDY,
+        GateId.INITIAL_RENDER,
         GateId.SCREENSHOTS,
+        GateId.STRESS_MEMORY,
     }
 
     development_key = generate_development_keypair(KeyPurpose.RELEASE)
     development_store = TrustStore()
     development_store.add_signing_key(development_key)
     development_evidence = _verified_external(
-        green, authority_key_id=development_key.key_id
+        report, authority_key_id=development_key.key_id
     )
     development_signed = [
         SignedExternalEvidence(
@@ -426,7 +489,7 @@ def test_release_gate_requires_independently_verified_exact_external_evidence(
         for item in development_evidence
     ]
     self_provisioned_development = derive_release_gate(
-        green,
+        report,
         signed_external_evidence=development_signed,
         trust_store=development_store,
         authority_policy=_authority_policy(development_evidence),
@@ -435,18 +498,18 @@ def test_release_gate_requires_independently_verified_exact_external_evidence(
     assert not self_provisioned_development.capability_enabled
 
     private_key, key_id, store = _external_signing_material()
-    verified = _verified_external(green, authority_key_id=key_id)
+    verified = _verified_external(report, authority_key_id=key_id)
     policy = _authority_policy(verified)
     signed = _sign_external(verified, private_key=private_key, key_id=key_id)
     missing_policy = derive_release_gate(
-        green,
+        report,
         signed_external_evidence=signed,
         trust_store=store,
         now=datetime(2026, 9, 29, 12, tzinfo=UTC),
     )
     assert not missing_policy.capability_enabled
     approved = derive_release_gate(
-        green,
+        report,
         signed_external_evidence=signed,
         trust_store=store,
         authority_policy=policy,
@@ -471,7 +534,7 @@ def test_release_gate_requires_independently_verified_exact_external_evidence(
         }
     )
     head_mismatch = derive_release_gate(
-        green,
+        report,
         signed_external_evidence=signed,
         trust_store=store,
         authority_policy=mismatched_head_policy,
@@ -490,7 +553,7 @@ def test_release_gate_requires_independently_verified_exact_external_evidence(
         wrong_run_evidence, private_key=private_key, key_id=key_id
     )
     wrong_run = derive_release_gate(
-        green,
+        report,
         signed_external_evidence=wrong_run_signed,
         trust_store=store,
         authority_policy=policy,
@@ -500,7 +563,7 @@ def test_release_gate_requires_independently_verified_exact_external_evidence(
     assert GateId.APPROVED_HOST in wrong_run.unmet_gates
 
     expired = derive_release_gate(
-        green,
+        report,
         signed_external_evidence=signed,
         trust_store=store,
         authority_policy=policy,
@@ -517,7 +580,7 @@ def test_release_gate_requires_independently_verified_exact_external_evidence(
     )
     signed[0] = tampered
     mismatched = derive_release_gate(
-        green,
+        report,
         signed_external_evidence=signed,
         trust_store=store,
         authority_policy=policy,

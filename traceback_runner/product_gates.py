@@ -92,6 +92,7 @@ class EvidenceStatus(StrEnum):
 
 
 class ExternalRequirementId(StrEnum):
+    APPROVED_HOST = "approved_host"
     KEYBOARD_ONLY = "keyboard_only"
     SCREEN_READER = "screen_reader"
     ZOOM_200 = "zoom_200"
@@ -137,7 +138,7 @@ REGISTERED_PRIVACY_SENTINELS = {
     PrivacySentinelClass.ABSOLUTE_PATH: b"/Users/private/raw-input.bam",
     PrivacySentinelClass.RAW_SEQUENCE: b"ACGTACGTACGTACGTACGTACGTACGTACGT",
 }
-REGISTERED_NETWORK_TARGET = ("127.0.0.1", 9)
+REGISTERED_NETWORK_TARGET = ("192.0.2.1", 443)
 REGISTERED_NETWORK_PAYLOAD = b"privacy-safe-probe"
 
 
@@ -218,7 +219,7 @@ class PrivacySentinelEvidence(RunnerContract):
 
 class NetworkProbeObservation(RunnerContract):
     operation: NetworkProbeOperation
-    target: Literal["127.0.0.1:9"] = "127.0.0.1:9"
+    target: Literal["192.0.2.1:443"] = "192.0.2.1:443"
     denial_observed: bool
     guard_recorded: bool
     payload_sha256: Sha256 | None = None
@@ -270,7 +271,7 @@ class NetworkDenialEvidence(RunnerContract):
         if any(
             not item.denial_observed
             or not item.guard_recorded
-            or item.target != "127.0.0.1:9"
+            or item.target != "192.0.2.1:443"
             or item.payload_sha256 != expected[item.operation]
             for item in self.observations
         ):
@@ -747,7 +748,7 @@ class ProductGateReport(RunnerContract):
     network_denial_evidence: NetworkDenialEvidence
     privacy_sentinel_evidence: PrivacySentinelEvidence
     external_requirements: tuple[ExternalRequirementEvidence, ...] = Field(
-        min_length=5, max_length=5
+        min_length=6, max_length=6
     )
     release_control_evidence: ReleaseControlEvidence
     gate_evidence: tuple[GateEvidence, ...]
@@ -770,12 +771,49 @@ class ProductGateReport(RunnerContract):
             raise ValueError(
                 "external requirement evidence must be complete and uniquely sorted"
             )
+        requirements = {
+            item.requirement_id: item for item in self.external_requirements
+        }
+        external_gate_requirements = {
+            GateId.APPROVED_HOST: (ExternalRequirementId.APPROVED_HOST,),
+            GateId.ACCESSIBILITY: (
+                ExternalRequirementId.KEYBOARD_ONLY,
+                ExternalRequirementId.SCREEN_READER,
+                ExternalRequirementId.ZOOM_200,
+            ),
+            GateId.SCREENSHOTS: (ExternalRequirementId.REVIEWED_SCREENSHOTS,),
+            GateId.FIVE_PROVIDER_STUDY: (
+                ExternalRequirementId.FIVE_PROVIDER_TASKS,
+            ),
+        }
+        for gate_id, required_ids in external_gate_requirements.items():
+            states = tuple(requirements[item].state for item in required_ids)
+            expected = (
+                EvidenceStatus.REQUIRED_EXTERNAL
+                if ExternalRequirementState.UNMET_NO_OBSERVED_EVIDENCE in states
+                else EvidenceStatus.OBSERVED_FAIL
+                if ExternalRequirementState.OBSERVED_FAIL in states
+                else EvidenceStatus.OBSERVED_PASS
+            )
+            gate = by_id[gate_id]
+            if gate.status != expected:
+                raise ValueError(
+                    "external gate status must derive from exact requirement states"
+                )
+            if expected == EvidenceStatus.REQUIRED_EXTERNAL and (
+                gate.evidence_sha256 is not None
+            ):
+                raise ValueError("unmet external gate cannot carry evidence")
         if any(
             item.state != ExternalRequirementState.UNMET_NO_OBSERVED_EVIDENCE
             for item in self.external_requirements
         ):
             raise ValueError(
                 "the local foundation report cannot claim observed external evidence"
+            )
+        if self.host_run.approved_host_reference is not None:
+            raise ValueError(
+                "the local foundation report cannot self-assert approved-host status"
             )
         measured = {
             GateId.FILTER_PERFORMANCE: self.filter_performance,
@@ -901,10 +939,8 @@ class ProductGateReport(RunnerContract):
             raise ValueError(
                 "release controls must bind missing E12 and external evidence"
             )
-        if (by_id[GateId.APPROVED_HOST].status == EvidenceStatus.OBSERVED_PASS) != (
-            self.host_run.approved_host_reference is not None
-        ):
-            raise ValueError("approved-host status must match the bound host reference")
+        if by_id[GateId.APPROVED_HOST].status != EvidenceStatus.REQUIRED_EXTERNAL:
+            raise ValueError("approved-host evidence remains externally required")
         return self
 
 
@@ -1720,6 +1756,14 @@ def run_foundation_gates(
     external_requirements = tuple(
         sorted(
             (
+                ExternalRequirementEvidence(
+                    requirement_id=ExternalRequirementId.APPROVED_HOST,
+                    state=ExternalRequirementState.UNMET_NO_OBSERVED_EVIDENCE,
+                    detail=(
+                        "No approved workstation profile or approved-host run was "
+                        "supplied"
+                    ),
+                ),
                 ExternalRequirementEvidence(
                     requirement_id=ExternalRequirementId.KEYBOARD_ONLY,
                     state=ExternalRequirementState.UNMET_NO_OBSERVED_EVIDENCE,

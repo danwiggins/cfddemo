@@ -45,7 +45,7 @@ metadata is retained as a fixture, while the actual keyboard, screen-reader,
 
 ## Gates that remain external
 
-The report always includes all ten gate identities plus five separate external
+The report always includes all ten gate identities plus six separate external
 requirement states. The following remain
 unpassed until evidence is supplied by the named work:
 
@@ -60,7 +60,7 @@ four-of-five uncoached recovery, five-of-five no-upload-belief, and five-minute
 doctor/demo/verify thresholds. This schema does not create study evidence.
 
 E12 remains `unavailable_not_implemented`. The report binds that missing
-dependency and all five unmet external requirements into a release-control
+dependency and all six unmet external requirements into a release-control
 record whose explorer, export and capability fields are fixed false.
 
 An external gate cannot be marked `observed_pass` without an evidence
