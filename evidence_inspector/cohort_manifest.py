@@ -6,16 +6,20 @@ clinical, scientific, identity, or provider-approval claim.
 
 from __future__ import annotations
 
+import base64
 import hashlib
 import json
 from collections import defaultdict
 from collections.abc import Mapping, Sequence
-from datetime import datetime, timedelta
+from datetime import UTC, datetime
 from enum import StrEnum
 from itertools import pairwise
 from typing import Annotated, Literal
 
+from cryptography.exceptions import InvalidSignature
+from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PublicKey
 from pydantic import Field, StringConstraints, model_validator
+from pydantic_core import TzInfo
 
 from evidence_inspector.method_registry import (
     RegistryContract,
@@ -26,33 +30,58 @@ from evidence_inspector.method_registry import (
 )
 from evidence_inspector.provider_linkage import (
     MAX_REVISIONS,
+    ApprovalId,
+    ApprovalPurpose,
     AnalysisRecordId,
+    Base64Signature,
     CollectionToken,
+    IssuerId,
+    IssuerStatus,
+    KeyId,
     LinkageId,
+    Nonce,
+    PrincipalId,
     ProviderNamespace,
+    ProviderIssuerTrust,
+    ProviderRole,
+    ProviderTrustSnapshot,
     RunToken,
     SpecimenToken,
     SubjectToken,
     UnitOfAnalysis,
     linkage_revision_sha256,
+    provider_trust_snapshot_sha256,
 )
 from evidence_inspector.provider_linkage_store import (
+    AuthorityTimeSource,
     CommittedLinkageReceipt,
     ProviderLinkageStore,
     ProviderLinkageStoreUnsafe,
     committed_linkage_receipt_sha256,
+    provider_linkage_store_time_source_is_pinned,
+    require_provider_linkage_store_process_integrity,
 )
 from evidence_inspector.provider_linkage_store import (
     capture_expected_trust_pins as _capture_expected_trust_pins,
 )
 
 MAX_MEMBERS = 100_000
+MAX_TRUSTED_GRAPH_DEPTH = 64
+MAX_TRUSTED_GRAPH_NODES = 8_000_000
+MAX_TRUSTED_SCALAR_CHARS = 4_096
 # Whole UTC seconds representable by Python's datetime range, years 1..9999.
 MIN_TIME_COORDINATE = -62_135_596_800
 MAX_TIME_COORDINATE = 253_402_300_799
 CohortId = Annotated[str, StringConstraints(pattern=r"^cohort_[0-9a-f]{32}$")]
+BiologicalTimepointId = Annotated[
+    str, StringConstraints(pattern=r"^timepoint_[0-9a-f]{32}$")
+]
 _PINNED_ACTIVE_SNAPSHOT = ProviderLinkageStore.active_snapshot
+_PINNED_AUTHORITY_READ_FENCE = ProviderLinkageStore.authority_read_fence
+_PINNED_AUTHORITY_TIME_READ = AuthorityTimeSource.read
 _PINNED_VERIFY_CURRENT_RECEIPT = ProviderLinkageStore.verify_current_receipt
+_PINNED_TIME_SOURCE_IDENTITY_CHECK = provider_linkage_store_time_source_is_pinned
+_PINNED_PROCESS_INTEGRITY_CHECK = require_provider_linkage_store_process_integrity
 _PINNED_STORE_CALLABLES = {
     name: getattr(ProviderLinkageStore, name)
     for name in vars(ProviderLinkageStore)
@@ -61,7 +90,14 @@ _PINNED_STORE_CALLABLES = {
 
 
 def _utc_second(value: datetime, field: str = "created_at") -> datetime:
-    if value.tzinfo is None or value.utcoffset() != timedelta(0) or value.microsecond:
+    if type(value) is not datetime:
+        raise ValueError(f"{field} must use the exact datetime type")
+    timezone = value.tzinfo
+    if timezone is not UTC and type(timezone) is not TzInfo:
+        raise ValueError(f"{field} must use an approved UTC timezone")
+    if value.utcoffset() is None or value.utcoffset().total_seconds() != 0:
+        raise ValueError(f"{field} must be UTC at whole-second precision")
+    if value.microsecond:
         raise ValueError(f"{field} must be UTC at whole-second precision")
     return value
 
@@ -111,6 +147,98 @@ class TimeAxisKind(StrEnum):
     STUDY_RELATIVE = "study_relative"
 
 
+class ProviderDataAuthorityPurpose(StrEnum):
+    COLLECTION_EVENT = "collection_event"
+    SUBJECT_TIME_ORIGIN = "subject_time_origin"
+    STUDY_TIME_ORIGIN = "study_time_origin"
+
+
+class ProviderDataGrantPayload(RegistryContract):
+    schema_version: Literal["traceback.provider-data-grant.v1"] = (
+        "traceback.provider-data-grant.v1"
+    )
+    grant_id: ApprovalId
+    provider_namespace: ProviderNamespace
+    issuer_id: IssuerId
+    key_id: KeyId
+    principal_id: PrincipalId
+    role: ProviderRole
+    allowed_purposes: tuple[ProviderDataAuthorityPurpose, ...] = Field(
+        min_length=1, max_length=3
+    )
+    trust_snapshot_id: str = Field(pattern=r"^trust_[0-9a-f]{32}$")
+    trust_snapshot_revision: int = Field(ge=1, le=MAX_REVISIONS, strict=True)
+    trust_snapshot_sha256: Sha256
+    nonce: Nonce
+    issued_at: datetime
+    expires_at: datetime
+
+    @model_validator(mode="after")
+    def exact_grant(self) -> ProviderDataGrantPayload:
+        _utc_second(self.issued_at, "data grant issued_at")
+        _utc_second(self.expires_at, "data grant expires_at")
+        if self.expires_at <= self.issued_at:
+            raise ValueError("provider data grant window is invalid")
+        if self.role != ProviderRole.LINKER:
+            raise ValueError("provider data grant requires the linker role")
+        if self.allowed_purposes != tuple(
+            sorted(set(self.allowed_purposes), key=str)
+        ):
+            raise ValueError("provider data purposes must be uniquely sorted")
+        return self
+
+
+class SignedProviderDataGrant(RegistryContract):
+    payload: ProviderDataGrantPayload
+    signature_base64: Base64Signature
+
+
+class ProviderDataAuthorityPayload(RegistryContract):
+    schema_version: Literal["traceback.provider-data-authority.v1"] = (
+        "traceback.provider-data-authority.v1"
+    )
+    authority_id: ApprovalId
+    provider_namespace: ProviderNamespace
+    issuer_id: IssuerId
+    key_id: KeyId
+    principal_id: PrincipalId
+    role: ProviderRole
+    purpose: ProviderDataAuthorityPurpose
+    target_sha256: Sha256
+    trust_snapshot_id: str = Field(pattern=r"^trust_[0-9a-f]{32}$")
+    trust_snapshot_revision: int = Field(ge=1, le=MAX_REVISIONS, strict=True)
+    trust_snapshot_sha256: Sha256
+    nonce: Nonce
+    issued_at: datetime
+    expires_at: datetime
+
+    @model_validator(mode="after")
+    def coherent_window(self) -> ProviderDataAuthorityPayload:
+        _utc_second(self.issued_at, "authority issued_at")
+        _utc_second(self.expires_at, "authority expires_at")
+        if self.expires_at <= self.issued_at:
+            raise ValueError("provider data authority window is invalid")
+        if self.role != ProviderRole.LINKER:
+            raise ValueError("provider data authority requires the linker role")
+        return self
+
+
+class SignedProviderDataAuthority(RegistryContract):
+    grant: SignedProviderDataGrant
+    payload: ProviderDataAuthorityPayload
+    signature_base64: Base64Signature
+
+
+def provider_data_authority_payload_bytes(
+    payload: ProviderDataAuthorityPayload,
+) -> bytes:
+    return _trusted_contract_bytes(payload)
+
+
+def provider_data_grant_payload_bytes(payload: ProviderDataGrantPayload) -> bytes:
+    return _trusted_contract_bytes(payload)
+
+
 class PolicyDigests(RegistryContract):
     inclusion_sha256: Sha256
     exclusion_sha256: Sha256
@@ -124,6 +252,131 @@ class TimeAxis(RegistryContract):
     origin_authority_sha256: Sha256
 
 
+class CollectionEventReference(RegistryContract):
+    """Exact provider-authority input for one biological collection event."""
+
+    schema_version: Literal["traceback.collection-event-reference.v1"] = (
+        "traceback.collection-event-reference.v1"
+    )
+    provider_namespace: ProviderNamespace
+    subject_token: SubjectToken
+    collection_token: CollectionToken
+    collected_at: datetime
+    authority: SignedProviderDataAuthority
+
+    @model_validator(mode="after")
+    def exact_collection_time(self) -> CollectionEventReference:
+        _utc_second(self.collected_at, "collected_at")
+        payload = self.authority.payload
+        if (
+            payload.provider_namespace != self.provider_namespace
+            or payload.purpose != ProviderDataAuthorityPurpose.COLLECTION_EVENT
+            or payload.target_sha256 != collection_event_statement_sha256(self)
+        ):
+            raise ValueError("collection event authority does not bind exact event")
+        return self
+
+
+def collection_event_statement_sha256(event: CollectionEventReference) -> str:
+    return _domain_sha256(
+        b"traceback-collection-event-statement-v1",
+        {
+            "provider_namespace": event.provider_namespace,
+            "subject_token": event.subject_token,
+            "collection_token": event.collection_token,
+            "collected_at": event.collected_at.isoformat(),
+        },
+    )
+
+
+class TimeOriginReference(RegistryContract):
+    schema_version: Literal["traceback.time-origin-reference.v1"] = (
+        "traceback.time-origin-reference.v1"
+    )
+    provider_namespace: ProviderNamespace
+    subject_token: SubjectToken | None
+    kind: Literal[TimeAxisKind.SUBJECT_RELATIVE, TimeAxisKind.STUDY_RELATIVE]
+    origin_time: datetime
+    axis_definition_sha256: Sha256
+    authority: SignedProviderDataAuthority
+
+    @model_validator(mode="after")
+    def exact_origin_authority(self) -> TimeOriginReference:
+        _utc_second(self.origin_time, "origin_time")
+        expected_purpose = (
+            ProviderDataAuthorityPurpose.SUBJECT_TIME_ORIGIN
+            if self.kind == TimeAxisKind.SUBJECT_RELATIVE
+            else ProviderDataAuthorityPurpose.STUDY_TIME_ORIGIN
+        )
+        if (self.kind == TimeAxisKind.SUBJECT_RELATIVE) != (
+            self.subject_token is not None
+        ):
+            raise ValueError("subject-relative origins require one exact subject")
+        payload = self.authority.payload
+        if (
+            payload.provider_namespace != self.provider_namespace
+            or payload.purpose != expected_purpose
+            or payload.target_sha256 != time_origin_statement_sha256(self)
+        ):
+            raise ValueError("time-origin authority does not bind exact origin")
+        return self
+
+
+def time_origin_statement_sha256(origin: TimeOriginReference) -> str:
+    return _domain_sha256(
+        b"traceback-time-origin-statement-v1",
+        {
+            "provider_namespace": origin.provider_namespace,
+            "subject_token": origin.subject_token,
+            "kind": origin.kind.value,
+            "origin_time": origin.origin_time.isoformat(),
+            "axis_definition_sha256": origin.axis_definition_sha256,
+        },
+    )
+
+
+def time_origin_authority_sha256(origins: Sequence[TimeOriginReference]) -> str:
+    return _domain_sha256(
+        b"traceback-time-origin-authority-v1",
+        [
+            hashlib.sha256(_trusted_contract_bytes(origin)).hexdigest()
+            for origin in origins
+        ],
+    )
+
+
+def collection_event_reference_sha256(event: CollectionEventReference) -> str:
+    return hashlib.sha256(_trusted_contract_bytes(event)).hexdigest()
+
+
+def biological_timepoint_id(event: CollectionEventReference) -> str:
+    digest = _domain_sha256(
+        b"traceback-biological-timepoint-v1",
+        {
+            "provider_namespace": event.provider_namespace,
+            "subject_token": event.subject_token,
+            "collection_token": event.collection_token,
+        },
+    )
+    return f"timepoint_{digest[:32]}"
+
+
+def collection_time_coordinate(
+    event: CollectionEventReference,
+    axis: TimeAxis,
+    origin: TimeOriginReference | None = None,
+) -> int:
+    """Derive the only permitted coordinate from collection-event semantics."""
+
+    if axis.kind == TimeAxisKind.COLLECTION_TIME:
+        if origin is not None:
+            raise ValueError("collection-time coordinates cannot use an origin")
+        return int(event.collected_at.timestamp())
+    if origin is None:
+        raise ValueError("relative coordinates require an authorized origin")
+    return int((event.collected_at - origin.origin_time).total_seconds())
+
+
 class MeasurementAnchor(RegistryContract):
     measurement_definition_sha256: Sha256
     anchor_definition_sha256: Sha256
@@ -133,12 +386,36 @@ class MeasurementAnchor(RegistryContract):
 class ProviderAuthorityReference(RegistryContract):
     provider_namespace: ProviderNamespace
     trust_snapshot_sha256: Sha256
+    trust_snapshot_json: str = Field(min_length=1, max_length=16_384)
     store_id: str = Field(pattern=r"^store_[0-9a-f]{32}$")
     store_epoch_sha256: Sha256
     storage_identity_sha256: Sha256
     trust_pins_sha256: Sha256
     state_version: int = Field(ge=1, le=MAX_REVISIONS, strict=True)
     state_head_sha256: Sha256
+
+    @model_validator(mode="after")
+    def exact_trust_snapshot(self) -> ProviderAuthorityReference:
+        trust = _provider_trust_snapshot(self)
+        if (
+            trust.provider_namespace != self.provider_namespace
+            or provider_trust_snapshot_sha256(trust) != self.trust_snapshot_sha256
+        ):
+            raise ValueError("provider authority does not bind exact trust snapshot")
+        return self
+
+
+def _provider_trust_snapshot(
+    authority: ProviderAuthorityReference,
+) -> ProviderTrustSnapshot:
+    try:
+        encoded = authority.trust_snapshot_json.encode("utf-8")
+        trust = ProviderTrustSnapshot.model_validate_json(encoded)
+    except (UnicodeError, ValueError):
+        raise ValueError("provider trust snapshot JSON is invalid") from None
+    if canonical_contract_bytes(trust) != encoded:
+        raise ValueError("provider trust snapshot JSON is not canonical")
+    return trust
 
 
 class CohortMember(RegistryContract):
@@ -159,7 +436,8 @@ class CohortMember(RegistryContract):
         pattern=r"^(?:subject|collection|specimen)_[0-9a-f]{32}$"
     )
     denominator_contribution: bool
-    linkage_event_sha256: Sha256
+    collection_event_sha256: Sha256
+    biological_timepoint_id: BiologicalTimepointId
     time_coordinate: int = Field(
         ge=MIN_TIME_COORDINATE, le=MAX_TIME_COORDINATE, strict=True
     )
@@ -167,8 +445,8 @@ class CohortMember(RegistryContract):
 
 
 class CohortManifest(RegistryContract):
-    schema_version: Literal["traceback.cohort-manifest.v1"] = (
-        "traceback.cohort-manifest.v1"
+    schema_version: Literal["traceback.cohort-manifest.v2"] = (
+        "traceback.cohort-manifest.v2"
     )
     cohort_id: CohortId
     version: int = Field(ge=1, le=100_000)
@@ -182,6 +460,12 @@ class CohortManifest(RegistryContract):
     measurement_anchor: MeasurementAnchor
     provider_authorities: tuple[ProviderAuthorityReference, ...] = Field(
         min_length=1, max_length=256
+    )
+    collection_events: tuple[CollectionEventReference, ...] = Field(
+        min_length=1, max_length=MAX_MEMBERS
+    )
+    time_origins: tuple[TimeOriginReference, ...] = Field(
+        default=(), max_length=MAX_MEMBERS
     )
     members: tuple[CohortMember, ...] = Field(min_length=1, max_length=MAX_MEMBERS)
     synthetic_only: Literal[True] = True
@@ -209,6 +493,65 @@ class CohortManifest(RegistryContract):
             raise ValueError("cohort members must use canonical longitudinal order")
         if {m.provider_namespace for m in self.members} != set(authority_keys):
             raise ValueError("every and only member providers require exact authority")
+        event_keys = [
+            (event.provider_namespace, event.subject_token, event.collection_token)
+            for event in self.collection_events
+        ]
+        if event_keys != sorted(event_keys) or len(event_keys) != len(set(event_keys)):
+            raise ValueError("collection events must be uniquely sorted")
+        events = {
+            (
+                event.provider_namespace,
+                event.subject_token,
+                event.collection_token,
+            ): event
+            for event in self.collection_events
+        }
+        origin_keys = [
+            (origin.provider_namespace, origin.subject_token or "")
+            for origin in self.time_origins
+        ]
+        if origin_keys != sorted(origin_keys) or len(origin_keys) != len(
+            set(origin_keys)
+        ):
+            raise ValueError("time origins must be uniquely sorted")
+        origins = {
+            (origin.provider_namespace, origin.subject_token): origin
+            for origin in self.time_origins
+        }
+        member_subjects = {
+            (member.provider_namespace, member.subject_token) for member in self.members
+        }
+        if self.time_axis.kind == TimeAxisKind.COLLECTION_TIME:
+            if self.time_origins:
+                raise ValueError("collection-time manifests cannot declare origins")
+        else:
+            if self.time_axis.origin_authority_sha256 != time_origin_authority_sha256(
+                self.time_origins
+            ):
+                raise ValueError("time axis does not bind exact origin authorities")
+            if any(
+                origin.kind != self.time_axis.kind
+                or origin.axis_definition_sha256
+                != self.time_axis.definition_sha256
+                for origin in self.time_origins
+            ):
+                raise ValueError("time origin does not match selected axis")
+            if self.time_axis.kind == TimeAxisKind.SUBJECT_RELATIVE:
+                if set(origins) != member_subjects:
+                    raise ValueError(
+                        "subject-relative axes require one origin per subject"
+                    )
+            else:
+                providers = {member.provider_namespace for member in self.members}
+                if set(origins) != {(provider, None) for provider in providers}:
+                    raise ValueError(
+                        "study-relative axes require one origin per provider"
+                    )
+                if len({origin.origin_time for origin in self.time_origins}) != 1:
+                    raise ValueError(
+                        "study-relative providers must authorize one origin"
+                    )
         analyses = {
             (m.provider_namespace, m.analysis_record_id): m for m in self.members
         }
@@ -219,6 +562,32 @@ class CohortManifest(RegistryContract):
             defaultdict(list)
         )
         for member in self.members:
+            event = events.get(
+                (
+                    member.provider_namespace,
+                    member.subject_token,
+                    member.collection_token,
+                )
+            )
+            if event is None:
+                raise ValueError("every member requires its exact collection event")
+            origin = None
+            if self.time_axis.kind == TimeAxisKind.SUBJECT_RELATIVE:
+                origin = origins.get(
+                    (member.provider_namespace, member.subject_token)
+                )
+            elif self.time_axis.kind == TimeAxisKind.STUDY_RELATIVE:
+                origin = origins.get((member.provider_namespace, None))
+            if (
+                member.collection_event_sha256
+                != collection_event_reference_sha256(event)
+                or member.biological_timepoint_id != biological_timepoint_id(event)
+                or member.time_coordinate
+                != collection_time_coordinate(event, self.time_axis, origin)
+            ):
+                raise ValueError(
+                    "member timepoint is not derived from its collection event"
+                )
             expected_token = {
                 UnitOfAnalysis.SUBJECT: member.subject_token,
                 UnitOfAnalysis.COLLECTION: member.collection_token,
@@ -241,18 +610,26 @@ class CohortManifest(RegistryContract):
                 and member.technical_replicate_of is not None
             ):
                 raise ValueError("one member cannot be both replicate and reanalysis")
+            if (
+                member.lineage_role != MemberLineageRole.BIOLOGICAL_DRAW
+                and member.denominator_contribution
+            ):
+                raise ValueError(
+                    "technical replicates and reanalysis cannot contribute denominators"
+                )
             expected_time = _domain_sha256(
                 b"traceback-cohort-time-coordinate-v1",
                 {
                     "collection_token": member.collection_token,
-                    "linkage_event_sha256": member.linkage_event_sha256,
+                    "collection_event_sha256": member.collection_event_sha256,
+                    "biological_timepoint_id": member.biological_timepoint_id,
                     "time_axis": self.time_axis.model_dump(mode="json"),
                     "time_coordinate": member.time_coordinate,
                 },
             )
             if member.time_coordinate_sha256 != expected_time:
                 raise ValueError(
-                    "member time coordinate is not bound to its linkage event"
+                    "member time coordinate is not bound to its collection event"
                 )
             groups[(member.provider_namespace, expected_token)].append(member)
             biological_groups[
@@ -263,6 +640,11 @@ class CohortManifest(RegistryContract):
                     member.specimen_token,
                 )
             ].append(member)
+        if set(events) != {
+            (member.provider_namespace, member.subject_token, member.collection_token)
+            for member in self.members
+        }:
+            raise ValueError("collection events cannot be unused or missing")
         for members in groups.values():
             contributors = [m for m in members if m.denominator_contribution]
             if (
@@ -303,6 +685,8 @@ class CohortManifest(RegistryContract):
                     raise ValueError(
                         "technical replicate source has different biological lineage"
                     )
+                if source.biological_timepoint_id != member.biological_timepoint_id:
+                    raise ValueError("technical replicate cannot create a timepoint")
             elif member.lineage_role == MemberLineageRole.REANALYSIS:
                 if self.reanalysis_rule == ReanalysisRule.EXCLUDE:
                     raise ValueError("reanalysis policy excludes this member")
@@ -321,6 +705,8 @@ class CohortManifest(RegistryContract):
                     raise ValueError(
                         "reanalysis source has different biological lineage"
                     )
+                if source.biological_timepoint_id != member.biological_timepoint_id:
+                    raise ValueError("reanalysis cannot create a timepoint")
         for start in analyses:
             seen: set[tuple[str, str]] = set()
             current = start
@@ -341,11 +727,130 @@ class CohortManifest(RegistryContract):
         return self
 
 
+_TRUSTED_MODEL_TYPES = frozenset(
+    {
+        ProviderDataAuthorityPayload,
+        ProviderDataGrantPayload,
+        SignedProviderDataGrant,
+        SignedProviderDataAuthority,
+        TimeAxis,
+        CollectionEventReference,
+        TimeOriginReference,
+        PolicyDigests,
+        MeasurementAnchor,
+        ProviderAuthorityReference,
+        CohortMember,
+        CohortManifest,
+        ProviderTrustSnapshot,
+        ProviderIssuerTrust,
+    }
+)
+_TRUSTED_ENUM_TYPES = frozenset(
+    {
+        TechnicalReplicateRule,
+        ReanalysisRule,
+        MemberLineageRole,
+        TimeAxisKind,
+        ProviderDataAuthorityPurpose,
+        ProviderRole,
+        IssuerStatus,
+        ApprovalPurpose,
+        UnitOfAnalysis,
+    }
+)
+
+
+def _require_trusted_graph(value: object) -> None:
+    """Reject caller-owned executable object shape before any serialization."""
+
+    # Stack entries are (object, depth, exit_marker, tuple_bound). The explicit
+    # traversal prevents caller-created cycles from reaching Python recursion.
+    stack: list[tuple[object, int, bool, int | None]] = [(value, 0, False, None)]
+    active: set[int] = set()
+    visited: set[int] = set()
+    nodes = 0
+    while stack:
+        item, depth, exiting, tuple_bound = stack.pop()
+        item_type = type(item)
+        if exiting:
+            active.remove(id(item))
+            continue
+        nodes += 1
+        if nodes > MAX_TRUSTED_GRAPH_NODES:
+            raise ValueError("cohort authority graph exceeds its node budget")
+        if depth > MAX_TRUSTED_GRAPH_DEPTH:
+            raise ValueError("cohort authority graph exceeds its depth budget")
+        if item is None or item_type in {int, bool}:
+            continue
+        if item_type is str:
+            scalar_bound = (
+                MAX_TRUSTED_SCALAR_CHARS if tuple_bound is None else tuple_bound
+            )
+            if len(item) > scalar_bound:
+                raise ValueError("cohort authority graph scalar is oversized")
+            continue
+        if item_type is datetime:
+            _utc_second(item, "contract timestamp")
+            continue
+        if item_type in _TRUSTED_ENUM_TYPES:
+            continue
+        if item_type is not tuple and item_type not in _TRUSTED_MODEL_TYPES:
+            raise TypeError("cohort authority graph contains an untrusted object type")
+        identity = id(item)
+        if identity in active:
+            raise ValueError("cohort authority graph contains a cycle")
+        if identity in visited:
+            continue
+        active.add(identity)
+        visited.add(identity)
+        stack.append((item, depth, True, tuple_bound))
+        if item_type is tuple:
+            bound = MAX_MEMBERS if tuple_bound is None else tuple_bound
+            if len(item) > bound:
+                raise ValueError("cohort authority graph tuple is oversized")
+            for child in reversed(item):
+                stack.append((child, depth + 1, False, None))
+            continue
+        values = object.__getattribute__(item, "__dict__")
+        fields = item_type.model_fields
+        if type(values) is not dict or set(values) != set(fields):
+            raise TypeError("cohort authority graph has an invalid model shape")
+        for name in reversed(tuple(fields)):
+            field = fields[name]
+            maximum = next(
+                (
+                    constraint.max_length
+                    for constraint in field.metadata
+                    if getattr(constraint, "max_length", None) is not None
+                ),
+                None,
+            )
+            stack.append((values[name], depth + 1, False, maximum))
+
+
+def _trusted_contract_bytes(value: RegistryContract) -> bytes:
+    _require_trusted_graph(value)
+    return canonical_contract_bytes(value)
+
+
 def cohort_manifest_bytes(manifest: CohortManifest) -> bytes:
-    return canonical_contract_bytes(manifest)
+    if type(manifest) is not CohortManifest:
+        raise TypeError("cohort manifest requires the exact current schema type")
+    return _trusted_contract_bytes(manifest)
 
 
 def cohort_manifest_from_bytes(content: bytes) -> CohortManifest:
+    try:
+        decoded = json.loads(content)
+    except (UnicodeDecodeError, json.JSONDecodeError):
+        decoded = None
+    if isinstance(decoded, dict) and decoded.get("schema_version") == (
+        "traceback.cohort-manifest.v1"
+    ):
+        raise ValueError(
+            "legacy cohort manifest v1 is historical-only because it used "
+            "linkage proposal time; rebuild v2 from collection-event authority"
+        )
     try:
         return contract_from_canonical_bytes(CohortManifest, content)
     except RegistryIdentityError as exc:
@@ -360,8 +865,9 @@ def build_cohort_member(
     *,
     revision: object,
     receipt: CommittedLinkageReceipt,
+    collection_event: CollectionEventReference,
     time_axis: TimeAxis,
-    time_coordinate: int,
+    time_origin: TimeOriginReference | None = None,
     lineage_role: MemberLineageRole,
     denominator_contribution: bool,
     unit_of_analysis: UnitOfAnalysis,
@@ -372,12 +878,42 @@ def build_cohort_member(
     run_token = revision.technical.run.token
     if run_token is None:
         raise ValueError("cohort membership requires known run lineage")
-    event_sha256 = _linkage_event_sha256(revision)
+    if (
+        collection_event.provider_namespace,
+        collection_event.subject_token,
+        collection_event.collection_token,
+    ) != (
+        revision.provider_namespace,
+        revision.biological.subject_token,
+        revision.biological.collection_token,
+    ):
+        raise ValueError("collection event does not match linkage lineage")
+    event_sha256 = collection_event_reference_sha256(collection_event)
+    timepoint_id = biological_timepoint_id(collection_event)
+    if time_origin is not None:
+        if (
+            time_origin.provider_namespace != revision.provider_namespace
+            or time_origin.kind != time_axis.kind
+            or time_origin.axis_definition_sha256 != time_axis.definition_sha256
+            or (
+                time_axis.kind == TimeAxisKind.SUBJECT_RELATIVE
+                and time_origin.subject_token != revision.biological.subject_token
+            )
+            or (
+                time_axis.kind == TimeAxisKind.STUDY_RELATIVE
+                and time_origin.subject_token is not None
+            )
+        ):
+            raise ValueError("time origin does not match linkage and axis")
+    time_coordinate = collection_time_coordinate(
+        collection_event, time_axis, time_origin
+    )
     coordinate_sha256 = _domain_sha256(
         b"traceback-cohort-time-coordinate-v1",
         {
             "collection_token": revision.biological.collection_token,
-            "linkage_event_sha256": event_sha256,
+            "collection_event_sha256": event_sha256,
+            "biological_timepoint_id": timepoint_id,
             "time_axis": time_axis.model_dump(mode="json"),
             "time_coordinate": time_coordinate,
         },
@@ -403,7 +939,8 @@ def build_cohort_member(
         lineage_role=lineage_role,
         analysis_unit_token=analysis_unit,
         denominator_contribution=denominator_contribution,
-        linkage_event_sha256=event_sha256,
+        collection_event_sha256=event_sha256,
+        biological_timepoint_id=timepoint_id,
         time_coordinate=time_coordinate,
         time_coordinate_sha256=coordinate_sha256,
     )
@@ -412,6 +949,8 @@ def build_cohort_member(
 def build_cohort_manifest(
     *,
     provider_authorities: Sequence[ProviderAuthorityReference],
+    collection_events: Sequence[CollectionEventReference],
+    time_origins: Sequence[TimeOriginReference] = (),
     members: Sequence[CohortMember],
     **values: object,
 ) -> CohortManifest:
@@ -420,6 +959,25 @@ def build_cohort_manifest(
             **values,
             "provider_authorities": tuple(
                 sorted(provider_authorities, key=lambda item: item.provider_namespace)
+            ),
+            "collection_events": tuple(
+                sorted(
+                    collection_events,
+                    key=lambda item: (
+                        item.provider_namespace,
+                        item.subject_token,
+                        item.collection_token,
+                    ),
+                )
+            ),
+            "time_origins": tuple(
+                sorted(
+                    time_origins,
+                    key=lambda item: (
+                        item.provider_namespace,
+                        item.subject_token or "",
+                    ),
+                )
             ),
             "members": tuple(
                 sorted(
@@ -449,8 +1007,12 @@ def _substantive_sha256(manifest: CohortManifest) -> str:
 
 
 def validate_manifest_history(history: Sequence[CohortManifest]) -> None:
+    if type(history) not in {tuple, list}:
+        raise TypeError("manifest history requires an exact tuple or list")
     if not history:
         raise ValueError("manifest history cannot be empty")
+    for manifest in history:
+        _require_trusted_graph(manifest)
     reparsed = tuple(
         cohort_manifest_from_bytes(cohort_manifest_bytes(manifest))
         for manifest in history
@@ -468,16 +1030,77 @@ def validate_manifest_history(history: Sequence[CohortManifest]) -> None:
             raise ValueError("a new version must change membership or cohort policy")
 
 
-def _linkage_event_sha256(revision: object) -> str:
-    return _domain_sha256(
-        b"traceback-cohort-linkage-event-v1",
-        {
-            "provider_namespace": revision.provider_namespace,
-            "collection_token": revision.biological.collection_token,
-            "source_projection_ref": revision.source_projection_ref,
-            "proposed_at": revision.proposed_at.isoformat(),
-        },
+def _verify_provider_data_authority(
+    authority: SignedProviderDataAuthority,
+    trust: ProviderTrustSnapshot,
+    *,
+    evaluated_at: datetime,
+) -> None:
+    payload = authority.payload
+    grant = authority.grant.payload
+    trust_sha256 = provider_trust_snapshot_sha256(trust)
+    if (
+        payload.provider_namespace != trust.provider_namespace
+        or payload.trust_snapshot_id != trust.snapshot_id
+        or payload.trust_snapshot_revision != trust.revision
+        or payload.trust_snapshot_sha256 != trust_sha256
+    ):
+        raise ValueError("provider data authority does not bind trusted snapshot")
+    if (
+        grant.provider_namespace != payload.provider_namespace
+        or grant.issuer_id != payload.issuer_id
+        or grant.key_id != payload.key_id
+        or grant.principal_id != payload.principal_id
+        or grant.role != payload.role
+        or grant.trust_snapshot_id != payload.trust_snapshot_id
+        or grant.trust_snapshot_revision != payload.trust_snapshot_revision
+        or grant.trust_snapshot_sha256 != trust_sha256
+    ):
+        raise ValueError("provider data grant does not bind authority and trust")
+    if (
+        grant.issued_at < trust.issued_at
+        or evaluated_at >= grant.expires_at
+        or grant.expires_at > trust.expires_at
+    ):
+        raise ValueError("provider data grant window is outside trusted snapshot")
+    if (
+        grant.issued_at > payload.issued_at
+        or payload.issued_at > evaluated_at
+        or evaluated_at >= payload.expires_at
+        or payload.expires_at > grant.expires_at
+        or payload.expires_at > trust.expires_at
+    ):
+        raise ValueError("provider data authority window is outside trusted snapshot")
+    issuer = next(
+        (
+            item
+            for item in trust.issuers
+            if (item.issuer_id, item.key_id) == (payload.issuer_id, payload.key_id)
+        ),
+        None,
     )
+    if (
+        issuer is None
+        or issuer.status != IssuerStatus.ACTIVE
+        or ProviderRole.LINKER not in issuer.allowed_roles
+    ):
+        raise ValueError("provider data grant issuer is not trusted")
+    if payload.purpose not in grant.allowed_purposes:
+        raise ValueError("provider data authority purpose is not explicitly granted")
+    try:
+        public_key = Ed25519PublicKey.from_public_bytes(
+            base64.b64decode(issuer.public_key_base64, validate=True)
+        )
+        public_key.verify(
+            base64.b64decode(authority.grant.signature_base64, validate=True),
+            provider_data_grant_payload_bytes(grant),
+        )
+        public_key.verify(
+            base64.b64decode(authority.signature_base64, validate=True),
+            provider_data_authority_payload_bytes(payload),
+        )
+    except (ValueError, InvalidSignature):
+        raise ValueError("provider data authority signature is invalid") from None
 
 
 def validate_manifest_against_linkage_store(
@@ -495,12 +1118,61 @@ def validate_manifest_against_linkage_store(
     for name, pinned in _PINNED_STORE_CALLABLES.items():
         if name in vars(store) or getattr(ProviderLinkageStore, name) is not pinned:
             raise TypeError("live linkage store authority callable was shadowed")
+    _PINNED_PROCESS_INTEGRITY_CHECK()
+    if not _PINNED_TIME_SOURCE_IDENTITY_CHECK(store):
+        raise ProviderLinkageStoreUnsafe(
+            "live linkage store authority time source is not pinned"
+        )
     snapshot = _PINNED_ACTIVE_SNAPSHOT(store)
+    with _PINNED_AUTHORITY_READ_FENCE(store):
+        time_source = vars(store).get("_time_source")
+        if type(time_source) is not AuthorityTimeSource:
+            raise TypeError("live linkage store authority time source is invalid")
+        evaluated_at = _PINNED_AUTHORITY_TIME_READ(time_source)
     authorities = {
         item.provider_namespace: item for item in manifest.provider_authorities
     }
+    trusted_snapshots = {
+        provider: _provider_trust_snapshot(authority)
+        for provider, authority in authorities.items()
+    }
+    if set(trusted_snapshots) != set(authorities):
+        raise ValueError("provider trust snapshot set is not exact")
+    manifest_events = {
+        (event.provider_namespace, event.subject_token, event.collection_token): event
+        for event in manifest.collection_events
+    }
+    manifest_origins = {
+        (origin.provider_namespace, origin.subject_token): origin
+        for origin in manifest.time_origins
+    }
     if set(expected_pins) != set(authorities):
         raise ValueError("provider authority set is not independently pinned")
+    for provider, trust in trusted_snapshots.items():
+        if (
+            trust.provider_namespace != provider
+            or provider_trust_snapshot_sha256(trust) != expected_pins[provider]
+        ):
+            raise ValueError("provider trust snapshot does not match independent pin")
+    data_authorities = [
+        event.authority for event in manifest.collection_events
+    ] + [origin.authority for origin in manifest.time_origins]
+    authority_ids = [item.payload.authority_id for item in data_authorities]
+    nonces = [item.payload.nonce for item in data_authorities]
+    grant_ids = [item.grant.payload.grant_id for item in data_authorities]
+    grant_nonces = [item.grant.payload.nonce for item in data_authorities]
+    if len(authority_ids) != len(set(authority_ids)) or len(nonces) != len(set(nonces)):
+        raise ValueError("provider data authority proofs cannot be reused")
+    if len(grant_ids) != len(set(grant_ids)) or len(grant_nonces) != len(
+        set(grant_nonces)
+    ):
+        raise ValueError("provider data grants cannot be reused")
+    for authority in data_authorities:
+        _verify_provider_data_authority(
+            authority,
+            trusted_snapshots[authority.payload.provider_namespace],
+            evaluated_at=evaluated_at,
+        )
     recomputed_pins = _captured_trust_pins_sha256(expected_pins)
     if snapshot.trust_pins_sha256 != recomputed_pins:
         raise ValueError("live store trust pins do not match independent pins")
@@ -579,31 +1251,59 @@ def validate_manifest_against_linkage_store(
             technical.reanalysis_of.token,
         ):
             raise ValueError("member lineage does not match exact linkage revision")
-        if member.linkage_event_sha256 != _linkage_event_sha256(revision):
-            raise ValueError("member time source does not match exact linkage event")
-        if member.time_coordinate != int(revision.proposed_at.timestamp()):
-            raise ValueError("member time coordinate is not derived from linkage event")
+        event = manifest_events[
+            (member.provider_namespace, member.subject_token, member.collection_token)
+        ]
+        origin = None
+        if manifest.time_axis.kind == TimeAxisKind.SUBJECT_RELATIVE:
+            origin = manifest_origins[(member.provider_namespace, member.subject_token)]
+        elif manifest.time_axis.kind == TimeAxisKind.STUDY_RELATIVE:
+            origin = manifest_origins[(member.provider_namespace, None)]
+        if (
+            member.collection_event_sha256 != collection_event_reference_sha256(event)
+            or member.biological_timepoint_id != biological_timepoint_id(event)
+            or member.time_coordinate
+            != collection_time_coordinate(event, manifest.time_axis, origin)
+        ):
+            raise ValueError(
+                "member timepoint is not derived from collection authority"
+            )
 
 
 __all__ = [
     "MAX_TIME_COORDINATE",
     "MIN_TIME_COORDINATE",
+    "BiologicalTimepointId",
     "CohortManifest",
     "CohortMember",
+    "CollectionEventReference",
     "MeasurementAnchor",
     "MemberLineageRole",
     "PolicyDigests",
     "ProviderAuthorityReference",
+    "ProviderDataAuthorityPayload",
+    "ProviderDataAuthorityPurpose",
+    "ProviderDataGrantPayload",
     "ReanalysisRule",
     "TechnicalReplicateRule",
     "TimeAxis",
     "TimeAxisKind",
+    "TimeOriginReference",
+    "SignedProviderDataAuthority",
+    "SignedProviderDataGrant",
+    "biological_timepoint_id",
     "build_cohort_manifest",
     "build_cohort_member",
     "capture_expected_trust_pins",
     "cohort_manifest_bytes",
     "cohort_manifest_from_bytes",
     "cohort_manifest_sha256",
+    "collection_event_reference_sha256",
+    "collection_time_coordinate",
+    "provider_data_authority_payload_bytes",
+    "provider_data_grant_payload_bytes",
+    "time_origin_authority_sha256",
+    "time_origin_statement_sha256",
     "trust_pins_sha256",
     "validate_manifest_against_linkage_store",
     "validate_manifest_history",
