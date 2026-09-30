@@ -128,6 +128,10 @@ def test_versions_are_append_only_consecutive_and_paginated(
         2,
     }
     assert page2.next_after_selector_id is None
+    selected = max((page1.records + page2.records), key=lambda item: item.cohort_version)
+    history = registry.resolve_history(selected.selector_id, selected.cohort_version)
+    assert history.manifests == (first, second)
+    assert history.selected_manifest_sha256 == cohort_manifest_sha256(second)
 
     conflicting = second.model_copy(
         update={

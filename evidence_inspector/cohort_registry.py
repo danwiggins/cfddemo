@@ -111,6 +111,18 @@ class RegisteredCohortManifest(RegistryContract):
     manifest: CohortManifest
 
 
+class RegisteredCohortHistory(RegistryContract):
+    schema_version: Literal["traceback.registered-cohort-history.v1"] = (
+        "traceback.registered-cohort-history.v1"
+    )
+    registry_id: RegistryId
+    registry_epoch_sha256: Sha256
+    state_version: int = Field(ge=1, le=MAX_REGISTERED_MANIFESTS)
+    state_head_sha256: Sha256
+    selected_manifest_sha256: Sha256
+    manifests: tuple[CohortManifest, ...] = Field(min_length=1, max_length=100_000)
+
+
 class CohortSelectorRecord(RegistryContract):
     schema_version: Literal["traceback.cohort-selector-record.v1"] = (
         "traceback.cohort-selector-record.v1"
@@ -875,6 +887,19 @@ class CohortRegistry:
     def resolve(
         self, selector_id: str, cohort_version: int
     ) -> RegisteredCohortManifest:
+        history = self.resolve_history(selector_id, cohort_version)
+        return RegisteredCohortManifest(
+            registry_id=history.registry_id,
+            registry_epoch_sha256=history.registry_epoch_sha256,
+            state_version=history.state_version,
+            state_head_sha256=history.state_head_sha256,
+            manifest_sha256=history.selected_manifest_sha256,
+            manifest=history.manifests[-1],
+        )
+
+    def resolve_history(
+        self, selector_id: str, cohort_version: int
+    ) -> RegisteredCohortHistory:
         if (
             type(selector_id) is not str
             or len(selector_id) != 56
@@ -886,17 +911,22 @@ class CohortRegistry:
         with self._lock(exclusive=False):
             loaded, head = self._load_state()
             matches = [
-                (digest, manifest)
+                (manifest.version, digest, manifest)
                 for digest, (manifest, _) in loaded.items()
-                if manifest.version == cohort_version
+                if manifest.version <= cohort_version
                 and _selector_id(
                     self._metadata.registry_epoch_sha256, manifest.cohort_id
                 )
                 == selector_id
             ]
-            if len(matches) != 1:
+            matches.sort(key=lambda item: item[0])
+            if (
+                len(matches) != cohort_version
+                or [item[0] for item in matches]
+                != list(range(1, cohort_version + 1))
+            ):
                 raise CohortRegistryConflict("cohort selector is unavailable")
-            digest, manifest = matches[0]
+            _, digest, manifest = matches[-1]
             try:
                 validate_manifest_against_linkage_store(
                     manifest,
@@ -907,13 +937,13 @@ class CohortRegistry:
                 raise CohortRegistryConflict(
                     "cohort selector authority is stale"
                 ) from None
-            return RegisteredCohortManifest(
+            return RegisteredCohortHistory(
                 registry_id=self._metadata.registry_id,
                 registry_epoch_sha256=self._metadata.registry_epoch_sha256,
                 state_version=len(loaded),
                 state_head_sha256=head,
-                manifest_sha256=digest,
-                manifest=manifest,
+                selected_manifest_sha256=digest,
+                manifests=tuple(item[2] for item in matches),
             )
 
     def list_selectors(
@@ -1015,5 +1045,6 @@ __all__ = [
     "CohortSelectorPage",
     "CohortSelectorRecord",
     "RegisteredCohortManifest",
+    "RegisteredCohortHistory",
     "cohort_registry_backup_from_bytes",
 ]
