@@ -1420,6 +1420,14 @@ def test_linux_proc_fd_anchor_is_retained_until_sqlite_close(
             assert supersession_module._safe_fstat(self.descriptor) is not None
             return self.connection.execute(*args, **kwargs)
 
+        def commit(self):
+            assert supersession_module._safe_fstat(self.descriptor) is not None
+            return self.connection.commit()
+
+        def rollback(self):
+            assert supersession_module._safe_fstat(self.descriptor) is not None
+            return self.connection.rollback()
+
         def close(self):
             assert supersession_module._safe_fstat(self.descriptor) is not None
             self.connection.close()
