@@ -14,7 +14,7 @@ import re
 import sqlite3
 import threading
 import unicodedata
-from datetime import datetime
+from datetime import UTC, datetime, timedelta
 from enum import StrEnum
 from typing import Annotated, Literal
 from urllib.parse import unquote
@@ -27,7 +27,7 @@ from pydantic import (
     ValidationError,
     model_validator,
 )
-from pydantic_core import PydanticSerializationError
+from pydantic_core import PydanticSerializationError, TzInfo
 
 from evidence_inspector.compatibility import (
     BundleId,
@@ -728,8 +728,6 @@ class _LongitudinalMemberDecisionBase(CompatibilityContract):
             or self.member_linkage_receipt_sha256 is None
         ):
             raise ValueError("eligible decision requires exact activation receipts")
-        if eligible and self.engine_version != SUPPORTED_LONGITUDINAL_ENGINE_VERSION:
-            raise ValueError("eligible decision requires the supported engine version")
         if self.delta_allowed != eligible or self.connecting_trend_allowed != eligible:
             raise ValueError("only equivalent or qualified outcomes permit rendering")
         if set(self.mismatch_dimensions) & set(self.unknown_dimensions):
@@ -857,6 +855,11 @@ class LongitudinalMemberDecision(_LongitudinalMemberDecisionBase):
 
     @model_validator(mode="after")
     def exact_snapshot_binding(self) -> LongitudinalMemberDecision:
+        if (
+            self.delta_allowed
+            and self.engine_version != SUPPORTED_LONGITUDINAL_ENGINE_VERSION
+        ):
+            raise ValueError("eligible decision requires the supported engine version")
         binding = (
             self.linkage_snapshot_state_version,
             self.linkage_snapshot_state_head_sha256,
@@ -1210,8 +1213,15 @@ def _contract_graph_is_trusted(root: object) -> bool:
     seen: set[int] = set()
     while stack:
         value = stack.pop()
-        if value is None or type(value) in {bool, int, float, str, bytes, datetime}:
+        if value is None or type(value) in {bool, int, float, str, bytes}:
             continue
+        if type(value) is datetime:
+            timezone = object.__getattribute__(value, "tzinfo")
+            if timezone is UTC:
+                continue
+            if type(timezone) is TzInfo and timezone.utcoffset(None) == timedelta(0):
+                continue
+            return False
         identity = id(value)
         if identity in seen:
             continue
@@ -2431,7 +2441,11 @@ decide_longitudinal_series = _bind_series_entrypoint(
 )
 
 
-def _bind_replay_entrypoint(member_decider: object, strict_bytes: object):
+def _bind_replay_entrypoint(
+    member_decider: object,
+    strict_bytes: object,
+    invalid_decision_bytes: bytes,
+):
     def entrypoint(
         expected: LongitudinalMemberDecision,
         anchor: LongitudinalRecord,
@@ -2445,6 +2459,11 @@ def _bind_replay_entrypoint(member_decider: object, strict_bytes: object):
     ) -> LongitudinalMemberDecision:
         """Replay an exact D03 decision; never trust a stored decision by itself."""
 
+        if type(linkage_store) is not ProviderLinkageStore:
+            raise LongitudinalDecisionReplayError(
+                "stored longitudinal decision does not replay exactly without a live "
+                "authority store"
+            )
         try:
             expected_bytes = strict_bytes(expected)  # type: ignore[operator]
         except (
@@ -2457,6 +2476,10 @@ def _bind_replay_entrypoint(member_decider: object, strict_bytes: object):
             raise LongitudinalDecisionReplayError(
                 "stored longitudinal decision is not an exact canonical contract"
             ) from None
+        if expected_bytes == invalid_decision_bytes:
+            raise LongitudinalDecisionReplayError(
+                "stored invalid-input decision sentinel is not replayable"
+            )
         actual = member_decider(  # type: ignore[operator]
             anchor,
             member,
@@ -2480,10 +2503,15 @@ def _bind_replay_entrypoint(member_decider: object, strict_bytes: object):
 replay_longitudinal_member_decision = _bind_replay_entrypoint(
     decide_longitudinal_member,
     _strict_member_decision_bytes,
+    _INVALID_INPUT_MEMBER_DECISION_BYTES,
 )
 
 
-def _bind_series_replay_entrypoint(series_decider: object, strict_bytes: object):
+def _bind_series_replay_entrypoint(
+    series_decider: object,
+    strict_bytes: object,
+    invalid_decision_bytes: bytes,
+):
     def entrypoint(
         expected: LongitudinalSeriesDecision,
         anchor: LongitudinalRecord,
@@ -2495,6 +2523,11 @@ def _bind_series_replay_entrypoint(series_decider: object, strict_bytes: object)
         expected_linkage_trust_snapshot_sha256_by_provider: dict[str, str],
         linkage_store: ProviderLinkageStore | None,
     ) -> LongitudinalSeriesDecision:
+        if type(linkage_store) is not ProviderLinkageStore:
+            raise LongitudinalDecisionReplayError(
+                "stored longitudinal series does not replay exactly without a live "
+                "authority store"
+            )
         try:
             expected_bytes = strict_bytes(expected)  # type: ignore[operator]
         except (
@@ -2507,6 +2540,10 @@ def _bind_series_replay_entrypoint(series_decider: object, strict_bytes: object)
             raise LongitudinalDecisionReplayError(
                 "stored longitudinal series is not an exact canonical v3 contract"
             ) from None
+        if expected_bytes == invalid_decision_bytes:
+            raise LongitudinalDecisionReplayError(
+                "stored invalid-input series sentinel is not replayable"
+            )
         actual = series_decider(  # type: ignore[operator]
             anchor,
             members,
@@ -2530,6 +2567,7 @@ def _bind_series_replay_entrypoint(series_decider: object, strict_bytes: object)
 replay_longitudinal_series_decision = _bind_series_replay_entrypoint(
     decide_longitudinal_series,
     _strict_series_decision_bytes,
+    _INVALID_INPUT_SERIES_DECISION_BYTES,
 )
 
 

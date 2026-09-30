@@ -7,6 +7,7 @@ import json
 import subprocess
 import sys
 import threading
+from datetime import timedelta, tzinfo
 from typing import ClassVar
 
 import pytest
@@ -538,6 +539,70 @@ def test_replay_uses_pinned_internal_evaluator(monkeypatch: pytest.MonkeyPatch) 
                 **{**arguments, "linkage_store": None},
             )
     assert calls == 0
+
+
+def test_replay_rejects_storeless_unknowns_and_cross_input_invalid_sentinels() -> None:
+    anchor = _record("1")
+    member = _record("2")
+    different_member = _record("3")
+    policy = _policy(anchor)
+    policy_sha256 = longitudinal_anchor_policy_sha256(policy)
+    storeless = {
+        "expected_policy_sha256": policy_sha256,
+        "expected_authority_head_sha256": HEAD_SHA256,
+        "expected_linkage_trust_snapshot_sha256_by_provider": {PROVIDER: TRUST_SHA256},
+        "linkage_store": None,
+    }
+    member_unknown = decide_longitudinal_member(anchor, member, policy, **storeless)
+    series_unknown = decide_longitudinal_series(anchor, (member,), policy, **storeless)
+    with pytest.raises(LongitudinalDecisionReplayError, match="live authority store"):
+        replay_longitudinal_member_decision(
+            member_unknown, anchor, member, policy, **storeless
+        )
+    with pytest.raises(LongitudinalDecisionReplayError, match="live authority store"):
+        replay_longitudinal_series_decision(
+            series_unknown, anchor, (member,), policy, **storeless
+        )
+
+    with _activated_records(anchor, member, different_member) as (records, store):
+        malformed_a = {
+            **storeless,
+            "expected_policy_sha256": policy_sha256.encode("ascii"),
+            "linkage_store": store,
+        }
+        malformed_b = {
+            **storeless,
+            "expected_policy_sha256": b"f" * 64,
+            "linkage_store": store,
+        }
+        invalid_member = decide_longitudinal_member(
+            records[0],
+            records[1],
+            policy,
+            **malformed_a,  # type: ignore[arg-type]
+        )
+        invalid_series = decide_longitudinal_series(
+            records[0],
+            (records[1],),
+            policy,
+            **malformed_a,  # type: ignore[arg-type]
+        )
+        with pytest.raises(LongitudinalDecisionReplayError, match="not replayable"):
+            replay_longitudinal_member_decision(
+                invalid_member,
+                records[0],
+                records[2],
+                policy,
+                **malformed_b,  # type: ignore[arg-type]
+            )
+        with pytest.raises(LongitudinalDecisionReplayError, match="not replayable"):
+            replay_longitudinal_series_decision(
+                invalid_series,
+                records[0],
+                (records[2],),
+                policy,
+                **malformed_b,  # type: ignore[arg-type]
+            )
 
 
 @pytest.mark.parametrize("entrypoint", ("member", "series"))
@@ -1156,6 +1221,7 @@ def test_legacy_v2_member_and_series_envelopes_parse_but_cannot_current_replay()
         )
         payload = current.model_dump(mode="json")
         payload["schema_version"] = "traceback.longitudinal-member-decision.v2"
+        payload["engine_version"] = "2.0.0"
         for field in (
             "linkage_snapshot_state_version",
             "linkage_snapshot_state_head_sha256",
@@ -1165,6 +1231,7 @@ def test_legacy_v2_member_and_series_envelopes_parse_but_cannot_current_replay()
         legacy_member = LegacyLongitudinalMemberDecisionV2.model_validate_json(
             json.dumps(payload)
         )
+        assert legacy_member.engine_version == "2.0.0"
         legacy_digest = hashlib.sha256(
             canonical_contract_bytes(legacy_member)
         ).hexdigest()
@@ -1181,6 +1248,7 @@ def test_legacy_v2_member_and_series_envelopes_parse_but_cannot_current_replay()
             )
         )
         assert legacy_series.decisions == (legacy_member,)
+        assert legacy_series.decisions[0].engine_version == "2.0.0"
         with pytest.raises(LongitudinalDecisionReplayError, match="canonical v3"):
             replay_longitudinal_series_decision(
                 legacy_series,  # type: ignore[arg-type]
@@ -1392,6 +1460,78 @@ def test_nested_caller_contract_subclass_is_zero_hook_rejected(
                     **arguments,
                 )
     assert CallerMeasurement.calls == 0
+
+
+@pytest.mark.parametrize("entrypoint", ("member", "series", "replay"))
+def test_caller_owned_datetime_timezone_is_zero_hook_rejected(
+    entrypoint: str,
+) -> None:
+    class CallerTimezone(tzinfo):
+        calls = 0
+
+        def utcoffset(self, value: object) -> timedelta:
+            del value
+            type(self).calls += 1
+            return timedelta(0)
+
+        def dst(self, value: object) -> timedelta:
+            del value
+            type(self).calls += 1
+            return timedelta(0)
+
+        def tzname(self, value: object) -> str:
+            del value
+            type(self).calls += 1
+            return "UTC"
+
+    anchor = _record("1")
+    member = _record("2")
+    policy = _policy(anchor)
+    with _activated_records(anchor, member) as (records, store):
+        active_anchor, active_member = records
+        arguments = {
+            "expected_policy_sha256": longitudinal_anchor_policy_sha256(policy),
+            "expected_authority_head_sha256": HEAD_SHA256,
+            "expected_linkage_trust_snapshot_sha256_by_provider": {
+                PROVIDER: TRUST_SHA256
+            },
+            "linkage_store": store,
+        }
+        genuine = decide_longitudinal_member(
+            active_anchor, active_member, policy, **arguments
+        )
+        hostile_time = active_anchor.linkage_revision.proposed_at.replace(
+            tzinfo=CallerTimezone()
+        )
+        poisoned_revision = active_anchor.linkage_revision.model_copy(
+            update={"proposed_at": hostile_time}
+        )
+        poisoned_anchor = active_anchor.model_copy(
+            update={"linkage_revision": poisoned_revision}
+        )
+        CallerTimezone.calls = 0
+        if entrypoint == "member":
+            rejected = decide_longitudinal_member(
+                poisoned_anchor, active_member, policy, **arguments
+            )
+            assert rejected.outcome == LongitudinalOutcome.UNKNOWN
+            assert not rejected.delta_allowed
+        elif entrypoint == "series":
+            rejected_series = decide_longitudinal_series(
+                poisoned_anchor, (active_member,), policy, **arguments
+            )
+            assert rejected_series.decisions[0].outcome == LongitudinalOutcome.UNKNOWN
+            assert not rejected_series.decisions[0].delta_allowed
+        else:
+            with pytest.raises(LongitudinalDecisionReplayError, match="replay exactly"):
+                replay_longitudinal_member_decision(
+                    genuine,
+                    poisoned_anchor,
+                    active_member,
+                    policy,
+                    **arguments,
+                )
+    assert CallerTimezone.calls == 0
 
 
 def test_preimport_nested_subclass_is_zero_hook_rejected_in_fresh_process() -> None:
