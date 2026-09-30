@@ -18,7 +18,7 @@ import threading
 from collections.abc import Iterator, Sequence
 from contextlib import contextmanager
 from dataclasses import dataclass
-from datetime import datetime
+from datetime import UTC, datetime
 from enum import StrEnum
 from pathlib import Path
 from typing import Annotated, Literal
@@ -26,6 +26,7 @@ from typing import Annotated, Literal
 from cryptography.exceptions import InvalidSignature
 from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PublicKey
 from pydantic import Field, StringConstraints, TypeAdapter, model_validator
+from pydantic_core import TzInfo
 
 from evidence_inspector.method_registry import (
     RegistryContract,
@@ -89,6 +90,10 @@ _PINNED_STORE_CALLABLES = {
     if callable(getattr(ProviderLinkageStore, name))
 }
 _SQLITE_OPEN_LOCK = threading.RLock()
+_PYDANTIC_UTC = TzInfo(0)
+_PLATFORM_PATH_TYPE = type(Path())
+_MAX_STORAGE_PATH_CHARS = 4096
+_MAX_STORAGE_PATH_PARTS = 256
 
 
 class RecordSupersessionError(RuntimeError):
@@ -112,6 +117,28 @@ class SupersessionReason(StrEnum):
     METHOD_REANALYSIS = "method_reanalysis"
     PIPELINE_CORRECTION = "pipeline_correction"
     QUALITY_REPROCESSING = "quality_reprocessing"
+
+
+def _captured_storage_root(root: str | Path) -> Path:
+    if type(root) is str:
+        if len(root) > _MAX_STORAGE_PATH_CHARS or "\0" in root:
+            raise RecordSupersessionUnsafe("record ledger root is unsafe")
+        return Path(root).absolute()
+    if type(root) is not _PLATFORM_PATH_TYPE:
+        raise TypeError("record ledger root must be an exact local path")
+    try:
+        raw_parts = object.__getattribute__(root, "_parts")
+    except AttributeError:
+        raise RecordSupersessionUnsafe("record ledger root is unsafe") from None
+    if type(raw_parts) is not list or len(raw_parts) > _MAX_STORAGE_PATH_PARTS:
+        raise RecordSupersessionUnsafe("record ledger root is unsafe")
+    parts = tuple(raw_parts.copy())
+    if (
+        any(type(part) is not str or "\0" in part for part in parts)
+        or sum(len(part) for part in parts) > _MAX_STORAGE_PATH_CHARS
+    ):
+        raise RecordSupersessionUnsafe("record ledger root is unsafe")
+    return Path(*parts).absolute()
 
 
 class SupersessionStatement(RegistryContract):
@@ -415,45 +442,164 @@ def make_comparison_id(
     )
 
 
+def _model_values(value: object, expected: tuple[str, ...]) -> dict[str, object] | None:
+    try:
+        values = object.__getattribute__(value, "__dict__")
+        extra = object.__getattribute__(value, "__pydantic_extra__")
+    except (AttributeError, TypeError):
+        return None
+    if (
+        type(values) is not dict
+        or any(type(key) is not str for key in values)
+        or set(values) != set(expected)
+    ):
+        return None
+    if extra is not None and (type(extra) is not dict or len(extra) != 0):
+        return None
+    return values
+
+
+def _fixed_hex(value: object, prefix: str, digits: int) -> bool:
+    if type(value) is not str or len(value) != len(prefix) + digits:
+        return False
+    return value.startswith(prefix) and all(
+        character in "0123456789abcdef" for character in value[len(prefix) :]
+    )
+
+
+def _approval_values(approval: object) -> dict[str, object] | None:
+    signed = _model_values(approval, ("payload", "signature_base64"))
+    if signed is None or type(signed["payload"]) is not ProviderApprovalPayload:
+        return None
+    payload = _model_values(
+        signed["payload"],
+        (
+            "schema_version",
+            "approval_id",
+            "provider_namespace",
+            "issuer_id",
+            "key_id",
+            "principal_id",
+            "role",
+            "purpose",
+            "proposed_revision_sha256",
+            "trust_snapshot_id",
+            "trust_snapshot_revision",
+            "trust_snapshot_sha256",
+            "nonce",
+            "issued_at",
+            "expires_at",
+        ),
+    )
+    if payload is None:
+        return None
+    if (
+        signed["signature_base64"] is None
+        or type(signed["signature_base64"]) is not str
+        or len(signed["signature_base64"]) != 88
+        or type(payload["schema_version"]) is not str
+        or payload["schema_version"] != "traceback.provider-linkage-approval.v1"
+        or not _fixed_hex(payload["approval_id"], "approval_", 32)
+        or not _fixed_hex(payload["provider_namespace"], "provider_", 32)
+        or not _fixed_hex(payload["issuer_id"], "issuer_", 32)
+        or not _fixed_hex(payload["key_id"], "key_", 32)
+        or not _fixed_hex(payload["principal_id"], "principal_", 32)
+        or type(payload["role"]) is not ProviderRole
+        or type(payload["purpose"]) is not ApprovalPurpose
+        or not _fixed_hex(payload["proposed_revision_sha256"], "", 64)
+        or not _fixed_hex(payload["trust_snapshot_id"], "trust_", 32)
+        or type(payload["trust_snapshot_revision"]) is not int
+        or not 1 <= payload["trust_snapshot_revision"] <= MAX_REVISIONS
+        or not _fixed_hex(payload["trust_snapshot_sha256"], "", 64)
+        or not _fixed_hex(payload["nonce"], "nonce_", 32)
+        or type(payload["issued_at"]) is not datetime
+        or type(payload["expires_at"]) is not datetime
+    ):
+        return None
+    issued_at = payload["issued_at"]
+    expires_at = payload["expires_at"]
+    issued_tz = object.__getattribute__(issued_at, "tzinfo")
+    expires_tz = object.__getattribute__(expires_at, "tzinfo")
+    if (
+        not (
+            issued_tz is UTC
+            or (type(issued_tz) is TzInfo and issued_tz == _PYDANTIC_UTC)
+        )
+        or not (
+            expires_tz is UTC
+            or (type(expires_tz) is TzInfo and expires_tz == _PYDANTIC_UTC)
+        )
+        or object.__getattribute__(issued_at, "microsecond")
+        or object.__getattribute__(expires_at, "microsecond")
+        or expires_at <= issued_at
+    ):
+        return None
+    return payload
+
+
 def _require_exact_record_shape(record: object, *, error_type: type[Exception]) -> None:
     if type(record) is not SupersedingRecord:
         raise error_type("record contract is invalid")
-    string_fields = (
-        "record_id",
-        "provider_namespace",
-        "analysis_record_id",
-        "result_id",
-        "result_sha256",
-        "bundle_sha256",
-        "linkage_id",
-        "linkage_revision_sha256",
-        "activation_receipt_sha256",
+    values = _model_values(
+        record,
+        (
+            "schema_version",
+            "record_id",
+            "provider_namespace",
+            "analysis_record_id",
+            "result_id",
+            "result_sha256",
+            "bundle_sha256",
+            "linkage_id",
+            "linkage_revision",
+            "linkage_revision_sha256",
+            "activation_receipt_sha256",
+            "lineage_role",
+            "reanalysis_of_record_id",
+            "supersedes_record_id",
+            "supersession_reason",
+            "supersession_authorization",
+            "biological_timepoint_contribution",
+        ),
     )
-    optional_fields = ("reanalysis_of_record_id", "supersedes_record_id")
     if (
-        any(type(getattr(record, name)) is not str for name in string_fields)
-        or any(
-            value is not None and type(value) is not str
-            for value in (getattr(record, name) for name in optional_fields)
-        )
-        or type(record.linkage_revision) is not int
-        or type(record.biological_timepoint_contribution) is not bool
-        or type(record.lineage_role) is not RecordLineageRole
+        values is None
+        or type(values["schema_version"]) is not str
+        or values["schema_version"] != "traceback.superseding-record.v2"
+        or not _fixed_hex(values["record_id"], "record_", 40)
+        or not _fixed_hex(values["provider_namespace"], "provider_", 32)
+        or not _fixed_hex(values["analysis_record_id"], "analysis_", 32)
+        or not _fixed_hex(values["result_id"], "result_", 40)
+        or not _fixed_hex(values["result_sha256"], "", 64)
+        or not _fixed_hex(values["bundle_sha256"], "", 64)
+        or not _fixed_hex(values["linkage_id"], "linkage_", 32)
+        or type(values["linkage_revision"]) is not int
+        or not 1 <= values["linkage_revision"] <= MAX_REVISIONS
+        or not _fixed_hex(values["linkage_revision_sha256"], "", 64)
+        or not _fixed_hex(values["activation_receipt_sha256"], "", 64)
+        or type(values["biological_timepoint_contribution"]) is not bool
+        or values["biological_timepoint_contribution"] is not False
+        or type(values["lineage_role"]) is not RecordLineageRole
         or (
-            record.supersession_reason is not None
-            and type(record.supersession_reason) is not SupersessionReason
+            values["reanalysis_of_record_id"] is not None
+            and not _fixed_hex(values["reanalysis_of_record_id"], "record_", 40)
         )
         or (
-            record.supersession_authorization is not None
-            and type(record.supersession_authorization) is not SignedProviderApproval
+            values["supersedes_record_id"] is not None
+            and not _fixed_hex(values["supersedes_record_id"], "record_", 40)
+        )
+        or (
+            values["supersession_reason"] is not None
+            and type(values["supersession_reason"]) is not SupersessionReason
+        )
+        or (
+            values["supersession_authorization"] is not None
+            and type(values["supersession_authorization"]) is not SignedProviderApproval
         )
     ):
         raise error_type("record contract is invalid")
-    authorization = record.supersession_authorization
-    if authorization is not None and (
-        type(authorization.payload) is not ProviderApprovalPayload
-        or type(authorization.signature_base64) is not str
-    ):
+    authorization = values["supersession_authorization"]
+    if authorization is not None and _approval_values(authorization) is None:
         raise error_type("record contract is invalid")
 
 
@@ -462,24 +608,92 @@ def _require_exact_comparison_shape(
 ) -> None:
     if type(comparison) is not DerivedComparison:
         raise error_type("comparison contract is invalid")
-    members = comparison.member_record_ids
+    values = _model_values(
+        comparison,
+        (
+            "schema_version",
+            "comparison_id",
+            "member_record_ids",
+            "derived_artifact_sha256",
+            "provider_namespace",
+            "linkage_store_id",
+            "linkage_store_epoch_sha256",
+            "linkage_storage_identity_sha256",
+            "linkage_state_version",
+            "linkage_state_head_sha256",
+            "authority",
+        ),
+    )
+    if values is None:
+        raise error_type("comparison contract is invalid")
+    members = values["member_record_ids"]
     if (
         type(members) is not tuple
         or not 2 <= len(members) <= MAX_COMPARISON_MEMBERS
-        or any(type(item) is not str for item in members)
-        or type(comparison.comparison_id) is not str
-        or type(comparison.derived_artifact_sha256) is not str
-        or type(comparison.provider_namespace) is not str
-        or type(comparison.linkage_store_id) is not str
-        or type(comparison.linkage_store_epoch_sha256) is not str
-        or type(comparison.linkage_storage_identity_sha256) is not str
-        or type(comparison.linkage_state_version) is not int
-        or type(comparison.linkage_state_head_sha256) is not str
-        or type(comparison.authority) is not SignedProviderApproval
-        or type(comparison.authority.payload) is not ProviderApprovalPayload
-        or type(comparison.authority.signature_base64) is not str
+        or any(not _fixed_hex(item, "record_", 40) for item in members)
+        or type(values["schema_version"]) is not str
+        or values["schema_version"] != "traceback.derived-comparison.v2"
+        or not _fixed_hex(values["comparison_id"], "comparison_", 40)
+        or not _fixed_hex(values["derived_artifact_sha256"], "", 64)
+        or not _fixed_hex(values["provider_namespace"], "provider_", 32)
+        or not _fixed_hex(values["linkage_store_id"], "store_", 32)
+        or not _fixed_hex(values["linkage_store_epoch_sha256"], "", 64)
+        or not _fixed_hex(values["linkage_storage_identity_sha256"], "", 64)
+        or type(values["linkage_state_version"]) is not int
+        or not 0 <= values["linkage_state_version"] <= MAX_REVISIONS
+        or not _fixed_hex(values["linkage_state_head_sha256"], "", 64)
+        or type(values["authority"]) is not SignedProviderApproval
+        or _approval_values(values["authority"]) is None
     ):
         raise error_type("comparison contract is invalid")
+
+
+def _require_exact_snapshot_shape(
+    snapshot: object, *, error_type: type[Exception]
+) -> None:
+    if type(snapshot) is not ActiveRecordSnapshot:
+        raise error_type("record snapshot is invalid")
+    values = _model_values(
+        snapshot,
+        (
+            "schema_version",
+            "ledger_id",
+            "ledger_epoch_sha256",
+            "storage_identity_sha256",
+            "state_version",
+            "state_head_sha256",
+            "linkage_store_id",
+            "linkage_store_epoch_sha256",
+            "linkage_storage_identity_sha256",
+            "linkage_state_version",
+            "linkage_state_head_sha256",
+            "records",
+        ),
+    )
+    if values is None:
+        raise error_type("record snapshot is invalid")
+    records = values["records"]
+    if (
+        type(values["schema_version"]) is not str
+        or values["schema_version"] != "traceback.active-record-snapshot.v1"
+        or not _fixed_hex(values["ledger_id"], "ledger_", 32)
+        or not _fixed_hex(values["ledger_epoch_sha256"], "", 64)
+        or not _fixed_hex(values["storage_identity_sha256"], "", 64)
+        or type(values["state_version"]) is not int
+        or not 0 <= values["state_version"] <= MAX_RECORDS + MAX_COMPARISONS * 4
+        or not _fixed_hex(values["state_head_sha256"], "", 64)
+        or not _fixed_hex(values["linkage_store_id"], "store_", 32)
+        or not _fixed_hex(values["linkage_store_epoch_sha256"], "", 64)
+        or not _fixed_hex(values["linkage_storage_identity_sha256"], "", 64)
+        or type(values["linkage_state_version"]) is not int
+        or not 0 <= values["linkage_state_version"] <= MAX_REVISIONS
+        or not _fixed_hex(values["linkage_state_head_sha256"], "", 64)
+        or type(records) is not tuple
+        or len(records) > MAX_RECORDS
+    ):
+        raise error_type("record snapshot is invalid")
+    for record in records:
+        _require_exact_record_shape(record, error_type=error_type)
 
 
 def record_sha256(record: SupersedingRecord) -> str:
@@ -607,13 +821,16 @@ class RecordSupersessionStore:
             for name, expected in _PINNED_STORE_CALLABLES.items()
         ):
             raise RecordSupersessionUnsafe("linkage store implementation changed")
-        self.root = Path(root).absolute()
+        self.root = _captured_storage_root(root)
         self.linkage_store = linkage_store
-        if self.root.is_symlink() or (self.root.exists() and not self.root.is_dir()):
-            raise RecordSupersessionUnsafe("record ledger root is unsafe")
-        self.root.mkdir(parents=True, exist_ok=True, mode=0o700)
-        self.root.chmod(0o700)
-        metadata = self.root.stat(follow_symlinks=False)
+        try:
+            self.root.mkdir(parents=True, exist_ok=False, mode=0o700)
+        except FileExistsError:
+            pass
+        try:
+            metadata = os.stat(self.root, follow_symlinks=False)
+        except OSError:
+            raise RecordSupersessionUnsafe("record ledger root is unsafe") from None
         if (
             not stat.S_ISDIR(metadata.st_mode)
             or stat.S_IMODE(metadata.st_mode) != 0o700
@@ -630,7 +847,17 @@ class RecordSupersessionStore:
             self._root_fd = os.open(self.root, root_flags)
         except OSError:
             raise RecordSupersessionUnsafe("record ledger root is unsafe") from None
-        self._root_identity = (metadata.st_dev, metadata.st_ino)
+        bound_root = os.fstat(self._root_fd)
+        if (
+            not stat.S_ISDIR(bound_root.st_mode)
+            or (bound_root.st_dev, bound_root.st_ino)
+            != (metadata.st_dev, metadata.st_ino)
+            or stat.S_IMODE(bound_root.st_mode) != 0o700
+            or bound_root.st_uid != os.geteuid()
+        ):
+            os.close(self._root_fd)
+            raise RecordSupersessionUnsafe("record ledger root changed")
+        self._root_identity = (bound_root.st_dev, bound_root.st_ino)
         self.database = self.root / "record-supersession.sqlite3"
         self._database_identity: tuple[int, int] | None = None
         self._database_fd: int | None = None
@@ -709,7 +936,10 @@ class RecordSupersessionStore:
             raise RecordSupersessionUnsafe("record ledger database changed")
         self._database_fd = descriptor
 
-    def _validate_storage(self) -> None:
+    def _validate_storage(
+        self,
+        sidecar_bindings: dict[str, tuple[int, tuple[int, int]]] | None = None,
+    ) -> None:
         metadata = self.root.stat(follow_symlinks=False)
         if (
             not stat.S_ISDIR(metadata.st_mode)
@@ -743,67 +973,166 @@ class RecordSupersessionStore:
             ):
                 raise RecordSupersessionUnsafe("record ledger database changed")
         for suffix in ("-wal", "-shm"):
-            sidecar = Path(str(self.database) + suffix)
-            if sidecar.exists():
-                metadata = sidecar.stat(follow_symlinks=False)
+            name = "record-supersession.sqlite3" + suffix
+            try:
+                metadata = os.stat(name, dir_fd=self._root_fd, follow_symlinks=False)
+            except FileNotFoundError:
+                if sidecar_bindings is not None and suffix in sidecar_bindings:
+                    raise RecordSupersessionUnsafe(
+                        "record ledger sidecar changed"
+                    ) from None
+                continue
+            if (
+                not stat.S_ISREG(metadata.st_mode)
+                or stat.S_IMODE(metadata.st_mode) != 0o600
+                or metadata.st_uid != os.geteuid()
+            ):
+                raise RecordSupersessionUnsafe("record ledger sidecar is unsafe")
+            if sidecar_bindings is not None:
+                binding = sidecar_bindings.get(suffix)
+                if binding is None:
+                    raise RecordSupersessionUnsafe("record ledger sidecar changed")
+                descriptor, identity = binding
+                bound = _safe_fstat(descriptor)
                 if (
-                    sidecar.is_symlink()
-                    or not stat.S_ISREG(metadata.st_mode)
-                    or stat.S_IMODE(metadata.st_mode) != 0o600
-                    or metadata.st_uid != os.geteuid()
+                    bound is None
+                    or not stat.S_ISREG(bound.st_mode)
+                    or (metadata.st_dev, metadata.st_ino) != identity
+                    or (bound.st_dev, bound.st_ino) != identity
+                    or stat.S_IMODE(bound.st_mode) != 0o600
+                    or bound.st_uid != os.geteuid()
                 ):
-                    raise RecordSupersessionUnsafe("record ledger sidecar is unsafe")
+                    raise RecordSupersessionUnsafe("record ledger sidecar changed")
+
+    def _bind_sidecars(
+        self, before: dict[int, tuple[int, int, int]]
+    ) -> dict[str, tuple[int, tuple[int, int]]]:
+        opened = _open_descriptor_identities()
+        bindings: dict[str, tuple[int, tuple[int, int]]] = {}
+        try:
+            for suffix in ("-wal", "-shm"):
+                name = "record-supersession.sqlite3" + suffix
+                metadata = os.stat(name, dir_fd=self._root_fd, follow_symlinks=False)
+                identity = (metadata.st_dev, metadata.st_ino)
+                sqlite_matches = [
+                    descriptor
+                    for descriptor, descriptor_identity in opened.items()
+                    if before.get(descriptor) != descriptor_identity
+                    and descriptor_identity == (stat.S_IFREG, *identity)
+                    and descriptor != self._database_fd
+                ]
+                if not sqlite_matches:
+                    raise RecordSupersessionUnsafe(
+                        "record ledger sidecar connection is unproven"
+                    )
+                for sqlite_descriptor in sqlite_matches:
+                    os.fchmod(sqlite_descriptor, 0o600)
+                    sqlite_metadata = os.fstat(sqlite_descriptor)
+                    if (
+                        (sqlite_metadata.st_dev, sqlite_metadata.st_ino) != identity
+                        or stat.S_IMODE(sqlite_metadata.st_mode) != 0o600
+                        or sqlite_metadata.st_uid != os.geteuid()
+                    ):
+                        raise RecordSupersessionUnsafe(
+                            "record ledger sidecar connection changed"
+                        )
+                descriptor = os.open(
+                    name,
+                    os.O_RDONLY
+                    | getattr(os, "O_CLOEXEC", 0)
+                    | getattr(os, "O_NOFOLLOW", 0),
+                    dir_fd=self._root_fd,
+                )
+                bindings[suffix] = (descriptor, identity)
+                bound = os.fstat(descriptor)
+                observed = os.stat(name, dir_fd=self._root_fd, follow_symlinks=False)
+                if (
+                    not stat.S_ISREG(bound.st_mode)
+                    or (bound.st_dev, bound.st_ino) != identity
+                    or (observed.st_dev, observed.st_ino) != identity
+                    or stat.S_IMODE(bound.st_mode) != 0o600
+                    or bound.st_uid != os.geteuid()
+                ):
+                    raise RecordSupersessionUnsafe("record ledger sidecar changed")
+        except (OSError, RecordSupersessionUnsafe):
+            for descriptor, _ in bindings.values():
+                os.close(descriptor)
+            raise RecordSupersessionUnsafe("record ledger sidecar is unsafe") from None
+        return bindings
 
     @contextmanager
     def _connect(self) -> Iterator[sqlite3.Connection]:
         connection: sqlite3.Connection | None = None
+        sidecar_bindings: dict[str, tuple[int, tuple[int, int]]] = {}
+        _SQLITE_OPEN_LOCK.acquire()
         try:
-            with _SQLITE_OPEN_LOCK:
-                self._validate_storage()
-                before = _open_descriptor_identities()
+            self._validate_storage()
+            cwd_descriptor = os.open(
+                ".",
+                os.O_RDONLY
+                | getattr(os, "O_DIRECTORY", 0)
+                | getattr(os, "O_CLOEXEC", 0),
+            )
+            before = _open_descriptor_identities()
+            try:
+                os.fchdir(self._root_fd)
                 connection = sqlite3.connect(
-                    self.database, timeout=5.0, isolation_level=None
-                )
-                observed = os.stat(
                     "record-supersession.sqlite3",
-                    dir_fd=self._root_fd,
-                    follow_symlinks=False,
+                    timeout=5.0,
+                    isolation_level=None,
                 )
-                identity = (observed.st_dev, observed.st_ino)
-                matches = [
-                    fd
-                    for fd, descriptor_identity in _open_descriptor_identities().items()
-                    if before.get(fd) != descriptor_identity
-                    and descriptor_identity == (stat.S_IFREG, *identity)
-                ]
-                if identity != self._database_identity or len(matches) != 1:
-                    raise RecordSupersessionUnsafe(
-                        "record ledger connection identity is unproven"
-                    )
-                sqlite_fd = matches[0]
-                os.fchmod(sqlite_fd, 0o600)
-                self._validate_storage()
                 connection.execute("PRAGMA busy_timeout=5000")
                 connection.execute("PRAGMA foreign_keys=ON")
                 connection.execute("PRAGMA synchronous=FULL")
                 connection.execute("PRAGMA journal_mode=WAL")
-                for suffix in ("-wal", "-shm"):
-                    sidecar = Path(str(self.database) + suffix)
-                    if sidecar.exists():
-                        sidecar.chmod(0o600)
+                connection.execute("SELECT COUNT(*) FROM sqlite_master").fetchone()
+            finally:
+                try:
+                    os.fchdir(cwd_descriptor)
+                finally:
+                    os.close(cwd_descriptor)
+            observed = os.stat(
+                "record-supersession.sqlite3",
+                dir_fd=self._root_fd,
+                follow_symlinks=False,
+            )
+            identity = (observed.st_dev, observed.st_ino)
+            matches = [
+                fd
+                for fd, descriptor_identity in _open_descriptor_identities().items()
+                if before.get(fd) != descriptor_identity
+                and descriptor_identity == (stat.S_IFREG, *identity)
+            ]
+            if identity != self._database_identity or len(matches) != 1:
+                raise RecordSupersessionUnsafe(
+                    "record ledger connection identity is unproven"
+                )
+            sqlite_fd = matches[0]
+            os.fchmod(sqlite_fd, 0o600)
+            sidecar_bindings = self._bind_sidecars(before)
+            self._validate_storage(sidecar_bindings)
             yield connection
         finally:
-            if connection is not None:
-                if "sqlite_fd" not in locals() or (
-                    (metadata := _safe_fstat(sqlite_fd)) is None
-                    or (metadata.st_dev, metadata.st_ino) != self._database_identity
-                ):
-                    connection.close()
-                    raise RecordSupersessionUnsafe(
-                        "record ledger connection identity changed"
-                    )
-                connection.close()
-            self._validate_storage()
+            try:
+                if connection is not None:
+                    try:
+                        if "sqlite_fd" not in locals() or (
+                            (metadata := _safe_fstat(sqlite_fd)) is None
+                            or (metadata.st_dev, metadata.st_ino)
+                            != self._database_identity
+                        ):
+                            raise RecordSupersessionUnsafe(
+                                "record ledger connection identity changed"
+                            )
+                        if sidecar_bindings:
+                            self._validate_storage(sidecar_bindings)
+                    finally:
+                        connection.close()
+                        for descriptor, _ in sidecar_bindings.values():
+                            os.close(descriptor)
+                self._validate_storage()
+            finally:
+                _SQLITE_OPEN_LOCK.release()
 
     def _initialize(self) -> None:
         with self._linkage_fence() as authority, self._connect() as connection:
@@ -856,11 +1185,6 @@ class RecordSupersessionStore:
             except BaseException:
                 connection.rollback()
                 raise
-        os.chmod(self.database, 0o600)
-        for suffix in ("-wal", "-shm"):
-            path = Path(str(self.database) + suffix)
-            if path.exists():
-                path.chmod(0o600)
 
     def _linkage_snapshot(self) -> ActiveLinkageSnapshot:
         try:
@@ -1372,6 +1696,8 @@ class RecordSupersessionStore:
             or issuer.status != IssuerStatus.ACTIVE
             or payload.role not in issuer.allowed_roles
             or payload.purpose not in issuer.allowed_purposes
+            or trust.issued_at > payload.issued_at
+            or payload.expires_at > trust.expires_at
             or (
                 require_current_time
                 and not (
@@ -1662,6 +1988,8 @@ class RecordSupersessionStore:
             or issuer.status != IssuerStatus.ACTIVE
             or payload.role not in issuer.allowed_roles
             or payload.purpose not in issuer.allowed_purposes
+            or trust.issued_at > payload.issued_at
+            or payload.expires_at > trust.expires_at
             or (
                 require_current_time
                 and not (
@@ -1837,13 +2165,7 @@ class RecordSupersessionStore:
                 raise
 
     def replay_snapshot(self, snapshot: ActiveRecordSnapshot) -> ActiveRecordSnapshot:
-        if type(snapshot) is not ActiveRecordSnapshot:
-            raise RecordSupersessionConflict("record snapshot is invalid")
-        records = snapshot.records
-        if type(records) is not tuple or len(records) > MAX_RECORDS:
-            raise RecordSupersessionConflict("record snapshot is invalid")
-        for record in records:
-            _require_exact_record_shape(record, error_type=RecordSupersessionConflict)
+        _require_exact_snapshot_shape(snapshot, error_type=RecordSupersessionConflict)
         try:
             parsed = contract_from_canonical_bytes(
                 ActiveRecordSnapshot, canonical_contract_bytes(snapshot)
