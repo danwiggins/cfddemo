@@ -724,6 +724,8 @@ _INVALID_INPUT_SERIES_DECISION = LongitudinalSeriesDecision(
 
 
 def _replay_record(record: object) -> LongitudinalRecord:
+    if type(record) is not LongitudinalRecord:
+        raise TypeError("longitudinal record type is invalid")
     encoded = _strict_validation_bytes(record)
     replayed = LongitudinalRecord.model_validate_json(encoded)
     if canonical_contract_bytes(replayed) != encoded:
@@ -732,6 +734,8 @@ def _replay_record(record: object) -> LongitudinalRecord:
 
 
 def _replay_policy(policy: object) -> LongitudinalAnchorPolicy:
+    if type(policy) is not LongitudinalAnchorPolicy:
+        raise TypeError("longitudinal policy type is invalid")
     encoded = _strict_validation_bytes(policy)
     replayed = LongitudinalAnchorPolicy.model_validate_json(encoded)
     if canonical_contract_bytes(replayed) != encoded:
