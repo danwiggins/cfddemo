@@ -488,6 +488,8 @@ def _build_integrated_explorer_source_type(
 ) -> type[IntegratedExplorerSource]:
     """Capture the installed reader chain outside mutable module dispatch."""
 
+    protected_methods: dict[str, Callable[..., object]] = {}
+
     class IntegratedExplorerSource(metaclass=_SealedExplorerType):
         __slots__ = (
             "_artifacts",
@@ -520,6 +522,12 @@ def _build_integrated_explorer_source_type(
             object.__setattr__(self, "_artifacts", artifacts)
             self._assert_installed_reader()
 
+        def __getattribute__(self, name: str) -> object:
+            protected = protected_methods.get(name)
+            if protected is not None:
+                return protected.__get__(self)
+            return object.__getattribute__(self, name)
+
         def __setattr__(self, name: str, value: object) -> None:
             raise TypeError("integrated explorer source is sealed")
 
@@ -530,6 +538,11 @@ def _build_integrated_explorer_source_type(
             reader = object.__getattribute__(self, "_reader")
             get_verified = object.__getattribute__(self, "_get_verified")
             query_reader = object.__getattribute__(self, "_query")
+            if any(
+                IntegratedExplorerSource.__dict__.get(name) is not expected
+                for name, expected in protected_methods.items()
+            ):
+                raise TypeError("integrated explorer source class changed")
             if (
                 globals().get("bind_catalog_live_reader") is not reader_factory
                 or globals().get("_reverify_document") is not reverify_document
@@ -592,6 +605,19 @@ def _build_integrated_explorer_source_type(
             self._assert_installed_reader()
             return _compare_explorer_documents(self, left_result_id, right_result_id)
 
+    protected_methods.update(
+        {
+            name: IntegratedExplorerSource.__dict__[name]
+            for name in (
+                "__getattribute__",
+                "_assert_installed_reader",
+                "_reverify",
+                "compare",
+                "get",
+                "query",
+            )
+        }
+    )
     return IntegratedExplorerSource
 
 

@@ -1292,7 +1292,12 @@ def _assert_live_catalog_reader(reader: CatalogLiveReader) -> None:
     ):
         raise CatalogFilesystemError("catalog verification class changed")
     if (
-        catalog.root != reader._root_path
+        globals().get("_assert_live_catalog_reader") is not reader._assert_live
+        or _CATALOG_VALIDATE_STORAGE is not reader._validate_storage
+        or _CATALOG_QUERY is not reader._query_catalog
+        or _CATALOG_REFERENCE is not reader._reference_verified
+        or _VERIFY_CATALOG_BUNDLE is not reader._verify_bundle
+        or catalog.root != reader._root_path
         or catalog.objects != reader._objects_path
         or catalog.database != reader._database_path
         or catalog._root_identity != reader._root_identity
@@ -1310,13 +1315,14 @@ def _assert_live_catalog_reader(reader: CatalogLiveReader) -> None:
         or reader._connection is None
     ):
         raise CatalogFilesystemError("catalog reader binding changed")
-    _CATALOG_VALIDATE_STORAGE(catalog)
+    reader._validate_storage(catalog)
 
 
 class CatalogLiveReader:
     """Sealed reader over one exact, open ResultCatalog installation."""
 
     __slots__ = (
+        "_assert_live",
         "_catalog",
         "_connection",
         "_connection_lock",
@@ -1326,6 +1332,8 @@ class CatalogLiveReader:
         "_objects_fd",
         "_objects_identity",
         "_objects_path",
+        "_query_catalog",
+        "_reference_verified",
         "_root_fd",
         "_root_identity",
         "_root_path",
@@ -1334,11 +1342,27 @@ class CatalogLiveReader:
         "_trust_keys_identity",
         "_trust_snapshot",
         "_trust_store",
+        "_validate_storage",
+        "_verify_bundle",
     )
 
-    def __init__(self, catalog: ResultCatalog) -> None:
+    def __init__(
+        self,
+        catalog: ResultCatalog,
+        *,
+        _assert_live: Callable[[CatalogLiveReader], None] = _assert_live_catalog_reader,
+        _query_catalog: Callable[[ResultCatalog, CatalogQuery], CatalogPage] = (
+            _CATALOG_QUERY
+        ),
+        _reference_verified: Callable[..., CatalogResultRef] = _CATALOG_REFERENCE,
+        _validate_storage: Callable[[ResultCatalog], None] = _CATALOG_VALIDATE_STORAGE,
+        _verify_bundle: Callable[[Path, TrustStore], VerifiedBundle] = (
+            _VERIFY_CATALOG_BUNDLE
+        ),
+    ) -> None:
         if type(catalog) is not ResultCatalog:
             raise TypeError("live catalog reader requires an exact ResultCatalog")
+        self._assert_live = _assert_live
         self._catalog = catalog
         self._root_path = catalog.root
         self._objects_path = catalog.objects
@@ -1348,6 +1372,8 @@ class CatalogLiveReader:
         self._database_identity = catalog._database_identity
         self._root_fd = catalog._root_fd
         self._objects_fd = catalog._objects_fd
+        self._query_catalog = _query_catalog
+        self._reference_verified = _reference_verified
         self._database_fd = catalog._database_fd
         self._sqlite_database_fd = catalog._sqlite_database_fd
         self._connection_lock = catalog._connection_lock
@@ -1355,7 +1381,9 @@ class CatalogLiveReader:
         self._trust_keys_identity = id(catalog.trust_store._keys)
         self._trust_snapshot = tuple(sorted(catalog.trust_store._keys.items()))
         self._connection = catalog._connection
-        _assert_live_catalog_reader(self)
+        self._validate_storage = _validate_storage
+        self._verify_bundle = _verify_bundle
+        self._assert_live(self)
         self._sealed = True
 
     def __setattr__(self, name: str, value: object) -> None:
@@ -1367,9 +1395,9 @@ class CatalogLiveReader:
         raise TypeError("catalog live reader is sealed")
 
     def query(self, query: CatalogQuery) -> CatalogPage:
-        _assert_live_catalog_reader(self)
-        page = _CATALOG_QUERY(self._catalog, query)
-        _assert_live_catalog_reader(self)
+        self._assert_live(self)
+        page = self._query_catalog(self._catalog, query)
+        self._assert_live(self)
         return page
 
     def get_verified(
@@ -1377,17 +1405,17 @@ class CatalogLiveReader:
         result_id: str,
         context: CatalogVerificationContext,
     ) -> CatalogResultRef:
-        _assert_live_catalog_reader(self)
+        self._assert_live(self)
         normalized_context = CatalogVerificationContext.model_validate_json(
             canonical_json_bytes(context)
         )
         with self._connection_lock:
-            _assert_live_catalog_reader(self)
+            self._assert_live(self)
             assert self._connection is not None
             row = self._connection.execute(
                 "SELECT ref_json FROM results WHERE result_id=?", (result_id,)
             ).fetchone()
-            _assert_live_catalog_reader(self)
+            self._assert_live(self)
         if row is None:
             raise KeyError("catalog result is unavailable")
         content = bytes(row[0])
@@ -1409,18 +1437,18 @@ class CatalogLiveReader:
             raise CatalogError("catalog result authority is revoked")
         if normalized_context.capability.method_ref != stored.method_ref:
             raise CatalogError("catalog result authority is stale")
-        _assert_live_catalog_reader(self)
-        verified = _VERIFY_CATALOG_BUNDLE(
+        self._assert_live(self)
+        verified = self._verify_bundle(
             _descriptor_path(self._objects_fd) / stored.bundle_sha256,
             self._trust_store,
         )
-        current = _CATALOG_REFERENCE(
+        current = self._reference_verified(
             verified,
             bundle_sha256=stored.bundle_sha256,
             manifest_sha256=stored.bundle_manifest_sha256,
             capability=normalized_context.capability,
         )
-        _assert_live_catalog_reader(self)
+        self._assert_live(self)
         if current != stored:
             raise CatalogError("catalog result authority or bundle identity changed")
         return current

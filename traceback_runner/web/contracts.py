@@ -20,24 +20,31 @@ _SAFE_OPERATOR_TEXT = re.compile(r"^[A-Za-z0-9][A-Za-z0-9 .,'()%;:!?+_-]*$")
 _IUPAC_SEQUENCE = re.compile(r"^[ACGTURYSWKMBDHVN]{24,}$", re.IGNORECASE)
 _SHA256_TEXT = re.compile(r"^[0-9a-f]{64}$")
 _MD5_TEXT = re.compile(r"^[0-9a-f]{32}$")
-_UNICODE_SEPARATORS = str.maketrans(
-    {
-        "∕": "/",
-        "⁄": "/",
-        "／": "/",
-        "⧸": "/",
-        "⧹": "\\",
-        "＼": "\\",
-    }
-)
 _DIGEST_FIELDS = ("sha256", "sha256s", "md5", "md5s")
 
 
+def _canonicalize_path_separators(value: str) -> str:
+    """Collapse Unicode slash and reverse-solidus confusables to separators."""
+
+    canonical: list[str] = []
+    for character in value:
+        name = unicodedata.name(character, "")
+        separator_like = (
+            character in {"/", "\\"}
+            or "SOLIDUS" in name
+            or "SLASH" in name
+            or name == "SET MINUS"
+            or ("BOX DRAWINGS" in name and "DIAGONAL" in name)
+        )
+        canonical.append("/" if separator_like else character)
+    return "".join(canonical)
+
+
 def _decoded_public_text(value: str) -> str:
-    decoded = unicodedata.normalize("NFKC", value).translate(_UNICODE_SEPARATORS)
+    decoded = _canonicalize_path_separators(unicodedata.normalize("NFKC", value))
     for _ in range(8):
-        next_value = unicodedata.normalize("NFKC", unquote(decoded)).translate(
-            _UNICODE_SEPARATORS
+        next_value = _canonicalize_path_separators(
+            unicodedata.normalize("NFKC", unquote(decoded))
         )
         if next_value == decoded:
             return decoded

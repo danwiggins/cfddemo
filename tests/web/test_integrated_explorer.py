@@ -12,6 +12,7 @@ from types import SimpleNamespace
 import pytest
 from pydantic import ValidationError
 
+import evidence_inspector.result_catalog as catalog_module
 import traceback_runner.web.explorer as explorer_module
 from evidence_inspector.compatibility import (
     ExecutionState,
@@ -244,6 +245,32 @@ def test_explorer_rejects_preconstruction_reader_factory_replacement(
         catalog.close()
 
 
+def test_explorer_pins_bundle_verifier_against_module_global_substitution(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    catalog, ref, _, _, explorer = _installed(tmp_path)
+    object_path = catalog.objects / ref.bundle_sha256
+    verified = verify_bundle(object_path, catalog.trust_store)
+    report = object_path / "report.html"
+    original = report.read_bytes()
+    replacement = bytes((original[0] ^ 1,)) + original[1:]
+    assert len(replacement) == len(original)
+    report.chmod(0o600)
+    report.write_bytes(replacement)
+    try:
+        with pytest.raises(ValueError, match="checksum mismatch"):
+            explorer.get(ref.result_id)
+        monkeypatch.setattr(
+            catalog_module,
+            "_VERIFY_CATALOG_BUNDLE",
+            lambda path, trust_store: verified,
+        )
+        with pytest.raises(CatalogFilesystemError, match="reader binding changed"):
+            explorer.get(ref.result_id)
+    finally:
+        catalog.close()
+
+
 def test_model_copy_poison_is_rejected_before_repository_sink(tmp_path: Path) -> None:
     catalog, _, _, artifact, _ = _installed(tmp_path)
     try:
@@ -267,6 +294,9 @@ def test_model_copy_poison_is_rejected_before_repository_sink(tmp_path: Path) ->
         "file%3A%2F%2F%2Ftmp%2Fcase.tsv",
         "source%E2%88%95private%E2%88%95case.tsv",
         "SoUrCe%2fPrIvAtE%2fcase.tsv",
+        "source∖private∖case.tsv",
+        "source⧵private⧵case.tsv",
+        "source╲private╲case.tsv",
         "Patient Identifier 42",
         "ACGTRYSWKMBDHVNACGTRYSWKMBDHVN",
         "AUGCRYSWKMBDHVNAUGCRYSWKMBDHVN",
@@ -293,18 +323,21 @@ def test_nested_public_projection_rejects_encoded_private_text(
 
 
 @pytest.mark.parametrize(
-    "private_sequence",
+    "private_label",
     (
         "AUGCRYSWKMBDHVNAUGCRYSWKMBDHVN",
         "ACGTURYSWKMBDHVNACGTURYSWKMBDHVN",
+        "source∖private∖case.tsv",
+        "source⧵private⧵case.tsv",
+        "source╲private╲case.tsv",
     ),
 )
-def test_iupac_rna_never_reaches_live_api_or_accessible_dom_sink(
-    tmp_path: Path, private_sequence: str
+def test_private_label_never_reaches_live_api_or_accessible_dom_sink(
+    tmp_path: Path, private_label: str
 ) -> None:
     catalog, ref, _, artifact, explorer = _installed(tmp_path)
     source = artifact.result_view_request.sources[0].model_copy(
-        update={"accessible_label": private_sequence}
+        update={"accessible_label": private_label}
     )
     request = artifact.result_view_request.model_copy(update={"sources": (source,)})
     view = build_result_view(request)
@@ -314,7 +347,7 @@ def test_iupac_rna_never_reaches_live_api_or_accessible_dom_sink(
     explorer._artifacts._records[ref.result_id] = canonical_json_bytes(poisoned)
     store = JobStore(tmp_path / "jobs.sqlite3")
     try:
-        with pytest.raises(ValueError, match="raw nucleotide sequence"):
+        with pytest.raises(ValueError, match="path|raw nucleotide sequence"):
             explorer.get(ref.result_id)
         with RunningLocalWebService.start(
             store=store,
@@ -329,12 +362,46 @@ def test_iupac_rna_never_reaches_live_api_or_accessible_dom_sink(
                 headers={"Cookie": cookie},
             )
             assert status == 400
-            assert private_sequence.encode() not in body
+            assert private_label.encode() not in body
             assert b"accessible_label" not in body
         script = Path("traceback_runner/web/static/app.js").read_text()
         assert "addCell(tableRow, row.accessible_label)" in script
         assert "cell.textContent = value" in script
     finally:
+        catalog.close()
+
+
+def test_source_class_replacement_fails_direct_and_at_http_boundary(
+    tmp_path: Path,
+) -> None:
+    catalog, ref, _, _, explorer = _installed(tmp_path)
+    cached = explorer.get(ref.result_id)
+    original_get = IntegratedExplorerSource.__dict__["get"]
+    type.__setattr__(
+        IntegratedExplorerSource,
+        "get",
+        lambda self, result_id: cached,
+    )
+    catalog.close()
+    store = JobStore(tmp_path / "jobs.sqlite3")
+    try:
+        with pytest.raises(TypeError, match="source class changed"):
+            explorer.get(ref.result_id)
+        with RunningLocalWebService.start(
+            store=store,
+            state_directory=tmp_path / "state",
+            explorer=explorer,
+        ) as service:
+            cookie, _ = _exchange(service)
+            status, _, _ = _request(
+                service,
+                "GET",
+                f"/api/v1/explorer/results/{ref.result_id}",
+                headers={"Cookie": cookie},
+            )
+            assert status == 400
+    finally:
+        type.__setattr__(IntegratedExplorerSource, "get", original_get)
         catalog.close()
 
 

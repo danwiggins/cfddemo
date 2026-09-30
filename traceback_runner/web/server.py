@@ -69,6 +69,50 @@ _SECURITY_HEADERS = {
 }
 
 
+def _build_explorer_dispatch(
+    source_type: type[IntegratedExplorerSource],
+    query_method: Callable[..., object],
+    get_method: Callable[..., object],
+    compare_method: Callable[..., object],
+) -> tuple[Callable[..., object], Callable[..., object], Callable[..., object]]:
+    """Capture exact source methods for the installed HTTP boundary."""
+
+    expected = {
+        "compare": compare_method,
+        "get": get_method,
+        "query": query_method,
+    }
+
+    def checked(source: IntegratedExplorerSource) -> None:
+        if type(source) is not source_type or any(
+            source_type.__dict__.get(name) is not method
+            for name, method in expected.items()
+        ):
+            raise TypeError("integrated explorer source class changed")
+
+    def query(source: IntegratedExplorerSource, value: object) -> object:
+        checked(source)
+        return query_method(source, value)
+
+    def get(source: IntegratedExplorerSource, result_id: str) -> object:
+        checked(source)
+        return get_method(source, result_id)
+
+    def compare(source: IntegratedExplorerSource, left: str, right: str) -> object:
+        checked(source)
+        return compare_method(source, left, right)
+
+    return query, get, compare
+
+
+_EXPLORER_QUERY, _EXPLORER_GET, _EXPLORER_COMPARE = _build_explorer_dispatch(
+    IntegratedExplorerSource,
+    IntegratedExplorerSource.query,
+    IntegratedExplorerSource.get,
+    IntegratedExplorerSource.compare,
+)
+
+
 class LocalWebServerError(RuntimeError):
     """The packaged local server could not establish its security boundary."""
 
@@ -710,7 +754,9 @@ class _Handler(http.server.BaseHTTPRequestHandler):
                     )
                 if "cursor" in parameters:
                     query_payload["cursor"] = parameters["cursor"][0]
-                page = self.application.explorer.query(CatalogQuery(**query_payload))
+                page = _EXPLORER_QUERY(
+                    self.application.explorer, CatalogQuery(**query_payload)
+                )
                 payload = page.model_dump(mode="json")
                 validate_public_projection(payload)
                 self._json(200, payload)
@@ -736,7 +782,7 @@ class _Handler(http.server.BaseHTTPRequestHandler):
                     right
                 ):
                     raise ValueError("comparison result identity is invalid")
-                comparison = self.application.explorer.compare(left, right)
+                comparison = _EXPLORER_COMPARE(self.application.explorer, left, right)
                 payload = prepare_explorer_comparison_response(
                     self.application.explorer, comparison
                 )
@@ -748,7 +794,9 @@ class _Handler(http.server.BaseHTTPRequestHandler):
                 if self.application.explorer is None:
                     raise ApiProblem(404, self.application.kernel.not_found_problem)
                 try:
-                    document = self.application.explorer.get(explorer_match.group(1))
+                    document = _EXPLORER_GET(
+                        self.application.explorer, explorer_match.group(1)
+                    )
                 except KeyError as exc:
                     raise ApiProblem(
                         404, self.application.kernel.not_found_problem
