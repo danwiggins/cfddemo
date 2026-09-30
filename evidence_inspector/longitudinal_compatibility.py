@@ -183,9 +183,7 @@ class LongitudinalComparisonKey(CompatibilityContract):
         if actual != ALL_COMPARISON_DIMENSIONS:
             raise ValueError("comparison key must contain every dimension in order")
         measurement_definition = self.dimensions[
-            ALL_COMPARISON_DIMENSIONS.index(
-                ComparisonDimension.MEASUREMENT_DEFINITION
-            )
+            ALL_COMPARISON_DIMENSIONS.index(ComparisonDimension.MEASUREMENT_DEFINITION)
         ]
         if (
             measurement_definition.state != DimensionValueState.KNOWN
@@ -267,8 +265,7 @@ class LongitudinalRecord(CompatibilityContract):
             if self.authorized_linkage is None:
                 raise ValueError("activation receipt requires signed linkage proof")
             if (
-                receipt.provider_namespace
-                != self.linkage_revision.provider_namespace
+                receipt.provider_namespace != self.linkage_revision.provider_namespace
                 or receipt.linkage_id != self.linkage_revision.linkage_id
                 or receipt.revision != self.linkage_revision.revision
                 or receipt.linkage_revision_sha256
@@ -438,12 +435,8 @@ class LongitudinalMemberDecision(CompatibilityContract):
     unknown_dimensions: tuple[ComparisonDimension, ...] = Field(
         max_length=len(ALL_COMPARISON_DIMENSIONS)
     )
-    evidence_refs: tuple[EvidenceRef, ...] = Field(
-        max_length=MAX_DECISION_EVIDENCE
-    )
-    bridge_refs: tuple[BridgeRef, ...] = Field(
-        max_length=MAX_DECISION_EVIDENCE
-    )
+    evidence_refs: tuple[EvidenceRef, ...] = Field(max_length=MAX_DECISION_EVIDENCE)
+    bridge_refs: tuple[BridgeRef, ...] = Field(max_length=MAX_DECISION_EVIDENCE)
     delta_allowed: bool
     connecting_trend_allowed: bool
 
@@ -503,8 +496,7 @@ class LongitudinalMemberDecision(CompatibilityContract):
                 raise ValueError("remediation decision requires evidenced mismatches")
         elif self.outcome == LongitudinalOutcome.INCOMPATIBLE:
             if not self.mismatch_dimensions and (
-                LongitudinalReason.SUBJECT_LINKAGE_MISMATCH
-                not in self.reason_codes
+                LongitudinalReason.SUBJECT_LINKAGE_MISMATCH not in self.reason_codes
             ):
                 raise ValueError("incompatible decision requires mismatch evidence")
         elif not any(
@@ -675,15 +667,15 @@ def _linkage_authority_invalid(
         authorized is None
         or receipt is None
         or linkage_store is None
+        or type(linkage_store) is not ProviderLinkageStore
         or expected_trust is None
-        or provider_trust_snapshot_sha256(authorized.trust_snapshot)
-        != expected_trust
+        or provider_trust_snapshot_sha256(authorized.trust_snapshot) != expected_trust
         or not authorized.authorization.linkage_authorized
     )
     if invalid:
         return True
     assert receipt is not None
-    assert linkage_store is not None
+    assert type(linkage_store) is ProviderLinkageStore
     try:
         linkage_store.verify_current_receipt(receipt)
     except ProviderLinkageStoreError:
@@ -700,8 +692,7 @@ def _result_state_invalid(
     capability = measurement.current_capability
     return (
         capability.authority_head_sha256 != expected_authority_head_sha256
-        or record.comparison_key.authority_head_sha256
-        != expected_authority_head_sha256
+        or record.comparison_key.authority_head_sha256 != expected_authority_head_sha256
         or record.comparison_key.authority_revision != capability.authority_revision
         or measurement.execution_state.value != "complete"
         or measurement.information_state.value != "sufficient"
@@ -770,10 +761,10 @@ def decide_longitudinal_member(
         and anchor.activation_receipt is not None
         and member.activation_receipt is not None
         and (
-        anchor.activation_receipt.state_version
-        != member.activation_receipt.state_version
-        or anchor.activation_receipt.state_head_sha256
-        != member.activation_receipt.state_head_sha256
+            anchor.activation_receipt.state_version
+            != member.activation_receipt.state_version
+            or anchor.activation_receipt.state_head_sha256
+            != member.activation_receipt.state_head_sha256
         )
     ):
         reasons.add(LongitudinalReason.LINKAGE_AUTHORITY_INVALID)
@@ -858,12 +849,8 @@ def decide_longitudinal_member(
         member_bundle_sha256=member.measurement.bundle_sha256,
         anchor_record_sha256=longitudinal_record_sha256(anchor),
         member_record_sha256=longitudinal_record_sha256(member),
-        anchor_linkage_revision_sha256=linkage_revision_sha256(
-            anchor.linkage_revision
-        ),
-        member_linkage_revision_sha256=linkage_revision_sha256(
-            member.linkage_revision
-        ),
+        anchor_linkage_revision_sha256=linkage_revision_sha256(anchor.linkage_revision),
+        member_linkage_revision_sha256=linkage_revision_sha256(member.linkage_revision),
         anchor_linkage_receipt_sha256=(
             committed_linkage_receipt_sha256(anchor.activation_receipt)
             if anchor.activation_receipt is not None

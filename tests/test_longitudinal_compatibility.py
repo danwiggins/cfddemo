@@ -4,8 +4,11 @@ from __future__ import annotations
 
 import hashlib
 import json
+from collections.abc import Iterator
+from contextlib import contextmanager
 from datetime import UTC, datetime
 from pathlib import Path
+from tempfile import TemporaryDirectory
 
 import pytest
 from pydantic import ValidationError
@@ -69,14 +72,10 @@ from evidence_inspector.provider_linkage import (
     OptionalOpaqueToken,
     TechnicalLineage,
     UnitOfAnalysis,
-    linkage_revision_sha256,
     provider_trust_snapshot_sha256,
 )
 from evidence_inspector.provider_linkage_store import (
-    CommittedLinkageReceipt,
     ProviderLinkageStore,
-    ProviderLinkageStoreConflict,
-    committed_linkage_receipt_sha256,
 )
 from tests.test_provider_linkage import (
     PROVIDER,
@@ -90,19 +89,6 @@ NOW = datetime(2026, 9, 29, 12, 0, tzinfo=UTC)
 HEAD_SHA256 = "8" * 64
 REGISTRY_SHA256 = "7" * 64
 TRUST_SHA256 = provider_trust_snapshot_sha256(_trust())
-LINKAGE_STATE_HEAD_SHA256 = "d" * 64
-
-
-class _LiveReceiptVerifier:
-    def verify_current_receipt(self, receipt: CommittedLinkageReceipt) -> None:
-        if (
-            receipt.state_version != 1
-            or receipt.state_head_sha256 != LINKAGE_STATE_HEAD_SHA256
-        ):
-            raise ProviderLinkageStoreConflict("linkage receipt is not current")
-
-
-LINKAGE_STORE = _LiveReceiptVerifier()
 
 
 def _asset(name: str, digit: str) -> AssetReference:
@@ -183,9 +169,7 @@ def _measurement(
     authority_head_sha256: str = HEAD_SHA256,
     authority_revision: int = 4,
 ) -> VerifiedMeasurementRecord:
-    method = _method(
-        alternate=changed == ComparisonDimension.MEASUREMENT_DEFINITION
-    )
+    method = _method(alternate=changed == ComparisonDimension.MEASUREMENT_DEFINITION)
     reference = ASSET["asset_reference_alpha"]
     atlas = ASSET["asset_atlas_alpha"]
     grid = ASSET["asset_grid_alpha"]
@@ -260,9 +244,7 @@ def _overlap_digest(
 ) -> str | None:
     e05 = measurement.compatibility_key
     return {
-        ComparisonDimension.REFERENCE: optional_contract_sha256(
-            e05.reference_asset
-        ),
+        ComparisonDimension.REFERENCE: optional_contract_sha256(e05.reference_asset),
         ComparisonDimension.ATLAS_MARKER_SET: composite_contract_sha256(
             e05.atlas_asset, e05.grid_asset, e05.panel_asset
         ),
@@ -398,19 +380,10 @@ def _record(
         proposed_at=NOW,
     )
     authorized_linkage = None
-    activation_receipt = None
     if authorized:
         authorized_linkage, _ = _consume(
             revision,
             (_create_approval(revision, result_digit),),
-        )
-        activation_receipt = CommittedLinkageReceipt(
-            provider_namespace=revision.provider_namespace,
-            linkage_id=revision.linkage_id,
-            revision=revision.revision,
-            linkage_revision_sha256=linkage_revision_sha256(revision),
-            state_version=1,
-            state_head_sha256=LINKAGE_STATE_HEAD_SHA256,
         )
     return LongitudinalRecord(
         measurement=measurement,
@@ -422,7 +395,7 @@ def _record(
         ),
         linkage_revision=revision,
         authorized_linkage=authorized_linkage,
-        activation_receipt=activation_receipt,
+        activation_receipt=None,
     )
 
 
@@ -441,9 +414,7 @@ def _policy(
             member_value, outcome = allowances[value.dimension]
             allowed = (
                 DimensionAllowance(
-                    member_value_sha256=comparison_dimension_value_sha256(
-                        member_value
-                    ),
+                    member_value_sha256=comparison_dimension_value_sha256(member_value),
                     outcome=outcome,
                     evidence_ref=f"evidence_{value.dimension.value}_alpha",
                     evidence_sha256="a" * 64,
@@ -465,9 +436,7 @@ def _policy(
         policy_id="longpolicy_fragment_alpha",
         version="1.0.0",
         engine_version="1.0.0",
-        anchor_key_sha256=longitudinal_comparison_key_sha256(
-            anchor.comparison_key
-        ),
+        anchor_key_sha256=longitudinal_comparison_key_sha256(anchor.comparison_key),
         rules=tuple(rules),
     )
 
@@ -480,19 +449,55 @@ def _decide(
     expected_policy: str | None = None,
     expected_head: str = HEAD_SHA256,
 ):
-    return decide_longitudinal_member(
-        anchor,
-        member,
-        policy,
-        expected_policy_sha256=(
-            expected_policy or longitudinal_anchor_policy_sha256(policy)
-        ),
-        expected_authority_head_sha256=expected_head,
-        expected_linkage_trust_snapshot_sha256_by_provider={
-            PROVIDER: TRUST_SHA256
-        },
-        linkage_store=LINKAGE_STORE,
-    )
+    with _activated_records(anchor, member) as (records, store):
+        return decide_longitudinal_member(
+            records[0],
+            records[1],
+            policy,
+            expected_policy_sha256=(
+                expected_policy or longitudinal_anchor_policy_sha256(policy)
+            ),
+            expected_authority_head_sha256=expected_head,
+            expected_linkage_trust_snapshot_sha256_by_provider={PROVIDER: TRUST_SHA256},
+            linkage_store=store,
+        )
+
+
+@contextmanager
+def _activated_records(
+    *records: LongitudinalRecord,
+) -> Iterator[tuple[tuple[LongitudinalRecord, ...], ProviderLinkageStore]]:
+    with TemporaryDirectory(prefix="traceback-linkage-test-") as directory:
+        store = ProviderLinkageStore(
+            Path(directory),
+            expected_trust_snapshot_sha256_by_provider={PROVIDER: TRUST_SHA256},
+            clock=lambda: NOW,
+        )
+        try:
+            for record in records:
+                if record.authorized_linkage is not None:
+                    store.commit_authorized_revision(record.authorized_linkage)
+            receipts = {
+                (item.provider_namespace, item.linkage_id, item.revision): item
+                for item in store.active_snapshot().receipts
+            }
+            activated = tuple(
+                record.model_copy(
+                    update={
+                        "activation_receipt": receipts.get(
+                            (
+                                record.linkage_revision.provider_namespace,
+                                record.linkage_revision.linkage_id,
+                                record.linkage_revision.revision,
+                            )
+                        )
+                    }
+                )
+                for record in records
+            )
+            yield activated, store
+        finally:
+            store.close()
 
 
 def test_exact_complete_key_is_equivalent_and_replay_bound() -> None:
@@ -506,10 +511,7 @@ def test_exact_complete_key_is_equivalent_and_replay_bound() -> None:
     assert decision.delta_allowed and decision.connecting_trend_allowed
     assert decision.anchor_result_sha256 == anchor.measurement.result_sha256
     assert decision.member_bundle_sha256 == member.measurement.bundle_sha256
-    assert anchor.activation_receipt is not None
-    assert decision.anchor_linkage_receipt_sha256 == (
-        committed_linkage_receipt_sha256(anchor.activation_receipt)
-    )
+    assert decision.anchor_linkage_receipt_sha256 is not None
     assert longitudinal_member_decision_sha256(decision)
 
 
@@ -563,9 +565,7 @@ def test_registered_allowance_has_exact_rendering_semantics(
 def test_unknown_absent_linkage_and_stale_authority_suppress_rendering() -> None:
     anchor = _record("1")
     policy = _policy(anchor)
-    unknown = _record(
-        "2", unknown=ComparisonDimension.UNCERTAINTY_METHOD
-    )
+    unknown = _record("2", unknown=ComparisonDimension.UNCERTAINTY_METHOD)
     unknown_decision = _decide(anchor, unknown, policy)
     assert unknown_decision.outcome == LongitudinalOutcome.UNKNOWN
     assert not unknown_decision.connecting_trend_allowed
@@ -581,7 +581,8 @@ def test_unknown_absent_linkage_and_stale_authority_suppress_rendering() -> None
     stale_decision = _decide(anchor, stale, policy)
     assert stale_decision.outcome == LongitudinalOutcome.UNKNOWN
     assert LongitudinalReason.RESULT_STATE_INVALID in stale_decision.reason_codes
-    assert stale_decision.member_record_sha256 == longitudinal_record_sha256(stale)
+    assert stale_decision.member_linkage_receipt_sha256 is not None
+    assert stale_decision.member_record_sha256 != longitudinal_record_sha256(stale)
     assert stale_decision.member_record_sha256 != longitudinal_record_sha256(unknown)
 
 
@@ -630,9 +631,7 @@ def test_live_store_receipts_are_required_and_replayed(tmp_path: Path) -> None:
             policy,
             expected_policy_sha256=longitudinal_anchor_policy_sha256(policy),
             expected_authority_head_sha256=HEAD_SHA256,
-            expected_linkage_trust_snapshot_sha256_by_provider={
-                PROVIDER: TRUST_SHA256
-            },
+            expected_linkage_trust_snapshot_sha256_by_provider={PROVIDER: TRUST_SHA256},
             linkage_store=store,
         )
         assert decision.outcome == LongitudinalOutcome.EQUIVALENT
@@ -643,9 +642,7 @@ def test_live_store_receipts_are_required_and_replayed(tmp_path: Path) -> None:
             policy,
             expected_policy_sha256=longitudinal_anchor_policy_sha256(policy),
             expected_authority_head_sha256=HEAD_SHA256,
-            expected_linkage_trust_snapshot_sha256_by_provider={
-                PROVIDER: TRUST_SHA256
-            },
+            expected_linkage_trust_snapshot_sha256_by_provider={PROVIDER: TRUST_SHA256},
             linkage_store=None,
         )
         assert no_verifier.outcome == LongitudinalOutcome.UNKNOWN
@@ -662,15 +659,78 @@ def test_live_store_receipts_are_required_and_replayed(tmp_path: Path) -> None:
             policy,
             expected_policy_sha256=longitudinal_anchor_policy_sha256(policy),
             expected_authority_head_sha256=HEAD_SHA256,
-            expected_linkage_trust_snapshot_sha256_by_provider={
-                PROVIDER: TRUST_SHA256
-            },
+            expected_linkage_trust_snapshot_sha256_by_provider={PROVIDER: TRUST_SHA256},
             linkage_store=store,
         )
         assert stale.outcome == LongitudinalOutcome.UNKNOWN
         assert LongitudinalReason.LINKAGE_AUTHORITY_INVALID in stale.reason_codes
     finally:
         store.close()
+
+
+def test_fake_or_cross_store_verifier_cannot_enable_comparison(
+    tmp_path: Path,
+) -> None:
+    anchor = _record("1")
+    member = _record("2")
+    policy = _policy(anchor)
+
+    class AcceptAll:
+        @staticmethod
+        def verify_current_receipt(_receipt) -> None:
+            return None
+
+    class AcceptAllSubclass(ProviderLinkageStore):
+        def verify_current_receipt(self, _receipt) -> None:
+            return None
+
+    with _activated_records(anchor, member) as (records, _source_store):
+        fake_verifiers = (
+            AcceptAll(),
+            object.__new__(AcceptAllSubclass),
+        )
+        for fake_verifier in fake_verifiers:
+            fake = decide_longitudinal_member(
+                records[0],
+                records[1],
+                policy,
+                expected_policy_sha256=longitudinal_anchor_policy_sha256(policy),
+                expected_authority_head_sha256=HEAD_SHA256,
+                expected_linkage_trust_snapshot_sha256_by_provider={
+                    PROVIDER: TRUST_SHA256
+                },
+                linkage_store=fake_verifier,  # type: ignore[arg-type]
+            )
+            assert fake.outcome == LongitudinalOutcome.UNKNOWN
+            assert LongitudinalReason.LINKAGE_AUTHORITY_INVALID in fake.reason_codes
+
+        other_store = ProviderLinkageStore(
+            tmp_path / "other-store",
+            expected_trust_snapshot_sha256_by_provider={PROVIDER: TRUST_SHA256},
+            clock=lambda: NOW,
+        )
+        try:
+            assert records[0].authorized_linkage is not None
+            assert records[1].authorized_linkage is not None
+            other_store.commit_authorized_revision(records[0].authorized_linkage)
+            other_store.commit_authorized_revision(records[1].authorized_linkage)
+            cross_store = decide_longitudinal_member(
+                records[0],
+                records[1],
+                policy,
+                expected_policy_sha256=longitudinal_anchor_policy_sha256(policy),
+                expected_authority_head_sha256=HEAD_SHA256,
+                expected_linkage_trust_snapshot_sha256_by_provider={
+                    PROVIDER: TRUST_SHA256
+                },
+                linkage_store=other_store,
+            )
+            assert cross_store.outcome == LongitudinalOutcome.UNKNOWN
+            assert LongitudinalReason.LINKAGE_AUTHORITY_INVALID in (
+                cross_store.reason_codes
+            )
+        finally:
+            other_store.close()
 
 
 def test_exact_e05_result_bundle_and_overlapping_key_cannot_drift() -> None:
@@ -698,9 +758,7 @@ def test_exact_e05_result_bundle_and_overlapping_key_cannot_drift() -> None:
     )
     changed_key = record.comparison_key.model_copy(
         update={
-            "e05_compatibility_key_sha256": compatibility_key_sha256(
-                changed_e05_key
-            )
+            "e05_compatibility_key_sha256": compatibility_key_sha256(changed_e05_key)
         }
     )
     with pytest.raises(ValidationError, match="conflicts with E05 identity"):
@@ -798,17 +856,16 @@ def test_series_uses_one_anchor_and_seals_every_decision_digest() -> None:
             )
         },
     )
-    series = decide_longitudinal_series(
-        anchor,
-        (middle, last),
-        policy,
-        expected_policy_sha256=longitudinal_anchor_policy_sha256(policy),
-        expected_authority_head_sha256=HEAD_SHA256,
-        expected_linkage_trust_snapshot_sha256_by_provider={
-            PROVIDER: TRUST_SHA256
-        },
-        linkage_store=LINKAGE_STORE,
-    )
+    with _activated_records(anchor, middle, last) as (records, store):
+        series = decide_longitudinal_series(
+            records[0],
+            (records[1], records[2]),
+            policy,
+            expected_policy_sha256=longitudinal_anchor_policy_sha256(policy),
+            expected_authority_head_sha256=HEAD_SHA256,
+            expected_linkage_trust_snapshot_sha256_by_provider={PROVIDER: TRUST_SHA256},
+            linkage_store=store,
+        )
     assert series.decisions[0].outcome == LongitudinalOutcome.QUALIFIED_COMPATIBLE
     assert series.decisions[1].outcome == LongitudinalOutcome.INCOMPATIBLE
     assert series.decision_sha256s == tuple(
@@ -858,9 +915,7 @@ def test_key_policy_order_and_measurement_definition_cannot_be_relabelled() -> N
         LongitudinalAnchorPolicy.model_validate_json(json.dumps(policy_payload))
 
     key_payload = anchor.comparison_key.model_dump(mode="json")
-    index = ALL_COMPARISON_DIMENSIONS.index(
-        ComparisonDimension.MEASUREMENT_DEFINITION
-    )
+    index = ALL_COMPARISON_DIMENSIONS.index(ComparisonDimension.MEASUREMENT_DEFINITION)
     key_payload["dimensions"][index]["content_sha256"] = "0" * 64
     with pytest.raises(ValidationError, match="bind exact method and quantity"):
         LongitudinalComparisonKey.model_validate_json(json.dumps(key_payload))
