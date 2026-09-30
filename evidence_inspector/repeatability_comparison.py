@@ -1,0 +1,589 @@
+"""Fail-closed, descriptive repeatability comparisons for Epic D07.
+
+The evaluator replays the exact D03 decision against current linkage authority,
+then permits numeric output only inside one exact, current repeatability envelope.
+It never attributes a difference, applies a correction, or assigns clinical meaning.
+"""
+
+from __future__ import annotations
+
+import hashlib
+import re
+import unicodedata
+from datetime import UTC, datetime
+from enum import StrEnum
+from typing import Annotated, Literal
+from urllib.parse import unquote
+
+from pydantic import AfterValidator, Field, StringConstraints, model_validator
+
+from evidence_inspector.compatibility import (
+    CompatibilityContract,
+    ExecutionState,
+    InformationState,
+)
+from evidence_inspector.longitudinal_compatibility import (
+    ComparisonDimension,
+    DimensionValueState,
+    LongitudinalAnchorPolicy,
+    LongitudinalMemberDecision,
+    LongitudinalOutcome,
+    LongitudinalRecord,
+    longitudinal_anchor_policy_sha256,
+    longitudinal_member_decision_sha256,
+    longitudinal_record_sha256,
+    replay_longitudinal_member_decision,
+)
+from evidence_inspector.method_registry import (
+    MethodReference,
+    QuantityId,
+    Sha256,
+    UnitId,
+    Version,
+    canonical_contract_bytes,
+)
+from evidence_inspector.provider_linkage_store import ProviderLinkageStore
+
+MAX_FACTORS = 4
+
+
+def _reject_private_token(value: str) -> str:
+    normalized = unicodedata.normalize("NFKC", value).lower()
+    for _ in range(3):
+        decoded = unquote(normalized)
+        if decoded == normalized:
+            break
+        normalized = decoded
+    segments = re.split(r"[^a-z0-9]+", normalized)
+    if any(
+        segment.startswith(term)
+        for segment in segments
+        for term in ("donor", "path", "patient", "read", "run", "sample", "sequence")
+    ):
+        raise ValueError("controlled identifier contains a reserved privacy term")
+    return value
+
+
+def _token(prefix: str):
+    return Annotated[
+        str,
+        StringConstraints(
+            min_length=len(prefix) + 2,
+            max_length=96,
+            pattern=rf"^{prefix}[a-z0-9]+(?:_[a-z0-9]+)*$",
+        ),
+        AfterValidator(_reject_private_token),
+    ]
+
+
+RepeatabilityEvidenceId = _token("repeatability_")
+RepeatabilityProtocolId = _token("protocol_")
+RepeatabilityAuthorityId = _token("authority_")
+UncertaintyMethodId = _token("uncertainty_")
+DenominatorSemanticsId = _token("denominator_")
+
+
+class RepeatabilityFactor(StrEnum):
+    BETWEEN_DAY = "between_day"
+    OPERATOR = "operator"
+    LOT = "lot"
+    PREANALYTICS = "preanalytics"
+
+
+ALL_REPEATABILITY_FACTORS = tuple(RepeatabilityFactor)
+
+
+class FactorEnvelope(CompatibilityContract):
+    factor: RepeatabilityFactor
+    maximum_absolute_contribution: float = Field(ge=0.0)
+
+
+class RepeatabilityEnvelope(CompatibilityContract):
+    """Exact preapproved technical envelope; factor bounds are explanatory only."""
+
+    schema_version: Literal["traceback.repeatability-envelope.v1"]
+    evidence_id: RepeatabilityEvidenceId
+    evidence_version: Version
+    evidence_sha256: Sha256
+    protocol_id: RepeatabilityProtocolId
+    protocol_version: Version
+    protocol_sha256: Sha256
+    authority_id: RepeatabilityAuthorityId
+    authority_sha256: Sha256
+    valid_from: datetime
+    valid_through: datetime
+    method_ref: MethodReference
+    method_definition_sha256: Sha256
+    quantity_id: QuantityId
+    unit: UnitId
+    uncertainty_method_id: UncertaintyMethodId
+    uncertainty_method_sha256: Sha256
+    denominator_semantics_id: DenominatorSemanticsId
+    denominator_semantics_sha256: Sha256
+    factor_envelopes: tuple[FactorEnvelope, ...] = Field(
+        min_length=MAX_FACTORS, max_length=MAX_FACTORS
+    )
+    maximum_absolute_delta: float = Field(ge=0.0)
+    combination_rule: Literal["preapproved_combined_absolute_delta.v1"]
+
+    @model_validator(mode="after")
+    def complete_current_envelope(self) -> RepeatabilityEnvelope:
+        if self.valid_from.tzinfo is None or self.valid_through.tzinfo is None:
+            raise ValueError("repeatability validity timestamps must be timezone-aware")
+        if self.valid_from.astimezone(UTC) >= self.valid_through.astimezone(UTC):
+            raise ValueError("repeatability validity window must be increasing")
+        if (
+            tuple(item.factor for item in self.factor_envelopes)
+            != ALL_REPEATABILITY_FACTORS
+        ):
+            raise ValueError(
+                "repeatability envelope must contain every factor in order"
+            )
+        return self
+
+
+class ObservationState(StrEnum):
+    AVAILABLE = "available"
+    MISSING_DRAW = "missing_draw"
+
+
+class ComparisonObservation(CompatibilityContract):
+    """A numeric observation or an explicit absent draw, bound to one D02 record."""
+
+    record_sha256: Sha256
+    state: ObservationState
+    value: float | None
+    uncertainty_lower: float | None
+    uncertainty_upper: float | None
+    denominator_count: int | None = Field(default=None, ge=1, le=1_000_000_000)
+
+    @model_validator(mode="after")
+    def coherent_observation(self) -> ComparisonObservation:
+        numeric = (
+            self.value,
+            self.uncertainty_lower,
+            self.uncertainty_upper,
+            self.denominator_count,
+        )
+        if self.state == ObservationState.MISSING_DRAW:
+            if any(item is not None for item in numeric):
+                raise ValueError("missing draw cannot contain numeric output")
+            return self
+        if any(item is None for item in numeric):
+            raise ValueError(
+                "available observation requires value, uncertainty, and denominator"
+            )
+        assert self.value is not None
+        assert self.uncertainty_lower is not None
+        assert self.uncertainty_upper is not None
+        if not self.uncertainty_lower <= self.value <= self.uncertainty_upper:
+            raise ValueError("uncertainty interval must contain the value")
+        return self
+
+
+class ComparisonAvailability(StrEnum):
+    AVAILABLE = "available"
+    UNAVAILABLE = "unavailable"
+
+
+class RepeatabilityClassification(StrEnum):
+    EXACT_SAME_VALUE = "exact_same_value"
+    NOISY_WITHIN_ENVELOPE = "noisy_within_envelope"
+    OUTSIDE_ENVELOPE = "outside_envelope"
+    MISSING_DRAW = "missing_draw"
+    FAILED_OR_INSUFFICIENT_MEASUREMENT = "failed_or_insufficient_measurement"
+    INCOMPATIBLE_OR_UNKNOWN = "incompatible_or_unknown"
+    REQUIRES_REANALYSIS_OR_BRIDGE = "requires_reanalysis_or_bridge"
+    EVIDENCE_UNAVAILABLE = "evidence_unavailable"
+
+
+class RepeatabilityReason(StrEnum):
+    EXACT_SAME_VALUE = "exact_same_value"
+    WITHIN_PREAPPROVED_ENVELOPE = "within_preapproved_envelope"
+    OUTSIDE_PREAPPROVED_ENVELOPE = "outside_preapproved_envelope"
+    MISSING_DRAW = "missing_draw"
+    MEASUREMENT_FAILED_OR_INSUFFICIENT = "measurement_failed_or_insufficient"
+    D03_INCOMPATIBLE_OR_UNKNOWN = "d03_incompatible_or_unknown"
+    D03_REANALYSIS_OR_BRIDGE_REQUIRED = "d03_reanalysis_or_bridge_required"
+    EVIDENCE_MISSING = "evidence_missing"
+    EVIDENCE_IDENTITY_MISMATCH = "evidence_identity_mismatch"
+    EVIDENCE_STALE = "evidence_stale"
+    MEASUREMENT_IDENTITY_MISMATCH = "measurement_identity_mismatch"
+
+
+class RepeatabilityComparison(CompatibilityContract):
+    schema_version: Literal["traceback.repeatability-comparison.v1"]
+    anchor_record_sha256: Sha256
+    member_record_sha256: Sha256
+    anchor_policy_sha256: Sha256
+    d03_decision_sha256: Sha256
+    repeatability_envelope_sha256: Sha256 | None
+    repeatability_evidence_sha256: Sha256 | None
+    repeatability_protocol_sha256: Sha256 | None
+    repeatability_authority_sha256: Sha256 | None
+    evaluated_at: datetime
+    availability: ComparisonAvailability
+    classification: RepeatabilityClassification
+    reason_codes: tuple[RepeatabilityReason, ...] = Field(min_length=1, max_length=4)
+    anchor_value: float | None
+    member_value: float | None
+    delta: float | None
+    anchor_uncertainty_lower: float | None
+    anchor_uncertainty_upper: float | None
+    member_uncertainty_lower: float | None
+    member_uncertainty_upper: float | None
+    anchor_denominator_count: int | None
+    member_denominator_count: int | None
+    maximum_absolute_delta: float | None
+    trend_allowed: bool
+    interpretation: Literal[
+        "descriptive_technical_difference_only_no_causal_or_clinical_meaning"
+    ]
+    automatic_correction_applied: Literal[False]
+
+    @model_validator(mode="after")
+    def suppress_unavailable_numbers(self) -> RepeatabilityComparison:
+        if self.evaluated_at.tzinfo is None:
+            raise ValueError("comparison evaluation timestamp must be timezone-aware")
+        numeric = (
+            self.anchor_value,
+            self.member_value,
+            self.delta,
+            self.anchor_uncertainty_lower,
+            self.anchor_uncertainty_upper,
+            self.member_uncertainty_lower,
+            self.member_uncertainty_upper,
+            self.anchor_denominator_count,
+            self.member_denominator_count,
+            self.maximum_absolute_delta,
+        )
+        available = self.availability == ComparisonAvailability.AVAILABLE
+        if available != all(item is not None for item in numeric):
+            raise ValueError(
+                "numeric comparison fields must be all present or all suppressed"
+            )
+        if self.trend_allowed != available:
+            raise ValueError("only an available comparison permits a trend")
+        if self.reason_codes != tuple(sorted(set(self.reason_codes), key=str)):
+            raise ValueError("comparison reasons must be uniquely sorted")
+        if available and self.classification not in {
+            RepeatabilityClassification.EXACT_SAME_VALUE,
+            RepeatabilityClassification.NOISY_WITHIN_ENVELOPE,
+        }:
+            raise ValueError("available comparison has invalid classification")
+        evidence_identities = (
+            self.repeatability_envelope_sha256,
+            self.repeatability_evidence_sha256,
+            self.repeatability_protocol_sha256,
+            self.repeatability_authority_sha256,
+        )
+        if available and any(item is None for item in evidence_identities):
+            raise ValueError("available comparison requires exact evidence identities")
+        if available:
+            assert self.anchor_value is not None
+            assert self.member_value is not None
+            assert self.delta is not None
+            assert self.maximum_absolute_delta is not None
+            if self.delta != self.member_value - self.anchor_value:
+                raise ValueError("comparison delta does not match exact values")
+            exact = self.delta == 0.0
+            if exact != (
+                self.classification == RepeatabilityClassification.EXACT_SAME_VALUE
+            ):
+                raise ValueError("same-value classification does not match delta")
+            if abs(self.delta) > self.maximum_absolute_delta:
+                raise ValueError("available delta exceeds repeatability envelope")
+        expected_reason = {
+            RepeatabilityClassification.EXACT_SAME_VALUE: RepeatabilityReason.EXACT_SAME_VALUE,
+            RepeatabilityClassification.NOISY_WITHIN_ENVELOPE: RepeatabilityReason.WITHIN_PREAPPROVED_ENVELOPE,
+            RepeatabilityClassification.OUTSIDE_ENVELOPE: RepeatabilityReason.OUTSIDE_PREAPPROVED_ENVELOPE,
+            RepeatabilityClassification.MISSING_DRAW: RepeatabilityReason.MISSING_DRAW,
+            RepeatabilityClassification.FAILED_OR_INSUFFICIENT_MEASUREMENT: RepeatabilityReason.MEASUREMENT_FAILED_OR_INSUFFICIENT,
+            RepeatabilityClassification.INCOMPATIBLE_OR_UNKNOWN: RepeatabilityReason.D03_INCOMPATIBLE_OR_UNKNOWN,
+            RepeatabilityClassification.REQUIRES_REANALYSIS_OR_BRIDGE: RepeatabilityReason.D03_REANALYSIS_OR_BRIDGE_REQUIRED,
+        }.get(self.classification)
+        if expected_reason is not None and self.reason_codes != (expected_reason,):
+            raise ValueError("comparison classification has invalid exact reason")
+        if (
+            self.classification == RepeatabilityClassification.EVIDENCE_UNAVAILABLE
+            and not (
+                set(self.reason_codes)
+                <= {
+                    RepeatabilityReason.EVIDENCE_MISSING,
+                    RepeatabilityReason.EVIDENCE_IDENTITY_MISMATCH,
+                    RepeatabilityReason.EVIDENCE_STALE,
+                    RepeatabilityReason.MEASUREMENT_IDENTITY_MISMATCH,
+                }
+            )
+        ):
+            raise ValueError("evidence-unavailable comparison has invalid reason")
+        return self
+
+
+def repeatability_envelope_sha256(envelope: RepeatabilityEnvelope) -> str:
+    return hashlib.sha256(canonical_contract_bytes(envelope)).hexdigest()
+
+
+def repeatability_comparison_sha256(comparison: RepeatabilityComparison) -> str:
+    return hashlib.sha256(canonical_contract_bytes(comparison)).hexdigest()
+
+
+def _result(
+    *,
+    anchor: LongitudinalRecord,
+    member: LongitudinalRecord,
+    policy: LongitudinalAnchorPolicy,
+    decision: LongitudinalMemberDecision,
+    evaluated_at: datetime,
+    classification: RepeatabilityClassification,
+    reasons: set[RepeatabilityReason],
+    envelope: RepeatabilityEnvelope | None,
+    anchor_observation: ComparisonObservation,
+    member_observation: ComparisonObservation,
+    available: bool,
+) -> RepeatabilityComparison:
+    numeric = available
+    anchor_value = anchor_observation.value if numeric else None
+    member_value = member_observation.value if numeric else None
+    assert not numeric or (anchor_value is not None and member_value is not None)
+    return RepeatabilityComparison(
+        schema_version="traceback.repeatability-comparison.v1",
+        anchor_record_sha256=longitudinal_record_sha256(anchor),
+        member_record_sha256=longitudinal_record_sha256(member),
+        anchor_policy_sha256=longitudinal_anchor_policy_sha256(policy),
+        d03_decision_sha256=longitudinal_member_decision_sha256(decision),
+        repeatability_envelope_sha256=(
+            repeatability_envelope_sha256(envelope) if envelope else None
+        ),
+        repeatability_evidence_sha256=(envelope.evidence_sha256 if envelope else None),
+        repeatability_protocol_sha256=(envelope.protocol_sha256 if envelope else None),
+        repeatability_authority_sha256=(
+            envelope.authority_sha256 if envelope else None
+        ),
+        evaluated_at=evaluated_at,
+        availability=(
+            ComparisonAvailability.AVAILABLE
+            if available
+            else ComparisonAvailability.UNAVAILABLE
+        ),
+        classification=classification,
+        reason_codes=tuple(sorted(reasons, key=str)),
+        anchor_value=anchor_value,
+        member_value=member_value,
+        delta=(member_value - anchor_value if numeric else None),
+        anchor_uncertainty_lower=(
+            anchor_observation.uncertainty_lower if numeric else None
+        ),
+        anchor_uncertainty_upper=(
+            anchor_observation.uncertainty_upper if numeric else None
+        ),
+        member_uncertainty_lower=(
+            member_observation.uncertainty_lower if numeric else None
+        ),
+        member_uncertainty_upper=(
+            member_observation.uncertainty_upper if numeric else None
+        ),
+        anchor_denominator_count=(
+            anchor_observation.denominator_count if numeric else None
+        ),
+        member_denominator_count=(
+            member_observation.denominator_count if numeric else None
+        ),
+        maximum_absolute_delta=(
+            envelope.maximum_absolute_delta if numeric and envelope else None
+        ),
+        trend_allowed=available,
+        interpretation="descriptive_technical_difference_only_no_causal_or_clinical_meaning",
+        automatic_correction_applied=False,
+    )
+
+
+def compare_repeatability(
+    anchor: LongitudinalRecord,
+    member: LongitudinalRecord,
+    policy: LongitudinalAnchorPolicy,
+    decision: LongitudinalMemberDecision,
+    anchor_observation: ComparisonObservation,
+    member_observation: ComparisonObservation,
+    envelope: RepeatabilityEnvelope | None,
+    *,
+    evaluated_at: datetime,
+    expected_policy_sha256: str,
+    expected_authority_head_sha256: str,
+    expected_linkage_trust_snapshot_sha256_by_provider: dict[str, str],
+    linkage_store: ProviderLinkageStore | None,
+    expected_envelope_sha256: str,
+    expected_evidence_sha256: str,
+    expected_protocol_sha256: str,
+    expected_repeatability_authority_sha256: str,
+) -> RepeatabilityComparison:
+    """Produce a descriptive delta only after exact D03 and evidence replay."""
+
+    if evaluated_at.tzinfo is None:
+        raise ValueError("evaluation timestamp must be timezone-aware")
+    replay_longitudinal_member_decision(
+        decision,
+        anchor,
+        member,
+        policy,
+        expected_policy_sha256=expected_policy_sha256,
+        expected_authority_head_sha256=expected_authority_head_sha256,
+        expected_linkage_trust_snapshot_sha256_by_provider=(
+            expected_linkage_trust_snapshot_sha256_by_provider
+        ),
+        linkage_store=linkage_store,
+    )
+    common = {
+        "anchor": anchor,
+        "member": member,
+        "policy": policy,
+        "decision": decision,
+        "evaluated_at": evaluated_at,
+        "envelope": envelope,
+        "anchor_observation": anchor_observation,
+        "member_observation": member_observation,
+    }
+    if anchor_observation.record_sha256 != longitudinal_record_sha256(
+        anchor
+    ) or member_observation.record_sha256 != longitudinal_record_sha256(member):
+        return _result(
+            **common,
+            classification=RepeatabilityClassification.EVIDENCE_UNAVAILABLE,
+            reasons={RepeatabilityReason.MEASUREMENT_IDENTITY_MISMATCH},
+            available=False,
+        )
+    measurements = (anchor.measurement, member.measurement)
+    if any(
+        item.execution_state != ExecutionState.COMPLETE
+        or item.information_state != InformationState.SUFFICIENT
+        for item in measurements
+    ):
+        return _result(
+            **common,
+            classification=RepeatabilityClassification.FAILED_OR_INSUFFICIENT_MEASUREMENT,
+            reasons={RepeatabilityReason.MEASUREMENT_FAILED_OR_INSUFFICIENT},
+            available=False,
+        )
+    if (
+        anchor_observation.state == ObservationState.MISSING_DRAW
+        or member_observation.state == ObservationState.MISSING_DRAW
+    ):
+        return _result(
+            **common,
+            classification=RepeatabilityClassification.MISSING_DRAW,
+            reasons={RepeatabilityReason.MISSING_DRAW},
+            available=False,
+        )
+    if decision.outcome in {
+        LongitudinalOutcome.REQUIRES_REANALYSIS,
+        LongitudinalOutcome.REGISTERED_BRIDGE,
+    }:
+        return _result(
+            **common,
+            classification=RepeatabilityClassification.REQUIRES_REANALYSIS_OR_BRIDGE,
+            reasons={RepeatabilityReason.D03_REANALYSIS_OR_BRIDGE_REQUIRED},
+            available=False,
+        )
+    if decision.outcome not in {
+        LongitudinalOutcome.EQUIVALENT,
+        LongitudinalOutcome.QUALIFIED_COMPATIBLE,
+    }:
+        return _result(
+            **common,
+            classification=RepeatabilityClassification.INCOMPATIBLE_OR_UNKNOWN,
+            reasons={RepeatabilityReason.D03_INCOMPATIBLE_OR_UNKNOWN},
+            available=False,
+        )
+    if envelope is None:
+        return _result(
+            **common,
+            classification=RepeatabilityClassification.EVIDENCE_UNAVAILABLE,
+            reasons={RepeatabilityReason.EVIDENCE_MISSING},
+            available=False,
+        )
+    evidence_digest = repeatability_envelope_sha256(envelope)
+    if (
+        evidence_digest != expected_envelope_sha256
+        or envelope.evidence_sha256 != expected_evidence_sha256
+        or envelope.protocol_sha256 != expected_protocol_sha256
+        or envelope.authority_sha256 != expected_repeatability_authority_sha256
+    ):
+        return _result(
+            **common,
+            classification=RepeatabilityClassification.EVIDENCE_UNAVAILABLE,
+            reasons={RepeatabilityReason.EVIDENCE_IDENTITY_MISMATCH},
+            available=False,
+        )
+    evaluation_utc = evaluated_at.astimezone(UTC)
+    if not (
+        envelope.valid_from.astimezone(UTC)
+        <= evaluation_utc
+        <= envelope.valid_through.astimezone(UTC)
+    ):
+        return _result(
+            **common,
+            classification=RepeatabilityClassification.EVIDENCE_UNAVAILABLE,
+            reasons={RepeatabilityReason.EVIDENCE_STALE},
+            available=False,
+        )
+    for record in (anchor, member):
+        key = record.comparison_key
+        dimensions = {item.dimension: item for item in key.dimensions}
+        uncertainty = dimensions[ComparisonDimension.UNCERTAINTY_METHOD]
+        denominator = dimensions[ComparisonDimension.DENOMINATOR_SEMANTICS]
+        if (
+            key.method_ref != envelope.method_ref
+            or key.method_definition_sha256 != envelope.method_definition_sha256
+            or key.quantity_id != envelope.quantity_id
+            or key.unit != envelope.unit
+            or uncertainty.state != DimensionValueState.KNOWN
+            or uncertainty.content_sha256 != envelope.uncertainty_method_sha256
+            or denominator.state != DimensionValueState.KNOWN
+            or denominator.content_sha256 != envelope.denominator_semantics_sha256
+        ):
+            return _result(
+                **common,
+                classification=RepeatabilityClassification.EVIDENCE_UNAVAILABLE,
+                reasons={RepeatabilityReason.MEASUREMENT_IDENTITY_MISMATCH},
+                available=False,
+            )
+    assert anchor_observation.value is not None
+    assert member_observation.value is not None
+    delta = member_observation.value - anchor_observation.value
+    if delta == 0.0:
+        return _result(
+            **common,
+            classification=RepeatabilityClassification.EXACT_SAME_VALUE,
+            reasons={RepeatabilityReason.EXACT_SAME_VALUE},
+            available=True,
+        )
+    if abs(delta) <= envelope.maximum_absolute_delta:
+        return _result(
+            **common,
+            classification=RepeatabilityClassification.NOISY_WITHIN_ENVELOPE,
+            reasons={RepeatabilityReason.WITHIN_PREAPPROVED_ENVELOPE},
+            available=True,
+        )
+    return _result(
+        **common,
+        classification=RepeatabilityClassification.OUTSIDE_ENVELOPE,
+        reasons={RepeatabilityReason.OUTSIDE_PREAPPROVED_ENVELOPE},
+        available=False,
+    )
+
+
+__all__ = [
+    "ALL_REPEATABILITY_FACTORS",
+    "ComparisonAvailability",
+    "ComparisonObservation",
+    "FactorEnvelope",
+    "ObservationState",
+    "RepeatabilityClassification",
+    "RepeatabilityComparison",
+    "RepeatabilityEnvelope",
+    "RepeatabilityFactor",
+    "RepeatabilityReason",
+    "compare_repeatability",
+    "repeatability_comparison_sha256",
+    "repeatability_envelope_sha256",
+]
