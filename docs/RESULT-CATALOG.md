@@ -40,6 +40,11 @@ references and never removes the content-addressed object. A v1 catalog is
 expanded transactionally to this v2 publication table after its original schema
 has been verified exactly.
 
+Recovery can enumerate bounded hidden publications and resolve one publication
+from the exact SQLite schema without trusting a filesystem journal. This lets a
+coordinator compensate a pending row after journal loss or corruption and keeps
+retry idempotent while retaining the immutable shared object.
+
 The catalog root, object directory, and database inode are retained and
 revalidated on operations. Staging creation and publication are relative to the
 bound object-directory descriptor, so path replacement cannot redirect accepted

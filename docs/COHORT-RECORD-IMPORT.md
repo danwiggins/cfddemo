@@ -39,8 +39,17 @@ directory is flushed. D05 linkage, result trust, catalog storage, and exact
 binding bytes are revalidated immediately before and after the in-transaction
 visibility change. Any failure compensates the exact publication row and
 binding while retaining the shared content-addressed object. Startup recovery
-uses the journal to remove an unadopted publication or finish an already adopted
-one; an empty or partial final binding is never accepted.
+enumerates hidden SQLite publications independently of journal parsing, then
+uses matching journal bytes to remove an unadopted publication or finish an
+already adopted one. Missing, truncated, or substituted journals compensate the
+exact durable publication and are removed with any linked final file; an empty
+or partial final binding is never accepted.
+
+Import and read paths invoke captured unbound authority functions and verify the
+entire reachable catalog, trust-store, linkage-store, verifier, storage, class,
+instance, and module-alias call chain. Replacing a validator cannot turn stale
+D05 membership or a revoked result key into accepted evidence, including a
+replacement that attempts to restore itself when called.
 
 This implementation remains synthetic and local. The binding index contains
 protected analysis and provider identifiers and must stay inside provider

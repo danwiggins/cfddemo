@@ -19,6 +19,7 @@ from contextlib import contextmanager
 from datetime import datetime
 from enum import StrEnum
 from pathlib import Path, PurePosixPath
+from types import MappingProxyType
 from typing import Annotated, Literal
 
 from pydantic import (
@@ -401,6 +402,14 @@ class PreparedCatalogImport(CatalogModel):
         if self.authority_sha256 != catalog_authority_sha256(self.authority):
             raise ValueError("prepared catalog authority digest is invalid")
         return self
+
+
+class PendingCatalogPublication(CatalogModel):
+    """Durable recovery key for a hidden catalog publication."""
+
+    publication_id: PublicationId
+    reference: CatalogResultRef
+    state: Literal["pending", "adopted"]
 
 
 class CatalogOrder(StrEnum):
@@ -866,8 +875,8 @@ class ResultCatalog:
     def authority_snapshot(self) -> CatalogAuthoritySnapshot:
         """Return an opaque digest-bound snapshot of exact live catalog authority."""
 
-        self._validate_storage()
-        self._validate_verification_authority()
+        _RC_VALIDATE_STORAGE(self)
+        _RC_VALIDATE_VERIFICATION_AUTHORITY(self)
         try:
             keys = tuple(
                 {
@@ -946,6 +955,7 @@ class ResultCatalog:
         self.close()
 
     def _validate_storage(self) -> None:
+        _RC_ASSERT_RUNTIME(self)
         try:
             root_stat = os.stat(self.root, follow_symlinks=False)
             if (
@@ -1002,8 +1012,8 @@ class ResultCatalog:
         self._database_fd = descriptor
 
     def _open_sqlite_connection(self) -> sqlite3.Connection:
-        self._validate_storage()
-        self._bind_database_descriptor()
+        _RC_VALIDATE_STORAGE(self)
+        _RC_BIND_DATABASE_DESCRIPTOR(self)
         descriptors_before = _open_descriptor_identities()
         try:
             connection = sqlite3.connect(
@@ -1046,14 +1056,14 @@ class ResultCatalog:
             self._sqlite_database_fd = matching_descriptors[0]
             if self._database_identity is None:
                 self._database_identity = observed_identity
-                self._bind_database_descriptor()
+                _RC_BIND_DATABASE_DESCRIPTOR(self)
             if (
                 not stat.S_ISREG(os.fstat(self._database_fd).st_mode)
                 or _inode_identity(os.fstat(self._database_fd)) != observed_identity
             ):
                 raise CatalogFilesystemError("catalog database changed")
             self._database_identity = observed_identity
-            self._validate_storage()
+            _RC_VALIDATE_STORAGE(self)
         except BaseException as error:
             if "connection" in locals():
                 connection.close()
@@ -1077,15 +1087,15 @@ class ResultCatalog:
         with self._connection_lock:
             if self._connection is None:
                 with _SQLITE_OPEN_LOCK:
-                    self._connection = self._open_sqlite_connection()
-            self._validate_storage()
+                    self._connection = _RC_OPEN_SQLITE_CONNECTION(self)
+            _RC_VALIDATE_STORAGE(self)
             try:
                 yield self._connection
             finally:
-                self._validate_storage()
+                _RC_VALIDATE_STORAGE(self)
 
     def _initialize(self) -> None:
-        with self._connection_lock, _SQLITE_OPEN_LOCK, self._connect() as connection:
+        with self._connection_lock, _SQLITE_OPEN_LOCK, _RC_CONNECT(self) as connection:
             connection.execute("PRAGMA synchronous=FULL")
             connection.execute("BEGIN EXCLUSIVE")
             try:
@@ -1118,7 +1128,7 @@ class ResultCatalog:
                     ) from None
                 raise
             os.chmod(self.database, 0o600)
-        self._validate_storage()
+        _RC_VALIDATE_STORAGE(self)
 
     @staticmethod
     def _migrate_v1(connection: sqlite3.Connection) -> None:
@@ -1192,7 +1202,7 @@ class ResultCatalog:
         )
         descriptors: list[int] = []
         path_bindings: list[tuple[int, str, tuple[int, ...]]] = []
-        self._validate_storage()
+        _RC_VALIDATE_STORAGE(self)
         temporary_name = f".catalog-{uuid.uuid4().hex}"
         os.mkdir(temporary_name, mode=0o700, dir_fd=self._objects_fd)
         temporary = self._bound_objects / temporary_name
@@ -1211,8 +1221,8 @@ class ResultCatalog:
             bundle_sha256, manifest_sha256, source_identities = _copy_exact_bundle(
                 current_fd, temporary
             )
-            self._fault("after_bundle_snapshot")
-            self._validate_storage()
+            _RC_FAULT(self, "after_bundle_snapshot")
+            _RC_VALIDATE_STORAGE(self)
             _verify_source_identities(current_fd, source_identities)
             for parent_fd, part, expected_identity in path_bindings:
                 rebound_fd = _open_directory_at(parent_fd, part)
@@ -1257,12 +1267,12 @@ class ResultCatalog:
         )
         if _capability_is_revoked(registry, capability):
             raise CatalogError("revoked method authority cannot be cataloged")
-        temporary, bundle_sha256, manifest_sha256 = self._capture(
-            root_id, relative_path
+        temporary, bundle_sha256, manifest_sha256 = _RC_CAPTURE(
+            self, root_id, relative_path
         )
         object_path = self._bound_objects / bundle_sha256
         try:
-            self._validate_verification_authority()
+            _RC_VALIDATE_VERIFICATION_AUTHORITY(self)
             verified = _PINNED_VERIFY_BUNDLE(temporary, self.trust_store)
             _PINNED_READER_SELECT(self.reader_registry, verified)
             if not isinstance(verified.manifest, ResultBundleManifestV2):
@@ -1274,7 +1284,7 @@ class ResultCatalog:
                 != capability.method_definition_sha256
             ):
                 raise CatalogConflict("bundle method identity conflicts")
-            reference = self._reference(
+            reference = _RC_REFERENCE(
                 verified,
                 bundle_sha256=bundle_sha256,
                 manifest_sha256=manifest_sha256,
@@ -1282,7 +1292,7 @@ class ResultCatalog:
             )
             _fsync_tree(temporary)
             _seal_tree(temporary)
-            self._validate_storage()
+            _RC_VALIDATE_STORAGE(self)
             parent_fd = self._objects_fd
             try:
                 try:
@@ -1308,9 +1318,9 @@ class ResultCatalog:
                         raise CatalogConflict("catalog object identity conflicts")
                     _remove_tree(temporary)
             finally:
-                self._validate_storage()
-            self._fault("after_object_publish")
-            with self._connect() as connection:
+                _RC_VALIDATE_STORAGE(self)
+            _RC_FAULT(self, "after_object_publish")
+            with _RC_CONNECT(self) as connection:
                 connection.execute("BEGIN IMMEDIATE")
                 try:
                     existing = connection.execute(
@@ -1346,7 +1356,7 @@ class ResultCatalog:
                         ):
                             raise CatalogConflict("catalog identity conflict")
                         connection.commit()
-                        self._validate_storage()
+                        _RC_VALIDATE_STORAGE(self)
                         return parsed
                     connection.execute(
                         """INSERT INTO results VALUES(?,?,?,?,?,?,?,?,?,?)""",
@@ -1377,9 +1387,9 @@ class ResultCatalog:
                         raise CatalogConflict(
                             "catalog alias identity conflict"
                         ) from None
-                    self._fault("before_catalog_commit")
+                    _RC_FAULT(self, "before_catalog_commit")
                     connection.commit()
-                    self._validate_storage()
+                    _RC_VALIDATE_STORAGE(self)
                 except BaseException:
                     connection.rollback()
                     raise
@@ -1411,12 +1421,12 @@ class ResultCatalog:
         if _capability_is_revoked(registry, capability):
             raise CatalogError("revoked method authority cannot be cataloged")
         aliases = CatalogAliases.model_validate_json(canonical_json_bytes(aliases))
-        temporary, bundle_sha256, manifest_sha256 = self._capture(
-            root_id, relative_path
+        temporary, bundle_sha256, manifest_sha256 = _RC_CAPTURE(
+            self, root_id, relative_path
         )
         object_path = self._bound_objects / bundle_sha256
         try:
-            authority = self.authority_snapshot()
+            authority = _RC_AUTHORITY_SNAPSHOT(self)
             verified = _PINNED_VERIFY_BUNDLE(temporary, self.trust_store)
             reader = _PINNED_READER_SELECT(self.reader_registry, verified)
             if not isinstance(verified.manifest, ResultBundleManifestV2):
@@ -1428,7 +1438,7 @@ class ResultCatalog:
                 != capability.method_definition_sha256
             ):
                 raise CatalogConflict("bundle method identity conflicts")
-            reference = self._reference(
+            reference = _RC_REFERENCE(
                 verified,
                 bundle_sha256=bundle_sha256,
                 manifest_sha256=manifest_sha256,
@@ -1436,7 +1446,7 @@ class ResultCatalog:
             )
             _fsync_tree(temporary)
             _seal_tree(temporary)
-            self._validate_storage()
+            _RC_VALIDATE_STORAGE(self)
             try:
                 try:
                     rename_directory_exclusive_at(
@@ -1463,10 +1473,10 @@ class ResultCatalog:
                         raise CatalogConflict("catalog object identity conflicts")
                     _remove_tree(temporary)
             finally:
-                self._validate_storage()
-            self._fault("after_object_publish")
+                _RC_VALIDATE_STORAGE(self)
+            _RC_FAULT(self, "after_object_publish")
             already_visible = False
-            with self._connect() as connection:
+            with _RC_CONNECT(self) as connection:
                 existing = connection.execute(
                     """SELECT r.ref_json, a.display_alias, a.run_alias,
                               a.timepoint_alias, p.state
@@ -1532,7 +1542,7 @@ class ResultCatalog:
             raise CatalogConflict("catalog preparation is invalid") from None
         if self._prepared_imports.get(normalized.publication_id) != normalized:
             raise CatalogConflict("catalog preparation is not live")
-        if require_authority and self.authority_snapshot() != normalized.authority:
+        if require_authority and _RC_AUTHORITY_SNAPSHOT(self) != normalized.authority:
             raise CatalogConflict("catalog authority changed during import")
         return normalized
 
@@ -1541,11 +1551,11 @@ class ResultCatalog:
     ) -> None:
         """Create a durable pending row that catalog queries cannot observe."""
 
-        normalized = self._require_prepared(prepared)
+        normalized = _RC_REQUIRE_PREPARED(self, prepared)
         if normalized.already_visible:
             return
         reference, aliases = normalized.reference, normalized.aliases
-        with self._connect() as connection:
+        with _RC_CONNECT(self) as connection:
             connection.execute("BEGIN IMMEDIATE")
             try:
                 existing = connection.execute(
@@ -1617,14 +1627,14 @@ class ResultCatalog:
     ) -> CatalogResultRef:
         """Make a pending row visible only after two in-transaction revalidations."""
 
-        normalized = self._require_prepared(prepared)
+        normalized = _RC_REQUIRE_PREPARED(self, prepared)
         if normalized.already_visible:
             revalidate("before_visibility")
-            self.verify_reference(normalized.reference)
+            _RC_VERIFY_REFERENCE(self, normalized.reference)
             revalidate("after_visibility_staged")
             return normalized.reference
-        self.verify_prepared_object(normalized)
-        with self._connect() as connection:
+        _RC_VERIFY_PREPARED_OBJECT(self, normalized)
+        with _RC_CONNECT(self) as connection:
             connection.execute("BEGIN IMMEDIATE")
             try:
                 row = connection.execute(
@@ -1641,13 +1651,13 @@ class ResultCatalog:
                 ):
                     raise CatalogConflict("pending catalog publication is invalid")
                 revalidate("before_visibility")
-                self.verify_prepared_object(normalized)
+                _RC_VERIFY_PREPARED_OBJECT(self, normalized)
                 connection.execute(
                     "UPDATE result_publications SET state='adopted' WHERE result_id=?",
                     (normalized.reference.result_id,),
                 )
                 revalidate("after_visibility_staged")
-                self.verify_prepared_object(normalized)
+                _RC_VERIFY_PREPARED_OBJECT(self, normalized)
                 connection.commit()
             except BaseException:
                 connection.rollback()
@@ -1659,9 +1669,9 @@ class ResultCatalog:
     ) -> None:
         """Forget an adopted preparation after its coordinator completes."""
 
-        normalized = self._require_prepared(prepared, require_authority=False)
+        normalized = _RC_REQUIRE_PREPARED(self, prepared, require_authority=False)
         if not normalized.already_visible:
-            with self._connect() as connection:
+            with _RC_CONNECT(self) as connection:
                 row = connection.execute(
                     """SELECT state FROM result_publications
                        WHERE result_id=? AND publication_id=?""",
@@ -1679,9 +1689,9 @@ class ResultCatalog:
     ) -> None:
         """Remove this operation's exact pending or adopted row after coordinator failure."""
 
-        normalized = self._require_prepared(prepared, require_authority=False)
+        normalized = _RC_REQUIRE_PREPARED(self, prepared, require_authority=False)
         if not normalized.already_visible:
-            with self._connect() as connection:
+            with _RC_CONNECT(self) as connection:
                 connection.execute("BEGIN IMMEDIATE")
                 try:
                     row = connection.execute(
@@ -1718,7 +1728,7 @@ class ResultCatalog:
     def verify_prepared_object(
         self, prepared: PreparedCatalogImport | Mapping[str, object]
     ) -> tuple[VerifiedBundle, ResultBundleReader]:
-        normalized = self._require_prepared(prepared)
+        normalized = _RC_REQUIRE_PREPARED(self, prepared)
         reference = normalized.reference
         try:
             object_fd = _open_directory_at(self._objects_fd, reference.bundle_sha256)
@@ -1746,9 +1756,9 @@ class ResultCatalog:
     ) -> None:
         """Remove only this operation's invisible pending row; retain shared object bytes."""
 
-        normalized = self._require_prepared(prepared, require_authority=False)
+        normalized = _RC_REQUIRE_PREPARED(self, prepared, require_authority=False)
         if not normalized.already_visible:
-            with self._connect() as connection:
+            with _RC_CONNECT(self) as connection:
                 connection.execute("BEGIN IMMEDIATE")
                 try:
                     row = connection.execute(
@@ -1790,7 +1800,7 @@ class ResultCatalog:
         reference = CatalogResultRef.model_validate_json(
             canonical_json_bytes(reference)
         )
-        with self._connect() as connection:
+        with _RC_CONNECT(self) as connection:
             connection.execute("BEGIN IMMEDIATE")
             try:
                 row = connection.execute(
@@ -1821,6 +1831,86 @@ class ResultCatalog:
                 connection.rollback()
                 raise
 
+    def pending_publications(self) -> tuple[PendingCatalogPublication, ...]:
+        """Enumerate bounded hidden rows so a coordinator can recover without a journal."""
+
+        with _RC_CONNECT(self) as connection:
+            rows = connection.execute(
+                """SELECT p.publication_id, r.ref_json
+                   FROM result_publications p
+                   JOIN results r ON r.result_id=p.result_id
+                   WHERE p.state='pending'
+                   ORDER BY p.publication_id
+                   LIMIT ?""",
+                (MAX_QUERY_LIMIT * 1000 + 1,),
+            ).fetchall()
+        if len(rows) > MAX_QUERY_LIMIT * 1000:
+            raise CatalogConflict("pending catalog publication bound exceeded")
+        try:
+            return tuple(
+                PendingCatalogPublication(
+                    publication_id=row[0],
+                    reference=CatalogResultRef.model_validate_json(row[1]),
+                    state="pending",
+                )
+                for row in rows
+            )
+        except Exception:  # noqa: BLE001 - normalize hostile database content
+            raise CatalogConflict("pending catalog publication is invalid") from None
+
+    def recovery_publications(self) -> tuple[PendingCatalogPublication, ...]:
+        """Enumerate bounded coordinator-owned publication rows for reconciliation."""
+
+        with _RC_CONNECT(self) as connection:
+            rows = connection.execute(
+                """SELECT p.publication_id, r.ref_json, p.state
+                   FROM result_publications p
+                   JOIN results r ON r.result_id=p.result_id
+                   ORDER BY p.publication_id
+                   LIMIT ?""",
+                (MAX_QUERY_LIMIT * 1000 + 1,),
+            ).fetchall()
+        if len(rows) > MAX_QUERY_LIMIT * 1000:
+            raise CatalogConflict("catalog publication recovery bound exceeded")
+        try:
+            return tuple(
+                PendingCatalogPublication(
+                    publication_id=row[0],
+                    reference=CatalogResultRef.model_validate_json(row[1]),
+                    state=row[2],
+                )
+                for row in rows
+            )
+        except Exception:  # noqa: BLE001 - normalize hostile database content
+            raise CatalogConflict("catalog publication recovery is invalid") from None
+
+    def publication_for_recovery(
+        self, publication_id: str
+    ) -> PendingCatalogPublication | None:
+        """Resolve one durable publication identity without trusting journal bytes."""
+
+        try:
+            publication_id = TypeAdapter(PublicationId).validate_python(publication_id)
+        except Exception:  # noqa: BLE001 - normalize hostile recovery key
+            raise CatalogConflict("catalog publication identity is invalid") from None
+        with _RC_CONNECT(self) as connection:
+            row = connection.execute(
+                """SELECT r.ref_json, p.state FROM result_publications p
+                   JOIN results r ON r.result_id=p.result_id
+                   WHERE p.publication_id=?""",
+                (publication_id,),
+            ).fetchone()
+        if row is None:
+            return None
+        try:
+            return PendingCatalogPublication(
+                publication_id=publication_id,
+                reference=CatalogResultRef.model_validate_json(row[0]),
+                state=row[1],
+            )
+        except Exception:  # noqa: BLE001 - normalize hostile database content
+            raise CatalogConflict("catalog publication is invalid") from None
+
     def verify_reference(
         self, reference: CatalogResultRef | Mapping[str, object]
     ) -> tuple[VerifiedBundle, ResultBundleReader]:
@@ -1832,7 +1922,7 @@ class ResultCatalog:
             )
         except Exception:  # noqa: BLE001 - normalize hostile reference input
             raise CatalogConflict("catalog reference is invalid") from None
-        with self._connect() as connection:
+        with _RC_CONNECT(self) as connection:
             row = connection.execute(
                 """SELECT r.ref_json FROM results r
                    LEFT JOIN result_publications p ON p.result_id=r.result_id
@@ -1841,7 +1931,7 @@ class ResultCatalog:
             ).fetchone()
         if row is None or CatalogResultRef.model_validate_json(row[0]) != normalized:
             raise CatalogConflict("catalog reference is not indexed exactly")
-        self._validate_storage()
+        _RC_VALIDATE_STORAGE(self)
         try:
             object_fd = _open_directory_at(self._objects_fd, normalized.bundle_sha256)
         except OSError:
@@ -1853,7 +1943,7 @@ class ResultCatalog:
                 or manifest_sha256 != normalized.bundle_manifest_sha256
             ):
                 raise CatalogConflict("catalog object identity conflicts")
-            self._validate_verification_authority()
+            _RC_VALIDATE_VERIFICATION_AUTHORITY(self)
             verified = _PINNED_VERIFY_BUNDLE(
                 _descriptor_path(object_fd), self.trust_store
             )
@@ -1940,7 +2030,7 @@ class ResultCatalog:
                 if value is not None:
                     clauses.append(f"a.{column}=?")
                     parameters.append(value)
-        self._append_method_filter(clauses, parameters, normalized.method_refs)
+        _RC_APPEND_METHOD_FILTER(clauses, parameters, normalized.method_refs)
         for column, values in (
             ("execution_state", normalized.execution_states),
             ("information_state", normalized.information_states),
@@ -1960,7 +2050,7 @@ class ResultCatalog:
             f"ORDER BY r.result_id {direction} LIMIT ?"
         )
         parameters.append(normalized.limit + 1)
-        with self._connect() as connection:
+        with _RC_CONNECT(self) as connection:
             rows = connection.execute(sql, parameters).fetchall()
             catalog_has_results = bool(rows)
             if not rows:
@@ -1972,7 +2062,7 @@ class ResultCatalog:
                     ).fetchone()
                     is not None
                 )
-        self._validate_storage()
+        _RC_VALIDATE_STORAGE(self)
         has_more = len(rows) > normalized.limit
         selected = rows[: normalized.limit]
         results = tuple(
@@ -2008,6 +2098,102 @@ class ResultCatalog:
             parameters.extend((method.method_id, method.version))
 
 
+_RESULT_METHOD_SEAL = MappingProxyType(
+    {
+        name: getattr(ResultCatalog, name)
+        for name in (
+            "_append_method_filter",
+            "_bind_database_descriptor",
+            "_capture",
+            "_connect",
+            "_fault",
+            "_open_sqlite_connection",
+            "_reference",
+            "_require_prepared",
+            "_validate_storage",
+            "_validate_verification_authority",
+            "adopt_prepared_import",
+            "authority_snapshot",
+            "compensate_prepared_import",
+            "finish_prepared_import",
+            "pending_publications",
+            "prepare_bundle_import",
+            "publication_for_recovery",
+            "query",
+            "recover_pending_publication",
+            "recovery_publications",
+            "stage_prepared_import",
+            "verify_prepared_object",
+            "verify_reference",
+        )
+    }
+)
+
+
+def _assert_result_runtime(
+    catalog: ResultCatalog,
+    *,
+    expected_methods: Mapping[str, object] = _RESULT_METHOD_SEAL,
+    expected_verify_bundle: object = _PINNED_VERIFY_BUNDLE,
+    expected_reader_select: object = _PINNED_READER_SELECT,
+    expected_trust_resolve: object = _PINNED_TRUST_RESOLVE,
+) -> None:
+    """Reject instance, class, or module replacement in the trust call chain."""
+
+    if type(catalog) is not ResultCatalog:
+        raise CatalogError("catalog authority type changed")
+    for name, expected in expected_methods.items():
+        if name in vars(catalog) or getattr(ResultCatalog, name) is not expected:
+            raise CatalogError("catalog authority callable changed")
+    for name, expected in _RESULT_ALIAS_SEAL.items():
+        if globals().get(name) is not expected:
+            raise CatalogError("catalog module authority changed")
+    if (
+        globals().get("_PINNED_VERIFY_BUNDLE") is not expected_verify_bundle
+        or globals().get("_PINNED_READER_SELECT") is not expected_reader_select
+        or globals().get("_PINNED_TRUST_RESOLVE") is not expected_trust_resolve
+        or TrustStore.resolve is not expected_trust_resolve
+        or "resolve" in vars(catalog.trust_store)
+    ):
+        raise CatalogError("catalog verification authority changed")
+
+
+_RC_ASSERT_RUNTIME = _assert_result_runtime
+_RC_APPEND_METHOD_FILTER = ResultCatalog._append_method_filter
+_RC_AUTHORITY_SNAPSHOT = ResultCatalog.authority_snapshot
+_RC_BIND_DATABASE_DESCRIPTOR = ResultCatalog._bind_database_descriptor
+_RC_CAPTURE = ResultCatalog._capture
+_RC_CONNECT = ResultCatalog._connect
+_RC_FAULT = ResultCatalog._fault
+_RC_OPEN_SQLITE_CONNECTION = ResultCatalog._open_sqlite_connection
+_RC_REFERENCE = ResultCatalog._reference
+_RC_REQUIRE_PREPARED = ResultCatalog._require_prepared
+_RC_VALIDATE_STORAGE = ResultCatalog._validate_storage
+_RC_VALIDATE_VERIFICATION_AUTHORITY = ResultCatalog._validate_verification_authority
+_RC_VERIFY_PREPARED_OBJECT = ResultCatalog.verify_prepared_object
+_RC_VERIFY_REFERENCE = ResultCatalog.verify_reference
+_RESULT_ALIAS_SEAL = MappingProxyType(
+    {
+        name: globals()[name]
+        for name in (
+            "_RC_APPEND_METHOD_FILTER",
+            "_RC_AUTHORITY_SNAPSHOT",
+            "_RC_BIND_DATABASE_DESCRIPTOR",
+            "_RC_CAPTURE",
+            "_RC_CONNECT",
+            "_RC_FAULT",
+            "_RC_OPEN_SQLITE_CONNECTION",
+            "_RC_REFERENCE",
+            "_RC_REQUIRE_PREPARED",
+            "_RC_VALIDATE_STORAGE",
+            "_RC_VALIDATE_VERIFICATION_AUTHORITY",
+            "_RC_VERIFY_PREPARED_OBJECT",
+            "_RC_VERIFY_REFERENCE",
+        )
+    }
+)
+
+
 __all__ = [
     "DEFAULT_RESULT_BUNDLE_READER_REGISTRY",
     "CatalogAliases",
@@ -2024,6 +2210,7 @@ __all__ = [
     "CatalogUnsupportedSchema",
     "ExecutionState",
     "InformationState",
+    "PendingCatalogPublication",
     "PreparedCatalogImport",
     "PublicationId",
     "ResultBundleReader",

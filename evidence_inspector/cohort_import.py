@@ -20,6 +20,8 @@ from typing import Annotated, Literal
 
 from pydantic import Field, StringConstraints, TypeAdapter, model_validator
 
+import evidence_inspector.cohort_manifest as cohort_manifest_module
+import evidence_inspector.result_catalog as result_catalog_module
 from evidence_inspector.cohort_manifest import (
     CohortManifest,
     CohortMember,
@@ -45,6 +47,7 @@ from evidence_inspector.result_catalog import (
     CatalogAliases,
     CatalogAuthoritySnapshot,
     CatalogResultRef,
+    PendingCatalogPublication,
     PreparedCatalogImport,
     PublicationId,
     ResultBundleReaderRegistry,
@@ -71,9 +74,17 @@ _PINNED_RESULT_ADOPT = ResultCatalog.adopt_prepared_import
 _PINNED_RESULT_FINISH = ResultCatalog.finish_prepared_import
 _PINNED_RESULT_COMPENSATE = ResultCatalog.compensate_prepared_import
 _PINNED_RESULT_RECOVER = ResultCatalog.recover_pending_publication
+_PINNED_RESULT_PENDING = ResultCatalog.pending_publications
+_PINNED_RESULT_PUBLICATION = ResultCatalog.publication_for_recovery
+_PINNED_RESULT_RECOVERY_ROWS = ResultCatalog.recovery_publications
 _PINNED_RESULT_VERIFY_PREPARED = ResultCatalog.verify_prepared_object
 _PINNED_READER_SELECT = ResultBundleReaderRegistry.select
 _PINNED_VALIDATE_MANIFEST = validate_manifest_against_linkage_store
+_PINNED_RESULT_RUNTIME_ASSERT = result_catalog_module._RC_ASSERT_RUNTIME
+_PINNED_RESULT_MODULE_VERIFY = result_catalog_module._PINNED_VERIFY_BUNDLE
+_PINNED_RESULT_MODULE_TRUST_RESOLVE = result_catalog_module._PINNED_TRUST_RESOLVE
+_PINNED_MANIFEST_ACTIVE_SNAPSHOT = cohort_manifest_module._PINNED_ACTIVE_SNAPSHOT
+_PINNED_MANIFEST_STORE_CALLABLES = cohort_manifest_module._PINNED_STORE_CALLABLES
 
 
 class CohortImportError(RuntimeError):
@@ -257,6 +268,9 @@ class CohortRecordCatalog:
             ("finish_prepared_import", _PINNED_RESULT_FINISH),
             ("compensate_prepared_import", _PINNED_RESULT_COMPENSATE),
             ("recover_pending_publication", _PINNED_RESULT_RECOVER),
+            ("pending_publications", _PINNED_RESULT_PENDING),
+            ("publication_for_recovery", _PINNED_RESULT_PUBLICATION),
+            ("recovery_publications", _PINNED_RESULT_RECOVERY_ROWS),
             ("verify_prepared_object", _PINNED_RESULT_VERIFY_PREPARED),
         ):
             if (
@@ -331,7 +345,7 @@ class CohortRecordCatalog:
             )
         self._root_identity = (metadata.st_dev, metadata.st_ino)
         try:
-            self._recover_pending()
+            _CC_RECOVER_PENDING(self)
         except BaseException:
             self.close()
             raise
@@ -349,6 +363,7 @@ class CohortRecordCatalog:
         self.close()
 
     def _validate_root(self) -> None:
+        _CC_ASSERT_RUNTIME(self)
         if self._root_fd is None:
             raise CohortImportFilesystemError("cohort record index is closed")
         try:
@@ -369,7 +384,7 @@ class CohortRecordCatalog:
             raise CohortImportFilesystemError("cohort record index root changed")
 
     def _validate_reader_registry(self) -> None:
-        self._validate_catalog_authority()
+        _CC_VALIDATE_CATALOG_AUTHORITY(self)
         if (
             type(self._reader_registry) is not ResultBundleReaderRegistry
             or "select" in vars(self._reader_registry)
@@ -452,9 +467,87 @@ class CohortRecordCatalog:
         """Reconcile durable journals without ever removing shared objects."""
 
         with _PROCESS_LOCK:
-            self._validate_root()
+            _CC_VALIDATE_ROOT(self)
             fcntl.flock(self._root_fd, fcntl.LOCK_EX)
             try:
+                entries = tuple(sorted(os.listdir(self._root_fd)))
+                if len(entries) > MAX_BINDINGS * 2:
+                    raise CohortImportFilesystemError(
+                        "cohort record recovery inventory exceeds its bound"
+                    )
+
+                def purge_files(publication_id: str, journal_name: str) -> None:
+                    journal_inode: tuple[int, int] | None = None
+                    try:
+                        journal_stat = os.stat(
+                            journal_name,
+                            dir_fd=self._root_fd,
+                            follow_symlinks=False,
+                        )
+                    except FileNotFoundError:
+                        journal_stat = None
+                    if journal_stat is not None:
+                        if stat.S_ISDIR(journal_stat.st_mode):
+                            raise CohortImportFilesystemError(
+                                "pending cohort publication is unsafe"
+                            )
+                        journal_inode = (journal_stat.st_dev, journal_stat.st_ino)
+                    for name in entries:
+                        if name.startswith(".pending."):
+                            continue
+                        try:
+                            metadata = os.stat(
+                                name,
+                                dir_fd=self._root_fd,
+                                follow_symlinks=False,
+                            )
+                        except FileNotFoundError:
+                            continue
+                        same_inode = journal_inode == (
+                            metadata.st_dev,
+                            metadata.st_ino,
+                        )
+                        matches_publication = False
+                        if stat.S_ISREG(metadata.st_mode) and metadata.st_nlink == 1:
+                            try:
+                                matches_publication = (
+                                    _CC_READ(self, name).publication_id
+                                    == publication_id
+                                )
+                            except CohortImportFilesystemError:
+                                removable_corrupt = (
+                                    journal_stat is None
+                                    and metadata.st_uid == os.geteuid()
+                                    and stat.S_IMODE(metadata.st_mode) == 0o600
+                                    and metadata.st_size <= MAX_BINDING_BYTES
+                                )
+                                if not same_inode and not removable_corrupt:
+                                    raise
+                                matches_publication = removable_corrupt
+                        if same_inode or matches_publication:
+                            os.unlink(name, dir_fd=self._root_fd)
+                    if journal_stat is not None:
+                        os.unlink(journal_name, dir_fd=self._root_fd)
+                    os.fsync(self._root_fd)
+
+                pending_rows: tuple[PendingCatalogPublication, ...] = (
+                    _PINNED_RESULT_PENDING(self._result_catalog)
+                )
+                for pending in pending_rows:
+                    pending_name = f".pending.{pending.publication_id}.json"
+                    try:
+                        binding = _CC_READ_PENDING(self, pending_name)
+                    except CohortImportFilesystemError:
+                        binding = None
+                    if binding is None or binding.result != pending.reference:
+                        _PINNED_RESULT_RECOVER(
+                            self._result_catalog,
+                            publication_id=pending.publication_id,
+                            reference=pending.reference,
+                            retain_adopted=False,
+                        )
+                        purge_files(pending.publication_id, pending_name)
+
                 pending_names = tuple(
                     sorted(
                         name
@@ -464,8 +557,22 @@ class CohortRecordCatalog:
                 )
                 for pending_name in pending_names:
                     try:
-                        binding = self._read_pending(pending_name)
+                        binding = _CC_READ_PENDING(self, pending_name)
                     except CohortImportFilesystemError:
+                        parts = pending_name.split(".")
+                        publication_id = parts[2] if len(parts) == 4 else ""
+                        durable = _PINNED_RESULT_PUBLICATION(
+                            self._result_catalog, publication_id
+                        )
+                        if durable is not None:
+                            _PINNED_RESULT_RECOVER(
+                                self._result_catalog,
+                                publication_id=durable.publication_id,
+                                reference=durable.reference,
+                                retain_adopted=False,
+                            )
+                            purge_files(durable.publication_id, pending_name)
+                            continue
                         try:
                             metadata = os.stat(
                                 pending_name,
@@ -501,7 +608,7 @@ class CohortRecordCatalog:
                     keep = state == "adopted"
                     if state == "absent" and binding.catalog_result_preexisting:
                         try:
-                            authority = self._validate_catalog_authority()
+                            authority = _CC_VALIDATE_CATALOG_AUTHORITY(self)
                             keep = (
                                 authority.storage_identity_sha256
                                 == binding.catalog_storage_identity_sha256
@@ -540,7 +647,7 @@ class CohortRecordCatalog:
                     if keep and final_exists:
                         os.unlink(pending_name, dir_fd=self._root_fd)
                         os.fsync(self._root_fd)
-                        if self._read(final_name) != binding:
+                        if _CC_READ(self, final_name) != binding:
                             raise CohortImportConflict(
                                 "recovered cohort publication conflicts"
                             )
@@ -556,11 +663,56 @@ class CohortRecordCatalog:
                         os.unlink(final_name, dir_fd=self._root_fd)
                     os.unlink(pending_name, dir_fd=self._root_fd)
                     os.fsync(self._root_fd)
-                self._validate_root()
+                valid_publications: set[str] = set()
+                valid_result_ids: set[str] = set()
+                for name in tuple(sorted(os.listdir(self._root_fd))):
+                    parts = name.split(".")
+                    looks_like_binding = (
+                        len(parts) == 3
+                        and len(parts[0]) == 64
+                        and parts[1].startswith("binding_")
+                        and len(parts[1]) == 72
+                        and parts[2] == "json"
+                    )
+                    if not looks_like_binding:
+                        continue
+                    try:
+                        recovered_binding = _CC_READ(self, name)
+                        valid_publications.add(recovered_binding.publication_id)
+                        valid_result_ids.add(recovered_binding.result.result_id)
+                    except CohortImportFilesystemError:
+                        metadata = os.stat(
+                            name,
+                            dir_fd=self._root_fd,
+                            follow_symlinks=False,
+                        )
+                        if (
+                            not stat.S_ISREG(metadata.st_mode)
+                            or metadata.st_uid != os.geteuid()
+                            or stat.S_IMODE(metadata.st_mode) != 0o600
+                            or metadata.st_size > MAX_BINDING_BYTES
+                        ):
+                            raise
+                        os.unlink(name, dir_fd=self._root_fd)
+                        os.fsync(self._root_fd)
+                for publication in _PINNED_RESULT_RECOVERY_ROWS(self._result_catalog):
+                    if (
+                        publication.state == "adopted"
+                        and publication.publication_id not in valid_publications
+                        and publication.reference.result_id not in valid_result_ids
+                    ):
+                        _PINNED_RESULT_RECOVER(
+                            self._result_catalog,
+                            publication_id=publication.publication_id,
+                            reference=publication.reference,
+                            retain_adopted=False,
+                        )
+                _CC_VALIDATE_ROOT(self)
             finally:
                 fcntl.flock(self._root_fd, fcntl.LOCK_UN)
 
     def _validate_catalog_authority(self) -> CatalogAuthoritySnapshot:
+        _CC_ASSERT_RUNTIME(self)
         catalog = self._result_catalog
         if (
             type(catalog) is not ResultCatalog
@@ -579,6 +731,9 @@ class CohortRecordCatalog:
             ("finish_prepared_import", _PINNED_RESULT_FINISH),
             ("compensate_prepared_import", _PINNED_RESULT_COMPENSATE),
             ("recover_pending_publication", _PINNED_RESULT_RECOVER),
+            ("pending_publications", _PINNED_RESULT_PENDING),
+            ("publication_for_recovery", _PINNED_RESULT_PUBLICATION),
+            ("recovery_publications", _PINNED_RESULT_RECOVERY_ROWS),
             ("verify_prepared_object", _PINNED_RESULT_VERIFY_PREPARED),
         ):
             if name in vars(catalog) or getattr(ResultCatalog, name) is not pinned:
@@ -588,6 +743,20 @@ class CohortRecordCatalog:
             or id(self._linkage_store) != self._linkage_store_identity
         ):
             raise CohortImportError("provider linkage authority changed")
+        _PINNED_RESULT_RUNTIME_ASSERT(catalog)
+        if (
+            result_catalog_module._PINNED_VERIFY_BUNDLE
+            is not _PINNED_RESULT_MODULE_VERIFY
+            or result_catalog_module._PINNED_TRUST_RESOLVE
+            is not _PINNED_RESULT_MODULE_TRUST_RESOLVE
+            or result_catalog_module._RC_ASSERT_RUNTIME
+            is not _PINNED_RESULT_RUNTIME_ASSERT
+            or cohort_manifest_module._PINNED_ACTIVE_SNAPSHOT
+            is not _PINNED_MANIFEST_ACTIVE_SNAPSHOT
+            or cohort_manifest_module._PINNED_STORE_CALLABLES
+            is not _PINNED_MANIFEST_STORE_CALLABLES
+        ):
+            raise CohortImportError("verification module authority changed")
         authority = _PINNED_RESULT_AUTHORITY(catalog)
         if (
             authority.storage_identity_sha256 != self._catalog_storage_identity_sha256
@@ -603,7 +772,7 @@ class CohortRecordCatalog:
     def _validate_manifest(
         self, manifest: CohortManifest, *, changed: bool = False
     ) -> None:
-        self._validate_catalog_authority()
+        _CC_VALIDATE_CATALOG_AUTHORITY(self)
         try:
             _PINNED_VALIDATE_MANIFEST(
                 manifest,
@@ -621,7 +790,7 @@ class CohortRecordCatalog:
             raise CohortImportError(message) from exc
 
     def _read(self, name: str) -> CohortRecordBinding:
-        self._validate_root()
+        _CC_VALIDATE_ROOT(self)
         parts = name.split(".")
         if (
             len(parts) != 3
@@ -680,11 +849,11 @@ class CohortRecordCatalog:
                 os.close(descriptor)
         if name != (f"{binding.cohort_manifest_sha256}.{binding.binding_id}.json"):
             raise CohortImportFilesystemError("cohort record binding name is invalid")
-        self._validate_root()
+        _CC_VALIDATE_ROOT(self)
         return binding
 
     def _names_unlocked(self) -> tuple[str, ...]:
-        self._validate_root()
+        _CC_VALIDATE_ROOT(self)
         names = tuple(sorted(os.listdir(self._root_fd)))
         if len(names) > MAX_BINDINGS:
             raise CohortImportFilesystemError("cohort record index exceeds its bound")
@@ -714,7 +883,7 @@ class CohortRecordCatalog:
         )
 
     def _write_pending(self, name: str, content: bytes) -> None:
-        self._validate_root()
+        _CC_VALIDATE_ROOT(self)
         flags = (
             os.O_WRONLY
             | os.O_CREAT
@@ -741,7 +910,7 @@ class CohortRecordCatalog:
             raise
         finally:
             os.close(descriptor)
-        self._validate_root()
+        _CC_VALIDATE_ROOT(self)
 
     def _revalidate_publication(
         self,
@@ -752,8 +921,8 @@ class CohortRecordCatalog:
         *,
         changed: bool,
     ) -> None:
-        self._validate_root()
-        authority = self._validate_catalog_authority()
+        _CC_VALIDATE_ROOT(self)
+        authority = _CC_VALIDATE_CATALOG_AUTHORITY(self)
         if (
             authority != prepared.authority
             or catalog_authority_sha256(authority) != binding.catalog_authority_sha256
@@ -762,11 +931,11 @@ class CohortRecordCatalog:
             or authority.trust_snapshot_sha256 != binding.result_trust_snapshot_sha256
         ):
             raise CohortImportConflict("result catalog authority changed")
-        self._validate_manifest(manifest, changed=changed)
+        _CC_VALIDATE_MANIFEST(self, manifest, changed=changed)
         _PINNED_RESULT_VERIFY_PREPARED(self._result_catalog, prepared)
         if final_name is not None:
             pending_name = f".pending.{binding.publication_id}.json"
-            if self._read_pending(pending_name) != binding:
+            if _CC_READ_PENDING(self, pending_name) != binding:
                 raise CohortImportConflict("cohort record binding changed")
             try:
                 pending_stat = os.stat(
@@ -784,7 +953,7 @@ class CohortRecordCatalog:
                 or final_stat.st_nlink != 2
             ):
                 raise CohortImportConflict("cohort record binding changed")
-        self._validate_root()
+        _CC_VALIDATE_ROOT(self)
 
     def import_bundle(
         self,
@@ -803,7 +972,7 @@ class CohortRecordCatalog:
 
         history = _canonical_history(manifest_history)
         manifest = history[-1]
-        self._validate_reader_registry()
+        _CC_VALIDATE_READER_REGISTRY(self)
         try:
             provider_namespace = _PROVIDER_NAMESPACE.validate_python(provider_namespace)
             analysis_record_id = _ANALYSIS_RECORD_ID.validate_python(analysis_record_id)
@@ -818,7 +987,7 @@ class CohortRecordCatalog:
         assert isinstance(registry, MethodRegistry)
         assert isinstance(authority_head, AuthorityHead)
         assert isinstance(capability, CurrentMethodCapability)
-        self._validate_manifest(manifest)
+        _CC_VALIDATE_MANIFEST(self, manifest)
         members = tuple(
             member
             for member in manifest.members
@@ -868,11 +1037,11 @@ class CohortRecordCatalog:
                 capability=capability,
                 aliases=aliases,
             )
-            self._fault("after_preflight")
-            authority = self._validate_catalog_authority()
+            _CC_FAULT(self, "after_preflight")
+            authority = _CC_VALIDATE_CATALOG_AUTHORITY(self)
             if authority != prepared.authority:
                 raise CohortImportConflict("result catalog authority changed")
-            self._validate_manifest(manifest, changed=True)
+            _CC_VALIDATE_MANIFEST(self, manifest, changed=True)
             _, reader = _PINNED_RESULT_VERIFY_PREPARED(self._result_catalog, prepared)
             manifest_digest = cohort_manifest_sha256(manifest)
             binding = CohortRecordBinding(
@@ -912,12 +1081,12 @@ class CohortRecordCatalog:
             final_name = f"{manifest_digest}.{binding.binding_id}.json"
             temporary_name = f".pending.{prepared.publication_id}.json"
             with _PROCESS_LOCK:
-                self._validate_root()
+                _CC_VALIDATE_ROOT(self)
                 fcntl.flock(self._root_fd, fcntl.LOCK_EX)
                 try:
-                    names = self._names_unlocked()
+                    names = _CC_NAMES_UNLOCKED(self)
                     existing = tuple(
-                        self._read(name)
+                        _CC_READ(self, name)
                         for name in names
                         if name.startswith(f"{manifest_digest}.")
                     )
@@ -928,7 +1097,7 @@ class CohortRecordCatalog:
                         )
                         same_result = item.result.result_id == binding.result.result_id
                         if same_member or same_result:
-                            if self._binding_equivalent(item, binding):
+                            if _CC_BINDING_EQUIVALENT(item, binding):
                                 _PINNED_RESULT_COMPENSATE(
                                     self._result_catalog, prepared
                                 )
@@ -940,17 +1109,17 @@ class CohortRecordCatalog:
                         raise CohortImportFilesystemError(
                             "cohort record index exceeds its bound"
                         )
-                    self._write_pending(temporary_name, content)
+                    _CC_WRITE_PENDING(self, temporary_name, content)
                     _PINNED_RESULT_STAGE(self._result_catalog, prepared)
-                    self._fault("after_result_stage")
-                    self._revalidate_publication(
-                        manifest, prepared, binding, None, changed=True
+                    _CC_FAULT(self, "after_result_stage")
+                    _CC_REVALIDATE_PUBLICATION(
+                        self, manifest, prepared, binding, None, changed=True
                     )
-                    self._fault("before_binding_publish")
-                    self._revalidate_publication(
-                        manifest, prepared, binding, None, changed=True
+                    _CC_FAULT(self, "before_binding_publish")
+                    _CC_REVALIDATE_PUBLICATION(
+                        self, manifest, prepared, binding, None, changed=True
                     )
-                    self._validate_root()
+                    _CC_VALIDATE_ROOT(self)
                     try:
                         os.link(
                             temporary_name,
@@ -965,16 +1134,16 @@ class CohortRecordCatalog:
                         ) from None
                     final_published = True
                     os.fsync(self._root_fd)
-                    self._validate_root()
-                    self._fault("after_binding_publish")
-                    self._revalidate_publication(
-                        manifest, prepared, binding, final_name, changed=True
+                    _CC_VALIDATE_ROOT(self)
+                    _CC_FAULT(self, "after_binding_publish")
+                    _CC_REVALIDATE_PUBLICATION(
+                        self, manifest, prepared, binding, final_name, changed=True
                     )
 
                     def revalidate(point: str) -> None:
-                        self._fault(point)
-                        self._revalidate_publication(
-                            manifest, prepared, binding, final_name, changed=True
+                        _CC_FAULT(self, point)
+                        _CC_REVALIDATE_PUBLICATION(
+                            self, manifest, prepared, binding, final_name, changed=True
                         )
 
                     _PINNED_RESULT_ADOPT(
@@ -982,16 +1151,16 @@ class CohortRecordCatalog:
                         prepared,
                         revalidate=revalidate,
                     )
-                    self._fault("after_visibility_commit")
-                    self._revalidate_publication(
-                        manifest, prepared, binding, final_name, changed=True
+                    _CC_FAULT(self, "after_visibility_commit")
+                    _CC_REVALIDATE_PUBLICATION(
+                        self, manifest, prepared, binding, final_name, changed=True
                     )
                     _PINNED_RESULT_VERIFY(self._result_catalog, prepared.reference)
                     os.unlink(temporary_name, dir_fd=self._root_fd)
                     temporary_name = None
                     os.fsync(self._root_fd)
-                    self._validate_root()
-                    if self._read(final_name) != binding:
+                    _CC_VALIDATE_ROOT(self)
+                    if _CC_READ(self, final_name) != binding:
                         raise CohortImportConflict("cohort record binding changed")
                     _PINNED_RESULT_FINISH(self._result_catalog, prepared)
                     prepared = None
@@ -1034,21 +1203,21 @@ class CohortRecordCatalog:
 
         history = _canonical_history(manifest_history)
         manifest = history[-1]
-        self._validate_reader_registry()
-        self._validate_manifest(manifest)
-        authority = self._validate_catalog_authority()
+        _CC_VALIDATE_READER_REGISTRY(self)
+        _CC_VALIDATE_MANIFEST(self, manifest)
+        authority = _CC_VALIDATE_CATALOG_AUTHORITY(self)
         digest = cohort_manifest_sha256(manifest)
         members = {
             (item.provider_namespace, item.analysis_record_id): item
             for item in manifest.members
         }
         with _PROCESS_LOCK:
-            self._validate_root()
+            _CC_VALIDATE_ROOT(self)
             fcntl.flock(self._root_fd, fcntl.LOCK_SH)
             try:
                 selected = tuple(
-                    self._read(name)
-                    for name in self._names_unlocked()
+                    _CC_READ(self, name)
+                    for name in _CC_NAMES_UNLOCKED(self)
                     if name.startswith(f"{digest}.")
                 )
             finally:
@@ -1105,6 +1274,85 @@ class CohortRecordCatalog:
                 ),
             )
         )
+
+
+_COHORT_METHOD_SEAL = MappingProxyType(
+    {
+        name: getattr(CohortRecordCatalog, name)
+        for name in (
+            "_binding_equivalent",
+            "_fault",
+            "_names_unlocked",
+            "_read",
+            "_read_pending",
+            "_recover_pending",
+            "_revalidate_publication",
+            "_validate_catalog_authority",
+            "_validate_manifest",
+            "_validate_reader_registry",
+            "_validate_root",
+            "_write_pending",
+            "bindings_for_manifest",
+            "import_bundle",
+        )
+    }
+)
+
+
+def _assert_cohort_runtime(
+    catalog: CohortRecordCatalog,
+    *,
+    expected_methods: Mapping[str, object] = _COHORT_METHOD_SEAL,
+    expected_manifest_validator: object = _PINNED_VALIDATE_MANIFEST,
+    expected_result_assert: object = _PINNED_RESULT_RUNTIME_ASSERT,
+) -> None:
+    if type(catalog) is not CohortRecordCatalog:
+        raise CohortImportError("cohort authority type changed")
+    for name, expected in expected_methods.items():
+        if name in vars(catalog) or getattr(CohortRecordCatalog, name) is not expected:
+            raise CohortImportError("cohort authority callable changed")
+    for name, expected in _COHORT_ALIAS_SEAL.items():
+        if globals().get(name) is not expected:
+            raise CohortImportError("cohort module authority changed")
+    if (
+        globals().get("_PINNED_VALIDATE_MANIFEST") is not expected_manifest_validator
+        or globals().get("_PINNED_RESULT_RUNTIME_ASSERT") is not expected_result_assert
+    ):
+        raise CohortImportError("cohort module authority changed")
+
+
+_CC_ASSERT_RUNTIME = _assert_cohort_runtime
+_CC_BINDING_EQUIVALENT = CohortRecordCatalog._binding_equivalent
+_CC_FAULT = CohortRecordCatalog._fault
+_CC_NAMES_UNLOCKED = CohortRecordCatalog._names_unlocked
+_CC_READ = CohortRecordCatalog._read
+_CC_READ_PENDING = CohortRecordCatalog._read_pending
+_CC_RECOVER_PENDING = CohortRecordCatalog._recover_pending
+_CC_REVALIDATE_PUBLICATION = CohortRecordCatalog._revalidate_publication
+_CC_VALIDATE_CATALOG_AUTHORITY = CohortRecordCatalog._validate_catalog_authority
+_CC_VALIDATE_MANIFEST = CohortRecordCatalog._validate_manifest
+_CC_VALIDATE_READER_REGISTRY = CohortRecordCatalog._validate_reader_registry
+_CC_VALIDATE_ROOT = CohortRecordCatalog._validate_root
+_CC_WRITE_PENDING = CohortRecordCatalog._write_pending
+_COHORT_ALIAS_SEAL = MappingProxyType(
+    {
+        name: globals()[name]
+        for name in (
+            "_CC_BINDING_EQUIVALENT",
+            "_CC_FAULT",
+            "_CC_NAMES_UNLOCKED",
+            "_CC_READ",
+            "_CC_READ_PENDING",
+            "_CC_RECOVER_PENDING",
+            "_CC_REVALIDATE_PUBLICATION",
+            "_CC_VALIDATE_CATALOG_AUTHORITY",
+            "_CC_VALIDATE_MANIFEST",
+            "_CC_VALIDATE_READER_REGISTRY",
+            "_CC_VALIDATE_ROOT",
+            "_CC_WRITE_PENDING",
+        )
+    }
+)
 
 
 __all__ = [

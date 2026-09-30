@@ -579,8 +579,9 @@ def test_live_trust_and_reader_method_shadowing_fail_before_verification(
 ) -> None:
     trust_shadow = _setup(tmp_path / "trust-shadow", live)
     trust_shadow[6].resolve = lambda _: object()  # type: ignore[method-assign]
-    with pytest.raises(CatalogError, match="trust store"):
+    with pytest.raises(CatalogError, match="verification authority|trust store"):
         _import(trust_shadow)
+    del vars(trust_shadow[6])["resolve"]
     assert trust_shadow[1].query(CatalogQuery()).empty
 
     reader_shadow = _setup(tmp_path / "reader-shadow", live)
@@ -591,6 +592,7 @@ def test_live_trust_and_reader_method_shadowing_fail_before_verification(
     )
     with pytest.raises(CatalogUnsupportedSchema, match="reader registry"):
         _import(reader_shadow)
+    del vars(reader_shadow[1].reader_registry)["select"]
     assert reader_shadow[1].query(CatalogQuery()).empty
 
     content_shadow = _setup(tmp_path / "reader-content-shadow", live)
@@ -608,12 +610,22 @@ def test_live_trust_and_reader_method_shadowing_fail_before_verification(
     )
     with pytest.raises(CatalogUnsupportedSchema, match="reader registry changed"):
         _import(content_shadow)
+    object.__setattr__(
+        content_shadow[1].reader_registry,
+        "readers",
+        DEFAULT_RESULT_BUNDLE_READER_REGISTRY.readers,
+    )
     assert content_shadow[1].query(CatalogQuery()).empty
 
     cohort_shadow = _setup(tmp_path / "cohort-reader-shadow", live)
     object.__setattr__(cohort_shadow[0]._reader_registry, "readers", ())
     with pytest.raises(CohortImportError, match="reader registry"):
         _import(cohort_shadow)
+    object.__setattr__(
+        cohort_shadow[0]._reader_registry,
+        "readers",
+        DEFAULT_RESULT_BUNDLE_READER_REGISTRY.readers,
+    )
     assert cohort_shadow[1].query(CatalogQuery()).empty
 
 
@@ -697,6 +709,90 @@ def test_result_catalog_object_substitution_is_rejected_before_import(
         _import(victim)
     assert victim[1].query(CatalogQuery()).empty
     assert attacker[1].query(CatalogQuery()).empty
+
+
+def test_stale_linkage_cannot_be_bypassed_by_instance_validator_shadow(
+    tmp_path: Path, live
+) -> None:
+    values = _setup(tmp_path, live)
+    revision = _known_run_revision(
+        linkage_id="linkage_" + "a" * 32,
+        subject="subject_" + "a" * 32,
+        collection="collection_" + "a" * 32,
+        specimen="specimen_" + "a" * 32,
+        analysis="analysis_" + "a" * 32,
+        measurement="measurement_" + "a" * 32,
+        source="projection_" + "a" * 32,
+        run_digit="a",
+    )
+    authorized, _ = _consume(revision, (_create_approval(revision, "a"),))
+    live[0].commit_authorized_revision(authorized)
+
+    def self_restoring(*_args, **_kwargs) -> None:
+        del vars(values[0])["_validate_manifest"]
+
+    object.__setattr__(values[0], "_validate_manifest", self_restoring)
+    with pytest.raises(CohortImportError, match="authority callable"):
+        _import(values)
+    assert values[1].query(CatalogQuery()).empty
+    assert tuple((tmp_path / "cohort-records").iterdir()) == ()
+
+
+def test_revoked_result_cannot_be_bypassed_by_nested_authority_shadows(
+    tmp_path: Path, live
+) -> None:
+    values = _setup(tmp_path, live)
+    saved_key = values[6].resolve(values[5].key_id)
+    values[6].revoke(values[5].key_id)
+    values[6].resolve = lambda _key_id: saved_key  # type: ignore[method-assign]
+    values[1]._validate_verification_authority = lambda: None  # type: ignore[method-assign]
+    with pytest.raises(CatalogError, match="authority callable|verification authority"):
+        _import(values)
+    del vars(values[6])["resolve"]
+    del vars(values[1])["_validate_verification_authority"]
+    assert values[1].query(CatalogQuery()).empty
+
+
+def test_read_revalidation_rejects_self_restoring_and_module_shadows(
+    tmp_path: Path, live, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    values = _setup(tmp_path, live)
+    _import(values)
+    saved_key = values[6].resolve(values[5].key_id)
+    values[6].revoke(values[5].key_id)
+
+    def restoring_resolve(_key_id):
+        del vars(values[6])["resolve"]
+        return saved_key
+
+    values[6].resolve = restoring_resolve  # type: ignore[method-assign]
+    monkeypatch.setattr(
+        cohort_import_module.result_catalog_module,
+        "_PINNED_VERIFY_BUNDLE",
+        lambda *_args, **_kwargs: object(),
+    )
+    with pytest.raises(
+        (CatalogError, CohortImportError),
+        match="authority changed|module authority|verification authority",
+    ):
+        values[0].bindings_for_manifest((values[2],))
+
+
+def test_class_validator_shadow_is_rejected_without_execution(
+    tmp_path: Path, live, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    values = _setup(tmp_path, live)
+    executed = False
+
+    def bypass(*_args, **_kwargs) -> None:
+        nonlocal executed
+        executed = True
+
+    monkeypatch.setattr(CohortRecordCatalog, "_validate_manifest", bypass)
+    with pytest.raises(CohortImportError, match="authority callable"):
+        _import(values)
+    assert not executed
+    assert values[1].query(CatalogQuery()).empty
 
 
 def test_linkage_advance_before_visibility_compensates(tmp_path: Path, live) -> None:
@@ -791,6 +887,135 @@ def test_crash_recovery_removes_partial_pre_stage_journal(tmp_path: Path, live) 
         assert values[1].query(CatalogQuery()).empty
     finally:
         recovered.close()
+
+
+@pytest.mark.parametrize(
+    "point",
+    ("after_result_stage", "after_binding_publish", "after_visibility_commit"),
+)
+@pytest.mark.parametrize(
+    "mutation", ("truncate", "substitute", "missing", "missing_truncate")
+)
+def test_corrupt_or_missing_real_journal_cannot_strand_pending_row(
+    tmp_path: Path, live, point: str, mutation: str
+) -> None:
+    values = _setup(tmp_path, live)
+    pid = os.fork()
+    if pid == 0:  # pragma: no cover - abrupt crash path
+        values[0]._fault_injector = lambda observed: (
+            os._exit(73) if observed == point else None
+        )
+        _import(values)
+        os._exit(74)
+    _, status = os.waitpid(pid, 0)
+    assert os.waitstatus_to_exitcode(status) == 73
+    values[0].close()
+    values[1].close()
+    journals = tuple((tmp_path / "cohort-records").glob(".pending.*"))
+    assert len(journals) == 1
+    journal = journals[0]
+    if mutation == "truncate":
+        journal.write_bytes(b'{"partial":')
+    elif mutation == "substitute":
+        journal.unlink()
+        journal.write_bytes(b"{}")
+        journal.chmod(0o600)
+    elif mutation == "missing":
+        journal.unlink()
+    else:
+        journal.unlink()
+        for final in (tmp_path / "cohort-records").glob("*.json"):
+            final.write_bytes(b'{"partial":')
+
+    results = ResultCatalog(
+        tmp_path / "results",
+        import_roots={"root_primary": tmp_path / "imports"},
+        trust_store=values[6],
+        reader_registry=DEFAULT_RESULT_BUNDLE_READER_REGISTRY,
+    )
+    cohorts = CohortRecordCatalog(
+        tmp_path / "cohort-records",
+        result_catalog=results,
+        linkage_store=live[0],
+        expected_trust_snapshot_sha256_by_provider=_pins(),
+        reader_registry=DEFAULT_RESULT_BUNDLE_READER_REGISTRY,
+    )
+    recovered_values = (cohorts, results, *values[2:])
+    try:
+        retained_adopted = point == "after_visibility_commit" and mutation == "missing"
+        assert bool(results.query(CatalogQuery()).results) is retained_adopted
+        assert bool(tuple((tmp_path / "cohort-records").iterdir())) is retained_adopted
+        binding = _import(recovered_values)
+        assert cohorts.bindings_for_manifest((values[2],)) == (binding,)
+    finally:
+        cohorts.close()
+        results.close()
+
+
+def test_concurrent_restart_recovery_is_idempotent(tmp_path: Path, live) -> None:
+    values = _setup(tmp_path, live)
+    crashing = os.fork()
+    if crashing == 0:  # pragma: no cover - abrupt crash path
+        values[0]._fault_injector = lambda observed: (
+            os._exit(75) if observed == "after_result_stage" else None
+        )
+        _import(values)
+        os._exit(76)
+    _, status = os.waitpid(crashing, 0)
+    assert os.waitstatus_to_exitcode(status) == 75
+    values[0].close()
+    values[1].close()
+
+    workers: list[int] = []
+    for _ in range(2):
+        pid = os.fork()
+        if pid == 0:  # pragma: no cover - child recovery process
+            try:
+                result = ResultCatalog(
+                    tmp_path / "results",
+                    import_roots={"root_primary": tmp_path / "imports"},
+                    trust_store=values[6],
+                    reader_registry=DEFAULT_RESULT_BUNDLE_READER_REGISTRY,
+                )
+                cohort = CohortRecordCatalog(
+                    tmp_path / "cohort-records",
+                    result_catalog=result,
+                    linkage_store=live[0],
+                    expected_trust_snapshot_sha256_by_provider=_pins(),
+                    reader_registry=DEFAULT_RESULT_BUNDLE_READER_REGISTRY,
+                )
+                cohort.close()
+                result.close()
+            except BaseException:  # noqa: BLE001 - child reports only exit status
+                os._exit(77)
+            os._exit(0)
+        workers.append(pid)
+    assert [os.waitstatus_to_exitcode(os.waitpid(pid, 0)[1]) for pid in workers] == [
+        0,
+        0,
+    ]
+
+    results = ResultCatalog(
+        tmp_path / "results",
+        import_roots={"root_primary": tmp_path / "imports"},
+        trust_store=values[6],
+        reader_registry=DEFAULT_RESULT_BUNDLE_READER_REGISTRY,
+    )
+    cohorts = CohortRecordCatalog(
+        tmp_path / "cohort-records",
+        result_catalog=results,
+        linkage_store=live[0],
+        expected_trust_snapshot_sha256_by_provider=_pins(),
+        reader_registry=DEFAULT_RESULT_BUNDLE_READER_REGISTRY,
+    )
+    try:
+        recovered_values = (cohorts, results, *values[2:])
+        assert results.query(CatalogQuery()).empty
+        binding = _import(recovered_values)
+        assert cohorts.bindings_for_manifest((values[2],)) == (binding,)
+    finally:
+        cohorts.close()
+        results.close()
 
 
 def stat_mode(path: Path) -> int:
