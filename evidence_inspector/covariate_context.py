@@ -19,7 +19,6 @@ from pydantic import Field, StringConstraints, model_validator
 from evidence_inspector.longitudinal_compatibility import (
     LongitudinalMemberDecision,
     LongitudinalOutcome,
-    longitudinal_member_decision_sha256,
 )
 from evidence_inspector.method_registry import RegistryContract, Sha256
 from evidence_inspector.safe_ingress import contract_type_graph, exact_model_bytes
@@ -34,6 +33,10 @@ MAX_CONTRACT_BYTES = (
 )
 MAX_SCALAR_LENGTH = 4_096
 MAX_TUPLE_LENGTH = MAX_COVARIATE_MEMBERS
+MAX_D03_DECISION_DEPTH = 64
+MAX_D03_DECISION_NODES = 10_000
+MAX_D03_DECISION_BYTES = 4 * 1_024 * 1_024
+MAX_D03_COLLECTION_ITEMS = 1_000
 
 OpaqueCovariateToken = Annotated[
     str, StringConstraints(pattern=r"^covariate_[0-9a-f]{32}$")
@@ -408,6 +411,7 @@ _TRUSTED_TYPES, _TRUSTED_ENUMS = contract_type_graph(
     CovariateContextResult,
     AggregateCovariateSummary,
 )
+_D03_TRUSTED_TYPES, _D03_TRUSTED_ENUMS = contract_type_graph(LongitudinalMemberDecision)
 _CODECS = MappingProxyType(
     {
         model: (model.__pydantic_serializer__, model.__pydantic_validator__)
@@ -641,19 +645,34 @@ def _canonical_d10_input(value: object) -> D10CovariateInput:
     return replayed
 
 
+def _d03_decision_bytes(value: object) -> bytes:
+    return exact_model_bytes(
+        value,
+        LongitudinalMemberDecision,
+        model_types=_D03_TRUSTED_TYPES,
+        enum_types=_D03_TRUSTED_ENUMS,
+        max_bytes=MAX_D03_DECISION_BYTES,
+        max_nodes=MAX_D03_DECISION_NODES,
+        max_depth=MAX_D03_DECISION_DEPTH,
+        max_collection_items=MAX_D03_COLLECTION_ITEMS,
+        max_string_bytes=MAX_SCALAR_LENGTH,
+        max_int_bits=64,
+    )
+
+
+def _d03_decision_sha256(value: object) -> str:
+    return hashlib.sha256(_d03_decision_bytes(value)).hexdigest()
+
+
 def _replay_d03_decision(value: object) -> LongitudinalMemberDecision:
     try:
-        original_sha256 = longitudinal_member_decision_sha256(value)  # type: ignore[arg-type]
-        encoded = LongitudinalMemberDecision.__pydantic_serializer__.to_json(
-            value,
-            warnings="error",
-        )
+        encoded = _d03_decision_bytes(value)
         replayed = LongitudinalMemberDecision.__pydantic_validator__.validate_json(
             encoded
         )
         if (
             type(replayed) is not LongitudinalMemberDecision
-            or longitudinal_member_decision_sha256(replayed) != original_sha256
+            or _d03_decision_bytes(replayed) != encoded
         ):
             raise ValueError("D03 member decision is not canonical")
         return replayed
@@ -688,23 +707,24 @@ def build_covariate_context(
     }
     if len(decisions_by_member) != len(decisions):
         raise ValueError("D03 decisions must bind unique members")
-    decision_sha256s = tuple(
-        longitudinal_member_decision_sha256(decision) for decision in decisions
-    )
+    decision_sha256s = tuple(_d03_decision_sha256(decision) for decision in decisions)
     if len(decision_sha256s) != len(set(decision_sha256s)):
         raise ValueError("D03 decision artifacts must be unique")
-    if set(decisions_by_member) != set(replayed.population.included_member_sha256s):
+    population = replayed.population
+    if set(decisions_by_member) != set(population.included_member_sha256s):
         raise ValueError("D03 decisions do not cover the exact population")
     if any(
+        decision.policy_sha256 != population.d02_anchor_policy_sha256
+        for decision in decisions
+    ):
+        raise ValueError("D03 decision policy does not match D02 anchor policy")
+    if any(
         member.d03_decision_sha256
-        != longitudinal_member_decision_sha256(
-            decisions_by_member[member.member_sha256]
-        )
+        != _d03_decision_sha256(decisions_by_member[member.member_sha256])
         or member.d03_outcome is not decisions_by_member[member.member_sha256].outcome
         for member in replayed.members
     ):
         raise ValueError("D03 member decision artifact does not match covariate input")
-    population = replayed.population
     for actual, expected, label in (
         (population.d09_status_sha256, expected_d09_status_sha256, "D09 status"),
         (

@@ -30,9 +30,12 @@ from evidence_inspector.longitudinal_compatibility import (
     ComparisonDimension,
     LongitudinalMemberDecision,
     LongitudinalOutcome,
+    longitudinal_anchor_policy_sha256,
     longitudinal_member_decision_sha256,
 )
 from tests.test_longitudinal_compatibility import _decide, _policy, _record
+
+D02_POLICY_SHA256 = longitudinal_anchor_policy_sha256(_policy(_record("1")))
 
 
 def _sha(digit: str) -> str:
@@ -116,7 +119,7 @@ def _input(*members: MemberCovariateContext) -> D10CovariateInput:
             cohort_manifest_sha256=_sha("a"),
             d09_status_sha256=_sha("b"),
             d09_population_sha256=_sha("c"),
-            d02_anchor_policy_sha256=_sha("d"),
+            d02_anchor_policy_sha256=D02_POLICY_SHA256,
             included_member_sha256s=included,
         ),
         members=tuple(members),
@@ -136,7 +139,7 @@ def _build(
         value,
         expected_d09_status_sha256=_sha("b"),
         expected_d09_population_sha256=_sha("c"),
-        expected_d02_anchor_policy_sha256=_sha("d"),
+        expected_d02_anchor_policy_sha256=D02_POLICY_SHA256,
         d03_member_decisions=decisions,
     )
 
@@ -285,7 +288,7 @@ def test_every_authority_pin_is_exact(field: str, expected: str, match: str) -> 
     arguments = {
         "expected_d09_status_sha256": _sha("b"),
         "expected_d09_population_sha256": _sha("c"),
-        "expected_d02_anchor_policy_sha256": _sha("d"),
+        "expected_d02_anchor_policy_sha256": D02_POLICY_SHA256,
         "d03_member_decisions": (
             _d03_decision(_member("1").member_sha256, LongitudinalOutcome.EQUIVALENT),
         ),
@@ -426,9 +429,48 @@ def test_d03_decisions_require_exact_coverage_and_builtin_tuple() -> None:
             source,
             expected_d09_status_sha256=_sha("b"),
             expected_d09_population_sha256=_sha("c"),
-            expected_d02_anchor_policy_sha256=_sha("d"),
+            expected_d02_anchor_policy_sha256=D02_POLICY_SHA256,
             d03_member_decisions=[source_decision],  # type: ignore[arg-type]
         )
+
+
+def test_d03_decision_policy_must_match_d02_anchor_policy() -> None:
+    member = _member("1")
+    wrong_policy = _d03_decision(
+        member.member_sha256, LongitudinalOutcome.EQUIVALENT
+    ).model_copy(update={"policy_sha256": _sha("e")})
+    rebound = member.model_copy(
+        update={
+            "d03_decision_sha256": covariate_module._d03_decision_sha256(wrong_policy)
+        }
+    )
+
+    with pytest.raises(ValueError, match="D02 anchor policy"):
+        _build(_input(rebound), (wrong_policy,))
+
+
+@pytest.mark.parametrize("attribute", ("__pydantic_private__", "__pydantic_extra__"))
+def test_d03_hidden_state_rejects_before_serialization(attribute: str) -> None:
+    member = _member("1")
+    decision = _d03_decision(member.member_sha256, member.d03_outcome).model_copy()
+    object.__setattr__(decision, attribute, {"private": "/tmp/forged"})
+
+    with pytest.raises(TypeError, match="exact canonical artifact"):
+        _build(_input(member), (decision,))
+
+
+def test_d03_extra_state_and_oversized_collection_reject_before_serialization() -> None:
+    member = _member("1")
+    decision = _d03_decision(member.member_sha256, member.d03_outcome)
+    extra = decision.model_copy()
+    object.__getattribute__(extra, "__dict__")["private_path"] = "/tmp/forged"
+    oversized = decision.model_copy(
+        update={"dimension_explanations": decision.dimension_explanations * 1_001}
+    )
+
+    for forged in (extra, oversized):
+        with pytest.raises(TypeError, match="exact canonical artifact"):
+            _build(_input(member), (forged,))
 
 
 def test_d03_decision_authority_is_unique_and_member_specific() -> None:
