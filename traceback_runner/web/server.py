@@ -33,6 +33,7 @@ from .auth import (
     BoundaryDenied,
     BrowserRequest,
     LocalWebBoundary,
+    LoopbackServerConfig,
     build_loopback_config,
 )
 from .contracts import ProblemDetail, ProblemOwner, validate_public_projection
@@ -1029,34 +1030,27 @@ class _Handler(http.server.BaseHTTPRequestHandler, metaclass=_SealedHandlerType)
 
 @dataclass(frozen=True, slots=True)
 class _EventStatus:
-    _is_set: Callable[[], bool]
+    value: bool
 
     def is_set(self) -> bool:
-        return self._is_set()
+        return self.value
 
 
 @dataclass(frozen=True, slots=True)
 class _ServerStatus:
-    _security_is_set: Callable[[], bool]
-    _active_workers: Callable[[], int]
+    security_failed_value: bool
+    active_workers: int
 
     @property
     def security_failed(self) -> _EventStatus:
-        return _EventStatus(self._security_is_set)
-
-    @property
-    def active_workers(self) -> int:
-        return self._active_workers()
+        return _EventStatus(self.security_failed_value)
 
 
 @dataclass(slots=True)
-class RunningLocalWebService:
-    """A started local service with restart-scoped in-memory credentials."""
-
-    _server: _LoopbackHttpServer
+class _RunningLocalWebRuntime:
+    server: _LoopbackHttpServer
     thread: threading.Thread
     boundary: LocalWebBoundary
-    bootstrap_code: str
     startup_anchor: _StartupAnchor
     state_directory: Path
     state_directory_fd: int
@@ -1064,16 +1058,41 @@ class RunningLocalWebService:
     instance_id: str
     watchdog_stop: threading.Event
     watchdog_thread: threading.Thread
-    closed: bool = False
+
+
+_RUNTIME_LOCK = threading.Lock()
+_RUNTIMES: dict[str, _RunningLocalWebRuntime] = {}
+
+
+@dataclass(frozen=True, slots=True)
+class RunningLocalWebService:
+    """An immutable handle to a package-owned local web runtime."""
+
+    _runtime_id: str
+    config: LoopbackServerConfig
+    bootstrap_code: str
+    instance_id: str
+    anchor_path: Path
+    _launch_url: str
 
     @property
     def server(self) -> _ServerStatus:
-        """Expose bounded status without the mutable HTTP server capability."""
+        """Return an inert status snapshot without runtime capabilities."""
 
-        return _ServerStatus(
-            self._server.security_failed.is_set,
-            lambda: self._server.active_workers,
-        )
+        with _RUNTIME_LOCK:
+            runtime = _RUNTIMES.get(self._runtime_id)
+            if runtime is None:
+                return _ServerStatus(True, 0)
+            return _ServerStatus(
+                runtime.server.security_failed.is_set(),
+                runtime.server.active_workers,
+            )
+
+    @property
+    def is_running(self) -> bool:
+        with _RUNTIME_LOCK:
+            runtime = _RUNTIMES.get(self._runtime_id)
+            return runtime is not None and runtime.thread.is_alive()
 
     @classmethod
     def start(
@@ -1163,20 +1182,26 @@ class RunningLocalWebService:
                 ),
             )
             explorer_http.assert_intact()
-            server.application = _Application(
+            application = _Application(
                 kernel,
                 boundary,
                 _packaged_assets(),
                 explorer,
                 explorer_http,
             )
+            server.application = application
 
             def validate_security_boundary() -> None:
                 _require_startup_anchor(startup_anchor)
                 _require_named_state_directory(state_directory, state_fd)
                 _require_instance_lease(state_fd, lease_fd)
-                if server.application.explorer_http is not explorer_http:
-                    raise LocalWebServerError("installed HTTP boundary changed")
+                if (
+                    server.application is not application
+                    or application.boundary is not boundary
+                    or application.kernel is not kernel
+                    or application.explorer_http is not explorer_http
+                ):
+                    raise LocalWebServerError("installed HTTP application changed")
                 if server.RequestHandlerClass is not _Handler:
                     raise LocalWebServerError("installed request handler changed")
                 explorer_http.assert_intact()
@@ -1226,11 +1251,11 @@ class RunningLocalWebService:
                 daemon=True,
             )
             watchdog_thread.start()
-            return cls(
-                _server=server,
+            runtime_id = secrets.token_hex(32)
+            runtime = _RunningLocalWebRuntime(
+                server=server,
                 thread=thread,
                 boundary=boundary,
-                bootstrap_code=bootstrap_code,
                 startup_anchor=startup_anchor,
                 state_directory=state_directory,
                 state_directory_fd=state_fd,
@@ -1238,6 +1263,20 @@ class RunningLocalWebService:
                 instance_id=instance_id,
                 watchdog_stop=watchdog_stop,
                 watchdog_thread=watchdog_thread,
+            )
+            with _RUNTIME_LOCK:
+                _RUNTIMES[runtime_id] = runtime
+            launch_url = (
+                f"{config.allowed_origins[0]}/"
+                f"{boundary.broker.launch_fragment(bootstrap_code)}"
+            )
+            return cls(
+                _runtime_id=runtime_id,
+                config=config,
+                bootstrap_code=bootstrap_code,
+                instance_id=instance_id,
+                anchor_path=startup_anchor.parent_path / startup_anchor.name,
+                _launch_url=launch_url,
             )
         except BaseException:
             if watchdog_stop is not None:
@@ -1267,39 +1306,48 @@ class RunningLocalWebService:
 
     @property
     def base_url(self) -> str:
-        return self.boundary.config.allowed_origins[0]
+        return self.config.allowed_origins[0]
 
     @property
     def launch_url(self) -> str:
-        return f"{self.base_url}/{self.boundary.broker.launch_fragment(self.bootstrap_code)}"
+        return self._launch_url
+
+    def issue_bootstrap(self) -> str:
+        with _RUNTIME_LOCK:
+            runtime = _RUNTIMES.get(self._runtime_id)
+            if runtime is None:
+                raise LocalWebServerError("local web service is closed")
+            return runtime.boundary.issue_bootstrap()
 
     def close(self) -> None:
-        if self.closed:
+        with _RUNTIME_LOCK:
+            runtime = _RUNTIMES.pop(self._runtime_id, None)
+        if runtime is None:
             return
-        self.closed = True
-        self.watchdog_stop.set()
+        runtime.watchdog_stop.set()
         try:
             try:
-                self._server.shutdown()
+                runtime.server.shutdown()
             finally:
-                self._server.server_close()
-                self.thread.join(timeout=5)
-                self.watchdog_thread.join(timeout=5)
+                runtime.server.server_close()
+                runtime.thread.join(timeout=5)
+                runtime.watchdog_thread.join(timeout=5)
         finally:
             try:
                 try:
                     _unlink_instance_state(
-                        self.state_directory_fd, expected_instance_id=self.instance_id
+                        runtime.state_directory_fd,
+                        expected_instance_id=runtime.instance_id,
                     )
                 finally:
-                    fcntl.flock(self.lease_fd, fcntl.LOCK_UN)
-                    os.close(self.lease_fd)
+                    fcntl.flock(runtime.lease_fd, fcntl.LOCK_UN)
+                    os.close(runtime.lease_fd)
             finally:
                 try:
-                    fcntl.flock(self.state_directory_fd, fcntl.LOCK_UN)
-                    os.close(self.state_directory_fd)
+                    fcntl.flock(runtime.state_directory_fd, fcntl.LOCK_UN)
+                    os.close(runtime.state_directory_fd)
                 finally:
-                    _close_startup_anchor(self.startup_anchor)
+                    _close_startup_anchor(runtime.startup_anchor)
 
     def __enter__(self) -> Self:
         return self

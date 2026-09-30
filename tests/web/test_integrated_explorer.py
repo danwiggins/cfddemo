@@ -420,6 +420,17 @@ def test_source_class_replacement_fails_direct_and_at_http_boundary(
             state_directory=tmp_path / "state",
             explorer=explorer,
         ) as service:
+            for name in (
+                "_server",
+                "application",
+                "boundary",
+                "closed",
+                "startup_anchor",
+                "thread",
+            ):
+                assert not hasattr(service, name)
+                with pytest.raises((AttributeError, TypeError)):
+                    setattr(service, name, object())
             assert not hasattr(service.server, "_server")
             assert not hasattr(service.server, "RequestHandlerClass")
             with pytest.raises((AttributeError, TypeError)):
