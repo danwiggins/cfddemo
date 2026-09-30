@@ -14,7 +14,7 @@ import sqlite3
 import stat
 import threading
 import uuid
-from collections.abc import Callable, Iterator, Mapping, Sequence
+from collections.abc import Iterator, Mapping, Sequence
 from contextlib import contextmanager
 from datetime import datetime
 from enum import StrEnum
@@ -1690,16 +1690,18 @@ class ResultCatalog:
     def adopt_prepared_import(
         self,
         prepared: PreparedCatalogImport | Mapping[str, object],
-        *,
-        revalidate: Callable[[str], None],
     ) -> CatalogResultRef:
-        """Make a pending row visible only after two in-transaction revalidations."""
+        """Atomically make a verified pending row visible.
+
+        Cross-catalog authorities must validate immediately before and after this
+        call while holding their own publication lock. This API deliberately
+        accepts no callback: caller code is never executed in the SQLite
+        transaction.
+        """
 
         normalized = _RC_REQUIRE_PREPARED(self, prepared)
         if normalized.already_owned:
-            revalidate("before_visibility")
             _RC_VERIFY_REFERENCE(self, normalized.reference)
-            revalidate("after_visibility_staged")
             return normalized.reference
         _RC_VERIFY_PREPARED_OBJECT(self, normalized)
         with _RC_CONNECT(self) as connection:
@@ -1718,7 +1720,6 @@ class ResultCatalog:
                     or row[1] != "pending"
                 ):
                     raise CatalogConflict("pending catalog publication is invalid")
-                revalidate("before_visibility")
                 _RC_VERIFY_PREPARED_OBJECT(self, normalized)
                 connection.execute(
                     """UPDATE result_publications SET state='adopted'
@@ -1730,7 +1731,6 @@ class ResultCatalog:
                         normalized.recovery_scope_sha256,
                     ),
                 )
-                revalidate("after_visibility_staged")
                 _RC_VERIFY_PREPARED_OBJECT(self, normalized)
                 connection.commit()
             except BaseException:

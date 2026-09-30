@@ -46,9 +46,11 @@ Publication is coordinated across SQLite and the binding directory. The result
 row is first durable but hidden in `pending` state. A same-directory mode-0600
 journal is flushed, hard-linked to the final name without overwrite, and the
 directory is flushed. D05 linkage, result trust, catalog storage, and exact
-binding bytes are revalidated immediately before and after the in-transaction
-visibility change. Any failure compensates the exact publication row and
-binding while retaining the shared content-addressed object. Startup recovery
+binding bytes are revalidated immediately before and after the atomic catalog
+visibility transaction while the binding root remains exclusively locked. The
+catalog transaction executes no coordinator or caller callback. Any failure
+compensates the exact publication row and binding before releasing that lock,
+while retaining the shared content-addressed object. Startup recovery
 enumerates hidden SQLite publications for the binding root's digest-bound
 recovery scope independently of journal parsing, then uses matching journal
 bytes to remove an unadopted publication or finish an already adopted one.

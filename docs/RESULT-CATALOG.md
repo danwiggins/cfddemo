@@ -33,9 +33,11 @@ all importers under the same catalog lock.
 Coordinators that must publish a second local index use the prepared-import
 protocol. Preparation verifies and retains the immutable object without adding
 a visible row. Staging adds a durable `pending` row that queries and reference
-verification exclude. Adoption changes that exact publication to `adopted`
-inside one immediate transaction with caller authority checks before and after
-the visibility update. Compensation removes only the exact publication's index
+verification exclude. Adoption verifies package-owned catalog authority and
+changes that exact publication to `adopted` inside one immediate transaction;
+it accepts and executes no caller callback. A coordinating catalog performs its
+own authority checks on both sides while holding its publication lock.
+Compensation removes only the exact publication's index
 references and never removes the content-addressed object. A v1 catalog is
 expanded transactionally to this v2 publication table after its original schema
 has been verified exactly.

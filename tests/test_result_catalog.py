@@ -177,9 +177,32 @@ def test_prepared_publication_is_hidden_until_atomic_adoption(
     assert catalog.query(CatalogQuery()).empty
     with pytest.raises(CatalogConflict, match="not indexed"):
         catalog.verify_reference(prepared.reference)
-    windows: list[str] = []
-    catalog.adopt_prepared_import(prepared, revalidate=windows.append)
-    assert windows == ["before_visibility", "after_visibility_staged"]
+    catalog.adopt_prepared_import(prepared)
+    assert catalog.query(CatalogQuery()).results == (prepared.reference,)
+    catalog.finish_prepared_import(prepared)
+
+
+def test_prepared_adoption_rejects_caller_callbacks_without_execution(
+    tmp_path: Path,
+) -> None:
+    catalog, _, _ = _catalog(tmp_path)
+    prepared = _prepare(catalog)
+    catalog.stage_prepared_import(prepared)
+    executed: list[str] = []
+
+    class MaliciousCallable:
+        def __call__(self, point: str) -> None:
+            executed.append(point)
+
+    for callback in (executed.append, MaliciousCallable()):
+        with pytest.raises(TypeError, match="unexpected keyword"):
+            catalog.adopt_prepared_import(  # type: ignore[call-arg]
+                prepared, revalidate=callback
+            )
+        assert executed == []
+        assert catalog.query(CatalogQuery()).empty
+
+    catalog.adopt_prepared_import(prepared)
     assert catalog.query(CatalogQuery()).results == (prepared.reference,)
     catalog.finish_prepared_import(prepared)
 

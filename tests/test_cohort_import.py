@@ -23,9 +23,11 @@ from evidence_inspector.cohort_import import (
 )
 from evidence_inspector.cohort_manifest import MeasurementAnchor
 from evidence_inspector.fault_controller import (
+    FAULT_POINTS,
     NO_FAULTS,
     DeterministicFaultController,
     FaultAction,
+    InjectedFault,
 )
 from evidence_inspector.result_catalog import (
     DEFAULT_RESULT_BUNDLE_READER_REGISTRY,
@@ -704,6 +706,60 @@ def test_fault_controller_rejects_callbacks_subclasses_and_replacement(
         )
 
 
+def test_fault_controller_rejects_hostile_points_without_dispatch_or_root_creation(
+    tmp_path: Path,
+) -> None:
+    calls: list[str] = []
+
+    class HostilePoint:
+        def __bool__(self):
+            calls.append("bool")
+            raise AssertionError
+
+        def __len__(self):
+            calls.append("len")
+            raise AssertionError
+
+        def __eq__(self, _other):
+            calls.append("eq")
+            raise AssertionError
+
+        def __ne__(self, _other):
+            calls.append("ne")
+            raise AssertionError
+
+        def __repr__(self):
+            calls.append("repr")
+            raise AssertionError
+
+        def __hash__(self):
+            calls.append("hash")
+            raise AssertionError
+
+    class HostileString(str):
+        __bool__ = HostilePoint.__bool__
+        __len__ = HostilePoint.__len__
+        __eq__ = HostilePoint.__eq__
+        __ne__ = HostilePoint.__ne__
+        __repr__ = HostilePoint.__repr__
+        __hash__ = HostilePoint.__hash__
+
+    target = tmp_path / "must-not-exist"
+    for point in (HostilePoint(), HostileString("after_preflight")):
+        with pytest.raises(TypeError, match="exact string"):
+            DeterministicFaultController(point)  # type: ignore[arg-type]
+    assert calls == []
+    assert not target.exists()
+
+    assert DeterministicFaultController().configuration[0] is None
+    for point in FAULT_POINTS:
+        assert DeterministicFaultController(point).configuration[0] == point
+    controller = DeterministicFaultController("after_preflight")
+    with pytest.raises(TypeError, match="exact string"):
+        controller.hit(HostileString("after_preflight"))  # type: ignore[arg-type]
+    assert calls == []
+
+
 def test_cohort_constructor_bounds_hostile_trust_mapping_before_root_creation(
     tmp_path: Path, live
 ) -> None:
@@ -852,6 +908,45 @@ def test_authority_change_at_every_publication_window_compensates(
     inventory = tuple((tmp_path / point / "cohort-records").iterdir())
     assert inventory == ()
     assert tuple((tmp_path / point / "results/objects").iterdir())
+
+
+def test_failed_visible_import_compensates_before_recovery_can_read(
+    tmp_path: Path, live
+) -> None:
+    controller = DeterministicFaultController(
+        "after_visibility_commit", action=FaultAction.PAUSE_RAISE
+    )
+    values = _setup(tmp_path, live, controller)
+    recovery_started = threading.Event()
+
+    def recover_and_read():
+        recovery_started.set()
+        recovered = CohortRecordCatalog(
+            tmp_path / "cohort-records",
+            result_catalog=values[1],
+            linkage_store=live[0],
+            expected_trust_snapshot_sha256_by_provider=_pins(),
+            reader_registry=DEFAULT_RESULT_BUNDLE_READER_REGISTRY,
+        )
+        try:
+            return recovered.record_status_for_manifest((values[2],))
+        finally:
+            recovered.close()
+
+    with ThreadPoolExecutor(max_workers=2) as executor:
+        importing = executor.submit(_import, values)
+        assert controller.wait_until_reached()
+        recovering = executor.submit(recover_and_read)
+        assert recovery_started.wait(timeout=10)
+        assert not recovering.done()
+        controller.release()
+        with pytest.raises(InjectedFault, match="after_visibility_commit"):
+            importing.result(timeout=10)
+        status = recovering.result(timeout=10)
+
+    assert status.members[0].availability is CohortRecordAvailability.MISSING
+    assert values[1].query(CatalogQuery()).empty
+    assert tuple((tmp_path / "cohort-records").iterdir()) == ()
 
 
 @pytest.mark.parametrize("point", ("before_binding_publish", "after_binding_publish"))

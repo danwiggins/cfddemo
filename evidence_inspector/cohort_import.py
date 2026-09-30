@@ -1122,6 +1122,45 @@ class CohortRecordCatalog:
         temporary_name: str | None = None
         final_name: str | None = None
         final_published = False
+        cleanup_attempted_under_lock = False
+
+        def cleanup_import() -> None:
+            nonlocal prepared, temporary_name, final_published
+            cleanup_errors: list[BaseException] = []
+            binding_removed = not final_published
+            if final_published and final_name is not None:
+                try:
+                    os.unlink(final_name, dir_fd=self._root_fd)
+                    os.fsync(self._root_fd)
+                    final_published = False
+                    binding_removed = True
+                except FileNotFoundError:
+                    final_published = False
+                    binding_removed = True
+                except OSError as exc:
+                    cleanup_errors.append(exc)
+            if temporary_name is not None:
+                try:
+                    os.unlink(temporary_name, dir_fd=self._root_fd)
+                    os.fsync(self._root_fd)
+                    temporary_name = None
+                except FileNotFoundError:
+                    temporary_name = None
+                except OSError as exc:
+                    cleanup_errors.append(exc)
+            # Never remove a visible result while its binding could remain. The
+            # retained ownership row lets startup recovery retry safely.
+            if prepared is not None and binding_removed:
+                try:
+                    _PINNED_RESULT_COMPENSATE(self._result_catalog, prepared)
+                    prepared = None
+                except Exception as exc:  # noqa: BLE001 - surface failed compensation
+                    cleanup_errors.append(exc)
+            if cleanup_errors:
+                raise CohortImportError(
+                    "cohort import compensation failed"
+                ) from cleanup_errors[0]
+
         try:
             prepared = _PINNED_RESULT_PREPARE(
                 self._result_catalog,
@@ -1268,16 +1307,14 @@ class CohortRecordCatalog:
                         self, manifest, prepared, binding, final_name, changed=True
                     )
 
-                    def revalidate(point: str) -> None:
-                        _CC_FAULT(self, point)
-                        _CC_REVALIDATE_PUBLICATION(
-                            self, manifest, prepared, binding, final_name, changed=True
-                        )
-
-                    _PINNED_RESULT_ADOPT(
-                        self._result_catalog,
-                        prepared,
-                        revalidate=revalidate,
+                    _CC_FAULT(self, "before_visibility")
+                    _CC_REVALIDATE_PUBLICATION(
+                        self, manifest, prepared, binding, final_name, changed=True
+                    )
+                    _PINNED_RESULT_ADOPT(self._result_catalog, prepared)
+                    _CC_FAULT(self, "after_visibility_staged")
+                    _CC_REVALIDATE_PUBLICATION(
+                        self, manifest, prepared, binding, final_name, changed=True
                     )
                     _CC_FAULT(self, "after_visibility_commit")
                     _CC_REVALIDATE_PUBLICATION(
@@ -1293,35 +1330,28 @@ class CohortRecordCatalog:
                     _PINNED_RESULT_FINISH(self._result_catalog, prepared)
                     prepared = None
                     return binding
+                except BaseException:
+                    # Publication and its compensation share the root/process
+                    # critical section. Readers and recovery can therefore never
+                    # observe state which this operation may still roll back.
+                    cleanup_attempted_under_lock = True
+                    cleanup_import()
+                    raise
                 finally:
                     fcntl.flock(self._root_fd, fcntl.LOCK_UN)
         except BaseException:
-            cleanup_errors: list[BaseException] = []
-            if prepared is not None:
-                try:
-                    _PINNED_RESULT_COMPENSATE(self._result_catalog, prepared)
-                except Exception as exc:  # noqa: BLE001 - surface failed compensation
-                    cleanup_errors.append(exc)
-            if final_published and final_name is not None:
-                try:
-                    os.unlink(final_name, dir_fd=self._root_fd)
-                    os.fsync(self._root_fd)
-                except FileNotFoundError:
-                    pass
-                except OSError as exc:
-                    cleanup_errors.append(exc)
-            if temporary_name is not None:
-                try:
-                    os.unlink(temporary_name, dir_fd=self._root_fd)
-                    os.fsync(self._root_fd)
-                except FileNotFoundError:
-                    pass
-                except OSError as exc:
-                    cleanup_errors.append(exc)
-            if cleanup_errors:
-                raise CohortImportError(
-                    "cohort import compensation failed"
-                ) from cleanup_errors[0]
+            # Preflight failures have no published binding or durable catalog
+            # row. Serialize their in-memory/object cleanup for the same root.
+            if not cleanup_attempted_under_lock and (
+                prepared is not None or temporary_name is not None or final_published
+            ):
+                with _PROCESS_LOCK:
+                    _CC_VALIDATE_ROOT(self)
+                    fcntl.flock(self._root_fd, fcntl.LOCK_EX)
+                    try:
+                        cleanup_import()
+                    finally:
+                        fcntl.flock(self._root_fd, fcntl.LOCK_UN)
             raise
 
     def bindings_for_manifest(
