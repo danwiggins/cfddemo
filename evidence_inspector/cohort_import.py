@@ -67,6 +67,7 @@ from traceback_runner.signing import RevokedKeyError
 
 MAX_BINDINGS = 100_000
 MAX_BINDING_BYTES = 128 * 1024
+MAX_ROLLBACK_MARKER_BYTES = 512
 BindingId = Annotated[str, StringConstraints(pattern=r"^binding_[0-9a-f]{64}$")]
 _PROVIDER_NAMESPACE = TypeAdapter(ProviderNamespace)
 _ANALYSIS_RECORD_ID = TypeAdapter(AnalysisRecordId)
@@ -550,6 +551,63 @@ class CohortRecordCatalog:
             raise CohortImportFilesystemError("pending cohort publication is invalid")
         return binding
 
+    def _read_rollback_marker(self, name: str) -> PublicationId:
+        parts = name.split(".")
+        if (
+            len(parts) != 4
+            or parts[0] != ""
+            or parts[1] != "rollback"
+            or parts[3] != "json"
+        ):
+            raise CohortImportFilesystemError("rollback marker is invalid")
+        try:
+            publication_id = TypeAdapter(PublicationId).validate_python(parts[2])
+        except Exception:
+            raise CohortImportFilesystemError("rollback marker is invalid") from None
+        if not publication_id.startswith(
+            f"publication_{self._recovery_scope_sha256[:16]}_"
+        ):
+            raise CohortImportFilesystemError("rollback marker is invalid")
+        flags = (
+            os.O_RDONLY
+            | getattr(os, "O_CLOEXEC", 0)
+            | getattr(os, "O_NOFOLLOW", 0)
+            | getattr(os, "O_NONBLOCK", 0)
+        )
+        descriptor = -1
+        try:
+            descriptor = os.open(name, flags, dir_fd=self._root_fd)
+            before = os.fstat(descriptor)
+            if (
+                not stat.S_ISREG(before.st_mode)
+                or before.st_uid != os.geteuid()
+                or before.st_nlink != 1
+                or stat.S_IMODE(before.st_mode) != 0o600
+                or before.st_size > MAX_ROLLBACK_MARKER_BYTES
+            ):
+                raise CohortImportFilesystemError("rollback marker is invalid")
+            with os.fdopen(descriptor, "rb") as stream:
+                content = stream.read(MAX_ROLLBACK_MARKER_BYTES + 1)
+                after = os.fstat(stream.fileno())
+                descriptor = -1
+            expected = canonical_json_bytes(
+                {
+                    "publication_id": publication_id,
+                    "recovery_scope_sha256": self._recovery_scope_sha256,
+                    "schema_version": "traceback.cohort-import-rollback.v1",
+                }
+            )
+            if content != expected or _file_identity(before) != _file_identity(after):
+                raise CohortImportFilesystemError("rollback marker is invalid")
+        except CohortImportFilesystemError:
+            raise
+        except Exception:
+            raise CohortImportFilesystemError("rollback marker is invalid") from None
+        finally:
+            if descriptor >= 0:
+                os.close(descriptor)
+        return publication_id
+
     def _recover_pending(self) -> None:
         """Reconcile durable journals without ever removing shared objects."""
 
@@ -558,7 +616,7 @@ class CohortRecordCatalog:
             fcntl.flock(self._root_fd, fcntl.LOCK_EX)
             try:
                 entries = tuple(sorted(os.listdir(self._root_fd)))
-                if len(entries) > MAX_BINDINGS * 2:
+                if len(entries) > MAX_BINDINGS * 3:
                     raise CohortImportFilesystemError(
                         "cohort record recovery inventory exceeds its bound"
                     )
@@ -580,7 +638,7 @@ class CohortRecordCatalog:
                             )
                         journal_inode = (journal_stat.st_dev, journal_stat.st_ino)
                     for name in entries:
-                        if name.startswith(".pending."):
+                        if name.startswith((".pending.", ".rollback.")):
                             continue
                         try:
                             metadata = os.stat(
@@ -615,6 +673,28 @@ class CohortRecordCatalog:
                             os.unlink(name, dir_fd=self._root_fd)
                     if journal_stat is not None:
                         os.unlink(journal_name, dir_fd=self._root_fd)
+                    os.fsync(self._root_fd)
+
+                rollback_names = tuple(
+                    name for name in entries if name.startswith(".rollback.")
+                )
+                for rollback_name in rollback_names:
+                    publication_id = _CC_READ_ROLLBACK(self, rollback_name)
+                    durable = _PINNED_RESULT_PUBLICATION(
+                        self._result_catalog,
+                        publication_id,
+                        self._recovery_scope_sha256,
+                    )
+                    if durable is not None:
+                        _PINNED_RESULT_RECOVER(
+                            self._result_catalog,
+                            publication_id=durable.publication_id,
+                            reference=durable.reference,
+                            recovery_scope_sha256=self._recovery_scope_sha256,
+                            retain_adopted=False,
+                        )
+                    purge_files(publication_id, f".pending.{publication_id}.json")
+                    os.unlink(rollback_name, dir_fd=self._root_fd)
                     os.fsync(self._root_fd)
 
                 pending_rows: tuple[PendingCatalogPublication, ...] = (
@@ -1019,6 +1099,48 @@ class CohortRecordCatalog:
             os.close(descriptor)
         _CC_VALIDATE_ROOT(self)
 
+    def _write_rollback_marker(self, publication_id: PublicationId) -> None:
+        name = f".rollback.{publication_id}.json"
+        content = canonical_json_bytes(
+            {
+                "publication_id": publication_id,
+                "recovery_scope_sha256": self._recovery_scope_sha256,
+                "schema_version": "traceback.cohort-import-rollback.v1",
+            }
+        )
+        if len(content) > MAX_ROLLBACK_MARKER_BYTES:
+            raise CohortImportFilesystemError("rollback marker exceeds its bound")
+        _CC_VALIDATE_ROOT(self)
+        flags = (
+            os.O_WRONLY
+            | os.O_CREAT
+            | os.O_EXCL
+            | getattr(os, "O_CLOEXEC", 0)
+            | getattr(os, "O_NOFOLLOW", 0)
+        )
+        try:
+            descriptor = os.open(name, flags, 0o600, dir_fd=self._root_fd)
+        except FileExistsError:
+            if _CC_READ_ROLLBACK(self, name) != publication_id:
+                raise CohortImportFilesystemError("rollback marker conflicts")
+            return
+        try:
+            with os.fdopen(descriptor, "wb", closefd=False) as stream:
+                stream.write(content)
+                stream.flush()
+                os.fchmod(stream.fileno(), 0o600)
+                os.fsync(stream.fileno())
+            os.fsync(self._root_fd)
+        except BaseException:
+            try:
+                os.unlink(name, dir_fd=self._root_fd)
+            except OSError:
+                pass
+            raise
+        finally:
+            os.close(descriptor)
+        _CC_VALIDATE_ROOT(self)
+
     def _revalidate_publication(
         self,
         manifest: CohortManifest,
@@ -1150,7 +1272,24 @@ class CohortRecordCatalog:
                     binding_removed = True
                 except OSError as exc:
                     cleanup_errors.append(exc)
-            if temporary_name is not None:
+            # Never remove a visible result while its binding could remain. The
+            # retained ownership row and journal let startup recovery retry safely.
+            rollback_complete = binding_removed
+            if prepared is not None and binding_removed:
+                try:
+                    _PINNED_RESULT_COMPENSATE(self._result_catalog, prepared)
+                    prepared = None
+                except Exception as exc:  # noqa: BLE001 - surface failed compensation
+                    cleanup_errors.append(exc)
+                    rollback_complete = False
+            if prepared is not None and not rollback_complete:
+                try:
+                    _CC_WRITE_ROLLBACK(self, prepared.publication_id)
+                except Exception as exc:  # noqa: BLE001 - preserve original failure
+                    cleanup_errors.append(exc)
+            # The pending journal is durable rollback intent. Remove it only
+            # after both the binding and exact catalog ownership are gone.
+            if temporary_name is not None and rollback_complete:
                 try:
                     os.unlink(temporary_name, dir_fd=self._root_fd)
                     os.fsync(self._root_fd)
@@ -1158,14 +1297,6 @@ class CohortRecordCatalog:
                 except FileNotFoundError:
                     temporary_name = None
                 except OSError as exc:
-                    cleanup_errors.append(exc)
-            # Never remove a visible result while its binding could remain. The
-            # retained ownership row lets startup recovery retry safely.
-            if prepared is not None and binding_removed:
-                try:
-                    _PINNED_RESULT_COMPENSATE(self._result_catalog, prepared)
-                    prepared = None
-                except Exception as exc:  # noqa: BLE001 - surface failed compensation
                     cleanup_errors.append(exc)
             if cleanup_errors:
                 raise CohortImportError(
@@ -1624,6 +1755,7 @@ _COHORT_METHOD_SEAL = MappingProxyType(
             "_names_unlocked",
             "_read",
             "_read_pending",
+            "_read_rollback_marker",
             "_recover_pending",
             "_revalidate_publication",
             "_validate_catalog_authority",
@@ -1631,6 +1763,7 @@ _COHORT_METHOD_SEAL = MappingProxyType(
             "_validate_reader_registry",
             "_validate_root",
             "_write_pending",
+            "_write_rollback_marker",
             "bindings_for_manifest",
             "import_bundle",
             "record_status_for_manifest",
@@ -1707,6 +1840,7 @@ _CC_FAULT = CohortRecordCatalog._fault
 _CC_NAMES_UNLOCKED = CohortRecordCatalog._names_unlocked
 _CC_READ = CohortRecordCatalog._read
 _CC_READ_PENDING = CohortRecordCatalog._read_pending
+_CC_READ_ROLLBACK = CohortRecordCatalog._read_rollback_marker
 _CC_RECOVER_PENDING = CohortRecordCatalog._recover_pending
 _CC_REVALIDATE_PUBLICATION = CohortRecordCatalog._revalidate_publication
 _CC_VALIDATE_CATALOG_AUTHORITY = CohortRecordCatalog._validate_catalog_authority
@@ -1714,6 +1848,7 @@ _CC_VALIDATE_MANIFEST = CohortRecordCatalog._validate_manifest
 _CC_VALIDATE_READER_REGISTRY = CohortRecordCatalog._validate_reader_registry
 _CC_VALIDATE_ROOT = CohortRecordCatalog._validate_root
 _CC_WRITE_PENDING = CohortRecordCatalog._write_pending
+_CC_WRITE_ROLLBACK = CohortRecordCatalog._write_rollback_marker
 _COHORT_ALIAS_SEAL = MappingProxyType(
     {
         name: globals()[name]
@@ -1723,6 +1858,7 @@ _COHORT_ALIAS_SEAL = MappingProxyType(
             "_CC_NAMES_UNLOCKED",
             "_CC_READ",
             "_CC_READ_PENDING",
+            "_CC_READ_ROLLBACK",
             "_CC_RECOVER_PENDING",
             "_CC_REVALIDATE_PUBLICATION",
             "_CC_VALIDATE_CATALOG_AUTHORITY",
@@ -1730,6 +1866,7 @@ _COHORT_ALIAS_SEAL = MappingProxyType(
             "_CC_VALIDATE_READER_REGISTRY",
             "_CC_VALIDATE_ROOT",
             "_CC_WRITE_PENDING",
+            "_CC_WRITE_ROLLBACK",
         )
     }
 )

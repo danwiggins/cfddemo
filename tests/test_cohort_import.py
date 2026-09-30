@@ -1284,6 +1284,66 @@ def test_crash_recovery_reconciles_journal_and_catalog_publication(
         results.close()
 
 
+def test_failed_cleanup_preserves_durable_rollback_intent(
+    tmp_path: Path, live, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    values = _setup(
+        tmp_path,
+        live,
+        DeterministicFaultController(
+            "after_visibility_commit", action=FaultAction.RAISE
+        ),
+    )
+    root_fd = values[0]._root_fd
+    real_unlink = os.unlink
+    failed = False
+
+    def fail_final_once(path, *args, **kwargs):
+        nonlocal failed
+        if (
+            not failed
+            and kwargs.get("dir_fd") == root_fd
+            and type(path) is str
+            and not path.startswith(".")
+            and path.endswith(".json")
+        ):
+            failed = True
+            raise OSError("injected final unlink failure")
+        return real_unlink(path, *args, **kwargs)
+
+    with monkeypatch.context() as patch:
+        patch.setattr(cohort_import_module.os, "unlink", fail_final_once)
+        with pytest.raises(CohortImportError, match="compensation failed"):
+            _import(values)
+    assert failed
+    assert len(tuple((tmp_path / "cohort-records").glob(".pending.*"))) == 1
+    assert len(tuple((tmp_path / "cohort-records").glob(".rollback.*"))) == 1
+
+    values[0].close()
+    values[1].close()
+    results = ResultCatalog(
+        tmp_path / "results",
+        import_roots={"root_primary": tmp_path / "imports"},
+        trust_store=values[6],
+        reader_registry=DEFAULT_RESULT_BUNDLE_READER_REGISTRY,
+    )
+    cohorts = CohortRecordCatalog(
+        tmp_path / "cohort-records",
+        result_catalog=results,
+        linkage_store=live[0],
+        expected_trust_snapshot_sha256_by_provider=_pins(),
+        reader_registry=DEFAULT_RESULT_BUNDLE_READER_REGISTRY,
+    )
+    try:
+        status = cohorts.record_status_for_manifest((values[2],))
+        assert status.members[0].availability is CohortRecordAvailability.MISSING
+        assert results.query(CatalogQuery()).empty
+        assert tuple((tmp_path / "cohort-records").iterdir()) == ()
+    finally:
+        cohorts.close()
+        results.close()
+
+
 def test_crash_recovery_removes_partial_pre_stage_journal(tmp_path: Path, live) -> None:
     values = _setup(tmp_path, live)
     recovery_scope = values[0]._recovery_scope_sha256
