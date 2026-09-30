@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import hashlib
 import json
 import os
 import threading
@@ -17,6 +18,7 @@ from evidence_inspector.cohort_import import (
     CohortImportConflict,
     CohortImportError,
     CohortImportFilesystemError,
+    CohortImportRollbackMarker,
     CohortRecordAvailability,
     CohortRecordCatalog,
     CohortRecordWithheldReason,
@@ -29,6 +31,7 @@ from evidence_inspector.fault_controller import (
     FaultAction,
     InjectedFault,
 )
+from evidence_inspector.method_registry import canonical_contract_bytes
 from evidence_inspector.result_catalog import (
     DEFAULT_RESULT_BUNDLE_READER_REGISTRY,
     CatalogError,
@@ -280,6 +283,28 @@ def test_final_read_and_idempotent_return_reject_linkage_toctou(
     error = _paused_error(controller, call, lambda: _advance_linkage(live, digit))
     assert isinstance(error, CohortImportError)
     assert "changed" in str(error) or "current" in str(error)
+
+
+@pytest.mark.parametrize("operation", ("read", "status"))
+def test_read_return_rechecks_exact_binding_after_concurrent_removal(
+    tmp_path: Path, live, operation: str
+) -> None:
+    point = "before_read_return" if operation == "read" else "before_status_return"
+    controller = DeterministicFaultController(point, action=FaultAction.PAUSE)
+    values = _setup(tmp_path, live, controller)
+    binding = _import(values)
+    final = (
+        tmp_path
+        / "cohort-records"
+        / f"{binding.cohort_manifest_sha256}.{binding.binding_id}.json"
+    )
+    if operation == "read":
+        call = lambda: values[0].bindings_for_manifest((values[2],))
+    else:
+        call = lambda: values[0].record_status_for_manifest((values[2],))
+    error = _paused_error(controller, call, final.unlink)
+    assert isinstance(error, CohortImportError)
+    assert "binding" in str(error)
 
 
 def test_same_verified_record_can_bind_to_a_new_manifest_version(
@@ -1403,6 +1428,88 @@ def test_marker_recovers_exact_candidate_and_preserves_committed_peer(
         finally:
             cohorts.close()
             results.close()
+
+
+def test_swapped_marker_cannot_delete_committed_peer_or_publish_candidate(
+    tmp_path: Path, live
+) -> None:
+    values = _setup(tmp_path, live)
+    first = _import(values)
+    previous = values[2]
+    second = _manifest(
+        previous.provider_authorities[0],
+        previous.members,
+        cohort_id=previous.cohort_id,
+        version=2,
+        previous_manifest_sha256=first.cohort_manifest_sha256,
+        created_at=previous.created_at + timedelta(seconds=1),
+        measurement_anchor=previous.measurement_anchor,
+        policies=previous.policies.model_copy(update={"missingness_sha256": "9" * 64}),
+    )
+    values[0].close()
+    crashing = CohortRecordCatalog(
+        tmp_path / "cohort-records",
+        result_catalog=values[1],
+        linkage_store=live[0],
+        expected_trust_snapshot_sha256_by_provider=_pins(),
+        reader_registry=DEFAULT_RESULT_BUNDLE_READER_REGISTRY,
+        fault_controller=DeterministicFaultController(
+            "after_visibility_commit", action=FaultAction.EXIT, exit_code=79
+        ),
+    )
+    pid = os.fork()
+    if pid == 0:  # pragma: no cover - abrupt crash path
+        _import((crashing, *values[1:]), manifest_history=(previous, second))
+        os._exit(80)
+    assert os.waitstatus_to_exitcode(os.waitpid(pid, 0)[1]) == 79
+    crashing.close()
+    values[1].close()
+    pending = tuple((tmp_path / "cohort-records").glob(".pending.*"))
+    marker_path = tuple((tmp_path / "cohort-records").glob(".rollback.*"))[0]
+    pending[0].unlink()
+    first_bytes = canonical_contract_bytes(first)
+    stale_operation = (
+        "candidate_"
+        + hashlib.sha256(
+            b"traceback-cohort-import-candidate-v1\0" + first_bytes
+        ).hexdigest()
+    )
+    stale = CohortImportRollbackMarker(
+        operation_id=stale_operation,
+        publication_id=first.publication_id,
+        recovery_scope_sha256=crashing._recovery_scope_sha256,
+        cohort_manifest_sha256=first.cohort_manifest_sha256,
+        binding_id=first.binding_id,
+        result_id=first.result.result_id,
+    )
+    marker_path.write_bytes(canonical_contract_bytes(stale))
+    marker_path.chmod(0o600)
+
+    results = ResultCatalog(
+        tmp_path / "results",
+        import_roots={"root_primary": tmp_path / "imports"},
+        trust_store=values[6],
+        reader_registry=DEFAULT_RESULT_BUNDLE_READER_REGISTRY,
+    )
+    cohorts = CohortRecordCatalog(
+        tmp_path / "cohort-records",
+        result_catalog=results,
+        linkage_store=live[0],
+        expected_trust_snapshot_sha256_by_provider=_pins(),
+        reader_registry=DEFAULT_RESULT_BUNDLE_READER_REGISTRY,
+    )
+    try:
+        assert cohorts.bindings_for_manifest((previous,)) == (first,)
+        assert (
+            cohorts.record_status_for_manifest((previous, second))
+            .members[0]
+            .availability
+            is CohortRecordAvailability.MISSING
+        )
+        assert results.query(CatalogQuery()).results == (first.result,)
+    finally:
+        cohorts.close()
+        results.close()
 
 
 def test_failed_cleanup_preserves_durable_rollback_intent(

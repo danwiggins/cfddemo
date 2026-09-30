@@ -182,6 +182,55 @@ def test_prepared_publication_is_hidden_until_atomic_adoption(
     catalog.finish_prepared_import(prepared)
 
 
+def test_recovery_rejects_hostile_scalar_subclasses_before_dispatch(
+    tmp_path: Path,
+) -> None:
+    catalog, _, _ = _catalog(tmp_path)
+    prepared = _prepare(catalog)
+    catalog.stage_prepared_import(prepared)
+    hooks: list[str] = []
+
+    class HostileString(str):
+        def __bool__(self):
+            hooks.append("bool")
+            return True
+
+        def __str__(self):
+            hooks.append("str")
+            return super().__str__()
+
+        def __repr__(self):
+            hooks.append("repr")
+            return super().__repr__()
+
+        def __eq__(self, other):
+            hooks.append("eq")
+            return super().__eq__(other)
+
+    class HostileBool:
+        def __bool__(self):
+            hooks.append("bool-object")
+            return True
+
+    before = catalog.pending_publications("c" * 64)
+    with pytest.raises(CatalogConflict):
+        catalog.recover_pending_publication(
+            publication_id=HostileString(prepared.publication_id),
+            reference=prepared.reference,
+            recovery_scope_sha256="c" * 64,
+            retain_adopted=False,
+        )
+    with pytest.raises(CatalogConflict):
+        catalog.recover_pending_publication(
+            publication_id=prepared.publication_id,
+            reference=prepared.reference,
+            recovery_scope_sha256="c" * 64,
+            retain_adopted=HostileBool(),  # type: ignore[arg-type]
+        )
+    assert hooks == []
+    assert catalog.pending_publications("c" * 64) == before
+
+
 def test_prepared_adoption_rejects_caller_callbacks_without_execution(
     tmp_path: Path,
 ) -> None:

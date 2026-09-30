@@ -54,6 +54,7 @@ from evidence_inspector.result_catalog import (
     CatalogAliases,
     CatalogAuthoritySnapshot,
     CatalogResultRef,
+    CoordinatedCatalogCandidate,
     PendingCatalogPublication,
     PreparedCatalogImport,
     PublicationId,
@@ -68,7 +69,7 @@ from traceback_runner.signing import RevokedKeyError
 
 MAX_BINDINGS = 100_000
 MAX_BINDING_BYTES = 128 * 1024
-MAX_ROLLBACK_MARKER_BYTES = 512
+MAX_ROLLBACK_MARKER_BYTES = 1024
 BindingId = Annotated[str, StringConstraints(pattern=r"^binding_[0-9a-f]{64}$")]
 _PROVIDER_NAMESPACE = TypeAdapter(ProviderNamespace)
 _ANALYSIS_RECORD_ID = TypeAdapter(AnalysisRecordId)
@@ -89,6 +90,9 @@ _PINNED_RESULT_PENDING = ResultCatalog.pending_publications
 _PINNED_RESULT_PUBLICATION = ResultCatalog.publication_for_recovery
 _PINNED_RESULT_RECOVERY_ROWS = ResultCatalog.recovery_publications
 _PINNED_RESULT_VERIFY_PREPARED = ResultCatalog.verify_prepared_object
+_PINNED_RESULT_REGISTER_CANDIDATE = ResultCatalog.register_coordinated_candidate
+_PINNED_RESULT_CANDIDATES = ResultCatalog.coordinated_candidates
+_PINNED_RESULT_FINISH_CANDIDATE = ResultCatalog.finish_coordinated_candidate
 _PINNED_READER_SELECT = ResultBundleReaderRegistry.select
 _PINNED_VALIDATE_MANIFEST = validate_manifest_against_linkage_store
 _PINNED_RESULT_RUNTIME_ASSERT = result_catalog_module._RC_ASSERT_RUNTIME
@@ -165,9 +169,10 @@ class CohortRecordBinding(RegistryContract):
 class CohortImportRollbackMarker(RegistryContract):
     """Durable rollback intent bound to one exact incomplete binding."""
 
-    schema_version: Literal["traceback.cohort-import-rollback.v2"] = (
-        "traceback.cohort-import-rollback.v2"
+    schema_version: Literal["traceback.cohort-import-rollback.v3"] = (
+        "traceback.cohort-import-rollback.v3"
     )
+    operation_id: Annotated[str, StringConstraints(pattern=r"^candidate_[0-9a-f]{64}$")]
     publication_id: PublicationId
     recovery_scope_sha256: Sha256
     cohort_manifest_sha256: Sha256
@@ -363,6 +368,9 @@ class CohortRecordCatalog:
             ("publication_for_recovery", _PINNED_RESULT_PUBLICATION),
             ("recovery_publications", _PINNED_RESULT_RECOVERY_ROWS),
             ("verify_prepared_object", _PINNED_RESULT_VERIFY_PREPARED),
+            ("register_coordinated_candidate", _PINNED_RESULT_REGISTER_CANDIDATE),
+            ("coordinated_candidates", _PINNED_RESULT_CANDIDATES),
+            ("finish_coordinated_candidate", _PINNED_RESULT_FINISH_CANDIDATE),
         ):
             if (
                 name in vars(result_catalog)
@@ -578,14 +586,14 @@ class CohortRecordCatalog:
             or parts[3] != "json"
         ):
             raise CohortImportFilesystemError("rollback marker is invalid")
-        try:
-            publication_id = TypeAdapter(PublicationId).validate_python(parts[2])
-        except Exception:  # noqa: BLE001 - normalize hostile marker name
-            raise CohortImportFilesystemError("rollback marker is invalid") from None
-        if not publication_id.startswith(
-            f"publication_{self._recovery_scope_sha256[:16]}_"
+        operation_id = parts[2]
+        if (
+            type(operation_id) is not str
+            or not operation_id.startswith("candidate_")
+            or len(operation_id) != 74
+            or any(char not in "0123456789abcdef" for char in operation_id[10:])
         ):
-            raise CohortImportFilesystemError("rollback marker is invalid")
+            raise CohortImportFilesystemError("rollback marker is invalid") from None
         flags = (
             os.O_RDONLY
             | getattr(os, "O_CLOEXEC", 0)
@@ -619,7 +627,7 @@ class CohortRecordCatalog:
             if descriptor >= 0:
                 os.close(descriptor)
         if (
-            marker.publication_id != publication_id
+            marker.operation_id != operation_id
             or marker.recovery_scope_sha256 != self._recovery_scope_sha256
         ):
             raise CohortImportFilesystemError("rollback marker is invalid")
@@ -632,11 +640,15 @@ class CohortRecordCatalog:
             _CC_VALIDATE_ROOT(self)
             fcntl.flock(self._root_fd, fcntl.LOCK_EX)
             try:
-                entries = tuple(sorted(os.listdir(self._root_fd)))
-                if len(entries) > MAX_BINDINGS * 3:
-                    raise CohortImportFilesystemError(
-                        "cohort record recovery inventory exceeds its bound"
-                    )
+                recovered_entries: list[str] = []
+                with os.scandir(self._root_fd) as iterator:
+                    for entry in iterator:
+                        if len(recovered_entries) >= MAX_BINDINGS * 4:
+                            raise CohortImportFilesystemError(
+                                "cohort record recovery inventory exceeds its bound"
+                            )
+                        recovered_entries.append(entry.name)
+                entries = tuple(sorted(recovered_entries))
 
                 def purge_files(
                     publication_id: str,
@@ -728,40 +740,50 @@ class CohortRecordCatalog:
                             return True
                     return False
 
-                rollback_names = tuple(
-                    name for name in entries if name.startswith(".rollback.")
+                candidates = _PINNED_RESULT_CANDIDATES(
+                    self._result_catalog, self._recovery_scope_sha256
                 )
-                for rollback_name in rollback_names:
-                    marker = _CC_READ_ROLLBACK(self, rollback_name)
-                    publication_id = marker.publication_id
-                    pending_name = f".pending.{publication_id}.json"
+                for candidate in candidates:
+                    pending_name = f".pending.{candidate.publication_id}.json"
+                    marker_name = f".rollback.{candidate.operation_id}.json"
+                    candidate_binding: CohortRecordBinding | None = None
                     try:
-                        rollback_binding = _CC_READ_PENDING(self, pending_name)
-                    except CohortImportFilesystemError:
-                        rollback_binding = None
-                    if rollback_binding is not None:
+                        observed = _CC_READ_PENDING(self, pending_name)
                         if (
-                            rollback_binding.publication_id != publication_id
-                            or rollback_binding.binding_id != marker.binding_id
-                            or rollback_binding.cohort_manifest_sha256
-                            != marker.cohort_manifest_sha256
-                            or rollback_binding.result.result_id != marker.result_id
+                            hashlib.sha256(
+                                canonical_contract_bytes(observed)
+                            ).hexdigest()
+                            == candidate.binding_sha256
                         ):
-                            raise CohortImportFilesystemError(
-                                "rollback marker does not match pending binding"
-                            )
-                    candidate_final = marker.final_name
-                    retain_owner = has_committed_peer(publication_id, candidate_final)
+                            candidate_binding = observed
+                    except CohortImportFilesystemError:
+                        pass
+                    if candidate_binding is not None and (
+                        candidate_binding.publication_id != candidate.publication_id
+                        or candidate_binding.result.result_id != candidate.result_id
+                        or candidate_binding.cohort_manifest_sha256
+                        != candidate.cohort_manifest_sha256
+                        or candidate_binding.binding_id != candidate.binding_id
+                    ):
+                        raise CohortImportFilesystemError(
+                            "catalog candidate does not match pending binding"
+                        )
                     durable = _PINNED_RESULT_PUBLICATION(
                         self._result_catalog,
-                        publication_id,
+                        candidate.publication_id,
                         self._recovery_scope_sha256,
                     )
+                    if (
+                        durable is not None
+                        and durable.reference.result_id != candidate.result_id
+                    ):
+                        raise CohortImportFilesystemError(
+                            "catalog candidate does not match ownership"
+                        )
+                    retain_owner = has_committed_peer(
+                        candidate.publication_id, candidate.final_name
+                    )
                     if durable is not None:
-                        if durable.reference.result_id != marker.result_id:
-                            raise CohortImportFilesystemError(
-                                "rollback marker does not match catalog ownership"
-                            )
                         _PINNED_RESULT_RECOVER(
                             self._result_catalog,
                             publication_id=durable.publication_id,
@@ -769,12 +791,72 @@ class CohortRecordCatalog:
                             recovery_scope_sha256=self._recovery_scope_sha256,
                             retain_adopted=retain_owner,
                         )
-                    purge_files(
-                        publication_id,
-                        pending_name,
-                        candidate_final=candidate_final,
-                        remove_all_publication_bindings=False,
-                    )
+                    # Replaceable marker bytes never authorize deletion. The durable
+                    # candidate permits only this exact final binding identity.
+                    try:
+                        final_binding = _CC_READ(self, candidate.final_name)
+                    except CohortImportFilesystemError:
+                        final_binding = None
+                    if (
+                        final_binding is not None
+                        and hashlib.sha256(
+                            canonical_contract_bytes(final_binding)
+                        ).hexdigest()
+                        == candidate.binding_sha256
+                    ):
+                        os.unlink(candidate.final_name, dir_fd=self._root_fd)
+                    for transient_name in (pending_name, marker_name):
+                        try:
+                            metadata = os.stat(
+                                transient_name,
+                                dir_fd=self._root_fd,
+                                follow_symlinks=False,
+                            )
+                        except FileNotFoundError:
+                            continue
+                        if (
+                            not stat.S_ISREG(metadata.st_mode)
+                            or metadata.st_uid != os.geteuid()
+                            or metadata.st_nlink not in {1, 2}
+                            or stat.S_IMODE(metadata.st_mode) != 0o600
+                            or metadata.st_size > MAX_BINDING_BYTES
+                        ):
+                            raise CohortImportFilesystemError(
+                                "candidate recovery file is unsafe"
+                            )
+                        os.unlink(transient_name, dir_fd=self._root_fd)
+                    os.fsync(self._root_fd)
+                    _PINNED_RESULT_FINISH_CANDIDATE(self._result_catalog, candidate)
+
+                # A marker without its durable candidate has no deletion authority.
+                recovered_entries = []
+                with os.scandir(self._root_fd) as iterator:
+                    for entry in iterator:
+                        if len(recovered_entries) >= MAX_BINDINGS * 4:
+                            raise CohortImportFilesystemError(
+                                "cohort record recovery inventory exceeds its bound"
+                            )
+                        recovered_entries.append(entry.name)
+                entries = tuple(sorted(recovered_entries))
+                for rollback_name in (
+                    name for name in entries if name.startswith(".rollback.")
+                ):
+                    try:
+                        metadata = os.stat(
+                            rollback_name,
+                            dir_fd=self._root_fd,
+                            follow_symlinks=False,
+                        )
+                    except FileNotFoundError:
+                        continue
+                    if (
+                        not stat.S_ISREG(metadata.st_mode)
+                        or metadata.st_uid != os.geteuid()
+                        or metadata.st_nlink != 1
+                        or stat.S_IMODE(metadata.st_mode) != 0o600
+                        or metadata.st_size > MAX_ROLLBACK_MARKER_BYTES
+                    ):
+                        raise CohortImportFilesystemError("rollback marker is invalid")
                     os.unlink(rollback_name, dir_fd=self._root_fd)
                     os.fsync(self._root_fd)
 
@@ -800,11 +882,7 @@ class CohortRecordCatalog:
                         purge_files(pending.publication_id, pending_name)
 
                 pending_names = tuple(
-                    sorted(
-                        name
-                        for name in os.listdir(self._root_fd)
-                        if name.startswith(".pending.")
-                    )
+                    name for name in entries if name.startswith(".pending.")
                 )
                 for pending_name in pending_names:
                     try:
@@ -875,7 +953,7 @@ class CohortRecordCatalog:
                     )
                 valid_publications: set[str] = set()
                 valid_result_ids: set[str] = set()
-                for name in tuple(sorted(os.listdir(self._root_fd))):
+                for name in entries:
                     parts = name.split(".")
                     looks_like_binding = (
                         len(parts) == 3
@@ -1091,9 +1169,15 @@ class CohortRecordCatalog:
 
     def _names_unlocked(self) -> tuple[str, ...]:
         _CC_VALIDATE_ROOT(self)
-        names = tuple(sorted(os.listdir(self._root_fd)))
-        if len(names) > MAX_BINDINGS:
-            raise CohortImportFilesystemError("cohort record index exceeds its bound")
+        captured: list[str] = []
+        with os.scandir(self._root_fd) as iterator:
+            for entry in iterator:
+                if len(captured) >= MAX_BINDINGS:
+                    raise CohortImportFilesystemError(
+                        "cohort record index exceeds its bound"
+                    )
+                captured.append(entry.name)
+        names = tuple(sorted(captured))
         for name in names:
             parts = name.split(".")
             if (
@@ -1149,15 +1233,10 @@ class CohortRecordCatalog:
             os.close(descriptor)
         _CC_VALIDATE_ROOT(self)
 
-    def _write_rollback_marker(self, binding: CohortRecordBinding) -> None:
-        marker = CohortImportRollbackMarker(
-            publication_id=binding.publication_id,
-            recovery_scope_sha256=self._recovery_scope_sha256,
-            cohort_manifest_sha256=binding.cohort_manifest_sha256,
-            binding_id=binding.binding_id,
-            result_id=binding.result.result_id,
-        )
-        name = f".rollback.{binding.publication_id}.json"
+    def _write_rollback_marker(self, marker: CohortImportRollbackMarker) -> None:
+        if type(marker) is not CohortImportRollbackMarker:
+            raise CohortImportFilesystemError("rollback marker is invalid")
+        name = f".rollback.{marker.operation_id}.json"
         content = canonical_contract_bytes(marker)
         if len(content) > MAX_ROLLBACK_MARKER_BYTES:
             raise CohortImportFilesystemError("rollback marker exceeds its bound")
@@ -1306,11 +1385,12 @@ class CohortRecordCatalog:
         temporary_name: str | None = None
         final_name: str | None = None
         rollback_name: str | None = None
+        candidate: CoordinatedCatalogCandidate | None = None
         final_published = False
         cleanup_attempted_under_lock = False
 
         def cleanup_import() -> None:
-            nonlocal prepared, rollback_name, temporary_name, final_published
+            nonlocal candidate, prepared, rollback_name, temporary_name, final_published
             cleanup_errors: list[BaseException] = []
             binding_removed = not final_published
             if final_published and final_name is not None:
@@ -1358,6 +1438,12 @@ class CohortRecordCatalog:
                 except FileNotFoundError:
                     rollback_name = None
                 except OSError as exc:
+                    cleanup_errors.append(exc)
+            if candidate is not None and rollback_complete:
+                try:
+                    _PINNED_RESULT_FINISH_CANDIDATE(self._result_catalog, candidate)
+                    candidate = None
+                except Exception as exc:  # noqa: BLE001 - retry during recovery
                     cleanup_errors.append(exc)
             if cleanup_errors:
                 raise CohortImportError(
@@ -1419,7 +1505,33 @@ class CohortRecordCatalog:
             content = canonical_contract_bytes(binding)
             final_name = f"{manifest_digest}.{binding.binding_id}.json"
             temporary_name = f".pending.{prepared.publication_id}.json"
-            rollback_name = f".rollback.{prepared.publication_id}.json"
+            operation_id = (
+                "candidate_"
+                + hashlib.sha256(
+                    b"traceback-cohort-import-candidate-v1\0" + content
+                ).hexdigest()
+            )
+            marker = CohortImportRollbackMarker(
+                operation_id=operation_id,
+                publication_id=binding.publication_id,
+                recovery_scope_sha256=self._recovery_scope_sha256,
+                cohort_manifest_sha256=binding.cohort_manifest_sha256,
+                binding_id=binding.binding_id,
+                result_id=binding.result.result_id,
+            )
+            marker_bytes = canonical_contract_bytes(marker)
+            candidate = CoordinatedCatalogCandidate(
+                operation_id=operation_id,
+                publication_id=binding.publication_id,
+                result_id=binding.result.result_id,
+                recovery_scope_sha256=self._recovery_scope_sha256,
+                cohort_manifest_sha256=binding.cohort_manifest_sha256,
+                binding_id=binding.binding_id,
+                final_name=final_name,
+                binding_sha256=hashlib.sha256(content).hexdigest(),
+                marker_sha256=hashlib.sha256(marker_bytes).hexdigest(),
+            )
+            rollback_name = f".rollback.{operation_id}.json"
             with _PROCESS_LOCK:
                 _CC_VALIDATE_ROOT(self)
                 fcntl.flock(self._root_fd, fcntl.LOCK_EX)
@@ -1482,6 +1594,9 @@ class CohortRecordCatalog:
                         )
                     _CC_WRITE_PENDING(self, temporary_name, content)
                     _PINNED_RESULT_STAGE(self._result_catalog, prepared)
+                    _PINNED_RESULT_REGISTER_CANDIDATE(
+                        self._result_catalog, prepared, candidate
+                    )
                     _CC_FAULT(self, "after_result_stage")
                     _CC_REVALIDATE_PUBLICATION(
                         self, manifest, prepared, binding, None, changed=True
@@ -1513,7 +1628,7 @@ class CohortRecordCatalog:
 
                     # Rollback intent must be durable before visibility. If this
                     # write fails, the result remains hidden in pending state.
-                    _CC_WRITE_ROLLBACK(self, binding)
+                    _CC_WRITE_ROLLBACK(self, marker)
                     _CC_FAULT(self, "before_visibility")
                     _CC_REVALIDATE_PUBLICATION(
                         self, manifest, prepared, binding, final_name, changed=True
@@ -1538,6 +1653,8 @@ class CohortRecordCatalog:
                     rollback_name = None
                     os.fsync(self._root_fd)
                     _CC_VALIDATE_ROOT(self)
+                    _PINNED_RESULT_FINISH_CANDIDATE(self._result_catalog, candidate)
+                    candidate = None
                     _PINNED_RESULT_FINISH(self._result_catalog, prepared)
                     prepared = None
                     return binding
@@ -1557,6 +1674,7 @@ class CohortRecordCatalog:
                 prepared is not None
                 or temporary_name is not None
                 or rollback_name is not None
+                or candidate is not None
                 or final_published
             ):
                 with _PROCESS_LOCK:
@@ -1569,6 +1687,32 @@ class CohortRecordCatalog:
             raise
 
     def bindings_for_manifest(
+        self, manifest_history: Sequence[CohortManifest]
+    ) -> tuple[CohortRecordBinding, ...]:
+        """Return bindings while a shared root lock fences recovery/publication."""
+
+        with _PROCESS_LOCK:
+            _CC_VALIDATE_ROOT(self)
+            descriptor = os.open(
+                ".",
+                os.O_RDONLY
+                | getattr(os, "O_DIRECTORY", 0)
+                | getattr(os, "O_CLOEXEC", 0)
+                | getattr(os, "O_NOFOLLOW", 0),
+                dir_fd=self._root_fd,
+            )
+            try:
+                if _file_identity(os.fstat(descriptor)) != _file_identity(
+                    os.fstat(self._root_fd)
+                ):
+                    raise CohortImportFilesystemError("cohort record root changed")
+                fcntl.flock(descriptor, fcntl.LOCK_SH)
+                return _CC_BINDINGS_BODY(self, manifest_history)
+            finally:
+                fcntl.flock(descriptor, fcntl.LOCK_UN)
+                os.close(descriptor)
+
+    def _bindings_for_manifest_body(
         self, manifest_history: Sequence[CohortManifest]
     ) -> tuple[CohortRecordBinding, ...]:
         """Return only bindings still valid under live linkage and current trust."""
@@ -1664,9 +1808,52 @@ class CohortRecordCatalog:
         _CC_VALIDATE_MANIFEST(self, manifest, changed=True)
         if _CC_VALIDATE_CATALOG_AUTHORITY(self) != authority:
             raise CohortImportConflict("cohort record catalog authority changed")
+        for item in ordered:
+            exact_name = f"{item.cohort_manifest_sha256}.{item.binding_id}.json"
+            if _CC_READ(self, exact_name) != item:
+                raise CohortImportConflict("cohort record binding changed")
+            publication = _PINNED_RESULT_PUBLICATION(
+                self._result_catalog,
+                item.publication_id,
+                self._recovery_scope_sha256,
+            )
+            if (
+                publication is None
+                or publication.state != "adopted"
+                or publication.reference != item.result
+            ):
+                raise CohortImportConflict(
+                    "cohort record publication ownership changed"
+                )
         return ordered
 
     def record_status_for_manifest(
+        self, manifest_history: Sequence[CohortManifest]
+    ) -> CohortManifestRecordStatus:
+        """Return status while a shared root lock fences recovery/publication."""
+
+        with _PROCESS_LOCK:
+            _CC_VALIDATE_ROOT(self)
+            descriptor = os.open(
+                ".",
+                os.O_RDONLY
+                | getattr(os, "O_DIRECTORY", 0)
+                | getattr(os, "O_CLOEXEC", 0)
+                | getattr(os, "O_NOFOLLOW", 0),
+                dir_fd=self._root_fd,
+            )
+            try:
+                if _file_identity(os.fstat(descriptor)) != _file_identity(
+                    os.fstat(self._root_fd)
+                ):
+                    raise CohortImportFilesystemError("cohort record root changed")
+                fcntl.flock(descriptor, fcntl.LOCK_SH)
+                return _CC_STATUS_BODY(self, manifest_history)
+            finally:
+                fcntl.flock(descriptor, fcntl.LOCK_UN)
+                os.close(descriptor)
+
+    def _record_status_for_manifest_body(
         self, manifest_history: Sequence[CohortManifest]
     ) -> CohortManifestRecordStatus:
         """Return complete canonical availability without exposing withheld results."""
@@ -1794,6 +1981,23 @@ class CohortRecordCatalog:
         _CC_VALIDATE_MANIFEST(self, manifest, changed=True)
         if _PINNED_MANIFEST_ACTIVE_SNAPSHOT(self._linkage_store) != linkage_snapshot:
             raise CohortImportConflict("cohort linkage authority changed")
+        for binding in selected:
+            exact_name = f"{binding.cohort_manifest_sha256}.{binding.binding_id}.json"
+            if _CC_READ(self, exact_name) != binding:
+                raise CohortImportConflict("cohort record binding changed")
+            publication = _PINNED_RESULT_PUBLICATION(
+                self._result_catalog,
+                binding.publication_id,
+                self._recovery_scope_sha256,
+            )
+            if (
+                publication is None
+                or publication.state != "adopted"
+                or publication.reference != binding.result
+            ):
+                raise CohortImportConflict(
+                    "cohort record publication ownership changed"
+                )
         linkage_snapshot_sha256 = hashlib.sha256(
             canonical_json_bytes(linkage_snapshot.model_dump(mode="json"))
         ).hexdigest()
@@ -1823,12 +2027,14 @@ _COHORT_METHOD_SEAL = MappingProxyType(
         name: getattr(CohortRecordCatalog, name)
         for name in (
             "_binding_equivalent",
+            "_bindings_for_manifest_body",
             "_fault",
             "_names_unlocked",
             "_read",
             "_read_pending",
             "_read_rollback_marker",
             "_recover_pending",
+            "_record_status_for_manifest_body",
             "_revalidate_publication",
             "_validate_catalog_authority",
             "_validate_manifest",
@@ -1908,12 +2114,14 @@ def _assert_cohort_runtime(
 
 _CC_ASSERT_RUNTIME = _assert_cohort_runtime
 _CC_BINDING_EQUIVALENT = CohortRecordCatalog._binding_equivalent
+_CC_BINDINGS_BODY = CohortRecordCatalog._bindings_for_manifest_body
 _CC_FAULT = CohortRecordCatalog._fault
 _CC_NAMES_UNLOCKED = CohortRecordCatalog._names_unlocked
 _CC_READ = CohortRecordCatalog._read
 _CC_READ_PENDING = CohortRecordCatalog._read_pending
 _CC_READ_ROLLBACK = CohortRecordCatalog._read_rollback_marker
 _CC_RECOVER_PENDING = CohortRecordCatalog._recover_pending
+_CC_STATUS_BODY = CohortRecordCatalog._record_status_for_manifest_body
 _CC_REVALIDATE_PUBLICATION = CohortRecordCatalog._revalidate_publication
 _CC_VALIDATE_CATALOG_AUTHORITY = CohortRecordCatalog._validate_catalog_authority
 _CC_VALIDATE_MANIFEST = CohortRecordCatalog._validate_manifest
@@ -1926,12 +2134,14 @@ _COHORT_ALIAS_SEAL = MappingProxyType(
         name: globals()[name]
         for name in (
             "_CC_BINDING_EQUIVALENT",
+            "_CC_BINDINGS_BODY",
             "_CC_FAULT",
             "_CC_NAMES_UNLOCKED",
             "_CC_READ",
             "_CC_READ_PENDING",
             "_CC_READ_ROLLBACK",
             "_CC_RECOVER_PENDING",
+            "_CC_STATUS_BODY",
             "_CC_REVALIDATE_PUBLICATION",
             "_CC_VALIDATE_CATALOG_AUTHORITY",
             "_CC_VALIDATE_MANIFEST",

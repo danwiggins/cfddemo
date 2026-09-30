@@ -59,7 +59,7 @@ _PINNED_TRUST_RESOLVE = TrustStore.resolve
 _PINNED_FAULT_SNAPSHOT = fault_controller_snapshot
 _PINNED_FAULT_HIT = DeterministicFaultController.hit
 
-CATALOG_SCHEMA_VERSION = 2
+CATALOG_SCHEMA_VERSION = 3
 MAX_IMPORT_ROOTS = 8
 MAX_IMPORT_DEPTH = 4
 MAX_QUERY_LIMIT = 100
@@ -127,11 +127,39 @@ _CATALOG_SCHEMA_SQL = {
     ("index", "result_publications_state"): (
         "CREATE INDEX result_publications_state ON result_publications(state, result_id)"
     ),
+    ("table", "coordinated_candidates"): """CREATE TABLE coordinated_candidates(
+        operation_id TEXT PRIMARY KEY,
+        publication_id TEXT NOT NULL,
+        result_id TEXT NOT NULL,
+        recovery_scope_sha256 TEXT NOT NULL,
+        candidate_json BLOB NOT NULL,
+        FOREIGN KEY(publication_id) REFERENCES result_publications(publication_id)
+            ON DELETE CASCADE
+    )""",
+    ("index", "coordinated_candidates_scope"): (
+        "CREATE INDEX coordinated_candidates_scope ON coordinated_candidates("
+        "recovery_scope_sha256, operation_id)"
+    ),
+}
+
+_CATALOG_SCHEMA_SQL_V2 = {
+    key: value
+    for key, value in _CATALOG_SCHEMA_SQL.items()
+    if key
+    not in {
+        ("table", "coordinated_candidates"),
+        ("index", "coordinated_candidates_scope"),
+    }
 }
 
 _CATALOG_SCHEMA_SIGNATURE_V1 = {
     key: _normalize_schema_sql(statement)
     for key, statement in _CATALOG_SCHEMA_SQL_V1.items()
+}
+
+_CATALOG_SCHEMA_SIGNATURE_V2 = {
+    key: _normalize_schema_sql(statement)
+    for key, statement in _CATALOG_SCHEMA_SQL_V2.items()
 }
 
 _CATALOG_SCHEMA_SIGNATURE = {
@@ -426,6 +454,23 @@ class PendingCatalogPublication(CatalogModel):
     publication_id: PublicationId
     reference: CatalogResultRef
     state: Literal["pending", "adopted"]
+
+
+class CoordinatedCatalogCandidate(CatalogModel):
+    """Durable identity of one incomplete coordinator publication attempt."""
+
+    schema_version: Literal["traceback.coordinated-catalog-candidate.v1"] = (
+        "traceback.coordinated-catalog-candidate.v1"
+    )
+    operation_id: Annotated[str, StringConstraints(pattern=r"^candidate_[0-9a-f]{64}$")]
+    publication_id: PublicationId
+    result_id: ResultId
+    recovery_scope_sha256: Sha256
+    cohort_manifest_sha256: Sha256
+    binding_id: Annotated[str, StringConstraints(pattern=r"^binding_[0-9a-f]{64}$")]
+    final_name: str = Field(min_length=1, max_length=160)
+    binding_sha256: Sha256
+    marker_sha256: Sha256
 
 
 class CatalogOrder(StrEnum):
@@ -1159,7 +1204,7 @@ class ResultCatalog:
                         (str(CATALOG_SCHEMA_VERSION),),
                     )
                 else:
-                    self._migrate_v1(connection)
+                    self._migrate_schema(connection)
                 self._validate_schema(connection)
                 connection.commit()
             except BaseException as error:
@@ -1175,7 +1220,7 @@ class ResultCatalog:
         _RC_VALIDATE_STORAGE(self)
 
     @staticmethod
-    def _migrate_v1(connection: sqlite3.Connection) -> None:
+    def _migrate_schema(connection: sqlite3.Connection) -> None:
         try:
             schema = {
                 (row[0], row[1]): _normalize_schema_sql(row[2])
@@ -1194,13 +1239,28 @@ class ResultCatalog:
             ).fetchone()[0]
         except sqlite3.DatabaseError:
             raise CatalogUnsupportedSchema("catalog schema is unsupported") from None
-        if row is None or row[0] != "1":
-            return
-        if schema != _CATALOG_SCHEMA_SIGNATURE_V1 or metadata_count != 1:
+        if row is None or metadata_count != 1:
             raise CatalogUnsupportedSchema("catalog schema is unsupported")
-        connection.execute(_CATALOG_SCHEMA_SQL[("table", "result_publications")])
-        connection.execute(_CATALOG_SCHEMA_SQL[("table", "coordinated_results")])
-        connection.execute(_CATALOG_SCHEMA_SQL[("index", "result_publications_state")])
+        if row[0] == "1":
+            if schema != _CATALOG_SCHEMA_SIGNATURE_V1:
+                raise CatalogUnsupportedSchema("catalog schema is unsupported")
+            connection.execute(_CATALOG_SCHEMA_SQL[("table", "result_publications")])
+            connection.execute(_CATALOG_SCHEMA_SQL[("table", "coordinated_results")])
+            connection.execute(
+                _CATALOG_SCHEMA_SQL[("index", "result_publications_state")]
+            )
+            schema = _CATALOG_SCHEMA_SIGNATURE_V2
+        elif row[0] == "2":
+            if schema != _CATALOG_SCHEMA_SIGNATURE_V2:
+                raise CatalogUnsupportedSchema("catalog schema is unsupported")
+        elif row[0] == str(CATALOG_SCHEMA_VERSION):
+            return
+        else:
+            raise CatalogUnsupportedSchema("catalog schema is unsupported")
+        connection.execute(_CATALOG_SCHEMA_SQL[("table", "coordinated_candidates")])
+        connection.execute(
+            _CATALOG_SCHEMA_SQL[("index", "coordinated_candidates_scope")]
+        )
         connection.execute(
             "UPDATE metadata SET value=? WHERE key='schema_version'",
             (str(CATALOG_SCHEMA_VERSION),),
@@ -1471,6 +1531,8 @@ class ResultCatalog:
         if _capability_is_revoked(registry, capability):
             raise CatalogError("revoked method authority cannot be cataloged")
         aliases = CatalogAliases.model_validate_json(canonical_json_bytes(aliases))
+        if type(recovery_scope_sha256) is not str:
+            raise CatalogConflict("catalog recovery scope is invalid")
         try:
             recovery_scope_sha256 = TypeAdapter(Sha256).validate_python(
                 recovery_scope_sha256
@@ -1535,8 +1597,10 @@ class ResultCatalog:
             already_owned = False
             publication_id = ""
             with _RC_CONNECT(self) as connection:
-                existing = connection.execute(
-                    """SELECT r.ref_json, a.display_alias, a.run_alias,
+                connection.execute("BEGIN")
+                try:
+                    existing = connection.execute(
+                        """SELECT r.ref_json, a.display_alias, a.run_alias,
                               a.timepoint_alias,
                               EXISTS(SELECT 1 FROM coordinated_results c
                                      WHERE c.result_id=r.result_id),
@@ -1546,12 +1610,23 @@ class ResultCatalog:
                        FROM results r
                        LEFT JOIN opaque_aliases a ON a.result_id=r.result_id
                        WHERE r.result_id=? OR r.bundle_sha256=? OR r.bundle_record_id=?""",
-                    (
-                        reference.result_id,
-                        reference.bundle_sha256,
-                        reference.bundle_record_id,
-                    ),
-                ).fetchone()
+                        (
+                            reference.result_id,
+                            reference.bundle_sha256,
+                            reference.bundle_record_id,
+                        ),
+                    ).fetchone()
+                    owner = None
+                    if existing is not None:
+                        owner = connection.execute(
+                            """SELECT publication_id, state FROM result_publications
+                           WHERE result_id=? AND recovery_scope_sha256=?""",
+                            (reference.result_id, recovery_scope_sha256),
+                        ).fetchone()
+                    connection.commit()
+                except BaseException:
+                    connection.rollback()
+                    raise
             if existing is not None:
                 parsed = CatalogResultRef.model_validate_json(existing[0])
                 if parsed != reference or tuple(existing[1:4]) != (
@@ -1561,11 +1636,6 @@ class ResultCatalog:
                 ):
                     raise CatalogConflict("catalog identity conflict")
                 already_visible = not bool(existing[4]) or bool(existing[5])
-                owner = connection.execute(
-                    """SELECT publication_id, state FROM result_publications
-                       WHERE result_id=? AND recovery_scope_sha256=?""",
-                    (reference.result_id, recovery_scope_sha256),
-                ).fetchone()
                 if owner is not None:
                     if owner[1] != "adopted":
                         raise CatalogConflict("catalog result publication is pending")
@@ -1864,6 +1934,104 @@ class ResultCatalog:
                     raise
         self._prepared_imports.pop(normalized.publication_id, None)
 
+    def register_coordinated_candidate(
+        self,
+        prepared: PreparedCatalogImport,
+        candidate: CoordinatedCatalogCandidate,
+    ) -> None:
+        """Durably bind one exact coordinator attempt before filesystem visibility."""
+
+        if (
+            type(prepared) is not PreparedCatalogImport
+            or type(candidate) is not CoordinatedCatalogCandidate
+        ):
+            raise CatalogConflict("catalog candidate is invalid")
+        normalized = _RC_REQUIRE_PREPARED(self, prepared)
+        if (
+            candidate.publication_id != normalized.publication_id
+            or candidate.result_id != normalized.reference.result_id
+            or candidate.recovery_scope_sha256 != normalized.recovery_scope_sha256
+        ):
+            raise CatalogConflict("catalog candidate conflicts with preparation")
+        encoded = canonical_json_bytes(candidate)
+        with _RC_CONNECT(self) as connection:
+            connection.execute("BEGIN IMMEDIATE")
+            try:
+                row = connection.execute(
+                    "SELECT candidate_json FROM coordinated_candidates WHERE operation_id=?",
+                    (candidate.operation_id,),
+                ).fetchone()
+                if row is None:
+                    connection.execute(
+                        "INSERT INTO coordinated_candidates VALUES(?,?,?,?,?)",
+                        (
+                            candidate.operation_id,
+                            candidate.publication_id,
+                            candidate.result_id,
+                            candidate.recovery_scope_sha256,
+                            encoded,
+                        ),
+                    )
+                elif bytes(row[0]) != encoded:
+                    raise CatalogConflict("catalog candidate identity conflicts")
+                connection.commit()
+            except BaseException:
+                connection.rollback()
+                raise
+
+    def coordinated_candidates(
+        self, recovery_scope_sha256: str
+    ) -> tuple[CoordinatedCatalogCandidate, ...]:
+        """Enumerate bounded durable incomplete attempts for one coordinator root."""
+
+        if type(recovery_scope_sha256) is not str:
+            raise CatalogConflict("catalog recovery scope is invalid")
+        try:
+            scope = TypeAdapter(Sha256).validate_python(recovery_scope_sha256)
+        except Exception:  # noqa: BLE001 - normalize hostile scope
+            raise CatalogConflict("catalog recovery scope is invalid") from None
+        with _RC_CONNECT(self) as connection:
+            rows = connection.execute(
+                """SELECT candidate_json FROM coordinated_candidates
+                   WHERE recovery_scope_sha256=? ORDER BY operation_id LIMIT ?""",
+                (scope, MAX_QUERY_LIMIT * 1000 + 1),
+            ).fetchall()
+        if len(rows) > MAX_QUERY_LIMIT * 1000:
+            raise CatalogConflict("catalog candidate recovery bound exceeded")
+        try:
+            return tuple(
+                CoordinatedCatalogCandidate.model_validate_json(row[0]) for row in rows
+            )
+        except Exception:  # noqa: BLE001 - normalize hostile database content
+            raise CatalogConflict("catalog candidate is invalid") from None
+
+    def finish_coordinated_candidate(
+        self, candidate: CoordinatedCatalogCandidate
+    ) -> None:
+        """Remove the exact candidate row; this is the durable commit point."""
+
+        if type(candidate) is not CoordinatedCatalogCandidate:
+            raise CatalogConflict("catalog candidate is invalid")
+        encoded = canonical_json_bytes(candidate)
+        with _RC_CONNECT(self) as connection:
+            connection.execute("BEGIN IMMEDIATE")
+            try:
+                row = connection.execute(
+                    "SELECT candidate_json FROM coordinated_candidates WHERE operation_id=?",
+                    (candidate.operation_id,),
+                ).fetchone()
+                if row is not None:
+                    if bytes(row[0]) != encoded:
+                        raise CatalogConflict("catalog candidate identity conflicts")
+                    connection.execute(
+                        "DELETE FROM coordinated_candidates WHERE operation_id=?",
+                        (candidate.operation_id,),
+                    )
+                connection.commit()
+            except BaseException:
+                connection.rollback()
+                raise
+
     def recover_pending_publication(
         self,
         *,
@@ -1874,6 +2042,12 @@ class ResultCatalog:
     ) -> Literal["absent", "pending_removed", "adopted"]:
         """Idempotently remove an exact pending publication after process recovery."""
 
+        if type(publication_id) is not str or type(recovery_scope_sha256) is not str:
+            raise CatalogConflict("catalog publication identity is invalid")
+        if type(retain_adopted) is not bool:
+            raise CatalogConflict("catalog recovery disposition is invalid")
+        if type(reference) is not CatalogResultRef:
+            raise CatalogConflict("catalog reference is invalid")
         reference = CatalogResultRef.model_validate_json(
             canonical_json_bytes(reference)
         )
@@ -1913,6 +2087,8 @@ class ResultCatalog:
     ) -> tuple[PendingCatalogPublication, ...]:
         """Enumerate bounded hidden rows so a coordinator can recover without a journal."""
 
+        if type(recovery_scope_sha256) is not str:
+            raise CatalogConflict("catalog recovery scope is invalid")
         try:
             scope = TypeAdapter(Sha256).validate_python(recovery_scope_sha256)
         except Exception:  # noqa: BLE001 - normalize hostile recovery scope
@@ -1948,6 +2124,8 @@ class ResultCatalog:
     ) -> tuple[PendingCatalogPublication, ...]:
         """Enumerate bounded coordinator-owned publication rows for reconciliation."""
 
+        if type(recovery_scope_sha256) is not str:
+            raise CatalogConflict("catalog recovery scope is invalid")
         try:
             scope = TypeAdapter(Sha256).validate_python(recovery_scope_sha256)
         except Exception:  # noqa: BLE001 - normalize hostile recovery scope
@@ -1982,6 +2160,8 @@ class ResultCatalog:
     ) -> PendingCatalogPublication | None:
         """Resolve one durable publication identity without trusting journal bytes."""
 
+        if type(publication_id) is not str or type(recovery_scope_sha256) is not str:
+            raise CatalogConflict("catalog publication identity is invalid")
         try:
             publication_id = TypeAdapter(PublicationId).validate_python(publication_id)
             scope = TypeAdapter(Sha256).validate_python(recovery_scope_sha256)
@@ -2239,11 +2419,14 @@ _RESULT_METHOD_SEAL = MappingProxyType(
             "adopt_prepared_import",
             "authority_snapshot",
             "compensate_prepared_import",
+            "coordinated_candidates",
             "finish_prepared_import",
+            "finish_coordinated_candidate",
             "pending_publications",
             "prepare_bundle_import",
             "publication_for_recovery",
             "query",
+            "register_coordinated_candidate",
             "recover_pending_publication",
             "recovery_publications",
             "stage_prepared_import",
