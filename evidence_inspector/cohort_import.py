@@ -621,7 +621,12 @@ class CohortRecordCatalog:
                         "cohort record recovery inventory exceeds its bound"
                     )
 
-                def purge_files(publication_id: str, journal_name: str) -> None:
+                def purge_files(
+                    publication_id: str,
+                    journal_name: str,
+                    *,
+                    remove_all_publication_bindings: bool = True,
+                ) -> None:
                     journal_inode: tuple[int, int] | None = None
                     try:
                         journal_stat = os.stat(
@@ -653,7 +658,11 @@ class CohortRecordCatalog:
                             metadata.st_ino,
                         )
                         matches_publication = False
-                        if stat.S_ISREG(metadata.st_mode) and metadata.st_nlink == 1:
+                        if (
+                            remove_all_publication_bindings
+                            and stat.S_ISREG(metadata.st_mode)
+                            and metadata.st_nlink == 1
+                        ):
                             try:
                                 matches_publication = (
                                     _CC_READ(self, name).publication_id
@@ -675,11 +684,39 @@ class CohortRecordCatalog:
                         os.unlink(journal_name, dir_fd=self._root_fd)
                     os.fsync(self._root_fd)
 
+                def has_committed_peer(
+                    publication_id: PublicationId, candidate_final: str
+                ) -> bool:
+                    for name in entries:
+                        if name == candidate_final or name.startswith("."):
+                            continue
+                        try:
+                            peer = _CC_READ(self, name)
+                        except CohortImportFilesystemError:
+                            continue
+                        if peer.publication_id == publication_id:
+                            return True
+                    return False
+
                 rollback_names = tuple(
                     name for name in entries if name.startswith(".rollback.")
                 )
                 for rollback_name in rollback_names:
                     publication_id = _CC_READ_ROLLBACK(self, rollback_name)
+                    pending_name = f".pending.{publication_id}.json"
+                    try:
+                        rollback_binding = _CC_READ_PENDING(self, pending_name)
+                    except CohortImportFilesystemError:
+                        rollback_binding = None
+                    retain_owner = False
+                    if rollback_binding is not None:
+                        candidate_final = (
+                            f"{rollback_binding.cohort_manifest_sha256}."
+                            f"{rollback_binding.binding_id}.json"
+                        )
+                        retain_owner = has_committed_peer(
+                            publication_id, candidate_final
+                        )
                     durable = _PINNED_RESULT_PUBLICATION(
                         self._result_catalog,
                         publication_id,
@@ -691,9 +728,13 @@ class CohortRecordCatalog:
                             publication_id=durable.publication_id,
                             reference=durable.reference,
                             recovery_scope_sha256=self._recovery_scope_sha256,
-                            retain_adopted=False,
+                            retain_adopted=retain_owner,
                         )
-                    purge_files(publication_id, f".pending.{publication_id}.json")
+                    purge_files(
+                        publication_id,
+                        pending_name,
+                        remove_all_publication_bindings=(rollback_binding is None),
+                    )
                     os.unlink(rollback_name, dir_fd=self._root_fd)
                     os.fsync(self._root_fd)
 
@@ -773,56 +814,24 @@ class CohortRecordCatalog:
                     final_name = (
                         f"{binding.cohort_manifest_sha256}.{binding.binding_id}.json"
                     )
-                    state = _PINNED_RESULT_RECOVER(
+                    retain_owner = has_committed_peer(
+                        binding.publication_id, final_name
+                    )
+                    _PINNED_RESULT_RECOVER(
                         self._result_catalog,
                         publication_id=binding.publication_id,
                         reference=binding.result,
                         recovery_scope_sha256=self._recovery_scope_sha256,
+                        retain_adopted=retain_owner,
                     )
-                    keep = state == "adopted"
-                    final_exists = False
-                    try:
-                        os.stat(final_name, dir_fd=self._root_fd, follow_symlinks=False)
-                        final_exists = True
-                    except FileNotFoundError:
-                        pass
-                    if keep and final_exists:
-                        pending_stat = os.stat(
-                            pending_name,
-                            dir_fd=self._root_fd,
-                            follow_symlinks=False,
-                        )
-                        final_stat = os.stat(
-                            final_name,
-                            dir_fd=self._root_fd,
-                            follow_symlinks=False,
-                        )
-                        keep = (
-                            (pending_stat.st_dev, pending_stat.st_ino)
-                            == (final_stat.st_dev, final_stat.st_ino)
-                            and pending_stat.st_nlink == 2
-                            and final_stat.st_nlink == 2
-                        )
-                    if keep and final_exists:
-                        os.unlink(pending_name, dir_fd=self._root_fd)
-                        os.fsync(self._root_fd)
-                        if _CC_READ(self, final_name) != binding:
-                            raise CohortImportConflict(
-                                "recovered cohort publication conflicts"
-                            )
-                        continue
-                    if state == "adopted":
-                        _PINNED_RESULT_RECOVER(
-                            self._result_catalog,
-                            publication_id=binding.publication_id,
-                            reference=binding.result,
-                            recovery_scope_sha256=self._recovery_scope_sha256,
-                            retain_adopted=False,
-                        )
-                    if final_exists:
-                        os.unlink(final_name, dir_fd=self._root_fd)
-                    os.unlink(pending_name, dir_fd=self._root_fd)
-                    os.fsync(self._root_fd)
+                    # A retained journal is always an incomplete import. Remove
+                    # only its hard-linked candidate; a committed peer may keep
+                    # the pre-existing ownership row.
+                    purge_files(
+                        binding.publication_id,
+                        pending_name,
+                        remove_all_publication_bindings=False,
+                    )
                 valid_publications: set[str] = set()
                 valid_result_ids: set[str] = set()
                 for name in tuple(sorted(os.listdir(self._root_fd))):

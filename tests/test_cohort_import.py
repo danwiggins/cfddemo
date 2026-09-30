@@ -1284,6 +1284,52 @@ def test_crash_recovery_reconciles_journal_and_catalog_publication(
         results.close()
 
 
+def test_adopted_pending_without_marker_rolls_back_as_incomplete(
+    tmp_path: Path, live
+) -> None:
+    values = _setup(
+        tmp_path,
+        live,
+        DeterministicFaultController(
+            "after_visibility_commit", action=FaultAction.EXIT, exit_code=75
+        ),
+    )
+    pid = os.fork()
+    if pid == 0:  # pragma: no cover - abrupt crash path
+        _import(values)
+        os._exit(76)
+    _, status = os.waitpid(pid, 0)
+    assert os.waitstatus_to_exitcode(status) == 75
+    values[0].close()
+    values[1].close()
+    markers = tuple((tmp_path / "cohort-records").glob(".rollback.*"))
+    assert len(markers) == 1
+    markers[0].unlink()
+    assert len(tuple((tmp_path / "cohort-records").glob(".pending.*"))) == 1
+
+    results = ResultCatalog(
+        tmp_path / "results",
+        import_roots={"root_primary": tmp_path / "imports"},
+        trust_store=values[6],
+        reader_registry=DEFAULT_RESULT_BUNDLE_READER_REGISTRY,
+    )
+    cohorts = CohortRecordCatalog(
+        tmp_path / "cohort-records",
+        result_catalog=results,
+        linkage_store=live[0],
+        expected_trust_snapshot_sha256_by_provider=_pins(),
+        reader_registry=DEFAULT_RESULT_BUNDLE_READER_REGISTRY,
+    )
+    try:
+        recovered = cohorts.record_status_for_manifest((values[2],))
+        assert recovered.members[0].availability is CohortRecordAvailability.MISSING
+        assert results.query(CatalogQuery()).empty
+        assert tuple((tmp_path / "cohort-records").iterdir()) == ()
+    finally:
+        cohorts.close()
+        results.close()
+
+
 def test_failed_cleanup_preserves_durable_rollback_intent(
     tmp_path: Path, live, monkeypatch: pytest.MonkeyPatch
 ) -> None:

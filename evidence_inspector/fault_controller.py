@@ -11,7 +11,6 @@ import os
 import threading
 from enum import StrEnum
 
-
 FAULT_POINTS = frozenset(
     {
         "after_bundle_snapshot",
