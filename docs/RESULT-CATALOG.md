@@ -30,6 +30,24 @@ unreferenced object, which a retry verifies and safely adopts. Garbage
 collection is deliberately absent until it can coordinate reference proof with
 all importers under the same catalog lock.
 
+Coordinators that must publish a second local index use the prepared-import
+protocol. Preparation verifies and retains the immutable object without adding
+a visible row. Staging adds a durable `pending` row that queries and reference
+verification exclude. Adoption verifies package-owned catalog authority and
+changes that exact publication to `adopted` inside one immediate transaction;
+it accepts and executes no caller callback. A coordinating catalog performs its
+own authority checks on both sides while holding its publication lock.
+Compensation removes only the exact publication's index
+references and never removes the content-addressed object. A v1 catalog is
+expanded transactionally to this v2 publication table after its original schema
+has been verified exactly.
+
+Recovery can enumerate bounded hidden publications for one digest-bound
+coordinator scope and resolve one publication from the exact SQLite schema
+without trusting a filesystem journal. This lets a
+coordinator compensate a pending row after journal loss or corruption and keeps
+retry idempotent while retaining the immutable shared object.
+
 The catalog root, object directory, and database inode are retained and
 revalidated on operations. Staging creation and publication are relative to the
 bound object-directory descriptor, so path replacement cannot redirect accepted
@@ -68,6 +86,13 @@ method, state, and exact opaque-alias selectors, deterministic result-ID order,
 keyset cursors, and a maximum page size of 100. Empty pages distinguish an empty
 catalog from a filtered query with no matches using a bounded existence probe,
 not a full-table count.
+
+Exact-ID live reads use the same visibility rule as catalog pages: a
+coordinator-staged result is absent until its publication is adopted. Lookup,
+bundle and authority verification, and the final exact-row visibility check run
+under one SQLite writer fence, so recovery cannot remove adoption between
+verification and return. Pending, recovered, and unknown IDs all return the
+same unavailable outcome without exposing hidden row existence.
 
 ## Scope
 

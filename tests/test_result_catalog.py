@@ -8,12 +8,17 @@ import shutil
 import sqlite3
 import threading
 import time
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from pathlib import Path
 
 import pytest
-import evidence_inspector.result_catalog as catalog_module
 
+import evidence_inspector.result_catalog as catalog_module
+from evidence_inspector.fault_controller import (
+    DeterministicFaultController,
+    FaultAction,
+    InjectedFault,
+)
 from evidence_inspector.method_registry import (
     DisplayRole,
     QualificationState,
@@ -29,18 +34,19 @@ from evidence_inspector.result_catalog import (
     CatalogError,
     CatalogFilesystemError,
     CatalogOrder,
-    CatalogQuery,
     CatalogQualificationState,
+    CatalogQuery,
     CatalogResultRef,
     CatalogUnsupportedSchema,
+    CatalogVerificationContext,
     ExecutionState,
     InformationState,
     ResultCatalog,
     TrustState,
     _copy_exact_bundle,
+    bind_catalog_live_reader,
 )
 from tests.test_bundles import _bundle, _downgrade_to_v1
-from traceback_runner.bundles import verify_bundle
 from tests.test_method_registry import (
     T0,
     T1,
@@ -52,7 +58,7 @@ from tests.test_method_registry import (
     _revoke_qualification,
     _role,
 )
-
+from traceback_runner.bundles import verify_bundle
 
 ALIASES = CatalogAliases(
     display_alias="dsp_aaaaaaaa",
@@ -101,7 +107,10 @@ def _bundle_method(capability) -> dict[str, str]:
     }
 
 
-def _catalog(tmp_path: Path, *, fault=None):
+def _catalog(
+    tmp_path: Path,
+    fault_controller: DeterministicFaultController | None = None,
+):
     import_root = tmp_path / "imports"
     import_root.mkdir(parents=True)
     *_, capability = _authority()
@@ -112,9 +121,28 @@ def _catalog(tmp_path: Path, *, fault=None):
         tmp_path / "catalog",
         import_roots={"root_primary": import_root},
         trust_store=trust_store,
-        fault_injector=fault,
+        **({"fault_controller": fault_controller} if fault_controller else {}),
     )
     return catalog, bundle_path, import_root
+
+
+def _paused_error(controller, operation, mutation) -> BaseException:
+    errors: list[BaseException] = []
+
+    def run() -> None:
+        try:
+            operation()
+        except BaseException as error:  # noqa: BLE001 - exact thread outcome
+            errors.append(error)
+
+    worker = threading.Thread(target=run)
+    worker.start()
+    assert controller.wait_until_reached()
+    mutation()
+    controller.release()
+    worker.join(timeout=10)
+    assert not worker.is_alive() and len(errors) == 1
+    return errors[0]
 
 
 def _import(catalog: ResultCatalog, **updates):
@@ -130,6 +158,252 @@ def _import(catalog: ResultCatalog, **updates):
     }
     values.update(updates)
     return catalog.import_bundle(**values)
+
+
+def _prepare(catalog: ResultCatalog):
+    registry, _, _, _, head, head_sha256, capability = _authority()
+    return catalog.prepare_bundle_import(
+        root_id="root_primary",
+        relative_path="incoming/record",
+        registry=registry,
+        authority_head=head,
+        expected_authority_head_sha256=head_sha256,
+        capability=capability,
+        aliases=ALIASES,
+        recovery_scope_sha256="c" * 64,
+    )
+
+
+def _verification_context() -> CatalogVerificationContext:
+    registry, _, _, _, head, head_sha256, capability = _authority()
+    return CatalogVerificationContext(
+        registry=registry,
+        authority_head=head,
+        expected_authority_head_sha256=head_sha256,
+        capability=capability,
+    )
+
+
+def test_prepared_publication_is_hidden_until_atomic_adoption(
+    tmp_path: Path,
+) -> None:
+    catalog, _, _ = _catalog(tmp_path)
+    prepared = _prepare(catalog)
+    catalog.stage_prepared_import(prepared)
+    assert catalog.query(CatalogQuery()).empty
+    with pytest.raises(CatalogConflict, match="not indexed"):
+        catalog.verify_reference(prepared.reference)
+    catalog.adopt_prepared_import(prepared)
+    assert catalog.query(CatalogQuery()).results == (prepared.reference,)
+    catalog.finish_prepared_import(prepared)
+
+
+def test_live_reader_never_exposes_pending_coordinated_result(tmp_path: Path) -> None:
+    catalog, _, _ = _catalog(tmp_path)
+    prepared = _prepare(catalog)
+    catalog.stage_prepared_import(prepared)
+    reader = bind_catalog_live_reader(catalog)
+    with pytest.raises(KeyError, match="unavailable"):
+        reader.get_verified(prepared.reference.result_id, _verification_context())
+    with pytest.raises(KeyError, match="unavailable"):
+        catalog.get_verified(prepared.reference.result_id, _verification_context())
+    assert catalog.query(CatalogQuery()).empty
+    catalog.adopt_prepared_import(prepared)
+    assert (
+        reader.get_verified(prepared.reference.result_id, _verification_context())
+        == prepared.reference
+    )
+
+
+def test_live_reader_fences_recovery_until_verified_return(tmp_path: Path) -> None:
+    controller = DeterministicFaultController(
+        "before_live_reader_return", action=FaultAction.PAUSE
+    )
+    catalog, _, _ = _catalog(tmp_path, controller)
+    prepared = _prepare(catalog)
+    catalog.stage_prepared_import(prepared)
+    catalog.adopt_prepared_import(prepared)
+    reader = bind_catalog_live_reader(catalog)
+    returned: list[CatalogResultRef] = []
+    recovery_done = threading.Event()
+
+    read_thread = threading.Thread(
+        target=lambda: returned.append(
+            reader.get_verified(prepared.reference.result_id, _verification_context())
+        )
+    )
+    read_thread.start()
+    assert controller.wait_until_reached()
+
+    def recover() -> None:
+        catalog.recover_pending_publication(
+            publication_id=prepared.publication_id,
+            reference=prepared.reference,
+            recovery_scope_sha256=prepared.recovery_scope_sha256,
+            retain_adopted=False,
+        )
+        recovery_done.set()
+
+    recovery_thread = threading.Thread(target=recover)
+    recovery_thread.start()
+    assert not recovery_done.wait(timeout=0.1)
+    controller.release()
+    read_thread.join(timeout=10)
+    recovery_thread.join(timeout=10)
+    assert not read_thread.is_alive() and not recovery_thread.is_alive()
+    assert returned == [prepared.reference]
+    assert recovery_done.is_set()
+    with pytest.raises(KeyError, match="unavailable"):
+        bind_catalog_live_reader(catalog).get_verified(
+            prepared.reference.result_id, _verification_context()
+        )
+
+
+def test_recovery_rejects_hostile_scalar_subclasses_before_dispatch(
+    tmp_path: Path,
+) -> None:
+    catalog, _, _ = _catalog(tmp_path)
+    prepared = _prepare(catalog)
+    catalog.stage_prepared_import(prepared)
+    hooks: list[str] = []
+
+    class HostileString(str):
+        def __bool__(self):
+            hooks.append("bool")
+            return True
+
+        def __str__(self):
+            hooks.append("str")
+            return super().__str__()
+
+        def __repr__(self):
+            hooks.append("repr")
+            return super().__repr__()
+
+        def __eq__(self, other):
+            hooks.append("eq")
+            return super().__eq__(other)
+
+    class HostileBool:
+        def __bool__(self):
+            hooks.append("bool-object")
+            return True
+
+    before = catalog.pending_publications("c" * 64)
+    with pytest.raises(CatalogConflict):
+        catalog.recover_pending_publication(
+            publication_id=HostileString(prepared.publication_id),
+            reference=prepared.reference,
+            recovery_scope_sha256="c" * 64,
+            retain_adopted=False,
+        )
+    with pytest.raises(CatalogConflict):
+        catalog.recover_pending_publication(
+            publication_id=prepared.publication_id,
+            reference=prepared.reference,
+            recovery_scope_sha256="c" * 64,
+            retain_adopted=HostileBool(),  # type: ignore[arg-type]
+        )
+    assert hooks == []
+    assert catalog.pending_publications("c" * 64) == before
+
+
+@pytest.mark.parametrize(
+    "method_name",
+    (
+        "register_coordinated_candidate",
+        "coordinated_candidates",
+        "finish_coordinated_candidate",
+    ),
+)
+def test_runtime_authority_check_does_not_invoke_hostile_descriptors(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    method_name: str,
+) -> None:
+    catalog, _, _ = _catalog(tmp_path)
+    hooks: list[str] = []
+
+    class HostileDescriptor:
+        def __get__(self, instance, owner):
+            hooks.append(method_name)
+            raise AssertionError("descriptor executed")
+
+    monkeypatch.setattr(ResultCatalog, method_name, HostileDescriptor())
+    with pytest.raises(CatalogError, match="authority callable"):
+        catalog_module._RC_ASSERT_RUNTIME(catalog)
+    assert hooks == []
+
+
+def test_prepared_adoption_rejects_caller_callbacks_without_execution(
+    tmp_path: Path,
+) -> None:
+    catalog, _, _ = _catalog(tmp_path)
+    prepared = _prepare(catalog)
+    catalog.stage_prepared_import(prepared)
+    executed: list[str] = []
+
+    class MaliciousCallable:
+        def __call__(self, point: str) -> None:
+            executed.append(point)
+
+    for callback in (executed.append, MaliciousCallable()):
+        with pytest.raises(TypeError, match="unexpected keyword"):
+            catalog.adopt_prepared_import(  # type: ignore[call-arg]
+                prepared, revalidate=callback
+            )
+        assert executed == []
+        assert catalog.query(CatalogQuery()).empty
+
+    catalog.adopt_prepared_import(prepared)
+    assert catalog.query(CatalogQuery()).results == (prepared.reference,)
+    catalog.finish_prepared_import(prepared)
+
+
+def test_result_catalog_rejects_mutated_fault_lock_without_dispatch(
+    tmp_path: Path,
+) -> None:
+    calls: list[str] = []
+
+    class Hook:
+        def __enter__(self):
+            calls.append("enter")
+            raise AssertionError
+
+        def __exit__(self, *_args):
+            calls.append("exit")
+            raise AssertionError
+
+    import_root = tmp_path / "imports"
+    import_root.mkdir()
+    *_, capability = _authority()
+    _, _, trust_store = _bundle(
+        import_root / "incoming", method=_bundle_method(capability)
+    )
+    controller = DeterministicFaultController("after_bundle_snapshot")
+    catalog = ResultCatalog(
+        tmp_path / "catalog",
+        import_roots={"root_primary": import_root},
+        trust_store=trust_store,
+        fault_controller=controller,
+    )
+    object.__setattr__(controller, "_lock", Hook())
+    with pytest.raises(CatalogError, match="fault controller changed"):
+        _import(catalog)
+    assert calls == []
+    assert catalog.query(CatalogQuery()).empty
+
+
+def test_prepared_publication_compensation_retains_shared_object(
+    tmp_path: Path,
+) -> None:
+    catalog, _, _ = _catalog(tmp_path)
+    prepared = _prepare(catalog)
+    object_path = tmp_path / "catalog/objects" / prepared.reference.bundle_sha256
+    catalog.stage_prepared_import(prepared)
+    catalog.compensate_prepared_import(prepared)
+    assert catalog.query(CatalogQuery()).empty
+    assert object_path.is_dir()
 
 
 def test_import_is_idempotent_private_and_selectable(tmp_path: Path) -> None:
@@ -226,54 +500,63 @@ def test_import_rejects_source_mutation_and_root_swap(tmp_path: Path) -> None:
     mutation_root.mkdir()
     bundle, _, trust = _bundle(mutation_root / "incoming")
 
-    def mutate(point: str) -> None:
-        if point == "after_bundle_snapshot":
-            (bundle / "report.html").write_bytes(b"changed")
-
+    mutation_fault = DeterministicFaultController(
+        "after_bundle_snapshot", action=FaultAction.PAUSE
+    )
     catalog = ResultCatalog(
         tmp_path / "mutation-catalog",
         import_roots={"root_primary": mutation_root},
         trust_store=trust,
-        fault_injector=mutate,
+        fault_controller=mutation_fault,
     )
-    with pytest.raises(CatalogFilesystemError, match="changed"):
-        _import(catalog)
+    error = _paused_error(
+        mutation_fault,
+        lambda: _import(catalog),
+        lambda: (bundle / "report.html").write_bytes(b"changed"),
+    )
+    assert isinstance(error, CatalogFilesystemError) and "changed" in str(error)
 
     path_root = tmp_path / "path-swap"
     path_root.mkdir()
     path_bundle, _, path_trust = _bundle(path_root / "incoming")
 
-    def swap_path(point: str) -> None:
-        if point == "after_bundle_snapshot":
-            path_bundle.rename(path_bundle.with_name("old-record"))
-            path_bundle.mkdir()
-
+    path_fault = DeterministicFaultController(
+        "after_bundle_snapshot", action=FaultAction.PAUSE
+    )
     path_swapped = ResultCatalog(
         tmp_path / "path-swap-catalog",
         import_roots={"root_primary": path_root},
         trust_store=path_trust,
-        fault_injector=swap_path,
+        fault_controller=path_fault,
     )
-    with pytest.raises(CatalogFilesystemError, match="path changed"):
-        _import(path_swapped)
+
+    def swap_path() -> None:
+        path_bundle.rename(path_bundle.with_name("old-record"))
+        path_bundle.mkdir()
+
+    error = _paused_error(path_fault, lambda: _import(path_swapped), swap_path)
+    assert isinstance(error, CatalogFilesystemError) and "path changed" in str(error)
 
     swap_root = tmp_path / "swap"
     swap_root.mkdir()
     _, _, swap_trust = _bundle(swap_root / "incoming")
 
-    def swap(point: str) -> None:
-        if point == "after_bundle_snapshot":
-            swap_root.rename(tmp_path / "old-swap")
-            swap_root.mkdir()
-
+    root_fault = DeterministicFaultController(
+        "after_bundle_snapshot", action=FaultAction.PAUSE
+    )
     swapped = ResultCatalog(
         tmp_path / "swap-catalog",
         import_roots={"root_primary": swap_root},
         trust_store=swap_trust,
-        fault_injector=swap,
+        fault_controller=root_fault,
     )
-    with pytest.raises(CatalogFilesystemError, match="root changed"):
-        _import(swapped)
+
+    def swap() -> None:
+        swap_root.rename(tmp_path / "old-swap")
+        swap_root.mkdir()
+
+    error = _paused_error(root_fault, lambda: _import(swapped), swap)
+    assert isinstance(error, CatalogFilesystemError) and "root changed" in str(error)
 
 
 def test_conflict_and_crash_leave_no_partial_catalog_state(tmp_path: Path) -> None:
@@ -318,23 +601,17 @@ def test_conflict_and_crash_leave_no_partial_catalog_state(tmp_path: Path) -> No
         )
     assert catalog.query(CatalogQuery()).results == (first,)
 
-    def fail(point: str) -> None:
-        if point == "before_catalog_commit":
-            raise OSError("synthetic crash")
-
     crash_root = tmp_path / "crash"
     crash_root.mkdir()
     *_, capability = _authority()
-    _, _, trust = _bundle(
-        crash_root / "incoming", method=_bundle_method(capability)
-    )
+    _, _, trust = _bundle(crash_root / "incoming", method=_bundle_method(capability))
     crashing = ResultCatalog(
         tmp_path / "crash-catalog",
         import_roots={"root_primary": crash_root},
         trust_store=trust,
-        fault_injector=fail,
+        fault_controller=DeterministicFaultController("before_catalog_commit"),
     )
-    with pytest.raises(OSError, match="synthetic crash"):
+    with pytest.raises(InjectedFault, match="before_catalog_commit"):
         _import(crashing)
     reopened = ResultCatalog(
         tmp_path / "crash-catalog",
@@ -351,23 +628,17 @@ def test_failed_publisher_never_unlinks_an_object_adopted_concurrently(
     import_root = tmp_path / "imports"
     import_root.mkdir()
     *_, capability = _authority()
-    _, _, trust = _bundle(
-        import_root / "incoming", method=_bundle_method(capability)
-    )
-    published = threading.Event()
+    _, _, trust = _bundle(import_root / "incoming", method=_bundle_method(capability))
     adopted = threading.Event()
-
-    def pause_then_fail(point: str) -> None:
-        if point == "after_object_publish":
-            published.set()
-            assert adopted.wait(timeout=10)
-            raise OSError("synthetic losing publisher")
+    controller = DeterministicFaultController(
+        "after_object_publish", action=FaultAction.PAUSE_RAISE
+    )
 
     first = ResultCatalog(
         tmp_path / "catalog",
         import_roots={"root_primary": import_root},
         trust_store=trust,
-        fault_injector=pause_then_fail,
+        fault_controller=controller,
     )
     second = ResultCatalog(
         tmp_path / "catalog",
@@ -379,38 +650,58 @@ def test_failed_publisher_never_unlinks_an_object_adopted_concurrently(
     def losing_import() -> None:
         try:
             _import(first)
-        except BaseException as error:
+        except BaseException as error:  # noqa: BLE001 - collect thread outcome
             errors.append(error)
 
     worker = threading.Thread(target=losing_import)
     worker.start()
-    assert published.wait(timeout=10)
+    assert controller.wait_until_reached()
     committed = _import(second)
     adopted.set()
+    controller.release()
     worker.join(timeout=10)
 
     assert not worker.is_alive()
     assert len(errors) == 1
-    assert isinstance(errors[0], OSError)
+    assert isinstance(errors[0], InjectedFault)
     object_path = second._bound_objects / committed.bundle_sha256
     assert object_path.is_dir()
-    assert verify_bundle(object_path, trust).manifest.record_id == committed.bundle_record_id
+    assert (
+        verify_bundle(object_path, trust).manifest.record_id
+        == committed.bundle_record_id
+    )
     assert second.query(CatalogQuery()).results == (committed,)
 
 
 def test_destination_and_database_replacement_fail_closed(tmp_path: Path) -> None:
-    catalog, _, _ = _catalog(tmp_path)
+    catalog, _, import_root = _catalog(tmp_path)
     original_root = catalog.root
     displaced_root = tmp_path / "displaced-catalog"
 
-    def replace_destination(point: str) -> None:
-        if point == "after_bundle_snapshot":
-            original_root.rename(displaced_root)
-            original_root.mkdir()
+    replacement = DeterministicFaultController(
+        "after_bundle_snapshot", action=FaultAction.PAUSE
+    )
+    with pytest.raises(AttributeError, match="read-only"):
+        catalog._fault_controller = replacement
+    assert not replacement.fired
+    catalog.close()
+    controller = DeterministicFaultController(
+        "after_bundle_snapshot", action=FaultAction.PAUSE
+    )
+    catalog = ResultCatalog(
+        original_root,
+        import_roots={"root_primary": import_root},
+        trust_store=catalog.trust_store,
+        fault_controller=controller,
+    )
 
-    catalog.fault_injector = replace_destination
-    with pytest.raises(CatalogFilesystemError, match="catalog root changed"):
-        _import(catalog)
+    def replace_destination() -> None:
+        original_root.rename(displaced_root)
+        original_root.mkdir()
+
+    error = _paused_error(controller, lambda: _import(catalog), replace_destination)
+    assert isinstance(error, CatalogFilesystemError)
+    assert "catalog root changed" in str(error)
     assert not list((displaced_root / "objects").glob("[0-9a-f]" * 64))
     catalog.close()
 
@@ -514,9 +805,7 @@ def test_sqlite_descriptor_proof_accepts_reused_fd_number(
         assert snapshot[reused_descriptor] != prior_identity
         return snapshot
 
-    monkeypatch.setattr(
-        catalog_module, "_open_descriptor_identities", force_reuse
-    )
+    monkeypatch.setattr(catalog_module, "_open_descriptor_identities", force_reuse)
     reopened = ResultCatalog(
         original_root,
         import_roots={"root_primary": import_root},
@@ -534,9 +823,7 @@ def test_simultaneous_fresh_catalog_constructors_are_atomic_and_usable(
     import_root = tmp_path / "imports"
     import_root.mkdir()
     *_, capability = _authority()
-    _, _, trust = _bundle(
-        import_root / "incoming", method=_bundle_method(capability)
-    )
+    _, _, trust = _bundle(import_root / "incoming", method=_bundle_method(capability))
     catalog_root = tmp_path / "catalog"
     barrier = threading.Barrier(2)
     catalogs: list[ResultCatalog] = []
@@ -552,7 +839,7 @@ def test_simultaneous_fresh_catalog_constructors_are_atomic_and_usable(
                     trust_store=trust,
                 )
             )
-        except BaseException as error:
+        except BaseException as error:  # noqa: BLE001 - collect thread outcome
             errors.append(error)
 
     workers = [threading.Thread(target=construct) for _ in range(2)]
@@ -786,7 +1073,7 @@ def _synthetic_ref(index: int) -> CatalogResultRef:
         authority_head_sha256="e" * 64,
         authority_revision=2,
         authority_scope="scope_provider_west",
-        capability_as_of=datetime(2026, 2, 1, tzinfo=timezone.utc),
+        capability_as_of=datetime(2026, 2, 1, tzinfo=UTC),
         qualification_state=CatalogQualificationState.QUALIFIED,
         display_role="provider_primary",
         research_inspectable=True,

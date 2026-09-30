@@ -39,7 +39,11 @@ from evidence_inspector.provider_linkage import (
 from evidence_inspector.provider_linkage_store import (
     CommittedLinkageReceipt,
     ProviderLinkageStore,
+    ProviderLinkageStoreUnsafe,
     committed_linkage_receipt_sha256,
+)
+from evidence_inspector.provider_linkage_store import (
+    capture_expected_trust_pins as _capture_expected_trust_pins,
 )
 
 MAX_MEMBERS = 100_000
@@ -69,8 +73,20 @@ def _domain_sha256(domain: bytes, value: object) -> str:
     return hashlib.sha256(domain + b"\0" + encoded).hexdigest()
 
 
-def trust_pins_sha256(pins: Mapping[str, str]) -> str:
+def capture_expected_trust_pins(pins: Mapping[str, str]) -> dict[str, str]:
+    """Expose D02's bounded one-pass capture with the D05 error contract."""
+    try:
+        return _capture_expected_trust_pins(pins)
+    except ProviderLinkageStoreUnsafe as exc:
+        raise ValueError("provider trust pins are invalid") from exc
+
+
+def _captured_trust_pins_sha256(pins: dict[str, str]) -> str:
     return _domain_sha256(b"traceback-linkage-trust-pins-v1", sorted(pins.items()))
+
+
+def trust_pins_sha256(pins: Mapping[str, str]) -> str:
+    return _captured_trust_pins_sha256(capture_expected_trust_pins(pins))
 
 
 class TechnicalReplicateRule(StrEnum):
@@ -471,6 +487,9 @@ def validate_manifest_against_linkage_store(
     expected_trust_snapshot_sha256_by_provider: Mapping[str, str],
 ) -> None:
     manifest = cohort_manifest_from_bytes(cohort_manifest_bytes(manifest))
+    expected_pins = capture_expected_trust_pins(
+        expected_trust_snapshot_sha256_by_provider
+    )
     if type(store) is not ProviderLinkageStore:
         raise TypeError("cohort validation requires the exact live linkage store type")
     for name, pinned in _PINNED_STORE_CALLABLES.items():
@@ -480,9 +499,9 @@ def validate_manifest_against_linkage_store(
     authorities = {
         item.provider_namespace: item for item in manifest.provider_authorities
     }
-    if set(expected_trust_snapshot_sha256_by_provider) != set(authorities):
+    if set(expected_pins) != set(authorities):
         raise ValueError("provider authority set is not independently pinned")
-    recomputed_pins = trust_pins_sha256(expected_trust_snapshot_sha256_by_provider)
+    recomputed_pins = _captured_trust_pins_sha256(expected_pins)
     if snapshot.trust_pins_sha256 != recomputed_pins:
         raise ValueError("live store trust pins do not match independent pins")
     common = (
@@ -494,10 +513,7 @@ def validate_manifest_against_linkage_store(
         snapshot.state_head_sha256,
     )
     for provider, authority in authorities.items():
-        if (
-            authority.trust_snapshot_sha256
-            != expected_trust_snapshot_sha256_by_provider[provider]
-        ):
+        if authority.trust_snapshot_sha256 != expected_pins[provider]:
             raise ValueError("provider trust authority does not match independent pin")
         if (
             authority.store_id,
@@ -584,6 +600,7 @@ __all__ = [
     "TimeAxisKind",
     "build_cohort_manifest",
     "build_cohort_member",
+    "capture_expected_trust_pins",
     "cohort_manifest_bytes",
     "cohort_manifest_from_bytes",
     "cohort_manifest_sha256",
