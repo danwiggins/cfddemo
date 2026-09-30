@@ -9,11 +9,13 @@ creates a biological collection or denominator contribution.
 from __future__ import annotations
 
 import base64
+import ctypes
 import hashlib
 import os
 import secrets
 import sqlite3
 import stat
+import sys
 import threading
 from collections.abc import Iterator, Sequence
 from contextlib import contextmanager
@@ -96,6 +98,21 @@ _MAX_STORAGE_PATH_CHARS = 4096
 _MAX_STORAGE_PATH_PARTS = 256
 
 
+def _load_pthread_fchdir():
+    if sys.platform != "darwin":
+        return None
+    try:
+        function = ctypes.CDLL(None, use_errno=True).pthread_fchdir_np
+        function.argtypes = (ctypes.c_int,)
+        function.restype = ctypes.c_int
+    except (AttributeError, OSError):
+        return None
+    return function
+
+
+_PINNED_PTHREAD_FCHDIR = _load_pthread_fchdir()
+
+
 class RecordSupersessionError(RuntimeError):
     """Sanitized durable-ledger failure."""
 
@@ -139,6 +156,22 @@ def _captured_storage_root(root: str | Path) -> Path:
     ):
         raise RecordSupersessionUnsafe("record ledger root is unsafe")
     return Path(*parts).absolute()
+
+
+@contextmanager
+def _thread_anchored_directory(descriptor: int) -> Iterator[None]:
+    function = _PINNED_PTHREAD_FCHDIR
+    if function is None or function(descriptor) != 0:
+        raise RecordSupersessionUnsafe(
+            "thread-local record ledger anchoring is unavailable"
+        )
+    try:
+        yield
+    finally:
+        if function(-1) != 0:
+            raise RecordSupersessionUnsafe(
+                "thread-local record ledger anchoring could not be cleared"
+            )
 
 
 class SupersessionStatement(RegistryContract):
@@ -1067,15 +1100,8 @@ class RecordSupersessionStore:
         _SQLITE_OPEN_LOCK.acquire()
         try:
             self._validate_storage()
-            cwd_descriptor = os.open(
-                ".",
-                os.O_RDONLY
-                | getattr(os, "O_DIRECTORY", 0)
-                | getattr(os, "O_CLOEXEC", 0),
-            )
             before = _open_descriptor_identities()
-            try:
-                os.fchdir(self._root_fd)
+            with _thread_anchored_directory(self._root_fd):
                 connection = sqlite3.connect(
                     "record-supersession.sqlite3",
                     timeout=5.0,
@@ -1086,11 +1112,6 @@ class RecordSupersessionStore:
                 connection.execute("PRAGMA synchronous=FULL")
                 connection.execute("PRAGMA journal_mode=WAL")
                 connection.execute("SELECT COUNT(*) FROM sqlite_master").fetchone()
-            finally:
-                try:
-                    os.fchdir(cwd_descriptor)
-                finally:
-                    os.close(cwd_descriptor)
             observed = os.stat(
                 "record-supersession.sqlite3",
                 dir_fd=self._root_fd,
