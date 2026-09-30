@@ -8,6 +8,7 @@ permits callers to omit registered grid cells from the comparison view.
 from __future__ import annotations
 
 import hashlib
+import json
 import math
 import re
 from enum import StrEnum
@@ -44,6 +45,12 @@ from .method_registry import (
 )
 from .result_catalog import CatalogResultRef
 from .result_view import CompatibilityContract, result_filters_sha256
+from .safe_ingress import (
+    capture_exact_model,
+    contract_type_graph,
+    exact_bytes,
+    exact_model_bytes,
+)
 
 MAX_SUBSET_LEVELS = 16
 MAX_REPLICATES = 32
@@ -51,6 +58,7 @@ MAX_PARAMETER_SETS = 32
 MAX_RUNS = 4_096
 MAX_CONTRIBUTORS = 512
 MAX_CANONICAL_BYTES = 8 * 1024 * 1024
+MAX_MEMBERSHIP_DIGESTS = 100_000
 CELL_ORIGIN_FRACTION_SUM_ABS_TOLERANCE = 1e-9
 
 Sha256 = Annotated[str, StringConstraints(pattern=r"^[0-9a-f]{64}$")]
@@ -95,6 +103,16 @@ SafeId = Annotated[
 
 
 def _digest(value: object) -> str:
+    if isinstance(value, CompatibilityContract):
+        value = json.loads(
+            exact_model_bytes(
+                value,
+                type(value),
+                model_types=_SENSITIVITY_MODEL_TYPES,
+                enum_types=_SENSITIVITY_ENUM_TYPES,
+                max_bytes=MAX_CANONICAL_BYTES,
+            )
+        )
     return hashlib.sha256(canonical_json_bytes(value)).hexdigest()
 
 
@@ -102,10 +120,16 @@ def whole_molecule_membership_sha256(
     molecule_sha256s: tuple[Sha256, ...],
 ) -> str:
     """Commit to canonical private membership without retaining molecule IDs."""
+    if type(molecule_sha256s) is not tuple:
+        raise TypeError("whole-molecule membership must be an exact tuple")
     if not molecule_sha256s:
         raise ValueError("whole-molecule membership cannot be empty")
+    if len(molecule_sha256s) > MAX_MEMBERSHIP_DIGESTS:
+        raise ValueError("whole-molecule membership exceeds digest-count bound")
     if any(
-        re.fullmatch(r"[0-9a-f]{64}", item) is None
+        type(item) is not str
+        or len(item) != 64
+        or re.fullmatch(r"[0-9a-f]{64}", item) is None
         for item in molecule_sha256s
     ):
         raise ValueError("whole-molecule membership accepts SHA-256 digests only")
@@ -221,9 +245,7 @@ class SensitivitySource(CompatibilityContract):
                 else "unknown"
             )
             or (
-                catalog.display_role.value
-                if catalog.display_role is not None
-                else None
+                catalog.display_role.value if catalog.display_role is not None else None
             )
             != (
                 capability.display_role.value
@@ -231,8 +253,7 @@ class SensitivitySource(CompatibilityContract):
                 else None
             )
             or catalog.research_inspectable != capability.research_inspectable
-            or catalog.current_provider_eligible
-            != capability.current_provider_eligible
+            or catalog.current_provider_eligible != capability.current_provider_eligible
         ):
             raise ValueError("E04 catalog identity does not match E08/E05 source")
         return self
@@ -272,9 +293,9 @@ class ReplicateSeed(CompatibilityContract):
 class SubsetMembershipCommitment(CompatibilityContract):
     subset_id: SafeId
     replicate_id: SafeId
-    membership_encoding: Literal[
+    membership_encoding: Literal["sorted-unique-whole-molecule-digests-sha256.v1"] = (
         "sorted-unique-whole-molecule-digests-sha256.v1"
-    ] = "sorted-unique-whole-molecule-digests-sha256.v1"
+    )
     membership_count: int = Field(ge=1, le=10**15)
     membership_sha256: Sha256
 
@@ -433,9 +454,9 @@ class RegisteredRunKey(CompatibilityContract):
 class RegisteredSubsetReceipt(CompatibilityContract):
     subset_id: SafeId
     replicate_id: SafeId
-    membership_encoding: Literal[
+    membership_encoding: Literal["sorted-unique-whole-molecule-digests-sha256.v1"] = (
         "sorted-unique-whole-molecule-digests-sha256.v1"
-    ] = "sorted-unique-whole-molecule-digests-sha256.v1"
+    )
     membership_count: int = Field(ge=1, le=10**15)
     membership_sha256: Sha256
     subset_sha256: Sha256
@@ -543,15 +564,12 @@ class SensitivityRegistration(CompatibilityContract):
             raise ValueError(
                 "run grid must equal the full preregistered Cartesian grid"
             )
-        level_by_id = {
-            item.subset_id: item for item in self.subset_family.levels
-        }
+        level_by_id = {item.subset_id: item for item in self.subset_family.levels}
         replicate_by_id = {
             item.replicate_id: item for item in self.subset_family.replicates
         }
         commitment_by_key = {
-            item.sort_key: item
-            for item in self.subset_family.membership_commitments
+            item.sort_key: item for item in self.subset_family.membership_commitments
         }
         expected_receipts = tuple(
             RegisteredSubsetReceipt(
@@ -603,6 +621,15 @@ def register_sensitivity_study(
     subset_family: WholeMoleculeSubsetFamily,
     parameter_sets: tuple[RegisteredParameterSet, ...],
 ) -> SensitivityRegistration:
+    registration_id = _bounded_safe_id(registration_id, "registration ID")
+    source = _capture(source, SensitivitySource)
+    subset_family = _capture(subset_family, WholeMoleculeSubsetFamily)
+    parameter_sets = _capture_model_tuple(
+        parameter_sets,
+        RegisteredParameterSet,
+        MAX_PARAMETER_SETS,
+        "parameter sets",
+    )
     source_record = source.record
     source_filter = source.explorer_artifact.request.result_view_request.filters
     source_atlas = source_record.compatibility_key.atlas_asset
@@ -626,9 +653,7 @@ def register_sensitivity_study(
         )
     )
     level_by_id = {item.subset_id: item for item in subset_family.levels}
-    replicate_by_id = {
-        item.replicate_id: item for item in subset_family.replicates
-    }
+    replicate_by_id = {item.replicate_id: item for item in subset_family.replicates}
     subset_receipts = tuple(
         RegisteredSubsetReceipt(
             subset_id=commitment.subset_id,
@@ -746,6 +771,14 @@ def sensitivity_result_sha256(
     parameters_sha256: str,
     estimates: tuple[SamplingEstimate, ...],
 ) -> str:
+    result_id = _bounded_safe_id(result_id, "result ID")
+    key = _capture(key, RegisteredRunKey)
+    attrition = _capture(attrition, RunAttrition)
+    subset_sha256 = _sha256_string(subset_sha256, "subset digest")
+    parameters_sha256 = _sha256_string(parameters_sha256, "parameter digest")
+    estimates = _capture_model_tuple(
+        estimates, SamplingEstimate, MAX_CONTRIBUTORS, "sampling estimates"
+    )
     return _digest(
         {
             "schema_version": "traceback.sensitivity-result-evidence.v1",
@@ -754,9 +787,7 @@ def sensitivity_result_sha256(
             "attrition": attrition.model_dump(mode="json"),
             "subset_sha256": subset_sha256,
             "parameters_sha256": parameters_sha256,
-            "estimates": tuple(
-                item.model_dump(mode="json") for item in estimates
-            ),
+            "estimates": tuple(item.model_dump(mode="json") for item in estimates),
         }
     )
 
@@ -774,6 +805,19 @@ def sensitivity_bundle_sha256(
     subset_sha256: str,
     parameters_sha256: str,
 ) -> str:
+    bundle_id = _bounded_safe_id(bundle_id, "bundle ID")
+    atlas_id = _bounded_safe_id(atlas_id, "atlas ID")
+    result_sha256 = _sha256_string(result_sha256, "result digest")
+    method_ref = _capture(method_ref, MethodReference)
+    method_definition_sha256 = _sha256_string(
+        method_definition_sha256, "method-definition digest"
+    )
+    atlas_sha256 = _sha256_string(atlas_sha256, "atlas digest")
+    filter_sha256 = _sha256_string(filter_sha256, "filter digest")
+    if type(seed) is not int or seed < 0 or seed > 2**63 - 1:
+        raise TypeError("seed is invalid")
+    subset_sha256 = _sha256_string(subset_sha256, "subset digest")
+    parameters_sha256 = _sha256_string(parameters_sha256, "parameter digest")
     return _digest(
         {
             "schema_version": "traceback.sensitivity-result-bundle.v1",
@@ -832,8 +876,10 @@ class SensitivityRunOutcome(CompatibilityContract):
                 raise ValueError(
                     "failed run requires failure code and no numeric result"
                 )
-        elif self.binding is not None or self.estimates or self.failure_code != (
-            FailureCode.INSUFFICIENT_MOLECULES
+        elif (
+            self.binding is not None
+            or self.estimates
+            or self.failure_code != (FailureCode.INSUFFICIENT_MOLECULES)
         ):
             raise ValueError(
                 "insufficient run requires its explicit code and no numeric result"
@@ -859,9 +905,7 @@ class SensitivityRunOutcome(CompatibilityContract):
                 bundle_id=self.binding.bundle_id,
                 result_sha256=self.binding.result_sha256,
                 method_ref=self.binding.method_ref,
-                method_definition_sha256=(
-                    self.binding.method_definition_sha256
-                ),
+                method_definition_sha256=(self.binding.method_definition_sha256),
                 atlas_id=self.binding.atlas_id,
                 atlas_sha256=self.binding.atlas_sha256,
                 filter_sha256=self.binding.filter_sha256,
@@ -924,8 +968,7 @@ class SensitivityStudyBundle(CompatibilityContract):
             item.subset_id: item for item in registration.subset_family.levels
         }
         replicate_by_id = {
-            item.replicate_id: item
-            for item in registration.subset_family.replicates
+            item.replicate_id: item for item in registration.subset_family.replicates
         }
         parameter_by_id = {
             item.parameter_id: item for item in registration.parameter_sets
@@ -946,8 +989,7 @@ class SensitivityStudyBundle(CompatibilityContract):
         for parameter in registration.parameter_sets:
             if (
                 parameter.method != record.method
-                or parameter.method_definition_sha256
-                != record.method_definition_sha256
+                or parameter.method_definition_sha256 != record.method_definition_sha256
                 or parameter.atlas_asset != source_atlas
             ):
                 raise ValueError(
@@ -974,10 +1016,7 @@ class SensitivityStudyBundle(CompatibilityContract):
             ):
                 raise ValueError("run attrition does not match registered subset")
             receipt_key = (outcome.key.subset_id, outcome.key.replicate_id)
-            if (
-                outcome.subset_sha256
-                != registered_receipts[receipt_key].subset_sha256
-            ):
+            if outcome.subset_sha256 != registered_receipts[receipt_key].subset_sha256:
                 raise ValueError("run does not match preregistered subset receipt")
             if outcome.status == RunStatus.COMPLETE:
                 assert outcome.binding is not None
@@ -1057,9 +1096,9 @@ class MethodSensitivityRow(CompatibilityContract):
     subset_id: SafeId
     replicate_id: SafeId
     contributor_id: SafeId
-    interpretation: Literal[
+    interpretation: Literal["registered_parameter_range_not_sampling_interval"] = (
         "registered_parameter_range_not_sampling_interval"
-    ] = "registered_parameter_range_not_sampling_interval"
+    )
     values: tuple[ParameterSensitivityValue, ...] = Field(
         min_length=1,
         max_length=MAX_PARAMETER_SETS,
@@ -1129,16 +1168,13 @@ class SensitivityComparisonView(CompatibilityContract):
 def build_sensitivity_comparison_view(
     bundle: SensitivityStudyBundle,
 ) -> SensitivityComparisonView:
+    bundle = _capture(bundle, SensitivityStudyBundle)
     registration = bundle.registration
-    level_by_id = {
-        item.subset_id: item for item in registration.subset_family.levels
-    }
+    level_by_id = {item.subset_id: item for item in registration.subset_family.levels}
     replicate_by_id = {
         item.replicate_id: item for item in registration.subset_family.replicates
     }
-    parameter_by_id = {
-        item.parameter_id: item for item in registration.parameter_sets
-    }
+    parameter_by_id = {item.parameter_id: item for item in registration.parameter_sets}
     run_rows = tuple(
         RunViewRow(
             key=outcome.key,
@@ -1257,6 +1293,7 @@ class SensitivityComparisonArtifact(CompatibilityContract):
 def build_sensitivity_comparison_artifact(
     bundle: SensitivityStudyBundle,
 ) -> SensitivityComparisonArtifact:
+    bundle = _capture(bundle, SensitivityStudyBundle)
     return SensitivityComparisonArtifact(
         bundle=bundle,
         view=build_sensitivity_comparison_view(bundle),
@@ -1266,17 +1303,31 @@ def build_sensitivity_comparison_artifact(
 def canonical_sensitivity_comparison_bytes(
     artifact: SensitivityComparisonArtifact,
 ) -> bytes:
-    content = canonical_json_bytes(artifact)
-    if len(content) > MAX_CANONICAL_BYTES:
-        raise SensitivityContractError(
-            "sensitivity artifact exceeds canonical byte bound"
+    try:
+        return exact_model_bytes(
+            artifact,
+            SensitivityComparisonArtifact,
+            model_types=_SENSITIVITY_MODEL_TYPES,
+            enum_types=_SENSITIVITY_ENUM_TYPES,
+            max_bytes=MAX_CANONICAL_BYTES,
         )
-    return content
+    except (TypeError, ValueError) as exc:
+        raise SensitivityContractError("sensitivity artifact is invalid") from exc
 
 
 def sensitivity_comparison_from_canonical_bytes(
     content: bytes,
 ) -> SensitivityComparisonArtifact:
+    if type(content) is not bytes:
+        raise SensitivityContractError("sensitivity artifact is invalid")
+    if len(content) > MAX_CANONICAL_BYTES:
+        raise SensitivityContractError(
+            "sensitivity artifact exceeds canonical byte bound"
+        )
+    try:
+        content = exact_bytes(content, max_bytes=MAX_CANONICAL_BYTES)
+    except TypeError as exc:
+        raise SensitivityContractError("sensitivity artifact is invalid") from exc
     if len(content) > MAX_CANONICAL_BYTES:
         raise SensitivityContractError(
             "sensitivity artifact exceeds canonical byte bound"
@@ -1288,6 +1339,60 @@ def sensitivity_comparison_from_canonical_bytes(
     if canonical_sensitivity_comparison_bytes(artifact) != content:
         raise SensitivityContractError("sensitivity artifact JSON is not canonical")
     return artifact
+
+
+_SENSITIVITY_MODEL_TYPES, _SENSITIVITY_ENUM_TYPES = contract_type_graph(
+    SensitivityComparisonArtifact,
+    SensitivityRegistration,
+    SensitivityRunOutcome,
+    SamplingEstimate,
+    MethodReference,
+)
+
+
+def _capture(value: object, expected_type: type[CompatibilityContract]):
+    try:
+        return capture_exact_model(
+            value,
+            expected_type,
+            model_types=_SENSITIVITY_MODEL_TYPES,
+            enum_types=_SENSITIVITY_ENUM_TYPES,
+            max_bytes=MAX_CANONICAL_BYTES,
+        )
+    except (TypeError, ValueError, ValidationError) as exc:
+        raise SensitivityContractError("sensitivity contract input is invalid") from exc
+
+
+def _capture_model_tuple(
+    value: object,
+    expected_type: type[CompatibilityContract],
+    maximum: int,
+    label: str,
+) -> tuple:
+    if type(value) is not tuple or len(value) > maximum:
+        raise SensitivityContractError(f"{label} violate the input bound")
+    return tuple(_capture(item, expected_type) for item in value)
+
+
+def _bounded_string(value: object, label: str) -> str:
+    if type(value) is not str or len(value) > 128:
+        raise SensitivityContractError(f"{label} is invalid")
+    return value
+
+
+def _bounded_safe_id(value: object, label: str) -> str:
+    identifier = _bounded_string(value, label)
+    try:
+        _require_safe_token(identifier, field=label)
+    except ValueError as exc:
+        raise SensitivityContractError(f"{label} is invalid") from exc
+    return identifier
+
+
+def _sha256_string(value: object, label: str) -> str:
+    if type(value) is not str or re.fullmatch(r"[0-9a-f]{64}", value) is None:
+        raise SensitivityContractError(f"{label} is invalid")
+    return value
 
 
 __all__ = [

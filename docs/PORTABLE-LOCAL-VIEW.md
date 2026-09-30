@@ -24,4 +24,16 @@ The CNA export includes coordinate grids, assets, methods, dosage chromosomes, b
 
 Accessibility metadata fixes native table navigation, explicit column headers, deterministic focus order, polite status announcements, 200% zoom support, reflow, and no color-only, hover-only, or keyboard-trap behavior. Consumers still own their HTML semantics and must not weaken these commitments.
 
+The metadata is a renderer contract, not observed accessibility evidence.
+Keyboard-only, screen-reader and 200% zoom audits remain external E14 release
+evidence and stay unmet until performed on the packaged product.
+
+Every public in-memory boundary rejects subclasses, proxies, oversized scalar
+values and oversized nested collections before serialization or filesystem
+path conversion.  Publication has one intentional callback boundary:
+`source_identity_verifier` is a trusted local authority dependency, invoked
+exactly once after staging.  Its returned identity tuple is independently
+captured as exact bounded contracts before comparison; no returned object hook
+is executed.
+
 This contract is synthetic/local only. `product_release_authorized` and `diagnostic_interpretation_allowed` are always false.

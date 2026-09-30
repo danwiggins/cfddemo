@@ -4,10 +4,12 @@ from __future__ import annotations
 
 import hashlib
 import json
+from typing import ClassVar
 
 import pytest
 from pydantic import ValidationError
 
+import evidence_inspector.sensitivity_comparison as sensitivity
 from evidence_inspector.cell_origin_explorer import (
     build_cell_origin_explorer_artifact,
     canonical_cell_origin_explorer_bytes,
@@ -16,12 +18,13 @@ from evidence_inspector.cell_origin_models import (
     BootstrapInformationStatus,
     NnlsRowScale,
 )
-from evidence_inspector.method_registry import method_definition_sha256
+from evidence_inspector.method_registry import MethodReference, method_definition_sha256
 from evidence_inspector.result_catalog import (
     CatalogQualificationState,
     CatalogResultRef,
 )
 from evidence_inspector.sensitivity_comparison import (
+    MAX_MEMBERSHIP_DIGESTS,
     CellOriginRunParameters,
     EdgeInclusionPolicy,
     FailureCode,
@@ -32,6 +35,7 @@ from evidence_inspector.sensitivity_comparison import (
     RunStatus,
     SamplingEstimate,
     SensitivityAvailability,
+    SensitivityComparisonArtifact,
     SensitivityContractError,
     SensitivityRunBinding,
     SensitivityRunOutcome,
@@ -42,6 +46,7 @@ from evidence_inspector.sensitivity_comparison import (
     SubsetMembershipCommitment,
     WholeMoleculeSubsetFamily,
     build_sensitivity_comparison_artifact,
+    build_sensitivity_comparison_view,
     canonical_sensitivity_comparison_bytes,
     register_sensitivity_study,
     sensitivity_bundle_sha256,
@@ -103,12 +108,9 @@ def _source() -> SensitivitySource:
 
 def _family() -> WholeMoleculeSubsetFamily:
     molecule_digests = tuple(
-        hashlib.sha256(f"molecule:{index}".encode()).hexdigest()
-        for index in range(8)
+        hashlib.sha256(f"molecule:{index}".encode()).hexdigest() for index in range(8)
     )
-    full_membership = whole_molecule_membership_sha256(
-        tuple(sorted(molecule_digests))
-    )
+    full_membership = whole_molecule_membership_sha256(tuple(sorted(molecule_digests)))
     return WholeMoleculeSubsetFamily(
         family_id="subset-family.synthetic",
         source_molecule_count=8,
@@ -155,11 +157,7 @@ def _family() -> WholeMoleculeSubsetFamily:
                 replicate_id="replicate.b",
                 membership_count=4,
                 membership_sha256=whole_molecule_membership_sha256(
-                    tuple(
-                        sorted(
-                            molecule_digests[index] for index in (0, 2, 4, 6)
-                        )
-                    )
+                    tuple(sorted(molecule_digests[index] for index in (0, 2, 4, 6)))
                 ),
             ),
         ),
@@ -218,12 +216,14 @@ def _complete_estimates(offset: float = 0.0) -> tuple[SamplingEstimate, ...]:
     )
 
 
-def _study_bundle() -> SensitivityStudyBundle:
+def _study_bundle(
+    edge_policy: EdgeInclusionPolicy = EdgeInclusionPolicy.MOLECULE_MIDPOINT_HALF_OPEN,
+) -> SensitivityStudyBundle:
     source = _source()
-    family = _family()
+    family = _family().model_copy(update={"edge_inclusion_policy": edge_policy})
     parameters = _parameter_sets(source)
     registration = register_sensitivity_study(
-        registration_id="registration.synthetic",
+        registration_id=f"registration.synthetic.{edge_policy.value}",
         source=source,
         subset_family=family,
         parameter_sets=parameters,
@@ -231,17 +231,13 @@ def _study_bundle() -> SensitivityStudyBundle:
     level_by_id = {item.subset_id: item for item in family.levels}
     replicate_by_id = {item.replicate_id: item for item in family.replicates}
     parameter_by_id = {item.parameter_id: item for item in parameters}
-    receipt_by_key = {
-        item.sort_key: item for item in registration.subset_receipts
-    }
+    receipt_by_key = {item.sort_key: item for item in registration.subset_receipts}
     outcomes = []
     for index, key in enumerate(registration.run_grid):
         level = level_by_id[key.subset_id]
         replicate = replicate_by_id[key.replicate_id]
         parameter = parameter_by_id[key.parameter_id]
-        subset_digest = receipt_by_key[
-            (key.subset_id, key.replicate_id)
-        ].subset_sha256
+        subset_digest = receipt_by_key[(key.subset_id, key.replicate_id)].subset_sha256
         attrition = RunAttrition(
             source_molecules=family.source_molecule_count,
             target_molecules=level.target_molecule_count,
@@ -392,9 +388,7 @@ def test_builds_full_registered_grid_without_cherry_picking() -> None:
     assert artifact.view.edge_inclusion_policy == (
         EdgeInclusionPolicy.MOLECULE_MIDPOINT_HALF_OPEN
     )
-    assert artifact.view.compatibility.outcome == (
-        "comparable_within_registered_grid"
-    )
+    assert artifact.view.compatibility.outcome == ("comparable_within_registered_grid")
     assert not artifact.view.compatibility.longitudinal_compatibility_inferred
 
 
@@ -605,9 +599,7 @@ def test_all_peer_subset_receipts_cannot_drift_from_registration() -> None:
 
 def test_complete_estimates_are_bound_to_fixed_result_and_bundle_identities() -> None:
     payload = _study_bundle().model_dump(mode="json")
-    complete = [
-        item for item in payload["outcomes"] if item["status"] == "complete"
-    ]
+    complete = [item for item in payload["outcomes"] if item["status"] == "complete"]
     complete[0]["estimates"], complete[1]["estimates"] = (
         complete[1]["estimates"],
         complete[0]["estimates"],
@@ -618,9 +610,7 @@ def test_complete_estimates_are_bound_to_fixed_result_and_bundle_identities() ->
 
 def test_complete_runs_require_unique_result_and_bundle_identities() -> None:
     bundle = _study_bundle()
-    complete = [
-        item for item in bundle.outcomes if item.status == RunStatus.COMPLETE
-    ]
+    complete = [item for item in bundle.outcomes if item.status == RunStatus.COMPLETE]
     first, second = complete[:2]
     assert first.binding is not None and second.binding is not None
     result_digest = sensitivity_result_sha256(
@@ -698,9 +688,7 @@ def test_subset_levels_reject_duplicate_ids_and_duplicate_fractions() -> None:
     payload["levels"][1]["fraction_ppm"] = 500_000
     for commitment in payload["membership_commitments"]:
         commitment["subset_id"] = (
-            "subset.a"
-            if commitment["subset_id"] == "subset.half"
-            else "subset.b"
+            "subset.a" if commitment["subset_id"] == "subset.half" else "subset.b"
         )
     with pytest.raises(ValidationError, match="subset fractions must be unique"):
         WholeMoleculeSubsetFamily.model_validate_json(json.dumps(payload))
@@ -780,9 +768,7 @@ def test_subset_family_denominator_must_match_exact_source() -> None:
         commitment["membership_count"] = (
             5 if commitment["subset_id"] == "subset.half" else 10
         )
-    family = WholeMoleculeSubsetFamily.model_validate_json(
-        json.dumps(family_payload)
-    )
+    family = WholeMoleculeSubsetFamily.model_validate_json(json.dumps(family_payload))
     registration = register_sensitivity_study(
         registration_id=bundle.registration.registration_id,
         source=bundle.source,
@@ -796,6 +782,7 @@ def test_subset_family_denominator_must_match_exact_source() -> None:
             outcomes=bundle.outcomes,
             attrition=bundle.attrition,
         )
+
 
 def test_source_rejects_e04_identity_drift() -> None:
     payload = _source().model_dump(mode="json")
@@ -936,3 +923,351 @@ def test_artifact_rejects_oversize_before_json_parse() -> None:
     oversized = b"{" + b" " * MAX_CANONICAL_BYTES
     with pytest.raises(SensitivityContractError, match="byte bound"):
         sensitivity_comparison_from_canonical_bytes(oversized)
+
+
+def test_public_object_boundaries_reject_top_level_and_nested_hooks() -> None:
+    bundle = _study_bundle()
+
+    class HookedBundle(SensitivityStudyBundle):
+        calls: ClassVar[int] = 0
+
+        def model_dump(self, *args: object, **kwargs: object) -> dict[str, object]:
+            type(self).calls += 1
+            return super().model_dump(*args, **kwargs)
+
+    hostile_bundle = HookedBundle.model_construct(**bundle.__dict__)
+    with pytest.raises(SensitivityContractError):
+        build_sensitivity_comparison_artifact(hostile_bundle)
+    assert HookedBundle.calls == 0
+
+    class HookedEstimate(SamplingEstimate):
+        calls: ClassVar[int] = 0
+
+        def model_dump(self, *args: object, **kwargs: object) -> dict[str, object]:
+            type(self).calls += 1
+            return super().model_dump(*args, **kwargs)
+
+    outcome = next(item for item in bundle.outcomes if item.estimates)
+    hostile_estimate = HookedEstimate.model_construct(**outcome.estimates[0].__dict__)
+    hostile_outcome = outcome.model_copy(
+        update={"estimates": (hostile_estimate, *outcome.estimates[1:])}
+    )
+    hostile_nested = bundle.model_copy(
+        update={
+            "outcomes": tuple(
+                hostile_outcome if item is outcome else item for item in bundle.outcomes
+            )
+        }
+    )
+    with pytest.raises(SensitivityContractError):
+        build_sensitivity_comparison_artifact(hostile_nested)
+    assert HookedEstimate.calls == 0
+
+
+def test_every_e11_public_model_boundary_rejects_virtual_dispatch() -> None:
+    bundle = _study_bundle()
+
+    class HookedSource(SensitivitySource):
+        calls: ClassVar[int] = 0
+
+        def model_dump(self, *args: object, **kwargs: object) -> dict[str, object]:
+            type(self).calls += 1
+            return super().model_dump(*args, **kwargs)
+
+    source = HookedSource.model_construct(**bundle.source.__dict__)
+    with pytest.raises(SensitivityContractError):
+        register_sensitivity_study(
+            registration_id="registration.hostile",
+            source=source,
+            subset_family=bundle.registration.subset_family,
+            parameter_sets=bundle.registration.parameter_sets,
+        )
+    assert HookedSource.calls == 0
+
+    complete = next(item for item in bundle.outcomes if item.binding is not None)
+    assert complete.binding is not None
+
+    class HookedKey(RegisteredRunKey):
+        calls: ClassVar[int] = 0
+
+        def model_dump(self, *args: object, **kwargs: object) -> dict[str, object]:
+            type(self).calls += 1
+            return super().model_dump(*args, **kwargs)
+
+    key = HookedKey.model_construct(**complete.key.__dict__)
+    with pytest.raises(SensitivityContractError):
+        sensitivity_result_sha256(
+            result_id=complete.binding.result_id,
+            key=key,
+            attrition=complete.attrition,
+            subset_sha256=complete.subset_sha256,
+            parameters_sha256=complete.binding.parameters_sha256,
+            estimates=complete.estimates,
+        )
+    assert HookedKey.calls == 0
+
+    class HookedMethodReference(MethodReference):
+        calls: ClassVar[int] = 0
+
+        def model_dump(self, *args: object, **kwargs: object) -> dict[str, object]:
+            type(self).calls += 1
+            return super().model_dump(*args, **kwargs)
+
+    method_ref = HookedMethodReference.model_construct(
+        **complete.binding.method_ref.__dict__
+    )
+    with pytest.raises(SensitivityContractError):
+        sensitivity_bundle_sha256(
+            bundle_id=complete.binding.bundle_id,
+            result_sha256=complete.binding.result_sha256,
+            method_ref=method_ref,
+            method_definition_sha256=complete.binding.method_definition_sha256,
+            atlas_id=complete.binding.atlas_id,
+            atlas_sha256=complete.binding.atlas_sha256,
+            filter_sha256=complete.binding.filter_sha256,
+            seed=complete.binding.seed,
+            subset_sha256=complete.binding.subset_sha256,
+            parameters_sha256=complete.binding.parameters_sha256,
+        )
+    assert HookedMethodReference.calls == 0
+
+    class HookedBundle(SensitivityStudyBundle):
+        calls: ClassVar[int] = 0
+
+        def model_dump(self, *args: object, **kwargs: object) -> dict[str, object]:
+            type(self).calls += 1
+            return super().model_dump(*args, **kwargs)
+
+    hooked_bundle = HookedBundle.model_construct(**bundle.__dict__)
+    with pytest.raises(SensitivityContractError):
+        build_sensitivity_comparison_view(hooked_bundle)
+    assert HookedBundle.calls == 0
+
+    artifact = build_sensitivity_comparison_artifact(bundle)
+
+    class HookedArtifact(SensitivityComparisonArtifact):
+        calls: ClassVar[int] = 0
+
+        def model_dump(self, *args: object, **kwargs: object) -> dict[str, object]:
+            type(self).calls += 1
+            return super().model_dump(*args, **kwargs)
+
+    hooked_artifact = HookedArtifact.model_construct(**artifact.__dict__)
+    with pytest.raises(SensitivityContractError):
+        canonical_sensitivity_comparison_bytes(hooked_artifact)
+    assert HookedArtifact.calls == 0
+
+    class HookedBytes(bytes):
+        pass
+
+    with pytest.raises(SensitivityContractError):
+        sensitivity_comparison_from_canonical_bytes(
+            HookedBytes(canonical_sensitivity_comparison_bytes(artifact))
+        )
+
+
+def test_e11_rejects_top_level_nested_extra_and_private_state_without_hooks(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    bundle = _study_bundle()
+    serializer_calls = 0
+
+    class SerializerGuard:
+        def to_python(self, *args: object, **kwargs: object) -> object:
+            nonlocal serializer_calls
+            serializer_calls += 1
+            raise AssertionError("forged state reached pinned serializer")
+
+    class EvilProxy:
+        calls = 0
+
+        def __str__(self) -> str:
+            type(self).calls += 1
+            return "/Users/alice/private.bam"
+
+        def __iter__(self):
+            type(self).calls += 1
+            raise AssertionError("forged proxy was traversed")
+
+    monkeypatch.setattr(
+        SensitivityStudyBundle,
+        "__pydantic_serializer__",
+        SerializerGuard(),
+    )
+    proxy = EvilProxy()
+    forged_top = bundle.model_copy(update={"hidden_private_path": proxy})
+    with pytest.raises(SensitivityContractError):
+        build_sensitivity_comparison_artifact(forged_top)
+
+    forged_outcome = bundle.outcomes[0].model_copy(
+        update={"hidden_private_path": "/Users/alice/private.bam"}
+    )
+    forged_nested = bundle.model_copy(
+        update={"outcomes": (forged_outcome, *bundle.outcomes[1:])}
+    )
+    with pytest.raises(SensitivityContractError):
+        build_sensitivity_comparison_artifact(forged_nested)
+
+    cycle: list[object] = []
+    cycle.append(cycle)
+    forged_private = bundle.model_copy()
+    object.__setattr__(forged_private, "__pydantic_private__", {"cycle": cycle})
+    with pytest.raises(SensitivityContractError):
+        build_sensitivity_comparison_artifact(forged_private)
+
+    forged_extra = bundle.model_copy()
+    object.__setattr__(forged_extra, "__pydantic_extra__", {"proxy": proxy})
+    with pytest.raises(SensitivityContractError):
+        build_sensitivity_comparison_artifact(forged_extra)
+    assert EvilProxy.calls == 0
+    assert serializer_calls == 0
+
+
+def test_public_object_boundaries_preflight_scalars_and_collections() -> None:
+    bundle = _study_bundle()
+    giant_registration = bundle.registration.model_copy(
+        update={"registration_id": "x" * 10_000_000}
+    )
+    with pytest.raises(SensitivityContractError):
+        build_sensitivity_comparison_artifact(
+            bundle.model_copy(update={"registration": giant_registration})
+        )
+
+    outcome = bundle.outcomes[0]
+    huge_attrition = outcome.attrition.model_copy(
+        update={"selected_molecules": 1 << 100_000}
+    )
+    with pytest.raises(SensitivityContractError):
+        build_sensitivity_comparison_artifact(
+            bundle.model_copy(
+                update={
+                    "outcomes": (
+                        outcome.model_copy(update={"attrition": huge_attrition}),
+                        *bundle.outcomes[1:],
+                    )
+                }
+            )
+        )
+
+    with pytest.raises(SensitivityContractError):
+        build_sensitivity_comparison_artifact(
+            bundle.model_copy(update={"outcomes": (bundle.outcomes[0],) * 4_097})
+        )
+
+    digest = "a" * 64
+    with pytest.raises(ValueError, match="digest-count bound"):
+        whole_molecule_membership_sha256((digest,) * (MAX_MEMBERSHIP_DIGESTS + 1))
+
+
+def test_registration_id_is_bounded_before_model_digest(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    digest_calls = 0
+
+    def unexpected_digest(*args: object, **kwargs: object) -> str:
+        nonlocal digest_calls
+        digest_calls += 1
+        raise AssertionError("registration digest must not run")
+
+    monkeypatch.setattr(sensitivity, "_model_digest", unexpected_digest)
+    source = _source()
+    with pytest.raises(SensitivityContractError, match="registration ID"):
+        register_sensitivity_study(
+            registration_id="x" * 10_000_000,
+            source=source,
+            subset_family=_family(),
+            parameter_sets=_parameter_sets(source),
+        )
+    assert digest_calls == 0
+
+
+@pytest.mark.parametrize(
+    "private_id",
+    ("patient123", "/Users/alice/private.bam", "Alice Example"),
+)
+def test_digest_ids_are_privacy_safe_before_digest_entry(
+    private_id: str, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    bundle = _study_bundle()
+    complete = next(item for item in bundle.outcomes if item.binding is not None)
+    binding = complete.binding
+    assert binding is not None
+    digest_calls = 0
+
+    def unexpected_digest(*args: object, **kwargs: object) -> str:
+        nonlocal digest_calls
+        digest_calls += 1
+        raise AssertionError("invalid identifier reached digest helper")
+
+    monkeypatch.setattr(sensitivity, "_digest", unexpected_digest)
+    with pytest.raises(SensitivityContractError):
+        sensitivity_result_sha256(
+            result_id=private_id,
+            key=complete.key,
+            attrition=complete.attrition,
+            subset_sha256=complete.subset_sha256,
+            parameters_sha256=binding.parameters_sha256,
+            estimates=complete.estimates,
+        )
+
+    bundle_arguments = {
+        "bundle_id": binding.bundle_id,
+        "result_sha256": binding.result_sha256,
+        "method_ref": binding.method_ref,
+        "method_definition_sha256": binding.method_definition_sha256,
+        "atlas_id": binding.atlas_id,
+        "atlas_sha256": binding.atlas_sha256,
+        "filter_sha256": binding.filter_sha256,
+        "seed": binding.seed,
+        "subset_sha256": binding.subset_sha256,
+        "parameters_sha256": binding.parameters_sha256,
+    }
+    with pytest.raises(SensitivityContractError):
+        sensitivity_bundle_sha256(**{**bundle_arguments, "bundle_id": private_id})
+    with pytest.raises(SensitivityContractError):
+        sensitivity_bundle_sha256(**{**bundle_arguments, "atlas_id": private_id})
+    assert digest_calls == 0
+
+
+@pytest.mark.parametrize("policy", tuple(EdgeInclusionPolicy))
+def test_every_edge_policy_is_bound_and_replays(policy: EdgeInclusionPolicy) -> None:
+    artifact = build_sensitivity_comparison_artifact(_study_bundle(policy))
+    canonical = canonical_sensitivity_comparison_bytes(artifact)
+    replayed = sensitivity_comparison_from_canonical_bytes(canonical)
+    assert replayed == artifact
+    assert replayed.bundle.registration.subset_family.edge_inclusion_policy == policy
+    assert replayed.view.edge_inclusion_policy == policy
+    assert all(
+        receipt.subset_sha256
+        for receipt in replayed.bundle.registration.subset_receipts
+    )
+
+
+def test_cross_policy_receipt_and_view_tamper_fail_replay() -> None:
+    artifact = build_sensitivity_comparison_artifact(_study_bundle())
+    alternate = EdgeInclusionPolicy.ANY_ALIGNED_BASE_HALF_OPEN
+    with pytest.raises(ValidationError, match="replay exactly"):
+        type(artifact)(
+            bundle=artifact.bundle,
+            view=artifact.view.model_copy(update={"edge_inclusion_policy": alternate}),
+        )
+
+    original = artifact.bundle.registration
+    changed_family = original.subset_family.model_copy(
+        update={"edge_inclusion_policy": alternate}
+    )
+    with pytest.raises(ValidationError, match="subset receipts"):
+        type(original)(
+            registration_id=original.registration_id,
+            source_explorer_sha256=original.source_explorer_sha256,
+            source_result_sha256=original.source_result_sha256,
+            source_bundle_sha256=original.source_bundle_sha256,
+            source_method_definition_sha256=original.source_method_definition_sha256,
+            source_atlas_sha256=original.source_atlas_sha256,
+            source_filter_sha256=original.source_filter_sha256,
+            subset_family=changed_family,
+            parameter_sets=original.parameter_sets,
+            run_grid=original.run_grid,
+            subset_receipts=original.subset_receipts,
+            registration_sha256=original.registration_sha256,
+        )
