@@ -310,11 +310,21 @@ def test_authorized_decision_cannot_omit_trust_or_approvals() -> None:
             trust_snapshot_sha256=None,
             evaluated_at=NOW,
             linkage_authorized=True,
-            comparison_linkage_eligible=True,
+            comparison_linkage_eligible=False,
             reason_codes=(LinkageAuthorityReason.AUTHORIZED,),
             approval_ids=(),
             principal_ids=(),
         )
+
+
+def test_d01_decision_schema_cannot_relabel_comparison_as_eligible() -> None:
+    revision = _revision()
+    decision = _decision(revision, (_create_approval(revision, "c"),))
+    payload = decision.model_dump(mode="json")
+    payload["comparison_linkage_eligible"] = True
+
+    with pytest.raises(ValidationError):
+        LinkageAuthorizationDecision.model_validate(payload)
 
 
 def test_activation_api_rejects_caller_supplied_consumption_state() -> None:
@@ -536,6 +546,53 @@ def test_correction_reason_matches_exact_field_delta(
     assert LinkageAuthorityReason.CORRECTION_DELTA_INVALID in _decision(
         mislabeled,
         _correction_approvals(mislabeled),
+        previous=original,
+    ).reason_codes
+
+
+@pytest.mark.parametrize(
+    ("reason", "updates"),
+    (
+        (
+            LinkageReasonCode.WRONG_SUBJECT,
+            {
+                "subject": _token("subject", "d"),
+                "collection": _token("collection", "d"),
+            },
+        ),
+        (
+            LinkageReasonCode.WRONG_COLLECTION,
+            {"collection": _token("collection", "d")},
+        ),
+    ),
+)
+@pytest.mark.parametrize("retained_descendant", ("specimen", "aliquot"))
+def test_parent_correction_rotates_specimen_and_known_aliquot_independently(
+    reason: LinkageReasonCode,
+    updates: dict[str, str],
+    retained_descendant: str,
+) -> None:
+    original = _revision(aliquot=_known("aliquot", "c"))
+    correction_updates: dict[str, object] = {
+        **updates,
+        "specimen": _token("specimen", "d"),
+        "aliquot": _known("aliquot", "d"),
+    }
+    if retained_descendant == "specimen":
+        correction_updates["specimen"] = original.biological.specimen_token
+    else:
+        correction_updates["aliquot"] = original.biological.aliquot
+    correction = _revision(
+        revision=2,
+        operation=LinkageOperation.CORRECT,
+        reason=reason,
+        previous=original,
+        **correction_updates,
+    )
+
+    assert LinkageAuthorityReason.CORRECTION_DELTA_INVALID in _decision(
+        correction,
+        _correction_approvals(correction),
         previous=original,
     ).reason_codes
 

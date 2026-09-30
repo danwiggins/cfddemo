@@ -345,7 +345,7 @@ class LinkageAuthorizationDecision(LinkageContract):
     trust_snapshot_sha256: Sha256 | None
     evaluated_at: datetime
     linkage_authorized: bool
-    comparison_linkage_eligible: bool
+    comparison_linkage_eligible: Literal[False] = False
     reason_codes: tuple[LinkageAuthorityReason, ...] = Field(min_length=1)
     approval_ids: tuple[ApprovalId, ...] = Field(max_length=MAX_APPROVALS)
     principal_ids: tuple[PrincipalId, ...] = Field(max_length=MAX_APPROVALS)
@@ -479,9 +479,17 @@ def _correction_delta_matches_reason(
     collection_changed = (
         previous.biological.collection_token != current.biological.collection_token
     )
-    specimen_changed = (
+    specimen_token_changed = (
         previous.biological.specimen_token != current.biological.specimen_token
-        or previous.biological.aliquot != current.biological.aliquot
+    )
+    aliquot_changed = previous.biological.aliquot != current.biological.aliquot
+    specimen_changed = specimen_token_changed or aliquot_changed
+    aliquot_rotation_valid = (
+        previous.biological.aliquot.token is None
+        or (
+            current.biological.aliquot.token is not None
+            and aliquot_changed
+        )
     )
     technical_changed = previous.technical != current.technical
     source_changed = previous.source_projection_ref != current.source_projection_ref
@@ -500,7 +508,8 @@ def _correction_delta_matches_reason(
         return (
             subject_changed
             and collection_changed
-            and specimen_changed
+            and specimen_token_changed
+            and aliquot_rotation_valid
             and not technical_changed
             and not source_changed
             and not unit_changed
@@ -509,7 +518,8 @@ def _correction_delta_matches_reason(
         return (
             not subject_changed
             and collection_changed
-            and specimen_changed
+            and specimen_token_changed
+            and aliquot_rotation_valid
             and not technical_changed
             and not source_changed
             and not unit_changed
