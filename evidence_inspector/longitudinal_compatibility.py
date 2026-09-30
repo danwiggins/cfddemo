@@ -1204,6 +1204,7 @@ def replay_longitudinal_member_decision(
     expected_policy_sha256: str,
     expected_authority_head_sha256: str,
     expected_linkage_trust_snapshot_sha256_by_provider: dict[str, str],
+    linkage_store: ProviderLinkageStore | None,
 ) -> LongitudinalMemberDecision:
     """Replay an exact D03 decision; never trust a stored decision by itself."""
 
@@ -1216,6 +1217,7 @@ def replay_longitudinal_member_decision(
         expected_linkage_trust_snapshot_sha256_by_provider=(
             expected_linkage_trust_snapshot_sha256_by_provider
         ),
+        linkage_store=linkage_store,
     )
     if actual != expected:
         raise LongitudinalDecisionReplayError(
