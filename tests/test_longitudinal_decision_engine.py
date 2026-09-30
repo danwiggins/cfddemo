@@ -772,10 +772,12 @@ def test_series_parse_rejects_decisions_from_different_anchor_snapshots() -> Non
                 authority_head_sha256=first.authority_head_sha256,
                 authority_revision=first.authority_revision,
                 policy_sha256=first.policy_sha256,
-                linkage_snapshot=snapshot,
+                linkage_snapshot_state_version=snapshot.state_version,
+                linkage_snapshot_state_head_sha256=snapshot.state_head_sha256,
                 linkage_snapshot_sha256=hashlib.sha256(
                     canonical_contract_bytes(snapshot)
                 ).hexdigest(),
+                linkage_receipts=snapshot.receipts,
                 member_result_ids=(
                     first.member_result_id,
                     second.member_result_id,
@@ -1167,13 +1169,60 @@ def test_series_parse_and_replay_reject_tampered_snapshot_binding() -> None:
         )
         payload = series.model_dump(mode="json")
         payload["linkage_snapshot_sha256"] = "f" * 64
-        with pytest.raises(ValidationError, match="snapshot digest"):
+        with pytest.raises(ValidationError, match="exact snapshot"):
             LongitudinalSeriesDecision.model_validate_json(json.dumps(payload))
         tampered = series.model_copy(update={"linkage_snapshot_sha256": "f" * 64})
         with pytest.raises(LongitudinalDecisionReplayError, match="canonical v3"):
             replay_longitudinal_series_decision(
                 tampered, records[0], records[1:], policy, **arguments
             )
+
+
+def test_series_serialization_excludes_unrelated_store_linkage_identities() -> None:
+    anchor = _record("1")
+    member = _record("2")
+    unrelated = _record("3", subject_digit="9")
+    policy = _policy(anchor)
+    with _activated_records(anchor, member) as (records, store):
+        arguments = {
+            "expected_policy_sha256": longitudinal_anchor_policy_sha256(policy),
+            "expected_authority_head_sha256": HEAD_SHA256,
+            "expected_linkage_trust_snapshot_sha256_by_provider": {
+                PROVIDER: TRUST_SHA256
+            },
+            "linkage_store": store,
+        }
+        before = decide_longitudinal_series(
+            records[0], records[1:], policy, **arguments
+        )
+        before_bytes = canonical_contract_bytes(before)
+        assert unrelated.authorized_linkage is not None
+        store.commit_authorized_revision(unrelated.authorized_linkage)
+        snapshot = store.active_snapshot()
+        receipts = {receipt.linkage_id: receipt for receipt in snapshot.receipts}
+        refreshed = tuple(
+            record.model_copy(
+                update={
+                    "activation_receipt": receipts[record.linkage_revision.linkage_id]
+                }
+            )
+            for record in (anchor, member)
+        )
+        after = decide_longitudinal_series(
+            refreshed[0], refreshed[1:], policy, **arguments
+        )
+        after_bytes = canonical_contract_bytes(after)
+    unrelated_tokens = (
+        unrelated.linkage_revision.biological.subject_token,
+        unrelated.linkage_revision.biological.collection_token,
+        unrelated.linkage_revision.biological.specimen_token,
+        unrelated.linkage_revision.technical.analysis_record_id,
+    )
+    assert len(after.linkage_receipts) == 2
+    assert all(token.encode("ascii") not in after_bytes for token in unrelated_tokens)
+    member_bytes = canonical_contract_bytes(after.decisions[0])
+    assert all(token.encode("ascii") not in member_bytes for token in unrelated_tokens)
+    assert abs(len(after_bytes) - len(before_bytes)) < 64
 
 
 @pytest.mark.parametrize("entrypoint", ("member", "series"))
@@ -1379,8 +1428,7 @@ def test_second_store_concurrent_commit_is_bound_as_of_and_breaks_replay(
                     **arguments,
                 )
         else:
-            assert result.linkage_snapshot is not None  # type: ignore[union-attr]
-            assert result.linkage_snapshot.state_version == expected_version  # type: ignore[union-attr]
+            assert result.linkage_snapshot_state_version == expected_version  # type: ignore[union-attr]
             with pytest.raises(LongitudinalDecisionReplayError, match="replay exactly"):
                 replay_longitudinal_series_decision(
                     result,  # type: ignore[arg-type]

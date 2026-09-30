@@ -891,8 +891,12 @@ class LongitudinalSeriesDecision(CompatibilityContract):
     authority_head_sha256: Sha256
     authority_revision: int = Field(ge=0, le=10_000_000)
     policy_sha256: Sha256
-    linkage_snapshot: ActiveLinkageSnapshot | None
+    linkage_snapshot_state_version: int | None = Field(ge=0, le=10_000_000)
+    linkage_snapshot_state_head_sha256: Sha256 | None
     linkage_snapshot_sha256: Sha256 | None
+    linkage_receipts: tuple[CommittedLinkageReceipt, ...] = Field(
+        max_length=MAX_SERIES_MEMBERS + 1
+    )
     member_result_ids: tuple[ResultId, ...] = Field(
         min_length=1, max_length=MAX_SERIES_MEMBERS
     )
@@ -945,34 +949,52 @@ class LongitudinalSeriesDecision(CompatibilityContract):
             item.delta_allowed or item.connecting_trend_allowed
             for item in self.decisions
         )
-        if eligible and self.linkage_snapshot is None:
-            raise ValueError("eligible series requires one exact linkage snapshot")
-        expected_snapshot_sha256 = (
-            hashlib.sha256(canonical_contract_bytes(self.linkage_snapshot)).hexdigest()
-            if self.linkage_snapshot is not None
-            else None
+        snapshot_binding = (
+            self.linkage_snapshot_state_version,
+            self.linkage_snapshot_state_head_sha256,
+            self.linkage_snapshot_sha256,
         )
-        if self.linkage_snapshot_sha256 != expected_snapshot_sha256:
-            raise ValueError("series linkage snapshot digest is not exact")
-        if self.linkage_snapshot is not None:
+        if any(value is not None for value in snapshot_binding) and any(
+            value is None for value in snapshot_binding
+        ):
+            raise ValueError("series linkage snapshot binding must be complete")
+        if eligible and any(value is None for value in snapshot_binding):
+            raise ValueError("eligible series requires one exact linkage snapshot")
+        if self.linkage_receipts != tuple(
+            sorted(
+                set(self.linkage_receipts),
+                key=lambda receipt: (
+                    receipt.provider_namespace,
+                    receipt.linkage_id,
+                    receipt.revision,
+                ),
+            )
+        ):
+            raise ValueError("series linkage receipts must be uniquely sorted")
+        if self.linkage_snapshot_sha256 is not None:
             if any(
                 item.linkage_snapshot_state_version
-                != self.linkage_snapshot.state_version
+                != self.linkage_snapshot_state_version
                 or item.linkage_snapshot_state_head_sha256
-                != self.linkage_snapshot.state_head_sha256
+                != self.linkage_snapshot_state_head_sha256
                 or item.linkage_snapshot_sha256 != self.linkage_snapshot_sha256
                 for item in self.decisions
             ):
                 raise ValueError("series decisions do not bind the exact snapshot")
             receipt_sha256s = {
                 committed_linkage_receipt_sha256(receipt)
-                for receipt in self.linkage_snapshot.receipts
+                for receipt in self.linkage_receipts
             }
-            if any(
-                item.anchor_linkage_receipt_sha256 not in receipt_sha256s
-                or item.member_linkage_receipt_sha256 not in receipt_sha256s
+            required_receipt_sha256s = {
+                digest
                 for item in self.decisions
-            ):
+                for digest in (
+                    item.anchor_linkage_receipt_sha256,
+                    item.member_linkage_receipt_sha256,
+                )
+                if digest is not None
+            }
+            if receipt_sha256s != required_receipt_sha256s:
                 raise ValueError("series decisions are not members of the snapshot")
         if self.decision_sha256s != tuple(
             longitudinal_member_decision_sha256(item) for item in self.decisions
@@ -1262,8 +1284,10 @@ _INVALID_INPUT_SERIES_DECISION_BYTES = canonical_contract_bytes(
         authority_head_sha256=_INVALID_INPUT_SHA256,
         authority_revision=0,
         policy_sha256=_INVALID_INPUT_SHA256,
-        linkage_snapshot=None,
+        linkage_snapshot_state_version=None,
+        linkage_snapshot_state_head_sha256=None,
         linkage_snapshot_sha256=None,
+        linkage_receipts=(),
         member_result_ids=(_INVALID_INPUT_RESULT_ID,),
         decisions=(
             LongitudinalMemberDecision.model_validate_json(
@@ -2179,6 +2203,21 @@ def _evaluate_longitudinal_series(
         if linkage_snapshot is not None
         else None
     )
+    relevant_receipts_by_sha256 = {
+        committed_linkage_receipt_sha256(receipt): receipt
+        for record in (anchor, *members)
+        if (receipt := record.activation_receipt) is not None
+    }
+    relevant_receipts = tuple(
+        sorted(
+            relevant_receipts_by_sha256.values(),
+            key=lambda receipt: (
+                receipt.provider_namespace,
+                receipt.linkage_id,
+                receipt.revision,
+            ),
+        )
+    )
     first = decisions[0]
     return LongitudinalSeriesDecision(
         schema_version="traceback.longitudinal-series-decision.v3",
@@ -2192,8 +2231,14 @@ def _evaluate_longitudinal_series(
         authority_head_sha256=first.authority_head_sha256,
         authority_revision=first.authority_revision,
         policy_sha256=longitudinal_anchor_policy_sha256(policy),
-        linkage_snapshot=linkage_snapshot,
+        linkage_snapshot_state_version=(
+            linkage_snapshot.state_version if linkage_snapshot is not None else None
+        ),
+        linkage_snapshot_state_head_sha256=(
+            linkage_snapshot.state_head_sha256 if linkage_snapshot is not None else None
+        ),
         linkage_snapshot_sha256=snapshot_sha256,
+        linkage_receipts=relevant_receipts,
         member_result_ids=member_ids,
         decisions=decisions,
         decision_sha256s=tuple(
