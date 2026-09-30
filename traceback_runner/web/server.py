@@ -21,8 +21,9 @@ from importlib.resources import files
 from pathlib import Path
 from types import TracebackType
 from typing import Any, Self
-from urllib.parse import urlsplit
+from urllib.parse import parse_qs, urlsplit
 
+from evidence_inspector.result_catalog import CatalogQuery
 from traceback_runner.serialization import canonical_json_bytes
 from traceback_runner.store import JobStore
 
@@ -35,6 +36,7 @@ from .auth import (
     build_loopback_config,
 )
 from .contracts import ProblemDetail, ProblemOwner
+from .explorer import IntegratedExplorerSource
 from .source import JobStoreProjectionSource
 
 MAX_REQUEST_BYTES = 4096
@@ -46,6 +48,7 @@ STATE_DIRECTORY_MODE = 0o700
 STATE_FILE_MODE = 0o600
 _STABLE_LOCK_ROOT = Path("/tmp").resolve(strict=True)
 _JOB_ROUTE = re.compile(r"^/api/v1/jobs/(job_[0-9a-f]{32})$")
+_EXPLORER_RESULT_ROUTE = re.compile(r"^/api/v1/explorer/results/(result_[0-9a-f]{40})$")
 _COOKIE_NAME = re.compile(r"^[!#$%&'*+\-.^_`|~0-9A-Za-z]+$")
 _COOKIE_VALUE = re.compile(r"^[A-Za-z0-9_-]{0,256}$")
 _SECURITY_HEADERS = {
@@ -445,6 +448,7 @@ class _Application:
     kernel: LocalApiKernel
     boundary: LocalWebBoundary
     assets: dict[str, tuple[str, bytes]]
+    explorer: IntegratedExplorerSource | None = None
 
 
 class _LoopbackHttpServer(http.server.ThreadingHTTPServer):
@@ -642,7 +646,10 @@ class _Handler(http.server.BaseHTTPRequestHandler):
             self._json(431, {"error": {"code": "TBX-WEB-431"}})
             return
         parsed = urlsplit(self.path)
-        if parsed.query or parsed.fragment:
+        if parsed.fragment:
+            self._json(404, {"error": {"code": "TBX-WEB-404"}})
+            return
+        if parsed.query and parsed.path != "/api/v1/explorer/catalog":
             self._json(404, {"error": {"code": "TBX-WEB-404"}})
             return
         asset = self.application.assets.get(parsed.path)
@@ -664,6 +671,53 @@ class _Handler(http.server.BaseHTTPRequestHandler):
                     200, {"jobs": [item.model_dump(mode="json") for item in jobs]}
                 )
                 return
+            if parsed.path == "/api/v1/explorer/catalog":
+                self.application.boundary.authorize(request)
+                if self.application.explorer is None:
+                    raise ApiProblem(404, self.application.kernel.not_found_problem)
+                parameters = parse_qs(
+                    parsed.query,
+                    keep_blank_values=False,
+                    strict_parsing=True,
+                    max_num_fields=8,
+                )
+                if set(parameters) - {"method_id", "method_version", "cursor", "limit"}:
+                    raise ValueError("unsupported explorer query")
+                if any(len(values) != 1 for values in parameters.values()):
+                    raise ValueError("explorer query values must be singular")
+                method_ids = parameters.get("method_id", [])
+                method_versions = parameters.get("method_version", [])
+                if (
+                    bool(method_ids) != bool(method_versions)
+                    or len(method_ids) > 1
+                    or len(method_versions) > 1
+                ):
+                    raise ValueError("method filters must be paired")
+                query_payload: dict[str, object] = {
+                    "limit": int(parameters.get("limit", ["50"])[0]),
+                }
+                if method_ids:
+                    query_payload["method_refs"] = (
+                        {"method_id": method_ids[0], "version": method_versions[0]},
+                    )
+                if "cursor" in parameters:
+                    query_payload["cursor"] = parameters["cursor"][0]
+                page = self.application.explorer.query(CatalogQuery(**query_payload))
+                self._json(200, page.model_dump(mode="json"))
+                return
+            explorer_match = _EXPLORER_RESULT_ROUTE.fullmatch(parsed.path)
+            if explorer_match is not None:
+                self.application.boundary.authorize(request)
+                if self.application.explorer is None:
+                    raise ApiProblem(404, self.application.kernel.not_found_problem)
+                try:
+                    document = self.application.explorer.get(explorer_match.group(1))
+                except KeyError as exc:
+                    raise ApiProblem(
+                        404, self.application.kernel.not_found_problem
+                    ) from exc
+                self._json(200, document.model_dump(mode="json"))
+                return
             match = _JOB_ROUTE.fullmatch(parsed.path)
             if match is not None:
                 job = self.application.kernel.get_job(request, match.group(1))
@@ -674,6 +728,9 @@ class _Handler(http.server.BaseHTTPRequestHandler):
             return
         except ApiProblem as exc:
             self._json(exc.status_code, exc.problem.model_dump(mode="json"))
+            return
+        except (TypeError, ValueError):
+            self._json(400, {"error": {"code": "TBX-WEB-400"}})
             return
         self._json(404, {"error": {"code": "TBX-WEB-404"}})
 
@@ -756,6 +813,7 @@ class RunningLocalWebService:
         store: JobStore,
         state_directory: Path,
         ipv6: bool = False,
+        explorer: IntegratedExplorerSource | None = None,
     ) -> Self:
         state_directory = state_directory.absolute()
         startup_anchor: _StartupAnchor | None = None
@@ -808,7 +866,9 @@ class RunningLocalWebService:
                 source=source,
                 not_found_problem=problem,
             )
-            server.application = _Application(kernel, boundary, _packaged_assets())
+            server.application = _Application(
+                kernel, boundary, _packaged_assets(), explorer
+            )
 
             def validate_security_boundary() -> None:
                 _require_startup_anchor(startup_anchor)

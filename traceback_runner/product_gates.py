@@ -7,14 +7,15 @@ a manual accessibility audit, and fixtures are not a five-provider study.
 
 from __future__ import annotations
 
+import hashlib
 import platform
 import socket
 import sys
+import tempfile
 import time
 import tracemalloc
 from collections.abc import Iterator, Sequence
 from contextlib import contextmanager
-from dataclasses import dataclass
 from datetime import UTC, datetime
 from enum import StrEnum
 from pathlib import Path
@@ -29,6 +30,12 @@ from pydantic import (
     model_validator,
 )
 
+from evidence_inspector.result_catalog import (
+    CatalogQualificationState,
+    CatalogQuery,
+    CatalogResultRef,
+    ResultCatalog,
+)
 from traceback_runner.contracts import RunnerContract
 from traceback_runner.serialization import canonical_json_bytes, sha256_bytes
 from traceback_runner.signing import (
@@ -290,6 +297,87 @@ class ScreenshotManifest(RunnerContract):
         ids = [item.fixture_id for item in self.fixtures]
         if ids != sorted(ids) or len(ids) != len(set(ids)):
             raise ValueError("screenshot fixtures must be uniquely sorted")
+        return self
+
+
+class BrowserCapture(RunnerContract):
+    """Parsed content address for one reviewed, real-browser capture."""
+
+    capture_id: SafeToken
+    fixture_id: SafeToken
+    surface_state: Literal["loading", "empty", "ready", "error", "incompatible"]
+    viewport_width_px: int = Field(ge=320, le=3840)
+    zoom_percent: Literal[100, 200]
+    image_sha256: Sha256
+    dom_sha256: Sha256
+    filters_sha256: Sha256
+
+
+class BrowserCaptureArtifact(RunnerContract):
+    schema_version: Literal["traceback.browser-capture-artifact.v1"] = (
+        "traceback.browser-capture-artifact.v1"
+    )
+    captured_at: datetime
+    browser_name: SafeToken
+    browser_version: SafeText
+    captures: tuple[BrowserCapture, ...] = Field(min_length=1, max_length=64)
+
+    @model_validator(mode="after")
+    def canonical_captures(self) -> BrowserCaptureArtifact:
+        if self.captured_at.tzinfo is None or self.captured_at.utcoffset() is None:
+            raise ValueError("browser capture time must be timezone-aware")
+        keys = [item.capture_id for item in self.captures]
+        if keys != sorted(keys) or len(keys) != len(set(keys)):
+            raise ValueError("browser captures must be uniquely sorted")
+        return self
+
+
+class AccessibilityAuditArtifact(RunnerContract):
+    schema_version: Literal["traceback.accessibility-audit-artifact.v1"] = (
+        "traceback.accessibility-audit-artifact.v1"
+    )
+    audited_at: datetime
+    auditor_id: SafeToken
+    browser_capture_artifact_sha256: Sha256
+    keyboard_audit_passed: bool
+    screen_reader_audit_passed: bool
+    zoom_200_audit_passed: bool
+    findings: tuple[SafeText, ...] = Field(max_length=128)
+
+    @model_validator(mode="after")
+    def aware_audit_time(self) -> AccessibilityAuditArtifact:
+        if self.audited_at.tzinfo is None or self.audited_at.utcoffset() is None:
+            raise ValueError("accessibility audit time must be timezone-aware")
+        return self
+
+
+class ProviderTaskOutcome(RunnerContract):
+    participant_id: SafeToken
+    task_id: SafeToken
+    completed: bool
+    duration_seconds: int = Field(ge=0, le=86_400)
+    error_count: int = Field(ge=0, le=1_000)
+
+
+class FiveProviderStudyArtifact(RunnerContract):
+    schema_version: Literal["traceback.five-provider-study-artifact.v1"] = (
+        "traceback.five-provider-study-artifact.v1"
+    )
+    conducted_at: datetime
+    protocol_sha256: Sha256
+    browser_capture_artifact_sha256: Sha256
+    outcomes: tuple[ProviderTaskOutcome, ...] = Field(min_length=5, max_length=500)
+
+    @model_validator(mode="after")
+    def five_distinct_participants(self) -> FiveProviderStudyArtifact:
+        if self.conducted_at.tzinfo is None or self.conducted_at.utcoffset() is None:
+            raise ValueError("provider study time must be timezone-aware")
+        participants = {item.participant_id for item in self.outcomes}
+        if len(participants) < 5:
+            raise ValueError("provider study requires five distinct participants")
+        keys = [(item.participant_id, item.task_id) for item in self.outcomes]
+        if keys != sorted(keys) or len(keys) != len(set(keys)):
+            raise ValueError("provider task outcomes must be uniquely sorted")
         return self
 
 
@@ -587,37 +675,84 @@ class ProductGateReport(RunnerContract):
         return self
 
 
-@dataclass(frozen=True, slots=True)
-class _SyntheticCatalogRecord:
-    result_id: str
-    method_id: str
-    state: str
-    created_order: int
+def _synthetic_catalog_ref(index: int) -> CatalogResultRef:
+    """A valid synthetic E04 reference; never a private stand-in record."""
 
-
-def _synthetic_records(count: int) -> tuple[_SyntheticCatalogRecord, ...]:
-    methods = ("fragment_span", "cell_origin", "cna_dosage", "cna_segmented")
-    states = ("complete", "insufficient", "failed", "not_run")
-    return tuple(
-        _SyntheticCatalogRecord(
-            result_id=f"result_{index:040x}",
-            method_id=methods[index % len(methods)],
-            state=states[(index // len(methods)) % len(states)],
-            created_order=index,
+    bundle_sha256 = f"{index + 1:064x}"
+    method_definition_sha256 = "c" * 64
+    identity = hashlib.sha256(
+        canonical_json_bytes(
+            {
+                "bundle_sha256": bundle_sha256,
+                "method_definition_sha256": method_definition_sha256,
+            }
         )
-        for index in range(count)
+    ).hexdigest()
+    return CatalogResultRef(
+        result_id=f"result_{identity[:40]}",
+        bundle_sha256=bundle_sha256,
+        bundle_record_id=f"record-{index:024x}",
+        bundle_manifest_sha256=f"{index + 2:064x}",
+        workflow_release_id="synthetic-workflow.v1",
+        method_ref={
+            "method_id": "mth_fragment_raw_query_length",
+            "version": "1.0.0",
+        },
+        method_definition_sha256=method_definition_sha256,
+        registry_sha256="d" * 64,
+        registry_version=1,
+        authority_head_sha256="e" * 64,
+        authority_revision=2,
+        authority_scope="scope_provider_west",
+        capability_as_of=datetime(2026, 2, 1, tzinfo=UTC),
+        qualification_state=CatalogQualificationState.QUALIFIED,
+        display_role="provider_primary",
+        research_inspectable=True,
+        current_provider_eligible=True,
     )
 
 
-def _filter_sort(
-    records: Sequence[_SyntheticCatalogRecord], *, method_id: str, state: str
-) -> tuple[_SyntheticCatalogRecord, ...]:
-    matches = (
-        item for item in records if item.method_id == method_id and item.state == state
-    )
-    return tuple(
-        sorted(matches, key=lambda item: (-item.created_order, item.result_id))
-    )
+@contextmanager
+def _real_catalog(count: int) -> Iterator[ResultCatalog]:
+    """Populate the actual immutable catalog schema in bounded batches."""
+
+    with tempfile.TemporaryDirectory(prefix="traceback-e14-catalog-") as directory:
+        root = Path(directory)
+        imports = root / "imports"
+        imports.mkdir()
+        catalog = ResultCatalog(
+            root / "catalog",
+            import_roots={"root_synthetic": imports},
+            trust_store=TrustStore(),
+        )
+        try:
+            with catalog._connect() as connection:
+                connection.execute("BEGIN IMMEDIATE")
+                for start in range(0, count, 1_000):
+                    rows = []
+                    for index in range(start, min(start + 1_000, count)):
+                        ref = _synthetic_catalog_ref(index)
+                        rows.append(
+                            (
+                                ref.result_id,
+                                ref.bundle_sha256,
+                                ref.bundle_record_id,
+                                ref.method_ref.method_id,
+                                ref.method_ref.version,
+                                ref.execution_state.value,
+                                ref.information_state.value,
+                                ref.trust_state.value,
+                                ref.qualification_state.value,
+                                ref.model_dump_json().encode(),
+                            )
+                        )
+                    connection.executemany(
+                        "INSERT INTO results VALUES(?,?,?,?,?,?,?,?,?,?)", rows
+                    )
+                connection.commit()
+            yield catalog
+        finally:
+            catalog.close()
 
 
 def _nearest_rank_p95(samples: Sequence[int]) -> int:
@@ -626,22 +761,35 @@ def _nearest_rank_p95(samples: Sequence[int]) -> int:
     return ordered[rank]
 
 
+def _explorer_query(catalog: ResultCatalog, query: CatalogQuery) -> object:
+    """Exercise the same E04-to-browser projection as the loopback API."""
+
+    from traceback_runner.web.explorer import IntegratedExplorerSource
+
+    return IntegratedExplorerSource(catalog=catalog).query(query)
+
+
 def _measure_filter(
-    records: Sequence[_SyntheticCatalogRecord],
+    catalog: ResultCatalog, record_count: int
 ) -> PerformanceMeasurement:
     samples: list[int] = []
-    for index in range(20):
-        method = ("fragment_span", "cell_origin", "cna_dosage", "cna_segmented")[
-            index % 4
-        ]
-        state = ("complete", "insufficient", "failed", "not_run")[(index // 4) % 4]
+    query = CatalogQuery(
+        method_refs=(
+            {"method_id": "mth_fragment_raw_query_length", "version": "1.0.0"},
+        ),
+        qualification_states=(CatalogQualificationState.QUALIFIED,),
+        limit=100,
+    )
+    for _ in range(20):
         started = time.perf_counter_ns()
-        _filter_sort(records, method_id=method, state=state)
+        page = _explorer_query(catalog, query)
         samples.append((time.perf_counter_ns() - started) // 1_000)
+        if len(page.results) != 100:
+            raise ValueError("catalog performance query returned an incomplete page")
     p95 = _nearest_rank_p95(samples)
     return PerformanceMeasurement(
         name="filter_sort",
-        record_count=len(records),
+        record_count=record_count,
         samples_us=tuple(samples),
         p95_us=p95,
         target_us=FILTER_P95_TARGET_US,
@@ -650,18 +798,19 @@ def _measure_filter(
 
 
 def _measure_initial_render(
-    records: Sequence[_SyntheticCatalogRecord],
+    catalog: ResultCatalog, record_count: int
 ) -> PerformanceMeasurement:
     samples: list[int] = []
+    query = CatalogQuery(limit=100)
     for _ in range(10):
         started = time.perf_counter_ns()
-        page = sorted(records, key=lambda item: item.result_id)[:100]
+        page = _explorer_query(catalog, query)
         _catalog_page_bytes(page)
         samples.append((time.perf_counter_ns() - started) // 1_000)
     p95 = _nearest_rank_p95(samples)
     return PerformanceMeasurement(
         name="initial_render",
-        record_count=len(records),
+        record_count=record_count,
         samples_us=tuple(samples),
         p95_us=p95,
         target_us=INITIAL_RENDER_TARGET_US,
@@ -669,19 +818,10 @@ def _measure_initial_render(
     )
 
 
-def _catalog_page_bytes(records: Sequence[_SyntheticCatalogRecord]) -> bytes:
-    """Serialize the same bounded public fields measured by initial render."""
+def _catalog_page_bytes(page: object) -> bytes:
+    """Serialize the actual bounded E04 API payload used by the renderer."""
 
-    return canonical_json_bytes(
-        [
-            {
-                "result_id": _SAFE_TEXT.validate_python(item.result_id),
-                "method_id": _SAFE_TEXT.validate_python(item.method_id),
-                "state": _SAFE_TEXT.validate_python(item.state),
-            }
-            for item in records
-        ]
-    )
+    return canonical_json_bytes(page)
 
 
 @contextmanager
@@ -774,14 +914,10 @@ def _privacy_sentinel_probe(
     for sentinel_class, sentinel in sentinels:
         value = sentinel.decode("ascii")
         sentinel_sha256 = sha256_bytes(sentinel)
-        poisoned_record = _SyntheticCatalogRecord(
-            result_id=value,
-            method_id="fragment_span",
-            state="complete",
-            created_order=0,
-        )
+        poisoned_record = _synthetic_catalog_ref(0).model_dump(mode="json")
+        poisoned_record["result_id"] = value
         try:
-            _catalog_page_bytes((poisoned_record,))
+            CatalogResultRef.model_validate(poisoned_record)
         except ValidationError:
             catalog_rejected = True
         else:
@@ -965,20 +1101,18 @@ def run_foundation_gates(
     probe_payload = REGISTERED_NETWORK_PAYLOAD
 
     with deny_external_network() as network_attempts:
-        records = _synthetic_records(CATALOG_RECORDS)
-        filter_measurement = _measure_filter(records)
-        render_measurement = _measure_initial_render(records)
+        with _real_catalog(CATALOG_RECORDS) as catalog:
+            filter_measurement = _measure_filter(catalog, CATALOG_RECORDS)
+            render_measurement = _measure_initial_render(catalog, CATALOG_RECORDS)
 
         tracemalloc.start()
-        stress_records = _synthetic_records(STRESS_RECORDS)
-        _filter_sort(
-            stress_records,
-            method_id="fragment_span",
-            state="complete",
-        )
-        _, peak_bytes = tracemalloc.get_traced_memory()
-        tracemalloc.stop()
-        del stress_records
+        try:
+            with _real_catalog(STRESS_RECORDS) as stress_catalog:
+                stress_page = _explorer_query(stress_catalog, CatalogQuery(limit=100))
+                _catalog_page_bytes(stress_page)
+            _, peak_bytes = tracemalloc.get_traced_memory()
+        finally:
+            tracemalloc.stop()
         probe_socket = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
         try:
             for operation_name, operation in (

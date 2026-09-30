@@ -3,14 +3,52 @@
   <head>
     <meta charset="utf-8">
     <meta name="viewport" content="width=device-width, initial-scale=1">
-    <title>Traceback local operator</title>
+    <title>Traceback local result explorer</title>
     <link rel="stylesheet" href="/assets/styles.css">
   </head>
   <body>
+    <a class="skip-link" href="#results">Skip to results</a>
+    <header>
+      <p class="eyebrow">Local research inspection</p>
+      <h1>Result explorer</h1>
+      <p id="status" role="status" aria-live="polite">Establishing local session</p>
+    </header>
     <main>
-      <h1>Traceback local operator</h1>
-      <p id="status" role="status">Establishing local session</p>
-      <ul id="jobs" aria-label="Local jobs"></ul>
+      <section aria-labelledby="filters-title">
+        <h2 id="filters-title">Shared filters and views</h2>
+        <form id="filters">
+          <label>Method ID <input id="method-id" name="method_id" autocomplete="off"></label>
+          <label>Method version <input id="method-version" name="method_version" autocomplete="off"></label>
+          <button type="submit">Apply filters</button>
+        </form>
+        <div class="switchers">
+          <label>View A <select id="left-result" aria-describedby="comparison-help"></select></label>
+          <label>View B <select id="right-result" aria-describedby="comparison-help"></select></label>
+        </div>
+        <p id="comparison-help" class="help">Comparisons show registered method and pipeline outputs only. Incompatible views do not show deltas.</p>
+      </section>
+      <section id="results" aria-labelledby="results-title" tabindex="-1">
+        <div class="section-heading">
+          <h2 id="results-title">Exact result values</h2>
+          <p id="compatibility" class="badge">Select two registered views</p>
+        </div>
+        <div id="panels" class="panels" aria-live="polite"></div>
+        <div class="table-wrap">
+          <table>
+            <caption>Accessible exact-value comparison table</caption>
+            <thead><tr><th scope="col">View</th><th scope="col">Result</th><th scope="col">State</th><th scope="col">Displayed</th><th scope="col">Eligible</th><th scope="col">QC</th></tr></thead>
+            <tbody id="exact-rows"></tbody>
+          </table>
+        </div>
+      </section>
+      <section aria-labelledby="provenance-title">
+        <h2 id="provenance-title">Method compatibility and provenance</h2>
+        <div id="provenance"></div>
+      </section>
+      <section aria-labelledby="jobs-title">
+        <h2 id="jobs-title">Local jobs</h2>
+        <ul id="jobs" aria-label="Local jobs"></ul>
+      </section>
     </main>
     <script src="/assets/app.js" defer></script>
   </body>
