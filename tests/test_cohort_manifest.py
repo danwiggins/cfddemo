@@ -5,6 +5,7 @@ from __future__ import annotations
 import base64
 import hashlib
 import json
+import threading
 from collections.abc import Iterator, Mapping
 from datetime import UTC, datetime, timedelta, tzinfo
 from pathlib import Path
@@ -776,6 +777,126 @@ def _short_lived_manifest(live, *, expire_grant: bool):
     )
 
 
+def _manifest_with_data_authority_window(
+    live,
+    authority_kind: str,
+    *,
+    issued_at: datetime = NOW,
+    grant_issued_at: datetime | None = None,
+    expires_at: datetime = AFTER,
+):
+    store, snapshot, provider_authority, _ = live
+    revision = snapshot.revisions[0]
+    event = _collection_event(
+        subject_token=revision.biological.subject_token,
+        collection_token=revision.biological.collection_token,
+    )
+    origin = None
+    axis = TIME_AXIS
+    if authority_kind == "event":
+        authority = _resign_grant(
+            event.authority,
+            issued_at=(issued_at if grant_issued_at is None else grant_issued_at),
+        )
+        authority = _resign_authority(
+            authority, issued_at=issued_at, expires_at=expires_at
+        )
+        event = event.model_copy(update={"authority": authority})
+    else:
+        kind = (
+            TimeAxisKind.SUBJECT_RELATIVE
+            if authority_kind == "subject_origin"
+            else TimeAxisKind.STUDY_RELATIVE
+        )
+        subject_token = (
+            revision.biological.subject_token
+            if kind == TimeAxisKind.SUBJECT_RELATIVE
+            else None
+        )
+        origin = _time_origin(
+            kind=kind,
+            origin_time=COLLECTED - timedelta(days=1),
+            subject_token=subject_token,
+        )
+        authority = _resign_grant(
+            origin.authority,
+            issued_at=(issued_at if grant_issued_at is None else grant_issued_at),
+        )
+        authority = _resign_authority(
+            authority, issued_at=issued_at, expires_at=expires_at
+        )
+        origin = origin.model_copy(update={"authority": authority})
+        axis = TimeAxis(
+            kind=kind,
+            definition_sha256="d" * 64,
+            unit_sha256="3" * 64,
+            origin_authority_sha256=time_origin_authority_sha256((origin,)),
+        )
+    member = build_cohort_member(
+        revision=revision,
+        receipt=snapshot.receipts[0],
+        collection_event=event,
+        time_axis=axis,
+        time_origin=origin,
+        lineage_role=MemberLineageRole.BIOLOGICAL_DRAW,
+        denominator_contribution=True,
+        unit_of_analysis=UnitOfAnalysis.COLLECTION,
+    )
+    manifest = build_cohort_manifest(
+        provider_authorities=(provider_authority,),
+        collection_events=(event,),
+        time_origins=(() if origin is None else (origin,)),
+        members=(member,),
+        **_manifest_values(time_axis=axis),
+    )
+    return store, manifest
+
+
+@pytest.mark.parametrize(
+    "authority_kind", ("event", "subject_origin", "study_origin")
+)
+@pytest.mark.parametrize("authority_part", ("proof", "grant"))
+def test_data_authority_must_exist_when_manifest_is_created(
+    live, authority_kind: str, authority_part: str
+) -> None:
+    future = NOW + timedelta(minutes=5)
+    store, manifest = _manifest_with_data_authority_window(
+        live,
+        authority_kind,
+        issued_at=future,
+        grant_issued_at=(NOW if authority_part == "proof" else future),
+    )
+    source = vars(store)["_time_source"]
+    assert type(source) is AuthorityTimeSource
+    source.advance_to(NOW + timedelta(minutes=10))
+    with pytest.raises(ValueError, match="window"):
+        _validate(manifest, store, expected_trust_snapshot_sha256_by_provider=_pins())
+
+
+@pytest.mark.parametrize(
+    "authority_kind", ("event", "subject_origin", "study_origin")
+)
+def test_clock_rollback_cannot_revive_expired_data_authority(
+    live, authority_kind: str
+) -> None:
+    store, manifest = _manifest_with_data_authority_window(
+        live,
+        authority_kind,
+        expires_at=NOW + timedelta(minutes=5),
+    )
+    source = vars(store)["_time_source"]
+    assert type(source) is AuthorityTimeSource
+    source.advance_to(NOW + timedelta(minutes=10))
+    with pytest.raises(ValueError, match="window"):
+        _validate(manifest, store, expected_trust_snapshot_sha256_by_provider=_pins())
+
+    # Fixed authority time is the documented deterministic clock seam. Simulate
+    # an underlying system-clock rollback without calling its monotonic API.
+    source._current = NOW  # type: ignore[attr-defined]
+    with pytest.raises(ProviderLinkageStoreError, match="moved backwards"):
+        _validate(manifest, store, expected_trust_snapshot_sha256_by_provider=_pins())
+
+
 def test_live_authority_time_rejects_expired_event_proof(live) -> None:
     store, manifest = _short_lived_manifest(live, expire_grant=False)
     source = vars(store)["_time_source"]
@@ -839,6 +960,7 @@ def test_create_linkage_grant_does_not_authorize_data_purpose(
         _verify_provider_data_authority(
             authority,
             trust,
+            manifest_created_at=CREATED,
             evaluated_at=CREATED,
         )
 
@@ -886,6 +1008,7 @@ def test_data_grant_must_bind_principal_and_precede_proof(
         _verify_provider_data_authority(
             authority,
             trust,
+            manifest_created_at=CREATED,
             evaluated_at=evaluated_at,
         )
 
@@ -1379,6 +1502,60 @@ def test_correction_then_tombstone_invalidates_prior_manifest(live) -> None:
             store,
             expected_trust_snapshot_sha256_by_provider=_pins(),
         )
+
+
+def test_public_commit_cannot_cross_the_manifest_validation_fence(live) -> None:
+    store, snapshot, authority, member = live
+    manifest = _manifest(authority, (member,))
+    previous = snapshot.revisions[0]
+    correction_revision = _revision(
+        revision=2,
+        operation=LinkageOperation.CORRECT,
+        reason=LinkageReasonCode.WRONG_SUBJECT,
+        previous=previous,
+        subject=_token("subject", "d"),
+        collection=_token("collection", "d"),
+        specimen=_token("specimen", "d"),
+    ).model_copy(update={"technical": previous.technical})
+    correction, _ = _consume(
+        correction_revision,
+        _correction_approvals(correction_revision),
+        previous=previous,
+    )
+    trigger = threading.Event()
+    commit_started = threading.Event()
+    commit_finished = threading.Event()
+
+    class RacingPins(Mapping[str, str]):
+        def __iter__(self):
+            return iter(_pins())
+
+        def __len__(self):
+            return len(_pins())
+
+        def __getitem__(self, key: str) -> str:
+            trigger.set()
+            assert commit_started.wait(timeout=2)
+            assert not commit_finished.wait(timeout=0.05)
+            return _pins()[key]
+
+    def commit_correction() -> None:
+        assert trigger.wait(timeout=2)
+        commit_started.set()
+        store.commit_authorized_revision(correction)
+        commit_finished.set()
+
+    thread = threading.Thread(target=commit_correction)
+    thread.start()
+    _validate(
+        manifest,
+        store,
+        expected_trust_snapshot_sha256_by_provider=RacingPins(),
+    )
+    thread.join(timeout=5)
+    assert not thread.is_alive()
+    assert commit_finished.is_set()
+    assert store.active_snapshot().state_version == 2
 
 
 def test_live_store_boundary_rejects_fake_subclass_and_instance_shadow(

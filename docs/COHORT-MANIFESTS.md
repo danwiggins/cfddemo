@@ -58,9 +58,8 @@ replicate and reanalysis policies determine whether those records are excluded
 or collapsed without changing the biological denominator.
 
 `validate_manifest_against_linkage_store` accepts a live
-`ProviderLinkageStore`, reads its current active snapshot, recomputes the store
-trust-pin digest from independently supplied provider pins, and invokes the
-store's pinned current-receipt verification. It requires the exact provider
+`ProviderLinkageStore`, reads its current active snapshot, and recomputes the store
+trust-pin digest from independently supplied provider pins. It requires the exact provider
 trust snapshots matching those independent pins and verifies every event and
 relative-origin signature against an active trusted issuer. A caller cannot
 authorize changed time semantics by recomputing dependent digests, selecting a
@@ -72,14 +71,22 @@ state head, provider, linkage revision, and lineage. Detached snapshots,
 closed stores, cross-store receipts, state advances, corrections, tombstones,
 and caller-forged trust-pin digests fail closed.
 
-Current trust, grant, and proof validity are evaluated at a protected time read
-from the live linkage store under its authority fence. The trust must already
-be issued, the grant and proof must be issued no later than that protected
-time, the protected time must be strictly before grant and proof expiry, and
-their expiry cannot exceed trust expiry. The caller-authored manifest creation
-field is version metadata and cannot authorize historical as-of replay.
-Future-issued, exactly expired, and post-expiry event or origin proofs fail
-closed.
+Trust, grant, and proof validity are required at both immutable manifest
+creation and the protected current time. The order is trust issuance, grant
+issuance, proof issuance, manifest creation, and current evaluation; both
+manifest creation and current evaluation must be strictly before proof and
+grant expiry, whose nesting cannot exceed trust expiry. Caller-authored
+creation time therefore cannot authorize historical as-of replay or a proof
+issued after the manifest. Future-issued, exactly expired, post-expiry, and
+backdated event or origin authority fail closed.
+
+One store write fence covers canonical validation, independent pin capture,
+the active snapshot, monotonic protected time, every authority and membership
+check, final snapshot/time revalidation, and return. Normal commits cannot move
+the live authority head between a successful final check and the result. The
+time comes from the store's persisted authority-time floor, so an underlying
+clock rollback cannot revive expired collection-event or relative-origin
+authority.
 
 Version one has no predecessor. Every later version must increment by one, bind
 the prior manifest digest, use a strictly later creation time, and change

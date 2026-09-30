@@ -53,7 +53,6 @@ from evidence_inspector.provider_linkage import (
     provider_trust_snapshot_sha256,
 )
 from evidence_inspector.provider_linkage_store import (
-    AuthorityTimeSource,
     CommittedLinkageReceipt,
     ProviderLinkageStore,
     ProviderLinkageStoreUnsafe,
@@ -78,8 +77,7 @@ BiologicalTimepointId = Annotated[
 ]
 _PINNED_ACTIVE_SNAPSHOT = ProviderLinkageStore.active_snapshot
 _PINNED_AUTHORITY_READ_FENCE = ProviderLinkageStore.authority_read_fence
-_PINNED_AUTHORITY_TIME_READ = AuthorityTimeSource.read
-_PINNED_VERIFY_CURRENT_RECEIPT = ProviderLinkageStore.verify_current_receipt
+_PINNED_AUTHORITY_TIME_IN_FENCE = ProviderLinkageStore.authority_time_in_fence
 _PINNED_TIME_SOURCE_IDENTITY_CHECK = provider_linkage_store_time_source_is_pinned
 _PINNED_PROCESS_INTEGRITY_CHECK = require_provider_linkage_store_process_integrity
 _PINNED_STORE_CALLABLES = {
@@ -1034,6 +1032,7 @@ def _verify_provider_data_authority(
     authority: SignedProviderDataAuthority,
     trust: ProviderTrustSnapshot,
     *,
+    manifest_created_at: datetime,
     evaluated_at: datetime,
 ) -> None:
     payload = authority.payload
@@ -1057,18 +1056,23 @@ def _verify_provider_data_authority(
         or grant.trust_snapshot_sha256 != trust_sha256
     ):
         raise ValueError("provider data grant does not bind authority and trust")
-    if (
-        grant.issued_at < trust.issued_at
-        or evaluated_at >= grant.expires_at
-        or grant.expires_at > trust.expires_at
+    if not (
+        trust.issued_at
+        <= grant.issued_at
+        <= manifest_created_at
+        <= evaluated_at
+        < grant.expires_at
+        <= trust.expires_at
     ):
         raise ValueError("provider data grant window is outside trusted snapshot")
-    if (
-        grant.issued_at > payload.issued_at
-        or payload.issued_at > evaluated_at
-        or evaluated_at >= payload.expires_at
-        or payload.expires_at > grant.expires_at
-        or payload.expires_at > trust.expires_at
+    if not (
+        grant.issued_at
+        <= payload.issued_at
+        <= manifest_created_at
+        <= evaluated_at
+        < payload.expires_at
+        <= grant.expires_at
+        <= trust.expires_at
     ):
         raise ValueError("provider data authority window is outside trusted snapshot")
     issuer = next(
@@ -1103,7 +1107,7 @@ def _verify_provider_data_authority(
         raise ValueError("provider data authority signature is invalid") from None
 
 
-def validate_manifest_against_linkage_store(
+def _validate_manifest_against_linkage_store_in_fence(
     manifest: CohortManifest,
     store: ProviderLinkageStore,
     *,
@@ -1113,22 +1117,8 @@ def validate_manifest_against_linkage_store(
     expected_pins = capture_expected_trust_pins(
         expected_trust_snapshot_sha256_by_provider
     )
-    if type(store) is not ProviderLinkageStore:
-        raise TypeError("cohort validation requires the exact live linkage store type")
-    for name, pinned in _PINNED_STORE_CALLABLES.items():
-        if name in vars(store) or getattr(ProviderLinkageStore, name) is not pinned:
-            raise TypeError("live linkage store authority callable was shadowed")
-    _PINNED_PROCESS_INTEGRITY_CHECK()
-    if not _PINNED_TIME_SOURCE_IDENTITY_CHECK(store):
-        raise ProviderLinkageStoreUnsafe(
-            "live linkage store authority time source is not pinned"
-        )
     snapshot = _PINNED_ACTIVE_SNAPSHOT(store)
-    with _PINNED_AUTHORITY_READ_FENCE(store):
-        time_source = vars(store).get("_time_source")
-        if type(time_source) is not AuthorityTimeSource:
-            raise TypeError("live linkage store authority time source is invalid")
-        evaluated_at = _PINNED_AUTHORITY_TIME_READ(time_source)
+    evaluated_at = _PINNED_AUTHORITY_TIME_IN_FENCE(store)
     authorities = {
         item.provider_namespace: item for item in manifest.provider_authorities
     }
@@ -1171,6 +1161,7 @@ def validate_manifest_against_linkage_store(
         _verify_provider_data_authority(
             authority,
             trusted_snapshots[authority.payload.provider_namespace],
+            manifest_created_at=manifest.created_at,
             evaluated_at=evaluated_at,
         )
     recomputed_pins = _captured_trust_pins_sha256(expected_pins)
@@ -1229,7 +1220,6 @@ def validate_manifest_against_linkage_store(
             receipt.state_head_sha256,
         ) != expected_receipt_common:
             raise ValueError("receipt does not bind every live store authority field")
-        _PINNED_VERIFY_CURRENT_RECEIPT(store, receipt)
         if member.linkage_revision_sha256 != linkage_revision_sha256(revision):
             raise ValueError("member linkage digest does not match live authority")
         if member.committed_receipt_sha256 != committed_linkage_receipt_sha256(receipt):
@@ -1268,6 +1258,46 @@ def validate_manifest_against_linkage_store(
             raise ValueError(
                 "member timepoint is not derived from collection authority"
             )
+
+    final_snapshot = _PINNED_ACTIVE_SNAPSHOT(store)
+    final_evaluated_at = _PINNED_AUTHORITY_TIME_IN_FENCE(store)
+    if final_snapshot != snapshot:
+        raise ProviderLinkageStoreUnsafe(
+            "live linkage authority changed during cohort validation"
+        )
+    for authority in data_authorities:
+        _verify_provider_data_authority(
+            authority,
+            trusted_snapshots[authority.payload.provider_namespace],
+            manifest_created_at=manifest.created_at,
+            evaluated_at=final_evaluated_at,
+        )
+
+
+def validate_manifest_against_linkage_store(
+    manifest: CohortManifest,
+    store: ProviderLinkageStore,
+    *,
+    expected_trust_snapshot_sha256_by_provider: Mapping[str, str],
+) -> None:
+    if type(store) is not ProviderLinkageStore:
+        raise TypeError("cohort validation requires the exact live linkage store type")
+    for name, pinned in _PINNED_STORE_CALLABLES.items():
+        if name in vars(store) or getattr(ProviderLinkageStore, name) is not pinned:
+            raise TypeError("live linkage store authority callable was shadowed")
+    _PINNED_PROCESS_INTEGRITY_CHECK()
+    if not _PINNED_TIME_SOURCE_IDENTITY_CHECK(store):
+        raise ProviderLinkageStoreUnsafe(
+            "live linkage store authority time source is not pinned"
+        )
+    with _PINNED_AUTHORITY_READ_FENCE(store):
+        _validate_manifest_against_linkage_store_in_fence(
+            manifest,
+            store,
+            expected_trust_snapshot_sha256_by_provider=(
+                expected_trust_snapshot_sha256_by_provider
+            ),
+        )
 
 
 __all__ = [
