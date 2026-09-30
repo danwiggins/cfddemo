@@ -16,11 +16,26 @@ from typing import Annotated, Literal, TypeVar
 
 from pydantic import Field, StringConstraints, model_validator
 
+from evidence_inspector.cohort_import import CohortRecordCatalog
+from evidence_inspector.cohort_registry import CohortRegistry
+from evidence_inspector.cohort_summary import (
+    CohortComparisonReplay,
+    CohortDenominatorPolicy,
+    CohortDenominatorSummary,
+    CohortDispositionPolicy,
+    MemberDisposition,
+    RegisteredCohortDenominatorSummary,
+    registered_cohort_denominator_authority_fence,
+)
+from evidence_inspector.compatibility import ResultId
 from evidence_inspector.longitudinal_compatibility import (
     LongitudinalMemberDecision,
     LongitudinalOutcome,
+    LongitudinalSeriesDecision,
 )
 from evidence_inspector.method_registry import RegistryContract, Sha256
+from evidence_inspector.provider_linkage_store import ProviderLinkageStore
+from evidence_inspector.result_view import ResultViewSource
 from evidence_inspector.safe_ingress import contract_type_graph, exact_model_bytes
 
 MAX_COVARIATE_MEMBERS = 1_000
@@ -37,6 +52,7 @@ MAX_D03_DECISION_DEPTH = 64
 MAX_D03_DECISION_NODES = 10_000
 MAX_D03_DECISION_BYTES = 4 * 1_024 * 1_024
 MAX_D03_COLLECTION_ITEMS = 1_000
+_PINNED_D09_AUTHORITY_FENCE = registered_cohort_denominator_authority_fence
 
 OpaqueCovariateToken = Annotated[
     str, StringConstraints(pattern=r"^covariate_[0-9a-f]{32}$")
@@ -168,6 +184,74 @@ class D10CovariateInput(RegistryContract):
                     raise ValueError(
                         "one covariate token cannot identify two dimensions"
                     )
+        return self
+
+
+class D03ContextRole(StrEnum):
+    ANCHOR = "anchor"
+    MEMBER = "member"
+
+
+class RegisteredCovariateObservation(RegistryContract):
+    """Protected reported metadata keyed only by an exact D06/D09 result."""
+
+    result_id: ResultId
+    values: tuple[CovariateValue, ...] = Field(
+        min_length=len(ALL_COVARIATE_DIMENSIONS),
+        max_length=len(ALL_COVARIATE_DIMENSIONS),
+    )
+
+    @model_validator(mode="after")
+    def complete_dimensions(self) -> RegisteredCovariateObservation:
+        if tuple(value.dimension for value in self.values) != ALL_COVARIATE_DIMENSIONS:
+            raise ValueError("covariate observation must contain every dimension")
+        return self
+
+
+class RegisteredD10CovariateInput(RegistryContract):
+    """Bounded protected metadata; all population and D03 identity is derived live."""
+
+    schema_version: Literal["traceback.registered-d10-covariate-input.v2"] = (
+        "traceback.registered-d10-covariate-input.v2"
+    )
+    observations: tuple[RegisteredCovariateObservation, ...] = Field(
+        max_length=MAX_COVARIATE_MEMBERS
+    )
+    metadata_source: Literal["protected_reported"] = "protected_reported"
+    provider_metadata_verified: Literal[False] = False
+
+    @model_validator(mode="after")
+    def unique_results(self) -> RegisteredD10CovariateInput:
+        result_ids = tuple(item.result_id for item in self.observations)
+        if result_ids != tuple(sorted(set(result_ids))):
+            raise ValueError("registered covariate observations must be uniquely sorted")
+        return self
+
+
+class RegisteredMemberCovariateContext(RegistryContract):
+    member_sha256: Sha256
+    result_id: ResultId
+    biological_timepoint_sha256: Sha256
+    d03_role: D03ContextRole
+    d03_decision_sha256: Sha256 | None = None
+    d03_outcome: LongitudinalOutcome | None = None
+    values: tuple[CovariateValue, ...] = Field(
+        min_length=len(ALL_COVARIATE_DIMENSIONS),
+        max_length=len(ALL_COVARIATE_DIMENSIONS),
+    )
+
+    @model_validator(mode="after")
+    def exact_role(self) -> RegisteredMemberCovariateContext:
+        if tuple(value.dimension for value in self.values) != ALL_COVARIATE_DIMENSIONS:
+            raise ValueError("registered member covariates are incomplete")
+        decision_bound = (
+            self.d03_decision_sha256 is not None and self.d03_outcome is not None
+        )
+        if self.d03_role is D03ContextRole.ANCHOR:
+            if self.d03_decision_sha256 is not None or self.d03_outcome is not None:
+                raise ValueError("D03 anchor cannot claim a member decision")
+        elif not decision_bound:
+            raise ValueError("D03 member context requires an exact decision")
         return self
 
 
