@@ -9,6 +9,7 @@ from __future__ import annotations
 import base64
 import hashlib
 import json
+import sqlite3
 from collections import defaultdict
 from collections.abc import Mapping, Sequence
 from datetime import UTC, datetime
@@ -39,6 +40,7 @@ from evidence_inspector.provider_linkage import (
     IssuerStatus,
     KeyId,
     LinkageId,
+    LinkageOperation,
     Nonce,
     PrincipalId,
     ProviderNamespace,
@@ -49,10 +51,12 @@ from evidence_inspector.provider_linkage import (
     SpecimenToken,
     SubjectToken,
     UnitOfAnalysis,
+    authorize_linkage_revision,
     linkage_revision_sha256,
     provider_trust_snapshot_sha256,
 )
 from evidence_inspector.provider_linkage_store import (
+    ActiveLinkageSnapshot,
     AuthorityTimeSource,
     CommittedLinkageReceipt,
     ProviderLinkageStore,
@@ -60,6 +64,10 @@ from evidence_inspector.provider_linkage_store import (
     committed_linkage_receipt_sha256,
     provider_linkage_store_time_source_is_pinned,
     require_provider_linkage_store_process_integrity,
+    _capture_pinned_store_now,
+    _require_authority_time_floor,
+    _PINNED_VALIDATE_COMMITTED_STATE,
+    _PINNED_VALIDATE_CURRENT_AUTHORITY,
 )
 from evidence_inspector.provider_linkage_store import (
     capture_expected_trust_pins as _capture_expected_trust_pins,
@@ -1103,7 +1111,77 @@ def _verify_provider_data_authority(
         raise ValueError("provider data authority signature is invalid") from None
 
 
-def validate_manifest_against_linkage_store(
+def _fenced_snapshot_and_time(
+    store: ProviderLinkageStore,
+) -> tuple[ActiveLinkageSnapshot, datetime]:
+    connection = vars(store).get("_connection")
+    if type(connection) is not sqlite3.Connection or not connection.in_transaction:
+        raise ProviderLinkageStoreUnsafe("linkage authority fence is not active")
+    evaluated_at, authority_floor = _capture_pinned_store_now(store, connection)
+    _require_authority_time_floor(connection, authority_floor)
+    records = _PINNED_VALIDATE_COMMITTED_STATE(store, connection)
+    metadata = dict(connection.execute("SELECT key, value FROM metadata"))
+    latest = {}
+    for record in records:
+        key = (record.revision.provider_namespace, record.revision.linkage_id)
+        latest[key] = record
+    trust_pins = dict(vars(store).get("_trust_pins", {}))
+    for record in latest.values():
+        if record.revision.operation != LinkageOperation.TOMBSTONE:
+            _PINNED_VALIDATE_CURRENT_AUTHORITY(
+                store,
+                record,
+                evaluated_at=evaluated_at,
+                expected_trust_by_provider=trust_pins,
+                authorize_revision=authorize_linkage_revision,
+            )
+    active_records = tuple(
+        sorted(
+            (
+                record
+                for record in latest.values()
+                if record.revision.operation != LinkageOperation.TOMBSTONE
+            ),
+            key=lambda item: (
+                item.revision.provider_namespace,
+                item.revision.linkage_id,
+                item.revision.revision,
+            ),
+        )
+    )
+    state_version = int(metadata["state_version"])
+    state_head = metadata["state_head_sha256"]
+    snapshot = ActiveLinkageSnapshot(
+        state_version=state_version,
+        state_head_sha256=state_head,
+        store_id=metadata["store_id"],
+        store_epoch_sha256=metadata["store_epoch_sha256"],
+        storage_identity_sha256=metadata["storage_identity_sha256"],
+        trust_pins_sha256=metadata["trust_pins_sha256"],
+        revisions=tuple(record.revision for record in active_records),
+        receipts=tuple(
+            CommittedLinkageReceipt(
+                provider_namespace=record.revision.provider_namespace,
+                store_id=metadata["store_id"],
+                store_epoch_sha256=metadata["store_epoch_sha256"],
+                storage_identity_sha256=metadata["storage_identity_sha256"],
+                trust_pins_sha256=metadata["trust_pins_sha256"],
+                linkage_id=record.revision.linkage_id,
+                revision=record.revision.revision,
+                linkage_revision_sha256=linkage_revision_sha256(record.revision),
+                authorized_record_sha256=hashlib.sha256(
+                    canonical_contract_bytes(record)
+                ).hexdigest(),
+                state_version=state_version,
+                state_head_sha256=state_head,
+            )
+            for record in active_records
+        ),
+    )
+    return snapshot, evaluated_at
+
+
+def _validate_manifest_against_linkage_store_fenced(
     manifest: CohortManifest,
     store: ProviderLinkageStore,
     *,
@@ -1123,12 +1201,7 @@ def validate_manifest_against_linkage_store(
         raise ProviderLinkageStoreUnsafe(
             "live linkage store authority time source is not pinned"
         )
-    snapshot = _PINNED_ACTIVE_SNAPSHOT(store)
-    with _PINNED_AUTHORITY_READ_FENCE(store):
-        time_source = vars(store).get("_time_source")
-        if type(time_source) is not AuthorityTimeSource:
-            raise TypeError("live linkage store authority time source is invalid")
-        evaluated_at = _PINNED_AUTHORITY_TIME_READ(time_source)
+    snapshot, evaluated_at = _fenced_snapshot_and_time(store)
     authorities = {
         item.provider_namespace: item for item in manifest.provider_authorities
     }
