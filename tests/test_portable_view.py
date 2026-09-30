@@ -8,6 +8,7 @@ import hashlib
 import os
 import stat
 from pathlib import Path
+from typing import ClassVar
 
 import pytest
 from pydantic import ValidationError
@@ -28,6 +29,7 @@ from evidence_inspector.portable_view import (
     PortableVersions,
     PortableViewBuildRequest,
     PortableViewConflictError,
+    PortableViewContractError,
     PortableViewPermissionError,
     PortableViewStorageError,
     PortableViewTamperError,
@@ -1163,3 +1165,168 @@ def test_verify_rejects_final_name_inode_swap_for_every_file(
     monkeypatch.setattr(portable, "_parse_canonical", replace_then_parse)
     with pytest.raises(PortableViewTamperError):
         verify_portable_view(root, trust_context=trust_context)
+
+
+def test_build_rejects_top_level_and_nested_hooks_without_dispatch(
+    integrated_request: PortableViewBuildRequest,
+    trust_context: PortableTrustContext,
+) -> None:
+    class HookedRequest(PortableViewBuildRequest):
+        calls: ClassVar[int] = 0
+
+        def model_dump(self, *args: object, **kwargs: object) -> dict[str, object]:
+            type(self).calls += 1
+            return super().model_dump(*args, **kwargs)
+
+    hostile_request = HookedRequest.model_construct(**integrated_request.__dict__)
+    with pytest.raises(PortableViewContractError):
+        build_portable_view(hostile_request, trust_context=trust_context)
+    assert HookedRequest.calls == 0
+
+    class HookedIdentity(PortableSourceIdentity):
+        calls: ClassVar[int] = 0
+
+        def model_dump(self, *args: object, **kwargs: object) -> dict[str, object]:
+            type(self).calls += 1
+            return super().model_dump(*args, **kwargs)
+
+    identity = integrated_request.source_identities[0]
+    hostile_identity = HookedIdentity.model_construct(**identity.__dict__)
+    nested = integrated_request.model_copy(
+        update={
+            "source_identities": (
+                hostile_identity,
+                *integrated_request.source_identities[1:],
+            )
+        }
+    )
+    with pytest.raises(PortableViewContractError):
+        build_portable_view(nested, trust_context=trust_context)
+    assert HookedIdentity.calls == 0
+
+
+def test_portable_ingress_preflights_large_scalars_collections_and_integers(
+    integrated_request: PortableViewBuildRequest,
+    trust_context: PortableTrustContext,
+    tmp_path: Path,
+) -> None:
+    with pytest.raises(PortableViewContractError):
+        build_portable_view(
+            integrated_request.model_copy(update={"view_id": "x" * 10_000_000}),
+            trust_context=trust_context,
+        )
+    with pytest.raises(PortableViewContractError):
+        build_portable_view(
+            integrated_request.model_copy(
+                update={
+                    "source_identities": (integrated_request.source_identities[0],)
+                    * 129
+                }
+            ),
+            trust_context=trust_context,
+        )
+
+    view, table = build_portable_view(integrated_request, trust_context=trust_context)
+    source_table = next(item for item in view.tables if item.rows)
+    source_row = source_table.rows[0]
+    source_cell = source_row.cells[0]
+    huge_cell = source_cell.model_copy(update={"integer_value": 1 << 100_000})
+    huge_row = source_row.model_copy(
+        update={"cells": (huge_cell, *source_row.cells[1:])}
+    )
+    huge_table = source_table.model_copy(
+        update={"rows": (huge_row, *source_table.rows[1:])}
+    )
+    huge_view = view.model_copy(
+        update={
+            "tables": tuple(
+                huge_table if item is source_table else item for item in view.tables
+            )
+        }
+    )
+    callback_calls = 0
+
+    def verifier() -> tuple[PortableSourceIdentity, ...]:
+        nonlocal callback_calls
+        callback_calls += 1
+        return view.source_identities
+
+    with pytest.raises(PortableViewContractError):
+        publish_portable_view(
+            tmp_path / "huge-int",
+            view=huge_view,
+            accessible_table=table,
+            trust_context=trust_context,
+            source_identity_verifier=verifier,
+        )
+    assert callback_calls == 0
+
+
+def test_exact_binary_and_path_types_reject_without_hooks(
+    integrated_request: PortableViewBuildRequest,
+    trust_context: PortableTrustContext,
+    tmp_path: Path,
+) -> None:
+    view, table = build_portable_view(integrated_request, trust_context=trust_context)
+    with pytest.raises(TypeError):
+        replay_portable_view(
+            integrated_request,
+            view,
+            bytearray(table),  # type: ignore[arg-type]
+            trust_context=trust_context,
+        )
+
+    class HostilePath:
+        calls = 0
+
+        def __fspath__(self) -> str:
+            type(self).calls += 1
+            return str(tmp_path / "hostile")
+
+    hostile_path = HostilePath()
+    with pytest.raises(PortableViewContractError):
+        publish_portable_view(
+            hostile_path,  # type: ignore[arg-type]
+            view=view,
+            accessible_table=table,
+            trust_context=trust_context,
+            source_identity_verifier=lambda: view.source_identities,
+        )
+    assert HostilePath.calls == 0
+    with pytest.raises(PortableViewContractError):
+        verify_portable_view(hostile_path, trust_context=trust_context)  # type: ignore[arg-type]
+    assert HostilePath.calls == 0
+
+
+def test_source_verifier_runs_once_and_return_is_exact_captured(
+    integrated_request: PortableViewBuildRequest,
+    trust_context: PortableTrustContext,
+    tmp_path: Path,
+) -> None:
+    view, table = build_portable_view(integrated_request, trust_context=trust_context)
+
+    class HookedIdentity(PortableSourceIdentity):
+        calls: ClassVar[int] = 0
+
+        def model_dump(self, *args: object, **kwargs: object) -> dict[str, object]:
+            type(self).calls += 1
+            return super().model_dump(*args, **kwargs)
+
+    hostile = HookedIdentity.model_construct(**view.source_identities[0].__dict__)
+    callback_calls = 0
+
+    def verifier() -> tuple[PortableSourceIdentity, ...]:
+        nonlocal callback_calls
+        callback_calls += 1
+        return (hostile, *view.source_identities[1:])
+
+    with pytest.raises(PortableViewTamperError):
+        publish_portable_view(
+            tmp_path / "hostile-verifier",
+            view=view,
+            accessible_table=table,
+            trust_context=trust_context,
+            source_identity_verifier=verifier,
+        )
+    assert callback_calls == 1
+    assert HookedIdentity.calls == 0

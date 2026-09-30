@@ -112,6 +112,12 @@ Canonical parsing rebuilds the view and requires exact equality. Contracts are
 closed, immutable, finite-number safe, and bounded: at most 16 subset levels,
 32 replicate seeds, 32 parameter sets, 4,096 run cells, and 512 contributors.
 Canonical input/output is capped at eight MiB before JSON parsing.
+The in-memory public builders apply the same boundary before serialization:
+only exact installed contract types and containers are accepted, scalar and
+collection bounds are checked without caller dispatch, and serialization uses
+the pinned class serializers.  Membership commitment construction accepts at
+most 100,000 exact SHA-256 strings so a forged caller object cannot turn the
+registration helper into unbounded pre-validation work.
 
 Identifiers use controlled syntax and reject private identifier stems. No raw
 molecule IDs, reads, sequences, paths, credentials, presentation aliases, or

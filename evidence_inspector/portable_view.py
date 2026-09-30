@@ -50,6 +50,13 @@ from .result_view import (
     ViewSurfaceState,
     result_filters_sha256,
 )
+from .safe_ingress import (
+    capture_exact_model,
+    contract_type_graph,
+    exact_bytes,
+    exact_model_bytes,
+    safe_local_path,
+)
 
 VIEW_PATH = "view.json"
 TABLE_PATH = "accessible-table.tsv"
@@ -684,9 +691,62 @@ class PublishedPortableView:
         return False
 
 
+_PORTABLE_MODEL_TYPES, _PORTABLE_ENUM_TYPES = contract_type_graph(
+    PortableViewBuildRequest,
+    PortableLocalView,
+    PortableTrustContext,
+    PortableViewManifest,
+    VerifiedPortableView,
+)
+
+
+def _capture_portable(value: object, expected_type: type[ModelT], max_bytes: int):
+    try:
+        return capture_exact_model(
+            value,
+            expected_type,
+            model_types=_PORTABLE_MODEL_TYPES,
+            enum_types=_PORTABLE_ENUM_TYPES,
+            max_bytes=max_bytes,
+        )
+    except (TypeError, ValueError, ValidationError) as exc:
+        raise PortableViewContractError("portable contract input is invalid") from exc
+
+
+def _capture_tables(value: object) -> tuple[ExactMeasurementTable, ...]:
+    if type(value) is not tuple or len(value) > MAX_TABLES:
+        raise PortableViewContractError("portable table collection exceeds its bound")
+    return tuple(
+        _capture_portable(item, ExactMeasurementTable, MAX_VIEW_BYTES) for item in value
+    )
+
+
+def _capture_source_identities(value: object) -> tuple[PortableSourceIdentity, ...]:
+    if type(value) is not tuple or len(value) > MAX_SOURCE_IDENTITIES:
+        raise PortableViewTamperError("source identity re-verification is invalid")
+    try:
+        return tuple(
+            _capture_portable(item, PortableSourceIdentity, MAX_VIEW_BYTES)
+            for item in value
+        )
+    except PortableViewContractError as exc:
+        raise PortableViewTamperError(
+            "source identity re-verification is invalid"
+        ) from exc
+
+
 def _digest(value: Any, *, exclude: set[str] | None = None) -> str:
     if isinstance(value, BaseModel):
-        value = value.model_dump(mode="json", exclude=exclude or set())
+        content = exact_model_bytes(
+            value,
+            type(value),
+            model_types=_PORTABLE_MODEL_TYPES,
+            enum_types=_PORTABLE_ENUM_TYPES,
+            max_bytes=MAX_VIEW_BYTES,
+        )
+        value = json.loads(content)
+        for key in exclude or set():
+            value.pop(key, None)
     elif isinstance(value, dict):
         value = {key: _jsonable(item) for key, item in value.items()}
     elif isinstance(value, (list, tuple)):
@@ -696,7 +756,15 @@ def _digest(value: Any, *, exclude: set[str] | None = None) -> str:
 
 def _jsonable(value: Any) -> Any:
     if isinstance(value, BaseModel):
-        return value.model_dump(mode="json")
+        return json.loads(
+            exact_model_bytes(
+                value,
+                type(value),
+                model_types=_PORTABLE_MODEL_TYPES,
+                enum_types=_PORTABLE_ENUM_TYPES,
+                max_bytes=MAX_VIEW_BYTES,
+            )
+        )
     if isinstance(value, dict):
         return {key: _jsonable(item) for key, item in value.items()}
     if isinstance(value, (list, tuple)):
@@ -1470,11 +1538,9 @@ def build_portable_view(
     """Build one deterministic local view and its canonical accessible TSV."""
 
     try:
-        request = PortableViewBuildRequest.model_validate_json(
-            canonical_json_bytes(request)
-        )
-        trust_context = PortableTrustContext.model_validate_json(
-            canonical_json_bytes(trust_context)
+        request = _capture_portable(request, PortableViewBuildRequest, MAX_VIEW_BYTES)
+        trust_context = _capture_portable(
+            trust_context, PortableTrustContext, MAX_VIEW_BYTES
         )
         _trusted_bindings(request, trust_context)
         _source_contract_bindings(request)
@@ -1545,6 +1611,7 @@ def _tsv_value(value: object | None) -> str:
 def accessible_table_bytes(tables: tuple[ExactMeasurementTable, ...]) -> bytes:
     """Return the canonical long-form exact-value table bytes."""
 
+    tables = _capture_tables(tables)
     lines = [_TABLE_HEADER]
     for table in tables:
         for row in table.rows:
@@ -1591,6 +1658,12 @@ def replay_portable_view(
 ) -> PortableLocalView:
     """Fail closed unless view and table replay byte-identically."""
 
+    request = _capture_portable(request, PortableViewBuildRequest, MAX_VIEW_BYTES)
+    expected_view = _capture_portable(expected_view, PortableLocalView, MAX_VIEW_BYTES)
+    expected_table_bytes = exact_bytes(expected_table_bytes, max_bytes=MAX_TABLE_BYTES)
+    trust_context = _capture_portable(
+        trust_context, PortableTrustContext, MAX_VIEW_BYTES
+    )
     actual_view, actual_table = build_portable_view(
         request, trust_context=trust_context
     )
@@ -2049,7 +2122,17 @@ def publish_portable_view(
 ) -> PublishedPortableView:
     """Publish a projection and return its authoritative immutable snapshot."""
 
-    destination = Path(destination)
+    try:
+        destination = safe_local_path(destination)
+        view = _capture_portable(view, PortableLocalView, MAX_VIEW_BYTES)
+        accessible_table = exact_bytes(accessible_table, max_bytes=MAX_TABLE_BYTES)
+        trust_context = _capture_portable(
+            trust_context, PortableTrustContext, MAX_VIEW_BYTES
+        )
+    except (TypeError, ValueError) as exc:
+        raise PortableViewContractError(
+            "portable publication input is invalid"
+        ) from exc
     if destination.name in {"", ".", ".."} or not re.fullmatch(
         r"[a-z0-9][a-z0-9._-]{0,127}", destination.name
     ):
@@ -2059,12 +2142,24 @@ def publish_portable_view(
         raise PortableViewTamperError("accessible table bytes do not match exact view")
     if sha256_bytes(accessible_table) != view.accessible_table_sha256:
         raise PortableViewTamperError("accessible table digest does not match view")
-    view_bytes = canonical_json_bytes(view)
+    view_bytes = exact_model_bytes(
+        view,
+        PortableLocalView,
+        model_types=_PORTABLE_MODEL_TYPES,
+        enum_types=_PORTABLE_ENUM_TYPES,
+        max_bytes=MAX_VIEW_BYTES,
+    )
     if len(view_bytes) > MAX_VIEW_BYTES:
         raise PortableViewContractError("portable view exceeds byte bound")
     manifest = _manifest_for(view_bytes, accessible_table, view)
     content = {
-        MANIFEST_PATH: canonical_json_bytes(manifest),
+        MANIFEST_PATH: exact_model_bytes(
+            manifest,
+            PortableViewManifest,
+            model_types=_PORTABLE_MODEL_TYPES,
+            enum_types=_PORTABLE_ENUM_TYPES,
+            max_bytes=MAX_MANIFEST_BYTES,
+        ),
         TABLE_PATH: accessible_table,
         VIEW_PATH: view_bytes,
     }
@@ -2158,6 +2253,7 @@ def publish_portable_view(
             raise PortableViewTamperError(
                 "source identity re-verification failed"
             ) from exc
+        observed = _capture_source_identities(observed)
         if observed != view.source_identities:
             raise PortableViewTamperError("source identity changed before publication")
         _validate_pinned_names(stage_fd, pinned, content, sync=True)
@@ -2220,7 +2316,16 @@ def _parse_canonical(model: type[ModelT], content: bytes, label: str) -> ModelT:
         parsed = model.model_validate_json(content)
     except (ValidationError, ValueError) as exc:
         raise PortableViewTamperError(f"{label} is invalid") from exc
-    if canonical_json_bytes(parsed) != content:
+    if (
+        exact_model_bytes(
+            parsed,
+            model,
+            model_types=_PORTABLE_MODEL_TYPES,
+            enum_types=_PORTABLE_ENUM_TYPES,
+            max_bytes=max(MAX_VIEW_BYTES, MAX_MANIFEST_BYTES),
+        )
+        != content
+    ):
         raise PortableViewTamperError(f"{label} is not canonical")
     return parsed
 
@@ -2230,7 +2335,15 @@ def verify_portable_view(
 ) -> VerifiedPortableView:
     """Capture an authoritative snapshot without attesting path currency."""
 
-    root_path = Path(root)
+    try:
+        root_path = safe_local_path(root)
+        trust_context = _capture_portable(
+            trust_context, PortableTrustContext, MAX_VIEW_BYTES
+        )
+    except (TypeError, ValueError) as exc:
+        raise PortableViewContractError(
+            "portable verification input is invalid"
+        ) from exc
     root_fd = _open_directory(root_path)
     pinned: dict[str, _PinnedArtifact] = {}
     try:
