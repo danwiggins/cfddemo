@@ -558,28 +558,46 @@ def test_http_routes_ignore_substituted_dispatch_globals_and_bind_result_id(
 ) -> None:
     catalog, ref, _, _, explorer = _installed(tmp_path)
     cached = explorer.get(ref.result_id)
+    cached_page = explorer.query(CatalogQuery(limit=1))
     monkeypatch.setattr(
         server_module,
-        "_EXPLORER_GET",
-        lambda source, result_id: cached,
-        raising=False,
-    )
-    monkeypatch.setattr(
-        server_module,
-        "_EXPLORER_QUERY",
-        lambda source, query: (_ for _ in ()).throw(AssertionError("substituted")),
-        raising=False,
-    )
-    monkeypatch.setattr(
-        server_module,
-        "_EXPLORER_COMPARE",
-        lambda source, left, right: (_ for _ in ()).throw(
-            AssertionError("substituted")
+        "_EXPLORER_DISPATCH",
+        (
+            lambda source, query: cached_page,
+            lambda source, result_id: cached,
+            lambda source, left, right: (_ for _ in ()).throw(
+                AssertionError("substituted")
+            ),
         ),
-        raising=False,
+    )
+    monkeypatch.setattr(
+        server_module,
+        "prepare_explorer_document_response",
+        lambda source, document: {
+            "models": {
+                "catalog_ref": {"result_id": f"result_{'f' * 40}"},
+                "private_path": "/private/subject.tsv",
+            }
+        },
+    )
+    monkeypatch.setattr(
+        server_module,
+        "prepare_explorer_comparison_response",
+        lambda source, comparison: {
+            "left_result_id": f"result_{'e' * 40}",
+            "right_result_id": f"result_{'d' * 40}",
+            "private_path": "/private/subject.tsv",
+        },
     )
     store = JobStore(tmp_path / "jobs.sqlite3")
     try:
+        with pytest.raises(TypeError):
+            RunningLocalWebService.start(
+                store=store,
+                state_directory=tmp_path / "rejected-state",
+                explorer=explorer,
+                _explorer_dispatch=server_module._EXPLORER_DISPATCH,  # type: ignore[call-arg]
+            )
         with RunningLocalWebService.start(
             store=store,
             state_directory=tmp_path / "state",
@@ -595,27 +613,27 @@ def test_http_routes_ignore_substituted_dispatch_globals_and_bind_result_id(
                 headers=headers,
             )
             assert status == 404
-            object.__setattr__(
-                service.server.application,
-                "explorer_get",
-                lambda source, result_id: cached,
-            )
-            status, _, _ = _request(
+            status, _, body = _request(
                 service,
                 "GET",
-                f"/api/v1/explorer/results/result_{'1' * 40}",
+                f"/api/v1/explorer/results/{ref.result_id}",
                 headers=headers,
             )
-            assert status == 400
-            assert (
-                _request(
-                    service,
-                    "GET",
-                    "/api/v1/explorer/catalog?limit=1",
-                    headers=headers,
-                )[0]
-                == 200
+            assert status == 200
+            assert b"private/subject" not in body
+            status, _, body = _request(
+                service,
+                "GET",
+                "/api/v1/explorer/catalog?limit=1&method_id=mth_nonexistent"
+                "&method_version=9.9.9",
+                headers=headers,
             )
+            assert status == 200
+            payload = json.loads(body)
+            assert payload["results"] == []
+            assert payload["query"]["method_refs"] == [
+                {"method_id": "mth_nonexistent", "version": "9.9.9"}
+            ]
             assert (
                 _request(
                     service,

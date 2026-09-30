@@ -304,6 +304,7 @@ class ExplorerCatalogProjection(RunnerContract):
     schema_version: Literal["traceback.explorer-catalog-page.v2"] = (
         "traceback.explorer-catalog-page.v2"
     )
+    query: CatalogQuery
     results: tuple[ExplorerCatalogItem, ...] = Field(max_length=MAX_EXPLORER_PAGE_SIZE)
     next_cursor: str | None = None
     empty: bool
@@ -566,6 +567,7 @@ def _build_integrated_explorer_source_type(
             page: CatalogPage = self._query(query)
             self._assert_installed_reader()
             return ExplorerCatalogProjection(
+                query=query,
                 results=tuple(
                     ExplorerCatalogItem(
                         ref=ref,
@@ -714,32 +716,63 @@ IntegratedExplorerSource = _build_integrated_explorer_source_type(
 )
 
 
-def prepare_explorer_document_response(
-    source: IntegratedExplorerSource,
-    document: ExplorerDocument,
-) -> dict[str, object]:
-    """Reverify live authority immediately before HTTP serialization."""
+def _build_explorer_response_preparers(
+    source_type: type[IntegratedExplorerSource],
+    source_get: Callable[..., ExplorerDocument],
+    source_reverify: Callable[..., None],
+    document_replay: Callable[..., ExplorerDocument],
+    comparison_replay: Callable[..., ExplorerComparison],
+    canonicalize: Callable[[object], bytes],
+    validate_public: Callable[..., None],
+) -> tuple[Callable[..., dict[str, object]], Callable[..., dict[str, object]]]:
+    """Capture the exact final-byte response boundary outside module dispatch."""
 
-    if type(source) is not IntegratedExplorerSource:
-        raise TypeError("explorer response requires the installed source")
-    replayed = ExplorerDocument.model_validate_json(canonical_json_bytes(document))
-    source._reverify(replayed)
-    payload = replayed.model_dump(mode="json")
-    validate_public_projection(payload)
-    return payload
+    expected = {"_reverify": source_reverify, "get": source_get}
+
+    def checked(source: IntegratedExplorerSource) -> None:
+        if type(source) is not source_type or any(
+            source_type.__dict__.get(name) is not method
+            for name, method in expected.items()
+        ):
+            raise TypeError("explorer response requires the installed source")
+
+    def prepare_document(
+        source: IntegratedExplorerSource,
+        document: ExplorerDocument,
+    ) -> dict[str, object]:
+        checked(source)
+        replayed = document_replay(canonicalize(document))
+        source_reverify(source, replayed)
+        checked(source)
+        payload = replayed.model_dump(mode="json")
+        validate_public(payload)
+        return payload
+
+    def prepare_comparison(
+        source: IntegratedExplorerSource,
+        comparison: ExplorerComparison,
+    ) -> dict[str, object]:
+        checked(source)
+        source_get(source, comparison.left_result_id)
+        source_get(source, comparison.right_result_id)
+        checked(source)
+        replayed = comparison_replay(canonicalize(comparison))
+        payload = replayed.model_dump(mode="json")
+        validate_public(payload)
+        return payload
+
+    return prepare_document, prepare_comparison
 
 
-def prepare_explorer_comparison_response(
-    source: IntegratedExplorerSource,
-    comparison: ExplorerComparison,
-) -> dict[str, object]:
-    """Reload both selected documents immediately before comparison response."""
-
-    if type(source) is not IntegratedExplorerSource:
-        raise TypeError("explorer response requires the installed source")
-    source.get(comparison.left_result_id)
-    source.get(comparison.right_result_id)
-    replayed = ExplorerComparison.model_validate_json(canonical_json_bytes(comparison))
-    payload = replayed.model_dump(mode="json")
-    validate_public_projection(payload)
-    return payload
+(
+    prepare_explorer_document_response,
+    prepare_explorer_comparison_response,
+) = _build_explorer_response_preparers(
+    IntegratedExplorerSource,
+    IntegratedExplorerSource.get,
+    IntegratedExplorerSource._reverify,
+    ExplorerDocument.model_validate_json,
+    ExplorerComparison.model_validate_json,
+    canonical_json_bytes,
+    validate_public_projection,
+)

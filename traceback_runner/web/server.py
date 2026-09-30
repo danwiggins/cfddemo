@@ -498,9 +498,6 @@ class _Application:
     boundary: LocalWebBoundary
     assets: dict[str, tuple[str, bytes]]
     explorer: IntegratedExplorerSource | None = None
-    explorer_query: Callable[..., object] | None = None
-    explorer_get: Callable[..., object] | None = None
-    explorer_compare: Callable[..., object] | None = None
 
 
 class _LoopbackHttpServer(http.server.ThreadingHTTPServer):
@@ -618,11 +615,16 @@ class _Handler(http.server.BaseHTTPRequestHandler):
         except (BrokenPipeError, ConnectionResetError, OSError):
             self.close_connection = True
 
-    def _json(self, status_code: int, payload: object) -> None:
+    def _json(
+        self,
+        status_code: int,
+        payload: object,
+        _canonicalize: Callable[[object], bytes] = canonical_json_bytes,
+    ) -> None:
         self._send(
             status_code,
             "application/json; charset=utf-8",
-            canonical_json_bytes(payload) + b"\n",
+            _canonicalize(payload) + b"\n",
         )
 
     def _deny(self, error: BoundaryDenied) -> None:
@@ -688,7 +690,19 @@ class _Handler(http.server.BaseHTTPRequestHandler):
     def do_HEAD(self) -> None:
         self.do_GET()
 
-    def do_GET(self) -> None:
+    def do_GET(
+        self,
+        _explorer_dispatch: tuple[
+            Callable[..., object], Callable[..., object], Callable[..., object]
+        ] = _EXPLORER_DISPATCH,
+        _prepare_document: Callable[..., dict[str, object]] = (
+            prepare_explorer_document_response
+        ),
+        _prepare_comparison: Callable[..., dict[str, object]] = (
+            prepare_explorer_comparison_response
+        ),
+        _validate_public: Callable[..., None] = validate_public_projection,
+    ) -> None:
         if not self._security_boundary_intact():
             self.close_connection = True
             self._json(503, {"error": {"code": "TBX-WEB-503"}})
@@ -757,14 +771,15 @@ class _Handler(http.server.BaseHTTPRequestHandler):
                     )
                 if "cursor" in parameters:
                     query_payload["cursor"] = parameters["cursor"][0]
-                explorer_query = self.application.explorer_query
-                if explorer_query is None:
-                    raise TypeError("explorer query boundary is unavailable")
-                page = explorer_query(
-                    self.application.explorer, CatalogQuery(**query_payload)
-                )
+                explorer_query = _explorer_dispatch[0]
+                query = CatalogQuery(**query_payload)
+                page = explorer_query(self.application.explorer, query)
+                if page.query != query:
+                    raise ValueError("catalog response query identity changed")
                 payload = page.model_dump(mode="json")
-                validate_public_projection(payload)
+                if payload.get("query") != query.model_dump(mode="json"):
+                    raise ValueError("catalog response query encoding changed")
+                _validate_public(payload)
                 self._json(200, payload)
                 return
             if parsed.path == _EXPLORER_COMPARE_ROUTE:
@@ -788,18 +803,20 @@ class _Handler(http.server.BaseHTTPRequestHandler):
                     right
                 ):
                     raise ValueError("comparison result identity is invalid")
-                explorer_compare = self.application.explorer_compare
-                if explorer_compare is None:
-                    raise TypeError("explorer comparison boundary is unavailable")
+                explorer_compare = _explorer_dispatch[2]
                 comparison = explorer_compare(self.application.explorer, left, right)
                 if (
                     comparison.left_result_id != left
                     or comparison.right_result_id != right
                 ):
                     raise ValueError("comparison response identity changed")
-                payload = prepare_explorer_comparison_response(
-                    self.application.explorer, comparison
-                )
+                payload = _prepare_comparison(self.application.explorer, comparison)
+                if (
+                    payload.get("left_result_id") != left
+                    or payload.get("right_result_id") != right
+                ):
+                    raise ValueError("comparison response encoding changed")
+                _validate_public(payload)
                 self._json(200, payload)
                 return
             explorer_match = _EXPLORER_RESULT_ROUTE.fullmatch(parsed.path)
@@ -808,9 +825,7 @@ class _Handler(http.server.BaseHTTPRequestHandler):
                 if self.application.explorer is None:
                     raise ApiProblem(404, self.application.kernel.not_found_problem)
                 requested_result_id = explorer_match.group(1)
-                explorer_get = self.application.explorer_get
-                if explorer_get is None:
-                    raise TypeError("explorer detail boundary is unavailable")
+                explorer_get = _explorer_dispatch[1]
                 try:
                     document = explorer_get(
                         self.application.explorer, requested_result_id
@@ -821,9 +836,17 @@ class _Handler(http.server.BaseHTTPRequestHandler):
                     ) from exc
                 if document.models.catalog_ref.result_id != requested_result_id:
                     raise ValueError("detail response identity changed")
-                payload = prepare_explorer_document_response(
-                    self.application.explorer, document
+                payload = _prepare_document(self.application.explorer, document)
+                models = payload.get("models")
+                catalog_ref = (
+                    models.get("catalog_ref") if isinstance(models, dict) else None
                 )
+                if (
+                    not isinstance(catalog_ref, dict)
+                    or catalog_ref.get("result_id") != requested_result_id
+                ):
+                    raise ValueError("detail response encoding changed")
+                _validate_public(payload)
                 self._json(200, payload)
                 return
             match = _JOB_ROUTE.fullmatch(parsed.path)
@@ -922,9 +945,6 @@ class RunningLocalWebService:
         state_directory: Path,
         ipv6: bool = False,
         explorer: IntegratedExplorerSource | None = None,
-        _explorer_dispatch: tuple[
-            Callable[..., object], Callable[..., object], Callable[..., object]
-        ] = _EXPLORER_DISPATCH,
     ) -> Self:
         state_directory = state_directory.absolute()
         startup_anchor: _StartupAnchor | None = None
@@ -977,15 +997,11 @@ class RunningLocalWebService:
                 source=source,
                 not_found_problem=problem,
             )
-            explorer_query, explorer_get, explorer_compare = _explorer_dispatch
             server.application = _Application(
                 kernel,
                 boundary,
                 _packaged_assets(),
                 explorer,
-                explorer_query,
-                explorer_get,
-                explorer_compare,
             )
 
             def validate_security_boundary() -> None:
