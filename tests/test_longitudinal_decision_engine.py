@@ -26,6 +26,7 @@ from evidence_inspector.longitudinal_compatibility import (
 )
 from tests.test_longitudinal_compatibility import (
     HEAD_SHA256,
+    LINKAGE_STORE,
     PROVIDER,
     TRUST_SHA256,
     _decide,
@@ -284,6 +285,7 @@ def test_v1_or_incomplete_decision_cannot_be_relabelled_as_d03() -> None:
         expected_linkage_trust_snapshot_sha256_by_provider={
             PROVIDER: TRUST_SHA256
         },
+        linkage_store=LINKAGE_STORE,
     )
     series_payload = series.model_dump(mode="json")
     series_payload.pop("schema_version")
@@ -326,6 +328,7 @@ def test_series_is_anchor_direct_and_does_not_inherit_adjacent_compatibility() -
         expected_linkage_trust_snapshot_sha256_by_provider={
             PROVIDER: TRUST_SHA256
         },
+        linkage_store=LINKAGE_STORE,
     )
     assert series.decisions[0].outcome == (
         LongitudinalOutcome.QUALIFIED_COMPATIBLE
@@ -345,6 +348,7 @@ def test_exact_e05_e01_and_lineage_authority_replay_rejects_tampering() -> None:
         "expected_linkage_trust_snapshot_sha256_by_provider": {
             PROVIDER: TRUST_SHA256
         },
+        "linkage_store": LINKAGE_STORE,
     }
     assert replay_longitudinal_member_decision(
         decision, anchor, member, policy, **pins
@@ -365,6 +369,12 @@ def test_exact_e05_e01_and_lineage_authority_replay_rejects_tampering() -> None:
     with pytest.raises(LongitudinalDecisionReplayError, match="replay exactly"):
         replay_longitudinal_member_decision(
             decision, anchor, member, policy, **stale_pins
+        )
+
+    no_store_pins = {**pins, "linkage_store": None}
+    with pytest.raises(LongitudinalDecisionReplayError, match="replay exactly"):
+        replay_longitudinal_member_decision(
+            decision, anchor, member, policy, **no_store_pins
         )
 
 
