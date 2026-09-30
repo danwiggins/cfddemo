@@ -4,14 +4,17 @@ from __future__ import annotations
 
 import hashlib
 import json
-from datetime import timedelta
+from datetime import timedelta, tzinfo
+from typing import ClassVar
 
 import pytest
 from pydantic import ValidationError
 
+import evidence_inspector.repeatability_comparison as repeatability_module
 from evidence_inspector.compatibility import ExecutionState, InformationState
 from evidence_inspector.longitudinal_compatibility import (
     ComparisonDimension,
+    LongitudinalDecisionReplayError,
     LongitudinalOutcome,
     decide_longitudinal_member,
     longitudinal_anchor_policy_sha256,
@@ -34,8 +37,10 @@ from evidence_inspector.repeatability_comparison import (
     RepeatabilityReason,
     compare_repeatability,
     measurement_evidence_payload_sha256,
+    measurement_evidence_receipt_signing_bytes,
     repeatability_comparison_sha256,
     repeatability_envelope_sha256,
+    result_trust_document_sha256,
 )
 from tests.test_longitudinal_compatibility import (
     HEAD_SHA256,
@@ -48,8 +53,9 @@ from tests.test_longitudinal_compatibility import (
     _record,
 )
 from traceback_runner.signing import (
+    DevelopmentTrustDocument,
     KeyPurpose,
-    TrustStore,
+    development_trust_bytes,
     generate_development_keypair,
     sign_bytes,
 )
@@ -58,8 +64,10 @@ EVIDENCE_SHA256 = "b" * 64
 PROTOCOL_SHA256 = "c" * 64
 AUTHORITY_SHA256 = "e" * 64
 SIGNING_KEY = generate_development_keypair(KeyPurpose.RESULT)
-RESULT_TRUST_STORE = TrustStore()
-RESULT_TRUST_STORE.add_signing_key(SIGNING_KEY)
+RESULT_TRUST_DOCUMENT = DevelopmentTrustDocument.model_validate_json(
+    development_trust_bytes(SIGNING_KEY)
+)
+RESULT_TRUST_SHA256 = result_trust_document_sha256(RESULT_TRUST_DOCUMENT)
 
 
 def _condition_policy(record, factor: RepeatabilityFactor) -> str:
@@ -142,6 +150,7 @@ def _observation(
     state: ObservationState = ObservationState.AVAILABLE,
     denominator: MeasurementDenominator | None = None,
     conditions: tuple[MeasurementCondition, ...] | None = None,
+    signing_key=SIGNING_KEY,
 ) -> ComparisonObservation:
     key = record.comparison_key
     dimensions = {item.dimension: item for item in key.dimensions}
@@ -193,8 +202,12 @@ def _observation(
         ),
         evidence_sha256=measurement_evidence_payload_sha256(evidence),
         signature=sign_bytes(
-            canonical_contract_bytes(evidence),
-            SIGNING_KEY,
+            measurement_evidence_receipt_signing_bytes(
+                "measurement_receipt_"
+                + record.measurement.result_id.removeprefix("result_"),
+                measurement_evidence_payload_sha256(evidence),
+            ),
+            signing_key,
             purpose=KeyPurpose.RESULT,
         ),
     )
@@ -237,7 +250,8 @@ def _compare(
     with _activated_records(anchor, member) as (records, store):
         anchor, member = records
         arguments["linkage_store"] = store
-        arguments["result_trust_store"] = RESULT_TRUST_STORE
+        arguments["result_trust_document"] = RESULT_TRUST_DOCUMENT
+        arguments["expected_result_trust_sha256"] = RESULT_TRUST_SHA256
         arguments.update(overrides)
         decision = decide_longitudinal_member(
             anchor,
@@ -282,6 +296,24 @@ def _compare(
             envelope,
             **arguments,
         )
+
+
+def _direct_arguments(policy, store, envelope, **overrides):
+    arguments = {
+        "evaluated_at": NOW,
+        "expected_policy_sha256": longitudinal_anchor_policy_sha256(policy),
+        "expected_authority_head_sha256": HEAD_SHA256,
+        "expected_linkage_trust_snapshot_sha256_by_provider": {PROVIDER: TRUST_SHA256},
+        "linkage_store": store,
+        "result_trust_document": RESULT_TRUST_DOCUMENT,
+        "expected_result_trust_sha256": RESULT_TRUST_SHA256,
+        "expected_envelope_sha256": repeatability_envelope_sha256(envelope),
+        "expected_evidence_sha256": EVIDENCE_SHA256,
+        "expected_protocol_sha256": PROTOCOL_SHA256,
+        "expected_repeatability_authority_sha256": AUTHORITY_SHA256,
+    }
+    arguments.update(overrides)
+    return arguments
 
 
 @pytest.mark.parametrize(
@@ -753,6 +785,317 @@ def test_qualified_method_drift_is_outside_repeatability_evidence_identity() -> 
     assert decision.outcome == LongitudinalOutcome.QUALIFIED_COMPATIBLE
     assert result.reason_codes == (RepeatabilityReason.MEASUREMENT_IDENTITY_MISMATCH,)
     assert result.delta is None
+
+
+def test_observation_subclass_cannot_run_hooks_after_d03_replay() -> None:
+    anchor = _record("1")
+    member = _record("2", changed=ComparisonDimension.ASSAY_PROTOCOL)
+    policy = _policy(anchor)
+    envelope = _envelope(anchor)
+    with _activated_records(anchor, member) as (records, store):
+        active_anchor, active_member = records
+        arguments = _direct_arguments(policy, store, envelope)
+        decision = decide_longitudinal_member(
+            active_anchor,
+            active_member,
+            policy,
+            expected_policy_sha256=arguments["expected_policy_sha256"],
+            expected_authority_head_sha256=arguments["expected_authority_head_sha256"],
+            expected_linkage_trust_snapshot_sha256_by_provider=arguments[
+                "expected_linkage_trust_snapshot_sha256_by_provider"
+            ],
+            linkage_store=store,
+        )
+        assert decision.outcome == LongitudinalOutcome.INCOMPATIBLE
+        member_observation = _observation(active_member, 0.55)
+
+        class CallerObservation(ComparisonObservation):
+            calls: ClassVar[int] = 0
+
+            def model_dump(self, *args: object, **kwargs: object) -> dict[str, object]:
+                type(self).calls += 1
+                object.__setattr__(decision, "outcome", LongitudinalOutcome.EQUIVALENT)
+                return super().model_dump(*args, **kwargs)
+
+            def __eq__(self, other: object) -> bool:
+                del other
+                type(self).calls += 1
+                object.__setattr__(decision, "outcome", LongitudinalOutcome.EQUIVALENT)
+                return True
+
+        poisoned = CallerObservation.model_validate_json(
+            canonical_contract_bytes(member_observation)
+        )
+        CallerObservation.calls = 0
+        result = compare_repeatability(
+            active_anchor,
+            active_member,
+            policy,
+            decision,
+            _observation(active_anchor, 0.5),
+            poisoned,
+            envelope,
+            **arguments,
+        )
+    assert CallerObservation.calls == 0
+    assert decision.outcome == LongitudinalOutcome.INCOMPATIBLE
+    assert result.availability == ComparisonAvailability.UNAVAILABLE
+    assert result.delta is None
+    assert not result.trend_allowed
+
+
+def test_receipt_relabel_invalidates_authority_signature() -> None:
+    anchor = _record("1")
+    member = _record("2")
+    policy = _policy(anchor)
+    decision = _decide(anchor, member, policy)
+
+    def relabel(_anchor, _member, anchor_observation, member_observation):
+        receipt = member_observation.receipt.model_copy(
+            update={"receipt_id": "measurement_receipt_relabelled"}
+        )
+        return (
+            anchor_observation,
+            member_observation.model_copy(update={"receipt": receipt}),
+        )
+
+    result = _compare(
+        anchor,
+        member,
+        policy,
+        decision,
+        _observation(anchor, 0.5),
+        _observation(member, 0.55),
+        _envelope(anchor),
+        observation_mutator=relabel,
+    )
+    assert result.reason_codes == (RepeatabilityReason.MEASUREMENT_SIGNATURE_INVALID,)
+    assert result.delta is None
+
+
+def test_live_authority_is_replayed_again_after_signature_verification(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    anchor = _record("1")
+    member = _record("2")
+    unrelated = _record("3")
+    policy = _policy(anchor)
+    envelope = _envelope(anchor)
+    original_verify = repeatability_module.verify_signature
+    with _activated_records(anchor, member) as (records, store):
+        active_anchor, active_member = records
+        arguments = _direct_arguments(policy, store, envelope)
+        decision = decide_longitudinal_member(
+            active_anchor,
+            active_member,
+            policy,
+            expected_policy_sha256=arguments["expected_policy_sha256"],
+            expected_authority_head_sha256=arguments["expected_authority_head_sha256"],
+            expected_linkage_trust_snapshot_sha256_by_provider=arguments[
+                "expected_linkage_trust_snapshot_sha256_by_provider"
+            ],
+            linkage_store=store,
+        )
+        calls = 0
+
+        def verify_then_mutate(*args: object, **kwargs: object) -> None:
+            nonlocal calls
+            original_verify(*args, **kwargs)
+            calls += 1
+            if calls == 1:
+                assert unrelated.authorized_linkage is not None
+                store.commit_authorized_revision(unrelated.authorized_linkage)
+
+        monkeypatch.setattr(
+            repeatability_module, "verify_signature", verify_then_mutate
+        )
+        with pytest.raises(LongitudinalDecisionReplayError, match="replay exactly"):
+            compare_repeatability(
+                active_anchor,
+                active_member,
+                policy,
+                decision,
+                _observation(active_anchor, 0.5),
+                _observation(active_member, 0.55),
+                envelope,
+                **arguments,
+            )
+    assert calls == 2
+
+
+def test_result_trust_requires_independent_pin() -> None:
+    anchor = _record("1")
+    member = _record("2")
+    policy = _policy(anchor)
+    envelope = _envelope(anchor)
+    attacker_key = generate_development_keypair(KeyPurpose.RESULT)
+    attacker_document = DevelopmentTrustDocument.model_validate_json(
+        development_trust_bytes(attacker_key)
+    )
+    with _activated_records(anchor, member) as (records, store):
+        active_anchor, active_member = records
+        arguments = _direct_arguments(
+            policy,
+            store,
+            envelope,
+            result_trust_document=attacker_document,
+        )
+        decision = decide_longitudinal_member(
+            active_anchor,
+            active_member,
+            policy,
+            expected_policy_sha256=arguments["expected_policy_sha256"],
+            expected_authority_head_sha256=arguments["expected_authority_head_sha256"],
+            expected_linkage_trust_snapshot_sha256_by_provider=arguments[
+                "expected_linkage_trust_snapshot_sha256_by_provider"
+            ],
+            linkage_store=store,
+        )
+        with pytest.raises(ValueError, match="independent pin"):
+            compare_repeatability(
+                active_anchor,
+                active_member,
+                policy,
+                decision,
+                _observation(active_anchor, 7.0, signing_key=attacker_key),
+                _observation(active_member, 7.05, signing_key=attacker_key),
+                envelope,
+                **arguments,
+            )
+
+
+def test_unverified_sensitive_key_id_never_enters_output() -> None:
+    anchor = _record("1")
+    member = _record("2")
+    policy = _policy(anchor)
+    envelope = _envelope(anchor)
+    with _activated_records(anchor, member) as (records, store):
+        active_anchor, active_member = records
+        arguments = _direct_arguments(policy, store, envelope)
+        decision = decide_longitudinal_member(
+            active_anchor,
+            active_member,
+            policy,
+            expected_policy_sha256=arguments["expected_policy_sha256"],
+            expected_authority_head_sha256=arguments["expected_authority_head_sha256"],
+            expected_linkage_trust_snapshot_sha256_by_provider=arguments[
+                "expected_linkage_trust_snapshot_sha256_by_provider"
+            ],
+            linkage_store=store,
+        )
+        member_observation = _observation(active_member, 0.55)
+        poisoned_signature = member_observation.receipt.signature.model_copy(
+            update={"key_id": "patient_private_key"}
+        )
+        poisoned_receipt = member_observation.receipt.model_copy(
+            update={"signature": poisoned_signature}
+        )
+        result = compare_repeatability(
+            active_anchor,
+            active_member,
+            policy,
+            decision,
+            _observation(active_anchor, 0.5),
+            member_observation.model_copy(update={"receipt": poisoned_receipt}),
+            envelope,
+            **arguments,
+        )
+    assert result.reason_codes == (RepeatabilityReason.MEASUREMENT_SIGNATURE_INVALID,)
+    assert result.measurement_signing_key_ids == ()
+    assert b"patient_private_key" not in canonical_contract_bytes(result)
+
+
+def test_caller_timezone_is_zero_hook_rejected_before_authority() -> None:
+    class CallerTimezone(tzinfo):
+        calls = 0
+
+        def utcoffset(self, value: object) -> timedelta:
+            del value
+            type(self).calls += 1
+            return timedelta(0)
+
+        def dst(self, value: object) -> timedelta:
+            del value
+            type(self).calls += 1
+            return timedelta(0)
+
+    anchor = _record("1")
+    member = _record("2")
+    policy = _policy(anchor)
+    decision = _decide(anchor, member, policy)
+    hostile_time = NOW.replace(tzinfo=CallerTimezone())
+    CallerTimezone.calls = 0
+    with pytest.raises(ValueError, match="trusted timezone-aware UTC"):
+        _compare(
+            anchor,
+            member,
+            policy,
+            decision,
+            _observation(anchor, 0.5),
+            _observation(member, 0.55),
+            _envelope(anchor),
+            evaluated_at=hostile_time,
+        )
+    assert CallerTimezone.calls == 0
+
+
+def test_d03_outcome_partition_is_exhaustive_and_positive_only() -> None:
+    eligible = {
+        LongitudinalOutcome.EQUIVALENT,
+        LongitudinalOutcome.QUALIFIED_COMPATIBLE,
+    }
+    explicitly_suppressed = {
+        LongitudinalOutcome.INCOMPATIBLE,
+        LongitudinalOutcome.UNKNOWN,
+        LongitudinalOutcome.REQUIRES_REANALYSIS,
+        LongitudinalOutcome.REGISTERED_BRIDGE,
+    }
+    assert eligible.isdisjoint(explicitly_suppressed)
+    assert eligible | explicitly_suppressed == set(LongitudinalOutcome)
+
+
+@pytest.mark.parametrize(
+    ("field", "value"),
+    (
+        ("anchor_value", 0.5),
+        ("member_value", 0.55),
+        ("delta", 0.05),
+        ("anchor_uncertainty_lower", 0.48),
+        ("anchor_uncertainty_upper", 0.52),
+        ("member_uncertainty_lower", 0.53),
+        ("member_uncertainty_upper", 0.57),
+        ("anchor_denominator_count", 100),
+        ("member_denominator_count", 100),
+        ("maximum_absolute_delta", 0.01),
+    ),
+)
+def test_unavailable_comparison_rejects_every_partial_numeric_field(
+    field: str,
+    value: float,
+) -> None:
+    anchor = _record("1")
+    member = _record("2")
+    policy = _policy(anchor)
+    outside = _compare(
+        anchor,
+        member,
+        policy,
+        _decide(anchor, member, policy),
+        _observation(anchor, 0.5),
+        _observation(member, 0.55),
+        _envelope(anchor, limit=0.01),
+    )
+    assert outside.availability == ComparisonAvailability.UNAVAILABLE
+    with pytest.raises(ValueError, match="all present or all suppressed"):
+        repeatability_comparison_sha256(outside.model_copy(update={field: value}))
+
+
+def test_result_trust_key_count_is_bounded_before_graph_traversal() -> None:
+    oversized = RESULT_TRUST_DOCUMENT.model_copy(
+        update={"keys": RESULT_TRUST_DOCUMENT.keys * 33}
+    )
+    with pytest.raises(ValueError, match="key count"):
+        result_trust_document_sha256(oversized)
 
 
 def test_every_member_is_compared_to_anchor_not_adjacent_member() -> None:

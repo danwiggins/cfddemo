@@ -11,17 +11,23 @@ is emitted only when all of these checks pass:
 
 1. The stored D03 decision replays exactly from the pinned anchor policy,
    current method authority, current provider-linkage trust, and the live D04
-   linkage-store receipt.
+   linkage-store receipt. D07 repeats that live replay immediately before any
+   numeric return so a concurrent linkage change fails closed.
 2. D03 classifies the member as `equivalent` or `qualified_compatible`.
 3. Both observations are canonical result-authority-signed evidence receipts
    binding the exact D02 record, E05 result and bundle bytes, value, uncertainty
    method and bounds, and reconciled total/included/excluded denominator counts.
+   The domain-separated signature also binds the receipt ID and evidence digest.
    Both measurements must be complete and sufficient.
-4. The repeatability envelope matches the independently pinned envelope,
+4. Result signatures replay against an independently pinned canonical trust
+   document. The document is bounded to 32 sorted unique public keys; key
+   purpose, namespace, revocation state, trust digest, and verified key IDs are
+   checked and bound into the comparison.
+5. The repeatability envelope matches the independently pinned envelope,
    evidence, protocol, and authority digests and is valid at evaluation time.
-5. Method reference and digest, quantity, unit, uncertainty method, and
+6. Method reference and digest, quantity, unit, uncertainty method, and
    denominator semantics match both records exactly.
-6. The absolute anchor-to-member delta is within the inclusive preapproved
+7. The absolute anchor-to-member delta is within the inclusive preapproved
    combined envelope.
 
 The envelope must explicitly cover between-day, operator, lot, and
