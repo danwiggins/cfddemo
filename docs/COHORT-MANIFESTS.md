@@ -42,6 +42,10 @@ share one timepoint handle and coordinate. Reanalysis and technical-replicate
 source chains must remain within the same biological lineage and cannot contain
 cycles.
 
+A collection-time axis has no origin proof and must bind the canonical digest
+of the empty origin set. An arbitrary unused origin digest, even with a
+recomputed member time commitment, cannot manufacture a new cohort version.
+
 Integer domains are finite. Linkage revisions use the upstream linkage
 revision maximum, store authority versions use the same 10,000-record maximum
 as the protected store's authoritative state semantics, and time coordinates use whole UTC seconds within Python's
@@ -93,8 +97,13 @@ the prior manifest digest, use a strictly later creation time, and change
 substantive membership or cohort policy. Authority refreshes and timestamps
 alone cannot create a new cohort version. The canonical parser rejects unknown
 fields, duplicate-key encodings, whitespace variants, and other noncanonical
-JSON. Identical controlled inputs reproduce identical bytes regardless of
-caller input order.
+JSON. Substantive comparison projects collection events and relative origins to
+their authority-independent provider, lineage, time, axis, and target semantics;
+proof IDs, nonces, signatures, proof-derived event digests, and proof-derived
+member time commitments cannot make an otherwise identical version substantive.
+Changed biological collection time, origin time, axis definition, membership,
+or policy remains substantive. Identical controlled inputs reproduce identical
+bytes regardless of caller input order.
 
 Both live-store and history validation first walk the exact object graph without
 calling caller-owned hooks. Only exact contract, enum, primitive, tuple, and
@@ -104,9 +113,11 @@ serialize and canonically reparse the complete manifest. Unvalidated
 bypass denominator, unit, role, dependency, ordering, member, or authority
 checks. The iterative preflight detects cycles and enforces depth, node,
 scalar, and declared per-field tuple limits before serialization, avoiding raw
-recursion failures or unbounded traversal. Technical-replicate and reanalysis
-dependencies share one acyclic graph even though their inclusion policies
-remain separate.
+recursion failures or unbounded traversal. Canonical byte input is bounded
+before parsing; duplicate keys, oversized integer tokens, deep JSON, excessive
+nodes or collection items, and oversized strings produce one sanitized
+canonical-input rejection. Technical-replicate and reanalysis dependencies
+share one acyclic graph even though their inclusion policies remain separate.
 
 All opaque linkage identities remain provider-local. Analysis records,
 declared-unit denominator groups, biological-lineage groups, and dependency

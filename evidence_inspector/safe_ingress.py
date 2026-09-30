@@ -130,7 +130,11 @@ def graph_is_safe(
             continue
         if value_type is str:
             limit = min(max_string_bytes, schema_max or max_string_bytes)
-            if len(value) > limit or len(value.encode("utf-8")) > max_string_bytes:
+            try:
+                encoded_length = len(value.encode("utf-8"))
+            except UnicodeError:
+                return False
+            if len(value) > limit or encoded_length > max_string_bytes:
                 return False
             continue
         if value_type is bytes:
@@ -194,8 +198,29 @@ def expanded_json_size_is_safe(
     nodes = 0
 
     def string_bound(value: str) -> int:
-        # A JSON string uses at most a six-byte escape for each code point.
-        return 2 + 6 * len(value)
+        # Match ensure_ascii=False without allocating the encoded string. Exact
+        # strings cannot run caller hooks, and invalid surrogate code points are
+        # rejected before they reach json.dumps().
+        total = 2
+        for character in value:
+            codepoint = ord(character)
+            if character in {'"', "\\"} or character in "\b\f\n\r\t":
+                total += 2
+            elif codepoint < 0x20:
+                total += 6
+            elif codepoint < 0x80:
+                total += 1
+            elif codepoint < 0x800:
+                total += 2
+            elif 0xD800 <= codepoint <= 0xDFFF:
+                return exceeded
+            elif codepoint < 0x10000:
+                total += 3
+            else:
+                total += 4
+            if total > max_bytes:
+                return exceeded
+        return total
 
     def cost(value: object, depth: int) -> int:
         nonlocal nodes
@@ -282,6 +307,10 @@ def exact_model_bytes(
     enum_types: frozenset[type[Enum]],
     max_bytes: int,
     max_nodes: int = DEFAULT_MAX_EXPANDED_NODES,
+    max_depth: int = DEFAULT_MAX_DEPTH,
+    max_collection_items: int = DEFAULT_MAX_COLLECTION_ITEMS,
+    max_string_bytes: int = DEFAULT_MAX_STRING_BYTES,
+    max_int_bits: int = DEFAULT_MAX_INT_BITS,
 ) -> bytes:
     if (
         type(value) is not expected_type
@@ -291,6 +320,7 @@ def exact_model_bytes(
             enum_types=enum_types,
             max_bytes=max_bytes,
             max_nodes=max_nodes,
+            max_depth=max_depth,
         )
         or not graph_is_safe(
             value,
@@ -298,6 +328,10 @@ def exact_model_bytes(
             enum_types=enum_types,
             max_binary_bytes=max_bytes,
             max_nodes=max_nodes,
+            max_depth=max_depth,
+            max_collection_items=max_collection_items,
+            max_string_bytes=max_string_bytes,
+            max_int_bits=max_int_bits,
         )
     ):
         raise TypeError("contract object graph is invalid")
@@ -317,6 +351,85 @@ def exact_model_bytes(
     if len(content) > max_bytes:
         raise ValueError("contract exceeds byte bound")
     return content
+
+
+def bounded_json_loads(
+    content: object,
+    *,
+    max_bytes: int,
+    max_depth: int = DEFAULT_MAX_DEPTH,
+    max_nodes: int = DEFAULT_MAX_NODES,
+    max_collection_items: int = DEFAULT_MAX_COLLECTION_ITEMS,
+    max_string_bytes: int = DEFAULT_MAX_STRING_BYTES,
+    max_int_bits: int = DEFAULT_MAX_INT_BITS,
+) -> object:
+    """Parse exact JSON bytes and fail closed on every structural budget.
+
+    The byte bound limits parser allocation. Integer tokens are bounded before
+    conversion, duplicate keys are rejected during parsing, and the resulting
+    exact built-in graph is walked iteratively before any model validation.
+    """
+
+    if type(content) is not bytes or len(content) > max_bytes:
+        raise ValueError("JSON input exceeds its byte bound")
+
+    max_decimal_digits = max(1, max_int_bits * 30103 // 100000 + 2)
+
+    def parse_integer(token: str) -> int:
+        digits = token[1:] if token.startswith("-") else token
+        if len(digits) > max_decimal_digits:
+            raise ValueError("JSON integer exceeds its bit bound")
+        value = int(token)
+        if value.bit_length() > max_int_bits:
+            raise ValueError("JSON integer exceeds its bit bound")
+        return value
+
+    def parse_float(token: str) -> float:
+        if len(token) > 128:
+            raise ValueError("JSON number exceeds its lexical bound")
+        return float(token)
+
+    def reject_constant(token: str) -> None:
+        raise ValueError(f"non-finite JSON token: {token}")
+
+    def exact_object(pairs: list[tuple[str, object]]) -> dict[str, object]:
+        captured: dict[str, object] = {}
+        for key, value in pairs:
+            if key in captured:
+                raise ValueError("JSON object contains a duplicate key")
+            captured[key] = value
+        return captured
+
+    try:
+        decoded = json.loads(
+            content,
+            parse_int=parse_integer,
+            parse_float=parse_float,
+            parse_constant=reject_constant,
+            object_pairs_hook=exact_object,
+        )
+    except (
+        UnicodeError,
+        json.JSONDecodeError,
+        RecursionError,
+        OverflowError,
+        TypeError,
+        ValueError,
+    ):
+        raise ValueError("JSON input is invalid") from None
+    if not graph_is_safe(
+        decoded,
+        model_types=frozenset(),
+        enum_types=frozenset(),
+        max_depth=max_depth,
+        max_nodes=max_nodes,
+        max_collection_items=max_collection_items,
+        max_string_bytes=max_string_bytes,
+        max_binary_bytes=0,
+        max_int_bits=max_int_bits,
+    ):
+        raise ValueError("JSON input exceeds its structural bounds")
+    return decoded
 
 
 def capture_exact_model(

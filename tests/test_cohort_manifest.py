@@ -13,6 +13,7 @@ from pathlib import Path
 import pytest
 from pydantic import ValidationError
 
+import evidence_inspector.cohort_manifest as cohort_manifest_module
 from evidence_inspector.method_registry import canonical_contract_bytes
 from evidence_inspector.cohort_manifest import (
     MAX_MEMBERS,
@@ -86,7 +87,7 @@ TIME_AXIS = TimeAxis(
     kind=TimeAxisKind.COLLECTION_TIME,
     definition_sha256="2" * 64,
     unit_sha256="3" * 64,
-    origin_authority_sha256="4" * 64,
+    origin_authority_sha256=time_origin_authority_sha256(()),
 )
 
 
@@ -1098,6 +1099,122 @@ def test_graph_preflight_rejects_cycles_and_oversized_fields(live) -> None:
         validate_manifest_history((oversized,))
 
 
+@pytest.mark.parametrize("hidden_state", ("__pydantic_extra__", "__pydantic_private__"))
+@pytest.mark.parametrize("boundary", ("bytes", "history", "live"))
+def test_closed_graph_rejects_hidden_pydantic_state(
+    live, hidden_state: str, boundary: str
+) -> None:
+    store, _, authority, member = live
+    forged = _manifest(authority, (member,)).model_copy()
+    object.__setattr__(forged, hidden_state, {"forged": "state"})
+    with pytest.raises(ValueError, match="not canonical"):
+        if boundary == "bytes":
+            cohort_manifest_bytes(forged)
+        elif boundary == "history":
+            validate_manifest_history((forged,))
+        else:
+            _validate(
+                forged,
+                store,
+                expected_trust_snapshot_sha256_by_provider=_pins(),
+            )
+
+
+@pytest.mark.parametrize("boundary", ("bytes", "history", "live"))
+def test_closed_graph_rejects_million_bit_integer_before_serialization(
+    live, boundary: str
+) -> None:
+    store, _, authority, member = live
+    forged = _manifest(authority, (member,)).model_copy(
+        update={"version": 1 << 1_000_000}
+    )
+    with pytest.raises(ValueError, match="not canonical"):
+        if boundary == "bytes":
+            cohort_manifest_bytes(forged)
+        elif boundary == "history":
+            validate_manifest_history((forged,))
+        else:
+            _validate(
+                forged,
+                store,
+                expected_trust_snapshot_sha256_by_provider=_pins(),
+            )
+
+
+@pytest.mark.parametrize("boundary", ("bytes", "history", "live"))
+def test_expanded_alias_cost_is_charged_at_every_occurrence(
+    live, monkeypatch, boundary: str
+) -> None:
+    store, _, authority, member = live
+    base = _manifest(authority, (member,))
+    base_size = len(cohort_manifest_bytes(base))
+    forged = base.model_copy(update={"members": (member, member)})
+    forged_size = len(cohort_manifest_bytes(forged))
+    low, high = base_size, forged_size * 2
+    while low < high:
+        candidate = (low + high) // 2
+        monkeypatch.setattr(
+            cohort_manifest_module,
+            "MAX_COHORT_MANIFEST_BYTES",
+            candidate,
+        )
+        try:
+            cohort_manifest_bytes(base)
+        except TypeError:
+            low = candidate + 1
+        else:
+            high = candidate
+    monkeypatch.setattr(
+        cohort_manifest_module,
+        "MAX_COHORT_MANIFEST_BYTES",
+        low,
+    )
+    assert cohort_manifest_bytes(base) == cohort_manifest_bytes(base)
+    with pytest.raises(TypeError, match="object graph is invalid"):
+        if boundary == "bytes":
+            cohort_manifest_bytes(forged)
+        elif boundary == "history":
+            validate_manifest_history((forged,))
+        else:
+            _validate(
+                forged,
+                store,
+                expected_trust_snapshot_sha256_by_provider=_pins(),
+            )
+
+
+def test_canonical_parser_bounds_bytes_depth_nodes_scalars_and_integer_tokens(
+    live, monkeypatch
+) -> None:
+    _, _, authority, member = live
+    content = cohort_manifest_bytes(_manifest(authority, (member,)))
+    original_bound = cohort_manifest_module.MAX_COHORT_MANIFEST_BYTES
+    monkeypatch.setattr(
+        cohort_manifest_module,
+        "MAX_COHORT_MANIFEST_BYTES",
+        len(content),
+    )
+    with pytest.raises(ValueError, match="not canonical") as captured:
+        cohort_manifest_from_bytes(content + b" ")
+    assert type(captured.value) is ValueError
+
+    monkeypatch.setattr(
+        cohort_manifest_module,
+        "MAX_COHORT_MANIFEST_BYTES",
+        original_bound,
+    )
+    hostile_inputs = (
+        b"[" * 2_000 + b"0" + b"]" * 2_000,
+        b'{"version":' + b"9" * 1_000 + b"}",
+        b"[" + b"0," * 100_000 + b"0]",
+        b'"' + b"x" * (cohort_manifest_module.MAX_TRUSTED_SCALAR_BYTES + 1) + b'"',
+    )
+    for hostile in hostile_inputs:
+        with pytest.raises(ValueError, match="not canonical") as captured:
+            cohort_manifest_from_bytes(hostile)
+        assert type(captured.value) is ValueError
+
+
 def test_closed_store_and_detached_snapshot_cannot_authorize(live) -> None:
     store, snapshot, authority, member = live
     manifest = _manifest(authority, (member,))
@@ -1395,6 +1512,192 @@ def test_history_requires_substantive_change_monotonic_time_and_exact_chain(
         )
     with pytest.raises(ValueError, match="consecutive"):
         validate_manifest_history((first, first.model_copy()))
+
+
+def _member_with_time_binding(
+    member: CohortMember,
+    event: CollectionEventReference,
+    axis: TimeAxis,
+    *,
+    coordinate: int | None = None,
+) -> CohortMember:
+    event_sha256 = collection_event_reference_sha256(event)
+    coordinate = member.time_coordinate if coordinate is None else coordinate
+    return member.model_copy(
+        update={
+            "collection_event_sha256": event_sha256,
+            "biological_timepoint_id": biological_timepoint_id(event),
+            "time_coordinate": coordinate,
+            "time_coordinate_sha256": _domain_sha256(
+                b"traceback-cohort-time-coordinate-v1",
+                {
+                    "collection_token": member.collection_token,
+                    "collection_event_sha256": event_sha256,
+                    "biological_timepoint_id": biological_timepoint_id(event),
+                    "time_axis": axis.model_dump(mode="json"),
+                    "time_coordinate": coordinate,
+                },
+            ),
+        }
+    )
+
+
+def _next_manifest(
+    first: CohortManifest,
+    *,
+    event: CollectionEventReference,
+    origin: TimeOriginReference | None,
+    axis: TimeAxis,
+    member: CohortMember,
+) -> CohortManifest:
+    payload = first.model_dump(mode="python")
+    payload.update(
+        {
+            "version": 2,
+            "previous_manifest_sha256": cohort_manifest_sha256(first),
+            "created_at": first.created_at + timedelta(days=1),
+            "time_axis": axis,
+            "collection_events": (event,),
+            "time_origins": (() if origin is None else (origin,)),
+            "members": (member,),
+        }
+    )
+    return CohortManifest.model_validate(payload)
+
+
+@pytest.mark.parametrize(
+    "authority_kind", ("event", "subject_origin", "study_origin")
+)
+@pytest.mark.parametrize("authority_part", ("proof", "grant"))
+def test_history_rejects_data_authority_only_refresh(
+    live, authority_kind: str, authority_part: str
+) -> None:
+    _, first = _manifest_with_data_authority_window(live, authority_kind)
+    event = first.collection_events[0]
+    origin = first.time_origins[0] if first.time_origins else None
+    axis = first.time_axis
+    if authority_kind == "event":
+        refreshed_authority = (
+            _resign_authority(
+                event.authority,
+                authority_id="approval_" + "e" * 32,
+                nonce="nonce_" + "e" * 32,
+            )
+            if authority_part == "proof"
+            else _resign_grant(
+                event.authority,
+                grant_id="approval_" + "e" * 32,
+                nonce="nonce_" + "e" * 32,
+            )
+        )
+        event = event.model_copy(
+            update={"authority": refreshed_authority}
+        )
+    else:
+        assert origin is not None
+        refreshed_authority = (
+            _resign_authority(
+                origin.authority,
+                authority_id="approval_" + "e" * 32,
+                nonce="nonce_" + "e" * 32,
+            )
+            if authority_part == "proof"
+            else _resign_grant(
+                origin.authority,
+                grant_id="approval_" + "e" * 32,
+                nonce="nonce_" + "e" * 32,
+            )
+        )
+        origin = origin.model_copy(
+            update={"authority": refreshed_authority}
+        )
+        axis = axis.model_copy(
+            update={
+                "origin_authority_sha256": time_origin_authority_sha256((origin,))
+            }
+        )
+    member = _member_with_time_binding(first.members[0], event, axis)
+    refreshed = _next_manifest(
+        first,
+        event=event,
+        origin=origin,
+        axis=axis,
+        member=member,
+    )
+    with pytest.raises(ValueError, match="membership or cohort policy"):
+        validate_manifest_history((first, refreshed))
+
+
+def test_history_accepts_changed_biological_time_and_axis_semantics(live) -> None:
+    _, first = _manifest_with_data_authority_window(live, "event")
+    previous_event = first.collection_events[0]
+    changed_event = _collection_event(
+        provider_namespace=previous_event.provider_namespace,
+        subject_token=previous_event.subject_token,
+        collection_token=previous_event.collection_token,
+        collected_at=previous_event.collected_at + timedelta(hours=1),
+    )
+    changed_coordinate = int(changed_event.collected_at.timestamp())
+    changed_member = _member_with_time_binding(
+        first.members[0],
+        changed_event,
+        first.time_axis,
+        coordinate=changed_coordinate,
+    )
+    changed_time = _next_manifest(
+        first,
+        event=changed_event,
+        origin=None,
+        axis=first.time_axis,
+        member=changed_member,
+    )
+    validate_manifest_history((first, changed_time))
+
+    _, relative = _manifest_with_data_authority_window(live, "study_origin")
+    previous_origin = relative.time_origins[0]
+    changed_origin = _time_origin(
+        kind=TimeAxisKind.STUDY_RELATIVE,
+        origin_time=previous_origin.origin_time,
+        subject_token=None,
+        definition_sha256="e" * 64,
+    )
+    changed_axis = relative.time_axis.model_copy(
+        update={
+            "definition_sha256": "e" * 64,
+            "origin_authority_sha256": time_origin_authority_sha256(
+                (changed_origin,)
+            ),
+        }
+    )
+    axis_member = _member_with_time_binding(
+        relative.members[0], relative.collection_events[0], changed_axis
+    )
+    changed_definition = _next_manifest(
+        relative,
+        event=relative.collection_events[0],
+        origin=changed_origin,
+        axis=changed_axis,
+        member=axis_member,
+    )
+    validate_manifest_history((relative, changed_definition))
+
+
+def test_collection_time_axis_requires_canonical_empty_origin_binding(live) -> None:
+    _, _, authority, member = live
+    first = _manifest(authority, (member,))
+    invalid_axis = first.time_axis.model_copy(
+        update={"origin_authority_sha256": "f" * 64}
+    )
+    rebound_member = _member_with_time_binding(
+        first.members[0], first.collection_events[0], invalid_axis
+    )
+    with pytest.raises(ValidationError, match="canonical empty origin"):
+        build_cohort_manifest(
+            provider_authorities=first.provider_authorities,
+            collection_events=first.collection_events,
+            members=(rebound_member,),
+            **_manifest_values(time_axis=invalid_axis),
+        )
 
 
 def test_canonical_parser_rejects_whitespace_duplicate_keys_and_extras(live) -> None:
