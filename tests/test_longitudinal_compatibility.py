@@ -1707,6 +1707,51 @@ def test_trust_pin_set_must_exactly_match_required_providers(
     assert not decision.connecting_trend_allowed
 
 
+def test_full_multi_provider_store_pins_allow_single_provider_comparison() -> None:
+    anchor = _record("1")
+    member = _record("2")
+    policy = _policy(anchor)
+    other_provider = _token("provider", "f")
+    pins = {PROVIDER: TRUST_SHA256, other_provider: "f" * 64}
+    with TemporaryDirectory(prefix="traceback-linkage-multiprovider-") as directory:
+        store = ProviderLinkageStore(
+            Path(directory),
+            expected_trust_snapshot_sha256_by_provider=pins,
+            time_source=AuthorityTimeSource.fixed(NOW),
+        )
+        try:
+            assert anchor.authorized_linkage is not None
+            assert member.authorized_linkage is not None
+            store.commit_authorized_revision(anchor.authorized_linkage)
+            store.commit_authorized_revision(member.authorized_linkage)
+            snapshot = store.active_snapshot()
+            receipts = {item.linkage_id: item for item in snapshot.receipts}
+            active_anchor = anchor.model_copy(
+                update={
+                    "activation_receipt": receipts[anchor.linkage_revision.linkage_id]
+                }
+            )
+            active_member = member.model_copy(
+                update={
+                    "activation_receipt": receipts[member.linkage_revision.linkage_id]
+                }
+            )
+            decision = decide_longitudinal_member(
+                active_anchor,
+                active_member,
+                policy,
+                expected_policy_sha256=longitudinal_anchor_policy_sha256(policy),
+                expected_authority_head_sha256=HEAD_SHA256,
+                expected_linkage_trust_snapshot_sha256_by_provider=pins,
+                linkage_store=store,
+            )
+        finally:
+            store.close()
+    assert decision.outcome == LongitudinalOutcome.EQUIVALENT
+    assert decision.delta_allowed
+    assert decision.connecting_trend_allowed
+
+
 def test_decision_boundary_replays_every_nested_record_binding() -> None:
     anchor = _record("1")
     member = _record("2")

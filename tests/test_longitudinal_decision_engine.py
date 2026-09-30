@@ -2,11 +2,15 @@
 
 from __future__ import annotations
 
+import hashlib
 import json
+import sys
+from typing import ClassVar
 
 import pytest
 from pydantic import ValidationError
 
+import evidence_inspector.longitudinal_compatibility as longitudinal_module
 from evidence_inspector.longitudinal_compatibility import (
     ALL_COMPARISON_DIMENSIONS,
     ComparisonDimension,
@@ -23,8 +27,10 @@ from evidence_inspector.longitudinal_compatibility import (
     decide_longitudinal_member,
     decide_longitudinal_series,
     longitudinal_anchor_policy_sha256,
+    longitudinal_member_decision_sha256,
     replay_longitudinal_member_decision,
 )
+from evidence_inspector.method_registry import canonical_contract_bytes
 from tests.test_longitudinal_compatibility import (
     HEAD_SHA256,
     PROVIDER,
@@ -435,6 +441,382 @@ def test_exact_e05_e01_and_lineage_authority_replay_rejects_tampering() -> None:
             replay_longitudinal_member_decision(
                 decision, anchor, member, policy, **no_store_pins
             )
+
+
+def test_replay_rejects_arbitrary_and_subclass_inputs_without_equality_hooks() -> None:
+    class EqualityTrap:
+        calls = 0
+
+        def __ne__(self, other: object) -> bool:
+            del other
+            type(self).calls += 1
+            return False
+
+    class DecisionSubclass(LongitudinalMemberDecision):
+        calls: ClassVar[int] = 0
+
+        def __ne__(self, other: object) -> bool:
+            del other
+            type(self).calls += 1
+            return False
+
+    anchor = _record("1")
+    member = _record("2")
+    policy = _policy(anchor)
+    with _activated_records(anchor, member) as (records, store):
+        active_anchor, active_member = records
+        arguments = {
+            "expected_policy_sha256": longitudinal_anchor_policy_sha256(policy),
+            "expected_authority_head_sha256": HEAD_SHA256,
+            "expected_linkage_trust_snapshot_sha256_by_provider": {
+                PROVIDER: TRUST_SHA256
+            },
+            "linkage_store": store,
+        }
+        decision = decide_longitudinal_member(
+            active_anchor, active_member, policy, **arguments
+        )
+        subclass = DecisionSubclass.model_validate_json(
+            canonical_contract_bytes(decision)
+        )
+        for untrusted in (EqualityTrap(), subclass):
+            with pytest.raises(LongitudinalDecisionReplayError, match="canonical"):
+                replay_longitudinal_member_decision(
+                    untrusted,  # type: ignore[arg-type]
+                    active_anchor,
+                    active_member,
+                    policy,
+                    **arguments,
+                )
+    assert EqualityTrap.calls == 0
+    assert DecisionSubclass.calls == 0
+
+
+def test_replay_uses_pinned_internal_evaluator(monkeypatch: pytest.MonkeyPatch) -> None:
+    anchor = _record("1")
+    member = _record("2")
+    policy = _policy(anchor)
+    with _activated_records(anchor, member) as (records, store):
+        active_anchor, active_member = records
+        arguments = {
+            "expected_policy_sha256": longitudinal_anchor_policy_sha256(policy),
+            "expected_authority_head_sha256": HEAD_SHA256,
+            "expected_linkage_trust_snapshot_sha256_by_provider": {
+                PROVIDER: TRUST_SHA256
+            },
+            "linkage_store": store,
+        }
+        decision = decide_longitudinal_member(
+            active_anchor, active_member, policy, **arguments
+        )
+        calls = 0
+
+        def forged(*args: object, **kwargs: object) -> LongitudinalMemberDecision:
+            nonlocal calls
+            del args, kwargs
+            calls += 1
+            return decision
+
+        monkeypatch.setattr(longitudinal_module, "decide_longitudinal_member", forged)
+        with pytest.raises(LongitudinalDecisionReplayError, match="replay exactly"):
+            replay_longitudinal_member_decision(
+                decision,
+                active_anchor,
+                active_member,
+                policy,
+                **{**arguments, "linkage_store": None},
+            )
+    assert calls == 0
+
+
+@pytest.mark.parametrize("entrypoint", ("member", "series"))
+@pytest.mark.parametrize("poisoned_input", ("anchor", "policy"))
+def test_caller_model_dump_shadow_never_executes_inside_authority_window(
+    entrypoint: str,
+    poisoned_input: str,
+) -> None:
+    anchor = _record("1")
+    member = _record("2")
+    policy = _policy(anchor)
+    with _activated_records(anchor, member) as (records, store):
+        active_anchor, active_member = records
+        expected_policy_sha256 = longitudinal_anchor_policy_sha256(policy)
+        calls = 0
+
+        def poisoned_model_dump(*args: object, **kwargs: object) -> dict[str, object]:
+            nonlocal calls
+            del args, kwargs
+            calls += 1
+            store.close()
+            return {}
+
+        if poisoned_input == "anchor":
+            object.__setattr__(active_anchor, "model_dump", poisoned_model_dump)
+        else:
+            object.__setattr__(policy, "model_dump", poisoned_model_dump)
+        arguments = {
+            "expected_policy_sha256": expected_policy_sha256,
+            "expected_authority_head_sha256": HEAD_SHA256,
+            "expected_linkage_trust_snapshot_sha256_by_provider": {
+                PROVIDER: TRUST_SHA256
+            },
+            "linkage_store": store,
+        }
+        if entrypoint == "member":
+            decision = decide_longitudinal_member(
+                active_anchor, active_member, policy, **arguments
+            )
+        else:
+            decision = decide_longitudinal_series(
+                active_anchor, (active_member,), policy, **arguments
+            ).decisions[0]
+    assert calls == 0
+    assert decision.outcome == LongitudinalOutcome.EQUIVALENT
+    assert decision.delta_allowed
+
+
+@pytest.mark.parametrize("entrypoint", ("member", "series"))
+def test_live_authority_change_during_evaluation_fails_whole_result_closed(
+    entrypoint: str,
+) -> None:
+    anchor = _record("1")
+    member = _record("2")
+    third = _record("3")
+    late = _record("4")
+    policy = _policy(anchor)
+    selected = (anchor, member) if entrypoint == "member" else (anchor, member, third)
+    with _activated_records(*selected) as (records, store):
+        active_anchor = records[0]
+        active_members = records[1:]
+        triggered = False
+
+        def trace(frame: object, event: str, arg: object):
+            nonlocal triggered
+            del arg
+            if (
+                not triggered
+                and event == "line"
+                and getattr(frame, "f_code", None)
+                is longitudinal_module._evaluate_longitudinal_member.__code__
+                and "anchor_key_sha256" in frame.f_locals  # type: ignore[attr-defined]
+            ):
+                triggered = True
+                assert late.authorized_linkage is not None
+                store.commit_authorized_revision(late.authorized_linkage)
+            return trace
+
+        arguments = {
+            "expected_policy_sha256": longitudinal_anchor_policy_sha256(policy),
+            "expected_authority_head_sha256": HEAD_SHA256,
+            "expected_linkage_trust_snapshot_sha256_by_provider": {
+                PROVIDER: TRUST_SHA256
+            },
+            "linkage_store": store,
+        }
+        sys.settrace(trace)
+        try:
+            if entrypoint == "member":
+                decision = decide_longitudinal_member(
+                    active_anchor, active_members[0], policy, **arguments
+                )
+            else:
+                series = decide_longitudinal_series(
+                    active_anchor, active_members, policy, **arguments
+                )
+                decision = series.decisions[0]
+        finally:
+            sys.settrace(None)
+        assert triggered
+        assert store.active_snapshot().state_version == len(selected) + 1
+    assert decision.outcome == LongitudinalOutcome.UNKNOWN
+    assert not decision.delta_allowed
+    assert not decision.connecting_trend_allowed
+
+
+@pytest.mark.parametrize(
+    "pin_name",
+    ("policy", "authority", "provider", "trust"),
+)
+@pytest.mark.parametrize("kind", ("bytes", "subclass"))
+def test_external_authority_pins_require_exact_strings_without_hooks(
+    pin_name: str,
+    kind: str,
+) -> None:
+    class HookedStr(str):
+        calls = 0
+
+        def __hash__(self) -> int:
+            type(self).calls += 1
+            return super().__hash__()
+
+        def __eq__(self, other: object) -> bool:
+            type(self).calls += 1
+            return super().__eq__(other)
+
+        def encode(self, *args: object, **kwargs: object) -> bytes:
+            type(self).calls += 1
+            return super().encode(*args, **kwargs)  # type: ignore[arg-type]
+
+    anchor = _record("1")
+    member = _record("2")
+    policy = _policy(anchor)
+    with _activated_records(anchor, member) as (records, store):
+        active_anchor, active_member = records
+        policy_sha256: object = longitudinal_anchor_policy_sha256(policy)
+        authority_head: object = HEAD_SHA256
+        provider: object = PROVIDER
+        trust: object = TRUST_SHA256
+        original = {
+            "policy": policy_sha256,
+            "authority": authority_head,
+            "provider": provider,
+            "trust": trust,
+        }[pin_name]
+        poisoned = (
+            str(original).encode("ascii")
+            if kind == "bytes"
+            else HookedStr(str(original))
+        )
+        if pin_name == "policy":
+            policy_sha256 = poisoned
+        elif pin_name == "authority":
+            authority_head = poisoned
+        elif pin_name == "provider":
+            provider = poisoned
+        else:
+            trust = poisoned
+        pins = {provider: trust}
+        HookedStr.calls = 0
+        decision = decide_longitudinal_member(
+            active_anchor,
+            active_member,
+            policy,
+            expected_policy_sha256=policy_sha256,  # type: ignore[arg-type]
+            expected_authority_head_sha256=authority_head,  # type: ignore[arg-type]
+            expected_linkage_trust_snapshot_sha256_by_provider=pins,  # type: ignore[arg-type]
+            linkage_store=store,
+        )
+    assert HookedStr.calls == 0
+    assert decision.anchor_result_id == "result_invalid_input"
+    assert decision.outcome == LongitudinalOutcome.UNKNOWN
+    assert not decision.delta_allowed
+
+
+def test_series_parse_rejects_decisions_from_different_anchor_snapshots() -> None:
+    anchor = _record("1")
+    member = _record("2")
+    later_member = _record("3")
+    policy = _policy(anchor)
+    with _activated_records(anchor, member) as (records, store):
+        active_anchor, active_member = records
+        arguments = {
+            "expected_policy_sha256": longitudinal_anchor_policy_sha256(policy),
+            "expected_authority_head_sha256": HEAD_SHA256,
+            "expected_linkage_trust_snapshot_sha256_by_provider": {
+                PROVIDER: TRUST_SHA256
+            },
+            "linkage_store": store,
+        }
+        first = decide_longitudinal_member(
+            active_anchor, active_member, policy, **arguments
+        )
+        assert later_member.authorized_linkage is not None
+        store.commit_authorized_revision(later_member.authorized_linkage)
+        snapshot = store.active_snapshot()
+        receipts = {item.linkage_id: item for item in snapshot.receipts}
+        refreshed_anchor = active_anchor.model_copy(
+            update={"activation_receipt": receipts[anchor.linkage_revision.linkage_id]}
+        )
+        refreshed_member = later_member.model_copy(
+            update={
+                "activation_receipt": receipts[later_member.linkage_revision.linkage_id]
+            }
+        )
+        second = decide_longitudinal_member(
+            refreshed_anchor, refreshed_member, policy, **arguments
+        )
+        assert first.outcome == second.outcome == LongitudinalOutcome.EQUIVALENT
+        assert first.anchor_record_sha256 != second.anchor_record_sha256
+        assert (
+            first.anchor_linkage_receipt_sha256 != second.anchor_linkage_receipt_sha256
+        )
+        with pytest.raises(ValidationError, match="one exact anchor"):
+            LongitudinalSeriesDecision(
+                schema_version="traceback.longitudinal-series-decision.v2",
+                anchor_result_id=first.anchor_result_id,
+                anchor_result_sha256=first.anchor_result_sha256,
+                anchor_bundle_sha256=first.anchor_bundle_sha256,
+                anchor_record_sha256=first.anchor_record_sha256,
+                anchor_key_sha256=first.anchor_key_sha256,
+                anchor_linkage_revision_sha256=(first.anchor_linkage_revision_sha256),
+                anchor_linkage_receipt_sha256=first.anchor_linkage_receipt_sha256,
+                authority_head_sha256=first.authority_head_sha256,
+                authority_revision=first.authority_revision,
+                policy_sha256=first.policy_sha256,
+                linkage_snapshot_sha256=hashlib.sha256(
+                    canonical_contract_bytes(snapshot)
+                ).hexdigest(),
+                member_result_ids=(
+                    first.member_result_id,
+                    second.member_result_id,
+                ),
+                decisions=(first, second),
+                decision_sha256s=(
+                    longitudinal_member_decision_sha256(first),
+                    longitudinal_member_decision_sha256(second),
+                ),
+            )
+
+
+def test_unsupported_engine_version_fails_closed() -> None:
+    anchor = _record("1")
+    member = _record("2")
+    policy = _policy(anchor).model_copy(update={"engine_version": "999.0.0"})
+    with _activated_records(anchor, member) as (records, store):
+        decision = decide_longitudinal_member(
+            records[0],
+            records[1],
+            policy,
+            expected_policy_sha256=longitudinal_anchor_policy_sha256(policy),
+            expected_authority_head_sha256=HEAD_SHA256,
+            expected_linkage_trust_snapshot_sha256_by_provider={PROVIDER: TRUST_SHA256},
+            linkage_store=store,
+        )
+    assert decision.outcome == LongitudinalOutcome.UNKNOWN
+    assert LongitudinalReason.POLICY_IDENTITY_INVALID in decision.reason_codes
+    assert not decision.delta_allowed
+
+
+def test_series_snapshot_work_is_bounded_not_per_member(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    anchor = _record("1")
+    members = (_record("2"), _record("3"), _record("4"))
+    policy = _policy(anchor)
+    with _activated_records(anchor, *members) as (records, store):
+        calls = 0
+        original = longitudinal_module._validate_store_input
+
+        def counted(store_input: object):
+            nonlocal calls
+            calls += 1
+            return original(store_input)
+
+        monkeypatch.setattr(longitudinal_module, "_validate_store_input", counted)
+        series = decide_longitudinal_series(
+            records[0],
+            records[1:],
+            policy,
+            expected_policy_sha256=longitudinal_anchor_policy_sha256(policy),
+            expected_authority_head_sha256=HEAD_SHA256,
+            expected_linkage_trust_snapshot_sha256_by_provider={PROVIDER: TRUST_SHA256},
+            linkage_store=store,
+        )
+    assert len(series.decisions) == len(members)
+    assert all(
+        item.outcome == LongitudinalOutcome.EQUIVALENT for item in series.decisions
+    )
+    assert calls == 3
 
 
 def test_explanations_actions_and_bridge_execution_fail_closed_on_tamper() -> None:

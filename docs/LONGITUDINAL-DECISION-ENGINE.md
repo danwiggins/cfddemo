@@ -86,11 +86,11 @@ a later member.
 Replay recomputes the decision from the exact E05 records, E01 capabilities and
 authority head, D01 authorized linkage revisions, D04 committed activation
 receipts, provider trust snapshots, anchor policy, and external pins. Both the
-anchor and member receipts are rechecked immediately through the live
-`ProviderLinkageStore.verify_current_receipt` authority. A serialized receipt
-or self-consistent stored digest is not enough; an absent verifier or any
-changed record, authority, lineage, receipt, explanation, action, or policy
-causes replay failure.
+anchor and member receipts must be exact members of one retained live
+`ProviderLinkageStore.active_snapshot`; the store head is revalidated before
+publication. A serialized receipt or self-consistent stored digest is not enough;
+an absent live store or any changed record, authority, lineage, receipt,
+explanation, action, or policy causes replay failure.
 
 All fixtures and tests are synthetic/local. Outcomes describe technical
 comparability only and carry no clinical interpretation.
