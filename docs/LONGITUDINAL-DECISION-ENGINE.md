@@ -7,6 +7,9 @@ algorithm.
 
 The enriched member and series decisions use v2 schema identities. A v1
 decision cannot be relabeled as v2 or omit D03 explanations and actions.
+Policy, member-decision, and series-decision `schema_version` fields are
+required on the wire. `bridge_execution_state` is also required; deserialization
+never supplies these authority-bearing fields from defaults.
 
 ## Requirement matrix
 
@@ -51,6 +54,23 @@ derivable from those explanations. They cannot be edited independently.
 Actions are controlled workflow states, not commands. A bridge decision always
 records `bridge_execution_state=not_executed`; the engine does not run a bridge,
 translate a value, start reanalysis, or mutate a record.
+
+## Exact reason sets
+
+Reason codes cannot be mixed across outcomes:
+
+- `equivalent`: exactly `exact_match`;
+- `qualified_compatible`: exactly `qualified_envelope`;
+- `requires_reanalysis`: exactly `reanalysis_required`;
+- `registered_bridge`: exactly `bridge_available`;
+- `incompatible`: exactly one of `disallowed_mismatch`, `mixed_dispositions`,
+  or `subject_linkage_mismatch`; and
+- `unknown`: a nonempty subset of the controlled unknown-state reasons only.
+
+The unknown-state reasons are `unknown_dimension`, `linkage_authority_invalid`,
+`policy_identity_invalid`, `anchor_identity_invalid`, and
+`result_state_invalid`. Compatibility reasons cannot be added to an unknown
+decision.
 
 ## Default, anchor, and replay rules
 

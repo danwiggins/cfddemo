@@ -384,6 +384,34 @@ class LongitudinalReason(StrEnum):
     SUBJECT_LINKAGE_MISMATCH = "subject_linkage_mismatch"
 
 
+_EXACT_REASON_SET_BY_OUTCOME = {
+    LongitudinalOutcome.EQUIVALENT: frozenset({LongitudinalReason.EXACT_MATCH}),
+    LongitudinalOutcome.QUALIFIED_COMPATIBLE: frozenset(
+        {LongitudinalReason.QUALIFIED_ENVELOPE}
+    ),
+    LongitudinalOutcome.REQUIRES_REANALYSIS: frozenset(
+        {LongitudinalReason.REANALYSIS_REQUIRED}
+    ),
+    LongitudinalOutcome.REGISTERED_BRIDGE: frozenset(
+        {LongitudinalReason.BRIDGE_AVAILABLE}
+    ),
+}
+_INCOMPATIBLE_REASON_SETS = {
+    frozenset({LongitudinalReason.DISALLOWED_MISMATCH}),
+    frozenset({LongitudinalReason.MIXED_DISPOSITIONS}),
+    frozenset({LongitudinalReason.SUBJECT_LINKAGE_MISMATCH}),
+}
+_UNKNOWN_REASON_SET = frozenset(
+    {
+        LongitudinalReason.UNKNOWN_DIMENSION,
+        LongitudinalReason.LINKAGE_AUTHORITY_INVALID,
+        LongitudinalReason.POLICY_IDENTITY_INVALID,
+        LongitudinalReason.ANCHOR_IDENTITY_INVALID,
+        LongitudinalReason.RESULT_STATE_INVALID,
+    }
+)
+
+
 class DimensionDecisionDisposition(StrEnum):
     EXACT_MATCH = "exact_match"
     UNKNOWN = "unknown"
@@ -517,9 +545,7 @@ class DimensionAnchorRule(CompatibilityContract):
 class LongitudinalAnchorPolicy(CompatibilityContract):
     """One policy pinned to one complete anchor key, never to adjacent pairs."""
 
-    schema_version: Literal["traceback.longitudinal-anchor-policy.v1"] = (
-        "traceback.longitudinal-anchor-policy.v1"
-    )
+    schema_version: Literal["traceback.longitudinal-anchor-policy.v1"]
     policy_id: LongitudinalPolicyId
     version: Version
     engine_version: EngineVersion
@@ -538,9 +564,7 @@ class LongitudinalAnchorPolicy(CompatibilityContract):
 
 
 class LongitudinalMemberDecision(CompatibilityContract):
-    schema_version: Literal["traceback.longitudinal-member-decision.v2"] = (
-        "traceback.longitudinal-member-decision.v2"
-    )
+    schema_version: Literal["traceback.longitudinal-member-decision.v2"]
     anchor_result_id: ResultId
     member_result_id: ResultId
     anchor_result_sha256: Sha256
@@ -586,7 +610,7 @@ class LongitudinalMemberDecision(CompatibilityContract):
         max_length=MAX_DECISION_EVIDENCE
     )
     next_action: LongitudinalNextAction
-    bridge_execution_state: Literal["not_executed"] = "not_executed"
+    bridge_execution_state: Literal["not_executed"]
     delta_allowed: bool
     connecting_trend_allowed: bool
 
@@ -607,6 +631,15 @@ class LongitudinalMemberDecision(CompatibilityContract):
         ):
             if values != tuple(sorted(set(values), key=str)):
                 raise ValueError(f"decision {label} must be uniquely sorted")
+        actual_reasons = frozenset(self.reason_codes)
+        if self.outcome == LongitudinalOutcome.UNKNOWN:
+            if not actual_reasons or not actual_reasons <= _UNKNOWN_REASON_SET:
+                raise ValueError("unknown outcome has invalid reason set")
+        elif self.outcome == LongitudinalOutcome.INCOMPATIBLE:
+            if actual_reasons not in _INCOMPATIBLE_REASON_SETS:
+                raise ValueError("incompatible outcome has invalid reason set")
+        elif actual_reasons != _EXACT_REASON_SET_BY_OUTCOME[self.outcome]:
+            raise ValueError("outcome has invalid exact reason set")
         eligible = self.outcome in {
             LongitudinalOutcome.EQUIVALENT,
             LongitudinalOutcome.QUALIFIED_COMPATIBLE,
@@ -727,9 +760,7 @@ class LongitudinalMemberDecision(CompatibilityContract):
 
 
 class LongitudinalSeriesDecision(CompatibilityContract):
-    schema_version: Literal["traceback.longitudinal-series-decision.v2"] = (
-        "traceback.longitudinal-series-decision.v2"
-    )
+    schema_version: Literal["traceback.longitudinal-series-decision.v2"]
     anchor_result_id: ResultId
     policy_sha256: Sha256
     member_result_ids: tuple[ResultId, ...] = Field(
@@ -1444,6 +1475,7 @@ def decide_longitudinal_member(
     }
     next_action = _next_action_for_outcome(outcome)
     return LongitudinalMemberDecision(
+        schema_version="traceback.longitudinal-member-decision.v2",
         anchor_result_id=anchor.measurement.result_id,
         member_result_id=member.measurement.result_id,
         anchor_result_sha256=anchor.measurement.result_sha256,
@@ -1485,6 +1517,7 @@ def decide_longitudinal_member(
             else ()
         ),
         next_action=next_action,
+        bridge_execution_state="not_executed",
         delta_allowed=eligible,
         connecting_trend_allowed=eligible,
     )
@@ -1541,6 +1574,7 @@ def decide_longitudinal_series(
         for member in members
     )
     return LongitudinalSeriesDecision(
+        schema_version="traceback.longitudinal-series-decision.v2",
         anchor_result_id=anchor.measurement.result_id,
         policy_sha256=longitudinal_anchor_policy_sha256(policy),
         member_result_ids=member_ids,

@@ -18,6 +18,8 @@ from evidence_inspector.longitudinal_compatibility import (
     LongitudinalMemberDecision,
     LongitudinalNextAction,
     LongitudinalOutcome,
+    LongitudinalReason,
+    LongitudinalSeriesDecision,
     decide_longitudinal_series,
     longitudinal_anchor_policy_sha256,
     replay_longitudinal_member_decision,
@@ -128,6 +130,83 @@ def test_every_outcome_has_one_safe_action_and_strict_rendering_gate() -> None:
         assert decision.bridge_execution_state == "not_executed"
 
 
+def test_every_outcome_rejects_reason_set_substitution() -> None:
+    dimension = ComparisonDimension.PREANALYTICS_POLICY
+    anchor = _record("1")
+    member = _record("2", changed=dimension)
+    value = _changed_value(member, dimension)
+    decisions_and_wrong_reasons = (
+        (
+            _decide(
+                anchor,
+                member,
+                _policy(
+                    anchor,
+                    {
+                        dimension: (
+                            value,
+                            LongitudinalOutcome.REQUIRES_REANALYSIS,
+                        )
+                    },
+                ),
+            ),
+            (LongitudinalReason.BRIDGE_AVAILABLE,),
+        ),
+        (
+            _decide(
+                anchor,
+                member,
+                _policy(
+                    anchor,
+                    {
+                        dimension: (
+                            value,
+                            LongitudinalOutcome.REGISTERED_BRIDGE,
+                        )
+                    },
+                ),
+            ),
+            (LongitudinalReason.REANALYSIS_REQUIRED,),
+        ),
+        (
+            _decide(anchor, member, _policy(anchor)),
+            (LongitudinalReason.EXACT_MATCH,),
+        ),
+        (
+            _decide(
+                anchor,
+                _record("2", unknown=ComparisonDimension.UNCERTAINTY_METHOD),
+                _policy(anchor),
+            ),
+            (LongitudinalReason.EXACT_MATCH,),
+        ),
+    )
+    for decision, reasons in decisions_and_wrong_reasons:
+        payload = decision.model_dump(mode="json")
+        payload["reason_codes"] = [item.value for item in reasons]
+        with pytest.raises(ValidationError, match="invalid.*reason set"):
+            LongitudinalMemberDecision.model_validate_json(json.dumps(payload))
+
+
+def test_mixed_subject_and_unknown_reason_sets_are_exactly_controlled() -> None:
+    anchor = _record("1")
+    subject_mismatch = _decide(
+        anchor,
+        _record("2", subject_digit="f"),
+        _policy(anchor),
+    )
+    assert subject_mismatch.reason_codes == (
+        LongitudinalReason.SUBJECT_LINKAGE_MISMATCH,
+    )
+
+    unknown = _decide(
+        anchor,
+        _record("2", unknown=ComparisonDimension.UNCERTAINTY_METHOD),
+        _policy(anchor),
+    )
+    assert unknown.reason_codes == (LongitudinalReason.UNKNOWN_DIMENSION,)
+
+
 def test_mismatch_explanation_binds_exact_values_evidence_and_bridge() -> None:
     dimension = ComparisonDimension.ASSAY_PROTOCOL
     anchor = _record("1")
@@ -158,6 +237,7 @@ def test_mismatch_explanation_binds_exact_values_evidence_and_bridge() -> None:
     ("mutation", "message"),
     [
         ({"schema_version": "traceback.longitudinal-anchor-policy.v0"}, "literal"),
+        ({"schema_version": None}, "schema_version"),
         ({"engine_version": None}, "engine_version"),
         ({"rules": None}, "rules"),
     ],
@@ -188,6 +268,27 @@ def test_v1_or_incomplete_decision_cannot_be_relabelled_as_d03() -> None:
     payload.pop("dimension_explanations")
     with pytest.raises(ValidationError, match="dimension_explanations"):
         LongitudinalMemberDecision.model_validate_json(json.dumps(payload))
+
+    for field in ("schema_version", "bridge_execution_state"):
+        payload = decision.model_dump(mode="json")
+        payload.pop(field)
+        with pytest.raises(ValidationError, match=field):
+            LongitudinalMemberDecision.model_validate_json(json.dumps(payload))
+
+    series = decide_longitudinal_series(
+        anchor,
+        (_record("2"),),
+        _policy(anchor),
+        expected_policy_sha256=longitudinal_anchor_policy_sha256(_policy(anchor)),
+        expected_authority_head_sha256=HEAD_SHA256,
+        expected_linkage_trust_snapshot_sha256_by_provider={
+            PROVIDER: TRUST_SHA256
+        },
+    )
+    series_payload = series.model_dump(mode="json")
+    series_payload.pop("schema_version")
+    with pytest.raises(ValidationError, match="schema_version"):
+        LongitudinalSeriesDecision.model_validate_json(json.dumps(series_payload))
 
 
 def test_series_is_anchor_direct_and_does_not_inherit_adjacent_compatibility() -> None:
@@ -338,6 +439,7 @@ def test_mixed_bridge_disposition_is_explained_but_never_actionable() -> None:
     )
     decision = _decide(anchor, member, policy)
     assert decision.outcome == LongitudinalOutcome.INCOMPATIBLE
+    assert decision.reason_codes == (LongitudinalReason.MIXED_DISPOSITIONS,)
     assert decision.next_action == LongitudinalNextAction.START_SEPARATE_SERIES
     assert decision.bridge_refs == ()
     bridge_explanation = next(

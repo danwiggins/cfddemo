@@ -438,6 +438,7 @@ def _policy(
             )
         )
     return LongitudinalAnchorPolicy(
+        schema_version="traceback.longitudinal-anchor-policy.v1",
         policy_id="longpolicy_fragment_alpha",
         version="1.0.0",
         engine_version="1.0.0",
