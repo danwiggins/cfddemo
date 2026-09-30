@@ -10,6 +10,9 @@ Epic D qualification gate passed.
 from __future__ import annotations
 
 import hashlib
+from collections.abc import Iterator
+from contextlib import contextmanager
+from dataclasses import dataclass
 from datetime import datetime
 from enum import StrEnum
 from typing import Annotated, Literal
@@ -703,6 +706,18 @@ class RegisteredCohortDenominatorSummary(RegistryContract):
         return self
 
 
+@dataclass(frozen=True, slots=True)
+class RegisteredCohortDenominatorDerivation:
+    """Protected live D09 derivation retained only while its authority is fenced."""
+
+    summary: RegisteredCohortDenominatorSummary
+    manifest: CohortManifest
+    population: CohortDenominatorSummary
+    comparison_replay: CohortComparisonReplay | None
+    comparison_series: LongitudinalSeriesDecision | None
+    repeatability_comparisons: tuple[RepeatabilityComparison, ...]
+
+
 _REGISTERED_SUMMARY_MODEL_TYPES, _REGISTERED_SUMMARY_ENUM_TYPES = (
     contract_type_graph(RegisteredCohortDenominatorSummary)
 )
@@ -1152,7 +1167,8 @@ def _validate_comparison_bindings(
         raise ValueError("D07 replay membership changed")
 
 
-def build_registered_cohort_denominator_summary(
+@contextmanager
+def registered_cohort_denominator_authority_fence(
     *,
     registry: CohortRegistry,
     selector_id: str,
@@ -1163,8 +1179,8 @@ def build_registered_cohort_denominator_summary(
     result_sources: tuple[ResultViewSource, ...],
     comparison_replay: CohortComparisonReplay | None = None,
     linkage_store: ProviderLinkageStore | None = None,
-) -> RegisteredCohortDenominatorSummary:
-    """Derive one D09 population from exact live D05/D06 authority state."""
+) -> Iterator[RegisteredCohortDenominatorDerivation]:
+    """Yield one protected D09 derivation while all live authority remains fenced."""
 
     if type(registry) is not CohortRegistry:
         raise TypeError("cohort registry type is invalid")
@@ -1317,9 +1333,45 @@ def build_registered_cohort_denominator_summary(
                 placeholder, RegisteredCohortDenominatorSummary
             ),
         )
-        return RegisteredCohortDenominatorSummary.model_validate_json(
+        result = RegisteredCohortDenominatorSummary.model_validate_json(
             registered_cohort_denominator_summary_bytes(result)
         )
+        yield RegisteredCohortDenominatorDerivation(
+            summary=result,
+            manifest=manifest,
+            population=population,
+            comparison_replay=replayed_comparison,
+            comparison_series=replayed_series,
+            repeatability_comparisons=replayed_repeatability,
+        )
+
+
+def build_registered_cohort_denominator_summary(
+    *,
+    registry: CohortRegistry,
+    selector_id: str,
+    cohort_version: int,
+    record_catalog: CohortRecordCatalog,
+    policy: CohortDenominatorPolicy,
+    disposition_policy: CohortDispositionPolicy,
+    result_sources: tuple[ResultViewSource, ...],
+    comparison_replay: CohortComparisonReplay | None = None,
+    linkage_store: ProviderLinkageStore | None = None,
+) -> RegisteredCohortDenominatorSummary:
+    """Derive one public D09 summary from exact live D05/D06 authority state."""
+
+    with registered_cohort_denominator_authority_fence(
+        registry=registry,
+        selector_id=selector_id,
+        cohort_version=cohort_version,
+        record_catalog=record_catalog,
+        policy=policy,
+        disposition_policy=disposition_policy,
+        result_sources=result_sources,
+        comparison_replay=comparison_replay,
+        linkage_store=linkage_store,
+    ) as derivation:
+        return derivation.summary
 
 
 def _row(
@@ -1605,6 +1657,7 @@ __all__ = [
     "MemberDispositionReason",
     "MissingValueRule",
     "UnavailableUnitRule",
+    "RegisteredCohortDenominatorDerivation",
     "RegisteredCohortDenominatorSummary",
     "build_cohort_denominator_summary",
     "build_registered_cohort_denominator_summary",
@@ -1614,4 +1667,5 @@ __all__ = [
     "cohort_denominator_summary_from_bytes",
     "registered_cohort_denominator_summary_bytes",
     "registered_cohort_denominator_summary_from_bytes",
+    "registered_cohort_denominator_authority_fence",
 ]
