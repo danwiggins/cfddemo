@@ -12,6 +12,7 @@ import base64
 import ctypes
 import fcntl
 import hashlib
+import hmac
 import os
 import secrets
 import sqlite3
@@ -67,6 +68,8 @@ SCHEMA_VERSION = 1
 MAX_RECORDS = 100_000
 MAX_COMPARISONS = 100_000
 MAX_COMPARISON_MEMBERS = 1_000
+MAX_HISTORY_PAGE_RECORDS = 1_000
+MAX_HISTORY_COMPARISON_WARNINGS = 1_000
 
 RecordId = Annotated[str, StringConstraints(pattern=r"^record_[0-9a-f]{40}$")]
 ComparisonId = Annotated[str, StringConstraints(pattern=r"^comparison_[0-9a-f]{40}$")]
@@ -354,6 +357,14 @@ class InvalidationReason(StrEnum):
     LINKAGE_CHANGED_OR_TOMBSTONED = "linkage_changed_or_tombstoned"
 
 
+class RecordHistoryState(StrEnum):
+    """One immutable record's current role in the global ledger."""
+
+    ACTIVE = "active"
+    SUPERSEDED = "superseded"
+    AUTHORITY_INVALID = "authority_invalid"
+
+
 class SupersedingRecord(RegistryContract):
     """One immutable result identity and its exact biological authority."""
 
@@ -515,6 +526,157 @@ class ActiveRecordSnapshot(RegistryContract):
         return self
 
 
+class RecordHistoryEntry(RegistryContract):
+    """One immutable record with its original authority proof and warnings."""
+
+    schema_version: Literal["traceback.record-history-entry.v1"] = (
+        "traceback.record-history-entry.v1"
+    )
+    record: SupersedingRecord
+    record_sha256: Sha256
+    activation_receipt: CommittedLinkageReceipt
+    state: RecordHistoryState
+    successor_record_id: RecordId | None = None
+    affected_comparisons: tuple[ComparisonStatus, ...] = Field(
+        max_length=MAX_HISTORY_COMPARISON_WARNINGS
+    )
+
+    @model_validator(mode="after")
+    def exact_bindings(self) -> RecordHistoryEntry:
+        if self.record_sha256 != record_sha256(self.record):
+            raise ValueError("record history digest is invalid")
+        receipt = self.activation_receipt
+        if (
+            receipt.provider_namespace != self.record.provider_namespace
+            or receipt.linkage_id != self.record.linkage_id
+            or receipt.revision != self.record.linkage_revision
+            or receipt.linkage_revision_sha256 != self.record.linkage_revision_sha256
+            or committed_linkage_receipt_sha256(receipt)
+            != self.record.activation_receipt_sha256
+        ):
+            raise ValueError("record history activation receipt is invalid")
+        comparison_ids = tuple(item.comparison_id for item in self.affected_comparisons)
+        if comparison_ids != tuple(sorted(set(comparison_ids))):
+            raise ValueError("record history comparison warnings are not canonical")
+        if any(
+            item.state is not ComparisonState.STALE
+            or self.record.record_id not in item.member_record_ids
+            for item in self.affected_comparisons
+        ):
+            raise ValueError("record history comparison warning is invalid")
+        return self
+
+
+class RecordHistoryCursor(RegistryContract):
+    """A page position bound to the exact ledger and linkage snapshots."""
+
+    schema_version: Literal["traceback.record-history-cursor.v1"] = (
+        "traceback.record-history-cursor.v1"
+    )
+    ledger_id: LedgerId
+    ledger_epoch_sha256: Sha256
+    storage_identity_sha256: Sha256
+    state_version: int = Field(ge=0, le=MAX_RECORDS + MAX_COMPARISONS * 4)
+    state_head_sha256: Sha256
+    linkage_store_id: LinkageStoreId
+    linkage_store_epoch_sha256: Sha256
+    linkage_storage_identity_sha256: Sha256
+    linkage_state_version: int = Field(ge=0, le=MAX_REVISIONS)
+    linkage_state_head_sha256: Sha256
+    after_record_id: RecordId
+    cursor_mac_sha256: Sha256
+
+
+class RecordHistorySnapshot(RegistryContract):
+    """One canonical bounded page of the protected global record history."""
+
+    schema_version: Literal["traceback.record-history-snapshot.v1"] = (
+        "traceback.record-history-snapshot.v1"
+    )
+    ledger_id: LedgerId
+    ledger_epoch_sha256: Sha256
+    storage_identity_sha256: Sha256
+    state_version: int = Field(ge=0, le=MAX_RECORDS + MAX_COMPARISONS * 4)
+    state_head_sha256: Sha256
+    linkage_store_id: LinkageStoreId
+    linkage_store_epoch_sha256: Sha256
+    linkage_storage_identity_sha256: Sha256
+    linkage_state_version: int = Field(ge=0, le=MAX_REVISIONS)
+    linkage_state_head_sha256: Sha256
+    cursor: RecordHistoryCursor | None = None
+    limit: int = Field(ge=1, le=MAX_HISTORY_PAGE_RECORDS, strict=True)
+    records: tuple[RecordHistoryEntry, ...] = Field(max_length=MAX_HISTORY_PAGE_RECORDS)
+    next_cursor: RecordHistoryCursor | None = None
+
+    @model_validator(mode="after")
+    def canonical_page(self) -> RecordHistorySnapshot:
+        record_ids = tuple(item.record.record_id for item in self.records)
+        if record_ids != tuple(sorted(set(record_ids))):
+            raise ValueError("record history page is not canonical")
+        if len(record_ids) > self.limit:
+            raise ValueError("record history page exceeds requested limit")
+        if self.cursor is not None and any(
+            record_id <= self.cursor.after_record_id for record_id in record_ids
+        ):
+            raise ValueError("record history cursor is invalid")
+        if self.next_cursor is not None and (
+            len(record_ids) != self.limit
+            or self.next_cursor.after_record_id != record_ids[-1]
+        ):
+            raise ValueError("record history next cursor is invalid")
+        expected_binding = (
+            self.ledger_id,
+            self.ledger_epoch_sha256,
+            self.storage_identity_sha256,
+            self.state_version,
+            self.state_head_sha256,
+            self.linkage_store_id,
+            self.linkage_store_epoch_sha256,
+            self.linkage_storage_identity_sha256,
+            self.linkage_state_version,
+            self.linkage_state_head_sha256,
+        )
+        for cursor in (self.cursor, self.next_cursor):
+            if cursor is not None and (
+                cursor.ledger_id,
+                cursor.ledger_epoch_sha256,
+                cursor.storage_identity_sha256,
+                cursor.state_version,
+                cursor.state_head_sha256,
+                cursor.linkage_store_id,
+                cursor.linkage_store_epoch_sha256,
+                cursor.linkage_storage_identity_sha256,
+                cursor.linkage_state_version,
+                cursor.linkage_state_head_sha256,
+            ) != expected_binding:
+                raise ValueError("record history cursor binding is invalid")
+        if (
+            sum(len(item.affected_comparisons) for item in self.records)
+            > MAX_HISTORY_COMPARISON_WARNINGS
+        ):
+            raise ValueError("record history comparison warning bound exceeded")
+        for item in self.records:
+            if (
+                item.activation_receipt.store_id != self.linkage_store_id
+                or item.activation_receipt.store_epoch_sha256
+                != self.linkage_store_epoch_sha256
+                or item.activation_receipt.storage_identity_sha256
+                != self.linkage_storage_identity_sha256
+            ):
+                raise ValueError("record history linkage store binding is invalid")
+            if (
+                item.successor_record_id is not None
+                and item.state is not RecordHistoryState.SUPERSEDED
+            ):
+                raise ValueError("record history supersession state is invalid")
+            if (
+                item.successor_record_id is None
+                and item.state is RecordHistoryState.SUPERSEDED
+            ):
+                raise ValueError("record history leaf state is invalid")
+        return self
+
+
 @dataclass(frozen=True)
 class _LinkageAuthorityView:
     snapshot: ActiveLinkageSnapshot
@@ -525,6 +687,31 @@ class _LinkageAuthorityView:
 
 def _digest(domain: bytes, content: bytes) -> str:
     return hashlib.sha256(domain + b"\0" + content).hexdigest()
+
+
+def _record_history_cursor_mac(
+    cursor: RecordHistoryCursor, key: bytes
+) -> str:
+    content = b"\0".join(
+        (
+            cursor.ledger_id.encode("ascii"),
+            cursor.ledger_epoch_sha256.encode("ascii"),
+            cursor.storage_identity_sha256.encode("ascii"),
+            str(cursor.state_version).encode("ascii"),
+            cursor.state_head_sha256.encode("ascii"),
+            cursor.linkage_store_id.encode("ascii"),
+            cursor.linkage_store_epoch_sha256.encode("ascii"),
+            cursor.linkage_storage_identity_sha256.encode("ascii"),
+            str(cursor.linkage_state_version).encode("ascii"),
+            cursor.linkage_state_head_sha256.encode("ascii"),
+            cursor.after_record_id.encode("ascii"),
+        )
+    )
+    return hmac.new(
+        key,
+        b"traceback-record-history-cursor-v1\0" + content,
+        hashlib.sha256,
+    ).hexdigest()
 
 
 def supersession_statement_sha256(record: SupersedingRecord) -> str:
@@ -630,6 +817,7 @@ def _model_values(value: object, expected: tuple[str, ...]) -> dict[str, object]
     try:
         values = object.__getattribute__(value, "__dict__")
         extra = object.__getattribute__(value, "__pydantic_extra__")
+        private = object.__getattribute__(value, "__pydantic_private__")
     except (AttributeError, TypeError):
         return None
     if (
@@ -639,6 +827,8 @@ def _model_values(value: object, expected: tuple[str, ...]) -> dict[str, object]
     ):
         return None
     if extra is not None and (type(extra) is not dict or len(extra) != 0):
+        return None
+    if private is not None and (type(private) is not dict or len(private) != 0):
         return None
     return values
 
@@ -880,6 +1070,259 @@ def _require_exact_snapshot_shape(
         _require_exact_record_shape(record, error_type=error_type)
 
 
+def _require_exact_comparison_status_shape(
+    status: object, *, error_type: type[Exception]
+) -> None:
+    if type(status) is not ComparisonStatus:
+        raise error_type("comparison status is invalid")
+    values = _model_values(
+        status,
+        (
+            "schema_version",
+            "comparison_id",
+            "state",
+            "reasons",
+            "member_record_ids",
+            "derived_artifact_sha256",
+            "linkage_state_version",
+            "linkage_state_head_sha256",
+        ),
+    )
+    if values is None:
+        raise error_type("comparison status is invalid")
+    reasons = values["reasons"]
+    members = values["member_record_ids"]
+    if (
+        values["schema_version"] != "traceback.derived-comparison-status.v1"
+        or not _fixed_hex(values["comparison_id"], "comparison_", 40)
+        or type(values["state"]) is not ComparisonState
+        or type(reasons) is not tuple
+        or any(type(item) is not InvalidationReason for item in reasons)
+        or type(members) is not tuple
+        or not 2 <= len(members) <= MAX_COMPARISON_MEMBERS
+        or any(not _fixed_hex(item, "record_", 40) for item in members)
+        or not _fixed_hex(values["derived_artifact_sha256"], "", 64)
+        or type(values["linkage_state_version"]) is not int
+        or not 0 <= values["linkage_state_version"] <= MAX_REVISIONS
+        or not _fixed_hex(values["linkage_state_head_sha256"], "", 64)
+    ):
+        raise error_type("comparison status is invalid")
+
+
+def _require_exact_activation_receipt_shape(
+    receipt: object, *, error_type: type[Exception]
+) -> None:
+    if type(receipt) is not CommittedLinkageReceipt:
+        raise error_type("record history activation receipt is invalid")
+    values = _model_values(
+        receipt,
+        (
+            "schema_version",
+            "provider_namespace",
+            "store_id",
+            "store_epoch_sha256",
+            "storage_identity_sha256",
+            "trust_pins_sha256",
+            "linkage_id",
+            "revision",
+            "linkage_revision_sha256",
+            "authorized_record_sha256",
+            "state_version",
+            "state_head_sha256",
+        ),
+    )
+    if (
+        values is None
+        or values["schema_version"] != "traceback.committed-linkage-receipt.v1"
+        or not _fixed_hex(values["provider_namespace"], "provider_", 32)
+        or not _fixed_hex(values["store_id"], "store_", 32)
+        or not _fixed_hex(values["store_epoch_sha256"], "", 64)
+        or not _fixed_hex(values["storage_identity_sha256"], "", 64)
+        or not _fixed_hex(values["trust_pins_sha256"], "", 64)
+        or not _fixed_hex(values["linkage_id"], "linkage_", 32)
+        or type(values["revision"]) is not int
+        or not 1 <= values["revision"] <= MAX_REVISIONS
+        or not _fixed_hex(values["linkage_revision_sha256"], "", 64)
+        or not _fixed_hex(values["authorized_record_sha256"], "", 64)
+        or type(values["state_version"]) is not int
+        or not 1 <= values["state_version"] <= MAX_REVISIONS
+        or not _fixed_hex(values["state_head_sha256"], "", 64)
+    ):
+        raise error_type("record history activation receipt is invalid")
+
+
+def _require_exact_history_cursor_shape(
+    cursor: object, *, error_type: type[Exception]
+) -> None:
+    if type(cursor) is not RecordHistoryCursor:
+        raise error_type("record history cursor is invalid")
+    values = _model_values(
+        cursor,
+        (
+            "schema_version",
+            "ledger_id",
+            "ledger_epoch_sha256",
+            "storage_identity_sha256",
+            "state_version",
+            "state_head_sha256",
+            "linkage_store_id",
+            "linkage_store_epoch_sha256",
+            "linkage_storage_identity_sha256",
+            "linkage_state_version",
+            "linkage_state_head_sha256",
+            "after_record_id",
+            "cursor_mac_sha256",
+        ),
+    )
+    if (
+        values is None
+        or values["schema_version"] != "traceback.record-history-cursor.v1"
+        or not _fixed_hex(values["ledger_id"], "ledger_", 32)
+        or not _fixed_hex(values["ledger_epoch_sha256"], "", 64)
+        or not _fixed_hex(values["storage_identity_sha256"], "", 64)
+        or type(values["state_version"]) is not int
+        or not 0 <= values["state_version"] <= MAX_RECORDS + MAX_COMPARISONS * 4
+        or not _fixed_hex(values["state_head_sha256"], "", 64)
+        or not _fixed_hex(values["linkage_store_id"], "store_", 32)
+        or not _fixed_hex(values["linkage_store_epoch_sha256"], "", 64)
+        or not _fixed_hex(values["linkage_storage_identity_sha256"], "", 64)
+        or type(values["linkage_state_version"]) is not int
+        or not 0 <= values["linkage_state_version"] <= MAX_REVISIONS
+        or not _fixed_hex(values["linkage_state_head_sha256"], "", 64)
+        or not _fixed_hex(values["after_record_id"], "record_", 40)
+        or not _fixed_hex(values["cursor_mac_sha256"], "", 64)
+    ):
+        raise error_type("record history cursor is invalid")
+
+
+def _require_exact_history_snapshot_shape(
+    snapshot: object, *, error_type: type[Exception]
+) -> None:
+    if type(snapshot) is not RecordHistorySnapshot:
+        raise error_type("record history snapshot is invalid")
+    values = _model_values(
+        snapshot,
+        (
+            "schema_version",
+            "ledger_id",
+            "ledger_epoch_sha256",
+            "storage_identity_sha256",
+            "state_version",
+            "state_head_sha256",
+            "linkage_store_id",
+            "linkage_store_epoch_sha256",
+            "linkage_storage_identity_sha256",
+            "linkage_state_version",
+            "linkage_state_head_sha256",
+            "cursor",
+            "limit",
+            "records",
+            "next_cursor",
+        ),
+    )
+    if values is None:
+        raise error_type("record history snapshot is invalid")
+    records = values["records"]
+    if (
+        values["schema_version"] != "traceback.record-history-snapshot.v1"
+        or not _fixed_hex(values["ledger_id"], "ledger_", 32)
+        or not _fixed_hex(values["ledger_epoch_sha256"], "", 64)
+        or not _fixed_hex(values["storage_identity_sha256"], "", 64)
+        or type(values["state_version"]) is not int
+        or not 0 <= values["state_version"] <= MAX_RECORDS + MAX_COMPARISONS * 4
+        or not _fixed_hex(values["state_head_sha256"], "", 64)
+        or not _fixed_hex(values["linkage_store_id"], "store_", 32)
+        or not _fixed_hex(values["linkage_store_epoch_sha256"], "", 64)
+        or not _fixed_hex(values["linkage_storage_identity_sha256"], "", 64)
+        or type(values["linkage_state_version"]) is not int
+        or not 0 <= values["linkage_state_version"] <= MAX_REVISIONS
+        or not _fixed_hex(values["linkage_state_head_sha256"], "", 64)
+        or type(values["limit"]) is not int
+        or not 1 <= values["limit"] <= MAX_HISTORY_PAGE_RECORDS
+        or type(records) is not tuple
+        or len(records) > MAX_HISTORY_PAGE_RECORDS
+        or len(records) > values["limit"]
+    ):
+        raise error_type("record history snapshot is invalid")
+    for cursor in (values["cursor"], values["next_cursor"]):
+        if cursor is not None:
+            _require_exact_history_cursor_shape(cursor, error_type=error_type)
+            cursor_values = _model_values(
+                cursor,
+                (
+                    "schema_version",
+                    "ledger_id",
+                    "ledger_epoch_sha256",
+                    "storage_identity_sha256",
+                    "state_version",
+                    "state_head_sha256",
+                    "linkage_store_id",
+                    "linkage_store_epoch_sha256",
+                    "linkage_storage_identity_sha256",
+                    "linkage_state_version",
+                    "linkage_state_head_sha256",
+                    "after_record_id",
+                    "cursor_mac_sha256",
+                ),
+            )
+            binding_fields = (
+                "ledger_id",
+                "ledger_epoch_sha256",
+                "storage_identity_sha256",
+                "state_version",
+                "state_head_sha256",
+                "linkage_store_id",
+                "linkage_store_epoch_sha256",
+                "linkage_storage_identity_sha256",
+                "linkage_state_version",
+                "linkage_state_head_sha256",
+            )
+            if cursor_values is None or any(
+                cursor_values[field] != values[field] for field in binding_fields
+            ):
+                raise error_type("record history cursor binding is invalid")
+    warning_count = 0
+    for entry in records:
+        if type(entry) is not RecordHistoryEntry:
+            raise error_type("record history entry is invalid")
+        entry_values = _model_values(
+            entry,
+            (
+                "schema_version",
+                "record",
+                "record_sha256",
+                "activation_receipt",
+                "state",
+                "successor_record_id",
+                "affected_comparisons",
+            ),
+        )
+        if entry_values is None:
+            raise error_type("record history entry is invalid")
+        warnings = entry_values["affected_comparisons"]
+        if (
+            entry_values["schema_version"] != "traceback.record-history-entry.v1"
+            or not _fixed_hex(entry_values["record_sha256"], "", 64)
+            or type(entry_values["state"]) is not RecordHistoryState
+            or (
+                entry_values["successor_record_id"] is not None
+                and not _fixed_hex(entry_values["successor_record_id"], "record_", 40)
+            )
+            or type(warnings) is not tuple
+            or len(warnings) > MAX_HISTORY_COMPARISON_WARNINGS
+        ):
+            raise error_type("record history entry is invalid")
+        warning_count += len(warnings)
+        if warning_count > MAX_HISTORY_COMPARISON_WARNINGS:
+            raise error_type("record history comparison warning bound exceeded")
+        _require_exact_record_shape(entry_values["record"], error_type=error_type)
+        _require_exact_activation_receipt_shape(
+            entry_values["activation_receipt"], error_type=error_type
+        )
+        for status in warnings:
+            _require_exact_comparison_status_shape(status, error_type=error_type)
+
+
 def record_sha256(record: SupersedingRecord) -> str:
     _require_exact_record_shape(record, error_type=ValueError)
     return hashlib.sha256(canonical_contract_bytes(record)).hexdigest()
@@ -924,6 +1367,17 @@ def _comparison_from_canonical_bytes(content: bytes) -> DerivedComparison:
     if canonical_contract_bytes(comparison) != content:
         raise RegistryIdentityError("comparison JSON is not canonical")
     return comparison
+
+
+def _history_snapshot_from_canonical_bytes(content: bytes) -> RecordHistorySnapshot:
+    try:
+        snapshot = RecordHistorySnapshot.model_validate_json(content)
+    except (TypeError, ValueError):
+        raise RegistryIdentityError("record history snapshot JSON is invalid") from None
+    _require_exact_history_snapshot_shape(snapshot, error_type=RegistryIdentityError)
+    if canonical_contract_bytes(snapshot) != content:
+        raise RegistryIdentityError("record history snapshot JSON is not canonical")
+    return snapshot
 
 
 _SCHEMA = (
@@ -1263,7 +1717,7 @@ class RecordSupersessionStore:
         try:
             if self._closed or self._root_fd is None:
                 raise RecordSupersessionUnsafe("record ledger is closed")
-            self._validate_storage()
+            _RS_VALIDATE_STORAGE(self)
             before = _open_descriptor_identities()
             try:
                 operation_root_fd = fcntl.fcntl(self._root_fd, fcntl.F_DUPFD_CLOEXEC, 0)
@@ -1295,8 +1749,8 @@ class RecordSupersessionStore:
                 )
             sqlite_fd = matches[0]
             os.fchmod(sqlite_fd, 0o600)
-            sidecar_bindings = self._bind_sidecars(before)
-            self._validate_storage(sidecar_bindings)
+            sidecar_bindings = _RS_BIND_SIDECARS(self, before)
+            _RS_VALIDATE_STORAGE(self, sidecar_bindings)
             yield connection
         finally:
             try:
@@ -1311,7 +1765,7 @@ class RecordSupersessionStore:
                                 "record ledger connection identity changed"
                             )
                         if sidecar_bindings:
-                            self._validate_storage(sidecar_bindings)
+                            _RS_VALIDATE_STORAGE(self, sidecar_bindings)
                     finally:
                         try:
                             connection.close()
@@ -1321,12 +1775,12 @@ class RecordSupersessionStore:
                             if retained_root_fd is not None:
                                 os.close(retained_root_fd)
                 if not self._closed:
-                    self._validate_storage()
+                    _RS_VALIDATE_STORAGE(self)
             finally:
                 _SQLITE_OPEN_LOCK.release()
 
     def _initialize(self) -> None:
-        with self._linkage_fence() as authority, self._connect() as connection:
+        with _RS_LINKAGE_FENCE(self) as authority, _RS_CONNECT(self) as connection:
             linkage = authority.snapshot
             connection.execute("BEGIN EXCLUSIVE")
             try:
@@ -1358,6 +1812,7 @@ class RecordSupersessionStore:
                         "ledger_id": ledger_id,
                         "ledger_epoch_sha256": epoch,
                         "storage_identity_sha256": identity,
+                        "cursor_mac_key": secrets.token_hex(32),
                         "linkage_store_id": linkage.store_id,
                         "linkage_store_epoch_sha256": linkage.store_epoch_sha256,
                         "linkage_storage_identity_sha256": linkage.storage_identity_sha256,
@@ -1372,7 +1827,9 @@ class RecordSupersessionStore:
                         (self._state_head(connection),),
                     )
                 self._validate_state(connection, linkage=linkage, authority=authority)
+                cursor_mac_key = _RS_METADATA(connection)["cursor_mac_key"]
                 connection.commit()
+                self._cursor_mac_key = bytes.fromhex(cursor_mac_key)
             except BaseException:
                 connection.rollback()
                 raise
@@ -1429,6 +1886,24 @@ class RecordSupersessionStore:
     @staticmethod
     def _state_head(connection: sqlite3.Connection) -> str:
         digest = hashlib.sha256()
+        digest.update(b"metadata\0")
+        for key in (
+            "ledger_id",
+            "ledger_epoch_sha256",
+            "storage_identity_sha256",
+            "cursor_mac_key",
+            "linkage_store_id",
+            "linkage_store_epoch_sha256",
+            "linkage_storage_identity_sha256",
+        ):
+            row = connection.execute(
+                "SELECT value FROM metadata WHERE key=?", (key,)
+            ).fetchone()
+            if row is None:
+                raise RecordSupersessionUnsafe("record ledger metadata is invalid")
+            for value in (key, row[0]):
+                raw = str(value).encode("ascii")
+                digest.update(len(raw).to_bytes(8, "big") + raw)
         for table, columns in (
             ("records", "sequence, record_sha256, record_json"),
             (
@@ -1475,12 +1950,13 @@ class RecordSupersessionStore:
         }
         if observed != expected_schema:
             raise RecordSupersessionUnsafe("record ledger schema is invalid")
-        metadata = self._metadata(connection)
+        metadata = _RS_METADATA(connection)
         expected_keys = {
             "schema_version",
             "ledger_id",
             "ledger_epoch_sha256",
             "storage_identity_sha256",
+            "cursor_mac_key",
             "linkage_store_id",
             "linkage_store_epoch_sha256",
             "linkage_storage_identity_sha256",
@@ -1496,6 +1972,7 @@ class RecordSupersessionStore:
             for key in (
                 "ledger_epoch_sha256",
                 "storage_identity_sha256",
+                "cursor_mac_key",
                 "linkage_store_epoch_sha256",
                 "linkage_storage_identity_sha256",
                 "state_head_sha256",
@@ -1509,8 +1986,13 @@ class RecordSupersessionStore:
             raise RecordSupersessionUnsafe(
                 "record ledger metadata is invalid"
             ) from None
+        retained_cursor_mac_key = getattr(self, "_cursor_mac_key", None)
+        if retained_cursor_mac_key is not None and not hmac.compare_digest(
+            metadata["cursor_mac_key"], retained_cursor_mac_key.hex()
+        ):
+            raise RecordSupersessionUnsafe("record ledger cursor authority changed")
         if linkage is None:
-            linkage = self._linkage_snapshot()
+            linkage = _RS_LINKAGE_SNAPSHOT(self)
         if (
             metadata["linkage_store_id"],
             metadata["linkage_store_epoch_sha256"],
@@ -1550,7 +2032,7 @@ class RecordSupersessionStore:
             records.append(record)
         if len(records) > MAX_RECORDS:
             raise RecordSupersessionUnsafe("record ledger exceeds its bound")
-        self._validate_record_history(records)
+        _RS_VALIDATE_RECORD_HISTORY(records)
         if authority is not None:
             historical = {
                 (
@@ -1621,7 +2103,7 @@ class RecordSupersessionStore:
                             "record ledger authority lineage is invalid"
                         )
                     try:
-                        self._verify_supersession_authorization(
+                        _RS_VERIFY_SUPERSESSION_AUTHORIZATION(
                             record,
                             authority,
                             revision,
@@ -1675,7 +2157,7 @@ class RecordSupersessionStore:
                         "comparison authority coordinates are invalid"
                     )
                 try:
-                    self._verify_comparison_authorization(
+                    _RS_VERIFY_COMPARISON_AUTHORIZATION(
                         comparison,
                         authority,
                         by_id,
@@ -1711,9 +2193,9 @@ class RecordSupersessionStore:
         if comparisons > MAX_COMPARISONS or invalidations > MAX_COMPARISONS * 3:
             raise RecordSupersessionUnsafe("comparison history exceeds its bound")
         version = len(records) + comparisons + invalidations
-        if state_version != version or metadata[
-            "state_head_sha256"
-        ] != self._state_head(connection):
+        if state_version != version or metadata["state_head_sha256"] != _RS_STATE_HEAD(
+            connection
+        ):
             raise RecordSupersessionUnsafe("record ledger state commitment is invalid")
 
     @staticmethod
@@ -1752,7 +2234,7 @@ class RecordSupersessionStore:
             int(connection.execute(f"SELECT COUNT(*) FROM {table}").fetchone()[0])
             for table in ("records", "comparisons", "invalidations")
         )
-        head = RecordSupersessionStore._state_head(connection)
+        head = _RS_STATE_HEAD(connection)
         connection.execute(
             "UPDATE metadata SET value=? WHERE key='state_version'", (str(version),)
         )
@@ -1800,7 +2282,6 @@ class RecordSupersessionStore:
         authority: _LinkageAuthorityView,
         *,
         source: SupersedingRecord | None,
-        verify_new_action: bool = True,
     ) -> None:
         snapshot = authority.snapshot
         live = self._active_linkages(snapshot)
@@ -1838,8 +2319,7 @@ class RecordSupersessionStore:
             raise RecordSupersessionConflict(
                 "reanalysis source is stale or changed biological lineage"
             )
-        if verify_new_action:
-            self._verify_supersession_authorization(record, authority, revision)
+        self._verify_supersession_authorization(record, authority, revision)
 
     @staticmethod
     def _verify_supersession_authorization(
@@ -1922,7 +2402,7 @@ class RecordSupersessionStore:
             raise RecordSupersessionConflict("record contract is invalid") from None
         raw = canonical_contract_bytes(parsed)
         digest = hashlib.sha256(raw).hexdigest()
-        with self._linkage_fence() as authority, self._connect() as connection:
+        with _RS_LINKAGE_FENCE(self) as authority, _RS_CONNECT(self) as connection:
             linkage = authority.snapshot
             connection.execute("BEGIN IMMEDIATE")
             try:
@@ -1936,13 +2416,14 @@ class RecordSupersessionStore:
                         raise RecordSupersessionConflict(
                             "record identity conflicts with history"
                         )
-                    source = self._source(connection, parsed.supersedes_record_id)
-                    self._validate_record_against_linkage(
+                    if not _RS_RECORD_MATCHES_LIVE_LINKAGE(
                         parsed,
-                        authority,
-                        source=source,
-                        verify_new_action=False,
-                    )
+                        _RS_ACTIVE_LINKAGES(linkage),
+                        require_current_receipt=True,
+                    ):
+                        raise RecordSupersessionConflict(
+                            "record does not bind exact live linkage"
+                        )
                     receipt = self._record_receipt(connection, parsed, digest)
                     connection.commit()
                     return receipt
@@ -2215,36 +2696,26 @@ class RecordSupersessionStore:
             for item in records
             if item.supersedes_record_id is not None
         }
-        by_id = {item.record_id: item for item in records}
         live = self._active_linkages(linkage)
-        active: list[SupersedingRecord] = []
-        for record in records:
-            if record.record_id in superseded:
-                continue
-            current: SupersedingRecord | None = record
-            chain_is_live = True
-            while current is not None:
-                if not self._record_matches_live_linkage(
-                    current, live, require_current_receipt=True
-                ):
-                    chain_is_live = False
-                    break
-                current = (
-                    by_id[current.supersedes_record_id]
-                    if current.supersedes_record_id is not None
-                    else None
-                )
-            if chain_is_live:
-                active.append(record)
+        active = [
+            record
+            for record in records
+            if record.record_id not in superseded
+            and self._record_matches_live_linkage(
+                record, live, require_current_receipt=True
+            )
+        ]
         return tuple(sorted(active, key=lambda item: item.record_id))
 
     def _refresh_invalidations(
         self, connection: sqlite3.Connection, linkage: ActiveLinkageSnapshot
     ) -> bool:
         changed = False
-        active_ids = {
-            item.record_id for item in self._active_records(connection, linkage)
+        records = {
+            record.record_id: record
+            for record in _RS_HISTORY_RECORDS(connection)
         }
+        live = _RS_ACTIVE_LINKAGES(linkage)
         next_sequence = int(
             connection.execute(
                 "SELECT COALESCE(MAX(sequence), 0) + 1 FROM invalidations"
@@ -2257,7 +2728,12 @@ class RecordSupersessionStore:
             reasons: set[InvalidationReason] = set()
             if row[1] != linkage.state_head_sha256:
                 reasons.add(InvalidationReason.LINKAGE_AUTHORITY_ADVANCED)
-            if any(item not in active_ids for item in comparison.member_record_ids):
+            if any(
+                not _RS_RECORD_MATCHES_LIVE_LINKAGE(
+                    records[item], live, require_current_receipt=True
+                )
+                for item in comparison.member_record_ids
+            ):
                 reasons.add(InvalidationReason.LINKAGE_CHANGED_OR_TOMBSTONED)
             for reason in sorted(reasons, key=str):
                 cursor = connection.execute(
@@ -2273,6 +2749,314 @@ class RecordSupersessionStore:
                     next_sequence += 1
                     changed = True
         return changed
+
+    @staticmethod
+    def _history_records(
+        connection: sqlite3.Connection,
+    ) -> tuple[SupersedingRecord, ...]:
+        """Load the validated global ledger in canonical record-ID order."""
+
+        return tuple(
+            sorted(
+                (
+                    _record_from_canonical_bytes(bytes(row[0]))
+                    for row in connection.execute(
+                        "SELECT record_json FROM records ORDER BY sequence"
+                    )
+                ),
+                key=lambda item: item.record_id,
+            )
+        )
+
+    @staticmethod
+    def _comparison_warnings_by_record(
+        connection: sqlite3.Connection,
+        linkage: ActiveLinkageSnapshot,
+        record_ids: set[str],
+    ) -> dict[str, tuple[ComparisonStatus, ...]]:
+        result: dict[str, list[ComparisonStatus]] = {
+            record_id: [] for record_id in record_ids
+        }
+        warning_count = 0
+        current: DerivedComparison | None = None
+        reasons: list[InvalidationReason] = []
+
+        def append_current() -> None:
+            nonlocal warning_count
+            if current is None or not reasons:
+                return
+            selected_members = record_ids.intersection(current.member_record_ids)
+            if not selected_members:
+                return
+            status = ComparisonStatus(
+                comparison_id=current.comparison_id,
+                state=ComparisonState.STALE,
+                reasons=tuple(reasons),
+                member_record_ids=current.member_record_ids,
+                derived_artifact_sha256=current.derived_artifact_sha256,
+                linkage_state_version=linkage.state_version,
+                linkage_state_head_sha256=linkage.state_head_sha256,
+            )
+            for record_id in sorted(selected_members):
+                warning_count += 1
+                if warning_count > MAX_HISTORY_COMPARISON_WARNINGS:
+                    raise RecordSupersessionConflict(
+                        "record history comparison warnings exceed their bound"
+                    )
+                result[record_id].append(status)
+
+        for row in connection.execute(
+            """SELECT comparisons.comparison_json, invalidations.reason
+                 FROM comparisons
+                 JOIN invalidations USING (comparison_id)
+             ORDER BY comparisons.comparison_id, invalidations.reason"""
+        ):
+            comparison = _comparison_from_canonical_bytes(bytes(row[0]))
+            if current is None or comparison.comparison_id != current.comparison_id:
+                append_current()
+                current = comparison
+                reasons = []
+            reasons.append(InvalidationReason(row[1]))
+        append_current()
+        return {
+            record_id: tuple(sorted(statuses, key=lambda item: item.comparison_id))
+            for record_id, statuses in result.items()
+        }
+
+    def record_history_snapshot(
+        self, *, cursor: RecordHistoryCursor | None = None, limit: int = 100
+    ) -> RecordHistorySnapshot:
+        """Return one canonical bounded page under ledger and linkage fences."""
+
+        if type(self) is not RecordSupersessionStore:
+            raise RecordSupersessionUnsafe("record history store is invalid")
+        if type(limit) is not int or not 1 <= limit <= MAX_HISTORY_PAGE_RECORDS:
+            raise RecordSupersessionConflict("record history page bound is invalid")
+        if cursor is not None:
+            _require_exact_history_cursor_shape(
+                cursor, error_type=RecordSupersessionConflict
+            )
+            try:
+                parsed_cursor = contract_from_canonical_bytes(
+                    RecordHistoryCursor, canonical_contract_bytes(cursor)
+                )
+            except (RegistryIdentityError, TypeError, ValueError):
+                raise RecordSupersessionConflict(
+                    "record history cursor is invalid"
+                ) from None
+        else:
+            parsed_cursor = None
+        with _RS_LINKAGE_FENCE(self) as authority, _RS_CONNECT(self) as connection:
+            linkage = authority.snapshot
+            connection.execute("BEGIN IMMEDIATE")
+            try:
+                _RS_VALIDATE_STATE(
+                    self, connection, linkage=linkage, authority=authority
+                )
+                metadata = _RS_METADATA(connection)
+                if parsed_cursor is not None and not hmac.compare_digest(
+                    parsed_cursor.cursor_mac_sha256,
+                    _record_history_cursor_mac(
+                        parsed_cursor, self._cursor_mac_key
+                    ),
+                ):
+                    raise RecordSupersessionConflict(
+                        "record history cursor is stale or invalid"
+                    )
+                if parsed_cursor is not None and (
+                    parsed_cursor.ledger_id != metadata["ledger_id"]
+                    or parsed_cursor.ledger_epoch_sha256
+                    != metadata["ledger_epoch_sha256"]
+                    or parsed_cursor.storage_identity_sha256
+                    != metadata["storage_identity_sha256"]
+                    or parsed_cursor.state_version != int(metadata["state_version"])
+                    or parsed_cursor.state_head_sha256
+                    != metadata["state_head_sha256"]
+                    or parsed_cursor.linkage_store_id != linkage.store_id
+                    or parsed_cursor.linkage_store_epoch_sha256
+                    != linkage.store_epoch_sha256
+                    or parsed_cursor.linkage_storage_identity_sha256
+                    != linkage.storage_identity_sha256
+                    or parsed_cursor.linkage_state_version != linkage.state_version
+                    or parsed_cursor.linkage_state_head_sha256
+                    != linkage.state_head_sha256
+                ):
+                    raise RecordSupersessionConflict(
+                        "record history cursor is stale or invalid"
+                    )
+                after_record_id = (
+                    parsed_cursor.after_record_id
+                    if parsed_cursor is not None
+                    else None
+                )
+                records = _RS_HISTORY_RECORDS(connection)
+                if after_record_id is not None and all(
+                    record.record_id != after_record_id for record in records
+                ):
+                    raise RecordSupersessionConflict(
+                        "record history cursor is unavailable"
+                    )
+                ordered = tuple(
+                    record
+                    for record in records
+                    if after_record_id is None or record.record_id > after_record_id
+                )
+                selected = ordered[:limit]
+                if _RS_REFRESH_INVALIDATIONS(self, connection, linkage):
+                    _RS_ADVANCE(connection)
+                _RS_VALIDATE_STATE(
+                    self, connection, linkage=linkage, authority=authority
+                )
+                metadata = _RS_METADATA(connection)
+                if parsed_cursor is not None and (
+                    parsed_cursor.state_version != int(metadata["state_version"])
+                    or parsed_cursor.state_head_sha256
+                    != metadata["state_head_sha256"]
+                ):
+                    raise RecordSupersessionConflict(
+                        "record history cursor is stale or invalid"
+                    )
+                activation_receipts = {
+                    (
+                        item.revision.provider_namespace,
+                        item.revision.linkage_id,
+                        item.revision.revision,
+                    ): receipt
+                    for item, receipt in zip(
+                        authority.history,
+                        authority.activation_receipts,
+                        strict=True,
+                    )
+                }
+                warnings = _RS_COMPARISON_WARNINGS_BY_RECORD(
+                    connection,
+                    linkage,
+                    {item.record_id for item in selected},
+                )
+                live = _RS_ACTIVE_LINKAGES(linkage)
+                successor_by_id = {
+                    item.supersedes_record_id: item.record_id
+                    for item in records
+                    if item.supersedes_record_id is not None
+                }
+                entries: list[RecordHistoryEntry] = []
+                for record in selected:
+                    key = (
+                        record.provider_namespace,
+                        record.linkage_id,
+                        record.linkage_revision,
+                    )
+                    receipt = activation_receipts.get(key)
+                    if receipt is None:
+                        raise RecordSupersessionUnsafe(
+                            "record history activation receipt is unavailable"
+                        )
+                    successor_record_id = successor_by_id.get(record.record_id)
+                    if successor_record_id is not None:
+                        state = RecordHistoryState.SUPERSEDED
+                    elif _RS_RECORD_MATCHES_LIVE_LINKAGE(
+                        record, live, require_current_receipt=True
+                    ):
+                        state = RecordHistoryState.ACTIVE
+                    else:
+                        state = RecordHistoryState.AUTHORITY_INVALID
+                    entries.append(
+                        RecordHistoryEntry(
+                            record=record,
+                            record_sha256=record_sha256(record),
+                            activation_receipt=receipt,
+                            state=state,
+                            successor_record_id=successor_record_id,
+                            affected_comparisons=warnings[record.record_id],
+                        )
+                    )
+                has_more = len(ordered) > len(selected)
+                next_cursor = None
+                if has_more and entries:
+                    cursor_values = {
+                        "ledger_id": metadata["ledger_id"],
+                        "ledger_epoch_sha256": metadata["ledger_epoch_sha256"],
+                        "storage_identity_sha256": metadata[
+                            "storage_identity_sha256"
+                        ],
+                        "state_version": int(metadata["state_version"]),
+                        "state_head_sha256": metadata["state_head_sha256"],
+                        "linkage_store_id": linkage.store_id,
+                        "linkage_store_epoch_sha256": linkage.store_epoch_sha256,
+                        "linkage_storage_identity_sha256": (
+                            linkage.storage_identity_sha256
+                        ),
+                        "linkage_state_version": linkage.state_version,
+                        "linkage_state_head_sha256": linkage.state_head_sha256,
+                        "after_record_id": entries[-1].record.record_id,
+                    }
+                    provisional_cursor = RecordHistoryCursor.model_construct(
+                        **cursor_values, cursor_mac_sha256="0" * 64
+                    )
+                    next_cursor = RecordHistoryCursor(
+                        **cursor_values,
+                        cursor_mac_sha256=_record_history_cursor_mac(
+                            provisional_cursor, self._cursor_mac_key
+                        ),
+                    )
+                snapshot = RecordHistorySnapshot(
+                    ledger_id=metadata["ledger_id"],
+                    ledger_epoch_sha256=metadata["ledger_epoch_sha256"],
+                    storage_identity_sha256=metadata["storage_identity_sha256"],
+                    state_version=int(metadata["state_version"]),
+                    state_head_sha256=metadata["state_head_sha256"],
+                    linkage_store_id=linkage.store_id,
+                    linkage_store_epoch_sha256=linkage.store_epoch_sha256,
+                    linkage_storage_identity_sha256=linkage.storage_identity_sha256,
+                    linkage_state_version=linkage.state_version,
+                    linkage_state_head_sha256=linkage.state_head_sha256,
+                    cursor=parsed_cursor,
+                    limit=limit,
+                    records=tuple(entries),
+                    next_cursor=next_cursor,
+                )
+                # Capture a detached canonical value before either authority fence
+                # is released; no internal database or authority object is returned.
+                captured = _history_snapshot_from_canonical_bytes(
+                    canonical_contract_bytes(snapshot)
+                )
+                _RS_VALIDATE_STATE(
+                    self, connection, linkage=linkage, authority=authority
+                )
+                connection.commit()
+                return captured
+            except BaseException:
+                connection.rollback()
+                raise
+
+    def replay_history_snapshot(
+        self, snapshot: RecordHistorySnapshot
+    ) -> RecordHistorySnapshot:
+        """Re-read the selected chain and reject stale or caller-altered history."""
+
+        if type(self) is not RecordSupersessionStore:
+            raise RecordSupersessionUnsafe("record history store is invalid")
+        _require_exact_history_snapshot_shape(
+            snapshot, error_type=RecordSupersessionConflict
+        )
+        try:
+            parsed = _history_snapshot_from_canonical_bytes(
+                canonical_contract_bytes(snapshot)
+            )
+        except (RegistryIdentityError, TypeError, ValueError):
+            raise RecordSupersessionConflict(
+                "record history snapshot is invalid"
+            ) from None
+        current = _RS_RECORD_HISTORY_SNAPSHOT(
+            self,
+            cursor=parsed.cursor,
+            limit=parsed.limit,
+        )
+        if parsed != current:
+            raise RecordSupersessionConflict(
+                "record history snapshot is stale or invalid"
+            )
+        return parsed
 
     def active_snapshot(self) -> ActiveRecordSnapshot:
         with self._linkage_fence() as authority, self._connect() as connection:
@@ -2409,6 +3193,34 @@ class RecordSupersessionStore:
         _require_exact_record_shape(record, error_type=RecordSupersessionConflict)
 
 
+# Captured unbound operations keep protected reads on the reviewed
+# implementation even if a caller shadows instance or class attributes.
+_RS_VALIDATE_STORAGE = RecordSupersessionStore._validate_storage
+_RS_BIND_SIDECARS = RecordSupersessionStore._bind_sidecars
+_RS_CONNECT = RecordSupersessionStore._connect
+_RS_LINKAGE_FENCE = RecordSupersessionStore._linkage_fence
+_RS_LINKAGE_SNAPSHOT = RecordSupersessionStore._linkage_snapshot
+_RS_METADATA = RecordSupersessionStore._metadata
+_RS_STATE_HEAD = RecordSupersessionStore._state_head
+_RS_VALIDATE_STATE = RecordSupersessionStore._validate_state
+_RS_VALIDATE_RECORD_HISTORY = RecordSupersessionStore._validate_record_history
+_RS_VERIFY_SUPERSESSION_AUTHORIZATION = (
+    RecordSupersessionStore._verify_supersession_authorization
+)
+_RS_VERIFY_COMPARISON_AUTHORIZATION = (
+    RecordSupersessionStore._verify_comparison_authorization
+)
+_RS_HISTORY_RECORDS = RecordSupersessionStore._history_records
+_RS_REFRESH_INVALIDATIONS = RecordSupersessionStore._refresh_invalidations
+_RS_ADVANCE = RecordSupersessionStore._advance
+_RS_COMPARISON_WARNINGS_BY_RECORD = (
+    RecordSupersessionStore._comparison_warnings_by_record
+)
+_RS_ACTIVE_LINKAGES = RecordSupersessionStore._active_linkages
+_RS_RECORD_MATCHES_LIVE_LINKAGE = RecordSupersessionStore._record_matches_live_linkage
+_RS_RECORD_HISTORY_SNAPSHOT = RecordSupersessionStore.record_history_snapshot
+
+
 __all__ = [
     "ActiveRecordSnapshot",
     "ComparisonCommitReceipt",
@@ -2417,6 +3229,10 @@ __all__ = [
     "DerivedComparison",
     "InvalidationReason",
     "RecordCommitReceipt",
+    "RecordHistoryEntry",
+    "RecordHistoryCursor",
+    "RecordHistorySnapshot",
+    "RecordHistoryState",
     "RecordLineageRole",
     "RecordSupersessionConflict",
     "RecordSupersessionError",

@@ -27,7 +27,31 @@ must already exist, and self-links, missing sources, branches, and cycles fail
 closed. An exact retry returns the same content-addressed receipt without
 advancing state. Active selection returns only chain leaves whose exact linkage
 revision and immutable activation receipt remain active in the live authority
-store. Every source in the chain must remain active.
+store. Superseded ancestors remain immutable history; a later correction or
+tombstone of an ancestor does not hide a separately authorized current leaf.
+
+`record_history_snapshot(*, cursor=None, limit=100)` is the protected
+read contract for longitudinal consumers. It returns the global immutable
+record ledger in canonical record-ID order with deterministic no-gap,
+no-duplicate pagination. The opaque typed continuation cursor authenticates its
+record position with a canonical HMAC-SHA-256 under a private 256-bit ledger key
+and binds the exact ledger and linkage identities, versions, and heads;
+continuation fails closed after any append or authority change instead of
+silently omitting newly sorted history. The limit is closed to 1 through 1,000.
+Every row includes the immutable record, its content digest, original activation
+receipt, successor edge, and durable stale-comparison warnings. Rows are explicitly
+`superseded`, `active`, or `authority_invalid`. A record with a successor is
+always historical. A leaf is active exactly when its own current linkage and
+activation receipt match live authority; a stale ancestor does not invalidate
+a separately authorized current replacement.
+
+The snapshot binds the ledger ID, epoch, storage identity, version and head and
+the current linkage-store ID, epoch, storage identity, version and head, plus
+the input cursor, page limit, and next cursor. The ledger transaction and
+linkage authority fence remain held through full-ledger chain validation,
+bounded page construction, detached canonical capture, and final state
+validation. `replay_history_snapshot` rejects prior heads and caller-altered
+values. Pages with more than 1,000 affected-comparison warnings fail closed.
 
 Provider-store schema v3 persists the original state coordinates for every
 activation receipt, so unrelated authority advances do not rewrite its proof.
@@ -66,6 +90,12 @@ Dependent commits hold a provider-store write fence through the ledger commit.
 The same process-integrity and offline-storage limits as the provider linkage
 store apply. Provider backup, rollback anchoring, encryption, OS access control,
 and real provider qualification remain external requirements.
+
+The cursor MAC key is generated once inside the private ledger database, bound
+into the ledger state head, retained across reopen, and included in a complete
+database backup or restore. Restoring an older complete database rejects cursors
+issued by later ledger heads. Detecting rollback to an internally consistent
+older database still requires the external rollback anchor described above.
 
 Provider stores migrate v1/v2 state to v3 in place. D04 records and comparisons
 use v2 signed contracts; pre-release v1 D04 rows are rejected rather than

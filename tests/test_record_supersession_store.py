@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import base64
+import hashlib
 import os
 import sqlite3
 import sys
@@ -33,6 +34,8 @@ from evidence_inspector.record_supersession_store import (
     ComparisonState,
     DerivedComparison,
     InvalidationReason,
+    RecordHistorySnapshot,
+    RecordHistoryState,
     RecordLineageRole,
     RecordSupersessionConflict,
     RecordSupersessionStore,
@@ -238,6 +241,27 @@ def _authorized_reanalysis(linkage, first_revision, first):
     )
 
 
+def _public_cursor_checksum(cursor) -> str:
+    content = b"\0".join(
+        (
+            cursor.ledger_id.encode("ascii"),
+            cursor.ledger_epoch_sha256.encode("ascii"),
+            cursor.storage_identity_sha256.encode("ascii"),
+            str(cursor.state_version).encode("ascii"),
+            cursor.state_head_sha256.encode("ascii"),
+            cursor.linkage_store_id.encode("ascii"),
+            cursor.linkage_store_epoch_sha256.encode("ascii"),
+            cursor.linkage_storage_identity_sha256.encode("ascii"),
+            str(cursor.linkage_state_version).encode("ascii"),
+            cursor.linkage_state_head_sha256.encode("ascii"),
+            cursor.after_record_id.encode("ascii"),
+        )
+    )
+    return hashlib.sha256(
+        b"traceback-record-history-cursor-v1\0" + content
+    ).hexdigest()
+
+
 def _resign(approval, *, issued_at, expires_at):
     payload = approval.payload.model_copy(
         update={"issued_at": issued_at, "expires_at": expires_at}
@@ -374,8 +398,387 @@ def test_reanalysis_supersedes_without_becoming_biological_timepoint(durable) ->
     assert reanalysis.biological_timepoint_contribution is False
     status = ledger.comparison_status(comparison.comparison_id)
     assert status.state == ComparisonState.STALE
-    assert InvalidationReason.RECORD_SUPERSEDED in status.reasons
-    assert InvalidationReason.LINKAGE_AUTHORITY_ADVANCED in status.reasons
+    assert status.reasons == (
+        InvalidationReason.LINKAGE_AUTHORITY_ADVANCED,
+        InvalidationReason.RECORD_SUPERSEDED,
+    )
+
+
+def test_history_snapshot_proves_superseded_source_and_active_leaf(durable) -> None:
+    linkage, ledger, first_revision, first, second = durable
+    ledger.commit_record(first)
+    ledger.commit_record(second)
+    comparison = _comparison(first, second, ledger.active_snapshot())
+    ledger.register_comparison(comparison)
+    _, reanalysis = _authorized_reanalysis(linkage, first_revision, first)
+    ledger.commit_record(reanalysis)
+
+    history = ledger.record_history_snapshot()
+    by_id = {item.record.record_id: item for item in history.records}
+    assert tuple(by_id) == tuple(
+        sorted((first.record_id, second.record_id, reanalysis.record_id))
+    )
+    assert by_id[first.record_id].state is RecordHistoryState.SUPERSEDED
+    assert by_id[reanalysis.record_id].state is RecordHistoryState.ACTIVE
+    assert by_id[first.record_id].successor_record_id == reanalysis.record_id
+    assert by_id[reanalysis.record_id].successor_record_id is None
+    assert by_id[first.record_id].activation_receipt.linkage_id == first.linkage_id
+    assert (
+        committed_linkage_receipt_sha256(by_id[first.record_id].activation_receipt)
+        == first.activation_receipt_sha256
+    )
+    warning = by_id[first.record_id].affected_comparisons[0]
+    assert warning.comparison_id == comparison.comparison_id
+    assert warning.state is ComparisonState.STALE
+    assert InvalidationReason.RECORD_SUPERSEDED in warning.reasons
+    assert ledger.replay_history_snapshot(history) == history
+
+
+def test_history_snapshot_marks_stale_leaf_authority_invalid(durable) -> None:
+    linkage, ledger, _, first, _ = durable
+    ledger.commit_record(first)
+    _tombstone_first_linkage(linkage, first)
+    history = ledger.record_history_snapshot()
+    assert len(history.records) == 1
+    assert history.records[0].state is RecordHistoryState.AUTHORITY_INVALID
+    assert first not in ledger.active_snapshot().records
+
+
+def test_history_snapshot_pages_globally_without_gaps_or_duplicates(durable) -> None:
+    linkage, ledger, first_revision, first, second = durable
+    ledger.commit_record(first)
+    ledger.commit_record(second)
+    _, reanalysis = _authorized_reanalysis(linkage, first_revision, first)
+    ledger.commit_record(reanalysis)
+
+    observed: list[str] = []
+    cursor = None
+    while True:
+        page = ledger.record_history_snapshot(cursor=cursor, limit=1)
+        observed.extend(item.record.record_id for item in page.records)
+        if page.next_cursor is None:
+            break
+        assert page.next_cursor.after_record_id == page.records[-1].record.record_id
+        cursor = page.next_cursor
+    assert observed == sorted((first.record_id, second.record_id, reanalysis.record_id))
+    assert len(observed) == len(set(observed))
+
+
+def test_history_snapshot_continuation_rejects_append_before_position(durable) -> None:
+    linkage, ledger, first_revision, first, second = durable
+    ledger.commit_record(first)
+    ledger.commit_record(second)
+    revision, _ = _authorized_reanalysis(linkage, first_revision, first)
+    page = ledger.record_history_snapshot(limit=1)
+    assert page.next_cursor is not None
+
+    appended = min(
+        (
+            _superseding_record(
+                linkage.active_snapshot(),
+                revision.linkage_id,
+                digit,
+                role=RecordLineageRole.REANALYSIS,
+                source=first,
+            )
+            for digit in "0123456789abcdef"
+        ),
+        key=lambda item: item.record_id,
+    )
+    assert appended.record_id < page.next_cursor.after_record_id
+    ledger.commit_record(appended)
+
+    with pytest.raises(RecordSupersessionConflict, match="stale"):
+        ledger.record_history_snapshot(cursor=page.next_cursor, limit=1)
+
+
+def test_stale_ancestor_does_not_hide_current_replacement_leaf(durable) -> None:
+    linkage, ledger, first_revision, first, _ = durable
+    ledger.commit_record(first)
+    _, reanalysis = _authorized_reanalysis(linkage, first_revision, first)
+    ledger.commit_record(reanalysis)
+    _correct_first_linkage(linkage, first)
+
+    history = ledger.record_history_snapshot()
+    by_id = {item.record.record_id: item for item in history.records}
+    assert by_id[first.record_id].state is RecordHistoryState.SUPERSEDED
+    assert by_id[reanalysis.record_id].state is RecordHistoryState.ACTIVE
+    assert ledger.active_snapshot().records == (reanalysis,)
+
+
+def test_history_snapshot_rejects_unknown_oversized_and_hostile_inputs(durable) -> None:
+    _, ledger, _, first, second = durable
+    ledger.commit_record(first)
+    ledger.commit_record(second)
+    with pytest.raises(RecordSupersessionConflict, match="invalid"):
+        ledger.record_history_snapshot(cursor="x" * 10_000_000)  # type: ignore[arg-type]
+    page = ledger.record_history_snapshot(limit=1)
+    assert page.next_cursor is not None
+    other_existing_id = next(
+        record_id
+        for record_id in (first.record_id, second.record_id)
+        if record_id != page.next_cursor.after_record_id
+    )
+    with pytest.raises(RecordSupersessionConflict, match="invalid"):
+        ledger.record_history_snapshot(
+            cursor=page.next_cursor.model_copy(
+                update={"after_record_id": other_existing_id}
+            )
+        )
+    with pytest.raises(RecordSupersessionConflict, match="invalid"):
+        ledger.record_history_snapshot(
+            cursor=page.next_cursor.model_copy(
+                update={"after_record_id": "record_" + "f" * 40}
+            )
+        )
+    for limit in (0, 1_001, True):
+        with pytest.raises(RecordSupersessionConflict, match="bound"):
+            ledger.record_history_snapshot(limit=limit)
+
+    history = ledger.record_history_snapshot(limit=1_000)
+    assert history.limit == 1_000
+    hostile = history.model_copy(deep=True)
+    object.__setattr__(hostile.records[0], "__pydantic_extra__", {"model_dump": 1})
+    with pytest.raises(RecordSupersessionConflict, match="entry"):
+        ledger.replay_history_snapshot(hostile)
+
+    hostile = history.model_copy(deep=True)
+    object.__setattr__(hostile.records[0].record, "__pydantic_private__", {"x": 1})
+    with pytest.raises(RecordSupersessionConflict, match="record contract"):
+        ledger.replay_history_snapshot(hostile)
+
+    hostile = history.model_copy(deep=True)
+    object.__setattr__(hostile, "__pydantic_private__", {"x": 1})
+    with pytest.raises(RecordSupersessionConflict, match="snapshot"):
+        ledger.replay_history_snapshot(hostile)
+
+    hostile = history.model_copy(update={"cursor": "invalid"})
+    with pytest.raises(RecordSupersessionConflict, match="cursor|snapshot"):
+        ledger.replay_history_snapshot(hostile)
+
+    with pytest.raises(ValidationError, match="at most 1000"):
+        RecordHistorySnapshot.model_validate(
+            {
+                **history.model_dump(mode="python"),
+                "records": [history.records[0].model_dump(mode="python")] * 1_001,
+            }
+        )
+
+
+def test_history_cursor_rejects_existing_id_with_recomputed_public_hash_without_mutation(
+    durable,
+) -> None:
+    _, ledger, _, first, second = durable
+    ledger.commit_record(first)
+    ledger.commit_record(second)
+    page = ledger.record_history_snapshot(limit=1)
+    assert page.next_cursor is not None
+    other_existing_id = next(
+        record_id
+        for record_id in (first.record_id, second.record_id)
+        if record_id != page.next_cursor.after_record_id
+    )
+    forged = page.next_cursor.model_copy(
+        update={"after_record_id": other_existing_id}
+    )
+    forged = forged.model_copy(
+        update={"cursor_mac_sha256": _public_cursor_checksum(forged)}
+    )
+    with ledger._connect() as connection:
+        before = (
+            tuple(connection.execute("SELECT key, value FROM metadata ORDER BY key")),
+            tuple(connection.execute("SELECT * FROM invalidations ORDER BY sequence")),
+        )
+
+    with pytest.raises(RecordSupersessionConflict, match="stale|invalid"):
+        ledger.record_history_snapshot(cursor=forged, limit=1)
+
+    with ledger._connect() as connection:
+        after = (
+            tuple(connection.execute("SELECT key, value FROM metadata ORDER BY key")),
+            tuple(connection.execute("SELECT * FROM invalidations ORDER BY sequence")),
+        )
+    assert after == before
+
+
+def test_history_cursor_authority_survives_reopen_and_complete_backup(
+    durable, tmp_path: Path
+) -> None:
+    linkage, ledger, _, first, second = durable
+    ledger.commit_record(first)
+    ledger.commit_record(second)
+    page = ledger.record_history_snapshot(limit=1)
+    assert page.next_cursor is not None
+
+    reopened = RecordSupersessionStore(ledger.root, linkage_store=linkage)
+    assert reopened.record_history_snapshot(
+        cursor=page.next_cursor, limit=1
+    ).records
+    reopened.close()
+
+    backup_root = tmp_path / "record-backup"
+    backup_root.mkdir(mode=0o700)
+    backup_database = backup_root / "record-supersession.sqlite3"
+    with (
+        ledger._connect() as source,
+        sqlite3.connect(backup_database) as destination,
+    ):
+        source.backup(destination)
+    backup_database.chmod(0o600)
+    restored = RecordSupersessionStore(backup_root, linkage_store=linkage)
+    try:
+        assert restored.record_history_snapshot(
+            cursor=page.next_cursor, limit=1
+        ).records
+    finally:
+        restored.close()
+
+
+def test_history_cursor_mac_key_tamper_fails_closed(durable) -> None:
+    _, ledger, _, first, second = durable
+    ledger.commit_record(first)
+    ledger.commit_record(second)
+    page = ledger.record_history_snapshot(limit=1)
+    assert page.next_cursor is not None
+    with ledger._connect() as connection:
+        original_key = connection.execute(
+            "SELECT value FROM metadata WHERE key='cursor_mac_key'"
+        ).fetchone()[0]
+        connection.execute(
+            "UPDATE metadata SET value=? WHERE key='cursor_mac_key'",
+            ("f" * 64 if original_key != "f" * 64 else "e" * 64,),
+        )
+    try:
+        with pytest.raises(RecordSupersessionUnsafe, match="cursor authority|commitment"):
+            ledger.record_history_snapshot(cursor=page.next_cursor, limit=1)
+    finally:
+        with ledger._connect() as connection:
+            connection.execute(
+                "UPDATE metadata SET value=? WHERE key='cursor_mac_key'",
+                (original_key,),
+            )
+
+
+def test_history_cursor_from_future_head_fails_after_complete_rollback(
+    durable, tmp_path: Path
+) -> None:
+    linkage, ledger, first_revision, first, second = durable
+    ledger.commit_record(first)
+    ledger.commit_record(second)
+    _, reanalysis = _authorized_reanalysis(linkage, first_revision, first)
+    rollback_database = tmp_path / "record-rollback.sqlite3"
+    with (
+        ledger._connect() as source,
+        sqlite3.connect(rollback_database) as destination,
+    ):
+        source.backup(destination)
+    rollback_database.chmod(0o600)
+
+    ledger.commit_record(reanalysis)
+    future_page = ledger.record_history_snapshot(limit=1)
+    assert future_page.next_cursor is not None
+    ledger.close()
+    for suffix in ("-wal", "-shm"):
+        sidecar = Path(str(ledger.database) + suffix)
+        if sidecar.exists():
+            sidecar.unlink()
+    os.replace(rollback_database, ledger.database)
+    rolled_back = RecordSupersessionStore(ledger.root, linkage_store=linkage)
+    try:
+        with pytest.raises(RecordSupersessionConflict, match="stale|invalid"):
+            rolled_back.record_history_snapshot(
+                cursor=future_page.next_cursor, limit=1
+            )
+    finally:
+        rolled_back.close()
+
+
+def test_history_snapshot_uses_captured_operations_and_rejects_subclasses(
+    durable, monkeypatch
+) -> None:
+    _, ledger, _, first, _ = durable
+    ledger.commit_record(first)
+    expected = ledger.record_history_snapshot()
+
+    ledger._connect = lambda: (_ for _ in ()).throw(AssertionError("shadow ran"))
+    monkeypatch.setattr(
+        RecordSupersessionStore,
+        "_history_records",
+        staticmethod(
+            lambda connection: (_ for _ in ()).throw(AssertionError("shadow ran"))
+        ),
+    )
+    assert ledger.replay_history_snapshot(expected) == expected
+
+    class HostileStore(RecordSupersessionStore):
+        pass
+
+    hostile = object.__new__(HostileStore)
+    with pytest.raises(RecordSupersessionUnsafe, match="store is invalid"):
+        RecordSupersessionStore.record_history_snapshot(hostile)
+
+
+def test_history_snapshot_replay_rejects_ledger_advance(durable) -> None:
+    _, ledger, _, first, second = durable
+    ledger.commit_record(first)
+    history = ledger.record_history_snapshot()
+    ledger.commit_record(second)
+    with pytest.raises(RecordSupersessionConflict, match="stale"):
+        ledger.replay_history_snapshot(history)
+
+
+def test_history_snapshot_final_revalidation_rejects_in_transaction_race(
+    durable, monkeypatch
+) -> None:
+    _, ledger, _, first, _ = durable
+    ledger.commit_record(first)
+    original = RecordSupersessionStore._comparison_warnings_by_record
+
+    def mutate_after_capture(connection, linkage, record_ids):
+        result = original(connection, linkage, record_ids)
+        connection.execute(
+            "UPDATE metadata SET value=? WHERE key='state_head_sha256'",
+            ("f" * 64,),
+        )
+        return result
+
+    monkeypatch.setattr(
+        supersession_module,
+        "_RS_COMPARISON_WARNINGS_BY_RECORD",
+        mutate_after_capture,
+    )
+    with pytest.raises(RecordSupersessionUnsafe, match="commitment"):
+        ledger.record_history_snapshot()
+
+
+def test_history_warning_lookup_is_one_set_based_query(durable, monkeypatch) -> None:
+    linkage, ledger, first_revision, first, second = durable
+    ledger.commit_record(first)
+    ledger.commit_record(second)
+    comparison = _comparison(first, second, ledger.active_snapshot())
+    ledger.register_comparison(comparison)
+    _, reanalysis = _authorized_reanalysis(linkage, first_revision, first)
+    ledger.commit_record(reanalysis)
+    original = RecordSupersessionStore._comparison_warnings_by_record
+    observed: list[str] = []
+
+    def count_queries(connection, linkage_snapshot, record_ids):
+        connection.set_trace_callback(observed.append)
+        try:
+            return original(connection, linkage_snapshot, record_ids)
+        finally:
+            connection.set_trace_callback(None)
+
+    monkeypatch.setattr(
+        supersession_module,
+        "_RS_COMPARISON_WARNINGS_BY_RECORD",
+        count_queries,
+    )
+    history = ledger.record_history_snapshot()
+    assert any(item.affected_comparisons for item in history.records)
+    assert len(
+        [statement for statement in observed if statement.lstrip().upper().startswith("SELECT")]
+    ) == 1
 
 
 def test_authority_advance_and_tombstone_persist_staleness(durable) -> None:
@@ -599,12 +1002,14 @@ def test_signed_supersession_rejects_wrong_purpose_and_signature(durable) -> Non
         ledger.commit_record(bad_signature)
 
 
-def test_reanalysis_is_inactive_when_any_source_linkage_is_tombstoned(durable) -> None:
+def test_reanalysis_remains_active_when_superseded_source_is_tombstoned(
+    durable,
+) -> None:
     linkage, ledger, first_revision, first, second = durable
     ledger.commit_record(first)
     ledger.commit_record(second)
     _, reanalysis = _authorized_reanalysis(linkage, first_revision, first)
-    ledger.commit_record(reanalysis)
+    receipt = ledger.commit_record(reanalysis)
     current = next(
         item
         for item in linkage.active_snapshot().revisions
@@ -628,7 +1033,8 @@ def test_reanalysis_is_inactive_when_any_source_linkage_is_tombstoned(durable) -
         previous=current,
     )
     linkage.commit_authorized_revision(authorized)
-    assert reanalysis not in ledger.active_snapshot().records
+    assert reanalysis in ledger.active_snapshot().records
+    assert ledger.commit_record(reanalysis) == receipt
 
 
 def test_linkage_writer_cannot_cross_dependent_commit_fence(durable) -> None:
