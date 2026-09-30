@@ -50,14 +50,15 @@ binding bytes are revalidated immediately before and after the atomic catalog
 visibility transaction while the binding root remains exclusively locked. The
 catalog transaction executes no coordinator or caller callback. Any failure
 compensates the exact publication row and binding before releasing that lock,
-while retaining the shared content-addressed object. A private canonical
-rollback marker is flushed before catalog visibility and remains until the
-binding and ownership commit completes. If marker creation fails, visibility
-never begins. If later cleanup fails, the marker and pending journal remain;
-restart recovery removes the binding plus exact ownership before clearing that
-intent. The marker binds the exact candidate manifest, binding, result, final
-filename, publication, and recovery scope, so a missing journal cannot cause
-recovery to remove an older committed binding that shares the ownership row.
+while retaining the shared content-addressed object. A durable SQLite candidate
+row is created before binding publication. It binds a unique operation identity
+to the exact publication, result, recovery scope, manifest, binding and final
+filename plus binding and marker digests. A private canonical rollback marker
+is then flushed before catalog visibility and remains until the binding and
+ownership commit completes. The database candidate is the recovery authority;
+replaceable marker or journal bytes never authorize deleting a peer binding.
+If marker creation or later cleanup fails, restart recovery uses the candidate
+row to remove only that incomplete binding and exact ownership.
 Startup recovery
 enumerates hidden SQLite publications for the binding root's digest-bound
 recovery scope independently of journal parsing. A retained pending journal is

@@ -299,9 +299,14 @@ def test_read_return_rechecks_exact_binding_after_concurrent_removal(
         / f"{binding.cohort_manifest_sha256}.{binding.binding_id}.json"
     )
     if operation == "read":
-        call = lambda: values[0].bindings_for_manifest((values[2],))
+
+        def call():
+            return values[0].bindings_for_manifest((values[2],))
     else:
-        call = lambda: values[0].record_status_for_manifest((values[2],))
+
+        def call():
+            return values[0].record_status_for_manifest((values[2],))
+
     error = _paused_error(controller, call, final.unlink)
     assert isinstance(error, CohortImportError)
     assert "binding" in str(error)
