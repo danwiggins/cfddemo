@@ -641,6 +641,59 @@ def test_public_entrypoint_shadow_guard_has_no_mutable_global_switch(
         del vars(registry)["list_selectors"]
 
 
+def test_instance_metadata_replacement_is_rejected(
+    registry: CohortRegistry,
+) -> None:
+    original = vars(registry)["_metadata"]
+    vars(registry)["_metadata"] = original.model_copy(
+        update={
+            "registry_id": "cohort_registry_" + "f" * 32,
+            "registry_epoch_sha256": "e" * 64,
+        }
+    )
+    try:
+        with pytest.raises(CohortRegistryUnsafe, match="authority state changed"):
+            registry.list_selectors()
+    finally:
+        vars(registry)["_metadata"] = original
+
+
+def test_instance_head_key_replacement_is_rejected(
+    registry: CohortRegistry,
+) -> None:
+    original = vars(registry)["_head_key"]
+    vars(registry)["_head_key"] = (
+        *original[:2],
+        "cohort_registry_" + "f" * 32,
+        "e" * 64,
+    )
+    try:
+        with pytest.raises(CohortRegistryUnsafe, match="authority state changed"):
+            registry.list_selectors()
+    finally:
+        vars(registry)["_head_key"] = original
+
+
+def test_instance_trusted_head_rewrite_cannot_mask_journal_rollback(
+    registry: CohortRegistry, live
+) -> None:
+    first = _first(live)
+    first_receipt = registry.register(first)
+    journal_path = registry.root / "registry-journal.jsonl"
+    first_journal = journal_path.read_bytes()
+    registry.register(_second(first, live))
+    final_journal = journal_path.read_bytes()
+    original_head = vars(registry)["_trusted_head_sha256"]
+    vars(registry)["_trusted_head_sha256"] = first_receipt.state_head_sha256
+    journal_path.write_bytes(first_journal)
+    try:
+        with pytest.raises(CohortRegistryUnsafe, match="authority state changed"):
+            registry.list_selectors()
+    finally:
+        journal_path.write_bytes(final_journal)
+        vars(registry)["_trusted_head_sha256"] = original_head
+
+
 def test_peer_rejects_rollback_to_its_own_preappend_head(
     registry: CohortRegistry, live
 ) -> None:

@@ -30,6 +30,13 @@ retry only when its canonical bytes match. Exact orphan temporary names
 from an interrupted publication are removed under the registry lock; unrelated
 entries fail closed.
 
+Every public entrypoint also verifies a process-private seal over the registry's
+authority-critical instance state. The registry metadata is reread from its
+bound descriptor, and the genesis and process-head key are rederived from those
+canonical bytes plus the live root descriptor. Replacing caller-visible
+metadata, trust pins, linkage store, storage identities, head key, or trusted
+head therefore fails closed before the value can authorize a result.
+
 The protected `resolve` result carries the exact manifest, registry identity,
 state version, state head, and manifest digest. Resolution and each complete
 selector page hold one linkage authority fence and one registry snapshot lock

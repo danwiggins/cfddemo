@@ -14,6 +14,7 @@ import os
 import secrets
 import stat
 import threading
+import weakref
 from collections.abc import Iterator, Mapping
 from contextlib import contextmanager
 from enum import StrEnum
@@ -56,6 +57,9 @@ MAX_PATH_CHARS = 4096
 MAX_PATH_PARTS = 256
 _REGISTRY_PROCESS_LOCK = threading.RLock()
 _REGISTRY_PROCESS_HEADS: dict[tuple[int, int, str, str], str] = {}
+_REGISTRY_INSTANCE_SEALS: weakref.WeakKeyDictionary[
+    object, tuple[object, ...]
+] = weakref.WeakKeyDictionary()
 _PINNED_AUTHORITY_READ_FENCE = ProviderLinkageStore.authority_read_fence
 _PINNED_ACTIVE_SNAPSHOT = ProviderLinkageStore.active_snapshot
 _PINNED_VALIDATE_MANIFEST_IN_FENCE = (
@@ -98,6 +102,11 @@ class CohortRegistryMetadata(RegistryContract):
     linkage_store_epoch_sha256: Sha256
     linkage_storage_identity_sha256: Sha256
     linkage_trust_pins_sha256: Sha256
+
+
+_METADATA_MODEL_TYPES, _METADATA_ENUM_TYPES = contract_type_graph(
+    CohortRegistryMetadata
+)
 
 
 class CohortRegistryJournalEntry(RegistryContract):
@@ -458,6 +467,125 @@ def cohort_registry_backup_from_bytes(content: bytes) -> CohortRegistryBackup:
     return backup
 
 
+def _registry_instance_snapshot(registry: CohortRegistry) -> tuple[object, ...]:
+    """Capture authority-critical state without invoking caller-owned hooks."""
+
+    instance = object.__getattribute__(registry, "__dict__")
+    required = (
+        "root",
+        "_linkage_store",
+        "_trust_pins",
+        "_root_identity",
+        "_objects_identity",
+        "_lock_identity",
+        "_journal_identity",
+        "_metadata_identity",
+        "_process_lock",
+        "_metadata",
+        "_genesis_head_sha256",
+        "_head_key",
+        "_trusted_head_sha256",
+    )
+    if type(instance) is not dict or any(name not in instance for name in required):
+        raise CohortRegistryUnsafe("cohort registry authority state changed")
+    metadata = instance["_metadata"]
+    try:
+        metadata_bytes = exact_model_bytes(
+            metadata,
+            CohortRegistryMetadata,
+            model_types=_METADATA_MODEL_TYPES,
+            enum_types=_METADATA_ENUM_TYPES,
+            max_bytes=4096,
+            max_nodes=64,
+            max_depth=8,
+            max_collection_items=16,
+            max_string_bytes=256,
+        )
+    except (TypeError, ValueError):
+        raise CohortRegistryUnsafe(
+            "cohort registry authority state changed"
+        ) from None
+    descriptor = instance.get("_metadata_fd")
+    descriptors = tuple(
+        instance.get(name)
+        for name in (
+            "_root_fd",
+            "_objects_fd",
+            "_lock_fd",
+            "_metadata_fd",
+            "_journal_fd",
+        )
+    )
+    if descriptor is None:
+        if any(item is not None for item in descriptors):
+            raise CohortRegistryUnsafe("cohort registry authority state changed")
+    elif type(descriptor) is not int:
+        raise CohortRegistryUnsafe("cohort registry authority state changed")
+    else:
+        try:
+            persisted = os.pread(descriptor, 4097, 0)
+        except OSError:
+            raise CohortRegistryUnsafe(
+                "cohort registry authority state changed"
+            ) from None
+        if persisted != metadata_bytes:
+            raise CohortRegistryUnsafe("cohort registry authority state changed")
+        root_descriptor = instance.get("_root_fd")
+        if type(root_descriptor) is not int:
+            raise CohortRegistryUnsafe("cohort registry authority state changed")
+        try:
+            root_observed = os.fstat(root_descriptor)
+            metadata_observed = os.fstat(descriptor)
+        except OSError:
+            raise CohortRegistryUnsafe(
+                "cohort registry authority state changed"
+            ) from None
+        root_identity = (root_observed.st_dev, root_observed.st_ino)
+        metadata_identity = (metadata_observed.st_dev, metadata_observed.st_ino)
+        derived_head_key = (
+            root_identity[0],
+            root_identity[1],
+            metadata.registry_id,
+            metadata.registry_epoch_sha256,
+        )
+        if (
+            instance["_root_identity"] != root_identity
+            or instance["_metadata_identity"] != metadata_identity
+            or instance["_genesis_head_sha256"]
+            != _metadata_genesis_sha256(metadata)
+            or instance["_head_key"] != derived_head_key
+        ):
+            raise CohortRegistryUnsafe("cohort registry authority state changed")
+    pins = instance["_trust_pins"]
+    if type(pins) is not dict:
+        raise CohortRegistryUnsafe("cohort registry authority state changed")
+    try:
+        captured_pins = capture_expected_trust_pins(pins)
+    except (TypeError, ValueError):
+        raise CohortRegistryUnsafe(
+            "cohort registry authority state changed"
+        ) from None
+    return (
+        id(instance["root"]),
+        id(instance["_linkage_store"]),
+        tuple(sorted(captured_pins.items())),
+        instance["_root_identity"],
+        instance["_objects_identity"],
+        instance["_lock_identity"],
+        instance["_journal_identity"],
+        instance["_metadata_identity"],
+        id(instance["_process_lock"]),
+        metadata_bytes,
+        instance["_genesis_head_sha256"],
+        instance["_head_key"],
+        instance["_trusted_head_sha256"],
+    )
+
+
+def _seal_registry_instance(registry: CohortRegistry) -> None:
+    _REGISTRY_INSTANCE_SEALS[registry] = _registry_instance_snapshot(registry)
+
+
 class CohortRegistry:
     """Descriptor-relative immutable manifest publication and safe projection."""
 
@@ -641,8 +769,24 @@ class CohortRegistry:
                     _CR_ACCEPT_OBSERVED_HEAD(
                         self, _CR_LOAD_JOURNAL(self), head, check_instance=False
                     )
+                    _seal_registry_instance(self)
         except BaseException:
-            _CR_CLOSE(self)
+            # Construction has not installed the instance seal yet, so cleanup
+            # cannot pass through the public integrity-checked close boundary.
+            for name in (
+                "_journal_fd",
+                "_metadata_fd",
+                "_lock_fd",
+                "_objects_fd",
+                "_root_fd",
+            ):
+                descriptor = getattr(self, name, None)
+                if descriptor is not None:
+                    try:
+                        os.close(descriptor)
+                    except OSError:
+                        pass
+                    setattr(self, name, None)
             raise
 
     def close(self) -> None:
@@ -935,6 +1079,7 @@ class CohortRegistry:
         _REGISTRY_PROCESS_HEADS[self._head_key] = head
         if check_instance:
             self._trusted_head_sha256 = head
+            _seal_registry_instance(self)
 
     def _load_state(
         self,
@@ -1109,7 +1254,6 @@ class CohortRegistry:
                         manifest_sha256=digest,
                     )
                     _CR_APPEND_JOURNAL(self, entry)
-                    self._trusted_head_sha256 = entry.entry_sha256
                 final, final_head = _CR_LOAD_STATE(self)
                 if digest not in final or final[digest][1] != content:
                     raise CohortRegistryUnsafe(
@@ -1546,6 +1690,21 @@ def _require_registry_integrity(registry: CohortRegistry) -> None:
         for name, expected in _REGISTRY_ALIAS_SEAL.items()
     ):
         raise CohortRegistryUnsafe("cohort registry authority callable changed")
+    instance = object.__getattribute__(registry, "__dict__")
+    initialized_names = (
+        "_metadata",
+        "_genesis_head_sha256",
+        "_head_key",
+        "_trusted_head_sha256",
+    )
+    initialized = tuple(name in instance for name in initialized_names)
+    if not any(initialized):
+        return
+    if not all(initialized):
+        raise CohortRegistryUnsafe("cohort registry authority state changed")
+    expected = _REGISTRY_INSTANCE_SEALS.get(registry)
+    if expected is None or _registry_instance_snapshot(registry) != expected:
+        raise CohortRegistryUnsafe("cohort registry authority state changed")
 
 
 _CR_CONSTRUCT = CohortRegistry
