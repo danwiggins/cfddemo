@@ -384,6 +384,178 @@ class LongitudinalReason(StrEnum):
     SUBJECT_LINKAGE_MISMATCH = "subject_linkage_mismatch"
 
 
+_EXACT_REASON_SET_BY_OUTCOME = {
+    LongitudinalOutcome.EQUIVALENT: frozenset({LongitudinalReason.EXACT_MATCH}),
+    LongitudinalOutcome.QUALIFIED_COMPATIBLE: frozenset(
+        {LongitudinalReason.QUALIFIED_ENVELOPE}
+    ),
+    LongitudinalOutcome.REQUIRES_REANALYSIS: frozenset(
+        {LongitudinalReason.REANALYSIS_REQUIRED}
+    ),
+    LongitudinalOutcome.REGISTERED_BRIDGE: frozenset(
+        {LongitudinalReason.BRIDGE_AVAILABLE}
+    ),
+}
+_INCOMPATIBLE_REASON_SETS = {
+    frozenset({LongitudinalReason.DISALLOWED_MISMATCH}),
+    frozenset({LongitudinalReason.MIXED_DISPOSITIONS}),
+    frozenset({LongitudinalReason.SUBJECT_LINKAGE_MISMATCH}),
+}
+_UNKNOWN_REASON_SET = frozenset(
+    {
+        LongitudinalReason.UNKNOWN_DIMENSION,
+        LongitudinalReason.LINKAGE_AUTHORITY_INVALID,
+        LongitudinalReason.POLICY_IDENTITY_INVALID,
+        LongitudinalReason.ANCHOR_IDENTITY_INVALID,
+        LongitudinalReason.RESULT_STATE_INVALID,
+    }
+)
+
+
+class DimensionDecisionDisposition(StrEnum):
+    EXACT_MATCH = "exact_match"
+    UNKNOWN = "unknown"
+    DISALLOWED_MISMATCH = "disallowed_mismatch"
+    QUALIFIED_COMPATIBLE = "qualified_compatible"
+    REQUIRES_REANALYSIS = "requires_reanalysis"
+    REGISTERED_BRIDGE = "registered_bridge"
+
+
+class LongitudinalNextAction(StrEnum):
+    USE_DIRECT_COMPARISON = "use_direct_comparison"
+    USE_QUALIFIED_COMPARISON = "use_qualified_comparison"
+    REQUEST_REANALYSIS = "request_reanalysis"
+    REVIEW_REGISTERED_BRIDGE = "review_registered_bridge"
+    START_SEPARATE_SERIES = "start_separate_series"
+    RESOLVE_UNKNOWN_INPUTS = "resolve_unknown_inputs"
+
+
+class LongitudinalDecisionReplayError(ValueError):
+    """A stored D03 decision did not replay from exact bound authorities."""
+
+
+def _next_action_for_outcome(
+    outcome: LongitudinalOutcome,
+) -> LongitudinalNextAction:
+    return {
+        LongitudinalOutcome.EQUIVALENT: (LongitudinalNextAction.USE_DIRECT_COMPARISON),
+        LongitudinalOutcome.QUALIFIED_COMPATIBLE: (
+            LongitudinalNextAction.USE_QUALIFIED_COMPARISON
+        ),
+        LongitudinalOutcome.REQUIRES_REANALYSIS: (
+            LongitudinalNextAction.REQUEST_REANALYSIS
+        ),
+        LongitudinalOutcome.REGISTERED_BRIDGE: (
+            LongitudinalNextAction.REVIEW_REGISTERED_BRIDGE
+        ),
+        LongitudinalOutcome.INCOMPATIBLE: (
+            LongitudinalNextAction.START_SEPARATE_SERIES
+        ),
+        LongitudinalOutcome.UNKNOWN: (LongitudinalNextAction.RESOLVE_UNKNOWN_INPUTS),
+    }[outcome]
+
+
+def _aggregate_explanation_outcome(
+    explanations: tuple[DimensionDecisionExplanation, ...],
+    reasons: frozenset[LongitudinalReason],
+) -> tuple[LongitudinalOutcome, frozenset[LongitudinalReason] | None]:
+    """Derive the evaluator outcome from all dispositions and override reasons."""
+
+    dispositions = tuple(item.disposition for item in explanations)
+    has_unknown = DimensionDecisionDisposition.UNKNOWN in dispositions
+    claims_unknown_dimension = LongitudinalReason.UNKNOWN_DIMENSION in reasons
+    if has_unknown != claims_unknown_dimension:
+        raise ValueError("unknown reason does not match explanation dispositions")
+    external_unknowns = reasons & (
+        _UNKNOWN_REASON_SET - {LongitudinalReason.UNKNOWN_DIMENSION}
+    )
+    if has_unknown or external_unknowns:
+        return LongitudinalOutcome.UNKNOWN, None
+    if LongitudinalReason.SUBJECT_LINKAGE_MISMATCH in reasons:
+        return (
+            LongitudinalOutcome.INCOMPATIBLE,
+            frozenset({LongitudinalReason.SUBJECT_LINKAGE_MISMATCH}),
+        )
+    mismatches = tuple(
+        item
+        for item in dispositions
+        if item != DimensionDecisionDisposition.EXACT_MATCH
+    )
+    if not mismatches:
+        return (
+            LongitudinalOutcome.EQUIVALENT,
+            frozenset({LongitudinalReason.EXACT_MATCH}),
+        )
+    unique = frozenset(mismatches)
+    if unique == {DimensionDecisionDisposition.QUALIFIED_COMPATIBLE}:
+        return (
+            LongitudinalOutcome.QUALIFIED_COMPATIBLE,
+            frozenset({LongitudinalReason.QUALIFIED_ENVELOPE}),
+        )
+    if unique == {DimensionDecisionDisposition.REQUIRES_REANALYSIS}:
+        return (
+            LongitudinalOutcome.REQUIRES_REANALYSIS,
+            frozenset({LongitudinalReason.REANALYSIS_REQUIRED}),
+        )
+    if unique == {DimensionDecisionDisposition.REGISTERED_BRIDGE}:
+        return (
+            LongitudinalOutcome.REGISTERED_BRIDGE,
+            frozenset({LongitudinalReason.BRIDGE_AVAILABLE}),
+        )
+    if unique == {DimensionDecisionDisposition.DISALLOWED_MISMATCH}:
+        return (
+            LongitudinalOutcome.INCOMPATIBLE,
+            frozenset({LongitudinalReason.DISALLOWED_MISMATCH}),
+        )
+    return (
+        LongitudinalOutcome.INCOMPATIBLE,
+        frozenset({LongitudinalReason.MIXED_DISPOSITIONS}),
+    )
+
+
+class DimensionDecisionExplanation(CompatibilityContract):
+    """Exact machine-readable explanation for one evaluated dimension."""
+
+    dimension: ComparisonDimension
+    anchor_state: DimensionValueState
+    member_state: DimensionValueState
+    anchor_value_sha256: Sha256
+    member_value_sha256: Sha256
+    disposition: DimensionDecisionDisposition
+    evidence_ref: EvidenceRef | None = None
+    evidence_sha256: Sha256 | None = None
+    bridge_ref: BridgeRef | None = None
+
+    @model_validator(mode="after")
+    def coherent_explanation(self) -> DimensionDecisionExplanation:
+        unknown = (
+            self.anchor_state == DimensionValueState.UNKNOWN
+            or self.member_state == DimensionValueState.UNKNOWN
+        )
+        exact = self.anchor_value_sha256 == self.member_value_sha256
+        evidenced = self.disposition in {
+            DimensionDecisionDisposition.QUALIFIED_COMPATIBLE,
+            DimensionDecisionDisposition.REQUIRES_REANALYSIS,
+            DimensionDecisionDisposition.REGISTERED_BRIDGE,
+        }
+        evidence_complete = (
+            self.evidence_ref is not None and self.evidence_sha256 is not None
+        )
+        evidence_partial = (self.evidence_ref is None) != (self.evidence_sha256 is None)
+        if unknown != (self.disposition == DimensionDecisionDisposition.UNKNOWN):
+            raise ValueError("unknown dimension must have unknown disposition")
+        if not unknown and exact != (
+            self.disposition == DimensionDecisionDisposition.EXACT_MATCH
+        ):
+            raise ValueError("equal known values must be an exact match")
+        if evidence_partial or evidenced != evidence_complete:
+            raise ValueError("only registered allowances carry evidence")
+        bridge = self.disposition == DimensionDecisionDisposition.REGISTERED_BRIDGE
+        if bridge != (self.bridge_ref is not None):
+            raise ValueError("only registered bridge explanations carry bridge_ref")
+        return self
+
+
 class DimensionAllowance(CompatibilityContract):
     """One named, evidence-bound transition away from the pinned anchor value."""
 
@@ -425,9 +597,7 @@ class DimensionAnchorRule(CompatibilityContract):
 class LongitudinalAnchorPolicy(CompatibilityContract):
     """One policy pinned to one complete anchor key, never to adjacent pairs."""
 
-    schema_version: Literal["traceback.longitudinal-anchor-policy.v1"] = (
-        "traceback.longitudinal-anchor-policy.v1"
-    )
+    schema_version: Literal["traceback.longitudinal-anchor-policy.v1"]
     policy_id: LongitudinalPolicyId
     version: Version
     engine_version: EngineVersion
@@ -446,9 +616,7 @@ class LongitudinalAnchorPolicy(CompatibilityContract):
 
 
 class LongitudinalMemberDecision(CompatibilityContract):
-    schema_version: Literal["traceback.longitudinal-member-decision.v1"] = (
-        "traceback.longitudinal-member-decision.v1"
-    )
+    schema_version: Literal["traceback.longitudinal-member-decision.v2"]
     anchor_result_id: ResultId
     member_result_id: ResultId
     anchor_result_sha256: Sha256
@@ -473,6 +641,10 @@ class LongitudinalMemberDecision(CompatibilityContract):
     reason_codes: tuple[LongitudinalReason, ...] = Field(
         min_length=1, max_length=MAX_DECISION_EVIDENCE
     )
+    dimension_explanations: tuple[DimensionDecisionExplanation, ...] = Field(
+        min_length=len(ALL_COMPARISON_DIMENSIONS),
+        max_length=len(ALL_COMPARISON_DIMENSIONS),
+    )
     evaluated_dimensions: tuple[ComparisonDimension, ...] = Field(
         min_length=len(ALL_COMPARISON_DIMENSIONS),
         max_length=len(ALL_COMPARISON_DIMENSIONS),
@@ -485,6 +657,8 @@ class LongitudinalMemberDecision(CompatibilityContract):
     )
     evidence_refs: tuple[EvidenceRef, ...] = Field(max_length=MAX_DECISION_EVIDENCE)
     bridge_refs: tuple[BridgeRef, ...] = Field(max_length=MAX_DECISION_EVIDENCE)
+    next_action: LongitudinalNextAction
+    bridge_execution_state: Literal["not_executed"]
     delta_allowed: bool
     connecting_trend_allowed: bool
 
@@ -492,6 +666,10 @@ class LongitudinalMemberDecision(CompatibilityContract):
     def coherent_rendering(self) -> LongitudinalMemberDecision:
         if self.evaluated_dimensions != ALL_COMPARISON_DIMENSIONS:
             raise ValueError("decision must report every evaluated dimension")
+        if tuple(item.dimension for item in self.dimension_explanations) != (
+            ALL_COMPARISON_DIMENSIONS
+        ):
+            raise ValueError("decision explanations must cover every dimension")
         for values, label in (
             (self.reason_codes, "reasons"),
             (self.mismatch_dimensions, "mismatches"),
@@ -501,6 +679,15 @@ class LongitudinalMemberDecision(CompatibilityContract):
         ):
             if values != tuple(sorted(set(values), key=str)):
                 raise ValueError(f"decision {label} must be uniquely sorted")
+        actual_reasons = frozenset(self.reason_codes)
+        if self.outcome == LongitudinalOutcome.UNKNOWN:
+            if not actual_reasons or not actual_reasons <= _UNKNOWN_REASON_SET:
+                raise ValueError("unknown outcome has invalid reason set")
+        elif self.outcome == LongitudinalOutcome.INCOMPATIBLE:
+            if actual_reasons not in _INCOMPATIBLE_REASON_SETS:
+                raise ValueError("incompatible outcome has invalid reason set")
+        elif actual_reasons != _EXACT_REASON_SET_BY_OUTCOME[self.outcome]:
+            raise ValueError("outcome has invalid exact reason set")
         eligible = self.outcome in {
             LongitudinalOutcome.EQUIVALENT,
             LongitudinalOutcome.QUALIFIED_COMPATIBLE,
@@ -512,13 +699,74 @@ class LongitudinalMemberDecision(CompatibilityContract):
             raise ValueError("eligible decision requires exact activation receipts")
         if self.delta_allowed != eligible or self.connecting_trend_allowed != eligible:
             raise ValueError("only equivalent or qualified outcomes permit rendering")
-        if self.outcome == LongitudinalOutcome.REGISTERED_BRIDGE:
-            if not self.bridge_refs:
-                raise ValueError("registered bridge decision requires bridge reference")
-        elif self.bridge_refs:
-            raise ValueError("bridge references are allowed only for bridge decisions")
         if set(self.mismatch_dimensions) & set(self.unknown_dimensions):
             raise ValueError("one dimension cannot be both mismatch and unknown")
+        explained_unknowns = tuple(
+            sorted(
+                (
+                    item.dimension
+                    for item in self.dimension_explanations
+                    if item.disposition == DimensionDecisionDisposition.UNKNOWN
+                ),
+                key=str,
+            )
+        )
+        explained_mismatches = tuple(
+            sorted(
+                (
+                    item.dimension
+                    for item in self.dimension_explanations
+                    if item.disposition
+                    not in {
+                        DimensionDecisionDisposition.EXACT_MATCH,
+                        DimensionDecisionDisposition.UNKNOWN,
+                    }
+                ),
+                key=str,
+            )
+        )
+        explained_evidence = tuple(
+            sorted(
+                {
+                    item.evidence_ref
+                    for item in self.dimension_explanations
+                    if item.evidence_ref is not None
+                }
+            )
+        )
+        explained_bridges = tuple(
+            sorted(
+                {
+                    item.bridge_ref
+                    for item in self.dimension_explanations
+                    if item.bridge_ref is not None
+                }
+            )
+        )
+        if self.unknown_dimensions != explained_unknowns:
+            raise ValueError("unknown dimensions do not match exact explanations")
+        if self.mismatch_dimensions != explained_mismatches:
+            raise ValueError("mismatch dimensions do not match exact explanations")
+        if self.evidence_refs != explained_evidence:
+            raise ValueError("evidence references do not match exact explanations")
+        aggregated_outcome, aggregated_reasons = _aggregate_explanation_outcome(
+            self.dimension_explanations,
+            actual_reasons,
+        )
+        if self.outcome != aggregated_outcome:
+            raise ValueError("outcome does not match explanation aggregation")
+        if aggregated_reasons is not None and actual_reasons != aggregated_reasons:
+            raise ValueError("reason set does not match explanation aggregation")
+        summarized_bridges = (
+            explained_bridges
+            if self.outcome == LongitudinalOutcome.REGISTERED_BRIDGE
+            else ()
+        )
+        if self.bridge_refs != summarized_bridges:
+            raise ValueError("bridge references do not match exact explanations")
+        expected_action = _next_action_for_outcome(self.outcome)
+        if self.next_action != expected_action:
+            raise ValueError("next action does not match compatibility outcome")
         if self.outcome == LongitudinalOutcome.EQUIVALENT:
             if (
                 self.reason_codes != (LongitudinalReason.EXACT_MATCH,)
@@ -563,9 +811,7 @@ class LongitudinalMemberDecision(CompatibilityContract):
 
 
 class LongitudinalSeriesDecision(CompatibilityContract):
-    schema_version: Literal["traceback.longitudinal-series-decision.v1"] = (
-        "traceback.longitudinal-series-decision.v1"
-    )
+    schema_version: Literal["traceback.longitudinal-series-decision.v2"]
     anchor_result_id: ResultId
     policy_sha256: Sha256
     member_result_ids: tuple[ResultId, ...] = Field(
@@ -705,49 +951,98 @@ _INVALID_INPUT_SHA256 = hashlib.sha256(
 ).hexdigest()
 _INVALID_INPUT_RESULT_ID = "result_invalid_input"
 _INVALID_INPUT_POLICY_ID = "longpolicy_invalid_input"
-_INVALID_INPUT_MEMBER_DECISION = LongitudinalMemberDecision(
-    anchor_result_id=_INVALID_INPUT_RESULT_ID,
-    member_result_id=_INVALID_INPUT_RESULT_ID,
-    anchor_result_sha256=_INVALID_INPUT_SHA256,
-    member_result_sha256=_INVALID_INPUT_SHA256,
-    anchor_bundle_sha256=_INVALID_INPUT_SHA256,
-    member_bundle_sha256=_INVALID_INPUT_SHA256,
-    anchor_record_sha256=_INVALID_INPUT_SHA256,
-    member_record_sha256=_INVALID_INPUT_SHA256,
-    anchor_linkage_revision_sha256=_INVALID_INPUT_SHA256,
-    member_linkage_revision_sha256=_INVALID_INPUT_SHA256,
-    anchor_linkage_receipt_sha256=None,
-    member_linkage_receipt_sha256=None,
-    authority_head_sha256=_INVALID_INPUT_SHA256,
-    authority_revision=0,
-    anchor_key_sha256=_INVALID_INPUT_SHA256,
-    member_key_sha256=_INVALID_INPUT_SHA256,
-    policy_id=_INVALID_INPUT_POLICY_ID,
-    policy_version="0.0.0",
-    policy_sha256=_INVALID_INPUT_SHA256,
-    engine_version="0.0.0",
-    outcome=LongitudinalOutcome.UNKNOWN,
-    reason_codes=(
-        LongitudinalReason.LINKAGE_AUTHORITY_INVALID,
-        LongitudinalReason.RESULT_STATE_INVALID,
-    ),
-    evaluated_dimensions=ALL_COMPARISON_DIMENSIONS,
-    mismatch_dimensions=(),
-    unknown_dimensions=tuple(sorted(ALL_COMPARISON_DIMENSIONS, key=str)),
-    evidence_refs=(),
-    bridge_refs=(),
-    delta_allowed=False,
-    connecting_trend_allowed=False,
+_INVALID_INPUT_EXPLANATIONS = tuple(
+    DimensionDecisionExplanation(
+        dimension=dimension,
+        anchor_state=DimensionValueState.UNKNOWN,
+        member_state=DimensionValueState.UNKNOWN,
+        anchor_value_sha256=hashlib.sha256(
+            b"traceback-invalid-longitudinal-dimension.v1\0"
+            + dimension.value.encode("ascii")
+        ).hexdigest(),
+        member_value_sha256=hashlib.sha256(
+            b"traceback-invalid-longitudinal-dimension.v1\0"
+            + dimension.value.encode("ascii")
+        ).hexdigest(),
+        disposition=DimensionDecisionDisposition.UNKNOWN,
+    )
+    for dimension in ALL_COMPARISON_DIMENSIONS
 )
-_INVALID_INPUT_SERIES_DECISION = LongitudinalSeriesDecision(
-    anchor_result_id=_INVALID_INPUT_RESULT_ID,
-    policy_sha256=_INVALID_INPUT_SHA256,
-    member_result_ids=(_INVALID_INPUT_RESULT_ID,),
-    decisions=(_INVALID_INPUT_MEMBER_DECISION,),
-    decision_sha256s=(
-        longitudinal_member_decision_sha256(_INVALID_INPUT_MEMBER_DECISION),
-    ),
+_INVALID_INPUT_MEMBER_DECISION_BYTES = canonical_contract_bytes(
+    LongitudinalMemberDecision(
+        schema_version="traceback.longitudinal-member-decision.v2",
+        anchor_result_id=_INVALID_INPUT_RESULT_ID,
+        member_result_id=_INVALID_INPUT_RESULT_ID,
+        anchor_result_sha256=_INVALID_INPUT_SHA256,
+        member_result_sha256=_INVALID_INPUT_SHA256,
+        anchor_bundle_sha256=_INVALID_INPUT_SHA256,
+        member_bundle_sha256=_INVALID_INPUT_SHA256,
+        anchor_record_sha256=_INVALID_INPUT_SHA256,
+        member_record_sha256=_INVALID_INPUT_SHA256,
+        anchor_linkage_revision_sha256=_INVALID_INPUT_SHA256,
+        member_linkage_revision_sha256=_INVALID_INPUT_SHA256,
+        anchor_linkage_receipt_sha256=None,
+        member_linkage_receipt_sha256=None,
+        authority_head_sha256=_INVALID_INPUT_SHA256,
+        authority_revision=0,
+        anchor_key_sha256=_INVALID_INPUT_SHA256,
+        member_key_sha256=_INVALID_INPUT_SHA256,
+        policy_id=_INVALID_INPUT_POLICY_ID,
+        policy_version="0.0.0",
+        policy_sha256=_INVALID_INPUT_SHA256,
+        engine_version="0.0.0",
+        outcome=LongitudinalOutcome.UNKNOWN,
+        reason_codes=tuple(
+            sorted(
+                (
+                    LongitudinalReason.LINKAGE_AUTHORITY_INVALID,
+                    LongitudinalReason.RESULT_STATE_INVALID,
+                    LongitudinalReason.UNKNOWN_DIMENSION,
+                ),
+                key=str,
+            )
+        ),
+        dimension_explanations=_INVALID_INPUT_EXPLANATIONS,
+        evaluated_dimensions=ALL_COMPARISON_DIMENSIONS,
+        mismatch_dimensions=(),
+        unknown_dimensions=tuple(sorted(ALL_COMPARISON_DIMENSIONS, key=str)),
+        evidence_refs=(),
+        bridge_refs=(),
+        next_action=LongitudinalNextAction.RESOLVE_UNKNOWN_INPUTS,
+        bridge_execution_state="not_executed",
+        delta_allowed=False,
+        connecting_trend_allowed=False,
+    )
 )
+_INVALID_INPUT_MEMBER_DECISION_SHA256 = hashlib.sha256(
+    _INVALID_INPUT_MEMBER_DECISION_BYTES
+).hexdigest()
+_INVALID_INPUT_SERIES_DECISION_BYTES = canonical_contract_bytes(
+    LongitudinalSeriesDecision(
+        schema_version="traceback.longitudinal-series-decision.v2",
+        anchor_result_id=_INVALID_INPUT_RESULT_ID,
+        policy_sha256=_INVALID_INPUT_SHA256,
+        member_result_ids=(_INVALID_INPUT_RESULT_ID,),
+        decisions=(
+            LongitudinalMemberDecision.model_validate_json(
+                _INVALID_INPUT_MEMBER_DECISION_BYTES
+            ),
+        ),
+        decision_sha256s=(_INVALID_INPUT_MEMBER_DECISION_SHA256,),
+    )
+)
+
+
+def _invalid_input_member_decision() -> LongitudinalMemberDecision:
+    return LongitudinalMemberDecision.model_validate_json(
+        _INVALID_INPUT_MEMBER_DECISION_BYTES
+    )
+
+
+def _invalid_input_series_decision() -> LongitudinalSeriesDecision:
+    return LongitudinalSeriesDecision.model_validate_json(
+        _INVALID_INPUT_SERIES_DECISION_BYTES
+    )
 
 
 def _replay_record(record: object) -> LongitudinalRecord:
@@ -1093,7 +1388,7 @@ def decide_longitudinal_member(
         linkage_store,
     )
     if validated is None:
-        return _INVALID_INPUT_MEMBER_DECISION
+        return _invalid_input_member_decision()
     (
         anchor,
         member,
@@ -1108,6 +1403,7 @@ def decide_longitudinal_member(
     member_key_sha256 = longitudinal_comparison_key_sha256(member.comparison_key)
     policy_sha256 = longitudinal_anchor_policy_sha256(policy)
     reasons: set[LongitudinalReason] = set()
+    explanations: list[DimensionDecisionExplanation] = []
     mismatches: list[ComparisonDimension] = []
     unknowns: list[ComparisonDimension] = []
     evidence: set[str] = set()
@@ -1182,8 +1478,28 @@ def decide_longitudinal_member(
             or member_value.state == DimensionValueState.UNKNOWN
         ):
             unknowns.append(rule.dimension)
+            explanations.append(
+                DimensionDecisionExplanation(
+                    dimension=rule.dimension,
+                    anchor_state=anchor_value.state,
+                    member_state=member_value.state,
+                    anchor_value_sha256=anchor_digest,
+                    member_value_sha256=member_digest,
+                    disposition=DimensionDecisionDisposition.UNKNOWN,
+                )
+            )
             continue
         if anchor_digest == member_digest:
+            explanations.append(
+                DimensionDecisionExplanation(
+                    dimension=rule.dimension,
+                    anchor_state=anchor_value.state,
+                    member_state=member_value.state,
+                    anchor_value_sha256=anchor_digest,
+                    member_value_sha256=member_digest,
+                    disposition=DimensionDecisionDisposition.EXACT_MATCH,
+                )
+            )
             continue
         mismatches.append(rule.dimension)
         allowance = next(
@@ -1196,11 +1512,34 @@ def decide_longitudinal_member(
         )
         if allowance is None:
             dispositions.add(LongitudinalOutcome.INCOMPATIBLE)
+            explanations.append(
+                DimensionDecisionExplanation(
+                    dimension=rule.dimension,
+                    anchor_state=anchor_value.state,
+                    member_state=member_value.state,
+                    anchor_value_sha256=anchor_digest,
+                    member_value_sha256=member_digest,
+                    disposition=(DimensionDecisionDisposition.DISALLOWED_MISMATCH),
+                )
+            )
             continue
         dispositions.add(allowance.outcome)
         evidence.add(allowance.evidence_ref)
         if allowance.bridge_ref is not None:
             bridges.add(allowance.bridge_ref)
+        explanations.append(
+            DimensionDecisionExplanation(
+                dimension=rule.dimension,
+                anchor_state=anchor_value.state,
+                member_state=member_value.state,
+                anchor_value_sha256=anchor_digest,
+                member_value_sha256=member_digest,
+                disposition=DimensionDecisionDisposition(allowance.outcome.value),
+                evidence_ref=allowance.evidence_ref,
+                evidence_sha256=allowance.evidence_sha256,
+                bridge_ref=allowance.bridge_ref,
+            )
+        )
 
     if unknowns:
         reasons.add(LongitudinalReason.UNKNOWN_DIMENSION)
@@ -1232,7 +1571,9 @@ def decide_longitudinal_member(
         LongitudinalOutcome.EQUIVALENT,
         LongitudinalOutcome.QUALIFIED_COMPATIBLE,
     }
+    next_action = _next_action_for_outcome(outcome)
     return LongitudinalMemberDecision(
+        schema_version="traceback.longitudinal-member-decision.v2",
         anchor_result_id=anchor.measurement.result_id,
         member_result_id=member.measurement.result_id,
         anchor_result_sha256=anchor.measurement.result_sha256,
@@ -1263,6 +1604,7 @@ def decide_longitudinal_member(
         engine_version=policy.engine_version,
         outcome=outcome,
         reason_codes=tuple(sorted(reasons, key=str)),
+        dimension_explanations=tuple(explanations),
         evaluated_dimensions=ALL_COMPARISON_DIMENSIONS,
         mismatch_dimensions=tuple(sorted(mismatches, key=str)),
         unknown_dimensions=tuple(sorted(unknowns, key=str)),
@@ -1272,6 +1614,8 @@ def decide_longitudinal_member(
             if outcome == LongitudinalOutcome.REGISTERED_BRIDGE
             else ()
         ),
+        next_action=next_action,
+        bridge_execution_state="not_executed",
         delta_allowed=eligible,
         connecting_trend_allowed=eligible,
     )
@@ -1299,7 +1643,7 @@ def decide_longitudinal_series(
         linkage_store,
     )
     if validated is None:
-        return _INVALID_INPUT_SERIES_DECISION
+        return _invalid_input_series_decision()
     (
         anchor,
         members,
@@ -1328,6 +1672,7 @@ def decide_longitudinal_series(
         for member in members
     )
     return LongitudinalSeriesDecision(
+        schema_version="traceback.longitudinal-series-decision.v2",
         anchor_result_id=anchor.measurement.result_id,
         policy_sha256=longitudinal_anchor_policy_sha256(policy),
         member_result_ids=member_ids,
@@ -1338,6 +1683,37 @@ def decide_longitudinal_series(
     )
 
 
+def replay_longitudinal_member_decision(
+    expected: LongitudinalMemberDecision,
+    anchor: LongitudinalRecord,
+    member: LongitudinalRecord,
+    policy: LongitudinalAnchorPolicy,
+    *,
+    expected_policy_sha256: str,
+    expected_authority_head_sha256: str,
+    expected_linkage_trust_snapshot_sha256_by_provider: dict[str, str],
+    linkage_store: ProviderLinkageStore | None,
+) -> LongitudinalMemberDecision:
+    """Replay an exact D03 decision; never trust a stored decision by itself."""
+
+    actual = decide_longitudinal_member(
+        anchor,
+        member,
+        policy,
+        expected_policy_sha256=expected_policy_sha256,
+        expected_authority_head_sha256=expected_authority_head_sha256,
+        expected_linkage_trust_snapshot_sha256_by_provider=(
+            expected_linkage_trust_snapshot_sha256_by_provider
+        ),
+        linkage_store=linkage_store,
+    )
+    if actual != expected:
+        raise LongitudinalDecisionReplayError(
+            "stored longitudinal decision does not replay exactly"
+        )
+    return actual
+
+
 __all__ = [
     "ALL_COMPARISON_DIMENSIONS",
     "MAX_DECISION_EVIDENCE",
@@ -1345,10 +1721,14 @@ __all__ = [
     "ComparisonDimensionValue",
     "DimensionAllowance",
     "DimensionAnchorRule",
+    "DimensionDecisionDisposition",
+    "DimensionDecisionExplanation",
     "DimensionValueState",
     "LongitudinalAnchorPolicy",
     "LongitudinalComparisonKey",
+    "LongitudinalDecisionReplayError",
     "LongitudinalMemberDecision",
+    "LongitudinalNextAction",
     "LongitudinalOutcome",
     "LongitudinalPolicyId",
     "LongitudinalReason",
@@ -1368,4 +1748,5 @@ __all__ = [
     "optional_text_sha256",
     "provider_measurement_id",
     "provider_projection_ref",
+    "replay_longitudinal_member_decision",
 ]

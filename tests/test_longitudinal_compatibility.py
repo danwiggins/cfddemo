@@ -438,6 +438,7 @@ def _policy(
             )
         )
     return LongitudinalAnchorPolicy(
+        schema_version="traceback.longitudinal-anchor-policy.v1",
         policy_id="longpolicy_fragment_alpha",
         version="1.0.0",
         engine_version="1.0.0",
@@ -1544,6 +1545,67 @@ def test_malformed_copied_shape_returns_constant_safe_unknown(
     assert not decision.connecting_trend_allowed
 
 
+def test_malformed_rejections_return_fresh_canonical_unknown_artifacts() -> None:
+    anchor = _record("1")
+    member = _record("2")
+    policy = _policy(anchor)
+    arguments = {
+        "expected_policy_sha256": "invalid",
+        "expected_authority_head_sha256": HEAD_SHA256,
+        "expected_linkage_trust_snapshot_sha256_by_provider": {PROVIDER: TRUST_SHA256},
+        "linkage_store": None,
+    }
+
+    first_member = decide_longitudinal_member(
+        anchor,
+        member,
+        policy,
+        **arguments,  # type: ignore[arg-type]
+    )
+    canonical_member = canonical_contract_bytes(first_member)
+    object.__setattr__(first_member, "delta_allowed", True)
+    object.__setattr__(first_member, "connecting_trend_allowed", True)
+
+    second_member = decide_longitudinal_member(
+        anchor,
+        member,
+        policy,
+        **arguments,  # type: ignore[arg-type]
+    )
+    assert second_member is not first_member
+    assert canonical_contract_bytes(second_member) == canonical_member
+    assert second_member.schema_version == "traceback.longitudinal-member-decision.v2"
+    assert second_member.outcome == LongitudinalOutcome.UNKNOWN
+    assert len(second_member.dimension_explanations) == len(ALL_COMPARISON_DIMENSIONS)
+    assert not second_member.delta_allowed
+    assert not second_member.connecting_trend_allowed
+
+    first_series = decide_longitudinal_series(
+        anchor,
+        (member,),
+        policy,
+        **arguments,  # type: ignore[arg-type]
+    )
+    canonical_series = canonical_contract_bytes(first_series)
+    first_series_member = first_series.decisions[0]
+    object.__setattr__(first_series_member, "delta_allowed", True)
+    object.__setattr__(first_series_member, "connecting_trend_allowed", True)
+
+    second_series = decide_longitudinal_series(
+        anchor,
+        (member,),
+        policy,
+        **arguments,  # type: ignore[arg-type]
+    )
+    assert second_series is not first_series
+    assert second_series.decisions[0] is not first_series_member
+    assert canonical_contract_bytes(second_series) == canonical_series
+    assert canonical_contract_bytes(second_series.decisions[0]) == canonical_member
+    assert second_series.decisions[0] == second_member
+    assert not second_series.decisions[0].delta_allowed
+    assert not second_series.decisions[0].connecting_trend_allowed
+
+
 @pytest.mark.parametrize("entrypoint", ("member", "series"))
 @pytest.mark.parametrize("store_state", ("uninitialized", "lock_none"))
 def test_malformed_exact_store_returns_constant_safe_unknown(
@@ -1832,7 +1894,7 @@ def test_decision_semantics_bounds_and_private_tokens_fail_closed() -> None:
     decision = _decide(anchor, member, _policy(anchor))
     payload = decision.model_dump(mode="json")
     payload["mismatch_dimensions"] = [ComparisonDimension.ASSAY_PROTOCOL.value]
-    with pytest.raises(ValidationError, match="exact identity match"):
+    with pytest.raises(ValidationError, match="mismatch dimensions"):
         LongitudinalMemberDecision.model_validate_json(json.dumps(payload))
 
     payload = decision.model_dump(mode="json")
