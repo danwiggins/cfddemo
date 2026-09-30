@@ -320,6 +320,12 @@ class ProviderLinkageStore:
         expected_trust_snapshot_sha256_by_provider: Mapping[str, str],
         time_source: AuthorityTimeSource | None = None,
     ) -> None:
+        if time_source is None:
+            selected_time_source = AuthorityTimeSource.system()
+        elif type(time_source) is AuthorityTimeSource:
+            selected_time_source = time_source
+        else:
+            raise ProviderLinkageStoreUnsafe("authority time source type is invalid")
         if not (
             0
             < len(expected_trust_snapshot_sha256_by_provider)
@@ -371,10 +377,7 @@ class ProviderLinkageStore:
             raise ProviderLinkageStoreUnsafe(
                 "provider trust pins are invalid"
             ) from None
-        self._time_source = time_source or AuthorityTimeSource.system()
-        if type(self._time_source) is not AuthorityTimeSource:
-            self.close()
-            raise ProviderLinkageStoreUnsafe("authority time source type is invalid")
+        self._time_source = selected_time_source
         _register_store_time_source(self, self._time_source)
         try:
             metadata = os.stat(
@@ -1638,9 +1641,7 @@ def require_provider_linkage_store_process_integrity() -> None:
     """Raise an explicit diagnostic failure when loaded-code mutation is seen."""
 
     if not provider_linkage_store_process_integrity_is_valid():
-        raise ProviderLinkageStoreUnsafe(
-            "linkage store process integrity check failed"
-        )
+        raise ProviderLinkageStoreUnsafe("linkage store process integrity check failed")
 
 
 __all__ = [

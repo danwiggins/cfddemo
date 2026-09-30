@@ -926,6 +926,51 @@ def test_invalid_trust_pin_or_time_source_is_rejected(tmp_path: Path) -> None:
         AuthorityTimeSource.fixed(NOW.replace(tzinfo=None))
 
 
+def test_time_source_subclass_is_rejected_without_object_execution(
+    tmp_path: Path,
+) -> None:
+    calls: list[str] = []
+
+    class AttackingTimeSource(AuthorityTimeSource):
+        def __bool__(self) -> bool:
+            calls.append("bool")
+            raise AssertionError("subclass truthiness executed")
+
+        def __getattribute__(self, name: str) -> object:
+            calls.append(f"getattribute:{name}")
+            raise AssertionError("subclass attribute access executed")
+
+        def __repr__(self) -> str:
+            calls.append("repr")
+            raise AssertionError("subclass repr executed")
+
+    attacking_source = AttackingTimeSource.fixed(NOW)
+    with pytest.raises(ProviderLinkageStoreUnsafe, match="time source type"):
+        ProviderLinkageStore(
+            tmp_path / "attacking-time-source",
+            expected_trust_snapshot_sha256_by_provider=_pins(),
+            time_source=attacking_source,
+        )
+    assert calls == []
+    assert not (tmp_path / "attacking-time-source").exists()
+
+
+def test_none_and_exact_time_source_instances_are_accepted(tmp_path: Path) -> None:
+    with ProviderLinkageStore(
+        tmp_path / "system-source",
+        expected_trust_snapshot_sha256_by_provider=_pins(),
+    ) as system_store:
+        assert system_store.active_snapshot().state_version == 0
+
+    exact_source = AuthorityTimeSource.fixed(NOW)
+    with ProviderLinkageStore(
+        tmp_path / "fixed-source",
+        expected_trust_snapshot_sha256_by_provider=_pins(),
+        time_source=exact_source,
+    ) as fixed_store:
+        assert fixed_store.active_snapshot().state_version == 0
+
+
 def test_legacy_arbitrary_clock_callback_is_not_an_authority_input(
     tmp_path: Path,
 ) -> None:
