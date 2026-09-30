@@ -9,6 +9,7 @@ from concurrent.futures import ThreadPoolExecutor
 from concurrent.futures import TimeoutError as FutureTimeout
 from datetime import datetime, timedelta, tzinfo
 from pathlib import Path
+from threading import Event
 
 import pytest
 from pydantic import ValidationError
@@ -1125,6 +1126,44 @@ def test_sqlite_connect_root_swap_cannot_write_substituted_directory(
             root.unlink()
         if backup.exists():
             os.replace(backup, root)
+
+
+def test_paused_sqlite_connect_never_redirects_unrelated_thread_cwd_or_io(
+    durable, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    _, ledger, _, first, _ = durable
+    ledger.commit_record(first)
+    original_connect = sqlite3.connect
+    entered = Event()
+    release = Event()
+    host = tmp_path / "unrelated-host"
+    host.mkdir(mode=0o700)
+    original_cwd = Path.cwd()
+
+    def paused_connect(database, *args, **kwargs):
+        entered.set()
+        if not release.wait(timeout=3):
+            raise AssertionError("paused connect was not released")
+        return original_connect(database, *args, **kwargs)
+
+    monkeypatch.setattr(supersession_module.sqlite3, "connect", paused_connect)
+    os.chdir(host)
+    try:
+        with ThreadPoolExecutor(max_workers=1) as pool:
+            future = pool.submit(ledger.active_snapshot)
+            assert entered.wait(timeout=2)
+            assert Path.cwd() == host
+            Path("unrelated-relative-output.txt").write_text("outside-ledger")
+            assert (host / "unrelated-relative-output.txt").read_text() == (
+                "outside-ledger"
+            )
+            assert not (ledger.root / "unrelated-relative-output.txt").exists()
+            release.set()
+            future.result(timeout=3)
+    finally:
+        release.set()
+        os.chdir(original_cwd)
+        monkeypatch.setattr(supersession_module.sqlite3, "connect", original_connect)
 
 
 def test_database_path_substitution_during_connect_fails_closed(
