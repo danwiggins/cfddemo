@@ -168,7 +168,9 @@ _MAX_TOTAL_BYTES = 36 * 1024 * 1024
 Sha256 = Annotated[str, StringConstraints(pattern=r"^[0-9a-f]{64}$")]
 ResultId = Annotated[str, StringConstraints(pattern=r"^result_[0-9a-f]{40}$")]
 RootId = Annotated[str, StringConstraints(pattern=r"^root_[a-z0-9]+(?:_[a-z0-9]+)*$")]
-PublicationId = Annotated[str, StringConstraints(pattern=r"^publication_[0-9a-f]{64}$")]
+PublicationId = Annotated[
+    str, StringConstraints(pattern=r"^publication_[0-9a-f]{16}_[0-9a-f]{64}$")
+]
 DisplayAlias = Annotated[str, StringConstraints(pattern=r"^dsp_[a-z0-9]{8,32}$")]
 RunAlias = Annotated[str, StringConstraints(pattern=r"^rnx_[a-z0-9]{8,32}$")]
 TimepointAlias = Annotated[str, StringConstraints(pattern=r"^tpt_[a-z0-9]{8,32}$")]
@@ -390,6 +392,7 @@ class PreparedCatalogImport(CatalogModel):
         "traceback.prepared-catalog-import.v1"
     )
     publication_id: PublicationId
+    recovery_scope_sha256: Sha256
     reference: CatalogResultRef
     aliases: CatalogAliases
     authority: CatalogAuthoritySnapshot
@@ -1409,6 +1412,7 @@ class ResultCatalog:
         expected_authority_head_sha256: str,
         capability: CurrentMethodCapability,
         aliases: CatalogAliases,
+        recovery_scope_sha256: str,
     ) -> PreparedCatalogImport:
         """Verify and publish immutable object bytes without exposing a result row."""
 
@@ -1421,6 +1425,12 @@ class ResultCatalog:
         if _capability_is_revoked(registry, capability):
             raise CatalogError("revoked method authority cannot be cataloged")
         aliases = CatalogAliases.model_validate_json(canonical_json_bytes(aliases))
+        try:
+            recovery_scope_sha256 = TypeAdapter(Sha256).validate_python(
+                recovery_scope_sha256
+            )
+        except Exception:  # noqa: BLE001 - normalize hostile recovery scope
+            raise CatalogConflict("catalog recovery scope is invalid") from None
         temporary, bundle_sha256, manifest_sha256 = _RC_CAPTURE(
             self, root_id, relative_path
         )
@@ -1511,9 +1521,13 @@ class ResultCatalog:
                     "authority": catalog_authority_sha256(authority),
                 }
             )
-            publication_id = "publication_" + hashlib.sha256(seed).hexdigest()
+            publication_id = (
+                f"publication_{recovery_scope_sha256[:16]}_"
+                + hashlib.sha256(seed).hexdigest()
+            )
             prepared = PreparedCatalogImport(
                 publication_id=publication_id,
+                recovery_scope_sha256=recovery_scope_sha256,
                 reference=reference,
                 aliases=aliases,
                 authority=authority,
@@ -1831,18 +1845,25 @@ class ResultCatalog:
                 connection.rollback()
                 raise
 
-    def pending_publications(self) -> tuple[PendingCatalogPublication, ...]:
+    def pending_publications(
+        self, recovery_scope_sha256: str
+    ) -> tuple[PendingCatalogPublication, ...]:
         """Enumerate bounded hidden rows so a coordinator can recover without a journal."""
 
+        try:
+            scope = TypeAdapter(Sha256).validate_python(recovery_scope_sha256)
+        except Exception:  # noqa: BLE001 - normalize hostile recovery scope
+            raise CatalogConflict("catalog recovery scope is invalid") from None
+        prefix = f"publication_{scope[:16]}_%"
         with _RC_CONNECT(self) as connection:
             rows = connection.execute(
                 """SELECT p.publication_id, r.ref_json
                    FROM result_publications p
                    JOIN results r ON r.result_id=p.result_id
-                   WHERE p.state='pending'
+                   WHERE p.state='pending' AND p.publication_id LIKE ?
                    ORDER BY p.publication_id
                    LIMIT ?""",
-                (MAX_QUERY_LIMIT * 1000 + 1,),
+                (prefix, MAX_QUERY_LIMIT * 1000 + 1),
             ).fetchall()
         if len(rows) > MAX_QUERY_LIMIT * 1000:
             raise CatalogConflict("pending catalog publication bound exceeded")
@@ -1858,17 +1879,25 @@ class ResultCatalog:
         except Exception:  # noqa: BLE001 - normalize hostile database content
             raise CatalogConflict("pending catalog publication is invalid") from None
 
-    def recovery_publications(self) -> tuple[PendingCatalogPublication, ...]:
+    def recovery_publications(
+        self, recovery_scope_sha256: str
+    ) -> tuple[PendingCatalogPublication, ...]:
         """Enumerate bounded coordinator-owned publication rows for reconciliation."""
 
+        try:
+            scope = TypeAdapter(Sha256).validate_python(recovery_scope_sha256)
+        except Exception:  # noqa: BLE001 - normalize hostile recovery scope
+            raise CatalogConflict("catalog recovery scope is invalid") from None
+        prefix = f"publication_{scope[:16]}_%"
         with _RC_CONNECT(self) as connection:
             rows = connection.execute(
                 """SELECT p.publication_id, r.ref_json, p.state
                    FROM result_publications p
                    JOIN results r ON r.result_id=p.result_id
+                   WHERE p.publication_id LIKE ?
                    ORDER BY p.publication_id
                    LIMIT ?""",
-                (MAX_QUERY_LIMIT * 1000 + 1,),
+                (prefix, MAX_QUERY_LIMIT * 1000 + 1),
             ).fetchall()
         if len(rows) > MAX_QUERY_LIMIT * 1000:
             raise CatalogConflict("catalog publication recovery bound exceeded")
@@ -1885,14 +1914,17 @@ class ResultCatalog:
             raise CatalogConflict("catalog publication recovery is invalid") from None
 
     def publication_for_recovery(
-        self, publication_id: str
+        self, publication_id: str, recovery_scope_sha256: str
     ) -> PendingCatalogPublication | None:
         """Resolve one durable publication identity without trusting journal bytes."""
 
         try:
             publication_id = TypeAdapter(PublicationId).validate_python(publication_id)
+            scope = TypeAdapter(Sha256).validate_python(recovery_scope_sha256)
         except Exception:  # noqa: BLE001 - normalize hostile recovery key
             raise CatalogConflict("catalog publication identity is invalid") from None
+        if not publication_id.startswith(f"publication_{scope[:16]}_"):
+            raise CatalogConflict("catalog publication recovery scope conflicts")
         with _RC_CONNECT(self) as connection:
             row = connection.execute(
                 """SELECT r.ref_json, p.state FROM result_publications p

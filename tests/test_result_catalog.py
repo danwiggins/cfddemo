@@ -141,6 +141,7 @@ def _prepare(catalog: ResultCatalog):
         expected_authority_head_sha256=head_sha256,
         capability=capability,
         aliases=ALIASES,
+        recovery_scope_sha256="c" * 64,
     )
 
 

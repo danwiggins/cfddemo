@@ -238,6 +238,7 @@ class CohortRecordCatalog:
             "_expected_trust_snapshot_sha256_by_provider",
             "_reader_registry",
             "_reader_registry_bytes",
+            "_recovery_scope_sha256",
         }
     )
 
@@ -344,6 +345,17 @@ class CohortRecordCatalog:
                 "cohort record index root ownership is unsafe"
             )
         self._root_identity = (metadata.st_dev, metadata.st_ino)
+        self._recovery_scope_sha256 = hashlib.sha256(
+            b"traceback-cohort-recovery-scope-v1\0"
+            + canonical_json_bytes(
+                {
+                    "configured_root_sha256": hashlib.sha256(
+                        os.fsencode(self.root)
+                    ).hexdigest(),
+                    "root_identity": self._root_identity,
+                }
+            )
+        ).hexdigest()
         try:
             _CC_RECOVER_PENDING(self)
         except BaseException:
@@ -411,9 +423,6 @@ class CohortRecordCatalog:
             len(parts) != 4
             or parts[0] != ""
             or parts[1] != "pending"
-            or not parts[2].startswith("publication_")
-            or len(parts[2]) != 76
-            or any(char not in "0123456789abcdef" for char in parts[2][12:])
             or parts[3] != "json"
         ):
             raise CohortImportFilesystemError("pending cohort publication is invalid")
@@ -459,7 +468,15 @@ class CohortRecordCatalog:
         finally:
             if descriptor >= 0:
                 os.close(descriptor)
-        if binding.publication_id != parts[2]:
+        try:
+            publication_id = TypeAdapter(PublicationId).validate_python(parts[2])
+        except Exception:  # noqa: BLE001 - normalize hostile journal name
+            raise CohortImportFilesystemError(
+                "pending cohort publication is invalid"
+            ) from None
+        if binding.publication_id != publication_id or not publication_id.startswith(
+            f"publication_{self._recovery_scope_sha256[:16]}_"
+        ):
             raise CohortImportFilesystemError("pending cohort publication is invalid")
         return binding
 
@@ -531,7 +548,9 @@ class CohortRecordCatalog:
                     os.fsync(self._root_fd)
 
                 pending_rows: tuple[PendingCatalogPublication, ...] = (
-                    _PINNED_RESULT_PENDING(self._result_catalog)
+                    _PINNED_RESULT_PENDING(
+                        self._result_catalog, self._recovery_scope_sha256
+                    )
                 )
                 for pending in pending_rows:
                     pending_name = f".pending.{pending.publication_id}.json"
@@ -562,7 +581,9 @@ class CohortRecordCatalog:
                         parts = pending_name.split(".")
                         publication_id = parts[2] if len(parts) == 4 else ""
                         durable = _PINNED_RESULT_PUBLICATION(
-                            self._result_catalog, publication_id
+                            self._result_catalog,
+                            publication_id,
+                            self._recovery_scope_sha256,
                         )
                         if durable is not None:
                             _PINNED_RESULT_RECOVER(
@@ -695,7 +716,9 @@ class CohortRecordCatalog:
                             raise
                         os.unlink(name, dir_fd=self._root_fd)
                         os.fsync(self._root_fd)
-                for publication in _PINNED_RESULT_RECOVERY_ROWS(self._result_catalog):
+                for publication in _PINNED_RESULT_RECOVERY_ROWS(
+                    self._result_catalog, self._recovery_scope_sha256
+                ):
                     if (
                         publication.state == "adopted"
                         and publication.publication_id not in valid_publications
@@ -1036,6 +1059,7 @@ class CohortRecordCatalog:
                 expected_authority_head_sha256=expected_authority_head_sha256,
                 capability=capability,
                 aliases=aliases,
+                recovery_scope_sha256=self._recovery_scope_sha256,
             )
             _CC_FAULT(self, "after_preflight")
             authority = _CC_VALIDATE_CATALOG_AUTHORITY(self)

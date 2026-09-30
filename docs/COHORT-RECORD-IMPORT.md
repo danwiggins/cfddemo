@@ -39,9 +39,10 @@ directory is flushed. D05 linkage, result trust, catalog storage, and exact
 binding bytes are revalidated immediately before and after the in-transaction
 visibility change. Any failure compensates the exact publication row and
 binding while retaining the shared content-addressed object. Startup recovery
-enumerates hidden SQLite publications independently of journal parsing, then
-uses matching journal bytes to remove an unadopted publication or finish an
-already adopted one. Missing, truncated, or substituted journals compensate the
+enumerates hidden SQLite publications for the binding root's digest-bound
+recovery scope independently of journal parsing, then uses matching journal
+bytes to remove an unadopted publication or finish an already adopted one.
+Missing, truncated, or substituted journals compensate the
 exact durable publication and are removed with any linked final file; an empty
 or partial final binding is never accepted.
 

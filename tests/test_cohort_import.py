@@ -869,9 +869,12 @@ def test_crash_recovery_reconciles_journal_and_catalog_publication(
 
 def test_crash_recovery_removes_partial_pre_stage_journal(tmp_path: Path, live) -> None:
     values = _setup(tmp_path, live)
+    recovery_scope = values[0]._recovery_scope_sha256
     values[0].close()
     partial = (
-        tmp_path / "cohort-records" / (".pending.publication_" + "f" * 64 + ".json")
+        tmp_path
+        / "cohort-records"
+        / (".pending.publication_" + recovery_scope[:16] + "_" + "f" * 64 + ".json")
     )
     partial.write_bytes(b'{"partial":')
     partial.chmod(0o600)
@@ -1015,6 +1018,55 @@ def test_concurrent_restart_recovery_is_idempotent(tmp_path: Path, live) -> None
         assert cohorts.bindings_for_manifest((values[2],)) == (binding,)
     finally:
         cohorts.close()
+        results.close()
+
+
+def test_recovery_scope_cannot_compensate_another_binding_root(
+    tmp_path: Path, live
+) -> None:
+    values = _setup(tmp_path, live)
+    original_scope = values[0]._recovery_scope_sha256
+    crashing = os.fork()
+    if crashing == 0:  # pragma: no cover - abrupt crash path
+        values[0]._fault_injector = lambda observed: (
+            os._exit(78) if observed == "after_result_stage" else None
+        )
+        _import(values)
+        os._exit(79)
+    _, status = os.waitpid(crashing, 0)
+    assert os.waitstatus_to_exitcode(status) == 78
+    values[0].close()
+    values[1].close()
+
+    results = ResultCatalog(
+        tmp_path / "results",
+        import_roots={"root_primary": tmp_path / "imports"},
+        trust_store=values[6],
+        reader_registry=DEFAULT_RESULT_BUNDLE_READER_REGISTRY,
+    )
+    unrelated = CohortRecordCatalog(
+        tmp_path / "other-cohort-records",
+        result_catalog=results,
+        linkage_store=live[0],
+        expected_trust_snapshot_sha256_by_provider=_pins(),
+        reader_registry=DEFAULT_RESULT_BUNDLE_READER_REGISTRY,
+    )
+    try:
+        assert len(results.pending_publications(original_scope)) == 1
+    finally:
+        unrelated.close()
+    recovered = CohortRecordCatalog(
+        tmp_path / "cohort-records",
+        result_catalog=results,
+        linkage_store=live[0],
+        expected_trust_snapshot_sha256_by_provider=_pins(),
+        reader_registry=DEFAULT_RESULT_BUNDLE_READER_REGISTRY,
+    )
+    try:
+        assert results.pending_publications(original_scope) == ()
+        assert results.query(CatalogQuery()).empty
+    finally:
+        recovered.close()
         results.close()
 
 
