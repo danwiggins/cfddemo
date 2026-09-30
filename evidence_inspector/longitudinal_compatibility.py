@@ -39,6 +39,12 @@ from evidence_inspector.provider_linkage import (
     linkage_revision_sha256,
     provider_trust_snapshot_sha256,
 )
+from evidence_inspector.provider_linkage_store import (
+    CommittedLinkageReceipt,
+    ProviderLinkageStore,
+    ProviderLinkageStoreError,
+    committed_linkage_receipt_sha256,
+)
 
 MAX_DIMENSIONS = 16
 MAX_ALLOWANCES_PER_DIMENSION = 32
@@ -207,6 +213,7 @@ class LongitudinalRecord(CompatibilityContract):
     comparison_key: LongitudinalComparisonKey
     linkage_revision: LinkageRevision
     authorized_linkage: AuthorizedLinkageRevision | None
+    activation_receipt: CommittedLinkageReceipt | None = None
 
     @model_validator(mode="after")
     def exact_bindings(self) -> LongitudinalRecord:
@@ -255,6 +262,19 @@ class LongitudinalRecord(CompatibilityContract):
             and self.authorized_linkage.revision != self.linkage_revision
         ):
             raise ValueError("authorized linkage does not bind exact revision")
+        if self.activation_receipt is not None:
+            receipt = self.activation_receipt
+            if self.authorized_linkage is None:
+                raise ValueError("activation receipt requires signed linkage proof")
+            if (
+                receipt.provider_namespace
+                != self.linkage_revision.provider_namespace
+                or receipt.linkage_id != self.linkage_revision.linkage_id
+                or receipt.revision != self.linkage_revision.revision
+                or receipt.linkage_revision_sha256
+                != linkage_revision_sha256(self.linkage_revision)
+            ):
+                raise ValueError("activation receipt does not bind exact linkage")
         self._validate_overlapping_e05_dimensions()
         return self
 
@@ -394,6 +414,8 @@ class LongitudinalMemberDecision(CompatibilityContract):
     member_record_sha256: Sha256
     anchor_linkage_revision_sha256: Sha256
     member_linkage_revision_sha256: Sha256
+    anchor_linkage_receipt_sha256: Sha256 | None
+    member_linkage_receipt_sha256: Sha256 | None
     authority_head_sha256: Sha256
     authority_revision: int = Field(ge=0, le=10_000_000)
     anchor_key_sha256: Sha256
@@ -442,6 +464,11 @@ class LongitudinalMemberDecision(CompatibilityContract):
             LongitudinalOutcome.EQUIVALENT,
             LongitudinalOutcome.QUALIFIED_COMPATIBLE,
         }
+        if eligible and (
+            self.anchor_linkage_receipt_sha256 is None
+            or self.member_linkage_receipt_sha256 is None
+        ):
+            raise ValueError("eligible decision requires exact activation receipts")
         if self.delta_allowed != eligible or self.connecting_trend_allowed != eligible:
             raise ValueError("only equivalent or qualified outcomes permit rendering")
         if self.outcome == LongitudinalOutcome.REGISTERED_BRIDGE:
@@ -633,26 +660,46 @@ def longitudinal_member_decision_sha256(
     return hashlib.sha256(canonical_contract_bytes(decision)).hexdigest()
 
 
-def _invalid_state(
+def _linkage_authority_invalid(
     record: LongitudinalRecord,
     *,
-    expected_authority_head_sha256: str,
     expected_linkage_trust_snapshot_sha256_by_provider: dict[str, str],
+    linkage_store: ProviderLinkageStore | None,
 ) -> bool:
-    measurement = record.measurement
-    capability = measurement.current_capability
     authorized = record.authorized_linkage
+    receipt = record.activation_receipt
     expected_trust = expected_linkage_trust_snapshot_sha256_by_provider.get(
         record.linkage_revision.provider_namespace
     )
-    return (
+    invalid = (
         authorized is None
+        or receipt is None
+        or linkage_store is None
         or expected_trust is None
         or provider_trust_snapshot_sha256(authorized.trust_snapshot)
         != expected_trust
         or not authorized.authorization.linkage_authorized
-        or not authorized.authorization.comparison_linkage_eligible
-        or capability.authority_head_sha256 != expected_authority_head_sha256
+    )
+    if invalid:
+        return True
+    assert receipt is not None
+    assert linkage_store is not None
+    try:
+        linkage_store.verify_current_receipt(receipt)
+    except ProviderLinkageStoreError:
+        return True
+    return False
+
+
+def _result_state_invalid(
+    record: LongitudinalRecord,
+    *,
+    expected_authority_head_sha256: str,
+) -> bool:
+    measurement = record.measurement
+    capability = measurement.current_capability
+    return (
+        capability.authority_head_sha256 != expected_authority_head_sha256
         or record.comparison_key.authority_head_sha256
         != expected_authority_head_sha256
         or record.comparison_key.authority_revision != capability.authority_revision
@@ -670,6 +717,7 @@ def decide_longitudinal_member(
     expected_policy_sha256: str,
     expected_authority_head_sha256: str,
     expected_linkage_trust_snapshot_sha256_by_provider: dict[str, str],
+    linkage_store: ProviderLinkageStore | None,
 ) -> LongitudinalMemberDecision:
     """Evaluate one member against the pinned anchor, never against a neighbor."""
 
@@ -687,18 +735,27 @@ def decide_longitudinal_member(
         reasons.add(LongitudinalReason.POLICY_IDENTITY_INVALID)
     if policy.anchor_key_sha256 != anchor_key_sha256:
         reasons.add(LongitudinalReason.ANCHOR_IDENTITY_INVALID)
-    if _invalid_state(
+    linkage_invalid = _linkage_authority_invalid(
+        anchor,
+        expected_linkage_trust_snapshot_sha256_by_provider=(
+            expected_linkage_trust_snapshot_sha256_by_provider
+        ),
+        linkage_store=linkage_store,
+    ) or _linkage_authority_invalid(
+        member,
+        expected_linkage_trust_snapshot_sha256_by_provider=(
+            expected_linkage_trust_snapshot_sha256_by_provider
+        ),
+        linkage_store=linkage_store,
+    )
+    if linkage_invalid:
+        reasons.add(LongitudinalReason.LINKAGE_AUTHORITY_INVALID)
+    if _result_state_invalid(
         anchor,
         expected_authority_head_sha256=expected_authority_head_sha256,
-        expected_linkage_trust_snapshot_sha256_by_provider=(
-            expected_linkage_trust_snapshot_sha256_by_provider
-        ),
-    ) or _invalid_state(
+    ) or _result_state_invalid(
         member,
         expected_authority_head_sha256=expected_authority_head_sha256,
-        expected_linkage_trust_snapshot_sha256_by_provider=(
-            expected_linkage_trust_snapshot_sha256_by_provider
-        ),
     ):
         reasons.add(LongitudinalReason.RESULT_STATE_INVALID)
     if (
@@ -708,7 +765,17 @@ def decide_longitudinal_member(
         != member.measurement.current_capability.authority_revision
     ):
         reasons.add(LongitudinalReason.RESULT_STATE_INVALID)
-    if anchor.authorized_linkage is None or member.authorized_linkage is None:
+    if (
+        not linkage_invalid
+        and anchor.activation_receipt is not None
+        and member.activation_receipt is not None
+        and (
+        anchor.activation_receipt.state_version
+        != member.activation_receipt.state_version
+        or anchor.activation_receipt.state_head_sha256
+        != member.activation_receipt.state_head_sha256
+        )
+    ):
         reasons.add(LongitudinalReason.LINKAGE_AUTHORITY_INVALID)
     linkage_identity_mismatch = (
         anchor.linkage_revision.provider_namespace
@@ -797,6 +864,16 @@ def decide_longitudinal_member(
         member_linkage_revision_sha256=linkage_revision_sha256(
             member.linkage_revision
         ),
+        anchor_linkage_receipt_sha256=(
+            committed_linkage_receipt_sha256(anchor.activation_receipt)
+            if anchor.activation_receipt is not None
+            else None
+        ),
+        member_linkage_receipt_sha256=(
+            committed_linkage_receipt_sha256(member.activation_receipt)
+            if member.activation_receipt is not None
+            else None
+        ),
         authority_head_sha256=expected_authority_head_sha256,
         authority_revision=anchor.measurement.current_capability.authority_revision,
         anchor_key_sha256=anchor_key_sha256,
@@ -829,6 +906,7 @@ def decide_longitudinal_series(
     expected_policy_sha256: str,
     expected_authority_head_sha256: str,
     expected_linkage_trust_snapshot_sha256_by_provider: dict[str, str],
+    linkage_store: ProviderLinkageStore | None,
 ) -> LongitudinalSeriesDecision:
     """Evaluate canonical immutable membership against one explicit anchor."""
 
@@ -847,6 +925,7 @@ def decide_longitudinal_series(
             expected_linkage_trust_snapshot_sha256_by_provider=(
                 expected_linkage_trust_snapshot_sha256_by_provider
             ),
+            linkage_store=linkage_store,
         )
         for member in members
     )

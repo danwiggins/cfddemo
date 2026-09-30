@@ -10,6 +10,7 @@ identity.
 Each `LongitudinalRecord` binds an exact E05 result ID/digest, bundle ID/digest,
 E05 compatibility-key digest, E01 capability digest, registry identity and
 authority head/revision to one proof-carrying D01 linkage revision and a
+current `CommittedLinkageReceipt` from the protected transactional store plus a
 `LongitudinalComparisonKey`. The linkage's protected measurement token and
 source-projection token are derived from those exact E05/E01 identities, so an
 unrelated authorized linkage cannot be attached to a result. The key carries
@@ -60,7 +61,7 @@ trend lines. `registered_bridge` reports the bridge reference but does not run
 it, emit a translated value, or connect the source records. `requires_reanalysis`,
 `registered_bridge`, `incompatible` and `unknown` all suppress deltas and trends.
 Each decision binds the exact result, bundle, record, linkage, capability,
-anchor and policy identities and has canonical bytes and a SHA-256 digest. A
+activation-receipt, anchor and policy identities and has canonical bytes and a SHA-256 digest. A
 series retains the ordered digest of every member decision. Closed semantic
 validation rejects forged combinations such as an `equivalent` outcome carrying
 mismatch dimensions or evidence.
@@ -70,8 +71,12 @@ Distinct collections are biological timepoints. Multiple technical analyses may
 bind the same collection without becoming additional biological timepoints.
 
 Policy digests, current E01 authority-head digest and provider trust-snapshot
-digests are caller-pinned external inputs. Missing or stale pins produce
-`unknown`. Scientific qualification and provider approval are not inferred from
+digests are caller-pinned external inputs. The decision engine also requires a
+live `ProviderLinkageStore`; it invokes `verify_current_receipt` for both anchor
+and member. A serialized, forged, stale or absent receipt, or an absent live
+verifier, produces `unknown` and suppresses deltas/trends. Receipt digests bind
+the exact provider, linkage, revision, store version and store head into each
+decision. Scientific qualification and provider approval are not inferred from
 a fixture, method label, matching digest, or passing test. The future durable
-comparison-membership ledger must replay D01 authority and bind the exact D02
+comparison-membership ledger must replay the live store and bind the exact D02
 decisions before materializing a view.
