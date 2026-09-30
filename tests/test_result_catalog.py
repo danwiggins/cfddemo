@@ -207,6 +207,40 @@ def test_prepared_adoption_rejects_caller_callbacks_without_execution(
     catalog.finish_prepared_import(prepared)
 
 
+def test_result_catalog_rejects_mutated_fault_lock_without_dispatch(
+    tmp_path: Path,
+) -> None:
+    calls: list[str] = []
+
+    class Hook:
+        def __enter__(self):
+            calls.append("enter")
+            raise AssertionError
+
+        def __exit__(self, *_args):
+            calls.append("exit")
+            raise AssertionError
+
+    import_root = tmp_path / "imports"
+    import_root.mkdir()
+    *_, capability = _authority()
+    _, _, trust_store = _bundle(
+        import_root / "incoming", method=_bundle_method(capability)
+    )
+    controller = DeterministicFaultController("after_bundle_snapshot")
+    catalog = ResultCatalog(
+        tmp_path / "catalog",
+        import_roots={"root_primary": import_root},
+        trust_store=trust_store,
+        fault_controller=controller,
+    )
+    object.__setattr__(controller, "_lock", Hook())
+    with pytest.raises(CatalogError, match="fault controller changed"):
+        _import(catalog)
+    assert calls == []
+    assert catalog.query(CatalogQuery()).empty
+
+
 def test_prepared_publication_compensation_retains_shared_object(
     tmp_path: Path,
 ) -> None:

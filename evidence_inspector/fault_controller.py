@@ -42,6 +42,65 @@ class InjectedFault(RuntimeError):
     """Deterministic package-owned test interruption."""
 
 
+_LOCK_TYPE = type(threading.Lock())
+_EVENT_TYPE = threading.Event
+_LOCK_ENTER = _LOCK_TYPE.__enter__
+_LOCK_EXIT = _LOCK_TYPE.__exit__
+_EVENT_SET = _EVENT_TYPE.set
+_EVENT_WAIT = _EVENT_TYPE.wait
+
+
+def validate_fault_controller(
+    controller: object,
+) -> tuple[str | None, FaultAction, int]:
+    """Capture exact controller primitives without dispatching to caller code."""
+
+    if type(controller) is not DeterministicFaultController:
+        raise TypeError("fault controller must be exact")
+    point = object.__getattribute__(controller, "_point")
+    action = object.__getattribute__(controller, "_action")
+    exit_code = object.__getattribute__(controller, "_exit_code")
+    armed = object.__getattribute__(controller, "_armed")
+    fired = object.__getattribute__(controller, "_fired")
+    lock = object.__getattribute__(controller, "_lock")
+    reached = object.__getattribute__(controller, "_reached")
+    released = object.__getattribute__(controller, "_released")
+    sealed = object.__getattribute__(controller, "_sealed")
+    if point is not None and type(point) is not str:
+        raise TypeError("fault point must be an exact string")
+    if point is not None and point not in FAULT_POINTS:
+        raise ValueError("fault point is invalid")
+    if type(action) is not FaultAction:
+        raise TypeError("fault action must be exact")
+    if type(exit_code) is not int or not 1 <= exit_code <= 255:
+        raise ValueError("fault exit code is invalid")
+    if type(armed) is not bool or type(fired) is not bool or type(sealed) is not bool:
+        raise TypeError("fault controller state is invalid")
+    if armed is not (point is not None) or not sealed:
+        raise TypeError("fault controller state is invalid")
+    if type(lock) is not _LOCK_TYPE:
+        raise TypeError("fault controller lock is invalid")
+    if type(reached) is not _EVENT_TYPE or type(released) is not _EVENT_TYPE:
+        raise TypeError("fault controller event is invalid")
+    return point, action, exit_code
+
+
+def fault_controller_snapshot(
+    controller: object,
+) -> tuple[str | None, FaultAction, int, int, int, int]:
+    """Bind configuration and every retained synchronization primitive."""
+
+    point, action, exit_code = validate_fault_controller(controller)
+    return (
+        point,
+        action,
+        exit_code,
+        id(object.__getattribute__(controller, "_lock")),
+        id(object.__getattribute__(controller, "_reached")),
+        id(object.__getattribute__(controller, "_released")),
+    )
+
+
 class DeterministicFaultController:
     __slots__ = (
         "_action",
@@ -95,38 +154,65 @@ class DeterministicFaultController:
 
     @property
     def configuration(self) -> tuple[str | None, FaultAction, int]:
-        return self._point, self._action, self._exit_code
+        return validate_fault_controller(self)
 
     @property
     def fired(self) -> bool:
         return self._fired
 
     def hit(self, point: str) -> None:
-        if type(self) is not DeterministicFaultController:
-            raise TypeError("fault controller must be exact")
         if type(point) is not str:
             raise TypeError("fault point must be an exact string")
         if point not in FAULT_POINTS:
             raise ValueError("fault point is invalid")
-        with self._lock:
-            if not self._armed or self._fired or point != self._point:
+        configured_point, action, exit_code = validate_fault_controller(self)
+        lock = object.__getattribute__(self, "_lock")
+        reached = object.__getattribute__(self, "_reached")
+        released = object.__getattribute__(self, "_released")
+        _LOCK_ENTER(lock)
+        try:
+            # Revalidate after acquiring the retained exact lock. Concurrent
+            # replacement can only fail closed before any replacement is used.
+            if validate_fault_controller(self) != (
+                configured_point,
+                action,
+                exit_code,
+            ):
+                raise TypeError("fault controller changed")
+            if (
+                object.__getattribute__(self, "_lock") is not lock
+                or object.__getattribute__(self, "_reached") is not reached
+                or object.__getattribute__(self, "_released") is not released
+            ):
+                raise TypeError("fault controller changed")
+            if (
+                not object.__getattribute__(self, "_armed")
+                or object.__getattribute__(self, "_fired")
+                or point != configured_point
+            ):
                 return
             object.__setattr__(self, "_fired", True)
-            self._reached.set()
-        if self._action is FaultAction.EXIT:
-            os._exit(self._exit_code)
-        if self._action is FaultAction.RAISE:
+            _EVENT_SET(reached)
+        finally:
+            _LOCK_EXIT(lock, None, None, None)
+        if action is FaultAction.EXIT:
+            os._exit(exit_code)
+        if action is FaultAction.RAISE:
             raise InjectedFault(f"injected fault at {point}")
-        if not self._released.wait(timeout=30):
+        if not _EVENT_WAIT(released, timeout=30):
             raise InjectedFault(f"fault pause timed out at {point}")
-        if self._action is FaultAction.PAUSE_RAISE:
+        if action is FaultAction.PAUSE_RAISE:
             raise InjectedFault(f"injected fault at {point}")
 
     def wait_until_reached(self, timeout: float = 10) -> bool:
-        return self._reached.wait(timeout=timeout)
+        validate_fault_controller(self)
+        reached = object.__getattribute__(self, "_reached")
+        return _EVENT_WAIT(reached, timeout=timeout)
 
     def release(self) -> None:
-        self._released.set()
+        validate_fault_controller(self)
+        released = object.__getattribute__(self, "_released")
+        _EVENT_SET(released)
 
 
 NO_FAULTS = DeterministicFaultController()
@@ -138,4 +224,6 @@ __all__ = [
     "DeterministicFaultController",
     "FaultAction",
     "InjectedFault",
+    "fault_controller_snapshot",
+    "validate_fault_controller",
 ]

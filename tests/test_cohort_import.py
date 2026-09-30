@@ -760,6 +760,89 @@ def test_fault_controller_rejects_hostile_points_without_dispatch_or_root_creati
     assert calls == []
 
 
+def test_fault_controller_internal_replacement_never_dispatches_or_creates_root(
+    tmp_path: Path, live
+) -> None:
+    calls: list[str] = []
+
+    class Hook:
+        def __enter__(self):
+            calls.append("enter")
+            raise AssertionError
+
+        def __exit__(self, *_args):
+            calls.append("exit")
+            raise AssertionError
+
+        def set(self):
+            calls.append("set")
+            raise AssertionError
+
+        def wait(self, *_args, **_kwargs):
+            calls.append("wait")
+            raise AssertionError
+
+    class HostilePoint(str):
+        def __eq__(self, _other):
+            calls.append("eq")
+            raise AssertionError
+
+        def __ne__(self, _other):
+            calls.append("ne")
+            raise AssertionError
+
+        def __hash__(self):
+            calls.append("hash")
+            raise AssertionError
+
+    source = _setup(tmp_path / "source", live)
+    replacements = (
+        ("_lock", Hook()),
+        ("_reached", Hook()),
+        ("_released", Hook()),
+        ("_point", HostilePoint("after_preflight")),
+    )
+    for index, (field, replacement) in enumerate(replacements):
+        controller = DeterministicFaultController("after_preflight")
+        object.__setattr__(controller, field, replacement)
+        target = tmp_path / f"rejected-{index}"
+        with pytest.raises(TypeError, match="fault"):
+            CohortRecordCatalog(
+                target,
+                result_catalog=source[1],
+                linkage_store=live[0],
+                expected_trust_snapshot_sha256_by_provider=_pins(),
+                reader_registry=DEFAULT_RESULT_BUNDLE_READER_REGISTRY,
+                fault_controller=controller,
+            )
+        assert not target.exists()
+        assert calls == []
+
+
+def test_mutated_retained_fault_controller_fails_before_caller_hook(
+    tmp_path: Path, live
+) -> None:
+    calls: list[str] = []
+
+    class Hook:
+        def __enter__(self):
+            calls.append("enter")
+            raise AssertionError
+
+        def __exit__(self, *_args):
+            calls.append("exit")
+            raise AssertionError
+
+    controller = DeterministicFaultController("after_preflight")
+    values = _setup(tmp_path, live, controller)
+    object.__setattr__(controller, "_lock", Hook())
+    with pytest.raises(CohortImportError, match="fault controller changed"):
+        _import(values)
+    assert calls == []
+    assert values[1].query(CatalogQuery()).empty
+    assert tuple((tmp_path / "cohort-records").iterdir()) == ()
+
+
 def test_cohort_constructor_bounds_hostile_trust_mapping_before_root_creation(
     tmp_path: Path, live
 ) -> None:

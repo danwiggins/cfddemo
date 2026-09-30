@@ -80,8 +80,10 @@ than treating a recursive Python self-check as an authorization root. No data,
 bundle-reader, plugin, or evaluation input receives a code-mutation capability.
 Production and recovery paths do not execute caller callbacks. Fault-window
 tests use an exact, non-subclassable package controller with immutable
-configuration and fixed raise, exit, or synchronization actions; catalog
-instances pin its exact identity and reject replacement.
+configuration and fixed raise, exit, or synchronization actions. Catalog
+instances pin its exact identity, primitive configuration, lock, and event
+identities; every member is type-checked without caller dispatch before the
+package invokes pinned unbound operations.
 
 This implementation remains synthetic and local. The binding index contains
 protected analysis and provider identifiers and must stay inside provider

@@ -35,6 +35,7 @@ from pydantic import (
 from evidence_inspector.fault_controller import (
     NO_FAULTS,
     DeterministicFaultController,
+    fault_controller_snapshot,
 )
 from evidence_inspector.method_registry import (
     AuthorityHead,
@@ -55,6 +56,8 @@ from traceback_runner.signing import TrustStore
 
 _PINNED_VERIFY_BUNDLE = verify_bundle
 _PINNED_TRUST_RESOLVE = TrustStore.resolve
+_PINNED_FAULT_SNAPSHOT = fault_controller_snapshot
+_PINNED_FAULT_HIT = DeterministicFaultController.hit
 
 CATALOG_SCHEMA_VERSION = 2
 MAX_IMPORT_ROOTS = 8
@@ -827,7 +830,7 @@ class ResultCatalog:
             raise TypeError("fault controller must be exact")
         self._fault_controller = fault_controller
         self._fault_controller_identity = id(fault_controller)
-        self._fault_controller_configuration = fault_controller.configuration
+        self._fault_controller_configuration = _PINNED_FAULT_SNAPSHOT(fault_controller)
         if self.root.is_symlink() or (self.root.exists() and not self.root.is_dir()):
             raise CatalogFilesystemError("catalog root is unsafe")
         self.root.mkdir(parents=True, exist_ok=True)
@@ -948,13 +951,18 @@ class ResultCatalog:
 
     def _fault(self, point: str) -> None:
         controller = self._fault_controller
-        if (
-            type(controller) is not DeterministicFaultController
-            or id(controller) != self._fault_controller_identity
-            or controller.configuration != self._fault_controller_configuration
+        try:
+            snapshot = _PINNED_FAULT_SNAPSHOT(controller)
+        except (TypeError, ValueError):
+            raise CatalogError("catalog fault controller changed") from None
+        if id(controller) != self._fault_controller_identity or (
+            snapshot != self._fault_controller_configuration
         ):
             raise CatalogError("catalog fault controller changed")
-        controller.hit(point)
+        try:
+            _PINNED_FAULT_HIT(controller, point)
+        except (TypeError, ValueError):
+            raise CatalogError("catalog fault controller changed") from None
 
     @property
     def _bound_objects(self) -> Path:

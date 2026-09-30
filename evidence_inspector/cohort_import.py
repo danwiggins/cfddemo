@@ -34,7 +34,11 @@ from evidence_inspector.cohort_manifest import (
     validate_manifest_against_linkage_store,
     validate_manifest_history,
 )
-from evidence_inspector.fault_controller import NO_FAULTS, DeterministicFaultController
+from evidence_inspector.fault_controller import (
+    NO_FAULTS,
+    DeterministicFaultController,
+    fault_controller_snapshot,
+)
 from evidence_inspector.method_registry import (
     AuthorityHead,
     CurrentMethodCapability,
@@ -90,6 +94,8 @@ _PINNED_RESULT_MODULE_VERIFY = result_catalog_module._PINNED_VERIFY_BUNDLE
 _PINNED_RESULT_MODULE_TRUST_RESOLVE = result_catalog_module._PINNED_TRUST_RESOLVE
 _PINNED_MANIFEST_ACTIVE_SNAPSHOT = cohort_manifest_module._PINNED_ACTIVE_SNAPSHOT
 _PINNED_MANIFEST_STORE_CALLABLES = cohort_manifest_module._PINNED_STORE_CALLABLES
+_PINNED_FAULT_SNAPSHOT = fault_controller_snapshot
+_PINNED_FAULT_HIT = DeterministicFaultController.hit
 
 
 class CohortImportError(RuntimeError):
@@ -383,7 +389,7 @@ class CohortRecordCatalog:
             raise TypeError("fault controller must be exact")
         self._fault_controller = fault_controller
         self._fault_controller_identity = id(fault_controller)
-        self._fault_controller_configuration = fault_controller.configuration
+        self._fault_controller_configuration = _PINNED_FAULT_SNAPSHOT(fault_controller)
         self.root = Path(root).absolute()
         if self.root.is_symlink() or (self.root.exists() and not self.root.is_dir()):
             raise CohortImportFilesystemError("cohort record index root is unsafe")
@@ -857,13 +863,18 @@ class CohortRecordCatalog:
 
     def _fault(self, point: str) -> None:
         controller = self._fault_controller
-        if (
-            type(controller) is not DeterministicFaultController
-            or id(controller) != self._fault_controller_identity
-            or controller.configuration != self._fault_controller_configuration
+        try:
+            snapshot = _PINNED_FAULT_SNAPSHOT(controller)
+        except (TypeError, ValueError):
+            raise CohortImportError("cohort fault controller changed") from None
+        if id(controller) != self._fault_controller_identity or (
+            snapshot != self._fault_controller_configuration
         ):
             raise CohortImportError("cohort fault controller changed")
-        controller.hit(point)
+        try:
+            _PINNED_FAULT_HIT(controller, point)
+        except (TypeError, ValueError):
+            raise CohortImportError("cohort fault controller changed") from None
 
     def _validate_manifest(
         self, manifest: CohortManifest, *, changed: bool = False
