@@ -754,10 +754,14 @@ def _linkage_authority_invalid(
     assert receipt is not None
     assert type(linkage_store) is ProviderLinkageStore
     try:
-        _PINNED_VERIFY_CURRENT_RECEIPT(linkage_store, receipt)
+        snapshot = _PINNED_ACTIVE_SNAPSHOT(linkage_store)
     except ProviderLinkageStoreError:
         return True
-    return False
+    return (
+        receipt.state_version != snapshot.state_version
+        or receipt.state_head_sha256 != snapshot.state_head_sha256
+        or receipt not in snapshot.receipts
+    )
 
 
 def _result_state_invalid(
