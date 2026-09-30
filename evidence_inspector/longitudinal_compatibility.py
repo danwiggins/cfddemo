@@ -14,6 +14,7 @@ import re
 import sqlite3
 import threading
 import unicodedata
+from datetime import datetime
 from enum import StrEnum
 from typing import Annotated, Literal
 from urllib.parse import unquote
@@ -616,8 +617,8 @@ class LongitudinalAnchorPolicy(CompatibilityContract):
         return self
 
 
-class LongitudinalMemberDecision(CompatibilityContract):
-    schema_version: Literal["traceback.longitudinal-member-decision.v2"]
+class _LongitudinalMemberDecisionBase(CompatibilityContract):
+    schema_version: str
     anchor_result_id: ResultId
     member_result_id: ResultId
     anchor_result_sha256: Sha256
@@ -664,7 +665,7 @@ class LongitudinalMemberDecision(CompatibilityContract):
     connecting_trend_allowed: bool
 
     @model_validator(mode="after")
-    def coherent_rendering(self) -> LongitudinalMemberDecision:
+    def coherent_rendering(self) -> _LongitudinalMemberDecisionBase:
         if self.evaluated_dimensions != ALL_COMPARISON_DIMENSIONS:
             raise ValueError("decision must report every evaluated dimension")
         if tuple(item.dimension for item in self.dimension_explanations) != (
@@ -698,6 +699,8 @@ class LongitudinalMemberDecision(CompatibilityContract):
             or self.member_linkage_receipt_sha256 is None
         ):
             raise ValueError("eligible decision requires exact activation receipts")
+        if eligible and self.engine_version != SUPPORTED_LONGITUDINAL_ENGINE_VERSION:
+            raise ValueError("eligible decision requires the supported engine version")
         if self.delta_allowed != eligible or self.connecting_trend_allowed != eligible:
             raise ValueError("only equivalent or qualified outcomes permit rendering")
         if set(self.mismatch_dimensions) & set(self.unknown_dimensions):
@@ -811,8 +814,73 @@ class LongitudinalMemberDecision(CompatibilityContract):
         return self
 
 
-class LongitudinalSeriesDecision(CompatibilityContract):
+class LegacyLongitudinalMemberDecisionV2(_LongitudinalMemberDecisionBase):
+    """Historical v2 member envelope; never sufficient for current replay."""
+
+    schema_version: Literal["traceback.longitudinal-member-decision.v2"]
+
+
+class LongitudinalMemberDecision(_LongitudinalMemberDecisionBase):
+    schema_version: Literal["traceback.longitudinal-member-decision.v3"]
+    linkage_snapshot_state_version: int | None = Field(ge=0, le=10_000_000)
+    linkage_snapshot_state_head_sha256: Sha256 | None
+    linkage_snapshot_sha256: Sha256 | None
+
+    @model_validator(mode="after")
+    def exact_snapshot_binding(self) -> LongitudinalMemberDecision:
+        binding = (
+            self.linkage_snapshot_state_version,
+            self.linkage_snapshot_state_head_sha256,
+            self.linkage_snapshot_sha256,
+        )
+        if any(value is not None for value in binding) and any(
+            value is None for value in binding
+        ):
+            raise ValueError("decision linkage snapshot binding must be complete")
+        if self.delta_allowed and any(value is None for value in binding):
+            raise ValueError("eligible decision requires an exact linkage snapshot")
+        return self
+
+
+class LegacyLongitudinalSeriesDecisionV2(CompatibilityContract):
     schema_version: Literal["traceback.longitudinal-series-decision.v2"]
+    anchor_result_id: ResultId
+    policy_sha256: Sha256
+    member_result_ids: tuple[ResultId, ...] = Field(
+        min_length=1, max_length=MAX_SERIES_MEMBERS
+    )
+    decisions: tuple[LegacyLongitudinalMemberDecisionV2, ...] = Field(
+        min_length=1, max_length=MAX_SERIES_MEMBERS
+    )
+    decision_sha256s: tuple[Sha256, ...] = Field(
+        min_length=1, max_length=MAX_SERIES_MEMBERS
+    )
+
+    @model_validator(mode="after")
+    def exact_legacy_membership(self) -> LegacyLongitudinalSeriesDecisionV2:
+        if self.member_result_ids != tuple(sorted(set(self.member_result_ids))):
+            raise ValueError("legacy series member IDs must be uniquely sorted")
+        if tuple(item.member_result_id for item in self.decisions) != (
+            self.member_result_ids
+        ):
+            raise ValueError("legacy series decisions must match ordered membership")
+        if any(
+            item.anchor_result_id != self.anchor_result_id
+            or item.policy_sha256 != self.policy_sha256
+            for item in self.decisions
+        ):
+            raise ValueError("legacy series decisions must share anchor and policy")
+        expected_sha256s = tuple(
+            hashlib.sha256(canonical_contract_bytes(item)).hexdigest()
+            for item in self.decisions
+        )
+        if self.decision_sha256s != expected_sha256s:
+            raise ValueError("legacy series digests do not match exact decisions")
+        return self
+
+
+class LongitudinalSeriesDecision(CompatibilityContract):
+    schema_version: Literal["traceback.longitudinal-series-decision.v3"]
     anchor_result_id: ResultId
     anchor_result_sha256: Sha256
     anchor_bundle_sha256: Sha256
@@ -823,6 +891,7 @@ class LongitudinalSeriesDecision(CompatibilityContract):
     authority_head_sha256: Sha256
     authority_revision: int = Field(ge=0, le=10_000_000)
     policy_sha256: Sha256
+    linkage_snapshot: ActiveLinkageSnapshot | None
     linkage_snapshot_sha256: Sha256 | None
     member_result_ids: tuple[ResultId, ...] = Field(
         min_length=1, max_length=MAX_SERIES_MEMBERS
@@ -872,11 +941,39 @@ class LongitudinalSeriesDecision(CompatibilityContract):
             raise ValueError(
                 "series decisions must share one exact anchor, authority, and policy"
             )
-        if self.linkage_snapshot_sha256 is None and any(
+        eligible = any(
             item.delta_allowed or item.connecting_trend_allowed
             for item in self.decisions
-        ):
+        )
+        if eligible and self.linkage_snapshot is None:
             raise ValueError("eligible series requires one exact linkage snapshot")
+        expected_snapshot_sha256 = (
+            hashlib.sha256(canonical_contract_bytes(self.linkage_snapshot)).hexdigest()
+            if self.linkage_snapshot is not None
+            else None
+        )
+        if self.linkage_snapshot_sha256 != expected_snapshot_sha256:
+            raise ValueError("series linkage snapshot digest is not exact")
+        if self.linkage_snapshot is not None:
+            if any(
+                item.linkage_snapshot_state_version
+                != self.linkage_snapshot.state_version
+                or item.linkage_snapshot_state_head_sha256
+                != self.linkage_snapshot.state_head_sha256
+                or item.linkage_snapshot_sha256 != self.linkage_snapshot_sha256
+                for item in self.decisions
+            ):
+                raise ValueError("series decisions do not bind the exact snapshot")
+            receipt_sha256s = {
+                committed_linkage_receipt_sha256(receipt)
+                for receipt in self.linkage_snapshot.receipts
+            }
+            if any(
+                item.anchor_linkage_receipt_sha256 not in receipt_sha256s
+                or item.member_linkage_receipt_sha256 not in receipt_sha256s
+                for item in self.decisions
+            ):
+                raise ValueError("series decisions are not members of the snapshot")
         if self.decision_sha256s != tuple(
             longitudinal_member_decision_sha256(item) for item in self.decisions
         ):
@@ -972,18 +1069,98 @@ def longitudinal_comparison_key_sha256(key: LongitudinalComparisonKey) -> str:
     return hashlib.sha256(canonical_contract_bytes(key)).hexdigest()
 
 
-def longitudinal_anchor_policy_sha256(policy: LongitudinalAnchorPolicy) -> str:
-    return hashlib.sha256(canonical_contract_bytes(policy)).hexdigest()
+def _exact_contract_bytes(
+    contract: object,
+    expected_type: type[object],
+    serializer: object,
+) -> bytes:
+    if type(contract) is not expected_type:
+        raise TypeError("longitudinal contract type is invalid")
+    if not _contract_graph_is_trusted(contract):
+        raise TypeError("longitudinal contract graph is invalid")
+    payload = serializer.to_python(  # type: ignore[attr-defined]
+        contract,
+        mode="json",
+        exclude_none=False,
+        warnings="error",
+    )
+    return json.dumps(
+        payload,
+        allow_nan=False,
+        ensure_ascii=False,
+        separators=(",", ":"),
+        sort_keys=True,
+    ).encode("utf-8")
 
 
-def longitudinal_record_sha256(record: LongitudinalRecord) -> str:
-    return hashlib.sha256(canonical_contract_bytes(record)).hexdigest()
+def _contract_graph_is_trusted(root: object) -> bool:
+    """Reject caller-owned nested proxies without invoking their hooks."""
+
+    stack = [root]
+    seen: set[int] = set()
+    while stack:
+        value = stack.pop()
+        if value is None or type(value) in {bool, int, float, str, bytes, datetime}:
+            continue
+        identity = id(value)
+        if identity in seen:
+            continue
+        seen.add(identity)
+        if isinstance(value, RegistryContract):
+            value_type = type(value)
+            if not value_type.__module__.startswith("evidence_inspector."):
+                return False
+            try:
+                state = object.__getattribute__(value, "__dict__")
+            except (AttributeError, TypeError):
+                return False
+            if type(state) is not dict or any(type(key) is not str for key in state):
+                return False
+            fields = vars(value_type).get("__pydantic_fields__")
+            if type(fields) is not dict or not set(fields) <= set(state):
+                return False
+            stack.extend(state[name] for name in fields)
+            continue
+        if isinstance(value, StrEnum):
+            if not type(value).__module__.startswith("evidence_inspector."):
+                return False
+            continue
+        if type(value) is tuple:
+            stack.extend(value)
+            continue
+        if type(value) is dict:
+            stack.extend(value.keys())
+            stack.extend(value.values())
+            continue
+        return False
+    return True
+
+
+def longitudinal_anchor_policy_sha256(
+    policy: LongitudinalAnchorPolicy,
+    _serializer: object = LongitudinalAnchorPolicy.__pydantic_serializer__,
+) -> str:
+    return hashlib.sha256(
+        _exact_contract_bytes(policy, LongitudinalAnchorPolicy, _serializer)
+    ).hexdigest()
+
+
+def longitudinal_record_sha256(
+    record: LongitudinalRecord,
+    _serializer: object = LongitudinalRecord.__pydantic_serializer__,
+) -> str:
+    return hashlib.sha256(
+        _exact_contract_bytes(record, LongitudinalRecord, _serializer)
+    ).hexdigest()
 
 
 def longitudinal_member_decision_sha256(
     decision: LongitudinalMemberDecision,
+    _serializer: object = LongitudinalMemberDecision.__pydantic_serializer__,
 ) -> str:
-    return hashlib.sha256(canonical_contract_bytes(decision)).hexdigest()
+    return hashlib.sha256(
+        _exact_contract_bytes(decision, LongitudinalMemberDecision, _serializer)
+    ).hexdigest()
 
 
 _INVALID_INPUT_SHA256 = hashlib.sha256(
@@ -1010,7 +1187,7 @@ _INVALID_INPUT_EXPLANATIONS = tuple(
 )
 _INVALID_INPUT_MEMBER_DECISION_BYTES = canonical_contract_bytes(
     LongitudinalMemberDecision(
-        schema_version="traceback.longitudinal-member-decision.v2",
+        schema_version="traceback.longitudinal-member-decision.v3",
         anchor_result_id=_INVALID_INPUT_RESULT_ID,
         member_result_id=_INVALID_INPUT_RESULT_ID,
         anchor_result_sha256=_INVALID_INPUT_SHA256,
@@ -1023,6 +1200,9 @@ _INVALID_INPUT_MEMBER_DECISION_BYTES = canonical_contract_bytes(
         member_linkage_revision_sha256=_INVALID_INPUT_SHA256,
         anchor_linkage_receipt_sha256=None,
         member_linkage_receipt_sha256=None,
+        linkage_snapshot_state_version=None,
+        linkage_snapshot_state_head_sha256=None,
+        linkage_snapshot_sha256=None,
         authority_head_sha256=_INVALID_INPUT_SHA256,
         authority_revision=0,
         anchor_key_sha256=_INVALID_INPUT_SHA256,
@@ -1059,7 +1239,7 @@ _INVALID_INPUT_MEMBER_DECISION_SHA256 = hashlib.sha256(
 ).hexdigest()
 _INVALID_INPUT_SERIES_DECISION_BYTES = canonical_contract_bytes(
     LongitudinalSeriesDecision(
-        schema_version="traceback.longitudinal-series-decision.v2",
+        schema_version="traceback.longitudinal-series-decision.v3",
         anchor_result_id=_INVALID_INPUT_RESULT_ID,
         anchor_result_sha256=_INVALID_INPUT_SHA256,
         anchor_bundle_sha256=_INVALID_INPUT_SHA256,
@@ -1070,6 +1250,7 @@ _INVALID_INPUT_SERIES_DECISION_BYTES = canonical_contract_bytes(
         authority_head_sha256=_INVALID_INPUT_SHA256,
         authority_revision=0,
         policy_sha256=_INVALID_INPUT_SHA256,
+        linkage_snapshot=None,
         linkage_snapshot_sha256=None,
         member_result_ids=(_INVALID_INPUT_RESULT_ID,),
         decisions=(
@@ -1094,65 +1275,68 @@ def _invalid_input_series_decision() -> LongitudinalSeriesDecision:
     )
 
 
-def _replay_record(record: object) -> LongitudinalRecord:
+def _replay_record(
+    record: object,
+    _serializer: object = LongitudinalRecord.__pydantic_serializer__,
+    _validator: object = LongitudinalRecord.__pydantic_validator__,
+) -> LongitudinalRecord:
     if type(record) is not LongitudinalRecord:
         raise TypeError("longitudinal record type is invalid")
-    encoded = _strict_validation_bytes(LongitudinalRecord, record)
-    replayed = LongitudinalRecord.model_validate_json(encoded)
-    if canonical_contract_bytes(replayed) != encoded:
+    encoded = _exact_contract_bytes(record, LongitudinalRecord, _serializer)
+    replayed = _validator.validate_json(encoded)  # type: ignore[attr-defined]
+    if (
+        type(replayed) is not LongitudinalRecord
+        or _exact_contract_bytes(replayed, LongitudinalRecord, _serializer) != encoded
+    ):
         raise ValueError("longitudinal record is not canonical")
     return replayed
 
 
-def _replay_policy(policy: object) -> LongitudinalAnchorPolicy:
+def _replay_policy(
+    policy: object,
+    _serializer: object = LongitudinalAnchorPolicy.__pydantic_serializer__,
+    _validator: object = LongitudinalAnchorPolicy.__pydantic_validator__,
+) -> LongitudinalAnchorPolicy:
     if type(policy) is not LongitudinalAnchorPolicy:
         raise TypeError("longitudinal policy type is invalid")
-    encoded = _strict_validation_bytes(LongitudinalAnchorPolicy, policy)
-    replayed = LongitudinalAnchorPolicy.model_validate_json(encoded)
-    if canonical_contract_bytes(replayed) != encoded:
+    encoded = _exact_contract_bytes(policy, LongitudinalAnchorPolicy, _serializer)
+    replayed = _validator.validate_json(encoded)  # type: ignore[attr-defined]
+    if (
+        type(replayed) is not LongitudinalAnchorPolicy
+        or _exact_contract_bytes(replayed, LongitudinalAnchorPolicy, _serializer)
+        != encoded
+    ):
         raise ValueError("longitudinal policy is not canonical")
     return replayed
 
 
-def _strict_validation_bytes(
-    model: type[LongitudinalRecord | LongitudinalAnchorPolicy],
+def _strict_member_decision_bytes(
     contract: object,
+    _serializer: object = LongitudinalMemberDecision.__pydantic_serializer__,
+    _validator: object = LongitudinalMemberDecision.__pydantic_validator__,
 ) -> bytes:
-    payload = model.model_dump(
-        contract,
-        mode="json",
-        exclude_none=False,
-        warnings="error",
-    )
-    return json.dumps(
-        payload,
-        allow_nan=False,
-        ensure_ascii=False,
-        separators=(",", ":"),
-        sort_keys=True,
-    ).encode("utf-8")
-
-
-def _strict_member_decision_bytes(contract: object) -> bytes:
     if type(contract) is not LongitudinalMemberDecision:
         raise TypeError("longitudinal decision type is invalid")
-    payload = LongitudinalMemberDecision.model_dump(
-        contract,
-        mode="json",
-        exclude_none=False,
-        warnings="error",
-    )
-    encoded = json.dumps(
-        payload,
-        allow_nan=False,
-        ensure_ascii=False,
-        separators=(",", ":"),
-        sort_keys=True,
-    ).encode("utf-8")
-    replayed = LongitudinalMemberDecision.model_validate_json(encoded)
-    canonical = canonical_contract_bytes(replayed)
+    encoded = _exact_contract_bytes(contract, LongitudinalMemberDecision, _serializer)
+    replayed = _validator.validate_json(encoded)  # type: ignore[attr-defined]
+    canonical = _exact_contract_bytes(replayed, LongitudinalMemberDecision, _serializer)
     if canonical != encoded:
         raise ValueError("longitudinal decision is not canonical")
+    return canonical
+
+
+def _strict_series_decision_bytes(
+    contract: object,
+    _serializer: object = LongitudinalSeriesDecision.__pydantic_serializer__,
+    _validator: object = LongitudinalSeriesDecision.__pydantic_validator__,
+) -> bytes:
+    if type(contract) is not LongitudinalSeriesDecision:
+        raise TypeError("longitudinal series decision type is invalid")
+    encoded = _exact_contract_bytes(contract, LongitudinalSeriesDecision, _serializer)
+    replayed = _validator.validate_json(encoded)  # type: ignore[attr-defined]
+    canonical = _exact_contract_bytes(replayed, LongitudinalSeriesDecision, _serializer)
+    if canonical != encoded:
+        raise ValueError("longitudinal series decision is not canonical")
     return canonical
 
 
@@ -1410,6 +1594,7 @@ def _linkage_authority_invalid(
     *,
     expected_linkage_trust_snapshot_sha256_by_provider: dict[str, str],
     linkage_snapshot: ActiveLinkageSnapshot | None,
+    receipt_index: frozenset[bytes] | None = None,
 ) -> bool:
     authorized = record.authorized_linkage
     receipt = record.activation_receipt
@@ -1432,10 +1617,17 @@ def _linkage_authority_invalid(
     if invalid:
         return True
     assert receipt is not None
+    indexed_receipts = (
+        receipt_index
+        if receipt_index is not None
+        else frozenset(
+            canonical_contract_bytes(item) for item in linkage_snapshot.receipts
+        )
+    )
     return (
         receipt.state_version != linkage_snapshot.state_version
         or receipt.state_head_sha256 != linkage_snapshot.state_head_sha256
-        or receipt not in linkage_snapshot.receipts
+        or canonical_contract_bytes(receipt) not in indexed_receipts
     )
 
 
@@ -1466,6 +1658,8 @@ def _evaluate_longitudinal_member(
     expected_linkage_trust_snapshot_sha256_by_provider: dict[str, str],
     linkage_store: ProviderLinkageStore | None,
     linkage_snapshot: ActiveLinkageSnapshot | None,
+    linkage_receipt_index: frozenset[bytes] | None = None,
+    anchor_linkage_invalid: bool | None = None,
 ) -> LongitudinalMemberDecision:
     anchor_key_sha256 = longitudinal_comparison_key_sha256(anchor.comparison_key)
     member_key_sha256 = longitudinal_comparison_key_sha256(member.comparison_key)
@@ -1484,18 +1678,25 @@ def _evaluate_longitudinal_member(
         reasons.add(LongitudinalReason.POLICY_IDENTITY_INVALID)
     if policy.anchor_key_sha256 != anchor_key_sha256:
         reasons.add(LongitudinalReason.ANCHOR_IDENTITY_INVALID)
-    linkage_invalid = _linkage_authority_invalid(
-        anchor,
-        expected_linkage_trust_snapshot_sha256_by_provider=(
-            expected_linkage_trust_snapshot_sha256_by_provider
-        ),
-        linkage_snapshot=linkage_snapshot,
-    ) or _linkage_authority_invalid(
+    anchor_invalid = (
+        anchor_linkage_invalid
+        if anchor_linkage_invalid is not None
+        else _linkage_authority_invalid(
+            anchor,
+            expected_linkage_trust_snapshot_sha256_by_provider=(
+                expected_linkage_trust_snapshot_sha256_by_provider
+            ),
+            linkage_snapshot=linkage_snapshot,
+            receipt_index=linkage_receipt_index,
+        )
+    )
+    linkage_invalid = anchor_invalid or _linkage_authority_invalid(
         member,
         expected_linkage_trust_snapshot_sha256_by_provider=(
             expected_linkage_trust_snapshot_sha256_by_provider
         ),
         linkage_snapshot=linkage_snapshot,
+        receipt_index=linkage_receipt_index,
     )
     if linkage_invalid:
         reasons.add(LongitudinalReason.LINKAGE_AUTHORITY_INVALID)
@@ -1643,7 +1844,7 @@ def _evaluate_longitudinal_member(
     }
     next_action = _next_action_for_outcome(outcome)
     return LongitudinalMemberDecision(
-        schema_version="traceback.longitudinal-member-decision.v2",
+        schema_version="traceback.longitudinal-member-decision.v3",
         anchor_result_id=anchor.measurement.result_id,
         member_result_id=member.measurement.result_id,
         anchor_result_sha256=anchor.measurement.result_sha256,
@@ -1662,6 +1863,17 @@ def _evaluate_longitudinal_member(
         member_linkage_receipt_sha256=(
             committed_linkage_receipt_sha256(member.activation_receipt)
             if member.activation_receipt is not None
+            else None
+        ),
+        linkage_snapshot_state_version=(
+            linkage_snapshot.state_version if linkage_snapshot is not None else None
+        ),
+        linkage_snapshot_state_head_sha256=(
+            linkage_snapshot.state_head_sha256 if linkage_snapshot is not None else None
+        ),
+        linkage_snapshot_sha256=(
+            hashlib.sha256(canonical_contract_bytes(linkage_snapshot)).hexdigest()
+            if linkage_snapshot is not None
             else None
         ),
         authority_head_sha256=expected_authority_head_sha256,
@@ -1691,7 +1903,52 @@ def _evaluate_longitudinal_member(
     )
 
 
-_PINNED_MEMBER_EVALUATOR = _evaluate_longitudinal_member
+def _build_runtime_integrity_check(root: object):
+    namespace = globals()
+    bindings = tuple(
+        (name, namespace[name])
+        for name in root.__code__.co_names  # type: ignore[attr-defined]
+        if name in namespace
+    )
+    state_values = (root, *(value for _, value in bindings))
+    function_states = tuple(
+        (
+            value,
+            value.__code__,
+            value.__defaults__,
+            value.__kwdefaults__,
+            tuple(
+                (id(cell), id(cell.cell_contents)) for cell in value.__closure__ or ()
+            ),
+        )
+        for value in state_values
+        if hasattr(value, "__code__")
+    )
+
+    def integrity_is_valid() -> bool:
+        try:
+            return all(
+                namespace.get(name) is value for name, value in bindings
+            ) and all(
+                value.__code__ is code
+                and value.__defaults__ == defaults
+                and value.__kwdefaults__ == kwdefaults
+                and tuple(
+                    (id(cell), id(cell.cell_contents))
+                    for cell in value.__closure__ or ()
+                )
+                == closure
+                for value, code, defaults, kwdefaults, closure in function_states
+            )
+        except (AttributeError, RuntimeError, TypeError):
+            return False
+
+    return integrity_is_valid
+
+
+_MEMBER_RUNTIME_INTEGRITY_IS_VALID = _build_runtime_integrity_check(
+    _evaluate_longitudinal_member
+)
 
 
 def _member_decision_matches_inputs(
@@ -1699,6 +1956,7 @@ def _member_decision_matches_inputs(
     anchor: LongitudinalRecord,
     member: LongitudinalRecord,
     policy: LongitudinalAnchorPolicy,
+    linkage_snapshot: ActiveLinkageSnapshot | None,
 ) -> bool:
     return (
         type(decision) is LongitudinalMemberDecision
@@ -1730,27 +1988,23 @@ def _member_decision_matches_inputs(
             if member.activation_receipt is not None
             else None
         )
+        and decision.linkage_snapshot_state_version
+        == (linkage_snapshot.state_version if linkage_snapshot is not None else None)
+        and decision.linkage_snapshot_state_head_sha256
+        == (
+            linkage_snapshot.state_head_sha256 if linkage_snapshot is not None else None
+        )
+        and decision.linkage_snapshot_sha256
+        == (
+            hashlib.sha256(canonical_contract_bytes(linkage_snapshot)).hexdigest()
+            if linkage_snapshot is not None
+            else None
+        )
         and decision.authority_head_sha256
         == anchor.measurement.current_capability.authority_head_sha256
         and decision.authority_revision
         == anchor.measurement.current_capability.authority_revision
         and decision.policy_sha256 == longitudinal_anchor_policy_sha256(policy)
-    )
-
-
-def _snapshot_is_current(
-    store: ProviderLinkageStore,
-    retained: ActiveLinkageSnapshot,
-) -> bool:
-    try:
-        final_store, final_snapshot = _validate_store_input(store)
-    except (TypeError, ValueError, AttributeError):
-        return False
-    return (
-        final_store is store
-        and final_snapshot is not None
-        and canonical_contract_bytes(final_snapshot)
-        == canonical_contract_bytes(retained)
     )
 
 
@@ -1763,6 +2017,8 @@ def _decide_longitudinal_member(
     expected_authority_head_sha256: object,
     expected_linkage_trust_snapshot_sha256_by_provider: object,
     linkage_store: object,
+    _member_evaluator: object = _evaluate_longitudinal_member,
+    _runtime_integrity_is_valid: object = _MEMBER_RUNTIME_INTEGRITY_IS_VALID,
 ) -> LongitudinalMemberDecision:
     raw_inputs = (
         anchor,
@@ -1776,9 +2032,10 @@ def _decide_longitudinal_member(
     validated = _validate_member_inputs(*raw_inputs)
     if validated is None:
         return _invalid_input_member_decision()
-    store = validated[6]
-    if store is None:
-        decision = _PINNED_MEMBER_EVALUATOR(
+    if not _runtime_integrity_is_valid():  # type: ignore[operator]
+        return _invalid_input_member_decision()
+    try:
+        decision = _member_evaluator(  # type: ignore[operator]
             validated[0],
             validated[1],
             validated[2],
@@ -1788,66 +2045,67 @@ def _decide_longitudinal_member(
             linkage_store=validated[6],
             linkage_snapshot=validated[7],
         )
-        return (
-            decision
-            if _member_decision_matches_inputs(
-                decision, validated[0], validated[1], validated[2]
+        if (
+            not _runtime_integrity_is_valid()  # type: ignore[operator]
+            or not _member_decision_matches_inputs(
+                decision, validated[0], validated[1], validated[2], validated[7]
             )
-            else _invalid_input_member_decision()
-        )
-    try:
-        lock = vars(store)["_lock"]
-        if type(lock) is not _RLOCK_TYPE:
+        ):
             return _invalid_input_member_decision()
-        with lock:
-            locked = _validate_member_inputs(*raw_inputs)
-            if locked is None or locked[7] is None:
-                return _invalid_input_member_decision()
-            decision = _PINNED_MEMBER_EVALUATOR(
-                locked[0],
-                locked[1],
-                locked[2],
-                expected_policy_sha256=locked[3],
-                expected_authority_head_sha256=locked[4],
-                expected_linkage_trust_snapshot_sha256_by_provider=locked[5],
-                linkage_store=locked[6],
-                linkage_snapshot=locked[7],
-            )
-            if not _member_decision_matches_inputs(
-                decision, locked[0], locked[1], locked[2]
-            ) or not _snapshot_is_current(store, locked[7]):
-                return _invalid_input_member_decision()
-            return decision
+        return decision
     except (KeyError, TypeError, ValueError, AttributeError, RuntimeError):
         return _invalid_input_member_decision()
 
 
-_PINNED_DECIDE_LONGITUDINAL_MEMBER = _decide_longitudinal_member
+_MEMBER_CORE_INTEGRITY_IS_VALID = _build_runtime_integrity_check(
+    _decide_longitudinal_member
+)
 
 
-def decide_longitudinal_member(
-    anchor: LongitudinalRecord,
-    member: LongitudinalRecord,
-    policy: LongitudinalAnchorPolicy,
-    *,
-    expected_policy_sha256: str,
-    expected_authority_head_sha256: str,
-    expected_linkage_trust_snapshot_sha256_by_provider: dict[str, str],
-    linkage_store: ProviderLinkageStore | None,
-) -> LongitudinalMemberDecision:
-    """Evaluate one member against the pinned anchor, never against a neighbor."""
+def _bind_member_entrypoint(
+    member_core: object,
+    core_integrity_is_valid: object,
+    invalid_decision: object,
+):
+    def entrypoint(
+        anchor: LongitudinalRecord,
+        member: LongitudinalRecord,
+        policy: LongitudinalAnchorPolicy,
+        *,
+        expected_policy_sha256: str,
+        expected_authority_head_sha256: str,
+        expected_linkage_trust_snapshot_sha256_by_provider: dict[str, str],
+        linkage_store: ProviderLinkageStore | None,
+    ) -> LongitudinalMemberDecision:
+        """Evaluate one member against the pinned anchor, never against a neighbor."""
 
-    return _PINNED_DECIDE_LONGITUDINAL_MEMBER(
-        anchor,
-        member,
-        policy,
-        expected_policy_sha256=expected_policy_sha256,
-        expected_authority_head_sha256=expected_authority_head_sha256,
-        expected_linkage_trust_snapshot_sha256_by_provider=(
-            expected_linkage_trust_snapshot_sha256_by_provider
-        ),
-        linkage_store=linkage_store,
-    )
+        if not core_integrity_is_valid():  # type: ignore[operator]
+            return invalid_decision()  # type: ignore[operator]
+        decision = member_core(  # type: ignore[operator]
+            anchor,
+            member,
+            policy,
+            expected_policy_sha256=expected_policy_sha256,
+            expected_authority_head_sha256=expected_authority_head_sha256,
+            expected_linkage_trust_snapshot_sha256_by_provider=(
+                expected_linkage_trust_snapshot_sha256_by_provider
+            ),
+            linkage_store=linkage_store,
+        )
+        return (
+            decision
+            if core_integrity_is_valid()  # type: ignore[operator]
+            else invalid_decision()  # type: ignore[operator]
+        )
+
+    return entrypoint
+
+
+decide_longitudinal_member = _bind_member_entrypoint(
+    _decide_longitudinal_member,
+    _MEMBER_CORE_INTEGRITY_IS_VALID,
+    _invalid_input_member_decision,
+)
 
 
 def _evaluate_longitudinal_series(
@@ -1860,12 +2118,28 @@ def _evaluate_longitudinal_series(
     expected_linkage_trust_snapshot_sha256_by_provider: dict[str, str],
     linkage_store: ProviderLinkageStore | None,
     linkage_snapshot: ActiveLinkageSnapshot | None,
+    _member_evaluator: object = _evaluate_longitudinal_member,
 ) -> LongitudinalSeriesDecision:
     member_ids = tuple(item.measurement.result_id for item in members)
     if member_ids != tuple(sorted(set(member_ids))):
         raise ValueError("series members must be uniquely sorted by result ID")
+    receipt_index = (
+        frozenset(
+            canonical_contract_bytes(receipt) for receipt in linkage_snapshot.receipts
+        )
+        if linkage_snapshot is not None
+        else frozenset()
+    )
+    anchor_linkage_invalid = _linkage_authority_invalid(
+        anchor,
+        expected_linkage_trust_snapshot_sha256_by_provider=(
+            expected_linkage_trust_snapshot_sha256_by_provider
+        ),
+        linkage_snapshot=linkage_snapshot,
+        receipt_index=receipt_index,
+    )
     decisions = tuple(
-        _PINNED_MEMBER_EVALUATOR(
+        _member_evaluator(  # type: ignore[operator]
             anchor,
             member,
             policy,
@@ -1876,22 +2150,18 @@ def _evaluate_longitudinal_series(
             ),
             linkage_store=linkage_store,
             linkage_snapshot=linkage_snapshot,
+            linkage_receipt_index=receipt_index,
+            anchor_linkage_invalid=anchor_linkage_invalid,
         )
         for member in members
     )
     if any(
-        not _member_decision_matches_inputs(decision, anchor, member, policy)
+        not _member_decision_matches_inputs(
+            decision, anchor, member, policy, linkage_snapshot
+        )
         for decision, member in zip(decisions, members, strict=True)
     ):
         return _invalid_input_series_decision()
-    if linkage_store is not None:
-        try:
-            if linkage_snapshot is None or not _snapshot_is_current(
-                linkage_store, linkage_snapshot
-            ):
-                return _invalid_input_series_decision()
-        except (TypeError, ValueError, AttributeError):
-            return _invalid_input_series_decision()
     snapshot_sha256 = (
         hashlib.sha256(canonical_contract_bytes(linkage_snapshot)).hexdigest()
         if linkage_snapshot is not None
@@ -1899,7 +2169,7 @@ def _evaluate_longitudinal_series(
     )
     first = decisions[0]
     return LongitudinalSeriesDecision(
-        schema_version="traceback.longitudinal-series-decision.v2",
+        schema_version="traceback.longitudinal-series-decision.v3",
         anchor_result_id=first.anchor_result_id,
         anchor_result_sha256=first.anchor_result_sha256,
         anchor_bundle_sha256=first.anchor_bundle_sha256,
@@ -1910,6 +2180,7 @@ def _evaluate_longitudinal_series(
         authority_head_sha256=first.authority_head_sha256,
         authority_revision=first.authority_revision,
         policy_sha256=longitudinal_anchor_policy_sha256(policy),
+        linkage_snapshot=linkage_snapshot,
         linkage_snapshot_sha256=snapshot_sha256,
         member_result_ids=member_ids,
         decisions=decisions,
@@ -1919,7 +2190,12 @@ def _evaluate_longitudinal_series(
     )
 
 
-def decide_longitudinal_series(
+_SERIES_RUNTIME_INTEGRITY_IS_VALID = _build_runtime_integrity_check(
+    _evaluate_longitudinal_series
+)
+
+
+def _decide_longitudinal_series(
     anchor: LongitudinalRecord,
     members: tuple[LongitudinalRecord, ...],
     policy: LongitudinalAnchorPolicy,
@@ -1928,6 +2204,8 @@ def decide_longitudinal_series(
     expected_authority_head_sha256: str,
     expected_linkage_trust_snapshot_sha256_by_provider: dict[str, str],
     linkage_store: ProviderLinkageStore | None,
+    _series_evaluator: object = _evaluate_longitudinal_series,
+    _runtime_integrity_is_valid: object = _SERIES_RUNTIME_INTEGRITY_IS_VALID,
 ) -> LongitudinalSeriesDecision:
     """Evaluate canonical immutable membership against one explicit anchor."""
 
@@ -1943,9 +2221,10 @@ def decide_longitudinal_series(
     validated = _validate_series_inputs(*raw_inputs)
     if validated is None:
         return _invalid_input_series_decision()
-    store = validated[6]
-    if store is None:
-        return _evaluate_longitudinal_series(
+    if not _runtime_integrity_is_valid():  # type: ignore[operator]
+        return _invalid_input_series_decision()
+    try:
+        decision = _series_evaluator(  # type: ignore[operator]
             validated[0],
             validated[1],
             validated[2],
@@ -1955,70 +2234,164 @@ def decide_longitudinal_series(
             linkage_store=validated[6],
             linkage_snapshot=validated[7],
         )
-    try:
-        lock = vars(store)["_lock"]
-        if type(lock) is not _RLOCK_TYPE:
+        if not _runtime_integrity_is_valid():  # type: ignore[operator]
             return _invalid_input_series_decision()
-        with lock:
-            locked = _validate_series_inputs(*raw_inputs)
-            if locked is None:
-                return _invalid_input_series_decision()
-            return _evaluate_longitudinal_series(
-                locked[0],
-                locked[1],
-                locked[2],
-                expected_policy_sha256=locked[3],
-                expected_authority_head_sha256=locked[4],
-                expected_linkage_trust_snapshot_sha256_by_provider=locked[5],
-                linkage_store=locked[6],
-                linkage_snapshot=locked[7],
-            )
+        return decision
     except (KeyError, TypeError, ValueError, AttributeError, RuntimeError):
         return _invalid_input_series_decision()
 
 
-def replay_longitudinal_member_decision(
-    expected: LongitudinalMemberDecision,
-    anchor: LongitudinalRecord,
-    member: LongitudinalRecord,
-    policy: LongitudinalAnchorPolicy,
-    *,
-    expected_policy_sha256: str,
-    expected_authority_head_sha256: str,
-    expected_linkage_trust_snapshot_sha256_by_provider: dict[str, str],
-    linkage_store: ProviderLinkageStore | None,
-) -> LongitudinalMemberDecision:
-    """Replay an exact D03 decision; never trust a stored decision by itself."""
+_SERIES_CORE_INTEGRITY_IS_VALID = _build_runtime_integrity_check(
+    _decide_longitudinal_series
+)
 
-    try:
-        expected_bytes = _strict_member_decision_bytes(expected)
-    except (
-        ValidationError,
-        PydanticSerializationError,
-        TypeError,
-        ValueError,
-        AttributeError,
-    ):
-        raise LongitudinalDecisionReplayError(
-            "stored longitudinal decision is not an exact canonical contract"
-        ) from None
 
-    actual = _PINNED_DECIDE_LONGITUDINAL_MEMBER(
-        anchor,
-        member,
-        policy,
-        expected_policy_sha256=expected_policy_sha256,
-        expected_authority_head_sha256=expected_authority_head_sha256,
-        expected_linkage_trust_snapshot_sha256_by_provider=(
-            expected_linkage_trust_snapshot_sha256_by_provider
-        ),
-        linkage_store=linkage_store,
-    )
-    if canonical_contract_bytes(actual) != expected_bytes:
-        raise LongitudinalDecisionReplayError(
-            "stored longitudinal decision does not replay exactly"
+def _bind_series_entrypoint(
+    series_core: object,
+    core_integrity_is_valid: object,
+    invalid_decision: object,
+):
+    def entrypoint(
+        anchor: LongitudinalRecord,
+        members: tuple[LongitudinalRecord, ...],
+        policy: LongitudinalAnchorPolicy,
+        *,
+        expected_policy_sha256: str,
+        expected_authority_head_sha256: str,
+        expected_linkage_trust_snapshot_sha256_by_provider: dict[str, str],
+        linkage_store: ProviderLinkageStore | None,
+    ) -> LongitudinalSeriesDecision:
+        """Evaluate canonical immutable membership against one explicit anchor."""
+
+        if not core_integrity_is_valid():  # type: ignore[operator]
+            return invalid_decision()  # type: ignore[operator]
+        decision = series_core(  # type: ignore[operator]
+            anchor,
+            members,
+            policy,
+            expected_policy_sha256=expected_policy_sha256,
+            expected_authority_head_sha256=expected_authority_head_sha256,
+            expected_linkage_trust_snapshot_sha256_by_provider=(
+                expected_linkage_trust_snapshot_sha256_by_provider
+            ),
+            linkage_store=linkage_store,
         )
-    return actual
+        return (
+            decision
+            if core_integrity_is_valid()  # type: ignore[operator]
+            else invalid_decision()  # type: ignore[operator]
+        )
+
+    return entrypoint
+
+
+decide_longitudinal_series = _bind_series_entrypoint(
+    _decide_longitudinal_series,
+    _SERIES_CORE_INTEGRITY_IS_VALID,
+    _invalid_input_series_decision,
+)
+
+
+def _bind_replay_entrypoint(member_decider: object, strict_bytes: object):
+    def entrypoint(
+        expected: LongitudinalMemberDecision,
+        anchor: LongitudinalRecord,
+        member: LongitudinalRecord,
+        policy: LongitudinalAnchorPolicy,
+        *,
+        expected_policy_sha256: str,
+        expected_authority_head_sha256: str,
+        expected_linkage_trust_snapshot_sha256_by_provider: dict[str, str],
+        linkage_store: ProviderLinkageStore | None,
+    ) -> LongitudinalMemberDecision:
+        """Replay an exact D03 decision; never trust a stored decision by itself."""
+
+        try:
+            expected_bytes = strict_bytes(expected)  # type: ignore[operator]
+        except (
+            ValidationError,
+            PydanticSerializationError,
+            TypeError,
+            ValueError,
+            AttributeError,
+        ):
+            raise LongitudinalDecisionReplayError(
+                "stored longitudinal decision is not an exact canonical contract"
+            ) from None
+        actual = member_decider(  # type: ignore[operator]
+            anchor,
+            member,
+            policy,
+            expected_policy_sha256=expected_policy_sha256,
+            expected_authority_head_sha256=expected_authority_head_sha256,
+            expected_linkage_trust_snapshot_sha256_by_provider=(
+                expected_linkage_trust_snapshot_sha256_by_provider
+            ),
+            linkage_store=linkage_store,
+        )
+        if strict_bytes(actual) != expected_bytes:  # type: ignore[operator]
+            raise LongitudinalDecisionReplayError(
+                "stored longitudinal decision does not replay exactly"
+            )
+        return actual
+
+    return entrypoint
+
+
+replay_longitudinal_member_decision = _bind_replay_entrypoint(
+    decide_longitudinal_member,
+    _strict_member_decision_bytes,
+)
+
+
+def _bind_series_replay_entrypoint(series_decider: object, strict_bytes: object):
+    def entrypoint(
+        expected: LongitudinalSeriesDecision,
+        anchor: LongitudinalRecord,
+        members: tuple[LongitudinalRecord, ...],
+        policy: LongitudinalAnchorPolicy,
+        *,
+        expected_policy_sha256: str,
+        expected_authority_head_sha256: str,
+        expected_linkage_trust_snapshot_sha256_by_provider: dict[str, str],
+        linkage_store: ProviderLinkageStore | None,
+    ) -> LongitudinalSeriesDecision:
+        try:
+            expected_bytes = strict_bytes(expected)  # type: ignore[operator]
+        except (
+            ValidationError,
+            PydanticSerializationError,
+            TypeError,
+            ValueError,
+            AttributeError,
+        ):
+            raise LongitudinalDecisionReplayError(
+                "stored longitudinal series is not an exact canonical v3 contract"
+            ) from None
+        actual = series_decider(  # type: ignore[operator]
+            anchor,
+            members,
+            policy,
+            expected_policy_sha256=expected_policy_sha256,
+            expected_authority_head_sha256=expected_authority_head_sha256,
+            expected_linkage_trust_snapshot_sha256_by_provider=(
+                expected_linkage_trust_snapshot_sha256_by_provider
+            ),
+            linkage_store=linkage_store,
+        )
+        if strict_bytes(actual) != expected_bytes:  # type: ignore[operator]
+            raise LongitudinalDecisionReplayError(
+                "stored longitudinal series does not replay exactly"
+            )
+        return actual
+
+    return entrypoint
+
+
+replay_longitudinal_series_decision = _bind_series_replay_entrypoint(
+    decide_longitudinal_series,
+    _strict_series_decision_bytes,
+)
 
 
 __all__ = [
@@ -2032,6 +2405,8 @@ __all__ = [
     "DimensionDecisionDisposition",
     "DimensionDecisionExplanation",
     "DimensionValueState",
+    "LegacyLongitudinalMemberDecisionV2",
+    "LegacyLongitudinalSeriesDecisionV2",
     "LongitudinalAnchorPolicy",
     "LongitudinalComparisonKey",
     "LongitudinalDecisionReplayError",
@@ -2057,4 +2432,5 @@ __all__ = [
     "provider_measurement_id",
     "provider_projection_ref",
     "replay_longitudinal_member_decision",
+    "replay_longitudinal_series_decision",
 ]

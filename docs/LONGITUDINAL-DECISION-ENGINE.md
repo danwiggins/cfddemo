@@ -5,8 +5,9 @@ for D02 and D03. D03 extends the pinned-anchor decision with exact explanations,
 controlled safe actions, and replay; it does not introduce a second comparison
 algorithm.
 
-The enriched member and series decisions use v2 schema identities. A v1
-decision cannot be relabeled as v2 or omit D03 explanations and actions.
+Current member and series decisions use v3 schema identities and bind the exact
+retained linkage snapshot. Historical v2 envelopes remain parseable through
+explicit legacy models but cannot satisfy current replay.
 Policy, member-decision, and series-decision `schema_version` fields are
 required on the wire. `bridge_execution_state` is also required; deserialization
 never supplies these authority-bearing fields from defaults.
@@ -86,11 +87,14 @@ a later member.
 Replay recomputes the decision from the exact E05 records, E01 capabilities and
 authority head, D01 authorized linkage revisions, D04 committed activation
 receipts, provider trust snapshots, anchor policy, and external pins. Both the
-anchor and member receipts must be exact members of one retained live
-`ProviderLinkageStore.active_snapshot`; the store head is revalidated before
-publication. A serialized receipt or self-consistent stored digest is not enough;
-an absent live store or any changed record, authority, lineage, receipt,
-explanation, action, or policy causes replay failure.
+anchor and member receipts must be exact members of one retained
+`ProviderLinkageStore.active_snapshot`. Decisions bind that immutable as-of
+snapshot's version, head, and digest; they do not claim the mutable store remains
+current after return. A consumer must replay the member or series against the
+live store immediately before emitting a delta or trend. A serialized receipt or
+self-consistent stored digest is not enough; an absent live store or any changed
+record, authority, lineage, receipt, explanation, action, or policy causes replay
+failure.
 
 All fixtures and tests are synthetic/local. Outcomes describe technical
 comparability only and carry no clinical interpretation.

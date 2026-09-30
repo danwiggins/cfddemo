@@ -72,13 +72,17 @@ bind the same collection without becoming additional biological timepoints.
 
 Policy digests, current E01 authority-head digest and provider trust-snapshot
 digests are caller-pinned external inputs. The decision engine also requires a
-live `ProviderLinkageStore`; it invokes `verify_current_receipt` for both anchor
-and member. The boundary requires the exact protected store implementation;
-duck-typed accept-all objects and subclasses cannot authorize a comparison. A
+live `ProviderLinkageStore`; anchor and member receipts must be exact members of
+one retained `active_snapshot`. The boundary requires the exact protected store
+implementation; duck-typed accept-all objects and subclasses cannot authorize a
+comparison. A
 serialized, cross-store, forged, stale or absent receipt, or an absent live
 store, produces `unknown` and suppresses deltas/trends. Receipt digests bind
 the exact provider, linkage, revision, store version and store head into each
-decision. Scientific qualification and provider approval are not inferred from
+decision. The returned decision is an immutable as-of artifact, not proof that
+the mutable store remains current after return. Delta/trend consumers must replay
+the exact member or series against the live store immediately before rendering.
+Scientific qualification and provider approval are not inferred from
 a fixture, method label, matching digest, or passing test. The future durable
 comparison-membership ledger must replay the live store and bind the exact D02
 decisions before materializing a view.

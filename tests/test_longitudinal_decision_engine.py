@@ -5,6 +5,7 @@ from __future__ import annotations
 import hashlib
 import json
 import sys
+import threading
 from typing import ClassVar
 
 import pytest
@@ -17,22 +18,31 @@ from evidence_inspector.longitudinal_compatibility import (
     ComparisonDimensionValue,
     DimensionDecisionDisposition,
     DimensionValueState,
+    LegacyLongitudinalMemberDecisionV2,
+    LegacyLongitudinalSeriesDecisionV2,
     LongitudinalAnchorPolicy,
     LongitudinalDecisionReplayError,
     LongitudinalMemberDecision,
     LongitudinalNextAction,
     LongitudinalOutcome,
     LongitudinalReason,
+    LongitudinalRecord,
     LongitudinalSeriesDecision,
     decide_longitudinal_member,
     decide_longitudinal_series,
     longitudinal_anchor_policy_sha256,
     longitudinal_member_decision_sha256,
     replay_longitudinal_member_decision,
+    replay_longitudinal_series_decision,
 )
 from evidence_inspector.method_registry import canonical_contract_bytes
+from evidence_inspector.provider_linkage_store import (
+    AuthorityTimeSource,
+    ProviderLinkageStore,
+)
 from tests.test_longitudinal_compatibility import (
     HEAD_SHA256,
+    NOW,
     PROVIDER,
     TRUST_SHA256,
     _activated_records,
@@ -326,7 +336,7 @@ def test_v1_or_incomplete_decision_cannot_be_relabelled_as_d03() -> None:
     decision = _decide(anchor, _record("2"), _policy(anchor))
     payload = decision.model_dump(mode="json")
     payload["schema_version"] = "traceback.longitudinal-member-decision.v1"
-    with pytest.raises(ValidationError, match="member-decision.v2"):
+    with pytest.raises(ValidationError, match="member-decision.v3"):
         LongitudinalMemberDecision.model_validate_json(json.dumps(payload))
 
     payload = decision.model_dump(mode="json")
@@ -628,9 +638,18 @@ def test_live_authority_change_during_evaluation_fails_whole_result_closed(
             sys.settrace(None)
         assert triggered
         assert store.active_snapshot().state_version == len(selected) + 1
-    assert decision.outcome == LongitudinalOutcome.UNKNOWN
-    assert not decision.delta_allowed
-    assert not decision.connecting_trend_allowed
+        assert decision.outcome == LongitudinalOutcome.EQUIVALENT
+        assert decision.linkage_snapshot_state_version == len(selected)
+        if entrypoint == "member":
+            with pytest.raises(LongitudinalDecisionReplayError, match="replay exactly"):
+                replay_longitudinal_member_decision(
+                    decision, active_anchor, active_members[0], policy, **arguments
+                )
+        else:
+            with pytest.raises(LongitudinalDecisionReplayError, match="replay exactly"):
+                replay_longitudinal_series_decision(
+                    series, active_anchor, active_members, policy, **arguments
+                )
 
 
 @pytest.mark.parametrize(
@@ -742,7 +761,7 @@ def test_series_parse_rejects_decisions_from_different_anchor_snapshots() -> Non
         )
         with pytest.raises(ValidationError, match="one exact anchor"):
             LongitudinalSeriesDecision(
-                schema_version="traceback.longitudinal-series-decision.v2",
+                schema_version="traceback.longitudinal-series-decision.v3",
                 anchor_result_id=first.anchor_result_id,
                 anchor_result_sha256=first.anchor_result_sha256,
                 anchor_bundle_sha256=first.anchor_bundle_sha256,
@@ -753,6 +772,7 @@ def test_series_parse_rejects_decisions_from_different_anchor_snapshots() -> Non
                 authority_head_sha256=first.authority_head_sha256,
                 authority_revision=first.authority_revision,
                 policy_sha256=first.policy_sha256,
+                linkage_snapshot=snapshot,
                 linkage_snapshot_sha256=hashlib.sha256(
                     canonical_contract_bytes(snapshot)
                 ).hexdigest(),
@@ -816,7 +836,499 @@ def test_series_snapshot_work_is_bounded_not_per_member(
     assert all(
         item.outcome == LongitudinalOutcome.EQUIVALENT for item in series.decisions
     )
-    assert calls == 3
+    assert calls == 1
+
+
+def test_series_receipt_membership_uses_one_index_and_one_anchor_check(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    class CountingReceipts(tuple):
+        contains_calls = 0
+
+        def __contains__(self, value: object) -> bool:
+            type(self).contains_calls += 1
+            return super().__contains__(value)
+
+    anchor = _record("1")
+    members = (_record("2"), _record("3"), _record("4"))
+    policy = _policy(anchor)
+    with _activated_records(anchor, *members) as (records, store):
+        snapshot = store.active_snapshot()
+        counted_snapshot = snapshot.model_copy(
+            update={"receipts": CountingReceipts(snapshot.receipts)}
+        )
+        calls = 0
+        original = longitudinal_module._linkage_authority_invalid
+
+        def counted(*args: object, **kwargs: object) -> bool:
+            nonlocal calls
+            calls += 1
+            return original(*args, **kwargs)
+
+        monkeypatch.setattr(longitudinal_module, "_linkage_authority_invalid", counted)
+        series = longitudinal_module._evaluate_longitudinal_series(
+            records[0],
+            records[1:],
+            policy,
+            expected_policy_sha256=longitudinal_anchor_policy_sha256(policy),
+            expected_authority_head_sha256=HEAD_SHA256,
+            expected_linkage_trust_snapshot_sha256_by_provider={PROVIDER: TRUST_SHA256},
+            linkage_store=store,
+            linkage_snapshot=counted_snapshot,
+        )
+    assert all(item.delta_allowed for item in series.decisions)
+    assert calls == len(members) + 1
+    assert CountingReceipts.contains_calls == 0
+
+
+def test_series_member_count_boundary_and_storeless_order_fail_closed() -> None:
+    anchor = _record("1")
+    member = _record("2")
+    earlier = _record("3")
+    policy = _policy(anchor)
+    arguments = {
+        "expected_policy_sha256": longitudinal_anchor_policy_sha256(policy),
+        "expected_authority_head_sha256": HEAD_SHA256,
+        "expected_linkage_trust_snapshot_sha256_by_provider": {PROVIDER: TRUST_SHA256},
+        "linkage_store": None,
+    }
+    at_limit = decide_longitudinal_series(
+        anchor, (member,) * 1_000, policy, **arguments
+    )
+    over_limit = decide_longitudinal_series(
+        anchor, (member,) * 1_001, policy, **arguments
+    )
+    unsorted = decide_longitudinal_series(
+        anchor, (earlier, member), policy, **arguments
+    )
+    duplicate = decide_longitudinal_series(
+        anchor, (member, member), policy, **arguments
+    )
+    for rejected in (at_limit, over_limit, unsorted, duplicate):
+        assert rejected.anchor_result_id == "result_invalid_input"
+        assert rejected.decisions[0].outcome == LongitudinalOutcome.UNKNOWN
+        assert not rejected.decisions[0].delta_allowed
+
+
+def test_series_strict_pins_and_unsupported_engine_fail_closed() -> None:
+    anchor = _record("1")
+    member = _record("2")
+    policy = _policy(anchor)
+    with _activated_records(anchor, member) as (records, store):
+        common = {
+            "expected_policy_sha256": longitudinal_anchor_policy_sha256(policy),
+            "expected_authority_head_sha256": HEAD_SHA256,
+            "expected_linkage_trust_snapshot_sha256_by_provider": {
+                PROVIDER: TRUST_SHA256
+            },
+            "linkage_store": store,
+        }
+        invalid_pin = decide_longitudinal_series(
+            records[0],
+            records[1:],
+            policy,
+            **{**common, "expected_authority_head_sha256": HEAD_SHA256.encode()},  # type: ignore[arg-type]
+        )
+        unsupported = policy.model_copy(update={"engine_version": "999.0.0"})
+        unsupported_series = decide_longitudinal_series(
+            records[0],
+            records[1:],
+            unsupported,
+            **{
+                **common,
+                "expected_policy_sha256": longitudinal_anchor_policy_sha256(
+                    unsupported
+                ),
+            },
+        )
+    assert invalid_pin.anchor_result_id == "result_invalid_input"
+    assert all(
+        item.outcome == LongitudinalOutcome.UNKNOWN
+        and LongitudinalReason.POLICY_IDENTITY_INVALID in item.reason_codes
+        and not item.delta_allowed
+        for item in unsupported_series.decisions
+    )
+
+
+def test_writable_legacy_pin_names_cannot_replace_internal_evaluation(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    anchor = _record("1")
+    member = _record("2")
+    policy = _policy(anchor)
+    with _activated_records(anchor, member) as (records, store):
+        active_anchor, active_member = records
+        arguments = {
+            "expected_policy_sha256": longitudinal_anchor_policy_sha256(policy),
+            "expected_authority_head_sha256": HEAD_SHA256,
+            "expected_linkage_trust_snapshot_sha256_by_provider": {
+                PROVIDER: TRUST_SHA256
+            },
+            "linkage_store": store,
+        }
+        genuine = decide_longitudinal_member(
+            active_anchor, active_member, policy, **arguments
+        )
+        assert genuine.delta_allowed
+        monkeypatch.setattr(
+            longitudinal_module,
+            "_PINNED_MEMBER_EVALUATOR",
+            lambda *args, **kwargs: genuine,
+            raising=False,
+        )
+        monkeypatch.setattr(
+            longitudinal_module,
+            "_PINNED_DECIDE_LONGITUDINAL_MEMBER",
+            lambda *args, **kwargs: genuine,
+            raising=False,
+        )
+        missing_store = {**arguments, "linkage_store": None}
+        rejected = decide_longitudinal_member(
+            active_anchor, active_member, policy, **missing_store
+        )
+        with pytest.raises(LongitudinalDecisionReplayError, match="replay exactly"):
+            replay_longitudinal_member_decision(
+                genuine,
+                active_anchor,
+                active_member,
+                policy,
+                **missing_store,
+            )
+    assert rejected.outcome == LongitudinalOutcome.UNKNOWN
+    assert not rejected.delta_allowed
+
+
+def test_member_replay_ignores_class_model_dump_replacement(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    anchor = _record("1")
+    member = _record("2")
+    policy = _policy(anchor)
+    with _activated_records(anchor, member) as (records, store):
+        active_anchor, active_member = records
+        arguments = {
+            "expected_policy_sha256": longitudinal_anchor_policy_sha256(policy),
+            "expected_authority_head_sha256": HEAD_SHA256,
+            "expected_linkage_trust_snapshot_sha256_by_provider": {
+                PROVIDER: TRUST_SHA256
+            },
+            "linkage_store": store,
+        }
+        genuine = decide_longitudinal_member(
+            active_anchor, active_member, policy, **arguments
+        )
+        genuine_payload = LongitudinalMemberDecision.__pydantic_serializer__.to_python(
+            genuine, mode="json", exclude_none=False
+        )
+        tampered = genuine.model_copy(update={"member_result_sha256": "f" * 64})
+        calls = 0
+
+        def poisoned_model_dump(*args: object, **kwargs: object) -> dict[str, object]:
+            nonlocal calls
+            del args, kwargs
+            calls += 1
+            return genuine_payload
+
+        monkeypatch.setattr(
+            LongitudinalMemberDecision, "model_dump", poisoned_model_dump
+        )
+        with pytest.raises(LongitudinalDecisionReplayError, match="replay exactly"):
+            replay_longitudinal_member_decision(
+                tampered,
+                active_anchor,
+                active_member,
+                policy,
+                **arguments,
+            )
+    assert calls == 0
+
+
+@pytest.mark.parametrize(
+    "contract_type,poisoned_input",
+    (
+        (LongitudinalRecord, "record"),
+        (LongitudinalAnchorPolicy, "policy"),
+    ),
+)
+def test_external_contract_class_model_dump_replacement_never_executes(
+    monkeypatch: pytest.MonkeyPatch,
+    contract_type: type[object],
+    poisoned_input: str,
+) -> None:
+    anchor = _record("1")
+    member = _record("2")
+    policy = _policy(anchor)
+    with _activated_records(anchor, member) as (records, store):
+        arguments = {
+            "expected_policy_sha256": longitudinal_anchor_policy_sha256(policy),
+            "expected_authority_head_sha256": HEAD_SHA256,
+            "expected_linkage_trust_snapshot_sha256_by_provider": {
+                PROVIDER: TRUST_SHA256
+            },
+            "linkage_store": store,
+        }
+        calls = 0
+
+        def poisoned_model_dump(*args: object, **kwargs: object) -> dict[str, object]:
+            nonlocal calls
+            del args, kwargs
+            calls += 1
+            return {}
+
+        monkeypatch.setattr(contract_type, "model_dump", poisoned_model_dump)
+        decision = decide_longitudinal_member(
+            records[0],
+            records[1],
+            policy,
+            **arguments,
+        )
+    assert poisoned_input in {"record", "policy"}
+    assert calls == 0
+    assert decision.outcome == LongitudinalOutcome.EQUIVALENT
+    assert decision.delta_allowed
+
+
+def test_legacy_v2_member_and_series_envelopes_parse_but_cannot_current_replay() -> (
+    None
+):
+    anchor = _record("1")
+    member = _record("2")
+    policy = _policy(anchor)
+    with _activated_records(anchor, member) as (records, store):
+        arguments = {
+            "expected_policy_sha256": longitudinal_anchor_policy_sha256(policy),
+            "expected_authority_head_sha256": HEAD_SHA256,
+            "expected_linkage_trust_snapshot_sha256_by_provider": {
+                PROVIDER: TRUST_SHA256
+            },
+            "linkage_store": store,
+        }
+        current = decide_longitudinal_member(
+            records[0], records[1], policy, **arguments
+        )
+        payload = current.model_dump(mode="json")
+        payload["schema_version"] = "traceback.longitudinal-member-decision.v2"
+        for field in (
+            "linkage_snapshot_state_version",
+            "linkage_snapshot_state_head_sha256",
+            "linkage_snapshot_sha256",
+        ):
+            payload.pop(field)
+        legacy_member = LegacyLongitudinalMemberDecisionV2.model_validate_json(
+            json.dumps(payload)
+        )
+        legacy_digest = hashlib.sha256(
+            canonical_contract_bytes(legacy_member)
+        ).hexdigest()
+        legacy_series = LegacyLongitudinalSeriesDecisionV2.model_validate_json(
+            json.dumps(
+                {
+                    "schema_version": "traceback.longitudinal-series-decision.v2",
+                    "anchor_result_id": legacy_member.anchor_result_id,
+                    "policy_sha256": legacy_member.policy_sha256,
+                    "member_result_ids": (legacy_member.member_result_id,),
+                    "decisions": (legacy_member.model_dump(mode="json"),),
+                    "decision_sha256s": (legacy_digest,),
+                }
+            )
+        )
+        assert legacy_series.decisions == (legacy_member,)
+        with pytest.raises(LongitudinalDecisionReplayError, match="canonical v3"):
+            replay_longitudinal_series_decision(
+                legacy_series,  # type: ignore[arg-type]
+                records[0],
+                records[1:],
+                policy,
+                **arguments,
+            )
+
+
+def test_series_parse_and_replay_reject_tampered_snapshot_binding() -> None:
+    anchor = _record("1")
+    member = _record("2")
+    policy = _policy(anchor)
+    with _activated_records(anchor, member) as (records, store):
+        arguments = {
+            "expected_policy_sha256": longitudinal_anchor_policy_sha256(policy),
+            "expected_authority_head_sha256": HEAD_SHA256,
+            "expected_linkage_trust_snapshot_sha256_by_provider": {
+                PROVIDER: TRUST_SHA256
+            },
+            "linkage_store": store,
+        }
+        series = decide_longitudinal_series(
+            records[0], records[1:], policy, **arguments
+        )
+        assert (
+            replay_longitudinal_series_decision(
+                series, records[0], records[1:], policy, **arguments
+            )
+            == series
+        )
+        payload = series.model_dump(mode="json")
+        payload["linkage_snapshot_sha256"] = "f" * 64
+        with pytest.raises(ValidationError, match="snapshot digest"):
+            LongitudinalSeriesDecision.model_validate_json(json.dumps(payload))
+        tampered = series.model_copy(update={"linkage_snapshot_sha256": "f" * 64})
+        with pytest.raises(LongitudinalDecisionReplayError, match="canonical v3"):
+            replay_longitudinal_series_decision(
+                tampered, records[0], records[1:], policy, **arguments
+            )
+
+
+@pytest.mark.parametrize("entrypoint", ("member", "series"))
+def test_nested_caller_proxy_cannot_mutate_evaluator_after_authority_capture(
+    monkeypatch: pytest.MonkeyPatch,
+    entrypoint: str,
+) -> None:
+    anchor = _record("1")
+    member = _record("2")
+    late = _record("3")
+    policy = _policy(anchor)
+    with _activated_records(anchor, member) as (records, store):
+        active_anchor, active_member = records
+        assert late.authorized_linkage is not None
+        store.commit_authorized_revision(late.authorized_linkage)
+        authority_started = False
+        hook_calls = 0
+        genuine_measurement = active_anchor.measurement
+        original_validate_store = longitudinal_module._validate_store_input
+
+        def marked_validate_store(store_input: object):
+            nonlocal authority_started
+            authority_started = True
+            return original_validate_store(store_input)
+
+        class MeasurementProxy:
+            @property
+            def __dict__(self) -> dict[str, object]:
+                nonlocal hook_calls
+                hook_calls += 1
+                assert not authority_started
+                monkeypatch.setattr(
+                    longitudinal_module,
+                    "_linkage_authority_invalid",
+                    lambda *args, **kwargs: False,
+                )
+                return vars(genuine_measurement)
+
+        poisoned_anchor = active_anchor.model_copy()
+        object.__setattr__(poisoned_anchor, "measurement", MeasurementProxy())
+        monkeypatch.setattr(
+            longitudinal_module, "_validate_store_input", marked_validate_store
+        )
+        arguments = {
+            "expected_policy_sha256": longitudinal_anchor_policy_sha256(policy),
+            "expected_authority_head_sha256": HEAD_SHA256,
+            "expected_linkage_trust_snapshot_sha256_by_provider": {
+                PROVIDER: TRUST_SHA256
+            },
+            "linkage_store": store,
+        }
+        if entrypoint == "member":
+            decision = decide_longitudinal_member(
+                poisoned_anchor, active_member, policy, **arguments
+            )
+        else:
+            decision = decide_longitudinal_series(
+                poisoned_anchor, (active_member,), policy, **arguments
+            ).decisions[0]
+    assert hook_calls == 0
+    assert not authority_started
+    assert decision.outcome == LongitudinalOutcome.UNKNOWN
+    assert not decision.delta_allowed
+
+
+@pytest.mark.parametrize("entrypoint", ("member", "series"))
+def test_second_store_concurrent_commit_is_bound_as_of_and_breaks_replay(
+    entrypoint: str,
+) -> None:
+    anchor = _record("1")
+    member = _record("2")
+    late = _record("3")
+    policy = _policy(anchor)
+    with _activated_records(anchor, member) as (records, store_a):
+        store_b = ProviderLinkageStore(
+            store_a.root,
+            expected_trust_snapshot_sha256_by_provider={PROVIDER: TRUST_SHA256},
+            time_source=AuthorityTimeSource.fixed(NOW),
+        )
+        writer_started = threading.Event()
+        writer_done = threading.Event()
+        writer_error: list[BaseException] = []
+        triggered = False
+
+        def writer() -> None:
+            try:
+                writer_started.set()
+                assert late.authorized_linkage is not None
+                store_b.commit_authorized_revision(late.authorized_linkage)
+            except Exception as error:  # noqa: BLE001 - preserve writer failure for main thread
+                writer_error.append(error)
+            finally:
+                writer_done.set()
+
+        def trace(frame: object, event: str, arg: object):
+            nonlocal triggered
+            del arg
+            if (
+                not triggered
+                and event == "line"
+                and getattr(frame, "f_code", None)
+                is longitudinal_module._evaluate_longitudinal_member.__code__
+                and "anchor_key_sha256" in frame.f_locals  # type: ignore[attr-defined]
+            ):
+                triggered = True
+                threading.Thread(target=writer, daemon=True).start()
+                assert writer_started.wait(1)
+            return trace
+
+        arguments = {
+            "expected_policy_sha256": longitudinal_anchor_policy_sha256(policy),
+            "expected_authority_head_sha256": HEAD_SHA256,
+            "expected_linkage_trust_snapshot_sha256_by_provider": {
+                PROVIDER: TRUST_SHA256
+            },
+            "linkage_store": store_a,
+        }
+        sys.settrace(trace)
+        try:
+            if entrypoint == "member":
+                result = decide_longitudinal_member(
+                    records[0], records[1], policy, **arguments
+                )
+            else:
+                result = decide_longitudinal_series(
+                    records[0], records[1:], policy, **arguments
+                )
+        finally:
+            sys.settrace(None)
+        assert writer_done.wait(5)
+        store_b.close()
+        assert not writer_error
+        assert triggered
+        expected_version = 2
+        if entrypoint == "member":
+            assert result.linkage_snapshot_state_version == expected_version
+            with pytest.raises(LongitudinalDecisionReplayError, match="replay exactly"):
+                replay_longitudinal_member_decision(
+                    result,  # type: ignore[arg-type]
+                    records[0],
+                    records[1],
+                    policy,
+                    **arguments,
+                )
+        else:
+            assert result.linkage_snapshot is not None  # type: ignore[union-attr]
+            assert result.linkage_snapshot.state_version == expected_version  # type: ignore[union-attr]
+            with pytest.raises(LongitudinalDecisionReplayError, match="replay exactly"):
+                replay_longitudinal_series_decision(
+                    result,  # type: ignore[arg-type]
+                    records[0],
+                    records[1:],
+                    policy,
+                    **arguments,
+                )
 
 
 def test_explanations_actions_and_bridge_execution_fail_closed_on_tamper() -> None:

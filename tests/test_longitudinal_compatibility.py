@@ -1574,7 +1574,7 @@ def test_malformed_rejections_return_fresh_canonical_unknown_artifacts() -> None
     )
     assert second_member is not first_member
     assert canonical_contract_bytes(second_member) == canonical_member
-    assert second_member.schema_version == "traceback.longitudinal-member-decision.v2"
+    assert second_member.schema_version == "traceback.longitudinal-member-decision.v3"
     assert second_member.outcome == LongitudinalOutcome.UNKNOWN
     assert len(second_member.dimension_explanations) == len(ALL_COMPARISON_DIMENSIONS)
     assert not second_member.delta_allowed
@@ -1750,6 +1750,52 @@ def test_full_multi_provider_store_pins_allow_single_provider_comparison() -> No
     assert decision.outcome == LongitudinalOutcome.EQUIVALENT
     assert decision.delta_allowed
     assert decision.connecting_trend_allowed
+
+
+def test_full_multi_provider_store_pins_allow_single_provider_series() -> None:
+    anchor = _record("1")
+    members = (_record("2"), _record("3"))
+    policy = _policy(anchor)
+    pins = {PROVIDER: TRUST_SHA256, _token("provider", "f"): "f" * 64}
+    with TemporaryDirectory(
+        prefix="traceback-linkage-series-multiprovider-"
+    ) as directory:
+        store = ProviderLinkageStore(
+            Path(directory),
+            expected_trust_snapshot_sha256_by_provider=pins,
+            time_source=AuthorityTimeSource.fixed(NOW),
+        )
+        try:
+            for record in (anchor, *members):
+                assert record.authorized_linkage is not None
+                store.commit_authorized_revision(record.authorized_linkage)
+            snapshot = store.active_snapshot()
+            receipts = {item.linkage_id: item for item in snapshot.receipts}
+            active = tuple(
+                record.model_copy(
+                    update={
+                        "activation_receipt": receipts[
+                            record.linkage_revision.linkage_id
+                        ]
+                    }
+                )
+                for record in (anchor, *members)
+            )
+            series = decide_longitudinal_series(
+                active[0],
+                active[1:],
+                policy,
+                expected_policy_sha256=longitudinal_anchor_policy_sha256(policy),
+                expected_authority_head_sha256=HEAD_SHA256,
+                expected_linkage_trust_snapshot_sha256_by_provider=pins,
+                linkage_store=store,
+            )
+        finally:
+            store.close()
+    assert all(
+        item.outcome == LongitudinalOutcome.EQUIVALENT for item in series.decisions
+    )
+    assert all(item.delta_allowed for item in series.decisions)
 
 
 def test_decision_boundary_replays_every_nested_record_binding() -> None:
