@@ -6,6 +6,7 @@ import base64
 import errno
 import hashlib
 import os
+import stat
 from pathlib import Path
 
 import pytest
@@ -540,8 +541,10 @@ def test_root_swap_and_symlink_tamper_fail_closed(
         source_identity_verifier=lambda: view.source_identities,
     )
     table_path = published / "accessible-table.tsv"
+    published.chmod(0o700)
     table_path.unlink()
     table_path.symlink_to(tmp_path / "outside.tsv")
+    published.chmod(0o500)
     with pytest.raises(PortableViewTamperError):
         verify_portable_view(published, trust_context=trust_context)
 
@@ -721,6 +724,7 @@ def test_rename_boundary_mutation_is_detected_and_quarantined(
                 dir_fd=parent_fd,
             )
             try:
+                os.chmod("accessible-table.tsv", 0o600, dir_fd=installed_fd)
                 table_fd = os.open(
                     "accessible-table.tsv",
                     os.O_WRONLY | os.O_TRUNC,
@@ -790,6 +794,56 @@ def test_failed_post_publish_validation_does_not_delete_a_replacement_winner(
     assert (destination / "winner-marker").read_text(encoding="utf-8") == "preserve"
 
 
+def test_publish_final_vector_catches_in_place_manifest_mutation_at_table_open(
+    integrated_request: PortableViewBuildRequest,
+    trust_context: PortableTrustContext,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    view, table = build_portable_view(integrated_request, trust_context=trust_context)
+    destination = tmp_path / "artifact"
+    original_open = portable.os.open
+    original_rename = portable.rename_directory_exclusive_at
+    installed = False
+    mutated = False
+
+    def mark_installed(parent_fd: int, source: str, target: str) -> None:
+        nonlocal installed
+        original_rename(parent_fd, source, target)
+        if target == destination.name:
+            installed = True
+
+    def mutate_manifest_when_table_opens(
+        path: object,
+        flags: int,
+        mode: int = 0o777,
+        *,
+        dir_fd: int | None = None,
+    ) -> int:
+        nonlocal mutated
+        if installed and path == "accessible-table.tsv" and not mutated:
+            mutated = True
+            manifest = destination / "manifest.json"
+            manifest.chmod(0o600)
+            payload = bytearray(manifest.read_bytes())
+            payload[-2] = ord("0") if payload[-2] != ord("0") else ord("1")
+            manifest.write_bytes(payload)
+        return original_open(path, flags, mode, dir_fd=dir_fd)
+
+    monkeypatch.setattr(portable, "rename_directory_exclusive_at", mark_installed)
+    monkeypatch.setattr(portable.os, "open", mutate_manifest_when_table_opens)
+    with pytest.raises(PortableViewTamperError):
+        publish_portable_view(
+            destination,
+            view=view,
+            accessible_table=table,
+            trust_context=trust_context,
+            source_identity_verifier=lambda: view.source_identities,
+        )
+    assert mutated
+    assert not destination.exists()
+
+
 def test_verify_rechecks_named_root_and_rejects_swap(
     integrated_request: PortableViewBuildRequest,
     trust_context: PortableTrustContext,
@@ -852,13 +906,86 @@ def test_verify_rejects_manifest_replacement_while_opening_second_file(
         nonlocal replaced
         if path == "accessible-table.tsv" and dir_fd is not None and not replaced:
             replaced = True
+            root.chmod(0o700)
             os.replace(replacement, root / "manifest.json")
+            root.chmod(0o500)
         return original_open(path, flags, mode, dir_fd=dir_fd)
 
     monkeypatch.setattr(portable.os, "open", racing_open)
     with pytest.raises(PortableViewTamperError):
         verify_portable_view(root, trust_context=trust_context)
     assert replaced
+
+
+def test_verify_final_vector_catches_in_place_manifest_mutation_at_table_open(
+    integrated_request: PortableViewBuildRequest,
+    trust_context: PortableTrustContext,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    view, table = build_portable_view(integrated_request, trust_context=trust_context)
+    root = tmp_path / "root"
+    publish_portable_view(
+        root,
+        view=view,
+        accessible_table=table,
+        trust_context=trust_context,
+        source_identity_verifier=lambda: view.source_identities,
+    )
+    original_open = portable.os.open
+    table_open_count = 0
+    mutated = False
+
+    def mutate_manifest_on_final_table_open(
+        path: object,
+        flags: int,
+        mode: int = 0o777,
+        *,
+        dir_fd: int | None = None,
+    ) -> int:
+        nonlocal table_open_count, mutated
+        if path == "accessible-table.tsv" and dir_fd is not None:
+            table_open_count += 1
+            if table_open_count == 2:
+                mutated = True
+                manifest = root / "manifest.json"
+                manifest.chmod(0o600)
+                payload = bytearray(manifest.read_bytes())
+                payload[-2] = ord("0") if payload[-2] != ord("0") else ord("1")
+                manifest.write_bytes(payload)
+        return original_open(path, flags, mode, dir_fd=dir_fd)
+
+    monkeypatch.setattr(portable.os, "open", mutate_manifest_on_final_table_open)
+    with pytest.raises(PortableViewTamperError):
+        verify_portable_view(root, trust_context=trust_context)
+    assert mutated
+
+
+@pytest.mark.parametrize(
+    "target", ["root", "manifest.json", "accessible-table.tsv", "view.json"]
+)
+def test_verify_rejects_write_bit_mode_changes(
+    integrated_request: PortableViewBuildRequest,
+    trust_context: PortableTrustContext,
+    tmp_path: Path,
+    target: str,
+) -> None:
+    view, table = build_portable_view(integrated_request, trust_context=trust_context)
+    root = tmp_path / "root"
+    publish_portable_view(
+        root,
+        view=view,
+        accessible_table=table,
+        trust_context=trust_context,
+        source_identity_verifier=lambda: view.source_identities,
+    )
+    assert stat.S_IMODE(root.stat().st_mode) == 0o500
+    for filename in ("manifest.json", "accessible-table.tsv", "view.json"):
+        assert stat.S_IMODE((root / filename).stat().st_mode) == 0o400
+    changed = root if target == "root" else root / target
+    changed.chmod(0o700 if target == "root" else 0o600)
+    with pytest.raises(PortableViewTamperError):
+        verify_portable_view(root, trust_context=trust_context)
 
 
 @pytest.mark.parametrize(
@@ -889,7 +1016,9 @@ def test_verify_rejects_final_name_inode_swap_for_every_file(
         nonlocal replaced
         if not replaced:
             replaced = True
+            root.chmod(0o700)
             os.replace(replacement, root / filename)
+            root.chmod(0o500)
         return original_parse(*args, **kwargs)
 
     monkeypatch.setattr(portable, "_parse_canonical", replace_then_parse)

@@ -65,6 +65,8 @@ MAX_TABLE_BYTES = 64 * 1024 * 1024
 MAX_VIEW_BYTES = 32 * 1024 * 1024
 MAX_MANIFEST_BYTES = 128 * 1024
 MAX_TOTAL_BYTES = MAX_TABLE_BYTES + MAX_VIEW_BYTES + MAX_MANIFEST_BYTES
+SEALED_FILE_MODE = 0o400
+SEALED_DIRECTORY_MODE = 0o500
 
 Sha256 = Annotated[str, StringConstraints(pattern=r"^[0-9a-f]{64}$")]
 
@@ -1631,6 +1633,10 @@ def _cleanup(parent_fd: int, stage_name: str | None, stage_fd: int | None) -> No
     if stage_name is None:
         return
     if stage_fd is not None:
+        try:
+            os.fchmod(stage_fd, 0o700)
+        except OSError:
+            pass
         for name in _FILES:
             try:
                 os.unlink(name, dir_fd=stage_fd)
@@ -1650,6 +1656,7 @@ class _PinnedArtifact:
     descriptor: int
     device: int
     inode: int
+    mode: int
     size_bytes: int
     sha256: str
 
@@ -1665,6 +1672,44 @@ def _read_descriptor(descriptor: int, limit: int) -> bytes:
         chunks.append(chunk)
         remaining -= len(chunk)
     return b"".join(chunks)
+
+
+def _require_sealed_directory(descriptor: int) -> None:
+    metadata = os.fstat(descriptor)
+    if (
+        not stat.S_ISDIR(metadata.st_mode)
+        or stat.S_IMODE(metadata.st_mode) != SEALED_DIRECTORY_MODE
+    ):
+        raise PortableViewTamperError("portable directory is not sealed")
+
+
+def _seal_stage(stage_fd: int) -> None:
+    try:
+        for name in _FILES:
+            descriptor = os.open(
+                name,
+                os.O_RDONLY
+                | getattr(os, "O_NOFOLLOW", 0)
+                | getattr(os, "O_NONBLOCK", 0),
+                dir_fd=stage_fd,
+            )
+            try:
+                metadata = os.fstat(descriptor)
+                if not stat.S_ISREG(metadata.st_mode) or metadata.st_nlink != 1:
+                    raise PortableViewTamperError(
+                        "portable artifact cannot be sealed safely"
+                    )
+                os.fchmod(descriptor, SEALED_FILE_MODE)
+                os.fsync(descriptor)
+            finally:
+                os.close(descriptor)
+        os.fchmod(stage_fd, SEALED_DIRECTORY_MODE)
+        os.fsync(stage_fd)
+        _require_sealed_directory(stage_fd)
+    except PortableViewError:
+        raise
+    except OSError as exc:
+        raise PortableViewStorageError("portable artifact sealing failed") from exc
 
 
 def _pin_artifacts(
@@ -1688,6 +1733,7 @@ def _pin_artifacts(
             if (
                 not stat.S_ISREG(metadata.st_mode)
                 or metadata.st_nlink != 1
+                or stat.S_IMODE(metadata.st_mode) != SEALED_FILE_MODE
                 or metadata.st_size != len(expected_bytes)
                 or observed != expected_bytes
             ):
@@ -1705,6 +1751,7 @@ def _pin_artifacts(
                 descriptor=descriptor,
                 device=metadata.st_dev,
                 inode=metadata.st_ino,
+                mode=stat.S_IMODE(metadata.st_mode),
                 size_bytes=metadata.st_size,
                 sha256=digest,
             )
@@ -1753,6 +1800,7 @@ def _pin_existing_artifacts(
             if (
                 not stat.S_ISREG(metadata.st_mode)
                 or metadata.st_nlink != 1
+                or stat.S_IMODE(metadata.st_mode) != SEALED_FILE_MODE
                 or metadata.st_size > limits[name]
             ):
                 os.close(descriptor)
@@ -1770,6 +1818,7 @@ def _pin_existing_artifacts(
                 descriptor=descriptor,
                 device=metadata.st_dev,
                 inode=metadata.st_ino,
+                mode=stat.S_IMODE(metadata.st_mode),
                 size_bytes=metadata.st_size,
                 sha256=digest,
             )
@@ -1800,46 +1849,76 @@ def _validate_pinned_names(
     *,
     sync: bool,
 ) -> None:
+    named: dict[str, int] = {}
     try:
+        _require_sealed_directory(root_fd)
         if set(os.listdir(root_fd)) != set(_FILES):
             raise PortableViewTamperError("artifact inventory changed")
         for name in _FILES:
-            named_fd: int | None = None
+            item = pinned[name]
+            named_fd = os.open(
+                name,
+                os.O_RDONLY
+                | getattr(os, "O_NOFOLLOW", 0)
+                | getattr(os, "O_NONBLOCK", 0),
+                dir_fd=root_fd,
+            )
+            named[name] = named_fd
+            metadata = os.fstat(named_fd)
+            if (
+                not stat.S_ISREG(metadata.st_mode)
+                or metadata.st_nlink != 1
+                or stat.S_IMODE(metadata.st_mode) != SEALED_FILE_MODE
+                or (metadata.st_dev, metadata.st_ino) != (item.device, item.inode)
+                or metadata.st_size != item.size_bytes
+            ):
+                raise PortableViewTamperError(
+                    "artifact name no longer resolves to its sealed pinned inode"
+                )
+
+        for name in reversed(_FILES):
             item = pinned[name]
             expected_bytes = expected[name]
-            try:
-                named_fd = os.open(
-                    name,
-                    os.O_RDONLY
-                    | getattr(os, "O_NOFOLLOW", 0)
-                    | getattr(os, "O_NONBLOCK", 0),
-                    dir_fd=root_fd,
-                )
-                metadata = os.fstat(named_fd)
+            pinned_metadata = os.fstat(item.descriptor)
+            named_metadata = os.fstat(named[name])
+            for metadata in (pinned_metadata, named_metadata):
                 if (
                     not stat.S_ISREG(metadata.st_mode)
                     or metadata.st_nlink != 1
+                    or stat.S_IMODE(metadata.st_mode) != item.mode
                     or (metadata.st_dev, metadata.st_ino) != (item.device, item.inode)
                     or metadata.st_size != item.size_bytes
                 ):
-                    raise PortableViewTamperError(
-                        "artifact name no longer resolves to its pinned inode"
-                    )
-                named_bytes = _read_descriptor(named_fd, len(expected_bytes))
-                pinned_bytes = _read_descriptor(item.descriptor, len(expected_bytes))
-                if (
-                    named_bytes != expected_bytes
-                    or pinned_bytes != expected_bytes
-                    or sha256_bytes(named_bytes) != item.sha256
-                    or sha256_bytes(pinned_bytes) != item.sha256
-                ):
-                    raise PortableViewTamperError("artifact content changed")
-                if sync:
-                    os.fsync(named_fd)
-                    os.fsync(item.descriptor)
-            finally:
-                if named_fd is not None:
-                    os.close(named_fd)
+                    raise PortableViewTamperError("sealed artifact stat vector changed")
+            pinned_bytes = _read_descriptor(item.descriptor, len(expected_bytes))
+            named_bytes = _read_descriptor(named[name], len(expected_bytes))
+            if (
+                pinned_bytes != expected_bytes
+                or named_bytes != expected_bytes
+                or sha256_bytes(pinned_bytes) != item.sha256
+                or sha256_bytes(named_bytes) != item.sha256
+            ):
+                raise PortableViewTamperError("sealed artifact digest vector changed")
+            if sync:
+                os.fsync(item.descriptor)
+                os.fsync(named[name])
+
+        if set(os.listdir(root_fd)) != set(_FILES):
+            raise PortableViewTamperError("artifact inventory changed")
+        for name in reversed(_FILES):
+            item = pinned[name]
+            metadata = os.stat(name, dir_fd=root_fd, follow_symlinks=False)
+            if (
+                not stat.S_ISREG(metadata.st_mode)
+                or metadata.st_nlink != 1
+                or stat.S_IMODE(metadata.st_mode) != item.mode
+                or (metadata.st_dev, metadata.st_ino) != (item.device, item.inode)
+                or metadata.st_size != item.size_bytes
+            ):
+                raise PortableViewTamperError(
+                    "final artifact name-to-inode vector changed"
+                )
+        _require_sealed_directory(root_fd)
         if sync:
             os.fsync(root_fd)
     except PortableViewError:
@@ -1848,6 +1927,12 @@ def _validate_pinned_names(
         raise PortableViewTamperError(
             "artifact inventory could not be revalidated"
         ) from exc
+    finally:
+        for descriptor in named.values():
+            try:
+                os.close(descriptor)
+            except OSError:
+                pass
 
 
 def _close_pinned(pinned: dict[str, _PinnedArtifact]) -> None:
@@ -2000,6 +2085,8 @@ def publish_portable_view(
             raise PortableViewStorageError(
                 "portable staging could not be synced"
             ) from exc
+        _seal_stage(stage_fd)
+        pinned = _pin_artifacts(stage_fd, content)
         try:
             observed = source_identity_verifier()
         except PortableViewError:
@@ -2010,7 +2097,6 @@ def publish_portable_view(
             ) from exc
         if observed != view.source_identities:
             raise PortableViewTamperError("source identity changed before publication")
-        pinned = _pin_artifacts(stage_fd, content)
         _validate_pinned_names(stage_fd, pinned, content, sync=True)
         _same_directory_at(parent_fd, stage_name, stage_fd)
         _same_directory(destination.parent, parent_fd)
@@ -2080,6 +2166,7 @@ def verify_portable_view(
     root_fd = _open_directory(root_path)
     pinned: dict[str, _PinnedArtifact] = {}
     try:
+        _require_sealed_directory(root_fd)
         limits = {
             MANIFEST_PATH: MAX_MANIFEST_BYTES,
             TABLE_PATH: MAX_TABLE_BYTES,
