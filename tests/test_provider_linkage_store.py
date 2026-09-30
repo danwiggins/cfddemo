@@ -5,7 +5,9 @@ from __future__ import annotations
 import base64
 import os
 import sqlite3
+from collections.abc import Iterator, Mapping
 from concurrent.futures import ThreadPoolExecutor
+from datetime import datetime, timedelta
 from multiprocessing import get_all_start_methods, get_context
 from multiprocessing.queues import Queue
 from multiprocessing.synchronize import Event as EventType
@@ -13,6 +15,7 @@ from pathlib import Path
 
 import pytest
 
+import evidence_inspector.provider_linkage_store as linkage_store_module
 from evidence_inspector.provider_linkage import (
     ApprovalPurpose,
     AuthorizedLinkageRevision,
@@ -27,12 +30,15 @@ from evidence_inspector.provider_linkage import (
     provider_trust_snapshot_sha256,
 )
 from evidence_inspector.provider_linkage_store import (
+    AuthorityTimeSource,
     CommittedLinkageReceipt,
     ProviderLinkageStore,
     ProviderLinkageStoreConflict,
     ProviderLinkageStoreSchemaError,
     ProviderLinkageStoreUnsafe,
     _trust_pins_sha256,
+    provider_linkage_store_process_integrity_is_valid,
+    require_provider_linkage_store_process_integrity,
 )
 from tests.test_provider_linkage import (
     AFTER,
@@ -51,15 +57,107 @@ from tests.test_provider_linkage import (
 )
 
 
+def test_detected_module_tamper_is_explicit_process_integrity_failure() -> None:
+    function = linkage_store_module._authority_time_text
+    original = function.__kwdefaults__
+    assert provider_linkage_store_process_integrity_is_valid()
+    try:
+        function.__kwdefaults__ = {"attacker_resealed": True}
+        assert not provider_linkage_store_process_integrity_is_valid()
+        with pytest.raises(
+            ProviderLinkageStoreUnsafe,
+            match="process integrity check failed",
+        ):
+            require_provider_linkage_store_process_integrity()
+    finally:
+        function.__kwdefaults__ = original
+
+    require_provider_linkage_store_process_integrity()
+
+
 def _pins() -> dict[str, str]:
     return {PROVIDER: provider_trust_snapshot_sha256(_trust())}
+
+
+class _OnePassPins(Mapping[str, str]):
+    def __init__(self, pairs: tuple[tuple[str, str], ...], *, length: object) -> None:
+        self._pairs = list(pairs)
+        self._length = length
+        self.iter_calls = 0
+        self.get_calls = 0
+        self.len_calls = 0
+        self.items_calls = 0
+
+    def __iter__(self) -> Iterator[str]:
+        self.iter_calls += 1
+        if self.iter_calls != 1:
+            raise AssertionError("trust mapping was reiterated")
+        return iter(tuple(key for key, _ in self._pairs))
+
+    def __getitem__(self, key: str) -> str:
+        self.get_calls += 1
+        for index, (candidate, value) in enumerate(self._pairs):
+            if candidate == key:
+                self._pairs.pop(index)
+                return value
+        raise KeyError(key)
+
+    def __len__(self) -> int:
+        self.len_calls += 1
+        if isinstance(self._length, BaseException):
+            raise self._length
+        assert type(self._length) is int
+        return self._length
+
+    def items(self) -> object:
+        self.items_calls += 1
+        raise AssertionError("trust mapping items view was accessed")
+
+
+class _OverlongPins(Mapping[str, str]):
+    def __init__(self) -> None:
+        self.yielded = 0
+        self.get_calls = 0
+        self.len_calls = 0
+
+    def __iter__(self) -> Iterator[str]:
+        index = 0
+        while True:
+            self.yielded += 1
+            yield f"provider_{index:032x}"
+            index += 1
+
+    def __getitem__(self, key: str) -> str:
+        self.get_calls += 1
+        return "a" * 64
+
+    def __len__(self) -> int:
+        self.len_calls += 1
+        raise AssertionError("overlong mapping length was accessed")
+
+
+class _DuplicatePins(Mapping[str, str]):
+    def __init__(self, values: tuple[str, str]) -> None:
+        self._values = values
+        self.get_calls = 0
+
+    def __iter__(self) -> Iterator[str]:
+        return iter((PROVIDER, PROVIDER))
+
+    def __getitem__(self, key: str) -> str:
+        value = self._values[self.get_calls]
+        self.get_calls += 1
+        return value
+
+    def __len__(self) -> int:
+        raise AssertionError("duplicate mapping length was accessed")
 
 
 def _store(root: Path) -> ProviderLinkageStore:
     return ProviderLinkageStore(
         root,
         expected_trust_snapshot_sha256_by_provider=_pins(),
-        clock=lambda: NOW,
+        time_source=AuthorityTimeSource.fixed(NOW),
     )
 
 
@@ -87,7 +185,7 @@ def _process_commit(
     store = ProviderLinkageStore(
         root,
         expected_trust_snapshot_sha256_by_provider=_pins(),
-        clock=lambda: NOW,
+        time_source=AuthorityTimeSource.fixed(NOW),
     )
     try:
         ready.put("ready")
@@ -128,6 +226,138 @@ def test_fresh_store_has_verified_empty_snapshot(tmp_path: Path) -> None:
     assert snapshot.state_version == 0
     assert snapshot.revisions == ()
     assert snapshot.receipts == ()
+
+
+def test_authority_time_floor_is_monotonic_and_persists_across_reopen(
+    tmp_path: Path,
+) -> None:
+    root = tmp_path / "protected"
+    time_source = AuthorityTimeSource.fixed(NOW)
+
+    store = ProviderLinkageStore(
+        root,
+        expected_trust_snapshot_sha256_by_provider=_pins(),
+        time_source=time_source,
+    )
+    try:
+        receipt = store.commit_authorized_revision(_record())
+        time_source.advance_to(AFTER + timedelta(hours=1))
+        with pytest.raises(ProviderLinkageStoreConflict, match="not current"):
+            store.active_snapshot()
+        with pytest.raises(ValueError, match="cannot move backwards"):
+            time_source.advance_to(NOW)
+        time_source._current = NOW  # type: ignore[attr-defined]
+        with pytest.raises(ProviderLinkageStoreUnsafe, match="moved backwards"):
+            store.active_snapshot()
+    finally:
+        store.close()
+
+    reopened = ProviderLinkageStore(
+        root,
+        expected_trust_snapshot_sha256_by_provider=_pins(),
+        time_source=time_source,
+    )
+    try:
+        with pytest.raises(ProviderLinkageStoreUnsafe, match="moved backwards"):
+            reopened.active_snapshot()
+        assert receipt.state_version == 1
+    finally:
+        reopened.close()
+
+
+def test_persisted_floor_survives_registry_and_parser_poisoning(
+    tmp_path: Path,
+) -> None:
+    root = tmp_path / "protected"
+    time_source = AuthorityTimeSource.fixed(NOW)
+    store = ProviderLinkageStore(
+        root,
+        expected_trust_snapshot_sha256_by_provider=_pins(),
+        time_source=time_source,
+    )
+    identity = id(store)
+    original_parser = linkage_store_module._authority_time_from_text
+    original_capture_defaults = (
+        linkage_store_module._capture_pinned_store_now.__defaults__
+    )
+    original_entry = linkage_store_module._STORE_TIME_SOURCES[identity]
+    try:
+        store.commit_authorized_revision(_record())
+        time_source.advance_to(AFTER + timedelta(hours=1))
+        with pytest.raises(ProviderLinkageStoreConflict, match="not current"):
+            store.active_snapshot()
+        persisted_entry = linkage_store_module._STORE_TIME_SOURCES[identity]
+        time_source._current = NOW  # type: ignore[attr-defined]
+        linkage_store_module._STORE_TIME_SOURCES[identity] = (
+            persisted_entry[0],
+            time_source,
+            None,
+        )
+        linkage_store_module._authority_time_from_text = lambda _: NOW
+        linkage_store_module._capture_pinned_store_now.__defaults__ = (
+            lambda _: NOW,
+            lambda _: (AFTER + timedelta(hours=1)).isoformat(),
+            lambda _: NOW,
+        )
+
+        with pytest.raises(ProviderLinkageStoreUnsafe, match="moved backwards"):
+            store.active_snapshot()
+    finally:
+        linkage_store_module._authority_time_from_text = original_parser
+        linkage_store_module._capture_pinned_store_now.__defaults__ = (
+            original_capture_defaults
+        )
+        linkage_store_module._STORE_TIME_SOURCES[identity] = original_entry
+        store.close()
+
+
+def test_v1_store_metadata_migrates_once_to_persisted_authority_floor(
+    tmp_path: Path,
+) -> None:
+    root = tmp_path / "protected"
+    with _store(root):
+        pass
+    connection = sqlite3.connect(root / "linkage.sqlite3")
+    connection.execute("DELETE FROM metadata WHERE key='authority_time_floor'")
+    connection.execute("UPDATE metadata SET value='1' WHERE key='schema_version'")
+    connection.commit()
+    connection.close()
+
+    with _store(root) as reopened:
+        assert reopened.active_snapshot().state_version == 0
+
+    connection = sqlite3.connect(root / "linkage.sqlite3")
+    metadata = dict(connection.execute("SELECT key, value FROM metadata"))
+    connection.close()
+    assert metadata["schema_version"] == "2"
+    assert metadata["authority_time_floor"] == NOW.isoformat()
+
+
+@pytest.mark.parametrize(
+    "invalid_floor",
+    (
+        "not-a-time",
+        NOW.replace(tzinfo=None).isoformat(),
+        NOW.replace(microsecond=1).isoformat(),
+        NOW.isoformat().replace("+00:00", "Z"),
+    ),
+)
+def test_malformed_persisted_authority_time_floor_is_rejected(
+    tmp_path: Path,
+    invalid_floor: str,
+) -> None:
+    root = tmp_path / "protected"
+    _store(root).close()
+    connection = sqlite3.connect(root / "linkage.sqlite3")
+    connection.execute(
+        "UPDATE metadata SET value=? WHERE key='authority_time_floor'",
+        (invalid_floor,),
+    )
+    connection.commit()
+    connection.close()
+
+    with pytest.raises(ProviderLinkageStoreSchemaError, match="authority time"):
+        _store(root)
 
 
 def test_exact_retry_is_idempotent_without_advancing_state(tmp_path: Path) -> None:
@@ -226,7 +456,7 @@ def test_approval_and_nonce_replay_namespace_is_global_across_providers(
             PROVIDER: provider_trust_snapshot_sha256(_trust()),
             other_provider: trust_sha256,
         },
-        clock=lambda: NOW,
+        time_source=AuthorityTimeSource.fixed(NOW),
     )
     try:
         store.commit_authorized_revision(first)
@@ -460,17 +690,17 @@ def test_record_bytes_and_digest_are_bound_into_state_head_and_receipt(
 def test_expired_authority_disables_commit_and_active_projection(
     tmp_path: Path,
 ) -> None:
-    current = [NOW]
+    time_source = AuthorityTimeSource.fixed(NOW)
     root = tmp_path / "protected"
     store = ProviderLinkageStore(
         root,
         expected_trust_snapshot_sha256_by_provider=_pins(),
-        clock=lambda: current[0],
+        time_source=time_source,
     )
     try:
         receipt = store.commit_authorized_revision(_record())
         store.verify_current_receipt(receipt)
-        current[0] = _trust().expires_at
+        time_source.advance_to(_trust().expires_at)
         with pytest.raises(ProviderLinkageStoreConflict, match="not current"):
             store.active_snapshot()
     finally:
@@ -761,22 +991,183 @@ def test_relative_or_symlink_root_is_rejected(tmp_path: Path) -> None:
         _store(alias)
 
 
-def test_invalid_trust_pin_or_clock_is_rejected(tmp_path: Path) -> None:
+def test_invalid_trust_pin_or_time_source_is_rejected(tmp_path: Path) -> None:
     with pytest.raises(ProviderLinkageStoreUnsafe, match="trust pins are invalid"):
         ProviderLinkageStore(
             tmp_path / "invalid-pins",
             expected_trust_snapshot_sha256_by_provider={"free text": "0" * 64},
         )
-    store = ProviderLinkageStore(
-        tmp_path / "invalid-clock",
+    with pytest.raises(ProviderLinkageStoreUnsafe, match="time source is invalid"):
+        AuthorityTimeSource.fixed(NOW.replace(tzinfo=None))
+
+
+@pytest.mark.parametrize("reported_length", (0, 10_000, RuntimeError("unused")))
+def test_trust_pin_capture_ignores_caller_length_and_items_views(
+    tmp_path: Path,
+    reported_length: object,
+) -> None:
+    pins = _OnePassPins(tuple(_pins().items()), length=reported_length)
+    with ProviderLinkageStore(
+        tmp_path / f"one-pass-{type(reported_length).__name__}-{reported_length!s}",
+        expected_trust_snapshot_sha256_by_provider=pins,
+        time_source=AuthorityTimeSource.fixed(NOW),
+    ) as store:
+        assert store.active_snapshot().state_version == 0
+    assert pins.iter_calls == 1
+    assert pins.get_calls == 1
+    assert pins.len_calls == 0
+    assert pins.items_calls == 0
+
+
+def test_overlong_trust_pin_iterator_stops_at_max_plus_one_without_root(
+    tmp_path: Path,
+) -> None:
+    pins = _OverlongPins()
+    root = tmp_path / "overlong-pins"
+    with pytest.raises(ProviderLinkageStoreUnsafe, match="pin count"):
+        ProviderLinkageStore(
+            root,
+            expected_trust_snapshot_sha256_by_provider=pins,
+            time_source=AuthorityTimeSource.fixed(NOW),
+        )
+    assert pins.yielded == linkage_store_module.MAX_PROVIDER_TRUST_PINS + 1
+    assert pins.get_calls == linkage_store_module.MAX_PROVIDER_TRUST_PINS
+    assert pins.len_calls == 0
+    assert not root.exists()
+
+
+@pytest.mark.parametrize("conflicting", (False, True))
+def test_duplicate_or_conflicting_trust_pin_iteration_is_rejected(
+    tmp_path: Path,
+    conflicting: bool,
+) -> None:
+    first = "a" * 64
+    pins = _DuplicatePins((first, "b" * 64 if conflicting else first))
+    root = tmp_path / f"duplicate-pins-{conflicting}"
+    with pytest.raises(ProviderLinkageStoreUnsafe, match="pins are invalid"):
+        ProviderLinkageStore(
+            root,
+            expected_trust_snapshot_sha256_by_provider=pins,
+            time_source=AuthorityTimeSource.fixed(NOW),
+        )
+    assert pins.get_calls == 1
+    assert not root.exists()
+
+
+@pytest.mark.parametrize("subclass_field", ("provider", "digest"))
+def test_trust_pin_capture_requires_exact_string_types_without_root(
+    tmp_path: Path,
+    subclass_field: str,
+) -> None:
+    class StringSubclass(str):
+        pass
+
+    provider = StringSubclass(PROVIDER) if subclass_field == "provider" else PROVIDER
+    digest: str = "a" * 64
+    if subclass_field == "digest":
+        digest = StringSubclass(digest)
+    root = tmp_path / f"subclass-{subclass_field}"
+    with pytest.raises(ProviderLinkageStoreUnsafe, match="pins are invalid"):
+        ProviderLinkageStore(
+            root,
+            expected_trust_snapshot_sha256_by_provider={provider: digest},
+            time_source=AuthorityTimeSource.fixed(NOW),
+        )
+    assert not root.exists()
+
+
+@pytest.mark.parametrize("count", (1, linkage_store_module.MAX_PROVIDER_TRUST_PINS))
+def test_exact_dict_trust_pin_boundaries_are_accepted(
+    tmp_path: Path,
+    count: int,
+) -> None:
+    pins = {f"provider_{index:032x}": f"{index + 1:064x}" for index in range(count)}
+    with ProviderLinkageStore(
+        tmp_path / f"exact-pins-{count}",
+        expected_trust_snapshot_sha256_by_provider=pins,
+        time_source=AuthorityTimeSource.fixed(NOW),
+    ) as store:
+        assert len(store._trust_pins) == count  # type: ignore[attr-defined]
+
+
+@pytest.mark.parametrize("count", (0, linkage_store_module.MAX_PROVIDER_TRUST_PINS + 1))
+def test_exact_dict_trust_pin_out_of_bounds_has_no_root(
+    tmp_path: Path,
+    count: int,
+) -> None:
+    pins = {f"provider_{index:032x}": f"{index + 1:064x}" for index in range(count)}
+    root = tmp_path / f"invalid-exact-pins-{count}"
+    with pytest.raises(ProviderLinkageStoreUnsafe, match="trust pin"):
+        ProviderLinkageStore(
+            root,
+            expected_trust_snapshot_sha256_by_provider=pins,
+            time_source=AuthorityTimeSource.fixed(NOW),
+        )
+    assert not root.exists()
+
+
+def test_time_source_subclass_is_rejected_without_object_execution(
+    tmp_path: Path,
+) -> None:
+    calls: list[str] = []
+
+    class AttackingTimeSource(AuthorityTimeSource):
+        def __bool__(self) -> bool:
+            calls.append("bool")
+            raise AssertionError("subclass truthiness executed")
+
+        def __getattribute__(self, name: str) -> object:
+            calls.append(f"getattribute:{name}")
+            raise AssertionError("subclass attribute access executed")
+
+        def __repr__(self) -> str:
+            calls.append("repr")
+            raise AssertionError("subclass repr executed")
+
+    attacking_source = AttackingTimeSource.fixed(NOW)
+    with pytest.raises(ProviderLinkageStoreUnsafe, match="time source type"):
+        ProviderLinkageStore(
+            tmp_path / "attacking-time-source",
+            expected_trust_snapshot_sha256_by_provider=_pins(),
+            time_source=attacking_source,
+        )
+    assert calls == []
+    assert not (tmp_path / "attacking-time-source").exists()
+
+
+def test_none_and_exact_time_source_instances_are_accepted(tmp_path: Path) -> None:
+    with ProviderLinkageStore(
+        tmp_path / "system-source",
         expected_trust_snapshot_sha256_by_provider=_pins(),
-        clock=lambda: NOW.replace(tzinfo=None),
-    )
-    try:
-        with pytest.raises(ProviderLinkageStoreUnsafe, match="clock is invalid"):
-            store.commit_authorized_revision(_record())
-    finally:
-        store.close()
+    ) as system_store:
+        assert system_store.active_snapshot().state_version == 0
+
+    exact_source = AuthorityTimeSource.fixed(NOW)
+    with ProviderLinkageStore(
+        tmp_path / "fixed-source",
+        expected_trust_snapshot_sha256_by_provider=_pins(),
+        time_source=exact_source,
+    ) as fixed_store:
+        assert fixed_store.active_snapshot().state_version == 0
+
+
+def test_legacy_arbitrary_clock_callback_is_not_an_authority_input(
+    tmp_path: Path,
+) -> None:
+    calls = 0
+
+    def attacking_clock() -> datetime:
+        nonlocal calls
+        calls += 1
+        return NOW
+
+    with pytest.raises(TypeError, match="unexpected keyword argument 'clock'"):
+        ProviderLinkageStore(  # type: ignore[call-arg]
+            tmp_path / "callback-clock",
+            expected_trust_snapshot_sha256_by_provider=_pins(),
+            clock=attacking_clock,
+        )
+    assert calls == 0
 
 
 def test_receipt_schema_rejects_free_text_identity() -> None:

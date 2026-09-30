@@ -27,12 +27,13 @@ method labels, or adjacency.
    trust, exact signed approvals, dual-principal correction, append-only
    history validation, and fail-closed activation/comparison eligibility. D01
    deliberately cannot consume approvals or project active linkage.
-2. **D01/D04 protected transactional store:** atomically consume approval IDs
+2. **D01/D04 protected transactional store (stack base):** atomically consume approval IDs
    and nonces with immutable revisions, preserve full-history identity and
    parent constraints, and expose active linkage only from committed state.
-3. **D02 compatibility-key/anchor:** add the complete Epic D measurement policy
-   key and six outcomes. Every member is evaluated against one pinned anchor;
-   `unknown` and invalid decisions suppress deltas and connecting trends.
+3. **D02 compatibility-key/anchor (this PR):** complete Epic D measurement
+   policy key and six outcomes. Every member is evaluated against one pinned
+   anchor; `unknown` and invalid decisions suppress deltas and connecting
+   trends.
 4. **D04/D05 supersession and immutable membership:** correction/supersession
    chain, cycle/idempotency/concurrency protection,
    immutable member ordering, unit-of-analysis and technical-replicate rules.
