@@ -493,11 +493,80 @@ def _packaged_assets() -> dict[str, tuple[str, bytes]]:
 
 
 @dataclass(frozen=True, slots=True)
+class _CallableIdentity:
+    target: Callable[..., object]
+    code: object
+    defaults: object
+    kwdefaults: object
+    closure_values: tuple[object, ...]
+
+    @classmethod
+    def capture(cls, target: Callable[..., object]) -> _CallableIdentity:
+        closure = getattr(target, "__closure__", None) or ()
+        return cls(
+            target=target,
+            code=getattr(target, "__code__", None),
+            defaults=getattr(target, "__defaults__", None),
+            kwdefaults=getattr(target, "__kwdefaults__", None),
+            closure_values=tuple(cell.cell_contents for cell in closure),
+        )
+
+    def assert_intact(self) -> None:
+        closure = getattr(self.target, "__closure__", None) or ()
+        if (
+            getattr(self.target, "__code__", None) is not self.code
+            or getattr(self.target, "__defaults__", None) is not self.defaults
+            or getattr(self.target, "__kwdefaults__", None) is not self.kwdefaults
+            or len(closure) != len(self.closure_values)
+            or any(
+                cell.cell_contents is not expected
+                for cell, expected in zip(closure, self.closure_values, strict=True)
+            )
+        ):
+            raise LocalWebServerError("installed HTTP callable changed")
+
+
+@dataclass(frozen=True, slots=True)
+class _ExplorerHttpBoundary:
+    dispatch: tuple[Callable[..., object], Callable[..., object], Callable[..., object]]
+    prepare_document: Callable[..., dict[str, object]]
+    prepare_comparison: Callable[..., dict[str, object]]
+    validate_public: Callable[..., None]
+    canonicalize: Callable[[object], bytes]
+    identities: tuple[_CallableIdentity, ...]
+
+    def assert_intact(self) -> None:
+        for identity in self.identities:
+            identity.assert_intact()
+
+    def encode(self, payload: object) -> bytes:
+        self.assert_intact()
+        content = self.canonicalize(payload) + b"\n"
+        self.assert_intact()
+        return content
+
+    def encode_public(self, payload: object) -> bytes:
+        self.assert_intact()
+        self.validate_public(payload)
+        return self.encode(payload)
+
+
+_INSTALLED_EXPLORER_HTTP_DEPENDENCIES = (
+    _EXPLORER_DISPATCH,
+    prepare_explorer_document_response,
+    prepare_explorer_comparison_response,
+    validate_public_projection,
+    canonical_json_bytes,
+)
+
+
+@dataclass(frozen=True, slots=True)
 class _Application:
     kernel: LocalApiKernel
     boundary: LocalWebBoundary
     assets: dict[str, tuple[str, bytes]]
     explorer: IntegratedExplorerSource | None = None
+    explorer_http: _ExplorerHttpBoundary | None = None
 
 
 class _LoopbackHttpServer(http.server.ThreadingHTTPServer):
@@ -507,6 +576,11 @@ class _LoopbackHttpServer(http.server.ThreadingHTTPServer):
     application: _Application
     security_validator: Callable[[], None]
     security_failed: threading.Event
+
+    def __setattr__(self, name: str, value: object) -> None:
+        if name == "RequestHandlerClass" and hasattr(self, "RequestHandlerClass"):
+            raise TypeError("installed request handler is sealed")
+        super().__setattr__(name, value)
 
     def __init__(self, *args: object, **kwargs: object) -> None:
         self._worker_slots = threading.BoundedSemaphore(MAX_HTTP_WORKERS)
@@ -524,7 +598,8 @@ class _LoopbackHttpServer(http.server.ThreadingHTTPServer):
         del request
         try:
             return bool(
-                client_address
+                self.RequestHandlerClass is _Handler
+                and client_address
                 and isinstance(client_address, tuple)
                 and ipaddress.ip_address(client_address[0]).is_loopback
             )
@@ -563,7 +638,15 @@ class _LoopbackHttpServerV6(_LoopbackHttpServer):
     address_family = socket.AF_INET6
 
 
-class _Handler(http.server.BaseHTTPRequestHandler):
+class _SealedHandlerType(type):
+    def __setattr__(cls, name: str, value: object) -> None:
+        raise TypeError("installed HTTP handler class is sealed")
+
+    def __delattr__(cls, name: str) -> None:
+        raise TypeError("installed HTTP handler class is sealed")
+
+
+class _Handler(http.server.BaseHTTPRequestHandler, metaclass=_SealedHandlerType):
     protocol_version = "HTTP/1.1"
     server_version = "TracebackLocal"
     sys_version = ""
@@ -615,16 +698,36 @@ class _Handler(http.server.BaseHTTPRequestHandler):
         except (BrokenPipeError, ConnectionResetError, OSError):
             self.close_connection = True
 
-    def _json(
-        self,
-        status_code: int,
-        payload: object,
-        _canonicalize: Callable[[object], bytes] = canonical_json_bytes,
-    ) -> None:
+    def _json(self, status_code: int, payload: object) -> None:
+        boundary = self.application.explorer_http
+        if boundary is None or not self._security_boundary_intact():
+            self.close_connection = True
+            self._send(
+                503,
+                "application/json; charset=utf-8",
+                b'{"error":{"code":"TBX-WEB-503"}}\n',
+            )
+            return
         self._send(
             status_code,
             "application/json; charset=utf-8",
-            _canonicalize(payload) + b"\n",
+            boundary.encode(payload),
+        )
+
+    def _public_json(self, status_code: int, payload: object) -> None:
+        boundary = self.application.explorer_http
+        if boundary is None or not self._security_boundary_intact():
+            self.close_connection = True
+            self._send(
+                503,
+                "application/json; charset=utf-8",
+                b'{"error":{"code":"TBX-WEB-503"}}\n',
+            )
+            return
+        self._send(
+            status_code,
+            "application/json; charset=utf-8",
+            boundary.encode_public(payload),
         )
 
     def _deny(self, error: BoundaryDenied) -> None:
@@ -690,19 +793,7 @@ class _Handler(http.server.BaseHTTPRequestHandler):
     def do_HEAD(self) -> None:
         self.do_GET()
 
-    def do_GET(
-        self,
-        _explorer_dispatch: tuple[
-            Callable[..., object], Callable[..., object], Callable[..., object]
-        ] = _EXPLORER_DISPATCH,
-        _prepare_document: Callable[..., dict[str, object]] = (
-            prepare_explorer_document_response
-        ),
-        _prepare_comparison: Callable[..., dict[str, object]] = (
-            prepare_explorer_comparison_response
-        ),
-        _validate_public: Callable[..., None] = validate_public_projection,
-    ) -> None:
+    def do_GET(self) -> None:
         if not self._security_boundary_intact():
             self.close_connection = True
             self._json(503, {"error": {"code": "TBX-WEB-503"}})
@@ -771,7 +862,11 @@ class _Handler(http.server.BaseHTTPRequestHandler):
                     )
                 if "cursor" in parameters:
                     query_payload["cursor"] = parameters["cursor"][0]
-                explorer_query = _explorer_dispatch[0]
+                explorer_http = self.application.explorer_http
+                if explorer_http is None:
+                    raise TypeError("explorer HTTP boundary is unavailable")
+                explorer_http.assert_intact()
+                explorer_query = explorer_http.dispatch[0]
                 query = CatalogQuery(**query_payload)
                 page = explorer_query(self.application.explorer, query)
                 if page.query != query:
@@ -779,8 +874,7 @@ class _Handler(http.server.BaseHTTPRequestHandler):
                 payload = page.model_dump(mode="json")
                 if payload.get("query") != query.model_dump(mode="json"):
                     raise ValueError("catalog response query encoding changed")
-                _validate_public(payload)
-                self._json(200, payload)
+                self._public_json(200, payload)
                 return
             if parsed.path == _EXPLORER_COMPARE_ROUTE:
                 self.application.boundary.authorize(request)
@@ -803,21 +897,26 @@ class _Handler(http.server.BaseHTTPRequestHandler):
                     right
                 ):
                     raise ValueError("comparison result identity is invalid")
-                explorer_compare = _explorer_dispatch[2]
+                explorer_http = self.application.explorer_http
+                if explorer_http is None:
+                    raise TypeError("explorer HTTP boundary is unavailable")
+                explorer_http.assert_intact()
+                explorer_compare = explorer_http.dispatch[2]
                 comparison = explorer_compare(self.application.explorer, left, right)
                 if (
                     comparison.left_result_id != left
                     or comparison.right_result_id != right
                 ):
                     raise ValueError("comparison response identity changed")
-                payload = _prepare_comparison(self.application.explorer, comparison)
+                payload = explorer_http.prepare_comparison(
+                    self.application.explorer, comparison
+                )
                 if (
                     payload.get("left_result_id") != left
                     or payload.get("right_result_id") != right
                 ):
                     raise ValueError("comparison response encoding changed")
-                _validate_public(payload)
-                self._json(200, payload)
+                self._public_json(200, payload)
                 return
             explorer_match = _EXPLORER_RESULT_ROUTE.fullmatch(parsed.path)
             if explorer_match is not None:
@@ -825,7 +924,11 @@ class _Handler(http.server.BaseHTTPRequestHandler):
                 if self.application.explorer is None:
                     raise ApiProblem(404, self.application.kernel.not_found_problem)
                 requested_result_id = explorer_match.group(1)
-                explorer_get = _explorer_dispatch[1]
+                explorer_http = self.application.explorer_http
+                if explorer_http is None:
+                    raise TypeError("explorer HTTP boundary is unavailable")
+                explorer_http.assert_intact()
+                explorer_get = explorer_http.dispatch[1]
                 try:
                     document = explorer_get(
                         self.application.explorer, requested_result_id
@@ -836,7 +939,9 @@ class _Handler(http.server.BaseHTTPRequestHandler):
                     ) from exc
                 if document.models.catalog_ref.result_id != requested_result_id:
                     raise ValueError("detail response identity changed")
-                payload = _prepare_document(self.application.explorer, document)
+                payload = explorer_http.prepare_document(
+                    self.application.explorer, document
+                )
                 models = payload.get("models")
                 catalog_ref = (
                     models.get("catalog_ref") if isinstance(models, dict) else None
@@ -846,8 +951,7 @@ class _Handler(http.server.BaseHTTPRequestHandler):
                     or catalog_ref.get("result_id") != requested_result_id
                 ):
                     raise ValueError("detail response encoding changed")
-                _validate_public(payload)
-                self._json(200, payload)
+                self._public_json(200, payload)
                 return
             match = _JOB_ROUTE.fullmatch(parsed.path)
             if match is not None:
@@ -891,7 +995,10 @@ class _Handler(http.server.BaseHTTPRequestHandler):
                     payload["bootstrap"],
                     authority=self.application.boundary.config.authority,
                 )
-                content = canonical_json_bytes({"csrf_token": grant.csrf_token}) + b"\n"
+                explorer_http = self.application.explorer_http
+                if explorer_http is None:
+                    raise TypeError("explorer HTTP boundary is unavailable")
+                content = explorer_http.encode({"csrf_token": grant.csrf_token})
                 try:
                     self.send_response(200)
                     for name, value in _SECURITY_HEADERS.items():
@@ -920,11 +1027,33 @@ class _Handler(http.server.BaseHTTPRequestHandler):
         self._json(404, {"error": {"code": "TBX-WEB-404"}})
 
 
+@dataclass(frozen=True, slots=True)
+class _EventStatus:
+    _is_set: Callable[[], bool]
+
+    def is_set(self) -> bool:
+        return self._is_set()
+
+
+@dataclass(frozen=True, slots=True)
+class _ServerStatus:
+    _security_is_set: Callable[[], bool]
+    _active_workers: Callable[[], int]
+
+    @property
+    def security_failed(self) -> _EventStatus:
+        return _EventStatus(self._security_is_set)
+
+    @property
+    def active_workers(self) -> int:
+        return self._active_workers()
+
+
 @dataclass(slots=True)
 class RunningLocalWebService:
     """A started local service with restart-scoped in-memory credentials."""
 
-    server: _LoopbackHttpServer
+    _server: _LoopbackHttpServer
     thread: threading.Thread
     boundary: LocalWebBoundary
     bootstrap_code: str
@@ -936,6 +1065,15 @@ class RunningLocalWebService:
     watchdog_stop: threading.Event
     watchdog_thread: threading.Thread
     closed: bool = False
+
+    @property
+    def server(self) -> _ServerStatus:
+        """Expose bounded status without the mutable HTTP server capability."""
+
+        return _ServerStatus(
+            self._server.security_failed.is_set,
+            lambda: self._server.active_workers,
+        )
 
     @classmethod
     def start(
@@ -997,17 +1135,51 @@ class RunningLocalWebService:
                 source=source,
                 not_found_problem=problem,
             )
+            (
+                explorer_dispatch,
+                prepare_document,
+                prepare_comparison,
+                validate_public,
+                canonicalize,
+            ) = _INSTALLED_EXPLORER_HTTP_DEPENDENCIES
+            tracked_callables = (
+                *explorer_dispatch,
+                prepare_document,
+                prepare_comparison,
+                validate_public,
+                canonicalize,
+                _Handler.do_GET,
+                _Handler._json,
+                _Handler._public_json,
+            )
+            explorer_http = _ExplorerHttpBoundary(
+                dispatch=explorer_dispatch,
+                prepare_document=prepare_document,
+                prepare_comparison=prepare_comparison,
+                validate_public=validate_public,
+                canonicalize=canonicalize,
+                identities=tuple(
+                    _CallableIdentity.capture(item) for item in tracked_callables
+                ),
+            )
+            explorer_http.assert_intact()
             server.application = _Application(
                 kernel,
                 boundary,
                 _packaged_assets(),
                 explorer,
+                explorer_http,
             )
 
             def validate_security_boundary() -> None:
                 _require_startup_anchor(startup_anchor)
                 _require_named_state_directory(state_directory, state_fd)
                 _require_instance_lease(state_fd, lease_fd)
+                if server.application.explorer_http is not explorer_http:
+                    raise LocalWebServerError("installed HTTP boundary changed")
+                if server.RequestHandlerClass is not _Handler:
+                    raise LocalWebServerError("installed request handler changed")
+                explorer_http.assert_intact()
 
             server.security_validator = validate_security_boundary
             instance_id = f"instance_{secrets.token_hex(16)}"
@@ -1055,7 +1227,7 @@ class RunningLocalWebService:
             )
             watchdog_thread.start()
             return cls(
-                server=server,
+                _server=server,
                 thread=thread,
                 boundary=boundary,
                 bootstrap_code=bootstrap_code,
@@ -1108,9 +1280,9 @@ class RunningLocalWebService:
         self.watchdog_stop.set()
         try:
             try:
-                self.server.shutdown()
+                self._server.shutdown()
             finally:
-                self.server.server_close()
+                self._server.server_close()
                 self.thread.join(timeout=5)
                 self.watchdog_thread.join(timeout=5)
         finally:

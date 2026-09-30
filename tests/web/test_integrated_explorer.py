@@ -420,6 +420,10 @@ def test_source_class_replacement_fails_direct_and_at_http_boundary(
             state_directory=tmp_path / "state",
             explorer=explorer,
         ) as service:
+            assert not hasattr(service.server, "_server")
+            assert not hasattr(service.server, "RequestHandlerClass")
+            with pytest.raises((AttributeError, TypeError)):
+                service.server.RequestHandlerClass = object  # type: ignore[attr-defined,misc]
             cookie, _ = _exchange(service)
             status, _, _ = _request(
                 service,
