@@ -4,12 +4,14 @@ from __future__ import annotations
 
 import json
 import os
+import threading
 from concurrent.futures import ThreadPoolExecutor
 from datetime import timedelta
 from pathlib import Path
 
 import pytest
 
+import evidence_inspector.cohort_registry as cohort_registry_module
 from evidence_inspector.cohort_manifest import (
     cohort_manifest_bytes,
     cohort_manifest_sha256,
@@ -159,11 +161,14 @@ def test_concurrent_same_bytes_adopt_once(registry: CohortRegistry, live) -> Non
 def test_two_instances_in_one_process_serialize_publication(
     registry: CohortRegistry, live
 ) -> None:
+    identity = registry.list_selectors()
     peer = CohortRegistry(
         registry.root,
         linkage_store=live[0],
         expected_trust_snapshot_sha256_by_provider=_pins(),
-        expected_state_head_sha256="0" * 64,
+        expected_registry_id=identity.registry_id,
+        expected_registry_epoch_sha256=identity.registry_epoch_sha256,
+        expected_state_head_sha256=identity.state_head_sha256,
     )
     manifest = _first(live)
     try:
@@ -213,6 +218,57 @@ def test_linkage_correction_keeps_history_but_stales_public_selector(
         registry.resolve(stale.selector_id, stale.cohort_version)
 
 
+def test_resolve_holds_authority_fence_through_exact_return(
+    registry: CohortRegistry,
+    live,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    store, snapshot, _, _ = live
+    manifest = _first(live)
+    registry.register(manifest)
+    selector = registry.list_selectors().records[0]
+    previous = snapshot.revisions[0]
+    proposed = _revision(
+        revision=2,
+        operation=LinkageOperation.CORRECT,
+        reason=LinkageReasonCode.WRONG_SUBJECT,
+        previous=previous,
+        subject=_token("subject", "e"),
+        collection=_token("collection", "e"),
+        specimen=_token("specimen", "e"),
+    ).model_copy(update={"technical": previous.technical})
+    correction, _ = _consume(
+        proposed,
+        _correction_approvals(proposed),
+        previous=previous,
+    )
+    original_model = cohort_registry_module.RegisteredCohortManifest
+    writer_started = threading.Event()
+    writer_finished = threading.Event()
+    workers: list[threading.Thread] = []
+
+    def construct(**values):
+        def write() -> None:
+            writer_started.set()
+            store.commit_authorized_revision(correction)
+            writer_finished.set()
+
+        worker = threading.Thread(target=write)
+        workers.append(worker)
+        worker.start()
+        assert writer_started.wait(timeout=1)
+        assert not writer_finished.wait(timeout=0.05)
+        return original_model(**values)
+
+    monkeypatch.setattr(cohort_registry_module, "RegisteredCohortManifest", construct)
+    resolved = registry.resolve(selector.selector_id, selector.cohort_version)
+    assert resolved.manifest == manifest
+    workers[0].join(timeout=2)
+    assert writer_finished.is_set()
+    with pytest.raises(CohortRegistryConflict, match="stale"):
+        registry.resolve(selector.selector_id, selector.cohort_version)
+
+
 def test_object_tamper_and_extra_entries_fail_closed(
     registry: CohortRegistry, live
 ) -> None:
@@ -260,6 +316,8 @@ def test_exact_crash_temporary_is_recovered_on_reopen(
         root,
         linkage_store=live[0],
         expected_trust_snapshot_sha256_by_provider=_pins(),
+        expected_registry_id=receipt.registry_id,
+        expected_registry_epoch_sha256=receipt.registry_epoch_sha256,
         expected_state_head_sha256=receipt.state_head_sha256,
     )
     try:
@@ -304,6 +362,8 @@ def test_backup_restore_rehearsal_preserves_exact_identity_and_state(
         backup,
         linkage_store=live[0],
         expected_trust_snapshot_sha256_by_provider=_pins(),
+        expected_registry_id=before.registry_id,
+        expected_registry_epoch_sha256=before.registry_epoch_sha256,
         expected_state_head_sha256=before.state_head_sha256,
     )
     try:
@@ -319,7 +379,7 @@ def test_invalid_backup_rejects_before_creating_restore_target(
 ) -> None:
     registry.register(_first(live))
     content = registry.backup_bytes()
-    expected_head = cohort_registry_backup_from_bytes(content).state_head_sha256
+    parsed = cohort_registry_backup_from_bytes(content)
     target = tmp_path / "must-not-exist"
     with pytest.raises(CohortRegistryConflict, match="invalid"):
         CohortRegistry.restore(
@@ -327,9 +387,33 @@ def test_invalid_backup_rejects_before_creating_restore_target(
             content + b" ",
             linkage_store=live[0],
             expected_trust_snapshot_sha256_by_provider=_pins(),
-            expected_state_head_sha256=expected_head,
+            expected_registry_id=parsed.metadata.registry_id,
+            expected_registry_epoch_sha256=(
+                parsed.metadata.registry_epoch_sha256
+            ),
+            expected_state_head_sha256=parsed.state_head_sha256,
         )
     assert not target.exists()
+
+
+def test_backup_parser_bounds_depth_integer_tokens_and_duplicate_keys(
+    registry: CohortRegistry,
+) -> None:
+    content = registry.backup_bytes()
+    duplicate = content[:-1] + b',"state_version":0}'
+    huge_integer = content.replace(
+        b'"state_version":0',
+        b'"state_version":' + b"9" * 100_000,
+        1,
+    )
+    assert huge_integer != content
+    for candidate in (
+        duplicate,
+        huge_integer,
+        b"[" * 2_000 + b"0" + b"]" * 2_000,
+    ):
+        with pytest.raises(CohortRegistryConflict, match="backup is invalid"):
+            cohort_registry_backup_from_bytes(candidate)
 
 
 def test_root_path_substitution_fails_without_populating_target(
@@ -407,11 +491,13 @@ def test_committed_object_deletion_and_journal_rollback_fail_closed(
     object_path.write_bytes(object_content)
     object_path.chmod(0o600)
     (root / "registry-journal.jsonl").write_bytes(b"")
-    with pytest.raises(CohortRegistryUnsafe, match="expected head"):
+    with pytest.raises(CohortRegistryUnsafe, match="rollback"):
         CohortRegistry(
             root,
             linkage_store=live[0],
             expected_trust_snapshot_sha256_by_provider=_pins(),
+            expected_registry_id=receipt.registry_id,
+            expected_registry_epoch_sha256=receipt.registry_epoch_sha256,
             expected_state_head_sha256=receipt.state_head_sha256,
         )
 
@@ -430,6 +516,10 @@ def test_old_valid_backup_cannot_authenticate_as_current_state(
             old_backup,
             linkage_store=live[0],
             expected_trust_snapshot_sha256_by_provider=_pins(),
+            expected_registry_id=current_receipt.registry_id,
+            expected_registry_epoch_sha256=(
+                current_receipt.registry_epoch_sha256
+            ),
             expected_state_head_sha256=current_receipt.state_head_sha256,
         )
     assert first_receipt.state_head_sha256 != current_receipt.state_head_sha256
@@ -458,8 +548,9 @@ def test_existing_empty_registry_requires_protected_expected_head(
     registry: CohortRegistry, live
 ) -> None:
     root = registry.root
+    identity = registry.list_selectors()
     registry.close()
-    with pytest.raises(CohortRegistryUnsafe, match="expected head is required"):
+    with pytest.raises(CohortRegistryUnsafe, match="identity and head are required"):
         CohortRegistry(
             root,
             linkage_store=live[0],
@@ -469,6 +560,105 @@ def test_existing_empty_registry_requires_protected_expected_head(
         root,
         linkage_store=live[0],
         expected_trust_snapshot_sha256_by_provider=_pins(),
-        expected_state_head_sha256="0" * 64,
+        expected_registry_id=identity.registry_id,
+        expected_registry_epoch_sha256=identity.registry_epoch_sha256,
+        expected_state_head_sha256=identity.state_head_sha256,
     )
     reopened.close()
+
+
+def test_self_consistent_forged_backup_metadata_cannot_replace_expected_identity(
+    registry: CohortRegistry, live, tmp_path: Path
+) -> None:
+    identity = registry.list_selectors()
+    payload = json.loads(registry.backup_bytes())
+    payload["metadata"]["registry_id"] = "cohort_registry_" + "f" * 32
+    forged_metadata = cohort_registry_module.CohortRegistryMetadata.model_validate(
+        payload["metadata"]
+    )
+    payload["state_head_sha256"] = (
+        cohort_registry_module._metadata_genesis_sha256(forged_metadata)
+    )
+    forged = json.dumps(
+        payload, sort_keys=True, separators=(",", ":"), ensure_ascii=False
+    ).encode("utf-8")
+    assert cohort_registry_backup_from_bytes(forged).metadata == forged_metadata
+    target = tmp_path / "forged-identity"
+    with pytest.raises(CohortRegistryConflict, match="expected head"):
+        CohortRegistry.restore(
+            target,
+            forged,
+            linkage_store=live[0],
+            expected_trust_snapshot_sha256_by_provider=_pins(),
+            expected_registry_id=identity.registry_id,
+            expected_registry_epoch_sha256=identity.registry_epoch_sha256,
+            expected_state_head_sha256=identity.state_head_sha256,
+        )
+    assert not target.exists()
+
+
+def test_missing_metadata_never_bootstraps_existing_rolled_back_storage(
+    registry: CohortRegistry, live
+) -> None:
+    registry.register(_first(live))
+    root = registry.root
+    registry.close()
+    (root / "registry-metadata.json").unlink()
+    with pytest.raises(CohortRegistryUnsafe, match="metadata is missing"):
+        CohortRegistry(
+            root,
+            linkage_store=live[0],
+            expected_trust_snapshot_sha256_by_provider=_pins(),
+        )
+
+
+def test_public_entrypoint_instance_shadow_is_rejected(
+    registry: CohortRegistry,
+) -> None:
+    vars(registry)["list_selectors"] = lambda: "forged"
+    try:
+        with pytest.raises(CohortRegistryUnsafe, match="callable changed"):
+            registry.list_selectors()
+    finally:
+        del vars(registry)["list_selectors"]
+
+
+def test_public_entrypoint_shadow_guard_has_no_mutable_global_switch(
+    registry: CohortRegistry,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(
+        cohort_registry_module,
+        "_REGISTRY_PUBLIC_ENTRYPOINTS",
+        frozenset(),
+        raising=False,
+    )
+    vars(registry)["list_selectors"] = lambda: "forged"
+    try:
+        with pytest.raises(CohortRegistryUnsafe, match="callable changed"):
+            registry.list_selectors()
+    finally:
+        del vars(registry)["list_selectors"]
+
+
+def test_peer_rejects_rollback_to_its_own_preappend_head(
+    registry: CohortRegistry, live
+) -> None:
+    identity = registry.list_selectors()
+    peer = CohortRegistry(
+        registry.root,
+        linkage_store=live[0],
+        expected_trust_snapshot_sha256_by_provider=_pins(),
+        expected_registry_id=identity.registry_id,
+        expected_registry_epoch_sha256=identity.registry_epoch_sha256,
+        expected_state_head_sha256=identity.state_head_sha256,
+    )
+    journal_path = registry.root / "registry-journal.jsonl"
+    empty_journal = journal_path.read_bytes()
+    try:
+        registry.register(_first(live))
+        journal_path.write_bytes(empty_journal)
+        with pytest.raises(CohortRegistryUnsafe, match="rollback"):
+            peer.list_selectors()
+    finally:
+        peer.close()

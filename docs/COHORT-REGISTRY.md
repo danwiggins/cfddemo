@@ -13,10 +13,15 @@ idempotent; a competing version or changed bytes fail closed.
 
 The object directory is append-only. A durable append-only journal assigns each
 commit a sequence, predecessor head, exact cohort/version, manifest digest, and
-manifest predecessor. The chained journal entry digest is the state head. A
-restart of an existing registry requires a separately retained expected head;
-deletion, truncation, or rollback therefore fails closed instead of blessing a
-recomputed older state. Root, object-directory, journal, lock, metadata, and manifest file types,
+manifest predecessor. The chain starts from a genesis digest over the immutable
+registry metadata, so the state head authenticates both identity and history. A
+restart of any existing root requires separately retained registry ID, registry
+epoch, and expected head; missing metadata is never recreated. Deletion,
+truncation, metadata substitution, or rollback therefore fails closed instead
+of blessing a recomputed older state. A process-wide monotonic head fence also
+prevents one live instance from accepting rollback to its own stale pre-append
+head after a peer advances the registry. Root, object-directory, journal, lock,
+metadata, and manifest file types,
 ownership, modes, descriptors, and inode bindings are revalidated. Publication
 uses descriptor-relative exclusive temporary files, fsync, and hard-link
 adoption without overwriting an existing object. An exact content-addressed
@@ -42,8 +47,9 @@ this projection is served; this module is not an authentication system.
 
 `backup_bytes` captures metadata, the exact journal, and every committed
 immutable object under one shared registry lock in a bounded canonical bundle.
-`restore` requires an independently supplied expected state head and validates
-the complete bundle, journal chain, history, trust pins, and exact linkage-store identity before
+`restore` requires independently supplied expected registry ID, epoch, and
+state head and validates the complete bundle, metadata-bound journal chain,
+history, trust pins, and exact linkage-store identity before
 creating a new private root; it refuses an existing target and reopens the
 result through the normal descriptor and inode checks. Backup bytes contain
 protected manifest content and therefore are not an export artifact or safe
