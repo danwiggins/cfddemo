@@ -387,8 +387,28 @@ def test_v1_store_metadata_migrates_once_to_persisted_authority_floor(
     connection = sqlite3.connect(root / "linkage.sqlite3")
     metadata = dict(connection.execute("SELECT key, value FROM metadata"))
     connection.close()
-    assert metadata["schema_version"] == "2"
+    assert metadata["schema_version"] == "3"
     assert metadata["authority_time_floor"] == NOW.isoformat()
+
+
+def test_v2_nonempty_store_migrates_immutable_activation_coordinates(
+    tmp_path: Path,
+) -> None:
+    root = tmp_path / "protected"
+    record = _record("c")
+    with _store(root) as store:
+        original = store.commit_authorized_revision(record)
+    with sqlite3.connect(root / "linkage.sqlite3") as connection:
+        connection.execute(
+            "ALTER TABLE linkage_revisions DROP COLUMN activation_state_version"
+        )
+        connection.execute(
+            "ALTER TABLE linkage_revisions DROP COLUMN activation_state_head_sha256"
+        )
+        connection.execute("UPDATE metadata SET value='2' WHERE key='schema_version'")
+    with _store(root) as reopened:
+        snapshot = reopened.active_snapshot()
+        assert snapshot.activation_receipts == (original,)
 
 
 @pytest.mark.parametrize(
@@ -693,7 +713,9 @@ def test_correction_invalidates_old_receipt_and_tombstone_removes_active(
         assert store.active_snapshot().revisions == ()
 
 
-def test_unrelated_commit_stales_snapshot_receipt(tmp_path: Path) -> None:
+def test_unrelated_commit_preserves_immutable_activation_receipt(
+    tmp_path: Path,
+) -> None:
     first = _record("c")
     second_revision = _revision(
         linkage_id=_token("linkage", "d"),
@@ -707,10 +729,12 @@ def test_unrelated_commit_stales_snapshot_receipt(tmp_path: Path) -> None:
         (_create_approval(second_revision, "d"),),
     )
     with _store(tmp_path / "protected") as store:
-        stale = store.commit_authorized_revision(first)
+        receipt = store.commit_authorized_revision(first)
         store.commit_authorized_revision(second)
+        snapshot = store.active_snapshot()
+        assert receipt in snapshot.activation_receipts
         with pytest.raises(ProviderLinkageStoreConflict, match="not current"):
-            store.verify_current_receipt(stale)
+            store.verify_current_receipt(receipt)
 
 
 def test_forged_receipt_is_not_authority(tmp_path: Path) -> None:

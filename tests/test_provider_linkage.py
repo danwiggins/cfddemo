@@ -143,6 +143,8 @@ def _trust(
                 allowed_purposes=(
                     ApprovalPurpose.CORRECT_LINKAGE,
                     ApprovalPurpose.CREATE_LINKAGE,
+                    ApprovalPurpose.REGISTER_COMPARISON,
+                    ApprovalPurpose.SUPERSEDE_RECORD,
                     ApprovalPurpose.TOMBSTONE_LINKAGE,
                 ),
             ),
@@ -373,7 +375,10 @@ def test_activation_api_rejects_caller_supplied_consumption_state() -> None:
 def test_caller_cannot_reset_replay_state_between_calls() -> None:
     first = _revision()
     approval = _create_approval(first, "c")
-    for supplied in (ProviderApprovalConsumptionLedger(), ProviderApprovalConsumptionLedger()):
+    for supplied in (
+        ProviderApprovalConsumptionLedger(),
+        ProviderApprovalConsumptionLedger(),
+    ):
         with pytest.raises(RuntimeError, match="durable atomic linkage persistence"):
             authorize_and_consume_linkage_revision(
                 first,
@@ -405,9 +410,10 @@ def test_wrong_subject_correction_requires_distinct_principals() -> None:
         digit="e",
         principal_digit="d",
     )
-    assert LinkageAuthorityReason.DUPLICATE_PRINCIPAL in _decision(
-        correction, (linker, repeated), previous=original
-    ).reason_codes
+    assert (
+        LinkageAuthorityReason.DUPLICATE_PRINCIPAL
+        in _decision(correction, (linker, repeated), previous=original).reason_codes
+    )
     assert _decision(
         correction, (linker, reviewer), previous=original
     ).linkage_authorized
@@ -475,15 +481,17 @@ def test_approval_must_follow_and_bind_pinned_trust() -> None:
         trust=trust,
         issued_at=datetime(2026, 9, 29, 9, 0, tzinfo=UTC),
     )
-    assert LinkageAuthorityReason.APPROVAL_NOT_CURRENT in _decision(
-        revision, (predating,), trust=trust
-    ).reason_codes
+    assert (
+        LinkageAuthorityReason.APPROVAL_NOT_CURRENT
+        in _decision(revision, (predating,), trust=trust).reason_codes
+    )
 
     other_trust = _trust(snapshot_digit="f")
     wrong_binding = _create_approval(revision, "c", trust=other_trust)
-    assert LinkageAuthorityReason.TRUST_BINDING_MISMATCH in _decision(
-        revision, (wrong_binding,), trust=trust
-    ).reason_codes
+    assert (
+        LinkageAuthorityReason.TRUST_BINDING_MISMATCH
+        in _decision(revision, (wrong_binding,), trust=trust).reason_codes
+    )
 
 
 @pytest.mark.parametrize(
@@ -543,11 +551,14 @@ def test_correction_reason_matches_exact_field_delta(
         previous=original,
         subject=_token("subject", "e"),
     )
-    assert LinkageAuthorityReason.CORRECTION_DELTA_INVALID in _decision(
-        mislabeled,
-        _correction_approvals(mislabeled),
-        previous=original,
-    ).reason_codes
+    assert (
+        LinkageAuthorityReason.CORRECTION_DELTA_INVALID
+        in _decision(
+            mislabeled,
+            _correction_approvals(mislabeled),
+            previous=original,
+        ).reason_codes
+    )
 
 
 @pytest.mark.parametrize(
@@ -590,11 +601,14 @@ def test_parent_correction_rotates_specimen_and_known_aliquot_independently(
         **correction_updates,
     )
 
-    assert LinkageAuthorityReason.CORRECTION_DELTA_INVALID in _decision(
-        correction,
-        _correction_approvals(correction),
-        previous=original,
-    ).reason_codes
+    assert (
+        LinkageAuthorityReason.CORRECTION_DELTA_INVALID
+        in _decision(
+            correction,
+            _correction_approvals(correction),
+            previous=original,
+        ).reason_codes
+    )
 
 
 def test_history_retains_original_and_validates_correction_chain() -> None:
@@ -662,9 +676,7 @@ def test_history_never_reassigns_technical_ids_after_tombstone(reused: str) -> N
     )
     tombstone_record, ledger = _consume(
         tombstone,
-        _correction_approvals(
-            tombstone, purpose=ApprovalPurpose.TOMBSTONE_LINKAGE
-        ),
+        _correction_approvals(tombstone, purpose=ApprovalPurpose.TOMBSTONE_LINKAGE),
         previous=first,
         ledger=ledger,
     )
@@ -749,9 +761,7 @@ def test_tombstone_history_validates_and_cannot_be_revived() -> None:
     )
     tombstone_record, ledger = _consume(
         tombstone,
-        _correction_approvals(
-            tombstone, purpose=ApprovalPurpose.TOMBSTONE_LINKAGE
-        ),
+        _correction_approvals(tombstone, purpose=ApprovalPurpose.TOMBSTONE_LINKAGE),
         previous=first,
         ledger=ledger,
     )
@@ -764,11 +774,14 @@ def test_tombstone_history_validates_and_cannot_be_revived() -> None:
         previous=tombstone,
         source=_token("projection", "f"),
     )
-    assert LinkageAuthorityReason.REVISION_CHAIN_INVALID in _decision(
-        attempted_revival,
-        _correction_approvals(attempted_revival),
-        previous=tombstone,
-    ).reason_codes
+    assert (
+        LinkageAuthorityReason.REVISION_CHAIN_INVALID
+        in _decision(
+            attempted_revival,
+            _correction_approvals(attempted_revival),
+            previous=tombstone,
+        ).reason_codes
+    )
 
 
 def test_projection_enforces_total_revision_bound() -> None:

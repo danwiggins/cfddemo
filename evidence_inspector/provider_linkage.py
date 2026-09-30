@@ -228,6 +228,8 @@ class ApprovalPurpose(StrEnum):
     CREATE_LINKAGE = "create_linkage"
     CORRECT_LINKAGE = "correct_linkage"
     TOMBSTONE_LINKAGE = "tombstone_linkage"
+    SUPERSEDE_RECORD = "supersede_record"
+    REGISTER_COMPARISON = "register_comparison"
 
 
 class IssuerStatus(StrEnum):
@@ -241,7 +243,7 @@ class ProviderIssuerTrust(LinkageContract):
     public_key_base64: Base64PublicKey
     status: IssuerStatus
     allowed_roles: tuple[ProviderRole, ...] = Field(min_length=1, max_length=2)
-    allowed_purposes: tuple[ApprovalPurpose, ...] = Field(min_length=1, max_length=3)
+    allowed_purposes: tuple[ApprovalPurpose, ...] = Field(min_length=1, max_length=5)
 
     @model_validator(mode="after")
     def sorted_unique_grants(self) -> ProviderIssuerTrust:
@@ -367,7 +369,9 @@ class LinkageAuthorizationDecision(LinkageContract):
             if self.trust_snapshot_sha256 is None:
                 raise ValueError("authorized decision requires exact trust snapshot")
             if not self.approval_ids or not self.principal_ids:
-                raise ValueError("authorized decision requires approvals and principals")
+                raise ValueError(
+                    "authorized decision requires approvals and principals"
+                )
             if len(self.approval_ids) != len(self.principal_ids):
                 raise ValueError("authorized decision approval count is inconsistent")
         if self.comparison_linkage_eligible and not self.linkage_authorized:
@@ -484,12 +488,8 @@ def _correction_delta_matches_reason(
     )
     aliquot_changed = previous.biological.aliquot != current.biological.aliquot
     specimen_changed = specimen_token_changed or aliquot_changed
-    aliquot_rotation_valid = (
-        previous.biological.aliquot.token is None
-        or (
-            current.biological.aliquot.token is not None
-            and aliquot_changed
-        )
+    aliquot_rotation_valid = previous.biological.aliquot.token is None or (
+        current.biological.aliquot.token is not None and aliquot_changed
     )
     technical_changed = previous.technical != current.technical
     source_changed = previous.source_projection_ref != current.source_projection_ref
@@ -634,9 +634,7 @@ def authorize_linkage_revision(
     if len(principals) != len(set(principals)):
         reasons.add(LinkageAuthorityReason.DUPLICATE_PRINCIPAL)
 
-    issuers = {
-        (item.issuer_id, item.key_id): item for item in trust_snapshot.issuers
-    }
+    issuers = {(item.issuer_id, item.key_id): item for item in trust_snapshot.issuers}
     observed_roles: set[ProviderRole] = set()
     expected_purpose = _purpose(revision.operation)
     for approval in approvals:
@@ -793,7 +791,9 @@ def validate_linkage_history(
             raise ValueError("linkage provider trust pin is absent")
         trust_sha256 = provider_trust_snapshot_sha256(record.trust_snapshot)
         if trust_sha256 != expected_trust:
-            raise ValueError("authorized linkage trust snapshot is not independently pinned")
+            raise ValueError(
+                "authorized linkage trust snapshot is not independently pinned"
+            )
         replay = authorize_linkage_revision(
             record.revision,
             previous_revision=record.previous_revision,
@@ -858,7 +858,10 @@ def validate_linkage_history(
             revision.biological.subject_token,
             revision.biological.collection_token,
         )
-        if specimen_parents.setdefault(specimen_key, specimen_parent) != specimen_parent:
+        if (
+            specimen_parents.setdefault(specimen_key, specimen_parent)
+            != specimen_parent
+        ):
             raise ValueError("linkage history contains conflicting specimen parent")
         if revision.biological.aliquot.token is not None:
             aliquot_key = (
