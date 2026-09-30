@@ -50,13 +50,15 @@ binding bytes are revalidated immediately before and after the atomic catalog
 visibility transaction while the binding root remains exclusively locked. The
 catalog transaction executes no coordinator or caller callback. Any failure
 compensates the exact publication row and binding before releasing that lock,
-while retaining the shared content-addressed object. If binding removal or
-catalog compensation itself fails, a private canonical rollback marker is
-flushed and the pending journal is retained; restart recovery consumes both and
-removes the binding plus exact ownership before clearing that intent. Startup recovery
+while retaining the shared content-addressed object. A private canonical
+rollback marker is flushed before catalog visibility and remains until the
+binding and ownership commit completes. If marker creation fails, visibility
+never begins. If later cleanup fails, the marker and pending journal remain;
+restart recovery removes the binding plus exact ownership before clearing that
+intent. Startup recovery
 enumerates hidden SQLite publications for the binding root's digest-bound
-recovery scope independently of journal parsing, then uses matching journal
-bytes to remove an unadopted publication or finish an already adopted one.
+recovery scope independently of journal parsing. A retained pending journal is
+an incomplete import and defaults to rollback even if SQLite reached `adopted`.
 Missing, truncated, or substituted journals compensate the
 exact durable publication and are removed with any linked final file; an empty
 or partial final binding is never accepted.

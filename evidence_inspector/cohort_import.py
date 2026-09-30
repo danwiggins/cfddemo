@@ -562,7 +562,7 @@ class CohortRecordCatalog:
             raise CohortImportFilesystemError("rollback marker is invalid")
         try:
             publication_id = TypeAdapter(PublicationId).validate_python(parts[2])
-        except Exception:
+        except Exception:  # noqa: BLE001 - normalize hostile marker name
             raise CohortImportFilesystemError("rollback marker is invalid") from None
         if not publication_id.startswith(
             f"publication_{self._recovery_scope_sha256[:16]}_"
@@ -601,7 +601,7 @@ class CohortRecordCatalog:
                 raise CohortImportFilesystemError("rollback marker is invalid")
         except CohortImportFilesystemError:
             raise
-        except Exception:
+        except Exception:  # noqa: BLE001 - normalize hostile marker content
             raise CohortImportFilesystemError("rollback marker is invalid") from None
         finally:
             if descriptor >= 0:
@@ -1254,11 +1254,12 @@ class CohortRecordCatalog:
         binding: CohortRecordBinding | None = None
         temporary_name: str | None = None
         final_name: str | None = None
+        rollback_name: str | None = None
         final_published = False
         cleanup_attempted_under_lock = False
 
         def cleanup_import() -> None:
-            nonlocal prepared, temporary_name, final_published
+            nonlocal prepared, rollback_name, temporary_name, final_published
             cleanup_errors: list[BaseException] = []
             binding_removed = not final_published
             if final_published and final_name is not None:
@@ -1296,6 +1297,15 @@ class CohortRecordCatalog:
                     temporary_name = None
                 except FileNotFoundError:
                     temporary_name = None
+                except OSError as exc:
+                    cleanup_errors.append(exc)
+            if rollback_name is not None and rollback_complete:
+                try:
+                    os.unlink(rollback_name, dir_fd=self._root_fd)
+                    os.fsync(self._root_fd)
+                    rollback_name = None
+                except FileNotFoundError:
+                    rollback_name = None
                 except OSError as exc:
                     cleanup_errors.append(exc)
             if cleanup_errors:
@@ -1358,6 +1368,7 @@ class CohortRecordCatalog:
             content = canonical_contract_bytes(binding)
             final_name = f"{manifest_digest}.{binding.binding_id}.json"
             temporary_name = f".pending.{prepared.publication_id}.json"
+            rollback_name = f".rollback.{prepared.publication_id}.json"
             with _PROCESS_LOCK:
                 _CC_VALIDATE_ROOT(self)
                 fcntl.flock(self._root_fd, fcntl.LOCK_EX)
@@ -1449,6 +1460,9 @@ class CohortRecordCatalog:
                         self, manifest, prepared, binding, final_name, changed=True
                     )
 
+                    # Rollback intent must be durable before visibility. If this
+                    # write fails, the result remains hidden in pending state.
+                    _CC_WRITE_ROLLBACK(self, prepared.publication_id)
                     _CC_FAULT(self, "before_visibility")
                     _CC_REVALIDATE_PUBLICATION(
                         self, manifest, prepared, binding, final_name, changed=True
@@ -1469,6 +1483,10 @@ class CohortRecordCatalog:
                     _CC_VALIDATE_ROOT(self)
                     if _CC_READ(self, final_name) != binding:
                         raise CohortImportConflict("cohort record binding changed")
+                    os.unlink(rollback_name, dir_fd=self._root_fd)
+                    rollback_name = None
+                    os.fsync(self._root_fd)
+                    _CC_VALIDATE_ROOT(self)
                     _PINNED_RESULT_FINISH(self._result_catalog, prepared)
                     prepared = None
                     return binding
@@ -1485,7 +1503,10 @@ class CohortRecordCatalog:
             # Preflight failures have no published binding or durable catalog
             # row. Serialize their in-memory/object cleanup for the same root.
             if not cleanup_attempted_under_lock and (
-                prepared is not None or temporary_name is not None or final_published
+                prepared is not None
+                or temporary_name is not None
+                or rollback_name is not None
+                or final_published
             ):
                 with _PROCESS_LOCK:
                     _CC_VALIDATE_ROOT(self)

@@ -1242,7 +1242,7 @@ def test_linkage_advance_before_visibility_compensates(tmp_path: Path, live) -> 
 
 @pytest.mark.parametrize(
     ("point", "visible"),
-    (("after_result_stage", False), ("after_visibility_commit", True)),
+    (("after_result_stage", False), ("after_visibility_commit", False)),
 )
 def test_crash_recovery_reconciles_journal_and_catalog_publication(
     tmp_path: Path, live, point: str, visible: bool
@@ -1344,6 +1344,75 @@ def test_failed_cleanup_preserves_durable_rollback_intent(
         results.close()
 
 
+def test_marker_and_final_unlink_failure_cannot_commit_failed_import(
+    tmp_path: Path, live, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    controller = DeterministicFaultController(
+        "after_visibility_commit", action=FaultAction.RAISE
+    )
+    values = _setup(tmp_path, live, controller)
+    root_fd = values[0]._root_fd
+    real_open, real_unlink = os.open, os.unlink
+    final_unlink_failed = False
+
+    def fail_rollback_open(path, *args, **kwargs):
+        if (
+            kwargs.get("dir_fd") == root_fd
+            and type(path) is str
+            and path.startswith(".rollback.")
+        ):
+            raise OSError("injected rollback marker open failure")
+        return real_open(path, *args, **kwargs)
+
+    def fail_final_once(path, *args, **kwargs):
+        nonlocal final_unlink_failed
+        if (
+            not final_unlink_failed
+            and kwargs.get("dir_fd") == root_fd
+            and type(path) is str
+            and not path.startswith(".")
+            and path.endswith(".json")
+        ):
+            final_unlink_failed = True
+            raise OSError("injected final unlink failure")
+        return real_unlink(path, *args, **kwargs)
+
+    with monkeypatch.context() as patch:
+        patch.setattr(cohort_import_module.os, "open", fail_rollback_open)
+        patch.setattr(cohort_import_module.os, "unlink", fail_final_once)
+        with pytest.raises(CohortImportError, match="compensation failed"):
+            _import(values)
+    assert final_unlink_failed
+    assert not controller.fired
+    assert values[1].query(CatalogQuery()).empty
+    assert len(tuple((tmp_path / "cohort-records").glob(".pending.*"))) == 1
+    assert not tuple((tmp_path / "cohort-records").glob(".rollback.*"))
+
+    values[0].close()
+    values[1].close()
+    results = ResultCatalog(
+        tmp_path / "results",
+        import_roots={"root_primary": tmp_path / "imports"},
+        trust_store=values[6],
+        reader_registry=DEFAULT_RESULT_BUNDLE_READER_REGISTRY,
+    )
+    cohorts = CohortRecordCatalog(
+        tmp_path / "cohort-records",
+        result_catalog=results,
+        linkage_store=live[0],
+        expected_trust_snapshot_sha256_by_provider=_pins(),
+        reader_registry=DEFAULT_RESULT_BUNDLE_READER_REGISTRY,
+    )
+    try:
+        status = cohorts.record_status_for_manifest((values[2],))
+        assert status.members[0].availability is CohortRecordAvailability.MISSING
+        assert results.query(CatalogQuery()).empty
+        assert tuple((tmp_path / "cohort-records").iterdir()) == ()
+    finally:
+        cohorts.close()
+        results.close()
+
+
 def test_crash_recovery_removes_partial_pre_stage_journal(tmp_path: Path, live) -> None:
     values = _setup(tmp_path, live)
     recovery_scope = values[0]._recovery_scope_sha256
@@ -1406,7 +1475,8 @@ def test_corrupt_or_missing_real_journal_cannot_strand_pending_row(
     else:
         journal.unlink()
         for final in (tmp_path / "cohort-records").glob("*.json"):
-            final.write_bytes(b'{"partial":')
+            if not final.name.startswith("."):
+                final.write_bytes(b'{"partial":')
 
     results = ResultCatalog(
         tmp_path / "results",
@@ -1423,7 +1493,7 @@ def test_corrupt_or_missing_real_journal_cannot_strand_pending_row(
     )
     recovered_values = (cohorts, results, *values[2:])
     try:
-        retained_adopted = point == "after_visibility_commit" and mutation == "missing"
+        retained_adopted = False
         assert bool(results.query(CatalogQuery()).results) is retained_adopted
         assert bool(tuple((tmp_path / "cohort-records").iterdir())) is retained_adopted
         binding = _import(recovered_values)
