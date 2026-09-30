@@ -9,6 +9,7 @@ import secrets
 import string
 import threading
 import time
+from collections import deque
 from collections.abc import Callable
 from dataclasses import dataclass
 from typing import Literal
@@ -24,7 +25,7 @@ _SAFE_METHODS = frozenset({"GET", "HEAD", "OPTIONS"})
 class BoundaryDenied(PermissionError):
     """Sanitized denial with no object existence or credential detail."""
 
-    def __init__(self, status_code: Literal[401, 403], code: str) -> None:
+    def __init__(self, status_code: Literal[401, 403, 429], code: str) -> None:
         super().__init__("local request denied")
         self.status_code = status_code
         self.code = code
@@ -127,6 +128,8 @@ class BootstrapBroker:
         session_ttl_seconds: int = 8 * 60 * 60,
         max_active_sessions: int = 32,
         token_attempt_limit: int = 4,
+        exchange_window_seconds: int = 60,
+        max_exchange_attempts: int = 8,
     ) -> None:
         if not 1 <= bootstrap_ttl_seconds <= 300:
             raise ValueError("bootstrap TTL must be between 1 and 300 seconds")
@@ -136,11 +139,18 @@ class BootstrapBroker:
             raise ValueError("active session limit must be between 1 and 256")
         if not 1 <= token_attempt_limit <= 16:
             raise ValueError("token attempt limit must be between 1 and 16")
+        if not 1 <= exchange_window_seconds <= 300:
+            raise ValueError("exchange window must be between 1 and 300 seconds")
+        if not 1 <= max_exchange_attempts <= 64:
+            raise ValueError("exchange attempt limit must be between 1 and 64")
         self._now = now
         self._bootstrap_ttl = bootstrap_ttl_seconds
         self._session_ttl = session_ttl_seconds
         self._max_active_sessions = max_active_sessions
         self._token_attempt_limit = token_attempt_limit
+        self._exchange_window_seconds = exchange_window_seconds
+        self._max_exchange_attempts = max_exchange_attempts
+        self._exchange_attempts: deque[float] = deque(maxlen=max_exchange_attempts)
         self._bootstrap_sha256: bytes | None = None
         self._bootstrap_expires_at = 0.0
         self._bootstrap_authority: str | None = None
@@ -203,6 +213,17 @@ class BootstrapBroker:
             supplied = self._digest(code)
             expected = self._bootstrap_sha256
             now = self._now()
+            while (
+                self._exchange_attempts
+                and now - self._exchange_attempts[0] >= self._exchange_window_seconds
+            ):
+                self._exchange_attempts.popleft()
+            if len(self._exchange_attempts) >= self._max_exchange_attempts:
+                self._bootstrap_sha256 = None
+                self._bootstrap_expires_at = 0.0
+                self._bootstrap_authority = None
+                raise BoundaryDenied(429, "TBX-AUTH-005")
+            self._exchange_attempts.append(now)
             valid = (
                 expected is not None
                 and now <= self._bootstrap_expires_at
@@ -285,6 +306,11 @@ class LocalWebBoundary:
         if "?" in request.path:
             raise BoundaryDenied(403, "TBX-AUTH-003")
         return self.broker.exchange(code, authority=self.config.authority)
+
+    def authorize_public_asset(self, request: BrowserRequest) -> None:
+        """Apply DNS-rebinding defenses before serving even non-sensitive assets."""
+
+        self._require_host(request)
 
     def authorize(self, request: BrowserRequest) -> None:
         self._require_host(request)

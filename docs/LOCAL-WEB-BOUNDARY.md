@@ -1,11 +1,33 @@
 # Local operator web boundary
 
-Status: B01 contract foundation; synthetic/local only. This does not start a
-production server or authorize real provider operation.
+Status: B01 packaged loopback integration; synthetic/local only. This does not
+authorize real provider operation or satisfy E14.
 
-`traceback_runner.web` freezes the security and projection interface that any
-later packaged browser implementation must preserve. The preserved Streamlit
-demo is not this service.
+`traceback_runner.web` freezes the security and projection interface and exposes
+a standard-library HTTP adapter on an operating-system-selected random loopback
+port. The adapter reads the authoritative `JobStore` through the existing
+operator projection; it does not create a browser-owned or in-memory production
+job database. The preserved Streamlit demo is not this service.
+
+## Packaged runtime
+
+- `RunningLocalWebService.start` binds literal `127.0.0.1` or `::1` with port
+  zero, then derives the one accepted Host and Origin from the actual port.
+- The launch URL carries the bootstrap code only in the fragment. The packaged
+  script clears the fragment before exchange, retains the CSRF token only in
+  page memory, and uses an HttpOnly SameSite=Strict session cookie.
+- HTML, JavaScript, and CSS are package resources. They contain no CDN, remote
+  font, analytics, model, map, or other runtime network reference. CSP permits
+  connections and assets only from the same local origin.
+- The state directory must be owned by the current OS user at mode `0700`.
+  `instance.json` is atomically replaced at mode `0600`, contains no credential,
+  and records `capability_enabled: false`. Bootstrap/session credentials remain
+  in memory and rotate on every restart.
+- Request bodies, sessions, exchange attempts, token-generation attempts, and
+  queue pages are bounded. Exchange throttling and one-use consumption occur
+  under the broker's single lock.
+- The adapter emits no access log, rejects forwarded headers, and performs
+  authorization before durable-store lookup.
 
 ## Threat boundary
 
@@ -59,9 +81,20 @@ backslash. Every text field and collection is bounded. Later HTTP and browser
 adapters should be thin translations over these frozen objects rather than
 separate state models.
 
-## Not yet claimed
+## Evidence boundary and claims not made
 
-This foundation does not choose React versus server-rendered HTML, package a
-browser runtime, expose a remote API, implement multi-user authorization, or
-prove provider usability. Those require their named B-epic evidence and remain
-behind the disabled product gate.
+Real-socket tests cover IPv4, IPv6 when available, exact Host/Origin/CSRF and
+session checks, guessed IDs, non-browser requests, forwarded headers, restart
+rotation, filesystem modes, offline package assets, and operation under a
+synthetic policy that rejects non-loopback egress.
+
+The current development host does not provide a second disposable OS account,
+so a real cross-account access attempt remains **explicitly unmet**. The mode
+and ownership assertions are prerequisites, not substitute evidence. That test
+must run on the approved Linux host before provider enablement.
+
+This integration does not choose React versus server-rendered HTML, implement
+multi-user authorization, or prove E14 performance, accessibility, screenshots,
+approved-host operation, or provider usability. It incorporates the control-plane
+audit's conclusion by keeping every release capability disabled and by limiting
+this change to the next reviewable B01 server boundary.

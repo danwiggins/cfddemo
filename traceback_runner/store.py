@@ -227,6 +227,18 @@ class JobStore:
             raise KeyError(job_id)
         return self._record(row)
 
+    def list_jobs(self, *, limit: int = 100) -> tuple[StoredJobRecord, ...]:
+        """Return a bounded authoritative queue snapshot for local projections."""
+
+        if not 1 <= limit <= 1000:
+            raise ValueError("job list limit must be between 1 and 1000")
+        with self._connect() as connection:
+            rows = connection.execute(
+                "SELECT * FROM jobs ORDER BY updated_at DESC, job_id LIMIT ?",
+                (limit,),
+            ).fetchall()
+        return tuple(self._record(row) for row in rows)
+
     def request(self, job_id: str) -> JobRequest:
         with self._connect() as connection:
             row = connection.execute(
