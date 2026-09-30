@@ -1269,9 +1269,7 @@ class RecordSupersessionStore:
             or issuer.status != IssuerStatus.ACTIVE
             or payload.role not in issuer.allowed_roles
             or payload.purpose not in issuer.allowed_purposes
-            or not (
-                payload.issued_at <= authority.evaluated_at < payload.expires_at
-            )
+            or not (payload.issued_at <= authority.evaluated_at < payload.expires_at)
         ):
             raise RecordSupersessionConflict("supersession authority is invalid")
         try:
@@ -1554,9 +1552,7 @@ class RecordSupersessionStore:
             or issuer.status != IssuerStatus.ACTIVE
             or payload.role not in issuer.allowed_roles
             or payload.purpose not in issuer.allowed_purposes
-            or not (
-                payload.issued_at <= authority.evaluated_at < payload.expires_at
-            )
+            or not (payload.issued_at <= authority.evaluated_at < payload.expires_at)
         ):
             raise RecordSupersessionConflict("comparison authority is invalid")
         try:

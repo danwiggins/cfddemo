@@ -1450,7 +1450,11 @@ class ProviderLinkageStore:
         capture_store_now = _capture_pinned_store_now
         with connect_store(self) as connection:
             evaluated_at, authority_time_floor = capture_store_now(self, connection)
-            connection.execute("BEGIN IMMEDIATE")
+            nested_transaction = connection.in_transaction
+            if nested_transaction:
+                connection.execute("SAVEPOINT fenced_active_snapshot")
+            else:
+                connection.execute("BEGIN IMMEDIATE")
             try:
                 snapshot = _PINNED_ACTIVE_SNAPSHOT_IN_TRANSACTION(
                     self,
@@ -1460,10 +1464,17 @@ class ProviderLinkageStore:
                 )
                 yield snapshot
             except BaseException:
-                connection.rollback()
+                if nested_transaction:
+                    connection.execute("ROLLBACK TO SAVEPOINT fenced_active_snapshot")
+                    connection.execute("RELEASE SAVEPOINT fenced_active_snapshot")
+                else:
+                    connection.rollback()
                 raise
             else:
-                connection.rollback()
+                if nested_transaction:
+                    connection.execute("RELEASE SAVEPOINT fenced_active_snapshot")
+                else:
+                    connection.rollback()
 
     @contextmanager
     def authority_read_fence(self) -> Iterator[None]:

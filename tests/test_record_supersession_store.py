@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import base64
+import os
 import sqlite3
 from concurrent.futures import ThreadPoolExecutor
 from concurrent.futures import TimeoutError as FutureTimeout
@@ -12,6 +13,7 @@ from pathlib import Path
 import pytest
 from pydantic import ValidationError
 
+import evidence_inspector.record_supersession_store as supersession_module
 from evidence_inspector.method_registry import canonical_contract_bytes
 from evidence_inspector.provider_linkage import (
     ApprovalPurpose,
@@ -244,6 +246,8 @@ def _resign(approval, *, issued_at, expires_at):
             ).decode("ascii"),
         }
     )
+
+
 def test_exact_retry_active_selection_and_canonical_replay(durable) -> None:
     _, ledger, _, first, second = durable
     first_receipt = ledger.commit_record(first)
@@ -669,3 +673,34 @@ def test_exact_retry_remains_idempotent_after_action_approval_expiry(durable) ->
     receipt = ledger.commit_record(reanalysis)
     linkage._time_source.advance_to(expiry + timedelta(minutes=1))
     assert ledger.commit_record(reanalysis) == receipt
+
+
+def test_database_path_substitution_during_connect_fails_closed(
+    durable, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _, ledger, _, first, _ = durable
+    ledger.commit_record(first)
+    backup = ledger.database.with_suffix(".bound-backup")
+    original_connect = sqlite3.connect
+    swapped = False
+
+    def substituting_connect(database, *args, **kwargs):
+        nonlocal swapped
+        if Path(database) == ledger.database and not swapped:
+            swapped = True
+            os.replace(ledger.database, backup)
+            original_connect(ledger.database).close()
+        return original_connect(database, *args, **kwargs)
+
+    monkeypatch.setattr(supersession_module.sqlite3, "connect", substituting_connect)
+    try:
+        with pytest.raises(RecordSupersessionUnsafe, match="identity|private"):
+            ledger.active_snapshot()
+    finally:
+        monkeypatch.setattr(supersession_module.sqlite3, "connect", original_connect)
+        for suffix in ("", "-wal", "-shm"):
+            path = Path(str(ledger.database) + suffix)
+            if path.exists():
+                path.unlink()
+        if backup.exists():
+            os.replace(backup, ledger.database)
