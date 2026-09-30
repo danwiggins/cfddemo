@@ -211,7 +211,26 @@ class SensitivitySource(CompatibilityContract):
             or catalog.authority_head_sha256 != capability.authority_head_sha256
             or catalog.authority_revision != capability.authority_revision
             or catalog.authority_scope != capability.authority_scope
+            or catalog.capability_as_of != capability.as_of
+            or catalog.qualification_state.value
+            != (
+                capability.qualification_state.value
+                if capability.qualification_state is not None
+                else "unknown"
+            )
+            or (
+                catalog.display_role.value
+                if catalog.display_role is not None
+                else None
+            )
+            != (
+                capability.display_role.value
+                if capability.display_role is not None
+                else None
+            )
             or catalog.research_inspectable != capability.research_inspectable
+            or catalog.current_provider_eligible
+            != capability.current_provider_eligible
         ):
             raise ValueError("E04 catalog identity does not match E08/E05 source")
         return self
@@ -306,6 +325,11 @@ class WholeMoleculeSubsetFamily(CompatibilityContract):
             )
             if level.target_molecule_count != expected:
                 raise ValueError("subset target does not match registered fraction")
+        target_counts = [item.target_molecule_count for item in self.levels]
+        if len(target_counts) != len(set(target_counts)):
+            raise ValueError(
+                "subset fractions must produce unique effective target counts"
+            )
         replicate_keys = [(item.replicate_id, item.seed) for item in self.replicates]
         if replicate_keys != sorted(replicate_keys):
             raise ValueError("replicate seeds must use canonical order")

@@ -580,6 +580,16 @@ def test_subset_levels_reject_duplicate_ids_and_duplicate_fractions() -> None:
         WholeMoleculeSubsetFamily.model_validate_json(json.dumps(payload))
 
 
+def test_subset_levels_reject_colliding_effective_counts_after_rounding() -> None:
+    payload = _family().model_dump(mode="json")
+    near_half = dict(payload["levels"][0])
+    near_half["subset_id"] = "subset.nearhalf"
+    near_half["fraction_ppm"] = 500_001
+    payload["levels"].insert(1, near_half)
+    with pytest.raises(ValidationError, match="unique effective target counts"):
+        WholeMoleculeSubsetFamily.model_validate_json(json.dumps(payload))
+
+
 def test_membership_commitments_are_complete_canonical_and_preregistered() -> None:
     payload = _family().model_dump(mode="json")
     payload["membership_commitments"].pop()
@@ -674,6 +684,25 @@ def test_source_rejects_e04_identity_drift() -> None:
         )
     ).hexdigest()
     payload["catalog_ref"]["result_id"] = f"result_{identity[:40]}"
+    with pytest.raises(ValidationError, match="catalog identity"):
+        SensitivitySource.model_validate_json(json.dumps(payload))
+
+
+@pytest.mark.parametrize(
+    ("field", "value"),
+    [
+        ("capability_as_of", "2099-01-01T00:00:00Z"),
+        ("qualification_state", "qualified"),
+        ("display_role", "provider_primary"),
+        ("current_provider_eligible", True),
+    ],
+)
+def test_source_rejects_e04_authority_state_overstatement(
+    field: str,
+    value: object,
+) -> None:
+    payload = _source().model_dump(mode="json")
+    payload["catalog_ref"][field] = value
     with pytest.raises(ValidationError, match="catalog identity"):
         SensitivitySource.model_validate_json(json.dumps(payload))
 

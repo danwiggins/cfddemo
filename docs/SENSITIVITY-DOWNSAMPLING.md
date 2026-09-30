@@ -16,9 +16,11 @@ cell-origin analysis, choose a preferred method, or authorize clinical use.
 - the E05 verified record and E01 method/authority transitively bound by E08.
 
 Construction requires the E04 bundle, method, registry, authority, scope, and
-research-inspection identities to match the E08/E05 source exactly. The source
-result, bundle, atlas, filter, method-definition, and input-molecule denominator
-are carried into the registration and final view.
+research-inspection identities to match the E08/E05 source exactly. Authority
+time, qualification, display role, and current provider eligibility must also
+match; a catalog reference cannot overstate a historical or research-only
+capability. The source result, bundle, atlas, filter, method-definition, and
+input-molecule denominator are carried into the registration and final view.
 
 ## Preregistered study grid
 
@@ -28,6 +30,11 @@ half-open edge-inclusion policy, sorted fraction levels, and sorted unique
 replicate seeds. Fractions are integer parts per million; target counts use
 registered floor rounding with a minimum of one. The full-molecule level is
 mandatory. Subset IDs and fractions are independently unique.
+Effective target counts must also be unique: two nominal fractions that round
+to the same molecule count are rejected rather than represented as distinct
+Cartesian cells. The edge-inclusion policy governs interval admission after a
+whole molecule is selected; it does not make equal downsampling targets
+distinct.
 
 Every level and replicate also has a preregistered membership commitment. The
 commitment hashes a sorted, unique sequence of privacy-safe whole-molecule
