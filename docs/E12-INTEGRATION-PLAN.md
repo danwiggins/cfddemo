@@ -35,6 +35,7 @@ limitation and never changes source values, denominators, or eligibility.
 | Immutable source/result identity | D06 binding, E04 catalog ref, E06 `ResultViewSource` | Bind result, bundle, method/version, capability, compatibility, denominator ledger, and source replay digest | Altering any identity or denominator field rejects the workspace; one result cannot represent two members |
 | One pinned anchor and six outcomes | Live-replayed D03 v3 series decision | Evaluate every member against the same pinned anchor; expose exact outcome/reasons/action | Property test every compatibility-key dimension; adjacency cannot bridge an anchor mismatch; old policy schema fails closed |
 | Standalone source values | Closed versioned family adapter over an applicable replayed E07 `FragmentExplorerView`, E08 `CellOriginExplorerArtifact`, or E09 `CnaExplorerSnapshot`, bound through the exact E04 result and E06 source authority | Bind the requested D02 measurement definition, quantity, unit, and one exact family coordinate before projecting values. A missing adapter is an explicit prerequisite/unavailable source-value state; D07 observations or comparison inputs never substitute for it | Wrong family/panel/bin/statistic/contributor/chromosome/segment, ambiguous or multiple match, quantity/unit mismatch, table/chart drift, and value-ranked selection reject the row |
+| Approved projection selection | Prerequisite protected `ProjectionPolicyRegistry` with independently pinned registry ID, epoch, expected head and bounded selector/version | Resolve one registered family/statistic/coordinate policy under the live registry; the browser request carries only selector/version and cannot author or hash a policy | Caller-created singleton/subset/value-ranked policies, stale selectors, rollback, registry replacement, head race and unregistered coordinates fail closed before source-artifact reads |
 | Delta and trend suppression | D03 outcome plus D07 comparison replay | Only `equivalent` or `qualified_compatible` with D07 `available` may expose D07 comparison values, comparison denominators, delta, comparison interval, shared axis, or connecting segment. Independently verified E07/E08/E09 standalone values and D09 counts remain visible in their own fields | `requires_reanalysis`, `registered_bridge`, `incompatible`, `unknown`, outside-envelope, missing, failed, insufficient, or stale comparison states contain no D07 numeric fields or segment; valid measurement-specific source rows remain visible as separate series |
 | Repeatability uncertainty | D07 signed observations, result trust, registered envelope/evidence/protocol/authority | Copy D07 fields only from an available replayed D07 comparison; for every unavailable D07 result, preserve the contract's exact suppression of both comparison values, both comparison denominators, delta, and uncertainty | Same-value, noisy, missing, incompatible, unregistered factor transition, revoked key, and stale evidence cases remain distinct |
 | Denominators and missingness | Registry-bound D09 summary over D05/D06/E06 | Show declared/included/excluded/unavailable members and denominator units; preserve missing and withheld as states | All counts reconcile for zero eligible, one eligible, partial, and full cohorts; filters never rewrite scientific counts |
@@ -53,11 +54,12 @@ limitation and never changes source values, denominators, or eligibility.
 Add `evidence_inspector/longitudinal_workspace.py` only after D06 and D09 merge.
 The module owns the protected-to-public boundary and contains these contracts:
 
-- `LongitudinalWorkspaceRequest`: registry-scoped selector/version, normalized
+- `LongitudinalWorkspaceRequest`: registry-scoped cohort selector/version,
+  independently registry-scoped projection-policy selector/version, normalized
   controlled filters, and exact IDs/digests for the D03 policy, D07 envelope,
-  D09 policy, requested D02 measurement definition/quantity/unit, and exact
-  family projection selection. It contains no manifest or linkage identifiers
-  and never carries a release flag.
+  D09 policy, and requested D02 measurement definition/quantity/unit. It carries
+  no family coordinate, projection-policy bytes or digest, manifest or linkage
+  identifier, and never carries a release flag.
 - `ProtectedLongitudinalRow`: exact manifest-member commitment, lineage role,
   denominator contribution, protected timepoint commitment and coordinate,
   D04 record-history identity, D06 binding/status, E06 source, the applicable
@@ -112,11 +114,17 @@ E12 adds one discriminated, versioned union with no generic numeric fallback:
   controlled segment statistic/unit, segment identity, and the exact
   layer/table value. Dosage and segmented coordinates never alias.
 
-Each adapter request is a closed canonical contract captured before artifact
-values are inspected. It binds one and only one family and coordinate, the
-exact D02 measurement-definition/quantity/unit tuple, D05 measurement anchor,
-and registered selection-policy digest. The policy contains the finite allowed
-family/statistic/coordinate set or an explicit canonical-all-components rule.
+Each adapter request is derived from a closed canonical policy resolved from a
+protected `ProjectionPolicyRegistry` before artifact values are inspected. The
+registry has an independently pinned ID, epoch and expected state head, a
+bounded opaque selector plus version, append-only canonical policy objects,
+rollback detection, bounded list/get reads and final-head revalidation. A
+browser/caller cannot submit policy bytes, a policy digest, a family coordinate
+or a subset. The resolved policy binds one and only one family and coordinate,
+the exact D02 measurement-definition/quantity/unit tuple, D05 measurement
+anchor, policy-registry identity/head and registered policy digest. The policy
+contains the finite allowed family/statistic/coordinate set or an explicit
+canonical-all-components rule.
 It cannot select `top`, `largest`, `most_changed`, minimum/maximum, or any
 value-ranked component. A request matching zero rows, multiple rows, another
 family, another panel, an unregistered contributor, a changed bin/coordinate,
@@ -140,30 +148,41 @@ build_longitudinal_workspace(
     cohort_registry,
     cohort_record_catalog,
     supersession_store,
+    projection_policy_registry,
     result_view_sources,
-    measurement_source_artifacts,
-    d03_series_inputs,
-    d07_comparison_inputs,
-    d09_policy,
-    d10_inputs,
+    measurement_source_artifact_registry,
+    d03_decision_registry,
+    d07_comparison_registry,
+    d09_summary_registry,
+    d10_context_registry,
 ) -> LongitudinalWorkspace
 ```
 
 Every caller-owned contract is captured as exact bounded canonical bytes before
 any authority operation. The function requires exact concrete store classes,
 invokes captured unbound methods, and performs no caller callback. It resolves
-D05 through the registry, obtains D06 status for the same selector/version,
-reads D04 active and bounded history state, builds the D09 summary from the live
-registry/catalog, replays each applicable E07/E08/E09 artifact against its exact
-E04/E06 source, replays the D03 series and each D07 comparison against current
-authority, and derives D10 from the exact D09 population and replayed D03
-decisions. It then
-repeats the D05, D06, D04, and linkage authority reads and compares every exact
-identity before returning. Authority mismatch, tamper, trust-source verification
-failure, or read race raises a typed safe boundary error and returns no
-workspace payload. Those failures never masquerade as scientific
-unavailability or produce a partially current chart. A stable, successfully
-verified revoked/withheld status remains visible as that exact state.
+D05 through the registry, resolves the approved projection policy through its
+independently pinned registry, obtains D06 status for the same selector/version,
+reads D04 active and bounded history state, obtains the D09 summary from its
+live registry/catalog authority, replays each applicable E07/E08/E09 artifact
+from durable family-source discovery against its exact E04/E06 source, replays
+the registered D03 series decision and each D07 comparison against current
+authority, and obtains D10 derived from that exact D09 population and replayed
+D03 decision set. Construction and return use one documented optimistic
+composite snapshot protocol: acquire the live D01 linkage, D04 history, D05 cohort, D06
+record/catalog, E04 catalog, E06 source, D03 decision, D07 comparison, D09
+summary, D10 context, family-source and projection-policy read fences in their
+fixed global order; capture every ID/epoch/version/head and canonical input;
+release the fences; and build only from those snapshots. No parser, family
+adapter, renderer, callback or network operation runs while authority locks are
+held. Immediately before return, reacquire the complete fence set in the same
+global order, revalidate every captured identity/head in reverse order, and
+reject the entire result if any dependency changed. Authority mismatch,
+tamper, trust-source verification failure, or read race raises a typed safe
+boundary error and returns no workspace payload. Those failures never
+masquerade as scientific unavailability or produce a partially current chart.
+A stable, successfully verified revoked/withheld status remains visible as that
+exact state.
 
 The first implementation should be limited to one measurement and one pinned
 anchor per workspace. Multiple incompatible outcomes retain values from their
@@ -242,8 +261,11 @@ registry tracks cumulative object bytes and rejects admission before writing
 when the backup bound would be exceeded. Integer tokens, nesting depth, graph
 nodes, strings and collections also use explicit pre-serialization limits.
 
-Publication holds one exclusive registry lock and the required D01/D04/D05/D06
-final authority fences. It canonicalizes and bounds all input before opening a
+Publication holds one exclusive registry lock plus final read fences for every
+mutable identity persisted in the object: D01 linkage, D04 history, D05 cohort,
+D06 record/catalog, E04 catalog, E06 source, D03 decision, D07 comparison, D09
+summary, D10 context, family-source artifact and projection-policy authority.
+It canonicalizes and bounds all input before opening a
 transaction, writes the content-addressed object with descriptor-relative
 no-follow/no-overwrite operations, fsyncs it, appends and fsyncs one hash-chained
 journal entry, reloads the complete registry state, rechecks all dependency
@@ -253,6 +275,8 @@ or changed authority is a conflict and never overwrites an object.
 
 All dependent operations use one documented lock order:
 `D01 linkage -> D04 history -> D05 cohort registry -> D06 cohort record catalog
+-> E04 catalog -> E06 source -> D03 decision -> D07 comparison -> D09 summary
+-> D10 context -> family-source artifacts -> projection-policy registry
 -> saved-comparison registry`. No callback, renderer, parser hook or network
 operation executes while those locks are held. Concurrency tests prove opposing
 save/read/supersession/cohort-registration/import operations terminate without
