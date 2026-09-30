@@ -308,6 +308,33 @@ def test_recovery_rejects_hostile_scalar_subclasses_before_dispatch(
     assert catalog.pending_publications("c" * 64) == before
 
 
+@pytest.mark.parametrize(
+    "method_name",
+    (
+        "register_coordinated_candidate",
+        "coordinated_candidates",
+        "finish_coordinated_candidate",
+    ),
+)
+def test_runtime_authority_check_does_not_invoke_hostile_descriptors(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    method_name: str,
+) -> None:
+    catalog, _, _ = _catalog(tmp_path)
+    hooks: list[str] = []
+
+    class HostileDescriptor:
+        def __get__(self, instance, owner):
+            hooks.append(method_name)
+            raise AssertionError("descriptor executed")
+
+    monkeypatch.setattr(ResultCatalog, method_name, HostileDescriptor())
+    with pytest.raises(CatalogError, match="authority callable"):
+        catalog_module._RC_ASSERT_RUNTIME(catalog)
+    assert hooks == []
+
+
 def test_prepared_adoption_rejects_caller_callbacks_without_execution(
     tmp_path: Path,
 ) -> None:

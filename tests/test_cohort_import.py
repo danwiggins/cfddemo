@@ -1204,6 +1204,36 @@ def test_candidate_authority_alias_shadow_is_rejected_without_execution(
     assert values[1].query(CatalogQuery()).empty
 
 
+@pytest.mark.parametrize(
+    "method_name",
+    (
+        "register_coordinated_candidate",
+        "coordinated_candidates",
+        "finish_coordinated_candidate",
+    ),
+)
+def test_catalog_authority_check_does_not_invoke_hostile_descriptors(
+    tmp_path: Path,
+    live,
+    monkeypatch: pytest.MonkeyPatch,
+    method_name: str,
+) -> None:
+    values = _setup(tmp_path, live)
+    hooks: list[str] = []
+
+    class HostileDescriptor:
+        def __get__(self, instance, owner):
+            hooks.append(method_name)
+            raise AssertionError("descriptor executed")
+
+    monkeypatch.setattr(ResultCatalog, method_name, HostileDescriptor())
+    with pytest.raises(CohortImportError, match="authority changed"):
+        _import(values)
+    assert hooks == []
+    monkeypatch.undo()
+    assert values[1].query(CatalogQuery()).empty
+
+
 def test_stale_linkage_cannot_be_bypassed_by_validator_code_mutation(
     tmp_path: Path, live
 ) -> None:

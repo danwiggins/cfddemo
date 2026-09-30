@@ -2434,7 +2434,7 @@ class ResultCatalog:
 
 _RESULT_METHOD_SEAL = MappingProxyType(
     {
-        name: getattr(ResultCatalog, name)
+        name: ResultCatalog.__dict__[name]
         for name in (
             "_append_method_filter",
             "_bind_database_descriptor",
@@ -2563,7 +2563,7 @@ def _assert_result_runtime(
     if type(catalog) is not ResultCatalog:
         raise CatalogError("catalog authority type changed")
     for name, expected in expected_methods.items():
-        current = getattr(ResultCatalog, name)
+        current = ResultCatalog.__dict__.get(name)
         if (
             name in vars(catalog)
             or current is not expected

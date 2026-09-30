@@ -374,7 +374,7 @@ class CohortRecordCatalog:
         ):
             if (
                 name in vars(result_catalog)
-                or getattr(ResultCatalog, name) is not pinned
+                or ResultCatalog.__dict__.get(name) is not pinned
             ):
                 raise TypeError("result catalog authority callable was shadowed")
         if type(linkage_store) is not ProviderLinkageStore:
@@ -1043,7 +1043,7 @@ class CohortRecordCatalog:
             ("coordinated_candidates", _PINNED_RESULT_CANDIDATES),
             ("finish_coordinated_candidate", _PINNED_RESULT_FINISH_CANDIDATE),
         ):
-            if name in vars(catalog) or getattr(ResultCatalog, name) is not pinned:
+            if name in vars(catalog) or ResultCatalog.__dict__.get(name) is not pinned:
                 raise CohortImportError("result catalog authority changed")
         if (
             type(self._linkage_store) is not ProviderLinkageStore
@@ -2027,7 +2027,7 @@ class CohortRecordCatalog:
 
 _COHORT_METHOD_SEAL = MappingProxyType(
     {
-        name: getattr(CohortRecordCatalog, name)
+        name: CohortRecordCatalog.__dict__[name]
         for name in (
             "_binding_equivalent",
             "_bindings_for_manifest_body",
@@ -2089,7 +2089,7 @@ def _assert_cohort_runtime(
     if type(catalog) is not CohortRecordCatalog:
         raise CohortImportError("cohort authority type changed")
     for name, expected in expected_methods.items():
-        current = getattr(CohortRecordCatalog, name)
+        current = CohortRecordCatalog.__dict__.get(name)
         if (
             name in vars(catalog)
             or current is not expected
