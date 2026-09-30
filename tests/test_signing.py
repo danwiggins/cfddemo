@@ -45,7 +45,9 @@ def test_public_development_trust_round_trips_without_private_key_material() -> 
     with pytest.raises(ValueError, match="canonical"):
         load_development_trust(b" \n" + content)
 
-    tampered = content.replace(key.key_id.encode(), b"dev-result-000000000000000000000000")
+    tampered = content.replace(
+        key.key_id.encode(), b"dev-result-000000000000000000000000"
+    )
     with pytest.raises(ValueError, match="does not match"):
         load_development_trust(tampered)
 
@@ -57,7 +59,9 @@ def test_signature_rejects_tampering_wrong_key_and_missing_key() -> None:
     correct_store.add_signing_key(key)
 
     with pytest.raises(InvalidSignatureError):
-        verify_signature(b"tampered", signature, correct_store, purpose=KeyPurpose.RESULT)
+        verify_signature(
+            b"tampered", signature, correct_store, purpose=KeyPurpose.RESULT
+        )
 
     wrong_key = generate_development_keypair(KeyPurpose.RESULT)
     wrong_store = TrustStore()
@@ -66,7 +70,9 @@ def test_signature_rejects_tampering_wrong_key_and_missing_key() -> None:
         verify_signature(b"original", signature, wrong_store, purpose=KeyPurpose.RESULT)
 
     with pytest.raises(UnknownKeyError):
-        verify_signature(b"original", signature, TrustStore(), purpose=KeyPurpose.RESULT)
+        verify_signature(
+            b"original", signature, TrustStore(), purpose=KeyPurpose.RESULT
+        )
 
 
 def test_release_and_result_key_purposes_are_not_interchangeable() -> None:
