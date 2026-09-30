@@ -749,14 +749,11 @@ def test_integer_boundaries_accept_documented_maxima(live) -> None:
         MAX_TIME_COORDINATE,
         MIN_TIME_COORDINATE,
     )
-    from evidence_inspector.provider_linkage import (
-        MAX_CONSUMED_APPROVALS,
-        MAX_REVISIONS,
-    )
+    from evidence_inspector.provider_linkage import MAX_REVISIONS
 
     _, _, authority, member = live
     ProviderAuthorityReference.model_validate(
-        {**authority.model_dump(mode="python"), "state_version": MAX_CONSUMED_APPROVALS}
+        {**authority.model_dump(mode="python"), "state_version": MAX_REVISIONS}
     )
     CohortMember.model_validate(
         {**member.model_dump(mode="python"), "linkage_revision": MAX_REVISIONS}
@@ -805,3 +802,94 @@ def test_history_boundary_rejects_oversized_integer_model_copies(
     ]
     with pytest.raises(ValueError, match="not canonical"):
         validate_manifest_history((variant,))
+
+
+def _second_provider_authority(
+    authority: ProviderAuthorityReference,
+) -> ProviderAuthorityReference:
+    return authority.model_copy(update={"provider_namespace": _token("provider", "d")})
+
+
+def _multi_provider_manifest(
+    authority: ProviderAuthorityReference,
+    members: tuple[CohortMember, ...],
+) -> CohortManifest:
+    first_provider_member = next(
+        item
+        for item in members
+        if item.provider_namespace == authority.provider_namespace
+    )
+    base = _manifest(authority, (first_provider_member,))
+    second = _second_provider_authority(authority)
+    return build_cohort_manifest(
+        provider_authorities=(authority, second),
+        members=members,
+        cohort_id=base.cohort_id,
+        version=base.version,
+        previous_manifest_sha256=base.previous_manifest_sha256,
+        created_at=base.created_at,
+        unit_of_analysis=base.unit_of_analysis,
+        technical_replicate_rule=base.technical_replicate_rule,
+        reanalysis_rule=base.reanalysis_rule,
+        time_axis=base.time_axis,
+        policies=base.policies,
+        measurement_anchor=base.measurement_anchor,
+    )
+
+
+def test_equal_provider_local_tokens_remain_distinct_denominators(live) -> None:
+    _, _, authority, first = live
+    second = _retime(
+        first,
+        first.time_coordinate,
+        provider_namespace=_token("provider", "d"),
+        linkage_id=_token("linkage", "d"),
+    )
+    manifest = _multi_provider_manifest(authority, (second, first))
+    assert len(manifest.members) == 2
+    assert sum(item.denominator_contribution for item in manifest.members) == 2
+    assert cohort_manifest_from_bytes(cohort_manifest_bytes(manifest)) == manifest
+
+
+def _cross_provider_dependency_copy(live) -> tuple[CohortManifest, CohortManifest]:
+    _, _, authority, first = live
+    provider_b = _token("provider", "d")
+    draw_b = _retime(
+        first,
+        first.time_coordinate + 10,
+        provider_namespace=provider_b,
+        linkage_id=_token("linkage", "d"),
+        analysis_record_id=_token("analysis", "d"),
+    )
+    replicate_b = _retime(
+        first,
+        first.time_coordinate + 20,
+        provider_namespace=provider_b,
+        linkage_id=_token("linkage", "e"),
+        analysis_record_id=_token("analysis", "e"),
+        lineage_role=MemberLineageRole.TECHNICAL_REPLICATE,
+        technical_replicate_of=draw_b.analysis_record_id,
+        denominator_contribution=False,
+    )
+    valid = _multi_provider_manifest(authority, (first, draw_b, replicate_b))
+    forged_replicate = replicate_b.model_copy(
+        update={"technical_replicate_of": first.analysis_record_id}
+    )
+    forged = valid.model_copy(update={"members": (first, draw_b, forged_replicate)})
+    return valid, forged
+
+
+def test_cross_provider_dependency_rejects_canonical_live_and_history(live) -> None:
+    store, _, _, _ = live
+    valid, forged = _cross_provider_dependency_copy(live)
+    assert cohort_manifest_from_bytes(cohort_manifest_bytes(valid)) == valid
+    with pytest.raises(ValueError, match="not canonical"):
+        cohort_manifest_from_bytes(cohort_manifest_bytes(forged))
+    with pytest.raises(ValueError, match="not canonical"):
+        validate_manifest_against_linkage_store(
+            forged,
+            store,
+            expected_trust_snapshot_sha256_by_provider=_pins(),
+        )
+    with pytest.raises(ValueError, match="not canonical"):
+        validate_manifest_history((forged,))

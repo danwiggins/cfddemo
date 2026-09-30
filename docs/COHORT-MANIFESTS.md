@@ -20,8 +20,8 @@ chains must remain within the same biological lineage and cannot contain
 cycles.
 
 Integer domains are finite. Linkage revisions use the upstream linkage
-revision maximum, store authority versions use the protected approval-ledger
-capacity, and time coordinates use whole UTC seconds within Python's
+revision maximum, store authority versions use the same 10,000-record maximum
+as the protected store's authoritative state semantics, and time coordinates use whole UTC seconds within Python's
 representable year 1 through 9999 range. Oversized integers fail canonical,
 history, and live-store validation even if a caller recomputes the time
 commitment.
@@ -57,3 +57,9 @@ the complete manifest. Unvalidated `model_copy` mutations therefore cannot
 bypass denominator, unit, role, dependency, ordering, member, or authority
 checks. Technical-replicate and reanalysis dependencies share one acyclic
 graph even though their inclusion policies remain separate.
+
+All opaque linkage identities remain provider-local. Analysis records,
+declared-unit denominator groups, biological-lineage groups, and dependency
+edges are keyed by provider namespace plus token. Equal opaque tokens from two
+providers therefore remain distinct, and a replicate or reanalysis cannot
+name a source analysis from another provider.

@@ -25,7 +25,6 @@ from evidence_inspector.method_registry import (
     contract_from_canonical_bytes,
 )
 from evidence_inspector.provider_linkage import (
-    MAX_CONSUMED_APPROVALS,
     MAX_REVISIONS,
     AnalysisRecordId,
     CollectionToken,
@@ -122,7 +121,7 @@ class ProviderAuthorityReference(RegistryContract):
     store_epoch_sha256: Sha256
     storage_identity_sha256: Sha256
     trust_pins_sha256: Sha256
-    state_version: int = Field(ge=1, le=MAX_CONSUMED_APPROVALS, strict=True)
+    state_version: int = Field(ge=1, le=MAX_REVISIONS, strict=True)
     state_head_sha256: Sha256
 
 
@@ -194,12 +193,14 @@ class CohortManifest(RegistryContract):
             raise ValueError("cohort members must use canonical longitudinal order")
         if {m.provider_namespace for m in self.members} != set(authority_keys):
             raise ValueError("every and only member providers require exact authority")
-        analyses = {m.analysis_record_id: m for m in self.members}
+        analyses = {
+            (m.provider_namespace, m.analysis_record_id): m for m in self.members
+        }
         if len(analyses) != len(self.members):
             raise ValueError("analysis records cannot be counted twice")
-        groups: dict[str, list[CohortMember]] = defaultdict(list)
-        biological_groups: dict[tuple[str, str, str], list[CohortMember]] = defaultdict(
-            list
+        groups: dict[tuple[str, str], list[CohortMember]] = defaultdict(list)
+        biological_groups: dict[tuple[str, str, str, str], list[CohortMember]] = (
+            defaultdict(list)
         )
         for member in self.members:
             expected_token = {
@@ -237,9 +238,14 @@ class CohortManifest(RegistryContract):
                 raise ValueError(
                     "member time coordinate is not bound to its linkage event"
                 )
-            groups[expected_token].append(member)
+            groups[(member.provider_namespace, expected_token)].append(member)
             biological_groups[
-                (member.subject_token, member.collection_token, member.specimen_token)
+                (
+                    member.provider_namespace,
+                    member.subject_token,
+                    member.collection_token,
+                    member.specimen_token,
+                )
             ].append(member)
         for members in groups.values():
             contributors = [m for m in members if m.denominator_contribution]
@@ -262,7 +268,9 @@ class CohortManifest(RegistryContract):
             if member.lineage_role == MemberLineageRole.TECHNICAL_REPLICATE:
                 if self.technical_replicate_rule == TechnicalReplicateRule.EXCLUDE:
                     raise ValueError("technical replicate policy excludes this member")
-                source = analyses.get(member.technical_replicate_of)
+                source = analyses.get(
+                    (member.provider_namespace, member.technical_replicate_of)
+                )
                 if source is None:
                     raise ValueError(
                         "technical replicate source is outside the manifest"
@@ -282,7 +290,7 @@ class CohortManifest(RegistryContract):
             elif member.lineage_role == MemberLineageRole.REANALYSIS:
                 if self.reanalysis_rule == ReanalysisRule.EXCLUDE:
                     raise ValueError("reanalysis policy excludes this member")
-                source = analyses.get(member.reanalysis_of)
+                source = analyses.get((member.provider_namespace, member.reanalysis_of))
                 if source is None:
                     raise ValueError("reanalysis source is outside the manifest")
                 if (
@@ -298,7 +306,7 @@ class CohortManifest(RegistryContract):
                         "reanalysis source has different biological lineage"
                     )
         for start in analyses:
-            seen: set[str] = set()
+            seen: set[tuple[str, str]] = set()
             current = start
             while True:
                 member = analyses[current]
@@ -310,9 +318,10 @@ class CohortManifest(RegistryContract):
                         "combined analysis dependency graph contains a cycle"
                     )
                 seen.add(current)
-                if source not in analyses:
+                source_key = (member.provider_namespace, source)
+                if source_key not in analyses:
                     break
-                current = source
+                current = source_key
         return self
 
 
