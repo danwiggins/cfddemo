@@ -22,7 +22,7 @@ never supplies these authority-bearing fields from defaults.
 | One pinned series anchor | every member evaluated against the anchor | explicit nontransitivity regression |
 | Bridge explicit and not implicit | registered bridge references | immutable `not_executed` state and review-only action |
 | Delta and trend eligibility | equivalent and qualified-compatible only | all-six-outcome regression |
-| E05, E01, and lineage replay | exact records, capabilities, linkage revisions, policy and pins | replay helper that rejects any stored-decision or authority drift |
+| E05, E01, and lineage replay | exact records, capabilities, activated linkage receipts, policy and pins | replay helper plus live protected-store verification |
 
 ## Exact dimension explanations
 
@@ -84,10 +84,13 @@ with that anchor. Compatibility between adjacent members cannot be inherited by
 a later member.
 
 Replay recomputes the decision from the exact E05 records, E01 capabilities and
-authority head, D01 authorized linkage revisions and provider trust snapshots,
-anchor policy, and external pins. A self-consistent stored digest is not enough;
-any changed record, authority, lineage, explanation, action, or policy causes
-replay failure.
+authority head, D01 authorized linkage revisions, D04 committed activation
+receipts, provider trust snapshots, anchor policy, and external pins. Both the
+anchor and member receipts are rechecked immediately through the live
+`ProviderLinkageStore.verify_current_receipt` authority. A serialized receipt
+or self-consistent stored digest is not enough; an absent verifier or any
+changed record, authority, lineage, receipt, explanation, action, or policy
+causes replay failure.
 
 All fixtures and tests are synthetic/local. Outcomes describe technical
 comparability only and carry no clinical interpretation.
