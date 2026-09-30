@@ -1,0 +1,73 @@
+# D03 longitudinal compatibility decision engine
+
+`evidence_inspector.longitudinal_compatibility` remains the single evaluator
+for D02 and D03. D03 extends the pinned-anchor decision with exact explanations,
+controlled safe actions, and replay; it does not introduce a second comparison
+algorithm.
+
+The enriched member and series decisions use v2 schema identities. A v1
+decision cannot be relabeled as v2 or omit D03 explanations and actions.
+
+## Requirement matrix
+
+| Requirement | D02 authority reused | D03 addition |
+|---|---|---|
+| Exact mismatch explanation and safe next action | mismatch and unknown dimension sets | one cryptographic explanation per dimension and one outcome-derived action |
+| Exact-match default | unlisted digest transitions are incompatible | adversarial retention tests |
+| Old or missing policy fields | closed versioned policy schema | explicit rejection tests; no legacy fallback |
+| Six outcomes | complete D02 outcome enum and evaluator | one exact safe action for every outcome |
+| One pinned series anchor | every member evaluated against the anchor | explicit nontransitivity regression |
+| Bridge explicit and not implicit | registered bridge references | immutable `not_executed` state and review-only action |
+| Delta and trend eligibility | equivalent and qualified-compatible only | all-six-outcome regression |
+| E05, E01, and lineage replay | exact records, capabilities, linkage revisions, policy and pins | replay helper that rejects any stored-decision or authority drift |
+
+## Exact dimension explanations
+
+Every decision contains all 13 dimensions in canonical order. Each explanation
+binds:
+
+- the dimension;
+- anchor and member known/unknown states;
+- canonical anchor and member value digests;
+- exact match, unknown, disallowed mismatch, qualified envelope, required
+  reanalysis, or registered bridge disposition;
+- the registered evidence reference and digest when an allowance exists; and
+- the bridge reference only for a registered-bridge disposition.
+
+The decision's mismatch, unknown, evidence, and bridge summaries must be exactly
+derivable from those explanations. They cannot be edited independently.
+
+## Controlled next actions
+
+| Outcome | Safe next action | Delta/trend |
+|---|---|---:|
+| `equivalent` | `use_direct_comparison` | allowed |
+| `qualified_compatible` | `use_qualified_comparison` | allowed |
+| `requires_reanalysis` | `request_reanalysis` | blocked |
+| `registered_bridge` | `review_registered_bridge` | blocked |
+| `incompatible` | `start_separate_series` | blocked |
+| `unknown` | `resolve_unknown_inputs` | blocked |
+
+Actions are controlled workflow states, not commands. A bridge decision always
+records `bridge_execution_state=not_executed`; the engine does not run a bridge,
+translate a value, start reanalysis, or mutate a record.
+
+## Default, anchor, and replay rules
+
+An exact complete-key match remains the only default-compatible path. A policy
+must use the current closed schema and contain every required field and every
+dimension rule. Missing fields, old schema versions, stale pins, missing
+authority, or unknown dimensions never fall back to compatibility.
+
+One series has one pinned anchor and policy. Every member is compared directly
+with that anchor. Compatibility between adjacent members cannot be inherited by
+a later member.
+
+Replay recomputes the decision from the exact E05 records, E01 capabilities and
+authority head, D01 authorized linkage revisions and provider trust snapshots,
+anchor policy, and external pins. A self-consistent stored digest is not enough;
+any changed record, authority, lineage, explanation, action, or policy causes
+replay failure.
+
+All fixtures and tests are synthetic/local. Outcomes describe technical
+comparability only and carry no clinical interpretation.

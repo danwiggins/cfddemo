@@ -1832,7 +1832,7 @@ def test_decision_semantics_bounds_and_private_tokens_fail_closed() -> None:
     decision = _decide(anchor, member, _policy(anchor))
     payload = decision.model_dump(mode="json")
     payload["mismatch_dimensions"] = [ComparisonDimension.ASSAY_PROTOCOL.value]
-    with pytest.raises(ValidationError, match="exact identity match"):
+    with pytest.raises(ValidationError, match="mismatch dimensions"):
         LongitudinalMemberDecision.model_validate_json(json.dumps(payload))
 
     payload = decision.model_dump(mode="json")
