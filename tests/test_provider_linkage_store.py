@@ -75,6 +75,33 @@ def test_detected_module_tamper_is_explicit_process_integrity_failure() -> None:
     require_provider_linkage_store_process_integrity()
 
 
+@pytest.mark.parametrize("wrapped", (False, True))
+def test_authority_fence_code_tamper_fails_process_integrity(wrapped: bool) -> None:
+    public_fence = ProviderLinkageStore.authority_read_fence
+    function = public_fence.__wrapped__ if wrapped else public_fence
+    original = function.__code__
+
+    if wrapped:
+        replacement = ProviderLinkageStore.active_snapshot.__code__
+    else:
+        captured = object()
+
+        def replacement_wrapper(*args: object, **kwargs: object) -> object:
+            del args, kwargs
+            return captured
+
+        replacement = replacement_wrapper.__code__
+
+    assert provider_linkage_store_process_integrity_is_valid()
+    try:
+        function.__code__ = replacement
+        assert not provider_linkage_store_process_integrity_is_valid()
+    finally:
+        function.__code__ = original
+
+    require_provider_linkage_store_process_integrity()
+
+
 def _pins() -> dict[str, str]:
     return {PROVIDER: provider_trust_snapshot_sha256(_trust())}
 
@@ -261,6 +288,37 @@ def test_authority_time_floor_is_monotonic_and_persists_across_reopen(
         with pytest.raises(ProviderLinkageStoreUnsafe, match="moved backwards"):
             reopened.active_snapshot()
         assert receipt.state_version == 1
+    finally:
+        reopened.close()
+
+
+def test_authority_read_fence_persists_nested_time_floor_advance(
+    tmp_path: Path,
+) -> None:
+    root = tmp_path / "protected"
+    time_source = AuthorityTimeSource.fixed(NOW)
+    store = ProviderLinkageStore(
+        root,
+        expected_trust_snapshot_sha256_by_provider=_pins(),
+        time_source=time_source,
+    )
+    later = AFTER + timedelta(hours=1)
+    try:
+        time_source.advance_to(later)
+        with store.authority_read_fence():
+            assert store.active_snapshot().state_version == 0
+    finally:
+        store.close()
+
+    time_source._current = NOW  # type: ignore[attr-defined]
+    reopened = ProviderLinkageStore(
+        root,
+        expected_trust_snapshot_sha256_by_provider=_pins(),
+        time_source=time_source,
+    )
+    try:
+        with pytest.raises(ProviderLinkageStoreUnsafe, match="moved backwards"):
+            reopened.active_snapshot()
     finally:
         reopened.close()
 
