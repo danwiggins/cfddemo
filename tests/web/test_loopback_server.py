@@ -43,7 +43,7 @@ def _request(
     headers: dict[str, str] | None = None,
     payload: dict[str, object] | None = None,
 ) -> tuple[int, dict[str, str], bytes]:
-    config = service.boundary.config
+    config = service.config
     connection = http.client.HTTPConnection(config.bind_host, config.port, timeout=3)
     body = json.dumps(payload, separators=(",", ":")).encode() if payload else None
     connection.putrequest(method, path, skip_host=True)
@@ -61,13 +61,15 @@ def _request(
     return response.status, response_headers, content
 
 
-def _exchange(service: RunningLocalWebService) -> tuple[str, str]:
+def _exchange(
+    service: RunningLocalWebService, bootstrap_code: str | None = None
+) -> tuple[str, str]:
     status, headers, content = _request(
         service,
         "POST",
         "/api/v1/session/bootstrap",
         headers={"Origin": service.base_url},
-        payload={"bootstrap": service.bootstrap_code},
+        payload={"bootstrap": bootstrap_code or service.bootstrap_code},
     )
     assert status == 200
     cookie = headers["set-cookie"].split(";", 1)[0]
@@ -81,7 +83,7 @@ def test_real_http_fragment_bootstrap_store_projection_and_offline_assets(
     store, job_id = _store(tmp_path)
     state = tmp_path / "web-state"
     with RunningLocalWebService.start(store=store, state_directory=state) as service:
-        assert service.boundary.config.port != 0
+        assert service.config.port != 0
         assert service.launch_url.startswith(f"{service.base_url}/#bootstrap=")
         assert "?" not in service.launch_url
 
@@ -125,8 +127,7 @@ def test_real_http_exact_authority_session_csrf_forwarding_and_guessed_ids(
         )
         assert status == 403
 
-        service.bootstrap_code = service.boundary.issue_bootstrap()
-        cookie, csrf = _exchange(service)
+        cookie, csrf = _exchange(service, service.issue_bootstrap())
         common = {"Cookie": cookie, "Origin": service.base_url}
 
         status, _, _ = _request(
@@ -162,7 +163,7 @@ def test_real_http_exact_authority_session_csrf_forwarding_and_guessed_ids(
         assert b"ffffffff" not in unauthenticated_body
         assert b"ffffffff" not in authenticated_body
 
-        config = service.boundary.config
+        config = service.config
         connection = http.client.HTTPConnection(
             config.bind_host, config.port, timeout=3
         )
@@ -195,8 +196,7 @@ def test_state_permissions_restart_rotation_and_explicit_cross_user_limit(
     assert stat.S_IMODE(state.stat().st_mode) == 0o700
     assert stat.S_IMODE((state / "instance.json").stat().st_mode) == 0o600
     assert stat.S_IMODE((state / "instance.lock").stat().st_mode) == 0o600
-    anchor_path = first.startup_anchor.parent_path / first.startup_anchor.name
-    assert stat.S_IMODE(anchor_path.stat().st_mode) == 0o600
+    assert stat.S_IMODE(first.anchor_path.stat().st_mode) == 0o600
     assert state.stat().st_uid == os.geteuid()
     saved = json.loads((state / "instance.json").read_bytes())
     assert saved["capability_enabled"] is False
@@ -271,10 +271,10 @@ def test_lock_entry_substitution_cannot_create_two_live_services(
             RunningLocalWebService.start(store=store, state_directory=state)
 
         deadline = time.monotonic() + 2
-        while first.thread.is_alive() and time.monotonic() < deadline:
+        while first.is_running and time.monotonic() < deadline:
             time.sleep(0.01)
         assert first.server.security_failed.is_set()
-        assert not first.thread.is_alive()
+        assert not first.is_running
         assert (state / "instance.json").read_bytes() == published
         with pytest.raises(LocalWebServerError, match="already running"):
             RunningLocalWebService.start(store=store, state_directory=state)
@@ -301,10 +301,10 @@ def test_live_state_directory_replacement_remains_serialized_by_parent_anchor(
             RunningLocalWebService.start(store=store, state_directory=state)
 
         deadline = time.monotonic() + 2
-        while first.thread.is_alive() and time.monotonic() < deadline:
+        while first.is_running and time.monotonic() < deadline:
             time.sleep(0.01)
         assert first.server.security_failed.is_set()
-        assert not first.thread.is_alive()
+        assert not first.is_running
         assert (displaced / "instance.json").read_bytes() == published
         with pytest.raises(LocalWebServerError, match="already running"):
             RunningLocalWebService.start(store=store, state_directory=state)
@@ -322,7 +322,7 @@ def test_startup_anchor_substitution_is_detected_and_cannot_bypass_parent_lease(
     state = tmp_path / "state"
     first = RunningLocalWebService.start(store=store, state_directory=state)
     published = (state / "instance.json").read_bytes()
-    anchor = first.startup_anchor
+    anchor = server_module._RUNTIMES[first._runtime_id].startup_anchor
     anchor_path = anchor.parent_path / anchor.name
     replacement = anchor.parent_path / f"{anchor.name}.replacement"
     replacement.write_bytes(b"")
@@ -333,10 +333,10 @@ def test_startup_anchor_substitution_is_detected_and_cannot_bypass_parent_lease(
         with pytest.raises(LocalWebServerError, match="already running"):
             RunningLocalWebService.start(store=store, state_directory=state)
         deadline = time.monotonic() + 2
-        while first.thread.is_alive() and time.monotonic() < deadline:
+        while first.is_running and time.monotonic() < deadline:
             time.sleep(0.01)
         assert first.server.security_failed.is_set()
-        assert not first.thread.is_alive()
+        assert not first.is_running
         assert (state / "instance.json").read_bytes() == published
         with pytest.raises(LocalWebServerError, match="already running"):
             RunningLocalWebService.start(store=store, state_directory=state)
@@ -351,7 +351,8 @@ def test_stable_lock_root_identity_substitution_is_rejected(tmp_path: Path) -> N
     with RunningLocalWebService.start(store=store, state_directory=state) as service:
         substitute = tmp_path / "substitute-lock-root"
         substitute.mkdir(mode=0o700)
-        spoofed = replace(service.startup_anchor, parent_path=substitute)
+        runtime = server_module._RUNTIMES[service._runtime_id]
+        spoofed = replace(runtime.startup_anchor, parent_path=substitute)
         with pytest.raises(LocalWebServerError, match="startup parent identity"):
             server_module._require_startup_anchor(spoofed)
 
@@ -373,10 +374,10 @@ def test_startup_parent_substitution_fails_existing_service_closed(
         with pytest.raises(LocalWebServerError, match="already running"):
             RunningLocalWebService.start(store=store, state_directory=state)
         deadline = time.monotonic() + 2
-        while first.thread.is_alive() and time.monotonic() < deadline:
+        while first.is_running and time.monotonic() < deadline:
             time.sleep(0.01)
         assert first.server.security_failed.is_set()
-        assert not first.thread.is_alive()
+        assert not first.is_running
         assert (displaced / "state" / "instance.json").read_bytes() == published
         with pytest.raises(LocalWebServerError, match="already running"):
             RunningLocalWebService.start(store=store, state_directory=state)
@@ -392,7 +393,7 @@ def test_authority_rejected_before_body_validation_or_read(tmp_path: Path) -> No
     with RunningLocalWebService.start(
         store=store, state_directory=tmp_path / "state"
     ) as service:
-        config = service.boundary.config
+        config = service.config
         connection = http.client.HTTPConnection(
             config.bind_host, config.port, timeout=1
         )
@@ -436,7 +437,7 @@ def test_duplicate_cookie_headers_are_rejected(tmp_path: Path) -> None:
         store=store, state_directory=tmp_path / "state"
     ) as service:
         cookie, _ = _exchange(service)
-        config = service.boundary.config
+        config = service.config
         connection = http.client.HTTPConnection(
             config.bind_host, config.port, timeout=3
         )
@@ -457,7 +458,7 @@ def test_partial_request_flood_has_bounded_workers_and_no_tracebacks(
     with RunningLocalWebService.start(
         store=store, state_directory=tmp_path / "state"
     ) as service:
-        config = service.boundary.config
+        config = service.config
         for _ in range(server_module.MAX_HTTP_WORKERS * 3):
             client = socket.create_connection(
                 (config.bind_host, config.port), timeout=1
@@ -480,7 +481,7 @@ def test_header_and_body_limits_fail_without_reading_oversized_body(
     with RunningLocalWebService.start(
         store=store, state_directory=tmp_path / "state"
     ) as service:
-        config = service.boundary.config
+        config = service.config
         client = socket.create_connection((config.bind_host, config.port), timeout=1)
         headers = "".join(f"X-Padding-{index}: x\r\n" for index in range(33))
         client.sendall(
@@ -546,6 +547,6 @@ def test_ipv6_listener_is_family_bound_when_available(tmp_path: Path) -> None:
     except LocalWebServerError:
         pytest.skip("IPv6 loopback is unavailable on this host")
     with service:
-        assert service.boundary.config.bind_host == "::1"
-        assert service.boundary.config.authority.startswith("[::1]:")
+        assert service.config.bind_host == "::1"
+        assert service.config.authority.startswith("[::1]:")
         assert _request(service, "GET", "/")[0] == 200

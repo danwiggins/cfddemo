@@ -14,12 +14,12 @@ import sqlite3
 import stat
 import threading
 import uuid
-from collections.abc import Callable, Mapping, Sequence
+from collections.abc import Callable, Iterator, Mapping, Sequence
 from contextlib import contextmanager
 from datetime import datetime
 from enum import StrEnum
 from pathlib import Path, PurePosixPath
-from typing import Annotated, Iterator, Literal
+from typing import Annotated, Literal
 
 from pydantic import (
     BaseModel,
@@ -27,6 +27,7 @@ from pydantic import (
     Field,
     StringConstraints,
     TypeAdapter,
+    ValidationError,
     field_validator,
     model_validator,
 )
@@ -145,19 +146,11 @@ _MAX_FILE_BYTES = {
 _MAX_TOTAL_BYTES = 36 * 1024 * 1024
 
 Sha256 = Annotated[str, StringConstraints(pattern=r"^[0-9a-f]{64}$")]
-ResultId = Annotated[
-    str, StringConstraints(pattern=r"^result_[0-9a-f]{40}$")
-]
-RootId = Annotated[
-    str, StringConstraints(pattern=r"^root_[a-z0-9]+(?:_[a-z0-9]+)*$")
-]
-DisplayAlias = Annotated[
-    str, StringConstraints(pattern=r"^dsp_[a-z0-9]{8,32}$")
-]
+ResultId = Annotated[str, StringConstraints(pattern=r"^result_[0-9a-f]{40}$")]
+RootId = Annotated[str, StringConstraints(pattern=r"^root_[a-z0-9]+(?:_[a-z0-9]+)*$")]
+DisplayAlias = Annotated[str, StringConstraints(pattern=r"^dsp_[a-z0-9]{8,32}$")]
 RunAlias = Annotated[str, StringConstraints(pattern=r"^rnx_[a-z0-9]{8,32}$")]
-TimepointAlias = Annotated[
-    str, StringConstraints(pattern=r"^tpt_[a-z0-9]{8,32}$")
-]
+TimepointAlias = Annotated[str, StringConstraints(pattern=r"^tpt_[a-z0-9]{8,32}$")]
 
 _ROOT_ID = TypeAdapter(RootId)
 
@@ -319,9 +312,7 @@ class CatalogEmptyReason(StrEnum):
 
 
 class CatalogPage(CatalogModel):
-    schema_version: Literal["traceback.catalog-page.v1"] = (
-        "traceback.catalog-page.v1"
-    )
+    schema_version: Literal["traceback.catalog-page.v1"] = "traceback.catalog-page.v1"
     results: tuple[CatalogResultRef, ...]
     next_cursor: ResultId | None = None
     empty: bool
@@ -333,6 +324,27 @@ class CatalogPage(CatalogModel):
             raise ValueError("empty state must match result count")
         if self.empty != (self.empty_reason is not None):
             raise ValueError("empty reason must appear exactly for empty pages")
+        return self
+
+
+class CatalogVerificationContext(CatalogModel):
+    """Current authority inputs required to re-verify one catalog result."""
+
+    registry: MethodRegistry
+    authority_head: AuthorityHead
+    expected_authority_head_sha256: Sha256
+    capability: CurrentMethodCapability
+
+    @model_validator(mode="after")
+    def current_authority_replays(self) -> CatalogVerificationContext:
+        replay_current_capability(
+            self.registry,
+            self.authority_head,
+            self.expected_authority_head_sha256,
+            self.capability,
+        )
+        if _capability_is_revoked(self.registry, self.capability):
+            raise ValueError("catalog verification authority is revoked")
         return self
 
 
@@ -369,9 +381,9 @@ def _capability_is_revoked(
         and item.effective_at <= capability.as_of
         for item in registry.revocations
     )
-    return (
-        capability.qualification_state is None and revoked_qualification
-    ) or (capability.display_role is None and revoked_role)
+    return (capability.qualification_state is None and revoked_qualification) or (
+        capability.display_role is None and revoked_role
+    )
 
 
 def _safe_relative(value: str) -> tuple[str, ...]:
@@ -439,7 +451,9 @@ def _open_descriptor_identities() -> dict[int, tuple[int, int, int]]:
             opened[descriptor] = identity
         return opened
     except OSError:
-        raise CatalogFilesystemError("database descriptor proof is unavailable") from None
+        raise CatalogFilesystemError(
+            "database descriptor proof is unavailable"
+        ) from None
 
 
 def _open_directory_at(parent_fd: int, name: str) -> int:
@@ -535,7 +549,10 @@ def _copy_exact_bundle(
                 if output is not None:
                     output.close()
             after = os.fstat(descriptor)
-            if _stat_identity(before) != _stat_identity(after) or copied != before.st_size:
+            if (
+                _stat_identity(before) != _stat_identity(after)
+                or copied != before.st_size
+            ):
                 raise CatalogFilesystemError("bundle changed during import")
             total += copied
             source_identities[relative] = _stat_identity(after)
@@ -752,13 +769,9 @@ class ResultCatalog:
         if self._database_identity is None or self._database_fd is not None:
             return
         database_flags = (
-            os.O_RDONLY
-            | getattr(os, "O_CLOEXEC", 0)
-            | getattr(os, "O_NOFOLLOW", 0)
+            os.O_RDONLY | getattr(os, "O_CLOEXEC", 0) | getattr(os, "O_NOFOLLOW", 0)
         )
-        descriptor = os.open(
-            "catalog.sqlite3", database_flags, dir_fd=self._root_fd
-        )
+        descriptor = os.open("catalog.sqlite3", database_flags, dir_fd=self._root_fd)
         metadata = os.fstat(descriptor)
         if (
             not stat.S_ISREG(metadata.st_mode)
@@ -956,17 +969,16 @@ class ResultCatalog:
                 finally:
                     os.close(rebound_fd)
             final_root = os.stat(root_path, follow_symlinks=False)
-            if (
-                stat.S_ISLNK(final_root.st_mode)
-                or (final_root.st_dev, final_root.st_ino)
-                != (root_stat.st_dev, root_stat.st_ino)
-            ):
+            if stat.S_ISLNK(final_root.st_mode) or (
+                final_root.st_dev,
+                final_root.st_ino,
+            ) != (root_stat.st_dev, root_stat.st_ino):
                 raise CatalogFilesystemError("catalog import root changed")
             return temporary, bundle_sha256, manifest_sha256
         except CatalogError:
             _remove_tree(self._bound_objects / temporary_name)
             raise
-        except Exception:
+        except OSError:
             _remove_tree(self._bound_objects / temporary_name)
             raise CatalogFilesystemError("catalog bundle import failed") from None
         finally:
@@ -1001,8 +1013,7 @@ class ResultCatalog:
             if not isinstance(verified.manifest, ResultBundleManifestV2):
                 raise CatalogUnsupportedSchema("bundle schema is unsupported")
             if (
-                verified.manifest.method.method_id
-                != capability.method_ref.method_id
+                verified.manifest.method.method_id != capability.method_ref.method_id
                 or verified.manifest.method.version != capability.method_ref.version
                 or verified.manifest.method.method_definition_sha256
                 != capability.method_definition_sha256
@@ -1063,10 +1074,15 @@ class ResultCatalog:
                                FROM opaque_aliases WHERE result_id=?""",
                             (parsed.result_id,),
                         ).fetchone()
-                        if parsed != reference or alias_row is None or tuple(alias_row) != (
-                            aliases.display_alias,
-                            aliases.run_alias,
-                            aliases.timepoint_alias,
+                        if (
+                            parsed != reference
+                            or alias_row is None
+                            or tuple(alias_row)
+                            != (
+                                aliases.display_alias,
+                                aliases.run_alias,
+                                aliases.timepoint_alias,
+                            )
                         ):
                             raise CatalogConflict("catalog identity conflict")
                         connection.commit()
@@ -1098,7 +1114,9 @@ class ResultCatalog:
                             ),
                         )
                     except sqlite3.IntegrityError:
-                        raise CatalogConflict("catalog alias identity conflict") from None
+                        raise CatalogConflict(
+                            "catalog alias identity conflict"
+                        ) from None
                     self._fault("before_catalog_commit")
                     connection.commit()
                     self._validate_storage()
@@ -1149,7 +1167,9 @@ class ResultCatalog:
 
     def query(self, query: CatalogQuery | Mapping[str, object]) -> CatalogPage:
         normalized = (
-            query if isinstance(query, CatalogQuery) else CatalogQuery.model_validate(query)
+            query
+            if isinstance(query, CatalogQuery)
+            else CatalogQuery.model_validate(query)
         )
         clauses: list[str] = []
         parameters: list[object] = []
@@ -1211,9 +1231,20 @@ class ResultCatalog:
             empty_reason=(
                 CatalogEmptyReason.NO_IMPORTED_RESULTS
                 if not results and not catalog_has_results
-                else CatalogEmptyReason.NO_MATCHES if not results else None
+                else CatalogEmptyReason.NO_MATCHES
+                if not results
+                else None
             ),
         )
+
+    def get_verified(
+        self,
+        result_id: str,
+        context: CatalogVerificationContext,
+    ) -> CatalogResultRef:
+        """Reload and re-verify E04 storage, bundle trust, and live authority."""
+
+        return bind_catalog_live_reader(self).get_verified(result_id, context)
 
     @staticmethod
     def _append_method_filter(
@@ -1224,10 +1255,235 @@ class ResultCatalog:
         if not methods:
             return
         clauses.append(
-            "(" + " OR ".join("(r.method_id=? AND r.method_version=?)" for _ in methods) + ")"
+            "("
+            + " OR ".join("(r.method_id=? AND r.method_version=?)" for _ in methods)
+            + ")"
         )
         for method in methods:
             parameters.extend((method.method_id, method.version))
+
+
+_CATALOG_VALIDATE_STORAGE = ResultCatalog._validate_storage
+_CATALOG_QUERY = ResultCatalog.query
+_CATALOG_REFERENCE = ResultCatalog._reference
+_VERIFY_CATALOG_BUNDLE = verify_bundle
+_CATALOG_PROTECTED_NAMES = (
+    "get_verified",
+    "_connect",
+    "_validate_storage",
+    "_open_sqlite_connection",
+    "_reference",
+    "_bound_objects",
+)
+_CATALOG_CLASS_IDENTITIES = {
+    name: ResultCatalog.__dict__[name] for name in _CATALOG_PROTECTED_NAMES
+}
+
+
+def _assert_live_catalog_reader(reader: CatalogLiveReader) -> None:
+    catalog = reader._catalog
+    if type(catalog) is not ResultCatalog:
+        raise CatalogFilesystemError("catalog reader identity changed")
+    if any(name in catalog.__dict__ for name in _CATALOG_PROTECTED_NAMES):
+        raise CatalogFilesystemError("catalog verification method is shadowed")
+    if any(
+        ResultCatalog.__dict__.get(name) is not expected
+        for name, expected in _CATALOG_CLASS_IDENTITIES.items()
+    ):
+        raise CatalogFilesystemError("catalog verification class changed")
+    if (
+        globals().get("_assert_live_catalog_reader") is not reader._assert_live
+        or _CATALOG_VALIDATE_STORAGE is not reader._validate_storage
+        or _CATALOG_QUERY is not reader._query_catalog
+        or _CATALOG_REFERENCE is not reader._reference_verified
+        or _VERIFY_CATALOG_BUNDLE is not reader._verify_bundle
+        or _capability_is_revoked is not reader._capability_revoked
+        or canonical_json_bytes is not reader._canonicalize
+        or _descriptor_path is not reader._descriptor_resolver
+        or replay_current_capability is not reader._replay_capability
+        or catalog.root != reader._root_path
+        or catalog.objects != reader._objects_path
+        or catalog.database != reader._database_path
+        or catalog._root_identity != reader._root_identity
+        or catalog._objects_identity != reader._objects_identity
+        or catalog._database_identity != reader._database_identity
+        or catalog._root_fd != reader._root_fd
+        or catalog._objects_fd != reader._objects_fd
+        or catalog._database_fd != reader._database_fd
+        or catalog._sqlite_database_fd != reader._sqlite_database_fd
+        or catalog._connection_lock is not reader._connection_lock
+        or catalog.trust_store is not reader._trust_store
+        or id(catalog.trust_store._keys) != reader._trust_keys_identity
+        or tuple(sorted(catalog.trust_store._keys.items())) != reader._trust_snapshot
+        or catalog._connection is not reader._connection
+        or reader._connection is None
+    ):
+        raise CatalogFilesystemError("catalog reader binding changed")
+    reader._validate_storage(catalog)
+
+
+class CatalogLiveReader:
+    """Sealed reader over one exact, open ResultCatalog installation."""
+
+    __slots__ = (
+        "_assert_live",
+        "_canonicalize",
+        "_capability_revoked",
+        "_catalog",
+        "_connection",
+        "_connection_lock",
+        "_database_fd",
+        "_database_identity",
+        "_database_path",
+        "_descriptor_resolver",
+        "_objects_fd",
+        "_objects_identity",
+        "_objects_path",
+        "_query_catalog",
+        "_reference_verified",
+        "_replay_capability",
+        "_result_ref_from_json",
+        "_root_fd",
+        "_root_identity",
+        "_root_path",
+        "_sealed",
+        "_sqlite_database_fd",
+        "_trust_keys_identity",
+        "_trust_snapshot",
+        "_trust_store",
+        "_validate_storage",
+        "_verification_context_from_json",
+        "_verify_bundle",
+    )
+
+    def __init__(
+        self,
+        catalog: ResultCatalog,
+        *,
+        _assert_live: Callable[[CatalogLiveReader], None] = _assert_live_catalog_reader,
+        _canonicalize: Callable[[object], bytes] = canonical_json_bytes,
+        _capability_revoked: Callable[
+            [MethodRegistry, CurrentMethodCapability], bool
+        ] = _capability_is_revoked,
+        _descriptor_resolver: Callable[[int], Path] = _descriptor_path,
+        _query_catalog: Callable[[ResultCatalog, CatalogQuery], CatalogPage] = (
+            _CATALOG_QUERY
+        ),
+        _reference_verified: Callable[..., CatalogResultRef] = _CATALOG_REFERENCE,
+        _replay_capability: Callable[..., None] = replay_current_capability,
+        _result_ref_from_json: Callable[..., CatalogResultRef] = (
+            CatalogResultRef.model_validate_json
+        ),
+        _validate_storage: Callable[[ResultCatalog], None] = _CATALOG_VALIDATE_STORAGE,
+        _verification_context_from_json: Callable[..., CatalogVerificationContext] = (
+            CatalogVerificationContext.model_validate_json
+        ),
+        _verify_bundle: Callable[[Path, TrustStore], VerifiedBundle] = (
+            _VERIFY_CATALOG_BUNDLE
+        ),
+    ) -> None:
+        if type(catalog) is not ResultCatalog:
+            raise TypeError("live catalog reader requires an exact ResultCatalog")
+        self._assert_live = _assert_live
+        self._canonicalize = _canonicalize
+        self._catalog = catalog
+        self._capability_revoked = _capability_revoked
+        self._root_path = catalog.root
+        self._objects_path = catalog.objects
+        self._database_path = catalog.database
+        self._root_identity = catalog._root_identity
+        self._objects_identity = catalog._objects_identity
+        self._database_identity = catalog._database_identity
+        self._descriptor_resolver = _descriptor_resolver
+        self._root_fd = catalog._root_fd
+        self._objects_fd = catalog._objects_fd
+        self._query_catalog = _query_catalog
+        self._reference_verified = _reference_verified
+        self._replay_capability = _replay_capability
+        self._result_ref_from_json = _result_ref_from_json
+        self._database_fd = catalog._database_fd
+        self._sqlite_database_fd = catalog._sqlite_database_fd
+        self._connection_lock = catalog._connection_lock
+        self._trust_store = catalog.trust_store
+        self._trust_keys_identity = id(catalog.trust_store._keys)
+        self._trust_snapshot = tuple(sorted(catalog.trust_store._keys.items()))
+        self._connection = catalog._connection
+        self._validate_storage = _validate_storage
+        self._verification_context_from_json = _verification_context_from_json
+        self._verify_bundle = _verify_bundle
+        self._assert_live(self)
+        self._sealed = True
+
+    def __setattr__(self, name: str, value: object) -> None:
+        if getattr(self, "_sealed", False):
+            raise TypeError("catalog live reader is sealed")
+        object.__setattr__(self, name, value)
+
+    def __delattr__(self, name: str) -> None:
+        raise TypeError("catalog live reader is sealed")
+
+    def query(self, query: CatalogQuery) -> CatalogPage:
+        self._assert_live(self)
+        page = self._query_catalog(self._catalog, query)
+        self._assert_live(self)
+        return page
+
+    def get_verified(
+        self,
+        result_id: str,
+        context: CatalogVerificationContext,
+    ) -> CatalogResultRef:
+        self._assert_live(self)
+        normalized_context = self._verification_context_from_json(
+            self._canonicalize(context)
+        )
+        with self._connection_lock:
+            self._assert_live(self)
+            assert self._connection is not None
+            row = self._connection.execute(
+                "SELECT ref_json FROM results WHERE result_id=?", (result_id,)
+            ).fetchone()
+            self._assert_live(self)
+        if row is None:
+            raise KeyError("catalog result is unavailable")
+        content = bytes(row[0])
+        try:
+            stored = self._result_ref_from_json(content)
+        except (ValidationError, ValueError, TypeError) as exc:
+            raise CatalogError("catalog result reference is invalid") from exc
+        if self._canonicalize(stored) != content:
+            raise CatalogError("catalog result reference is not canonical")
+        self._replay_capability(
+            normalized_context.registry,
+            normalized_context.authority_head,
+            normalized_context.expected_authority_head_sha256,
+            normalized_context.capability,
+        )
+        if self._capability_revoked(
+            normalized_context.registry, normalized_context.capability
+        ):
+            raise CatalogError("catalog result authority is revoked")
+        if normalized_context.capability.method_ref != stored.method_ref:
+            raise CatalogError("catalog result authority is stale")
+        self._assert_live(self)
+        verified = self._verify_bundle(
+            self._descriptor_resolver(self._objects_fd) / stored.bundle_sha256,
+            self._trust_store,
+        )
+        current = self._reference_verified(
+            verified,
+            bundle_sha256=stored.bundle_sha256,
+            manifest_sha256=stored.bundle_manifest_sha256,
+            capability=normalized_context.capability,
+        )
+        self._assert_live(self)
+        if current != stored:
+            raise CatalogError("catalog result authority or bundle identity changed")
+        return current
+
+
+def bind_catalog_live_reader(catalog: ResultCatalog) -> CatalogLiveReader:
+    return CatalogLiveReader(catalog)
 
 
 __all__ = [
@@ -1236,14 +1492,17 @@ __all__ = [
     "CatalogEmptyReason",
     "CatalogError",
     "CatalogFilesystemError",
+    "CatalogLiveReader",
     "CatalogOrder",
     "CatalogPage",
     "CatalogQualificationState",
     "CatalogQuery",
     "CatalogResultRef",
     "CatalogUnsupportedSchema",
+    "CatalogVerificationContext",
     "ExecutionState",
     "InformationState",
     "ResultCatalog",
     "TrustState",
+    "bind_catalog_live_reader",
 ]

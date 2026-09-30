@@ -21,8 +21,9 @@ from importlib.resources import files
 from pathlib import Path
 from types import TracebackType
 from typing import Any, Self
-from urllib.parse import urlsplit
+from urllib.parse import parse_qs, urlsplit
 
+from evidence_inspector.result_catalog import CatalogQuery
 from traceback_runner.serialization import canonical_json_bytes
 from traceback_runner.store import JobStore
 
@@ -32,9 +33,15 @@ from .auth import (
     BoundaryDenied,
     BrowserRequest,
     LocalWebBoundary,
+    LoopbackServerConfig,
     build_loopback_config,
 )
-from .contracts import ProblemDetail, ProblemOwner
+from .contracts import ProblemDetail, ProblemOwner, validate_public_projection
+from .explorer import (
+    IntegratedExplorerSource,
+    prepare_explorer_comparison_response,
+    prepare_explorer_document_response,
+)
 from .source import JobStoreProjectionSource
 
 MAX_REQUEST_BYTES = 4096
@@ -46,6 +53,8 @@ STATE_DIRECTORY_MODE = 0o700
 STATE_FILE_MODE = 0o600
 _STABLE_LOCK_ROOT = Path("/tmp").resolve(strict=True)
 _JOB_ROUTE = re.compile(r"^/api/v1/jobs/(job_[0-9a-f]{32})$")
+_EXPLORER_RESULT_ROUTE = re.compile(r"^/api/v1/explorer/results/(result_[0-9a-f]{40})$")
+_EXPLORER_COMPARE_ROUTE = "/api/v1/explorer/compare"
 _COOKIE_NAME = re.compile(r"^[!#$%&'*+\-.^_`|~0-9A-Za-z]+$")
 _COOKIE_VALUE = re.compile(r"^[A-Za-z0-9_-]{0,256}$")
 _SECURITY_HEADERS = {
@@ -59,6 +68,50 @@ _SECURITY_HEADERS = {
     "X-Content-Type-Options": "nosniff",
     "X-Frame-Options": "DENY",
 }
+
+
+def _build_explorer_dispatch(
+    source_type: type[IntegratedExplorerSource],
+    query_method: Callable[..., object],
+    get_method: Callable[..., object],
+    compare_method: Callable[..., object],
+) -> tuple[Callable[..., object], Callable[..., object], Callable[..., object]]:
+    """Capture exact source methods for the installed HTTP boundary."""
+
+    expected = {
+        "compare": compare_method,
+        "get": get_method,
+        "query": query_method,
+    }
+
+    def checked(source: IntegratedExplorerSource) -> None:
+        if type(source) is not source_type or any(
+            source_type.__dict__.get(name) is not method
+            for name, method in expected.items()
+        ):
+            raise TypeError("integrated explorer source class changed")
+
+    def query(source: IntegratedExplorerSource, value: object) -> object:
+        checked(source)
+        return query_method(source, value)
+
+    def get(source: IntegratedExplorerSource, result_id: str) -> object:
+        checked(source)
+        return get_method(source, result_id)
+
+    def compare(source: IntegratedExplorerSource, left: str, right: str) -> object:
+        checked(source)
+        return compare_method(source, left, right)
+
+    return query, get, compare
+
+
+_EXPLORER_DISPATCH = _build_explorer_dispatch(
+    IntegratedExplorerSource,
+    IntegratedExplorerSource.query,
+    IntegratedExplorerSource.get,
+    IntegratedExplorerSource.compare,
+)
 
 
 class LocalWebServerError(RuntimeError):
@@ -441,10 +494,80 @@ def _packaged_assets() -> dict[str, tuple[str, bytes]]:
 
 
 @dataclass(frozen=True, slots=True)
+class _CallableIdentity:
+    target: Callable[..., object]
+    code: object
+    defaults: object
+    kwdefaults: object
+    closure_values: tuple[object, ...]
+
+    @classmethod
+    def capture(cls, target: Callable[..., object]) -> _CallableIdentity:
+        closure = getattr(target, "__closure__", None) or ()
+        return cls(
+            target=target,
+            code=getattr(target, "__code__", None),
+            defaults=getattr(target, "__defaults__", None),
+            kwdefaults=getattr(target, "__kwdefaults__", None),
+            closure_values=tuple(cell.cell_contents for cell in closure),
+        )
+
+    def assert_intact(self) -> None:
+        closure = getattr(self.target, "__closure__", None) or ()
+        if (
+            getattr(self.target, "__code__", None) is not self.code
+            or getattr(self.target, "__defaults__", None) is not self.defaults
+            or getattr(self.target, "__kwdefaults__", None) is not self.kwdefaults
+            or len(closure) != len(self.closure_values)
+            or any(
+                cell.cell_contents is not expected
+                for cell, expected in zip(closure, self.closure_values, strict=True)
+            )
+        ):
+            raise LocalWebServerError("installed HTTP callable changed")
+
+
+@dataclass(frozen=True, slots=True)
+class _ExplorerHttpBoundary:
+    dispatch: tuple[Callable[..., object], Callable[..., object], Callable[..., object]]
+    prepare_document: Callable[..., dict[str, object]]
+    prepare_comparison: Callable[..., dict[str, object]]
+    validate_public: Callable[..., None]
+    canonicalize: Callable[[object], bytes]
+    identities: tuple[_CallableIdentity, ...]
+
+    def assert_intact(self) -> None:
+        for identity in self.identities:
+            identity.assert_intact()
+
+    def encode(self, payload: object) -> bytes:
+        self.assert_intact()
+        content = self.canonicalize(payload) + b"\n"
+        self.assert_intact()
+        return content
+
+    def encode_public(self, payload: object) -> bytes:
+        self.assert_intact()
+        self.validate_public(payload)
+        return self.encode(payload)
+
+
+_INSTALLED_EXPLORER_HTTP_DEPENDENCIES = (
+    _EXPLORER_DISPATCH,
+    prepare_explorer_document_response,
+    prepare_explorer_comparison_response,
+    validate_public_projection,
+    canonical_json_bytes,
+)
+
+
+@dataclass(frozen=True, slots=True)
 class _Application:
     kernel: LocalApiKernel
     boundary: LocalWebBoundary
     assets: dict[str, tuple[str, bytes]]
+    explorer: IntegratedExplorerSource | None = None
+    explorer_http: _ExplorerHttpBoundary | None = None
 
 
 class _LoopbackHttpServer(http.server.ThreadingHTTPServer):
@@ -454,6 +577,11 @@ class _LoopbackHttpServer(http.server.ThreadingHTTPServer):
     application: _Application
     security_validator: Callable[[], None]
     security_failed: threading.Event
+
+    def __setattr__(self, name: str, value: object) -> None:
+        if name == "RequestHandlerClass" and hasattr(self, "RequestHandlerClass"):
+            raise TypeError("installed request handler is sealed")
+        super().__setattr__(name, value)
 
     def __init__(self, *args: object, **kwargs: object) -> None:
         self._worker_slots = threading.BoundedSemaphore(MAX_HTTP_WORKERS)
@@ -471,7 +599,8 @@ class _LoopbackHttpServer(http.server.ThreadingHTTPServer):
         del request
         try:
             return bool(
-                client_address
+                self.RequestHandlerClass is _Handler
+                and client_address
                 and isinstance(client_address, tuple)
                 and ipaddress.ip_address(client_address[0]).is_loopback
             )
@@ -510,7 +639,15 @@ class _LoopbackHttpServerV6(_LoopbackHttpServer):
     address_family = socket.AF_INET6
 
 
-class _Handler(http.server.BaseHTTPRequestHandler):
+class _SealedHandlerType(type):
+    def __setattr__(cls, name: str, value: object) -> None:
+        raise TypeError("installed HTTP handler class is sealed")
+
+    def __delattr__(cls, name: str) -> None:
+        raise TypeError("installed HTTP handler class is sealed")
+
+
+class _Handler(http.server.BaseHTTPRequestHandler, metaclass=_SealedHandlerType):
     protocol_version = "HTTP/1.1"
     server_version = "TracebackLocal"
     sys_version = ""
@@ -563,10 +700,35 @@ class _Handler(http.server.BaseHTTPRequestHandler):
             self.close_connection = True
 
     def _json(self, status_code: int, payload: object) -> None:
+        boundary = self.application.explorer_http
+        if boundary is None or not self._security_boundary_intact():
+            self.close_connection = True
+            self._send(
+                503,
+                "application/json; charset=utf-8",
+                b'{"error":{"code":"TBX-WEB-503"}}\n',
+            )
+            return
         self._send(
             status_code,
             "application/json; charset=utf-8",
-            canonical_json_bytes(payload) + b"\n",
+            boundary.encode(payload),
+        )
+
+    def _public_json(self, status_code: int, payload: object) -> None:
+        boundary = self.application.explorer_http
+        if boundary is None or not self._security_boundary_intact():
+            self.close_connection = True
+            self._send(
+                503,
+                "application/json; charset=utf-8",
+                b'{"error":{"code":"TBX-WEB-503"}}\n',
+            )
+            return
+        self._send(
+            status_code,
+            "application/json; charset=utf-8",
+            boundary.encode_public(payload),
         )
 
     def _deny(self, error: BoundaryDenied) -> None:
@@ -642,7 +804,13 @@ class _Handler(http.server.BaseHTTPRequestHandler):
             self._json(431, {"error": {"code": "TBX-WEB-431"}})
             return
         parsed = urlsplit(self.path)
-        if parsed.query or parsed.fragment:
+        if parsed.fragment:
+            self._json(404, {"error": {"code": "TBX-WEB-404"}})
+            return
+        if parsed.query and parsed.path not in {
+            "/api/v1/explorer/catalog",
+            _EXPLORER_COMPARE_ROUTE,
+        }:
             self._json(404, {"error": {"code": "TBX-WEB-404"}})
             return
         asset = self.application.assets.get(parsed.path)
@@ -664,6 +832,128 @@ class _Handler(http.server.BaseHTTPRequestHandler):
                     200, {"jobs": [item.model_dump(mode="json") for item in jobs]}
                 )
                 return
+            if parsed.path == "/api/v1/explorer/catalog":
+                self.application.boundary.authorize(request)
+                if self.application.explorer is None:
+                    raise ApiProblem(404, self.application.kernel.not_found_problem)
+                parameters = parse_qs(
+                    parsed.query,
+                    keep_blank_values=False,
+                    strict_parsing=True,
+                    max_num_fields=8,
+                )
+                if set(parameters) - {"method_id", "method_version", "cursor", "limit"}:
+                    raise ValueError("unsupported explorer query")
+                if any(len(values) != 1 for values in parameters.values()):
+                    raise ValueError("explorer query values must be singular")
+                method_ids = parameters.get("method_id", [])
+                method_versions = parameters.get("method_version", [])
+                if (
+                    bool(method_ids) != bool(method_versions)
+                    or len(method_ids) > 1
+                    or len(method_versions) > 1
+                ):
+                    raise ValueError("method filters must be paired")
+                query_payload: dict[str, object] = {
+                    "limit": int(parameters.get("limit", ["50"])[0]),
+                }
+                if method_ids:
+                    query_payload["method_refs"] = (
+                        {"method_id": method_ids[0], "version": method_versions[0]},
+                    )
+                if "cursor" in parameters:
+                    query_payload["cursor"] = parameters["cursor"][0]
+                explorer_http = self.application.explorer_http
+                if explorer_http is None:
+                    raise TypeError("explorer HTTP boundary is unavailable")
+                explorer_http.assert_intact()
+                explorer_query = explorer_http.dispatch[0]
+                query = CatalogQuery(**query_payload)
+                page = explorer_query(self.application.explorer, query)
+                if page.query != query:
+                    raise ValueError("catalog response query identity changed")
+                payload = page.model_dump(mode="json")
+                if payload.get("query") != query.model_dump(mode="json"):
+                    raise ValueError("catalog response query encoding changed")
+                self._public_json(200, payload)
+                return
+            if parsed.path == _EXPLORER_COMPARE_ROUTE:
+                self.application.boundary.authorize(request)
+                if self.application.explorer is None:
+                    raise ApiProblem(404, self.application.kernel.not_found_problem)
+                parameters = parse_qs(
+                    parsed.query,
+                    keep_blank_values=False,
+                    strict_parsing=True,
+                    max_num_fields=2,
+                )
+                if set(parameters) != {"left", "right"} or any(
+                    len(values) != 1 for values in parameters.values()
+                ):
+                    raise ValueError("comparison requires singular left and right")
+                result_pattern = re.compile(r"^result_[0-9a-f]{40}$")
+                left = parameters["left"][0]
+                right = parameters["right"][0]
+                if not result_pattern.fullmatch(left) or not result_pattern.fullmatch(
+                    right
+                ):
+                    raise ValueError("comparison result identity is invalid")
+                explorer_http = self.application.explorer_http
+                if explorer_http is None:
+                    raise TypeError("explorer HTTP boundary is unavailable")
+                explorer_http.assert_intact()
+                explorer_compare = explorer_http.dispatch[2]
+                comparison = explorer_compare(self.application.explorer, left, right)
+                if (
+                    comparison.left_result_id != left
+                    or comparison.right_result_id != right
+                ):
+                    raise ValueError("comparison response identity changed")
+                payload = explorer_http.prepare_comparison(
+                    self.application.explorer, comparison
+                )
+                if (
+                    payload.get("left_result_id") != left
+                    or payload.get("right_result_id") != right
+                ):
+                    raise ValueError("comparison response encoding changed")
+                self._public_json(200, payload)
+                return
+            explorer_match = _EXPLORER_RESULT_ROUTE.fullmatch(parsed.path)
+            if explorer_match is not None:
+                self.application.boundary.authorize(request)
+                if self.application.explorer is None:
+                    raise ApiProblem(404, self.application.kernel.not_found_problem)
+                requested_result_id = explorer_match.group(1)
+                explorer_http = self.application.explorer_http
+                if explorer_http is None:
+                    raise TypeError("explorer HTTP boundary is unavailable")
+                explorer_http.assert_intact()
+                explorer_get = explorer_http.dispatch[1]
+                try:
+                    document = explorer_get(
+                        self.application.explorer, requested_result_id
+                    )
+                except KeyError as exc:
+                    raise ApiProblem(
+                        404, self.application.kernel.not_found_problem
+                    ) from exc
+                if document.models.catalog_ref.result_id != requested_result_id:
+                    raise ValueError("detail response identity changed")
+                payload = explorer_http.prepare_document(
+                    self.application.explorer, document
+                )
+                models = payload.get("models")
+                catalog_ref = (
+                    models.get("catalog_ref") if isinstance(models, dict) else None
+                )
+                if (
+                    not isinstance(catalog_ref, dict)
+                    or catalog_ref.get("result_id") != requested_result_id
+                ):
+                    raise ValueError("detail response encoding changed")
+                self._public_json(200, payload)
+                return
             match = _JOB_ROUTE.fullmatch(parsed.path)
             if match is not None:
                 job = self.application.kernel.get_job(request, match.group(1))
@@ -674,6 +964,9 @@ class _Handler(http.server.BaseHTTPRequestHandler):
             return
         except ApiProblem as exc:
             self._json(exc.status_code, exc.problem.model_dump(mode="json"))
+            return
+        except (TypeError, ValueError):
+            self._json(400, {"error": {"code": "TBX-WEB-400"}})
             return
         self._json(404, {"error": {"code": "TBX-WEB-404"}})
 
@@ -703,7 +996,10 @@ class _Handler(http.server.BaseHTTPRequestHandler):
                     payload["bootstrap"],
                     authority=self.application.boundary.config.authority,
                 )
-                content = canonical_json_bytes({"csrf_token": grant.csrf_token}) + b"\n"
+                explorer_http = self.application.explorer_http
+                if explorer_http is None:
+                    raise TypeError("explorer HTTP boundary is unavailable")
+                content = explorer_http.encode({"csrf_token": grant.csrf_token})
                 try:
                     self.send_response(200)
                     for name, value in _SECURITY_HEADERS.items():
@@ -732,14 +1028,29 @@ class _Handler(http.server.BaseHTTPRequestHandler):
         self._json(404, {"error": {"code": "TBX-WEB-404"}})
 
 
-@dataclass(slots=True)
-class RunningLocalWebService:
-    """A started local service with restart-scoped in-memory credentials."""
+@dataclass(frozen=True, slots=True)
+class _EventStatus:
+    value: bool
 
+    def is_set(self) -> bool:
+        return self.value
+
+
+@dataclass(frozen=True, slots=True)
+class _ServerStatus:
+    security_failed_value: bool
+    active_workers: int
+
+    @property
+    def security_failed(self) -> _EventStatus:
+        return _EventStatus(self.security_failed_value)
+
+
+@dataclass(slots=True)
+class _RunningLocalWebRuntime:
     server: _LoopbackHttpServer
     thread: threading.Thread
     boundary: LocalWebBoundary
-    bootstrap_code: str
     startup_anchor: _StartupAnchor
     state_directory: Path
     state_directory_fd: int
@@ -747,7 +1058,41 @@ class RunningLocalWebService:
     instance_id: str
     watchdog_stop: threading.Event
     watchdog_thread: threading.Thread
-    closed: bool = False
+
+
+_RUNTIME_LOCK = threading.Lock()
+_RUNTIMES: dict[str, _RunningLocalWebRuntime] = {}
+
+
+@dataclass(frozen=True, slots=True)
+class RunningLocalWebService:
+    """An immutable handle to a package-owned local web runtime."""
+
+    _runtime_id: str
+    config: LoopbackServerConfig
+    bootstrap_code: str
+    instance_id: str
+    anchor_path: Path
+    _launch_url: str
+
+    @property
+    def server(self) -> _ServerStatus:
+        """Return an inert status snapshot without runtime capabilities."""
+
+        with _RUNTIME_LOCK:
+            runtime = _RUNTIMES.get(self._runtime_id)
+            if runtime is None:
+                return _ServerStatus(True, 0)
+            return _ServerStatus(
+                runtime.server.security_failed.is_set(),
+                runtime.server.active_workers,
+            )
+
+    @property
+    def is_running(self) -> bool:
+        with _RUNTIME_LOCK:
+            runtime = _RUNTIMES.get(self._runtime_id)
+            return runtime is not None and runtime.thread.is_alive()
 
     @classmethod
     def start(
@@ -756,6 +1101,7 @@ class RunningLocalWebService:
         store: JobStore,
         state_directory: Path,
         ipv6: bool = False,
+        explorer: IntegratedExplorerSource | None = None,
     ) -> Self:
         state_directory = state_directory.absolute()
         startup_anchor: _StartupAnchor | None = None
@@ -808,12 +1154,57 @@ class RunningLocalWebService:
                 source=source,
                 not_found_problem=problem,
             )
-            server.application = _Application(kernel, boundary, _packaged_assets())
+            (
+                explorer_dispatch,
+                prepare_document,
+                prepare_comparison,
+                validate_public,
+                canonicalize,
+            ) = _INSTALLED_EXPLORER_HTTP_DEPENDENCIES
+            tracked_callables = (
+                *explorer_dispatch,
+                prepare_document,
+                prepare_comparison,
+                validate_public,
+                canonicalize,
+                _Handler.do_GET,
+                _Handler._json,
+                _Handler._public_json,
+            )
+            explorer_http = _ExplorerHttpBoundary(
+                dispatch=explorer_dispatch,
+                prepare_document=prepare_document,
+                prepare_comparison=prepare_comparison,
+                validate_public=validate_public,
+                canonicalize=canonicalize,
+                identities=tuple(
+                    _CallableIdentity.capture(item) for item in tracked_callables
+                ),
+            )
+            explorer_http.assert_intact()
+            application = _Application(
+                kernel,
+                boundary,
+                _packaged_assets(),
+                explorer,
+                explorer_http,
+            )
+            server.application = application
 
             def validate_security_boundary() -> None:
                 _require_startup_anchor(startup_anchor)
                 _require_named_state_directory(state_directory, state_fd)
                 _require_instance_lease(state_fd, lease_fd)
+                if (
+                    server.application is not application
+                    or application.boundary is not boundary
+                    or application.kernel is not kernel
+                    or application.explorer_http is not explorer_http
+                ):
+                    raise LocalWebServerError("installed HTTP application changed")
+                if server.RequestHandlerClass is not _Handler:
+                    raise LocalWebServerError("installed request handler changed")
+                explorer_http.assert_intact()
 
             server.security_validator = validate_security_boundary
             instance_id = f"instance_{secrets.token_hex(16)}"
@@ -860,11 +1251,11 @@ class RunningLocalWebService:
                 daemon=True,
             )
             watchdog_thread.start()
-            return cls(
+            runtime_id = secrets.token_hex(32)
+            runtime = _RunningLocalWebRuntime(
                 server=server,
                 thread=thread,
                 boundary=boundary,
-                bootstrap_code=bootstrap_code,
                 startup_anchor=startup_anchor,
                 state_directory=state_directory,
                 state_directory_fd=state_fd,
@@ -872,6 +1263,20 @@ class RunningLocalWebService:
                 instance_id=instance_id,
                 watchdog_stop=watchdog_stop,
                 watchdog_thread=watchdog_thread,
+            )
+            with _RUNTIME_LOCK:
+                _RUNTIMES[runtime_id] = runtime
+            launch_url = (
+                f"{config.allowed_origins[0]}/"
+                f"{boundary.broker.launch_fragment(bootstrap_code)}"
+            )
+            return cls(
+                _runtime_id=runtime_id,
+                config=config,
+                bootstrap_code=bootstrap_code,
+                instance_id=instance_id,
+                anchor_path=startup_anchor.parent_path / startup_anchor.name,
+                _launch_url=launch_url,
             )
         except BaseException:
             if watchdog_stop is not None:
@@ -901,39 +1306,48 @@ class RunningLocalWebService:
 
     @property
     def base_url(self) -> str:
-        return self.boundary.config.allowed_origins[0]
+        return self.config.allowed_origins[0]
 
     @property
     def launch_url(self) -> str:
-        return f"{self.base_url}/{self.boundary.broker.launch_fragment(self.bootstrap_code)}"
+        return self._launch_url
+
+    def issue_bootstrap(self) -> str:
+        with _RUNTIME_LOCK:
+            runtime = _RUNTIMES.get(self._runtime_id)
+            if runtime is None:
+                raise LocalWebServerError("local web service is closed")
+            return runtime.boundary.issue_bootstrap()
 
     def close(self) -> None:
-        if self.closed:
+        with _RUNTIME_LOCK:
+            runtime = _RUNTIMES.pop(self._runtime_id, None)
+        if runtime is None:
             return
-        self.closed = True
-        self.watchdog_stop.set()
+        runtime.watchdog_stop.set()
         try:
             try:
-                self.server.shutdown()
+                runtime.server.shutdown()
             finally:
-                self.server.server_close()
-                self.thread.join(timeout=5)
-                self.watchdog_thread.join(timeout=5)
+                runtime.server.server_close()
+                runtime.thread.join(timeout=5)
+                runtime.watchdog_thread.join(timeout=5)
         finally:
             try:
                 try:
                     _unlink_instance_state(
-                        self.state_directory_fd, expected_instance_id=self.instance_id
+                        runtime.state_directory_fd,
+                        expected_instance_id=runtime.instance_id,
                     )
                 finally:
-                    fcntl.flock(self.lease_fd, fcntl.LOCK_UN)
-                    os.close(self.lease_fd)
+                    fcntl.flock(runtime.lease_fd, fcntl.LOCK_UN)
+                    os.close(runtime.lease_fd)
             finally:
                 try:
-                    fcntl.flock(self.state_directory_fd, fcntl.LOCK_UN)
-                    os.close(self.state_directory_fd)
+                    fcntl.flock(runtime.state_directory_fd, fcntl.LOCK_UN)
+                    os.close(runtime.state_directory_fd)
                 finally:
-                    _close_startup_anchor(self.startup_anchor)
+                    _close_startup_anchor(runtime.startup_anchor)
 
     def __enter__(self) -> Self:
         return self

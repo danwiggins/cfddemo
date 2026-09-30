@@ -27,10 +27,12 @@ result artifact, open a socket, invoke AWS, or ingest biological data.
 - exact run, timestamp, Python, operating system, machine, and processor
   evidence.
 
-Local performance results use `observed_local_unapproved`. They can show that a
-target was met on the current machine, but they cannot satisfy the approved-host
-gate. Screenshot and accessibility entries remain `fixture_only`: metadata is
-not a browser capture or manual assistive-technology audit.
+The three scale/performance entries remain `fixture_only`. The catalog population
+uses private SQL rather than 10,000 verified E04 imports, the render measurement
+ends at Python serialization rather than browser DOM readiness, and `tracemalloc`
+does not measure process RSS, SQLite/native allocations, or browser memory.
+Screenshot and accessibility entries are also `fixture_only`: metadata is not a
+reviewed browser capture or manual assistive-technology audit.
 
 ## Gates that remain external
 

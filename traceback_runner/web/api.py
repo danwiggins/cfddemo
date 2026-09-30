@@ -41,6 +41,10 @@ class LocalApiKernel:
         self._boundary.authorize(request)
         return self._source.list_jobs()
 
+    @property
+    def not_found_problem(self) -> ProblemDetail:
+        return self._not_found_problem
+
     def get_job(self, request: BrowserRequest, job_id: OpaqueId) -> JobProjection:
         self._boundary.authorize(request)
         try:
