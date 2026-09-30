@@ -21,6 +21,7 @@ from evidence_inspector.fragment_explorer import (
 from evidence_inspector.portable_view import PortableLocalView
 from evidence_inspector.provenance_drawer import ProvenanceDrawer
 from evidence_inspector.result_catalog import (
+    CatalogLiveReader,
     CatalogPage,
     CatalogQuery,
     CatalogResultRef,
@@ -39,8 +40,7 @@ from evidence_inspector.sensitivity_comparison import (
     SensitivityComparisonArtifact,
     sensitivity_comparison_from_canonical_bytes,
 )
-from traceback_runner.contracts import RunnerContract
-from traceback_runner.contracts import ResultBundleManifestV2
+from traceback_runner.contracts import ResultBundleManifestV2, RunnerContract
 from traceback_runner.serialization import canonical_json_bytes, sha256_bytes
 from traceback_runner.web.contracts import validate_public_projection
 
@@ -455,135 +455,237 @@ def _reverify_document(
         raise ValueError("catalog result changed before explorer response")
 
 
-class IntegratedExplorerSource:
-    __slots__ = ("_artifacts", "_authority", "_get_verified", "_query")
+class _SealedExplorerType(type):
+    def __new__(
+        cls, name: str, bases: tuple[type, ...], namespace: dict[str, object]
+    ) -> _SealedExplorerType:
+        if any(isinstance(base, _SealedExplorerType) for base in bases):
+            raise TypeError("integrated explorer source cannot be subclassed")
+        return super().__new__(cls, name, bases, namespace)
 
-    def __init__(
-        self,
-        *,
-        catalog: ResultCatalog,
-        authority: CatalogAuthorityIndex,
-        artifacts: CanonicalExplorerArtifactRepository,
-    ) -> None:
-        reader = bind_catalog_live_reader(catalog)
-        self._get_verified = reader.get_verified
-        self._query = reader.query
-        self._authority = authority
-        self._artifacts = artifacts
+    def __setattr__(cls, name: str, value: object) -> None:
+        raise TypeError("integrated explorer source class is sealed")
 
-    def query(self, query: CatalogQuery) -> ExplorerCatalogProjection:
-        page: CatalogPage = self._query(query)
-        return ExplorerCatalogProjection(
-            results=tuple(
-                ExplorerCatalogItem(
-                    ref=ref,
-                    has_registered_view=(
-                        self._artifacts.contains(ref.result_id)
-                        and self._authority.contains(ref.result_id)
-                    ),
-                    eligibility=explorer_eligibility(ref),
-                )
-                for ref in page.results
-            ),
-            next_cursor=page.next_cursor,
-            empty=page.empty,
-            empty_reason=page.empty_reason.value if page.empty_reason else None,
+    def __delattr__(cls, name: str) -> None:
+        raise TypeError("integrated explorer source class is sealed")
+
+
+def _build_integrated_explorer_source_type(
+    reader_factory: Callable[[ResultCatalog], CatalogLiveReader],
+    reader_type: type[CatalogLiveReader],
+    reader_get_verified: Callable[
+        [CatalogLiveReader, str, CatalogVerificationContext], CatalogResultRef
+    ],
+    reader_query: Callable[[CatalogLiveReader, CatalogQuery], CatalogPage],
+    reverify_document: Callable[
+        [
+            Callable[[str, CatalogVerificationContext], CatalogResultRef],
+            CatalogAuthorityIndex,
+            ExplorerDocument,
+        ],
+        None,
+    ],
+) -> type[IntegratedExplorerSource]:
+    """Capture the installed reader chain outside mutable module dispatch."""
+
+    class IntegratedExplorerSource(metaclass=_SealedExplorerType):
+        __slots__ = (
+            "_artifacts",
+            "_authority",
+            "_get_verified",
+            "_query",
+            "_reader",
         )
 
-    def get(self, result_id: str) -> ExplorerDocument:
-        context = self._authority.context_for(result_id)
-        ref = self._get_verified(result_id, context)
-        record = self._artifacts.load(result_id)
-        models = _bind_record_to_catalog(ref, record)
-        document = ExplorerDocument(
-            models=models,
-            eligibility=explorer_eligibility(ref),
-        )
-        replayed = ExplorerDocument.model_validate_json(canonical_json_bytes(document))
-        validate_public_projection(replayed.model_dump(mode="json"))
-        _reverify_document(self._get_verified, self._authority, replayed)
-        return replayed
+        def __init__(
+            self,
+            *,
+            catalog: ResultCatalog,
+            authority: CatalogAuthorityIndex,
+            artifacts: CanonicalExplorerArtifactRepository,
+        ) -> None:
+            if globals().get("bind_catalog_live_reader") is not reader_factory:
+                raise TypeError("explorer requires the package-owned reader factory")
+            reader = reader_factory(catalog)
+            if (
+                type(reader) is not reader_type
+                or reader_type.get_verified is not reader_get_verified
+                or reader_type.query is not reader_query
+            ):
+                raise TypeError("explorer requires the package-owned live reader")
+            object.__setattr__(self, "_reader", reader)
+            object.__setattr__(self, "_get_verified", reader.get_verified)
+            object.__setattr__(self, "_query", reader.query)
+            object.__setattr__(self, "_authority", authority)
+            object.__setattr__(self, "_artifacts", artifacts)
+            self._assert_installed_reader()
 
-    def compare(self, left_result_id: str, right_result_id: str) -> ExplorerComparison:
-        if left_result_id == right_result_id:
-            raise ValueError("comparison requires two distinct results")
-        left = self.get(left_result_id)
-        right = self.get(right_result_id)
-        if (
-            left.models.result_view.filters_sha256
-            != right.models.result_view.filters_sha256
-        ):
-            comparison = ExplorerComparison(
-                left_result_id=left_result_id,
-                right_result_id=right_result_id,
-                outcome="unknown",
-                synchronized=False,
-                delta_available=False,
-                blocked_reason="Selected results use different exact filter contexts",
+        def __setattr__(self, name: str, value: object) -> None:
+            raise TypeError("integrated explorer source is sealed")
+
+        def __delattr__(self, name: str) -> None:
+            raise TypeError("integrated explorer source is sealed")
+
+        def _assert_installed_reader(self) -> None:
+            reader = object.__getattribute__(self, "_reader")
+            get_verified = object.__getattribute__(self, "_get_verified")
+            query_reader = object.__getattribute__(self, "_query")
+            if (
+                globals().get("bind_catalog_live_reader") is not reader_factory
+                or globals().get("_reverify_document") is not reverify_document
+                or type(reader) is not reader_type
+                or reader_type.get_verified is not reader_get_verified
+                or reader_type.query is not reader_query
+                or get_verified.__self__ is not reader
+                or get_verified.__func__ is not reader_get_verified
+                or query_reader.__self__ is not reader
+                or query_reader.__func__ is not reader_query
+            ):
+                raise TypeError("integrated explorer reader chain changed")
+
+        def _reverify(self, document: ExplorerDocument) -> None:
+            self._assert_installed_reader()
+            reverify_document(self._get_verified, self._authority, document)
+            self._assert_installed_reader()
+
+        def query(self, query: CatalogQuery) -> ExplorerCatalogProjection:
+            self._assert_installed_reader()
+            page: CatalogPage = self._query(query)
+            self._assert_installed_reader()
+            return ExplorerCatalogProjection(
+                results=tuple(
+                    ExplorerCatalogItem(
+                        ref=ref,
+                        has_registered_view=(
+                            self._artifacts.contains(ref.result_id)
+                            and self._authority.contains(ref.result_id)
+                        ),
+                        eligibility=explorer_eligibility(ref),
+                    )
+                    for ref in page.results
+                ),
+                next_cursor=page.next_cursor,
+                empty=page.empty,
+                empty_reason=page.empty_reason.value if page.empty_reason else None,
             )
-            _reverify_document(self._get_verified, self._authority, left)
-            _reverify_document(self._get_verified, self._authority, right)
-            return comparison
-        candidates = [
-            item
-            for item in (left.models.fragment, right.models.fragment)
-            if item is not None
-        ]
-        canonical_candidates: dict[bytes, FragmentExplorerView] = {}
-        for candidate in candidates:
-            orientation = (
-                candidate.state.left.result_id,
-                candidate.state.right.result_id,
+
+        def get(self, result_id: str) -> ExplorerDocument:
+            self._assert_installed_reader()
+            context = self._authority.context_for(result_id)
+            ref = self._get_verified(result_id, context)
+            record = self._artifacts.load(result_id)
+            models = _bind_record_to_catalog(ref, record)
+            document = ExplorerDocument(
+                models=models,
+                eligibility=explorer_eligibility(ref),
             )
-            if orientation == (right_result_id, left_result_id):
-                raise ValueError("comparison artifact orientation is reversed")
-            if orientation != (left_result_id, right_result_id):
-                continue
-            if not _fragment_matches_selected_documents(candidate, left, right):
-                raise ValueError("comparison artifact is not cross-bound to selections")
-            canonical_candidates[canonical_json_bytes(candidate)] = candidate
-        if len(canonical_candidates) > 1:
-            raise ValueError("comparison artifacts are ambiguous")
-        fragment = next(iter(canonical_candidates.values()), None)
-        if fragment is None:
-            comparison = ExplorerComparison(
-                left_result_id=left_result_id,
-                right_result_id=right_result_id,
-                outcome="unknown",
-                synchronized=False,
-                delta_available=False,
-                blocked_reason="No exact registered compatibility decision",
+            replayed = ExplorerDocument.model_validate_json(
+                canonical_json_bytes(document)
             )
-            _reverify_document(self._get_verified, self._authority, left)
-            _reverify_document(self._get_verified, self._authority, right)
-            return comparison
-        outcome = fragment.compatibility.outcome
-        if outcome == CompatibilityOutcome.COMPARABLE:
-            projected = "comparable"
-        elif outcome == CompatibilityOutcome.INCOMPATIBLE:
-            projected = "incompatible"
-        else:
-            projected = "unknown"
-        synchronized = bool(
-            projected == "comparable" and fragment.synchronized_comparison
-        )
+            validate_public_projection(replayed.model_dump(mode="json"))
+            self._reverify(replayed)
+            return replayed
+
+        def compare(
+            self, left_result_id: str, right_result_id: str
+        ) -> ExplorerComparison:
+            self._assert_installed_reader()
+            return _compare_explorer_documents(self, left_result_id, right_result_id)
+
+    return IntegratedExplorerSource
+
+
+def _compare_explorer_documents(
+    source: IntegratedExplorerSource,
+    left_result_id: str,
+    right_result_id: str,
+) -> ExplorerComparison:
+    if left_result_id == right_result_id:
+        raise ValueError("comparison requires two distinct results")
+    left = source.get(left_result_id)
+    right = source.get(right_result_id)
+    if (
+        left.models.result_view.filters_sha256
+        != right.models.result_view.filters_sha256
+    ):
         comparison = ExplorerComparison(
             left_result_id=left_result_id,
             right_result_id=right_result_id,
-            outcome=projected,
-            synchronized=synchronized,
-            delta_available=bool(synchronized and fragment.delta_rows),
-            blocked_reason=(
-                None
-                if synchronized
-                else "Exact compatibility does not permit synchronized comparison"
-            ),
-            fragment=fragment,
+            outcome="unknown",
+            synchronized=False,
+            delta_available=False,
+            blocked_reason="Selected results use different exact filter contexts",
         )
-        validate_public_projection(comparison.model_dump(mode="json"))
-        _reverify_document(self._get_verified, self._authority, left)
-        _reverify_document(self._get_verified, self._authority, right)
+        source._reverify(left)
+        source._reverify(right)
         return comparison
+    candidates = [
+        item
+        for item in (left.models.fragment, right.models.fragment)
+        if item is not None
+    ]
+    canonical_candidates: dict[bytes, FragmentExplorerView] = {}
+    for candidate in candidates:
+        orientation = (
+            candidate.state.left.result_id,
+            candidate.state.right.result_id,
+        )
+        if orientation == (right_result_id, left_result_id):
+            raise ValueError("comparison artifact orientation is reversed")
+        if orientation != (left_result_id, right_result_id):
+            continue
+        if not _fragment_matches_selected_documents(candidate, left, right):
+            raise ValueError("comparison artifact is not cross-bound to selections")
+        canonical_candidates[canonical_json_bytes(candidate)] = candidate
+    if len(canonical_candidates) > 1:
+        raise ValueError("comparison artifacts are ambiguous")
+    fragment = next(iter(canonical_candidates.values()), None)
+    if fragment is None:
+        comparison = ExplorerComparison(
+            left_result_id=left_result_id,
+            right_result_id=right_result_id,
+            outcome="unknown",
+            synchronized=False,
+            delta_available=False,
+            blocked_reason="No exact registered compatibility decision",
+        )
+        source._reverify(left)
+        source._reverify(right)
+        return comparison
+    outcome = fragment.compatibility.outcome
+    if outcome == CompatibilityOutcome.COMPARABLE:
+        projected = "comparable"
+    elif outcome == CompatibilityOutcome.INCOMPATIBLE:
+        projected = "incompatible"
+    else:
+        projected = "unknown"
+    synchronized = bool(projected == "comparable" and fragment.synchronized_comparison)
+    comparison = ExplorerComparison(
+        left_result_id=left_result_id,
+        right_result_id=right_result_id,
+        outcome=projected,
+        synchronized=synchronized,
+        delta_available=bool(synchronized and fragment.delta_rows),
+        blocked_reason=(
+            None
+            if synchronized
+            else "Exact compatibility does not permit synchronized comparison"
+        ),
+        fragment=fragment,
+    )
+    validate_public_projection(comparison.model_dump(mode="json"))
+    source._reverify(left)
+    source._reverify(right)
+    return comparison
+
+
+IntegratedExplorerSource = _build_integrated_explorer_source_type(
+    bind_catalog_live_reader,
+    CatalogLiveReader,
+    CatalogLiveReader.get_verified,
+    CatalogLiveReader.query,
+    _reverify_document,
+)
 
 
 def prepare_explorer_document_response(
@@ -595,7 +697,7 @@ def prepare_explorer_document_response(
     if type(source) is not IntegratedExplorerSource:
         raise TypeError("explorer response requires the installed source")
     replayed = ExplorerDocument.model_validate_json(canonical_json_bytes(document))
-    _reverify_document(source._get_verified, source._authority, replayed)
+    source._reverify(replayed)
     payload = replayed.model_dump(mode="json")
     validate_public_projection(payload)
     return payload

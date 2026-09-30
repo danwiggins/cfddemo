@@ -978,7 +978,7 @@ class ResultCatalog:
         except CatalogError:
             _remove_tree(self._bound_objects / temporary_name)
             raise
-        except Exception:
+        except OSError:
             _remove_tree(self._bound_objects / temporary_name)
             raise CatalogFilesystemError("catalog bundle import failed") from None
         finally:
@@ -1329,6 +1329,7 @@ class CatalogLiveReader:
         "_root_fd",
         "_root_identity",
         "_root_path",
+        "_sealed",
         "_sqlite_database_fd",
         "_trust_keys_identity",
         "_trust_snapshot",
@@ -1355,6 +1356,15 @@ class CatalogLiveReader:
         self._trust_snapshot = tuple(sorted(catalog.trust_store._keys.items()))
         self._connection = catalog._connection
         _assert_live_catalog_reader(self)
+        self._sealed = True
+
+    def __setattr__(self, name: str, value: object) -> None:
+        if getattr(self, "_sealed", False):
+            raise TypeError("catalog live reader is sealed")
+        object.__setattr__(self, name, value)
+
+    def __delattr__(self, name: str) -> None:
+        raise TypeError("catalog live reader is sealed")
 
     def query(self, query: CatalogQuery) -> CatalogPage:
         _assert_live_catalog_reader(self)
@@ -1426,6 +1436,7 @@ __all__ = [
     "CatalogEmptyReason",
     "CatalogError",
     "CatalogFilesystemError",
+    "CatalogLiveReader",
     "CatalogOrder",
     "CatalogPage",
     "CatalogQualificationState",
@@ -1433,7 +1444,6 @@ __all__ = [
     "CatalogResultRef",
     "CatalogUnsupportedSchema",
     "CatalogVerificationContext",
-    "CatalogLiveReader",
     "ExecutionState",
     "InformationState",
     "ResultCatalog",

@@ -17,7 +17,7 @@ from traceback_runner.contracts import JobState, RunnerContract
 
 MAX_ACTIONS = 8
 _SAFE_OPERATOR_TEXT = re.compile(r"^[A-Za-z0-9][A-Za-z0-9 .,'()%;:!?+_-]*$")
-_IUPAC_SEQUENCE = re.compile(r"^[ACGTRYSWKMBDHVN]{24,}$", re.IGNORECASE)
+_IUPAC_SEQUENCE = re.compile(r"^[ACGTURYSWKMBDHVN]{24,}$", re.IGNORECASE)
 _SHA256_TEXT = re.compile(r"^[0-9a-f]{64}$")
 _MD5_TEXT = re.compile(r"^[0-9a-f]{32}$")
 _UNICODE_SEPARATORS = str.maketrans(

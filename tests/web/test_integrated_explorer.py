@@ -6,12 +6,13 @@ import importlib.util
 import inspect
 import json
 import sys
-from types import SimpleNamespace
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 from pydantic import ValidationError
 
+import traceback_runner.web.explorer as explorer_module
 from evidence_inspector.compatibility import (
     ExecutionState,
     InformationState,
@@ -28,9 +29,8 @@ from evidence_inspector.result_catalog import (
 )
 from evidence_inspector.result_view import build_result_view
 from tests.web.test_loopback_server import _exchange, _request
-from traceback_runner.serialization import canonical_json_bytes
-from traceback_runner.serialization import sha256_bytes
 from traceback_runner.bundles import verify_bundle
+from traceback_runner.serialization import canonical_json_bytes, sha256_bytes
 from traceback_runner.store import JobStore
 from traceback_runner.web.explorer import (
     CanonicalExplorerArtifactRepository,
@@ -193,6 +193,57 @@ def test_detail_rejects_closed_shadowed_or_substituted_catalog(
         catalog.close()
 
 
+def test_explorer_rejects_post_construction_verifier_replacement(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    catalog, ref, _, _, explorer = _installed(tmp_path)
+    try:
+        with pytest.raises(TypeError, match="sealed"):
+            explorer._get_verified = lambda result_id, context: ref  # type: ignore[method-assign]
+        with pytest.raises(TypeError, match="sealed"):
+            explorer._reader._connection = None
+        with pytest.raises(TypeError, match="class is sealed"):
+            IntegratedExplorerSource.get = lambda self, result_id: ref  # type: ignore[method-assign]
+        monkeypatch.setattr(
+            explorer_module,
+            "_reverify_document",
+            lambda get_verified, authority, document: None,
+        )
+        with pytest.raises(TypeError, match="reader chain changed"):
+            explorer.get(ref.result_id)
+        monkeypatch.undo()
+        catalog.close()
+        with pytest.raises(CatalogFilesystemError):
+            explorer.get(ref.result_id)
+    finally:
+        catalog.close()
+
+
+def test_explorer_rejects_preconstruction_reader_factory_replacement(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    catalog, ref, _, _, explorer = _installed(tmp_path)
+
+    class FakeReader:
+        get_verified = staticmethod(lambda result_id, context: ref)
+        query = staticmethod(lambda query: None)
+
+    monkeypatch.setattr(
+        explorer_module,
+        "bind_catalog_live_reader",
+        lambda candidate: FakeReader(),
+    )
+    try:
+        with pytest.raises(TypeError, match="package-owned reader factory"):
+            IntegratedExplorerSource(
+                catalog=catalog,
+                authority=explorer._authority,
+                artifacts=explorer._artifacts,
+            )
+    finally:
+        catalog.close()
+
+
 def test_model_copy_poison_is_rejected_before_repository_sink(tmp_path: Path) -> None:
     catalog, _, _, artifact, _ = _installed(tmp_path)
     try:
@@ -218,6 +269,8 @@ def test_model_copy_poison_is_rejected_before_repository_sink(tmp_path: Path) ->
         "SoUrCe%2fPrIvAtE%2fcase.tsv",
         "Patient Identifier 42",
         "ACGTRYSWKMBDHVNACGTRYSWKMBDHVN",
+        "AUGCRYSWKMBDHVNAUGCRYSWKMBDHVN",
+        "ACGTURYSWKMBDHVNACGTURYSWKMBDHVN",
     ),
 )
 def test_nested_public_projection_rejects_encoded_private_text(
@@ -229,15 +282,58 @@ def test_nested_public_projection_rejects_encoded_private_text(
             update={"accessible_label": private_text}
         )
         request = artifact.result_view_request.model_copy(update={"sources": (source,)})
-        row = artifact.result_view.rows[0].model_copy(
-            update={"accessible_label": private_text}
-        )
-        view = artifact.result_view.model_copy(update={"rows": (row,)})
-        poisoned = artifact.model_copy(
-            update={"result_view_request": request, "result_view": view}
-        )
         with pytest.raises((ValidationError, ValueError)):
+            view = build_result_view(request)
+            poisoned = artifact.model_copy(
+                update={"result_view_request": request, "result_view": view}
+            )
             CanonicalExplorerArtifactRepository((poisoned,))
+    finally:
+        catalog.close()
+
+
+@pytest.mark.parametrize(
+    "private_sequence",
+    (
+        "AUGCRYSWKMBDHVNAUGCRYSWKMBDHVN",
+        "ACGTURYSWKMBDHVNACGTURYSWKMBDHVN",
+    ),
+)
+def test_iupac_rna_never_reaches_live_api_or_accessible_dom_sink(
+    tmp_path: Path, private_sequence: str
+) -> None:
+    catalog, ref, _, artifact, explorer = _installed(tmp_path)
+    source = artifact.result_view_request.sources[0].model_copy(
+        update={"accessible_label": private_sequence}
+    )
+    request = artifact.result_view_request.model_copy(update={"sources": (source,)})
+    view = build_result_view(request)
+    poisoned = artifact.model_copy(
+        update={"result_view_request": request, "result_view": view}
+    )
+    explorer._artifacts._records[ref.result_id] = canonical_json_bytes(poisoned)
+    store = JobStore(tmp_path / "jobs.sqlite3")
+    try:
+        with pytest.raises(ValueError, match="raw nucleotide sequence"):
+            explorer.get(ref.result_id)
+        with RunningLocalWebService.start(
+            store=store,
+            state_directory=tmp_path / "state",
+            explorer=explorer,
+        ) as service:
+            cookie, _ = _exchange(service)
+            status, _, body = _request(
+                service,
+                "GET",
+                f"/api/v1/explorer/results/{ref.result_id}",
+                headers={"Cookie": cookie},
+            )
+            assert status == 400
+            assert private_sequence.encode() not in body
+            assert b"accessible_label" not in body
+        script = Path("traceback_runner/web/static/app.js").read_text()
+        assert "addCell(tableRow, row.accessible_label)" in script
+        assert "cell.textContent = value" in script
     finally:
         catalog.close()
 
