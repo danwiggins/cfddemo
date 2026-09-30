@@ -16,6 +16,7 @@ from evidence_inspector.cohort_registry import (
     CohortRegistry,
     CohortRegistryConflict,
     CohortRegistryUnsafe,
+    cohort_registry_backup_from_bytes,
 )
 from evidence_inspector.provider_linkage import LinkageOperation, LinkageReasonCode
 from tests.test_cohort_manifest import _manifest, live as _cohort_live
@@ -275,6 +276,48 @@ def test_registry_cannot_be_rebound_to_another_linkage_store(
             )
     finally:
         other.close()
+
+
+def test_backup_restore_rehearsal_preserves_exact_identity_and_state(
+    registry: CohortRegistry, live, tmp_path: Path
+) -> None:
+    first = _first(live)
+    registry.register(first)
+    registry.register(_second(first, live))
+    before = registry.list_selectors()
+    backup = registry.backup_bytes()
+    assert cohort_registry_backup_from_bytes(backup).state_head_sha256 == (
+        before.state_head_sha256
+    )
+
+    restored = CohortRegistry.restore(
+        tmp_path / "restored-cohorts",
+        backup,
+        linkage_store=live[0],
+        expected_trust_snapshot_sha256_by_provider=_pins(),
+    )
+    try:
+        after = restored.list_selectors()
+        assert after == before
+        assert restored.backup_bytes() == backup
+    finally:
+        restored.close()
+
+
+def test_invalid_backup_rejects_before_creating_restore_target(
+    registry: CohortRegistry, live, tmp_path: Path
+) -> None:
+    registry.register(_first(live))
+    content = registry.backup_bytes()
+    target = tmp_path / "must-not-exist"
+    with pytest.raises(CohortRegistryConflict, match="invalid"):
+        CohortRegistry.restore(
+            target,
+            content + b" ",
+            linkage_store=live[0],
+            expected_trust_snapshot_sha256_by_provider=_pins(),
+        )
+    assert not target.exists()
 
 
 def test_root_path_substitution_fails_without_populating_target(

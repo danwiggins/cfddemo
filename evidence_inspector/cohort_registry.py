@@ -42,6 +42,7 @@ from evidence_inspector.provider_linkage_store import ProviderLinkageStore
 MAX_REGISTERED_MANIFESTS = 100_000
 MAX_SELECTOR_PAGE = 100
 MAX_MANIFEST_BYTES = 16 * 1024 * 1024
+MAX_BACKUP_BYTES = 256 * 1024 * 1024
 MAX_PATH_CHARS = 4096
 MAX_PATH_PARTS = 256
 _REGISTRY_PROCESS_LOCK = threading.RLock()
@@ -141,6 +142,26 @@ class CohortSelectorPage(RegistryContract):
     next_after_version: int | None = Field(default=None, ge=1, le=100_000)
 
 
+class CohortRegistryBackupObject(RegistryContract):
+    schema_version: Literal["traceback.cohort-registry-backup-object.v1"] = (
+        "traceback.cohort-registry-backup-object.v1"
+    )
+    manifest_sha256: Sha256
+    manifest_json: Annotated[str, StringConstraints(max_length=MAX_MANIFEST_BYTES)]
+
+
+class CohortRegistryBackup(RegistryContract):
+    schema_version: Literal["traceback.cohort-registry-backup.v1"] = (
+        "traceback.cohort-registry-backup.v1"
+    )
+    metadata: CohortRegistryMetadata
+    state_version: int = Field(ge=0, le=MAX_REGISTERED_MANIFESTS)
+    state_head_sha256: Sha256
+    objects: tuple[CohortRegistryBackupObject, ...] = Field(
+        max_length=MAX_REGISTERED_MANIFESTS
+    )
+
+
 def _snapshot_path(value: str | Path) -> Path:
     if type(value) is str:
         raw = value
@@ -188,6 +209,40 @@ def _read_bounded(descriptor: int, maximum: int) -> bytes:
         chunks.append(chunk)
 
 
+def _publish_file(directory_fd: int, name: str, content: bytes) -> None:
+    temporary = f".tmp-{secrets.token_hex(16)}"
+    descriptor: int | None = None
+    try:
+        descriptor = os.open(
+            temporary,
+            os.O_WRONLY
+            | os.O_CREAT
+            | os.O_EXCL
+            | getattr(os, "O_CLOEXEC", 0)
+            | getattr(os, "O_NOFOLLOW", 0),
+            0o600,
+            dir_fd=directory_fd,
+        )
+        _write_all(descriptor, content)
+        os.fsync(descriptor)
+        os.link(
+            temporary,
+            name,
+            src_dir_fd=directory_fd,
+            dst_dir_fd=directory_fd,
+            follow_symlinks=False,
+        )
+        os.fsync(directory_fd)
+    finally:
+        if descriptor is not None:
+            os.close(descriptor)
+        try:
+            os.unlink(temporary, dir_fd=directory_fd)
+        except FileNotFoundError:
+            pass
+        os.fsync(directory_fd)
+
+
 def _selector_id(epoch: str, cohort_id: str) -> str:
     digest = hashlib.sha256(
         b"traceback-cohort-selector-v1\0"
@@ -204,6 +259,48 @@ def _state_head(manifests: tuple[tuple[str, bytes], ...]) -> str:
         digest.update(manifest_sha256.encode("ascii") + b"\0")
         digest.update(len(content).to_bytes(8, "big") + content)
     return digest.hexdigest()
+
+
+def _validate_backup(backup: CohortRegistryBackup) -> None:
+    if backup.state_version != len(backup.objects):
+        raise CohortRegistryConflict("cohort registry backup count is invalid")
+    pairs: list[tuple[str, bytes]] = []
+    cohorts: dict[str, list[CohortManifest]] = {}
+    previous_digest = ""
+    for item in backup.objects:
+        if item.manifest_sha256 <= previous_digest:
+            raise CohortRegistryConflict("cohort registry backup order is invalid")
+        previous_digest = item.manifest_sha256
+        try:
+            content = item.manifest_json.encode("utf-8")
+            manifest = cohort_manifest_from_bytes(content)
+        except (UnicodeError, ValueError):
+            raise CohortRegistryConflict(
+                "cohort registry backup manifest is invalid"
+            ) from None
+        if hashlib.sha256(content).hexdigest() != item.manifest_sha256:
+            raise CohortRegistryConflict("cohort registry backup digest is invalid")
+        pairs.append((item.manifest_sha256, content))
+        cohorts.setdefault(manifest.cohort_id, []).append(manifest)
+    try:
+        for history in cohorts.values():
+            history.sort(key=lambda item: item.version)
+            validate_manifest_history(tuple(history))
+    except (TypeError, ValueError):
+        raise CohortRegistryConflict("cohort registry backup history is invalid") from None
+    if _state_head(tuple(pairs)) != backup.state_head_sha256:
+        raise CohortRegistryConflict("cohort registry backup state is invalid")
+
+
+def cohort_registry_backup_from_bytes(content: bytes) -> CohortRegistryBackup:
+    if type(content) is not bytes or len(content) > MAX_BACKUP_BYTES:
+        raise CohortRegistryConflict("cohort registry backup exceeds its bound")
+    try:
+        backup = contract_from_canonical_bytes(CohortRegistryBackup, content)
+    except Exception:
+        raise CohortRegistryConflict("cohort registry backup is invalid") from None
+    _validate_backup(backup)
+    return backup
 
 
 class CohortRegistry:
@@ -394,37 +491,7 @@ class CohortRegistry:
                 raise CohortRegistryUnsafe("cohort registry storage changed")
 
     def _publish(self, directory_fd: int, name: str, content: bytes) -> None:
-        temporary = f".tmp-{secrets.token_hex(16)}"
-        descriptor: int | None = None
-        try:
-            descriptor = os.open(
-                temporary,
-                os.O_WRONLY
-                | os.O_CREAT
-                | os.O_EXCL
-                | getattr(os, "O_CLOEXEC", 0)
-                | getattr(os, "O_NOFOLLOW", 0),
-                0o600,
-                dir_fd=directory_fd,
-            )
-            _write_all(descriptor, content)
-            os.fsync(descriptor)
-            os.link(
-                temporary,
-                name,
-                src_dir_fd=directory_fd,
-                dst_dir_fd=directory_fd,
-                follow_symlinks=False,
-            )
-            os.fsync(directory_fd)
-        finally:
-            if descriptor is not None:
-                os.close(descriptor)
-            try:
-                os.unlink(temporary, dir_fd=directory_fd)
-            except FileNotFoundError:
-                pass
-            os.fsync(directory_fd)
+        _publish_file(directory_fd, name, content)
 
     def _recover_temporary_objects(self) -> None:
         if self._objects_fd is None:
@@ -644,6 +711,167 @@ class CohortRegistry:
                 previous_manifest_sha256=captured.previous_manifest_sha256,
             )
 
+    def backup_bytes(self) -> bytes:
+        """Return one protected, canonical, consistent registry backup bundle."""
+
+        with self._lock(exclusive=False):
+            loaded, head = self._load_state()
+            backup = CohortRegistryBackup(
+                metadata=self._metadata,
+                state_version=len(loaded),
+                state_head_sha256=head,
+                objects=tuple(
+                    CohortRegistryBackupObject(
+                        manifest_sha256=digest,
+                        manifest_json=content.decode("utf-8"),
+                    )
+                    for digest, (_, content) in sorted(loaded.items())
+                ),
+            )
+            content = canonical_contract_bytes(backup)
+            if len(content) > MAX_BACKUP_BYTES:
+                raise CohortRegistryConflict(
+                    "cohort registry backup exceeds its bound"
+                )
+            return content
+
+    @classmethod
+    def restore(
+        cls,
+        root: str | Path,
+        backup_content: bytes,
+        *,
+        linkage_store: ProviderLinkageStore,
+        expected_trust_snapshot_sha256_by_provider: Mapping[str, str],
+    ) -> CohortRegistry:
+        """Restore a verified bundle into one new private registry root."""
+
+        if type(linkage_store) is not ProviderLinkageStore:
+            raise TypeError("cohort registry requires the exact linkage store type")
+        backup = cohort_registry_backup_from_bytes(backup_content)
+        pins = capture_expected_trust_pins(
+            expected_trust_snapshot_sha256_by_provider
+        )
+        snapshot = linkage_store.active_snapshot()
+        if snapshot.trust_pins_sha256 != trust_pins_sha256(pins) or (
+            backup.metadata.linkage_store_id,
+            backup.metadata.linkage_store_epoch_sha256,
+            backup.metadata.linkage_storage_identity_sha256,
+            backup.metadata.linkage_trust_pins_sha256,
+        ) != (
+            snapshot.store_id,
+            snapshot.store_epoch_sha256,
+            snapshot.storage_identity_sha256,
+            snapshot.trust_pins_sha256,
+        ):
+            raise CohortRegistryConflict(
+                "cohort registry backup authority is invalid"
+            )
+        target = _snapshot_path(root)
+        parent = target.parent
+        try:
+            parent_lstat = os.stat(parent, follow_symlinks=False)
+            parent_fd = os.open(
+                parent,
+                os.O_RDONLY
+                | getattr(os, "O_DIRECTORY", 0)
+                | getattr(os, "O_CLOEXEC", 0)
+                | getattr(os, "O_NOFOLLOW", 0),
+            )
+            parent_bound = os.fstat(parent_fd)
+            if (
+                not stat.S_ISDIR(parent_lstat.st_mode)
+                or (parent_lstat.st_dev, parent_lstat.st_ino)
+                != (parent_bound.st_dev, parent_bound.st_ino)
+            ):
+                raise CohortRegistryUnsafe("cohort registry restore parent changed")
+            os.mkdir(target.name, 0o700, dir_fd=parent_fd)
+            root_lstat = os.stat(
+                target.name, dir_fd=parent_fd, follow_symlinks=False
+            )
+            root_fd = os.open(
+                target.name,
+                os.O_RDONLY
+                | getattr(os, "O_DIRECTORY", 0)
+                | getattr(os, "O_CLOEXEC", 0)
+                | getattr(os, "O_NOFOLLOW", 0),
+                dir_fd=parent_fd,
+            )
+            root_bound = os.fstat(root_fd)
+            if (
+                not stat.S_ISDIR(root_lstat.st_mode)
+                or (root_lstat.st_dev, root_lstat.st_ino)
+                != (root_bound.st_dev, root_bound.st_ino)
+                or stat.S_IMODE(root_bound.st_mode) != 0o700
+                or root_bound.st_uid != os.geteuid()
+            ):
+                raise CohortRegistryUnsafe("cohort registry restore root changed")
+            os.mkdir("objects", 0o700, dir_fd=root_fd)
+            objects_lstat = os.stat(
+                "objects", dir_fd=root_fd, follow_symlinks=False
+            )
+            objects_fd = os.open(
+                "objects",
+                os.O_RDONLY
+                | getattr(os, "O_DIRECTORY", 0)
+                | getattr(os, "O_CLOEXEC", 0)
+                | getattr(os, "O_NOFOLLOW", 0),
+                dir_fd=root_fd,
+            )
+            objects_bound = os.fstat(objects_fd)
+            if (
+                not stat.S_ISDIR(objects_lstat.st_mode)
+                or (objects_lstat.st_dev, objects_lstat.st_ino)
+                != (objects_bound.st_dev, objects_bound.st_ino)
+                or stat.S_IMODE(objects_bound.st_mode) != 0o700
+                or objects_bound.st_uid != os.geteuid()
+            ):
+                raise CohortRegistryUnsafe("cohort registry restore objects changed")
+            lock_fd = os.open(
+                ".registry.lock",
+                os.O_RDWR
+                | os.O_CREAT
+                | os.O_EXCL
+                | getattr(os, "O_CLOEXEC", 0)
+                | getattr(os, "O_NOFOLLOW", 0),
+                0o600,
+                dir_fd=root_fd,
+            )
+            os.close(lock_fd)
+            _publish_file(
+                root_fd,
+                "registry-metadata.json",
+                canonical_contract_bytes(backup.metadata),
+            )
+            for item in backup.objects:
+                _publish_file(
+                    objects_fd,
+                    f"{item.manifest_sha256}.json",
+                    item.manifest_json.encode("utf-8"),
+                )
+            os.fsync(objects_fd)
+            os.fsync(root_fd)
+            os.fsync(parent_fd)
+        except FileExistsError:
+            raise CohortRegistryConflict(
+                "cohort registry restore target already exists"
+            ) from None
+        except OSError:
+            raise CohortRegistryUnsafe("cohort registry restore failed") from None
+        finally:
+            for name in ("objects_fd", "root_fd", "parent_fd"):
+                descriptor = locals().get(name)
+                if type(descriptor) is int:
+                    try:
+                        os.close(descriptor)
+                    except OSError:
+                        pass
+        return cls(
+            target,
+            linkage_store=linkage_store,
+            expected_trust_snapshot_sha256_by_provider=pins,
+        )
+
     def resolve(
         self, selector_id: str, cohort_version: int
     ) -> RegisteredCohortManifest:
@@ -779,10 +1007,13 @@ __all__ = [
     "CohortAuthorityState",
     "CohortRegistrationReceipt",
     "CohortRegistry",
+    "CohortRegistryBackup",
+    "CohortRegistryBackupObject",
     "CohortRegistryConflict",
     "CohortRegistryError",
     "CohortRegistryUnsafe",
     "CohortSelectorPage",
     "CohortSelectorRecord",
     "RegisteredCohortManifest",
+    "cohort_registry_backup_from_bytes",
 ]

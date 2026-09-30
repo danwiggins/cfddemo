@@ -34,8 +34,15 @@ sequence, or free-text identity values. Pagination is deterministic and
 bounded to 100 rows. The loopback session boundary must authorize access before
 this projection is served; this module is not an authentication system.
 
-Current limitations are explicit: a supported encrypted backup/restore bundle
-and cross-process restore rehearsal remain required before durable cohort
-publication can be called operationally complete. D06, D09, and D08 must bind
-the registry identity and state head returned by this module rather than accept
-caller-built manifest bytes or browser aliases as authority.
+`backup_bytes` captures metadata and every immutable object under one shared
+registry lock in a bounded canonical bundle. `restore` validates the complete
+bundle, state head, history, trust pins, and exact linkage-store identity before
+creating a new private root; it refuses an existing target and reopens the
+result through the normal descriptor and inode checks. Backup bytes contain
+protected manifest content and therefore are not an export artifact or safe
+browser response. Provider-managed encryption, retention, and backup media
+policy remain deployment inputs rather than claims made by this code.
+
+D06, D09, and D08 must bind the registry identity and state head returned by
+this module rather than accept caller-built manifest bytes or browser aliases
+as authority.
