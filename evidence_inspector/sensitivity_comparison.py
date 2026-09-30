@@ -8,6 +8,7 @@ permits callers to omit registered grid cells from the comparison view.
 from __future__ import annotations
 
 import hashlib
+import math
 import re
 from enum import StrEnum
 from itertools import product
@@ -50,6 +51,7 @@ MAX_PARAMETER_SETS = 32
 MAX_RUNS = 4_096
 MAX_CONTRIBUTORS = 512
 MAX_CANONICAL_BYTES = 8 * 1024 * 1024
+CELL_ORIGIN_FRACTION_SUM_ABS_TOLERANCE = 1e-9
 
 Sha256 = Annotated[str, StringConstraints(pattern=r"^[0-9a-f]{64}$")]
 
@@ -817,6 +819,14 @@ class SensitivityRunOutcome(CompatibilityContract):
                 or self.failure_code is not None
             ):
                 raise ValueError("complete run requires binding and estimates only")
+            total = sum(item.estimate_fraction for item in self.estimates)
+            if not math.isclose(
+                total,
+                1.0,
+                rel_tol=0.0,
+                abs_tol=CELL_ORIGIN_FRACTION_SUM_ABS_TOLERANCE,
+            ):
+                raise ValueError("canonical cell fractions must sum to 1")
         elif self.status == RunStatus.FAILED:
             if self.binding is not None or self.estimates or self.failure_code is None:
                 raise ValueError(
@@ -1281,6 +1291,7 @@ def sensitivity_comparison_from_canonical_bytes(
 
 
 __all__ = [
+    "CELL_ORIGIN_FRACTION_SUM_ABS_TOLERANCE",
     "CellOriginRunParameters",
     "EdgeInclusionPolicy",
     "FailureCode",

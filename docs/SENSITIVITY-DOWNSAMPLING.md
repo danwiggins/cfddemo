@@ -66,6 +66,12 @@ Every registered cell has exactly one outcome: `complete`, `failed`, or
 cannot contain numerical estimates. Their controlled failure codes are counted
 in the study attrition ledger.
 
+A complete cell-origin run must retain every canonical contributor and its
+fractions must sum to one using the upstream normalization rule: zero relative
+tolerance and `1e-9` absolute tolerance. This is checked before accepting the
+canonical result and bundle digests, so resealing nonnormalized values cannot
+turn invalid numeric evidence into a valid run.
+
 Each run reconciles:
 
 ```text

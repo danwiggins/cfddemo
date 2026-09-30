@@ -332,6 +332,52 @@ def _study_bundle() -> SensitivityStudyBundle:
     )
 
 
+def _resealed_complete_estimates_payload(
+    estimates: tuple[SamplingEstimate, ...],
+) -> dict[str, object]:
+    bundle = _study_bundle()
+    outcome = next(
+        item for item in bundle.outcomes if item.status == RunStatus.COMPLETE
+    )
+    binding = outcome.binding
+    assert binding is not None
+    result_digest = sensitivity_result_sha256(
+        result_id=binding.result_id,
+        key=outcome.key,
+        attrition=outcome.attrition,
+        subset_sha256=outcome.subset_sha256,
+        parameters_sha256=binding.parameters_sha256,
+        estimates=estimates,
+    )
+    bundle_digest = sensitivity_bundle_sha256(
+        bundle_id=binding.bundle_id,
+        result_sha256=result_digest,
+        method_ref=binding.method_ref,
+        method_definition_sha256=binding.method_definition_sha256,
+        atlas_id=binding.atlas_id,
+        atlas_sha256=binding.atlas_sha256,
+        filter_sha256=binding.filter_sha256,
+        seed=binding.seed,
+        subset_sha256=binding.subset_sha256,
+        parameters_sha256=binding.parameters_sha256,
+    )
+    payload = bundle.model_dump(mode="json")
+    changed = next(
+        item
+        for item in payload["outcomes"]
+        if (
+            item["key"]["subset_id"],
+            item["key"]["replicate_id"],
+            item["key"]["parameter_id"],
+        )
+        == outcome.key.sort_key
+    )
+    changed["estimates"] = [item.model_dump(mode="json") for item in estimates]
+    changed["binding"]["result_sha256"] = result_digest
+    changed["binding"]["bundle_sha256"] = bundle_digest
+    return payload
+
+
 def test_builds_full_registered_grid_without_cherry_picking() -> None:
     bundle = _study_bundle()
     artifact = build_sensitivity_comparison_artifact(bundle)
@@ -386,6 +432,68 @@ def test_numeric_zero_is_not_missing_and_unavailable_has_no_bounds() -> None:
         )
 
 
+def _normalized_estimates(offset: float) -> tuple[SamplingEstimate, ...]:
+    return (
+        SamplingEstimate(
+            contributor_id="immune",
+            estimate_fraction=0.5,
+            uncertainty_status="not_run",
+        ),
+        SamplingEstimate(
+            contributor_id="liver",
+            estimate_fraction=0.5 + offset,
+            uncertainty_status="not_run",
+        ),
+    )
+
+
+@pytest.mark.parametrize("offset", [0.9e-9, -0.9e-9])
+def test_complete_fraction_sum_accepts_upstream_tolerance_boundary(
+    offset: float,
+) -> None:
+    payload = _resealed_complete_estimates_payload(_normalized_estimates(offset))
+    SensitivityStudyBundle.model_validate_json(json.dumps(payload))
+
+
+@pytest.mark.parametrize(
+    "estimates",
+    [
+        _normalized_estimates(1.1e-9),
+        _normalized_estimates(-1.1e-9),
+        (
+            SamplingEstimate(
+                contributor_id="immune",
+                estimate_fraction=0.9,
+                uncertainty_status="not_run",
+            ),
+            SamplingEstimate(
+                contributor_id="liver",
+                estimate_fraction=0.9,
+                uncertainty_status="not_run",
+            ),
+        ),
+        (
+            SamplingEstimate(
+                contributor_id="immune",
+                estimate_fraction=0.2,
+                uncertainty_status="not_run",
+            ),
+            SamplingEstimate(
+                contributor_id="liver",
+                estimate_fraction=0.2,
+                uncertainty_status="not_run",
+            ),
+        ),
+    ],
+)
+def test_complete_fraction_sum_rejects_resealed_nonnormalized_evidence(
+    estimates: tuple[SamplingEstimate, ...],
+) -> None:
+    payload = _resealed_complete_estimates_payload(estimates)
+    with pytest.raises(ValidationError, match="canonical cell fractions must sum"):
+        SensitivityStudyBundle.model_validate_json(json.dumps(payload))
+
+
 def test_registration_rejects_caller_selected_grid_omission() -> None:
     bundle = _study_bundle()
     payload = bundle.registration.model_dump(mode="json")
@@ -424,6 +532,24 @@ def test_failed_run_cannot_carry_best_looking_numeric_result() -> None:
         ).model_dump(mode="json")
     ]
     with pytest.raises(ValidationError, match="failed run"):
+        SensitivityStudyBundle.model_validate_json(json.dumps(payload))
+
+
+def test_insufficient_run_cannot_carry_numeric_result() -> None:
+    payload = _study_bundle().model_dump(mode="json")
+    insufficient = next(
+        item
+        for item in payload["outcomes"]
+        if item["status"] == "insufficient_information"
+    )
+    insufficient["estimates"] = [
+        SamplingEstimate(
+            contributor_id="immune",
+            estimate_fraction=1.0,
+            uncertainty_status="not_run",
+        ).model_dump(mode="json")
+    ]
+    with pytest.raises(ValidationError, match="insufficient run"):
         SensitivityStudyBundle.model_validate_json(json.dumps(payload))
 
 
