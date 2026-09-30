@@ -52,6 +52,7 @@ from evidence_inspector.provider_linkage import (
 )
 from evidence_inspector.provider_linkage_store import (
     ActiveLinkageSnapshot,
+    CommittedLinkageReceipt,
     ProviderLinkageStore,
     ProviderLinkageStoreError,
     committed_linkage_receipt_sha256,
@@ -79,6 +80,9 @@ _PINNED_ACTIVE_SNAPSHOT = ProviderLinkageStore.active_snapshot
 _PINNED_FENCED_ACTIVE_SNAPSHOT = ProviderLinkageStore.fenced_active_snapshot
 _PINNED_AUTHORIZED_HISTORY_IN_FENCE = ProviderLinkageStore.authorized_history_in_fence
 _PINNED_AUTHORITY_TIME_IN_FENCE = ProviderLinkageStore.authority_time_in_fence
+_PINNED_ACTIVATION_RECEIPT_HISTORY_IN_FENCE = (
+    ProviderLinkageStore.activation_receipt_history_in_fence
+)
 _PINNED_STORE_CALLABLES = {
     name: getattr(ProviderLinkageStore, name)
     for name in vars(ProviderLinkageStore)
@@ -305,6 +309,7 @@ class _LinkageAuthorityView:
     snapshot: ActiveLinkageSnapshot
     history: tuple[AuthorizedLinkageRevision, ...]
     evaluated_at: datetime
+    activation_receipts: tuple[CommittedLinkageReceipt, ...]
 
 
 def _digest(domain: bytes, content: bytes) -> str:
@@ -846,7 +851,7 @@ class RecordSupersessionStore:
                         "UPDATE metadata SET value=? WHERE key='state_head_sha256'",
                         (self._state_head(connection),),
                     )
-                self._validate_state(connection, linkage=linkage)
+                self._validate_state(connection, linkage=linkage, authority=authority)
                 connection.commit()
             except BaseException:
                 connection.rollback()
@@ -882,10 +887,14 @@ class RecordSupersessionStore:
                     raise RecordSupersessionUnsafe("live linkage authority is invalid")
                 history = _PINNED_AUTHORIZED_HISTORY_IN_FENCE(self.linkage_store)
                 evaluated_at = _PINNED_AUTHORITY_TIME_IN_FENCE(self.linkage_store)
+                activation_receipts = _PINNED_ACTIVATION_RECEIPT_HISTORY_IN_FENCE(
+                    self.linkage_store
+                )
                 yield _LinkageAuthorityView(
                     snapshot=snapshot,
                     history=history,
                     evaluated_at=evaluated_at,
+                    activation_receipts=activation_receipts,
                 )
         except (
             ProviderLinkageStoreError,
@@ -934,6 +943,7 @@ class RecordSupersessionStore:
         connection: sqlite3.Connection,
         *,
         linkage: ActiveLinkageSnapshot | None = None,
+        authority: _LinkageAuthorityView | None = None,
     ) -> None:
         expected_schema = {
             (
@@ -1026,17 +1036,86 @@ class RecordSupersessionStore:
         if len(records) > MAX_RECORDS:
             raise RecordSupersessionUnsafe("record ledger exceeds its bound")
         self._validate_record_history(records)
-        live_linkages = self._active_linkages(linkage)
-        for record in records:
-            if (
-                record.provider_namespace,
-                record.linkage_id,
-            ) in live_linkages and not self._record_matches_live_linkage(
-                record, live_linkages, require_current_receipt=True
-            ):
-                raise RecordSupersessionUnsafe(
-                    "record ledger authority binding is invalid"
+        if authority is not None:
+            historical = {
+                (
+                    item.revision.provider_namespace,
+                    item.revision.linkage_id,
+                    item.revision.revision,
+                ): (item, receipt)
+                for item, receipt in zip(
+                    authority.history,
+                    authority.activation_receipts,
+                    strict=True,
                 )
+            }
+            by_id = {item.record_id: item for item in records}
+            for record in records:
+                item = historical.get(
+                    (
+                        record.provider_namespace,
+                        record.linkage_id,
+                        record.linkage_revision,
+                    )
+                )
+                if item is None:
+                    raise RecordSupersessionUnsafe(
+                        "record ledger authority binding is invalid"
+                    )
+                authorized, receipt = item
+                revision = authorized.revision
+                if (
+                    record.linkage_revision_sha256 != linkage_revision_sha256(revision)
+                    or record.activation_receipt_sha256
+                    != committed_linkage_receipt_sha256(receipt)
+                    or record.analysis_record_id
+                    != revision.technical.analysis_record_id
+                ):
+                    raise RecordSupersessionUnsafe(
+                        "record ledger authority binding is invalid"
+                    )
+                source = (
+                    by_id[record.supersedes_record_id]
+                    if record.supersedes_record_id is not None
+                    else None
+                )
+                upstream = revision.technical.reanalysis_of.token
+                if record.lineage_role == RecordLineageRole.PRIMARY_ANALYSIS and (
+                    upstream is not None or source is not None
+                ):
+                    raise RecordSupersessionUnsafe(
+                        "record ledger authority lineage is invalid"
+                    )
+                if record.lineage_role == RecordLineageRole.REANALYSIS:
+                    if source is None or upstream != source.analysis_record_id:
+                        raise RecordSupersessionUnsafe(
+                            "record ledger authority lineage is invalid"
+                        )
+                    source_item = historical.get(
+                        (
+                            source.provider_namespace,
+                            source.linkage_id,
+                            source.linkage_revision,
+                        )
+                    )
+                    if (
+                        source_item is None
+                        or source_item[0].revision.biological != revision.biological
+                    ):
+                        raise RecordSupersessionUnsafe(
+                            "record ledger authority lineage is invalid"
+                        )
+                    try:
+                        self._verify_supersession_authorization(
+                            record,
+                            authority,
+                            revision,
+                            require_current_time=False,
+                        )
+                    except RecordSupersessionConflict:
+                        raise RecordSupersessionUnsafe(
+                            "record ledger supersession authority is invalid"
+                        ) from None
         record_ids = {item.record_id for item in records}
         comparison_ids: set[str] = set()
         comparisons = 0
@@ -1069,6 +1148,28 @@ class RecordSupersessionStore:
                 or not set(comparison.member_record_ids).issubset(record_ids)
             ):
                 raise RecordSupersessionUnsafe("comparison history binding is invalid")
+            if authority is not None:
+                if (
+                    comparison.linkage_state_version,
+                    comparison.linkage_state_head_sha256,
+                ) not in {
+                    (item.state_version, item.state_head_sha256)
+                    for item in authority.activation_receipts
+                }:
+                    raise RecordSupersessionUnsafe(
+                        "comparison authority coordinates are invalid"
+                    )
+                try:
+                    self._verify_comparison_authorization(
+                        comparison,
+                        authority,
+                        by_id,
+                        require_current_time=False,
+                    )
+                except RecordSupersessionConflict:
+                    raise RecordSupersessionUnsafe(
+                        "comparison authority is invalid"
+                    ) from None
             comparison_ids.add(comparison.comparison_id)
             comparisons += 1
         invalidations = 0
@@ -1230,6 +1331,8 @@ class RecordSupersessionStore:
         record: SupersedingRecord,
         authority: _LinkageAuthorityView,
         revision: LinkageRevision,
+        *,
+        require_current_time: bool = True,
     ) -> None:
         approval = record.supersession_authorization
         if approval is None:
@@ -1269,7 +1372,12 @@ class RecordSupersessionStore:
             or issuer.status != IssuerStatus.ACTIVE
             or payload.role not in issuer.allowed_roles
             or payload.purpose not in issuer.allowed_purposes
-            or not (payload.issued_at <= authority.evaluated_at < payload.expires_at)
+            or (
+                require_current_time
+                and not (
+                    payload.issued_at <= authority.evaluated_at < payload.expires_at
+                )
+            )
         ):
             raise RecordSupersessionConflict("supersession authority is invalid")
         try:
@@ -1301,7 +1409,7 @@ class RecordSupersessionStore:
             linkage = authority.snapshot
             connection.execute("BEGIN IMMEDIATE")
             try:
-                self._validate_state(connection, linkage=linkage)
+                self._validate_state(connection, linkage=linkage, authority=authority)
                 existing = connection.execute(
                     "SELECT record_sha256, record_json FROM records WHERE record_id=?",
                     (parsed.record_id,),
@@ -1356,7 +1464,7 @@ class RecordSupersessionStore:
                         linkage.state_head_sha256,
                     )
                 version, head = self._advance(connection)
-                self._validate_state(connection, linkage=linkage)
+                self._validate_state(connection, linkage=linkage, authority=authority)
                 receipt = self._record_receipt(
                     connection, parsed, digest, version=version, head=head
                 )
@@ -1428,7 +1536,7 @@ class RecordSupersessionStore:
             linkage = authority.snapshot
             connection.execute("BEGIN IMMEDIATE")
             try:
-                self._validate_state(connection, linkage=linkage)
+                self._validate_state(connection, linkage=linkage, authority=authority)
                 existing = connection.execute(
                     "SELECT comparison_sha256, comparison_json FROM comparisons WHERE comparison_id=?",
                     (parsed.comparison_id,),
@@ -1494,7 +1602,7 @@ class RecordSupersessionStore:
                     ),
                 )
                 version, head = self._advance(connection)
-                self._validate_state(connection, linkage=linkage)
+                self._validate_state(connection, linkage=linkage, authority=authority)
                 receipt = self._comparison_receipt(
                     connection, parsed, digest, version=version, head=head
                 )
@@ -1514,9 +1622,11 @@ class RecordSupersessionStore:
     def _verify_comparison_authorization(
         comparison: DerivedComparison,
         authority: _LinkageAuthorityView,
-        active: dict[str, SupersedingRecord],
+        records: dict[str, SupersedingRecord],
+        *,
+        require_current_time: bool = True,
     ) -> None:
-        first = active[comparison.member_record_ids[0]]
+        first = records[comparison.member_record_ids[0]]
         authorized = next(
             (
                 item
@@ -1552,7 +1662,12 @@ class RecordSupersessionStore:
             or issuer.status != IssuerStatus.ACTIVE
             or payload.role not in issuer.allowed_roles
             or payload.purpose not in issuer.allowed_purposes
-            or not (payload.issued_at <= authority.evaluated_at < payload.expires_at)
+            or (
+                require_current_time
+                and not (
+                    payload.issued_at <= authority.evaluated_at < payload.expires_at
+                )
+            )
         ):
             raise RecordSupersessionConflict("comparison authority is invalid")
         try:
@@ -1645,10 +1760,10 @@ class RecordSupersessionStore:
             linkage = authority.snapshot
             connection.execute("BEGIN IMMEDIATE")
             try:
-                self._validate_state(connection, linkage=linkage)
+                self._validate_state(connection, linkage=linkage, authority=authority)
                 if self._refresh_invalidations(connection, linkage):
                     self._advance(connection)
-                self._validate_state(connection, linkage=linkage)
+                self._validate_state(connection, linkage=linkage, authority=authority)
                 metadata = self._metadata(connection)
                 result = ActiveRecordSnapshot(
                     ledger_id=metadata["ledger_id"],
@@ -1687,11 +1802,11 @@ class RecordSupersessionStore:
             linkage = authority.snapshot
             connection.execute("BEGIN IMMEDIATE")
             try:
-                self._validate_state(connection, linkage=linkage)
+                self._validate_state(connection, linkage=linkage, authority=authority)
                 changed = self._refresh_invalidations(connection, linkage)
                 if changed:
                     self._advance(connection)
-                self._validate_state(connection, linkage=linkage)
+                self._validate_state(connection, linkage=linkage, authority=authority)
                 row = connection.execute(
                     "SELECT comparison_json FROM comparisons WHERE comparison_id=?",
                     (comparison_id,),
