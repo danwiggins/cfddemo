@@ -9,6 +9,7 @@ import os
 import socket
 import stat
 import time
+from dataclasses import replace
 from pathlib import Path
 
 import pytest
@@ -227,7 +228,7 @@ def test_state_permissions_restart_rotation_and_explicit_cross_user_limit(
     insecure_parent = tmp_path / "insecure-parent"
     insecure_parent.mkdir(mode=0o700)
     os.chmod(insecure_parent, 0o770)
-    with pytest.raises(LocalWebServerError, match="startup parent"):
+    with pytest.raises(LocalWebServerError, match="state parent"):
         RunningLocalWebService.start(
             store=store, state_directory=insecure_parent / "state"
         )
@@ -322,7 +323,8 @@ def test_startup_anchor_substitution_is_detected_and_cannot_bypass_parent_lease(
     first = RunningLocalWebService.start(store=store, state_directory=state)
     published = (state / "instance.json").read_bytes()
     anchor = first.startup_anchor
-    replacement = anchor.parent_path / ".replacement-anchor"
+    anchor_path = anchor.parent_path / anchor.name
+    replacement = anchor.parent_path / f"{anchor.name}.replacement"
     replacement.write_bytes(b"")
     os.chmod(replacement, 0o600)
     os.replace(replacement, anchor.parent_path / anchor.name)
@@ -340,6 +342,18 @@ def test_startup_anchor_substitution_is_detected_and_cannot_bypass_parent_lease(
             RunningLocalWebService.start(store=store, state_directory=state)
     finally:
         first.close()
+        anchor_path.unlink(missing_ok=True)
+
+
+def test_stable_lock_root_identity_substitution_is_rejected(tmp_path: Path) -> None:
+    store, _ = _store(tmp_path)
+    state = tmp_path / "state"
+    with RunningLocalWebService.start(store=store, state_directory=state) as service:
+        substitute = tmp_path / "substitute-lock-root"
+        substitute.mkdir(mode=0o700)
+        spoofed = replace(service.startup_anchor, parent_path=substitute)
+        with pytest.raises(LocalWebServerError, match="startup parent identity"):
+            server_module._require_startup_anchor(spoofed)
 
 
 def test_startup_parent_substitution_fails_existing_service_closed(
@@ -353,16 +367,24 @@ def test_startup_parent_substitution_fails_existing_service_closed(
     published = (state / "instance.json").read_bytes()
     parent.rename(displaced)
     parent.mkdir(mode=0o700)
+    state.mkdir(mode=0o700)
 
     try:
+        with pytest.raises(LocalWebServerError, match="already running"):
+            RunningLocalWebService.start(store=store, state_directory=state)
         deadline = time.monotonic() + 2
         while first.thread.is_alive() and time.monotonic() < deadline:
             time.sleep(0.01)
         assert first.server.security_failed.is_set()
         assert not first.thread.is_alive()
         assert (displaced / "state" / "instance.json").read_bytes() == published
+        with pytest.raises(LocalWebServerError, match="already running"):
+            RunningLocalWebService.start(store=store, state_directory=state)
     finally:
         first.close()
+
+    with RunningLocalWebService.start(store=store, state_directory=state) as restarted:
+        assert _request(restarted, "GET", "/")[0] == 200
 
 
 def test_authority_rejected_before_body_validation_or_read(tmp_path: Path) -> None:

@@ -44,6 +44,7 @@ MAX_HTTP_WORKERS = 16
 REQUEST_TIMEOUT_SECONDS = 2
 STATE_DIRECTORY_MODE = 0o700
 STATE_FILE_MODE = 0o600
+_STABLE_LOCK_ROOT = Path("/tmp").resolve(strict=True)
 _JOB_ROUTE = re.compile(r"^/api/v1/jobs/(job_[0-9a-f]{32})$")
 _COOKIE_NAME = re.compile(r"^[!#$%&'*+\-.^_`|~0-9A-Za-z]+$")
 _COOKIE_VALUE = re.compile(r"^[A-Za-z0-9_-]{0,256}$")
@@ -69,6 +70,9 @@ class _StartupAnchor:
     parent_path: Path
     parent_fd: int
     parent_mode: int
+    state_parent_path: Path
+    state_parent_fd: int
+    state_parent_mode: int
     name: str
     descriptor: int
 
@@ -81,11 +85,13 @@ def _require_startup_anchor(anchor: _StartupAnchor) -> None:
             anchor.name, dir_fd=anchor.parent_fd, follow_symlinks=False
         )
         pinned_anchor = os.fstat(anchor.descriptor)
+        named_state_parent = anchor.state_parent_path.lstat()
+        pinned_state_parent = os.fstat(anchor.state_parent_fd)
     except OSError as exc:
         raise LocalWebServerError("local web startup anchor is unavailable") from exc
     if (
         not stat.S_ISDIR(named_parent.st_mode)
-        or named_parent.st_uid != os.geteuid()
+        or named_parent.st_uid != 0
         or stat.S_IMODE(named_parent.st_mode) != anchor.parent_mode
         or (named_parent.st_dev, named_parent.st_ino)
         != (pinned_parent.st_dev, pinned_parent.st_ino)
@@ -100,24 +106,32 @@ def _require_startup_anchor(anchor: _StartupAnchor) -> None:
         != (pinned_anchor.st_dev, pinned_anchor.st_ino)
     ):
         raise LocalWebServerError("local web startup anchor identity changed")
+    if (
+        not stat.S_ISDIR(named_state_parent.st_mode)
+        or named_state_parent.st_uid != os.geteuid()
+        or stat.S_IMODE(named_state_parent.st_mode) != anchor.state_parent_mode
+        or (named_state_parent.st_dev, named_state_parent.st_ino)
+        != (pinned_state_parent.st_dev, pinned_state_parent.st_ino)
+    ):
+        raise LocalWebServerError("local web state parent identity changed")
 
 
 def _open_startup_anchor(state_directory: Path) -> _StartupAnchor:
-    parent_path = state_directory.parent
+    parent_path = _STABLE_LOCK_ROOT
     parent_fd: int | None = None
+    state_parent_fd: int | None = None
     descriptor: int | None = None
     parent_locked = False
     anchor_locked = False
     try:
-        parent_path.mkdir(mode=STATE_DIRECTORY_MODE, parents=True, exist_ok=True)
         parent_metadata = parent_path.lstat()
         if (
             not stat.S_ISDIR(parent_metadata.st_mode)
-            or parent_metadata.st_uid != os.geteuid()
-            or stat.S_IMODE(parent_metadata.st_mode) & 0o022
+            or parent_metadata.st_uid != 0
+            or not parent_metadata.st_mode & stat.S_ISVTX
         ):
             raise LocalWebServerError(
-                "local web startup parent must be user-owned and not writable by others"
+                "local web stable lock root must be a root-owned sticky directory"
             )
         parent_fd = os.open(
             parent_path,
@@ -131,8 +145,8 @@ def _open_startup_anchor(state_directory: Path) -> _StartupAnchor:
             raise LocalWebServerError("local web startup parent changed during open")
         fcntl.flock(parent_fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
         parent_locked = True
-        name_digest = hashlib.sha256(os.fsencode(state_directory.name)).hexdigest()
-        anchor_name = f".traceback-web-{name_digest[:32]}.lock"
+        name_digest = hashlib.sha256(os.fsencode(state_directory)).hexdigest()
+        anchor_name = f".traceback-web-{os.geteuid()}-{name_digest[:32]}.lock"
         descriptor = os.open(
             anchor_name,
             os.O_RDWR | os.O_CREAT | getattr(os, "O_NOFOLLOW", 0),
@@ -149,16 +163,42 @@ def _open_startup_anchor(state_directory: Path) -> _StartupAnchor:
         os.fchmod(descriptor, STATE_FILE_MODE)
         fcntl.flock(descriptor, fcntl.LOCK_EX | fcntl.LOCK_NB)
         anchor_locked = True
+        state_parent_path = state_directory.parent
+        state_parent_path.mkdir(mode=STATE_DIRECTORY_MODE, parents=True, exist_ok=True)
+        state_parent_metadata = state_parent_path.lstat()
+        if (
+            not stat.S_ISDIR(state_parent_metadata.st_mode)
+            or state_parent_metadata.st_uid != os.geteuid()
+            or stat.S_IMODE(state_parent_metadata.st_mode) & 0o022
+        ):
+            raise LocalWebServerError(
+                "local web state parent must be user-owned and not writable by others"
+            )
+        state_parent_fd = os.open(
+            state_parent_path,
+            os.O_RDONLY | getattr(os, "O_DIRECTORY", 0) | getattr(os, "O_NOFOLLOW", 0),
+        )
+        pinned_state_parent = os.fstat(state_parent_fd)
+        if (pinned_state_parent.st_dev, pinned_state_parent.st_ino) != (
+            state_parent_metadata.st_dev,
+            state_parent_metadata.st_ino,
+        ):
+            raise LocalWebServerError("local web state parent changed during open")
         anchor = _StartupAnchor(
             parent_path=parent_path,
             parent_fd=parent_fd,
             parent_mode=stat.S_IMODE(parent_metadata.st_mode),
+            state_parent_path=state_parent_path,
+            state_parent_fd=state_parent_fd,
+            state_parent_mode=stat.S_IMODE(state_parent_metadata.st_mode),
             name=anchor_name,
             descriptor=descriptor,
         )
         _require_startup_anchor(anchor)
         return anchor
     except BaseException as exc:
+        if state_parent_fd is not None:
+            os.close(state_parent_fd)
         if anchor_locked and descriptor is not None:
             fcntl.flock(descriptor, fcntl.LOCK_UN)
         if descriptor is not None:
@@ -177,14 +217,31 @@ def _open_startup_anchor(state_directory: Path) -> _StartupAnchor:
 def _close_startup_anchor(anchor: _StartupAnchor) -> None:
     try:
         try:
-            fcntl.flock(anchor.descriptor, fcntl.LOCK_UN)
+            try:
+                named = os.stat(
+                    anchor.name,
+                    dir_fd=anchor.parent_fd,
+                    follow_symlinks=False,
+                )
+                pinned = os.fstat(anchor.descriptor)
+                if (named.st_dev, named.st_ino) == (pinned.st_dev, pinned.st_ino):
+                    os.unlink(anchor.name, dir_fd=anchor.parent_fd)
+                    os.fsync(anchor.parent_fd)
+            except FileNotFoundError:
+                pass
         finally:
-            os.close(anchor.descriptor)
+            os.close(anchor.state_parent_fd)
     finally:
         try:
-            fcntl.flock(anchor.parent_fd, fcntl.LOCK_UN)
+            try:
+                fcntl.flock(anchor.descriptor, fcntl.LOCK_UN)
+            finally:
+                os.close(anchor.descriptor)
         finally:
-            os.close(anchor.parent_fd)
+            try:
+                fcntl.flock(anchor.parent_fd, fcntl.LOCK_UN)
+            finally:
+                os.close(anchor.parent_fd)
 
 
 def _open_state_directory(path: Path) -> int:
