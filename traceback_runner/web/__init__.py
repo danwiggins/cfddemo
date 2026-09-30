@@ -6,9 +6,9 @@ server cannot silently weaken the loopback threat boundary.
 """
 
 from .auth import (
+    BootstrapBroker,
     BoundaryDenied,
     BrowserRequest,
-    BootstrapBroker,
     LocalWebBoundary,
     LoopbackServerConfig,
     SessionGrant,
@@ -24,9 +24,9 @@ from .contracts import (
 
 __all__ = [
     "ActionKind",
+    "BootstrapBroker",
     "BoundaryDenied",
     "BrowserRequest",
-    "BootstrapBroker",
     "JobAction",
     "JobProjection",
     "LocalWebBoundary",

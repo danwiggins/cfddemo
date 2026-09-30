@@ -6,6 +6,8 @@ import hashlib
 import hmac
 import ipaddress
 import secrets
+import string
+import threading
 import time
 from collections.abc import Callable
 from dataclasses import dataclass
@@ -47,27 +49,31 @@ class LoopbackServerConfig(RunnerContract):
             raise ValueError("bind host must be a literal loopback address") from exc
         if not address.is_loopback:
             raise ValueError("local web service must bind only to loopback")
-        if self.allowed_host_headers != tuple(sorted(set(self.allowed_host_headers))):
-            raise ValueError("allowed Host values must be uniquely sorted")
-        if self.allowed_origins != tuple(sorted(set(self.allowed_origins))):
-            raise ValueError("allowed origins must be uniquely sorted")
-        expected_suffix = f":{self.port}"
-        if any(not item.endswith(expected_suffix) for item in self.allowed_host_headers):
-            raise ValueError("allowed Host values must bind the configured port")
-        for origin in self.allowed_origins:
-            parsed = urlsplit(origin)
-            if parsed.scheme != "http" or parsed.path not in {"", "/"}:
-                raise ValueError("local origin must be a plain loopback HTTP origin")
-            if parsed.hostname is None:
-                raise ValueError("local origin requires a host")
-            try:
-                if not ipaddress.ip_address(parsed.hostname).is_loopback:
-                    raise ValueError("allowed origin must resolve to literal loopback")
-            except ValueError as exc:
-                raise ValueError("allowed origin must use a literal loopback address") from exc
-            if parsed.port != self.port:
-                raise ValueError("allowed origin must bind the configured port")
+        authority = (
+            f"[{address.compressed}]:{self.port}"
+            if address.version == 6
+            else f"{address.compressed}:{self.port}"
+        )
+        expected_hosts = (authority,)
+        expected_origins = (f"http://{authority}",)
+        if self.allowed_host_headers != expected_hosts:
+            raise ValueError("allowed Host must exactly match the bind authority")
+        if self.allowed_origins != expected_origins:
+            raise ValueError("allowed Origin must exactly match the bind authority")
+        parsed = urlsplit(self.allowed_origins[0])
+        if (
+            parsed.username is not None
+            or parsed.password is not None
+            or parsed.query
+            or parsed.fragment
+            or parsed.path not in {"", "/"}
+        ):
+            raise ValueError("local origin must be an exact authority without userinfo")
         return self
+
+    @property
+    def authority(self) -> str:
+        return self.allowed_host_headers[0]
 
 
 def build_loopback_config(*, port: int, ipv6: bool = False) -> LoopbackServerConfig:
@@ -90,6 +96,7 @@ class BrowserRequest:
     origin: str | None = None
     session_token: str | None = None
     csrf_token: str | None = None
+    forwarded_headers: tuple[str, ...] = ()
 
 
 @dataclass(frozen=True, slots=True)
@@ -106,6 +113,7 @@ class SessionGrant:
 class _SessionRecord:
     csrf_sha256: bytes
     expires_at: float
+    authority: str
 
 
 class BootstrapBroker:
@@ -115,61 +123,135 @@ class BootstrapBroker:
         self,
         *,
         now: Callable[[], float] = time.monotonic,
-        token_factory: Callable[[], str] = lambda: secrets.token_urlsafe(32),
+        token_factory: Callable[[], str] | None = None,
+        allow_test_token_factory: bool = False,
         bootstrap_ttl_seconds: int = 60,
         session_ttl_seconds: int = 8 * 60 * 60,
+        max_active_sessions: int = 32,
+        token_attempt_limit: int = 4,
     ) -> None:
+        if not 1 <= bootstrap_ttl_seconds <= 300:
+            raise ValueError("bootstrap TTL must be between 1 and 300 seconds")
+        if not 60 <= session_ttl_seconds <= 86_400:
+            raise ValueError("session TTL must be between 60 and 86400 seconds")
+        if not 1 <= max_active_sessions <= 256:
+            raise ValueError("active session limit must be between 1 and 256")
+        if not 1 <= token_attempt_limit <= 16:
+            raise ValueError("token attempt limit must be between 1 and 16")
+        if token_factory is not None and not allow_test_token_factory:
+            raise ValueError("custom credential generators are test-only")
         self._now = now
-        self._token_factory = token_factory
+        self._token_factory = token_factory or (lambda: secrets.token_urlsafe(32))
         self._bootstrap_ttl = bootstrap_ttl_seconds
         self._session_ttl = session_ttl_seconds
+        self._max_active_sessions = max_active_sessions
+        self._token_attempt_limit = token_attempt_limit
         self._bootstrap_sha256: bytes | None = None
         self._bootstrap_expires_at = 0.0
+        self._bootstrap_authority: str | None = None
         self._sessions: dict[bytes, _SessionRecord] = {}
+        self._lock = threading.RLock()
 
     @staticmethod
     def _digest(value: str) -> bytes:
         return hashlib.sha256(value.encode("utf-8")).digest()
 
-    def issue_bootstrap(self) -> str:
-        code = self._token_factory()
-        self._bootstrap_sha256 = self._digest(code)
-        self._bootstrap_expires_at = self._now() + self._bootstrap_ttl
-        return code
+    @staticmethod
+    def _strong_token(value: str) -> bool:
+        alphabet = string.ascii_letters + string.digits + "-_"
+        return 43 <= len(value) <= 128 and all(
+            character in alphabet for character in value
+        )
+
+    def _issue_unique_token(self, forbidden: set[bytes]) -> tuple[str, bytes]:
+        for _ in range(self._token_attempt_limit):
+            token = self._token_factory()
+            if not self._strong_token(token):
+                continue
+            digest = self._digest(token)
+            if digest not in forbidden:
+                return token, digest
+        raise RuntimeError("strong unique credential issuance failed")
+
+    def _prune_expired_sessions(self, now: float) -> None:
+        expired = [
+            digest
+            for digest, record in self._sessions.items()
+            if now > record.expires_at
+        ]
+        for digest in expired:
+            self._sessions.pop(digest, None)
+
+    def _active_credential_digests(self) -> set[bytes]:
+        digests = set(self._sessions)
+        digests.update(record.csrf_sha256 for record in self._sessions.values())
+        if self._bootstrap_sha256 is not None:
+            digests.add(self._bootstrap_sha256)
+        return digests
+
+    def issue_bootstrap(self, *, authority: str) -> str:
+        with self._lock:
+            code, digest = self._issue_unique_token(self._active_credential_digests())
+            self._bootstrap_sha256 = digest
+            self._bootstrap_expires_at = self._now() + self._bootstrap_ttl
+            self._bootstrap_authority = authority
+            return code
 
     @staticmethod
     def launch_fragment(code: str) -> str:
+        if not BootstrapBroker._strong_token(code):
+            raise ValueError("bootstrap credential does not meet strength policy")
         return f"#bootstrap={code}"
 
-    def exchange(self, code: str) -> SessionGrant:
-        supplied = self._digest(code)
-        expected = self._bootstrap_sha256
-        valid = (
-            expected is not None
-            and self._now() <= self._bootstrap_expires_at
-            and hmac.compare_digest(supplied, expected)
-        )
-        self._bootstrap_sha256 = None
-        self._bootstrap_expires_at = 0.0
-        if not valid:
-            raise BoundaryDenied(401, "TBX-AUTH-001")
-        session_token = self._token_factory()
-        csrf_token = self._token_factory()
-        self._sessions[self._digest(session_token)] = _SessionRecord(
-            csrf_sha256=self._digest(csrf_token),
-            expires_at=self._now() + self._session_ttl,
-        )
-        return SessionGrant(session_token=session_token, csrf_token=csrf_token)
+    def exchange(self, code: str, *, authority: str) -> SessionGrant:
+        with self._lock:
+            supplied = self._digest(code)
+            expected = self._bootstrap_sha256
+            now = self._now()
+            valid = (
+                expected is not None
+                and now <= self._bootstrap_expires_at
+                and self._bootstrap_authority == authority
+                and hmac.compare_digest(supplied, expected)
+            )
+            self._bootstrap_sha256 = None
+            self._bootstrap_expires_at = 0.0
+            self._bootstrap_authority = None
+            if not valid:
+                raise BoundaryDenied(401, "TBX-AUTH-001")
+            self._prune_expired_sessions(now)
+            if len(self._sessions) >= self._max_active_sessions:
+                raise BoundaryDenied(403, "TBX-AUTH-004")
+            forbidden = self._active_credential_digests()
+            forbidden.add(supplied)
+            session_token, session_digest = self._issue_unique_token(forbidden)
+            forbidden.add(session_digest)
+            csrf_token, csrf_digest = self._issue_unique_token(forbidden)
+            self._sessions[session_digest] = _SessionRecord(
+                csrf_sha256=csrf_digest,
+                expires_at=now + self._session_ttl,
+                authority=authority,
+            )
+            return SessionGrant(session_token=session_token, csrf_token=csrf_token)
 
-    def require_session(self, session_token: str | None) -> _SessionRecord:
+    def require_session(
+        self, session_token: str | None, *, authority: str
+    ) -> _SessionRecord:
         if session_token is None:
             raise BoundaryDenied(401, "TBX-AUTH-001")
         digest = self._digest(session_token)
-        record = self._sessions.get(digest)
-        if record is None or self._now() > record.expires_at:
-            self._sessions.pop(digest, None)
-            raise BoundaryDenied(401, "TBX-AUTH-001")
-        return record
+        with self._lock:
+            record = self._sessions.get(digest)
+            now = self._now()
+            if (
+                record is None
+                or now > record.expires_at
+                or record.authority != authority
+            ):
+                if record is not None and now > record.expires_at:
+                    self._sessions.pop(digest, None)
+                raise BoundaryDenied(401, "TBX-AUTH-001")
+            return record
 
     def require_csrf(self, record: _SessionRecord, csrf_token: str | None) -> None:
         if csrf_token is None or not hmac.compare_digest(
@@ -183,7 +265,16 @@ class LocalWebBoundary:
         self.config = config
         self.broker = broker
 
+    def issue_bootstrap(self) -> str:
+        return self.broker.issue_bootstrap(authority=self.config.authority)
+
+    @staticmethod
+    def _reject_forwarded(request: BrowserRequest) -> None:
+        if request.forwarded_headers:
+            raise BoundaryDenied(403, "TBX-AUTH-003")
+
     def _require_host(self, request: BrowserRequest) -> None:
+        self._reject_forwarded(request)
         if request.host not in self.config.allowed_host_headers:
             raise BoundaryDenied(403, "TBX-AUTH-003")
 
@@ -198,11 +289,13 @@ class LocalWebBoundary:
             raise BoundaryDenied(403, "TBX-AUTH-003")
         if "?" in request.path:
             raise BoundaryDenied(403, "TBX-AUTH-003")
-        return self.broker.exchange(code)
+        return self.broker.exchange(code, authority=self.config.authority)
 
     def authorize(self, request: BrowserRequest) -> None:
         self._require_host(request)
-        session = self.broker.require_session(request.session_token)
+        session = self.broker.require_session(
+            request.session_token, authority=self.config.authority
+        )
         method = request.method.upper()
         if method not in _SAFE_METHODS:
             self._require_origin(request)

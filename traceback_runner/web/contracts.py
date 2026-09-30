@@ -5,6 +5,7 @@ from __future__ import annotations
 import re
 from datetime import datetime
 from enum import StrEnum
+from pathlib import PurePosixPath
 from typing import Annotated, Literal
 
 from pydantic import AfterValidator, Field, StringConstraints, model_validator
@@ -15,14 +16,48 @@ MAX_ACTIONS = 8
 
 
 def _safe_operator_text(value: str) -> str:
-    if "/Users/" in value or "/home/" in value or "\\Users\\" in value:
+    if re.search(r"(?:^|[\s(])/(?:Users|home|Volumes|private|var|tmp|opt|etc)/", value):
         raise ValueError("operator text cannot contain an absolute path")
+    if re.search(r"[A-Za-z]:\\", value) or "\\\\" in value:
+        raise ValueError("operator text cannot contain an absolute path")
+    if re.search(r"\b(?:https?|file)://\S+", value, flags=re.IGNORECASE):
+        raise ValueError("operator text cannot contain an external URL")
     if re.search(
         r"(?:donor|patient|sample|read)[_-]?(?:id|identifier)?\s*[:=._-]\s*\S+",
         value,
         flags=re.IGNORECASE,
     ):
         raise ValueError("operator text cannot contain a private identifier")
+    if re.search(
+        r"\b[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}\b",
+        value,
+        flags=re.IGNORECASE,
+    ):
+        raise ValueError("operator text cannot contain a UUID-like identifier")
+    if re.search(r"\b[ACGTRYSWKMBDHVN]{24,}\b", value, flags=re.IGNORECASE):
+        raise ValueError("operator text cannot contain a raw nucleotide sequence")
+    if re.search(
+        r"(?:authorization|api[_ -]?key|secret|password|token)\s*[:=]\s*\S+",
+        value,
+        flags=re.IGNORECASE,
+    ):
+        raise ValueError("operator text cannot contain a credential")
+    return value
+
+
+def _bundled_docs_path(value: str) -> str:
+    if "\\" in value or "?" in value or "#" in value:
+        raise ValueError("documentation path must be a bundled POSIX path")
+    path = PurePosixPath(value)
+    if (
+        not value.startswith("docs/")
+        or path.is_absolute()
+        or ".." in path.parts
+        or "." in path.parts
+        or path.suffix != ".md"
+        or str(path) != value
+    ):
+        raise ValueError("documentation path must name a bundled Markdown file")
     return value
 
 
@@ -30,6 +65,13 @@ SafeText = Annotated[
     str,
     StringConstraints(strip_whitespace=True, min_length=1, max_length=512),
     AfterValidator(_safe_operator_text),
+]
+BundledDocsPath = Annotated[
+    str,
+    StringConstraints(
+        min_length=9, max_length=160, pattern=r"^docs/[A-Za-z0-9._/-]+\.md$"
+    ),
+    AfterValidator(_bundled_docs_path),
 ]
 OpaqueId = Annotated[
     str,
@@ -61,7 +103,7 @@ class ProblemDetail(RunnerContract):
     problem: SafeText
     cause: SafeText
     fix: SafeText
-    docs_path: str = Field(pattern=r"^docs/[A-Za-z0-9._/-]+$")
+    docs_path: BundledDocsPath
     owner: ProblemOwner
     retryable: bool
     correlation_id: CorrelationId

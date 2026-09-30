@@ -62,6 +62,30 @@ Offline verification is explicitly **as of** the supplied authority snapshot.
 Missing, future, expired or mismatched authority remains `unknown`; it is not a
 claim about live current state.
 
+## E14 product gates
+
+`traceback_runner.product_gates` separates a local measurement report from the
+release decision. `ProductGateReport.capability_enabled` is fixed to `false`;
+editing gate statuses or attaching an arbitrary reference can never enable a
+capability. `derive_release_gate` enables only when all measured targets pass,
+every gate is an observed pass, the exact approved host is bound, and the four
+external artifacts match independently supplied Ed25519-signed evidence under
+an independently supplied, non-revoked release trust store at an injected,
+aware verification time within each artifact's validity window. The external
+contracts additionally require five representative users, keyboard plus
+screen-reader plus 200 percent zoom audits, and reviewed browser captures.
+Missing trust, bad signatures, digest mismatches, incomplete evidence, and
+failed measurements remain unmet gates.
+
+The synthetic privacy gate is adversarial rather than an absence check. It
+injects each forbidden identifier, path, and sequence class through catalog
+serialization, problem responses, and screenshot/accessibility contracts and
+requires all three real paths to reject it. The network gate actively probes
+`connect_ex` and `sendto` while the process guard also denies connect,
+create-connection, DNS lookup, and connected-socket send variants. These local
+results still do not replace approved-host, accessibility, screenshot, or
+five-provider evidence.
+
 ## Asset installation boundary
 
 `verify_release_asset_authorization` reports authority
