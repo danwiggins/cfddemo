@@ -674,6 +674,7 @@ class ProviderLinkageStore:
         with self._connect() as connection:
             connection.execute("BEGIN IMMEDIATE")
             try:
+                self._validate_schema(connection)
                 self._validate_current_authority(record)
                 existing = connection.execute(
                     """SELECT revision_sha256, authorized_record_sha256, record_json
@@ -759,6 +760,7 @@ class ProviderLinkageStore:
                             trust_sha256,
                         ),
                     )
+                self._verify_consumptions(connection, record, revision_sha256)
                 records = self._load_records(connection)
                 validate_linkage_history(
                     records,
@@ -781,6 +783,7 @@ class ProviderLinkageStore:
                     "UPDATE metadata SET value=? WHERE key='state_head_sha256'",
                     (state_head,),
                 )
+                self._validate_schema(connection)
                 receipt = CommittedLinkageReceipt(
                     provider_namespace=revision.provider_namespace,
                     linkage_id=revision.linkage_id,
@@ -885,6 +888,7 @@ class ProviderLinkageStore:
         with self._connect() as connection:
             connection.execute("BEGIN")
             try:
+                self._validate_schema(connection)
                 records = self._load_records(connection)
                 validate_linkage_history(
                     records,

@@ -533,6 +533,61 @@ def test_same_inventory_malformed_schema_is_rejected(tmp_path: Path) -> None:
         _store(root)
 
 
+def test_live_store_rechecks_exact_schema_before_authority_reads(
+    tmp_path: Path,
+) -> None:
+    root = tmp_path / "protected"
+    store = _store(root)
+    connection = sqlite3.connect(root / "linkage.sqlite3")
+    connection.execute("DROP INDEX linkage_revision_order")
+    connection.execute(
+        "CREATE INDEX linkage_revision_order ON linkage_revisions(linkage_id, revision)"
+    )
+    connection.commit()
+    connection.close()
+    try:
+        with pytest.raises(ProviderLinkageStoreSchemaError, match="schema"):
+            store.active_snapshot()
+    finally:
+        store.close()
+
+
+def test_live_trigger_cannot_delete_consumption_and_reopen_replay(
+    tmp_path: Path,
+) -> None:
+    root = tmp_path / "protected"
+    first = _record("c")
+    other_revision = _revision(
+        linkage_id=_token("linkage", "d"),
+        collection=_token("collection", "d"),
+        specimen=_token("specimen", "d"),
+        analysis=_token("analysis", "d"),
+        measurement=_token("measurement", "d"),
+    )
+    other, _ = _consume(
+        other_revision,
+        (_create_approval(other_revision, "c"),),
+    )
+    store = _store(root)
+    store.commit_authorized_revision(first)
+    connection = sqlite3.connect(root / "linkage.sqlite3")
+    connection.execute("DELETE FROM approval_consumptions")
+    connection.execute(
+        """CREATE TRIGGER erase_consumption
+           AFTER INSERT ON approval_consumptions
+           BEGIN DELETE FROM approval_consumptions; END"""
+    )
+    connection.commit()
+    connection.close()
+    try:
+        with pytest.raises(ProviderLinkageStoreSchemaError, match="schema"):
+            store.commit_authorized_revision(other)
+        with pytest.raises(ProviderLinkageStoreSchemaError, match="schema"):
+            store.active_snapshot()
+    finally:
+        store.close()
+
+
 def test_relative_or_symlink_root_is_rejected(tmp_path: Path) -> None:
     with pytest.raises(ProviderLinkageStoreUnsafe, match="absolute"):
         _store(Path("relative"))
