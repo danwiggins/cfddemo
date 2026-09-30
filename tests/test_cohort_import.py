@@ -1330,6 +1330,81 @@ def test_adopted_pending_without_marker_rolls_back_as_incomplete(
         results.close()
 
 
+def test_marker_recovers_exact_candidate_and_preserves_committed_peer(
+    tmp_path: Path, live
+) -> None:
+    values = _setup(tmp_path, live)
+    first = _import(values)
+    previous = values[2]
+    second = _manifest(
+        previous.provider_authorities[0],
+        previous.members,
+        cohort_id=previous.cohort_id,
+        version=2,
+        previous_manifest_sha256=first.cohort_manifest_sha256,
+        created_at=previous.created_at + timedelta(seconds=1),
+        measurement_anchor=previous.measurement_anchor,
+        policies=previous.policies.model_copy(update={"missingness_sha256": "c" * 64}),
+    )
+    values[0].close()
+    crashing = CohortRecordCatalog(
+        tmp_path / "cohort-records",
+        result_catalog=values[1],
+        linkage_store=live[0],
+        expected_trust_snapshot_sha256_by_provider=_pins(),
+        reader_registry=DEFAULT_RESULT_BUNDLE_READER_REGISTRY,
+        fault_controller=DeterministicFaultController(
+            "after_visibility_commit", action=FaultAction.EXIT, exit_code=77
+        ),
+    )
+    crashing_values = (crashing, *values[1:])
+    pid = os.fork()
+    if pid == 0:  # pragma: no cover - abrupt crash path
+        _import(crashing_values, manifest_history=(previous, second))
+        os._exit(78)
+    _, status = os.waitpid(pid, 0)
+    assert os.waitstatus_to_exitcode(status) == 77
+    recovery_scope = crashing._recovery_scope_sha256
+    crashing.close()
+    values[1].close()
+    pending = tuple((tmp_path / "cohort-records").glob(".pending.*"))
+    assert len(pending) == 1
+    pending[0].unlink()
+
+    def reopen():
+        results = ResultCatalog(
+            tmp_path / "results",
+            import_roots={"root_primary": tmp_path / "imports"},
+            trust_store=values[6],
+            reader_registry=DEFAULT_RESULT_BUNDLE_READER_REGISTRY,
+        )
+        cohorts = CohortRecordCatalog(
+            tmp_path / "cohort-records",
+            result_catalog=results,
+            linkage_store=live[0],
+            expected_trust_snapshot_sha256_by_provider=_pins(),
+            reader_registry=DEFAULT_RESULT_BUNDLE_READER_REGISTRY,
+        )
+        return cohorts, results
+
+    for _ in range(2):
+        cohorts, results = reopen()
+        try:
+            assert cohorts.bindings_for_manifest((previous,)) == (first,)
+            second_status = cohorts.record_status_for_manifest((previous, second))
+            assert (
+                second_status.members[0].availability
+                is CohortRecordAvailability.MISSING
+            )
+            assert results.query(CatalogQuery()).results == (first.result,)
+            ownership = results.recovery_publications(recovery_scope)
+            assert len(ownership) == 1
+            assert ownership[0].reference == first.result
+        finally:
+            cohorts.close()
+            results.close()
+
+
 def test_failed_cleanup_preserves_durable_rollback_intent(
     tmp_path: Path, live, monkeypatch: pytest.MonkeyPatch
 ) -> None:

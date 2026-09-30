@@ -55,7 +55,10 @@ rollback marker is flushed before catalog visibility and remains until the
 binding and ownership commit completes. If marker creation fails, visibility
 never begins. If later cleanup fails, the marker and pending journal remain;
 restart recovery removes the binding plus exact ownership before clearing that
-intent. Startup recovery
+intent. The marker binds the exact candidate manifest, binding, result, final
+filename, publication, and recovery scope, so a missing journal cannot cause
+recovery to remove an older committed binding that shares the ownership row.
+Startup recovery
 enumerates hidden SQLite publications for the binding root's digest-bound
 recovery scope independently of journal parsing. A retained pending journal is
 an incomplete import and defaults to rollback even if SQLite reached `adopted`.
