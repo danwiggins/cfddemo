@@ -19,10 +19,16 @@ job database. The preserved Streamlit demo is not this service.
 - HTML, JavaScript, and CSS are package resources. They contain no CDN, remote
   font, analytics, model, map, or other runtime network reference. CSP permits
   connections and assets only from the same local origin.
-- The state directory must be owned by the current OS user at mode `0700`.
-  `instance.json` is atomically replaced at mode `0600`, contains no credential,
-  and records `capability_enabled: false`. Bootstrap/session credentials remain
-  in memory and rotate on every restart.
+- Before opening the state directory, startup pins and exclusively locks its
+  user-owned, non-group/world-writable parent plus a deterministic mode-`0600`
+  name anchor. The state directory must be owned by the current OS user at mode
+  `0700`. Parent, anchor, state-directory, and instance-lock identities are
+  revalidated before and after publication and while the listener is live.
+  Replacement fails the listener closed while the parent anchor remains held
+  until explicit cleanup, so renaming and recreating the state-directory name
+  cannot admit a second instance. `instance.json` is atomically replaced at
+  mode `0600`, contains no credential, and records `capability_enabled: false`.
+  Bootstrap/session credentials remain in memory and rotate on every restart.
 - Request bodies, sessions, exchange attempts, token-generation attempts, and
   queue pages are bounded. Exchange throttling and one-use consumption occur
   under the broker's single lock.
@@ -85,8 +91,9 @@ separate state models.
 
 Real-socket tests cover IPv4, IPv6 when available, exact Host/Origin/CSRF and
 session checks, guessed IDs, non-browser requests, forwarded headers, restart
-rotation, filesystem modes, offline package assets, and operation under a
-synthetic policy that rejects non-loopback egress.
+rotation, filesystem modes, parent/state/lock substitution races, offline
+package assets, and operation under a synthetic policy that rejects non-loopback
+egress.
 
 The current development host does not provide a second disposable OS account,
 so a real cross-account access attempt remains **explicitly unmet**. The mode

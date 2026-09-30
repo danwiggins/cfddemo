@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import errno
 import fcntl
+import hashlib
 import http.server
 import ipaddress
 import json
@@ -61,6 +62,129 @@ _SECURITY_HEADERS = {
 
 class LocalWebServerError(RuntimeError):
     """The packaged local server could not establish its security boundary."""
+
+
+@dataclass(frozen=True, slots=True)
+class _StartupAnchor:
+    parent_path: Path
+    parent_fd: int
+    parent_mode: int
+    name: str
+    descriptor: int
+
+
+def _require_startup_anchor(anchor: _StartupAnchor) -> None:
+    try:
+        named_parent = anchor.parent_path.lstat()
+        pinned_parent = os.fstat(anchor.parent_fd)
+        named_anchor = os.stat(
+            anchor.name, dir_fd=anchor.parent_fd, follow_symlinks=False
+        )
+        pinned_anchor = os.fstat(anchor.descriptor)
+    except OSError as exc:
+        raise LocalWebServerError("local web startup anchor is unavailable") from exc
+    if (
+        not stat.S_ISDIR(named_parent.st_mode)
+        or named_parent.st_uid != os.geteuid()
+        or stat.S_IMODE(named_parent.st_mode) != anchor.parent_mode
+        or (named_parent.st_dev, named_parent.st_ino)
+        != (pinned_parent.st_dev, pinned_parent.st_ino)
+    ):
+        raise LocalWebServerError("local web startup parent identity changed")
+    if (
+        not stat.S_ISREG(named_anchor.st_mode)
+        or stat.S_IMODE(named_anchor.st_mode) != STATE_FILE_MODE
+        or named_anchor.st_uid != os.geteuid()
+        or named_anchor.st_nlink != 1
+        or (named_anchor.st_dev, named_anchor.st_ino)
+        != (pinned_anchor.st_dev, pinned_anchor.st_ino)
+    ):
+        raise LocalWebServerError("local web startup anchor identity changed")
+
+
+def _open_startup_anchor(state_directory: Path) -> _StartupAnchor:
+    parent_path = state_directory.parent
+    parent_fd: int | None = None
+    descriptor: int | None = None
+    parent_locked = False
+    anchor_locked = False
+    try:
+        parent_path.mkdir(mode=STATE_DIRECTORY_MODE, parents=True, exist_ok=True)
+        parent_metadata = parent_path.lstat()
+        if (
+            not stat.S_ISDIR(parent_metadata.st_mode)
+            or parent_metadata.st_uid != os.geteuid()
+            or stat.S_IMODE(parent_metadata.st_mode) & 0o022
+        ):
+            raise LocalWebServerError(
+                "local web startup parent must be user-owned and not writable by others"
+            )
+        parent_fd = os.open(
+            parent_path,
+            os.O_RDONLY | getattr(os, "O_DIRECTORY", 0) | getattr(os, "O_NOFOLLOW", 0),
+        )
+        pinned_parent = os.fstat(parent_fd)
+        if (pinned_parent.st_dev, pinned_parent.st_ino) != (
+            parent_metadata.st_dev,
+            parent_metadata.st_ino,
+        ):
+            raise LocalWebServerError("local web startup parent changed during open")
+        fcntl.flock(parent_fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        parent_locked = True
+        name_digest = hashlib.sha256(os.fsencode(state_directory.name)).hexdigest()
+        anchor_name = f".traceback-web-{name_digest[:32]}.lock"
+        descriptor = os.open(
+            anchor_name,
+            os.O_RDWR | os.O_CREAT | getattr(os, "O_NOFOLLOW", 0),
+            STATE_FILE_MODE,
+            dir_fd=parent_fd,
+        )
+        anchor_metadata = os.fstat(descriptor)
+        if (
+            not stat.S_ISREG(anchor_metadata.st_mode)
+            or anchor_metadata.st_uid != os.geteuid()
+            or anchor_metadata.st_nlink != 1
+        ):
+            raise LocalWebServerError("local web startup anchor is not private")
+        os.fchmod(descriptor, STATE_FILE_MODE)
+        fcntl.flock(descriptor, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        anchor_locked = True
+        anchor = _StartupAnchor(
+            parent_path=parent_path,
+            parent_fd=parent_fd,
+            parent_mode=stat.S_IMODE(parent_metadata.st_mode),
+            name=anchor_name,
+            descriptor=descriptor,
+        )
+        _require_startup_anchor(anchor)
+        return anchor
+    except BaseException as exc:
+        if anchor_locked and descriptor is not None:
+            fcntl.flock(descriptor, fcntl.LOCK_UN)
+        if descriptor is not None:
+            os.close(descriptor)
+        if parent_locked and parent_fd is not None:
+            fcntl.flock(parent_fd, fcntl.LOCK_UN)
+        if parent_fd is not None:
+            os.close(parent_fd)
+        if isinstance(exc, LocalWebServerError):
+            raise
+        if isinstance(exc, OSError) and exc.errno in {errno.EACCES, errno.EAGAIN}:
+            raise LocalWebServerError("local web service is already running") from exc
+        raise LocalWebServerError("local web startup anchor is unavailable") from exc
+
+
+def _close_startup_anchor(anchor: _StartupAnchor) -> None:
+    try:
+        try:
+            fcntl.flock(anchor.descriptor, fcntl.LOCK_UN)
+        finally:
+            os.close(anchor.descriptor)
+    finally:
+        try:
+            fcntl.flock(anchor.parent_fd, fcntl.LOCK_UN)
+        finally:
+            os.close(anchor.parent_fd)
 
 
 def _open_state_directory(path: Path) -> int:
@@ -559,6 +683,7 @@ class RunningLocalWebService:
     thread: threading.Thread
     boundary: LocalWebBoundary
     bootstrap_code: str
+    startup_anchor: _StartupAnchor
     state_directory: Path
     state_directory_fd: int
     lease_fd: int
@@ -575,6 +700,8 @@ class RunningLocalWebService:
         state_directory: Path,
         ipv6: bool = False,
     ) -> Self:
+        state_directory = state_directory.absolute()
+        startup_anchor: _StartupAnchor | None = None
         state_fd: int | None = None
         lease_fd: int | None = None
         server: _LoopbackHttpServer | None = None
@@ -583,7 +710,10 @@ class RunningLocalWebService:
         watchdog_stop: threading.Event | None = None
         watchdog_thread: threading.Thread | None = None
         try:
+            startup_anchor = _open_startup_anchor(state_directory)
+            _require_startup_anchor(startup_anchor)
             state_fd = _open_state_directory(state_directory)
+            _require_startup_anchor(startup_anchor)
             _require_named_state_directory(state_directory, state_fd)
             lease_fd = _acquire_instance_lease(state_fd)
             _require_instance_lease(state_fd, lease_fd)
@@ -624,11 +754,13 @@ class RunningLocalWebService:
             server.application = _Application(kernel, boundary, _packaged_assets())
 
             def validate_security_boundary() -> None:
+                _require_startup_anchor(startup_anchor)
                 _require_named_state_directory(state_directory, state_fd)
                 _require_instance_lease(state_fd, lease_fd)
 
             server.security_validator = validate_security_boundary
             instance_id = f"instance_{secrets.token_hex(16)}"
+            _require_startup_anchor(startup_anchor)
             _require_named_state_directory(state_directory, state_fd)
             _require_instance_lease(state_fd, lease_fd)
             _write_instance_state(
@@ -642,6 +774,7 @@ class RunningLocalWebService:
                     "started_at": datetime.now(UTC).isoformat(timespec="seconds"),
                 },
             )
+            _require_startup_anchor(startup_anchor)
             _require_named_state_directory(state_directory, state_fd)
             _require_instance_lease(state_fd, lease_fd)
             bootstrap_code = boundary.issue_bootstrap()
@@ -675,6 +808,7 @@ class RunningLocalWebService:
                 thread=thread,
                 boundary=boundary,
                 bootstrap_code=bootstrap_code,
+                startup_anchor=startup_anchor,
                 state_directory=state_directory,
                 state_directory_fd=state_fd,
                 lease_fd=lease_fd,
@@ -704,6 +838,8 @@ class RunningLocalWebService:
             if state_fd is not None:
                 fcntl.flock(state_fd, fcntl.LOCK_UN)
                 os.close(state_fd)
+            if startup_anchor is not None:
+                _close_startup_anchor(startup_anchor)
             raise
 
     @property
@@ -736,8 +872,11 @@ class RunningLocalWebService:
                     fcntl.flock(self.lease_fd, fcntl.LOCK_UN)
                     os.close(self.lease_fd)
             finally:
-                fcntl.flock(self.state_directory_fd, fcntl.LOCK_UN)
-                os.close(self.state_directory_fd)
+                try:
+                    fcntl.flock(self.state_directory_fd, fcntl.LOCK_UN)
+                    os.close(self.state_directory_fd)
+                finally:
+                    _close_startup_anchor(self.startup_anchor)
 
     def __enter__(self) -> Self:
         return self
