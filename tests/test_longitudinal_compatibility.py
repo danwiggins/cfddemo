@@ -5,6 +5,7 @@ from __future__ import annotations
 import hashlib
 import json
 from datetime import UTC, datetime
+from pathlib import Path
 
 import pytest
 from pydantic import ValidationError
@@ -68,7 +69,14 @@ from evidence_inspector.provider_linkage import (
     OptionalOpaqueToken,
     TechnicalLineage,
     UnitOfAnalysis,
+    linkage_revision_sha256,
     provider_trust_snapshot_sha256,
+)
+from evidence_inspector.provider_linkage_store import (
+    CommittedLinkageReceipt,
+    ProviderLinkageStore,
+    ProviderLinkageStoreConflict,
+    committed_linkage_receipt_sha256,
 )
 from tests.test_provider_linkage import (
     PROVIDER,
@@ -82,6 +90,19 @@ NOW = datetime(2026, 9, 29, 12, 0, tzinfo=UTC)
 HEAD_SHA256 = "8" * 64
 REGISTRY_SHA256 = "7" * 64
 TRUST_SHA256 = provider_trust_snapshot_sha256(_trust())
+LINKAGE_STATE_HEAD_SHA256 = "d" * 64
+
+
+class _LiveReceiptVerifier:
+    def verify_current_receipt(self, receipt: CommittedLinkageReceipt) -> None:
+        if (
+            receipt.state_version != 1
+            or receipt.state_head_sha256 != LINKAGE_STATE_HEAD_SHA256
+        ):
+            raise ProviderLinkageStoreConflict("linkage receipt is not current")
+
+
+LINKAGE_STORE = _LiveReceiptVerifier()
 
 
 def _asset(name: str, digit: str) -> AssetReference:
@@ -377,10 +398,19 @@ def _record(
         proposed_at=NOW,
     )
     authorized_linkage = None
+    activation_receipt = None
     if authorized:
         authorized_linkage, _ = _consume(
             revision,
             (_create_approval(revision, result_digit),),
+        )
+        activation_receipt = CommittedLinkageReceipt(
+            provider_namespace=revision.provider_namespace,
+            linkage_id=revision.linkage_id,
+            revision=revision.revision,
+            linkage_revision_sha256=linkage_revision_sha256(revision),
+            state_version=1,
+            state_head_sha256=LINKAGE_STATE_HEAD_SHA256,
         )
     return LongitudinalRecord(
         measurement=measurement,
@@ -392,6 +422,7 @@ def _record(
         ),
         linkage_revision=revision,
         authorized_linkage=authorized_linkage,
+        activation_receipt=activation_receipt,
     )
 
 
@@ -460,6 +491,7 @@ def _decide(
         expected_linkage_trust_snapshot_sha256_by_provider={
             PROVIDER: TRUST_SHA256
         },
+        linkage_store=LINKAGE_STORE,
     )
 
 
@@ -474,6 +506,10 @@ def test_exact_complete_key_is_equivalent_and_replay_bound() -> None:
     assert decision.delta_allowed and decision.connecting_trend_allowed
     assert decision.anchor_result_sha256 == anchor.measurement.result_sha256
     assert decision.member_bundle_sha256 == member.measurement.bundle_sha256
+    assert anchor.activation_receipt is not None
+    assert decision.anchor_linkage_receipt_sha256 == (
+        committed_linkage_receipt_sha256(anchor.activation_receipt)
+    )
     assert longitudinal_member_decision_sha256(decision)
 
 
@@ -547,6 +583,94 @@ def test_unknown_absent_linkage_and_stale_authority_suppress_rendering() -> None
     assert LongitudinalReason.RESULT_STATE_INVALID in stale_decision.reason_codes
     assert stale_decision.member_record_sha256 == longitudinal_record_sha256(stale)
     assert stale_decision.member_record_sha256 != longitudinal_record_sha256(unknown)
+
+
+def test_live_store_receipts_are_required_and_replayed(tmp_path: Path) -> None:
+    anchor = _record("1")
+    member = _record("2")
+    assert anchor.authorized_linkage is not None
+    assert member.authorized_linkage is not None
+    store = ProviderLinkageStore(
+        tmp_path / "protected",
+        expected_trust_snapshot_sha256_by_provider={PROVIDER: TRUST_SHA256},
+        clock=lambda: NOW,
+    )
+    try:
+        store.commit_authorized_revision(anchor.authorized_linkage)
+        store.commit_authorized_revision(member.authorized_linkage)
+        snapshot = store.active_snapshot()
+        receipts = {
+            (item.provider_namespace, item.linkage_id): item
+            for item in snapshot.receipts
+        }
+        anchor = anchor.model_copy(
+            update={
+                "activation_receipt": receipts[
+                    (
+                        anchor.linkage_revision.provider_namespace,
+                        anchor.linkage_revision.linkage_id,
+                    )
+                ]
+            }
+        )
+        member = member.model_copy(
+            update={
+                "activation_receipt": receipts[
+                    (
+                        member.linkage_revision.provider_namespace,
+                        member.linkage_revision.linkage_id,
+                    )
+                ]
+            }
+        )
+        policy = _policy(anchor)
+        decision = decide_longitudinal_member(
+            anchor,
+            member,
+            policy,
+            expected_policy_sha256=longitudinal_anchor_policy_sha256(policy),
+            expected_authority_head_sha256=HEAD_SHA256,
+            expected_linkage_trust_snapshot_sha256_by_provider={
+                PROVIDER: TRUST_SHA256
+            },
+            linkage_store=store,
+        )
+        assert decision.outcome == LongitudinalOutcome.EQUIVALENT
+
+        no_verifier = decide_longitudinal_member(
+            anchor,
+            member,
+            policy,
+            expected_policy_sha256=longitudinal_anchor_policy_sha256(policy),
+            expected_authority_head_sha256=HEAD_SHA256,
+            expected_linkage_trust_snapshot_sha256_by_provider={
+                PROVIDER: TRUST_SHA256
+            },
+            linkage_store=None,
+        )
+        assert no_verifier.outcome == LongitudinalOutcome.UNKNOWN
+        assert LongitudinalReason.LINKAGE_AUTHORITY_INVALID in (
+            no_verifier.reason_codes
+        )
+
+        third = _record("3")
+        assert third.authorized_linkage is not None
+        store.commit_authorized_revision(third.authorized_linkage)
+        stale = decide_longitudinal_member(
+            anchor,
+            member,
+            policy,
+            expected_policy_sha256=longitudinal_anchor_policy_sha256(policy),
+            expected_authority_head_sha256=HEAD_SHA256,
+            expected_linkage_trust_snapshot_sha256_by_provider={
+                PROVIDER: TRUST_SHA256
+            },
+            linkage_store=store,
+        )
+        assert stale.outcome == LongitudinalOutcome.UNKNOWN
+        assert LongitudinalReason.LINKAGE_AUTHORITY_INVALID in stale.reason_codes
+    finally:
+        store.close()
 
 
 def test_exact_e05_result_bundle_and_overlapping_key_cannot_drift() -> None:
@@ -683,6 +807,7 @@ def test_series_uses_one_anchor_and_seals_every_decision_digest() -> None:
         expected_linkage_trust_snapshot_sha256_by_provider={
             PROVIDER: TRUST_SHA256
         },
+        linkage_store=LINKAGE_STORE,
     )
     assert series.decisions[0].outcome == LongitudinalOutcome.QUALIFIED_COMPATIBLE
     assert series.decisions[1].outcome == LongitudinalOutcome.INCOMPATIBLE
