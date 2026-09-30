@@ -968,60 +968,81 @@ _INVALID_INPUT_EXPLANATIONS = tuple(
     )
     for dimension in ALL_COMPARISON_DIMENSIONS
 )
-_INVALID_INPUT_MEMBER_DECISION = LongitudinalMemberDecision(
-    schema_version="traceback.longitudinal-member-decision.v2",
-    anchor_result_id=_INVALID_INPUT_RESULT_ID,
-    member_result_id=_INVALID_INPUT_RESULT_ID,
-    anchor_result_sha256=_INVALID_INPUT_SHA256,
-    member_result_sha256=_INVALID_INPUT_SHA256,
-    anchor_bundle_sha256=_INVALID_INPUT_SHA256,
-    member_bundle_sha256=_INVALID_INPUT_SHA256,
-    anchor_record_sha256=_INVALID_INPUT_SHA256,
-    member_record_sha256=_INVALID_INPUT_SHA256,
-    anchor_linkage_revision_sha256=_INVALID_INPUT_SHA256,
-    member_linkage_revision_sha256=_INVALID_INPUT_SHA256,
-    anchor_linkage_receipt_sha256=None,
-    member_linkage_receipt_sha256=None,
-    authority_head_sha256=_INVALID_INPUT_SHA256,
-    authority_revision=0,
-    anchor_key_sha256=_INVALID_INPUT_SHA256,
-    member_key_sha256=_INVALID_INPUT_SHA256,
-    policy_id=_INVALID_INPUT_POLICY_ID,
-    policy_version="0.0.0",
-    policy_sha256=_INVALID_INPUT_SHA256,
-    engine_version="0.0.0",
-    outcome=LongitudinalOutcome.UNKNOWN,
-    reason_codes=tuple(
-        sorted(
-            (
-                LongitudinalReason.LINKAGE_AUTHORITY_INVALID,
-                LongitudinalReason.RESULT_STATE_INVALID,
-                LongitudinalReason.UNKNOWN_DIMENSION,
+_INVALID_INPUT_MEMBER_DECISION_BYTES = canonical_contract_bytes(
+    LongitudinalMemberDecision(
+        schema_version="traceback.longitudinal-member-decision.v2",
+        anchor_result_id=_INVALID_INPUT_RESULT_ID,
+        member_result_id=_INVALID_INPUT_RESULT_ID,
+        anchor_result_sha256=_INVALID_INPUT_SHA256,
+        member_result_sha256=_INVALID_INPUT_SHA256,
+        anchor_bundle_sha256=_INVALID_INPUT_SHA256,
+        member_bundle_sha256=_INVALID_INPUT_SHA256,
+        anchor_record_sha256=_INVALID_INPUT_SHA256,
+        member_record_sha256=_INVALID_INPUT_SHA256,
+        anchor_linkage_revision_sha256=_INVALID_INPUT_SHA256,
+        member_linkage_revision_sha256=_INVALID_INPUT_SHA256,
+        anchor_linkage_receipt_sha256=None,
+        member_linkage_receipt_sha256=None,
+        authority_head_sha256=_INVALID_INPUT_SHA256,
+        authority_revision=0,
+        anchor_key_sha256=_INVALID_INPUT_SHA256,
+        member_key_sha256=_INVALID_INPUT_SHA256,
+        policy_id=_INVALID_INPUT_POLICY_ID,
+        policy_version="0.0.0",
+        policy_sha256=_INVALID_INPUT_SHA256,
+        engine_version="0.0.0",
+        outcome=LongitudinalOutcome.UNKNOWN,
+        reason_codes=tuple(
+            sorted(
+                (
+                    LongitudinalReason.LINKAGE_AUTHORITY_INVALID,
+                    LongitudinalReason.RESULT_STATE_INVALID,
+                    LongitudinalReason.UNKNOWN_DIMENSION,
+                ),
+                key=str,
+            )
+        ),
+        dimension_explanations=_INVALID_INPUT_EXPLANATIONS,
+        evaluated_dimensions=ALL_COMPARISON_DIMENSIONS,
+        mismatch_dimensions=(),
+        unknown_dimensions=tuple(sorted(ALL_COMPARISON_DIMENSIONS, key=str)),
+        evidence_refs=(),
+        bridge_refs=(),
+        next_action=LongitudinalNextAction.RESOLVE_UNKNOWN_INPUTS,
+        bridge_execution_state="not_executed",
+        delta_allowed=False,
+        connecting_trend_allowed=False,
+    )
+)
+_INVALID_INPUT_MEMBER_DECISION_SHA256 = hashlib.sha256(
+    _INVALID_INPUT_MEMBER_DECISION_BYTES
+).hexdigest()
+_INVALID_INPUT_SERIES_DECISION_BYTES = canonical_contract_bytes(
+    LongitudinalSeriesDecision(
+        schema_version="traceback.longitudinal-series-decision.v2",
+        anchor_result_id=_INVALID_INPUT_RESULT_ID,
+        policy_sha256=_INVALID_INPUT_SHA256,
+        member_result_ids=(_INVALID_INPUT_RESULT_ID,),
+        decisions=(
+            LongitudinalMemberDecision.model_validate_json(
+                _INVALID_INPUT_MEMBER_DECISION_BYTES
             ),
-            key=str,
-        )
-    ),
-    dimension_explanations=_INVALID_INPUT_EXPLANATIONS,
-    evaluated_dimensions=ALL_COMPARISON_DIMENSIONS,
-    mismatch_dimensions=(),
-    unknown_dimensions=tuple(sorted(ALL_COMPARISON_DIMENSIONS, key=str)),
-    evidence_refs=(),
-    bridge_refs=(),
-    next_action=LongitudinalNextAction.RESOLVE_UNKNOWN_INPUTS,
-    bridge_execution_state="not_executed",
-    delta_allowed=False,
-    connecting_trend_allowed=False,
+        ),
+        decision_sha256s=(_INVALID_INPUT_MEMBER_DECISION_SHA256,),
+    )
 )
-_INVALID_INPUT_SERIES_DECISION = LongitudinalSeriesDecision(
-    schema_version="traceback.longitudinal-series-decision.v2",
-    anchor_result_id=_INVALID_INPUT_RESULT_ID,
-    policy_sha256=_INVALID_INPUT_SHA256,
-    member_result_ids=(_INVALID_INPUT_RESULT_ID,),
-    decisions=(_INVALID_INPUT_MEMBER_DECISION,),
-    decision_sha256s=(
-        longitudinal_member_decision_sha256(_INVALID_INPUT_MEMBER_DECISION),
-    ),
-)
+
+
+def _invalid_input_member_decision() -> LongitudinalMemberDecision:
+    return LongitudinalMemberDecision.model_validate_json(
+        _INVALID_INPUT_MEMBER_DECISION_BYTES
+    )
+
+
+def _invalid_input_series_decision() -> LongitudinalSeriesDecision:
+    return LongitudinalSeriesDecision.model_validate_json(
+        _INVALID_INPUT_SERIES_DECISION_BYTES
+    )
 
 
 def _replay_record(record: object) -> LongitudinalRecord:
@@ -1367,7 +1388,7 @@ def decide_longitudinal_member(
         linkage_store,
     )
     if validated is None:
-        return _INVALID_INPUT_MEMBER_DECISION
+        return _invalid_input_member_decision()
     (
         anchor,
         member,
@@ -1622,7 +1643,7 @@ def decide_longitudinal_series(
         linkage_store,
     )
     if validated is None:
-        return _INVALID_INPUT_SERIES_DECISION
+        return _invalid_input_series_decision()
     (
         anchor,
         members,
