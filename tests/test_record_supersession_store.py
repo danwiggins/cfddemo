@@ -7,7 +7,7 @@ import os
 import sqlite3
 from concurrent.futures import ThreadPoolExecutor
 from concurrent.futures import TimeoutError as FutureTimeout
-from datetime import timedelta
+from datetime import datetime, timedelta, tzinfo
 from pathlib import Path
 
 import pytest
@@ -48,6 +48,7 @@ from tests.test_provider_linkage import (
     KEY_ID,
     NOW,
     PRIVATE_KEY,
+    T0,
     _consume,
     _correction_approvals,
     _create_approval,
@@ -474,6 +475,7 @@ def test_tamper_schema_and_content_are_detected_without_private_text(durable) ->
             "UPDATE records SET record_json=? WHERE record_id=?",
             (b'{"patient":"leak"}', first.record_id),
         )
+    connection.close()
     with pytest.raises(RecordSupersessionUnsafe, match="history") as captured:
         ledger.active_snapshot()
     assert "patient" not in str(captured.value)
@@ -508,6 +510,7 @@ def test_resealed_durable_cycle_is_rejected_from_complete_history(durable) -> No
             "UPDATE metadata SET value=? WHERE key='state_head_sha256'",
             (RecordSupersessionStore._state_head(connection),),
         )
+    connection.close()
     with pytest.raises(RecordSupersessionUnsafe, match="chain"):
         ledger.active_snapshot()
 
@@ -525,6 +528,7 @@ def test_resealed_activation_receipt_substitution_is_rejected(durable) -> None:
             "UPDATE metadata SET value=? WHERE key='state_head_sha256'",
             (RecordSupersessionStore._state_head(connection),),
         )
+    connection.close()
     with pytest.raises(RecordSupersessionUnsafe, match="authority binding"):
         ledger.active_snapshot()
 
@@ -544,6 +548,7 @@ def test_resealed_comparison_authority_columns_cannot_restore_current(durable) -
             "UPDATE metadata SET value=? WHERE key='state_head_sha256'",
             (RecordSupersessionStore._state_head(connection),),
         )
+    connection.close()
     with pytest.raises(RecordSupersessionUnsafe, match="history binding"):
         ledger.comparison_status(comparison.comparison_id)
 
@@ -727,6 +732,401 @@ def test_exact_retry_remains_idempotent_after_action_approval_expiry(durable) ->
     assert ledger.commit_record(reanalysis) == receipt
 
 
+@pytest.mark.parametrize("action", ("supersession", "comparison"))
+@pytest.mark.parametrize(
+    ("issued_at", "expires_at", "advance_to"),
+    (
+        (T0 - timedelta(seconds=1), AFTER, None),
+        (NOW, NOW + timedelta(minutes=1), NOW + timedelta(minutes=1)),
+        (NOW, AFTER + timedelta(seconds=1), None),
+    ),
+)
+def test_action_approval_requires_full_trust_and_evaluation_window(
+    durable, action, issued_at, expires_at, advance_to
+) -> None:
+    linkage, ledger, first_revision, first, second = durable
+    ledger.commit_record(first)
+    if action == "supersession":
+        _, candidate = _authorized_reanalysis(linkage, first_revision, first)
+        assert candidate.supersession_authorization is not None
+        candidate = candidate.model_copy(
+            update={
+                "supersession_authorization": _resign(
+                    candidate.supersession_authorization,
+                    issued_at=issued_at,
+                    expires_at=expires_at,
+                )
+            }
+        )
+        operation = lambda: ledger.commit_record(candidate)
+    else:
+        ledger.commit_record(second)
+        comparison = _comparison(first, second, ledger.active_snapshot())
+        comparison = comparison.model_copy(
+            update={
+                "authority": _resign(
+                    comparison.authority,
+                    issued_at=issued_at,
+                    expires_at=expires_at,
+                )
+            }
+        )
+        operation = lambda: ledger.register_comparison(comparison)
+    if advance_to is not None:
+        linkage._time_source.advance_to(advance_to)
+    with pytest.raises(RecordSupersessionConflict, match="authority is invalid"):
+        operation()
+
+
+def test_nested_approval_preflight_rejects_huge_fields_before_serialization(
+    durable,
+) -> None:
+    linkage, ledger, first_revision, first, second = durable
+    ledger.commit_record(first)
+    ledger.commit_record(second)
+    _, reanalysis = _authorized_reanalysis(linkage, first_revision, first)
+    approval = reanalysis.supersession_authorization
+    assert approval is not None
+    huge_payload = approval.payload.model_copy(update={"approval_id": "x" * 10_000_000})
+    huge_record = reanalysis.model_copy(
+        update={
+            "supersession_authorization": approval.model_copy(
+                update={"payload": huge_payload}
+            )
+        }
+    )
+    with pytest.raises(ValueError, match="record contract is invalid"):
+        record_sha256(huge_record)
+    with pytest.raises(RecordSupersessionConflict, match="record contract is invalid"):
+        ledger.commit_record(huge_record)
+
+    comparison = _comparison(first, second, ledger.active_snapshot())
+    huge_comparison = comparison.model_copy(
+        update={
+            "authority": comparison.authority.model_copy(
+                update={"payload": huge_payload}
+            )
+        }
+    )
+    with pytest.raises(ValueError, match="comparison contract is invalid"):
+        supersession_module.comparison_sha256(huge_comparison)
+    with pytest.raises(
+        RecordSupersessionConflict, match="comparison contract is invalid"
+    ):
+        ledger.register_comparison(huge_comparison)
+    huge_snapshot = ledger.active_snapshot().model_copy(
+        update={"records": (huge_record,)}
+    )
+    with pytest.raises(RecordSupersessionConflict, match="record contract is invalid"):
+        ledger.replay_snapshot(huge_snapshot)
+    with pytest.raises(
+        RecordSupersessionConflict, match="comparison identity is invalid"
+    ):
+        ledger.comparison_status("x" * 10_000_000)
+
+
+def test_nested_approval_preflight_rejects_hostile_timezone_key_and_extra(
+    durable,
+) -> None:
+    class HostileTimezone(tzinfo):
+        def utcoffset(self, value):
+            raise AssertionError("timezone hook executed")
+
+        def dst(self, value):
+            raise AssertionError("timezone hook executed")
+
+    class HostileKey(str):
+        armed = False
+
+        def __hash__(self):
+            if self.armed:
+                raise AssertionError("key hook executed")
+            return super().__hash__()
+
+        def __eq__(self, other):
+            if self.armed:
+                raise AssertionError("key hook executed")
+            return super().__eq__(other)
+
+    class HostileExtra(dict):
+        def __eq__(self, other):
+            raise AssertionError("extra hook executed")
+
+    linkage, _, first_revision, first, _ = durable
+    _, reanalysis = _authorized_reanalysis(linkage, first_revision, first)
+    approval = reanalysis.supersession_authorization
+    assert approval is not None
+
+    hostile_time = datetime(2026, 9, 29, 12, tzinfo=HostileTimezone())
+    time_payload = approval.payload.model_copy(update={"issued_at": hostile_time})
+    time_record = reanalysis.model_copy(
+        update={
+            "supersession_authorization": approval.model_copy(
+                update={"payload": time_payload}
+            )
+        }
+    )
+    with pytest.raises(ValueError, match="record contract is invalid"):
+        record_sha256(time_record)
+
+    key_payload = approval.payload.model_copy(deep=True)
+    key = HostileKey("approval_id")
+    key_payload.__dict__[key] = key_payload.__dict__.pop("approval_id")
+    HostileKey.armed = True
+    key_record = reanalysis.model_copy(
+        update={
+            "supersession_authorization": approval.model_copy(
+                update={"payload": key_payload}
+            )
+        }
+    )
+    with pytest.raises(ValueError, match="record contract is invalid"):
+        record_sha256(key_record)
+    HostileKey.armed = False
+
+    extra_payload = approval.payload.model_copy(deep=True)
+    object.__setattr__(extra_payload, "__pydantic_extra__", HostileExtra())
+    extra_record = reanalysis.model_copy(
+        update={
+            "supersession_authorization": approval.model_copy(
+                update={"payload": extra_payload}
+            )
+        }
+    )
+    with pytest.raises(ValueError, match="record contract is invalid"):
+        record_sha256(extra_record)
+
+
+@pytest.mark.parametrize("suffix", ("-wal", "-shm"))
+def test_live_sidecar_inode_substitution_fails_closed(durable, suffix) -> None:
+    _, ledger, _, first, _ = durable
+    ledger.commit_record(first)
+    sidecar = Path(str(ledger.database) + suffix)
+    backup = Path(str(sidecar) + ".bound-backup")
+    try:
+        with (
+            pytest.raises(RecordSupersessionUnsafe, match="sidecar"),
+            ledger._connect() as connection,
+        ):
+            assert sidecar.exists()
+            os.replace(sidecar, backup)
+            sidecar.write_bytes(b"substituted")
+            sidecar.chmod(0o600)
+            connection.execute("SELECT COUNT(*) FROM records").fetchone()
+    finally:
+        if sidecar.exists():
+            sidecar.unlink()
+        if backup.exists():
+            os.replace(backup, sidecar)
+
+
+@pytest.mark.parametrize("suffix", ("-wal", "-shm"))
+def test_sidecar_chmod_race_never_follows_substituted_symlink(
+    durable, suffix, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    _, ledger, _, first, _ = durable
+    ledger.commit_record(first)
+    sidecar = Path(str(ledger.database) + suffix)
+    backup = Path(str(sidecar) + ".bound-backup")
+    target = tmp_path / f"target{suffix}"
+    target.write_bytes(b"private")
+    target.chmod(0o640)
+    original_fchmod = os.fchmod
+    swapped = False
+
+    def swapping_fchmod(descriptor, mode):
+        nonlocal swapped
+        descriptor_metadata = os.fstat(descriptor)
+        if not swapped and sidecar.exists():
+            sidecar_metadata = sidecar.stat(follow_symlinks=False)
+            if (descriptor_metadata.st_dev, descriptor_metadata.st_ino) == (
+                sidecar_metadata.st_dev,
+                sidecar_metadata.st_ino,
+            ):
+                os.replace(sidecar, backup)
+                sidecar.symlink_to(target)
+                swapped = True
+        return original_fchmod(descriptor, mode)
+
+    monkeypatch.setattr(supersession_module.os, "fchmod", swapping_fchmod)
+    try:
+        with pytest.raises(RecordSupersessionUnsafe, match="sidecar"):
+            ledger.active_snapshot()
+        assert swapped
+        assert target.stat().st_mode & 0o777 == 0o640
+    finally:
+        monkeypatch.setattr(supersession_module.os, "fchmod", original_fchmod)
+        if sidecar.is_symlink() or sidecar.exists():
+            sidecar.unlink()
+        if backup.exists():
+            os.replace(backup, sidecar)
+
+
+def test_preopened_sidecar_descriptors_do_not_prove_sqlite_ownership(durable) -> None:
+    _, ledger, _, first, _ = durable
+    ledger.commit_record(first)
+    keeper = sqlite3.connect(ledger.database, isolation_level=None)
+    try:
+        keeper.execute("PRAGMA journal_mode=WAL")
+        keeper.execute("SELECT COUNT(*) FROM records").fetchone()
+        for suffix in ("-wal", "-shm"):
+            Path(str(ledger.database) + suffix).chmod(0o600)
+        before = supersession_module._open_descriptor_identities()
+        with pytest.raises(RecordSupersessionUnsafe, match="sidecar"):
+            ledger._bind_sidecars(before)
+    finally:
+        keeper.close()
+
+
+def test_initialization_main_database_race_never_chmods_substituted_symlink(
+    durable, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    linkage, _, _, _, _ = durable
+    root = tmp_path / "raced-records"
+    database = root / "record-supersession.sqlite3"
+    backup = root / "record-supersession.sqlite3.bound-backup"
+    target = tmp_path / "main-target"
+    target.write_bytes(b"private")
+    target.chmod(0o640)
+    original_fchmod = os.fchmod
+    swapped = False
+
+    def swapping_fchmod(descriptor, mode):
+        nonlocal swapped
+        descriptor_metadata = os.fstat(descriptor)
+        if not swapped and database.exists():
+            database_metadata = database.stat(follow_symlinks=False)
+            if (descriptor_metadata.st_dev, descriptor_metadata.st_ino) == (
+                database_metadata.st_dev,
+                database_metadata.st_ino,
+            ):
+                os.replace(database, backup)
+                database.symlink_to(target)
+                swapped = True
+        return original_fchmod(descriptor, mode)
+
+    monkeypatch.setattr(supersession_module.os, "fchmod", swapping_fchmod)
+    try:
+        with pytest.raises(RecordSupersessionUnsafe):
+            RecordSupersessionStore(root, linkage_store=linkage)
+        assert swapped
+        assert target.stat().st_mode & 0o777 == 0o640
+    finally:
+        monkeypatch.setattr(supersession_module.os, "fchmod", original_fchmod)
+        if database.is_symlink() or database.exists():
+            database.unlink()
+        if backup.exists():
+            os.replace(backup, database)
+
+
+def test_constructor_root_swap_never_mutates_or_populates_substituted_directory(
+    durable, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    linkage, _, _, _, _ = durable
+    root = tmp_path / "existing-root"
+    backup = tmp_path / "existing-root.bound-backup"
+    target = tmp_path / "attacker-target"
+    root.mkdir(mode=0o700)
+    target.mkdir(mode=0o750)
+    original_open = os.open
+    swapped = False
+
+    def swapping_open(path, flags, *args, **kwargs):
+        nonlocal swapped
+        if not swapped and Path(path) == root:
+            os.replace(root, backup)
+            root.symlink_to(target, target_is_directory=True)
+            swapped = True
+        return original_open(path, flags, *args, **kwargs)
+
+    monkeypatch.setattr(supersession_module.os, "open", swapping_open)
+    try:
+        with pytest.raises(RecordSupersessionUnsafe, match="root"):
+            RecordSupersessionStore(root, linkage_store=linkage)
+        assert swapped
+        assert target.stat().st_mode & 0o777 == 0o750
+        assert not (target / "record-supersession.sqlite3").exists()
+    finally:
+        monkeypatch.setattr(supersession_module.os, "open", original_open)
+        if root.is_symlink() or root.exists():
+            root.unlink()
+        if backup.exists():
+            os.replace(backup, root)
+
+
+def test_constructor_rejects_hostile_path_objects_before_hooks(durable) -> None:
+    class HostilePath(type(Path())):
+        def __fspath__(self):
+            raise AssertionError("path hook executed")
+
+        @property
+        def parts(self):
+            raise AssertionError("parts hook executed")
+
+    class HostileProxy:
+        def __fspath__(self):
+            raise AssertionError("proxy hook executed")
+
+    linkage, _, _, _, _ = durable
+    hostile = HostilePath("/private/hostile")
+    with pytest.raises(TypeError, match="exact local path"):
+        RecordSupersessionStore(hostile, linkage_store=linkage)
+    with pytest.raises(TypeError, match="exact local path"):
+        RecordSupersessionStore(HostileProxy(), linkage_store=linkage)  # type: ignore[arg-type]
+    with pytest.raises(RecordSupersessionUnsafe, match="root is unsafe"):
+        RecordSupersessionStore("x" * 4097, linkage_store=linkage)
+    with pytest.raises(RecordSupersessionUnsafe, match="root is unsafe"):
+        RecordSupersessionStore("unsafe\0path", linkage_store=linkage)
+
+
+def test_constructor_snapshots_exact_path_parts(durable, tmp_path: Path) -> None:
+    linkage, _, _, _, _ = durable
+    caller = tmp_path / "captured-root"
+    caller_parts = object.__getattribute__(caller, "_parts")
+    store = RecordSupersessionStore(caller, linkage_store=linkage)
+    try:
+        caller_parts[:] = ["/", "private", "mutated-after-capture"]
+        assert store.root == tmp_path / "captured-root"
+        assert store.database.parent == store.root
+    finally:
+        store.close()
+
+
+def test_sqlite_connect_root_swap_cannot_write_substituted_directory(
+    durable, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    _, ledger, _, first, _ = durable
+    ledger.commit_record(first)
+    root = ledger.root
+    backup = tmp_path / "records.bound-backup"
+    target = tmp_path / "sqlite-target"
+    target.mkdir(mode=0o750)
+    original_connect = sqlite3.connect
+    swapped = False
+
+    def swapping_connect(database, *args, **kwargs):
+        nonlocal swapped
+        if not swapped:
+            os.replace(root, backup)
+            root.symlink_to(target, target_is_directory=True)
+            swapped = True
+        return original_connect(database, *args, **kwargs)
+
+    monkeypatch.setattr(supersession_module.sqlite3, "connect", swapping_connect)
+    try:
+        with pytest.raises(RecordSupersessionUnsafe):
+            ledger.active_snapshot()
+        assert swapped
+        assert target.stat().st_mode & 0o777 == 0o750
+        assert tuple(target.iterdir()) == ()
+    finally:
+        monkeypatch.setattr(supersession_module.sqlite3, "connect", original_connect)
+        if root.is_symlink() or root.exists():
+            root.unlink()
+        if backup.exists():
+            os.replace(backup, root)
+
+
 def test_database_path_substitution_during_connect_fails_closed(
     durable, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -738,7 +1138,7 @@ def test_database_path_substitution_during_connect_fails_closed(
 
     def substituting_connect(database, *args, **kwargs):
         nonlocal swapped
-        if Path(database) == ledger.database and not swapped:
+        if Path(database).name == ledger.database.name and not swapped:
             swapped = True
             os.replace(ledger.database, backup)
             original_connect(ledger.database).close()
@@ -786,6 +1186,7 @@ def test_resealed_historical_receipt_tamper_fails_after_correction(durable) -> N
             "UPDATE metadata SET value=? WHERE key='state_head_sha256'",
             (RecordSupersessionStore._state_head(connection),),
         )
+    connection.close()
     with pytest.raises(RecordSupersessionUnsafe, match="authority binding"):
         ledger.active_snapshot()
 
@@ -804,5 +1205,6 @@ def test_resealed_historical_receipt_tamper_fails_after_tombstone(durable) -> No
             "UPDATE metadata SET value=? WHERE key='state_head_sha256'",
             (RecordSupersessionStore._state_head(connection),),
         )
+    connection.close()
     with pytest.raises(RecordSupersessionUnsafe, match="authority binding"):
         ledger.active_snapshot()
