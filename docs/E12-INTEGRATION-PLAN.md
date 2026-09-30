@@ -1,6 +1,6 @@
 # E12 cohort/timepoint integration plan
 
-Status: implementation map at `4f3080e5355b9d4cb74e87c66078c964343da4f4`.
+Status: implementation map at `7df3ca834217c06c99dfdcae3f99885e0d8d949d`.
 This document is not qualification evidence and does not authorize release,
 export, provider operation, or clinical interpretation.
 
@@ -246,16 +246,14 @@ replacement, class/instance/private-state hooks, oversized inputs, concurrent
 bootstrap/read/save versus revoke, crash recovery, and absence of reader,
 provider and scope identifiers from every public byte, error, log and route.
 
-### D04 record-history prerequisite
+### D04 record-history dependency
 
-Current D04 `active_snapshot()` exposes active chain leaves and
-`comparison_status()` exposes comparison invalidation, but neither returns the
-authoritative superseded record history required by D08. Before D08 promises a
-superseded row, add a protected bounded API such as:
+Current main includes the reviewed protected bounded history API required by
+D08:
 
 ```python
 RecordSupersessionStore.record_history_snapshot(
-    *, after_record_id: str | None = None, limit: int = 100
+    *, cursor: RecordHistoryCursor | None = None, limit: int = 100
 ) -> RecordHistorySnapshot
 ```
 
@@ -275,14 +273,15 @@ state revalidation, and return. The API requires the exact store class, invokes
 captured unbound operations, accepts no callback or caller-authored snapshot,
 and fails with typed safe errors on authority advance or storage race.
 
-Focused D04 tests must cover exact 1,000-row success and 1,001/invalid-limit
+Focused D04 evidence covers exact 1,000-row success and 1,001/invalid-limit
 rejection, deterministic pagination, changed/missing/duplicate rows, broken
 source/successor edges, cycles, branches, stale linkage, tombstone, concurrent
 supersession, schema/index/row tamper, root/database replacement, class and
-instance shadows, Pydantic private/extra state, oversized graphs, cursor
-forgery, and seeded protected-token absence from any public projection or safe
-error. Until this API merges and passes exact-head review, D08 may show only
-active leaves and must label authoritative superseded history unavailable.
+instance shadows, Pydantic private/extra state, oversized graphs, non-forgeable
+store-keyed cursor authentication, rollback/reopen/backup behavior, and seeded
+protected-token absence from public projections and safe errors. D08 must still
+consume this API under the composite fence below rather than treating a prior
+snapshot as current authority.
 
 ### Composable authority-fence prerequisite
 
@@ -665,17 +664,15 @@ The first cut remains local, synthetic and release-disabled unless its named
 provider/scientific/governance gates separately pass. Documentation, a green
 source checkout, or a successful synthetic quickstart cannot claim those gates.
 
-## Current blockers
+## Remaining blockers
 
-At this baseline, implementing the builder would require accepting weaker
+At current main, implementing the builder would still require accepting weaker
 caller assertions and is therefore prohibited:
 
-- D06 on main accepts manifest sequences and does not bind the D05 registry ID,
-  epoch, state version/head, or selector. The active D06 correction adds those
-  fields and live reads but is unmerged.
-- D09 is unmerged and its exact review identified unsafe caller-owned model
-  hooks/private state. E12 must consume its corrected registry-bound summary,
-  not reproduce denominator logic.
+- The D06 live-registry and trust-fence correction is merged. Corrected D09 is
+  independently GREEN but remains unmerged while it is rebased and reverified
+  on this D04 main. E12 must consume that exact registry-bound D09 summary, not
+  reproduce denominator logic.
 - D10 is unmerged and currently labels its D09 input `declared_digest_only` with
   `live_d09_registry_verified=false`; it cannot be used as live D09 authority.
   It also requires an authority-backed D03 decision-to-outcome binding rather
@@ -687,9 +684,6 @@ caller assertions and is therefore prohibited:
   its composable read fence; and require live replay before every selector,
   builder, source-detail and save operation. A caller role string, local session
   alone, or checked-in synthetic grant cannot authorize non-synthetic access.
-- D04 lacks a bounded authoritative history/status read. `active_snapshot()`
-  returns leaves and `comparison_status()` returns invalidation only. The D04
-  history API above must merge before D08 promises superseded source rows.
 - Standalone numeric values require the applicable E07, E08, or E09 replayable
   artifact and the closed family adapter above, bound through the exact E04/E06
   source and requested D02 identity/coordinate. A measurement without that
@@ -716,8 +710,8 @@ caller assertions and is therefore prohibited:
   in-memory or filesystem artifact writing inside D08 cannot satisfy the Save
   and reopen journey.
 
-The merge order is D06 correction, D04 history API, corrected D09, corrected
-D10, protected reader-authorization registry plus B01 session binding,
+The remaining merge order is corrected D09, corrected D10, protected
+reader-authorization registry plus B01 session binding,
 protected D03/D07 decision/comparison discovery, protected anchor-policy
 and projection-policy registries, protected E06 result-view-source discovery,
 family-specific measurement-source adapters,
