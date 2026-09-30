@@ -11,8 +11,10 @@ is emitted only when all of these checks pass:
 
 1. The stored D03 decision replays exactly from the pinned anchor policy,
    current method authority, current provider-linkage trust, and the live D04
-   linkage-store receipt. D07 repeats that live replay immediately before any
-   numeric return so a concurrent linkage change fails closed.
+   linkage-store receipt. D07 holds a SQLite authority fence across the final
+   live replay and artifact construction, so a linkage writer cannot interleave
+   with a numeric return. The immutable result is valid as of that serialized
+   read; a consumer must replay it after any later linkage commit before use.
 2. D03 classifies the member as `equivalent` or `qualified_compatible`.
 3. Both observations are canonical result-authority-signed evidence receipts
    binding the exact D02 record, E05 result and bundle bytes, value, uncertainty
@@ -53,9 +55,12 @@ anchor-relative difference is outside the envelope.
 ## Privacy and replay
 
 Contracts are immutable, closed, versioned, bounded, canonically replayed, and
-then hashed. Canonical replay occurs at envelope, observation, evidence-receipt,
-comparison evaluation, and comparison digest boundaries, so unchecked
-`model_copy` mutations cannot create authority.
+then hashed. Exact no-hook collection, primitive, model-state, and global graph
+depth/node preflights reject oversized forged graphs, repeated container aliases,
+and cycles before serialization.
+Canonical replay occurs at envelope, observation, evidence-receipt, comparison
+evaluation, and comparison digest boundaries, so unchecked `model_copy`
+mutations cannot create authority.
 Controlled identifiers reject path-like and identity-bearing vocabulary. The
 comparison artifact binds the exact records, anchor policy, replayed D03
 decision, repeatability envelope, and evaluation time without carrying local

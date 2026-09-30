@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import threading
 from datetime import timedelta, tzinfo
 from typing import ClassVar
 
@@ -21,6 +22,10 @@ from evidence_inspector.longitudinal_compatibility import (
     longitudinal_record_sha256,
 )
 from evidence_inspector.method_registry import canonical_contract_bytes
+from evidence_inspector.provider_linkage_store import (
+    AuthorityTimeSource,
+    ProviderLinkageStore,
+)
 from evidence_inspector.repeatability_comparison import (
     ALL_REPEATABILITY_FACTORS,
     ComparisonAvailability,
@@ -923,6 +928,115 @@ def test_live_authority_is_replayed_again_after_signature_verification(
     assert calls == 2
 
 
+@pytest.mark.parametrize("mutation_point", ("post_replay", "result_entry"))
+def test_authority_fence_blocks_cross_store_commit_through_artifact_construction(
+    monkeypatch: pytest.MonkeyPatch,
+    mutation_point: str,
+) -> None:
+    anchor = _record("1")
+    member = _record("2")
+    unrelated = _record("3")
+    policy = _policy(anchor)
+    envelope = _envelope(anchor)
+    original_replay = repeatability_module.replay_longitudinal_member_decision
+    original_result = repeatability_module._result
+    with _activated_records(anchor, member) as (records, store):
+        active_anchor, active_member = records
+        second_store = ProviderLinkageStore(
+            store.root,
+            expected_trust_snapshot_sha256_by_provider={PROVIDER: TRUST_SHA256},
+            time_source=AuthorityTimeSource.fixed(NOW),
+        )
+        writer_started = threading.Event()
+        writer_done = threading.Event()
+        writer_errors: list[BaseException] = []
+        writer: threading.Thread | None = None
+
+        def commit_unrelated() -> None:
+            try:
+                writer_started.set()
+                assert unrelated.authorized_linkage is not None
+                second_store.commit_authorized_revision(unrelated.authorized_linkage)
+            except BaseException as error:
+                writer_errors.append(error)
+            finally:
+                writer_done.set()
+
+        def start_blocked_writer() -> None:
+            nonlocal writer
+            if writer is not None:
+                return
+            writer = threading.Thread(target=commit_unrelated)
+            writer.start()
+            assert writer_started.wait(5)
+            assert not writer_done.wait(0.2)
+
+        replay_calls = 0
+
+        def replay_with_barrier(*args: object, **kwargs: object):
+            nonlocal replay_calls
+            replayed = original_replay(*args, **kwargs)
+            replay_calls += 1
+            if mutation_point == "post_replay" and replay_calls == 2:
+                start_blocked_writer()
+            return replayed
+
+        def result_with_barrier(*args: object, **kwargs: object):
+            if mutation_point == "result_entry" and kwargs.get("available") is True:
+                start_blocked_writer()
+            return original_result(*args, **kwargs)
+
+        monkeypatch.setattr(
+            repeatability_module,
+            "replay_longitudinal_member_decision",
+            replay_with_barrier,
+        )
+        monkeypatch.setattr(repeatability_module, "_result", result_with_barrier)
+        arguments = _direct_arguments(policy, store, envelope)
+        decision = decide_longitudinal_member(
+            active_anchor,
+            active_member,
+            policy,
+            expected_policy_sha256=arguments["expected_policy_sha256"],
+            expected_authority_head_sha256=arguments["expected_authority_head_sha256"],
+            expected_linkage_trust_snapshot_sha256_by_provider=arguments[
+                "expected_linkage_trust_snapshot_sha256_by_provider"
+            ],
+            linkage_store=store,
+        )
+        result = compare_repeatability(
+            active_anchor,
+            active_member,
+            policy,
+            decision,
+            _observation(active_anchor, 0.5),
+            _observation(active_member, 0.55),
+            envelope,
+            **arguments,
+        )
+        assert writer is not None
+        assert writer_done.wait(5)
+        writer.join(5)
+        second_store.close()
+        assert not writer_errors
+        assert result.availability == ComparisonAvailability.AVAILABLE
+        with pytest.raises(LongitudinalDecisionReplayError, match="replay exactly"):
+            original_replay(
+                decision,
+                active_anchor,
+                active_member,
+                policy,
+                expected_policy_sha256=arguments["expected_policy_sha256"],
+                expected_authority_head_sha256=arguments[
+                    "expected_authority_head_sha256"
+                ],
+                expected_linkage_trust_snapshot_sha256_by_provider=arguments[
+                    "expected_linkage_trust_snapshot_sha256_by_provider"
+                ],
+                linkage_store=store,
+            )
+
+
 def test_result_trust_requires_independent_pin() -> None:
     anchor = _record("1")
     member = _record("2")
@@ -1125,8 +1239,176 @@ def test_result_trust_key_count_is_bounded_before_graph_traversal() -> None:
     oversized = RESULT_TRUST_DOCUMENT.model_copy(
         update={"keys": RESULT_TRUST_DOCUMENT.keys * 33}
     )
-    with pytest.raises(ValueError, match="key count"):
+    with pytest.raises(ValueError, match="exact bound"):
         result_trust_document_sha256(oversized)
+
+
+def test_maximum_valid_unique_result_trust_document_replays() -> None:
+    template = RESULT_TRUST_DOCUMENT.keys[0]
+    document = RESULT_TRUST_DOCUMENT.model_copy(
+        update={
+            "keys": tuple(
+                template.model_copy(update={"key_id": f"dev-result-{index:024x}"})
+                for index in range(32)
+            )
+        }
+    )
+
+    assert result_trust_document_sha256(document)
+
+
+def test_oversized_contract_collections_reject_before_graph_traversal(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    anchor = _record("1")
+    member = _record("2")
+    observation = _observation(anchor, 0.5)
+    oversized_evidence = observation.evidence.model_copy(
+        update={"conditions": observation.evidence.conditions * 25_000}
+    )
+    oversized_observation = observation.model_copy(
+        update={"evidence": oversized_evidence}
+    )
+    envelope = _envelope(anchor)
+    oversized_envelope = envelope.model_copy(
+        update={"factor_envelopes": envelope.factor_envelopes * 25_000}
+    )
+    outside = _compare(
+        anchor,
+        member,
+        _policy(anchor),
+        _decide(anchor, member, _policy(anchor)),
+        observation,
+        _observation(member, 0.55),
+        _envelope(anchor, limit=0.01),
+    )
+    oversized_comparisons = (
+        outside.model_copy(update={"reason_codes": outside.reason_codes * 100_000}),
+        outside.model_copy(
+            update={
+                "measurement_signing_key_ids": outside.measurement_signing_key_ids
+                * 100_000
+            }
+        ),
+        outside.model_copy(update={"factor_transition_sha256s": ("f" * 64,) * 100_000}),
+    )
+    graph_calls = 0
+
+    def unexpected_graph_traversal(root: object) -> bool:
+        nonlocal graph_calls
+        del root
+        graph_calls += 1
+        return True
+
+    monkeypatch.setattr(
+        repeatability_module,
+        "_contract_graph_is_trusted",
+        unexpected_graph_traversal,
+    )
+    oversized_contracts = (
+        (MeasurementEvidencePayload, oversized_evidence),
+        (ComparisonObservation, oversized_observation),
+        (RepeatabilityEnvelope, oversized_envelope),
+        *((type(outside), item) for item in oversized_comparisons),
+    )
+    for model, contract in oversized_contracts:
+        with pytest.raises(ValueError, match="exact bound"):
+            repeatability_module._replay_contract(model, contract)
+    assert graph_calls == 0
+
+
+def test_oversized_contract_graph_values_reject_before_serialization(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    observation = _observation(_record("1"), 0.5)
+    oversized_signature = observation.receipt.signature.model_copy(
+        update={"signature_base64": "A" * 10_000_000}
+    )
+    oversized_receipt = observation.receipt.model_copy(
+        update={"signature": oversized_signature}
+    )
+    assert observation.evidence.denominator is not None
+    oversized_denominator = observation.evidence.denominator.model_copy(
+        update={"total_count": 1 << 4_096}
+    )
+    oversized_integer = observation.evidence.model_copy(
+        update={"denominator": oversized_denominator}
+    )
+    oversized_unexpected_tuple = observation.receipt.model_copy(
+        update={"receipt_id": ("x",) * 100_000}
+    )
+
+    class PoisonStateKey:
+        hash_calls = 0
+
+        def __hash__(self) -> int:
+            self.hash_calls += 1
+            return 1
+
+    oversized_state = observation.receipt.model_copy()
+    poison_key = PoisonStateKey()
+    state = object.__getattribute__(oversized_state, "__dict__")
+    state[poison_key] = None
+    poison_key.hash_calls = 0
+    equal_length_state = observation.receipt.model_copy()
+    equal_poison_key = PoisonStateKey()
+    equal_state = object.__getattribute__(equal_length_state, "__dict__")
+    equal_state.pop("receipt_id")
+    equal_state[equal_poison_key] = None
+    equal_poison_key.hash_calls = 0
+    deeply_nested: object = "x"
+    for _ in range(100_000):
+        deeply_nested = (deeply_nested,)
+    oversized_depth = observation.receipt.model_copy(
+        update={"receipt_id": deeply_nested}
+    )
+    alias_dag: object = "x"
+    for _ in range(4):
+        alias_dag = (alias_dag,) * 32
+    oversized_alias_dag = observation.receipt.model_copy(
+        update={"receipt_id": alias_dag}
+    )
+    cyclic = observation.receipt.model_copy()
+    cyclic_state = object.__getattribute__(cyclic, "__dict__")
+    cyclic_state["signature"] = cyclic
+    original_graph_check = repeatability_module._contract_graph_is_trusted
+    graph_calls = 0
+    serializer_calls = 0
+
+    def counted_graph_check(root: object) -> bool:
+        nonlocal graph_calls
+        graph_calls += 1
+        return original_graph_check(root)
+
+    class UnexpectedSerializer:
+        def to_python(self, *args: object, **kwargs: object) -> object:
+            nonlocal serializer_calls
+            del args, kwargs
+            serializer_calls += 1
+            raise AssertionError("oversized primitive reached serialization")
+
+    monkeypatch.setattr(
+        repeatability_module,
+        "_contract_graph_is_trusted",
+        counted_graph_check,
+    )
+    serializer = UnexpectedSerializer()
+    for model, contract in (
+        (MeasurementEvidenceReceipt, oversized_receipt),
+        (MeasurementEvidencePayload, oversized_integer),
+        (MeasurementEvidenceReceipt, oversized_unexpected_tuple),
+        (MeasurementEvidenceReceipt, oversized_state),
+        (MeasurementEvidenceReceipt, equal_length_state),
+        (MeasurementEvidenceReceipt, oversized_depth),
+        (MeasurementEvidenceReceipt, oversized_alias_dag),
+        (MeasurementEvidenceReceipt, cyclic),
+    ):
+        with pytest.raises(TypeError, match="contract graph"):
+            repeatability_module._exact_contract_bytes(contract, model, serializer)
+    assert graph_calls == 8
+    assert serializer_calls == 0
+    assert poison_key.hash_calls == 0
+    assert equal_poison_key.hash_calls == 0
 
 
 def test_every_member_is_compared_to_anchor_not_adjacent_member() -> None:

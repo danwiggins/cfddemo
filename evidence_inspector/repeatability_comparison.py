@@ -37,6 +37,7 @@ from evidence_inspector.longitudinal_compatibility import (
     ComparisonDimension,
     DimensionValueState,
     LongitudinalAnchorPolicy,
+    LongitudinalDecisionReplayError,
     LongitudinalMemberDecision,
     LongitudinalOutcome,
     LongitudinalRecord,
@@ -67,6 +68,12 @@ from traceback_runner.signing import (
 
 MAX_FACTORS = 4
 MAX_RESULT_TRUST_KEYS = 32
+MAX_CONTRACT_PRIMITIVE_LENGTH = 4_096
+MAX_CONTRACT_INTEGER_ABSOLUTE = (1 << 63) - 1
+MAX_CONTRACT_TUPLE_LENGTH = 32
+MAX_CONTRACT_GRAPH_NODES = 4_096
+MAX_CONTRACT_GRAPH_DEPTH = 64
+_PINNED_AUTHORITY_READ_FENCE = ProviderLinkageStore.authority_read_fence
 
 
 def _reject_private_token(value: str) -> str:
@@ -492,11 +499,30 @@ _TRUSTED_ENUM_TYPES = frozenset(
 def _contract_graph_is_trusted(root: object) -> bool:
     """Reject caller-controlled nested objects without invoking their hooks."""
 
-    stack = [root]
+    stack = [(root, 0)]
     seen: set[int] = set()
+    visited_nodes = 0
     while stack:
-        value = stack.pop()
-        if value is None or type(value) in {bool, int, float, str, bytes}:
+        value, depth = stack.pop()
+        visited_nodes += 1
+        if visited_nodes > MAX_CONTRACT_GRAPH_NODES or depth > MAX_CONTRACT_GRAPH_DEPTH:
+            return False
+        if value is None or type(value) in {bool, float}:
+            continue
+        if type(value) in {str, bytes}:
+            if len(value) > MAX_CONTRACT_PRIMITIVE_LENGTH:
+                return False
+            continue
+        if type(value) is int:
+            if (
+                not -MAX_CONTRACT_INTEGER_ABSOLUTE
+                <= value
+                <= MAX_CONTRACT_INTEGER_ABSOLUTE
+            ):
+                return False
+            continue
+        value_type = type(value)
+        if value_type in _TRUSTED_ENUM_TYPES or (value_type is tuple and not value):
             continue
         if type(value) is datetime:
             timezone = object.__getattribute__(value, "tzinfo")
@@ -507,9 +533,8 @@ def _contract_graph_is_trusted(root: object) -> bool:
             return False
         identity = id(value)
         if identity in seen:
-            continue
+            return False
         seen.add(identity)
-        value_type = type(value)
         if value_type in _TRUSTED_CONTRACT_TYPES:
             try:
                 state = object.__getattribute__(value, "__dict__")
@@ -519,16 +544,17 @@ def _contract_graph_is_trusted(root: object) -> bool:
             if (
                 type(state) is not dict
                 or type(fields) is not dict
+                or len(state) != len(fields)
                 or any(type(key) is not str for key in state)
-                or not set(fields) <= set(state)
+                or state.keys() != fields.keys()
             ):
                 return False
-            stack.extend(state[name] for name in fields)
-            continue
-        if value_type in _TRUSTED_ENUM_TYPES:
+            stack.extend((state[name], depth + 1) for name in fields)
             continue
         if type(value) is tuple:
-            stack.extend(value)
+            if len(value) > MAX_CONTRACT_TUPLE_LENGTH:
+                return False
+            stack.extend((item, depth + 1) for item in value)
             continue
         return False
     return True
@@ -550,13 +576,44 @@ _CONTRACT_CODECS = MappingProxyType(
     }
 )
 
+_COLLECTION_BOUNDS = MappingProxyType(
+    {
+        ComparisonObservation: (("evidence.conditions", MAX_FACTORS, MAX_FACTORS),),
+        DevelopmentTrustDocument: (("keys", 1, MAX_RESULT_TRUST_KEYS),),
+        MeasurementEvidencePayload: (("conditions", MAX_FACTORS, MAX_FACTORS),),
+        RepeatabilityComparison: (
+            ("reason_codes", 1, 4),
+            ("measurement_signing_key_ids", 0, 2),
+            ("factor_transition_sha256s", 0, MAX_FACTORS),
+        ),
+        RepeatabilityEnvelope: (("factor_envelopes", MAX_FACTORS, MAX_FACTORS),),
+    }
+)
+
+
+def _preflight_collection_bounds(contract: object, expected_type: type[object]) -> None:
+    if type(contract) is not expected_type:
+        raise TypeError("repeatability contract type is invalid")
+    for dotted_path, minimum, maximum in _COLLECTION_BOUNDS.get(expected_type, ()):
+        current = contract
+        for name in dotted_path.split("."):
+            state = object.__getattribute__(current, "__dict__")
+            if type(state) is not dict or name not in state:
+                raise TypeError("repeatability contract collection is invalid")
+            current = state[name]
+        if type(current) is not tuple or not minimum <= len(current) <= maximum:
+            raise ValueError(
+                f"repeatability contract {dotted_path} exceeds its exact bound"
+            )
+
 
 def _exact_contract_bytes(
     contract: object,
     expected_type: type[object],
     serializer: object,
 ) -> bytes:
-    if type(contract) is not expected_type or not _contract_graph_is_trusted(contract):
+    _preflight_collection_bounds(contract, expected_type)
+    if not _contract_graph_is_trusted(contract):
         raise TypeError("repeatability contract graph is invalid")
     payload = serializer.to_python(  # type: ignore[attr-defined]
         contract,
@@ -611,12 +668,7 @@ def measurement_evidence_receipt_signing_bytes(
 def _bounded_result_trust_document(
     document: object,
 ) -> DevelopmentTrustDocument:
-    if type(document) is not DevelopmentTrustDocument:
-        raise TypeError("result trust document type is invalid")
-    state = object.__getattribute__(document, "__dict__")
-    keys = state.get("keys") if type(state) is dict else None
-    if type(keys) is not tuple or not 1 <= len(keys) <= MAX_RESULT_TRUST_KEYS:
-        raise ValueError("result trust document key count is invalid")
+    _preflight_collection_bounds(document, DevelopmentTrustDocument)
     return _replay_contract(DevelopmentTrustDocument, document)
 
 
@@ -1126,44 +1178,52 @@ def compare_repeatability(
                 )
             ).hexdigest()
         )
-    decision = replay_longitudinal_member_decision(
-        decision,
-        anchor,
-        member,
-        policy,
-        expected_policy_sha256=expected_policy_sha256,
-        expected_authority_head_sha256=expected_authority_head_sha256,
-        expected_linkage_trust_snapshot_sha256_by_provider=(
-            expected_linkage_trust_snapshot_sha256_by_provider
-        ),
-        linkage_store=linkage_store,
-    )
-    common["decision"] = decision
-    assert anchor_observation.evidence.value is not None
-    assert member_observation.evidence.value is not None
-    delta = member_observation.evidence.value - anchor_observation.evidence.value
-    if delta == 0.0:
+    if (
+        type(linkage_store) is not ProviderLinkageStore
+        or ProviderLinkageStore.authority_read_fence is not _PINNED_AUTHORITY_READ_FENCE
+    ):
+        raise LongitudinalDecisionReplayError(
+            "repeatability publication requires an exact live authority fence"
+        )
+    with _PINNED_AUTHORITY_READ_FENCE(linkage_store):
+        decision = replay_longitudinal_member_decision(
+            decision,
+            anchor,
+            member,
+            policy,
+            expected_policy_sha256=expected_policy_sha256,
+            expected_authority_head_sha256=expected_authority_head_sha256,
+            expected_linkage_trust_snapshot_sha256_by_provider=(
+                expected_linkage_trust_snapshot_sha256_by_provider
+            ),
+            linkage_store=linkage_store,
+        )
+        common["decision"] = decision
+        assert anchor_observation.evidence.value is not None
+        assert member_observation.evidence.value is not None
+        delta = member_observation.evidence.value - anchor_observation.evidence.value
+        if delta == 0.0:
+            return _result(
+                **common,
+                classification=RepeatabilityClassification.EXACT_SAME_VALUE,
+                reasons={RepeatabilityReason.EXACT_SAME_VALUE},
+                available=True,
+                factor_transition_sha256s=tuple(transition_sha256s),
+            )
+        if abs(delta) <= envelope.maximum_absolute_delta:
+            return _result(
+                **common,
+                classification=RepeatabilityClassification.NOISY_WITHIN_ENVELOPE,
+                reasons={RepeatabilityReason.WITHIN_PREAPPROVED_ENVELOPE},
+                available=True,
+                factor_transition_sha256s=tuple(transition_sha256s),
+            )
         return _result(
             **common,
-            classification=RepeatabilityClassification.EXACT_SAME_VALUE,
-            reasons={RepeatabilityReason.EXACT_SAME_VALUE},
-            available=True,
-            factor_transition_sha256s=tuple(transition_sha256s),
+            classification=RepeatabilityClassification.OUTSIDE_ENVELOPE,
+            reasons={RepeatabilityReason.OUTSIDE_PREAPPROVED_ENVELOPE},
+            available=False,
         )
-    if abs(delta) <= envelope.maximum_absolute_delta:
-        return _result(
-            **common,
-            classification=RepeatabilityClassification.NOISY_WITHIN_ENVELOPE,
-            reasons={RepeatabilityReason.WITHIN_PREAPPROVED_ENVELOPE},
-            available=True,
-            factor_transition_sha256s=tuple(transition_sha256s),
-        )
-    return _result(
-        **common,
-        classification=RepeatabilityClassification.OUTSIDE_ENVELOPE,
-        reasons={RepeatabilityReason.OUTSIDE_PREAPPROVED_ENVELOPE},
-        available=False,
-    )
 
 
 __all__ = [

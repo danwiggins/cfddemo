@@ -1217,7 +1217,11 @@ class ProviderLinkageStore:
         with connect_store(self) as connection:
             trust_pins = dict(self._trust_pins)
             evaluated_at, authority_time_floor = capture_store_now(self, connection)
-            connection.execute("BEGIN")
+            nested_transaction = connection.in_transaction
+            if nested_transaction:
+                connection.execute("SAVEPOINT active_snapshot")
+            else:
+                connection.execute("BEGIN")
             try:
                 require_authority_time_floor(connection, authority_time_floor)
                 records = validate_committed_state(self, connection)
@@ -1287,8 +1291,36 @@ class ProviderLinkageStore:
                         for item in revisions
                     ),
                 )
-                connection.commit()
+                if nested_transaction:
+                    connection.execute("RELEASE SAVEPOINT active_snapshot")
+                else:
+                    connection.commit()
                 return snapshot
+            except BaseException:
+                if nested_transaction:
+                    connection.execute("ROLLBACK TO SAVEPOINT active_snapshot")
+                    connection.execute("RELEASE SAVEPOINT active_snapshot")
+                else:
+                    connection.rollback()
+                raise
+
+    @contextmanager
+    def authority_read_fence(self) -> Iterator[None]:
+        """Hold one validated SQLite write fence across an authority-bound read."""
+
+        connect_store = _PINNED_CONNECT
+        validate_committed_state = _PINNED_VALIDATE_COMMITTED_STATE
+        with connect_store(self) as connection:
+            if connection.in_transaction:
+                raise ProviderLinkageStoreUnsafe(
+                    "linkage store authority fence requires an idle connection"
+                )
+            connection.execute("BEGIN IMMEDIATE")
+            try:
+                validate_committed_state(self, connection)
+                yield
+                validate_committed_state(self, connection)
+                connection.commit()
             except BaseException:
                 connection.rollback()
                 raise
@@ -1403,7 +1435,11 @@ def _capture_pinned_store_now(
     store: ProviderLinkageStore,
     connection: sqlite3.Connection,
 ) -> tuple[datetime, str]:
-    connection.execute("BEGIN IMMEDIATE")
+    nested_transaction = connection.in_transaction
+    if nested_transaction:
+        connection.execute("SAVEPOINT capture_store_now")
+    else:
+        connection.execute("BEGIN IMMEDIATE")
     try:
         row = connection.execute(
             "SELECT value FROM metadata WHERE key='authority_time_floor'"
@@ -1500,9 +1536,16 @@ def _capture_pinned_store_now(
             raise ProviderLinkageStoreUnsafe(
                 "linkage store authority time changed during capture"
             )
-        connection.commit()
+        if nested_transaction:
+            connection.execute("RELEASE SAVEPOINT capture_store_now")
+        else:
+            connection.commit()
     except BaseException as error:
-        connection.rollback()
+        if nested_transaction:
+            connection.execute("ROLLBACK TO SAVEPOINT capture_store_now")
+            connection.execute("RELEASE SAVEPOINT capture_store_now")
+        else:
+            connection.rollback()
         if isinstance(error, ProviderLinkageStoreError):
             raise
         if isinstance(error, sqlite3.DatabaseError):
@@ -1558,6 +1601,8 @@ _PROCESS_INTEGRITY_FUNCTIONS = (
     ProviderLinkageStore.commit_authorized_revision,
     ProviderLinkageStore._validate_current_authority,
     ProviderLinkageStore.active_snapshot,
+    ProviderLinkageStore.authority_read_fence,
+    ProviderLinkageStore.authority_read_fence.__wrapped__,
 )
 _PROCESS_INTEGRITY_FUNCTION_STATES = tuple(
     (
@@ -1649,6 +1694,8 @@ def provider_linkage_store_process_integrity_is_valid() -> bool:
                 ProviderLinkageStore.commit_authorized_revision,
                 ProviderLinkageStore._validate_current_authority,
                 ProviderLinkageStore.active_snapshot,
+                ProviderLinkageStore.authority_read_fence,
+                ProviderLinkageStore.authority_read_fence.__wrapped__,
             )
             and observed_function_states == _PROCESS_INTEGRITY_FUNCTION_STATES
             and _PINNED_AUTHORITY_TIME_SOURCE_READ is AuthorityTimeSource.read
