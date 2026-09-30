@@ -27,6 +27,17 @@ from traceback_runner.web.contracts import (
 )
 
 
+class _StaticSource:
+    def __init__(self, jobs: tuple[JobProjection, ...]) -> None:
+        self.jobs = {job.job_id: job for job in jobs}
+
+    def list_jobs(self) -> tuple[JobProjection, ...]:
+        return tuple(self.jobs[key] for key in sorted(self.jobs))
+
+    def get_job(self, job_id: str) -> JobProjection:
+        return self.jobs[job_id]
+
+
 def _problem() -> ProblemDetail:
     return ProblemDetail(
         code="TBX-WEB-404",
@@ -161,6 +172,8 @@ def test_credential_strength_ttl_attempts_and_session_count_are_bounded(
         {"session_ttl_seconds": 86_401},
         {"max_active_sessions": 257},
         {"token_attempt_limit": 17},
+        {"exchange_window_seconds": 301},
+        {"max_exchange_attempts": 65},
     ):
         with pytest.raises(ValueError):
             BootstrapBroker(**kwargs)
@@ -176,6 +189,19 @@ def test_credential_strength_ttl_attempts_and_session_count_are_bounded(
     with pytest.raises(BoundaryDenied) as capacity:
         boundary.exchange_bootstrap(_exchange_request(), second)
     assert capacity.value.code == "TBX-AUTH-004"
+
+    limited = BootstrapBroker(now=lambda: 100.0, max_exchange_attempts=1)
+    limited_boundary = LocalWebBoundary(build_loopback_config(port=8765), limited)
+    invalid = limited_boundary.issue_bootstrap()
+    with pytest.raises(BoundaryDenied):
+        limited_boundary.exchange_bootstrap(_exchange_request(), invalid + "x")
+    valid = limited_boundary.issue_bootstrap()
+    with pytest.raises(BoundaryDenied) as throttled:
+        limited_boundary.exchange_bootstrap(_exchange_request(), valid)
+    assert (throttled.value.status_code, throttled.value.code) == (
+        429,
+        "TBX-AUTH-005",
+    )
 
 
 def test_missing_session_cross_origin_host_and_csrf_fail_closed() -> None:
@@ -270,7 +296,7 @@ def test_authorization_precedes_guessed_object_lookup() -> None:
     boundary, broker = _boundary()
     kernel = LocalApiKernel(
         boundary=boundary,
-        jobs=(_job(),),
+        source=_StaticSource((_job(),)),
         not_found_problem=_problem(),
     )
     guessed_id = "job_ffffffffffffffff"
