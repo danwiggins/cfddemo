@@ -798,6 +798,146 @@ def test_provider_linkage_must_bind_measurement_and_authority_projection() -> No
         )
 
 
+def test_activation_receipt_binds_exact_signed_linkage_proof() -> None:
+    record = _record("1")
+    with _activated_records(record) as (activated, _):
+        current = activated[0]
+        alternate, _ = _consume(
+            record.linkage_revision,
+            (_create_approval(record.linkage_revision, "f"),),
+        )
+        payload = current.model_dump(mode="python")
+        payload["authorized_linkage"] = alternate
+        with pytest.raises(ValidationError, match="exact signed linkage proof"):
+            LongitudinalRecord.model_validate(payload)
+
+
+@pytest.mark.parametrize(
+    "shadowed_method", ("verify_current_receipt", "active_snapshot")
+)
+def test_exact_store_instance_method_shadow_cannot_bypass_authority(
+    shadowed_method: str,
+) -> None:
+    anchor = _record("1")
+    member = _record("2")
+    policy = _policy(anchor)
+    with _activated_records(anchor, member) as (records, store):
+        setattr(store, shadowed_method, lambda *_: None)
+        decision = decide_longitudinal_member(
+            records[0],
+            records[1],
+            policy,
+            expected_policy_sha256=longitudinal_anchor_policy_sha256(policy),
+            expected_authority_head_sha256=HEAD_SHA256,
+            expected_linkage_trust_snapshot_sha256_by_provider={PROVIDER: TRUST_SHA256},
+            linkage_store=store,
+        )
+
+    assert decision.outcome == LongitudinalOutcome.UNKNOWN
+    assert not decision.delta_allowed
+    assert not decision.connecting_trend_allowed
+    assert LongitudinalReason.LINKAGE_AUTHORITY_INVALID in decision.reason_codes
+
+
+def test_decision_boundary_replays_every_nested_record_binding() -> None:
+    anchor = _record("1")
+    member = _record("2")
+    policy = _policy(anchor)
+    with _activated_records(anchor, member) as (records, store):
+        active_anchor, active_member = records
+        measurement = active_member.measurement
+        alternate_proof, _ = _consume(
+            active_member.linkage_revision,
+            (_create_approval(active_member.linkage_revision, "f"),),
+        )
+        mutations = (
+            active_member.model_copy(
+                update={
+                    "measurement": measurement.model_copy(
+                        update={"result_sha256": "f" * 64}
+                    )
+                }
+            ),
+            active_member.model_copy(
+                update={
+                    "measurement": measurement.model_copy(
+                        update={"bundle_sha256": "f" * 64}
+                    )
+                }
+            ),
+            active_member.model_copy(
+                update={
+                    "comparison_key": active_member.comparison_key.model_copy(
+                        update={"result_sha256": "f" * 64}
+                    )
+                }
+            ),
+            active_member.model_copy(
+                update={
+                    "measurement": measurement.model_copy(
+                        update={"method": _method(alternate=True)}
+                    )
+                }
+            ),
+            active_member.model_copy(
+                update={
+                    "measurement": measurement.model_copy(
+                        update={
+                            "method": measurement.method.model_copy(
+                                update={"quantity_id": "qty_fragment_count"}
+                            )
+                        }
+                    )
+                }
+            ),
+            active_member.model_copy(
+                update={
+                    "measurement": measurement.model_copy(
+                        update={
+                            "method": measurement.method.model_copy(
+                                update={"unit": "unit_count"}
+                            )
+                        }
+                    )
+                }
+            ),
+            active_member.model_copy(
+                update={
+                    "measurement": measurement.model_copy(
+                        update={
+                            "current_capability": measurement.current_capability.model_copy(
+                                update={"authority_head_sha256": "f" * 64}
+                            )
+                        }
+                    )
+                }
+            ),
+            active_member.model_copy(update={"authorized_linkage": alternate_proof}),
+        )
+        decisions = tuple(
+            decide_longitudinal_member(
+                active_anchor,
+                mutated,
+                policy,
+                expected_policy_sha256=longitudinal_anchor_policy_sha256(policy),
+                expected_authority_head_sha256=HEAD_SHA256,
+                expected_linkage_trust_snapshot_sha256_by_provider={
+                    PROVIDER: TRUST_SHA256
+                },
+                linkage_store=store,
+            )
+            for mutated in mutations
+        )
+
+    assert all(item.outcome == LongitudinalOutcome.UNKNOWN for item in decisions)
+    assert all(not item.delta_allowed for item in decisions)
+    assert all(not item.connecting_trend_allowed for item in decisions)
+    assert all(
+        LongitudinalReason.RESULT_STATE_INVALID in item.reason_codes
+        for item in decisions
+    )
+
+
 def test_stale_policy_wrong_subject_and_mixed_dispositions_fail_closed() -> None:
     anchor = _record("1")
     member = _record("2")

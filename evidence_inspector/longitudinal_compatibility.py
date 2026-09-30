@@ -270,8 +270,14 @@ class LongitudinalRecord(CompatibilityContract):
                 or receipt.revision != self.linkage_revision.revision
                 or receipt.linkage_revision_sha256
                 != linkage_revision_sha256(self.linkage_revision)
+                or receipt.authorized_record_sha256
+                != hashlib.sha256(
+                    canonical_contract_bytes(self.authorized_linkage)
+                ).hexdigest()
             ):
-                raise ValueError("activation receipt does not bind exact linkage")
+                raise ValueError(
+                    "activation receipt does not bind exact signed linkage proof"
+                )
         self._validate_overlapping_e05_dimensions()
         return self
 
@@ -652,6 +658,17 @@ def longitudinal_member_decision_sha256(
     return hashlib.sha256(canonical_contract_bytes(decision)).hexdigest()
 
 
+def _longitudinal_record_invalid(record: LongitudinalRecord) -> bool:
+    """Replay every nested binding instead of trusting an existing model instance."""
+
+    try:
+        encoded = canonical_contract_bytes(record)
+        replayed = LongitudinalRecord.model_validate_json(encoded)
+    except (AttributeError, TypeError, ValueError):
+        return True
+    return canonical_contract_bytes(replayed) != encoded
+
+
 def _linkage_authority_invalid(
     record: LongitudinalRecord,
     *,
@@ -671,13 +688,14 @@ def _linkage_authority_invalid(
         or expected_trust is None
         or provider_trust_snapshot_sha256(authorized.trust_snapshot) != expected_trust
         or not authorized.authorization.linkage_authorized
+        or any(name in ProviderLinkageStore.__dict__ for name in vars(linkage_store))
     )
     if invalid:
         return True
     assert receipt is not None
     assert type(linkage_store) is ProviderLinkageStore
     try:
-        linkage_store.verify_current_receipt(receipt)
+        ProviderLinkageStore.verify_current_receipt(linkage_store, receipt)
     except ProviderLinkageStoreError:
         return True
     return False
@@ -721,6 +739,9 @@ def decide_longitudinal_member(
     evidence: set[str] = set()
     bridges: set[str] = set()
     dispositions: set[LongitudinalOutcome] = set()
+
+    if _longitudinal_record_invalid(anchor) or _longitudinal_record_invalid(member):
+        reasons.add(LongitudinalReason.RESULT_STATE_INVALID)
 
     if policy_sha256 != expected_policy_sha256:
         reasons.add(LongitudinalReason.POLICY_IDENTITY_INVALID)
