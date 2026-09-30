@@ -48,6 +48,45 @@ StoreId = Annotated[str, StringConstraints(pattern=r"^store_[0-9a-f]{32}$")]
 _STORE_ID = TypeAdapter(StoreId)
 
 
+def _capture_expected_trust_pins(
+    value: Mapping[str, str],
+) -> dict[str, str]:
+    """Capture one bounded mapping pass without trusting its size or views."""
+
+    try:
+        iterator = iter(value)
+    except Exception:  # noqa: BLE001 - normalize hostile mapping hooks
+        raise ProviderLinkageStoreUnsafe("provider trust pins are invalid") from None
+    captured: dict[str, str] = {}
+    try:
+        for index in range(MAX_PROVIDER_TRUST_PINS + 1):
+            try:
+                raw_provider = next(iterator)
+            except StopIteration:
+                break
+            if index == MAX_PROVIDER_TRUST_PINS:
+                raise ProviderLinkageStoreUnsafe("provider trust pin count is invalid")
+            if type(raw_provider) is not str:
+                raise ProviderLinkageStoreUnsafe("provider trust pins are invalid")
+            provider = _PROVIDER_NAMESPACE.validate_python(raw_provider, strict=True)
+            if provider != raw_provider or provider in captured:
+                raise ProviderLinkageStoreUnsafe("provider trust pins are invalid")
+            raw_digest = value[raw_provider]
+            if type(raw_digest) is not str:
+                raise ProviderLinkageStoreUnsafe("provider trust pins are invalid")
+            digest = _SHA256.validate_python(raw_digest, strict=True)
+            if digest != raw_digest:
+                raise ProviderLinkageStoreUnsafe("provider trust pins are invalid")
+            captured[provider] = digest
+    except ProviderLinkageStoreUnsafe:
+        raise
+    except Exception:  # noqa: BLE001 - normalize hostile mapping hooks
+        raise ProviderLinkageStoreUnsafe("provider trust pins are invalid") from None
+    if not captured:
+        raise ProviderLinkageStoreUnsafe("provider trust pins are required")
+    return captured
+
+
 class ProviderLinkageStoreError(RuntimeError):
     """Sanitized protected-store failure."""
 
@@ -326,12 +365,9 @@ class ProviderLinkageStore:
             selected_time_source = time_source
         else:
             raise ProviderLinkageStoreUnsafe("authority time source type is invalid")
-        if not (
-            0
-            < len(expected_trust_snapshot_sha256_by_provider)
-            <= MAX_PROVIDER_TRUST_PINS
-        ):
-            raise ProviderLinkageStoreUnsafe("provider trust pins are required")
+        trust_pins = _capture_expected_trust_pins(
+            expected_trust_snapshot_sha256_by_provider
+        )
         requested_root = Path(root)
         if not requested_root.is_absolute():
             raise ProviderLinkageStoreUnsafe("linkage store root must be absolute")
@@ -366,17 +402,7 @@ class ProviderLinkageStore:
         self._sqlite_database_fd: int | None = None
         self._connection: sqlite3.Connection | None = None
         self._lock = threading.RLock()
-        try:
-            self._trust_pins = {
-                _PROVIDER_NAMESPACE.validate_python(provider): _SHA256.validate_python(
-                    digest
-                )
-                for provider, digest in expected_trust_snapshot_sha256_by_provider.items()
-            }
-        except ValueError:
-            raise ProviderLinkageStoreUnsafe(
-                "provider trust pins are invalid"
-            ) from None
+        self._trust_pins = trust_pins
         self._time_source = selected_time_source
         _register_store_time_source(self, self._time_source)
         try:

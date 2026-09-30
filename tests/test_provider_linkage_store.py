@@ -5,6 +5,7 @@ from __future__ import annotations
 import base64
 import os
 import sqlite3
+from collections.abc import Iterator, Mapping
 from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timedelta
 from multiprocessing import get_all_start_methods, get_context
@@ -76,6 +77,80 @@ def test_detected_module_tamper_is_explicit_process_integrity_failure() -> None:
 
 def _pins() -> dict[str, str]:
     return {PROVIDER: provider_trust_snapshot_sha256(_trust())}
+
+
+class _OnePassPins(Mapping[str, str]):
+    def __init__(self, pairs: tuple[tuple[str, str], ...], *, length: object) -> None:
+        self._pairs = list(pairs)
+        self._length = length
+        self.iter_calls = 0
+        self.get_calls = 0
+        self.len_calls = 0
+        self.items_calls = 0
+
+    def __iter__(self) -> Iterator[str]:
+        self.iter_calls += 1
+        if self.iter_calls != 1:
+            raise AssertionError("trust mapping was reiterated")
+        return iter(tuple(key for key, _ in self._pairs))
+
+    def __getitem__(self, key: str) -> str:
+        self.get_calls += 1
+        for index, (candidate, value) in enumerate(self._pairs):
+            if candidate == key:
+                self._pairs.pop(index)
+                return value
+        raise KeyError(key)
+
+    def __len__(self) -> int:
+        self.len_calls += 1
+        if isinstance(self._length, BaseException):
+            raise self._length
+        assert type(self._length) is int
+        return self._length
+
+    def items(self) -> object:
+        self.items_calls += 1
+        raise AssertionError("trust mapping items view was accessed")
+
+
+class _OverlongPins(Mapping[str, str]):
+    def __init__(self) -> None:
+        self.yielded = 0
+        self.get_calls = 0
+        self.len_calls = 0
+
+    def __iter__(self) -> Iterator[str]:
+        index = 0
+        while True:
+            self.yielded += 1
+            yield f"provider_{index:032x}"
+            index += 1
+
+    def __getitem__(self, key: str) -> str:
+        self.get_calls += 1
+        return "a" * 64
+
+    def __len__(self) -> int:
+        self.len_calls += 1
+        raise AssertionError("overlong mapping length was accessed")
+
+
+class _DuplicatePins(Mapping[str, str]):
+    def __init__(self, values: tuple[str, str]) -> None:
+        self._values = values
+        self.get_calls = 0
+
+    def __iter__(self) -> Iterator[str]:
+        return iter((PROVIDER, PROVIDER))
+
+    def __getitem__(self, key: str) -> str:
+        value = self._values[self.get_calls]
+        self.get_calls += 1
+        return value
+
+    def __len__(self) -> int:
+        raise AssertionError("duplicate mapping length was accessed")
 
 
 def _store(root: Path) -> ProviderLinkageStore:
@@ -924,6 +999,111 @@ def test_invalid_trust_pin_or_time_source_is_rejected(tmp_path: Path) -> None:
         )
     with pytest.raises(ProviderLinkageStoreUnsafe, match="time source is invalid"):
         AuthorityTimeSource.fixed(NOW.replace(tzinfo=None))
+
+
+@pytest.mark.parametrize("reported_length", (0, 10_000, RuntimeError("unused")))
+def test_trust_pin_capture_ignores_caller_length_and_items_views(
+    tmp_path: Path,
+    reported_length: object,
+) -> None:
+    pins = _OnePassPins(tuple(_pins().items()), length=reported_length)
+    with ProviderLinkageStore(
+        tmp_path / f"one-pass-{type(reported_length).__name__}-{reported_length!s}",
+        expected_trust_snapshot_sha256_by_provider=pins,
+        time_source=AuthorityTimeSource.fixed(NOW),
+    ) as store:
+        assert store.active_snapshot().state_version == 0
+    assert pins.iter_calls == 1
+    assert pins.get_calls == 1
+    assert pins.len_calls == 0
+    assert pins.items_calls == 0
+
+
+def test_overlong_trust_pin_iterator_stops_at_max_plus_one_without_root(
+    tmp_path: Path,
+) -> None:
+    pins = _OverlongPins()
+    root = tmp_path / "overlong-pins"
+    with pytest.raises(ProviderLinkageStoreUnsafe, match="pin count"):
+        ProviderLinkageStore(
+            root,
+            expected_trust_snapshot_sha256_by_provider=pins,
+            time_source=AuthorityTimeSource.fixed(NOW),
+        )
+    assert pins.yielded == linkage_store_module.MAX_PROVIDER_TRUST_PINS + 1
+    assert pins.get_calls == linkage_store_module.MAX_PROVIDER_TRUST_PINS
+    assert pins.len_calls == 0
+    assert not root.exists()
+
+
+@pytest.mark.parametrize("conflicting", (False, True))
+def test_duplicate_or_conflicting_trust_pin_iteration_is_rejected(
+    tmp_path: Path,
+    conflicting: bool,
+) -> None:
+    first = "a" * 64
+    pins = _DuplicatePins((first, "b" * 64 if conflicting else first))
+    root = tmp_path / f"duplicate-pins-{conflicting}"
+    with pytest.raises(ProviderLinkageStoreUnsafe, match="pins are invalid"):
+        ProviderLinkageStore(
+            root,
+            expected_trust_snapshot_sha256_by_provider=pins,
+            time_source=AuthorityTimeSource.fixed(NOW),
+        )
+    assert pins.get_calls == 1
+    assert not root.exists()
+
+
+@pytest.mark.parametrize("subclass_field", ("provider", "digest"))
+def test_trust_pin_capture_requires_exact_string_types_without_root(
+    tmp_path: Path,
+    subclass_field: str,
+) -> None:
+    class StringSubclass(str):
+        pass
+
+    provider = StringSubclass(PROVIDER) if subclass_field == "provider" else PROVIDER
+    digest: str = "a" * 64
+    if subclass_field == "digest":
+        digest = StringSubclass(digest)
+    root = tmp_path / f"subclass-{subclass_field}"
+    with pytest.raises(ProviderLinkageStoreUnsafe, match="pins are invalid"):
+        ProviderLinkageStore(
+            root,
+            expected_trust_snapshot_sha256_by_provider={provider: digest},
+            time_source=AuthorityTimeSource.fixed(NOW),
+        )
+    assert not root.exists()
+
+
+@pytest.mark.parametrize("count", (1, linkage_store_module.MAX_PROVIDER_TRUST_PINS))
+def test_exact_dict_trust_pin_boundaries_are_accepted(
+    tmp_path: Path,
+    count: int,
+) -> None:
+    pins = {f"provider_{index:032x}": f"{index + 1:064x}" for index in range(count)}
+    with ProviderLinkageStore(
+        tmp_path / f"exact-pins-{count}",
+        expected_trust_snapshot_sha256_by_provider=pins,
+        time_source=AuthorityTimeSource.fixed(NOW),
+    ) as store:
+        assert len(store._trust_pins) == count  # type: ignore[attr-defined]
+
+
+@pytest.mark.parametrize("count", (0, linkage_store_module.MAX_PROVIDER_TRUST_PINS + 1))
+def test_exact_dict_trust_pin_out_of_bounds_has_no_root(
+    tmp_path: Path,
+    count: int,
+) -> None:
+    pins = {f"provider_{index:032x}": f"{index + 1:064x}" for index in range(count)}
+    root = tmp_path / f"invalid-exact-pins-{count}"
+    with pytest.raises(ProviderLinkageStoreUnsafe, match="trust pin"):
+        ProviderLinkageStore(
+            root,
+            expected_trust_snapshot_sha256_by_provider=pins,
+            time_source=AuthorityTimeSource.fixed(NOW),
+        )
+    assert not root.exists()
 
 
 def test_time_source_subclass_is_rejected_without_object_execution(
