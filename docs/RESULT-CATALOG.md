@@ -87,6 +87,13 @@ keyset cursors, and a maximum page size of 100. Empty pages distinguish an empty
 catalog from a filtered query with no matches using a bounded existence probe,
 not a full-table count.
 
+Exact-ID live reads use the same visibility rule as catalog pages: a
+coordinator-staged result is absent until its publication is adopted. Lookup,
+bundle and authority verification, and the final exact-row visibility check run
+under one SQLite writer fence, so recovery cannot remove adoption between
+verification and return. Pending, recovered, and unknown IDs all return the
+same unavailable outcome without exposing hidden row existence.
+
 ## Scope
 
 This is research inspection infrastructure. It is not a frontend, network API,

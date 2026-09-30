@@ -205,6 +205,8 @@ def test_live_reader_never_exposes_pending_coordinated_result(tmp_path: Path) ->
     reader = bind_catalog_live_reader(catalog)
     with pytest.raises(KeyError, match="unavailable"):
         reader.get_verified(prepared.reference.result_id, _verification_context())
+    with pytest.raises(KeyError, match="unavailable"):
+        catalog.get_verified(prepared.reference.result_id, _verification_context())
     assert catalog.query(CatalogQuery()).empty
     catalog.adopt_prepared_import(prepared)
     assert (
