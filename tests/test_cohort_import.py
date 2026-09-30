@@ -328,6 +328,7 @@ def test_same_verified_record_can_bind_to_a_new_manifest_version(
         measurement_anchor=previous.measurement_anchor,
         policies=previous.policies.model_copy(update={"missingness_sha256": "b" * 64}),
     )
+    vars(live[0])["_time_source"].advance_to(second.created_at)
     second_binding = _import(values, manifest_history=(previous, second))
     assert second_binding.result == first.result
     assert second_binding.binding_id != first.binding_id
@@ -350,6 +351,7 @@ def test_binding_count_limit_rejects_without_replacing_existing_record(
         measurement_anchor=previous.measurement_anchor,
         policies=previous.policies.model_copy(update={"missingness_sha256": "b" * 64}),
     )
+    vars(live[0])["_time_source"].advance_to(second.created_at)
     monkeypatch.setattr(cohort_import_module, "MAX_BINDINGS", 1)
     with pytest.raises(CohortImportFilesystemError, match="bound"):
         _import(values, manifest_history=(previous, second))
@@ -1431,6 +1433,7 @@ def test_marker_recovers_exact_candidate_and_preserves_committed_peer(
         measurement_anchor=previous.measurement_anchor,
         policies=previous.policies.model_copy(update={"missingness_sha256": "c" * 64}),
     )
+    vars(live[0])["_time_source"].advance_to(second.created_at)
     values[0].close()
     crashing = CohortRecordCatalog(
         tmp_path / "cohort-records",
@@ -1506,6 +1509,7 @@ def test_swapped_marker_cannot_delete_committed_peer_or_publish_candidate(
         measurement_anchor=previous.measurement_anchor,
         policies=previous.policies.model_copy(update={"missingness_sha256": "9" * 64}),
     )
+    vars(live[0])["_time_source"].advance_to(second.created_at)
     values[0].close()
     crashing = CohortRecordCatalog(
         tmp_path / "cohort-records",
