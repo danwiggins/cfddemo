@@ -13,8 +13,9 @@ provisioned provider trust pins and current clock, extends exactly one immutable
 revision chain, consumes every approval ID and nonce, validates the complete
 history, advances the state version/head and commits. A conflict rolls the whole
 transaction back. An exact retry returns the existing receipt without advancing
-state. Reusing either an approval ID or nonce for different bytes is rejected by
-database constraints, including across processes and restarts.
+state. Approval IDs and nonces occupy one global replay namespace, so reuse for
+different bytes or a different provider is rejected by database constraints,
+including across processes and restarts.
 
 The store validates the full append-only history, not only active rows:
 
@@ -28,19 +29,25 @@ The store validates the full append-only history, not only active rows:
 
 ## Read boundary
 
-`active_snapshot` runs from one database snapshot, revalidates schema, signed
-history, state head, current trust/approval time and tombstones, then returns
+`active_snapshot` runs from one database snapshot, revalidates schema, exact
+canonical authorized-record bytes and digests, signed history, state head,
+current trust/approval time and tombstones, then returns
 only latest active revisions in canonical order. A `CommittedLinkageReceipt` is
 not authority by itself. `verify_current_receipt` must recheck it against the
 live store; any correction, tombstone or unrelated state change makes an older
-receipt stale.
+receipt stale. Receipts also bind the store ID, store epoch, root/database
+storage identity, exact trust-pin set and exact authorized-record digest. A
+receipt from another independently initialized store is rejected even when both
+stores contain byte-identical linkage revisions.
 
 ## Storage boundary
 
 The root is absolute, private (`0700`) and opened no-follow. The database is
 regular, private (`0600`), descriptor-bound to the SQLite connection and
-revalidated before and after operations. Initialization uses an exact committed
-schema; partial, extra or altered tables/indexes fail closed. Trust pins are
+revalidated before and after operations. Existing permissive modes are rejected,
+not repaired; WAL/SHM sidecars are also private, owned, regular and no-follow.
+Initialization uses an exact committed schema; partial, extra or altered
+tables/indexes fail closed. Trust pins are
 persisted on first initialization and every reopen must supply the exact same
 set. SQLite uses WAL, full synchronous writes, foreign keys and bounded busy
 waits.

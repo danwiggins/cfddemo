@@ -5,6 +5,7 @@ from __future__ import annotations
 import hashlib
 import json
 import os
+import secrets
 import sqlite3
 import stat
 import threading
@@ -12,9 +13,9 @@ from collections.abc import Callable, Iterator, Mapping
 from contextlib import contextmanager
 from datetime import UTC, datetime
 from pathlib import Path
-from typing import Literal, Self
+from typing import Annotated, Literal, Self
 
-from pydantic import Field, TypeAdapter, model_validator
+from pydantic import Field, StringConstraints, TypeAdapter, model_validator
 
 from evidence_inspector.method_registry import (
     RegistryContract,
@@ -39,6 +40,8 @@ MAX_PROVIDER_TRUST_PINS = 256
 _SQLITE_OPEN_LOCK = threading.RLock()
 _PROVIDER_NAMESPACE = TypeAdapter(ProviderNamespace)
 _SHA256 = TypeAdapter(Sha256)
+StoreId = Annotated[str, StringConstraints(pattern=r"^store_[0-9a-f]{32}$")]
+_STORE_ID = TypeAdapter(StoreId)
 
 
 class ProviderLinkageStoreError(RuntimeError):
@@ -64,9 +67,14 @@ class CommittedLinkageReceipt(RegistryContract):
         "traceback.committed-linkage-receipt.v1"
     )
     provider_namespace: ProviderNamespace
+    store_id: StoreId
+    store_epoch_sha256: Sha256
+    storage_identity_sha256: Sha256
+    trust_pins_sha256: Sha256
     linkage_id: LinkageId
     revision: int = Field(ge=1, le=MAX_REVISIONS)
     linkage_revision_sha256: Sha256
+    authorized_record_sha256: Sha256
     state_version: int = Field(ge=1)
     state_head_sha256: Sha256
 
@@ -77,6 +85,10 @@ class ActiveLinkageSnapshot(RegistryContract):
     )
     state_version: int = Field(ge=0)
     state_head_sha256: Sha256
+    store_id: StoreId
+    store_epoch_sha256: Sha256
+    storage_identity_sha256: Sha256
+    trust_pins_sha256: Sha256
     revisions: tuple[LinkageRevision, ...] = Field(max_length=MAX_REVISIONS)
     receipts: tuple[CommittedLinkageReceipt, ...] = Field(max_length=MAX_REVISIONS)
 
@@ -116,6 +128,7 @@ _SCHEMA_SQL = {
         linkage_id TEXT NOT NULL,
         revision INTEGER NOT NULL,
         revision_sha256 TEXT NOT NULL UNIQUE,
+        authorized_record_sha256 TEXT NOT NULL UNIQUE,
         operation TEXT NOT NULL,
         record_json BLOB NOT NULL,
         PRIMARY KEY(provider_namespace, linkage_id, revision)
@@ -126,8 +139,8 @@ _SCHEMA_SQL = {
         nonce TEXT NOT NULL,
         revision_sha256 TEXT NOT NULL REFERENCES linkage_revisions(revision_sha256),
         trust_snapshot_sha256 TEXT NOT NULL,
-        PRIMARY KEY(provider_namespace, approval_id),
-        UNIQUE(provider_namespace, nonce)
+        PRIMARY KEY(approval_id),
+        UNIQUE(nonce)
     )""",
     ("index", "linkage_revision_order"): """CREATE INDEX linkage_revision_order
         ON linkage_revisions(provider_namespace, linkage_id, revision)""",
@@ -166,6 +179,13 @@ def _record_bytes(record: AuthorizedLinkageRevision) -> bytes:
     return canonical_contract_bytes(record)
 
 
+def _trust_pins_sha256(pins: Mapping[str, str]) -> str:
+    encoded = json.dumps(
+        sorted(pins.items()), separators=(",", ":"), ensure_ascii=True
+    ).encode("ascii")
+    return hashlib.sha256(b"traceback-linkage-trust-pins-v1\0" + encoded).hexdigest()
+
+
 class ProviderLinkageStore:
     """SQLite-backed approval consumption and immutable linkage history."""
 
@@ -186,10 +206,19 @@ class ProviderLinkageStore:
         if not requested_root.is_absolute():
             raise ProviderLinkageStoreUnsafe("linkage store root must be absolute")
         self.root = requested_root
-        if self.root.is_symlink() or (self.root.exists() and not self.root.is_dir()):
+        root_existed = self.root.exists()
+        if self.root.is_symlink() or (root_existed and not self.root.is_dir()):
             raise ProviderLinkageStoreUnsafe("linkage store root is unsafe")
-        self.root.mkdir(parents=True, exist_ok=True)
-        self.root.chmod(0o700)
+        if root_existed:
+            root_metadata = os.stat(self.root, follow_symlinks=False)
+            if (
+                stat.S_IMODE(root_metadata.st_mode) != 0o700
+                or root_metadata.st_uid != os.geteuid()
+            ):
+                raise ProviderLinkageStoreUnsafe("linkage store root is unsafe")
+        else:
+            self.root.mkdir(parents=True, mode=0o700)
+            self.root.chmod(0o700)
         flags = (
             os.O_RDONLY
             | getattr(os, "O_DIRECTORY", 0)
@@ -215,7 +244,9 @@ class ProviderLinkageStore:
                 for provider, digest in expected_trust_snapshot_sha256_by_provider.items()
             }
         except ValueError:
-            raise ProviderLinkageStoreUnsafe("provider trust pins are invalid") from None
+            raise ProviderLinkageStoreUnsafe(
+                "provider trust pins are invalid"
+            ) from None
         self._clock = clock or (lambda: datetime.now(UTC).replace(microsecond=0))
         try:
             metadata = os.stat(
@@ -224,7 +255,11 @@ class ProviderLinkageStore:
         except FileNotFoundError:
             pass
         else:
-            if not stat.S_ISREG(metadata.st_mode):
+            if (
+                not stat.S_ISREG(metadata.st_mode)
+                or stat.S_IMODE(metadata.st_mode) != 0o600
+                or metadata.st_uid != os.geteuid()
+            ):
                 self.close()
                 raise ProviderLinkageStoreUnsafe("linkage store database is unsafe")
             self._database_identity = _inode_identity(metadata)
@@ -271,6 +306,8 @@ class ProviderLinkageStore:
             if (
                 not stat.S_ISDIR(root.st_mode)
                 or _inode_identity(root) != self._root_identity
+                or stat.S_IMODE(root.st_mode) != 0o700
+                or root.st_uid != os.geteuid()
             ):
                 raise ProviderLinkageStoreUnsafe("linkage store root changed")
             if self._database_identity is not None:
@@ -282,29 +319,88 @@ class ProviderLinkageStore:
                 if (
                     not stat.S_ISREG(database.st_mode)
                     or _inode_identity(database) != self._database_identity
+                    or stat.S_IMODE(database.st_mode) != 0o600
+                    or database.st_uid != os.geteuid()
                 ):
                     raise ProviderLinkageStoreUnsafe("linkage store database changed")
                 for descriptor in (self._database_fd, self._sqlite_database_fd):
-                    if descriptor is not None and (
-                        _inode_identity(os.fstat(descriptor))
-                        != self._database_identity
+                    if descriptor is not None:
+                        bound = os.fstat(descriptor)
+                        if (
+                            _inode_identity(bound) != self._database_identity
+                            or not stat.S_ISREG(bound.st_mode)
+                            or stat.S_IMODE(bound.st_mode) != 0o600
+                            or bound.st_uid != os.geteuid()
+                        ):
+                            raise ProviderLinkageStoreUnsafe(
+                                "linkage store database changed"
+                            )
+                for suffix in ("-wal", "-shm"):
+                    try:
+                        sidecar = os.stat(
+                            f"linkage.sqlite3{suffix}",
+                            dir_fd=self._root_fd,
+                            follow_symlinks=False,
+                        )
+                    except FileNotFoundError:
+                        continue
+                    if (
+                        not stat.S_ISREG(sidecar.st_mode)
+                        or stat.S_IMODE(sidecar.st_mode) != 0o600
+                        or sidecar.st_uid != os.geteuid()
                     ):
                         raise ProviderLinkageStoreUnsafe(
-                            "linkage store database changed"
+                            "linkage store sidecar is unsafe"
                         )
         except ProviderLinkageStoreError:
             raise
         except (OSError, TypeError):
             raise ProviderLinkageStoreUnsafe("linkage store storage changed") from None
 
+    def _storage_identity_sha256(self) -> str:
+        if self._database_identity is None:
+            raise ProviderLinkageStoreUnsafe(
+                "linkage store database identity is absent"
+            )
+        framed = b"\0".join(
+            (
+                b"traceback-linkage-storage-identity-v1",
+                str(self._root_identity[0]).encode("ascii"),
+                str(self._root_identity[1]).encode("ascii"),
+                str(self._database_identity[0]).encode("ascii"),
+                str(self._database_identity[1]).encode("ascii"),
+            )
+        )
+        return hashlib.sha256(framed).hexdigest()
+
+    def _secure_database_files(self) -> None:
+        if self._database_fd is not None:
+            os.fchmod(self._database_fd, 0o600)
+        for name in ("linkage.sqlite3-wal", "linkage.sqlite3-shm"):
+            try:
+                descriptor = os.open(
+                    name,
+                    os.O_RDONLY
+                    | getattr(os, "O_CLOEXEC", 0)
+                    | getattr(os, "O_NOFOLLOW", 0),
+                    dir_fd=self._root_fd,
+                )
+            except FileNotFoundError:
+                continue
+            try:
+                metadata = os.fstat(descriptor)
+                if not stat.S_ISREG(metadata.st_mode):
+                    raise ProviderLinkageStoreUnsafe("linkage store sidecar is unsafe")
+                os.fchmod(descriptor, 0o600)
+            finally:
+                os.close(descriptor)
+
     def _bind_database_descriptor(self) -> None:
         if self._database_identity is None or self._database_fd is not None:
             return
         descriptor = os.open(
             "linkage.sqlite3",
-            os.O_RDONLY
-            | getattr(os, "O_CLOEXEC", 0)
-            | getattr(os, "O_NOFOLLOW", 0),
+            os.O_RDONLY | getattr(os, "O_CLOEXEC", 0) | getattr(os, "O_NOFOLLOW", 0),
             dir_fd=self._root_fd,
         )
         metadata = os.fstat(descriptor)
@@ -348,6 +444,7 @@ class ProviderLinkageStore:
                 )
             self._sqlite_database_fd = matches[0]
             if self._database_identity is None:
+                os.fchmod(self._sqlite_database_fd, 0o600)
                 self._database_identity = observed
                 self._bind_database_descriptor()
             self._validate_storage()
@@ -357,13 +454,7 @@ class ProviderLinkageStore:
             if isinstance(error, ProviderLinkageStoreError):
                 raise
             raise ProviderLinkageStoreUnsafe("linkage store database changed") from None
-        for path in (
-            self.database,
-            Path(f"{self.database}-wal"),
-            Path(f"{self.database}-shm"),
-        ):
-            if path.exists():
-                path.chmod(0o600)
+        self._secure_database_files()
         connection.row_factory = sqlite3.Row
         connection.execute("PRAGMA foreign_keys=ON")
         connection.execute("PRAGMA busy_timeout=30000")
@@ -384,6 +475,7 @@ class ProviderLinkageStore:
     def _initialize(self) -> None:
         with self._lock, _SQLITE_OPEN_LOCK, self._connect() as connection:
             connection.execute("PRAGMA journal_mode=WAL")
+            self._secure_database_files()
             connection.execute("PRAGMA synchronous=FULL")
             connection.execute("BEGIN EXCLUSIVE")
             try:
@@ -404,6 +496,16 @@ class ProviderLinkageStore:
                             ("schema_version", str(SCHEMA_VERSION)),
                             ("state_version", "0"),
                             ("state_head_sha256", hashlib.sha256(b"").hexdigest()),
+                            ("store_id", f"store_{secrets.token_hex(16)}"),
+                            ("store_epoch_sha256", secrets.token_hex(32)),
+                            (
+                                "storage_identity_sha256",
+                                self._storage_identity_sha256(),
+                            ),
+                            (
+                                "trust_pins_sha256",
+                                _trust_pins_sha256(self._trust_pins),
+                            ),
                         ),
                     )
                     connection.executemany(
@@ -424,6 +526,19 @@ class ProviderLinkageStore:
                     raise ProviderLinkageStoreConflict(
                         "linkage store trust pins do not match"
                     )
+                metadata = dict(connection.execute("SELECT key, value FROM metadata"))
+                if metadata[
+                    "storage_identity_sha256"
+                ] != self._storage_identity_sha256() or metadata[
+                    "trust_pins_sha256"
+                ] != _trust_pins_sha256(self._trust_pins):
+                    raise ProviderLinkageStoreConflict(
+                        "linkage store identity does not match"
+                    )
+                self._store_id = metadata["store_id"]
+                self._store_epoch_sha256 = metadata["store_epoch_sha256"]
+                self._storage_identity = metadata["storage_identity_sha256"]
+                self._trust_pins_digest = metadata["trust_pins_sha256"]
                 connection.commit()
             except BaseException as error:
                 connection.rollback()
@@ -434,7 +549,6 @@ class ProviderLinkageStore:
                         "linkage store schema is unsupported"
                     ) from None
                 raise
-            os.chmod(self.database, 0o600)
 
     @staticmethod
     def _validate_schema(connection: sqlite3.Connection) -> None:
@@ -455,43 +569,54 @@ class ProviderLinkageStore:
             ) from None
         if (
             schema != _SCHEMA_SIGNATURE
-            or set(metadata) != {
+            or set(metadata)
+            != {
                 "schema_version",
                 "state_version",
                 "state_head_sha256",
+                "store_id",
+                "store_epoch_sha256",
+                "storage_identity_sha256",
+                "trust_pins_sha256",
             }
             or metadata["schema_version"] != str(SCHEMA_VERSION)
         ):
-            raise ProviderLinkageStoreSchemaError(
-                "linkage store schema is unsupported"
-            )
+            raise ProviderLinkageStoreSchemaError("linkage store schema is unsupported")
         try:
             state_version = int(metadata["state_version"])
             _SHA256.validate_python(metadata["state_head_sha256"])
+            _STORE_ID.validate_python(metadata["store_id"])
+            _SHA256.validate_python(metadata["store_epoch_sha256"])
+            _SHA256.validate_python(metadata["storage_identity_sha256"])
+            _SHA256.validate_python(metadata["trust_pins_sha256"])
         except (ValueError, TypeError):
             raise ProviderLinkageStoreSchemaError(
                 "linkage store metadata is invalid"
             ) from None
         if state_version < 0 or str(state_version) != metadata["state_version"]:
-            raise ProviderLinkageStoreSchemaError(
-                "linkage store metadata is invalid"
-            )
+            raise ProviderLinkageStoreSchemaError("linkage store metadata is invalid")
 
     @staticmethod
     def _load_records(
         connection: sqlite3.Connection,
     ) -> tuple[AuthorizedLinkageRevision, ...]:
         rows = connection.execute(
-            """SELECT record_json FROM linkage_revisions
+            """SELECT record_json, authorized_record_sha256 FROM linkage_revisions
                ORDER BY provider_namespace, linkage_id, revision"""
         ).fetchall()
         if len(rows) > MAX_REVISIONS:
             raise ProviderLinkageStoreSchemaError("linkage history exceeds its bound")
         try:
-            return tuple(
-                AuthorizedLinkageRevision.model_validate_json(bytes(row[0]))
-                for row in rows
-            )
+            records = []
+            for row in rows:
+                raw = bytes(row[0])
+                if hashlib.sha256(raw).hexdigest() != row[1]:
+                    raise ValueError("record digest mismatch")
+                record = AuthorizedLinkageRevision.model_validate_json(raw)
+                if _record_bytes(record) != raw:
+                    raise ValueError("record bytes are not canonical")
+                records.append(record)
+            return tuple(records)
         except (ValueError, TypeError):
             raise ProviderLinkageStoreSchemaError(
                 "linkage store record is invalid"
@@ -499,7 +624,12 @@ class ProviderLinkageStore:
 
     @staticmethod
     def _state_head(connection: sqlite3.Connection) -> str:
+        metadata = dict(connection.execute("SELECT key, value FROM metadata"))
         payload = {
+            "store_id": metadata["store_id"],
+            "store_epoch_sha256": metadata["store_epoch_sha256"],
+            "storage_identity_sha256": metadata["storage_identity_sha256"],
+            "trust_pins_sha256": metadata["trust_pins_sha256"],
             "trust_pins": [
                 tuple(row)
                 for row in connection.execute(
@@ -511,7 +641,7 @@ class ProviderLinkageStore:
                 tuple(row)
                 for row in connection.execute(
                     """SELECT provider_namespace, linkage_id, revision,
-                              revision_sha256
+                              revision_sha256, authorized_record_sha256
                        FROM linkage_revisions
                        ORDER BY provider_namespace, linkage_id, revision"""
                 )
@@ -540,12 +670,13 @@ class ProviderLinkageStore:
         revision = record.revision
         revision_sha256 = linkage_revision_sha256(revision)
         serialized = _record_bytes(record)
+        authorized_record_sha256 = hashlib.sha256(serialized).hexdigest()
         with self._connect() as connection:
             connection.execute("BEGIN IMMEDIATE")
             try:
                 self._validate_current_authority(record)
                 existing = connection.execute(
-                    """SELECT revision_sha256, record_json
+                    """SELECT revision_sha256, authorized_record_sha256, record_json
                        FROM linkage_revisions
                        WHERE provider_namespace=? AND linkage_id=? AND revision=?""",
                     (
@@ -555,12 +686,20 @@ class ProviderLinkageStore:
                     ),
                 ).fetchone()
                 if existing is not None:
-                    if existing[0] != revision_sha256 or bytes(existing[1]) != serialized:
+                    if (
+                        existing[0] != revision_sha256
+                        or existing[1] != authorized_record_sha256
+                        or bytes(existing[2]) != serialized
+                    ):
                         raise ProviderLinkageStoreConflict(
                             "linkage revision conflicts with committed state"
                         )
                     self._verify_consumptions(connection, record, revision_sha256)
-                    receipt = self._receipt(connection, revision)
+                    receipt = self._receipt(
+                        connection,
+                        revision,
+                        authorized_record_sha256,
+                    )
                     connection.commit()
                     return receipt
 
@@ -596,12 +735,13 @@ class ProviderLinkageStore:
                         )
 
                 connection.execute(
-                    """INSERT INTO linkage_revisions VALUES(?, ?, ?, ?, ?, ?)""",
+                    """INSERT INTO linkage_revisions VALUES(?, ?, ?, ?, ?, ?, ?)""",
                     (
                         revision.provider_namespace,
                         revision.linkage_id,
                         revision.revision,
                         revision_sha256,
+                        authorized_record_sha256,
                         revision.operation.value,
                         serialized,
                     ),
@@ -624,11 +764,14 @@ class ProviderLinkageStore:
                     records,
                     expected_trust_snapshot_sha256_by_provider=self._trust_pins,
                 )
-                state_version = int(
-                    connection.execute(
-                        "SELECT value FROM metadata WHERE key='state_version'"
-                    ).fetchone()[0]
-                ) + 1
+                state_version = (
+                    int(
+                        connection.execute(
+                            "SELECT value FROM metadata WHERE key='state_version'"
+                        ).fetchone()[0]
+                    )
+                    + 1
+                )
                 state_head = self._state_head(connection)
                 connection.execute(
                     "UPDATE metadata SET value=? WHERE key='state_version'",
@@ -641,8 +784,13 @@ class ProviderLinkageStore:
                 receipt = CommittedLinkageReceipt(
                     provider_namespace=revision.provider_namespace,
                     linkage_id=revision.linkage_id,
+                    store_id=self._store_id,
+                    store_epoch_sha256=self._store_epoch_sha256,
+                    storage_identity_sha256=self._storage_identity,
+                    trust_pins_sha256=self._trust_pins_digest,
                     revision=revision.revision,
                     linkage_revision_sha256=revision_sha256,
+                    authorized_record_sha256=authorized_record_sha256,
                     state_version=state_version,
                     state_head_sha256=state_head,
                 )
@@ -672,9 +820,7 @@ class ProviderLinkageStore:
     ) -> None:
         expected_trust = self._trust_pins.get(record.revision.provider_namespace)
         if expected_trust is None:
-            raise ProviderLinkageStoreConflict(
-                "linkage provider trust pin is absent"
-            )
+            raise ProviderLinkageStoreConflict("linkage provider trust pin is absent")
         try:
             decision = authorize_linkage_revision(
                 record.revision,
@@ -685,13 +831,9 @@ class ProviderLinkageStore:
                 evaluated_at=self._clock(),
             )
         except (TypeError, ValueError):
-            raise ProviderLinkageStoreUnsafe(
-                "linkage store clock is invalid"
-            ) from None
+            raise ProviderLinkageStoreUnsafe("linkage store clock is invalid") from None
         if not decision.linkage_authorized:
-            raise ProviderLinkageStoreConflict(
-                "linkage authority is not current"
-            )
+            raise ProviderLinkageStoreConflict("linkage authority is not current")
 
     @staticmethod
     def _verify_consumptions(
@@ -720,13 +862,19 @@ class ProviderLinkageStore:
     def _receipt(
         connection: sqlite3.Connection,
         revision: LinkageRevision,
+        authorized_record_sha256: str,
     ) -> CommittedLinkageReceipt:
         metadata = dict(connection.execute("SELECT key, value FROM metadata"))
         return CommittedLinkageReceipt(
             provider_namespace=revision.provider_namespace,
+            store_id=metadata["store_id"],
+            store_epoch_sha256=metadata["store_epoch_sha256"],
+            storage_identity_sha256=metadata["storage_identity_sha256"],
+            trust_pins_sha256=metadata["trust_pins_sha256"],
             linkage_id=revision.linkage_id,
             revision=revision.revision,
             linkage_revision_sha256=linkage_revision_sha256(revision),
+            authorized_record_sha256=authorized_record_sha256,
             state_version=int(metadata["state_version"]),
             state_head_sha256=metadata["state_head_sha256"],
         )
@@ -748,9 +896,7 @@ class ProviderLinkageStore:
                         "linkage store state head is invalid"
                     )
                 latest: dict[tuple[str, str], LinkageRevision] = {}
-                latest_records: dict[
-                    tuple[str, str], AuthorizedLinkageRevision
-                ] = {}
+                latest_records: dict[tuple[str, str], AuthorizedLinkageRevision] = {}
                 for record in records:
                     key = (
                         record.revision.provider_namespace,
@@ -780,13 +926,28 @@ class ProviderLinkageStore:
                 snapshot = ActiveLinkageSnapshot(
                     state_version=state_version,
                     state_head_sha256=state_head,
+                    store_id=metadata["store_id"],
+                    store_epoch_sha256=metadata["store_epoch_sha256"],
+                    storage_identity_sha256=metadata["storage_identity_sha256"],
+                    trust_pins_sha256=metadata["trust_pins_sha256"],
                     revisions=revisions,
                     receipts=tuple(
                         CommittedLinkageReceipt(
                             provider_namespace=item.provider_namespace,
+                            store_id=metadata["store_id"],
+                            store_epoch_sha256=metadata["store_epoch_sha256"],
+                            storage_identity_sha256=metadata["storage_identity_sha256"],
+                            trust_pins_sha256=metadata["trust_pins_sha256"],
                             linkage_id=item.linkage_id,
                             revision=item.revision,
                             linkage_revision_sha256=linkage_revision_sha256(item),
+                            authorized_record_sha256=hashlib.sha256(
+                                _record_bytes(
+                                    latest_records[
+                                        (item.provider_namespace, item.linkage_id)
+                                    ]
+                                )
+                            ).hexdigest(),
                             state_version=state_version,
                             state_head_sha256=state_head,
                         )

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import base64
 import os
 import sqlite3
 from concurrent.futures import ThreadPoolExecutor
@@ -17,7 +18,12 @@ from evidence_inspector.provider_linkage import (
     AuthorizedLinkageRevision,
     LinkageOperation,
     LinkageReasonCode,
+    ProviderApprovalPayload,
     ProviderRole,
+    SignedProviderApproval,
+    approval_payload_bytes,
+    linkage_revision_sha256,
+    prepare_authorized_linkage_revision,
     provider_trust_snapshot_sha256,
 )
 from evidence_inspector.provider_linkage_store import (
@@ -28,7 +34,11 @@ from evidence_inspector.provider_linkage_store import (
     ProviderLinkageStoreUnsafe,
 )
 from tests.test_provider_linkage import (
+    AFTER,
+    ISSUER,
+    KEY_ID,
     NOW,
+    PRIVATE_KEY,
     PROVIDER,
     _approval,
     _consume,
@@ -97,6 +107,8 @@ def test_commit_consumes_approval_and_enables_only_live_store_projection(
     assert snapshot.revisions == (record.revision,)
     assert snapshot.receipts == (receipt,)
     assert receipt.state_version == 1
+    assert receipt.store_id == snapshot.store_id
+    assert receipt.authorized_record_sha256
     assert (root.stat().st_mode & 0o777) == 0o700
     assert ((root / "linkage.sqlite3").stat().st_mode & 0o777) == 0o600
 
@@ -119,6 +131,23 @@ def test_exact_retry_is_idempotent_without_advancing_state(tmp_path: Path) -> No
     assert repeated == first
 
 
+def test_receipt_is_bound_to_one_store_epoch_and_storage_identity(
+    tmp_path: Path,
+) -> None:
+    record = _record()
+    with (
+        _store(tmp_path / "first") as first_store,
+        _store(tmp_path / "second") as second_store,
+    ):
+        first = first_store.commit_authorized_revision(record)
+        second = second_store.commit_authorized_revision(record)
+        assert first != second
+        assert first.store_id != second.store_id
+        assert first.storage_identity_sha256 != second.storage_identity_sha256
+        with pytest.raises(ProviderLinkageStoreConflict, match="not current"):
+            second_store.verify_current_receipt(first)
+
+
 def test_approval_and_nonce_cannot_be_reused_on_another_revision(
     tmp_path: Path,
 ) -> None:
@@ -139,6 +168,64 @@ def test_approval_and_nonce_cannot_be_reused_on_another_revision(
         with pytest.raises(ProviderLinkageStoreConflict, match="approval or identity"):
             store.commit_authorized_revision(other)
         assert store.active_snapshot().revisions == (first.revision,)
+
+
+def test_approval_and_nonce_replay_namespace_is_global_across_providers(
+    tmp_path: Path,
+) -> None:
+    first = _record("c")
+    other_provider = _token("provider", "f")
+    revision = _revision(linkage_id=_token("linkage", "f")).model_copy(
+        update={"provider_namespace": other_provider}
+    )
+    trust = _trust(snapshot_digit="f").model_copy(
+        update={"provider_namespace": other_provider}
+    )
+    trust_sha256 = provider_trust_snapshot_sha256(trust)
+    payload = ProviderApprovalPayload(
+        approval_id=first.approvals[0].payload.approval_id,
+        provider_namespace=other_provider,
+        issuer_id=ISSUER,
+        key_id=KEY_ID,
+        principal_id=_token("principal", "f"),
+        role=ProviderRole.LINKER,
+        purpose=ApprovalPurpose.CREATE_LINKAGE,
+        proposed_revision_sha256=linkage_revision_sha256(revision),
+        trust_snapshot_id=trust.snapshot_id,
+        trust_snapshot_revision=trust.revision,
+        trust_snapshot_sha256=trust_sha256,
+        nonce=first.approvals[0].payload.nonce,
+        issued_at=NOW,
+        expires_at=AFTER,
+    )
+    approval = SignedProviderApproval(
+        payload=payload,
+        signature_base64=base64.b64encode(
+            PRIVATE_KEY.sign(approval_payload_bytes(payload))
+        ).decode("ascii"),
+    )
+    other = prepare_authorized_linkage_revision(
+        revision,
+        previous_revision=None,
+        approvals=(approval,),
+        trust_snapshot=trust,
+        expected_trust_snapshot_sha256=trust_sha256,
+        evaluated_at=NOW,
+    )
+    store = ProviderLinkageStore(
+        tmp_path / "protected",
+        expected_trust_snapshot_sha256_by_provider={
+            PROVIDER: provider_trust_snapshot_sha256(_trust()),
+            other_provider: trust_sha256,
+        },
+        clock=lambda: NOW,
+    )
+    try:
+        store.commit_authorized_revision(first)
+        with pytest.raises(ProviderLinkageStoreConflict, match="approval or identity"):
+            store.commit_authorized_revision(other)
+    finally:
+        store.close()
 
 
 def test_cross_connection_race_consumes_approval_once(tmp_path: Path) -> None:
@@ -339,6 +426,29 @@ def test_forged_receipt_is_not_authority(tmp_path: Path) -> None:
             store.verify_current_receipt(forged)
 
 
+def test_record_bytes_and_digest_are_bound_into_state_head_and_receipt(
+    tmp_path: Path,
+) -> None:
+    root = tmp_path / "protected"
+    record = _record("c")
+    with _store(root) as store:
+        receipt = store.commit_authorized_revision(record)
+        alternate, _ = _consume(
+            record.revision,
+            (_create_approval(record.revision, "d"),),
+        )
+        connection = sqlite3.connect(root / "linkage.sqlite3")
+        connection.execute(
+            "UPDATE linkage_revisions SET record_json=?",
+            (alternate.model_dump_json().encode("utf-8"),),
+        )
+        connection.commit()
+        connection.close()
+
+        with pytest.raises(ProviderLinkageStoreSchemaError, match="record is invalid"):
+            store.verify_current_receipt(receipt)
+
+
 def test_expired_authority_disables_commit_and_active_projection(
     tmp_path: Path,
 ) -> None:
@@ -380,6 +490,31 @@ def test_root_or_database_substitution_fails_closed(tmp_path: Path) -> None:
             store.active_snapshot()
     finally:
         store.close()
+
+
+def test_private_modes_are_revalidated_before_every_authority_operation(
+    tmp_path: Path,
+) -> None:
+    root = tmp_path / "protected"
+    store = _store(root)
+    try:
+        root.chmod(0o777)
+        with pytest.raises(ProviderLinkageStoreUnsafe, match="root changed"):
+            store.active_snapshot()
+        root.chmod(0o700)
+        (root / "linkage.sqlite3").chmod(0o666)
+        with pytest.raises(ProviderLinkageStoreUnsafe, match="database changed"):
+            store.active_snapshot()
+    finally:
+        store.close()
+
+    root.chmod(0o777)
+    with pytest.raises(ProviderLinkageStoreUnsafe, match="root is unsafe"):
+        _store(root)
+    root.chmod(0o700)
+    (root / "linkage.sqlite3").chmod(0o666)
+    with pytest.raises(ProviderLinkageStoreUnsafe, match="database is unsafe"):
+        _store(root)
 
 
 def test_same_inventory_malformed_schema_is_rejected(tmp_path: Path) -> None:
