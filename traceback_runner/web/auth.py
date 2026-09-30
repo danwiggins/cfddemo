@@ -299,13 +299,18 @@ class LocalWebBoundary:
             raise BoundaryDenied(403, "TBX-AUTH-003")
 
     def exchange_bootstrap(self, request: BrowserRequest, code: str) -> SessionGrant:
+        self.authorize_bootstrap_request(request)
+        return self.broker.exchange(code, authority=self.config.authority)
+
+    def authorize_bootstrap_request(self, request: BrowserRequest) -> None:
+        """Reject untrusted authorities before parsing a request body."""
+
         self._require_host(request)
         self._require_origin(request)
         if request.method != "POST" or request.path != "/api/v1/session/bootstrap":
             raise BoundaryDenied(403, "TBX-AUTH-003")
         if "?" in request.path:
             raise BoundaryDenied(403, "TBX-AUTH-003")
-        return self.broker.exchange(code, authority=self.config.authority)
 
     def authorize_public_asset(self, request: BrowserRequest) -> None:
         """Apply DNS-rebinding defenses before serving even non-sensitive assets."""

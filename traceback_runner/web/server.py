@@ -2,7 +2,10 @@
 
 from __future__ import annotations
 
+import errno
+import fcntl
 import http.server
+import ipaddress
 import json
 import os
 import re
@@ -12,7 +15,6 @@ import stat
 import threading
 from dataclasses import dataclass
 from datetime import UTC, datetime
-from http.cookies import SimpleCookie
 from importlib.resources import files
 from pathlib import Path
 from types import TracebackType
@@ -34,9 +36,15 @@ from .contracts import ProblemDetail, ProblemOwner
 from .source import JobStoreProjectionSource
 
 MAX_REQUEST_BYTES = 4096
+MAX_REQUEST_HEADERS = 32
+MAX_REQUEST_HEADER_BYTES = 16 * 1024
+MAX_HTTP_WORKERS = 16
+REQUEST_TIMEOUT_SECONDS = 2
 STATE_DIRECTORY_MODE = 0o700
 STATE_FILE_MODE = 0o600
 _JOB_ROUTE = re.compile(r"^/api/v1/jobs/(job_[0-9a-f]{32})$")
+_COOKIE_NAME = re.compile(r"^[!#$%&'*+\-.^_`|~0-9A-Za-z]+$")
+_COOKIE_VALUE = re.compile(r"^[A-Za-z0-9_-]{0,256}$")
 _SECURITY_HEADERS = {
     "Cache-Control": "no-store",
     "Content-Security-Policy": (
@@ -80,6 +88,91 @@ def _open_state_directory(path: Path) -> int:
         os.close(descriptor)
         raise LocalWebServerError("local web state directory changed during open")
     return descriptor
+
+
+def _require_named_state_directory(path: Path, directory_fd: int) -> None:
+    try:
+        named = path.lstat()
+        pinned = os.fstat(directory_fd)
+    except OSError as exc:
+        raise LocalWebServerError("local web state directory is unavailable") from exc
+    if (
+        not stat.S_ISDIR(named.st_mode)
+        or stat.S_IMODE(named.st_mode) != STATE_DIRECTORY_MODE
+        or named.st_uid != os.geteuid()
+        or (named.st_dev, named.st_ino) != (pinned.st_dev, pinned.st_ino)
+    ):
+        raise LocalWebServerError("local web state directory identity changed")
+
+
+def _acquire_instance_lease(directory_fd: int) -> int:
+    descriptor: int | None = None
+    try:
+        descriptor = os.open(
+            "instance.lock",
+            os.O_RDWR | os.O_CREAT | getattr(os, "O_NOFOLLOW", 0),
+            STATE_FILE_MODE,
+            dir_fd=directory_fd,
+        )
+        metadata = os.fstat(descriptor)
+        if (
+            not stat.S_ISREG(metadata.st_mode)
+            or metadata.st_uid != os.geteuid()
+            or metadata.st_nlink != 1
+        ):
+            os.close(descriptor)
+            descriptor = None
+            raise LocalWebServerError("local web lease file is not private")
+        os.fchmod(descriptor, STATE_FILE_MODE)
+        fcntl.flock(descriptor, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        return descriptor
+    except OSError as exc:
+        if descriptor is not None:
+            os.close(descriptor)
+        if exc.errno in {errno.EACCES, errno.EAGAIN}:
+            raise LocalWebServerError("local web service is already running") from exc
+        raise LocalWebServerError("local web lease could not be acquired") from exc
+
+
+def _unlink_instance_state(
+    directory_fd: int, *, expected_instance_id: str | None = None
+) -> None:
+    try:
+        descriptor = os.open(
+            "instance.json",
+            os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0),
+            dir_fd=directory_fd,
+        )
+    except FileNotFoundError:
+        return
+    except OSError as exc:
+        raise LocalWebServerError("local web state file is unsafe") from exc
+    try:
+        metadata = os.fstat(descriptor)
+        if (
+            not stat.S_ISREG(metadata.st_mode)
+            or stat.S_IMODE(metadata.st_mode) != STATE_FILE_MODE
+            or metadata.st_uid != os.geteuid()
+            or metadata.st_nlink != 1
+            or metadata.st_size > MAX_REQUEST_BYTES
+        ):
+            raise LocalWebServerError("local web state file is unsafe")
+        if expected_instance_id is not None:
+            payload = json.loads(os.read(descriptor, MAX_REQUEST_BYTES + 1))
+            if (
+                not isinstance(payload, dict)
+                or payload.get("instance_id") != expected_instance_id
+            ):
+                return
+    except (OSError, ValueError, json.JSONDecodeError) as exc:
+        raise LocalWebServerError("local web state file is unsafe") from exc
+    finally:
+        os.close(descriptor)
+    try:
+        os.unlink("instance.json", dir_fd=directory_fd)
+        os.fsync(directory_fd)
+    except FileNotFoundError:
+        pass
 
 
 def _write_instance_state(directory_fd: int, payload: dict[str, object]) -> None:
@@ -154,7 +247,57 @@ class _Application:
 class _LoopbackHttpServer(http.server.ThreadingHTTPServer):
     daemon_threads = True
     allow_reuse_address = False
+    request_queue_size = MAX_HTTP_WORKERS
     application: _Application
+
+    def __init__(self, *args: object, **kwargs: object) -> None:
+        self._worker_slots = threading.BoundedSemaphore(MAX_HTTP_WORKERS)
+        self._worker_count = 0
+        self._worker_count_lock = threading.Lock()
+        super().__init__(*args, **kwargs)
+
+    @property
+    def active_workers(self) -> int:
+        with self._worker_count_lock:
+            return self._worker_count
+
+    def verify_request(self, request: socket.socket, client_address: object) -> bool:
+        del request
+        try:
+            return bool(
+                client_address
+                and isinstance(client_address, tuple)
+                and ipaddress.ip_address(client_address[0]).is_loopback
+            )
+        except (ValueError, TypeError):
+            return False
+
+    def process_request(self, request: socket.socket, client_address: object) -> None:
+        if not self._worker_slots.acquire(blocking=False):
+            self.shutdown_request(request)
+            return
+        with self._worker_count_lock:
+            self._worker_count += 1
+        try:
+            super().process_request(request, client_address)
+        except BaseException:
+            with self._worker_count_lock:
+                self._worker_count -= 1
+            self._worker_slots.release()
+            raise
+
+    def process_request_thread(
+        self, request: socket.socket, client_address: object
+    ) -> None:
+        try:
+            super().process_request_thread(request, client_address)
+        finally:
+            with self._worker_count_lock:
+                self._worker_count -= 1
+            self._worker_slots.release()
+
+    def handle_error(self, request: object, client_address: object) -> None:
+        del request, client_address
 
 
 class _LoopbackHttpServerV6(_LoopbackHttpServer):
@@ -175,21 +318,32 @@ class _Handler(http.server.BaseHTTPRequestHandler):
 
     def setup(self) -> None:
         super().setup()
-        self.connection.settimeout(5)
+        self.connection.settimeout(REQUEST_TIMEOUT_SECONDS)
+
+    def _headers_within_bounds(self) -> bool:
+        items = list(self.headers.items())
+        return (
+            len(items) <= MAX_REQUEST_HEADERS
+            and sum(len(name) + len(value) + 4 for name, value in items)
+            <= MAX_REQUEST_HEADER_BYTES
+        )
 
     def _single_header(self, name: str) -> str | None:
         values = self.headers.get_all(name, failobj=[])
         return values[0] if len(values) == 1 else None
 
     def _send(self, status_code: int, content_type: str, content: bytes) -> None:
-        self.send_response(status_code)
-        for name, value in _SECURITY_HEADERS.items():
-            self.send_header(name, value)
-        self.send_header("Content-Type", content_type)
-        self.send_header("Content-Length", str(len(content)))
-        self.end_headers()
-        if self.command != "HEAD":
-            self.wfile.write(content)
+        try:
+            self.send_response(status_code)
+            for name, value in _SECURITY_HEADERS.items():
+                self.send_header(name, value)
+            self.send_header("Content-Type", content_type)
+            self.send_header("Content-Length", str(len(content)))
+            self.end_headers()
+            if self.command != "HEAD":
+                self.wfile.write(content)
+        except (BrokenPipeError, ConnectionResetError, OSError):
+            self.close_connection = True
 
     def _json(self, status_code: int, payload: object) -> None:
         self._send(
@@ -205,19 +359,29 @@ class _Handler(http.server.BaseHTTPRequestHandler):
         values = self.headers.get_all("Cookie", failobj=[])
         if len(values) != 1:
             return None
-        cookie = SimpleCookie()
-        try:
-            cookie.load(values[0])
-        except Exception:
+        cookies: dict[str, str] = {}
+        for segment in values[0].split(";"):
+            item = segment.strip()
+            if not item or item.count("=") != 1:
+                return None
+            name, value = item.split("=", 1)
+            if (
+                not _COOKIE_NAME.fullmatch(name)
+                or not _COOKIE_VALUE.fullmatch(value)
+                or name in cookies
+            ):
+                return None
+            cookies[name] = value
+        token = cookies.get("traceback_session")
+        if token is None or not 43 <= len(token) <= 128:
             return None
-        morsel = cookie.get("traceback_session")
-        return morsel.value if morsel is not None else None
+        return token
 
     def _request(self, path: str) -> BrowserRequest:
         forwarded = tuple(
             sorted(
                 name
-                for name in self.headers.keys()
+                for name in self.headers
                 if name.casefold() == "forwarded"
                 or name.casefold().startswith("x-forwarded-")
             )
@@ -245,13 +409,17 @@ class _Handler(http.server.BaseHTTPRequestHandler):
             raise ValueError("request body exceeds the local API bound")
         payload = json.loads(self.rfile.read(length))
         if not isinstance(payload, dict):
-            raise ValueError("request body must be an object")
+            raise TypeError("request body must be an object")
         return payload
 
     def do_HEAD(self) -> None:
         self.do_GET()
 
     def do_GET(self) -> None:
+        if not self._headers_within_bounds():
+            self.close_connection = True
+            self._json(431, {"error": {"code": "TBX-WEB-431"}})
+            return
         parsed = urlsplit(self.path)
         if parsed.query or parsed.fragment:
             self._json(404, {"error": {"code": "TBX-WEB-404"}})
@@ -289,6 +457,10 @@ class _Handler(http.server.BaseHTTPRequestHandler):
         self._json(404, {"error": {"code": "TBX-WEB-404"}})
 
     def do_POST(self) -> None:
+        if not self._headers_within_bounds():
+            self.close_connection = True
+            self._json(431, {"error": {"code": "TBX-WEB-431"}})
+            return
         parsed = urlsplit(self.path)
         if parsed.query or parsed.fragment:
             self._json(404, {"error": {"code": "TBX-WEB-404"}})
@@ -296,26 +468,31 @@ class _Handler(http.server.BaseHTTPRequestHandler):
         request = self._request(parsed.path)
         try:
             if parsed.path == "/api/v1/session/bootstrap":
+                self.application.boundary.authorize_bootstrap_request(request)
                 payload = self._body_json()
                 if set(payload) != {"bootstrap"} or not isinstance(
                     payload["bootstrap"], str
                 ):
                     raise ValueError("bootstrap request shape is invalid")
-                grant = self.application.boundary.exchange_bootstrap(
-                    request, payload["bootstrap"]
+                grant = self.application.boundary.broker.exchange(
+                    payload["bootstrap"],
+                    authority=self.application.boundary.config.authority,
                 )
                 content = canonical_json_bytes({"csrf_token": grant.csrf_token}) + b"\n"
-                self.send_response(200)
-                for name, value in _SECURITY_HEADERS.items():
-                    self.send_header(name, value)
-                self.send_header("Content-Type", "application/json; charset=utf-8")
-                self.send_header("Content-Length", str(len(content)))
-                self.send_header(
-                    "Set-Cookie",
-                    f"{grant.cookie_name}={grant.session_token}; Path=/; HttpOnly; SameSite=Strict",
-                )
-                self.end_headers()
-                self.wfile.write(content)
+                try:
+                    self.send_response(200)
+                    for name, value in _SECURITY_HEADERS.items():
+                        self.send_header(name, value)
+                    self.send_header("Content-Type", "application/json; charset=utf-8")
+                    self.send_header("Content-Length", str(len(content)))
+                    self.send_header(
+                        "Set-Cookie",
+                        f"{grant.cookie_name}={grant.session_token}; Path=/; HttpOnly; SameSite=Strict",
+                    )
+                    self.end_headers()
+                    self.wfile.write(content)
+                except (BrokenPipeError, ConnectionResetError, OSError):
+                    self.close_connection = True
                 return
             if parsed.path == "/api/v1/session/validate":
                 self.application.boundary.authorize(request)
@@ -324,7 +501,7 @@ class _Handler(http.server.BaseHTTPRequestHandler):
         except BoundaryDenied as exc:
             self._deny(exc)
             return
-        except (ValueError, json.JSONDecodeError):
+        except (TypeError, ValueError, json.JSONDecodeError):
             self._json(400, {"error": {"code": "TBX-WEB-400"}})
             return
         self._json(404, {"error": {"code": "TBX-WEB-404"}})
@@ -338,8 +515,11 @@ class RunningLocalWebService:
     thread: threading.Thread
     boundary: LocalWebBoundary
     bootstrap_code: str
+    state_directory: Path
     state_directory_fd: int
+    lease_fd: int
     instance_id: str
+    closed: bool = False
 
     @classmethod
     def start(
@@ -349,41 +529,50 @@ class RunningLocalWebService:
         state_directory: Path,
         ipv6: bool = False,
     ) -> Self:
-        host = "::1" if ipv6 else "127.0.0.1"
-        server_type = _LoopbackHttpServerV6 if ipv6 else _LoopbackHttpServer
-        try:
-            server = server_type((host, 0), _Handler)
-        except OSError as exc:
-            raise LocalWebServerError(
-                "literal loopback listener is unavailable"
-            ) from exc
-        port = int(server.server_address[1])
-        config = build_loopback_config(port=port, ipv6=ipv6)
-        broker = BootstrapBroker()
-        boundary = LocalWebBoundary(config, broker)
-        problem = ProblemDetail(
-            code="TBX-WEB-404",
-            problem="Requested local object is unavailable",
-            cause="The object is unavailable in this local session",
-            fix="Refresh the local queue",
-            docs_path="docs/OPERATOR-GUIDE.md",
-            owner=ProblemOwner.OPERATOR,
-            retryable=False,
-            correlation_id="cor_0000000000000000",
-            preserved_work="Existing verified work is unchanged",
-            repeated_work="No work was repeated",
-        )
-        source = JobStoreProjectionSource(store)
-        kernel = LocalApiKernel(
-            boundary=boundary,
-            source=source,
-            not_found_problem=problem,
-        )
-        server.application = _Application(kernel, boundary, _packaged_assets())
         state_fd: int | None = None
+        lease_fd: int | None = None
+        server: _LoopbackHttpServer | None = None
+        instance_id: str | None = None
         try:
             state_fd = _open_state_directory(state_directory)
+            _require_named_state_directory(state_directory, state_fd)
+            lease_fd = _acquire_instance_lease(state_fd)
+            _unlink_instance_state(state_fd)
+            _require_named_state_directory(state_directory, state_fd)
+
+            host = "::1" if ipv6 else "127.0.0.1"
+            server_type = _LoopbackHttpServerV6 if ipv6 else _LoopbackHttpServer
+            try:
+                server = server_type((host, 0), _Handler)
+            except OSError as exc:
+                raise LocalWebServerError(
+                    "literal loopback listener is unavailable"
+                ) from exc
+            port = int(server.server_address[1])
+            config = build_loopback_config(port=port, ipv6=ipv6)
+            broker = BootstrapBroker()
+            boundary = LocalWebBoundary(config, broker)
+            problem = ProblemDetail(
+                code="TBX-WEB-404",
+                problem="Requested local object is unavailable",
+                cause="The object is unavailable in this local session",
+                fix="Refresh the local queue",
+                docs_path="docs/OPERATOR-GUIDE.md",
+                owner=ProblemOwner.OPERATOR,
+                retryable=False,
+                correlation_id="cor_0000000000000000",
+                preserved_work="Existing verified work is unchanged",
+                repeated_work="No work was repeated",
+            )
+            source = JobStoreProjectionSource(store)
+            kernel = LocalApiKernel(
+                boundary=boundary,
+                source=source,
+                not_found_problem=problem,
+            )
+            server.application = _Application(kernel, boundary, _packaged_assets())
             instance_id = f"instance_{secrets.token_hex(16)}"
+            _require_named_state_directory(state_directory, state_fd)
             _write_instance_state(
                 state_fd,
                 {
@@ -395,6 +584,7 @@ class RunningLocalWebService:
                     "started_at": datetime.now(UTC).isoformat(timespec="seconds"),
                 },
             )
+            _require_named_state_directory(state_directory, state_fd)
             bootstrap_code = boundary.issue_bootstrap()
             thread = threading.Thread(
                 target=server.serve_forever,
@@ -407,11 +597,22 @@ class RunningLocalWebService:
                 thread=thread,
                 boundary=boundary,
                 bootstrap_code=bootstrap_code,
+                state_directory=state_directory,
                 state_directory_fd=state_fd,
+                lease_fd=lease_fd,
                 instance_id=instance_id,
             )
         except BaseException:
-            server.server_close()
+            if server is not None:
+                server.server_close()
+            if state_fd is not None and instance_id is not None:
+                try:
+                    _unlink_instance_state(state_fd, expected_instance_id=instance_id)
+                except LocalWebServerError:
+                    pass
+            if lease_fd is not None:
+                fcntl.flock(lease_fd, fcntl.LOCK_UN)
+                os.close(lease_fd)
             if state_fd is not None:
                 os.close(state_fd)
             raise
@@ -425,10 +626,26 @@ class RunningLocalWebService:
         return f"{self.base_url}/{self.boundary.broker.launch_fragment(self.bootstrap_code)}"
 
     def close(self) -> None:
-        self.server.shutdown()
-        self.server.server_close()
-        self.thread.join(timeout=5)
-        os.close(self.state_directory_fd)
+        if self.closed:
+            return
+        self.closed = True
+        try:
+            try:
+                self.server.shutdown()
+            finally:
+                self.server.server_close()
+                self.thread.join(timeout=5)
+        finally:
+            try:
+                try:
+                    _unlink_instance_state(
+                        self.state_directory_fd, expected_instance_id=self.instance_id
+                    )
+                finally:
+                    fcntl.flock(self.lease_fd, fcntl.LOCK_UN)
+                    os.close(self.lease_fd)
+            finally:
+                os.close(self.state_directory_fd)
 
     def __enter__(self) -> Self:
         return self

@@ -3,7 +3,9 @@
 from __future__ import annotations
 
 import json
+import os
 import sqlite3
+import stat
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 from threading import Event
@@ -26,7 +28,7 @@ from traceback_runner.snapshots import (
     capture_snapshot,
     input_tree_sha256,
 )
-from traceback_runner.store import JobStore, StaleLease, UnsupportedSchema
+from traceback_runner.store import JobStore, StaleLease, StoreError, UnsupportedSchema
 
 
 class FakeClock:
@@ -65,6 +67,62 @@ def _stage(name: str = "measure", version: str = "v1") -> StageSpec:
         )
 
     return StageSpec(name, version, callback, {"mode": "synthetic"})
+
+
+def test_store_permissions_and_identity_are_revalidated(tmp_path: Path) -> None:
+    source, files = _source(tmp_path)
+    path = tmp_path / "private-state" / "jobs.sqlite3"
+    store = JobStore(path)
+    record = store.submit(_request(source, files))
+
+    assert stat.S_IMODE(path.parent.stat().st_mode) == 0o700
+    assert stat.S_IMODE(path.stat().st_mode) == 0o600
+    for suffix in ("-wal", "-shm"):
+        sidecar = Path(f"{path}{suffix}")
+        if sidecar.exists():
+            assert stat.S_IMODE(sidecar.stat().st_mode) == 0o600
+
+    os.chmod(path, 0o644)
+    with pytest.raises(StoreError, match="database identity changed"):
+        store.get(record.job_id)
+
+
+def test_projection_state_and_revision_share_one_sqlite_snapshot(
+    tmp_path: Path,
+) -> None:
+    source, files = _source(tmp_path)
+    store = JobStore(tmp_path / "state" / "jobs.sqlite3")
+    record = store.submit(_request(source, files))
+    before = store.get_projection_snapshot(record.job_id)
+    started = Event()
+
+    def transition() -> None:
+        started.set()
+        store.transition(
+            record.job_id,
+            JobState.WAITING_FOR_FINALIZATION,
+            "input remains open",
+        )
+
+    observed: set[tuple[JobState, int]] = set()
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        future = pool.submit(transition)
+        assert started.wait(2)
+        for _ in range(100):
+            snapshot = store.get_projection_snapshot(record.job_id)
+            observed.add((snapshot.record.state, snapshot.revision))
+            listed = store.list_projection_snapshots()
+            assert (listed[0].record.state, listed[0].revision) in {
+                (before.record.state, before.revision),
+                (JobState.WAITING_FOR_FINALIZATION, before.revision + 1),
+            }
+        future.result()
+    after = store.get_projection_snapshot(record.job_id)
+    observed.add((after.record.state, after.revision))
+    assert observed <= {
+        (before.record.state, before.revision),
+        (JobState.WAITING_FOR_FINALIZATION, before.revision + 1),
+    }
 
 
 def test_duplicate_and_concurrent_submit_creates_one_job(tmp_path: Path) -> None:
@@ -222,7 +280,9 @@ def test_publication_crash_is_adopted_exactly_once(tmp_path: Path) -> None:
         )
 
 
-def test_db_commit_crash_reuses_receipt_without_rerunning_callback(tmp_path: Path) -> None:
+def test_db_commit_crash_reuses_receipt_without_rerunning_callback(
+    tmp_path: Path,
+) -> None:
     source, files = _source(tmp_path)
     calls = 0
 
@@ -244,7 +304,10 @@ def test_db_commit_crash_reuses_receipt_without_rerunning_callback(tmp_path: Pat
         runner.execute(job.job_id, [stage], worker_id="worker-a")
     assert calls == 1
     recovered = Runner(state, synthetic_enabled=True)
-    assert recovered.execute(job.job_id, [stage], worker_id="worker-b").state == JobState.COMPLETE
+    assert (
+        recovered.execute(job.job_id, [stage], worker_id="worker-b").state
+        == JobState.COMPLETE
+    )
     assert calls == 1
 
 
@@ -295,7 +358,9 @@ def test_changed_stage_version_cannot_reuse_previous_receipt(tmp_path: Path) -> 
     assert isinstance(envelope.contract, StageReceipt)
 
 
-def test_changed_ancestor_invalidates_unchanged_downstream_receipt(tmp_path: Path) -> None:
+def test_changed_ancestor_invalidates_unchanged_downstream_receipt(
+    tmp_path: Path,
+) -> None:
     source, files = _source(tmp_path)
     calls: list[str] = []
     commits = 0
@@ -321,9 +386,7 @@ def test_changed_ancestor_invalidates_unchanged_downstream_receipt(tmp_path: Pat
             if commits == 2:
                 raise InjectedCrash(point)
 
-    runner = Runner(
-        tmp_path / "state", synthetic_enabled=True, fault_injector=crash
-    )
+    runner = Runner(tmp_path / "state", synthetic_enabled=True, fault_injector=crash)
     job = runner.submit(_request(source, files), source, files)
     with pytest.raises(InjectedCrash):
         runner.execute(
@@ -380,21 +443,30 @@ def test_resubmit_recovers_snapshot_sealed_before_db_attach(tmp_path: Path) -> N
     recovered = Runner(state, synthetic_enabled=True)
     job = recovered.submit(request, source, files)
     assert job.state == JobState.READY
-    assert recovered.execute(job.job_id, [_stage()], worker_id="worker").state == JobState.COMPLETE
+    assert (
+        recovered.execute(job.job_id, [_stage()], worker_id="worker").state
+        == JobState.COMPLETE
+    )
 
 
-def test_recovery_preserves_verified_receipts_from_multiple_stages(tmp_path: Path) -> None:
+def test_recovery_preserves_verified_receipts_from_multiple_stages(
+    tmp_path: Path,
+) -> None:
     source, files = _source(tmp_path)
     runner = Runner(tmp_path / "state", synthetic_enabled=True)
     job = runner.submit(_request(source, files), source, files)
     stages = [_stage("validate"), _stage("measure")]
-    assert runner.execute(job.job_id, stages, worker_id="worker").state == JobState.COMPLETE
+    assert (
+        runner.execute(job.job_id, stages, worker_id="worker").state
+        == JobState.COMPLETE
+    )
 
     report = runner.recover(job.job_id)
     assert set(report.adopted) == {"validate", "measure"}
     assert report.quarantined == ()
     assert runner.outputs(job.job_id, "validate")["result"].is_file()
     assert runner.outputs(job.job_id, "measure")["result"].is_file()
+
 
 def test_private_crash_is_quarantined_and_retried_after_lease_expiry(
     tmp_path: Path,
@@ -422,7 +494,10 @@ def test_private_crash_is_quarantined_and_retried_after_lease_expiry(
     recovered = Runner(state, clock=clock, lease_seconds=5, synthetic_enabled=True)
     report = recovered.recover(job.job_id)
     assert len(report.quarantined) == 1
-    assert recovered.execute(job.job_id, [_stage()], worker_id="worker-b").state == JobState.COMPLETE
+    assert (
+        recovered.execute(job.job_id, [_stage()], worker_id="worker-b").state
+        == JobState.COMPLETE
+    )
 
 
 @pytest.mark.parametrize("target", ["receipt", "output"])
@@ -446,7 +521,9 @@ def test_pause_retry_and_explicit_synthetic_gate(tmp_path: Path) -> None:
     request = _request(source, files)
     disabled = Runner(tmp_path / "disabled")
     job = disabled.submit(request, source, files)
-    with pytest.raises(SyntheticExecutionDisabled, match="real-data execution is not enabled"):
+    with pytest.raises(
+        SyntheticExecutionDisabled, match="real-data execution is not enabled"
+    ):
         disabled.execute(job.job_id, [_stage()], worker_id="worker")
 
     enabled = Runner(tmp_path / "enabled", synthetic_enabled=True)
@@ -458,11 +535,18 @@ def test_pause_retry_and_explicit_synthetic_gate(tmp_path: Path) -> None:
         return StageResult({"result": "paused.json"})
 
     stages = [StageSpec("measure", "v1", pausing)]
-    assert enabled.execute(job.job_id, stages, worker_id="worker").state == JobState.PAUSED
-    assert enabled.resume(job.job_id, stages, worker_id="worker").state == JobState.COMPLETE
+    assert (
+        enabled.execute(job.job_id, stages, worker_id="worker").state == JobState.PAUSED
+    )
+    assert (
+        enabled.resume(job.job_id, stages, worker_id="worker").state
+        == JobState.COMPLETE
+    )
 
 
-def test_failure_can_retry_without_reusing_changed_stage_definition(tmp_path: Path) -> None:
+def test_failure_can_retry_without_reusing_changed_stage_definition(
+    tmp_path: Path,
+) -> None:
     source, files = _source(tmp_path)
     runner = Runner(tmp_path / "state", synthetic_enabled=True)
     job = runner.submit(_request(source, files), source, files)
@@ -485,17 +569,26 @@ def test_backup_and_unsupported_schema_fail_closed(tmp_path: Path) -> None:
 
     bad = tmp_path / "future.sqlite3"
     with sqlite3.connect(bad) as connection:
-        connection.execute("CREATE TABLE metadata(key TEXT PRIMARY KEY, value TEXT NOT NULL)")
+        connection.execute(
+            "CREATE TABLE metadata(key TEXT PRIMARY KEY, value TEXT NOT NULL)"
+        )
         connection.execute("INSERT INTO metadata VALUES ('schema_version', '999')")
     with pytest.raises(UnsupportedSchema, match="unsupported"):
         JobStore(bad)
 
 
-@pytest.mark.parametrize("point", [
-    "before_snapshot_capture", "after_snapshot_seal", "after_snapshot_attach",
-    "after_snapshot_validating",
-])
-def test_submission_crash_boundaries_recover_on_resubmit(tmp_path: Path, point: str) -> None:
+@pytest.mark.parametrize(
+    "point",
+    [
+        "before_snapshot_capture",
+        "after_snapshot_seal",
+        "after_snapshot_attach",
+        "after_snapshot_validating",
+    ],
+)
+def test_submission_crash_boundaries_recover_on_resubmit(
+    tmp_path: Path, point: str
+) -> None:
     source, files = _source(tmp_path)
     request = _request(source, files)
     state = tmp_path / "state"
@@ -519,11 +612,19 @@ def test_submission_crash_boundaries_recover_on_resubmit(tmp_path: Path, point: 
     if point == "before_snapshot_capture":
         assert not incomplete.exists()
         assert any(recovered.quarantine_dir.iterdir())
-    assert recovered.execute(job.job_id, [_stage()], worker_id="resumed").state == JobState.COMPLETE
+    assert (
+        recovered.execute(job.job_id, [_stage()], worker_id="resumed").state
+        == JobState.COMPLETE
+    )
 
 
-@pytest.mark.parametrize("point", ["after_snapshot_seal", "after_snapshot_attach", "after_snapshot_validating"])
-def test_recover_finishes_sealed_submission_without_source(tmp_path: Path, point: str) -> None:
+@pytest.mark.parametrize(
+    "point",
+    ["after_snapshot_seal", "after_snapshot_attach", "after_snapshot_validating"],
+)
+def test_recover_finishes_sealed_submission_without_source(
+    tmp_path: Path, point: str
+) -> None:
     source, files = _source(tmp_path)
     runner = Runner(tmp_path / "state", synthetic_enabled=True)
 
@@ -542,7 +643,9 @@ def test_recover_finishes_sealed_submission_without_source(tmp_path: Path, point
     assert runner.status(job.job_id).state == JobState.READY
 
 
-def test_recovery_quarantine_holds_lease_grant_transaction(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+def test_recovery_quarantine_holds_lease_grant_transaction(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
     source, files = _source(tmp_path)
     clock = FakeClock()
     runner = Runner(tmp_path / "state", clock=clock, synthetic_enabled=True)
@@ -566,11 +669,13 @@ def test_recovery_quarantine_holds_lease_grant_transaction(tmp_path: Path, monke
         return lease, current
 
     with ThreadPoolExecutor(max_workers=1) as pool:
+
         def quarantine(path, reason):
             futures.append(pool.submit(grant))
             assert grant_started.wait(5)
             assert not grant_finished.wait(0.1)
             return real_quarantine(path, reason)
+
         monkeypatch.setattr(runner, "_quarantine", quarantine)
         report = runner.recover(job.job_id)
         lease, current = futures[0].result(timeout=5)
@@ -590,6 +695,7 @@ def test_missing_attached_manifest_fails_closed_during_recovery(tmp_path: Path) 
     def crash(point: str) -> None:
         if point == "after_snapshot_attach":
             raise InjectedCrash(point)
+
     runner.fault_injector = crash
     with pytest.raises(InjectedCrash):
         runner.submit(request, source, files)
@@ -626,12 +732,17 @@ def test_recovery_does_not_adopt_live_publication_before_commit(tmp_path: Path) 
         assert future.result(timeout=5).state == JobState.COMPLETE
 
 
-@pytest.mark.parametrize("new_names", [
-    ("measure", "validate"),
-    ("validate", "technical_qc", "measure"),
-    ("measure",),
-])
-def test_changed_stage_order_addition_and_removal_recompute_inputs(tmp_path: Path, new_names) -> None:
+@pytest.mark.parametrize(
+    "new_names",
+    [
+        ("measure", "validate"),
+        ("validate", "technical_qc", "measure"),
+        ("measure",),
+    ],
+)
+def test_changed_stage_order_addition_and_removal_recompute_inputs(
+    tmp_path: Path, new_names
+) -> None:
     source, files = _source(tmp_path)
     calls = []
     runner = Runner(tmp_path / "state", synthetic_enabled=True)
@@ -643,18 +754,23 @@ def test_changed_stage_order_addition_and_removal_recompute_inputs(tmp_path: Pat
             predecessors = [p.name for p in context.prior_stage_dirs]
             (context.attempt_dir / "result.json").write_text(json.dumps(predecessors))
             return StageResult({"result": "result.json"})
+
         return StageSpec(name, "v1", callback)
 
     committed = 0
+
     def crash(point):
         nonlocal committed
         if point == "after_db_commit":
             committed += 1
             if committed == 2:
                 raise InjectedCrash(point)
+
     runner.fault_injector = crash
     with pytest.raises(InjectedCrash):
-        runner.execute(job.job_id, [stage("validate"), stage("measure")], worker_id="old")
+        runner.execute(
+            job.job_id, [stage("validate"), stage("measure")], worker_id="old"
+        )
     runner.fault_injector = None
     calls.clear()
     result = runner.execute(job.job_id, [stage(n) for n in new_names], worker_id="new")
@@ -663,8 +779,12 @@ def test_changed_stage_order_addition_and_removal_recompute_inputs(tmp_path: Pat
     assert calls == expected
 
 
-@pytest.mark.parametrize("corruption", ["extra-file", "extra-directory", "missing-manifest"])
-def test_sealed_snapshot_inventory_changes_block_execution(tmp_path: Path, corruption: str) -> None:
+@pytest.mark.parametrize(
+    "corruption", ["extra-file", "extra-directory", "missing-manifest"]
+)
+def test_sealed_snapshot_inventory_changes_block_execution(
+    tmp_path: Path, corruption: str
+) -> None:
     source, files = _source(tmp_path)
     runner = Runner(tmp_path / "state", synthetic_enabled=True)
     job = runner.submit(_request(source, files), source, files)
@@ -694,6 +814,8 @@ def test_callback_snapshot_mutation_cannot_publish(tmp_path: Path) -> None:
         return StageResult({"result": "out"})
 
     with pytest.raises(SnapshotViolation, match="digest changed"):
-        runner.execute(job.job_id, [StageSpec("measure", "v1", mutate)], worker_id="worker")
+        runner.execute(
+            job.job_id, [StageSpec("measure", "v1", mutate)], worker_id="worker"
+        )
     assert runner.status(job.job_id).state == JobState.TERMINAL_FAILURE
     assert not (runner.artifacts_dir / job.job_id).exists()

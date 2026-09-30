@@ -8,6 +8,7 @@ import json
 import os
 import socket
 import stat
+import time
 from pathlib import Path
 
 import pytest
@@ -15,6 +16,7 @@ import pytest
 from evidence_inspector.models import sha256_bytes
 from traceback_runner.contracts import InputKind, JobRequest
 from traceback_runner.store import JobStore
+from traceback_runner.web import server as server_module
 from traceback_runner.web.server import LocalWebServerError, RunningLocalWebService
 
 
@@ -188,14 +190,22 @@ def test_state_permissions_restart_rotation_and_explicit_cross_user_limit(
     first = RunningLocalWebService.start(store=store, state_directory=state)
     first_cookie, _ = _exchange(first)
     first_instance = first.instance_id
-    first.close()
 
     assert stat.S_IMODE(state.stat().st_mode) == 0o700
     assert stat.S_IMODE((state / "instance.json").stat().st_mode) == 0o600
+    assert stat.S_IMODE((state / "instance.lock").stat().st_mode) == 0o600
     assert state.stat().st_uid == os.geteuid()
     saved = json.loads((state / "instance.json").read_bytes())
     assert saved["capability_enabled"] is False
     assert "bootstrap" not in saved and "session" not in saved
+    with pytest.raises(LocalWebServerError, match="already running"):
+        RunningLocalWebService.start(store=store, state_directory=state)
+
+    first.close()
+    first.close()
+    assert not (state / "instance.json").exists()
+    (state / "instance.json").write_bytes(b"stale truncated state")
+    os.chmod(state / "instance.json", 0o600)
 
     with RunningLocalWebService.start(store=store, state_directory=state) as second:
         assert second.instance_id != first_instance
@@ -211,6 +221,141 @@ def test_state_permissions_restart_rotation_and_explicit_cross_user_limit(
     insecure.mkdir(mode=0o755)
     with pytest.raises(LocalWebServerError, match="0700"):
         RunningLocalWebService.start(store=store, state_directory=insecure)
+
+
+def test_state_directory_replacement_during_publication_fails_closed(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    store, _ = _store(tmp_path)
+    state = tmp_path / "state"
+    displaced = tmp_path / "displaced-state"
+    original = server_module._write_instance_state
+
+    def replace_after_write(directory_fd: int, payload: dict[str, object]) -> None:
+        original(directory_fd, payload)
+        state.rename(displaced)
+        state.mkdir(mode=0o700)
+
+    monkeypatch.setattr(server_module, "_write_instance_state", replace_after_write)
+    with pytest.raises(LocalWebServerError, match="identity changed"):
+        RunningLocalWebService.start(store=store, state_directory=state)
+    assert not (displaced / "instance.json").exists()
+    assert not (state / "instance.json").exists()
+
+
+def test_authority_rejected_before_body_validation_or_read(tmp_path: Path) -> None:
+    store, _ = _store(tmp_path)
+    with RunningLocalWebService.start(
+        store=store, state_directory=tmp_path / "state"
+    ) as service:
+        config = service.boundary.config
+        connection = http.client.HTTPConnection(
+            config.bind_host, config.port, timeout=1
+        )
+        connection.putrequest("POST", "/api/v1/session/bootstrap", skip_host=True)
+        connection.putheader("Host", "evil.example")
+        connection.putheader("Origin", service.base_url)
+        connection.putheader("Content-Type", "text/plain")
+        connection.putheader("Content-Length", "4096")
+        connection.endheaders()
+        assert connection.getresponse().status == 403
+        connection.close()
+
+
+@pytest.mark.parametrize(
+    "cookie_header",
+    [
+        "traceback_session=one; traceback_session=two",
+        'traceback_session="quoted"',
+        "traceback_session=valid; malformed",
+    ],
+)
+def test_ambiguous_session_cookies_are_rejected(
+    tmp_path: Path, cookie_header: str
+) -> None:
+    store, _ = _store(tmp_path)
+    with RunningLocalWebService.start(
+        store=store, state_directory=tmp_path / "state"
+    ) as service:
+        status, _, _ = _request(
+            service,
+            "GET",
+            "/api/v1/jobs",
+            headers={"Cookie": cookie_header},
+        )
+        assert status == 401
+
+
+def test_duplicate_cookie_headers_are_rejected(tmp_path: Path) -> None:
+    store, _ = _store(tmp_path)
+    with RunningLocalWebService.start(
+        store=store, state_directory=tmp_path / "state"
+    ) as service:
+        cookie, _ = _exchange(service)
+        config = service.boundary.config
+        connection = http.client.HTTPConnection(
+            config.bind_host, config.port, timeout=3
+        )
+        connection.putrequest("GET", "/api/v1/jobs", skip_host=True)
+        connection.putheader("Host", config.authority)
+        connection.putheader("Cookie", cookie)
+        connection.putheader("Cookie", cookie)
+        connection.endheaders()
+        assert connection.getresponse().status == 401
+        connection.close()
+
+
+def test_partial_request_flood_has_bounded_workers_and_no_tracebacks(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    store, _ = _store(tmp_path)
+    clients: list[socket.socket] = []
+    with RunningLocalWebService.start(
+        store=store, state_directory=tmp_path / "state"
+    ) as service:
+        config = service.boundary.config
+        for _ in range(server_module.MAX_HTTP_WORKERS * 3):
+            client = socket.create_connection(
+                (config.bind_host, config.port), timeout=1
+            )
+            client.sendall(b"GET / HTTP/1.1\r\nHost: ")
+            clients.append(client)
+        time.sleep(0.2)
+        assert service.server.active_workers <= server_module.MAX_HTTP_WORKERS
+        for client in clients:
+            client.close()
+        time.sleep(0.2)
+        assert _request(service, "GET", "/")[0] == 200
+    assert "Traceback" not in capsys.readouterr().err
+
+
+def test_header_and_body_limits_fail_without_reading_oversized_body(
+    tmp_path: Path,
+) -> None:
+    store, _ = _store(tmp_path)
+    with RunningLocalWebService.start(
+        store=store, state_directory=tmp_path / "state"
+    ) as service:
+        config = service.boundary.config
+        client = socket.create_connection((config.bind_host, config.port), timeout=1)
+        headers = "".join(f"X-Padding-{index}: x\r\n" for index in range(33))
+        client.sendall(
+            f"GET / HTTP/1.1\r\nHost: {config.authority}\r\n{headers}\r\n".encode()
+        )
+        assert b" 431 " in client.recv(1024)
+        client.close()
+
+        connection = http.client.HTTPConnection(
+            config.bind_host, config.port, timeout=1
+        )
+        connection.putrequest("POST", "/api/v1/session/bootstrap", skip_host=True)
+        connection.putheader("Host", config.authority)
+        connection.putheader("Origin", service.base_url)
+        connection.putheader("Content-Type", "application/json")
+        connection.putheader("Content-Length", str(server_module.MAX_REQUEST_BYTES + 1))
+        connection.endheaders()
+        assert connection.getresponse().status == 400
+        connection.close()
 
 
 def test_localhost_operation_survives_external_egress_denial(

@@ -3,13 +3,15 @@
 from __future__ import annotations
 
 import json
+import os
 import sqlite3
+import stat
 import time
 import uuid
+from collections.abc import Callable, Iterator
 from contextlib import contextmanager
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Callable, Iterator
 
 from .contracts import JobRequest, JobState, job_key, validate_transition
 from .serialization import canonical_json_bytes
@@ -54,6 +56,12 @@ class StoredJobRecord:
 
 
 @dataclass(frozen=True)
+class StoredJobProjectionSnapshot:
+    record: StoredJobRecord
+    revision: int
+
+
+@dataclass(frozen=True)
 class AttemptLease:
     job_id: str
     stage: str
@@ -69,14 +77,75 @@ class JobStore:
     def __init__(self, path: Path, *, clock: Callable[[], float] = time.time) -> None:
         self.path = path
         self.clock = clock
-        path.parent.mkdir(parents=True, exist_ok=True)
+        path.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
+        parent = path.parent.lstat()
+        if not stat.S_ISDIR(parent.st_mode) or parent.st_uid != os.geteuid():
+            raise StoreError("runner store directory must be owned by this OS user")
+        os.chmod(path.parent, 0o700)
+        self._directory_identity = (parent.st_dev, parent.st_ino)
+        self._database_identity: tuple[int, int] | None = None
+        self._sidecar_identities: dict[Path, tuple[int, int]] = {}
+        self._secure_storage()
         self._initialize()
+        self._secure_storage()
+        database = self.path.lstat()
+        self._database_identity = (database.st_dev, database.st_ino)
+
+    def _secure_storage(self) -> None:
+        parent = self.path.parent.lstat()
+        if (
+            not stat.S_ISDIR(parent.st_mode)
+            or parent.st_uid != os.geteuid()
+            or (parent.st_dev, parent.st_ino) != self._directory_identity
+            or stat.S_IMODE(parent.st_mode) != 0o700
+        ):
+            raise StoreError("runner store directory identity changed")
+        for candidate in (
+            self.path,
+            Path(f"{self.path}-wal"),
+            Path(f"{self.path}-shm"),
+        ):
+            try:
+                metadata = candidate.lstat()
+            except FileNotFoundError:
+                continue
+            if (
+                not stat.S_ISREG(metadata.st_mode)
+                or metadata.st_uid != os.geteuid()
+                or metadata.st_nlink != 1
+            ):
+                raise StoreError("runner store files must be private regular files")
+            identity = (metadata.st_dev, metadata.st_ino)
+            if candidate == self.path:
+                if self._database_identity is None:
+                    os.chmod(candidate, 0o600)
+                elif (
+                    identity != self._database_identity
+                    or stat.S_IMODE(metadata.st_mode) != 0o600
+                ):
+                    raise StoreError("runner store database identity changed")
+            else:
+                previous = self._sidecar_identities.get(candidate)
+                if previous is None:
+                    os.chmod(candidate, 0o600)
+                    self._sidecar_identities[candidate] = identity
+                elif previous != identity or stat.S_IMODE(metadata.st_mode) != 0o600:
+                    raise StoreError("runner store sidecar identity changed")
+        for candidate in tuple(self._sidecar_identities):
+            if not candidate.exists():
+                self._sidecar_identities.pop(candidate, None)
+        if self._database_identity is not None:
+            database = self.path.lstat()
+            if (database.st_dev, database.st_ino) != self._database_identity:
+                raise StoreError("runner store database identity changed")
 
     def _connect(self) -> sqlite3.Connection:
+        self._secure_storage()
         connection = sqlite3.connect(self.path, timeout=30, isolation_level=None)
         connection.row_factory = sqlite3.Row
         connection.execute("PRAGMA foreign_keys=ON")
         connection.execute("PRAGMA busy_timeout=30000")
+        self._secure_storage()
         return connection
 
     @contextmanager
@@ -153,7 +222,9 @@ class JobStore:
                         "SELECT value FROM metadata WHERE key='schema_version'"
                     ).fetchone()
                 except sqlite3.DatabaseError as exc:
-                    raise UnsupportedSchema("database has no recognized schema") from exc
+                    raise UnsupportedSchema(
+                        "database has no recognized schema"
+                    ) from exc
                 if row is None or int(row[0]) != SCHEMA_VERSION:
                     found = "missing" if row is None else row[0]
                     raise UnsupportedSchema(
@@ -192,7 +263,9 @@ class JobStore:
             ).fetchone()
             if existing is not None:
                 if existing["request_key"] != request_identity:
-                    raise IdempotencyConflict("idempotency key belongs to another request")
+                    raise IdempotencyConflict(
+                        "idempotency key belongs to another request"
+                    )
                 return self._record(existing)
             job_id = uuid.uuid4().hex
             connection.execute(
@@ -216,13 +289,17 @@ class JobStore:
                 ) VALUES (?, ?, NULL, ?, ?, 0)""",
                 (job_id, now, JobState.DISCOVERED.value, "submitted"),
             )
-            row = connection.execute("SELECT * FROM jobs WHERE job_id=?", (job_id,)).fetchone()
+            row = connection.execute(
+                "SELECT * FROM jobs WHERE job_id=?", (job_id,)
+            ).fetchone()
             assert row is not None
             return self._record(row)
 
     def get(self, job_id: str) -> StoredJobRecord:
         with self._connect() as connection:
-            row = connection.execute("SELECT * FROM jobs WHERE job_id=?", (job_id,)).fetchone()
+            row = connection.execute(
+                "SELECT * FROM jobs WHERE job_id=?", (job_id,)
+            ).fetchone()
         if row is None:
             raise KeyError(job_id)
         return self._record(row)
@@ -239,6 +316,47 @@ class JobStore:
             ).fetchall()
         return tuple(self._record(row) for row in rows)
 
+    @classmethod
+    def _projection_snapshot(cls, row: sqlite3.Row) -> StoredJobProjectionSnapshot:
+        return StoredJobProjectionSnapshot(
+            record=cls._record(row),
+            revision=int(row["projection_revision"]),
+        )
+
+    def get_projection_snapshot(self, job_id: str) -> StoredJobProjectionSnapshot:
+        """Read state and audit revision in one SQLite statement."""
+
+        with self._connect() as connection:
+            row = connection.execute(
+                """SELECT jobs.*,
+                          COALESCE((SELECT MAX(sequence) FROM audit
+                                    WHERE audit.job_id=jobs.job_id), 0)
+                              AS projection_revision
+                   FROM jobs WHERE jobs.job_id=?""",
+                (job_id,),
+            ).fetchone()
+        if row is None:
+            raise KeyError(job_id)
+        return self._projection_snapshot(row)
+
+    def list_projection_snapshots(
+        self, *, limit: int = 100
+    ) -> tuple[StoredJobProjectionSnapshot, ...]:
+        """Read a bounded queue whose state and revision share one snapshot."""
+
+        if not 1 <= limit <= 100:
+            raise ValueError("projection limit must be between 1 and 100")
+        with self._connect() as connection:
+            rows = connection.execute(
+                """SELECT jobs.*,
+                          COALESCE((SELECT MAX(sequence) FROM audit
+                                    WHERE audit.job_id=jobs.job_id), 0)
+                              AS projection_revision
+                   FROM jobs ORDER BY updated_at DESC, job_id LIMIT ?""",
+                (limit,),
+            ).fetchall()
+        return tuple(self._projection_snapshot(row) for row in rows)
+
     def request(self, job_id: str) -> JobRequest:
         with self._connect() as connection:
             row = connection.execute(
@@ -248,11 +366,11 @@ class JobStore:
             raise KeyError(job_id)
         return JobRequest.model_validate_json(row[0])
 
-    def transition(
-        self, job_id: str, state: JobState, reason: str
-    ) -> StoredJobRecord:
+    def transition(self, job_id: str, state: JobState, reason: str) -> StoredJobRecord:
         with self._transaction() as connection:
-            row = connection.execute("SELECT * FROM jobs WHERE job_id=?", (job_id,)).fetchone()
+            row = connection.execute(
+                "SELECT * FROM jobs WHERE job_id=?", (job_id,)
+            ).fetchone()
             if row is None:
                 raise KeyError(job_id)
             previous = JobState(row["state"])
@@ -268,7 +386,9 @@ class JobStore:
                 ) VALUES (?, ?, ?, ?, ?, ?)""",
                 (job_id, now, previous.value, state.value, reason, row["lease_token"]),
             )
-            updated = connection.execute("SELECT * FROM jobs WHERE job_id=?", (job_id,)).fetchone()
+            updated = connection.execute(
+                "SELECT * FROM jobs WHERE job_id=?", (job_id,)
+            ).fetchone()
             assert updated is not None
             return self._record(updated)
 
@@ -321,7 +441,9 @@ class JobStore:
         if lease_seconds <= 0:
             raise ValueError("lease_seconds must be positive")
         with self._transaction() as connection:
-            row = connection.execute("SELECT * FROM jobs WHERE job_id=?", (job_id,)).fetchone()
+            row = connection.execute(
+                "SELECT * FROM jobs WHERE job_id=?", (job_id,)
+            ).fetchone()
             if row is None:
                 raise KeyError(job_id)
             now = self.clock()
@@ -344,13 +466,23 @@ class JobStore:
                     job_id, stage, attempt, lease_token, stage_definition_sha256,
                     worker_id, status, started_at
                 ) VALUES (?, ?, ?, ?, ?, ?, 'running', ?)""",
-                (job_id, stage, attempt, token, stage_definition_sha256, worker_id, now),
+                (
+                    job_id,
+                    stage,
+                    attempt,
+                    token,
+                    stage_definition_sha256,
+                    worker_id,
+                    now,
+                ),
             )
             return AttemptLease(job_id, stage, attempt, token, worker_id, expires)
 
     def heartbeat(self, lease: AttemptLease, lease_seconds: float) -> AttemptLease:
         with self._transaction() as connection:
-            row = connection.execute("SELECT * FROM jobs WHERE job_id=?", (lease.job_id,)).fetchone()
+            row = connection.execute(
+                "SELECT * FROM jobs WHERE job_id=?", (lease.job_id,)
+            ).fetchone()
             now = self.clock()
             if row is None or not self._lease_matches(row, lease, now):
                 raise StaleLease("lease expired or was superseded")
@@ -360,7 +492,12 @@ class JobStore:
                 (expires, now, lease.job_id),
             )
             return AttemptLease(
-                lease.job_id, lease.stage, lease.attempt, lease.token, lease.worker_id, expires
+                lease.job_id,
+                lease.stage,
+                lease.attempt,
+                lease.token,
+                lease.worker_id,
+                expires,
             )
 
     @staticmethod
@@ -373,9 +510,13 @@ class JobStore:
             and row["lease_expires_at"] >= now
         )
 
-    def commit_attempt(self, lease: AttemptLease, receipt_path: str, receipt_sha256: str) -> None:
+    def commit_attempt(
+        self, lease: AttemptLease, receipt_path: str, receipt_sha256: str
+    ) -> None:
         with self._transaction() as connection:
-            row = connection.execute("SELECT * FROM jobs WHERE job_id=?", (lease.job_id,)).fetchone()
+            row = connection.execute(
+                "SELECT * FROM jobs WHERE job_id=?", (lease.job_id,)
+            ).fetchone()
             now = self.clock()
             if row is None or not self._lease_matches(row, lease, now):
                 raise StaleLease("stale worker cannot commit a stage")
@@ -393,7 +534,13 @@ class JobStore:
             connection.execute(
                 """UPDATE attempts SET status='committed', receipt_path=?, receipt_sha256=?
                    WHERE job_id=? AND stage=? AND attempt=?""",
-                (receipt_path, receipt_sha256, lease.job_id, lease.stage, lease.attempt),
+                (
+                    receipt_path,
+                    receipt_sha256,
+                    lease.job_id,
+                    lease.stage,
+                    lease.attempt,
+                ),
             )
             connection.execute(
                 """UPDATE jobs SET lease_owner=NULL, lease_expires_at=NULL, updated_at=?
@@ -412,7 +559,9 @@ class JobStore:
         """Adopt publication after a DB-boundary crash, even if its lease expired."""
 
         with self._transaction() as connection:
-            row = connection.execute("SELECT * FROM jobs WHERE job_id=?", (lease.job_id,)).fetchone()
+            row = connection.execute(
+                "SELECT * FROM jobs WHERE job_id=?", (lease.job_id,)
+            ).fetchone()
             if row is None:
                 return False
             attempt = connection.execute(
@@ -431,12 +580,21 @@ class JobStore:
                 return attempt["receipt_sha256"] == receipt_sha256
             if row["lease_token"] != lease.token:
                 return False
-            if row["lease_owner"] is not None and row["lease_expires_at"] >= self.clock():
+            if (
+                row["lease_owner"] is not None
+                and row["lease_expires_at"] >= self.clock()
+            ):
                 raise LeaseBusy("publication still belongs to a live worker")
             connection.execute(
                 """UPDATE attempts SET status='committed', receipt_path=?, receipt_sha256=?
                    WHERE job_id=? AND stage=? AND attempt=?""",
-                (receipt_path, receipt_sha256, lease.job_id, lease.stage, lease.attempt),
+                (
+                    receipt_path,
+                    receipt_sha256,
+                    lease.job_id,
+                    lease.stage,
+                    lease.attempt,
+                ),
             )
             connection.execute(
                 """UPDATE jobs SET lease_owner=NULL, lease_expires_at=NULL, updated_at=?
@@ -475,13 +633,18 @@ class JobStore:
         """
 
         with self._transaction() as connection:
-            row = connection.execute("SELECT * FROM jobs WHERE job_id=?", (job_id,)).fetchone()
+            row = connection.execute(
+                "SELECT * FROM jobs WHERE job_id=?", (job_id,)
+            ).fetchone()
             if row is None:
                 raise KeyError(job_id)
             active = None
             now = self.clock()
             if row["lease_owner"] is not None:
-                if row["lease_expires_at"] is not None and row["lease_expires_at"] >= now:
+                if (
+                    row["lease_expires_at"] is not None
+                    and row["lease_expires_at"] >= now
+                ):
                     active = f"{row['current_stage']}-{row['lease_token']}"
                 else:
                     connection.execute(
@@ -496,10 +659,14 @@ class JobStore:
                     )
             yield active
 
-    def fail_attempt(self, lease: AttemptLease, message: str, *, retryable: bool) -> None:
+    def fail_attempt(
+        self, lease: AttemptLease, message: str, *, retryable: bool
+    ) -> None:
         target = JobState.RETRYABLE_FAILURE if retryable else JobState.TERMINAL_FAILURE
         with self._transaction() as connection:
-            row = connection.execute("SELECT * FROM jobs WHERE job_id=?", (lease.job_id,)).fetchone()
+            row = connection.execute(
+                "SELECT * FROM jobs WHERE job_id=?", (lease.job_id,)
+            ).fetchone()
             now = self.clock()
             if row is None or row["lease_token"] != lease.token:
                 raise StaleLease("stale worker cannot record failure")
@@ -541,6 +708,7 @@ class JobStore:
             raise
         target.close()
         source.close()
+        os.chmod(destination, 0o600)
         return destination
 
     def audit(self, job_id: str) -> tuple[dict[str, object], ...]:
