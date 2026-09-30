@@ -8,8 +8,6 @@ import json
 import pytest
 from pydantic import ValidationError
 
-from traceback_runner.serialization import canonical_json_bytes
-
 from evidence_inspector.cell_origin_explorer import (
     build_cell_origin_explorer_artifact,
     canonical_cell_origin_explorer_bytes,
@@ -18,11 +16,11 @@ from evidence_inspector.cell_origin_models import (
     BootstrapInformationStatus,
     NnlsRowScale,
 )
+from evidence_inspector.method_registry import method_definition_sha256
 from evidence_inspector.result_catalog import (
     CatalogQualificationState,
     CatalogResultRef,
 )
-from evidence_inspector.method_registry import method_definition_sha256
 from evidence_inspector.sensitivity_comparison import (
     CellOriginRunParameters,
     EdgeInclusionPolicy,
@@ -34,7 +32,6 @@ from evidence_inspector.sensitivity_comparison import (
     RunStatus,
     SamplingEstimate,
     SensitivityAvailability,
-    SensitivityComparisonArtifact,
     SensitivityContractError,
     SensitivityRunBinding,
     SensitivityRunOutcome,
@@ -42,13 +39,18 @@ from evidence_inspector.sensitivity_comparison import (
     SensitivityStudyBundle,
     StudyAttrition,
     SubsetLevel,
+    SubsetMembershipCommitment,
     WholeMoleculeSubsetFamily,
     build_sensitivity_comparison_artifact,
     canonical_sensitivity_comparison_bytes,
     register_sensitivity_study,
+    sensitivity_bundle_sha256,
     sensitivity_comparison_from_canonical_bytes,
+    sensitivity_result_sha256,
+    whole_molecule_membership_sha256,
 )
 from tests.test_cell_origin_explorer import _request as cell_origin_request
+from traceback_runner.serialization import canonical_json_bytes
 
 
 def _digest(value: object) -> str:
@@ -100,6 +102,13 @@ def _source() -> SensitivitySource:
 
 
 def _family() -> WholeMoleculeSubsetFamily:
+    molecule_digests = tuple(
+        hashlib.sha256(f"molecule:{index}".encode()).hexdigest()
+        for index in range(8)
+    )
+    full_membership = whole_molecule_membership_sha256(
+        tuple(sorted(molecule_digests))
+    )
     return WholeMoleculeSubsetFamily(
         family_id="subset-family.synthetic",
         source_molecule_count=8,
@@ -119,6 +128,40 @@ def _family() -> WholeMoleculeSubsetFamily:
         replicates=(
             ReplicateSeed(replicate_id="replicate.a", seed=7),
             ReplicateSeed(replicate_id="replicate.b", seed=11),
+        ),
+        membership_commitments=(
+            SubsetMembershipCommitment(
+                subset_id="subset.full",
+                replicate_id="replicate.a",
+                membership_count=8,
+                membership_sha256=full_membership,
+            ),
+            SubsetMembershipCommitment(
+                subset_id="subset.full",
+                replicate_id="replicate.b",
+                membership_count=8,
+                membership_sha256=full_membership,
+            ),
+            SubsetMembershipCommitment(
+                subset_id="subset.half",
+                replicate_id="replicate.a",
+                membership_count=4,
+                membership_sha256=whole_molecule_membership_sha256(
+                    tuple(sorted(molecule_digests[:4]))
+                ),
+            ),
+            SubsetMembershipCommitment(
+                subset_id="subset.half",
+                replicate_id="replicate.b",
+                membership_count=4,
+                membership_sha256=whole_molecule_membership_sha256(
+                    tuple(
+                        sorted(
+                            molecule_digests[index] for index in (0, 2, 4, 6)
+                        )
+                    )
+                ),
+            ),
         ),
     )
 
@@ -188,14 +231,17 @@ def _study_bundle() -> SensitivityStudyBundle:
     level_by_id = {item.subset_id: item for item in family.levels}
     replicate_by_id = {item.replicate_id: item for item in family.replicates}
     parameter_by_id = {item.parameter_id: item for item in parameters}
+    receipt_by_key = {
+        item.sort_key: item for item in registration.subset_receipts
+    }
     outcomes = []
     for index, key in enumerate(registration.run_grid):
         level = level_by_id[key.subset_id]
         replicate = replicate_by_id[key.replicate_id]
         parameter = parameter_by_id[key.parameter_id]
-        subset_digest = hashlib.sha256(
-            f"{key.subset_id}:{key.replicate_id}".encode()
-        ).hexdigest()
+        subset_digest = receipt_by_key[
+            (key.subset_id, key.replicate_id)
+        ].subset_sha256
         attrition = RunAttrition(
             source_molecules=family.source_molecule_count,
             target_molecules=level.target_molecule_count,
@@ -227,9 +273,29 @@ def _study_bundle() -> SensitivityStudyBundle:
             )
             continue
         estimates = _complete_estimates(offset=index * 0.001)
-        result_digest = hashlib.sha256(f"result:{key.sort_key}".encode()).hexdigest()
-        bundle_digest = hashlib.sha256(f"bundle:{key.sort_key}".encode()).hexdigest()
         atlas = parameter.atlas_asset
+        result_id = f"result.sensitivity.{index}"
+        bundle_id = f"bundle.sensitivity.{index}"
+        result_digest = sensitivity_result_sha256(
+            result_id=result_id,
+            key=key,
+            attrition=attrition,
+            subset_sha256=subset_digest,
+            parameters_sha256=parameter.parameters_sha256,
+            estimates=estimates,
+        )
+        bundle_digest = sensitivity_bundle_sha256(
+            bundle_id=bundle_id,
+            result_sha256=result_digest,
+            method_ref=parameter.method.method_ref,
+            method_definition_sha256=parameter.method_definition_sha256,
+            atlas_id=atlas.asset_id,
+            atlas_sha256=atlas.content_sha256,
+            filter_sha256=registration.source_filter_sha256,
+            seed=replicate.seed,
+            subset_sha256=subset_digest,
+            parameters_sha256=parameter.parameters_sha256,
+        )
         outcomes.append(
             SensitivityRunOutcome(
                 key=key,
@@ -237,9 +303,9 @@ def _study_bundle() -> SensitivityStudyBundle:
                 attrition=attrition,
                 subset_sha256=subset_digest,
                 binding=SensitivityRunBinding(
-                    result_id=f"result.sensitivity.{index}",
+                    result_id=result_id,
                     result_sha256=result_digest,
-                    bundle_id=f"bundle.sensitivity.{index}",
+                    bundle_id=bundle_id,
                     bundle_sha256=bundle_digest,
                     method_ref=parameter.method.method_ref,
                     method_definition_sha256=parameter.method_definition_sha256,
@@ -328,6 +394,18 @@ def test_registration_rejects_caller_selected_grid_omission() -> None:
         type(bundle.registration).model_validate_json(json.dumps(payload))
 
 
+def test_registration_grid_is_exact_cartesian_without_duplicate_keys() -> None:
+    registration = _study_bundle().registration
+    keys = tuple(item.sort_key for item in registration.run_grid)
+    expected_count = (
+        len(registration.subset_family.levels)
+        * len(registration.subset_family.replicates)
+        * len(registration.parameter_sets)
+    )
+    assert len(keys) == expected_count
+    assert len(keys) == len(set(keys))
+
+
 def test_bundle_rejects_silent_failed_or_omitted_replicate() -> None:
     payload = _study_bundle().model_dump(mode="json")
     payload["outcomes"].pop()
@@ -352,11 +430,11 @@ def test_failed_run_cannot_carry_best_looking_numeric_result() -> None:
 @pytest.mark.parametrize(
     ("field", "value", "message"),
     [
-        ("seed", 99, "run binding"),
+        ("seed", 99, "bind exact result evidence"),
         ("subset_sha256", "f" * 64, "subset receipt"),
-        ("filter_sha256", "e" * 64, "run binding"),
-        ("atlas_sha256", "d" * 64, "run binding"),
-        ("parameters_sha256", "c" * 64, "run binding"),
+        ("filter_sha256", "e" * 64, "bind exact result evidence"),
+        ("atlas_sha256", "d" * 64, "bind exact result evidence"),
+        ("parameters_sha256", "c" * 64, "bind exact numeric evidence"),
     ],
 )
 def test_run_bindings_fail_closed_on_identity_drift(
@@ -385,7 +463,75 @@ def test_parameter_runs_share_exact_seeded_whole_molecule_subset() -> None:
     peer["subset_sha256"] = "f" * 64
     if peer["binding"] is not None:
         peer["binding"]["subset_sha256"] = "f" * 64
-    with pytest.raises(ValidationError, match="exact seeded subset"):
+    with pytest.raises(ValidationError, match="bind exact numeric evidence"):
+        SensitivityStudyBundle.model_validate_json(json.dumps(payload))
+
+
+def test_all_peer_subset_receipts_cannot_drift_from_registration() -> None:
+    payload = _study_bundle().model_dump(mode="json")
+    for outcome in payload["outcomes"]:
+        outcome["subset_sha256"] = "f" * 64
+        if outcome["binding"] is not None:
+            outcome["binding"]["subset_sha256"] = "f" * 64
+    with pytest.raises(ValidationError, match="bind exact|preregistered subset"):
+        SensitivityStudyBundle.model_validate_json(json.dumps(payload))
+
+
+def test_complete_estimates_are_bound_to_fixed_result_and_bundle_identities() -> None:
+    payload = _study_bundle().model_dump(mode="json")
+    complete = [
+        item for item in payload["outcomes"] if item["status"] == "complete"
+    ]
+    complete[0]["estimates"], complete[1]["estimates"] = (
+        complete[1]["estimates"],
+        complete[0]["estimates"],
+    )
+    with pytest.raises(ValidationError, match="result digest.*numeric evidence"):
+        SensitivityStudyBundle.model_validate_json(json.dumps(payload))
+
+
+def test_complete_runs_require_unique_result_and_bundle_identities() -> None:
+    bundle = _study_bundle()
+    complete = [
+        item for item in bundle.outcomes if item.status == RunStatus.COMPLETE
+    ]
+    first, second = complete[:2]
+    assert first.binding is not None and second.binding is not None
+    result_digest = sensitivity_result_sha256(
+        result_id=first.binding.result_id,
+        key=second.key,
+        attrition=second.attrition,
+        subset_sha256=second.subset_sha256,
+        parameters_sha256=second.binding.parameters_sha256,
+        estimates=second.estimates,
+    )
+    bundle_digest = sensitivity_bundle_sha256(
+        bundle_id=second.binding.bundle_id,
+        result_sha256=result_digest,
+        method_ref=second.binding.method_ref,
+        method_definition_sha256=second.binding.method_definition_sha256,
+        atlas_id=second.binding.atlas_id,
+        atlas_sha256=second.binding.atlas_sha256,
+        filter_sha256=second.binding.filter_sha256,
+        seed=second.binding.seed,
+        subset_sha256=second.binding.subset_sha256,
+        parameters_sha256=second.binding.parameters_sha256,
+    )
+    payload = bundle.model_dump(mode="json")
+    changed = next(
+        item
+        for item in payload["outcomes"]
+        if (
+            item["key"]["subset_id"],
+            item["key"]["replicate_id"],
+            item["key"]["parameter_id"],
+        )
+        == second.key.sort_key
+    )
+    changed["binding"]["result_id"] = first.binding.result_id
+    changed["binding"]["result_sha256"] = result_digest
+    changed["binding"]["bundle_sha256"] = bundle_digest
+    with pytest.raises(ValidationError, match="result_id identities must be unique"):
         SensitivityStudyBundle.model_validate_json(json.dumps(payload))
 
 
@@ -414,12 +560,90 @@ def test_subset_registration_requires_full_level_and_exact_rounding() -> None:
         WholeMoleculeSubsetFamily.model_validate_json(json.dumps(payload))
 
 
+def test_subset_levels_reject_duplicate_ids_and_duplicate_fractions() -> None:
+    payload = _family().model_dump(mode="json")
+    payload["levels"][1]["subset_id"] = payload["levels"][0]["subset_id"]
+    with pytest.raises(ValidationError, match="subset IDs must be unique"):
+        WholeMoleculeSubsetFamily.model_validate_json(json.dumps(payload))
+
+    payload = _family().model_dump(mode="json")
+    payload["levels"][0]["subset_id"] = "subset.a"
+    payload["levels"][1]["subset_id"] = "subset.b"
+    payload["levels"][1]["fraction_ppm"] = 500_000
+    for commitment in payload["membership_commitments"]:
+        commitment["subset_id"] = (
+            "subset.a"
+            if commitment["subset_id"] == "subset.half"
+            else "subset.b"
+        )
+    with pytest.raises(ValidationError, match="subset fractions must be unique"):
+        WholeMoleculeSubsetFamily.model_validate_json(json.dumps(payload))
+
+
+def test_membership_commitments_are_complete_canonical_and_preregistered() -> None:
+    payload = _family().model_dump(mode="json")
+    payload["membership_commitments"].pop()
+    with pytest.raises(ValidationError, match="full subset-replicate grid"):
+        WholeMoleculeSubsetFamily.model_validate_json(json.dumps(payload))
+
+    study_payload = _study_bundle().model_dump(mode="json")
+    commitments = study_payload["registration"]["subset_family"][
+        "membership_commitments"
+    ]
+    half_commitment = next(
+        item for item in commitments if item["subset_id"] == "subset.half"
+    )
+    half_commitment["membership_sha256"] = "f" * 64
+    with pytest.raises(ValidationError, match="preregistered context"):
+        SensitivityStudyBundle.model_validate_json(json.dumps(study_payload))
+
+
+def test_full_subset_membership_is_seed_invariant() -> None:
+    payload = _family().model_dump(mode="json")
+    full = [
+        item
+        for item in payload["membership_commitments"]
+        if item["subset_id"] == "subset.full"
+    ]
+    full[1]["membership_sha256"] = "f" * 64
+    with pytest.raises(ValidationError, match="identical across replicate seeds"):
+        WholeMoleculeSubsetFamily.model_validate_json(json.dumps(payload))
+
+
+def test_membership_digest_requires_unique_canonical_order() -> None:
+    first = "0" * 64
+    second = "f" * 64
+    with pytest.raises(ValueError, match="uniquely sorted"):
+        whole_molecule_membership_sha256((second, first))
+    with pytest.raises(ValueError, match="uniquely sorted"):
+        whole_molecule_membership_sha256((first, first))
+    with pytest.raises(ValueError, match="SHA-256 digests only"):
+        whole_molecule_membership_sha256(("raw-molecule-id",))
+
+
+def test_parameter_payloads_must_be_unique_despite_distinct_ids() -> None:
+    source = _source()
+    parameters = _parameter_sets(source)
+    duplicate = parameters[1].model_copy(update={"parameter_id": "parameter.zzz"})
+    with pytest.raises(ValidationError, match="unique parameter payloads"):
+        register_sensitivity_study(
+            registration_id="registration.synthetic",
+            source=source,
+            subset_family=_family(),
+            parameter_sets=(*parameters, duplicate),
+        )
+
+
 def test_subset_family_denominator_must_match_exact_source() -> None:
     bundle = _study_bundle()
     family_payload = bundle.registration.subset_family.model_dump(mode="json")
     family_payload["source_molecule_count"] = 10
     family_payload["levels"][0]["target_molecule_count"] = 5
     family_payload["levels"][1]["target_molecule_count"] = 10
+    for commitment in family_payload["membership_commitments"]:
+        commitment["membership_count"] = (
+            5 if commitment["subset_id"] == "subset.half" else 10
+        )
     family = WholeMoleculeSubsetFamily.model_validate_json(
         json.dumps(family_payload)
     )

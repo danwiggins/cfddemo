@@ -27,12 +27,21 @@ selection, deterministic SHA-256 seeded ranking, nested subsets, one explicit
 half-open edge-inclusion policy, sorted fraction levels, and sorted unique
 replicate seeds. Fractions are integer parts per million; target counts use
 registered floor rounding with a minimum of one. The full-molecule level is
-mandatory.
+mandatory. Subset IDs and fractions are independently unique.
+
+Every level and replicate also has a preregistered membership commitment. The
+commitment hashes a sorted, unique sequence of privacy-safe whole-molecule
+content digests; raw molecule identifiers are not retained. Its derived subset
+receipt binds the source explorer, result, bundle, method, atlas, filter,
+family, edge policy, fraction, target, seed, and exact membership commitment.
+The full-molecule commitment must be identical across seeds because sampling
+cannot change membership at 100 percent.
 
 Parameter sets bind the exact E01 method definition, atlas asset, and canonical
 parameter digest. The parameters include CpG minimum, UXM thresholds, NNLS row
 scale, solver tolerance, and maximum iterations. Every parameter set must use
-the source method and atlas.
+the source method and atlas. Distinct parameter IDs cannot alias the same
+parameter digest.
 
 The run grid must equal the complete Cartesian product:
 
@@ -62,6 +71,10 @@ The selected count must equal the preregistered target. All parameter runs for
 one subset level and replicate must share the same subset digest, proving they
 used the same whole-molecule selection. Complete outputs bind exact result,
 bundle, method, atlas, filter, seed, subset, and parameter identities.
+The result digest is recomputed from the run key, attrition, subset, parameters,
+and every numeric estimate; the bundle digest is recomputed from that result
+and its complete execution binding. Swapping values while retaining result or
+bundle identity therefore fails closed.
 
 ## Two different uncertainty concepts
 

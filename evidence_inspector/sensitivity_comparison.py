@@ -96,6 +96,27 @@ def _digest(value: object) -> str:
     return hashlib.sha256(canonical_json_bytes(value)).hexdigest()
 
 
+def whole_molecule_membership_sha256(
+    molecule_sha256s: tuple[Sha256, ...],
+) -> str:
+    """Commit to canonical private membership without retaining molecule IDs."""
+    if not molecule_sha256s:
+        raise ValueError("whole-molecule membership cannot be empty")
+    if any(
+        re.fullmatch(r"[0-9a-f]{64}", item) is None
+        for item in molecule_sha256s
+    ):
+        raise ValueError("whole-molecule membership accepts SHA-256 digests only")
+    if molecule_sha256s != tuple(sorted(set(molecule_sha256s))):
+        raise ValueError("whole-molecule digests must be uniquely sorted")
+    return _digest(
+        {
+            "schema_version": "traceback.whole-molecule-membership.v1",
+            "molecule_sha256s": molecule_sha256s,
+        }
+    )
+
+
 class SensitivityContractError(ValueError):
     """A sensitivity contract or canonical replay failed closed."""
 
@@ -227,6 +248,20 @@ class ReplicateSeed(CompatibilityContract):
         return self
 
 
+class SubsetMembershipCommitment(CompatibilityContract):
+    subset_id: SafeId
+    replicate_id: SafeId
+    membership_encoding: Literal[
+        "sorted-unique-whole-molecule-digests-sha256.v1"
+    ] = "sorted-unique-whole-molecule-digests-sha256.v1"
+    membership_count: int = Field(ge=1, le=10**15)
+    membership_sha256: Sha256
+
+    @property
+    def sort_key(self) -> tuple[str, str]:
+        return self.subset_id, self.replicate_id
+
+
 class WholeMoleculeSubsetFamily(CompatibilityContract):
     schema_version: Literal["traceback.whole-molecule-subset-family.v1"] = (
         "traceback.whole-molecule-subset-family.v1"
@@ -247,13 +282,21 @@ class WholeMoleculeSubsetFamily(CompatibilityContract):
         min_length=1,
         max_length=MAX_REPLICATES,
     )
+    membership_commitments: tuple[SubsetMembershipCommitment, ...] = Field(
+        min_length=1,
+        max_length=MAX_SUBSET_LEVELS * MAX_REPLICATES,
+    )
 
     @model_validator(mode="after")
     def canonical_family(self) -> WholeMoleculeSubsetFamily:
         _safe_id(self.family_id, field="subset family ID")
         level_keys = [(item.fraction_ppm, item.subset_id) for item in self.levels]
-        if level_keys != sorted(level_keys) or len(level_keys) != len(set(level_keys)):
-            raise ValueError("subset levels must be uniquely sorted")
+        if level_keys != sorted(level_keys):
+            raise ValueError("subset levels must use canonical order")
+        if len({item.subset_id for item in self.levels}) != len(self.levels):
+            raise ValueError("subset IDs must be unique")
+        if len({item.fraction_ppm for item in self.levels}) != len(self.levels):
+            raise ValueError("subset fractions must be unique")
         if self.levels[-1].fraction_ppm != 1_000_000:
             raise ValueError("subset family must include the full-molecule level")
         for level in self.levels:
@@ -270,6 +313,39 @@ class WholeMoleculeSubsetFamily(CompatibilityContract):
             self.replicates
         ) or len({item.seed for item in self.replicates}) != len(self.replicates):
             raise ValueError("replicate IDs and seeds must be unique")
+        expected_membership_keys = tuple(
+            sorted(
+                (
+                    (level.subset_id, replicate.replicate_id)
+                    for level, replicate in product(self.levels, self.replicates)
+                )
+            )
+        )
+        membership_keys = tuple(
+            commitment.sort_key for commitment in self.membership_commitments
+        )
+        if membership_keys != expected_membership_keys:
+            raise ValueError(
+                "membership commitments must equal the full subset-replicate grid"
+            )
+        target_by_subset = {
+            level.subset_id: level.target_molecule_count for level in self.levels
+        }
+        for commitment in self.membership_commitments:
+            if commitment.membership_count != target_by_subset[commitment.subset_id]:
+                raise ValueError(
+                    "membership commitment count must equal registered target"
+                )
+        full_subset_id = self.levels[-1].subset_id
+        full_memberships = {
+            item.membership_sha256
+            for item in self.membership_commitments
+            if item.subset_id == full_subset_id
+        }
+        if len(full_memberships) != 1:
+            raise ValueError(
+                "full subset membership must be identical across replicate seeds"
+            )
         return self
 
 
@@ -328,6 +404,61 @@ class RegisteredRunKey(CompatibilityContract):
         return self.subset_id, self.replicate_id, self.parameter_id
 
 
+class RegisteredSubsetReceipt(CompatibilityContract):
+    subset_id: SafeId
+    replicate_id: SafeId
+    membership_encoding: Literal[
+        "sorted-unique-whole-molecule-digests-sha256.v1"
+    ] = "sorted-unique-whole-molecule-digests-sha256.v1"
+    membership_count: int = Field(ge=1, le=10**15)
+    membership_sha256: Sha256
+    subset_sha256: Sha256
+
+    @property
+    def sort_key(self) -> tuple[str, str]:
+        return self.subset_id, self.replicate_id
+
+
+def _registered_subset_sha256(
+    *,
+    source_explorer_sha256: str,
+    source_result_sha256: str,
+    source_bundle_sha256: str,
+    source_method_definition_sha256: str,
+    source_atlas_sha256: str,
+    source_filter_sha256: str,
+    subset_family: WholeMoleculeSubsetFamily,
+    level: SubsetLevel,
+    replicate: ReplicateSeed,
+    commitment: SubsetMembershipCommitment,
+) -> str:
+    return _digest(
+        {
+            "schema_version": "traceback.registered-subset-receipt.v1",
+            "source_explorer_sha256": source_explorer_sha256,
+            "source_result_sha256": source_result_sha256,
+            "source_bundle_sha256": source_bundle_sha256,
+            "source_method_definition_sha256": source_method_definition_sha256,
+            "source_atlas_sha256": source_atlas_sha256,
+            "source_filter_sha256": source_filter_sha256,
+            "family_id": subset_family.family_id,
+            "source_molecule_count": subset_family.source_molecule_count,
+            "selection_unit": subset_family.selection_unit,
+            "selection_algorithm": subset_family.selection_algorithm,
+            "nested_subsets": subset_family.nested_subsets,
+            "edge_inclusion_policy": subset_family.edge_inclusion_policy,
+            "subset_id": level.subset_id,
+            "fraction_ppm": level.fraction_ppm,
+            "target_molecule_count": level.target_molecule_count,
+            "replicate_id": replicate.replicate_id,
+            "seed": replicate.seed,
+            "membership_encoding": commitment.membership_encoding,
+            "membership_count": commitment.membership_count,
+            "membership_sha256": commitment.membership_sha256,
+        }
+    )
+
+
 class SensitivityRegistration(CompatibilityContract):
     schema_version: Literal["traceback.sensitivity-registration.v1"] = (
         "traceback.sensitivity-registration.v1"
@@ -336,6 +467,8 @@ class SensitivityRegistration(CompatibilityContract):
     source_explorer_sha256: Sha256
     source_result_sha256: Sha256
     source_bundle_sha256: Sha256
+    source_method_definition_sha256: Sha256
+    source_atlas_sha256: Sha256
     source_filter_sha256: Sha256
     subset_family: WholeMoleculeSubsetFamily
     parameter_sets: tuple[RegisteredParameterSet, ...] = Field(
@@ -345,6 +478,10 @@ class SensitivityRegistration(CompatibilityContract):
     run_grid: tuple[RegisteredRunKey, ...] = Field(
         min_length=1,
         max_length=MAX_RUNS,
+    )
+    subset_receipts: tuple[RegisteredSubsetReceipt, ...] = Field(
+        min_length=1,
+        max_length=MAX_SUBSET_LEVELS * MAX_REPLICATES,
     )
     registration_sha256: Sha256
 
@@ -356,6 +493,9 @@ class SensitivityRegistration(CompatibilityContract):
             set(parameter_ids)
         ):
             raise ValueError("parameter sets must use unique canonical order")
+        parameter_digests = [item.parameters_sha256 for item in self.parameter_sets]
+        if len(parameter_digests) != len(set(parameter_digests)):
+            raise ValueError("parameter sets must have unique parameter payloads")
         expected = tuple(
             sorted(
                 (
@@ -377,6 +517,45 @@ class SensitivityRegistration(CompatibilityContract):
             raise ValueError(
                 "run grid must equal the full preregistered Cartesian grid"
             )
+        level_by_id = {
+            item.subset_id: item for item in self.subset_family.levels
+        }
+        replicate_by_id = {
+            item.replicate_id: item for item in self.subset_family.replicates
+        }
+        commitment_by_key = {
+            item.sort_key: item
+            for item in self.subset_family.membership_commitments
+        }
+        expected_receipts = tuple(
+            RegisteredSubsetReceipt(
+                subset_id=subset_id,
+                replicate_id=replicate_id,
+                membership_count=commitment_by_key[
+                    (subset_id, replicate_id)
+                ].membership_count,
+                membership_sha256=commitment_by_key[
+                    (subset_id, replicate_id)
+                ].membership_sha256,
+                subset_sha256=_registered_subset_sha256(
+                    source_explorer_sha256=self.source_explorer_sha256,
+                    source_result_sha256=self.source_result_sha256,
+                    source_bundle_sha256=self.source_bundle_sha256,
+                    source_method_definition_sha256=(
+                        self.source_method_definition_sha256
+                    ),
+                    source_atlas_sha256=self.source_atlas_sha256,
+                    source_filter_sha256=self.source_filter_sha256,
+                    subset_family=self.subset_family,
+                    level=level_by_id[subset_id],
+                    replicate=replicate_by_id[replicate_id],
+                    commitment=commitment_by_key[(subset_id, replicate_id)],
+                ),
+            )
+            for subset_id, replicate_id in sorted(commitment_by_key)
+        )
+        if self.subset_receipts != expected_receipts:
+            raise ValueError("subset receipts do not match preregistered context")
         expected_digest = _model_digest(self, exclude={"registration_sha256"})
         if self.registration_sha256 != expected_digest:
             raise ValueError("registration digest does not match exact run grid")
@@ -400,6 +579,9 @@ def register_sensitivity_study(
 ) -> SensitivityRegistration:
     source_record = source.record
     source_filter = source.explorer_artifact.request.result_view_request.filters
+    source_atlas = source_record.compatibility_key.atlas_asset
+    assert source_atlas is not None
+    source_filter_sha256 = result_filters_sha256(source_filter)
     run_grid = tuple(
         sorted(
             (
@@ -417,15 +599,45 @@ def register_sensitivity_study(
             key=lambda item: item.sort_key,
         )
     )
+    level_by_id = {item.subset_id: item for item in subset_family.levels}
+    replicate_by_id = {
+        item.replicate_id: item for item in subset_family.replicates
+    }
+    subset_receipts = tuple(
+        RegisteredSubsetReceipt(
+            subset_id=commitment.subset_id,
+            replicate_id=commitment.replicate_id,
+            membership_count=commitment.membership_count,
+            membership_sha256=commitment.membership_sha256,
+            subset_sha256=_registered_subset_sha256(
+                source_explorer_sha256=source.explorer_sha256,
+                source_result_sha256=source_record.result_sha256,
+                source_bundle_sha256=source_record.bundle_sha256,
+                source_method_definition_sha256=(
+                    source_record.method_definition_sha256
+                ),
+                source_atlas_sha256=source_atlas.content_sha256,
+                source_filter_sha256=source_filter_sha256,
+                subset_family=subset_family,
+                level=level_by_id[commitment.subset_id],
+                replicate=replicate_by_id[commitment.replicate_id],
+                commitment=commitment,
+            ),
+        )
+        for commitment in subset_family.membership_commitments
+    )
     payload: dict[str, Any] = {
         "registration_id": registration_id,
         "source_explorer_sha256": source.explorer_sha256,
         "source_result_sha256": source_record.result_sha256,
         "source_bundle_sha256": source_record.bundle_sha256,
-        "source_filter_sha256": result_filters_sha256(source_filter),
+        "source_method_definition_sha256": source_record.method_definition_sha256,
+        "source_atlas_sha256": source_atlas.content_sha256,
+        "source_filter_sha256": source_filter_sha256,
         "subset_family": subset_family,
         "parameter_sets": parameter_sets,
         "run_grid": run_grid,
+        "subset_receipts": subset_receipts,
     }
     placeholder = SensitivityRegistration.model_construct(
         **payload,
@@ -499,6 +711,60 @@ class SensitivityRunBinding(CompatibilityContract):
     parameters_sha256: Sha256
 
 
+def sensitivity_result_sha256(
+    *,
+    result_id: str,
+    key: RegisteredRunKey,
+    attrition: RunAttrition,
+    subset_sha256: str,
+    parameters_sha256: str,
+    estimates: tuple[SamplingEstimate, ...],
+) -> str:
+    return _digest(
+        {
+            "schema_version": "traceback.sensitivity-result-evidence.v1",
+            "result_id": result_id,
+            "key": key.model_dump(mode="json"),
+            "attrition": attrition.model_dump(mode="json"),
+            "subset_sha256": subset_sha256,
+            "parameters_sha256": parameters_sha256,
+            "estimates": tuple(
+                item.model_dump(mode="json") for item in estimates
+            ),
+        }
+    )
+
+
+def sensitivity_bundle_sha256(
+    *,
+    bundle_id: str,
+    result_sha256: str,
+    method_ref: MethodReference,
+    method_definition_sha256: str,
+    atlas_id: str,
+    atlas_sha256: str,
+    filter_sha256: str,
+    seed: int,
+    subset_sha256: str,
+    parameters_sha256: str,
+) -> str:
+    return _digest(
+        {
+            "schema_version": "traceback.sensitivity-result-bundle.v1",
+            "bundle_id": bundle_id,
+            "result_sha256": result_sha256,
+            "method_ref": method_ref.model_dump(mode="json"),
+            "method_definition_sha256": method_definition_sha256,
+            "atlas_id": atlas_id,
+            "atlas_sha256": atlas_sha256,
+            "filter_sha256": filter_sha256,
+            "seed": seed,
+            "subset_sha256": subset_sha256,
+            "parameters_sha256": parameters_sha256,
+        }
+    )
+
+
 class SensitivityRunOutcome(CompatibilityContract):
     key: RegisteredRunKey
     status: RunStatus
@@ -543,6 +809,34 @@ class SensitivityRunOutcome(CompatibilityContract):
             and self.binding.subset_sha256 != self.subset_sha256
         ):
             raise ValueError("run binding does not match subset receipt")
+        if self.status == RunStatus.COMPLETE:
+            assert self.binding is not None
+            expected_result = sensitivity_result_sha256(
+                result_id=self.binding.result_id,
+                key=self.key,
+                attrition=self.attrition,
+                subset_sha256=self.subset_sha256,
+                parameters_sha256=self.binding.parameters_sha256,
+                estimates=self.estimates,
+            )
+            if self.binding.result_sha256 != expected_result:
+                raise ValueError("result digest does not bind exact numeric evidence")
+            expected_bundle = sensitivity_bundle_sha256(
+                bundle_id=self.binding.bundle_id,
+                result_sha256=self.binding.result_sha256,
+                method_ref=self.binding.method_ref,
+                method_definition_sha256=(
+                    self.binding.method_definition_sha256
+                ),
+                atlas_id=self.binding.atlas_id,
+                atlas_sha256=self.binding.atlas_sha256,
+                filter_sha256=self.binding.filter_sha256,
+                seed=self.binding.seed,
+                subset_sha256=self.binding.subset_sha256,
+                parameters_sha256=self.binding.parameters_sha256,
+            )
+            if self.binding.bundle_sha256 != expected_bundle:
+                raise ValueError("bundle digest does not bind exact result evidence")
         return self
 
 
@@ -583,6 +877,8 @@ class SensitivityStudyBundle(CompatibilityContract):
             registration.source_explorer_sha256 != self.source.explorer_sha256
             or registration.source_result_sha256 != record.result_sha256
             or registration.source_bundle_sha256 != record.bundle_sha256
+            or registration.source_method_definition_sha256
+            != record.method_definition_sha256
             or registration.source_filter_sha256
             != self.source.explorer_artifact.view.binding.filter_sha256
         ):
@@ -602,6 +898,8 @@ class SensitivityStudyBundle(CompatibilityContract):
         }
         source_atlas = record.compatibility_key.atlas_asset
         assert source_atlas is not None
+        if registration.source_atlas_sha256 != source_atlas.content_sha256:
+            raise ValueError("registration does not bind exact source atlas")
         source_denominators = self.source.explorer_artifact.view.fragment_denominators
         assert source_denominators is not None
         if (
@@ -627,7 +925,10 @@ class SensitivityStudyBundle(CompatibilityContract):
                 for item in self.source.explorer_artifact.view.dot_interval_rows
             )
         )
-        subset_receipts: dict[tuple[str, str], str] = {}
+        registered_receipts = {
+            item.sort_key: item for item in registration.subset_receipts
+        }
+        complete_bindings: list[SensitivityRunBinding] = []
         for outcome in self.outcomes:
             level = level_by_id[outcome.key.subset_id]
             replicate = replicate_by_id[outcome.key.replicate_id]
@@ -639,12 +940,15 @@ class SensitivityStudyBundle(CompatibilityContract):
             ):
                 raise ValueError("run attrition does not match registered subset")
             receipt_key = (outcome.key.subset_id, outcome.key.replicate_id)
-            previous = subset_receipts.setdefault(receipt_key, outcome.subset_sha256)
-            if previous != outcome.subset_sha256:
-                raise ValueError("parameter runs do not share the exact seeded subset")
+            if (
+                outcome.subset_sha256
+                != registered_receipts[receipt_key].subset_sha256
+            ):
+                raise ValueError("run does not match preregistered subset receipt")
             if outcome.status == RunStatus.COMPLETE:
                 assert outcome.binding is not None
                 binding = outcome.binding
+                complete_bindings.append(binding)
                 if (
                     binding.method_ref != parameter.method.method_ref
                     or binding.method_definition_sha256
@@ -660,6 +964,15 @@ class SensitivityStudyBundle(CompatibilityContract):
                     source_contributors
                 ):
                     raise ValueError("run contributors do not match source atlas")
+        for field in (
+            "result_id",
+            "result_sha256",
+            "bundle_id",
+            "bundle_sha256",
+        ):
+            identities = [getattr(item, field) for item in complete_bindings]
+            if len(identities) != len(set(identities)):
+                raise ValueError(f"complete run {field} identities must be unique")
         counts = {
             status: sum(item.status == status for item in self.outcomes)
             for status in RunStatus
@@ -950,14 +1263,15 @@ __all__ = [
     "MethodSensitivityRow",
     "RegisteredParameterSet",
     "RegisteredRunKey",
+    "RegisteredSubsetReceipt",
     "ReplicateSeed",
     "RunAttrition",
     "RunStatus",
     "SamplingEstimate",
     "SensitivityAvailability",
-    "SensitivityCompatibility",
     "SensitivityComparisonArtifact",
     "SensitivityComparisonView",
+    "SensitivityCompatibility",
     "SensitivityContractError",
     "SensitivityRegistration",
     "SensitivityRunBinding",
@@ -966,10 +1280,14 @@ __all__ = [
     "SensitivityStudyBundle",
     "StudyAttrition",
     "SubsetLevel",
+    "SubsetMembershipCommitment",
     "WholeMoleculeSubsetFamily",
     "build_sensitivity_comparison_artifact",
     "build_sensitivity_comparison_view",
     "canonical_sensitivity_comparison_bytes",
     "register_sensitivity_study",
+    "sensitivity_bundle_sha256",
     "sensitivity_comparison_from_canonical_bytes",
+    "sensitivity_result_sha256",
+    "whole_molecule_membership_sha256",
 ]
