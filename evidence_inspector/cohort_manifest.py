@@ -43,6 +43,13 @@ from evidence_inspector.provider_linkage_store import (
 
 MAX_MEMBERS = 100_000
 CohortId = Annotated[str, StringConstraints(pattern=r"^cohort_[0-9a-f]{32}$")]
+_PINNED_ACTIVE_SNAPSHOT = ProviderLinkageStore.active_snapshot
+_PINNED_VERIFY_CURRENT_RECEIPT = ProviderLinkageStore.verify_current_receipt
+_PINNED_STORE_CALLABLES = {
+    name: getattr(ProviderLinkageStore, name)
+    for name in vars(ProviderLinkageStore)
+    if callable(getattr(ProviderLinkageStore, name))
+}
 
 
 def _utc_second(value: datetime, field: str = "created_at") -> datetime:
@@ -283,22 +290,22 @@ class CohortManifest(RegistryContract):
                     raise ValueError(
                         "reanalysis source has different biological lineage"
                     )
-        for source_field, label in (
-            ("reanalysis_of", "reanalysis"),
-            ("technical_replicate_of", "technical replicate"),
-        ):
-            for start in analyses:
-                seen: set[str] = set()
-                current = start
-                while getattr(analyses[current], source_field) is not None:
-                    if current in seen:
-                        raise ValueError(f"{label} lineage contains a cycle")
-                    seen.add(current)
-                    source = getattr(analyses[current], source_field)
-                    assert source is not None
-                    if source not in analyses:
-                        break
-                    current = source
+        for start in analyses:
+            seen: set[str] = set()
+            current = start
+            while True:
+                member = analyses[current]
+                source = member.technical_replicate_of or member.reanalysis_of
+                if source is None:
+                    break
+                if current in seen:
+                    raise ValueError(
+                        "combined analysis dependency graph contains a cycle"
+                    )
+                seen.add(current)
+                if source not in analyses:
+                    break
+                current = source
         return self
 
 
@@ -412,11 +419,15 @@ def _substantive_sha256(manifest: CohortManifest) -> str:
 def validate_manifest_history(history: Sequence[CohortManifest]) -> None:
     if not history:
         raise ValueError("manifest history cannot be empty")
-    cohort_id = history[0].cohort_id
-    for index, manifest in enumerate(history, start=1):
+    reparsed = tuple(
+        cohort_manifest_from_bytes(cohort_manifest_bytes(manifest))
+        for manifest in history
+    )
+    cohort_id = reparsed[0].cohort_id
+    for index, manifest in enumerate(reparsed, start=1):
         if manifest.cohort_id != cohort_id or manifest.version != index:
             raise ValueError("manifest history must be one consecutive cohort chain")
-    for previous, current in pairwise(history):
+    for previous, current in pairwise(reparsed):
         if current.previous_manifest_sha256 != cohort_manifest_sha256(previous):
             raise ValueError("manifest predecessor digest is stale or mismatched")
         if current.created_at <= previous.created_at:
@@ -443,7 +454,13 @@ def validate_manifest_against_linkage_store(
     *,
     expected_trust_snapshot_sha256_by_provider: Mapping[str, str],
 ) -> None:
-    snapshot = store.active_snapshot()
+    manifest = cohort_manifest_from_bytes(cohort_manifest_bytes(manifest))
+    if type(store) is not ProviderLinkageStore:
+        raise TypeError("cohort validation requires the exact live linkage store type")
+    for name, pinned in _PINNED_STORE_CALLABLES.items():
+        if name in vars(store) or getattr(ProviderLinkageStore, name) is not pinned:
+            raise TypeError("live linkage store authority callable was shadowed")
+    snapshot = _PINNED_ACTIVE_SNAPSHOT(store)
     authorities = {
         item.provider_namespace: item for item in manifest.provider_authorities
     }
@@ -508,7 +525,7 @@ def validate_manifest_against_linkage_store(
             receipt.state_head_sha256,
         ) != expected_receipt_common:
             raise ValueError("receipt does not bind every live store authority field")
-        store.verify_current_receipt(receipt)
+        _PINNED_VERIFY_CURRENT_RECEIPT(store, receipt)
         if member.linkage_revision_sha256 != linkage_revision_sha256(revision):
             raise ValueError("member linkage digest does not match live authority")
         if member.committed_receipt_sha256 != committed_linkage_receipt_sha256(receipt):

@@ -37,7 +37,10 @@ from evidence_inspector.provider_linkage import (
     UnitOfAnalysis,
     provider_trust_snapshot_sha256,
 )
-from evidence_inspector.provider_linkage_store import ProviderLinkageStoreError
+from evidence_inspector.provider_linkage_store import (
+    ProviderLinkageStore,
+    ProviderLinkageStoreError,
+)
 from tests.test_provider_linkage import (
     PROVIDER,
     _approval,
@@ -345,7 +348,9 @@ def test_reanalysis_cycle_and_unknown_source_reject(live) -> None:
         lineage_role=MemberLineageRole.REANALYSIS,
         denominator_contribution=False,
     )
-    with pytest.raises(ValidationError, match="cycle"):
+    with pytest.raises(
+        ValidationError, match="combined analysis dependency graph contains a cycle"
+    ):
         _manifest(authority, (draw, a, b))
     unknown = _retime(a, 110, reanalysis_of=_token("analysis", "f"))
     with pytest.raises(ValidationError, match="outside"):
@@ -369,7 +374,7 @@ def test_reanalysis_cycle_and_unknown_source_reject(live) -> None:
         denominator_contribution=False,
     )
     with pytest.raises(
-        ValidationError, match="technical replicate lineage contains a cycle"
+        ValidationError, match="combined analysis dependency graph contains a cycle"
     ):
         _manifest(authority, (draw, technical_a, technical_b))
 
@@ -558,3 +563,138 @@ def test_correction_then_tombstone_invalidates_prior_manifest(live) -> None:
             store,
             expected_trust_snapshot_sha256_by_provider=_pins(),
         )
+
+
+def test_live_store_boundary_rejects_fake_subclass_and_instance_shadow(
+    live, tmp_path: Path
+) -> None:
+    store, _, authority, member = live
+    manifest = _manifest(authority, (member,))
+    with pytest.raises(TypeError, match="exact live linkage store type"):
+        validate_manifest_against_linkage_store(
+            manifest,
+            object(),
+            expected_trust_snapshot_sha256_by_provider=_pins(),  # type: ignore[arg-type]
+        )
+
+    class DerivedStore(ProviderLinkageStore):
+        pass
+
+    derived = DerivedStore(
+        tmp_path / "derived",
+        expected_trust_snapshot_sha256_by_provider=_pins(),
+    )
+    try:
+        with pytest.raises(TypeError, match="exact live linkage store type"):
+            validate_manifest_against_linkage_store(
+                manifest, derived, expected_trust_snapshot_sha256_by_provider=_pins()
+            )
+    finally:
+        derived.close()
+
+    store.active_snapshot = lambda: None  # type: ignore[method-assign]
+    with pytest.raises(TypeError, match="callable was shadowed"):
+        validate_manifest_against_linkage_store(
+            manifest, store, expected_trust_snapshot_sha256_by_provider=_pins()
+        )
+    del store.active_snapshot
+
+
+def test_live_store_boundary_rejects_class_callable_shadow(live, monkeypatch) -> None:
+    store, _, authority, member = live
+    manifest = _manifest(authority, (member,))
+    monkeypatch.setattr(ProviderLinkageStore, "active_snapshot", lambda self: None)
+    with pytest.raises(TypeError, match="callable was shadowed"):
+        validate_manifest_against_linkage_store(
+            manifest, store, expected_trust_snapshot_sha256_by_provider=_pins()
+        )
+
+
+def test_live_boundary_revalidates_model_copy_mutations(live) -> None:
+    store, _, authority, member = live
+    manifest = _manifest(authority, (member,))
+    mutations = (
+        manifest.model_copy(
+            update={
+                "members": (
+                    member.model_copy(update={"denominator_contribution": False}),
+                )
+            }
+        ),
+        manifest.model_copy(
+            update={
+                "members": (
+                    member.model_copy(
+                        update={"analysis_unit_token": member.subject_token}
+                    ),
+                )
+            }
+        ),
+        manifest.model_copy(
+            update={
+                "members": (
+                    member.model_copy(
+                        update={"lineage_role": MemberLineageRole.REANALYSIS}
+                    ),
+                )
+            }
+        ),
+        manifest.model_copy(
+            update={
+                "provider_authorities": (
+                    authority.model_copy(update={"state_head_sha256": "f" * 64}),
+                )
+            }
+        ),
+        manifest.model_copy(
+            update={
+                "members": (
+                    member.model_copy(update={"linkage_revision_sha256": "f" * 64}),
+                )
+            }
+        ),
+    )
+    for mutated in mutations:
+        with pytest.raises((ValueError, ValidationError)):
+            validate_manifest_against_linkage_store(
+                mutated, store, expected_trust_snapshot_sha256_by_provider=_pins()
+            )
+
+
+def test_history_boundary_revalidates_model_copy_mutations(live) -> None:
+    _, _, authority, member = live
+    first = _manifest(authority, (member,))
+    invalid_first = first.model_copy(
+        update={
+            "members": (member.model_copy(update={"denominator_contribution": False}),)
+        }
+    )
+    with pytest.raises(ValueError):
+        validate_manifest_history((invalid_first,))
+
+
+def test_mixed_replicate_reanalysis_dependency_cycle_rejects(live) -> None:
+    _, _, authority, draw = live
+    a_id, b_id = _token("analysis", "a"), _token("analysis", "b")
+    technical = _retime(
+        draw,
+        210,
+        linkage_id=_token("linkage", "a"),
+        analysis_record_id=a_id,
+        technical_replicate_of=b_id,
+        lineage_role=MemberLineageRole.TECHNICAL_REPLICATE,
+        denominator_contribution=False,
+    )
+    reanalysis = _retime(
+        draw,
+        220,
+        linkage_id=_token("linkage", "b"),
+        analysis_record_id=b_id,
+        reanalysis_of=a_id,
+        lineage_role=MemberLineageRole.REANALYSIS,
+        denominator_contribution=False,
+    )
+    with pytest.raises(
+        ValidationError, match="combined analysis dependency graph contains a cycle"
+    ):
+        _manifest(authority, (draw, technical, reanalysis))
