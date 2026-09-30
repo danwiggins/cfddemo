@@ -28,6 +28,29 @@ registry, floor, or validator aliases cannot revive expired approval. The
 captured validator and internal storage call chain do not dynamically dispatch
 through caller-shadowable instance methods.
 
+## Process-integrity precondition
+
+Installed package bytes, imported module globals and Python function objects
+must be protected by the operating system and deployment environment. Arbitrary
+in-process code execution, debugger access, or mutation of installed module
+bytecode/globals is outside this store's threat model and invalidates the
+process. A principal with that capability can rewrite both an implementation
+and any Python-resident fingerprint or expected baseline, so such fingerprints
+are not an authorization or trust root.
+
+The package exposes a best-effort loaded-process integrity diagnostic. When it
+observes mutation, the longitudinal boundary fails explicitly before using the
+store. This is useful corruption/tamper detection, but a matching or newly
+resealed diagnostic never proves that a compromised process is trustworthy.
+Deployment must establish code signing or immutable package provenance, OS
+access control and a clean process start outside the interpreter.
+
+Untrusted canonical input bytes, Pydantic model-copy/object-shape attacks,
+caller-controlled store objects, and storage/path/database races remain in
+scope and fail closed. This authority path has no eval, executable plugin, or
+unsafe object-deserialization hook through which serialized data can mutate
+loaded code.
+
 The store validates the full append-only history, not only active rows:
 
 - collection tokens retain one subject parent;
@@ -66,7 +89,8 @@ set. SQLite uses WAL, full synchronous writes, foreign keys and bounded busy
 waits.
 
 This is a local application integrity boundary, not protection from a principal
-that can replace all provider-managed storage while the application is stopped.
+that can mutate the running program or replace all provider-managed storage
+while the application is stopped.
 Provider encryption, OS access control, consistent backup/restore and an
 external rollback anchor remain deployment requirements. Until those are
 qualified, this work is research-only and does not claim Epic D evidence or

@@ -82,3 +82,13 @@ decision. Scientific qualification and provider approval are not inferred from
 a fixture, method label, matching digest, or passing test. The future durable
 comparison-membership ledger must replay the live store and bind the exact D02
 decisions before materializing a view.
+
+The engine invokes a best-effort process-integrity diagnostic before and after
+the live-store snapshot and fails closed when mutation is observed. That check
+is detection, not authority: arbitrary in-process code/bytecode/global mutation
+is outside the threat model because the same principal can rewrite the check and
+its Python-resident baseline. Immutable package provenance, OS process control
+and a clean start are deployment preconditions. Untrusted serialized/model
+inputs, caller-controlled object shape, exact store identity and storage races
+remain inside the validated boundary; no executable plugin, eval or unsafe
+object-deserialization path is accepted here.

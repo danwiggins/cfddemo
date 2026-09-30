@@ -36,6 +36,8 @@ from evidence_inspector.provider_linkage_store import (
     ProviderLinkageStoreSchemaError,
     ProviderLinkageStoreUnsafe,
     _trust_pins_sha256,
+    provider_linkage_store_process_integrity_is_valid,
+    require_provider_linkage_store_process_integrity,
 )
 from tests.test_provider_linkage import (
     AFTER,
@@ -52,6 +54,24 @@ from tests.test_provider_linkage import (
     _token,
     _trust,
 )
+
+
+def test_detected_module_tamper_is_explicit_process_integrity_failure() -> None:
+    function = linkage_store_module._authority_time_text
+    original = function.__kwdefaults__
+    assert provider_linkage_store_process_integrity_is_valid()
+    try:
+        function.__kwdefaults__ = {"attacker_resealed": True}
+        assert not provider_linkage_store_process_integrity_is_valid()
+        with pytest.raises(
+            ProviderLinkageStoreUnsafe,
+            match="process integrity check failed",
+        ):
+            require_provider_linkage_store_process_integrity()
+    finally:
+        function.__kwdefaults__ = original
+
+    require_provider_linkage_store_process_integrity()
 
 
 def _pins() -> dict[str, str]:

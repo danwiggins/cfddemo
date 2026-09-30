@@ -1516,7 +1516,7 @@ _PINNED_VALIDATE_CURRENT_AUTHORITY = ProviderLinkageStore._validate_current_auth
 _PINNED_VERIFY_CONSUMPTIONS = ProviderLinkageStore._verify_consumptions
 _PINNED_RECEIPT = ProviderLinkageStore._receipt
 _PINNED_ACTIVE_SNAPSHOT = ProviderLinkageStore.active_snapshot
-_AUTHORITY_RUNTIME_FUNCTIONS = (
+_PROCESS_INTEGRITY_FUNCTIONS = (
     _authority_time_from_text,
     _authority_time_text,
     _pinned_time_source_value,
@@ -1530,7 +1530,7 @@ _AUTHORITY_RUNTIME_FUNCTIONS = (
     ProviderLinkageStore._validate_current_authority,
     ProviderLinkageStore.active_snapshot,
 )
-_AUTHORITY_RUNTIME_FUNCTION_STATES = tuple(
+_PROCESS_INTEGRITY_FUNCTION_STATES = tuple(
     (
         function.__code__,
         function.__defaults__,
@@ -1545,7 +1545,7 @@ _AUTHORITY_RUNTIME_FUNCTION_STATES = tuple(
             else None
         ),
     )
-    for function in _AUTHORITY_RUNTIME_FUNCTIONS
+    for function in _PROCESS_INTEGRITY_FUNCTIONS
 )
 _PINNED_STORE_TIME_SOURCES = _STORE_TIME_SOURCES
 _PINNED_STORE_TIME_SOURCE_LOCK = _STORE_TIME_SOURCE_LOCK
@@ -1554,12 +1554,37 @@ _PINNED_STORE_TIME_SOURCE_LOCK = _STORE_TIME_SOURCE_LOCK
 def provider_linkage_store_time_source_is_pinned(
     store: ProviderLinkageStore,
 ) -> bool:
-    """Return whether the exact time-source runtime still matches construction."""
+    """Return whether the store retains its exact package-owned time source."""
 
     try:
         current = vars(store).get("_time_source")
         with _PINNED_STORE_TIME_SOURCE_LOCK:
             entry = _PINNED_STORE_TIME_SOURCES.get(id(store))
+        return (
+            type(current) is AuthorityTimeSource
+            and type(_STORE_TIME_SOURCE_LOCK) is _RLOCK_TYPE
+            and _STORE_TIME_SOURCE_LOCK is _PINNED_STORE_TIME_SOURCE_LOCK
+            and _STORE_TIME_SOURCES is _PINNED_STORE_TIME_SOURCES
+            and entry is not None
+            and entry[0]() is store
+            and entry[1] is current
+            and type(entry[2]) is datetime
+            and entry[2].utcoffset() == timedelta(0)
+            and entry[2].microsecond == 0
+        )
+    except (AttributeError, TypeError, LookupError, RuntimeError):
+        return False
+
+
+def provider_linkage_store_process_integrity_is_valid() -> bool:
+    """Best-effort detection of mutation in the loaded authority implementation.
+
+    This diagnostic is not an authorization root. A principal able to rewrite
+    installed Python code can also rewrite this check or its baseline; deployment
+    must establish package and process integrity outside this interpreter.
+    """
+
+    try:
         observed_function_states = tuple(
             (
                 function.__code__,
@@ -1578,20 +1603,10 @@ def provider_linkage_store_time_source_is_pinned(
                     else None
                 ),
             )
-            for function in _AUTHORITY_RUNTIME_FUNCTIONS
+            for function in _PROCESS_INTEGRITY_FUNCTIONS
         )
         return (
-            type(current) is AuthorityTimeSource
-            and type(_STORE_TIME_SOURCE_LOCK) is _RLOCK_TYPE
-            and _STORE_TIME_SOURCE_LOCK is _PINNED_STORE_TIME_SOURCE_LOCK
-            and _STORE_TIME_SOURCES is _PINNED_STORE_TIME_SOURCES
-            and entry is not None
-            and entry[0]() is store
-            and entry[1] is current
-            and type(entry[2]) is datetime
-            and entry[2].utcoffset() == timedelta(0)
-            and entry[2].microsecond == 0
-            and _AUTHORITY_RUNTIME_FUNCTIONS
+            _PROCESS_INTEGRITY_FUNCTIONS
             == (
                 _authority_time_from_text,
                 _authority_time_text,
@@ -1606,7 +1621,7 @@ def provider_linkage_store_time_source_is_pinned(
                 ProviderLinkageStore._validate_current_authority,
                 ProviderLinkageStore.active_snapshot,
             )
-            and observed_function_states == _AUTHORITY_RUNTIME_FUNCTION_STATES
+            and observed_function_states == _PROCESS_INTEGRITY_FUNCTION_STATES
             and _PINNED_AUTHORITY_TIME_SOURCE_READ is AuthorityTimeSource.read
             and _PINNED_AUTHORITY_TIME_SOURCE_ADVANCE is AuthorityTimeSource.advance_to
             and _PINNED_AUTHORITY_TIME_SOURCE_SET_FAILURE
@@ -1619,6 +1634,15 @@ def provider_linkage_store_time_source_is_pinned(
         return False
 
 
+def require_provider_linkage_store_process_integrity() -> None:
+    """Raise an explicit diagnostic failure when loaded-code mutation is seen."""
+
+    if not provider_linkage_store_process_integrity_is_valid():
+        raise ProviderLinkageStoreUnsafe(
+            "linkage store process integrity check failed"
+        )
+
+
 __all__ = [
     "ActiveLinkageSnapshot",
     "AuthorityTimeSource",
@@ -1629,5 +1653,7 @@ __all__ = [
     "ProviderLinkageStoreSchemaError",
     "ProviderLinkageStoreUnsafe",
     "committed_linkage_receipt_sha256",
+    "provider_linkage_store_process_integrity_is_valid",
     "provider_linkage_store_time_source_is_pinned",
+    "require_provider_linkage_store_process_integrity",
 ]

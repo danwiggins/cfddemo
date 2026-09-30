@@ -58,8 +58,10 @@ from evidence_inspector.provider_linkage_store import (
     CommittedLinkageReceipt,
     ProviderLinkageStore,
     ProviderLinkageStoreError,
+    ProviderLinkageStoreUnsafe,
     committed_linkage_receipt_sha256,
     provider_linkage_store_time_source_is_pinned,
+    require_provider_linkage_store_process_integrity,
 )
 
 _PINNED_VERIFY_CURRENT_RECEIPT = ProviderLinkageStore.verify_current_receipt
@@ -70,12 +72,7 @@ _PINNED_STORE_CALLABLES = {
     if callable(getattr(ProviderLinkageStore, name))
 }
 _PINNED_TIME_SOURCE_IDENTITY_CHECK = provider_linkage_store_time_source_is_pinned
-_PINNED_TIME_SOURCE_IDENTITY_CHECK_STATE = (
-    _PINNED_TIME_SOURCE_IDENTITY_CHECK.__code__,
-    _PINNED_TIME_SOURCE_IDENTITY_CHECK.__defaults__,
-    _PINNED_TIME_SOURCE_IDENTITY_CHECK.__kwdefaults__,
-    _PINNED_TIME_SOURCE_IDENTITY_CHECK.__closure__,
-)
+_PINNED_PROCESS_INTEGRITY_CHECK = require_provider_linkage_store_process_integrity
 _STORE_BOUNDARY_ERRORS = (
     ProviderLinkageStoreError,
     sqlite3.Error,
@@ -803,6 +800,10 @@ def _validate_store_input(
     if store is None:
         return None, None
     try:
+        _PINNED_PROCESS_INTEGRITY_CHECK()
+    except ProviderLinkageStoreError:
+        raise ValueError("linkage store process integrity check failed") from None
+    try:
         invalid_callable_boundary = (
             type(store) is not ProviderLinkageStore
             or ProviderLinkageStore.verify_current_receipt
@@ -813,13 +814,6 @@ def _validate_store_input(
                 for name, pinned in _PINNED_STORE_CALLABLES.items()
             )
             or any(name in ProviderLinkageStore.__dict__ for name in vars(store))
-            or (
-                _PINNED_TIME_SOURCE_IDENTITY_CHECK.__code__,
-                _PINNED_TIME_SOURCE_IDENTITY_CHECK.__defaults__,
-                _PINNED_TIME_SOURCE_IDENTITY_CHECK.__kwdefaults__,
-                _PINNED_TIME_SOURCE_IDENTITY_CHECK.__closure__,
-            )
-            != _PINNED_TIME_SOURCE_IDENTITY_CHECK_STATE
             or not _PINNED_TIME_SOURCE_IDENTITY_CHECK(store)
         )
     except _STORE_BOUNDARY_ERRORS:
@@ -880,15 +874,13 @@ def _validate_store_input(
                 for name, pinned in _PINNED_STORE_CALLABLES.items()
             )
             or any(name in ProviderLinkageStore.__dict__ for name in vars(store))
-            or (
-                _PINNED_TIME_SOURCE_IDENTITY_CHECK.__code__,
-                _PINNED_TIME_SOURCE_IDENTITY_CHECK.__defaults__,
-                _PINNED_TIME_SOURCE_IDENTITY_CHECK.__kwdefaults__,
-                _PINNED_TIME_SOURCE_IDENTITY_CHECK.__closure__,
-            )
-            != _PINNED_TIME_SOURCE_IDENTITY_CHECK_STATE
             or not _PINNED_TIME_SOURCE_IDENTITY_CHECK(store)
         )
+        _PINNED_PROCESS_INTEGRITY_CHECK()
+    except ProviderLinkageStoreUnsafe as error:
+        if str(error) == "linkage store process integrity check failed":
+            raise ValueError("linkage store process integrity check failed") from None
+        raise ValueError("linkage store authority changed during snapshot") from None
     except _STORE_BOUNDARY_ERRORS:
         raise ValueError("linkage store authority changed during snapshot") from None
     if authority_changed:
