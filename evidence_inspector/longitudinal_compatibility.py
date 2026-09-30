@@ -62,6 +62,22 @@ from evidence_inspector.provider_linkage_store import (
 
 _PINNED_VERIFY_CURRENT_RECEIPT = ProviderLinkageStore.verify_current_receipt
 _PINNED_ACTIVE_SNAPSHOT = ProviderLinkageStore.active_snapshot
+_PINNED_STORE_CALLABLES = {
+    name: getattr(ProviderLinkageStore, name)
+    for name in vars(ProviderLinkageStore)
+    if callable(getattr(ProviderLinkageStore, name))
+}
+_STORE_BOUNDARY_ERRORS = (
+    ProviderLinkageStoreError,
+    sqlite3.Error,
+    OSError,
+    RuntimeError,
+    ValueError,
+    TypeError,
+    AttributeError,
+    LookupError,
+    AssertionError,
+)
 _RLOCK_TYPE = type(threading.RLock())
 _SHA256_ADAPTER = TypeAdapter(Sha256)
 _TRUST_PINS_ADAPTER = TypeAdapter(dict[ProviderNamespace, Sha256])
@@ -777,13 +793,21 @@ def _validate_store_input(
 ) -> tuple[ProviderLinkageStore | None, ActiveLinkageSnapshot | None]:
     if store is None:
         return None, None
-    if (
-        type(store) is not ProviderLinkageStore
-        or ProviderLinkageStore.verify_current_receipt
-        is not _PINNED_VERIFY_CURRENT_RECEIPT
-        or ProviderLinkageStore.active_snapshot is not _PINNED_ACTIVE_SNAPSHOT
-        or any(name in ProviderLinkageStore.__dict__ for name in vars(store))
-    ):
+    try:
+        invalid_callable_boundary = (
+            type(store) is not ProviderLinkageStore
+            or ProviderLinkageStore.verify_current_receipt
+            is not _PINNED_VERIFY_CURRENT_RECEIPT
+            or ProviderLinkageStore.active_snapshot is not _PINNED_ACTIVE_SNAPSHOT
+            or any(
+                getattr(ProviderLinkageStore, name, None) is not pinned
+                for name, pinned in _PINNED_STORE_CALLABLES.items()
+            )
+            or any(name in ProviderLinkageStore.__dict__ for name in vars(store))
+        )
+    except _STORE_BOUNDARY_ERRORS:
+        raise ValueError("linkage store authority input is invalid") from None
+    if invalid_callable_boundary:
         raise ValueError("linkage store authority input is invalid")
     state = vars(store)
     required = {
@@ -830,7 +854,7 @@ def _validate_store_input(
         raise ValueError("linkage store internal authority state is invalid")
     try:
         snapshot = _PINNED_ACTIVE_SNAPSHOT(store)
-    except (ProviderLinkageStoreError, sqlite3.Error, AttributeError, TypeError):
+    except _STORE_BOUNDARY_ERRORS:
         raise ValueError("linkage store live authority state is invalid") from None
     return store, snapshot
 

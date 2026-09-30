@@ -6,7 +6,7 @@ import hashlib
 import json
 from collections.abc import Iterator
 from contextlib import contextmanager
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from tempfile import TemporaryDirectory
 
@@ -865,6 +865,161 @@ def test_store_class_method_shadow_cannot_bypass_authority(
     assert not decision.delta_allowed
     assert not decision.connecting_trend_allowed
     assert LongitudinalReason.LINKAGE_AUTHORITY_INVALID in decision.reason_codes
+
+
+_SNAPSHOT_AUTHORITY_CALLABLES = (
+    "_connect",
+    "_validate_storage",
+    "_open_connection",
+    "_bind_database_descriptor",
+    "_secure_database_files",
+    "_validate_schema",
+    "_load_records",
+    "_state_head",
+    "_storage_identity_sha256",
+    "_validate_committed_state",
+    "_validate_current_authority",
+    "active_snapshot",
+    "verify_current_receipt",
+)
+
+
+def _assert_closed_decision(decision: LongitudinalMemberDecision) -> None:
+    assert decision.outcome == LongitudinalOutcome.UNKNOWN
+    assert not decision.delta_allowed
+    assert not decision.connecting_trend_allowed
+    assert LongitudinalReason.LINKAGE_AUTHORITY_INVALID in decision.reason_codes
+
+
+@pytest.mark.parametrize("surface", ("member", "series"))
+@pytest.mark.parametrize("shadowed_method", _SNAPSHOT_AUTHORITY_CALLABLES)
+def test_expired_store_internal_callable_shadow_cannot_restore_authority(
+    monkeypatch: pytest.MonkeyPatch,
+    surface: str,
+    shadowed_method: str,
+) -> None:
+    anchor = _record("1")
+    member = _record("2")
+    policy = _policy(anchor)
+    with _activated_records(anchor, member) as (records, store):
+        store._clock = lambda: NOW + timedelta(hours=2)  # type: ignore[attr-defined]
+        normal = decide_longitudinal_member(
+            records[0],
+            records[1],
+            policy,
+            expected_policy_sha256=longitudinal_anchor_policy_sha256(policy),
+            expected_authority_head_sha256=HEAD_SHA256,
+            expected_linkage_trust_snapshot_sha256_by_provider={PROVIDER: TRUST_SHA256},
+            linkage_store=store,
+        )
+        _assert_closed_decision(normal)
+        monkeypatch.setattr(ProviderLinkageStore, shadowed_method, lambda *_: None)
+        if surface == "member":
+            shadowed = decide_longitudinal_member(
+                records[0],
+                records[1],
+                policy,
+                expected_policy_sha256=longitudinal_anchor_policy_sha256(policy),
+                expected_authority_head_sha256=HEAD_SHA256,
+                expected_linkage_trust_snapshot_sha256_by_provider={
+                    PROVIDER: TRUST_SHA256
+                },
+                linkage_store=store,
+            )
+            _assert_closed_decision(shadowed)
+        else:
+            series = decide_longitudinal_series(
+                records[0],
+                (records[1],),
+                policy,
+                expected_policy_sha256=longitudinal_anchor_policy_sha256(policy),
+                expected_authority_head_sha256=HEAD_SHA256,
+                expected_linkage_trust_snapshot_sha256_by_provider={
+                    PROVIDER: TRUST_SHA256
+                },
+                linkage_store=store,
+            )
+            assert all(
+                item.outcome == LongitudinalOutcome.UNKNOWN
+                and not item.delta_allowed
+                and not item.connecting_trend_allowed
+                for item in series.decisions
+            )
+
+
+@pytest.mark.parametrize("surface", ("member", "series"))
+@pytest.mark.parametrize("failure", ("clock", "validator"))
+def test_exact_store_authority_runtime_failure_returns_constant_unknown(
+    monkeypatch: pytest.MonkeyPatch,
+    surface: str,
+    failure: str,
+) -> None:
+    anchor = _record("1")
+    member = _record("2")
+    policy = _policy(anchor)
+
+    def fail(*_: object) -> None:
+        raise RuntimeError("synthetic authority failure")
+
+    with _activated_records(anchor, member) as (records, store):
+        if failure == "clock":
+            store._clock = fail  # type: ignore[attr-defined]
+        else:
+            monkeypatch.setattr(
+                ProviderLinkageStore, "_validate_current_authority", fail
+            )
+        if surface == "member":
+            decision = decide_longitudinal_member(
+                records[0],
+                records[1],
+                policy,
+                expected_policy_sha256=longitudinal_anchor_policy_sha256(policy),
+                expected_authority_head_sha256=HEAD_SHA256,
+                expected_linkage_trust_snapshot_sha256_by_provider={
+                    PROVIDER: TRUST_SHA256
+                },
+                linkage_store=store,
+            )
+            _assert_closed_decision(decision)
+        else:
+            series = decide_longitudinal_series(
+                records[0],
+                (records[1],),
+                policy,
+                expected_policy_sha256=longitudinal_anchor_policy_sha256(policy),
+                expected_authority_head_sha256=HEAD_SHA256,
+                expected_linkage_trust_snapshot_sha256_by_provider={
+                    PROVIDER: TRUST_SHA256
+                },
+                linkage_store=store,
+            )
+            assert series.decisions[0].outcome == LongitudinalOutcome.UNKNOWN
+            assert not series.decisions[0].delta_allowed
+            assert not series.decisions[0].connecting_trend_allowed
+
+
+def test_store_process_control_failure_is_not_masked() -> None:
+    anchor = _record("1")
+    member = _record("2")
+    policy = _policy(anchor)
+
+    def interrupt() -> datetime:
+        raise KeyboardInterrupt
+
+    with _activated_records(anchor, member) as (records, store):
+        store._clock = interrupt  # type: ignore[attr-defined]
+        with pytest.raises(KeyboardInterrupt):
+            decide_longitudinal_member(
+                records[0],
+                records[1],
+                policy,
+                expected_policy_sha256=longitudinal_anchor_policy_sha256(policy),
+                expected_authority_head_sha256=HEAD_SHA256,
+                expected_linkage_trust_snapshot_sha256_by_provider={
+                    PROVIDER: TRUST_SHA256
+                },
+                linkage_store=store,
+            )
 
 
 @pytest.mark.parametrize("target", ("anchor", "member"))
