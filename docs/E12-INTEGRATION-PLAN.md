@@ -273,15 +273,18 @@ state revalidation, and return. The API requires the exact store class, invokes
 captured unbound operations, accepts no callback or caller-authored snapshot,
 and fails with typed safe errors on authority advance or storage race.
 
-Focused D04 evidence covers exact 1,000-row success and 1,001/invalid-limit
-rejection, deterministic pagination, changed/missing/duplicate rows, broken
+Focused D04 evidence covers acceptance of `limit=1,000`, rejection of
+`limit=1,001` and other invalid limits, deterministic pagination,
+changed/missing/duplicate rows, broken
 source/successor edges, cycles, branches, stale linkage, tombstone, concurrent
 supersession, schema/index/row tamper, root/database replacement, class and
 instance shadows, Pydantic private/extra state, oversized graphs, non-forgeable
-store-keyed cursor authentication, rollback/reopen/backup behavior, and seeded
-protected-token absence from public projections and safe errors. D08 must still
-consume this API under the composite fence below rather than treating a prior
-snapshot as current authority.
+store-keyed cursor authentication, rollback/reopen/backup behavior, and safe
+error handling. A populated exact 1,000-row page and seeded protected-token
+absence from the future D08 public projection remain E12 acceptance tests; D04
+does not itself expose that public projection. D08 must consume this API under
+the composite fence below rather than treating a prior snapshot as current
+authority.
 
 ### Composable authority-fence prerequisite
 
