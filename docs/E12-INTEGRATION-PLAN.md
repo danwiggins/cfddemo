@@ -56,9 +56,11 @@ The module owns the protected-to-public boundary and contains these contracts:
 
 - `LongitudinalWorkspaceRequest`: registry-scoped cohort selector/version,
   independently registry-scoped anchor-policy selector/version and
-  projection-policy selector/version, normalized controlled filters, the D09
+  approved-anchor selector/version, projection-policy selector/version,
+  normalized controlled filters, the D09
   policy selector/version, and requested D02 measurement
-  definition/quantity/unit. It carries no caller-chosen anchor record, D03
+  definition/quantity/unit. The approved-anchor selector resolves only within
+  the chosen policy's bounded live candidate page. It carries no caller-chosen anchor record, D03
   policy ID/digest, D07 envelope ID/digest, family coordinate,
   projection-policy bytes or digest, manifest or linkage identifier, and never
   carries a release flag.
@@ -152,7 +154,7 @@ build_longitudinal_workspace(
     supersession_store,
     anchor_policy_registry,
     projection_policy_registry,
-    result_view_sources,
+    result_view_source_registry,
     measurement_source_artifact_registry,
     d03_decision_registry,
     d07_comparison_registry,
@@ -167,7 +169,8 @@ invokes captured unbound methods, and performs no caller callback. It resolves
 D05 through the registry, resolves the approved anchor policy/D07 envelope and
 the approved projection policy through their independently pinned registries,
 derives the bounded anchor-candidate page from the registered policy and live
-authority, obtains D06 status for the same selector/version,
+authority, resolves the request's explicit opaque approved-anchor selector from
+that exact page, obtains D06 status for the same selector/version,
 reads D04 active and bounded history state, obtains the D09 summary from its
 live registry/catalog authority, replays each applicable E07/E08/E09 artifact
 from durable family-source discovery against its exact E04/E06 source, replays
@@ -299,7 +302,8 @@ nodes, strings and collections also use explicit pre-serialization limits.
 Publication holds one exclusive registry lock plus final read fences for every
 mutable identity persisted in the object: D01 linkage, D04 history, D05 cohort,
 D06 record/catalog, E04 catalog, E06 source, D03 decision, D07 comparison, D09
-summary, D10 context, family-source artifact and projection-policy authority.
+summary, D10 context, family-source artifact, anchor-policy authority and
+projection-policy authority.
 It canonicalizes and bounds all input before opening a
 transaction, writes the content-addressed object with descriptor-relative
 no-follow/no-overwrite operations, fsyncs it, appends and fsyncs one hash-chained
@@ -393,7 +397,11 @@ free-form cohort, record, or anchor identity.
    linkage. It shows
    a safe alias, biological-timepoint ordinal/offset, method version, and exact
    eligibility state. There is no implicit first/latest/provider-primary anchor
-   and no arbitrary record-ID field.
+   and no arbitrary record-ID field. The operator must choose one candidate; the
+   request carries that registry-scoped opaque anchor selector/version and the
+   builder resolves it against the same candidate page. Omission, injection,
+   stale version or selection from another policy fails closed; there is no
+   implicit first/latest/provider-primary choice.
 4. Before any result table or chart, the operator sees a deterministic diff
    between the selected cohort version and its predecessor, or between a saved
    comparison's version and the version being reopened. The diff identifies
@@ -616,6 +624,11 @@ caller assertions and is therefore prohibited:
   policy, D07 envelope and bounded live anchor-candidate projection behind an
   opaque selector/version; a caller-provided policy digest or anchor identity is
   not authority.
+- E06 `ResultViewSource` is a pure model boundary, not a protected discoverable
+  store. Add a durable bounded result-view-source registry bound to D06/E04
+  result identity and current E06 replay authority. The builder resolves sources
+  by opaque selector and exact result/member commitments; it never accepts a
+  caller-owned `ResultViewSource` sequence.
 - The current D01/D04/D06/E04 and downstream APIs do not expose the composable
   cross-store fence required above. In particular D04/D06 cannot reopen D01
   while its fence is held, and E04 does not fence trust mutation through return.
@@ -626,7 +639,8 @@ caller assertions and is therefore prohibited:
 
 The merge order is D06 correction, D04 history API, corrected D09, corrected
 D10, protected D03/D07 decision/comparison discovery, protected anchor-policy
-and projection-policy registries, family-specific measurement-source adapters,
+and projection-policy registries, protected E06 result-view-source discovery,
+family-specific measurement-source adapters,
 composable authority-fence adapters/coordinator, D08 read model, durable
 saved-comparison registry, browser integration, then installed quickstart and
 rollback rehearsal evidence. E14 may automate renderer checks afterward;
