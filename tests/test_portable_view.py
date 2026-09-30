@@ -702,6 +702,94 @@ def test_callback_staged_file_mutation_fails_and_cleans_up(
     assert not any(item.name.startswith(".artifact.") for item in parent.iterdir())
 
 
+def test_rename_boundary_mutation_is_detected_and_quarantined(
+    integrated_request: PortableViewBuildRequest,
+    trust_context: PortableTrustContext,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    view, table = build_portable_view(integrated_request, trust_context=trust_context)
+    destination = tmp_path / "artifact"
+    original_rename = portable.rename_directory_exclusive_at
+
+    def mutate_after_rename(parent_fd: int, source: str, target: str) -> None:
+        original_rename(parent_fd, source, target)
+        if target == destination.name:
+            installed_fd = os.open(
+                target,
+                os.O_RDONLY | getattr(os, "O_DIRECTORY", 0),
+                dir_fd=parent_fd,
+            )
+            try:
+                table_fd = os.open(
+                    "accessible-table.tsv",
+                    os.O_WRONLY | os.O_TRUNC,
+                    dir_fd=installed_fd,
+                )
+                try:
+                    os.write(table_fd, b"corrupt-at-rename-boundary")
+                finally:
+                    os.close(table_fd)
+            finally:
+                os.close(installed_fd)
+
+    monkeypatch.setattr(portable, "rename_directory_exclusive_at", mutate_after_rename)
+    with pytest.raises(PortableViewTamperError):
+        publish_portable_view(
+            destination,
+            view=view,
+            accessible_table=table,
+            trust_context=trust_context,
+            source_identity_verifier=lambda: view.source_identities,
+        )
+    assert not destination.exists()
+    assert not any(
+        item.name.startswith(".artifact.invalid.") for item in tmp_path.iterdir()
+    )
+
+
+def test_failed_post_publish_validation_does_not_delete_a_replacement_winner(
+    integrated_request: PortableViewBuildRequest,
+    trust_context: PortableTrustContext,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    view, table = build_portable_view(integrated_request, trust_context=trust_context)
+    destination = tmp_path / "artifact"
+    winner = tmp_path / "winner"
+    winner.mkdir()
+    (winner / "winner-marker").write_text("preserve", encoding="utf-8")
+    displaced = tmp_path / "displaced-artifact"
+    original_rename = portable.rename_directory_exclusive_at
+
+    def replace_after_rename(parent_fd: int, source: str, target: str) -> None:
+        original_rename(parent_fd, source, target)
+        if target == destination.name:
+            os.rename(
+                destination.name,
+                displaced.name,
+                src_dir_fd=parent_fd,
+                dst_dir_fd=parent_fd,
+            )
+            os.rename(
+                winner.name,
+                destination.name,
+                src_dir_fd=parent_fd,
+                dst_dir_fd=parent_fd,
+            )
+
+    monkeypatch.setattr(portable, "rename_directory_exclusive_at", replace_after_rename)
+    with pytest.raises(PortableViewTamperError):
+        publish_portable_view(
+            destination,
+            view=view,
+            accessible_table=table,
+            trust_context=trust_context,
+            source_identity_verifier=lambda: view.source_identities,
+        )
+    assert (destination / "winner-marker").read_text(encoding="utf-8") == "preserve"
+
+
 def test_verify_rechecks_named_root_and_rejects_swap(
     integrated_request: PortableViewBuildRequest,
     trust_context: PortableTrustContext,
@@ -730,5 +818,80 @@ def test_verify_rechecks_named_root_and_rejects_swap(
         return original(*args, **kwargs)
 
     monkeypatch.setattr(portable, "_parse_canonical", swap_then_parse)
+    with pytest.raises(PortableViewTamperError):
+        verify_portable_view(root, trust_context=trust_context)
+
+
+def test_verify_rejects_manifest_replacement_while_opening_second_file(
+    integrated_request: PortableViewBuildRequest,
+    trust_context: PortableTrustContext,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    view, table = build_portable_view(integrated_request, trust_context=trust_context)
+    root = tmp_path / "root"
+    publish_portable_view(
+        root,
+        view=view,
+        accessible_table=table,
+        trust_context=trust_context,
+        source_identity_verifier=lambda: view.source_identities,
+    )
+    replacement = tmp_path / "replacement-manifest.json"
+    replacement.write_bytes((root / "manifest.json").read_bytes())
+    original_open = portable.os.open
+    replaced = False
+
+    def racing_open(
+        path: object,
+        flags: int,
+        mode: int = 0o777,
+        *,
+        dir_fd: int | None = None,
+    ) -> int:
+        nonlocal replaced
+        if path == "accessible-table.tsv" and dir_fd is not None and not replaced:
+            replaced = True
+            os.replace(replacement, root / "manifest.json")
+        return original_open(path, flags, mode, dir_fd=dir_fd)
+
+    monkeypatch.setattr(portable.os, "open", racing_open)
+    with pytest.raises(PortableViewTamperError):
+        verify_portable_view(root, trust_context=trust_context)
+    assert replaced
+
+
+@pytest.mark.parametrize(
+    "filename", ["manifest.json", "accessible-table.tsv", "view.json"]
+)
+def test_verify_rejects_final_name_inode_swap_for_every_file(
+    integrated_request: PortableViewBuildRequest,
+    trust_context: PortableTrustContext,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    filename: str,
+) -> None:
+    view, table = build_portable_view(integrated_request, trust_context=trust_context)
+    root = tmp_path / "root"
+    publish_portable_view(
+        root,
+        view=view,
+        accessible_table=table,
+        trust_context=trust_context,
+        source_identity_verifier=lambda: view.source_identities,
+    )
+    replacement = tmp_path / f"replacement-{filename}"
+    replacement.write_bytes((root / filename).read_bytes())
+    original_parse = portable._parse_canonical
+    replaced = False
+
+    def replace_then_parse(*args: object, **kwargs: object) -> object:
+        nonlocal replaced
+        if not replaced:
+            replaced = True
+            os.replace(replacement, root / filename)
+        return original_parse(*args, **kwargs)
+
+    monkeypatch.setattr(portable, "_parse_canonical", replace_then_parse)
     with pytest.raises(PortableViewTamperError):
         verify_portable_view(root, trust_context=trust_context)
