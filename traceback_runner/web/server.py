@@ -13,6 +13,7 @@ import secrets
 import socket
 import stat
 import threading
+from collections.abc import Callable
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from importlib.resources import files
@@ -107,7 +108,10 @@ def _require_named_state_directory(path: Path, directory_fd: int) -> None:
 
 def _acquire_instance_lease(directory_fd: int) -> int:
     descriptor: int | None = None
+    directory_locked = False
     try:
+        fcntl.flock(directory_fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        directory_locked = True
         descriptor = os.open(
             "instance.lock",
             os.O_RDWR | os.O_CREAT | getattr(os, "O_NOFOLLOW", 0),
@@ -129,9 +133,27 @@ def _acquire_instance_lease(directory_fd: int) -> int:
     except OSError as exc:
         if descriptor is not None:
             os.close(descriptor)
+        if directory_locked:
+            fcntl.flock(directory_fd, fcntl.LOCK_UN)
         if exc.errno in {errno.EACCES, errno.EAGAIN}:
             raise LocalWebServerError("local web service is already running") from exc
         raise LocalWebServerError("local web lease could not be acquired") from exc
+
+
+def _require_instance_lease(directory_fd: int, lease_fd: int) -> None:
+    try:
+        named = os.stat("instance.lock", dir_fd=directory_fd, follow_symlinks=False)
+        pinned = os.fstat(lease_fd)
+    except OSError as exc:
+        raise LocalWebServerError("local web lease identity is unavailable") from exc
+    if (
+        not stat.S_ISREG(named.st_mode)
+        or stat.S_IMODE(named.st_mode) != STATE_FILE_MODE
+        or named.st_uid != os.geteuid()
+        or named.st_nlink != 1
+        or (named.st_dev, named.st_ino) != (pinned.st_dev, pinned.st_ino)
+    ):
+        raise LocalWebServerError("local web lease identity changed")
 
 
 def _unlink_instance_state(
@@ -249,11 +271,14 @@ class _LoopbackHttpServer(http.server.ThreadingHTTPServer):
     allow_reuse_address = False
     request_queue_size = MAX_HTTP_WORKERS
     application: _Application
+    security_validator: Callable[[], None]
+    security_failed: threading.Event
 
     def __init__(self, *args: object, **kwargs: object) -> None:
         self._worker_slots = threading.BoundedSemaphore(MAX_HTTP_WORKERS)
         self._worker_count = 0
         self._worker_count_lock = threading.Lock()
+        self.security_failed = threading.Event()
         super().__init__(*args, **kwargs)
 
     @property
@@ -327,6 +352,17 @@ class _Handler(http.server.BaseHTTPRequestHandler):
             and sum(len(name) + len(value) + 4 for name, value in items)
             <= MAX_REQUEST_HEADER_BYTES
         )
+
+    def _security_boundary_intact(self) -> bool:
+        server = self.server  # type: ignore[assignment]
+        if server.security_failed.is_set():  # type: ignore[attr-defined]
+            return False
+        try:
+            server.security_validator()  # type: ignore[attr-defined]
+        except LocalWebServerError:
+            server.security_failed.set()  # type: ignore[attr-defined]
+            return False
+        return True
 
     def _single_header(self, name: str) -> str | None:
         values = self.headers.get_all(name, failobj=[])
@@ -416,6 +452,10 @@ class _Handler(http.server.BaseHTTPRequestHandler):
         self.do_GET()
 
     def do_GET(self) -> None:
+        if not self._security_boundary_intact():
+            self.close_connection = True
+            self._json(503, {"error": {"code": "TBX-WEB-503"}})
+            return
         if not self._headers_within_bounds():
             self.close_connection = True
             self._json(431, {"error": {"code": "TBX-WEB-431"}})
@@ -457,6 +497,10 @@ class _Handler(http.server.BaseHTTPRequestHandler):
         self._json(404, {"error": {"code": "TBX-WEB-404"}})
 
     def do_POST(self) -> None:
+        if not self._security_boundary_intact():
+            self.close_connection = True
+            self._json(503, {"error": {"code": "TBX-WEB-503"}})
+            return
         if not self._headers_within_bounds():
             self.close_connection = True
             self._json(431, {"error": {"code": "TBX-WEB-431"}})
@@ -519,6 +563,8 @@ class RunningLocalWebService:
     state_directory_fd: int
     lease_fd: int
     instance_id: str
+    watchdog_stop: threading.Event
+    watchdog_thread: threading.Thread
     closed: bool = False
 
     @classmethod
@@ -533,12 +579,17 @@ class RunningLocalWebService:
         lease_fd: int | None = None
         server: _LoopbackHttpServer | None = None
         instance_id: str | None = None
+        thread: threading.Thread | None = None
+        watchdog_stop: threading.Event | None = None
+        watchdog_thread: threading.Thread | None = None
         try:
             state_fd = _open_state_directory(state_directory)
             _require_named_state_directory(state_directory, state_fd)
             lease_fd = _acquire_instance_lease(state_fd)
+            _require_instance_lease(state_fd, lease_fd)
             _unlink_instance_state(state_fd)
             _require_named_state_directory(state_directory, state_fd)
+            _require_instance_lease(state_fd, lease_fd)
 
             host = "::1" if ipv6 else "127.0.0.1"
             server_type = _LoopbackHttpServerV6 if ipv6 else _LoopbackHttpServer
@@ -571,8 +622,15 @@ class RunningLocalWebService:
                 not_found_problem=problem,
             )
             server.application = _Application(kernel, boundary, _packaged_assets())
+
+            def validate_security_boundary() -> None:
+                _require_named_state_directory(state_directory, state_fd)
+                _require_instance_lease(state_fd, lease_fd)
+
+            server.security_validator = validate_security_boundary
             instance_id = f"instance_{secrets.token_hex(16)}"
             _require_named_state_directory(state_directory, state_fd)
+            _require_instance_lease(state_fd, lease_fd)
             _write_instance_state(
                 state_fd,
                 {
@@ -585,6 +643,7 @@ class RunningLocalWebService:
                 },
             )
             _require_named_state_directory(state_directory, state_fd)
+            _require_instance_lease(state_fd, lease_fd)
             bootstrap_code = boundary.issue_bootstrap()
             thread = threading.Thread(
                 target=server.serve_forever,
@@ -592,6 +651,25 @@ class RunningLocalWebService:
                 daemon=True,
             )
             thread.start()
+            watchdog_stop = threading.Event()
+
+            def watch_security_boundary() -> None:
+                while not watchdog_stop.wait(0.05):
+                    try:
+                        server.security_validator()
+                    except LocalWebServerError:
+                        server.security_failed.set()
+                    if server.security_failed.is_set():
+                        server.shutdown()
+                        server.server_close()
+                        return
+
+            watchdog_thread = threading.Thread(
+                target=watch_security_boundary,
+                name="traceback-local-web-security",
+                daemon=True,
+            )
+            watchdog_thread.start()
             return cls(
                 server=server,
                 thread=thread,
@@ -601,10 +679,20 @@ class RunningLocalWebService:
                 state_directory_fd=state_fd,
                 lease_fd=lease_fd,
                 instance_id=instance_id,
+                watchdog_stop=watchdog_stop,
+                watchdog_thread=watchdog_thread,
             )
         except BaseException:
+            if watchdog_stop is not None:
+                watchdog_stop.set()
             if server is not None:
+                if thread is not None and thread.is_alive():
+                    server.shutdown()
                 server.server_close()
+            if thread is not None and thread.ident is not None:
+                thread.join(timeout=5)
+            if watchdog_thread is not None and watchdog_thread.ident is not None:
+                watchdog_thread.join(timeout=5)
             if state_fd is not None and instance_id is not None:
                 try:
                     _unlink_instance_state(state_fd, expected_instance_id=instance_id)
@@ -614,6 +702,7 @@ class RunningLocalWebService:
                 fcntl.flock(lease_fd, fcntl.LOCK_UN)
                 os.close(lease_fd)
             if state_fd is not None:
+                fcntl.flock(state_fd, fcntl.LOCK_UN)
                 os.close(state_fd)
             raise
 
@@ -629,12 +718,14 @@ class RunningLocalWebService:
         if self.closed:
             return
         self.closed = True
+        self.watchdog_stop.set()
         try:
             try:
                 self.server.shutdown()
             finally:
                 self.server.server_close()
                 self.thread.join(timeout=5)
+                self.watchdog_thread.join(timeout=5)
         finally:
             try:
                 try:
@@ -645,6 +736,7 @@ class RunningLocalWebService:
                     fcntl.flock(self.lease_fd, fcntl.LOCK_UN)
                     os.close(self.lease_fd)
             finally:
+                fcntl.flock(self.state_directory_fd, fcntl.LOCK_UN)
                 os.close(self.state_directory_fd)
 
     def __enter__(self) -> Self:

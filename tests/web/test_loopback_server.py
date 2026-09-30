@@ -243,6 +243,35 @@ def test_state_directory_replacement_during_publication_fails_closed(
     assert not (state / "instance.json").exists()
 
 
+def test_lock_entry_substitution_cannot_create_two_live_services(
+    tmp_path: Path,
+) -> None:
+    store, _ = _store(tmp_path)
+    state = tmp_path / "state"
+    first = RunningLocalWebService.start(store=store, state_directory=state)
+    published = (state / "instance.json").read_bytes()
+    replacement = state / ".replacement-lock"
+    replacement.write_bytes(b"")
+    os.chmod(replacement, 0o600)
+    os.replace(replacement, state / "instance.lock")
+
+    try:
+        with pytest.raises(LocalWebServerError, match="already running"):
+            RunningLocalWebService.start(store=store, state_directory=state)
+
+        deadline = time.monotonic() + 2
+        while first.thread.is_alive() and time.monotonic() < deadline:
+            time.sleep(0.01)
+        assert first.server.security_failed.is_set()
+        assert not first.thread.is_alive()
+        assert (state / "instance.json").read_bytes() == published
+    finally:
+        first.close()
+
+    with RunningLocalWebService.start(store=store, state_directory=state) as restarted:
+        assert _request(restarted, "GET", "/")[0] == 200
+
+
 def test_authority_rejected_before_body_validation_or_read(tmp_path: Path) -> None:
     store, _ = _store(tmp_path)
     with RunningLocalWebService.start(
