@@ -32,6 +32,16 @@ bundle, and current result-key trust. A later linkage change or key revocation
 therefore withholds the binding rather than turning stale evidence into an
 available longitudinal record.
 
+`record_status_for_manifest()` returns a bounded canonical status artifact with
+exactly one item in D05 member order. Each item is `available` with a live
+verified binding, `missing`, or `withheld` with a typed safe reason and no result
+details. The artifact binds the cohort/version/manifest digest, current linkage
+snapshot, current catalog/trust authority, complete member coverage, and its
+own canonical digest. Structural corruption, a wrong member identity, or an
+unverifiable catalog still fails the whole read. The existing
+`bindings_for_manifest()` API remains strict for callers that require all
+selected records to verify.
+
 Publication is coordinated across SQLite and the binding directory. The result
 row is first durable but hidden in `pending` state. A same-directory mode-0600
 journal is flushed, hard-linked to the final name without overwrite, and the
@@ -46,11 +56,30 @@ Missing, truncated, or substituted journals compensate the
 exact durable publication and are removed with any linked final file; an empty
 or partial final binding is never accepted.
 
+Every binding root also owns a durable, scope-digest-bound reference to an
+adopted coordinated result, including when the result bytes and visible catalog
+row already existed. Recovery removes only that root's ownership row. A shared
+result remains visible while any other root retains an adopted owner; the final
+owner cleanup removes only the catalog reference and retains the immutable
+content-addressed object bytes. Direct, non-coordinated catalog imports are not
+deleted by binding-root recovery.
+
 Import and read paths invoke captured unbound authority functions and verify the
 entire reachable catalog, trust-store, linkage-store, verifier, storage, class,
 instance, and module-alias call chain. Replacing a validator cannot turn stale
 D05 membership or a revoked result key into accepted evidence, including a
 replacement that attempts to restore itself when called.
+Python function code, defaults, keyword defaults, and closure cells are also
+fingerprinted to diagnose in-process monkeypatching. These checks assume a
+trusted package and process image. Arbitrary code execution that can rewrite
+both a verifier and its expected fingerprint makes that process untrusted and
+must be handled by package integrity, process isolation, and restart rather
+than treating a recursive Python self-check as an authorization root. No data,
+bundle-reader, plugin, or evaluation input receives a code-mutation capability.
+Production and recovery paths do not execute caller callbacks. Fault-window
+tests use an exact, non-subclassable package controller with immutable
+configuration and fixed raise, exit, or synchronization actions; catalog
+instances pin its exact identity and reject replacement.
 
 This implementation remains synthetic and local. The binding index contains
 protected analysis and provider identifiers and must stay inside provider

@@ -4,6 +4,8 @@ from __future__ import annotations
 
 import json
 import os
+import threading
+from concurrent.futures import ThreadPoolExecutor
 from datetime import timedelta
 from pathlib import Path
 
@@ -14,9 +16,16 @@ from evidence_inspector.cohort_import import (
     CohortImportConflict,
     CohortImportError,
     CohortImportFilesystemError,
+    CohortRecordAvailability,
     CohortRecordCatalog,
+    CohortRecordWithheldReason,
 )
 from evidence_inspector.cohort_manifest import MeasurementAnchor
+from evidence_inspector.fault_controller import (
+    NO_FAULTS,
+    DeterministicFaultController,
+    FaultAction,
+)
 from evidence_inspector.result_catalog import (
     DEFAULT_RESULT_BUNDLE_READER_REGISTRY,
     CatalogError,
@@ -40,7 +49,7 @@ from tests.test_method_registry import (
 from tests.test_provider_linkage import _consume, _create_approval
 from tests.test_provider_linkage_store import _pins
 from traceback_runner.serialization import canonical_json_bytes
-from traceback_runner.signing import RevokedKeyError
+from traceback_runner.signing import RevokedKeyError, TrustStore
 
 pytest_plugins = ("tests.test_cohort_manifest",)
 
@@ -82,7 +91,7 @@ def _authority():
     return registry, head, head_sha256, capability
 
 
-def _setup(tmp_path: Path, live):
+def _setup(tmp_path: Path, live, fault_controller=NO_FAULTS):
     store, _, authority, member = live
     registry, head, head_sha256, capability = _authority()
     import_root = tmp_path / "imports"
@@ -113,6 +122,7 @@ def _setup(tmp_path: Path, live):
         linkage_store=store,
         expected_trust_snapshot_sha256_by_provider=_pins(),
         reader_registry=DEFAULT_RESULT_BUNDLE_READER_REGISTRY,
+        fault_controller=fault_controller,
     )
     return (
         cohorts,
@@ -127,6 +137,25 @@ def _setup(tmp_path: Path, live):
         head_sha256,
         capability,
     )
+
+
+def _paused_error(controller, operation, mutation) -> BaseException:
+    errors: list[BaseException] = []
+
+    def run() -> None:
+        try:
+            operation()
+        except BaseException as error:  # noqa: BLE001 - exact thread outcome
+            errors.append(error)
+
+    worker = threading.Thread(target=run)
+    worker.start()
+    assert controller.wait_until_reached()
+    mutation()
+    controller.release()
+    worker.join(timeout=10)
+    assert not worker.is_alive() and len(errors) == 1
+    return errors[0]
 
 
 def _import(values, **updates):
@@ -162,6 +191,21 @@ def _binding_path(root: Path, binding) -> Path:
     return root / (f"{binding.cohort_manifest_sha256}.{binding.binding_id}.json")
 
 
+def _advance_linkage(live, digit: str) -> None:
+    revision = _known_run_revision(
+        linkage_id="linkage_" + digit * 32,
+        subject="subject_" + digit * 32,
+        collection="collection_" + digit * 32,
+        specimen="specimen_" + digit * 32,
+        analysis="analysis_" + digit * 32,
+        measurement="measurement_" + digit * 32,
+        source="projection_" + digit * 32,
+        run_digit=digit,
+    )
+    authorized, _ = _consume(revision, (_create_approval(revision, digit),))
+    live[0].commit_authorized_revision(authorized)
+
+
 def test_verified_bundle_is_idempotently_bound_to_exact_live_member(
     tmp_path: Path, live
 ) -> None:
@@ -178,6 +222,61 @@ def test_verified_bundle_is_idempotently_bound_to_exact_live_member(
     serialized = binding.model_dump_json()
     assert str(tmp_path) not in serialized
     assert "subject_" not in serialized
+
+
+def test_manifest_record_status_preserves_missing_available_and_withheld_member(
+    tmp_path: Path, live
+) -> None:
+    values = _setup(tmp_path, live)
+    missing = values[0].record_status_for_manifest((values[2],))
+    assert len(missing.members) == 1
+    assert missing.members[0].availability is CohortRecordAvailability.MISSING
+    assert missing.members[0].binding is None
+
+    binding = _import(values)
+    available = values[0].record_status_for_manifest((values[2],))
+    assert available.members[0].availability is CohortRecordAvailability.AVAILABLE
+    assert available.members[0].binding == binding
+    assert available.status_sha256 != missing.status_sha256
+
+    values[6].revoke(values[5].key_id)
+    withheld = values[0].record_status_for_manifest((values[2],))
+    item = withheld.members[0]
+    assert item.availability is CohortRecordAvailability.WITHHELD
+    assert item.withheld_reason is CohortRecordWithheldReason.RESULT_KEY_REVOKED
+    assert item.binding is None
+    serialized = withheld.model_dump_json()
+    assert binding.result.result_id not in serialized
+    assert binding.publication_id not in serialized
+    corrupted = withheld.model_dump(mode="json")
+    corrupted["status_sha256"] = "0" * 64
+    with pytest.raises(ValueError, match="digest"):
+        type(withheld).model_validate(corrupted)
+
+
+@pytest.mark.parametrize(
+    ("point", "operation"),
+    (
+        ("before_read_return", "read"),
+        ("before_status_return", "status"),
+        ("before_idempotent_return", "idempotent"),
+    ),
+)
+def test_final_read_and_idempotent_return_reject_linkage_toctou(
+    tmp_path: Path, live, point: str, operation: str
+) -> None:
+    controller = DeterministicFaultController(point, action=FaultAction.PAUSE)
+    values = _setup(tmp_path, live, controller)
+    _import(values)
+    call = {
+        "read": lambda: values[0].bindings_for_manifest((values[2],)),
+        "status": lambda: values[0].record_status_for_manifest((values[2],)),
+        "idempotent": lambda: _import(values),
+    }[operation]
+    digit = {"read": "d", "status": "e", "idempotent": "f"}[operation]
+    error = _paused_error(controller, call, lambda: _advance_linkage(live, digit))
+    assert isinstance(error, CohortImportError)
+    assert "changed" in str(error) or "current" in str(error)
 
 
 def test_same_verified_record_can_bind_to_a_new_manifest_version(
@@ -549,8 +648,6 @@ def test_model_copy_authority_and_reference_corruption_fail_closed(
 def test_result_catalog_rejects_reader_and_trust_authority_substitution(
     tmp_path: Path, live
 ) -> None:
-    values = _setup(tmp_path, live)
-
     class FakeResultCatalog(ResultCatalog):
         pass
 
@@ -563,6 +660,38 @@ def test_result_catalog_rejects_reader_and_trust_authority_substitution(
             expected_trust_snapshot_sha256_by_provider=_pins(),
             reader_registry=DEFAULT_RESULT_BUNDLE_READER_REGISTRY,
         )
+
+
+def test_fault_controller_rejects_callbacks_subclasses_and_replacement(
+    tmp_path: Path, live
+) -> None:
+    values = _setup(tmp_path, live)
+    executed = False
+
+    def malicious(_point: str) -> None:
+        nonlocal executed
+        executed = True
+
+    with pytest.raises(TypeError, match="fault controller"):
+        CohortRecordCatalog(
+            tmp_path / "callback-index",
+            result_catalog=values[1],
+            linkage_store=live[0],
+            expected_trust_snapshot_sha256_by_provider=_pins(),
+            reader_registry=DEFAULT_RESULT_BUNDLE_READER_REGISTRY,
+            fault_controller=malicious,  # type: ignore[arg-type]
+        )
+    assert not executed
+    with pytest.raises(TypeError, match="cannot be subclassed"):
+
+        class InvalidFaultController(DeterministicFaultController):
+            pass
+
+    replacement = DeterministicFaultController("after_preflight")
+    with pytest.raises(AttributeError, match="read-only"):
+        values[0]._fault_controller = replacement
+    with pytest.raises(TypeError, match="immutable"):
+        replacement._point = "after_result_stage"
     values[1].prepare_bundle_import = lambda **_: None  # type: ignore[method-assign]
     with pytest.raises(TypeError, match="shadowed"):
         CohortRecordCatalog(
@@ -655,19 +784,15 @@ def test_binding_bytes_are_canonical_and_permissions_private(
 def test_authority_change_at_every_publication_window_compensates(
     tmp_path: Path, live, point: str
 ) -> None:
-    values = _setup(tmp_path / point, live)
-    fired = False
-
-    def fault(observed: str) -> None:
-        nonlocal fired
-        if observed == point and not fired:
-            fired = True
-            values[6].revoke(values[5].key_id)
-
-    values[0]._fault_injector = fault
-    with pytest.raises(Exception, match="authority changed|revoked"):
-        _import(values)
-    assert fired
+    controller = DeterministicFaultController(point, action=FaultAction.PAUSE)
+    values = _setup(tmp_path / point, live, controller)
+    error = _paused_error(
+        controller,
+        lambda: _import(values),
+        lambda: values[6].revoke(values[5].key_id),
+    )
+    assert "authority changed" in str(error) or "revoked" in str(error)
+    assert controller.fired
     assert values[1].query(CatalogQuery()).empty
     inventory = tuple((tmp_path / point / "cohort-records").iterdir())
     assert inventory == ()
@@ -678,22 +803,18 @@ def test_authority_change_at_every_publication_window_compensates(
 def test_root_replacement_during_publication_compensates(
     tmp_path: Path, live, point: str
 ) -> None:
-    values = _setup(tmp_path / point, live)
+    controller = DeterministicFaultController(point, action=FaultAction.PAUSE)
+    values = _setup(tmp_path / point, live, controller)
     root = tmp_path / point / "cohort-records"
     displaced = tmp_path / point / "displaced"
-    fired = False
 
-    def fault(observed: str) -> None:
-        nonlocal fired
-        if observed == point and not fired:
-            fired = True
-            root.rename(displaced)
-            root.mkdir(mode=0o700)
+    def replace_root() -> None:
+        root.rename(displaced)
+        root.mkdir(mode=0o700)
 
-    values[0]._fault_injector = fault
-    with pytest.raises(CohortImportFilesystemError, match="root changed"):
-        _import(values)
-    assert fired
+    error = _paused_error(controller, lambda: _import(values), replace_root)
+    assert isinstance(error, CohortImportFilesystemError)
+    assert "root changed" in str(error)
     assert values[1].query(CatalogQuery()).empty
     assert tuple(displaced.iterdir()) == ()
     assert tuple(root.iterdir()) == ()
@@ -795,8 +916,75 @@ def test_class_validator_shadow_is_rejected_without_execution(
     assert values[1].query(CatalogQuery()).empty
 
 
-def test_linkage_advance_before_visibility_compensates(tmp_path: Path, live) -> None:
+def test_stale_linkage_cannot_be_bypassed_by_validator_code_mutation(
+    tmp_path: Path, live
+) -> None:
     values = _setup(tmp_path, live)
+    revision = _known_run_revision(
+        linkage_id="linkage_" + "b" * 32,
+        subject="subject_" + "b" * 32,
+        collection="collection_" + "b" * 32,
+        specimen="specimen_" + "b" * 32,
+        analysis="analysis_" + "b" * 32,
+        measurement="measurement_" + "b" * 32,
+        source="projection_" + "b" * 32,
+        run_digit="b",
+    )
+    authorized, _ = _consume(revision, (_create_approval(revision, "b"),))
+    live[0].commit_authorized_revision(authorized)
+
+    def bypass(self, manifest, *, changed=False) -> None:
+        del self, manifest, changed
+
+    original = CohortRecordCatalog._validate_manifest.__code__
+    try:
+        CohortRecordCatalog._validate_manifest.__code__ = bypass.__code__
+        with pytest.raises(CohortImportError, match="authority callable"):
+            _import(values)
+    finally:
+        CohortRecordCatalog._validate_manifest.__code__ = original
+    assert values[1].query(CatalogQuery()).empty
+
+
+def test_revocation_cannot_be_bypassed_by_authority_code_mutation(
+    tmp_path: Path, live
+) -> None:
+    values = _setup(tmp_path, live)
+    saved_key = values[6].resolve(values[5].key_id)
+    values[6]._review_saved_key = saved_key
+    values[6].revoke(values[5].key_id)
+
+    def bypass_validation(self) -> None:
+        del self
+
+    def bypass_resolve(self, key_id):
+        del key_id
+        return self._review_saved_key
+
+    validation_code = ResultCatalog._validate_verification_authority.__code__
+    resolve_code = TrustStore.resolve.__code__
+    try:
+        ResultCatalog._validate_verification_authority.__code__ = (
+            bypass_validation.__code__
+        )
+        TrustStore.resolve.__code__ = bypass_resolve.__code__
+        with pytest.raises(
+            (CatalogError, CohortImportError),
+            match="authority callable|authority changed|module authority",
+        ):
+            _import(values)
+    finally:
+        ResultCatalog._validate_verification_authority.__code__ = validation_code
+        TrustStore.resolve.__code__ = resolve_code
+        del values[6]._review_saved_key
+    assert values[1].query(CatalogQuery()).empty
+
+
+def test_linkage_advance_before_visibility_compensates(tmp_path: Path, live) -> None:
+    controller = DeterministicFaultController(
+        "before_visibility", action=FaultAction.PAUSE
+    )
+    values = _setup(tmp_path, live, controller)
     revision = _known_run_revision(
         linkage_id="linkage_" + "e" * 32,
         subject="subject_" + "e" * 32,
@@ -808,18 +996,13 @@ def test_linkage_advance_before_visibility_compensates(tmp_path: Path, live) -> 
         run_digit="e",
     )
     authorized, _ = _consume(revision, (_create_approval(revision, "e"),))
-    fired = False
-
-    def fault(point: str) -> None:
-        nonlocal fired
-        if point == "before_visibility" and not fired:
-            fired = True
-            live[0].commit_authorized_revision(authorized)
-
-    values[0]._fault_injector = fault
-    with pytest.raises(CohortImportError, match="changed during import"):
-        _import(values)
-    assert fired
+    error = _paused_error(
+        controller,
+        lambda: _import(values),
+        lambda: live[0].commit_authorized_revision(authorized),
+    )
+    assert isinstance(error, CohortImportError)
+    assert "changed during import" in str(error)
     assert values[1].query(CatalogQuery()).empty
     assert tuple((tmp_path / "cohort-records").iterdir()) == ()
 
@@ -831,12 +1014,13 @@ def test_linkage_advance_before_visibility_compensates(tmp_path: Path, live) -> 
 def test_crash_recovery_reconciles_journal_and_catalog_publication(
     tmp_path: Path, live, point: str, visible: bool
 ) -> None:
-    values = _setup(tmp_path, live)
+    values = _setup(
+        tmp_path,
+        live,
+        DeterministicFaultController(point, action=FaultAction.EXIT, exit_code=71),
+    )
     pid = os.fork()
     if pid == 0:  # pragma: no cover - abrupt crash path cannot report assertions
-        values[0]._fault_injector = lambda observed: (
-            os._exit(71) if observed == point else None
-        )
         _import(values)
         os._exit(72)
     _, status = os.waitpid(pid, 0)
@@ -902,12 +1086,13 @@ def test_crash_recovery_removes_partial_pre_stage_journal(tmp_path: Path, live) 
 def test_corrupt_or_missing_real_journal_cannot_strand_pending_row(
     tmp_path: Path, live, point: str, mutation: str
 ) -> None:
-    values = _setup(tmp_path, live)
+    values = _setup(
+        tmp_path,
+        live,
+        DeterministicFaultController(point, action=FaultAction.EXIT, exit_code=73),
+    )
     pid = os.fork()
     if pid == 0:  # pragma: no cover - abrupt crash path
-        values[0]._fault_injector = lambda observed: (
-            os._exit(73) if observed == point else None
-        )
         _import(values)
         os._exit(74)
     _, status = os.waitpid(pid, 0)
@@ -956,12 +1141,15 @@ def test_corrupt_or_missing_real_journal_cannot_strand_pending_row(
 
 
 def test_concurrent_restart_recovery_is_idempotent(tmp_path: Path, live) -> None:
-    values = _setup(tmp_path, live)
+    values = _setup(
+        tmp_path,
+        live,
+        DeterministicFaultController(
+            "after_result_stage", action=FaultAction.EXIT, exit_code=75
+        ),
+    )
     crashing = os.fork()
     if crashing == 0:  # pragma: no cover - abrupt crash path
-        values[0]._fault_injector = lambda observed: (
-            os._exit(75) if observed == "after_result_stage" else None
-        )
         _import(values)
         os._exit(76)
     _, status = os.waitpid(crashing, 0)
@@ -1024,13 +1212,16 @@ def test_concurrent_restart_recovery_is_idempotent(tmp_path: Path, live) -> None
 def test_recovery_scope_cannot_compensate_another_binding_root(
     tmp_path: Path, live
 ) -> None:
-    values = _setup(tmp_path, live)
+    values = _setup(
+        tmp_path,
+        live,
+        DeterministicFaultController(
+            "after_result_stage", action=FaultAction.EXIT, exit_code=78
+        ),
+    )
     original_scope = values[0]._recovery_scope_sha256
     crashing = os.fork()
     if crashing == 0:  # pragma: no cover - abrupt crash path
-        values[0]._fault_injector = lambda observed: (
-            os._exit(78) if observed == "after_result_stage" else None
-        )
         _import(values)
         os._exit(79)
     _, status = os.waitpid(crashing, 0)
@@ -1068,6 +1259,59 @@ def test_recovery_scope_cannot_compensate_another_binding_root(
     finally:
         recovered.close()
         results.close()
+
+
+def test_shared_result_retains_each_coordinator_owner_until_last_cleanup(
+    tmp_path: Path, live
+) -> None:
+    values = _setup(tmp_path, live)
+    catalogs = [values[0]]
+    roots = [tmp_path / "cohort-records"]
+    for suffix in ("b", "c"):
+        root = tmp_path / f"cohort-records-{suffix}"
+        cohort = CohortRecordCatalog(
+            root,
+            result_catalog=values[1],
+            linkage_store=live[0],
+            expected_trust_snapshot_sha256_by_provider=_pins(),
+            reader_registry=DEFAULT_RESULT_BUNDLE_READER_REGISTRY,
+        )
+        catalogs.append(cohort)
+        roots.append(root)
+    import_values = [(cohort, *values[1:]) for cohort in catalogs]
+    with ThreadPoolExecutor(max_workers=3) as executor:
+        bindings = list(executor.map(_import, import_values))
+    assert all(binding.result == bindings[0].result for binding in bindings)
+
+    try:
+        for index, (cohort, root, binding) in enumerate(
+            zip(catalogs, roots, bindings, strict=True)
+        ):
+            cohort.close()
+            binding_path = _binding_path(root, binding)
+            if index == 1:
+                binding_path.write_bytes(b'{"partial":')
+            else:
+                binding_path.unlink()
+            recovered = CohortRecordCatalog(
+                root,
+                result_catalog=values[1],
+                linkage_store=live[0],
+                expected_trust_snapshot_sha256_by_provider=_pins(),
+                reader_registry=DEFAULT_RESULT_BUNDLE_READER_REGISTRY,
+            )
+            catalogs[index] = recovered
+            visible = index < len(catalogs) - 1
+            assert bool(values[1].query(CatalogQuery()).results) is visible
+            if visible:
+                remaining = catalogs[index + 1]
+                assert remaining.bindings_for_manifest((values[2],)) == (
+                    bindings[index + 1],
+                )
+    finally:
+        for cohort in catalogs:
+            cohort.close()
+        values[1].close()
 
 
 def stat_mode(path: Path) -> int:

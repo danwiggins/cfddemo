@@ -14,6 +14,11 @@ from pathlib import Path
 import pytest
 
 import evidence_inspector.result_catalog as catalog_module
+from evidence_inspector.fault_controller import (
+    DeterministicFaultController,
+    FaultAction,
+    InjectedFault,
+)
 from evidence_inspector.method_registry import (
     DisplayRole,
     QualificationState,
@@ -100,7 +105,7 @@ def _bundle_method(capability) -> dict[str, str]:
     }
 
 
-def _catalog(tmp_path: Path, *, fault=None):
+def _catalog(tmp_path: Path):
     import_root = tmp_path / "imports"
     import_root.mkdir(parents=True)
     *_, capability = _authority()
@@ -111,9 +116,27 @@ def _catalog(tmp_path: Path, *, fault=None):
         tmp_path / "catalog",
         import_roots={"root_primary": import_root},
         trust_store=trust_store,
-        fault_injector=fault,
     )
     return catalog, bundle_path, import_root
+
+
+def _paused_error(controller, operation, mutation) -> BaseException:
+    errors: list[BaseException] = []
+
+    def run() -> None:
+        try:
+            operation()
+        except BaseException as error:  # noqa: BLE001 - exact thread outcome
+            errors.append(error)
+
+    worker = threading.Thread(target=run)
+    worker.start()
+    assert controller.wait_until_reached()
+    mutation()
+    controller.release()
+    worker.join(timeout=10)
+    assert not worker.is_alive() and len(errors) == 1
+    return errors[0]
 
 
 def _import(catalog: ResultCatalog, **updates):
@@ -267,54 +290,63 @@ def test_import_rejects_source_mutation_and_root_swap(tmp_path: Path) -> None:
     mutation_root.mkdir()
     bundle, _, trust = _bundle(mutation_root / "incoming")
 
-    def mutate(point: str) -> None:
-        if point == "after_bundle_snapshot":
-            (bundle / "report.html").write_bytes(b"changed")
-
+    mutation_fault = DeterministicFaultController(
+        "after_bundle_snapshot", action=FaultAction.PAUSE
+    )
     catalog = ResultCatalog(
         tmp_path / "mutation-catalog",
         import_roots={"root_primary": mutation_root},
         trust_store=trust,
-        fault_injector=mutate,
+        fault_controller=mutation_fault,
     )
-    with pytest.raises(CatalogFilesystemError, match="changed"):
-        _import(catalog)
+    error = _paused_error(
+        mutation_fault,
+        lambda: _import(catalog),
+        lambda: (bundle / "report.html").write_bytes(b"changed"),
+    )
+    assert isinstance(error, CatalogFilesystemError) and "changed" in str(error)
 
     path_root = tmp_path / "path-swap"
     path_root.mkdir()
     path_bundle, _, path_trust = _bundle(path_root / "incoming")
 
-    def swap_path(point: str) -> None:
-        if point == "after_bundle_snapshot":
-            path_bundle.rename(path_bundle.with_name("old-record"))
-            path_bundle.mkdir()
-
+    path_fault = DeterministicFaultController(
+        "after_bundle_snapshot", action=FaultAction.PAUSE
+    )
     path_swapped = ResultCatalog(
         tmp_path / "path-swap-catalog",
         import_roots={"root_primary": path_root},
         trust_store=path_trust,
-        fault_injector=swap_path,
+        fault_controller=path_fault,
     )
-    with pytest.raises(CatalogFilesystemError, match="path changed"):
-        _import(path_swapped)
+
+    def swap_path() -> None:
+        path_bundle.rename(path_bundle.with_name("old-record"))
+        path_bundle.mkdir()
+
+    error = _paused_error(path_fault, lambda: _import(path_swapped), swap_path)
+    assert isinstance(error, CatalogFilesystemError) and "path changed" in str(error)
 
     swap_root = tmp_path / "swap"
     swap_root.mkdir()
     _, _, swap_trust = _bundle(swap_root / "incoming")
 
-    def swap(point: str) -> None:
-        if point == "after_bundle_snapshot":
-            swap_root.rename(tmp_path / "old-swap")
-            swap_root.mkdir()
-
+    root_fault = DeterministicFaultController(
+        "after_bundle_snapshot", action=FaultAction.PAUSE
+    )
     swapped = ResultCatalog(
         tmp_path / "swap-catalog",
         import_roots={"root_primary": swap_root},
         trust_store=swap_trust,
-        fault_injector=swap,
+        fault_controller=root_fault,
     )
-    with pytest.raises(CatalogFilesystemError, match="root changed"):
-        _import(swapped)
+
+    def swap() -> None:
+        swap_root.rename(tmp_path / "old-swap")
+        swap_root.mkdir()
+
+    error = _paused_error(root_fault, lambda: _import(swapped), swap)
+    assert isinstance(error, CatalogFilesystemError) and "root changed" in str(error)
 
 
 def test_conflict_and_crash_leave_no_partial_catalog_state(tmp_path: Path) -> None:
@@ -359,10 +391,6 @@ def test_conflict_and_crash_leave_no_partial_catalog_state(tmp_path: Path) -> No
         )
     assert catalog.query(CatalogQuery()).results == (first,)
 
-    def fail(point: str) -> None:
-        if point == "before_catalog_commit":
-            raise OSError("synthetic crash")
-
     crash_root = tmp_path / "crash"
     crash_root.mkdir()
     *_, capability = _authority()
@@ -371,9 +399,9 @@ def test_conflict_and_crash_leave_no_partial_catalog_state(tmp_path: Path) -> No
         tmp_path / "crash-catalog",
         import_roots={"root_primary": crash_root},
         trust_store=trust,
-        fault_injector=fail,
+        fault_controller=DeterministicFaultController("before_catalog_commit"),
     )
-    with pytest.raises(OSError, match="synthetic crash"):
+    with pytest.raises(InjectedFault, match="before_catalog_commit"):
         _import(crashing)
     reopened = ResultCatalog(
         tmp_path / "crash-catalog",
@@ -391,20 +419,16 @@ def test_failed_publisher_never_unlinks_an_object_adopted_concurrently(
     import_root.mkdir()
     *_, capability = _authority()
     _, _, trust = _bundle(import_root / "incoming", method=_bundle_method(capability))
-    published = threading.Event()
     adopted = threading.Event()
-
-    def pause_then_fail(point: str) -> None:
-        if point == "after_object_publish":
-            published.set()
-            assert adopted.wait(timeout=10)
-            raise OSError("synthetic losing publisher")
+    controller = DeterministicFaultController(
+        "after_object_publish", action=FaultAction.PAUSE_RAISE
+    )
 
     first = ResultCatalog(
         tmp_path / "catalog",
         import_roots={"root_primary": import_root},
         trust_store=trust,
-        fault_injector=pause_then_fail,
+        fault_controller=controller,
     )
     second = ResultCatalog(
         tmp_path / "catalog",
@@ -421,14 +445,15 @@ def test_failed_publisher_never_unlinks_an_object_adopted_concurrently(
 
     worker = threading.Thread(target=losing_import)
     worker.start()
-    assert published.wait(timeout=10)
+    assert controller.wait_until_reached()
     committed = _import(second)
     adopted.set()
+    controller.release()
     worker.join(timeout=10)
 
     assert not worker.is_alive()
     assert len(errors) == 1
-    assert isinstance(errors[0], OSError)
+    assert isinstance(errors[0], InjectedFault)
     object_path = second._bound_objects / committed.bundle_sha256
     assert object_path.is_dir()
     assert (
@@ -439,18 +464,34 @@ def test_failed_publisher_never_unlinks_an_object_adopted_concurrently(
 
 
 def test_destination_and_database_replacement_fail_closed(tmp_path: Path) -> None:
-    catalog, _, _ = _catalog(tmp_path)
+    catalog, _, import_root = _catalog(tmp_path)
     original_root = catalog.root
     displaced_root = tmp_path / "displaced-catalog"
 
-    def replace_destination(point: str) -> None:
-        if point == "after_bundle_snapshot":
-            original_root.rename(displaced_root)
-            original_root.mkdir()
+    replacement = DeterministicFaultController(
+        "after_bundle_snapshot", action=FaultAction.PAUSE
+    )
+    with pytest.raises(AttributeError, match="read-only"):
+        catalog._fault_controller = replacement
+    assert not replacement.fired
+    catalog.close()
+    controller = DeterministicFaultController(
+        "after_bundle_snapshot", action=FaultAction.PAUSE
+    )
+    catalog = ResultCatalog(
+        original_root,
+        import_roots={"root_primary": import_root},
+        trust_store=catalog.trust_store,
+        fault_controller=controller,
+    )
 
-    catalog.fault_injector = replace_destination
-    with pytest.raises(CatalogFilesystemError, match="catalog root changed"):
-        _import(catalog)
+    def replace_destination() -> None:
+        original_root.rename(displaced_root)
+        original_root.mkdir()
+
+    error = _paused_error(controller, lambda: _import(catalog), replace_destination)
+    assert isinstance(error, CatalogFilesystemError)
+    assert "catalog root changed" in str(error)
     assert not list((displaced_root / "objects").glob("[0-9a-f]" * 64))
     catalog.close()
 

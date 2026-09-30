@@ -13,7 +13,8 @@ import hashlib
 import os
 import stat
 import threading
-from collections.abc import Callable, Mapping, Sequence
+from collections.abc import Mapping, Sequence
+from enum import StrEnum
 from pathlib import Path
 from types import MappingProxyType
 from typing import Annotated, Literal
@@ -32,6 +33,7 @@ from evidence_inspector.cohort_manifest import (
     validate_manifest_against_linkage_store,
     validate_manifest_history,
 )
+from evidence_inspector.fault_controller import NO_FAULTS, DeterministicFaultController
 from evidence_inspector.method_registry import (
     AuthorityHead,
     CurrentMethodCapability,
@@ -52,9 +54,11 @@ from evidence_inspector.result_catalog import (
     PublicationId,
     ResultBundleReaderRegistry,
     ResultCatalog,
+    _authority_value_fingerprint,
     catalog_authority_sha256,
 )
 from traceback_runner.serialization import canonical_json_bytes
+from traceback_runner.signing import RevokedKeyError
 
 MAX_BINDINGS = 100_000
 MAX_BINDING_BYTES = 128 * 1024
@@ -149,6 +153,63 @@ class CohortRecordBinding(RegistryContract):
         return self
 
 
+class CohortRecordAvailability(StrEnum):
+    AVAILABLE = "available"
+    MISSING = "missing"
+    WITHHELD = "withheld"
+
+
+class CohortRecordWithheldReason(StrEnum):
+    RESULT_KEY_REVOKED = "result_key_revoked"
+
+
+class CohortMemberRecordStatus(RegistryContract):
+    schema_version: Literal["traceback.cohort-member-record-status.v1"] = (
+        "traceback.cohort-member-record-status.v1"
+    )
+    provider_namespace: ProviderNamespace
+    analysis_record_id: AnalysisRecordId
+    member_sha256: Sha256
+    availability: CohortRecordAvailability
+    binding: CohortRecordBinding | None = None
+    withheld_reason: CohortRecordWithheldReason | None = None
+
+    @model_validator(mode="after")
+    def state_is_consistent(self) -> CohortMemberRecordStatus:
+        if self.availability is CohortRecordAvailability.AVAILABLE:
+            if self.binding is None or self.withheld_reason is not None:
+                raise ValueError("available status requires only a binding")
+        elif self.availability is CohortRecordAvailability.WITHHELD:
+            if self.binding is not None or self.withheld_reason is None:
+                raise ValueError("withheld status requires only a safe reason")
+        elif self.binding is not None or self.withheld_reason is not None:
+            raise ValueError("missing status cannot carry result details")
+        return self
+
+
+class CohortManifestRecordStatus(RegistryContract):
+    schema_version: Literal["traceback.cohort-manifest-record-status.v1"] = (
+        "traceback.cohort-manifest-record-status.v1"
+    )
+    cohort_id: str = Field(pattern=r"^cohort_[0-9a-f]{32}$")
+    cohort_version: int = Field(ge=1, le=100_000)
+    cohort_manifest_sha256: Sha256
+    linkage_snapshot_sha256: Sha256
+    catalog_authority_sha256: Sha256
+    members: tuple[CohortMemberRecordStatus, ...] = Field(
+        min_length=1, max_length=MAX_BINDINGS
+    )
+    status_sha256: Sha256
+
+    @model_validator(mode="after")
+    def digest_is_canonical(self) -> CohortManifestRecordStatus:
+        payload = self.model_dump(mode="json", exclude={"status_sha256"})
+        expected = hashlib.sha256(canonical_json_bytes(payload)).hexdigest()
+        if self.status_sha256 != expected:
+            raise ValueError("cohort record status digest is invalid")
+        return self
+
+
 def _binding_id(
     *,
     cohort_manifest_sha256: str,
@@ -239,6 +300,9 @@ class CohortRecordCatalog:
             "_reader_registry",
             "_reader_registry_bytes",
             "_recovery_scope_sha256",
+            "_fault_controller",
+            "_fault_controller_identity",
+            "_fault_controller_configuration",
         }
     )
 
@@ -255,7 +319,7 @@ class CohortRecordCatalog:
         linkage_store: ProviderLinkageStore,
         expected_trust_snapshot_sha256_by_provider: Mapping[str, str],
         reader_registry: ResultBundleReaderRegistry,
-        fault_injector: Callable[[str], None] | None = None,
+        fault_controller: DeterministicFaultController = NO_FAULTS,
     ) -> None:
         if type(result_catalog) is not ResultCatalog:
             raise TypeError("cohort import requires the exact result catalog type")
@@ -319,7 +383,11 @@ class CohortRecordCatalog:
         self._expected_trust_snapshot_sha256_by_provider = MappingProxyType(pins)
         self._reader_registry = normalized_registry
         self._reader_registry_bytes = canonical_json_bytes(normalized_registry)
-        self._fault_injector = fault_injector
+        if type(fault_controller) is not DeterministicFaultController:
+            raise TypeError("fault controller must be exact")
+        self._fault_controller = fault_controller
+        self._fault_controller_identity = id(fault_controller)
+        self._fault_controller_configuration = fault_controller.configuration
         self.root = Path(root).absolute()
         if self.root.is_symlink() or (self.root.exists() and not self.root.is_dir()):
             raise CohortImportFilesystemError("cohort record index root is unsafe")
@@ -563,6 +631,7 @@ class CohortRecordCatalog:
                             self._result_catalog,
                             publication_id=pending.publication_id,
                             reference=pending.reference,
+                            recovery_scope_sha256=self._recovery_scope_sha256,
                             retain_adopted=False,
                         )
                         purge_files(pending.publication_id, pending_name)
@@ -590,6 +659,7 @@ class CohortRecordCatalog:
                                 self._result_catalog,
                                 publication_id=durable.publication_id,
                                 reference=durable.reference,
+                                recovery_scope_sha256=self._recovery_scope_sha256,
                                 retain_adopted=False,
                             )
                             purge_files(durable.publication_id, pending_name)
@@ -625,23 +695,9 @@ class CohortRecordCatalog:
                         self._result_catalog,
                         publication_id=binding.publication_id,
                         reference=binding.result,
+                        recovery_scope_sha256=self._recovery_scope_sha256,
                     )
                     keep = state == "adopted"
-                    if state == "absent" and binding.catalog_result_preexisting:
-                        try:
-                            authority = _CC_VALIDATE_CATALOG_AUTHORITY(self)
-                            keep = (
-                                authority.storage_identity_sha256
-                                == binding.catalog_storage_identity_sha256
-                                and authority.trust_snapshot_sha256
-                                == binding.result_trust_snapshot_sha256
-                            )
-                            if keep:
-                                _PINNED_RESULT_VERIFY(
-                                    self._result_catalog, binding.result
-                                )
-                        except Exception:  # noqa: BLE001 - invalid recovery authority
-                            keep = False
                     final_exists = False
                     try:
                         os.stat(final_name, dir_fd=self._root_fd, follow_symlinks=False)
@@ -678,6 +734,7 @@ class CohortRecordCatalog:
                             self._result_catalog,
                             publication_id=binding.publication_id,
                             reference=binding.result,
+                            recovery_scope_sha256=self._recovery_scope_sha256,
                             retain_adopted=False,
                         )
                     if final_exists:
@@ -699,6 +756,19 @@ class CohortRecordCatalog:
                         continue
                     try:
                         recovered_binding = _CC_READ(self, name)
+                        durable = _PINNED_RESULT_PUBLICATION(
+                            self._result_catalog,
+                            recovered_binding.publication_id,
+                            self._recovery_scope_sha256,
+                        )
+                        if (
+                            durable is None
+                            or durable.state != "adopted"
+                            or durable.reference != recovered_binding.result
+                        ):
+                            os.unlink(name, dir_fd=self._root_fd)
+                            os.fsync(self._root_fd)
+                            continue
                         valid_publications.add(recovered_binding.publication_id)
                         valid_result_ids.add(recovered_binding.result.result_id)
                     except CohortImportFilesystemError:
@@ -728,6 +798,7 @@ class CohortRecordCatalog:
                             self._result_catalog,
                             publication_id=publication.publication_id,
                             reference=publication.reference,
+                            recovery_scope_sha256=self._recovery_scope_sha256,
                             retain_adopted=False,
                         )
                 _CC_VALIDATE_ROOT(self)
@@ -789,8 +860,14 @@ class CohortRecordCatalog:
         return authority
 
     def _fault(self, point: str) -> None:
-        if self._fault_injector is not None:
-            self._fault_injector(point)
+        controller = self._fault_controller
+        if (
+            type(controller) is not DeterministicFaultController
+            or id(controller) != self._fault_controller_identity
+            or controller.configuration != self._fault_controller_configuration
+        ):
+            raise CohortImportError("cohort fault controller changed")
+        controller.hit(point)
 
     def _validate_manifest(
         self, manifest: CohortManifest, *, changed: bool = False
@@ -1122,9 +1199,40 @@ class CohortRecordCatalog:
                         same_result = item.result.result_id == binding.result.result_id
                         if same_member or same_result:
                             if _CC_BINDING_EQUIVALENT(item, binding):
+                                _CC_FAULT(self, "before_idempotent_return")
+                                _CC_REVALIDATE_PUBLICATION(
+                                    self,
+                                    manifest,
+                                    prepared,
+                                    item,
+                                    None,
+                                    changed=True,
+                                )
+                                prepared_authority = prepared.authority
                                 _PINNED_RESULT_COMPENSATE(
                                     self._result_catalog, prepared
                                 )
+                                prepared = None
+                                _CC_VALIDATE_ROOT(self)
+                                _CC_VALIDATE_MANIFEST(self, manifest, changed=True)
+                                if (
+                                    _CC_VALIDATE_CATALOG_AUTHORITY(self)
+                                    != prepared_authority
+                                ):
+                                    raise CohortImportConflict(
+                                        "result catalog authority changed"
+                                    )
+                                existing_name = (
+                                    f"{item.cohort_manifest_sha256}."
+                                    f"{item.binding_id}.json"
+                                )
+                                if _CC_READ(self, existing_name) != item:
+                                    raise CohortImportConflict(
+                                        "cohort record binding changed"
+                                    )
+                                _PINNED_RESULT_VERIFY(self._result_catalog, item.result)
+                                _CC_VALIDATE_ROOT(self)
+                                _CC_VALIDATE_MANIFEST(self, manifest, changed=True)
                                 return item
                             raise CohortImportConflict(
                                 "cohort record binding conflicts"
@@ -1279,6 +1387,19 @@ class CohortRecordCatalog:
                 != authority.storage_identity_sha256
             ):
                 raise CohortImportConflict("cohort record catalog authority changed")
+            publication = _PINNED_RESULT_PUBLICATION(
+                self._result_catalog,
+                binding.publication_id,
+                self._recovery_scope_sha256,
+            )
+            if (
+                publication is None
+                or publication.state != "adopted"
+                or publication.reference != binding.result
+            ):
+                raise CohortImportConflict(
+                    "cohort record publication ownership changed"
+                )
             _, reader = _PINNED_RESULT_VERIFY(self._result_catalog, binding.result)
             if (
                 reader.reader_id != binding.reader_id
@@ -1286,7 +1407,7 @@ class CohortRecordCatalog:
                 or reader.maximum_version != binding.reader_maximum_version
             ):
                 raise CohortImportConflict("cohort record reader binding changed")
-        return tuple(
+        ordered = tuple(
             sorted(
                 selected,
                 key=lambda item: (
@@ -1297,6 +1418,163 @@ class CohortRecordCatalog:
                     item.analysis_record_id,
                 ),
             )
+        )
+        _CC_FAULT(self, "before_read_return")
+        _CC_VALIDATE_ROOT(self)
+        _CC_VALIDATE_MANIFEST(self, manifest, changed=True)
+        if _CC_VALIDATE_CATALOG_AUTHORITY(self) != authority:
+            raise CohortImportConflict("cohort record catalog authority changed")
+        return ordered
+
+    def record_status_for_manifest(
+        self, manifest_history: Sequence[CohortManifest]
+    ) -> CohortManifestRecordStatus:
+        """Return complete canonical availability without exposing withheld results."""
+
+        history = _canonical_history(manifest_history)
+        manifest = history[-1]
+        _CC_VALIDATE_READER_REGISTRY(self)
+        _CC_VALIDATE_MANIFEST(self, manifest)
+        authority = _CC_VALIDATE_CATALOG_AUTHORITY(self)
+        digest = cohort_manifest_sha256(manifest)
+        members = {
+            (item.provider_namespace, item.analysis_record_id): item
+            for item in manifest.members
+        }
+        with _PROCESS_LOCK:
+            _CC_VALIDATE_ROOT(self)
+            fcntl.flock(self._root_fd, fcntl.LOCK_SH)
+            try:
+                selected = tuple(
+                    _CC_READ(self, name)
+                    for name in _CC_NAMES_UNLOCKED(self)
+                    if name.startswith(f"{digest}.")
+                )
+            finally:
+                fcntl.flock(self._root_fd, fcntl.LOCK_UN)
+        indexed: dict[tuple[str, str], CohortRecordBinding] = {}
+        for binding in selected:
+            key = (binding.provider_namespace, binding.analysis_record_id)
+            member = members.get(key)
+            if (
+                member is None
+                or key in indexed
+                or binding.cohort_id != manifest.cohort_id
+                or binding.cohort_version != manifest.version
+                or binding.cohort_manifest_sha256 != digest
+                or _member_sha256(member) != binding.member_sha256
+                or binding.lineage_role != member.lineage_role
+                or binding.denominator_contribution != member.denominator_contribution
+                or binding.measurement_anchor_sha256
+                != manifest.measurement_anchor.measurement_definition_sha256
+            ):
+                raise CohortImportConflict(
+                    "cohort record binding conflicts with manifest"
+                )
+            indexed[key] = binding
+
+        statuses: list[CohortMemberRecordStatus] = []
+        for member in manifest.members:
+            binding = indexed.get(
+                (member.provider_namespace, member.analysis_record_id)
+            )
+            if binding is None:
+                statuses.append(
+                    CohortMemberRecordStatus(
+                        provider_namespace=member.provider_namespace,
+                        analysis_record_id=member.analysis_record_id,
+                        member_sha256=_member_sha256(member),
+                        availability=CohortRecordAvailability.MISSING,
+                    )
+                )
+                continue
+            bound_authority = CatalogAuthoritySnapshot(
+                storage_identity_sha256=binding.catalog_storage_identity_sha256,
+                trust_snapshot_sha256=binding.result_trust_snapshot_sha256,
+                reader_registry_sha256=authority.reader_registry_sha256,
+            )
+            if (
+                binding.catalog_authority_sha256
+                != catalog_authority_sha256(bound_authority)
+                or binding.catalog_storage_identity_sha256
+                != authority.storage_identity_sha256
+                or binding.reader_registry_sha256
+                != _reader_registry_sha256(self._reader_registry)
+            ):
+                raise CohortImportConflict("cohort record catalog authority changed")
+            publication = _PINNED_RESULT_PUBLICATION(
+                self._result_catalog,
+                binding.publication_id,
+                self._recovery_scope_sha256,
+            )
+            if (
+                publication is None
+                or publication.state != "adopted"
+                or publication.reference != binding.result
+            ):
+                raise CohortImportConflict(
+                    "cohort record publication ownership changed"
+                )
+            try:
+                _, reader = _PINNED_RESULT_VERIFY(self._result_catalog, binding.result)
+            except RevokedKeyError:
+                statuses.append(
+                    CohortMemberRecordStatus(
+                        provider_namespace=member.provider_namespace,
+                        analysis_record_id=member.analysis_record_id,
+                        member_sha256=binding.member_sha256,
+                        availability=CohortRecordAvailability.WITHHELD,
+                        withheld_reason=(CohortRecordWithheldReason.RESULT_KEY_REVOKED),
+                    )
+                )
+                continue
+            if (
+                reader.reader_id != binding.reader_id
+                or reader.minimum_version != binding.reader_minimum_version
+                or reader.maximum_version != binding.reader_maximum_version
+            ):
+                raise CohortImportConflict("cohort record reader binding changed")
+            statuses.append(
+                CohortMemberRecordStatus(
+                    provider_namespace=member.provider_namespace,
+                    analysis_record_id=member.analysis_record_id,
+                    member_sha256=binding.member_sha256,
+                    availability=CohortRecordAvailability.AVAILABLE,
+                    binding=binding,
+                )
+            )
+
+        _CC_FAULT(self, "before_status_return")
+        _CC_VALIDATE_ROOT(self)
+        _CC_VALIDATE_MANIFEST(self, manifest, changed=True)
+        final_authority = _CC_VALIDATE_CATALOG_AUTHORITY(self)
+        if final_authority != authority:
+            raise CohortImportConflict("cohort record catalog authority changed")
+        linkage_snapshot = _PINNED_MANIFEST_ACTIVE_SNAPSHOT(self._linkage_store)
+        _CC_VALIDATE_MANIFEST(self, manifest, changed=True)
+        if _PINNED_MANIFEST_ACTIVE_SNAPSHOT(self._linkage_store) != linkage_snapshot:
+            raise CohortImportConflict("cohort linkage authority changed")
+        linkage_snapshot_sha256 = hashlib.sha256(
+            canonical_json_bytes(linkage_snapshot.model_dump(mode="json"))
+        ).hexdigest()
+        payload = {
+            "schema_version": "traceback.cohort-manifest-record-status.v1",
+            "cohort_id": manifest.cohort_id,
+            "cohort_version": manifest.version,
+            "cohort_manifest_sha256": digest,
+            "linkage_snapshot_sha256": linkage_snapshot_sha256,
+            "catalog_authority_sha256": catalog_authority_sha256(final_authority),
+            "members": tuple(statuses),
+        }
+        digest_payload = {
+            **payload,
+            "members": tuple(item.model_dump(mode="json") for item in statuses),
+        }
+        return CohortManifestRecordStatus(
+            **payload,
+            status_sha256=hashlib.sha256(
+                canonical_json_bytes(digest_payload)
+            ).hexdigest(),
         )
 
 
@@ -1318,7 +1596,27 @@ _COHORT_METHOD_SEAL = MappingProxyType(
             "_write_pending",
             "bindings_for_manifest",
             "import_bundle",
+            "record_status_for_manifest",
         )
+    }
+)
+_COHORT_METHOD_FINGERPRINTS = MappingProxyType(
+    {
+        name: _authority_value_fingerprint(value)
+        for name, value in _COHORT_METHOD_SEAL.items()
+    }
+)
+_COHORT_PINNED_FINGERPRINTS = MappingProxyType(
+    {
+        "manifest_validator": _authority_value_fingerprint(_PINNED_VALIDATE_MANIFEST),
+        "result_assert": _authority_value_fingerprint(_PINNED_RESULT_RUNTIME_ASSERT),
+        "active_snapshot": _authority_value_fingerprint(
+            _PINNED_MANIFEST_ACTIVE_SNAPSHOT
+        ),
+        **{
+            f"store:{name}": _authority_value_fingerprint(value)
+            for name, value in _PINNED_MANIFEST_STORE_CALLABLES.items()
+        },
     }
 )
 
@@ -1333,14 +1631,35 @@ def _assert_cohort_runtime(
     if type(catalog) is not CohortRecordCatalog:
         raise CohortImportError("cohort authority type changed")
     for name, expected in expected_methods.items():
-        if name in vars(catalog) or getattr(CohortRecordCatalog, name) is not expected:
+        current = getattr(CohortRecordCatalog, name)
+        if (
+            name in vars(catalog)
+            or current is not expected
+            or _authority_value_fingerprint(current)
+            != _COHORT_METHOD_FINGERPRINTS[name]
+        ):
             raise CohortImportError("cohort authority callable changed")
     for name, expected in _COHORT_ALIAS_SEAL.items():
-        if globals().get(name) is not expected:
+        current = globals().get(name)
+        if (
+            current is not expected
+            or _authority_value_fingerprint(current) != _COHORT_ALIAS_FINGERPRINTS[name]
+        ):
             raise CohortImportError("cohort module authority changed")
     if (
         globals().get("_PINNED_VALIDATE_MANIFEST") is not expected_manifest_validator
         or globals().get("_PINNED_RESULT_RUNTIME_ASSERT") is not expected_result_assert
+        or _authority_value_fingerprint(_PINNED_VALIDATE_MANIFEST)
+        != _COHORT_PINNED_FINGERPRINTS["manifest_validator"]
+        or _authority_value_fingerprint(_PINNED_RESULT_RUNTIME_ASSERT)
+        != _COHORT_PINNED_FINGERPRINTS["result_assert"]
+        or _authority_value_fingerprint(_PINNED_MANIFEST_ACTIVE_SNAPSHOT)
+        != _COHORT_PINNED_FINGERPRINTS["active_snapshot"]
+        or any(
+            _authority_value_fingerprint(value)
+            != _COHORT_PINNED_FINGERPRINTS[f"store:{name}"]
+            for name, value in _PINNED_MANIFEST_STORE_CALLABLES.items()
+        )
     ):
         raise CohortImportError("cohort module authority changed")
 
@@ -1377,6 +1696,12 @@ _COHORT_ALIAS_SEAL = MappingProxyType(
         )
     }
 )
+_COHORT_ALIAS_FINGERPRINTS = MappingProxyType(
+    {
+        name: _authority_value_fingerprint(value)
+        for name, value in _COHORT_ALIAS_SEAL.items()
+    }
+)
 
 
 __all__ = [
@@ -1384,6 +1709,10 @@ __all__ = [
     "CohortImportConflict",
     "CohortImportError",
     "CohortImportFilesystemError",
+    "CohortManifestRecordStatus",
+    "CohortMemberRecordStatus",
+    "CohortRecordAvailability",
     "CohortRecordBinding",
     "CohortRecordCatalog",
+    "CohortRecordWithheldReason",
 ]
