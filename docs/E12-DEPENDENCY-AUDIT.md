@@ -26,9 +26,10 @@ method labels, or adjacency.
    biological and technical lineage contracts, independently pinned provider
    trust, exact signed approvals, dual-principal correction, append-only
    revision projection, and fail-closed comparison-linkage eligibility.
-2. **D02 compatibility-key/anchor:** add the complete Epic D measurement policy
-   key and six outcomes. Every member is evaluated against one pinned anchor;
-   `unknown` and invalid decisions suppress deltas and connecting trends.
+2. **D02 compatibility-key/anchor (stacked PR):** complete Epic D measurement
+   policy key and six outcomes. Every member is evaluated against one pinned
+   anchor; `unknown` and invalid decisions suppress deltas and connecting
+   trends.
 3. **D04/D05 ledger and immutable membership:** durable no-follow local store,
    correction/supersession chain, cycle/idempotency/concurrency protection,
    immutable member ordering, unit-of-analysis and technical-replicate rules.
