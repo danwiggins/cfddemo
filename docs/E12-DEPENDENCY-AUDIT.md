@@ -37,6 +37,11 @@ method labels, or adjacency.
 4. **D04/D05 supersession and immutable membership:** correction/supersession
    chain, cycle/idempotency/concurrency protection,
    immutable member ordering, unit-of-analysis and technical-replicate rules.
+   D05 v2 now derives biological timepoints from independently pinned
+   collection-event authority rather than linkage proposal time. A protected
+   durable cohort-version registry and authorized browser alias projection
+   remain an explicit persistence follow-up; immutable bytes alone do not make
+   a cohort discoverable or published.
 5. **D09 denominator/missingness:** bind declared denominator, inclusion,
    missingness and unavailable-record policy to the comparison identity and
    reconcile it with E06 ledgers.
