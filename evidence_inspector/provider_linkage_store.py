@@ -429,8 +429,8 @@ class ProviderLinkageStore:
         self._sqlite_database_fd: int | None = None
         self._connection: sqlite3.Connection | None = None
         self._lock = threading.RLock()
-        # Thread identity of the active authority_read_fence holder, if any.
-        self._authority_fence_thread: int | None = None
+        # (pid, thread) of the active authority_read_fence holder, if any.
+        self._authority_fence_thread: tuple[int, int] | None = None
         self._trust_pins = trust_pins
         self._time_source = selected_time_source
         _register_store_time_source(self, self._time_source)
@@ -1494,7 +1494,7 @@ class ProviderLinkageStore:
                 validate_committed_state(self, connection)
                 # Already-fenced callers distinguish this fence from other
                 # store transactions (for example fenced_active_snapshot).
-                self._authority_fence_thread = threading.get_ident()
+                self._authority_fence_thread = (os.getpid(), threading.get_ident())
                 try:
                     yield
                 finally:

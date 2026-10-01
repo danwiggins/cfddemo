@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import os
 import threading
 from datetime import timedelta, tzinfo
 from typing import ClassVar
@@ -1625,4 +1626,18 @@ def test_in_fence_variant_checks_the_fence_before_any_unavailable_result() -> No
             holder.join(5)
         with ProviderLinkageStore.authority_read_fence(store):
             unavailable = compare_repeatability_in_fence(*inputs, **arguments)
+            # A child forked inside the fence inherits the mark and an open
+            # transaction but does not hold the parent's fence.
+            child = os.fork()
+            if child == 0:
+                code = 1
+                try:
+                    compare_repeatability_in_fence(*inputs, **arguments)
+                except LongitudinalDecisionReplayError:
+                    code = 0
+                except BaseException:
+                    code = 2
+                os._exit(code)
+            _, status = os.waitpid(child, 0)
+            assert os.waitstatus_to_exitcode(status) == 0
         assert unavailable.reason_codes == (RepeatabilityReason.EVIDENCE_MISSING,)

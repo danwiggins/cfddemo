@@ -10,6 +10,7 @@ from __future__ import annotations
 import base64
 import hashlib
 import json
+import os
 import re
 import sqlite3
 import threading
@@ -879,12 +880,13 @@ def _require_held_authority_fence(linkage_store: object) -> None:
     fence_thread = (
         state.get("_authority_fence_thread") if type(state) is dict else None
     )
-    # authority_read_fence marks its holder thread for exactly its body, while
-    # it holds one BEGIN IMMEDIATE transaction; another store transaction
-    # (such as fenced_active_snapshot) or another thread's fence does not match.
+    # authority_read_fence marks its holder (process, thread) for exactly its
+    # body while it holds one BEGIN IMMEDIATE transaction.  Another store
+    # transaction (such as fenced_active_snapshot), another thread's fence, and
+    # a forked child that inherited the mark do not match.
     if (
-        type(fence_thread) is not int
-        or fence_thread != threading.get_ident()
+        type(fence_thread) is not tuple
+        or fence_thread != (os.getpid(), threading.get_ident())
         or type(connection) is not sqlite3.Connection
         or not connection.in_transaction
     ):

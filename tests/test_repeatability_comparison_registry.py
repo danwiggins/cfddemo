@@ -1102,6 +1102,38 @@ def test_failed_restore_removes_its_partial_target_and_can_retry(
         restored.close()
 
 
+def test_restore_construction_failure_removes_the_published_target(
+    registry: RepeatabilityComparisonRegistry,
+    live: Live,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    receipt = _register(registry, live)
+    backup = registry.backup_bytes()
+    target = tmp_path / "construct-restore"
+
+    def failing_construct(*args, **kwargs):
+        assert (target / "registry-journal.jsonl").exists()
+        raise RepeatabilityComparisonRegistryStale("linkage authority is not current")
+
+    monkeypatch.setattr(registry_module, "_CR_CONSTRUCT", failing_construct)
+    with pytest.raises(RepeatabilityComparisonRegistryStale):
+        RepeatabilityComparisonRegistry.restore(
+            target, backup, **_restore_values(live, receipt)
+        )
+    monkeypatch.undo()
+    assert not target.exists()
+    restored = RepeatabilityComparisonRegistry.restore(
+        target, backup, **_restore_values(live, receipt)
+    )
+    try:
+        assert restored.resolve(receipt.selector_id).object_sha256 == (
+            receipt.object_sha256
+        )
+    finally:
+        restored.close()
+
+
 def test_interpreter_warning_registry_does_not_disable_the_registry(
     registry: RepeatabilityComparisonRegistry, live: Live, monkeypatch: pytest.MonkeyPatch
 ) -> None:

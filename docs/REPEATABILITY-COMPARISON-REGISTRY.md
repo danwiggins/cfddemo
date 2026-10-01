@@ -105,9 +105,9 @@ already-fenced variant with the same contract and gates. It requires that the
 calling thread holds the store's `authority_read_fence`, checked at entry and
 again before the final replay and construction; otherwise it raises
 `LongitudinalDecisionReplayError` before any result. `authority_read_fence`
-now records its holder thread for exactly its body, so another thread's fence
-and other store transactions such as `fenced_active_snapshot` do not satisfy
-the check. `compare_repeatability` is unchanged.
+now records its holder process and thread for exactly its body, so another
+thread's fence, a forked child that inherited the mark, and other store
+transactions such as `fenced_active_snapshot` do not satisfy the check. `compare_repeatability` is unchanged.
 
 The registry holds one fence across authority-time capture, D03 derivation,
 D07 evaluation, pre-publication replay, the registry lock, publication, journal
@@ -141,6 +141,16 @@ it, for example to revoke a key, is therefore possible by reopening the
 registry, and makes every comparison whose output changes stale. The instance
 seal re-hashes the configured document on every call.
 
+Limitation: result trust has no protected, monotonic authority. Revocation is
+effective only in registry instances opened with the new document. An instance
+still open with the old document keeps resolving and registering under it, and
+reopening with an old self-consistent document and its pin resurrects revoked
+comparisons. This is the same trust model D07 already has (caller-supplied
+document plus independent pin), not a gap the registry introduces. Closing it
+needs a protected result-trust authority with a monotonic head and a read
+fence held through registration, replay, commit, and return; that is a
+separate prerequisite and a product decision.
+
 ## Storage and bounds
 
 Storage follows the D03 decision registry: a private `0700` root, `0600`
@@ -171,7 +181,8 @@ require an exact canonical round trip.
 `backup_bytes` and `restore` follow the D03 registry. Restore requires the
 independently retained registry ID, epoch, and state head, the same linkage
 store identity and trust pins, a matching result trust document and pin, and an
-empty target. A backup contains protected records, signed observations, and
+empty target. Any failure, including the final open that rechecks live
+authority, removes the target it created so the restore can be retried. A backup contains protected records, signed observations, and
 values, and is not an export artifact.
 
 ## Not in scope

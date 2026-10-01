@@ -2001,6 +2001,18 @@ class RepeatabilityComparisonRegistry:
             os.fsync(objects_fd)
             os.fsync(root_fd)
             os.fsync(parent_fd)
+            # Construction rechecks live authority; if it fails, the published
+            # target is removed below so the restore can be retried.
+            restored = _CR_CONSTRUCT(
+                target,
+                linkage_store=linkage_store,
+                expected_trust_snapshot_sha256_by_provider=pins,
+                result_trust_document=result_trust_document,
+                expected_result_trust_sha256=expected_result_trust_sha256,
+                expected_registry_id=expected_registry_id,
+                expected_registry_epoch_sha256=expected_registry_epoch_sha256,
+                expected_state_head_sha256=expected_state_head_sha256,
+            )
             completed = True
         except FileExistsError:
             raise RepeatabilityComparisonRegistryConflict(
@@ -2028,16 +2040,7 @@ class RepeatabilityComparisonRegistry:
                         os.close(descriptor)
                     except OSError:
                         pass
-        return _CR_CONSTRUCT(
-            target,
-            linkage_store=linkage_store,
-            expected_trust_snapshot_sha256_by_provider=pins,
-            result_trust_document=result_trust_document,
-            expected_result_trust_sha256=expected_result_trust_sha256,
-            expected_registry_id=expected_registry_id,
-            expected_registry_epoch_sha256=expected_registry_epoch_sha256,
-            expected_state_head_sha256=expected_state_head_sha256,
-        )
+        return restored
 
 
 _REGISTRY_METHOD_SEAL = MappingProxyType(
