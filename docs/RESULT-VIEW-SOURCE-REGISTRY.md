@@ -159,7 +159,10 @@ the returned `RegisteredResultViewSource`, which binds the registry ID, epoch,
 state version and head, selector, version, object digest, cohort commitments,
 D06 status digest, catalog-authority digest, member and binding digests,
 catalog-result digest, source, decision and ledger digests, and a source replay
-digest over those commitments.
+digest over every other returned field, so no commitment in the returned
+contract can be changed without failing validation. The digest is not a
+signature: a holder outside this process can recompute it, so a serialized
+copy is never authority, and consumers must call `resolve` again.
 
 The result is an as-of read: it binds one D06 status. A consumer that composes
 it with other authority must hold the composite E12 fence or call `resolve`
@@ -220,11 +223,12 @@ restores never touch each other's files. A crashed restore can leave its hidden
 staging directory behind; it is never opened as a registry and does not block a
 retry. The target must not exist; an empty directory created at that name
 between the final existence check and the rename would be replaced, which is a
-same-user race outside the threat model. A crash during first-time creation
-(control files present, no metadata, empty journal, no objects) resumes
-creation on the next construction without expected identity; a root with a
-non-empty journal or objects but no metadata still never bootstraps a new
-identity. The
+same-user race outside the threat model. First-time creation is staged the same way: the root, control files, empty
+journal, and metadata are built in a hidden sibling and renamed into place, so
+an existing root always has published metadata. A root without metadata
+therefore always fails closed and never bootstraps a new identity. Once a
+restore's rename lands it is never cleaned up, even if the parent fsync then
+fails. The
 metadata binds the cohort registry ID and epoch, the linkage store ID, epoch,
 and storage identity, the E04 catalog storage and reader-registry identities,
 and the D06 record-catalog scope; reopening or restoring against a different

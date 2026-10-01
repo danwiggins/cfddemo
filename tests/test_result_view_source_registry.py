@@ -566,7 +566,7 @@ def test_resolve_holds_d06_fence_through_exact_return(
     def sha256(content=b"", *args, **kwargs):
         # The replay digest is computed while the result is constructed, after
         # live re-verification and before return.
-        if bytes(content).startswith(b"traceback-e06-source-replay-v1") and not workers:
+        if bytes(content).startswith(b"traceback-e06-source-replay-v2") and not workers:
 
             def revoke() -> None:
                 started.set()
@@ -1146,28 +1146,99 @@ def test_concurrent_restores_to_one_target_leave_exactly_one_registry(
     ]
 
 
-def test_interrupted_first_creation_resumes_but_state_never_rebootstraps(
-    live: Live,
+def test_creation_is_staged_and_a_root_without_metadata_never_rebootstraps(
+    live: Live, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    root = live.root / "partial-create"
-    root.mkdir(mode=0o700)
-    (root / "objects").mkdir(mode=0o700)
-    for name in (".registry.lock", "registry-journal.jsonl"):
-        (root / name).write_bytes(b"")
-        (root / name).chmod(0o600)
-    resumed = ResultViewSourceRegistry(root, record_catalog=live.cohorts)
-    resumed.close()
-    assert (root / "registry-metadata.json").exists()
+    root = live.root / "staged-create"
+    original_link = os.link
 
-    populated = live.root / "metadata-deleted"
-    populated.mkdir(mode=0o700)
-    (populated / "objects").mkdir(mode=0o700)
-    (populated / ".registry.lock").write_bytes(b"")
-    (populated / "registry-journal.jsonl").write_bytes(b"{}\n")
-    for name in (".registry.lock", "registry-journal.jsonl"):
-        (populated / name).chmod(0o600)
+    def failing_link(source, destination, *args, **kwargs):
+        if destination == "registry-metadata.json":
+            raise OSError("power loss")
+        return original_link(source, destination, *args, **kwargs)
+
+    # Simulate a crash during creation: in-process cleanup never runs.
+    monkeypatch.setattr(os, "link", failing_link)
+    monkeypatch.setattr(registry_module, "_remove_partial_restore", lambda *a: None)
+    with pytest.raises(OSError):
+        ResultViewSourceRegistry(root, record_catalog=live.cohorts)
+    monkeypatch.undo()
+    assert not root.exists()
+    created = ResultViewSourceRegistry(root, record_catalog=live.cohorts)
+    identity = created._metadata.registry_id
+    created.close()
+
+    (root / "registry-metadata.json").unlink()
     with pytest.raises(ResultViewSourceRegistryUnsafe, match="metadata is missing"):
-        ResultViewSourceRegistry(populated, record_catalog=live.cohorts)
+        ResultViewSourceRegistry(root, record_catalog=live.cohorts)
+    assert not (root / "registry-metadata.json").exists()
+    assert identity.startswith("e06_registry_")
+
+
+def test_registered_result_binds_every_returned_commitment(
+    registry: ResultViewSourceRegistry, live: Live
+) -> None:
+    resolved = _resolve(registry, live, _register(registry, live))
+    values = resolved.model_dump(mode="python")
+    for name in (
+        "catalog_result_sha256",
+        "cohort_manifest_sha256",
+        "state_head_sha256",
+        "binding_sha256",
+        "catalog_authority_sha256",
+        "object_sha256",
+    ):
+        with pytest.raises(ValidationError, match="replay digest"):
+            RegisteredResultViewSource.model_validate({**values, name: "0" * 64})
+    for name, value in (
+        ("registry_id", "e06_registry_" + "0" * 32),
+        ("state_version", resolved.state_version + 1),
+        ("source_version", resolved.source_version + 1),
+    ):
+        with pytest.raises(ValidationError, match="replay digest"):
+            RegisteredResultViewSource.model_validate({**values, name: value})
+    with pytest.raises(ValidationError):
+        RegisteredResultViewSource.model_validate(
+            {**values, "counterpart_member_sha256": "0" * 64}
+        )
+
+
+def test_restore_rename_then_parent_fsync_failure_keeps_the_restore(
+    registry: ResultViewSourceRegistry, live: Live, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    receipt = _register(registry, live)
+    backup = registry.backup_bytes()
+    target = live.root / "fsync-restore"
+    values = {
+        "record_catalog": live.cohorts,
+        "expected_registry_id": receipt.registry_id,
+        "expected_registry_epoch_sha256": receipt.registry_epoch_sha256,
+        "expected_state_head_sha256": receipt.state_head_sha256,
+    }
+    original_rename = os.rename
+    original_fsync = os.fsync
+    renamed = {"done": False}
+
+    def rename(*args, **kwargs):
+        original_rename(*args, **kwargs)
+        renamed["done"] = True
+
+    def fsync(descriptor):
+        if renamed["done"]:
+            renamed["done"] = False
+            raise OSError("parent fsync failed")
+        return original_fsync(descriptor)
+
+    monkeypatch.setattr(os, "rename", rename)
+    monkeypatch.setattr(os, "fsync", fsync)
+    with pytest.raises(ResultViewSourceRegistryUnsafe, match="restore failed"):
+        ResultViewSourceRegistry.restore(target, backup, **values)
+    monkeypatch.undo()
+    reopened = ResultViewSourceRegistry(target, **values)
+    try:
+        assert _resolve(reopened, live, receipt).object_sha256 == receipt.object_sha256
+    finally:
+        reopened.close()
 
 
 def test_replay_rejects_any_stored_field_that_live_derivation_does_not_reproduce(
