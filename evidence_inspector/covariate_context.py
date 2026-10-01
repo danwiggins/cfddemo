@@ -431,6 +431,33 @@ class RegisteredD03SeriesBinding(RegistryContract):
     linkage_snapshot_state_head_sha256: Sha256 | None
     linkage_snapshot_sha256: Sha256 | None
 
+    @model_validator(mode="after")
+    def complete_snapshot(self) -> RegisteredD03SeriesBinding:
+        snapshot = (
+            self.linkage_snapshot_state_version,
+            self.linkage_snapshot_state_head_sha256,
+            self.linkage_snapshot_sha256,
+        )
+        if any(item is None for item in snapshot) and any(
+            item is not None for item in snapshot
+        ):
+            raise ValueError("D03 series linkage snapshot binding must be complete")
+        return self
+
+
+# Fields a verified binding must reproduce exactly. The registry state version and
+# head are excluded: unrelated registrations may advance them.
+_STABLE_BINDING_FIELDS = (
+    "registry_id",
+    "registry_epoch_sha256",
+    "selector_id",
+    "object_sha256",
+    "series_decision_sha256",
+    "linkage_snapshot_state_version",
+    "linkage_snapshot_state_head_sha256",
+    "linkage_snapshot_sha256",
+)
+
 
 class RegisteredCovariateContext(RegistryContract):
     """Protected D10 context whose D03 decisions came from a live registry replay.
@@ -953,18 +980,9 @@ def verify_registered_covariate_context(
     binding = captured.d03_series
     series = _resolve_registered_series(decision_registry, binding.selector_id)
     fresh = _series_binding(series)
-    if (
-        fresh.registry_id,
-        fresh.registry_epoch_sha256,
-        fresh.object_sha256,
-        fresh.series_decision_sha256,
-        fresh.linkage_snapshot_sha256,
-    ) != (
-        binding.registry_id,
-        binding.registry_epoch_sha256,
-        binding.object_sha256,
-        binding.series_decision_sha256,
-        binding.linkage_snapshot_sha256,
+    if any(
+        getattr(fresh, name) != getattr(binding, name)
+        for name in _STABLE_BINDING_FIELDS
     ):
         raise ValueError("registered covariate context D03 binding is not current")
     context = captured.context

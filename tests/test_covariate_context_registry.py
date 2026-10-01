@@ -263,10 +263,13 @@ def test_verification_rebuilds_and_tolerates_unrelated_registry_growth(live) -> 
 def test_verification_rejects_a_forged_binding_or_context(live) -> None:
     registered = _build(live, _input(live))
     binding = registered.d03_series
+    assert binding.linkage_snapshot_state_version is not None
     for update in (
         {"series_decision_sha256": "0" * 64},
         {"object_sha256": "0" * 64},
         {"registry_epoch_sha256": "0" * 64},
+        {"linkage_snapshot_state_version": binding.linkage_snapshot_state_version + 1},
+        {"linkage_snapshot_state_head_sha256": "0" * 64},
     ):
         forged = registered.model_copy(
             update={"d03_series": binding.model_copy(update=update)}
@@ -298,3 +301,15 @@ def test_verification_rejects_a_forged_binding_or_context(live) -> None:
         verify_registered_covariate_context(
             registered.model_dump(), decision_registry=live[1]  # type: ignore[arg-type]
         )
+
+
+def test_linkage_snapshot_binding_must_be_complete(live) -> None:
+    registered = _build(live, _input(live))
+    values = registered.d03_series.model_dump(mode="python")
+    for field in (
+        "linkage_snapshot_state_version",
+        "linkage_snapshot_state_head_sha256",
+        "linkage_snapshot_sha256",
+    ):
+        with pytest.raises(ValueError, match="must be complete"):
+            type(registered.d03_series)(**{**values, field: None})
