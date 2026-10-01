@@ -673,13 +673,17 @@ At current main, implementing the builder would still require accepting weaker
 caller assertions and is therefore prohibited:
 
 - The D06 live-registry and trust-fence correction is merged. Corrected D09 is
-  independently GREEN but remains unmerged while it is rebased and reverified
-  on this D04 main. E12 must consume that exact registry-bound D09 summary, not
+  PR #52 (macOS gate green on 2026-10-01) and awaits merge. Its registered v3
+  summary carries aggregate counts only, with no D03 decisions or per-member
+  identities. E12 must consume that exact registry-bound D09 summary, not
   reproduce denominator logic.
-- D10 is unmerged and currently labels its D09 input `declared_digest_only` with
-  `live_d09_registry_verified=false`; it cannot be used as live D09 authority.
-  It also requires an authority-backed D03 decision-to-outcome binding rather
-  than a second caller-owned dictionary.
+- D10 is draft PR #54, stacked on #52. It labels its D09 input
+  `declared_digest_only` with `live_d09_registry_verified=false`, so it cannot
+  be used as live D09 authority. It also marks `d03_authority_verified=false`:
+  D03 decisions are unsigned, so D10 cannot tell a real decision from one a
+  caller built or re-pointed at another member. E12 needs an authority-backed
+  D03 decision-to-outcome binding (the D03 decision registry below) rather than
+  a second caller-owned dictionary.
 - B01 authenticates a local browser session but has no externally authorized
   longitudinal reader-role authority. Add a protected, durable and bounded
   `ReaderAuthorizationRegistry` whose grants are provider-signed, scoped,
