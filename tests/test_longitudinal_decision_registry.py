@@ -835,3 +835,23 @@ def test_any_module_global_replacement_fails_closed(
     monkeypatch.setattr(registry_module, "_injected_helper", object(), raising=False)
     with pytest.raises(LongitudinalDecisionRegistryUnsafe, match="callable"):
         registry.resolve(receipt.selector_id)
+
+
+@pytest.mark.parametrize("name", ("MAX_REGISTERED_SERIES", "MAX_SELECTOR_PAGE"))
+def test_integer_bound_replaced_by_a_non_integer_fails_closed(
+    registry: LongitudinalDecisionRegistry,
+    live,
+    monkeypatch: pytest.MonkeyPatch,
+    name: str,
+) -> None:
+    receipt = _register(registry, live)
+
+    class HookedBound(int):
+        def __add__(self, other):  # pragma: no cover - must never be reached
+            raise AssertionError("hooked bound reached")
+
+    monkeypatch.setattr(registry_module, name, HookedBound(getattr(registry_module, name)))
+    with pytest.raises(LongitudinalDecisionRegistryUnsafe, match="callable"):
+        registry.resolve(receipt.selector_id)
+    with pytest.raises(LongitudinalDecisionRegistryUnsafe, match="callable"):
+        registry.list_selectors()
