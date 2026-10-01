@@ -26,7 +26,7 @@ from evidence_inspector.safe_ingress import contract_type_graph, exact_model_byt
 MAX_COVARIATE_MEMBERS = 1_000
 MAX_GRAPH_DEPTH = 32
 MAX_GRAPH_NODES_PER_MEMBER = 64
-MAX_GRAPH_NODES = 1_024 + MAX_GRAPH_NODES_PER_MEMBER * MAX_COVARIATE_MEMBERS
+MAX_GRAPH_NODES = 1_032 + MAX_GRAPH_NODES_PER_MEMBER * MAX_COVARIATE_MEMBERS
 MAX_CONTRACT_BYTES_PER_MEMBER = 4 * 1_024
 MAX_CONTRACT_BYTES = (
     1 * 1_024 * 1_024 + MAX_CONTRACT_BYTES_PER_MEMBER * MAX_COVARIATE_MEMBERS
@@ -37,6 +37,7 @@ MAX_D03_DECISION_DEPTH = 64
 MAX_D03_DECISION_NODES = 10_000
 MAX_D03_DECISION_BYTES = 4 * 1_024 * 1_024
 MAX_D03_COLLECTION_ITEMS = 1_000
+MAX_D03_DECISIONS_TOTAL_BYTES = 16 * 1_024 * 1_024
 
 OpaqueCovariateToken = Annotated[
     str, StringConstraints(pattern=r"^covariate_[0-9a-f]{32}$")
@@ -212,6 +213,7 @@ class CovariateContextResult(RegistryContract):
     classification: CovariateClassification
     reason_codes: tuple[CovariateReason, ...] = Field(min_length=1, max_length=3)
     live_d09_registry_verified: Literal[False] = False
+    d03_authority_verified: Literal[False] = False
     comparison_eligibility_changed: Literal[False] = False
     measurement_values_changed: Literal[False] = False
     silent_correction_applied: Literal[False] = False
@@ -329,6 +331,7 @@ class AggregateCovariateSummary(RegistryContract):
     groups: tuple[AggregateCovariateGroup, ...] = Field(
         max_length=MAX_COVARIATE_MEMBERS
     )
+    d03_authority_verified: Literal[False] = False
     measurement_values_changed: Literal[False] = False
     silent_correction_applied: Literal[False] = False
     biological_attribution_allowed: Literal[False] = False
@@ -511,6 +514,15 @@ def project_aggregate_covariate_summary(
     """Remove protected row identities and tokens from one exact local result."""
 
     protected = _replay(CovariateContextResult, value)
+    # Protected groups are ordered by token-derived IDs; reorder by exported
+    # content only so the aggregate bytes reveal nothing about the tokens.
+    exported = sorted(
+        (
+            tuple(item.state for item in group.values),
+            len(group.member_sha256s),
+        )
+        for group in protected.groups
+    )
     summary = AggregateCovariateSummary(
         protected_context_sha256=covariate_context_result_sha256(protected),
         classification=protected.classification,
@@ -518,11 +530,9 @@ def project_aggregate_covariate_summary(
         included_member_count=len(protected.included_member_sha256s),
         groups=tuple(
             AggregateCovariateGroup(
-                group_index=index,
-                states=tuple(item.state for item in group.values),
-                member_count=len(group.member_sha256s),
+                group_index=index, states=states, member_count=member_count
             )
-            for index, group in enumerate(protected.groups)
+            for index, (states, member_count) in enumerate(exported)
         ),
     )
     return _replay(AggregateCovariateSummary, summary)
@@ -687,7 +697,15 @@ def _capture_d03_decisions(
 ) -> tuple[LongitudinalMemberDecision, ...]:
     if type(decisions) is not tuple or len(decisions) > MAX_COVARIATE_MEMBERS:
         raise TypeError("D03 decisions must use one bounded exact tuple")
-    return tuple(_replay_d03_decision(decision) for decision in decisions)
+    captured: list[LongitudinalMemberDecision] = []
+    total_bytes = 0
+    for decision in decisions:
+        replayed = _replay_d03_decision(decision)
+        total_bytes += len(_d03_decision_bytes(replayed))
+        if total_bytes > MAX_D03_DECISIONS_TOTAL_BYTES:
+            raise TypeError("D03 decisions exceed the collection byte budget")
+        captured.append(replayed)
+    return tuple(captured)
 
 
 def build_covariate_context(

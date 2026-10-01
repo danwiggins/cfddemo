@@ -385,6 +385,41 @@ def test_aggregate_projection_omits_protected_rows_timepoints_and_tokens() -> No
     assert all(value.encode("ascii") not in content for value in protected_values)
 
 
+def test_aggregate_group_order_does_not_depend_on_protected_tokens() -> None:
+    exported = set()
+    for singleton_batch in "123456789":
+        protected = _build(
+            _input(
+                _member("1", batch=singleton_batch),
+                _member("2", batch="0"),
+                _member("3", batch="0"),
+            )
+        )
+        summary = project_aggregate_covariate_summary(protected)
+        assert aggregate_covariate_summary_bytes(summary, protected_result=protected)
+        exported.add(
+            tuple((group.states, group.member_count) for group in summary.groups)
+        )
+
+    assert len(exported) == 1
+
+
+def test_d03_authority_is_never_claimed_as_verified() -> None:
+    protected = _build(_input(_member("1")))
+    summary = project_aggregate_covariate_summary(protected)
+
+    assert protected.d03_authority_verified is False
+    assert summary.d03_authority_verified is False
+    for model, value in (
+        (type(protected), protected),
+        (type(summary), summary),
+    ):
+        with pytest.raises(ValueError):
+            model.model_validate(
+                {**value.model_dump(mode="python"), "d03_authority_verified": True}
+            )
+
+
 def test_aggregate_summary_rejects_forged_classification_and_reasons() -> None:
     protected = _build(
         _input(
@@ -471,6 +506,23 @@ def test_d03_extra_state_and_oversized_collection_reject_before_serialization() 
     for forged in (extra, oversized):
         with pytest.raises(TypeError, match="exact canonical artifact"):
             _build(_input(member), (forged,))
+
+
+def test_d03_decisions_share_one_collection_byte_budget(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    one = len(
+        covariate_module._d03_decision_bytes(
+            _d03_decision(_sha("1"), LongitudinalOutcome.EQUIVALENT)
+        )
+    )
+    assert (
+        one * MAX_COVARIATE_MEMBERS < covariate_module.MAX_D03_DECISIONS_TOTAL_BYTES
+    )
+    monkeypatch.setattr(covariate_module, "MAX_D03_DECISIONS_TOTAL_BYTES", one + 1)
+
+    with pytest.raises(TypeError, match="collection byte budget"):
+        _build(_input(_member("1"), _member("2")))
 
 
 def test_d03_decision_authority_is_unique_and_member_specific() -> None:
