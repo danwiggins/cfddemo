@@ -179,6 +179,14 @@ class SeriesRegistrationReceipt(RegistryContract):
     object_sha256: Sha256
     decision_sha256: Sha256
 
+    @model_validator(mode="after")
+    def exact_selector(self) -> SeriesRegistrationReceipt:
+        if self.selector_id != _selector_id(
+            self.registry_epoch_sha256, self.object_sha256
+        ):
+            raise ValueError("series receipt selector does not match its object")
+        return self
+
 
 class RegisteredLongitudinalSeriesDecision(RegistryContract):
     """Protected decision that replayed exactly against live linkage authority."""
@@ -197,6 +205,16 @@ class RegisteredLongitudinalSeriesDecision(RegistryContract):
     replayed_against_live_linkage: Literal[True] = True
     synthetic_only: Literal[True] = True
     clinical_use_authorized: Literal[False] = False
+
+    @model_validator(mode="after")
+    def exact_identity(self) -> RegisteredLongitudinalSeriesDecision:
+        if self.selector_id != _selector_id(
+            self.registry_epoch_sha256, self.object_sha256
+        ):
+            raise ValueError("registered series selector does not match its object")
+        if self.decision_sha256 != _series_decision_sha256(self.decision):
+            raise ValueError("registered series decision digest is invalid")
+        return self
 
 
 class SeriesOutcomeCount(RegistryContract):
@@ -571,6 +589,28 @@ def longitudinal_decision_backup_from_bytes(
         ) from None
     _validate_backup(backup)
     return backup
+
+
+def _remove_partial_restore(
+    parent_fd: int | None, name: str, root_fd: int, objects_fd: int | None
+) -> None:
+    """Remove only the files a failed restore created, then its root."""
+
+    try:
+        if objects_fd is not None:
+            for entry in os.listdir(objects_fd):
+                os.unlink(entry, dir_fd=objects_fd)
+            os.rmdir("objects", dir_fd=root_fd)
+        for entry in os.listdir(root_fd):
+            try:
+                os.unlink(entry, dir_fd=root_fd)
+            except OSError:
+                os.rmdir(entry, dir_fd=root_fd)
+        if parent_fd is not None:
+            os.rmdir(name, dir_fd=parent_fd)
+            os.fsync(parent_fd)
+    except OSError:
+        pass
 
 
 def _outcome_counts(
@@ -1213,9 +1253,22 @@ class LongitudinalDecisionRegistry:
             raise LongitudinalDecisionRegistryUnsafe("D03 decision registry is closed")
         content = canonical_contract_bytes(entry) + b"\n"
         try:
+            committed_size = os.fstat(descriptor).st_size
+        except OSError:
+            raise LongitudinalDecisionRegistryUnsafe(
+                "D03 decision registry journal append failed"
+            ) from None
+        try:
             _write_all(descriptor, content)
             os.fsync(descriptor)
         except OSError:
+            # Remove any torn suffix so the committed chain stays readable; the
+            # object it named remains an uncommitted remnant for later cleanup.
+            try:
+                os.ftruncate(descriptor, committed_size)
+                os.fsync(descriptor)
+            except OSError:
+                pass
             raise LongitudinalDecisionRegistryUnsafe(
                 "D03 decision registry journal append failed"
             ) from None
@@ -1444,16 +1497,16 @@ class LongitudinalDecisionRegistry:
                     raise LongitudinalDecisionRegistryUnsafe(
                         "D03 series publication is unproven"
                     )
-                return SeriesRegistrationReceipt(
+                return _DR_RECEIPT(
                     registry_id=self._metadata.registry_id,
                     registry_epoch_sha256=self._metadata.registry_epoch_sha256,
                     state_version=len(final),
                     state_head_sha256=final_head,
-                    selector_id=_selector_id(
+                    selector_id=_DR_SELECTOR_ID(
                         self._metadata.registry_epoch_sha256, digest
                     ),
                     object_sha256=digest,
-                    decision_sha256=_series_decision_sha256(captured.decision),
+                    decision_sha256=_DR_DECISION_SHA256(captured.decision),
                 )
 
     def resolve(self, selector_id: str) -> RegisteredLongitudinalSeriesDecision:
@@ -1473,7 +1526,7 @@ class LongitudinalDecisionRegistry:
                 matches = [
                     (digest, value)
                     for digest, (value, _) in loaded.items()
-                    if _selector_id(self._metadata.registry_epoch_sha256, digest)
+                    if _DR_SELECTOR_ID(self._metadata.registry_epoch_sha256, digest)
                     == selector_id
                 ]
                 if len(matches) != 1:
@@ -1482,14 +1535,14 @@ class LongitudinalDecisionRegistry:
                     )
                 digest, value = matches[0]
                 decision = _DR_REPLAY_IN_FENCE(self, value)
-                return RegisteredLongitudinalSeriesDecision(
+                return _DR_RESOLVED(
                     registry_id=self._metadata.registry_id,
                     registry_epoch_sha256=self._metadata.registry_epoch_sha256,
                     state_version=len(loaded),
                     state_head_sha256=head,
                     selector_id=selector_id,
                     object_sha256=digest,
-                    decision_sha256=_series_decision_sha256(decision),
+                    decision_sha256=_DR_DECISION_SHA256(decision),
                     decision=decision,
                 )
 
@@ -1523,7 +1576,7 @@ class LongitudinalDecisionRegistry:
                 loaded, head = _DR_LOAD_STATE(self)
                 ordered = sorted(
                     (
-                        _selector_id(self._metadata.registry_epoch_sha256, digest),
+                        _DR_SELECTOR_ID(self._metadata.registry_epoch_sha256, digest),
                         digest,
                         value,
                     )
@@ -1541,10 +1594,10 @@ class LongitudinalDecisionRegistry:
                     else:
                         authority_state = SeriesAuthorityState.CURRENT
                     rows.append(
-                        SeriesSelectorRecord(
+                        _DR_SELECTOR_RECORD(
                             selector_id=selector_id,
                             object_sha256=digest,
-                            decision_sha256=_series_decision_sha256(value.decision),
+                            decision_sha256=_DR_DECISION_SHA256(value.decision),
                             policy_sha256=value.decision.policy_sha256,
                             anchor_key_sha256=value.decision.anchor_key_sha256,
                             authority_state=authority_state,
@@ -1556,7 +1609,7 @@ class LongitudinalDecisionRegistry:
                         )
                     )
                 more = len(ordered) > len(selected)
-                return SeriesSelectorPage(
+                return _DR_SELECTOR_PAGE(
                     registry_id=self._metadata.registry_id,
                     registry_epoch_sha256=self._metadata.registry_epoch_sha256,
                     state_version=len(loaded),
@@ -1646,6 +1699,8 @@ class LongitudinalDecisionRegistry:
         parent_fd: int | None = None
         root_fd: int | None = None
         objects_fd: int | None = None
+        created = False
+        completed = False
         try:
             parent_lstat = os.stat(parent, follow_symlinks=False)
             parent_fd = os.open(parent, directory_flags)
@@ -1658,6 +1713,7 @@ class LongitudinalDecisionRegistry:
                     "D03 decision registry restore parent changed"
                 )
             os.mkdir(target.name, 0o700, dir_fd=parent_fd)
+            created = True
             root_lstat = os.stat(target.name, dir_fd=parent_fd, follow_symlinks=False)
             root_fd = os.open(target.name, directory_flags, dir_fd=parent_fd)
             root_bound = os.fstat(root_fd)
@@ -1717,6 +1773,7 @@ class LongitudinalDecisionRegistry:
             os.fsync(objects_fd)
             os.fsync(root_fd)
             os.fsync(parent_fd)
+            completed = True
         except FileExistsError:
             raise LongitudinalDecisionRegistryConflict(
                 "D03 decision registry restore target already exists"
@@ -1726,6 +1783,8 @@ class LongitudinalDecisionRegistry:
                 "D03 decision registry restore failed"
             ) from None
         finally:
+            if created and not completed and root_fd is not None:
+                _remove_partial_restore(parent_fd, target.name, root_fd, objects_fd)
             for descriptor in (objects_fd, root_fd, parent_fd):
                 if descriptor is not None:
                     try:
@@ -1839,6 +1898,14 @@ _DR_APPEND_JOURNAL = LongitudinalDecisionRegistry._append_journal
 _DR_ACCEPT_OBSERVED_HEAD = LongitudinalDecisionRegistry._accept_observed_head
 _DR_LOAD_STATE = LongitudinalDecisionRegistry._load_state
 _DR_REPLAY_IN_FENCE = LongitudinalDecisionRegistry._replay_in_fence
+# Result constructors and identity helpers are sealed so a module-global
+# replacement cannot pair one selector with another series' decision.
+_DR_RECEIPT = SeriesRegistrationReceipt
+_DR_RESOLVED = RegisteredLongitudinalSeriesDecision
+_DR_SELECTOR_RECORD = SeriesSelectorRecord
+_DR_SELECTOR_PAGE = SeriesSelectorPage
+_DR_SELECTOR_ID = _selector_id
+_DR_DECISION_SHA256 = _series_decision_sha256
 _REGISTRY_AUTHORITY_SEAL = MappingProxyType(
     {
         "_PINNED_AUTHORITY_READ_FENCE": _PINNED_AUTHORITY_READ_FENCE,
@@ -1864,6 +1931,12 @@ _REGISTRY_ALIAS_SEAL = MappingProxyType(
             "_DR_ACCEPT_OBSERVED_HEAD",
             "_DR_LOAD_STATE",
             "_DR_REPLAY_IN_FENCE",
+            "_DR_RECEIPT",
+            "_DR_RESOLVED",
+            "_DR_SELECTOR_RECORD",
+            "_DR_SELECTOR_PAGE",
+            "_DR_SELECTOR_ID",
+            "_DR_DECISION_SHA256",
         )
     }
 )

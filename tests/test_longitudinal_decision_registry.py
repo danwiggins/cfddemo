@@ -11,6 +11,7 @@ import pytest
 import evidence_inspector.longitudinal_decision_registry as registry_module
 from evidence_inspector.longitudinal_compatibility import (
     LongitudinalOutcome,
+    LongitudinalSeriesDecision,
     decide_longitudinal_series,
     longitudinal_anchor_policy_sha256,
 )
@@ -227,36 +228,73 @@ def test_resolve_holds_linkage_fence_through_exact_return(
     receipt = _register(registry, live)
     extra = _record("4")
     assert extra.authorized_linkage is not None
-    original_model = registry_module.RegisteredLongitudinalSeriesDecision
+    original_bytes = registry_module.canonical_contract_bytes
     writer_started = threading.Event()
     writer_finished = threading.Event()
     workers: list[threading.Thread] = []
 
-    def construct(**values):
-        def write() -> None:
-            writer_started.set()
-            live[0].commit_authorized_revision(extra.authorized_linkage)
-            writer_finished.set()
+    def canonical_bytes(value):
+        # Digesting the replayed decision happens while the result is being
+        # constructed, after replay and before return.
+        if type(value) is LongitudinalSeriesDecision and not workers:
 
-        worker = threading.Thread(target=write)
-        workers.append(worker)
-        worker.start()
-        assert writer_started.wait(timeout=1)
-        assert not writer_finished.wait(timeout=0.05)
-        return original_model(**values)
+            def write() -> None:
+                writer_started.set()
+                live[0].commit_authorized_revision(extra.authorized_linkage)
+                writer_finished.set()
 
-    monkeypatch.setattr(
-        registry_module, "RegisteredLongitudinalSeriesDecision", construct
-    )
+            worker = threading.Thread(target=write)
+            workers.append(worker)
+            worker.start()
+            assert writer_started.wait(timeout=1)
+            assert not writer_finished.wait(timeout=0.05)
+        return original_bytes(value)
+
+    monkeypatch.setattr(registry_module, "canonical_contract_bytes", canonical_bytes)
     resolved = registry.resolve(receipt.selector_id)
     assert resolved.decision_sha256 == receipt.decision_sha256
+    assert workers
     workers[0].join(timeout=2)
     assert writer_finished.is_set()
-    monkeypatch.setattr(
-        registry_module, "RegisteredLongitudinalSeriesDecision", original_model
-    )
+    monkeypatch.undo()
     with pytest.raises(LongitudinalDecisionRegistryStale):
         registry.resolve(receipt.selector_id)
+
+
+def test_result_constructor_cannot_pair_a_selector_with_another_decision(
+    registry: LongitudinalDecisionRegistry, live, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _, active = live
+    one = _register(registry, live, members=active[1:2])
+    two = _register(registry, live)
+    other = registry.resolve(two.selector_id)
+
+    def substitute(**values):
+        return registry_module.RegisteredLongitudinalSeriesDecision.model_construct(
+            **{
+                **values,
+                "decision": other.decision,
+                "decision_sha256": other.decision_sha256,
+            }
+        )
+
+    monkeypatch.setattr(registry_module, "_DR_RESOLVED", substitute)
+    with pytest.raises(LongitudinalDecisionRegistryUnsafe, match="authority callable"):
+        registry.resolve(one.selector_id)
+    monkeypatch.undo()
+    monkeypatch.setattr(
+        registry_module, "RegisteredLongitudinalSeriesDecision", substitute
+    )
+    assert registry.resolve(one.selector_id).decision_sha256 == one.decision_sha256
+
+    resolved = registry.resolve(one.selector_id)
+    values = resolved.model_dump(mode="python")
+    for update, match in (
+        ({"decision": other.decision}, "digest"),
+        ({"object_sha256": two.object_sha256}, "selector"),
+    ):
+        with pytest.raises(ValueError, match=match):
+            type(resolved)(**{**values, **update})
 
 
 def test_selector_page_is_private_counted_and_paginated(
@@ -667,3 +705,67 @@ def test_wrong_trust_pins_and_store_type_are_rejected(tmp_path: Path, live) -> N
             expected_trust_snapshot_sha256_by_provider=PINS,
         )
     assert not (tmp_path / "pins").exists()
+
+
+def test_torn_journal_append_is_truncated_and_registration_retries(
+    registry: LongitudinalDecisionRegistry, live, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    original_write = registry_module._write_all
+    calls = {"journal": 0}
+
+    def torn_write(descriptor: int, content: bytes) -> None:
+        if content.endswith(b"\n") and b"d03-decision-journal-entry" in content:
+            calls["journal"] += 1
+            os.write(descriptor, content[: len(content) // 2])
+            raise OSError("disk full")
+        original_write(descriptor, content)
+
+    monkeypatch.setattr(registry_module, "_write_all", torn_write)
+    with pytest.raises(LongitudinalDecisionRegistryUnsafe, match="append failed"):
+        _register(registry, live)
+    monkeypatch.undo()
+    assert calls["journal"] == 1
+    assert (registry.root / "registry-journal.jsonl").read_bytes() == b""
+    assert registry.list_selectors().state_version == 0
+
+    receipt = _register(registry, live)
+    assert receipt.state_version == 1
+    assert registry.resolve(receipt.selector_id).object_sha256 == receipt.object_sha256
+
+
+def test_failed_restore_removes_its_partial_target_and_can_retry(
+    registry: LongitudinalDecisionRegistry,
+    live,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    receipt = _register(registry, live)
+    backup = registry.backup_bytes()
+    original_publish = registry_module._publish_file
+
+    def failing_publish(directory_fd: int, name: str, content: bytes) -> None:
+        if name == "registry-journal.jsonl":
+            raise OSError("disk full")
+        original_publish(directory_fd, name, content)
+
+    target = tmp_path / "partial-restore"
+    values = {
+        "linkage_store": live[0],
+        "expected_trust_snapshot_sha256_by_provider": PINS,
+        "expected_registry_id": receipt.registry_id,
+        "expected_registry_epoch_sha256": receipt.registry_epoch_sha256,
+        "expected_state_head_sha256": receipt.state_head_sha256,
+    }
+    monkeypatch.setattr(registry_module, "_publish_file", failing_publish)
+    with pytest.raises(LongitudinalDecisionRegistryUnsafe, match="restore failed"):
+        LongitudinalDecisionRegistry.restore(target, backup, **values)
+    monkeypatch.undo()
+    assert not target.exists()
+
+    restored = LongitudinalDecisionRegistry.restore(target, backup, **values)
+    try:
+        assert restored.resolve(receipt.selector_id).object_sha256 == (
+            receipt.object_sha256
+        )
+    finally:
+        restored.close()

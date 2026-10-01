@@ -68,7 +68,16 @@ hard-link adoption, a journal chain that starts at a genesis digest over the
 immutable metadata, required retained registry ID, epoch, and head on reopen,
 a process-wide monotonic head fence against rollback, inode-bound control files,
 a process-private instance seal, and sealed class and module callables,
-including the pinned D03 decide and replay functions.
+including the pinned D03 decide and replay functions and the result
+constructors, so a replaced module global cannot pair one selector with another
+series' decision. The returned decision also validates that its selector derives
+from its object digest and its decision digest from its decision.
+
+A failed journal append truncates any torn suffix back to the last committed
+entry, so the chain stays readable and the registration can be retried. A
+failed restore removes the partial target it created, so a retry is possible.
+Both gaps also exist in the merged D05 cohort registry and are a follow-up
+there.
 
 The journal is the commit point. An object without a journal entry is the
 remnant of an interrupted registration. Reads tolerate at most one. The next
