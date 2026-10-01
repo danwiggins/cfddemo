@@ -98,7 +98,8 @@ source carries the fixed list of unverified fields
 `method_authority_head_current_verified=false`, so a consumer cannot mistake a
 bound ledger or an import-time method head for a verified one. The list covers
 the counterpart record as well as the subject: the E05 decision depends on the
-counterpart's information state, compatibility key, and other unmapped fields.
+counterpart's information state, the four unmapped compatibility-key
+sub-fields, and its other unmapped fields.
 
 Who may author an E06 denominator ledger, and whether E12 should show one at
 all next to the D09 v3 counts, is a product decision this registry does not
