@@ -846,76 +846,50 @@ def _remove_partial_restore(
         pass
 
 
-_RESTORE_MARKER = ".restore-incomplete"
-_RESTORE_ROOT_NAMES = frozenset(
-    {
-        _RESTORE_MARKER,
-        ".registry.lock",
-        "objects",
-        "registry-journal.jsonl",
-        "registry-metadata.json",
-    }
-)
+def _is_unpublished_root(root_fd: int) -> bool:
+    """Return whether a root holds only an interrupted first-time creation."""
 
-
-def _clear_incomplete_restore(parent_fd: int, name: str) -> bool:
-    """Remove a target left by a restore that crashed before completing.
-
-    Only a private directory that still carries the restore marker and holds
-    nothing but restore-created names is removed; anything else is left alone
-    and the caller reports a conflict.
-    """
-
-    flags = (
-        os.O_RDONLY
-        | getattr(os, "O_DIRECTORY", 0)
-        | getattr(os, "O_CLOEXEC", 0)
-        | getattr(os, "O_NOFOLLOW", 0)
-    )
-    root_fd: int | None = None
-    objects_fd: int | None = None
     try:
-        observed = os.stat(name, dir_fd=parent_fd, follow_symlinks=False)
-        if not stat.S_ISDIR(observed.st_mode) or observed.st_uid != os.geteuid():
-            return False
-        root_fd = os.open(name, flags, dir_fd=parent_fd)
-        bound = os.fstat(root_fd)
-        if (bound.st_dev, bound.st_ino) != (observed.st_dev, observed.st_ino):
-            return False
-        marker = os.stat(_RESTORE_MARKER, dir_fd=root_fd, follow_symlinks=False)
-        if not stat.S_ISREG(marker.st_mode) or marker.st_uid != os.geteuid():
-            return False
         entries = set(os.listdir(root_fd))
-        if any(
-            entry not in _RESTORE_ROOT_NAMES and not entry.startswith(".tmp-")
+        if "registry-metadata.json" in entries or any(
+            entry not in {"objects", ".registry.lock", "registry-journal.jsonl"}
+            and not entry.startswith(".tmp-")
             for entry in entries
         ):
             return False
-        if "objects" in entries:
-            objects_fd = os.open("objects", flags, dir_fd=root_fd)
-            if any(
-                not (
-                    (len(entry) == 69 and entry.endswith(".json"))
-                    or entry.startswith(".tmp-")
-                )
-                for entry in os.listdir(objects_fd)
-            ):
+        if "registry-journal.jsonl" in entries:
+            journal = os.stat(
+                "registry-journal.jsonl", dir_fd=root_fd, follow_symlinks=False
+            )
+            if not stat.S_ISREG(journal.st_mode) or journal.st_size != 0:
                 return False
-        _remove_partial_restore(parent_fd, name, root_fd, objects_fd)
+        if "objects" in entries:
+            objects = os.stat("objects", dir_fd=root_fd, follow_symlinks=False)
+            if not stat.S_ISDIR(objects.st_mode):
+                return False
+            flags = (
+                os.O_RDONLY
+                | getattr(os, "O_DIRECTORY", 0)
+                | getattr(os, "O_CLOEXEC", 0)
+                | getattr(os, "O_NOFOLLOW", 0)
+            )
+            objects_fd = os.open("objects", flags, dir_fd=root_fd)
+            try:
+                if any(not name.startswith(".tmp-") for name in os.listdir(objects_fd)):
+                    return False
+            finally:
+                os.close(objects_fd)
     except OSError:
         return False
-    finally:
-        for descriptor in (objects_fd, root_fd):
-            if descriptor is not None:
-                try:
-                    os.close(descriptor)
-                except OSError:
-                    pass
+    return True
+
+
+def _require_absent(parent_fd: int, name: str) -> None:
     try:
         os.stat(name, dir_fd=parent_fd, follow_symlinks=False)
     except FileNotFoundError:
-        return True
-    return False
+        return
+    raise FileExistsError(name)
 
 
 def _authority_identity(record_catalog: CohortRecordCatalog) -> dict[str, object]:
@@ -1232,16 +1206,15 @@ class ResultViewSourceRegistry:
             if (bound.st_dev, bound.st_ino) != (root_lstat.st_dev, root_lstat.st_ino):
                 raise ResultViewSourceRegistryUnsafe("E06 source registry root changed")
             self._root_identity = (bound.st_dev, bound.st_ino)
-            try:
-                os.stat(_RESTORE_MARKER, dir_fd=self._root_fd, follow_symlinks=False)
-            except FileNotFoundError:
-                pass
-            else:
-                raise ResultViewSourceRegistryUnsafe(
-                    "E06 source registry restore is incomplete"
-                )
+            if not root_created and all(item is None for item in expected_values):
+                # A crash during first-time creation leaves control files but no
+                # published metadata and no committed state; resume creation.
+                root_created = _is_unpublished_root(self._root_fd)
             if root_created:
-                os.mkdir("objects", 0o700, dir_fd=self._root_fd)
+                try:
+                    os.mkdir("objects", 0o700, dir_fd=self._root_fd)
+                except FileExistsError:
+                    pass
             self._objects_fd = os.open("objects", flags, dir_fd=self._root_fd)
             objects = os.fstat(self._objects_fd)
             if (
@@ -2374,6 +2347,7 @@ class ResultViewSourceRegistry:
         objects_fd: int | None = None
         created = False
         completed = False
+        staging = f".{target.name}.restore-{secrets.token_hex(16)}"
         try:
             parent_lstat = os.stat(parent, follow_symlinks=False)
             parent_fd = os.open(parent, directory_flags)
@@ -2385,15 +2359,14 @@ class ResultViewSourceRegistry:
                 raise ResultViewSourceRegistryUnsafe(
                     "E06 source registry restore parent changed"
                 )
-            try:
-                os.mkdir(target.name, 0o700, dir_fd=parent_fd)
-            except FileExistsError:
-                if not _clear_incomplete_restore(parent_fd, target.name):
-                    raise
-                os.mkdir(target.name, 0o700, dir_fd=parent_fd)
+            _require_absent(parent_fd, target.name)
+            # The restore is built in a private staging sibling and renamed into
+            # place only when complete, so a crash never leaves a partial target
+            # and a concurrent restore never touches another's files.
+            os.mkdir(staging, 0o700, dir_fd=parent_fd)
             created = True
-            root_lstat = os.stat(target.name, dir_fd=parent_fd, follow_symlinks=False)
-            root_fd = os.open(target.name, directory_flags, dir_fd=parent_fd)
+            root_lstat = os.stat(staging, dir_fd=parent_fd, follow_symlinks=False)
+            root_fd = os.open(staging, directory_flags, dir_fd=parent_fd)
             root_bound = os.fstat(root_fd)
             if (
                 not stat.S_ISDIR(root_lstat.st_mode)
@@ -2430,21 +2403,6 @@ class ResultViewSourceRegistry:
                 dir_fd=root_fd,
             )
             os.close(lock_fd)
-            # A durable marker distinguishes a crashed restore from a registry;
-            # the constructor refuses it and the next restore may clear it.
-            marker_fd = os.open(
-                _RESTORE_MARKER,
-                os.O_WRONLY
-                | os.O_CREAT
-                | os.O_EXCL
-                | getattr(os, "O_CLOEXEC", 0)
-                | getattr(os, "O_NOFOLLOW", 0),
-                0o600,
-                dir_fd=root_fd,
-            )
-            os.fsync(marker_fd)
-            os.close(marker_fd)
-            os.fsync(root_fd)
             _publish_file(
                 root_fd,
                 "registry-metadata.json",
@@ -2464,8 +2422,9 @@ class ResultViewSourceRegistry:
                 ),
             )
             os.fsync(objects_fd)
-            os.unlink(_RESTORE_MARKER, dir_fd=root_fd)
             os.fsync(root_fd)
+            _require_absent(parent_fd, target.name)
+            os.rename(staging, target.name, src_dir_fd=parent_fd, dst_dir_fd=parent_fd)
             os.fsync(parent_fd)
             completed = True
         except FileExistsError:
@@ -2479,10 +2438,10 @@ class ResultViewSourceRegistry:
         finally:
             if created and not completed:
                 if root_fd is not None:
-                    _remove_partial_restore(parent_fd, target.name, root_fd, objects_fd)
+                    _remove_partial_restore(parent_fd, staging, root_fd, objects_fd)
                 elif parent_fd is not None:
                     try:
-                        os.rmdir(target.name, dir_fd=parent_fd)
+                        os.rmdir(staging, dir_fd=parent_fd)
                         os.fsync(parent_fd)
                     except OSError:
                         pass

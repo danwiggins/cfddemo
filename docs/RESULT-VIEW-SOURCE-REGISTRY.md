@@ -212,12 +212,19 @@ process-wide monotonic head fence against rollback, inode-bound control files,
 torn-journal truncation, and removal of a failed restore's partial target.
 A crash in the middle of a journal append leaves an unterminated final line;
 it was never fsynced or returned, so reopening and every registration truncate
-it under the exclusive lock, and every complete line must still validate. A
-restore writes a durable `.restore-incomplete` marker before its first file and
-removes it last. The constructor refuses a root that still carries the marker,
-and the next restore to the same target removes a marked directory that holds
-only restore-created names, then retries; any other existing target is a
-conflict. The
+it under the exclusive lock, and every complete line must still validate.
+Restore builds the registry in a private hidden sibling
+(`.<name>.restore-<random>`) and renames it onto the target only after every
+file is fsynced, so a crash leaves no partial target and two concurrent
+restores never touch each other's files. A crashed restore can leave its hidden
+staging directory behind; it is never opened as a registry and does not block a
+retry. The target must not exist; an empty directory created at that name
+between the final existence check and the rename would be replaced, which is a
+same-user race outside the threat model. A crash during first-time creation
+(control files present, no metadata, empty journal, no objects) resumes
+creation on the next construction without expected identity; a root with a
+non-empty journal or objects but no metadata still never bootstraps a new
+identity. The
 metadata binds the cohort registry ID and epoch, the linkage store ID, epoch,
 and storage identity, the E04 catalog storage and reader-registry identities,
 and the D06 record-catalog scope; reopening or restoring against a different

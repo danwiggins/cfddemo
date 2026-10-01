@@ -1063,7 +1063,7 @@ def test_crash_torn_journal_tail_is_dropped_on_reopen_and_registration(
         reopened.close()
 
 
-def test_crashed_restore_is_refused_and_cleared_by_the_next_restore(
+def test_crashed_restore_leaves_no_target_and_can_retry(
     registry: ResultViewSourceRegistry,
     live: Live,
     monkeypatch: pytest.MonkeyPatch,
@@ -1090,26 +1090,84 @@ def test_crashed_restore_is_refused_and_cleared_by_the_next_restore(
     with pytest.raises(ResultViewSourceRegistryUnsafe, match="restore failed"):
         ResultViewSourceRegistry.restore(target, backup, **values)
     monkeypatch.undo()
-    assert (target / ".restore-incomplete").exists()
-    with open(target / "registry-journal.jsonl", "wb") as handle:
-        handle.write(b"")
-    (target / "registry-journal.jsonl").chmod(0o600)
-    with pytest.raises(ResultViewSourceRegistryUnsafe, match="restore is incomplete"):
-        ResultViewSourceRegistry(target, **values)
-    (target / "registry-journal.jsonl").unlink()
+    assert not target.exists()
+    assert any(
+        item.name.startswith(".crashed-restore.restore-")
+        for item in live.root.iterdir()
+    )
     restored = ResultViewSourceRegistry.restore(target, backup, **values)
     try:
-        assert not (target / ".restore-incomplete").exists()
         assert _resolve(restored, live, receipt).object_sha256 == receipt.object_sha256
     finally:
         restored.close()
     foreign = live.root / "foreign"
     foreign.mkdir(mode=0o700)
-    (foreign / ".restore-incomplete").write_bytes(b"")
-    (foreign / "keep.txt").write_bytes(b"x")
     with pytest.raises(ResultViewSourceRegistryConflict, match="already exists"):
         ResultViewSourceRegistry.restore(foreign, backup, **values)
-    assert (foreign / "keep.txt").exists()
+
+
+def test_concurrent_restores_to_one_target_leave_exactly_one_registry(
+    registry: ResultViewSourceRegistry, live: Live
+) -> None:
+    receipt = _register(registry, live)
+    backup = registry.backup_bytes()
+    target = live.root / "raced-restore"
+    values = {
+        "record_catalog": live.cohorts,
+        "expected_registry_id": receipt.registry_id,
+        "expected_registry_epoch_sha256": receipt.registry_epoch_sha256,
+        "expected_state_head_sha256": receipt.state_head_sha256,
+    }
+    barrier = threading.Barrier(2)
+    outcomes: list[object] = []
+
+    def restore() -> None:
+        barrier.wait()
+        try:
+            outcomes.append(ResultViewSourceRegistry.restore(target, backup, **values))
+        except (ResultViewSourceRegistryConflict, ResultViewSourceRegistryUnsafe) as exc:
+            outcomes.append(exc)
+
+    threads = [threading.Thread(target=restore) for _ in range(2)]
+    for thread in threads:
+        thread.start()
+    for thread in threads:
+        thread.join(timeout=60)
+    winners = [item for item in outcomes if isinstance(item, ResultViewSourceRegistry)]
+    assert len(outcomes) == 2 and len(winners) == 1
+    try:
+        assert _resolve(winners[0], live, receipt).object_sha256 == (
+            receipt.object_sha256
+        )
+    finally:
+        winners[0].close()
+    assert not [
+        item for item in live.root.iterdir() if item.name.startswith(".raced-restore.")
+    ]
+
+
+def test_interrupted_first_creation_resumes_but_state_never_rebootstraps(
+    live: Live,
+) -> None:
+    root = live.root / "partial-create"
+    root.mkdir(mode=0o700)
+    (root / "objects").mkdir(mode=0o700)
+    for name in (".registry.lock", "registry-journal.jsonl"):
+        (root / name).write_bytes(b"")
+        (root / name).chmod(0o600)
+    resumed = ResultViewSourceRegistry(root, record_catalog=live.cohorts)
+    resumed.close()
+    assert (root / "registry-metadata.json").exists()
+
+    populated = live.root / "metadata-deleted"
+    populated.mkdir(mode=0o700)
+    (populated / "objects").mkdir(mode=0o700)
+    (populated / ".registry.lock").write_bytes(b"")
+    (populated / "registry-journal.jsonl").write_bytes(b"{}\n")
+    for name in (".registry.lock", "registry-journal.jsonl"):
+        (populated / name).chmod(0o600)
+    with pytest.raises(ResultViewSourceRegistryUnsafe, match="metadata is missing"):
+        ResultViewSourceRegistry(populated, record_catalog=live.cohorts)
 
 
 def test_replay_rejects_any_stored_field_that_live_derivation_does_not_reproduce(
