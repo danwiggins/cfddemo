@@ -17,8 +17,10 @@ Verified source measurements and D09 denominator counts remain visible whenever
 their own source authority is valid. Comparative D07 delta, comparison
 uncertainty, shared-series axis, and connecting segment are separate fields and
 are suppressed unless current D01 linkage, D04 supersession, D05 membership,
-D06 record availability, D03 anchor-relative compatibility, D07 repeatability,
-and D09 denominator gates all pass for that exact comparison. This separation
+D06 record availability, D03 anchor-relative compatibility, and D07
+repeatability gates all pass for that exact comparison, and the registered D09
+population containing both members is current. D09 supplies aggregate
+denominator context only; it never decides comparison eligibility. This separation
 allows incompatible records to remain inspectable as distinct unconnected
 series without implying comparison. D10 context is displayed as a confounding
 limitation and never changes source values, denominators, or eligibility.
