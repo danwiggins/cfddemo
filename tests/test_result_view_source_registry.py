@@ -1020,3 +1020,51 @@ def test_stored_source_is_the_exact_e06_contract(
     assert registered_source_object_bytes(value) == content
     assert type(value.source) is ResultViewSource
     assert len(content) < registry_module.MAX_OBJECT_BYTES // 4
+
+
+def test_replay_rejects_any_stored_field_that_live_derivation_does_not_reproduce(
+    registry: ResultViewSourceRegistry, live: Live
+) -> None:
+    receipt = _register(registry, live)
+    loaded, _ = registry_module._SR_LOAD_STATE(registry)
+    value = loaded[receipt.object_sha256][0]
+    with CohortRecordCatalog.record_status_authority_fence(
+        live.cohorts, live.selector_id, live.cohort_version
+    ) as (_, status):
+        registry_module._SR_REPLAY_IN_FENCE(registry, value, status)
+        for update in (
+            {"binding_sha256": "0" * 64},
+            {"counterpart_binding_sha256": "0" * 64},
+            {"counterpart_member_sha256": "0" * 64},
+            {"cohort_registry_epoch_sha256": "0" * 64},
+        ):
+            with pytest.raises(ResultViewSourceRegistryStale):
+                registry_module._SR_REPLAY_IN_FENCE(
+                    registry, value.model_copy(update=update), status
+                )
+
+
+def test_peer_rejects_rollback_to_its_own_preappend_head(
+    registry: ResultViewSourceRegistry, live: Live
+) -> None:
+    first = _register(registry, live)
+    journal = registry.root / "registry-journal.jsonl"
+    before = journal.read_bytes()
+    peer = ResultViewSourceRegistry(
+        registry.root,
+        record_catalog=live.cohorts,
+        expected_registry_id=first.registry_id,
+        expected_registry_epoch_sha256=first.registry_epoch_sha256,
+        expected_state_head_sha256=first.state_head_sha256,
+    )
+    try:
+        second = _register(registry, live, accessible_label="Second aggregate")
+        with open(journal, "r+b") as handle:
+            handle.truncate(len(before))
+        (registry.root / "objects" / f"{second.object_sha256}.json").unlink()
+        # The peer's own trusted head is still in the truncated chain; only the
+        # process-wide head fence detects the rollback.
+        with pytest.raises(ResultViewSourceRegistryUnsafe, match="rollback"):
+            _resolve(peer, live, first)
+    finally:
+        peer.close()
