@@ -18,9 +18,12 @@ from evidence_inspector.cohort_manifest import (
 )
 from evidence_inspector.cohort_registry import (
     CohortAuthorityState,
+    CohortHistoryView,
     CohortRegistry,
     CohortRegistryConflict,
     CohortRegistryUnsafe,
+    CohortStaleReason,
+    RegisteredCohortHistory,
     cohort_registry_backup_from_bytes,
 )
 from evidence_inspector.provider_linkage import LinkageOperation, LinkageReasonCode
@@ -715,3 +718,482 @@ def test_peer_rejects_rollback_to_its_own_preappend_head(
             peer.list_selectors()
     finally:
         peer.close()
+
+
+def _correction(live, letter: str):
+    _, snapshot, _, _ = live
+    previous = snapshot.revisions[0]
+    proposed = _revision(
+        revision=2,
+        operation=LinkageOperation.CORRECT,
+        reason=LinkageReasonCode.WRONG_SUBJECT,
+        previous=previous,
+        subject=_token("subject", letter),
+        collection=_token("collection", letter),
+        specimen=_token("specimen", letter),
+    ).model_copy(update={"technical": previous.technical})
+    correction, _ = _consume(
+        proposed,
+        _correction_approvals(proposed),
+        previous=previous,
+    )
+    return correction
+
+
+def _correct_linkage(live, letter: str) -> None:
+    live[0].commit_authorized_revision(_correction(live, letter))
+
+
+def test_history_view_reports_current_but_is_never_presented_as_current(
+    registry: CohortRegistry, live
+) -> None:
+    first = _first(live)
+    registry.register(first)
+    second = _second(first, live)
+    registry.register(second)
+    selector = registry.list_selectors().records[0].selector_id
+    history = registry.resolve_history(selector, 2)
+
+    view = registry.resolve_history_view(selector, 2)
+    assert type(view) is CohortHistoryView
+    assert view.authority_state is CohortAuthorityState.CURRENT
+    assert view.stale_reason is None
+    assert view.presented_as_current is False
+    assert view.protected_only is True
+    assert view.historical_manifests == history.manifests == (first, second)
+    assert view.historical_selected_manifest_sha256 == (
+        history.selected_manifest_sha256
+    )
+    assert (view.state_version, view.state_head_sha256) == (
+        history.state_version,
+        history.state_head_sha256,
+    )
+    assert view.latest_registered_cohort_version == 2
+
+    older = registry.resolve_history_view(selector, 1)
+    assert older.historical_manifests == (first,)
+    assert older.cohort_version == 1
+    assert older.latest_registered_cohort_version == 2
+
+
+def test_history_view_returns_stale_version_after_authority_changes(
+    registry: CohortRegistry, live
+) -> None:
+    manifest = _first(live)
+    receipt = registry.register(manifest)
+    selector = registry.list_selectors().records[0]
+    before = registry.resolve_history(selector.selector_id, 1)
+
+    _correct_linkage(live, "f")
+    with pytest.raises(CohortRegistryConflict, match="stale"):
+        registry.resolve_history(selector.selector_id, 1)
+    with pytest.raises(CohortRegistryConflict, match="stale"):
+        registry.resolve(selector.selector_id, 1)
+
+    view = registry.resolve_history_view(selector.selector_id, 1)
+    assert view.authority_state is CohortAuthorityState.STALE
+    assert view.stale_reason is CohortStaleReason.LINKAGE_AUTHORITY_NOT_CURRENT
+    assert view.presented_as_current is False
+    assert view.historical_manifests == before.manifests == (manifest,)
+    assert view.historical_selected_manifest_sha256 == receipt.manifest_sha256
+    assert view.state_head_sha256 == receipt.state_head_sha256
+    assert registry.list_selectors().records[0].authority_state is (
+        view.authority_state
+    )
+    object_path = registry.root / "objects" / f"{receipt.manifest_sha256}.json"
+    assert object_path.read_bytes() == cohort_manifest_bytes(manifest)
+
+
+def test_history_view_cannot_stand_in_for_registered_history(
+    registry: CohortRegistry, live
+) -> None:
+    from evidence_inspector.cohort_import import (
+        CohortImportError,
+        _capture_registered_history,
+    )
+
+    registry.register(_first(live))
+    selector = registry.list_selectors().records[0].selector_id
+    _correct_linkage(live, "a")
+    view = registry.resolve_history_view(selector, 1)
+    assert not isinstance(view, RegisteredCohortHistory)
+    assert not issubclass(CohortHistoryView, RegisteredCohortHistory)
+    with pytest.raises(ValueError):
+        RegisteredCohortHistory.model_validate(view.model_dump())
+    with pytest.raises(ValueError):
+        RegisteredCohortHistory.model_validate_json(view.model_dump_json())
+    with pytest.raises(CohortImportError):
+        _capture_registered_history(view)
+
+
+def test_history_view_contract_rejects_current_or_inconsistent_presentation(
+    registry: CohortRegistry, live
+) -> None:
+    registry.register(_first(live))
+    selector = registry.list_selectors().records[0].selector_id
+    view = registry.resolve_history_view(selector, 1)
+    values = view.model_dump()
+    assert CohortHistoryView.model_validate(values) == view
+    for update in (
+        {"presented_as_current": True},
+        {"protected_only": False},
+        {"schema_version": "traceback.registered-cohort-history.v1"},
+        {"stale_reason": CohortStaleReason.LINKAGE_AUTHORITY_NOT_CURRENT},
+        {"authority_state": CohortAuthorityState.STALE},
+        {"selector_id": "cohort_selector_" + "0" * 40},
+        {"historical_selected_manifest_sha256": "0" * 64},
+        {"cohort_version": 2},
+        {"latest_registered_cohort_version": 2},
+        {"historical_manifests": ()},
+    ):
+        with pytest.raises(ValueError):
+            CohortHistoryView.model_validate({**values, **update})
+
+
+def test_history_view_selector_bounds_are_sanitized(
+    registry: CohortRegistry, live
+) -> None:
+    registry.register(_first(live))
+    selector = registry.list_selectors().records[0].selector_id
+    for bad_selector, bad_version in (
+        ("cohort_selector_short", 1),
+        (selector, 0),
+        (selector, 100_001),
+        (selector, True),
+        (None, 1),
+    ):
+        with pytest.raises(CohortRegistryConflict, match="invalid"):
+            registry.resolve_history_view(bad_selector, bad_version)
+    with pytest.raises(CohortRegistryConflict, match="unavailable"):
+        registry.resolve_history_view(selector, 2)
+    with pytest.raises(CohortRegistryConflict, match="unavailable"):
+        registry.resolve_history_view("cohort_selector_" + "a" * 40, 1)
+
+
+def test_history_view_holds_authority_fence_through_exact_return(
+    registry: CohortRegistry,
+    live,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    store = live[0]
+    registry.register(_first(live))
+    selector = registry.list_selectors().records[0]
+    correction = _correction(live, "b")
+    original_model = cohort_registry_module.CohortHistoryView
+    writer_started = threading.Event()
+    writer_finished = threading.Event()
+    workers: list[threading.Thread] = []
+
+    def construct(**values):
+        def write() -> None:
+            writer_started.set()
+            store.commit_authorized_revision(correction)
+            writer_finished.set()
+
+        worker = threading.Thread(target=write)
+        workers.append(worker)
+        worker.start()
+        assert writer_started.wait(timeout=1)
+        assert not writer_finished.wait(timeout=0.05)
+        return original_model(**values)
+
+    monkeypatch.setattr(cohort_registry_module, "CohortHistoryView", construct)
+    view = registry.resolve_history_view(selector.selector_id, 1)
+    assert view.authority_state is CohortAuthorityState.CURRENT
+    workers[0].join(timeout=2)
+    assert writer_finished.is_set()
+    monkeypatch.undo()
+    stale = registry.resolve_history_view(selector.selector_id, 1)
+    assert stale.authority_state is CohortAuthorityState.STALE
+
+
+def test_history_view_rejects_registry_tamper_and_shadows(
+    registry: CohortRegistry, live, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    receipt = registry.register(_first(live))
+    selector = registry.list_selectors().records[0].selector_id
+    _correct_linkage(live, "c")
+    vars(registry)["resolve_history_view"] = lambda *_: "forged"
+    try:
+        with pytest.raises(CohortRegistryUnsafe, match="callable changed"):
+            registry.resolve_history_view(selector, 1)
+    finally:
+        del vars(registry)["resolve_history_view"]
+
+    with monkeypatch.context() as patch:
+        patch.setattr(CohortRegistry, "resolve_history_view", lambda *_: "forged")
+        with pytest.raises(CohortRegistryUnsafe, match="callable changed"):
+            registry.list_selectors()
+
+    object_path = registry.root / "objects" / f"{receipt.manifest_sha256}.json"
+    original = object_path.read_bytes()
+    object_path.write_bytes(original + b" ")
+    try:
+        with pytest.raises(CohortRegistryUnsafe, match="digest"):
+            registry.resolve_history_view(selector, 1)
+    finally:
+        object_path.write_bytes(original)
+
+    journal_path = registry.root / "registry-journal.jsonl"
+    journal = journal_path.read_bytes()
+    journal_path.write_bytes(b"")
+    try:
+        with pytest.raises(CohortRegistryUnsafe, match="rollback"):
+            registry.resolve_history_view(selector, 1)
+    finally:
+        journal_path.write_bytes(journal)
+
+
+def test_torn_journal_append_is_truncated_and_registration_retries(
+    registry: CohortRegistry, live, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    original_write = os.write
+    calls = {"journal": 0}
+
+    def torn_write(descriptor: int, content) -> int:
+        data = bytes(content)
+        if data.endswith(b"\n") and b"cohort-registry-journal-entry" in data:
+            calls["journal"] += 1
+            original_write(descriptor, data[: len(data) // 2])
+            raise OSError("disk full")
+        return original_write(descriptor, content)
+
+    manifest = _first(live)
+    monkeypatch.setattr(os, "write", torn_write)
+    with pytest.raises(CohortRegistryUnsafe, match="append failed"):
+        registry.register(manifest)
+    monkeypatch.undo()
+    assert calls["journal"] == 1
+    assert (registry.root / "registry-journal.jsonl").read_bytes() == b""
+    assert registry.list_selectors().state_version == 0
+
+    receipt = registry.register(manifest)
+    assert receipt.state_version == 1
+    selector = registry.list_selectors().records[0].selector_id
+    assert registry.resolve(selector, 1).manifest == manifest
+
+
+def _restore_values(receipt, live) -> dict[str, object]:
+    return {
+        "linkage_store": live[0],
+        "expected_trust_snapshot_sha256_by_provider": _pins(),
+        "expected_registry_id": receipt.registry_id,
+        "expected_registry_epoch_sha256": receipt.registry_epoch_sha256,
+        "expected_state_head_sha256": receipt.state_head_sha256,
+    }
+
+
+def test_failed_restore_removes_its_partial_target_and_can_retry(
+    registry: CohortRegistry,
+    live,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    manifest = _first(live)
+    receipt = registry.register(manifest)
+    backup = registry.backup_bytes()
+    original_link = os.link
+
+    def failing_link(source, destination, *args, **kwargs):
+        if destination == "registry-journal.jsonl":
+            raise OSError("disk full")
+        return original_link(source, destination, *args, **kwargs)
+
+    target = tmp_path / "partial-restore"
+    monkeypatch.setattr(os, "link", failing_link)
+    with pytest.raises(CohortRegistryUnsafe, match="restore failed"):
+        CohortRegistry.restore(target, backup, **_restore_values(receipt, live))
+    monkeypatch.undo()
+    assert not target.exists()
+
+    restored = CohortRegistry.restore(target, backup, **_restore_values(receipt, live))
+    try:
+        selector = restored.list_selectors().records[0].selector_id
+        assert restored.resolve(selector, 1).manifest == manifest
+    finally:
+        restored.close()
+
+
+def test_failed_restore_root_open_removes_the_empty_target(
+    registry: CohortRegistry,
+    live,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    receipt = registry.register(_first(live))
+    backup = registry.backup_bytes()
+    target = tmp_path / "root-open-restore"
+    original_open = os.open
+
+    def failing_open(path, *args, **kwargs):
+        if path == target.name and kwargs.get("dir_fd") is not None:
+            raise OSError("descriptor exhausted")
+        return original_open(path, *args, **kwargs)
+
+    monkeypatch.setattr(os, "open", failing_open)
+    with pytest.raises(CohortRegistryUnsafe, match="restore failed"):
+        CohortRegistry.restore(target, backup, **_restore_values(receipt, live))
+    monkeypatch.undo()
+    assert not target.exists()
+
+
+def test_failed_restore_keeps_contents_of_an_unverified_substituted_root(
+    registry: CohortRegistry,
+    live,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    receipt = registry.register(_first(live))
+    backup = registry.backup_bytes()
+    target = tmp_path / "substituted-restore"
+    victim = tmp_path / "victim"
+    victim.mkdir(mode=0o700)
+    (victim / "keep.txt").write_text("keep")
+    original_mkdir = os.mkdir
+
+    def substituting_mkdir(path, *args, **kwargs):
+        result = original_mkdir(path, *args, **kwargs)
+        if path == target.name:
+            os.rmdir(target)
+            victim.rename(target)
+        return result
+
+    monkeypatch.setattr(os, "mkdir", substituting_mkdir)
+    with pytest.raises(CohortRegistryUnsafe, match="root changed"):
+        CohortRegistry.restore(target, backup, **_restore_values(receipt, live))
+    monkeypatch.undo()
+    assert (target / "keep.txt").read_text() == "keep"
+
+
+def test_failed_restore_never_removes_entries_it_did_not_create(
+    registry: CohortRegistry,
+    live,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    receipt = registry.register(_first(live))
+    backup = registry.backup_bytes()
+    target = tmp_path / "foreign-entry-restore"
+    original_link = os.link
+
+    def failing_link(source, destination, *args, **kwargs):
+        if destination == "registry-journal.jsonl":
+            (target / "foreign.txt").write_text("foreign")
+            (target / "objects" / "foreign.txt").write_text("foreign")
+            raise OSError("disk full")
+        return original_link(source, destination, *args, **kwargs)
+
+    monkeypatch.setattr(os, "link", failing_link)
+    with pytest.raises(CohortRegistryUnsafe, match="restore failed"):
+        CohortRegistry.restore(target, backup, **_restore_values(receipt, live))
+    monkeypatch.undo()
+    assert (target / "foreign.txt").read_text() == "foreign"
+    assert (target / "objects" / "foreign.txt").read_text() == "foreign"
+
+
+def test_failed_restore_reopen_removes_the_restored_target_and_can_retry(
+    registry: CohortRegistry,
+    live,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    manifest = _first(live)
+    receipt = registry.register(manifest)
+    backup = registry.backup_bytes()
+    target = tmp_path / "reopen-restore"
+    original_construct = cohort_registry_module._CR_CONSTRUCT
+    calls = {"construct": 0}
+
+    def failing_construct(*args, **kwargs):
+        calls["construct"] += 1
+        raise CohortRegistryUnsafe("cohort registry root changed")
+
+    # The alias seal is checked on instance entrypoints, not on the classmethod
+    # boundary that calls this alias, so this injects a reopen failure only.
+    monkeypatch.setattr(cohort_registry_module, "_CR_CONSTRUCT", failing_construct)
+    with pytest.raises(CohortRegistryUnsafe, match="root changed"):
+        CohortRegistry.restore(target, backup, **_restore_values(receipt, live))
+    monkeypatch.setattr(cohort_registry_module, "_CR_CONSTRUCT", original_construct)
+    assert calls["construct"] == 1
+    assert not target.exists()
+
+    restored = CohortRegistry.restore(target, backup, **_restore_values(receipt, live))
+    try:
+        selector = restored.list_selectors().records[0].selector_id
+        assert restored.resolve(selector, 1).manifest == manifest
+    finally:
+        restored.close()
+
+
+def test_failed_restore_reopen_keeps_a_target_a_peer_committed_into(
+    registry: CohortRegistry,
+    live,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    first = _first(live)
+    receipt = registry.register(first)
+    backup = registry.backup_bytes()
+    second = _second(first, live)
+    target = tmp_path / "peer-restore"
+    original_construct = cohort_registry_module._CR_CONSTRUCT
+    peer_receipts = []
+
+    def peer_commits_then_reopen_fails(*args, **kwargs):
+        # Restore the sealed alias so the peer runs the unmodified registry.
+        cohort_registry_module._CR_CONSTRUCT = original_construct
+        peer = original_construct(*args, **kwargs)
+        try:
+            peer_receipts.append(peer.register(second))
+        finally:
+            peer.close()
+        raise CohortRegistryUnsafe("cohort registry expected identity or head is invalid")
+
+    monkeypatch.setattr(
+        cohort_registry_module, "_CR_CONSTRUCT", peer_commits_then_reopen_fails
+    )
+    with pytest.raises(CohortRegistryUnsafe, match="expected identity or head"):
+        CohortRegistry.restore(target, backup, **_restore_values(receipt, live))
+    monkeypatch.setattr(cohort_registry_module, "_CR_CONSTRUCT", original_construct)
+
+    assert len(peer_receipts) == 1
+    reopened = CohortRegistry(
+        target,
+        linkage_store=live[0],
+        expected_trust_snapshot_sha256_by_provider=_pins(),
+        expected_registry_id=receipt.registry_id,
+        expected_registry_epoch_sha256=receipt.registry_epoch_sha256,
+        expected_state_head_sha256=peer_receipts[0].state_head_sha256,
+    )
+    try:
+        selector = reopened.list_selectors().records[0].selector_id
+        view = reopened.resolve_history_view(selector, 2)
+        assert view.historical_manifests == (first, second)
+    finally:
+        reopened.close()
+
+
+def test_failed_restore_reopen_keeps_a_target_whose_journal_changed(
+    registry: CohortRegistry,
+    live,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    receipt = registry.register(_first(live))
+    backup = registry.backup_bytes()
+    target = tmp_path / "journal-changed-restore"
+    original_construct = cohort_registry_module._CR_CONSTRUCT
+
+    def journal_changes_then_reopen_fails(*args, **kwargs):
+        with (target / "registry-journal.jsonl").open("ab") as handle:
+            handle.write(b"peer\n")
+        raise CohortRegistryUnsafe("cohort registry journal is invalid")
+
+    monkeypatch.setattr(
+        cohort_registry_module, "_CR_CONSTRUCT", journal_changes_then_reopen_fails
+    )
+    with pytest.raises(CohortRegistryUnsafe, match="journal is invalid"):
+        CohortRegistry.restore(target, backup, **_restore_values(receipt, live))
+    monkeypatch.setattr(cohort_registry_module, "_CR_CONSTRUCT", original_construct)
+    assert (target / "registry-journal.jsonl").read_bytes().endswith(b"peer\n")
+    assert (target / "registry-metadata.json").exists()

@@ -22,7 +22,7 @@ from pathlib import Path
 from types import MappingProxyType
 from typing import Annotated, Literal
 
-from pydantic import Field, StringConstraints
+from pydantic import Field, StringConstraints, model_validator
 
 import evidence_inspector.cohort_manifest as cohort_manifest_module
 from evidence_inspector.cohort_manifest import (
@@ -92,6 +92,12 @@ class CohortAuthorityState(StrEnum):
     STALE = "stale"
 
 
+class CohortStaleReason(StrEnum):
+    """Controlled reason a registered cohort version is not current."""
+
+    LINKAGE_AUTHORITY_NOT_CURRENT = "linkage_authority_not_current"
+
+
 class CohortRegistryMetadata(RegistryContract):
     schema_version: Literal["traceback.cohort-registry-metadata.v1"] = (
         "traceback.cohort-registry-metadata.v1"
@@ -158,6 +164,62 @@ class RegisteredCohortHistory(RegistryContract):
     state_head_sha256: Sha256
     selected_manifest_sha256: Sha256
     manifests: tuple[CohortManifest, ...] = Field(min_length=1, max_length=100_000)
+
+
+class CohortHistoryView(RegistryContract):
+    """Protected immutable history read that is never current authority.
+
+    The view carries the exact registered manifests for one selector/version
+    together with the authority state observed under the registry's linkage
+    fence.  It is deliberately not a ``RegisteredCohortHistory``: its schema,
+    field names, and ``presented_as_current`` marker differ, so it cannot be
+    accepted where current cohort authority is required.  Callers that need
+    current authority must call ``resolve_history``.
+    """
+
+    schema_version: Literal["traceback.cohort-history-view.v1"] = (
+        "traceback.cohort-history-view.v1"
+    )
+    protected_only: Literal[True] = True
+    presented_as_current: Literal[False] = False
+    registry_id: RegistryId
+    registry_epoch_sha256: Sha256
+    state_version: int = Field(ge=1, le=MAX_REGISTERED_MANIFESTS)
+    state_head_sha256: Sha256
+    selector_id: SelectorId
+    cohort_version: int = Field(ge=1, le=100_000)
+    latest_registered_cohort_version: int = Field(ge=1, le=100_000)
+    authority_state: CohortAuthorityState
+    stale_reason: CohortStaleReason | None
+    historical_selected_manifest_sha256: Sha256
+    historical_manifests: tuple[CohortManifest, ...] = Field(
+        min_length=1, max_length=100_000
+    )
+
+    @model_validator(mode="after")
+    def _exact_view(self) -> CohortHistoryView:
+        if (self.authority_state is CohortAuthorityState.STALE) != (
+            self.stale_reason is not None
+        ):
+            raise ValueError("cohort history view stale reason is inconsistent")
+        if (
+            len(self.historical_manifests) != self.cohort_version
+            or self.latest_registered_cohort_version < self.cohort_version
+            or self.state_version < self.latest_registered_cohort_version
+        ):
+            raise ValueError("cohort history view bounds are inconsistent")
+        cohort_id = self.historical_manifests[0].cohort_id
+        if _selector_id(self.registry_epoch_sha256, cohort_id) != self.selector_id:
+            raise ValueError("cohort history view selector is inconsistent")
+        for expected, manifest in enumerate(self.historical_manifests, start=1):
+            if manifest.version != expected or manifest.cohort_id != cohort_id:
+                raise ValueError("cohort history view order is inconsistent")
+        if (
+            cohort_manifest_sha256(self.historical_manifests[-1])
+            != self.historical_selected_manifest_sha256
+        ):
+            raise ValueError("cohort history view selection is inconsistent")
+        return self
 
 
 class CohortSelectorRecord(RegistryContract):
@@ -359,6 +421,43 @@ def _selector_id(epoch: str, cohort_id: str) -> str:
     return f"cohort_selector_{digest[:40]}"
 
 
+def _require_selector_request(selector_id: object, cohort_version: object) -> None:
+    if (
+        type(selector_id) is not str
+        or len(selector_id) != 56
+        or not selector_id.startswith("cohort_selector_")
+        or type(cohort_version) is not int
+        or not 1 <= cohort_version <= 100_000
+    ):
+        raise CohortRegistryConflict("cohort selector is invalid")
+
+
+def _select_registered_history(
+    loaded: Mapping[str, tuple[CohortManifest, bytes]],
+    registry_epoch_sha256: str,
+    selector_id: str,
+    cohort_version: int,
+) -> tuple[list[tuple[int, str, CohortManifest]], int]:
+    """Return the exact consecutive history through one version and the latest."""
+
+    selected = [
+        (manifest.version, digest, manifest)
+        for digest, (manifest, _) in loaded.items()
+        if _selector_id(registry_epoch_sha256, manifest.cohort_id) == selector_id
+    ]
+    latest = max((item[0] for item in selected), default=0)
+    matches = sorted(
+        (item for item in selected if item[0] <= cohort_version),
+        key=lambda item: item[0],
+    )
+    if (
+        len(matches) != cohort_version
+        or [item[0] for item in matches] != list(range(1, cohort_version + 1))
+    ):
+        raise CohortRegistryConflict("cohort selector is unavailable")
+    return matches, latest
+
+
 def _journal_entry_sha256(entry: CohortRegistryJournalEntry) -> str:
     placeholder = entry.model_copy(update={"entry_sha256": "0" * 64})
     return hashlib.sha256(
@@ -465,6 +564,105 @@ def cohort_registry_backup_from_bytes(content: bytes) -> CohortRegistryBackup:
         raise CohortRegistryConflict("cohort registry backup is invalid") from None
     _validate_backup(backup)
     return backup
+
+
+def _remove_partial_restore(
+    parent_fd: int,
+    name: str,
+    root_fd: int | None,
+    objects_fd: int | None,
+    root_names: list[str],
+    object_names: list[str],
+) -> None:
+    """Remove only the exact entries a failed restore created, then its root.
+
+    Entries are removed by recorded name, never by directory sweep, and the
+    directories are removed with ``rmdir``; anything this restore did not
+    create keeps its directory non-empty and is left in place.
+    """
+
+    try:
+        if objects_fd is not None:
+            for entry in reversed(object_names):
+                try:
+                    os.unlink(entry, dir_fd=objects_fd)
+                except FileNotFoundError:
+                    pass
+            os.fsync(objects_fd)
+        if root_fd is not None:
+            for entry in reversed(root_names):
+                try:
+                    if entry == "objects":
+                        os.rmdir(entry, dir_fd=root_fd)
+                    else:
+                        os.unlink(entry, dir_fd=root_fd)
+                except FileNotFoundError:
+                    pass
+            os.fsync(root_fd)
+        os.rmdir(name, dir_fd=parent_fd)
+    except OSError:
+        pass
+    try:
+        os.fsync(parent_fd)
+    except OSError:
+        pass
+
+
+def _restore_target_unchanged(
+    root_fd: int,
+    objects_fd: int | None,
+    root_names: list[str],
+    object_names: list[str],
+    journal_content: bytes | None,
+) -> bool:
+    """Return whether a failed restore target holds only what restore wrote.
+
+    Called with the target's registry lock held exclusively.  Any extra entry
+    or a journal that differs from the restored bytes means another registry
+    instance committed into the target, so cleanup must not run.
+    """
+
+    try:
+        if not set(os.listdir(root_fd)) <= set(root_names):
+            return False
+        if objects_fd is not None and not set(os.listdir(objects_fd)) <= set(
+            object_names
+        ):
+            return False
+        if "registry-journal.jsonl" in root_names:
+            descriptor = os.open(
+                "registry-journal.jsonl",
+                os.O_RDONLY
+                | getattr(os, "O_CLOEXEC", 0)
+                | getattr(os, "O_NOFOLLOW", 0),
+                dir_fd=root_fd,
+            )
+            try:
+                content = _read_bounded(descriptor, MAX_BACKUP_BYTES)
+            finally:
+                os.close(descriptor)
+            if content != journal_content:
+                return False
+    except FileNotFoundError:
+        return True
+    except (OSError, CohortRegistryUnsafe):
+        return False
+    return True
+
+
+def _publish_restored_file(
+    directory_fd: int, name: str, content: bytes, created: list[str]
+) -> None:
+    try:
+        _publish_file(directory_fd, name, content)
+    except FileExistsError:
+        # The name existed before this restore linked it; it is not ours.
+        raise
+    except BaseException:
+        # The link may have succeeded before a later fsync failed.
+        created.append(name)
+        raise
+    created.append(name)
 
 
 def _registry_instance_snapshot(registry: CohortRegistry) -> tuple[object, ...]:
@@ -599,6 +797,7 @@ class CohortRegistry:
             "register",
             "resolve",
             "resolve_history",
+            "resolve_history_view",
         ):
             instance = object.__getattribute__(self, "__dict__")
             if name in instance:
@@ -1056,9 +1255,21 @@ class CohortRegistry:
             raise CohortRegistryUnsafe("cohort registry is closed")
         content = canonical_contract_bytes(entry) + b"\n"
         try:
+            committed_size = os.fstat(descriptor).st_size
+        except OSError:
+            raise CohortRegistryUnsafe("cohort registry journal append failed") from None
+        try:
             _write_all(descriptor, content)
             os.fsync(descriptor)
         except OSError:
+            # Remove any torn suffix so the committed chain stays readable; the
+            # object it named remains an exact uncommitted object that a retry
+            # adopts only when its canonical bytes match.
+            try:
+                os.ftruncate(descriptor, committed_size)
+                os.fsync(descriptor)
+            except OSError:
+                pass
             raise CohortRegistryUnsafe("cohort registry journal append failed") from None
 
     def _accept_observed_head(
@@ -1348,6 +1559,17 @@ class CohortRegistry:
             )
         target = _snapshot_path(root)
         parent = target.parent
+        parent_fd: int | None = None
+        root_fd: int | None = None
+        objects_fd: int | None = None
+        created = False
+        root_verified = False
+        objects_verified = False
+        root_names: list[str] = []
+        object_names: list[str] = []
+        lock_fd: int | None = None
+        journal_content: bytes | None = None
+        completed = False
         try:
             parent_lstat = os.stat(parent, follow_symlinks=False)
             parent_fd = os.open(
@@ -1365,6 +1587,7 @@ class CohortRegistry:
             ):
                 raise CohortRegistryUnsafe("cohort registry restore parent changed")
             os.mkdir(target.name, 0o700, dir_fd=parent_fd)
+            created = True
             root_lstat = os.stat(
                 target.name, dir_fd=parent_fd, follow_symlinks=False
             )
@@ -1385,7 +1608,11 @@ class CohortRegistry:
                 or root_bound.st_uid != os.geteuid()
             ):
                 raise CohortRegistryUnsafe("cohort registry restore root changed")
+            if os.listdir(root_fd):
+                raise CohortRegistryUnsafe("cohort registry restore root changed")
+            root_verified = True
             os.mkdir("objects", 0o700, dir_fd=root_fd)
+            root_names.append("objects")
             objects_lstat = os.stat(
                 "objects", dir_fd=root_fd, follow_symlinks=False
             )
@@ -1406,6 +1633,9 @@ class CohortRegistry:
                 or objects_bound.st_uid != os.geteuid()
             ):
                 raise CohortRegistryUnsafe("cohort registry restore objects changed")
+            if os.listdir(objects_fd):
+                raise CohortRegistryUnsafe("cohort registry restore objects changed")
+            objects_verified = True
             lock_fd = os.open(
                 ".registry.lock",
                 os.O_RDWR
@@ -1416,25 +1646,46 @@ class CohortRegistry:
                 0o600,
                 dir_fd=root_fd,
             )
-            os.close(lock_fd)
-            _publish_file(
+            root_names.append(".registry.lock")
+            # Hold the target's registry lock while it is partially written so
+            # no other instance can open and commit into it before cleanup.
+            fcntl.flock(lock_fd, fcntl.LOCK_EX)
+            _publish_restored_file(
                 root_fd,
                 "registry-metadata.json",
                 canonical_contract_bytes(backup.metadata),
+                root_names,
             )
             for item in backup.objects:
-                _publish_file(
+                _publish_restored_file(
                     objects_fd,
                     f"{item.manifest_sha256}.json",
                     item.manifest_json.encode("utf-8"),
+                    object_names,
                 )
             journal_content = b"".join(
                 canonical_contract_bytes(entry) + b"\n" for entry in backup.journal
             )
-            _publish_file(root_fd, "registry-journal.jsonl", journal_content)
+            _publish_restored_file(
+                root_fd, "registry-journal.jsonl", journal_content, root_names
+            )
             os.fsync(objects_fd)
             os.fsync(root_fd)
             os.fsync(parent_fd)
+            # Reopen through the normal checks while the cleanup scope is
+            # still active, so a failed reopen also leaves a retryable target.
+            # The reopen takes the registry lock itself, so release it here;
+            # cleanup reacquires it and proves the target is unchanged.
+            fcntl.flock(lock_fd, fcntl.LOCK_UN)
+            restored = _CR_CONSTRUCT(
+                target,
+                linkage_store=linkage_store,
+                expected_trust_snapshot_sha256_by_provider=pins,
+                expected_registry_id=expected_registry_id,
+                expected_registry_epoch_sha256=expected_registry_epoch_sha256,
+                expected_state_head_sha256=expected_state_head_sha256,
+            )
+            completed = True
         except FileExistsError:
             raise CohortRegistryConflict(
                 "cohort registry restore target already exists"
@@ -1442,21 +1693,42 @@ class CohortRegistry:
         except OSError:
             raise CohortRegistryUnsafe("cohort registry restore failed") from None
         finally:
-            for name in ("objects_fd", "root_fd", "parent_fd"):
-                descriptor = locals().get(name)
-                if type(descriptor) is int:
+            if created and not completed and parent_fd is not None:
+                # Remove only recorded entries inside directories verified as
+                # the fresh empty ones this restore created; an unverified
+                # substitute is left in place (rmdir fails when non-empty).
+                # With the lock held, a target another instance has committed
+                # into is left untouched.
+                cleanup = True
+                if lock_fd is not None and root_fd is not None:
+                    try:
+                        fcntl.flock(lock_fd, fcntl.LOCK_EX)
+                    except OSError:
+                        cleanup = False
+                    else:
+                        cleanup = _restore_target_unchanged(
+                            root_fd,
+                            objects_fd if objects_verified else None,
+                            root_names,
+                            object_names,
+                            journal_content,
+                        )
+                if cleanup:
+                    _remove_partial_restore(
+                        parent_fd,
+                        target.name,
+                        root_fd if root_verified else None,
+                        objects_fd if objects_verified else None,
+                        root_names,
+                        object_names,
+                    )
+            for descriptor in (lock_fd, objects_fd, root_fd, parent_fd):
+                if descriptor is not None:
                     try:
                         os.close(descriptor)
                     except OSError:
                         pass
-        return _CR_CONSTRUCT(
-            target,
-            linkage_store=linkage_store,
-            expected_trust_snapshot_sha256_by_provider=pins,
-            expected_registry_id=expected_registry_id,
-            expected_registry_epoch_sha256=expected_registry_epoch_sha256,
-            expected_state_head_sha256=expected_state_head_sha256,
-        )
+        return restored
 
     def resolve(
         self, selector_id: str, cohort_version: int
@@ -1489,31 +1761,14 @@ class CohortRegistry:
     def _resolve_history_in_fence(
         self, selector_id: str, cohort_version: int
     ) -> RegisteredCohortHistory:
-        if (
-            type(selector_id) is not str
-            or len(selector_id) != 56
-            or not selector_id.startswith("cohort_selector_")
-            or type(cohort_version) is not int
-            or not 1 <= cohort_version <= 100_000
-        ):
-            raise CohortRegistryConflict("cohort selector is invalid")
+        _require_selector_request(selector_id, cohort_version)
         loaded, head = _CR_LOAD_STATE(self)
-        matches = [
-            (manifest.version, digest, manifest)
-            for digest, (manifest, _) in loaded.items()
-            if manifest.version <= cohort_version
-            and _selector_id(
-                self._metadata.registry_epoch_sha256, manifest.cohort_id
-            )
-            == selector_id
-        ]
-        matches.sort(key=lambda item: item[0])
-        if (
-            len(matches) != cohort_version
-            or [item[0] for item in matches]
-            != list(range(1, cohort_version + 1))
-        ):
-            raise CohortRegistryConflict("cohort selector is unavailable")
+        matches, _ = _select_registered_history(
+            loaded,
+            self._metadata.registry_epoch_sha256,
+            selector_id,
+            cohort_version,
+        )
         _, digest, manifest = matches[-1]
         try:
             _PINNED_VALIDATE_MANIFEST_IN_FENCE(
@@ -1533,6 +1788,56 @@ class CohortRegistry:
             selected_manifest_sha256=digest,
             manifests=tuple(item[2] for item in matches),
         )
+
+    def resolve_history_view(
+        self, selector_id: str, cohort_version: int
+    ) -> CohortHistoryView:
+        """Return immutable registered history with its observed authority state.
+
+        Unlike ``resolve_history`` this read does not reject stale linkage
+        authority.  The result is a distinct protected contract that is never
+        presented as current; a stale version carries a controlled reason.
+        """
+
+        _require_registry_integrity(self)
+        _require_selector_request(selector_id, cohort_version)
+        with _PINNED_AUTHORITY_READ_FENCE(self._linkage_store):
+            with _CR_LOCK(self, exclusive=False):
+                loaded, head = _CR_LOAD_STATE(self)
+                matches, latest = _select_registered_history(
+                    loaded,
+                    self._metadata.registry_epoch_sha256,
+                    selector_id,
+                    cohort_version,
+                )
+                _, digest, manifest = matches[-1]
+                try:
+                    _PINNED_VALIDATE_MANIFEST_IN_FENCE(
+                        manifest,
+                        self._linkage_store,
+                        expected_trust_snapshot_sha256_by_provider=self._trust_pins,
+                    )
+                except Exception:
+                    authority_state = CohortAuthorityState.STALE
+                    stale_reason: CohortStaleReason | None = (
+                        CohortStaleReason.LINKAGE_AUTHORITY_NOT_CURRENT
+                    )
+                else:
+                    authority_state = CohortAuthorityState.CURRENT
+                    stale_reason = None
+                return CohortHistoryView(
+                    registry_id=self._metadata.registry_id,
+                    registry_epoch_sha256=self._metadata.registry_epoch_sha256,
+                    state_version=len(loaded),
+                    state_head_sha256=head,
+                    selector_id=selector_id,
+                    cohort_version=cohort_version,
+                    latest_registered_cohort_version=latest,
+                    authority_state=authority_state,
+                    stale_reason=stale_reason,
+                    historical_selected_manifest_sha256=digest,
+                    historical_manifests=tuple(item[2] for item in matches),
+                )
 
     def list_selectors(
         self,
@@ -1655,6 +1960,7 @@ _REGISTRY_METHOD_SEAL = MappingProxyType(
             "restore",
             "resolve",
             "resolve_history",
+            "resolve_history_view",
             "list_selectors",
             "close",
         )
@@ -1751,6 +2057,7 @@ _REGISTRY_ALIAS_SEAL = MappingProxyType(
 
 __all__ = [
     "CohortAuthorityState",
+    "CohortHistoryView",
     "CohortRegistrationReceipt",
     "CohortRegistry",
     "CohortRegistryBackup",
@@ -1760,6 +2067,7 @@ __all__ = [
     "CohortRegistryUnsafe",
     "CohortSelectorPage",
     "CohortSelectorRecord",
+    "CohortStaleReason",
     "RegisteredCohortManifest",
     "RegisteredCohortHistory",
     "cohort_registry_backup_from_bytes",
