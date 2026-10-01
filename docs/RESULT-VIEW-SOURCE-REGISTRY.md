@@ -61,8 +61,14 @@ Authority that does not exist today:
   `bundle_id`, `information_state`, the compatibility key's result schema,
   assets, semantics, and registered policy reference, and
   `effective_approval_ref` when the result is provider-eligible exist only in
-  the caller's record. E04 stores none of them. The method-definition object is
-  verified only through its digest, which the binding pins.
+  the caller's record. E04 stores none of them. `CatalogResultRef` does carry
+  a `bundle_record_id`, but it is a different identifier from the E05
+  `bundle_id`, and nothing maps one to the other. The method-definition object
+  is verified only through its digest, which the binding pins. The key's
+  measurement family, quantity, and unit are bound through that digest, because
+  `VerifiedMeasurementRecord` requires them to equal the method's; only the four
+  sub-fields above are unverified, and `caller_asserted_fields` lists exactly
+  those four for each record.
 - **Labels** are presentation text, privacy-checked by E06 and otherwise
   caller-authored.
 
@@ -81,7 +87,7 @@ Field classification used by the registry:
 | Compatibility decision | Exact E05 re-derivation from stored records, stored policy and pin, and the binding's authority head | Pure replay |
 | E06 source and filter identities | Exact E06 re-construction from the replayed decision | Pure replay |
 | Compatibility policy and policy pin | Caller input | Not verified |
-| `result_sha256`, `bundle_id`, `information_state`, compatibility key details, `effective_approval_ref` | Caller input | Not verified |
+| `result_sha256`, `bundle_id`, `information_state`, compatibility key result schema, assets, semantics, and policy reference, `effective_approval_ref` | Caller input | Not verified |
 | Denominator ledger | Caller input; digest bound | Not verified |
 | Accessible and QC labels | Caller input; E06 privacy checks | Not verified |
 
@@ -211,28 +217,18 @@ Storage follows the D03 decision registry: a private `0700` root, `0600`
 owner-only files, descriptor-relative exclusive publication with fsync and
 hard-link adoption, a journal chain from a genesis digest over immutable
 metadata, required retained registry ID, epoch, and head on reopen, a
-process-wide monotonic head fence against rollback (keyed by registry ID and
-epoch rather than root inode, so restoring an older backup to a new path in the
-same process is detected; the D03 and D05 registries key it by inode and have
-that gap), inode-bound control files,
-torn-journal truncation, and removal of a failed restore's partial target.
-A crash in the middle of a journal append leaves an unterminated final line;
-it was never fsynced or returned, so reopening and every registration truncate
-it under the exclusive lock, and every complete line must still validate.
-Restore builds the registry in a private hidden sibling
-(`.<name>.restore-<random>`) and renames it onto the target only after every
-file is fsynced, so a crash leaves no partial target and two concurrent
-restores never touch each other's files. A crashed restore can leave its hidden
-staging directory behind; it is never opened as a registry and does not block a
-retry. The target must not exist; an empty directory created at that name
-between the final existence check and the rename would be replaced, which is a
-same-user race outside the threat model. First-time creation is staged the same way: the root, control files, empty
-journal, and metadata are built in a hidden sibling and renamed into place, so
-an existing root always has published metadata. A root without metadata
-therefore always fails closed and never bootstraps a new identity. Once a
-restore's rename lands it is never cleaned up, even if the parent fsync then
-fails. The
-metadata binds the cohort registry ID and epoch, the linkage store ID, epoch,
+process-wide monotonic head fence against rollback, inode-bound control files,
+and a process-private instance seal.
+
+A failed journal append truncates any torn suffix back to the last committed
+entry, so the chain stays readable and the registration can be retried. A
+failed restore, including a failed final reopen of the restored registry,
+removes the partial target it created, so a retry is possible. A crash, rather
+than a caught failure, can still leave a torn journal tail or a partial restore
+target that needs manual repair; that is the same shared follow-up as the D03
+decision and D05 cohort registries.
+
+The metadata binds the cohort registry ID and epoch, the linkage store ID, epoch,
 and storage identity, the E04 catalog storage and reader-registry identities,
 and the D06 record-catalog scope; reopening or restoring against a different
 D06 catalog fails.
@@ -256,12 +252,8 @@ interpreter's `__warningregistry__` must not disable the registry.
 
 ## Known gaps
 
-- If first-time creation's rename lands but the parent fsync then fails, the
-  constructor raises after the root exists. The caller has no retained ID,
-  epoch, or head, so reopening needs them read from the root's metadata and
-  journal by an operator.
-- A restore whose backup is older than a head this process has already seen
-  is rejected at the final open, but its restored copy stays on disk.
+- Crash recovery for torn journal tails, partial restore targets, and partial
+  first-time creation matches D03/D05 and is a shared follow-up.
 - The rollback fence is per process. A fresh process trusts the retained head
   it is given.
 

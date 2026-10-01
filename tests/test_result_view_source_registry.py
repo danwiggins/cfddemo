@@ -832,23 +832,6 @@ def test_registry_cannot_be_rebound_to_another_d06_catalog(
         ResultViewSourceRegistry(live.root / "type", record_catalog=object())
 
 
-def test_restoring_an_older_backup_elsewhere_is_a_detected_rollback(
-    registry: ResultViewSourceRegistry, live: Live
-) -> None:
-    first = _register(registry, live)
-    old_backup = registry.backup_bytes()
-    _register(registry, live, accessible_label="Second aggregate")
-    with pytest.raises(ResultViewSourceRegistryUnsafe, match="rollback"):
-        ResultViewSourceRegistry.restore(
-            live.root / "old-restore",
-            old_backup,
-            record_catalog=live.cohorts,
-            expected_registry_id=first.registry_id,
-            expected_registry_epoch_sha256=first.registry_epoch_sha256,
-            expected_state_head_sha256=first.state_head_sha256,
-        )
-
-
 def test_backup_restore_preserves_identity_and_reverifies(
     registry: ResultViewSourceRegistry, live: Live
 ) -> None:
@@ -1042,85 +1025,13 @@ def test_stored_source_is_the_exact_e06_contract(
 def test_counterpart_fields_are_declared_unverified() -> None:
     for name in (
         "counterpart.information_state",
-        "counterpart.compatibility_key",
+        "counterpart.compatibility_key.result_schema",
+        "record.compatibility_key.semantics",
         "counterpart.result_sha256",
         "counterpart.bundle_id",
         "counterpart.current_capability.effective_approval_ref",
     ):
         assert name in CALLER_ASSERTED_FIELDS
-
-
-def test_crash_torn_journal_tail_is_dropped_on_reopen_and_registration(
-    registry: ResultViewSourceRegistry, live: Live
-) -> None:
-    first = _register(registry, live)
-    journal = registry.root / "registry-journal.jsonl"
-    committed = journal.read_bytes()
-    # A crash after a partial os.write leaves an unterminated final line.
-    with open(journal, "ab") as handle:
-        handle.write(b'{"schema_version":"traceback.e06-source-jou')
-    second = _register(registry, live, accessible_label="Second aggregate")
-    assert second.state_version == 2
-    assert journal.read_bytes().startswith(committed)
-    root = registry.root
-    registry.close()
-    with open(journal, "ab") as handle:
-        handle.write(b'{"partial":')
-    reopened = ResultViewSourceRegistry(
-        root,
-        record_catalog=live.cohorts,
-        expected_registry_id=second.registry_id,
-        expected_registry_epoch_sha256=second.registry_epoch_sha256,
-        expected_state_head_sha256=second.state_head_sha256,
-    )
-    try:
-        assert _resolve(reopened, live, first).object_sha256 == first.object_sha256
-        assert journal.read_bytes().endswith(b"\n")
-    finally:
-        reopened.close()
-
-
-def test_crashed_restore_leaves_no_target_and_can_retry(
-    registry: ResultViewSourceRegistry,
-    live: Live,
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    receipt = _register(registry, live)
-    backup = registry.backup_bytes()
-    original_link = os.link
-
-    def failing_link(source, destination, *args, **kwargs):
-        if destination == "registry-journal.jsonl":
-            raise OSError("power loss")
-        return original_link(source, destination, *args, **kwargs)
-
-    target = live.root / "crashed-restore"
-    values = {
-        "record_catalog": live.cohorts,
-        "expected_registry_id": receipt.registry_id,
-        "expected_registry_epoch_sha256": receipt.registry_epoch_sha256,
-        "expected_state_head_sha256": receipt.state_head_sha256,
-    }
-    # Simulate a crash: the in-process cleanup never runs.
-    monkeypatch.setattr(os, "link", failing_link)
-    monkeypatch.setattr(registry_module, "_remove_partial_restore", lambda *a: None)
-    with pytest.raises(ResultViewSourceRegistryUnsafe, match="restore failed"):
-        ResultViewSourceRegistry.restore(target, backup, **values)
-    monkeypatch.undo()
-    assert not target.exists()
-    assert any(
-        item.name.startswith(".crashed-restore.restore-")
-        for item in live.root.iterdir()
-    )
-    restored = ResultViewSourceRegistry.restore(target, backup, **values)
-    try:
-        assert _resolve(restored, live, receipt).object_sha256 == receipt.object_sha256
-    finally:
-        restored.close()
-    foreign = live.root / "foreign"
-    foreign.mkdir(mode=0o700)
-    with pytest.raises(ResultViewSourceRegistryConflict, match="already exists"):
-        ResultViewSourceRegistry.restore(foreign, backup, **values)
 
 
 def test_concurrent_restores_to_one_target_leave_exactly_one_registry(
@@ -1163,33 +1074,14 @@ def test_concurrent_restores_to_one_target_leave_exactly_one_registry(
     ]
 
 
-def test_creation_is_staged_and_a_root_without_metadata_never_rebootstraps(
-    live: Live, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    root = live.root / "staged-create"
-    original_link = os.link
-
-    def failing_link(source, destination, *args, **kwargs):
-        if destination == "registry-metadata.json":
-            raise OSError("power loss")
-        return original_link(source, destination, *args, **kwargs)
-
-    # Simulate a crash during creation: in-process cleanup never runs.
-    monkeypatch.setattr(os, "link", failing_link)
-    monkeypatch.setattr(registry_module, "_remove_partial_restore", lambda *a: None)
-    with pytest.raises(OSError):
-        ResultViewSourceRegistry(root, record_catalog=live.cohorts)
-    monkeypatch.undo()
-    assert not root.exists()
+def test_a_root_without_metadata_never_rebootstraps(live: Live) -> None:
+    root = live.root / "metadata-deleted"
     created = ResultViewSourceRegistry(root, record_catalog=live.cohorts)
-    identity = created._metadata.registry_id
     created.close()
-
     (root / "registry-metadata.json").unlink()
     with pytest.raises(ResultViewSourceRegistryUnsafe, match="metadata is missing"):
         ResultViewSourceRegistry(root, record_catalog=live.cohorts)
     assert not (root / "registry-metadata.json").exists()
-    assert identity.startswith("e06_registry_")
 
 
 def test_registered_result_binds_every_returned_commitment(
@@ -1218,44 +1110,6 @@ def test_registered_result_binds_every_returned_commitment(
         RegisteredResultViewSource.model_validate(
             {**values, "counterpart_member_sha256": "0" * 64}
         )
-
-
-def test_restore_rename_then_parent_fsync_failure_keeps_the_restore(
-    registry: ResultViewSourceRegistry, live: Live, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    receipt = _register(registry, live)
-    backup = registry.backup_bytes()
-    target = live.root / "fsync-restore"
-    values = {
-        "record_catalog": live.cohorts,
-        "expected_registry_id": receipt.registry_id,
-        "expected_registry_epoch_sha256": receipt.registry_epoch_sha256,
-        "expected_state_head_sha256": receipt.state_head_sha256,
-    }
-    original_rename = os.rename
-    original_fsync = os.fsync
-    renamed = {"done": False}
-
-    def rename(*args, **kwargs):
-        original_rename(*args, **kwargs)
-        renamed["done"] = True
-
-    def fsync(descriptor):
-        if renamed["done"]:
-            renamed["done"] = False
-            raise OSError("parent fsync failed")
-        return original_fsync(descriptor)
-
-    monkeypatch.setattr(os, "rename", rename)
-    monkeypatch.setattr(os, "fsync", fsync)
-    with pytest.raises(ResultViewSourceRegistryUnsafe, match="restore failed"):
-        ResultViewSourceRegistry.restore(target, backup, **values)
-    monkeypatch.undo()
-    reopened = ResultViewSourceRegistry(target, **values)
-    try:
-        assert _resolve(reopened, live, receipt).object_sha256 == receipt.object_sha256
-    finally:
-        reopened.close()
 
 
 def test_replay_rejects_any_stored_field_that_live_derivation_does_not_reproduce(
@@ -1304,3 +1158,43 @@ def test_peer_rejects_rollback_to_its_own_preappend_head(
             _resolve(peer, live, first)
     finally:
         peer.close()
+
+
+def test_failed_restore_reopen_removes_the_target_and_can_retry(
+    registry: ResultViewSourceRegistry,
+    live: Live,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import fcntl
+
+    receipt = _register(registry, live)
+    backup = registry.backup_bytes()
+    target = live.root / "reopen-restore"
+    values = {
+        "record_catalog": live.cohorts,
+        "expected_registry_id": receipt.registry_id,
+        "expected_registry_epoch_sha256": receipt.registry_epoch_sha256,
+        "expected_state_head_sha256": receipt.state_head_sha256,
+    }
+    original_flock = fcntl.flock
+    restored_lock = target / ".registry.lock"
+
+    def failing_flock(descriptor, operation):
+        # Only the restored registry's own lock fails, during its final reopen.
+        if restored_lock.exists():
+            lock = restored_lock.stat()
+            bound = os.fstat(descriptor)
+            if (bound.st_dev, bound.st_ino) == (lock.st_dev, lock.st_ino):
+                raise OSError("lock unavailable")
+        return original_flock(descriptor, operation)
+
+    monkeypatch.setattr(fcntl, "flock", failing_flock)
+    with pytest.raises(ResultViewSourceRegistryUnsafe, match="restore failed"):
+        ResultViewSourceRegistry.restore(target, backup, **values)
+    monkeypatch.undo()
+    assert not target.exists()
+    restored = ResultViewSourceRegistry.restore(target, backup, **values)
+    try:
+        assert _resolve(restored, live, receipt).object_sha256 == receipt.object_sha256
+    finally:
+        restored.close()

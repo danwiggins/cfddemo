@@ -99,7 +99,10 @@ CallerAssertedFields = Literal[
     "compatibility_policy",
     "compatibility_policy_pin",
     "counterpart.bundle_id",
-    "counterpart.compatibility_key",
+    "counterpart.compatibility_key.assets",
+    "counterpart.compatibility_key.registered_policy",
+    "counterpart.compatibility_key.result_schema",
+    "counterpart.compatibility_key.semantics",
     "counterpart.current_capability.effective_approval_ref",
     "counterpart.current_capability.qualification_state_unknown_versus_unassigned",
     "counterpart.information_state",
@@ -107,7 +110,10 @@ CallerAssertedFields = Literal[
     "denominator",
     "qc_label",
     "record.bundle_id",
-    "record.compatibility_key",
+    "record.compatibility_key.assets",
+    "record.compatibility_key.registered_policy",
+    "record.compatibility_key.result_schema",
+    "record.compatibility_key.semantics",
     "record.current_capability.effective_approval_ref",
     "record.current_capability.qualification_state_unknown_versus_unassigned",
     "record.information_state",
@@ -118,9 +124,7 @@ CallerAssertedFields = Literal[
 CALLER_ASSERTED_FIELDS: tuple[str, ...] = get_args(CallerAssertedFields)
 
 _REGISTRY_PROCESS_LOCK = threading.RLock()
-# Keyed by registry identity, not storage: a restore of an older backup to a
-# new path must still be detected as a rollback in this process.
-_REGISTRY_PROCESS_HEADS: dict[tuple[str, str], str] = {}
+_REGISTRY_PROCESS_HEADS: dict[tuple[int, int, str, str], str] = {}
 _REGISTRY_INSTANCE_SEALS: weakref.WeakKeyDictionary[
     object, tuple[object, ...]
 ] = weakref.WeakKeyDictionary()
@@ -857,97 +861,6 @@ def _new_metadata(
     )
 
 
-def _create_registry_root(
-    root: Path, metadata: ResultViewSourceRegistryMetadata
-) -> bool:
-    """Create a complete registry root atomically; return False if one exists.
-
-    The root, control files, empty journal, and metadata are built in a
-    private hidden sibling and renamed into place, so an existing root always
-    has published metadata and a crash never leaves a partial registry.
-    """
-
-    root.parent.mkdir(parents=True, exist_ok=True)
-    flags = (
-        os.O_RDONLY
-        | getattr(os, "O_DIRECTORY", 0)
-        | getattr(os, "O_CLOEXEC", 0)
-        | getattr(os, "O_NOFOLLOW", 0)
-    )
-    file_flags = (
-        os.O_WRONLY
-        | os.O_CREAT
-        | os.O_EXCL
-        | getattr(os, "O_CLOEXEC", 0)
-        | getattr(os, "O_NOFOLLOW", 0)
-    )
-    parent_fd = os.open(root.parent, flags)
-    staging = f".{root.name}.create-{secrets.token_hex(16)}"
-    staging_fd: int | None = None
-    objects_fd: int | None = None
-    created = False
-    published = False
-    try:
-        try:
-            os.stat(root.name, dir_fd=parent_fd, follow_symlinks=False)
-        except FileNotFoundError:
-            pass
-        else:
-            return False
-        os.mkdir(staging, 0o700, dir_fd=parent_fd)
-        created = True
-        staging_fd = os.open(staging, flags, dir_fd=parent_fd)
-        os.mkdir("objects", 0o700, dir_fd=staging_fd)
-        objects_fd = os.open("objects", flags, dir_fd=staging_fd)
-        for name in (".registry.lock", "registry-journal.jsonl"):
-            descriptor = os.open(name, file_flags, 0o600, dir_fd=staging_fd)
-            try:
-                os.fsync(descriptor)
-            finally:
-                os.close(descriptor)
-        _publish_file(
-            staging_fd, "registry-metadata.json", canonical_contract_bytes(metadata)
-        )
-        os.fsync(objects_fd)
-        os.fsync(staging_fd)
-        try:
-            os.stat(root.name, dir_fd=parent_fd, follow_symlinks=False)
-        except FileNotFoundError:
-            pass
-        else:
-            return False
-        try:
-            os.rename(staging, root.name, src_dir_fd=parent_fd, dst_dir_fd=parent_fd)
-        except OSError:
-            # A concurrent creator won the rename; this attempt is discarded.
-            return False
-        published = True
-        os.fsync(parent_fd)
-        return True
-    finally:
-        if created and not published and staging_fd is not None:
-            _remove_partial_restore(parent_fd, staging, staging_fd, objects_fd)
-        elif created and not published:
-            try:
-                os.rmdir(staging, dir_fd=parent_fd)
-            except OSError:
-                pass
-        for descriptor in (objects_fd, staging_fd, parent_fd):
-            if descriptor is not None:
-                try:
-                    os.close(descriptor)
-                except OSError:
-                    pass
-
-
-def _require_absent(parent_fd: int, name: str) -> None:
-    try:
-        os.stat(name, dir_fd=parent_fd, follow_symlinks=False)
-    except FileNotFoundError:
-        return
-    raise FileExistsError(name)
-
-
 def _authority_identity(record_catalog: CohortRecordCatalog) -> dict[str, object]:
     """Read the D06 catalog's own pinned identities without invoking hooks."""
 
@@ -1117,7 +1030,12 @@ def _registry_instance_snapshot(registry: ResultViewSourceRegistry) -> tuple[obj
             ) from None
         root_identity = (root_observed.st_dev, root_observed.st_ino)
         metadata_identity = (metadata_observed.st_dev, metadata_observed.st_ino)
-        derived_head_key = (metadata.registry_id, metadata.registry_epoch_sha256)
+        derived_head_key = (
+            root_identity[0],
+            root_identity[1],
+            metadata.registry_id,
+            metadata.registry_epoch_sha256,
+        )
         if (
             persisted != metadata_bytes
             or instance["_root_identity"] != root_identity
@@ -1234,9 +1152,12 @@ class ResultViewSourceRegistry:
             # The linkage snapshot is read before any registry lock: the D01
             # fence is not reentrant and must never be taken under this lock.
             linkage = _PINNED_ACTIVE_SNAPSHOT(self._authority["_linkage_store"])
-            root_created = _create_registry_root(
-                self.root, _new_metadata(self._authority, linkage)
-            )
+            try:
+                self.root.mkdir(parents=True, mode=0o700, exist_ok=False)
+            except FileExistsError:
+                root_created = False
+            else:
+                root_created = True
             root_lstat = os.stat(self.root, follow_symlinks=False)
             if (
                 not stat.S_ISDIR(root_lstat.st_mode)
@@ -1257,6 +1178,8 @@ class ResultViewSourceRegistry:
             if (bound.st_dev, bound.st_ino) != (root_lstat.st_dev, root_lstat.st_ino):
                 raise ResultViewSourceRegistryUnsafe("E06 source registry root changed")
             self._root_identity = (bound.st_dev, bound.st_ino)
+            if root_created:
+                os.mkdir("objects", 0o700, dir_fd=self._root_fd)
             self._objects_fd = os.open("objects", flags, dir_fd=self._root_fd)
             objects = os.fstat(self._objects_fd)
             if (
@@ -1271,8 +1194,10 @@ class ResultViewSourceRegistry:
             self._lock_fd = os.open(
                 ".registry.lock",
                 os.O_RDWR
+                | (os.O_CREAT if root_created else 0)
                 | getattr(os, "O_CLOEXEC", 0)
                 | getattr(os, "O_NOFOLLOW", 0),
+                0o600,
                 dir_fd=self._root_fd,
             )
             lock_metadata = os.fstat(self._lock_fd)
@@ -1286,9 +1211,11 @@ class ResultViewSourceRegistry:
             self._journal_fd = os.open(
                 "registry-journal.jsonl",
                 os.O_RDWR
+                | (os.O_CREAT if root_created else 0)
                 | os.O_APPEND
                 | getattr(os, "O_CLOEXEC", 0)
                 | getattr(os, "O_NOFOLLOW", 0),
+                0o600,
                 dir_fd=self._root_fd,
             )
             journal_metadata = os.fstat(self._journal_fd)
@@ -1302,14 +1229,17 @@ class ResultViewSourceRegistry:
                 )
             self._journal_identity = (journal_metadata.st_dev, journal_metadata.st_ino)
             with _SR_LOCK(self, exclusive=True):
-                self._metadata = _SR_LOAD_OR_CREATE_METADATA(self, linkage)
+                self._metadata = _SR_LOAD_OR_CREATE_METADATA(
+                    self, linkage, allow_create=root_created
+                )
                 self._genesis_head_sha256 = _metadata_genesis_sha256(self._metadata)
                 self._head_key = (
+                    self._root_identity[0],
+                    self._root_identity[1],
                     self._metadata.registry_id,
                     self._metadata.registry_epoch_sha256,
                 )
                 _SR_RECOVER_TEMPORARY_OBJECTS(self)
-                _SR_RECOVER_TORN_JOURNAL(self)
                 _, head = _SR_LOAD_STATE(self, check_trusted_head=False)
                 if root_created:
                     if any(item is not None for item in expected_values):
@@ -1494,7 +1424,7 @@ class ResultViewSourceRegistry:
         os.fsync(self._objects_fd)
 
     def _load_or_create_metadata(
-        self, linkage: object
+        self, linkage: object, *, allow_create: bool
     ) -> ResultViewSourceRegistryMetadata:
         assert self._root_fd is not None
         authority = self._authority
@@ -1515,11 +1445,20 @@ class ResultViewSourceRegistry:
                 dir_fd=self._root_fd,
             )
         except FileNotFoundError:
-            # Creation is staged and renamed into place with its metadata, so a
-            # root without metadata is never a new registry: fail closed.
-            raise ResultViewSourceRegistryUnsafe(
-                "E06 source registry metadata is missing"
-            ) from None
+            if not allow_create:
+                raise ResultViewSourceRegistryUnsafe(
+                    "E06 source registry metadata is missing"
+                ) from None
+            try:
+                _SR_PUBLISH(
+                    self,
+                    self._root_fd,
+                    "registry-metadata.json",
+                    canonical_contract_bytes(_new_metadata(authority, linkage)),
+                )
+            except FileExistsError:
+                pass
+            return _SR_LOAD_OR_CREATE_METADATA(self, linkage, allow_create=False)
         try:
             observed = os.fstat(descriptor)
             if (
@@ -1633,28 +1572,6 @@ class ResultViewSourceRegistry:
                 pass
             raise ResultViewSourceRegistryUnsafe(
                 "E06 source registry journal append failed"
-            ) from None
-
-    def _recover_torn_journal(self) -> None:
-        """Drop an incomplete final journal line left by a crash mid-append.
-
-        Must run under the exclusive registry lock.  A line without its newline
-        was never fsynced and returned as committed, so it is not state; every
-        complete line must still validate as part of the chain.
-        """
-
-        descriptor = self._journal_fd
-        if descriptor is None:
-            raise ResultViewSourceRegistryUnsafe("E06 source registry is closed")
-        try:
-            os.lseek(descriptor, 0, os.SEEK_SET)
-            content = _read_bounded(descriptor, MAX_JOURNAL_BYTES)
-            if content and not content.endswith(b"\n"):
-                os.ftruncate(descriptor, content.rfind(b"\n") + 1)
-                os.fsync(descriptor)
-        except OSError:
-            raise ResultViewSourceRegistryUnsafe(
-                "E06 source registry journal recovery failed"
             ) from None
 
     def _accept_observed_head(
@@ -1981,7 +1898,6 @@ class ResultViewSourceRegistry:
             )
             with _SR_LOCK(self, exclusive=True):
                 _SR_RECOVER_TEMPORARY_OBJECTS(self)
-                _SR_RECOVER_TORN_JOURNAL(self)
                 loaded, head = _SR_LOAD_STATE(self)
                 assert self._objects_fd is not None
                 # The journal is the commit point: an object without an entry is
@@ -2356,7 +2272,6 @@ class ResultViewSourceRegistry:
         objects_fd: int | None = None
         created = False
         completed = False
-        staging = f".{target.name}.restore-{secrets.token_hex(16)}"
         try:
             parent_lstat = os.stat(parent, follow_symlinks=False)
             parent_fd = os.open(parent, directory_flags)
@@ -2368,14 +2283,10 @@ class ResultViewSourceRegistry:
                 raise ResultViewSourceRegistryUnsafe(
                     "E06 source registry restore parent changed"
                 )
-            _require_absent(parent_fd, target.name)
-            # The restore is built in a private staging sibling and renamed into
-            # place only when complete, so a crash never leaves a partial target
-            # and a concurrent restore never touches another's files.
-            os.mkdir(staging, 0o700, dir_fd=parent_fd)
+            os.mkdir(target.name, 0o700, dir_fd=parent_fd)
             created = True
-            root_lstat = os.stat(staging, dir_fd=parent_fd, follow_symlinks=False)
-            root_fd = os.open(staging, directory_flags, dir_fd=parent_fd)
+            root_lstat = os.stat(target.name, dir_fd=parent_fd, follow_symlinks=False)
+            root_fd = os.open(target.name, directory_flags, dir_fd=parent_fd)
             root_bound = os.fstat(root_fd)
             if (
                 not stat.S_ISDIR(root_lstat.st_mode)
@@ -2432,12 +2343,18 @@ class ResultViewSourceRegistry:
             )
             os.fsync(objects_fd)
             os.fsync(root_fd)
-            _require_absent(parent_fd, target.name)
-            os.rename(staging, target.name, src_dir_fd=parent_fd, dst_dir_fd=parent_fd)
-            # Once renamed, the descriptors name the published target; never
-            # clean them up, even if the parent fsync below fails.
-            completed = True
             os.fsync(parent_fd)
+            # Reopen through the normal checks before the restore counts as
+            # complete, so a target that cannot open is removed, not left to
+            # block a retry.
+            restored = _SR_CONSTRUCT(
+                target,
+                record_catalog=record_catalog,
+                expected_registry_id=expected_registry_id,
+                expected_registry_epoch_sha256=expected_registry_epoch_sha256,
+                expected_state_head_sha256=expected_state_head_sha256,
+            )
+            completed = True
         except FileExistsError:
             raise ResultViewSourceRegistryConflict(
                 "E06 source registry restore target already exists"
@@ -2449,10 +2366,10 @@ class ResultViewSourceRegistry:
         finally:
             if created and not completed:
                 if root_fd is not None:
-                    _remove_partial_restore(parent_fd, staging, root_fd, objects_fd)
+                    _remove_partial_restore(parent_fd, target.name, root_fd, objects_fd)
                 elif parent_fd is not None:
                     try:
-                        os.rmdir(staging, dir_fd=parent_fd)
+                        os.rmdir(target.name, dir_fd=parent_fd)
                         os.fsync(parent_fd)
                     except OSError:
                         pass
@@ -2462,13 +2379,7 @@ class ResultViewSourceRegistry:
                         os.close(descriptor)
                     except OSError:
                         pass
-        return _SR_CONSTRUCT(
-            target,
-            record_catalog=record_catalog,
-            expected_registry_id=expected_registry_id,
-            expected_registry_epoch_sha256=expected_registry_epoch_sha256,
-            expected_state_head_sha256=expected_state_head_sha256,
-        )
+        return restored
 
 
 _REGISTRY_METHOD_SEAL = MappingProxyType(
@@ -2486,7 +2397,6 @@ _REGISTRY_METHOD_SEAL = MappingProxyType(
             "_load_or_create_metadata",
             "_load_journal",
             "_append_journal",
-            "_recover_torn_journal",
             "_accept_observed_head",
             "_load_state",
             "_derive_in_fence",
@@ -2565,7 +2475,6 @@ _SR_RECOVER_TEMPORARY_OBJECTS = ResultViewSourceRegistry._recover_temporary_obje
 _SR_LOAD_OR_CREATE_METADATA = ResultViewSourceRegistry._load_or_create_metadata
 _SR_LOAD_JOURNAL = ResultViewSourceRegistry._load_journal
 _SR_APPEND_JOURNAL = ResultViewSourceRegistry._append_journal
-_SR_RECOVER_TORN_JOURNAL = ResultViewSourceRegistry._recover_torn_journal
 _SR_ACCEPT_OBSERVED_HEAD = ResultViewSourceRegistry._accept_observed_head
 _SR_LOAD_STATE = ResultViewSourceRegistry._load_state
 _SR_DERIVE_IN_FENCE = ResultViewSourceRegistry._derive_in_fence
@@ -2603,7 +2512,6 @@ _REGISTRY_ALIAS_SEAL = MappingProxyType(
             "_SR_LOAD_OR_CREATE_METADATA",
             "_SR_LOAD_JOURNAL",
             "_SR_APPEND_JOURNAL",
-            "_SR_RECOVER_TORN_JOURNAL",
             "_SR_ACCEPT_OBSERVED_HEAD",
             "_SR_LOAD_STATE",
             "_SR_DERIVE_IN_FENCE",
