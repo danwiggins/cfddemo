@@ -10,8 +10,12 @@ from __future__ import annotations
 import base64
 import hashlib
 import json
+import os
 import re
+import sqlite3
+import threading
 import unicodedata
+from contextlib import AbstractContextManager, nullcontext
 from datetime import UTC, datetime, timedelta
 from enum import StrEnum
 from types import MappingProxyType
@@ -864,7 +868,34 @@ def _result(
     return _replay_contract(RepeatabilityComparison, comparison)
 
 
-def compare_repeatability(
+def _require_held_authority_fence(linkage_store: object) -> None:
+    """Require that this thread already holds the store's authority fence."""
+
+    if type(linkage_store) is not ProviderLinkageStore:
+        raise LongitudinalDecisionReplayError(
+            "repeatability publication requires an exact live authority fence"
+        )
+    state = object.__getattribute__(linkage_store, "__dict__")
+    connection = state.get("_connection") if type(state) is dict else None
+    fence_thread = (
+        state.get("_authority_fence_thread") if type(state) is dict else None
+    )
+    # authority_read_fence marks its holder (process, thread) for exactly its
+    # body while it holds one BEGIN IMMEDIATE transaction.  Another store
+    # transaction (such as fenced_active_snapshot), another thread's fence, and
+    # a forked child that inherited the mark do not match.
+    if (
+        type(fence_thread) is not tuple
+        or fence_thread != (os.getpid(), threading.get_ident())
+        or type(connection) is not sqlite3.Connection
+        or not connection.in_transaction
+    ):
+        raise LongitudinalDecisionReplayError(
+            "repeatability comparison requires the held live authority fence"
+        )
+
+
+def _compare_repeatability(
     anchor: LongitudinalRecord,
     member: LongitudinalRecord,
     policy: LongitudinalAnchorPolicy,
@@ -884,9 +915,10 @@ def compare_repeatability(
     expected_evidence_sha256: str,
     expected_protocol_sha256: str,
     expected_repeatability_authority_sha256: str,
+    fence_held: bool,
 ) -> RepeatabilityComparison:
-    """Produce a descriptive delta only after exact D03 and evidence replay."""
-
+    if fence_held:
+        _require_held_authority_fence(linkage_store)
     if not _contract_graph_is_trusted(evaluated_at):
         raise ValueError(
             "evaluation timestamp must be an exact trusted timezone-aware UTC value"
@@ -1185,7 +1217,13 @@ def compare_repeatability(
         raise LongitudinalDecisionReplayError(
             "repeatability publication requires an exact live authority fence"
         )
-    with _PINNED_AUTHORITY_READ_FENCE(linkage_store):
+    final_fence: AbstractContextManager[object]
+    if fence_held:
+        _require_held_authority_fence(linkage_store)
+        final_fence = nullcontext()
+    else:
+        final_fence = _PINNED_AUTHORITY_READ_FENCE(linkage_store)
+    with final_fence:
         decision = replay_longitudinal_member_decision(
             decision,
             anchor,
@@ -1226,6 +1264,118 @@ def compare_repeatability(
         )
 
 
+def compare_repeatability(
+    anchor: LongitudinalRecord,
+    member: LongitudinalRecord,
+    policy: LongitudinalAnchorPolicy,
+    decision: LongitudinalMemberDecision,
+    anchor_observation: ComparisonObservation,
+    member_observation: ComparisonObservation,
+    envelope: RepeatabilityEnvelope | None,
+    *,
+    evaluated_at: datetime,
+    expected_policy_sha256: str,
+    expected_authority_head_sha256: str,
+    expected_linkage_trust_snapshot_sha256_by_provider: dict[str, str],
+    linkage_store: ProviderLinkageStore | None,
+    result_trust_document: DevelopmentTrustDocument,
+    expected_result_trust_sha256: str,
+    expected_envelope_sha256: str,
+    expected_evidence_sha256: str,
+    expected_protocol_sha256: str,
+    expected_repeatability_authority_sha256: str,
+) -> RepeatabilityComparison:
+    """Produce a descriptive delta only after exact D03 and evidence replay.
+
+    The final live D03 replay and artifact construction run inside one
+    linkage authority fence that this function acquires.
+    """
+
+    return _compare_repeatability(
+        anchor,
+        member,
+        policy,
+        decision,
+        anchor_observation,
+        member_observation,
+        envelope,
+        evaluated_at=evaluated_at,
+        expected_policy_sha256=expected_policy_sha256,
+        expected_authority_head_sha256=expected_authority_head_sha256,
+        expected_linkage_trust_snapshot_sha256_by_provider=(
+            expected_linkage_trust_snapshot_sha256_by_provider
+        ),
+        linkage_store=linkage_store,
+        result_trust_document=result_trust_document,
+        expected_result_trust_sha256=expected_result_trust_sha256,
+        expected_envelope_sha256=expected_envelope_sha256,
+        expected_evidence_sha256=expected_evidence_sha256,
+        expected_protocol_sha256=expected_protocol_sha256,
+        expected_repeatability_authority_sha256=(
+            expected_repeatability_authority_sha256
+        ),
+        fence_held=False,
+    )
+
+
+def compare_repeatability_in_fence(
+    anchor: LongitudinalRecord,
+    member: LongitudinalRecord,
+    policy: LongitudinalAnchorPolicy,
+    decision: LongitudinalMemberDecision,
+    anchor_observation: ComparisonObservation,
+    member_observation: ComparisonObservation,
+    envelope: RepeatabilityEnvelope | None,
+    *,
+    evaluated_at: datetime,
+    expected_policy_sha256: str,
+    expected_authority_head_sha256: str,
+    expected_linkage_trust_snapshot_sha256_by_provider: dict[str, str],
+    linkage_store: ProviderLinkageStore | None,
+    result_trust_document: DevelopmentTrustDocument,
+    expected_result_trust_sha256: str,
+    expected_envelope_sha256: str,
+    expected_evidence_sha256: str,
+    expected_protocol_sha256: str,
+    expected_repeatability_authority_sha256: str,
+) -> RepeatabilityComparison:
+    """Already-fenced variant for callers that hold the linkage authority fence.
+
+    The caller must hold ``ProviderLinkageStore.authority_read_fence`` on
+    ``linkage_store`` in this thread for the whole call; both D03 replays and
+    construction then run under that one fence instead of a nested one, which
+    SQLite cannot open.  Without the held fence it raises before any authority
+    read.  The comparison contract and every gate are identical to
+    ``compare_repeatability``.
+    """
+
+    return _compare_repeatability(
+        anchor,
+        member,
+        policy,
+        decision,
+        anchor_observation,
+        member_observation,
+        envelope,
+        evaluated_at=evaluated_at,
+        expected_policy_sha256=expected_policy_sha256,
+        expected_authority_head_sha256=expected_authority_head_sha256,
+        expected_linkage_trust_snapshot_sha256_by_provider=(
+            expected_linkage_trust_snapshot_sha256_by_provider
+        ),
+        linkage_store=linkage_store,
+        result_trust_document=result_trust_document,
+        expected_result_trust_sha256=expected_result_trust_sha256,
+        expected_envelope_sha256=expected_envelope_sha256,
+        expected_evidence_sha256=expected_evidence_sha256,
+        expected_protocol_sha256=expected_protocol_sha256,
+        expected_repeatability_authority_sha256=(
+            expected_repeatability_authority_sha256
+        ),
+        fence_held=True,
+    )
+
+
 __all__ = [
     "ALL_REPEATABILITY_FACTORS",
     "MAX_RESULT_TRUST_KEYS",
@@ -1245,6 +1395,7 @@ __all__ = [
     "RepeatabilityReason",
     "ResultSigningKeyId",
     "compare_repeatability",
+    "compare_repeatability_in_fence",
     "measurement_evidence_payload_sha256",
     "measurement_evidence_receipt_sha256",
     "measurement_evidence_receipt_signing_bytes",
