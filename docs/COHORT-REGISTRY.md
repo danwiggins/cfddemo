@@ -89,7 +89,12 @@ lock and cleans up only when the target holds nothing but what restore wrote
 committed into is left untouched. Cleanup removes only the exact entries it
 recorded creating (by name, never by directory sweep), then the directories
 with `rmdir`, and fsyncs the parent, so the same target can be retried. When the root cannot be opened it removes only an empty target; any
-entry it did not create keeps its directory in place. Backup bytes contain
+entry it did not create keeps its directory in place. POSIX cannot remove a
+file only if it is still the one restore created, so a same-user process that
+swaps a recorded file for another of the same name between reopen and cleanup
+can have it removed. That process could delete the file directly anyway; the
+process and user boundary is the trust boundary, as for in-process code
+mutation. Backup bytes contain
 protected manifest content and therefore are not an export artifact or safe
 browser response. Provider-managed encryption, retention, and backup media
 policy remain deployment inputs rather than claims made by this code.
