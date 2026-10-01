@@ -679,18 +679,18 @@ source checkout, or a successful synthetic quickstart cannot claim those gates.
 At current main, implementing the builder would still require accepting weaker
 caller assertions and is therefore prohibited:
 
-- The D06 live-registry and trust-fence correction is merged. Corrected D09 is
-  PR #52. Its registered v3
-  summary carries aggregate counts only, with no D03 decisions or per-member
-  identities. E12 must consume that exact registry-bound D09 summary, not
-  reproduce denominator logic.
-- D10 is draft PR #54, stacked on #52. It labels its D09 input
-  `declared_digest_only` with `live_d09_registry_verified=false`, so it cannot
-  be used as live D09 authority. It also marks `d03_authority_verified=false`:
-  D03 decisions are unsigned, so D10 cannot tell a real decision from one a
-  caller built or re-pointed at another member. E12 needs an authority-backed
-  D03 decision-to-outcome binding (the D03 decision registry below) rather than
-  a second caller-owned dictionary.
+- The D06 live-registry and trust-fence correction is merged, and so is
+  corrected D09 (#52). Its registered v3 summary carries aggregate counts only,
+  with no D03 decisions or per-member identities. E12 must consume that exact
+  registry-bound D09 summary, not reproduce denominator logic.
+- D10 is merged (#54). Its D09 input is still `declared_digest_only` with
+  `live_d09_registry_verified=false`, so it cannot be used as live D09
+  authority. Its plain builder takes caller-supplied D03 decisions and marks
+  them `d03_authority_verified=false`. `build_registered_covariate_context`
+  instead resolves the population's decisions from the protected D03 decision
+  registry (#56), which replays them against live linkage, and returns a
+  `RegisteredCovariateContext` with `d03_authority_verified=true` that a
+  consumer re-checks with `verify_registered_covariate_context`.
 - B01 authenticates a local browser session but has no externally authorized
   longitudinal reader-role authority. Add a protected, durable and bounded
   `ReaderAuthorizationRegistry` whose grants are provider-signed, scoped,
@@ -703,10 +703,12 @@ caller assertions and is therefore prohibited:
   source and requested D02 identity/coordinate. A measurement without that
   reviewed projection remains explicitly unavailable in E12; D07 observations
   and comparison inputs are not a substitute source-value authority.
-- No durable D03/D07 artifact index exists. E12 must resolve exact canonical
-  D03/D07 inputs through protected local decision and comparison registries. It
-  must not accept those inputs, a digest/outcome/value tuple, or policy/envelope
-  identities in the browser request.
+- The protected D03 decision registry is merged (#56): it derives each series
+  decision itself and replays it against live linkage on every read. No D07
+  comparison index exists yet. E12 must resolve exact canonical D03/D07 inputs
+  through those protected registries. It must not accept those inputs, a
+  digest/outcome/value tuple, or policy/envelope identities in the browser
+  request.
 - No protected anchor-policy registry exists. It must bind the approved D03
   policy, D07 envelope and bounded live anchor-candidate projection behind an
   opaque selector/version; a caller-provided policy digest or anchor identity is
@@ -731,17 +733,18 @@ caller assertions and is therefore prohibited:
   policy objects directly. The request's D09 policy selector and the builder's
   `d09_summary_registry` need a protected D09 policy/summary registry with its
   own read fence.
-- D10 (#54) defers live D09/D03 binding. After D03 discovery exists, a D10
-  integration step must derive context from the registered D09 population and
-  replayed D03 decisions, behind the `d10_context_registry` fence.
+- D10's D03 binding is done through the D03 decision registry. Its live D09
+  binding is not: after the D09 policy/summary registry exists, a D10
+  integration step must derive context from the registered D09 population,
+  behind the `d10_context_registry` fence.
 - The family adapters need durable family-source artifact discovery (the
   `measurement_source_artifact_registry`) and its read fence; the adapters
   alone do not locate E07/E08/E09 artifacts.
 
-The remaining merge order is corrected D09, corrected D10, protected
+The remaining merge order is protected
 reader-authorization registry plus B01 session binding, D05 bounded
 stale-history read, protected D09 policy/summary registry,
-protected D03/D07 decision/comparison discovery, D10 live D09/D03 integration
+protected D07 comparison discovery, D10 live D09 integration
 and context registry, protected anchor-policy
 and projection-policy registries, protected E06 result-view-source discovery,
 family-source artifact discovery registry, family-specific measurement-source

@@ -10,10 +10,10 @@ or assign biological or clinical meaning.
 The registered D09 v3 summary (`build_registered_cohort_denominator_summary`)
 derives aggregate counts from D05/D06 authority only and deliberately carries no
 D03 member decisions or per-member identities. D10 needs both, so it cannot
-consume that summary directly. Binding D10 to live D09, D03, and D07 authority
-is E12 integration work (see `docs/E12-DEPENDENCY-AUDIT.md`), not part of this
-contract. Until then, `D09PopulationDigestInput` is a versioned digest-only
-adapter that binds:
+consume that summary directly. Binding D10 to live D09 authority is E12
+integration work (see `docs/E12-INTEGRATION-PLAN.md`). D03 binding is covered
+below. Until then, `D09PopulationDigestInput` is a versioned digest-only adapter
+that binds:
 
 - the exact cohort-manifest digest;
 - the declared future D09 status and population digests;
@@ -54,15 +54,38 @@ member or decision identities. No caller-declared digest/outcome pair is
 accepted, so a supplied decision's outcome cannot be relabelled or collapsed
 inside D10.
 
-D10 does not establish D03 custody. A `LongitudinalMemberDecision` carries no
-signature or self-binding between its member-result digest and its bundle,
-record, and linkage digests, so a caller can supply a canonical decision that
-D03 never produced, including a real decision re-pointed at another member.
-D10 only checks that each supplied decision is canonical, matches the D02
-anchor policy, and covers the declared population exactly. Both the protected
-result and the aggregate are therefore permanently marked
-`d03_authority_verified=false`. E12 must bind member decisions to D03 replay
-against live linkage and record authority before any consumer relies on them.
+## D03 decisions: two paths
+
+`build_covariate_context` takes caller-supplied decisions and does not establish
+D03 custody. A `LongitudinalMemberDecision` carries no signature or self-binding
+between its member-result digest and its bundle, record, and linkage digests, so
+a caller can supply a canonical decision that D03 never produced, including a
+real decision re-pointed at another member. That builder only checks that each
+supplied decision is canonical, matches the D02 anchor policy, and covers the
+declared population exactly. Its `CovariateContextResult` and the aggregate are
+therefore marked `d03_authority_verified=false`.
+
+`build_registered_covariate_context` takes no decisions. It takes a
+`LongitudinalDecisionRegistry` (`docs/LONGITUDINAL-DECISION-REGISTRY.md`) and a
+series selector, resolves the series (the registry replays it against the live
+linkage store and raises `LongitudinalDecisionRegistryStale` rather than return
+a stale decision), requires the series policy to equal the population's D02
+anchor policy, and uses the registry's decision for each included member. The
+population may be a subset of the series but not exceed it. Each member's
+declared decision digest and outcome must equal the registry's. It returns a
+`RegisteredCovariateContext` that wraps the unchanged v1 result with a binding to
+the registry ID and epoch, state version and head, selector, object digest,
+series decision digest, and the decision's linkage snapshot, and is marked
+`d03_authority_verified=true`.
+
+That binding is as-of one linkage snapshot, and a stored wrapper is not
+authority by itself. `verify_registered_covariate_context` re-resolves the
+selector, requires the same registry identity, object, series decision, and
+snapshot, rebuilds the context from the registry's decisions, and requires it to
+be identical. Unrelated registrations may advance the registry head; the
+returned wrapper carries the current head. Any linkage change makes both build
+and verification fail. The aggregate projection is unchanged and still reports
+`d03_authority_verified=false`, because it cannot prove its source on its own.
 
 ## Protected and aggregate outputs
 

@@ -3,7 +3,9 @@
 This module groups opaque batch, protocol, and preanalytical metadata. It does
 not alter measurements, establish comparability, or attribute biological or
 clinical meaning. The D09 boundary is digest-only until its live registry
-contract is finalized.
+contract is finalized. D03 decisions are either caller-supplied (marked
+unverified) or resolved from the protected D03 decision registry, which replays
+them against live linkage before D10 uses them.
 """
 
 from __future__ import annotations
@@ -19,6 +21,10 @@ from pydantic import Field, StringConstraints, model_validator
 from evidence_inspector.longitudinal_compatibility import (
     LongitudinalMemberDecision,
     LongitudinalOutcome,
+)
+from evidence_inspector.longitudinal_decision_registry import (
+    LongitudinalDecisionRegistry,
+    RegisteredLongitudinalSeriesDecision,
 )
 from evidence_inspector.method_registry import RegistryContract, Sha256
 from evidence_inspector.safe_ingress import contract_type_graph, exact_model_bytes
@@ -408,12 +414,53 @@ class AggregateCovariateSummary(RegistryContract):
         return self
 
 
+class RegisteredD03SeriesBinding(RegistryContract):
+    """Exact D03 registry identity a registered D10 context was derived from."""
+
+    schema_version: Literal["traceback.d10-d03-series-binding.v1"] = (
+        "traceback.d10-d03-series-binding.v1"
+    )
+    registry_id: str = Field(pattern=r"^d03_registry_[0-9a-f]{32}$")
+    registry_epoch_sha256: Sha256
+    state_version: int = Field(ge=1, le=10_000, strict=True)
+    state_head_sha256: Sha256
+    selector_id: str = Field(pattern=r"^d03_series_[0-9a-f]{40}$")
+    object_sha256: Sha256
+    series_decision_sha256: Sha256
+    linkage_snapshot_state_version: int | None = Field(ge=0, le=10_000_000)
+    linkage_snapshot_state_head_sha256: Sha256 | None
+    linkage_snapshot_sha256: Sha256 | None
+
+
+class RegisteredCovariateContext(RegistryContract):
+    """Protected D10 context whose D03 decisions came from a live registry replay.
+
+    The binding is as-of one linkage snapshot. A consumer re-checks it with
+    ``verify_registered_covariate_context`` before relying on it; a stored copy
+    is never authority by itself.
+    """
+
+    schema_version: Literal["traceback.registered-covariate-context.v1"] = (
+        "traceback.registered-covariate-context.v1"
+    )
+    context: CovariateContextResult
+    d03_series: RegisteredD03SeriesBinding
+    d03_authority_verified: Literal[True] = True
+    live_d09_registry_verified: Literal[False] = False
+    synthetic_only: Literal[True] = True
+    protected_local_only: Literal[True] = True
+
+
 ContractT = TypeVar("ContractT", bound=RegistryContract)
 _TRUSTED_TYPES, _TRUSTED_ENUMS = contract_type_graph(
     D10CovariateInput,
     CovariateContextResult,
     AggregateCovariateSummary,
 )
+_REGISTERED_TYPES, _REGISTERED_ENUMS = contract_type_graph(RegisteredCovariateContext)
+# The registered wrapper adds one fixed binding around one protected result.
+_REGISTERED_EXTRA_NODES = 64
+_REGISTERED_EXTRA_BYTES = 4 * 1_024
 _D03_TRUSTED_TYPES, _D03_TRUSTED_ENUMS = contract_type_graph(LongitudinalMemberDecision)
 _CODECS = MappingProxyType(
     {
@@ -780,6 +827,169 @@ def build_covariate_context(
     return _replay(CovariateContextResult, result)
 
 
+def _registered_bytes(value: object) -> bytes:
+    try:
+        return exact_model_bytes(
+            value,
+            RegisteredCovariateContext,
+            model_types=_REGISTERED_TYPES,
+            enum_types=_REGISTERED_ENUMS,
+            max_bytes=MAX_CONTRACT_BYTES + _REGISTERED_EXTRA_BYTES,
+            max_nodes=MAX_GRAPH_NODES + _REGISTERED_EXTRA_NODES,
+            max_depth=MAX_GRAPH_DEPTH,
+            max_collection_items=MAX_TUPLE_LENGTH,
+            max_string_bytes=MAX_SCALAR_LENGTH,
+            max_int_bits=64,
+        )
+    except (TypeError, ValueError):
+        raise TypeError("registered covariate context object graph is invalid") from None
+
+
+def registered_covariate_context_bytes(value: RegisteredCovariateContext) -> bytes:
+    """Return exact canonical bytes for one protected registered D10 context."""
+
+    encoded = _registered_bytes(value)
+    replayed = RegisteredCovariateContext.model_validate_json(encoded)
+    if _registered_bytes(replayed) != encoded:
+        raise ValueError("registered covariate context does not replay canonically")
+    return encoded
+
+
+def _resolve_registered_series(
+    decision_registry: LongitudinalDecisionRegistry, series_selector_id: str
+) -> RegisteredLongitudinalSeriesDecision:
+    if type(decision_registry) is not LongitudinalDecisionRegistry:
+        raise TypeError("D10 requires the exact D03 decision registry type")
+    # resolve replays the stored series against the live linkage store and raises
+    # LongitudinalDecisionRegistryStale rather than return a stale decision.
+    return decision_registry.resolve(series_selector_id)
+
+
+def _population_decisions(
+    series: RegisteredLongitudinalSeriesDecision, population: D09PopulationDigestInput
+) -> tuple[LongitudinalMemberDecision, ...]:
+    by_member = {
+        decision.member_result_sha256: decision
+        for decision in series.decision.decisions
+    }
+    missing = set(population.included_member_sha256s) - set(by_member)
+    if missing:
+        raise ValueError("D03 registry series does not cover the D10 population")
+    return tuple(by_member[member] for member in population.included_member_sha256s)
+
+
+def _series_binding(
+    series: RegisteredLongitudinalSeriesDecision,
+) -> RegisteredD03SeriesBinding:
+    return RegisteredD03SeriesBinding(
+        registry_id=series.registry_id,
+        registry_epoch_sha256=series.registry_epoch_sha256,
+        state_version=series.state_version,
+        state_head_sha256=series.state_head_sha256,
+        selector_id=series.selector_id,
+        object_sha256=series.object_sha256,
+        series_decision_sha256=series.decision_sha256,
+        linkage_snapshot_state_version=series.decision.linkage_snapshot_state_version,
+        linkage_snapshot_state_head_sha256=(
+            series.decision.linkage_snapshot_state_head_sha256
+        ),
+        linkage_snapshot_sha256=series.decision.linkage_snapshot_sha256,
+    )
+
+
+def build_registered_covariate_context(
+    value: D10CovariateInput,
+    *,
+    expected_d09_status_sha256: str,
+    expected_d09_population_sha256: str,
+    expected_d02_anchor_policy_sha256: str,
+    decision_registry: LongitudinalDecisionRegistry,
+    series_selector_id: str,
+) -> RegisteredCovariateContext:
+    """Build D10 context from D03 decisions resolved from the protected registry.
+
+    The caller supplies covariate metadata and declares each member's decision
+    digest and outcome, but the decisions themselves come only from a registry
+    resolve that replayed against live linkage. Every declared digest and
+    outcome must equal the registry's decision for that member.
+    """
+
+    replayed = _canonical_d10_input(value)
+    series = _resolve_registered_series(decision_registry, series_selector_id)
+    if series.decision.policy_sha256 != replayed.population.d02_anchor_policy_sha256:
+        raise ValueError("D03 registry series policy does not match D02 anchor policy")
+    context = build_covariate_context(
+        replayed,
+        expected_d09_status_sha256=expected_d09_status_sha256,
+        expected_d09_population_sha256=expected_d09_population_sha256,
+        expected_d02_anchor_policy_sha256=expected_d02_anchor_policy_sha256,
+        d03_member_decisions=_population_decisions(series, replayed.population),
+    )
+    result = RegisteredCovariateContext(
+        context=context, d03_series=_series_binding(series)
+    )
+    return RegisteredCovariateContext.model_validate_json(
+        registered_covariate_context_bytes(result)
+    )
+
+
+def verify_registered_covariate_context(
+    value: RegisteredCovariateContext,
+    *,
+    decision_registry: LongitudinalDecisionRegistry,
+) -> RegisteredCovariateContext:
+    """Re-resolve the bound series and rebuild the context; never trust it stored.
+
+    Returns a freshly bound context. The registry state head may have advanced
+    through unrelated registrations; the registry identity, selector, object,
+    series decision, and rebuilt context must all be unchanged.
+    """
+
+    if type(value) is not RegisteredCovariateContext:
+        raise TypeError("registered covariate context requires the exact type")
+    captured = RegisteredCovariateContext.model_validate_json(
+        registered_covariate_context_bytes(value)
+    )
+    binding = captured.d03_series
+    series = _resolve_registered_series(decision_registry, binding.selector_id)
+    fresh = _series_binding(series)
+    if (
+        fresh.registry_id,
+        fresh.registry_epoch_sha256,
+        fresh.object_sha256,
+        fresh.series_decision_sha256,
+        fresh.linkage_snapshot_sha256,
+    ) != (
+        binding.registry_id,
+        binding.registry_epoch_sha256,
+        binding.object_sha256,
+        binding.series_decision_sha256,
+        binding.linkage_snapshot_sha256,
+    ):
+        raise ValueError("registered covariate context D03 binding is not current")
+    context = captured.context
+    rebuilt = build_registered_covariate_context(
+        D10CovariateInput(
+            population=D09PopulationDigestInput(
+                cohort_manifest_sha256=context.cohort_manifest_sha256,
+                d09_status_sha256=context.d09_status_sha256,
+                d09_population_sha256=context.d09_population_sha256,
+                d02_anchor_policy_sha256=context.d02_anchor_policy_sha256,
+                included_member_sha256s=context.included_member_sha256s,
+            ),
+            members=context.member_contexts,
+        ),
+        expected_d09_status_sha256=context.d09_status_sha256,
+        expected_d09_population_sha256=context.d09_population_sha256,
+        expected_d02_anchor_policy_sha256=context.d02_anchor_policy_sha256,
+        decision_registry=decision_registry,
+        series_selector_id=binding.selector_id,
+    )
+    if rebuilt.context != context:
+        raise ValueError("registered covariate context does not rebuild exactly")
+    return rebuilt
+
+
 __all__ = [
     "ALL_COVARIATE_DIMENSIONS",
     "MAX_COVARIATE_MEMBERS",
@@ -795,12 +1005,17 @@ __all__ = [
     "D09PopulationDigestInput",
     "D10CovariateInput",
     "MemberCovariateContext",
+    "RegisteredCovariateContext",
+    "RegisteredD03SeriesBinding",
     "aggregate_covariate_summary_bytes",
     "aggregate_covariate_summary_sha256",
     "build_covariate_context",
+    "build_registered_covariate_context",
     "covariate_context_result_sha256",
     "d09_population_digest_input_sha256",
     "d10_covariate_input_sha256",
     "member_covariate_context_sha256",
     "project_aggregate_covariate_summary",
+    "registered_covariate_context_bytes",
+    "verify_registered_covariate_context",
 ]
