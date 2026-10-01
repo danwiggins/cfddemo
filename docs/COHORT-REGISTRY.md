@@ -80,12 +80,13 @@ immutable object under one shared registry lock in a bounded canonical bundle.
 state head and validates the complete bundle, metadata-bound journal chain,
 history, trust pins, and exact linkage-store identity before
 creating a new private root; it refuses an existing target and reopens the
-result through the normal descriptor and inode checks. If restore fails after
-creating the target, it removes only what it created (contents of the root and
-objects directories whose identity it verified, then the root) and fsyncs the
-parent, so the same target can be retried; when the root cannot be opened it
-removes the empty directory, and a substituted unverified directory is left in
-place. Backup bytes contain
+result through the normal descriptor and inode checks. The root and objects
+directories must be empty when verified. If restore fails after creating the
+target, including when the final reopen fails, it removes only the exact
+entries it recorded creating (by name, never by directory sweep), then the
+directories with `rmdir`, and fsyncs the parent, so the same target can be
+retried. When the root cannot be opened it removes only an empty target; any
+entry it did not create keeps its directory in place. Backup bytes contain
 protected manifest content and therefore are not an export artifact or safe
 browser response. Provider-managed encryption, retention, and backup media
 policy remain deployment inputs rather than claims made by this code.

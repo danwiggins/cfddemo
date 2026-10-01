@@ -1047,7 +1047,7 @@ def test_failed_restore_keeps_contents_of_an_unverified_substituted_root(
     backup = registry.backup_bytes()
     target = tmp_path / "substituted-restore"
     victim = tmp_path / "victim"
-    victim.mkdir(mode=0o755)
+    victim.mkdir(mode=0o700)
     (victim / "keep.txt").write_text("keep")
     original_mkdir = os.mkdir
 
@@ -1063,3 +1063,68 @@ def test_failed_restore_keeps_contents_of_an_unverified_substituted_root(
         CohortRegistry.restore(target, backup, **_restore_values(receipt, live))
     monkeypatch.undo()
     assert (target / "keep.txt").read_text() == "keep"
+
+
+def test_failed_restore_never_removes_entries_it_did_not_create(
+    registry: CohortRegistry,
+    live,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    receipt = registry.register(_first(live))
+    backup = registry.backup_bytes()
+    target = tmp_path / "foreign-entry-restore"
+    original_link = os.link
+
+    def failing_link(source, destination, *args, **kwargs):
+        if destination == "registry-journal.jsonl":
+            (target / "foreign.txt").write_text("foreign")
+            (target / "objects" / "foreign.txt").write_text("foreign")
+            raise OSError("disk full")
+        return original_link(source, destination, *args, **kwargs)
+
+    monkeypatch.setattr(os, "link", failing_link)
+    with pytest.raises(CohortRegistryUnsafe, match="restore failed"):
+        CohortRegistry.restore(target, backup, **_restore_values(receipt, live))
+    monkeypatch.undo()
+    assert sorted(path.name for path in target.iterdir()) == [
+        "foreign.txt",
+        "objects",
+    ]
+    assert [path.name for path in (target / "objects").iterdir()] == [
+        "foreign.txt"
+    ]
+
+
+def test_failed_restore_reopen_removes_the_restored_target_and_can_retry(
+    registry: CohortRegistry,
+    live,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    manifest = _first(live)
+    receipt = registry.register(manifest)
+    backup = registry.backup_bytes()
+    target = tmp_path / "reopen-restore"
+    original_construct = cohort_registry_module._CR_CONSTRUCT
+    calls = {"construct": 0}
+
+    def failing_construct(*args, **kwargs):
+        calls["construct"] += 1
+        raise CohortRegistryUnsafe("cohort registry root changed")
+
+    # The alias seal is checked on instance entrypoints, not on the classmethod
+    # boundary that calls this alias, so this injects a reopen failure only.
+    monkeypatch.setattr(cohort_registry_module, "_CR_CONSTRUCT", failing_construct)
+    with pytest.raises(CohortRegistryUnsafe, match="root changed"):
+        CohortRegistry.restore(target, backup, **_restore_values(receipt, live))
+    monkeypatch.setattr(cohort_registry_module, "_CR_CONSTRUCT", original_construct)
+    assert calls["construct"] == 1
+    assert not target.exists()
+
+    restored = CohortRegistry.restore(target, backup, **_restore_values(receipt, live))
+    try:
+        selector = restored.list_selectors().records[0].selector_id
+        assert restored.resolve(selector, 1).manifest == manifest
+    finally:
+        restored.close()

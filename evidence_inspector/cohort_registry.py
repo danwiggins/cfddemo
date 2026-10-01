@@ -567,25 +567,60 @@ def cohort_registry_backup_from_bytes(content: bytes) -> CohortRegistryBackup:
 
 
 def _remove_partial_restore(
-    parent_fd: int | None, name: str, root_fd: int, objects_fd: int | None
+    parent_fd: int,
+    name: str,
+    root_fd: int | None,
+    objects_fd: int | None,
+    root_names: list[str],
+    object_names: list[str],
 ) -> None:
-    """Remove only the files a failed restore created, then its root."""
+    """Remove only the exact entries a failed restore created, then its root.
+
+    Entries are removed by recorded name, never by directory sweep, and the
+    directories are removed with ``rmdir``; anything this restore did not
+    create keeps its directory non-empty and is left in place.
+    """
 
     try:
         if objects_fd is not None:
-            for entry in os.listdir(objects_fd):
-                os.unlink(entry, dir_fd=objects_fd)
-            os.rmdir("objects", dir_fd=root_fd)
-        for entry in os.listdir(root_fd):
-            try:
-                os.unlink(entry, dir_fd=root_fd)
-            except OSError:
-                os.rmdir(entry, dir_fd=root_fd)
-        if parent_fd is not None:
-            os.rmdir(name, dir_fd=parent_fd)
-            os.fsync(parent_fd)
+            for entry in reversed(object_names):
+                try:
+                    os.unlink(entry, dir_fd=objects_fd)
+                except FileNotFoundError:
+                    pass
+            os.fsync(objects_fd)
+        if root_fd is not None:
+            for entry in reversed(root_names):
+                try:
+                    if entry == "objects":
+                        os.rmdir(entry, dir_fd=root_fd)
+                    else:
+                        os.unlink(entry, dir_fd=root_fd)
+                except FileNotFoundError:
+                    pass
+            os.fsync(root_fd)
+        os.rmdir(name, dir_fd=parent_fd)
     except OSError:
         pass
+    try:
+        os.fsync(parent_fd)
+    except OSError:
+        pass
+
+
+def _publish_restored_file(
+    directory_fd: int, name: str, content: bytes, created: list[str]
+) -> None:
+    try:
+        _publish_file(directory_fd, name, content)
+    except FileExistsError:
+        # The name existed before this restore linked it; it is not ours.
+        raise
+    except BaseException:
+        # The link may have succeeded before a later fsync failed.
+        created.append(name)
+        raise
+    created.append(name)
 
 
 def _registry_instance_snapshot(registry: CohortRegistry) -> tuple[object, ...]:
@@ -1488,6 +1523,8 @@ class CohortRegistry:
         created = False
         root_verified = False
         objects_verified = False
+        root_names: list[str] = []
+        object_names: list[str] = []
         completed = False
         try:
             parent_lstat = os.stat(parent, follow_symlinks=False)
@@ -1527,8 +1564,11 @@ class CohortRegistry:
                 or root_bound.st_uid != os.geteuid()
             ):
                 raise CohortRegistryUnsafe("cohort registry restore root changed")
+            if os.listdir(root_fd):
+                raise CohortRegistryUnsafe("cohort registry restore root changed")
             root_verified = True
             os.mkdir("objects", 0o700, dir_fd=root_fd)
+            root_names.append("objects")
             objects_lstat = os.stat(
                 "objects", dir_fd=root_fd, follow_symlinks=False
             )
@@ -1549,6 +1589,8 @@ class CohortRegistry:
                 or objects_bound.st_uid != os.geteuid()
             ):
                 raise CohortRegistryUnsafe("cohort registry restore objects changed")
+            if os.listdir(objects_fd):
+                raise CohortRegistryUnsafe("cohort registry restore objects changed")
             objects_verified = True
             lock_fd = os.open(
                 ".registry.lock",
@@ -1560,25 +1602,40 @@ class CohortRegistry:
                 0o600,
                 dir_fd=root_fd,
             )
+            root_names.append(".registry.lock")
             os.close(lock_fd)
-            _publish_file(
+            _publish_restored_file(
                 root_fd,
                 "registry-metadata.json",
                 canonical_contract_bytes(backup.metadata),
+                root_names,
             )
             for item in backup.objects:
-                _publish_file(
+                _publish_restored_file(
                     objects_fd,
                     f"{item.manifest_sha256}.json",
                     item.manifest_json.encode("utf-8"),
+                    object_names,
                 )
             journal_content = b"".join(
                 canonical_contract_bytes(entry) + b"\n" for entry in backup.journal
             )
-            _publish_file(root_fd, "registry-journal.jsonl", journal_content)
+            _publish_restored_file(
+                root_fd, "registry-journal.jsonl", journal_content, root_names
+            )
             os.fsync(objects_fd)
             os.fsync(root_fd)
             os.fsync(parent_fd)
+            # Reopen through the normal checks while the cleanup scope is
+            # still active, so a failed reopen also leaves a retryable target.
+            restored = _CR_CONSTRUCT(
+                target,
+                linkage_store=linkage_store,
+                expected_trust_snapshot_sha256_by_provider=pins,
+                expected_registry_id=expected_registry_id,
+                expected_registry_epoch_sha256=expected_registry_epoch_sha256,
+                expected_state_head_sha256=expected_state_head_sha256,
+            )
             completed = True
         except FileExistsError:
             raise CohortRegistryConflict(
@@ -1587,37 +1644,25 @@ class CohortRegistry:
         except OSError:
             raise CohortRegistryUnsafe("cohort registry restore failed") from None
         finally:
-            if created and not completed:
-                # Only empty directories whose identity was verified as the
-                # ones this restore created; an unverified substitute is left
-                # in place (rmdir fails on any non-empty directory).
-                if root_fd is not None and root_verified:
-                    _remove_partial_restore(
-                        parent_fd,
-                        target.name,
-                        root_fd,
-                        objects_fd if objects_verified else None,
-                    )
-                elif parent_fd is not None:
-                    try:
-                        os.rmdir(target.name, dir_fd=parent_fd)
-                        os.fsync(parent_fd)
-                    except OSError:
-                        pass
+            if created and not completed and parent_fd is not None:
+                # Remove only recorded entries inside directories verified as
+                # the fresh empty ones this restore created; an unverified
+                # substitute is left in place (rmdir fails when non-empty).
+                _remove_partial_restore(
+                    parent_fd,
+                    target.name,
+                    root_fd if root_verified else None,
+                    objects_fd if objects_verified else None,
+                    root_names,
+                    object_names,
+                )
             for descriptor in (objects_fd, root_fd, parent_fd):
                 if descriptor is not None:
                     try:
                         os.close(descriptor)
                     except OSError:
                         pass
-        return _CR_CONSTRUCT(
-            target,
-            linkage_store=linkage_store,
-            expected_trust_snapshot_sha256_by_provider=pins,
-            expected_registry_id=expected_registry_id,
-            expected_registry_epoch_sha256=expected_registry_epoch_sha256,
-            expected_state_head_sha256=expected_state_head_sha256,
-        )
+        return restored
 
     def resolve(
         self, selector_id: str, cohort_version: int
