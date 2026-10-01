@@ -899,6 +899,8 @@ def _population_decisions(
         decision.member_result_sha256: decision
         for decision in series.decision.decisions
     }
+    if len(by_member) != len(series.decision.decisions):
+        raise ValueError("D03 registry series repeats a member-result digest")
     missing = set(population.included_member_sha256s) - set(by_member)
     if missing:
         raise ValueError("D03 registry series does not cover the D10 population")

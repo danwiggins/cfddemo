@@ -6,6 +6,7 @@ from pathlib import Path
 
 import pytest
 
+import evidence_inspector.covariate_context as covariate_module
 from evidence_inspector.covariate_context import (
     CovariateDimension,
     D09PopulationDigestInput,
@@ -313,3 +314,26 @@ def test_linkage_snapshot_binding_must_be_complete(live) -> None:
     ):
         with pytest.raises(ValueError, match="must be complete"):
             type(registered.d03_series)(**{**values, field: None})
+
+
+def test_series_with_a_repeated_member_digest_is_rejected(live) -> None:
+    _, registry, receipt, _ = live
+    resolved = registry.resolve(receipt.selector_id)
+    first = resolved.decision.decisions[0]
+    ambiguous = resolved.model_construct(
+        **{
+            **dict(resolved),
+            "decision": resolved.decision.model_construct(
+                **{
+                    **dict(resolved.decision),
+                    "decisions": (
+                        first,
+                        first.model_copy(update={"member_result_id": "result_other"}),
+                    ),
+                }
+            ),
+        }
+    )
+    population = _input(live, members=lambda items: items[:1]).population
+    with pytest.raises(ValueError, match="repeats a member-result digest"):
+        covariate_module._population_decisions(ambiguous, population)
