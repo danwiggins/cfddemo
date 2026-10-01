@@ -1645,6 +1645,8 @@ class RepeatabilityComparisonRegistry:
                 )
                 content = registered_comparison_object_bytes(captured)
                 captured = registered_comparison_object_from_bytes(content)
+            except (ProviderLinkageStoreUnsafe, ProviderLinkageStoreSchemaError):
+                raise
             except Exception:
                 raise RepeatabilityComparisonRegistryConflict(
                     "D07 comparison inputs are not exact replayable contracts"

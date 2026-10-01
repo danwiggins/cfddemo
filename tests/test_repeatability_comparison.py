@@ -1596,6 +1596,11 @@ def test_in_fence_variant_checks_the_fence_before_any_unavailable_result() -> No
         )
         with pytest.raises(LongitudinalDecisionReplayError, match="held live"):
             compare_repeatability_in_fence(*inputs, **arguments)
+        # Another store transaction holds the lock and a transaction but is not
+        # the authority fence.
+        with store.fenced_active_snapshot():
+            with pytest.raises(LongitudinalDecisionReplayError, match="held live"):
+                compare_repeatability_in_fence(*inputs, **arguments)
 
         held = threading.Event()
         release = threading.Event()

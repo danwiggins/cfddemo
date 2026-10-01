@@ -102,11 +102,12 @@ paths do not open the fence and run fine inside one.
 
 D07 therefore gains `compare_repeatability_in_fence`, an additive
 already-fenced variant with the same contract and gates. It requires that the
-calling thread holds the store's authority fence (the store's re-entrant lock
-is owned by this thread and its connection is inside a transaction), checked
-at entry and again before the final replay and construction; otherwise it
-raises `LongitudinalDecisionReplayError` before any result. Another thread's
-fence does not satisfy it. `compare_repeatability` is unchanged.
+calling thread holds the store's `authority_read_fence`, checked at entry and
+again before the final replay and construction; otherwise it raises
+`LongitudinalDecisionReplayError` before any result. `authority_read_fence`
+now records its holder thread for exactly its body, so another thread's fence
+and other store transactions such as `fenced_active_snapshot` do not satisfy
+the check. `compare_repeatability` is unchanged.
 
 The registry holds one fence across authority-time capture, D03 derivation,
 D07 evaluation, pre-publication replay, the registry lock, publication, journal

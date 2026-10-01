@@ -77,7 +77,6 @@ MAX_CONTRACT_TUPLE_LENGTH = 32
 MAX_CONTRACT_GRAPH_NODES = 4_096
 MAX_CONTRACT_GRAPH_DEPTH = 64
 _PINNED_AUTHORITY_READ_FENCE = ProviderLinkageStore.authority_read_fence
-_RLOCK_TYPE = type(threading.RLock())
 
 
 def _reject_private_token(value: str) -> str:
@@ -876,13 +875,16 @@ def _require_held_authority_fence(linkage_store: object) -> None:
             "repeatability publication requires an exact live authority fence"
         )
     state = object.__getattribute__(linkage_store, "__dict__")
-    lock = state.get("_lock") if type(state) is dict else None
     connection = state.get("_connection") if type(state) is dict else None
-    # The fence holds the store's re-entrant lock and one BEGIN IMMEDIATE
-    # transaction for its whole body; both must belong to this thread now.
+    fence_thread = (
+        state.get("_authority_fence_thread") if type(state) is dict else None
+    )
+    # authority_read_fence marks its holder thread for exactly its body, while
+    # it holds one BEGIN IMMEDIATE transaction; another store transaction
+    # (such as fenced_active_snapshot) or another thread's fence does not match.
     if (
-        type(lock) is not _RLOCK_TYPE
-        or not lock._is_owned()
+        type(fence_thread) is not int
+        or fence_thread != threading.get_ident()
         or type(connection) is not sqlite3.Connection
         or not connection.in_transaction
     ):
