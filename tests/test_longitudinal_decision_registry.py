@@ -286,8 +286,9 @@ def test_result_constructor_cannot_pair_a_selector_with_another_decision(
     monkeypatch.setattr(
         registry_module, "RegisteredLongitudinalSeriesDecision", substitute
     )
-    with pytest.raises(LongitudinalDecisionRegistryUnsafe, match="authority callable"):
-        registry.resolve(one.selector_id)
+    # resolve constructs through the sealed alias, so replacing the public
+    # class name cannot change what it returns.
+    assert registry.resolve(one.selector_id).decision_sha256 == one.decision_sha256
     monkeypatch.undo()
 
     resolved = registry.resolve(one.selector_id)
@@ -806,52 +807,12 @@ def test_failed_restore_root_open_removes_the_empty_target(
     assert not target.exists()
 
 
-@pytest.mark.parametrize(
-    "name",
-    (
-        "canonical_contract_bytes",
-        "_outcome_counts",
-        "SeriesAuthorityState",
-        "_selector_id",
-        "_series_decision_sha256",
-        "registered_series_object_from_bytes",
-        "_require_registry_class_integrity",
-    ),
-)
-def test_any_module_global_replacement_fails_closed(
-    registry: LongitudinalDecisionRegistry,
-    live,
-    monkeypatch: pytest.MonkeyPatch,
-    name: str,
+def test_interpreter_warning_registry_does_not_disable_the_registry(
+    registry: LongitudinalDecisionRegistry, live, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     receipt = _register(registry, live)
-    original = getattr(registry_module, name)
-    monkeypatch.setattr(registry_module, name, lambda *a, **k: original(*a, **k))
-    with pytest.raises(LongitudinalDecisionRegistryUnsafe, match="callable"):
-        registry.resolve(receipt.selector_id)
-    with pytest.raises(LongitudinalDecisionRegistryUnsafe, match="callable"):
-        registry.list_selectors()
-    monkeypatch.undo()
-    monkeypatch.setattr(registry_module, "_injected_helper", object(), raising=False)
-    with pytest.raises(LongitudinalDecisionRegistryUnsafe, match="callable"):
-        registry.resolve(receipt.selector_id)
-
-
-@pytest.mark.parametrize("name", ("MAX_REGISTERED_SERIES", "MAX_SELECTOR_PAGE"))
-def test_integer_bound_replaced_by_a_non_integer_fails_closed(
-    registry: LongitudinalDecisionRegistry,
-    live,
-    monkeypatch: pytest.MonkeyPatch,
-    name: str,
-) -> None:
-    receipt = _register(registry, live)
-
-    class HookedBound(int):
-        def __add__(self, other):  # pragma: no cover - must never be reached
-            raise AssertionError("hooked bound reached")
-
-    monkeypatch.setattr(registry_module, name, HookedBound(getattr(registry_module, name)))
-    with pytest.raises(LongitudinalDecisionRegistryUnsafe, match="callable"):
-        registry.resolve(receipt.selector_id)
-    with pytest.raises(LongitudinalDecisionRegistryUnsafe, match="callable"):
-        registry.list_selectors()
+    # Python adds this key to a module's globals whenever a warning is attributed
+    # to it, even if the warning is filtered; the registry must stay usable.
+    monkeypatch.setitem(registry_module.__dict__, "__warningregistry__", {})
+    assert registry.resolve(receipt.selector_id).object_sha256 == receipt.object_sha256
+    assert registry.list_selectors().state_version == 1

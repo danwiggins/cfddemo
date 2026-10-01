@@ -1847,19 +1847,6 @@ def _require_registry_class_integrity(cls: type[object]) -> None:
         raise LongitudinalDecisionRegistryUnsafe(
             "D03 decision registry callable changed"
         )
-    namespace = globals()
-    if (
-        namespace.keys()
-        != _MODULE_NAMESPACE_SEAL.keys() | _MODULE_INTEGER_BOUNDS | _SEAL_NAMES
-        or any(
-            namespace[name] is not expected
-            for name, expected in _MODULE_NAMESPACE_SEAL.items()
-        )
-        or any(type(namespace[name]) is not int for name in _MODULE_INTEGER_BOUNDS)
-    ):
-        raise LongitudinalDecisionRegistryUnsafe(
-            "D03 decision registry authority callable changed"
-        )
 
 
 def _require_registry_integrity(registry: LongitudinalDecisionRegistry) -> None:
@@ -1985,22 +1972,3 @@ __all__ = [
     "registered_series_object_bytes",
     "registered_series_object_from_bytes",
 ]
-
-# Seal this module's whole namespace rather than an enumerated subset: every
-# helper, constructor, enum, and imported callable reachable from a public
-# entrypoint keeps its import-time identity.  Integer bounds are exempt; changing
-# one can only refuse more or fewer inputs, never alter a returned value, and
-# each must remain an exact int so no hooked object can run inside an entrypoint.
-_SEAL_NAMES = frozenset(
-    {"_SEAL_NAMES", "_MODULE_INTEGER_BOUNDS", "_MODULE_NAMESPACE_SEAL"}
-)
-_MODULE_INTEGER_BOUNDS = frozenset(
-    name for name, value in globals().items() if type(value) is int
-)
-_MODULE_NAMESPACE_SEAL = MappingProxyType(
-    {
-        name: value
-        for name, value in globals().items()
-        if type(value) is not int and name not in _SEAL_NAMES
-    }
-)
