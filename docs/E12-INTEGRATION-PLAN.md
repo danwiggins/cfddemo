@@ -18,9 +18,9 @@ their own source authority is valid. Comparative D07 delta, comparison
 uncertainty, shared-series axis, and connecting segment are separate fields and
 are suppressed unless current D01 linkage, D04 supersession, D05 membership,
 D06 record availability, D03 anchor-relative compatibility, and D07
-repeatability gates all pass for that exact comparison, and the registered D09
-population containing both members is current. D09 supplies aggregate
-denominator context only; it never decides comparison eligibility. This separation
+repeatability gates all pass for that exact comparison. D09 counts are shown
+alongside as aggregate population context only: D09 is not a comparison gate,
+and a D09 `included` count never implies comparison eligibility. This separation
 allows incompatible records to remain inspectable as distinct unconnected
 series without implying comparison. D10 context is displayed as a confounding
 limitation and never changes source values, denominators, or eligibility.
@@ -41,7 +41,7 @@ limitation and never changes source values, denominators, or eligibility.
 | Approved anchor and projection selection | Prerequisite protected `AnchorPolicyRegistry` and `ProjectionPolicyRegistry`, each with independently pinned registry ID, epoch, expected head and bounded selector/version | Resolve one registered D03 anchor policy/D07 envelope, one approved anchor within that policy's live candidate page, and one registered family/statistic/coordinate policy; the anchor/projection-selection portion of the browser request carries only those three selector/version pairs and cannot author or hash a policy or anchor identity | Caller-created anchor/policy/envelope or projection subsets, value-ranked policies, stale selectors, rollback, registry replacement, head race and unregistered coordinates fail closed before member or source-artifact reads |
 | Delta and trend suppression | D03 outcome plus D07 comparison replay | Only `equivalent` or `qualified_compatible` with D07 `available` may expose D07 comparison values, comparison denominators, delta, comparison interval, shared axis, or connecting segment. Independently verified E07/E08/E09 standalone values and D09 counts remain visible in their own fields | `requires_reanalysis`, `registered_bridge`, `incompatible`, `unknown`, outside-envelope, missing, failed, insufficient, or stale comparison states contain no D07 numeric fields or segment; valid measurement-specific source rows remain visible as separate series |
 | Repeatability uncertainty | D07 signed observations, result trust, registered envelope/evidence/protocol/authority | Copy D07 fields only from an available replayed D07 comparison; for every unavailable D07 result, preserve the contract's exact suppression of both comparison values, both comparison denominators, delta, and uncertainty | Same-value, noisy, missing, incompatible, unregistered factor transition, revoked key, and stale evidence cases remain distinct |
-| Denominators and missingness | Registry-bound D09 v3 summary derived from D05/D06 only (no E06 ledger or comparability evidence) | Show declared/included/excluded/unavailable members and denominator units; preserve missing and withheld as states | All counts reconcile for zero eligible, one eligible, partial, and full cohorts; filters never rewrite scientific counts |
+| Denominators and missingness | Registry-bound D09 v3 summary derived from D05/D06 only (no E06 ledger or comparability evidence) | Show declared/included/excluded/unavailable members and denominator units; preserve missing and withheld as states | All counts reconcile for zero-included-unit, one-included-unit, partial, and full cohorts; filters never rewrite scientific counts |
 | Batch/preanalytical context | D10 result derived from the exact D09 population and exact D03 decisions | Show aggregate group states and controlled limitation reasons; never silently correct or attribute change biologically | Protocol/timepoint alias, mixed context, and missing metadata remain visible; values and eligibility remain unchanged |
 | Filters | E06 independent state axes plus E12 controlled cohort/timepoint/lineage filters | Filters select rows after authority construction; they cannot alter source contracts, denominators, compatibility, qualification, or role | Empty filter retains denominator ledger; timepoint filter includes all rows assigned to the selected biological collection; lineage filter cannot promote a technical row |
 | Supersession and history | Live D04 snapshot/status plus immutable D05 version | Current comparisons use active leaves. Superseded source rows remain visible as immutable history with an affected-comparison warning and no current segment; historical cohort versions remain addressable but visibly stale when authority changed | Supersession invalidates derived comparisons; replacement and source are distinguishable; old records and cohort versions remain immutable and are never rewritten |
@@ -545,9 +545,12 @@ tests and extend `tests/web/test_integrated_explorer.py` for the HTTP/DOM layer.
    remain separate and visible.
 5. An incompatible middle member cannot connect compatible endpoints; every
    segment is explicitly authorized anchor-relative.
-6. Missing, withheld, failed, insufficient, excluded replicate, excluded
-   reanalysis, zero-eligible, and one-eligible cases preserve exact states and
-   reconciled D09 counts.
+6. The registered D09 states (collapsed technical replicate and reanalysis,
+   policy-excluded, D06 missing, D06 withheld, unqualified or
+   provider-ineligible, zero-included-unit and one-included-unit) keep exact
+   states and reconciled D09 counts. Failed or insufficient source results
+   appear as source-row states from their own E06/E07/E08/E09 authority, not as
+   D09 reasons.
 7. D04 supersession keeps the immutable source row with an affected-comparison
    warning while the active leaf alone controls current comparison. A stable
    verified result-key revocation renders an exact revoked/withheld row. Linkage
