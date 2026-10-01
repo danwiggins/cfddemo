@@ -1783,8 +1783,16 @@ class LongitudinalDecisionRegistry:
                 "D03 decision registry restore failed"
             ) from None
         finally:
-            if created and not completed and root_fd is not None:
-                _remove_partial_restore(parent_fd, target.name, root_fd, objects_fd)
+            if created and not completed:
+                if root_fd is not None:
+                    _remove_partial_restore(
+                        parent_fd, target.name, root_fd, objects_fd
+                    )
+                elif parent_fd is not None:
+                    try:
+                        os.rmdir(target.name, dir_fd=parent_fd)
+                    except OSError:
+                        pass
             for descriptor in (objects_fd, root_fd, parent_fd):
                 if descriptor is not None:
                     try:
@@ -1837,6 +1845,15 @@ def _require_registry_class_integrity(cls: type[object]) -> None:
     ):
         raise LongitudinalDecisionRegistryUnsafe(
             "D03 decision registry callable changed"
+        )
+    namespace = globals()
+    if namespace.keys() != _MODULE_NAMESPACE_SEAL.keys() or any(
+        namespace[name] is not expected
+        for name, expected in _MODULE_NAMESPACE_SEAL.items()
+        if expected is not _UNSEALED_BOUND
+    ):
+        raise LongitudinalDecisionRegistryUnsafe(
+            "D03 decision registry authority callable changed"
         )
 
 
@@ -1963,3 +1980,16 @@ __all__ = [
     "registered_series_object_bytes",
     "registered_series_object_from_bytes",
 ]
+
+# Seal this module's whole namespace rather than an enumerated subset: every
+# helper, constructor, enum, and imported callable reachable from a public
+# entrypoint keeps its import-time identity.  Integer bounds are exempt; changing
+# one can only refuse more or fewer inputs, never alter a returned value.
+_UNSEALED_BOUND = object()
+_MODULE_NAMESPACE_SEAL = MappingProxyType(
+    {
+        name: _UNSEALED_BOUND if type(value) is int else value
+        for name, value in globals().items()
+    }
+    | {"_MODULE_NAMESPACE_SEAL": _UNSEALED_BOUND}
+)

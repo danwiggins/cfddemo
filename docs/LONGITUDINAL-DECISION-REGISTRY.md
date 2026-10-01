@@ -68,9 +68,13 @@ hard-link adoption, a journal chain that starts at a genesis digest over the
 immutable metadata, required retained registry ID, epoch, and head on reopen,
 a process-wide monotonic head fence against rollback, inode-bound control files,
 a process-private instance seal, and sealed class and module callables,
-including the pinned D03 decide and replay functions and the result
-constructors, so a replaced module global cannot pair one selector with another
-series' decision. The returned decision also validates that its selector derives
+including the pinned D03 decide and replay functions. The module's whole
+namespace is sealed at import: replacing or adding any module global (a helper,
+constructor, enum, or imported serializer) fails closed at every public
+entrypoint, including restore. Integer bounds are exempt because changing one can
+only refuse more or fewer inputs. This is defense in depth against in-process
+mutation, not a security boundary: the standard library, pydantic, and the seal
+check itself are trusted at the same level as in the D05 cohort registry. The returned decision also validates that its selector derives
 from its object digest and its decision digest from its decision.
 
 A failed journal append truncates any torn suffix back to the last committed
