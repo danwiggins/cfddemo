@@ -80,7 +80,8 @@ digest and its decision digest from its decision.
 
 A failed journal append truncates any torn suffix back to the last committed
 entry, so the chain stays readable and the registration can be retried. A
-failed restore removes the partial target it created, so a retry is possible.
+failed restore, including a failed final reopen of the restored registry,
+removes the partial target it created, so a retry is possible.
 Both gaps also exist in the merged D05 cohort registry and are a follow-up
 there.
 
