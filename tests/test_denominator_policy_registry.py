@@ -865,32 +865,50 @@ def test_selector_record_carries_live_counts_only_when_current(env: Env) -> None
         type(row)(**{**values, "included_members": 1})
 
 
-def test_backup_with_a_noncontiguous_policy_history_is_rejected(
-    env: Env, tmp_path: Path
-) -> None:
-    _register(env)
-    second = _register(env, policy=env.policy(version=2, definition_sha256="1" * 64))
-    backup = denominator_policy_backup_from_bytes(env.registry.backup_bytes())
-    kept = tuple(
-        item for item in backup.objects if item.object_sha256 == second.object_sha256
-    )
-    entry = registry_module._build_journal_entry(
-        sequence=1,
-        previous_entry_sha256=registry_module._metadata_genesis_sha256(
-            backup.metadata
-        ),
-        object_sha256=second.object_sha256,
-        object_bytes=len(kept[0].object_json.encode("utf-8")),
-    )
+def _forge_backup(backup, digests: tuple[str, ...]) -> tuple[bytes, str]:
+    """Re-chain a backup so its journal commits exactly ``digests`` in order."""
+
+    sizes = {
+        item.object_sha256: len(item.object_json.encode("utf-8"))
+        for item in backup.objects
+    }
+    previous = registry_module._metadata_genesis_sha256(backup.metadata)
+    journal = []
+    for sequence, digest in enumerate(digests, start=1):
+        entry = registry_module._build_journal_entry(
+            sequence=sequence,
+            previous_entry_sha256=previous,
+            object_sha256=digest,
+            object_bytes=sizes[digest],
+        )
+        journal.append(entry)
+        previous = entry.entry_sha256
     forged = backup.model_copy(
         update={
-            "state_version": 1,
-            "state_head_sha256": entry.entry_sha256,
-            "journal": (entry,),
-            "objects": kept,
+            "state_version": len(journal),
+            "state_head_sha256": previous,
+            "journal": tuple(journal),
+            "objects": tuple(
+                item for item in backup.objects if item.object_sha256 in digests
+            ),
         }
     )
-    content = registry_module._canonical_backup_bytes(forged)
+    return registry_module._canonical_backup_bytes(forged), previous
+
+
+@pytest.mark.parametrize("shape", ("gap", "reordered"))
+def test_backup_with_a_noncontiguous_policy_history_is_rejected(
+    env: Env, tmp_path: Path, shape: str
+) -> None:
+    first = _register(env)
+    second = _register(env, policy=env.policy(version=2, definition_sha256="1" * 64))
+    backup = denominator_policy_backup_from_bytes(env.registry.backup_bytes())
+    digests = (
+        (second.object_sha256,)
+        if shape == "gap"
+        else (second.object_sha256, first.object_sha256)
+    )
+    content, head = _forge_backup(backup, digests)
     with pytest.raises(DenominatorPolicyRegistryConflict, match="history"):
         denominator_policy_backup_from_bytes(content)
     target = tmp_path / "gap-restore"
@@ -902,6 +920,104 @@ def test_backup_with_a_noncontiguous_policy_history_is_rejected(
             record_catalog=env.catalog,
             expected_registry_id=backup.metadata.registry_id,
             expected_registry_epoch_sha256=backup.metadata.registry_epoch_sha256,
-            expected_state_head_sha256=entry.entry_sha256,
+            expected_state_head_sha256=head,
         )
     assert not target.exists()
+
+
+def test_reordered_history_on_disk_fails_closed(env: Env) -> None:
+    first = _register(env)
+    second = _register(env, policy=env.policy(version=2, definition_sha256="1" * 64))
+    backup = denominator_policy_backup_from_bytes(env.registry.backup_bytes())
+    content, head = _forge_backup(backup, (second.object_sha256, first.object_sha256))
+    env.registry.close()
+    journal = b"".join(
+        canonical_contract_bytes(entry) + b"\n"
+        for entry in registry_module.DenominatorPolicyBackup.model_validate_json(
+            content
+        ).journal
+    )
+    (env.registry.root / "registry-journal.jsonl").write_bytes(journal)
+    with pytest.raises(DenominatorPolicyRegistryUnsafe, match="history"):
+        DenominatorPolicyRegistry(
+            env.registry.root,
+            cohort_registry=env.cohort_registry,
+            record_catalog=env.catalog,
+            expected_registry_id=first.registry_id,
+            expected_registry_epoch_sha256=first.registry_epoch_sha256,
+            expected_state_head_sha256=head,
+        )
+
+
+def test_restore_rejects_other_d05_d06_authority_before_creating_a_target(
+    env: Env, tmp_path: Path
+) -> None:
+    receipt = _register(env)
+    backup = env.registry.backup_bytes()
+    store = env.cohort_registry._linkage_store
+    other_catalog = CohortRecordCatalog(
+        tmp_path / "other-records",
+        result_catalog=env.values[1],
+        linkage_store=store,
+        cohort_registry=env.cohort_registry,
+        expected_trust_snapshot_sha256_by_provider=_pins(),
+        reader_registry=DEFAULT_RESULT_BUNDLE_READER_REGISTRY,
+    )
+    target = tmp_path / "other-restore"
+    try:
+        with pytest.raises(DenominatorPolicyRegistryConflict, match="authority"):
+            DenominatorPolicyRegistry.restore(
+                target,
+                backup,
+                cohort_registry=env.cohort_registry,
+                record_catalog=other_catalog,
+                expected_registry_id=receipt.registry_id,
+                expected_registry_epoch_sha256=receipt.registry_epoch_sha256,
+                expected_state_head_sha256=receipt.state_head_sha256,
+            )
+    finally:
+        other_catalog.close()
+    assert not target.exists()
+
+
+def test_failed_restore_reopen_removes_the_published_target(
+    env: Env, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    receipt = _register(env)
+    backup = env.registry.backup_bytes()
+    original_open = os.open
+
+    def failing_open(path, flags, *args, **kwargs):
+        # Restore creates the lock with O_CREAT; only the final reopen omits it.
+        if path == ".registry.lock" and not flags & os.O_CREAT:
+            raise OSError("descriptor exhausted")
+        return original_open(path, flags, *args, **kwargs)
+
+    target = tmp_path / "reopen-restore"
+    values = {
+        "cohort_registry": env.cohort_registry,
+        "record_catalog": env.catalog,
+        "expected_registry_id": receipt.registry_id,
+        "expected_registry_epoch_sha256": receipt.registry_epoch_sha256,
+        "expected_state_head_sha256": receipt.state_head_sha256,
+    }
+    monkeypatch.setattr(os, "open", failing_open)
+    with pytest.raises(DenominatorPolicyRegistryUnsafe, match="restore failed"):
+        DenominatorPolicyRegistry.restore(target, backup, **values)
+    monkeypatch.undo()
+    assert not target.exists()
+    restored = DenominatorPolicyRegistry.restore(target, backup, **values)
+    restored.close()
+
+
+def test_resolve_cannot_run_inside_a_held_linkage_fence(env: Env) -> None:
+    # Measured composition: the builder re-enters the non-nestable linkage
+    # fence, so a caller-held fence turns resolve into a typed stale error.
+    receipt = _register(env)
+    store = env.cohort_registry._linkage_store
+    with type(store).authority_read_fence(store):
+        with pytest.raises(DenominatorPolicyRegistryStale):
+            env.registry.resolve(receipt.selector_id, 1)
+    assert env.registry.resolve(receipt.selector_id, 1).object_sha256 == (
+        receipt.object_sha256
+    )

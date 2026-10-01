@@ -86,10 +86,12 @@ Consequences:
 - The D09 lock is held through construction of the returned value, so no D09
   registration lands between the rebuild and the return.
 - The D05/D06 fence is released when the builder returns. The summary is an
-  as-of summary for one linkage/catalog snapshot, which its digests identify. A
-  consumer that needs D05/D06 to stay unchanged through a later step must hold
-  the composite fence or call `resolve` again inside it. This registry does not
-  provide that composite fence.
+  as-of summary for one linkage/catalog snapshot, which its digests identify.
+  `resolve` cannot be called inside a held linkage or D06 fence: the builder
+  tries to re-enter it and fails, and `resolve` raises
+  `DenominatorPolicyRegistryStale`. A test pins this. A consumer that needs
+  D05/D06 to stay unchanged through a later step needs the composite fence
+  adapter or an in-fence builder entry point. This registry provides neither.
 - The E12 plan lists D09 after D01/D05/D06 in its global fence order. This
   registry has to take its lock before them, because the builder cannot run
   inside them. The composable authority-fence adapter must reconcile this. For
@@ -137,7 +139,9 @@ The journal is the commit point. An object without a journal entry is the
 remnant of an interrupted registration. Reads tolerate at most one. The next
 registration removes it, unless it holds the exact bytes being registered, in
 which case it is adopted. A failed journal append truncates any torn suffix. A
-failed restore removes the partial target it created. A non-contiguous policy
+failed restore removes the partial target it created. That includes a target
+whose final reopen fails. Policy history is validated in journal order: each
+selector's versions must be committed as 1, 2, … N. A gap or a reordered
 history fails closed on load and on restore.
 
 One object holds at most 32 MiB of canonical bytes. Each disposition rule set

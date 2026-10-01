@@ -630,9 +630,14 @@ def _build_journal_entry(
 def _validate_selector_versions(
     epoch: str, values: list[RegisteredDenominatorPolicyObject]
 ) -> None:
-    """Each selector's committed policy versions must be exactly 1..N."""
+    """In journal order, each selector's policy versions must append 1, 2, ... N.
 
-    versions: dict[str, list[int]] = {}
+    ``values`` must be in journal (commit) order, so every committed prefix is
+    itself a contiguous history and a later version never precedes its
+    predecessor.
+    """
+
+    counts: dict[str, int] = {}
     for value in values:
         if (
             value.cohort_registry_id != values[0].cohort_registry_id
@@ -640,12 +645,11 @@ def _validate_selector_versions(
             != values[0].cohort_registry_epoch_sha256
         ):
             raise ValueError("D09 policy objects bind different cohort registries")
-        versions.setdefault(_object_selector_id(epoch, value), []).append(
-            value.policy.version
-        )
-    for items in versions.values():
-        if sorted(items) != list(range(1, len(items) + 1)):
+        selector_id = _object_selector_id(epoch, value)
+        expected = counts.get(selector_id, 0) + 1
+        if value.policy.version != expected:
             raise ValueError("D09 policy versions are not contiguous")
+        counts[selector_id] = expected
 
 
 def _validate_backup(backup: DenominatorPolicyBackup) -> None:
@@ -656,7 +660,7 @@ def _validate_backup(backup: DenominatorPolicyBackup) -> None:
             "D09 policy registry backup count is invalid"
         )
     sizes: dict[str, int] = {}
-    values: list[RegisteredDenominatorPolicyObject] = []
+    values: dict[str, RegisteredDenominatorPolicyObject] = {}
     previous_digest = ""
     for item in backup.objects:
         if item.object_sha256 <= previous_digest:
@@ -684,7 +688,7 @@ def _validate_backup(backup: DenominatorPolicyBackup) -> None:
                 "D09 policy registry backup object is invalid"
             )
         sizes[item.object_sha256] = len(content)
-        values.append(value)
+        values[item.object_sha256] = value
     if sum(sizes.values()) > MAX_TOTAL_OBJECT_BYTES:
         raise DenominatorPolicyRegistryConflict(
             "D09 policy registry backup exceeds its bound"
@@ -695,7 +699,10 @@ def _validate_backup(backup: DenominatorPolicyBackup) -> None:
         )
     try:
         if values:
-            _validate_selector_versions(backup.metadata.registry_epoch_sha256, values)
+            _validate_selector_versions(
+                backup.metadata.registry_epoch_sha256,
+                [values[entry.object_sha256] for entry in backup.journal],
+            )
     except ValueError:
         raise DenominatorPolicyRegistryConflict(
             "D09 policy registry backup history is invalid"
@@ -1521,7 +1528,7 @@ class DenominatorPolicyRegistry:
             if loaded:
                 _validate_selector_versions(
                     self._metadata.registry_epoch_sha256,
-                    [value for value, _ in loaded.values()],
+                    [loaded[entry.object_sha256][0] for entry in journal],
                 )
         except ValueError:
             raise DenominatorPolicyRegistryUnsafe(
@@ -2034,6 +2041,17 @@ class DenominatorPolicyRegistry:
             os.fsync(objects_fd)
             os.fsync(root_fd)
             os.fsync(parent_fd)
+            # Reopen through the normal descriptor, inode, history, and D05/D06
+            # binding checks before the restore counts as complete, so a target
+            # that cannot open is removed instead of blocking a retry.
+            restored = _PR_CONSTRUCT(
+                target,
+                cohort_registry=cohort_registry,
+                record_catalog=record_catalog,
+                expected_registry_id=expected_registry_id,
+                expected_registry_epoch_sha256=expected_registry_epoch_sha256,
+                expected_state_head_sha256=expected_state_head_sha256,
+            )
             completed = True
         except FileExistsError:
             raise DenominatorPolicyRegistryConflict(
@@ -2061,14 +2079,7 @@ class DenominatorPolicyRegistry:
                         os.close(descriptor)
                     except OSError:
                         pass
-        return _PR_CONSTRUCT(
-            target,
-            cohort_registry=cohort_registry,
-            record_catalog=record_catalog,
-            expected_registry_id=expected_registry_id,
-            expected_registry_epoch_sha256=expected_registry_epoch_sha256,
-            expected_state_head_sha256=expected_state_head_sha256,
-        )
+        return restored
 
 
 _REGISTRY_METHOD_SEAL = MappingProxyType(
