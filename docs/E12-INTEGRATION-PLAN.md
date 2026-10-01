@@ -27,9 +27,9 @@ limitation and never changes source values, denominators, or eligibility.
 
 | Requirement | Authoritative input | E12 check and projection | Acceptance evidence |
 | --- | --- | --- | --- |
-| Authorized cohort selection | Exact `CohortRegistry`; `resolve_history()` result with registry ID, epoch, state version/head, selector, manifest digest | Resolve under the live registry; reject caller-built manifest, browser alias, stale head, or changed linkage authority | Selector resolves current registered history; rollback, stale selector, caller manifest, and head race fail closed |
+| Authorized cohort selection | Exact `CohortRegistry`; `resolve_history(selector_id, …)` result with registry ID, epoch, state version/head and manifest digest (the selector is the call's input, not a returned field) | Resolve under the live registry; reject caller-built manifest, browser alias, stale head, or changed linkage authority | Selector resolves current registered history; rollback, stale selector, caller manifest, and head race fail closed |
 | Authorized reader | Prerequisite protected `ReaderAuthorizationRegistry` containing externally provider-authorized, signed and revocable `longitudinal_reader` grants; independently pinned registry ID, epoch, expected head and B01 session binding | Every selector, workspace and source-detail route resolves the opaque session credential to one current, unexpired reader grant under the live registry. The builder receives the live registry plus the session credential, never a caller-authored role, principal, grant, scope or approval digest | Missing, forged, expired, revoked, wrong-role, wrong-scope, stale-head, registry-replacement and grant-revocation races fail with `permission_denied` before protected selector or workspace reads; synthetic tests use only a checked-in synthetic provider authority |
-| Subject/draw linkage | Live `ProviderLinkageStore` receipts retained by D05 and D03 | Never infer identity from result aliases, dates, method labels, or adjacency; revalidate through D05/D03 APIs | Wrong subject, corrected linkage, tombstone, stale receipt, cross-store receipt, and authority advance suppress all comparisons |
+| Subject/draw linkage | Live `ProviderLinkageStore` state; D05 members retain only `committed_receipt_sha256`, and D03 series decisions retain the receipts themselves | Never infer identity from result aliases, dates, method labels, or adjacency; revalidate through D05/D03 APIs | Wrong subject, corrected linkage, tombstone, stale receipt, cross-store receipt, and authority advance suppress all comparisons |
 | Biological timepoint | D05 v2 signed collection event, `CohortManifest.time_axis`, and `CohortMember.biological_timepoint_id/time_coordinate` | Derive one public timepoint ordinal and a stable signed-seconds offset from the first biological coordinate; expose controlled axis kind, `seconds` unit, definition digest, and relative/absolute semantics, but never the protected handle, collection token, or absolute collection timestamp | Sibling specimens share a point only as policy permits; technical rerun/reanalysis remains at its source collection coordinate; unequal intervals retain unequal numeric spacing |
 | Technical rerun and reanalysis distinction | D05 lineage role/source edge plus the prerequisite live D04 bounded record-history snapshot | Source table carries controlled `biological_draw`, `technical_replicate`, or `reanalysis` role; only a manifest denominator contributor counts as a biological unit | Reanalysis twice is idempotent; superseded source remains immutable/history-only; active replacement does not create a timepoint or denominator |
 | Verified result availability | D06 registry-bound `CohortManifestRecordStatus` and bindings | Preserve `available`, `missing`, and `withheld`; no missing/withheld row contains result details or a zero value | Exact registry/catalog/linkage/status identities match; revocation, stale registry, missing record, malformed binding, and read race fail closed |
@@ -716,12 +716,29 @@ caller assertions and is therefore prohibited:
 - No durable saved-comparison registry exists. It is a separate required PR;
   in-memory or filesystem artifact writing inside D08 cannot satisfy the Save
   and reopen journey.
+- D05 `resolve_history()` rejects stale authority before returning history, so
+  no API yet returns a historical cohort version as visibly stale after
+  authority changes. The history and reopen requirements above need a separate
+  bounded stale-history read that never presents the result as current.
+- D09 (#52) exposes `build_registered_cohort_denominator_summary`, which takes
+  policy objects directly. The request's D09 policy selector and the builder's
+  `d09_summary_registry` need a protected D09 policy/summary registry with its
+  own read fence.
+- D10 (#54) defers live D09/D03 binding. After D03 discovery exists, a D10
+  integration step must derive context from the registered D09 population and
+  replayed D03 decisions, behind the `d10_context_registry` fence.
+- The family adapters need durable family-source artifact discovery (the
+  `measurement_source_artifact_registry`) and its read fence; the adapters
+  alone do not locate E07/E08/E09 artifacts.
 
 The remaining merge order is corrected D09, corrected D10, protected
-reader-authorization registry plus B01 session binding,
-protected D03/D07 decision/comparison discovery, protected anchor-policy
+reader-authorization registry plus B01 session binding, D05 bounded
+stale-history read, protected D09 policy/summary registry,
+protected D03/D07 decision/comparison discovery, D10 live D09/D03 integration
+and context registry, protected anchor-policy
 and projection-policy registries, protected E06 result-view-source discovery,
-family-specific measurement-source adapters,
+family-source artifact discovery registry, family-specific measurement-source
+adapters,
 composable authority-fence adapters/coordinator, D08 read model, durable
 saved-comparison registry, browser integration, then installed quickstart and
 rollback rehearsal evidence. E14 may automate renderer checks afterward;
