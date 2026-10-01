@@ -7,8 +7,13 @@ or assign biological or clinical meaning.
 
 ## D09 adapter boundary
 
-The live D09 registry interface is not final. `D09PopulationDigestInput` is a
-versioned digest-only adapter that binds:
+The registered D09 v3 summary (`build_registered_cohort_denominator_summary`)
+derives aggregate counts from D05/D06 authority only and deliberately carries no
+D03 member decisions or per-member identities. D10 needs both, so it cannot
+consume that summary directly. Binding D10 to live D09, D03, and D07 authority
+is E12 integration work (see `docs/E12-DEPENDENCY-AUDIT.md`), not part of this
+contract. Until then, `D09PopulationDigestInput` is a versioned digest-only
+adapter that binds:
 
 - the exact cohort-manifest digest;
 - the declared future D09 status and population digests;
@@ -18,8 +23,8 @@ versioned digest-only adapter that binds:
 The adapter is permanently marked `declared_digest_only`,
 `live_d09_registry_verified=false`, `synthetic_only=true`, and
 `clinical_use_authorized=false`. This implementation therefore does not claim
-that D09 registry evidence was read or verified. A future integration must
-replace the adapter at this explicit boundary and recheck live D09 authority.
+that D09 registry evidence was read or verified. E12 must replace the adapter
+at this explicit boundary and recheck live D09 authority.
 
 ## Covariates and classification
 
