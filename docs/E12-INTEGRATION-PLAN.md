@@ -54,7 +54,7 @@ limitation and never changes source values, denominators, or eligibility.
 
 ## Required implementation cut
 
-Add `evidence_inspector/longitudinal_workspace.py` only after D06 and D09 merge.
+Add `evidence_inspector/longitudinal_workspace.py` only after the remaining merge order below completes.
 The module owns the protected-to-public boundary and contains these contracts:
 
 - `LongitudinalWorkspaceRequest`: registry-scoped cohort selector/version,
@@ -545,12 +545,14 @@ tests and extend `tests/web/test_integrated_explorer.py` for the HTTP/DOM layer.
    remain separate and visible.
 5. An incompatible middle member cannot connect compatible endpoints; every
    segment is explicitly authorized anchor-relative.
-6. The registered D09 states (collapsed technical replicate and reanalysis,
-   policy-excluded, D06 missing, D06 withheld, unqualified or
-   provider-ineligible, zero-included-unit and one-included-unit) keep exact
-   states and reconciled D09 counts. Failed or insufficient source results
-   appear as source-row states from their own E06/E07/E08/E09 authority, not as
-   D09 reasons.
+6. Fixtures with collapsed technical replicates and reanalyses,
+   policy-excluded members, D06 missing and withheld records, unqualified or
+   provider-ineligible results, and zero- and one-included-unit cohorts yield
+   reconciled D09 v3 aggregate counts and the matching summary state. The D09
+   v3 summary serializes no per-member reasons, so each row's lineage,
+   missing and withheld state comes from D05 lineage and D06 bindings on
+   `LongitudinalSourceRow`. Failed or insufficient source results appear as
+   source-row states from their own E06/E07/E08/E09 authority.
 7. D04 supersession keeps the immutable source row with an affected-comparison
    warning while the active leaf alone controls current comparison. A stable
    verified result-key revocation renders an exact revoked/withheld row. Linkage
@@ -678,7 +680,7 @@ At current main, implementing the builder would still require accepting weaker
 caller assertions and is therefore prohibited:
 
 - The D06 live-registry and trust-fence correction is merged. Corrected D09 is
-  PR #52 (macOS gate green on 2026-10-01) and awaits merge. Its registered v3
+  PR #52. Its registered v3
   summary carries aggregate counts only, with no D03 decisions or per-member
   identities. E12 must consume that exact registry-bound D09 summary, not
   reproduce denominator logic.
