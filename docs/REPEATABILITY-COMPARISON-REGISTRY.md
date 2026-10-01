@@ -182,7 +182,16 @@ require an exact canonical round trip.
 independently retained registry ID, epoch, and state head, the same linkage
 store identity and trust pins, a matching result trust document and pin, and an
 empty target. Any failure, including the final open that rechecks live
-authority, removes the target it created so the restore can be retried. A backup contains protected records, signed observations, and
+authority, removes the files the restore created so it can be retried. Cleanup
+is best-effort: if a foreign entry (for example a non-empty directory) appears
+in the target, the target stays and a retry needs a new path.
+
+Known recovery gaps, shared with the D03 decision and D05 cohort registries
+and left for a common follow-up: a process that dies part-way through creating
+a new registry root leaves a root that fails closed on reopen and must be
+removed by hand, and restore cleanup is best-effort as above. Both fail closed;
+neither can return a comparison. The fix is staged creation and restore in a
+private sibling directory with an atomic rename into place. A backup contains protected records, signed observations, and
 values, and is not an export artifact.
 
 ## Not in scope
