@@ -88,8 +88,11 @@ Field classification used by the registry:
 The core identity fields (member, result, bundle, method, capability as
 pinned, trust) have live authority, so the registry is built. Each resolved
 source carries the fixed list of unverified fields
-(`caller_asserted_fields`) and the literal `denominator_verified=false`, so a
-consumer cannot mistake a bound ledger for a verified one.
+(`caller_asserted_fields`) and the literals `denominator_verified=false` and
+`method_authority_head_current_verified=false`, so a consumer cannot mistake a
+bound ledger or an import-time method head for a verified one. The list covers
+the counterpart record as well as the subject: the E05 decision depends on the
+counterpart's information state, compatibility key, and other unmapped fields.
 
 Who may author an E06 denominator ledger, and whether E12 should show one at
 all next to the D09 v3 counts, is a product decision this registry does not
@@ -131,6 +134,13 @@ counterpart, or label) appends the next source version, up to 16. Exact
 re-registration is idempotent. Within one cohort selector and version, one
 result maps to one member and one member to one result; the journal loader
 enforces the same rule, so tampered or restored state cannot break it.
+
+The scope of that rule is one cohort selector and version, which is the scope
+of one E12 workspace. Across cohort versions the same result may appear under
+a different member commitment, because D06 deliberately lets one verified
+record bind to a new manifest version whose member contents changed. Whether
+E12 should also forbid that across versions is a product decision; the
+registry does not make it.
 
 ## Every read re-verifies
 
@@ -199,7 +209,15 @@ owner-only files, descriptor-relative exclusive publication with fsync and
 hard-link adoption, a journal chain from a genesis digest over immutable
 metadata, required retained registry ID, epoch, and head on reopen, a
 process-wide monotonic head fence against rollback, inode-bound control files,
-torn-journal truncation, and removal of a failed restore's partial target. The
+torn-journal truncation, and removal of a failed restore's partial target.
+A crash in the middle of a journal append leaves an unterminated final line;
+it was never fsynced or returned, so reopening and every registration truncate
+it under the exclusive lock, and every complete line must still validate. A
+restore writes a durable `.restore-incomplete` marker before its first file and
+removes it last. The constructor refuses a root that still carries the marker,
+and the next restore to the same target removes a marked directory that holds
+only restore-created names, then retries; any other existing target is a
+conflict. The
 metadata binds the cohort registry ID and epoch, the linkage store ID, epoch,
 and storage identity, the E04 catalog storage and reader-registry identities,
 and the D06 record-catalog scope; reopening or restoring against a different

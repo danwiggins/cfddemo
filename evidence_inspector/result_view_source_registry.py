@@ -30,7 +30,7 @@ from contextlib import contextmanager
 from enum import StrEnum
 from pathlib import Path
 from types import MappingProxyType
-from typing import Annotated, Literal
+from typing import Annotated, Literal, get_args
 
 from pydantic import Field, StringConstraints, model_validator
 
@@ -93,10 +93,16 @@ MAX_PATH_PARTS = 256
 # Fields of a resolved source that no live authority in this codebase can
 # re-derive.  They are bound by digest (alteration is detected) but are not
 # verified.  The list is a literal so that the claim is part of the contract.
-CALLER_ASSERTED_FIELDS: tuple[str, ...] = (
+CallerAssertedFields = Literal[
     "accessible_label",
     "compatibility_policy",
     "compatibility_policy_pin",
+    "counterpart.bundle_id",
+    "counterpart.compatibility_key",
+    "counterpart.current_capability.effective_approval_ref",
+    "counterpart.current_capability.qualification_state_unknown_versus_unassigned",
+    "counterpart.information_state",
+    "counterpart.result_sha256",
     "denominator",
     "qc_label",
     "record.bundle_id",
@@ -105,22 +111,10 @@ CALLER_ASSERTED_FIELDS: tuple[str, ...] = (
     "record.current_capability.qualification_state_unknown_versus_unassigned",
     "record.information_state",
     "record.result_sha256",
-)
-CallerAssertedFields = Literal[
-    (
-        "accessible_label",
-        "compatibility_policy",
-        "compatibility_policy_pin",
-        "denominator",
-        "qc_label",
-        "record.bundle_id",
-        "record.compatibility_key",
-        "record.current_capability.effective_approval_ref",
-        "record.current_capability.qualification_state_unknown_versus_unassigned",
-        "record.information_state",
-        "record.result_sha256",
-    )
 ]
+# The counterpart entries name fields of the second record the E05
+# decision depends on; they are as unverified as the subject's.
+CALLER_ASSERTED_FIELDS: tuple[str, ...] = get_args(CallerAssertedFields)
 
 _REGISTRY_PROCESS_LOCK = threading.RLock()
 _REGISTRY_PROCESS_HEADS: dict[tuple[int, int, str, str], str] = {}
@@ -852,6 +846,78 @@ def _remove_partial_restore(
         pass
 
 
+_RESTORE_MARKER = ".restore-incomplete"
+_RESTORE_ROOT_NAMES = frozenset(
+    {
+        _RESTORE_MARKER,
+        ".registry.lock",
+        "objects",
+        "registry-journal.jsonl",
+        "registry-metadata.json",
+    }
+)
+
+
+def _clear_incomplete_restore(parent_fd: int, name: str) -> bool:
+    """Remove a target left by a restore that crashed before completing.
+
+    Only a private directory that still carries the restore marker and holds
+    nothing but restore-created names is removed; anything else is left alone
+    and the caller reports a conflict.
+    """
+
+    flags = (
+        os.O_RDONLY
+        | getattr(os, "O_DIRECTORY", 0)
+        | getattr(os, "O_CLOEXEC", 0)
+        | getattr(os, "O_NOFOLLOW", 0)
+    )
+    root_fd: int | None = None
+    objects_fd: int | None = None
+    try:
+        observed = os.stat(name, dir_fd=parent_fd, follow_symlinks=False)
+        if not stat.S_ISDIR(observed.st_mode) or observed.st_uid != os.geteuid():
+            return False
+        root_fd = os.open(name, flags, dir_fd=parent_fd)
+        bound = os.fstat(root_fd)
+        if (bound.st_dev, bound.st_ino) != (observed.st_dev, observed.st_ino):
+            return False
+        marker = os.stat(_RESTORE_MARKER, dir_fd=root_fd, follow_symlinks=False)
+        if not stat.S_ISREG(marker.st_mode) or marker.st_uid != os.geteuid():
+            return False
+        entries = set(os.listdir(root_fd))
+        if any(
+            entry not in _RESTORE_ROOT_NAMES and not entry.startswith(".tmp-")
+            for entry in entries
+        ):
+            return False
+        if "objects" in entries:
+            objects_fd = os.open("objects", flags, dir_fd=root_fd)
+            if any(
+                not (
+                    (len(entry) == 69 and entry.endswith(".json"))
+                    or entry.startswith(".tmp-")
+                )
+                for entry in os.listdir(objects_fd)
+            ):
+                return False
+        _remove_partial_restore(parent_fd, name, root_fd, objects_fd)
+    except OSError:
+        return False
+    finally:
+        for descriptor in (objects_fd, root_fd):
+            if descriptor is not None:
+                try:
+                    os.close(descriptor)
+                except OSError:
+                    pass
+    try:
+        os.stat(name, dir_fd=parent_fd, follow_symlinks=False)
+    except FileNotFoundError:
+        return True
+    return False
+
+
 def _authority_identity(record_catalog: CohortRecordCatalog) -> dict[str, object]:
     """Read the D06 catalog's own pinned identities without invoking hooks."""
 
@@ -1166,6 +1232,14 @@ class ResultViewSourceRegistry:
             if (bound.st_dev, bound.st_ino) != (root_lstat.st_dev, root_lstat.st_ino):
                 raise ResultViewSourceRegistryUnsafe("E06 source registry root changed")
             self._root_identity = (bound.st_dev, bound.st_ino)
+            try:
+                os.stat(_RESTORE_MARKER, dir_fd=self._root_fd, follow_symlinks=False)
+            except FileNotFoundError:
+                pass
+            else:
+                raise ResultViewSourceRegistryUnsafe(
+                    "E06 source registry restore is incomplete"
+                )
             if root_created:
                 os.mkdir("objects", 0o700, dir_fd=self._root_fd)
             self._objects_fd = os.open("objects", flags, dir_fd=self._root_fd)
@@ -1231,6 +1305,7 @@ class ResultViewSourceRegistry:
                     self._metadata.registry_epoch_sha256,
                 )
                 _SR_RECOVER_TEMPORARY_OBJECTS(self)
+                _SR_RECOVER_TORN_JOURNAL(self)
                 _, head = _SR_LOAD_STATE(self, check_trusted_head=False)
                 if root_created:
                     if any(item is not None for item in expected_values):
@@ -1577,6 +1652,28 @@ class ResultViewSourceRegistry:
                 "E06 source registry journal append failed"
             ) from None
 
+    def _recover_torn_journal(self) -> None:
+        """Drop an incomplete final journal line left by a crash mid-append.
+
+        Must run under the exclusive registry lock.  A line without its newline
+        was never fsynced and returned as committed, so it is not state; every
+        complete line must still validate as part of the chain.
+        """
+
+        descriptor = self._journal_fd
+        if descriptor is None:
+            raise ResultViewSourceRegistryUnsafe("E06 source registry is closed")
+        try:
+            os.lseek(descriptor, 0, os.SEEK_SET)
+            content = _read_bounded(descriptor, MAX_JOURNAL_BYTES)
+            if content and not content.endswith(b"\n"):
+                os.ftruncate(descriptor, content.rfind(b"\n") + 1)
+                os.fsync(descriptor)
+        except OSError:
+            raise ResultViewSourceRegistryUnsafe(
+                "E06 source registry journal recovery failed"
+            ) from None
+
     def _accept_observed_head(
         self,
         journal: tuple[ResultViewSourceJournalEntry, ...],
@@ -1901,6 +1998,7 @@ class ResultViewSourceRegistry:
             )
             with _SR_LOCK(self, exclusive=True):
                 _SR_RECOVER_TEMPORARY_OBJECTS(self)
+                _SR_RECOVER_TORN_JOURNAL(self)
                 loaded, head = _SR_LOAD_STATE(self)
                 assert self._objects_fd is not None
                 # The journal is the commit point: an object without an entry is
@@ -2287,7 +2385,12 @@ class ResultViewSourceRegistry:
                 raise ResultViewSourceRegistryUnsafe(
                     "E06 source registry restore parent changed"
                 )
-            os.mkdir(target.name, 0o700, dir_fd=parent_fd)
+            try:
+                os.mkdir(target.name, 0o700, dir_fd=parent_fd)
+            except FileExistsError:
+                if not _clear_incomplete_restore(parent_fd, target.name):
+                    raise
+                os.mkdir(target.name, 0o700, dir_fd=parent_fd)
             created = True
             root_lstat = os.stat(target.name, dir_fd=parent_fd, follow_symlinks=False)
             root_fd = os.open(target.name, directory_flags, dir_fd=parent_fd)
@@ -2327,6 +2430,21 @@ class ResultViewSourceRegistry:
                 dir_fd=root_fd,
             )
             os.close(lock_fd)
+            # A durable marker distinguishes a crashed restore from a registry;
+            # the constructor refuses it and the next restore may clear it.
+            marker_fd = os.open(
+                _RESTORE_MARKER,
+                os.O_WRONLY
+                | os.O_CREAT
+                | os.O_EXCL
+                | getattr(os, "O_CLOEXEC", 0)
+                | getattr(os, "O_NOFOLLOW", 0),
+                0o600,
+                dir_fd=root_fd,
+            )
+            os.fsync(marker_fd)
+            os.close(marker_fd)
+            os.fsync(root_fd)
             _publish_file(
                 root_fd,
                 "registry-metadata.json",
@@ -2346,6 +2464,7 @@ class ResultViewSourceRegistry:
                 ),
             )
             os.fsync(objects_fd)
+            os.unlink(_RESTORE_MARKER, dir_fd=root_fd)
             os.fsync(root_fd)
             os.fsync(parent_fd)
             completed = True
@@ -2397,6 +2516,7 @@ _REGISTRY_METHOD_SEAL = MappingProxyType(
             "_load_or_create_metadata",
             "_load_journal",
             "_append_journal",
+            "_recover_torn_journal",
             "_accept_observed_head",
             "_load_state",
             "_derive_in_fence",
@@ -2475,6 +2595,7 @@ _SR_RECOVER_TEMPORARY_OBJECTS = ResultViewSourceRegistry._recover_temporary_obje
 _SR_LOAD_OR_CREATE_METADATA = ResultViewSourceRegistry._load_or_create_metadata
 _SR_LOAD_JOURNAL = ResultViewSourceRegistry._load_journal
 _SR_APPEND_JOURNAL = ResultViewSourceRegistry._append_journal
+_SR_RECOVER_TORN_JOURNAL = ResultViewSourceRegistry._recover_torn_journal
 _SR_ACCEPT_OBSERVED_HEAD = ResultViewSourceRegistry._accept_observed_head
 _SR_LOAD_STATE = ResultViewSourceRegistry._load_state
 _SR_DERIVE_IN_FENCE = ResultViewSourceRegistry._derive_in_fence
@@ -2512,6 +2633,7 @@ _REGISTRY_ALIAS_SEAL = MappingProxyType(
             "_SR_LOAD_OR_CREATE_METADATA",
             "_SR_LOAD_JOURNAL",
             "_SR_APPEND_JOURNAL",
+            "_SR_RECOVER_TORN_JOURNAL",
             "_SR_ACCEPT_OBSERVED_HEAD",
             "_SR_LOAD_STATE",
             "_SR_DERIVE_IN_FENCE",

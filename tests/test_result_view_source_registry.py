@@ -1022,6 +1022,96 @@ def test_stored_source_is_the_exact_e06_contract(
     assert len(content) < registry_module.MAX_OBJECT_BYTES // 4
 
 
+def test_counterpart_fields_are_declared_unverified() -> None:
+    for name in (
+        "counterpart.information_state",
+        "counterpart.compatibility_key",
+        "counterpart.result_sha256",
+        "counterpart.bundle_id",
+        "counterpart.current_capability.effective_approval_ref",
+    ):
+        assert name in CALLER_ASSERTED_FIELDS
+
+
+def test_crash_torn_journal_tail_is_dropped_on_reopen_and_registration(
+    registry: ResultViewSourceRegistry, live: Live
+) -> None:
+    first = _register(registry, live)
+    journal = registry.root / "registry-journal.jsonl"
+    committed = journal.read_bytes()
+    # A crash after a partial os.write leaves an unterminated final line.
+    with open(journal, "ab") as handle:
+        handle.write(b'{"schema_version":"traceback.e06-source-jou')
+    second = _register(registry, live, accessible_label="Second aggregate")
+    assert second.state_version == 2
+    assert journal.read_bytes().startswith(committed)
+    root = registry.root
+    registry.close()
+    with open(journal, "ab") as handle:
+        handle.write(b'{"partial":')
+    reopened = ResultViewSourceRegistry(
+        root,
+        record_catalog=live.cohorts,
+        expected_registry_id=second.registry_id,
+        expected_registry_epoch_sha256=second.registry_epoch_sha256,
+        expected_state_head_sha256=second.state_head_sha256,
+    )
+    try:
+        assert _resolve(reopened, live, first).object_sha256 == first.object_sha256
+        assert journal.read_bytes().endswith(b"\n")
+    finally:
+        reopened.close()
+
+
+def test_crashed_restore_is_refused_and_cleared_by_the_next_restore(
+    registry: ResultViewSourceRegistry,
+    live: Live,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    receipt = _register(registry, live)
+    backup = registry.backup_bytes()
+    original_link = os.link
+
+    def failing_link(source, destination, *args, **kwargs):
+        if destination == "registry-journal.jsonl":
+            raise OSError("power loss")
+        return original_link(source, destination, *args, **kwargs)
+
+    target = live.root / "crashed-restore"
+    values = {
+        "record_catalog": live.cohorts,
+        "expected_registry_id": receipt.registry_id,
+        "expected_registry_epoch_sha256": receipt.registry_epoch_sha256,
+        "expected_state_head_sha256": receipt.state_head_sha256,
+    }
+    # Simulate a crash: the in-process cleanup never runs.
+    monkeypatch.setattr(os, "link", failing_link)
+    monkeypatch.setattr(registry_module, "_remove_partial_restore", lambda *a: None)
+    with pytest.raises(ResultViewSourceRegistryUnsafe, match="restore failed"):
+        ResultViewSourceRegistry.restore(target, backup, **values)
+    monkeypatch.undo()
+    assert (target / ".restore-incomplete").exists()
+    with open(target / "registry-journal.jsonl", "wb") as handle:
+        handle.write(b"")
+    (target / "registry-journal.jsonl").chmod(0o600)
+    with pytest.raises(ResultViewSourceRegistryUnsafe, match="restore is incomplete"):
+        ResultViewSourceRegistry(target, **values)
+    (target / "registry-journal.jsonl").unlink()
+    restored = ResultViewSourceRegistry.restore(target, backup, **values)
+    try:
+        assert not (target / ".restore-incomplete").exists()
+        assert _resolve(restored, live, receipt).object_sha256 == receipt.object_sha256
+    finally:
+        restored.close()
+    foreign = live.root / "foreign"
+    foreign.mkdir(mode=0o700)
+    (foreign / ".restore-incomplete").write_bytes(b"")
+    (foreign / "keep.txt").write_bytes(b"x")
+    with pytest.raises(ResultViewSourceRegistryConflict, match="already exists"):
+        ResultViewSourceRegistry.restore(foreign, backup, **values)
+    assert (foreign / "keep.txt").exists()
+
+
 def test_replay_rejects_any_stored_field_that_live_derivation_does_not_reproduce(
     registry: ResultViewSourceRegistry, live: Live
 ) -> None:
