@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import fcntl
 import hashlib
 import os
 import threading
@@ -816,3 +817,46 @@ def test_interpreter_warning_registry_does_not_disable_the_registry(
     monkeypatch.setitem(registry_module.__dict__, "__warningregistry__", {})
     assert registry.resolve(receipt.selector_id).object_sha256 == receipt.object_sha256
     assert registry.list_selectors().state_version == 1
+
+
+def test_failed_restore_reopen_removes_the_target_and_can_retry(
+    registry: LongitudinalDecisionRegistry,
+    live,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    receipt = _register(registry, live)
+    backup = registry.backup_bytes()
+    target = tmp_path / "reopen-restore"
+    values = {
+        "linkage_store": live[0],
+        "expected_trust_snapshot_sha256_by_provider": PINS,
+        "expected_registry_id": receipt.registry_id,
+        "expected_registry_epoch_sha256": receipt.registry_epoch_sha256,
+        "expected_state_head_sha256": receipt.state_head_sha256,
+    }
+    original_flock = fcntl.flock
+    restored_lock = target / ".registry.lock"
+
+    def failing_flock(descriptor, operation):
+        # Only the restored registry's own lock fails, during its final reopen.
+        if restored_lock.exists():
+            lock = restored_lock.stat()
+            bound = os.fstat(descriptor)
+            if (bound.st_dev, bound.st_ino) == (lock.st_dev, lock.st_ino):
+                raise OSError("lock unavailable")
+        return original_flock(descriptor, operation)
+
+    monkeypatch.setattr(fcntl, "flock", failing_flock)
+    with pytest.raises(LongitudinalDecisionRegistryUnsafe, match="restore failed"):
+        LongitudinalDecisionRegistry.restore(target, backup, **values)
+    monkeypatch.undo()
+    assert not target.exists()
+
+    restored = LongitudinalDecisionRegistry.restore(target, backup, **values)
+    try:
+        assert restored.resolve(receipt.selector_id).object_sha256 == (
+            receipt.object_sha256
+        )
+    finally:
+        restored.close()

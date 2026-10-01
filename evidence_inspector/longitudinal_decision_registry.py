@@ -1773,6 +1773,17 @@ class LongitudinalDecisionRegistry:
             os.fsync(objects_fd)
             os.fsync(root_fd)
             os.fsync(parent_fd)
+            # Reopen through the normal checks before the restore counts as
+            # complete, so a target that cannot open is removed, not left to
+            # block a retry.
+            restored = _DR_CONSTRUCT(
+                target,
+                linkage_store=linkage_store,
+                expected_trust_snapshot_sha256_by_provider=pins,
+                expected_registry_id=expected_registry_id,
+                expected_registry_epoch_sha256=expected_registry_epoch_sha256,
+                expected_state_head_sha256=expected_state_head_sha256,
+            )
             completed = True
         except FileExistsError:
             raise LongitudinalDecisionRegistryConflict(
@@ -1800,14 +1811,7 @@ class LongitudinalDecisionRegistry:
                         os.close(descriptor)
                     except OSError:
                         pass
-        return _DR_CONSTRUCT(
-            target,
-            linkage_store=linkage_store,
-            expected_trust_snapshot_sha256_by_provider=pins,
-            expected_registry_id=expected_registry_id,
-            expected_registry_epoch_sha256=expected_registry_epoch_sha256,
-            expected_state_head_sha256=expected_state_head_sha256,
-        )
+        return restored
 
 
 _REGISTRY_METHOD_SEAL = MappingProxyType(
