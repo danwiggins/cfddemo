@@ -211,7 +211,10 @@ Storage follows the D03 decision registry: a private `0700` root, `0600`
 owner-only files, descriptor-relative exclusive publication with fsync and
 hard-link adoption, a journal chain from a genesis digest over immutable
 metadata, required retained registry ID, epoch, and head on reopen, a
-process-wide monotonic head fence against rollback, inode-bound control files,
+process-wide monotonic head fence against rollback (keyed by registry ID and
+epoch rather than root inode, so restoring an older backup to a new path in the
+same process is detected; the D03 and D05 registries key it by inode and have
+that gap), inode-bound control files,
 torn-journal truncation, and removal of a failed restore's partial target.
 A crash in the middle of a journal append leaves an unterminated final line;
 it was never fsynced or returned, so reopening and every registration truncate
@@ -250,6 +253,17 @@ instance), the pinned D06 fence, linkage snapshot, E05 decide, and E06 bind
 callables, the sealed result constructors and selector and digest helpers, and
 the instance's authority state. There is no whole-module namespace seal; the
 interpreter's `__warningregistry__` must not disable the registry.
+
+## Known gaps
+
+- If first-time creation's rename lands but the parent fsync then fails, the
+  constructor raises after the root exists. The caller has no retained ID,
+  epoch, or head, so reopening needs them read from the root's metadata and
+  journal by an operator.
+- A restore whose backup is older than a head this process has already seen
+  is rejected at the final open, but its restored copy stays on disk.
+- The rollback fence is per process. A fresh process trusts the retained head
+  it is given.
 
 ## Not in scope
 

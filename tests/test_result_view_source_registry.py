@@ -832,6 +832,23 @@ def test_registry_cannot_be_rebound_to_another_d06_catalog(
         ResultViewSourceRegistry(live.root / "type", record_catalog=object())
 
 
+def test_restoring_an_older_backup_elsewhere_is_a_detected_rollback(
+    registry: ResultViewSourceRegistry, live: Live
+) -> None:
+    first = _register(registry, live)
+    old_backup = registry.backup_bytes()
+    _register(registry, live, accessible_label="Second aggregate")
+    with pytest.raises(ResultViewSourceRegistryUnsafe, match="rollback"):
+        ResultViewSourceRegistry.restore(
+            live.root / "old-restore",
+            old_backup,
+            record_catalog=live.cohorts,
+            expected_registry_id=first.registry_id,
+            expected_registry_epoch_sha256=first.registry_epoch_sha256,
+            expected_state_head_sha256=first.state_head_sha256,
+        )
+
+
 def test_backup_restore_preserves_identity_and_reverifies(
     registry: ResultViewSourceRegistry, live: Live
 ) -> None:

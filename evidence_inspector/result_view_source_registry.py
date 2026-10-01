@@ -118,7 +118,9 @@ CallerAssertedFields = Literal[
 CALLER_ASSERTED_FIELDS: tuple[str, ...] = get_args(CallerAssertedFields)
 
 _REGISTRY_PROCESS_LOCK = threading.RLock()
-_REGISTRY_PROCESS_HEADS: dict[tuple[int, int, str, str], str] = {}
+# Keyed by registry identity, not storage: a restore of an older backup to a
+# new path must still be detected as a rollback in this process.
+_REGISTRY_PROCESS_HEADS: dict[tuple[str, str], str] = {}
 _REGISTRY_INSTANCE_SEALS: weakref.WeakKeyDictionary[
     object, tuple[object, ...]
 ] = weakref.WeakKeyDictionary()
@@ -1115,12 +1117,7 @@ def _registry_instance_snapshot(registry: ResultViewSourceRegistry) -> tuple[obj
             ) from None
         root_identity = (root_observed.st_dev, root_observed.st_ino)
         metadata_identity = (metadata_observed.st_dev, metadata_observed.st_ino)
-        derived_head_key = (
-            root_identity[0],
-            root_identity[1],
-            metadata.registry_id,
-            metadata.registry_epoch_sha256,
-        )
+        derived_head_key = (metadata.registry_id, metadata.registry_epoch_sha256)
         if (
             persisted != metadata_bytes
             or instance["_root_identity"] != root_identity
@@ -1308,8 +1305,6 @@ class ResultViewSourceRegistry:
                 self._metadata = _SR_LOAD_OR_CREATE_METADATA(self, linkage)
                 self._genesis_head_sha256 = _metadata_genesis_sha256(self._metadata)
                 self._head_key = (
-                    self._root_identity[0],
-                    self._root_identity[1],
                     self._metadata.registry_id,
                     self._metadata.registry_epoch_sha256,
                 )
