@@ -28,7 +28,9 @@ adoption without overwriting an existing object. An exact content-addressed
 object left between object publication and journal append is safely adopted on
 retry only when its canonical bytes match. Exact orphan temporary names
 from an interrupted publication are removed under the registry lock; unrelated
-entries fail closed.
+entries fail closed. A failed journal append truncates the journal back to its
+pre-append size, so a torn suffix cannot wedge the registry; the retry adopts
+the exact published object.
 
 Every public entrypoint also verifies a process-private seal over the registry's
 authority-critical instance state. The registry metadata is reread from its
@@ -44,6 +46,26 @@ through validation and return construction. Corrections and tombstones do
 not delete historical manifests; they make the selector stale and prevent
 protected resolution.
 
+`resolve_history_view(selector_id, cohort_version)` is the separate bounded
+read for history and reopen. It returns `CohortHistoryView`
+(`traceback.cohort-history-view.v1`), not `RegisteredCohortHistory`: the exact
+immutable registered manifests through the requested version (same selector
+and 1..100,000 version bounds as `resolve_history`), registry ID/epoch, state
+version/head, the latest registered version for the selector, and the
+`current|stale` authority state observed under the same linkage fence and
+shared registry lock held through return construction. A stale version carries
+the controlled reason `linkage_authority_not_current`; the contract rejects a
+stale state without a reason and a current state with one. The view is marked
+`protected_only: true` and `presented_as_current: false` in every state, uses
+distinct field names (`historical_manifests`,
+`historical_selected_manifest_sha256`), and fails `RegisteredCohortHistory`
+validation, so it cannot be accepted where current cohort authority is
+required. A caller that needs current authority must call `resolve` or
+`resolve_history`, which still reject stale authority unchanged. Authority
+state reflects live linkage validity of the selected version only, matching
+the selector page; a newer registered version is reported separately through
+`latest_registered_cohort_version` rather than as staleness.
+
 The browser-facing selector projection is deliberately separate. It contains
 only a registry-scoped opaque selector, version, content/policy/anchor digests,
 bounded counts, and `current|stale` authority state. It never contains cohort,
@@ -58,7 +80,12 @@ immutable object under one shared registry lock in a bounded canonical bundle.
 state head and validates the complete bundle, metadata-bound journal chain,
 history, trust pins, and exact linkage-store identity before
 creating a new private root; it refuses an existing target and reopens the
-result through the normal descriptor and inode checks. Backup bytes contain
+result through the normal descriptor and inode checks. If restore fails after
+creating the target, it removes only what it created (contents of the root and
+objects directories whose identity it verified, then the root) and fsyncs the
+parent, so the same target can be retried; when the root cannot be opened it
+removes the empty directory, and a substituted unverified directory is left in
+place. Backup bytes contain
 protected manifest content and therefore are not an export artifact or safe
 browser response. Provider-managed encryption, retention, and backup media
 policy remain deployment inputs rather than claims made by this code.
