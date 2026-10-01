@@ -422,6 +422,38 @@ def test_final_return_holds_result_trust_fence_through_return(
     )
 
 
+def test_public_status_authority_fence_holds_result_trust_until_consumer_exit(
+    tmp_path: Path, live
+) -> None:
+    values = _setup(tmp_path, live)
+    _import(values)
+    selector_id, cohort_version = _selection(values)
+    mutation_started = threading.Event()
+
+    def revoke() -> None:
+        mutation_started.set()
+        values[6].revoke(values[5].key_id)
+
+    with ThreadPoolExecutor(max_workers=1) as executor:
+        with values[0].record_status_authority_fence(
+            selector_id,
+            cohort_version,
+            expected_registry=values[11],
+            expected_linkage_store=live[0],
+        ) as (history, status):
+            assert history.selected_manifest_sha256 == status.cohort_manifest_sha256
+            assert status.members[0].availability is CohortRecordAvailability.AVAILABLE
+            mutation = executor.submit(revoke)
+            assert mutation_started.wait(timeout=10)
+            assert not mutation.done()
+        mutation.result(timeout=10)
+
+    assert (
+        _status(values).members[0].availability
+        is CohortRecordAvailability.WITHHELD
+    )
+
+
 @pytest.mark.parametrize("operation", ("read", "status"))
 def test_read_return_rechecks_exact_binding_after_concurrent_removal(
     tmp_path: Path, live, operation: str

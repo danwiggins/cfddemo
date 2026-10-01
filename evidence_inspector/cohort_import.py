@@ -2469,11 +2469,32 @@ class CohortRecordCatalog:
             bindings=ordered,
         )
 
-    def record_status_for_manifest(
-        self, selector_id: str, cohort_version: int
-    ) -> CohortManifestRecordStatus:
-        """Return status while a shared root lock fences recovery/publication."""
+    @contextmanager
+    def record_status_authority_fence(
+        self,
+        selector_id: str,
+        cohort_version: int,
+        *,
+        expected_registry: CohortRegistry | None = None,
+        expected_linkage_store: ProviderLinkageStore | None = None,
+    ) -> Iterator[tuple[RegisteredCohortHistory, CohortManifestRecordStatus]]:
+        """Yield one status while every registry/catalog/trust lock remains held.
 
+        This protected composition boundary lets downstream derivations finish
+        without reopening private D06 internals or introducing another lock.
+        Callers must not invoke mutable authority APIs while the fence is held.
+        """
+
+        if (
+            expected_registry is not None
+            and expected_registry is not self._cohort_registry
+        ):
+            raise CohortImportError("cohort registry authority does not match catalog")
+        if (
+            expected_linkage_store is not None
+            and expected_linkage_store is not self._linkage_store
+        ):
+            raise CohortImportError("provider linkage authority does not match catalog")
         with _CC_REGISTERED_AUTHORITY_FENCE(
             self, selector_id, cohort_version
         ) as (registered_history, linkage_snapshot, registry_state_heads):
@@ -2496,7 +2517,7 @@ class CohortRecordCatalog:
                                 "cohort record root changed"
                             )
                         fcntl.flock(descriptor, fcntl.LOCK_SH)
-                        return _CC_STATUS_BODY(
+                        status = _CC_STATUS_BODY(
                             self,
                             selector_id,
                             cohort_version,
@@ -2504,9 +2525,20 @@ class CohortRecordCatalog:
                             linkage_snapshot,
                             registry_state_heads,
                         )
+                        yield registered_history, status
                     finally:
                         fcntl.flock(descriptor, fcntl.LOCK_UN)
                         os.close(descriptor)
+
+    def record_status_for_manifest(
+        self, selector_id: str, cohort_version: int
+    ) -> CohortManifestRecordStatus:
+        """Return status while a shared root lock fences recovery/publication."""
+
+        with CohortRecordCatalog.record_status_authority_fence(
+            self, selector_id, cohort_version
+        ) as (_, status):
+            return status
 
     def _record_status_for_manifest_body(
         self,
@@ -2803,6 +2835,7 @@ _COHORT_METHOD_SEAL = MappingProxyType(
             "close",
             "import_bundle",
             "record_status_for_manifest",
+            "record_status_authority_fence",
         )
     }
 )
