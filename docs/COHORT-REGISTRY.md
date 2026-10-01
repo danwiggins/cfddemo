@@ -81,11 +81,14 @@ state head and validates the complete bundle, metadata-bound journal chain,
 history, trust pins, and exact linkage-store identity before
 creating a new private root; it refuses an existing target and reopens the
 result through the normal descriptor and inode checks. The root and objects
-directories must be empty when verified. If restore fails after creating the
-target, including when the final reopen fails, it removes only the exact
-entries it recorded creating (by name, never by directory sweep), then the
-directories with `rmdir`, and fsyncs the parent, so the same target can be
-retried. When the root cannot be opened it removes only an empty target; any
+directories must be empty when verified, and restore holds the new target's
+registry lock exclusively while publishing into it. If restore fails after
+creating the target, including when the final reopen fails, it reacquires that
+lock and cleans up only when the target holds nothing but what restore wrote
+(no extra entries, journal bytes unchanged); a target another instance has
+committed into is left untouched. Cleanup removes only the exact entries it
+recorded creating (by name, never by directory sweep), then the directories
+with `rmdir`, and fsyncs the parent, so the same target can be retried. When the root cannot be opened it removes only an empty target; any
 entry it did not create keeps its directory in place. Backup bytes contain
 protected manifest content and therefore are not an export artifact or safe
 browser response. Provider-managed encryption, retention, and backup media

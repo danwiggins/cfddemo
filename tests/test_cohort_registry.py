@@ -1087,13 +1087,8 @@ def test_failed_restore_never_removes_entries_it_did_not_create(
     with pytest.raises(CohortRegistryUnsafe, match="restore failed"):
         CohortRegistry.restore(target, backup, **_restore_values(receipt, live))
     monkeypatch.undo()
-    assert sorted(path.name for path in target.iterdir()) == [
-        "foreign.txt",
-        "objects",
-    ]
-    assert [path.name for path in (target / "objects").iterdir()] == [
-        "foreign.txt"
-    ]
+    assert (target / "foreign.txt").read_text() == "foreign"
+    assert (target / "objects" / "foreign.txt").read_text() == "foreign"
 
 
 def test_failed_restore_reopen_removes_the_restored_target_and_can_retry(
@@ -1128,3 +1123,77 @@ def test_failed_restore_reopen_removes_the_restored_target_and_can_retry(
         assert restored.resolve(selector, 1).manifest == manifest
     finally:
         restored.close()
+
+
+def test_failed_restore_reopen_keeps_a_target_a_peer_committed_into(
+    registry: CohortRegistry,
+    live,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    first = _first(live)
+    receipt = registry.register(first)
+    backup = registry.backup_bytes()
+    second = _second(first, live)
+    target = tmp_path / "peer-restore"
+    original_construct = cohort_registry_module._CR_CONSTRUCT
+    peer_receipts = []
+
+    def peer_commits_then_reopen_fails(*args, **kwargs):
+        # Restore the sealed alias so the peer runs the unmodified registry.
+        cohort_registry_module._CR_CONSTRUCT = original_construct
+        peer = original_construct(*args, **kwargs)
+        try:
+            peer_receipts.append(peer.register(second))
+        finally:
+            peer.close()
+        raise CohortRegistryUnsafe("cohort registry expected identity or head is invalid")
+
+    monkeypatch.setattr(
+        cohort_registry_module, "_CR_CONSTRUCT", peer_commits_then_reopen_fails
+    )
+    with pytest.raises(CohortRegistryUnsafe, match="expected identity or head"):
+        CohortRegistry.restore(target, backup, **_restore_values(receipt, live))
+    monkeypatch.setattr(cohort_registry_module, "_CR_CONSTRUCT", original_construct)
+
+    assert len(peer_receipts) == 1
+    reopened = CohortRegistry(
+        target,
+        linkage_store=live[0],
+        expected_trust_snapshot_sha256_by_provider=_pins(),
+        expected_registry_id=receipt.registry_id,
+        expected_registry_epoch_sha256=receipt.registry_epoch_sha256,
+        expected_state_head_sha256=peer_receipts[0].state_head_sha256,
+    )
+    try:
+        selector = reopened.list_selectors().records[0].selector_id
+        view = reopened.resolve_history_view(selector, 2)
+        assert view.historical_manifests == (first, second)
+    finally:
+        reopened.close()
+
+
+def test_failed_restore_reopen_keeps_a_target_whose_journal_changed(
+    registry: CohortRegistry,
+    live,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    receipt = registry.register(_first(live))
+    backup = registry.backup_bytes()
+    target = tmp_path / "journal-changed-restore"
+    original_construct = cohort_registry_module._CR_CONSTRUCT
+
+    def journal_changes_then_reopen_fails(*args, **kwargs):
+        with (target / "registry-journal.jsonl").open("ab") as handle:
+            handle.write(b"peer\n")
+        raise CohortRegistryUnsafe("cohort registry journal is invalid")
+
+    monkeypatch.setattr(
+        cohort_registry_module, "_CR_CONSTRUCT", journal_changes_then_reopen_fails
+    )
+    with pytest.raises(CohortRegistryUnsafe, match="journal is invalid"):
+        CohortRegistry.restore(target, backup, **_restore_values(receipt, live))
+    monkeypatch.setattr(cohort_registry_module, "_CR_CONSTRUCT", original_construct)
+    assert (target / "registry-journal.jsonl").read_bytes().endswith(b"peer\n")
+    assert (target / "registry-metadata.json").exists()

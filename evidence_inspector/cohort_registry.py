@@ -608,6 +608,48 @@ def _remove_partial_restore(
         pass
 
 
+def _restore_target_unchanged(
+    root_fd: int,
+    objects_fd: int | None,
+    root_names: list[str],
+    object_names: list[str],
+    journal_content: bytes | None,
+) -> bool:
+    """Return whether a failed restore target holds only what restore wrote.
+
+    Called with the target's registry lock held exclusively.  Any extra entry
+    or a journal that differs from the restored bytes means another registry
+    instance committed into the target, so cleanup must not run.
+    """
+
+    try:
+        if not set(os.listdir(root_fd)) <= set(root_names):
+            return False
+        if objects_fd is not None and not set(os.listdir(objects_fd)) <= set(
+            object_names
+        ):
+            return False
+        if "registry-journal.jsonl" in root_names:
+            descriptor = os.open(
+                "registry-journal.jsonl",
+                os.O_RDONLY
+                | getattr(os, "O_CLOEXEC", 0)
+                | getattr(os, "O_NOFOLLOW", 0),
+                dir_fd=root_fd,
+            )
+            try:
+                content = _read_bounded(descriptor, MAX_BACKUP_BYTES)
+            finally:
+                os.close(descriptor)
+            if content != journal_content:
+                return False
+    except FileNotFoundError:
+        return True
+    except (OSError, CohortRegistryUnsafe):
+        return False
+    return True
+
+
 def _publish_restored_file(
     directory_fd: int, name: str, content: bytes, created: list[str]
 ) -> None:
@@ -1525,6 +1567,8 @@ class CohortRegistry:
         objects_verified = False
         root_names: list[str] = []
         object_names: list[str] = []
+        lock_fd: int | None = None
+        journal_content: bytes | None = None
         completed = False
         try:
             parent_lstat = os.stat(parent, follow_symlinks=False)
@@ -1603,7 +1647,9 @@ class CohortRegistry:
                 dir_fd=root_fd,
             )
             root_names.append(".registry.lock")
-            os.close(lock_fd)
+            # Hold the target's registry lock while it is partially written so
+            # no other instance can open and commit into it before cleanup.
+            fcntl.flock(lock_fd, fcntl.LOCK_EX)
             _publish_restored_file(
                 root_fd,
                 "registry-metadata.json",
@@ -1628,6 +1674,9 @@ class CohortRegistry:
             os.fsync(parent_fd)
             # Reopen through the normal checks while the cleanup scope is
             # still active, so a failed reopen also leaves a retryable target.
+            # The reopen takes the registry lock itself, so release it here;
+            # cleanup reacquires it and proves the target is unchanged.
+            fcntl.flock(lock_fd, fcntl.LOCK_UN)
             restored = _CR_CONSTRUCT(
                 target,
                 linkage_store=linkage_store,
@@ -1648,15 +1697,32 @@ class CohortRegistry:
                 # Remove only recorded entries inside directories verified as
                 # the fresh empty ones this restore created; an unverified
                 # substitute is left in place (rmdir fails when non-empty).
-                _remove_partial_restore(
-                    parent_fd,
-                    target.name,
-                    root_fd if root_verified else None,
-                    objects_fd if objects_verified else None,
-                    root_names,
-                    object_names,
-                )
-            for descriptor in (objects_fd, root_fd, parent_fd):
+                # With the lock held, a target another instance has committed
+                # into is left untouched.
+                cleanup = True
+                if lock_fd is not None and root_fd is not None:
+                    try:
+                        fcntl.flock(lock_fd, fcntl.LOCK_EX)
+                    except OSError:
+                        cleanup = False
+                    else:
+                        cleanup = _restore_target_unchanged(
+                            root_fd,
+                            objects_fd if objects_verified else None,
+                            root_names,
+                            object_names,
+                            journal_content,
+                        )
+                if cleanup:
+                    _remove_partial_restore(
+                        parent_fd,
+                        target.name,
+                        root_fd if root_verified else None,
+                        objects_fd if objects_verified else None,
+                        root_names,
+                        object_names,
+                    )
+            for descriptor in (lock_fd, objects_fd, root_fd, parent_fd):
                 if descriptor is not None:
                     try:
                         os.close(descriptor)
