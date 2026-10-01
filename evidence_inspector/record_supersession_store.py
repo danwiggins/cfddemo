@@ -71,6 +71,17 @@ MAX_COMPARISON_MEMBERS = 1_000
 MAX_HISTORY_PAGE_RECORDS = 1_000
 MAX_HISTORY_COMPARISON_WARNINGS = 1_000
 
+
+def history_comparison_warning_row_bound(limit: int) -> int:
+    """Return the listed-warning bound per row for one history page limit.
+
+    Every page lists at most ``MAX_HISTORY_COMPARISON_WARNINGS`` statuses, so a
+    record in any number of stale comparisons stays readable; each row always
+    carries its complete affected-comparison count.
+    """
+
+    return MAX_HISTORY_COMPARISON_WARNINGS // limit
+
 RecordId = Annotated[str, StringConstraints(pattern=r"^record_[0-9a-f]{40}$")]
 ComparisonId = Annotated[str, StringConstraints(pattern=r"^comparison_[0-9a-f]{40}$")]
 ResultId = Annotated[str, StringConstraints(pattern=r"^result_[0-9a-f]{40}$")]
@@ -529,14 +540,15 @@ class ActiveRecordSnapshot(RegistryContract):
 class RecordHistoryEntry(RegistryContract):
     """One immutable record with its original authority proof and warnings."""
 
-    schema_version: Literal["traceback.record-history-entry.v1"] = (
-        "traceback.record-history-entry.v1"
+    schema_version: Literal["traceback.record-history-entry.v2"] = (
+        "traceback.record-history-entry.v2"
     )
     record: SupersedingRecord
     record_sha256: Sha256
     activation_receipt: CommittedLinkageReceipt
     state: RecordHistoryState
     successor_record_id: RecordId | None = None
+    affected_comparison_count: int = Field(ge=0, le=MAX_COMPARISONS, strict=True)
     affected_comparisons: tuple[ComparisonStatus, ...] = Field(
         max_length=MAX_HISTORY_COMPARISON_WARNINGS
     )
@@ -558,6 +570,8 @@ class RecordHistoryEntry(RegistryContract):
         comparison_ids = tuple(item.comparison_id for item in self.affected_comparisons)
         if comparison_ids != tuple(sorted(set(comparison_ids))):
             raise ValueError("record history comparison warnings are not canonical")
+        if len(comparison_ids) > self.affected_comparison_count:
+            raise ValueError("record history comparison warning count is invalid")
         if any(
             item.state is not ComparisonState.STALE
             or self.record.record_id not in item.member_record_ids
@@ -590,8 +604,8 @@ class RecordHistoryCursor(RegistryContract):
 class RecordHistorySnapshot(RegistryContract):
     """One canonical bounded page of the protected global record history."""
 
-    schema_version: Literal["traceback.record-history-snapshot.v1"] = (
-        "traceback.record-history-snapshot.v1"
+    schema_version: Literal["traceback.record-history-snapshot.v2"] = (
+        "traceback.record-history-snapshot.v2"
     )
     ledger_id: LedgerId
     ledger_epoch_sha256: Sha256
@@ -650,11 +664,13 @@ class RecordHistorySnapshot(RegistryContract):
                 cursor.linkage_state_head_sha256,
             ) != expected_binding:
                 raise ValueError("record history cursor binding is invalid")
-        if (
-            sum(len(item.affected_comparisons) for item in self.records)
-            > MAX_HISTORY_COMPARISON_WARNINGS
+        row_bound = history_comparison_warning_row_bound(self.limit)
+        if any(
+            len(item.affected_comparisons)
+            != min(item.affected_comparison_count, row_bound)
+            for item in self.records
         ):
-            raise ValueError("record history comparison warning bound exceeded")
+            raise ValueError("record history comparison warning bound is invalid")
         for item in self.records:
             if (
                 item.activation_receipt.store_id != self.linkage_store_id
@@ -1224,7 +1240,7 @@ def _require_exact_history_snapshot_shape(
         raise error_type("record history snapshot is invalid")
     records = values["records"]
     if (
-        values["schema_version"] != "traceback.record-history-snapshot.v1"
+        values["schema_version"] != "traceback.record-history-snapshot.v2"
         or not _fixed_hex(values["ledger_id"], "ledger_", 32)
         or not _fixed_hex(values["ledger_epoch_sha256"], "", 64)
         or not _fixed_hex(values["storage_identity_sha256"], "", 64)
@@ -1281,7 +1297,7 @@ def _require_exact_history_snapshot_shape(
                 cursor_values[field] != values[field] for field in binding_fields
             ):
                 raise error_type("record history cursor binding is invalid")
-    warning_count = 0
+    row_bound = history_comparison_warning_row_bound(values["limit"])
     for entry in records:
         if type(entry) is not RecordHistoryEntry:
             raise error_type("record history entry is invalid")
@@ -1294,27 +1310,28 @@ def _require_exact_history_snapshot_shape(
                 "activation_receipt",
                 "state",
                 "successor_record_id",
+                "affected_comparison_count",
                 "affected_comparisons",
             ),
         )
         if entry_values is None:
             raise error_type("record history entry is invalid")
         warnings = entry_values["affected_comparisons"]
+        warning_count = entry_values["affected_comparison_count"]
         if (
-            entry_values["schema_version"] != "traceback.record-history-entry.v1"
+            entry_values["schema_version"] != "traceback.record-history-entry.v2"
             or not _fixed_hex(entry_values["record_sha256"], "", 64)
             or type(entry_values["state"]) is not RecordHistoryState
             or (
                 entry_values["successor_record_id"] is not None
                 and not _fixed_hex(entry_values["successor_record_id"], "record_", 40)
             )
+            or type(warning_count) is not int
+            or not 0 <= warning_count <= MAX_COMPARISONS
             or type(warnings) is not tuple
-            or len(warnings) > MAX_HISTORY_COMPARISON_WARNINGS
+            or len(warnings) != min(warning_count, row_bound)
         ):
             raise error_type("record history entry is invalid")
-        warning_count += len(warnings)
-        if warning_count > MAX_HISTORY_COMPARISON_WARNINGS:
-            raise error_type("record history comparison warning bound exceeded")
         _require_exact_record_shape(entry_values["record"], error_type=error_type)
         _require_exact_activation_receipt_shape(
             entry_values["activation_receipt"], error_type=error_type
@@ -2773,37 +2790,43 @@ class RecordSupersessionStore:
         connection: sqlite3.Connection,
         linkage: ActiveLinkageSnapshot,
         record_ids: set[str],
-    ) -> dict[str, tuple[ComparisonStatus, ...]]:
-        result: dict[str, list[ComparisonStatus]] = {
+        row_bound: int,
+    ) -> dict[str, tuple[int, tuple[ComparisonStatus, ...]]]:
+        """Count every stale comparison per record; list the first ``row_bound``.
+
+        Rows arrive in canonical comparison-ID order, so the listed prefix is
+        deterministic and statuses beyond the bound are never constructed.
+        """
+
+        counts = {record_id: 0 for record_id in record_ids}
+        listed: dict[str, list[ComparisonStatus]] = {
             record_id: [] for record_id in record_ids
         }
-        warning_count = 0
         current: DerivedComparison | None = None
         reasons: list[InvalidationReason] = []
 
         def append_current() -> None:
-            nonlocal warning_count
             if current is None or not reasons:
                 return
             selected_members = record_ids.intersection(current.member_record_ids)
             if not selected_members:
                 return
-            status = ComparisonStatus(
-                comparison_id=current.comparison_id,
-                state=ComparisonState.STALE,
-                reasons=tuple(reasons),
-                member_record_ids=current.member_record_ids,
-                derived_artifact_sha256=current.derived_artifact_sha256,
-                linkage_state_version=linkage.state_version,
-                linkage_state_head_sha256=linkage.state_head_sha256,
-            )
+            status: ComparisonStatus | None = None
             for record_id in sorted(selected_members):
-                warning_count += 1
-                if warning_count > MAX_HISTORY_COMPARISON_WARNINGS:
-                    raise RecordSupersessionConflict(
-                        "record history comparison warnings exceed their bound"
+                counts[record_id] += 1
+                if len(listed[record_id]) >= row_bound:
+                    continue
+                if status is None:
+                    status = ComparisonStatus(
+                        comparison_id=current.comparison_id,
+                        state=ComparisonState.STALE,
+                        reasons=tuple(reasons),
+                        member_record_ids=current.member_record_ids,
+                        derived_artifact_sha256=current.derived_artifact_sha256,
+                        linkage_state_version=linkage.state_version,
+                        linkage_state_head_sha256=linkage.state_head_sha256,
                     )
-                result[record_id].append(status)
+                listed[record_id].append(status)
 
         for row in connection.execute(
             """SELECT comparisons.comparison_json, invalidations.reason
@@ -2819,8 +2842,8 @@ class RecordSupersessionStore:
             reasons.append(InvalidationReason(row[1]))
         append_current()
         return {
-            record_id: tuple(sorted(statuses, key=lambda item: item.comparison_id))
-            for record_id, statuses in result.items()
+            record_id: (counts[record_id], tuple(listed[record_id]))
+            for record_id in record_ids
         }
 
     def record_history_snapshot(
@@ -2932,6 +2955,7 @@ class RecordSupersessionStore:
                     connection,
                     linkage,
                     {item.record_id for item in selected},
+                    history_comparison_warning_row_bound(limit),
                 )
                 live = _RS_ACTIVE_LINKAGES(linkage)
                 successor_by_id = {
@@ -2967,7 +2991,8 @@ class RecordSupersessionStore:
                             activation_receipt=receipt,
                             state=state,
                             successor_record_id=successor_record_id,
-                            affected_comparisons=warnings[record.record_id],
+                            affected_comparison_count=warnings[record.record_id][0],
+                            affected_comparisons=warnings[record.record_id][1],
                         )
                     )
                 has_more = len(ordered) > len(selected)

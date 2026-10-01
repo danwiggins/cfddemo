@@ -34,6 +34,7 @@ from evidence_inspector.record_supersession_store import (
     ComparisonState,
     DerivedComparison,
     InvalidationReason,
+    RecordHistoryEntry,
     RecordHistorySnapshot,
     RecordHistoryState,
     RecordLineageRole,
@@ -166,9 +167,13 @@ def durable(tmp_path: Path):
         linkage.close()
 
 
-def _comparison(first: SupersedingRecord, second: SupersedingRecord, snapshot):
+def _comparison(
+    first: SupersedingRecord,
+    second: SupersedingRecord,
+    snapshot,
+    digest: str = "e" * 64,
+):
     members = tuple(sorted((first.record_id, second.record_id)))
-    digest = "e" * 64
     values = {
         "comparison_id": make_comparison_id(members, digest),
         "member_record_ids": members,
@@ -734,8 +739,8 @@ def test_history_snapshot_final_revalidation_rejects_in_transaction_race(
     ledger.commit_record(first)
     original = RecordSupersessionStore._comparison_warnings_by_record
 
-    def mutate_after_capture(connection, linkage, record_ids):
-        result = original(connection, linkage, record_ids)
+    def mutate_after_capture(connection, linkage, record_ids, row_bound):
+        result = original(connection, linkage, record_ids, row_bound)
         connection.execute(
             "UPDATE metadata SET value=? WHERE key='state_head_sha256'",
             ("f" * 64,),
@@ -762,10 +767,10 @@ def test_history_warning_lookup_is_one_set_based_query(durable, monkeypatch) -> 
     original = RecordSupersessionStore._comparison_warnings_by_record
     observed: list[str] = []
 
-    def count_queries(connection, linkage_snapshot, record_ids):
+    def count_queries(connection, linkage_snapshot, record_ids, row_bound):
         connection.set_trace_callback(observed.append)
         try:
-            return original(connection, linkage_snapshot, record_ids)
+            return original(connection, linkage_snapshot, record_ids, row_bound)
         finally:
             connection.set_trace_callback(None)
 
@@ -779,6 +784,99 @@ def test_history_warning_lookup_is_one_set_based_query(durable, monkeypatch) -> 
     assert len(
         [statement for statement in observed if statement.lstrip().upper().startswith("SELECT")]
     ) == 1
+
+
+def _history_with_stale_comparisons(durable, count: int):
+    linkage, ledger, first_revision, first, second = durable
+    ledger.commit_record(first)
+    ledger.commit_record(second)
+    snapshot = ledger.active_snapshot()
+    comparisons = [
+        _comparison(first, second, snapshot, digest=f"{index:064x}")
+        for index in range(1, count + 1)
+    ]
+    for comparison in comparisons:
+        ledger.register_comparison(comparison)
+    _, reanalysis = _authorized_reanalysis(linkage, first_revision, first)
+    ledger.commit_record(reanalysis)
+    return ledger, first, second, sorted(item.comparison_id for item in comparisons)
+
+
+def test_history_warnings_list_bounded_prefix_with_complete_count(durable) -> None:
+    ledger, first, second, comparison_ids = _history_with_stale_comparisons(durable, 3)
+
+    full = ledger.record_history_snapshot(limit=1)
+    assert full.records[0].affected_comparison_count == 3
+    assert [
+        item.comparison_id for item in full.records[0].affected_comparisons
+    ] == comparison_ids
+
+    # limit=1,000 lists one warning per row, the canonical lowest comparison ID,
+    # while every row still reports its complete affected-comparison count.
+    wide = ledger.record_history_snapshot(limit=1_000)
+    by_id = {item.record.record_id: item for item in wide.records}
+    for record in (first, second):
+        entry = by_id[record.record_id]
+        assert entry.affected_comparison_count == 3
+        assert [item.comparison_id for item in entry.affected_comparisons] == (
+            comparison_ids[:1]
+        )
+    assert ledger.replay_history_snapshot(wide) == wide
+    assert ledger.replay_history_snapshot(full) == full
+
+
+def test_record_in_more_stale_comparisons_than_page_budget_stays_readable(
+    durable, monkeypatch
+) -> None:
+    ledger, first, second, comparison_ids = _history_with_stale_comparisons(durable, 3)
+    # Shrink the page budget below one record's stale comparisons; the former
+    # page-total bound made this record unreadable even at limit=1.
+    monkeypatch.setattr(supersession_module, "MAX_HISTORY_COMPARISON_WARNINGS", 2)
+    seen: list[str] = []
+    cursor = None
+    while True:
+        page = ledger.record_history_snapshot(cursor=cursor, limit=1)
+        entry = page.records[0]
+        seen.append(entry.record.record_id)
+        if entry.record.record_id in (first.record_id, second.record_id):
+            assert entry.affected_comparison_count == 3
+            assert [item.comparison_id for item in entry.affected_comparisons] == (
+                comparison_ids[:2]
+            )
+        assert ledger.replay_history_snapshot(page) == page
+        cursor = page.next_cursor
+        if cursor is None:
+            break
+    assert seen == sorted(seen) and len(seen) == 3
+
+
+def test_history_warning_count_and_prefix_tamper_are_rejected(durable) -> None:
+    ledger, _, _, _ = _history_with_stale_comparisons(durable, 3)
+    page = ledger.record_history_snapshot(limit=1)
+    entry = page.records[0].model_dump()
+    assert entry["affected_comparison_count"] == 3
+
+    with pytest.raises(ValidationError, match="warning count"):
+        RecordHistoryEntry.model_validate({**entry, "affected_comparison_count": 2})
+    for forged_entry in (
+        {**entry, "affected_comparisons": entry["affected_comparisons"][:2]},
+        {**entry, "affected_comparison_count": 4},
+    ):
+        with pytest.raises(ValidationError, match="warning bound"):
+            RecordHistorySnapshot.model_validate(
+                {**page.model_dump(), "records": (forged_entry,)}
+            )
+
+    # A truncated row passes structural checks with any larger count, so only
+    # live replay can prove the count; an inflated count must be rejected.
+    wide = ledger.record_history_snapshot(limit=1_000)
+    rows = [item.model_dump() for item in wide.records]
+    rows[0] = {**rows[0], "affected_comparison_count": 4}
+    inflated = RecordHistorySnapshot.model_validate(
+        {**wide.model_dump(), "records": tuple(rows)}
+    )
+    with pytest.raises(RecordSupersessionConflict, match="stale or invalid"):
+        ledger.replay_history_snapshot(inflated)
 
 
 def test_authority_advance_and_tombstone_persist_staleness(durable) -> None:
