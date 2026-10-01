@@ -39,6 +39,14 @@ anchor-to-member transition must exactly match the corresponding registered
 factor transition before the approved combined absolute-delta rule can be used.
 D07 does not infer a missing condition or invent a transition/composition rule.
 
+`compare_repeatability_in_fence` is the already-fenced variant for a caller
+that holds the store's authority fence in the calling thread, such as the
+protected D07 comparison registry (`docs/REPEATABILITY-COMPARISON-REGISTRY.md`).
+SQLite cannot open the nested fence `compare_repeatability` would take. The
+variant checks that this thread holds the fence at entry and before the final
+replay, and otherwise raises before returning any result; its gates and
+contract are identical.
+
 ## Unavailable states
 
 `outside_envelope`, `missing_draw`, `failed_measurement`,

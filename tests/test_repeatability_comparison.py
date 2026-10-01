@@ -41,6 +41,7 @@ from evidence_inspector.repeatability_comparison import (
     RepeatabilityFactor,
     RepeatabilityReason,
     compare_repeatability,
+    compare_repeatability_in_fence,
     measurement_evidence_payload_sha256,
     measurement_evidence_receipt_signing_bytes,
     repeatability_comparison_sha256,
@@ -1499,3 +1500,124 @@ def test_naive_evaluation_time_is_rejected() -> None:
             _envelope(anchor),
             evaluated_at=NOW.replace(tzinfo=None),
         )
+
+
+def test_in_fence_variant_requires_this_threads_held_fence_and_matches() -> None:
+    anchor = _record("1")
+    member = _record("2")
+    policy = _policy(anchor)
+    envelope = _envelope(anchor)
+    with _activated_records(anchor, member) as (records, store):
+        active_anchor, active_member = records
+        arguments = _direct_arguments(policy, store, envelope)
+        decision = decide_longitudinal_member(
+            active_anchor,
+            active_member,
+            policy,
+            expected_policy_sha256=arguments["expected_policy_sha256"],
+            expected_authority_head_sha256=arguments["expected_authority_head_sha256"],
+            expected_linkage_trust_snapshot_sha256_by_provider=arguments[
+                "expected_linkage_trust_snapshot_sha256_by_provider"
+            ],
+            linkage_store=store,
+        )
+        inputs = (
+            active_anchor,
+            active_member,
+            policy,
+            decision,
+            _observation(active_anchor, 0.5),
+            _observation(active_member, 0.55),
+            envelope,
+        )
+        expected = compare_repeatability(*inputs, **arguments)
+        assert expected.availability == ComparisonAvailability.AVAILABLE
+
+        with pytest.raises(LongitudinalDecisionReplayError, match="held live"):
+            compare_repeatability_in_fence(*inputs, **arguments)
+
+        # A nested fence cannot be opened, which is why the variant exists.
+        with ProviderLinkageStore.authority_read_fence(store):
+            with pytest.raises(Exception, match="idle connection"):
+                compare_repeatability(*inputs, **arguments)
+        with ProviderLinkageStore.authority_read_fence(store):
+            fenced = compare_repeatability_in_fence(*inputs, **arguments)
+        assert canonical_contract_bytes(fenced) == canonical_contract_bytes(expected)
+
+        # Another thread's fence is not this caller's fence.
+        held = threading.Event()
+        release = threading.Event()
+
+        def hold() -> None:
+            with ProviderLinkageStore.authority_read_fence(store):
+                held.set()
+                release.wait(5)
+
+        holder = threading.Thread(target=hold)
+        holder.start()
+        try:
+            assert held.wait(5)
+            with pytest.raises(LongitudinalDecisionReplayError, match="held live"):
+                compare_repeatability_in_fence(*inputs, **arguments)
+        finally:
+            release.set()
+            holder.join(5)
+
+
+def test_in_fence_variant_checks_the_fence_before_any_unavailable_result() -> None:
+    anchor = _record("1")
+    member = _record("2")
+    policy = _policy(anchor)
+    envelope = _envelope(anchor)
+    with _activated_records(anchor, member) as (records, store):
+        active_anchor, active_member = records
+        arguments = _direct_arguments(policy, store, envelope)
+        decision = decide_longitudinal_member(
+            active_anchor,
+            active_member,
+            policy,
+            expected_policy_sha256=arguments["expected_policy_sha256"],
+            expected_authority_head_sha256=arguments["expected_authority_head_sha256"],
+            expected_linkage_trust_snapshot_sha256_by_provider=arguments[
+                "expected_linkage_trust_snapshot_sha256_by_provider"
+            ],
+            linkage_store=store,
+        )
+        # A missing envelope returns before the final fenced block, so only the
+        # entry check can refuse it.
+        inputs = (
+            active_anchor,
+            active_member,
+            policy,
+            decision,
+            _observation(active_anchor, 0.5),
+            _observation(active_member, 0.55),
+            None,
+        )
+        with pytest.raises(LongitudinalDecisionReplayError, match="held live"):
+            compare_repeatability_in_fence(*inputs, **arguments)
+
+        held = threading.Event()
+        release = threading.Event()
+
+        def hold() -> None:
+            with ProviderLinkageStore.authority_read_fence(store):
+                held.set()
+                release.wait(5)
+
+        holder = threading.Thread(target=hold)
+        holder.start()
+        timer = threading.Timer(1.0, release.set)
+        timer.start()
+        try:
+            assert held.wait(5)
+            with pytest.raises(LongitudinalDecisionReplayError, match="held live"):
+                compare_repeatability_in_fence(*inputs, **arguments)
+            assert not release.is_set()
+        finally:
+            timer.cancel()
+            release.set()
+            holder.join(5)
+        with ProviderLinkageStore.authority_read_fence(store):
+            unavailable = compare_repeatability_in_fence(*inputs, **arguments)
+        assert unavailable.reason_codes == (RepeatabilityReason.EVIDENCE_MISSING,)
