@@ -175,6 +175,25 @@ def test_key_bound_is_enforced(trust: ResultTrustRegistry) -> None:
     assert trust.revoke_key(RESULT_KEY.key_id).applied
 
 
+def test_tombstones_cannot_exhaust_capacity_to_revoke_active_keys(
+    trust: ResultTrustRegistry,
+) -> None:
+    for index in range(trust_module.MAX_TRUST_TOMBSTONES):
+        trust.revoke_key(f"dev-result-{index:024x}")
+    with pytest.raises(ResultTrustRegistryConflict, match="tombstone bound"):
+        trust.revoke_key(f"dev-result-{10**6:024x}")
+    keys = [
+        _public(generate_development_keypair(KeyPurpose.RESULT))
+        for _ in range(trust_module.MAX_TRUST_KEYS)
+    ]
+    for key in keys:
+        trust.add_key(key)
+    # Every active key can still be revoked once all bounds are reached.
+    for key in keys:
+        assert trust.revoke_key(key.key_id).applied
+    assert trust.current_trust().state_version == trust_module.MAX_TRUST_EVENTS
+
+
 def test_snapshot_rejects_a_mismatched_digest(trust: ResultTrustRegistry) -> None:
     trust.add_key(RESULT_KEY)
     snapshot = trust.current_trust()

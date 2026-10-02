@@ -48,8 +48,10 @@ Rules, enforced when appending and again when loading the journal:
 - Any other entry for an existing key ID is rejected. Key IDs are derived from
   the public key, namespace, and purpose, so this can only happen through a
   forged or corrupted input.
-- At most 32 keys (D07's result trust bound, revoked keys included) and 256
-  events.
+- At most 32 keys (D07's result trust bound, revoked keys included), 192
+  tombstones, and 256 events. Tombstones have their own bound so they can
+  never use up the capacity reserved for revoking every added key; revoking an
+  added key always fits.
 
 The current trust is the fold of the journal: one `DevelopmentTrustDocument`
 whose keys are sorted by ID, with revoked keys kept and marked `revoked`.
@@ -95,6 +97,11 @@ Readers bind the identity and head they read:
 The lock is not reentrant on a thread. `flock` converts a lock in place, so a
 nested acquisition (for example a revoke inside a held read fence) would
 silently upgrade or release the outer lock. The registry raises instead.
+
+Lock order for consumers is: linkage authority fence, then the trust read
+fence, then the consumer's own registry lock. Code that holds a trust read
+fence must not open a linkage fence or write linkage, and must not call a D07
+registry (which would re-enter the trust lock and raise).
 
 ## Storage
 

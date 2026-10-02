@@ -61,6 +61,10 @@ from traceback_runner.signing import (
 # document past that, revoked keys included.
 MAX_TRUST_KEYS = 32
 MAX_TRUST_EVENTS = 256
+# Revocations of never-added IDs (tombstones) have their own bound, so they can
+# never use up the journal capacity reserved for adding and then revoking every
+# key: 32 additions + 32 revocations + 192 tombstones = 256 events.
+MAX_TRUST_TOMBSTONES = MAX_TRUST_EVENTS - 2 * MAX_TRUST_KEYS
 MAX_JOURNAL_BYTES = 256 * 1024
 MAX_BACKUP_BYTES = 512 * 1024
 MAX_PATH_CHARS = 4096
@@ -425,6 +429,10 @@ def _fold_events(
         else:
             if entry.key_id in revoked:
                 raise ValueError("result trust journal re-revokes a key")
+            if entry.key_id not in keys and len(revoked - keys.keys()) >= (
+                MAX_TRUST_TOMBSTONES
+            ):
+                raise ValueError("result trust journal exceeds its tombstone bound")
             revoked.add(entry.key_id)
             if entry.key_id in keys:
                 keys[entry.key_id] = (keys[entry.key_id][0], True)
@@ -1034,6 +1042,16 @@ class ResultTrustRegistry:
                     raise ResultTrustRegistryConflict("result trust registry is full")
             else:
                 applied = key_id not in revoked
+                if (
+                    applied
+                    and key_id not in keys
+                    and len(revoked - keys.keys()) >= MAX_TRUST_TOMBSTONES
+                ):
+                    # Revoking an added key always fits; only tombstones for
+                    # never-added IDs are refused at their own bound.
+                    raise ResultTrustRegistryConflict(
+                        "result trust registry tombstone bound reached"
+                    )
             if applied:
                 if len(journal) >= MAX_TRUST_EVENTS:
                     raise ResultTrustRegistryConflict(
@@ -1386,6 +1404,7 @@ _REGISTRY_ALIAS_SEAL = MappingProxyType(
 __all__ = [
     "MAX_TRUST_EVENTS",
     "MAX_TRUST_KEYS",
+    "MAX_TRUST_TOMBSTONES",
     "ResultTrustBackup",
     "ResultTrustEventKind",
     "ResultTrustEventReceipt",
