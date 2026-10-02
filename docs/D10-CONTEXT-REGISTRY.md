@@ -37,13 +37,23 @@ covariate tokens and the D09/D03 selections. Under the exclusive D10 lock it:
 2. derives one live context through the pinned builder. If the inputs do not
    cover exactly the live D09 included set, the D03 series does not cover it,
    the pin is wrong, or the two reads saw different linkage, registration is
-   rejected and nothing is written; and
+   rejected and nothing is written. When D09 includes the D03 series anchor
+   (an ordinary cohort), the covariates include the anchor's result digest
+   and the derived context carries it as an `anchor` row with no D03
+   decision (see `docs/COVARIATE-CONTEXT.md`); and
 3. publishes the object, appends one hash-chained journal entry, reloads the
    committed state, and returns a receipt with the context digest.
 
 The selector `d10_context_…` is derived from the registry epoch and the object
 digest. Exact re-registration is idempotent. Different covariates or
 selections produce a new selector.
+
+The stored object holds only these inputs, never a derived context, so its
+`traceback.d10-registered-context-object.v1` schema did not change when the
+D10 result and crosswalk contracts moved to v2 for anchor admission. Objects
+stored earlier keep reading under their pinned head and rebuild into v2
+contexts on every read. A selector registered against a population that
+excluded the anchor stays valid while D09 keeps excluding it.
 
 ## Every read rebuilds
 
@@ -60,7 +70,8 @@ rather than being reported as stale.
 `list_selectors(after_selector_id=None, limit=50)` returns a bounded page (1 to
 100 rows) ordered by selector. A row carries the selector, object digest,
 `current|stale` state and, for a current row only, the context digest,
-classification, included-member count, and group count. Rows never contain
+classification, included-member count (the anchor counts when D09 includes
+it), and group count. Rows never contain
 member or result digests, D09/D03 selectors, covariate tokens, timepoints, or
 crosswalk rows.
 

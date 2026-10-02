@@ -14,8 +14,8 @@ member set, so it cannot consume that summary directly. There are two paths.
 
 The live path (`build_live_covariate_context`, below) derives the population
 from the D09 policy registry and is marked `live_d09_registry_verified=true`.
-The v1 path is unchanged: `D09PopulationDigestInput` is a versioned digest-only
-adapter that binds:
+The digest-only path is unchanged: `D09PopulationDigestInput` (v1) is a
+versioned digest-only adapter that binds:
 
 - the exact cohort-manifest digest;
 - the declared future D09 status and population digests;
@@ -48,9 +48,14 @@ The result uses four explicit classifications:
 Classification is descriptive. Even `clear` does not establish comparability,
 causality, or qualification. The output fixes measurement changes, eligibility
 changes, correction, biological attribution, and clinical interpretation to
-`false`. Each member's D03 decision digest and outcome remain bound into the
-input and per-member digest. The builder consumes exact canonical D03 member
-decision artifacts, derives their digests and outcomes after replay, binds each
+`false`. Each member row carries a `d03_role`. A `member` row's D03 decision
+digest and outcome remain bound into the input and per-member digest. An
+`anchor` row is the D03 series anchor itself: D03 decides every member against
+the anchor and never decides the anchor against itself, so that row carries no
+decision digest or outcome (both `null`), but its covariates still take part in
+grouping and classification. At most one row is the anchor. Only the live path
+admits an anchor row (see below); the caller-supplied builders reject one. The
+builder consumes exact canonical D03 member decision artifacts, derives their digests and outcomes after replay, binds each
 artifact's member-result digest to the included member, and rejects duplicate
 member or decision identities. No caller-declared digest/outcome pair is
 accepted, so a supplied decision's outcome cannot be relabelled or collapsed
@@ -75,10 +80,10 @@ a stale decision), requires the series policy to equal the population's D02
 anchor policy, and uses the registry's decision for each included member. The
 population may be a subset of the series but not exceed it. Each member's
 declared decision digest and outcome must equal the registry's. It returns a
-`RegisteredCovariateContext` that wraps the unchanged v1 result with a binding to
-the registry ID and epoch, state version and head, selector, object digest,
-series decision digest, and the decision's linkage snapshot, and is marked
-`d03_authority_verified=true`.
+`RegisteredCovariateContext` that wraps the v2 result (member rows only) with a
+binding to the registry ID and epoch, state version and head, selector, object
+digest, series decision digest, and the decision's linkage snapshot, and is
+marked `d03_authority_verified=true`.
 
 That binding is as-of one linkage snapshot, and a stored wrapper is not
 authority by itself. `verify_registered_covariate_context` re-resolves the
@@ -135,6 +140,25 @@ decision. All four keys must be equal:
 A missing or ambiguous match fails. D03 series members that D09 did not include
 are ignored. The covariates must cover every and only the matched members.
 
+The anchor is the one exception. A D03 series keeps its anchor out of
+`member_result_ids` and has no decision for it, but in an ordinary cohort the
+anchor is itself an included biological draw. The included member whose catalog
+result ID equals the series `anchor_result_id` is admitted as an `anchor`
+crosswalk row with no decision. The same join keys are checked against the
+series' own anchor identity:
+
+- result bundle (`bundle_sha256` = `anchor_bundle_sha256`);
+- D01 linkage revision (`CohortMember.linkage_revision_sha256` =
+  `anchor_linkage_revision_sha256`); and
+- committed linkage receipt (`committed_receipt_sha256` =
+  `anchor_linkage_receipt_sha256`, which must be present).
+
+Its D10 member digest is the series `anchor_result_sha256`, and its timepoint
+comes from its own D05 member. D10 does not mint a reflexive anchor-vs-anchor
+D03 decision (that would also create an anchor-vs-anchor D07 candidate). A
+series that also decides its own anchor is refused as ambiguous. If D09 excludes
+the anchor, the population is just the decided members, as before.
+
 The D09 rebuild and the D03 replay each take the D01 linkage fence themselves,
 so neither can run inside the other. They run one after the other. The D09
 summary's `linkage_snapshot_sha256` and the D03 series decision's
@@ -144,18 +168,21 @@ state. A D03 series without a linkage snapshot is rejected.
 
 ### What the live result binds
 
-The result is `LiveCovariateContext`. It wraps the unchanged v1
-`CovariateContextResult` with the #57 `RegisteredD03SeriesBinding` and a new
-`LiveD09PopulationBinding`. The binding holds D09 registry identity, selector,
-policy version, object and policy digests, D05 selection, manifest, v3 summary,
-population, record-status, catalog-authority, and linkage-snapshot digests. It
-also holds one crosswalk row per included member (D09 member digest, catalog
-result digest, result ID, D03 member-result digest, D03 decision digest).
-The wrapper is marked `live_d09_registry_verified=true` and
-`d03_authority_verified=true`. The inner v1 result still reports both as
-`false`, because it cannot prove its sources on its own.
+The result is `LiveCovariateContext`. It wraps the v2
+`CovariateContextResult` with the #57 `RegisteredD03SeriesBinding` and a
+`LiveD09PopulationBinding` (v2). The binding holds D09 registry identity,
+selector, policy version, object and policy digests, D05 selection, manifest,
+v3 summary, population, record-status, catalog-authority, and linkage-snapshot
+digests. It also holds one crosswalk row per included member: D09 member
+digest, catalog result digest, result ID, `d03_role` (`anchor` or `member`),
+the D03 result digest (the decision's member result, or the series anchor
+result), and the D03 decision digest (`null` exactly for the anchor row). The
+context's member rows must carry the same role and decision digest as their
+crosswalk rows. The wrapper is marked `live_d09_registry_verified=true` and
+`d03_authority_verified=true`. The inner result still reports both as `false`,
+because it cannot prove its sources on its own.
 
-On this path the v1 fields are filled from authority:
+On this path the result fields are filled from authority:
 
 - `d09_status_sha256` is the D09 registered policy object digest;
 - `d09_population_sha256` is the v3 `population_sha256`;
@@ -165,7 +192,7 @@ On this path the v1 fields are filled from authority:
   of its D05 member, not a caller value.
 
 `verify_live_covariate_context` re-resolves D09 and D03 by the bound selectors,
-rebuilds from the stored covariate values, and requires an identical v1
+rebuilds from the stored covariate values, and requires an identical
 result, the same D03 binding fields as #57, and the same D09 registry identity,
 selector, version, object, policy and manifest digests, population digest,
 linkage snapshot, and crosswalk. The D09 state head, v3 summary digest (it binds
@@ -207,11 +234,29 @@ to 1,000 members. The shared safe-ingress path performs exact no-hook
 collection, primitive, state, alias, graph-node, and graph-depth checks and
 rejects forged `model_copy`, private, or extra state before serialization.
 Ingress budgets scale from the public population bound: 1,032 fixed graph nodes
-plus 64 nodes per member, and 1 MiB fixed canonical JSON space plus 4 KiB per
-member. This admits the maximum valid 1,000-member/1,000-group protected result
-and aggregate projection with headroom while rejecting expanded hostile graphs
+plus 66 nodes per member (64 before the v2 `d03_role` field), and 1 MiB fixed
+canonical JSON space plus 4 KiB per member. This admits the maximum valid
+1,000-member/1,000-group protected result and aggregate projection with headroom while rejecting expanded hostile graphs
 before serialization. D03 member decisions are captured one at a time under
 the D03 per-decision bounds and share one 16 MiB canonical byte budget across
 the whole collection, about twice the size of a valid 1,000-member input.
 No raw sequence, read-level data, local path, provider identity, or subject
 identity belongs in these artifacts.
+
+## Schema versions
+
+Admitting the anchor added `d03_role` to the member row and the crosswalk row
+and made their decision fields nullable. Those rows are inside digested
+contracts, so the containing contracts were bumped rather than extended in
+place: `traceback.d10-covariate-input.v2`,
+`traceback.covariate-context-result.v2` and
+`traceback.d10-live-d09-population-binding.v2`. The wrappers
+(`traceback.live-covariate-context.v1`,
+`traceback.registered-covariate-context.v1`) and the aggregate summary keep
+their versions because their own fields did not change; the nested schema
+string disambiguates their bytes.
+
+No store retains a v1 input, result or binding. The D10 context registry stores
+only its v1 input object (covariate tokens and D09/D03 selectors, unchanged),
+and rebuilds a v2 context from live authority on every read, so registered
+selectors keep working. v1 result or binding bytes fail closed on read.

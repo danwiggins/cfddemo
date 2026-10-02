@@ -341,6 +341,47 @@ def test_resolve_cannot_run_inside_a_held_linkage_fence(env) -> None:
     assert registry.resolve(receipt.selector_id).object_sha256 == receipt.object_sha256
 
 
+def test_stored_v1_objects_keep_reading_and_rebuild_v2_contexts(env) -> None:
+    # The registry stores only D10 inputs, whose v1 object contract carries
+    # no D03 role or decision; the v2 context is re-derived on every read.
+    live, registry = env
+    receipt = _register(live, registry)
+    stored = (registry.root / "objects" / f"{receipt.object_sha256}.json").read_bytes()
+    assert b'"traceback.d10-registered-context-object.v1"' in stored
+    assert b"d03_role" not in stored and b"d03_decision" not in stored
+    reopened = _reopen(live, registry, receipt)
+    try:
+        resolved = reopened.resolve(receipt.selector_id)
+    finally:
+        reopened.close()
+    assert resolved.object_sha256 == receipt.object_sha256
+    assert resolved.live.context.schema_version == (
+        "traceback.covariate-context-result.v2"
+    )
+    assert resolved.context_sha256 == receipt.context_sha256
+
+
+def test_registry_derives_a_context_with_the_included_anchor(tmp_path: Path) -> None:
+    live, closers = make_live(tmp_path, anchor_included=True)
+    registry = CovariateContextRegistry(
+        tmp_path / "d10", d09_registry=live.d09, decision_registry=live.d03
+    )
+    closers.append(registry)
+    try:
+        receipt = _register(live, registry)
+        resolved = registry.resolve(receipt.selector_id)
+        assert resolved.live.context == build(live).context
+        roles = sorted(
+            item.d03_role.value for item in resolved.live.context.member_contexts
+        )
+        assert roles == ["anchor", "member"]
+        (record,) = registry.list_selectors().records
+        assert record.included_member_count == 2
+    finally:
+        for item in reversed(closers):
+            item.close()
+
+
 # --- shared storage behaviour (tests/registry_storage_checks.py) ----------------
 
 
