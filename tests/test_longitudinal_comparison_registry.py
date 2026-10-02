@@ -1455,3 +1455,32 @@ def test_non_composite_fence_kinds_are_refused(
             operation()
     assert registry.identity() == before
     assert not (tmp_path / "fresh").exists() or not os.listdir(tmp_path / "fresh")
+
+
+def _storage_bytes(root: Path) -> dict[str, bytes]:
+    return {
+        str(path.relative_to(root)): path.read_bytes()
+        for path in sorted(root.rglob("*"))
+        if path.is_file()
+    }
+
+
+@pytest.mark.parametrize("operation", ["resolve", "reopen", "list_selectors"])
+def test_a_refused_fence_leaves_pending_recovery_untouched(
+    registry, fence, operation
+) -> None:
+    first = registry.register(make_saved(fence.heads), dependency_fence=fence)
+    _write_candidate(
+        registry, _pending_record(registry, fence, make_saved(fence.heads, anchor_version=2))
+    )
+    before = _storage_bytes(registry.root)
+    refused = FakeFence(fence.heads)
+    refused.kind = DependencyFenceKind.DIRECT_HEAD_REREAD
+    calls = {
+        "resolve": lambda: registry.resolve(first.selector_id, 1, dependency_fence=refused),
+        "reopen": lambda: registry.reopen(first.selector_id, 1, dependency_fence=refused),
+        "list_selectors": lambda: registry.list_selectors(dependency_fence=refused),
+    }
+    with pytest.raises(LongitudinalComparisonRegistryUnsafe, match="composite"):
+        calls[operation]()
+    assert _storage_bytes(registry.root) == before

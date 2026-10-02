@@ -2426,10 +2426,11 @@ class LongitudinalComparisonRegistry:
             raise LongitudinalComparisonRegistryConflict(
                 "saved comparison selector is invalid"
             )
-        _CR_ENSURE_RECOVERED(self)
         with _held(dependency_fence) as held:
             held = _require_held(held)
+            # Refuse a non-composite fence before any storage side effect.
             fence_kind = _captured_fence_kind(held)
+            _CR_ENSURE_RECOVERED(self)
             with _CR_LOCK(self, exclusive=False):
                 index = _CR_LOAD_INDEX(self)
                 entry = index.by_key.get((selector_id, comparison_version))
@@ -2516,10 +2517,11 @@ class LongitudinalComparisonRegistry:
             raise LongitudinalComparisonRegistryConflict(
                 "saved comparison page cursor is invalid"
             )
-        _CR_ENSURE_RECOVERED(self)
         with _held(dependency_fence) as held:
             held = _require_held(held)
+            # Refuse a non-composite fence before any storage side effect.
             fence_kind = _captured_fence_kind(held)
+            _CR_ENSURE_RECOVERED(self)
             with _CR_LOCK(self, exclusive=False):
                 index = _CR_LOAD_INDEX(self)
                 ordered = sorted(index.by_key)

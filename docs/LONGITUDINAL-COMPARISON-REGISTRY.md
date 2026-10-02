@@ -139,8 +139,10 @@ Every journal entry, receipt, page and reopen records the fence kind. D08
 must refuse Save, and must not present a publication as fenced, unless the
 kind is `composite_authority_fence`.
 
-On reads, `_ensure_recovered` may take the registry lock alone, before the
-fence, to resolve a pending recovery; it reads no dependency authority.
+On `resolve`, `reopen` and `list_selectors`, `_ensure_recovered` runs inside
+the held dependency fence, after the fence kind is accepted, so a refused
+fence leaves storage untouched; it reads no dependency authority.
+`identity()` and `backup_bytes()` take no fence and may recover alone.
 
 No store takes this registry's lock, and every dependency lock is acquired
 by the composite fence before this registry's lock, so the registry is last
