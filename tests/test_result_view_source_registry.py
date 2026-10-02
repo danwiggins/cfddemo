@@ -82,6 +82,7 @@ from traceback_runner.signing import (
     TrustStore,
     generate_development_keypair,
 )
+from tests import registry_storage_checks as storage_checks
 
 
 def _revision(digit: str):
@@ -1222,3 +1223,93 @@ def test_failed_restore_reopen_removes_the_target_and_can_retry(
         assert _resolve(restored, live, receipt).object_sha256 == receipt.object_sha256
     finally:
         restored.close()
+
+
+# --- shared storage behaviour (tests/registry_storage_checks.py) ----------------
+
+
+def test_storage_torn_tail_needs_explicit_operator_recovery(
+    registry: ResultViewSourceRegistry, live: Live
+) -> None:
+    storage_checks.check_torn_tail_recovery(
+        registry,
+        lambda: _register(registry, live),
+        lambda values: ResultViewSourceRegistry(
+            registry.root,
+            record_catalog=live.cohorts,
+            **storage_checks.expected(values),
+        ),
+        ResultViewSourceRegistryUnsafe,
+    )
+
+
+def test_storage_interrupted_append_truncates_on_any_exception(
+    registry: ResultViewSourceRegistry, live: Live, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    storage_checks.check_append_interrupt_truncates(
+        registry, registry_module, lambda: _register(registry, live), monkeypatch
+    )
+
+
+def test_storage_lock_descriptor_is_read_under_the_process_lock(
+    registry: ResultViewSourceRegistry, live: Live, tmp_path: Path
+) -> None:
+    storage_checks.check_lock_reads_descriptor_under_process_lock(
+        registry, ResultViewSourceRegistryUnsafe, tmp_path
+    )
+
+
+def test_storage_owned_temporaries_are_swept_and_directories_fail_closed(
+    registry: ResultViewSourceRegistry,
+    live: Live,
+) -> None:
+    _register(registry, live)
+    storage_checks.check_owned_temporaries(
+        registry,
+        lambda values: ResultViewSourceRegistry(
+            registry.root,
+            record_catalog=live.cohorts,
+            **storage_checks.expected(values),
+        ),
+        ResultViewSourceRegistryUnsafe,
+    )
+
+
+def test_storage_interrupted_creation_is_recoverable(
+    registry: ResultViewSourceRegistry,
+    live: Live,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    storage_checks.check_interrupted_creation(
+        lambda root: ResultViewSourceRegistry(root, record_catalog=live.cohorts),
+        lambda root, values: ResultViewSourceRegistry(
+            root, record_catalog=live.cohorts, **storage_checks.expected(values)
+        ),
+        tmp_path / "created-by-storage-check",
+        registry_module,
+        "_commit_staged_root",
+        "_discard_staged_root",
+        monkeypatch,
+    )
+
+
+def test_storage_interrupted_restore_is_staged(
+    registry: ResultViewSourceRegistry,
+    live: Live,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _register(registry, live)
+    storage_checks.check_interrupted_restore(
+        registry,
+        lambda target, backup, values: ResultViewSourceRegistry.restore(
+            target,
+            backup,
+            record_catalog=live.cohorts,
+            **storage_checks.expected(values),
+        ),
+        registry_module,
+        tmp_path,
+        monkeypatch,
+    )

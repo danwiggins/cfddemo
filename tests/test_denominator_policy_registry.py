@@ -44,6 +44,7 @@ from tests.test_provider_linkage import (
     _token,
 )
 from tests.test_provider_linkage_store import _pins
+from tests import registry_storage_checks as storage_checks
 
 
 @dataclass
@@ -1106,3 +1107,85 @@ def test_pinned_population_builder_replacement_is_rejected(
     )
     with pytest.raises(DenominatorPolicyRegistryUnsafe):
         env.registry.resolve_population(receipt.selector_id, 1)
+
+
+# --- shared storage behaviour (tests/registry_storage_checks.py) ----------------
+
+
+def test_storage_torn_tail_needs_explicit_operator_recovery(env: Env) -> None:
+    registry = env.registry
+    storage_checks.check_torn_tail_recovery(
+        registry,
+        lambda: _register(env),
+        lambda values: _reopen(env, values),
+        DenominatorPolicyRegistryUnsafe,
+    )
+
+
+def test_storage_interrupted_append_truncates_on_any_exception(
+    env: Env, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    registry = env.registry
+    storage_checks.check_append_interrupt_truncates(
+        registry, registry_module, lambda: _register(env), monkeypatch
+    )
+
+
+def test_storage_lock_descriptor_is_read_under_the_process_lock(
+    env: Env, tmp_path: Path
+) -> None:
+    registry = env.registry
+    storage_checks.check_lock_reads_descriptor_under_process_lock(
+        registry, DenominatorPolicyRegistryUnsafe, tmp_path
+    )
+
+
+def test_storage_owned_temporaries_are_swept_and_directories_fail_closed(
+    env: Env,
+) -> None:
+    registry = env.registry
+    _register(env)
+    storage_checks.check_owned_temporaries(
+        registry, lambda values: _reopen(env, values), DenominatorPolicyRegistryUnsafe
+    )
+
+
+def test_storage_interrupted_creation_is_recoverable(
+    env: Env, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    storage_checks.check_interrupted_creation(
+        lambda root: DenominatorPolicyRegistry(
+            root, cohort_registry=env.cohort_registry, record_catalog=env.catalog
+        ),
+        lambda root, values: DenominatorPolicyRegistry(
+            root,
+            cohort_registry=env.cohort_registry,
+            record_catalog=env.catalog,
+            **storage_checks.expected(values),
+        ),
+        tmp_path / "created-by-storage-check",
+        registry_module,
+        "_commit_staged_root",
+        "_discard_staged_root",
+        monkeypatch,
+    )
+
+
+def test_storage_interrupted_restore_is_staged(
+    env: Env, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    registry = env.registry
+    _register(env)
+    storage_checks.check_interrupted_restore(
+        registry,
+        lambda target, backup, values: DenominatorPolicyRegistry.restore(
+            target,
+            backup,
+            cohort_registry=env.cohort_registry,
+            record_catalog=env.catalog,
+            **storage_checks.expected(values),
+        ),
+        registry_module,
+        tmp_path,
+        monkeypatch,
+    )
