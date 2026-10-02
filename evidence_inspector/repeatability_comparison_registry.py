@@ -1822,6 +1822,12 @@ class RepeatabilityComparisonRegistry:
             _PINNED_AUTHORITY_READ_FENCE(self._linkage_store),
             _CR_RESULT_TRUST_FENCE(self) as trust,
         ):
+            if trust is not None and not trust.document.keys:
+                # D07 bounds a result trust document to at least one key, so an
+                # empty trust registry cannot evaluate any comparison.
+                raise RepeatabilityComparisonRegistryConflict(
+                    "D07 comparison result trust registry has no keys"
+                )
             evaluated_at = _CR_LIVE_TIME_IN_FENCE(self)
             decision = _PINNED_DECIDE_MEMBER(
                 anchor,

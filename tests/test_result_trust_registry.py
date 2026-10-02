@@ -550,6 +550,21 @@ def test_d07_unknown_key_registers_unavailable_and_a_later_add_makes_it_stale(
     assert current.availability is ComparisonAvailability.AVAILABLE
 
 
+def test_d07_registration_against_an_empty_trust_registry_is_rejected(
+    live: Live,  # noqa: F811
+    trust: ResultTrustRegistry,
+    tmp_path: Path,
+) -> None:
+    trust.revoke_key(RESULT_KEY.key_id)
+    registry = _open_d07(tmp_path / "empty", live, trust)
+    try:
+        with pytest.raises(RepeatabilityComparisonRegistryConflict, match="no keys"):
+            _register(registry, live)
+        assert registry.list_selectors().state_version == 0
+    finally:
+        registry.close()
+
+
 def test_d07_trust_registry_binding_cannot_be_swapped(
     d07: RepeatabilityComparisonRegistry,
     live: Live,  # noqa: F811
