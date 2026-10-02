@@ -1522,39 +1522,50 @@ class RecordSupersessionStore:
         self.database = self.root / "record-supersession.sqlite3"
         self._database_identity: tuple[int, int] | None = None
         self._database_fd: int | None = None
-        try:
-            descriptor = os.open(
+        # _connect proves which descriptor SQLite opened by diffing the
+        # process-wide descriptor table under _SQLITE_OPEN_LOCK. Every
+        # descriptor this module opens onto the ledger database inode must
+        # therefore be opened (and closed) under the same lock, or a
+        # concurrent initializer's descriptors land inside another thread's
+        # proof window and fail it ("identity is unproven"/"changed").
+        with _SQLITE_OPEN_LOCK:
+            try:
+                descriptor = os.open(
+                    "record-supersession.sqlite3",
+                    os.O_RDWR
+                    | os.O_CREAT
+                    | os.O_EXCL
+                    | getattr(os, "O_CLOEXEC", 0)
+                    | getattr(os, "O_NOFOLLOW", 0),
+                    0o600,
+                    dir_fd=self._root_fd,
+                )
+            except FileExistsError:
+                pass
+            else:
+                os.close(descriptor)
+            database_metadata = os.stat(
                 "record-supersession.sqlite3",
-                os.O_RDWR
-                | os.O_CREAT
-                | os.O_EXCL
-                | getattr(os, "O_CLOEXEC", 0)
-                | getattr(os, "O_NOFOLLOW", 0),
-                0o600,
                 dir_fd=self._root_fd,
+                follow_symlinks=False,
             )
-        except FileExistsError:
-            pass
-        else:
-            os.close(descriptor)
-        database_metadata = os.stat(
-            "record-supersession.sqlite3",
-            dir_fd=self._root_fd,
-            follow_symlinks=False,
-        )
-        if (
-            not stat.S_ISREG(database_metadata.st_mode)
-            or stat.S_IMODE(database_metadata.st_mode) != 0o600
-            or database_metadata.st_uid != os.geteuid()
-        ):
-            self.close()
-            raise RecordSupersessionUnsafe("record ledger database must be private")
-        self._database_identity = (
-            database_metadata.st_dev,
-            database_metadata.st_ino,
-        )
+            if (
+                not stat.S_ISREG(database_metadata.st_mode)
+                or stat.S_IMODE(database_metadata.st_mode) != 0o600
+                or database_metadata.st_uid != os.geteuid()
+            ):
+                self.close()
+                raise RecordSupersessionUnsafe("record ledger database must be private")
+            self._database_identity = (
+                database_metadata.st_dev,
+                database_metadata.st_ino,
+            )
+            try:
+                self._bind_database_descriptor()
+            except BaseException:
+                self.close()
+                raise
         try:
-            self._bind_database_descriptor()
             self._initialize()
         except BaseException:
             self.close()
