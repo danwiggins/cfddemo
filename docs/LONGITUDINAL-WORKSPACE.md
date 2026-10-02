@@ -311,7 +311,11 @@ row/context states by decision of the plan: a stale D07 comparison (the plan
 lists "stale comparison states" among the suppressed D07 states, and an
 expired envelope is D07 `unavailable`), and a stale D10 context (context only;
 it never changes values or eligibility, and a stale context cannot be proven
-to belong to this workspace).
+to belong to this workspace). Known limit: a stale D10 page row skips the
+exact D09/D06/D03 bindings, so a D06 remove-and-re-add between the snapshots
+can show a transient `stale` covariate context instead of `read_conflict`;
+values, counts, gates and segments are unaffected, and a rebuild shows the
+current context.
 
 ## Limitations
 
