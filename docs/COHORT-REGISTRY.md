@@ -31,6 +31,12 @@ from an interrupted publication are removed under the registry lock; unrelated
 entries fail closed. A failed journal append truncates the journal back to its
 pre-append size, so a torn suffix cannot wedge the registry; the retry adopts
 the exact published object.
+Crash recovery follows the shared storage behaviour in
+`docs/REGISTRY-STORAGE.md`. Creation and restore are staged in a hidden
+sibling and published with one rename. A torn journal tail fails closed on
+reopen until an operator runs `recover_torn_journal_tail` with the retained
+identity and head. Owned `.tmp-<32 hex>` names are swept under the
+exclusive lock (the D05 rule). A failed append truncates on any exception.
 
 Every public entrypoint also verifies a process-private seal over the registry's
 authority-critical instance state. The registry metadata is reread from its

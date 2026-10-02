@@ -36,6 +36,7 @@ from tests.test_covariate_context_live import (
     make_live,
 )
 from tests.test_provider_linkage_store import _pins, _store
+from tests import registry_storage_checks as storage_checks
 
 
 @pytest.fixture
@@ -338,3 +339,104 @@ def test_resolve_cannot_run_inside_a_held_linkage_fence(env) -> None:
         with pytest.raises(CovariateContextRegistryStale):
             registry.resolve(receipt.selector_id)
     assert registry.resolve(receipt.selector_id).object_sha256 == receipt.object_sha256
+
+
+# --- shared storage behaviour (tests/registry_storage_checks.py) ----------------
+
+
+def test_storage_torn_tail_needs_explicit_operator_recovery(env) -> None:
+    live, registry = env
+    storage_checks.check_torn_tail_recovery(
+        registry,
+        lambda: _register(live, registry),
+        lambda values: _reopen(live, registry, values),
+        CovariateContextRegistryUnsafe,
+    )
+
+
+def test_storage_interrupted_append_truncates_on_any_exception(
+    env, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    live, registry = env
+    storage_checks.check_append_interrupt_truncates(
+        registry, registry_module, lambda: _register(live, registry), monkeypatch
+    )
+
+
+def test_storage_lock_descriptor_is_read_under_the_process_lock(
+    env, tmp_path: Path
+) -> None:
+    live, registry = env
+    storage_checks.check_lock_reads_descriptor_under_process_lock(
+        registry, CovariateContextRegistryUnsafe, tmp_path
+    )
+
+
+def test_storage_owned_temporaries_are_swept_and_directories_fail_closed(
+    env,
+) -> None:
+    live, registry = env
+    _register(live, registry)
+    storage_checks.check_owned_temporaries(
+        registry,
+        lambda values: _reopen(live, registry, values),
+        CovariateContextRegistryUnsafe,
+    )
+
+
+def test_storage_interrupted_creation_is_recoverable(
+    env, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    live, registry = env
+    storage_checks.check_interrupted_creation(
+        lambda root: CovariateContextRegistry(
+            root, d09_registry=live.d09, decision_registry=live.d03
+        ),
+        lambda root, values: CovariateContextRegistry(
+            root,
+            d09_registry=live.d09,
+            decision_registry=live.d03,
+            **storage_checks.expected(values),
+        ),
+        tmp_path / "created-by-storage-check",
+        registry_module,
+        "_commit_staged_root",
+        "_discard_staged_root",
+        monkeypatch,
+    )
+
+
+def test_storage_interrupted_restore_is_staged(
+    env, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    live, registry = env
+    _register(live, registry)
+    storage_checks.check_interrupted_restore(
+        registry,
+        lambda target, backup, values: CovariateContextRegistry.restore(
+            target,
+            backup,
+            d09_registry=live.d09,
+            decision_registry=live.d03,
+            **storage_checks.expected(values),
+        ),
+        registry_module,
+        tmp_path,
+        monkeypatch,
+    )
+
+
+def test_storage_creation_under_a_symlinked_parent(env, tmp_path: Path) -> None:
+    live, _ = env
+    storage_checks.check_creation_under_symlinked_parent(
+        lambda root: CovariateContextRegistry(
+            root, d09_registry=live.d09, decision_registry=live.d03
+        ),
+        lambda root, values: CovariateContextRegistry(
+            root,
+            d09_registry=live.d09,
+            decision_registry=live.d03,
+            **storage_checks.expected(values),
+        ),
+        tmp_path,
+    )

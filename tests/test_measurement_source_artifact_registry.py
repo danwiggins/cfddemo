@@ -63,6 +63,7 @@ from tests.test_method_registry import _definition
 from tests.test_result_view_source_registry import Live, _policy
 from traceback_runner.serialization import canonical_json_bytes
 from traceback_runner.signing import KeyPurpose, generate_development_keypair
+from tests import registry_storage_checks as storage_checks
 
 
 def _fragment_authority():
@@ -964,3 +965,122 @@ def test_concurrent_resolve_and_revoke_terminate_with_exact_outcomes(
     assert len(outcomes) == 6
     with pytest.raises(MeasurementSourceArtifactRegistryStale):
         _resolve(registry, live, receipt, e06_receipt)
+
+
+# --- shared storage behaviour (tests/registry_storage_checks.py) ----------------
+
+
+def test_storage_torn_tail_needs_explicit_operator_recovery(
+    registry: MeasurementSourceArtifactRegistry, e06, live: Live
+) -> None:
+    e06_receipt = _e06_register(e06, live)
+    storage_checks.check_torn_tail_recovery(
+        registry,
+        lambda: _register(registry, live, e06_receipt),
+        lambda values: MeasurementSourceArtifactRegistry(
+            registry.root,
+            result_view_source_registry=e06,
+            **storage_checks.expected(values),
+        ),
+        MeasurementSourceArtifactRegistryUnsafe,
+    )
+
+
+def test_storage_interrupted_append_truncates_on_any_exception(
+    registry: MeasurementSourceArtifactRegistry,
+    e06,
+    live: Live,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    e06_receipt = _e06_register(e06, live)
+    storage_checks.check_append_interrupt_truncates(
+        registry,
+        registry_module,
+        lambda: _register(registry, live, e06_receipt),
+        monkeypatch,
+    )
+
+
+def test_storage_lock_descriptor_is_read_under_the_process_lock(
+    registry: MeasurementSourceArtifactRegistry, e06, live: Live, tmp_path: Path
+) -> None:
+    storage_checks.check_lock_reads_descriptor_under_process_lock(
+        registry, MeasurementSourceArtifactRegistryUnsafe, tmp_path
+    )
+
+
+def test_storage_owned_temporaries_are_swept_and_directories_fail_closed(
+    registry: MeasurementSourceArtifactRegistry,
+    e06,
+    live: Live,
+) -> None:
+    e06_receipt = _e06_register(e06, live)
+    _register(registry, live, e06_receipt)
+    storage_checks.check_owned_temporaries(
+        registry,
+        lambda values: MeasurementSourceArtifactRegistry(
+            registry.root,
+            result_view_source_registry=e06,
+            **storage_checks.expected(values),
+        ),
+        MeasurementSourceArtifactRegistryUnsafe,
+    )
+
+
+def test_storage_interrupted_creation_is_recoverable(
+    registry: MeasurementSourceArtifactRegistry,
+    e06,
+    live: Live,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    storage_checks.check_interrupted_creation(
+        lambda root: MeasurementSourceArtifactRegistry(
+            root, result_view_source_registry=e06
+        ),
+        lambda root, values: MeasurementSourceArtifactRegistry(
+            root, result_view_source_registry=e06, **storage_checks.expected(values)
+        ),
+        tmp_path / "created-by-storage-check",
+        registry_module,
+        "_commit_staged_root",
+        "_discard_staged_root",
+        monkeypatch,
+    )
+
+
+def test_storage_interrupted_restore_is_staged(
+    registry: MeasurementSourceArtifactRegistry,
+    e06,
+    live: Live,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    e06_receipt = _e06_register(e06, live)
+    _register(registry, live, e06_receipt)
+    storage_checks.check_interrupted_restore(
+        registry,
+        lambda target, backup, values: MeasurementSourceArtifactRegistry.restore(
+            target,
+            backup,
+            result_view_source_registry=e06,
+            **storage_checks.expected(values),
+        ),
+        registry_module,
+        tmp_path,
+        monkeypatch,
+    )
+
+
+def test_storage_creation_under_a_symlinked_parent(
+    registry: MeasurementSourceArtifactRegistry, e06, live: Live, tmp_path: Path
+) -> None:
+    storage_checks.check_creation_under_symlinked_parent(
+        lambda root: MeasurementSourceArtifactRegistry(
+            root, result_view_source_registry=e06
+        ),
+        lambda root, values: MeasurementSourceArtifactRegistry(
+            root, result_view_source_registry=e06, **storage_checks.expected(values)
+        ),
+        tmp_path,
+    )

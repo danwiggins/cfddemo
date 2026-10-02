@@ -230,10 +230,13 @@ and a process-private instance seal.
 A failed journal append truncates any torn suffix back to the last committed
 entry, so the chain stays readable and the registration can be retried. A
 failed restore, including a failed final reopen of the restored registry,
-removes the partial target it created, so a retry is possible. A crash, rather
-than a caught failure, can still leave a torn journal tail or a partial restore
-target that needs manual repair; that is the same shared follow-up as the D03
-decision and D05 cohort registries.
+removes the partial target it created, so a retry is possible.
+Crash recovery follows the shared storage behaviour in
+`docs/REGISTRY-STORAGE.md`. Creation and restore are staged in a hidden
+sibling and published with one rename. A torn journal tail fails closed on
+reopen until an operator runs `recover_torn_journal_tail` with the retained
+identity and head. Owned `.tmp-<32 hex>` names are swept under the
+exclusive lock (the D05 rule). A failed append truncates on any exception.
 
 The metadata binds the cohort registry ID and epoch, the linkage store ID, epoch,
 and storage identity, the E04 catalog storage and reader-registry identities,
@@ -259,8 +262,6 @@ interpreter's `__warningregistry__` must not disable the registry.
 
 ## Known gaps
 
-- Crash recovery for torn journal tails, partial restore targets, and partial
-  first-time creation matches D03/D05 and is a shared follow-up.
 - The rollback fence is per process. A fresh process trusts the retained head
   it is given.
 

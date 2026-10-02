@@ -169,12 +169,16 @@ current under an active key, unique selectors, one revocation per registered
 grant, non-decreasing record times).
 
 A failed journal append truncates any torn suffix back to the last committed
-entry, so the chain stays readable and the mutation can be retried. A crash,
-rather than a caught failure, can still leave a torn journal tail that makes
-the registry fail closed on reopen until repaired; crash recovery on reopen is
-the shared follow-up across the registries (D03, D05, D07, D09, E06). At most one uncommitted
-object is tolerated and it is removed by the next mutation. A failed create or
-restore, including a failed final reopen, removes the target it created.
+entry, so the chain stays readable and the mutation can be retried. At most
+one uncommitted object is tolerated and it is removed by the next mutation. A
+failed create or restore, including a failed final reopen, removes the target
+it created.
+Crash recovery follows the shared storage behaviour in
+`docs/REGISTRY-STORAGE.md`. Creation and restore are staged in a hidden
+sibling and published with one rename. A torn journal tail fails closed on
+reopen until an operator runs `recover_torn_journal_tail` with the retained
+identity and head. Owned `.tmp-<32 hex>` names are swept under the
+exclusive lock (the D05 rule). A failed append truncates on any exception.
 
 Bounds: 1,000 grants, 64 trust revisions, 16 keys, 16 cohort and 16
 measurement scopes per grant, 16 KiB per object, 2 MiB of journal, 64 MiB of
@@ -242,8 +246,7 @@ are single-use.
 
 ## Known gaps
 - The rollback fence is per process; a fresh process trusts the retained head
-  it is given. A crash-partial create or restore target still needs manual
-  removal, as in D03/D05.
+  it is given.
 - A restore is a replacement, not a replica. The fence is the lock file inside
   one root, so running the original and a restored copy at the same time
   splits it: a revocation in one is invisible to the other. Operators must

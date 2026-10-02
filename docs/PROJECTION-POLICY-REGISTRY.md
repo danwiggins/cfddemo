@@ -168,9 +168,13 @@ failed restore (including a failed final reopen) removing its target. The
 metadata binds no external store. As in D03, reads tolerate one uncommitted
 object without parsing it; the next registration reads it and fails closed if
 its bytes do not match its name, which blocks registration until an operator
-removes it. The shared storage follow-up in the E12 plan (interrupted root
-creation, torn tails found on reopen, staged restore, and parse-everything
-reads) applies here too.
+removes it. Every read parses every committed object (synthetic scale only).
+Crash recovery follows the shared storage behaviour in
+`docs/REGISTRY-STORAGE.md`. Creation and restore are staged in a hidden
+sibling and published with one rename. A torn journal tail fails closed on
+reopen until an operator runs `recover_torn_journal_tail` with the retained
+identity and head. Owned `.tmp-<32 hex>` names are swept under the
+exclusive lock (the D05 rule). A failed append truncates on any exception.
 
 Threat model: in-process code mutation and same-user filesystem races are out
 of scope. The seals and storage checks fail closed on accidental drift; they do

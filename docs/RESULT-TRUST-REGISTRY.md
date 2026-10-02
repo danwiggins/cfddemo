@@ -127,8 +127,13 @@ There is no whole-module namespace seal; a test pins that Python's
 
 Events are under 1 KB, so they are stored inline in the journal; there is no
 objects directory. The journal is the commit point. A failed append truncates
-any torn suffix, and the event can be retried. A journal with a torn tail
-from a crash fails closed.
+any torn suffix on any exception (an interrupt keeps its own type), and the
+event can be retried. A journal with a torn tail from a crash fails closed on
+reopen until an operator runs `recover_torn_journal_tail`. Creation and restore
+are staged, and owned `.tmp-<32 hex>` names in the root are swept under the
+exclusive lock. This registry is the source of the lock-descriptor ordering
+and truncate-on-any-exception fixes the family now shares; see
+`docs/REGISTRY-STORAGE.md`.
 
 `backup_bytes()` returns canonical metadata, state, and journal. `restore()`
 validates the chain and the event rules, requires the retained ID, epoch, and

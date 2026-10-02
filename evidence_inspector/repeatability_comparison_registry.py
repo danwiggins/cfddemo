@@ -74,6 +74,16 @@ from evidence_inspector.result_trust_registry import (
     ResultTrustSnapshot,
     project_result_trust_document,
 )
+from evidence_inspector.registry_storage import (
+    begin_staged_root as _begin_staged_root,
+    bound_name as _bound_name,
+    commit_staged_root as _commit_staged_root,
+    commit_staging_directory as _commit_staging_directory,
+    discard_staged_root as _discard_staged_root,
+    make_staging_directory as _make_staging_directory,
+    recover_torn_journal_tail as _recover_torn_journal_tail,
+    remove_owned_temporaries as _remove_owned_temporaries,
+)
 from evidence_inspector.safe_ingress import (
     bounded_json_loads,
     contract_type_graph,
@@ -637,6 +647,24 @@ def _metadata_genesis_sha256(metadata: RepeatabilityComparisonRegistryMetadata) 
     ).hexdigest()
 
 
+def _torn_tail_metadata(
+    content: bytes,
+) -> (
+    RepeatabilityComparisonRegistryMetadata
+    | RepeatabilityComparisonRegistryTrustBoundMetadata
+):
+    """Parse either D07 metadata schema for operator torn-tail recovery."""
+
+    try:
+        return contract_from_canonical_bytes(
+            RepeatabilityComparisonRegistryMetadata, content
+        )
+    except Exception:
+        return contract_from_canonical_bytes(
+            RepeatabilityComparisonRegistryTrustBoundMetadata, content
+        )
+
+
 def _build_journal_entry(
     *, sequence: int, previous_entry_sha256: str, object_sha256: str, object_bytes: int
 ) -> RepeatabilityComparisonJournalEntry:
@@ -957,6 +985,7 @@ class RepeatabilityComparisonRegistry:
         # Keep this list literal: consulting a mutable module global here would let
         # an attacker disable the guard before installing an instance shadow.
         if name in (
+            "recover_torn_journal_tail",
             "backup_bytes",
             "close",
             "list_selectors",
@@ -1066,13 +1095,16 @@ class RepeatabilityComparisonRegistry:
         self._metadata_fd: int | None = None
         self._journal_fd: int | None = None
         self._process_lock = threading.RLock()
+        final_root = self.root
+        staged_root: Path | None = None
         try:
-            try:
-                self.root.mkdir(parents=True, mode=0o700, exist_ok=False)
-            except FileExistsError:
-                root_created = False
-            else:
-                root_created = True
+            # A new root is built in a hidden sibling and published with one
+            # rename, so an interrupted creation never leaves a half-built
+            # root at the final path.
+            staged_root = _begin_staged_root(final_root)
+            root_created = staged_root is not None
+            if staged_root is not None:
+                self.root = staged_root
             root_lstat = os.stat(self.root, follow_symlinks=False)
             if (
                 not stat.S_ISDIR(root_lstat.st_mode)
@@ -1185,12 +1217,20 @@ class RepeatabilityComparisonRegistry:
                         raise RepeatabilityComparisonRegistryUnsafe(
                             "D07 comparison registry expected identity or head is invalid"
                         )
+                    if staged_root is not None:
+                        _commit_staged_root(staged_root, final_root, self._root_fd)
+                        self.root = final_root
                     self._trusted_head_sha256 = head
                     _CR_ACCEPT_OBSERVED_HEAD(
                         self, _CR_LOAD_JOURNAL(self), head, check_instance=False
                     )
                     _seal_registry_instance(self)
+            # Cleared only after the lock and any fence have exited: until
+            # here a failure still removes the new root by inode.
+            staged_root = None
         except BaseException:
+            if staged_root is not None:
+                _discard_staged_root(staged_root, final_root, self._root_fd)
             # Construction has not installed the instance seal yet, so cleanup
             # cannot pass through the public integrity-checked close boundary.
             for name in (
@@ -1245,10 +1285,14 @@ class RepeatabilityComparisonRegistry:
 
     @contextmanager
     def _lock(self, *, exclusive: bool) -> Iterator[None]:
-        descriptor = self._lock_fd
-        if descriptor is None:
-            raise RepeatabilityComparisonRegistryUnsafe("D07 comparison registry is closed")
         with _REGISTRY_PROCESS_LOCK, self._process_lock:
+            # Read the descriptor only under the process lock, which close()
+            # also holds, so a concurrent close cannot hand us a reused number.
+            descriptor = self._lock_fd
+            if descriptor is None:
+                raise RepeatabilityComparisonRegistryUnsafe(
+                    "D07 comparison registry is closed"
+                )
             fcntl.flock(descriptor, fcntl.LOCK_EX if exclusive else fcntl.LOCK_SH)
             try:
                 _CR_VALIDATE_STORAGE(self)
@@ -1340,28 +1384,19 @@ class RepeatabilityComparisonRegistry:
         _publish_file(directory_fd, name, content)
 
     def _recover_temporary_objects(self) -> None:
-        if self._objects_fd is None:
+        # D05 rule: an owned ``.tmp-<32 hex>`` name in the registry's private
+        # root or objects directory is always unlinked under the exclusive
+        # lock; a directory under that name makes unlink fail, so recovery
+        # fails closed.
+        if self._root_fd is None or self._objects_fd is None:
             raise RepeatabilityComparisonRegistryUnsafe("D07 comparison registry is closed")
         try:
-            names = os.listdir(self._objects_fd)
+            for directory_fd in (self._root_fd, self._objects_fd):
+                _remove_owned_temporaries(directory_fd)
         except OSError:
             raise RepeatabilityComparisonRegistryUnsafe(
-                "D07 comparison registry objects are unavailable"
+                "D07 comparison registry recovery is unsafe"
             ) from None
-        for name in names:
-            if (
-                type(name) is str
-                and len(name) == 37
-                and name.startswith(".tmp-")
-                and all(character in "0123456789abcdef" for character in name[5:])
-            ):
-                try:
-                    os.unlink(name, dir_fd=self._objects_fd)
-                except OSError:
-                    raise RepeatabilityComparisonRegistryUnsafe(
-                        "D07 comparison registry recovery is unsafe"
-                    ) from None
-        os.fsync(self._objects_fd)
 
     def _load_or_create_metadata(
         self, *, allow_create: bool
@@ -1535,7 +1570,7 @@ class RepeatabilityComparisonRegistry:
         try:
             _write_all(descriptor, content)
             os.fsync(descriptor)
-        except OSError:
+        except BaseException as error:
             # Remove any torn suffix so the committed chain stays readable; the
             # object it named remains an uncommitted remnant for later cleanup.
             try:
@@ -1543,6 +1578,9 @@ class RepeatabilityComparisonRegistry:
                 os.fsync(descriptor)
             except OSError:
                 pass
+            # An interrupt or other non-OS failure keeps its own type.
+            if not isinstance(error, OSError):
+                raise
             raise RepeatabilityComparisonRegistryUnsafe(
                 "D07 comparison registry journal append failed"
             ) from None
@@ -2221,6 +2259,7 @@ class RepeatabilityComparisonRegistry:
         root_fd: int | None = None
         objects_fd: int | None = None
         created = False
+        staging_name = target.name
         completed = False
         try:
             parent_lstat = os.stat(parent, follow_symlinks=False)
@@ -2233,10 +2272,10 @@ class RepeatabilityComparisonRegistry:
                 raise RepeatabilityComparisonRegistryUnsafe(
                     "D07 comparison registry restore parent changed"
                 )
-            os.mkdir(target.name, 0o700, dir_fd=parent_fd)
+            staging_name = _make_staging_directory(parent_fd, target.name)
             created = True
-            root_lstat = os.stat(target.name, dir_fd=parent_fd, follow_symlinks=False)
-            root_fd = os.open(target.name, directory_flags, dir_fd=parent_fd)
+            root_lstat = os.stat(staging_name, dir_fd=parent_fd, follow_symlinks=False)
+            root_fd = os.open(staging_name, directory_flags, dir_fd=parent_fd)
             root_bound = os.fstat(root_fd)
             if (
                 not stat.S_ISDIR(root_lstat.st_mode)
@@ -2294,6 +2333,9 @@ class RepeatabilityComparisonRegistry:
             os.fsync(objects_fd)
             os.fsync(root_fd)
             os.fsync(parent_fd)
+            # The staged root becomes the target only once it is complete.
+            _commit_staging_directory(parent_fd, staging_name, target.name, root_fd)
+            staging_name = target.name
             # Construction rechecks live authority; if it fails, the published
             # target is removed below so the restore can be retried.
             restored = _CR_CONSTRUCT(
@@ -2317,14 +2359,23 @@ class RepeatabilityComparisonRegistry:
                 "D07 comparison registry restore failed"
             ) from None
         finally:
+            if (
+                created
+                and not completed
+                and root_fd is not None
+                and parent_fd is not None
+            ):
+                staging_name = _bound_name(
+                    parent_fd, root_fd, staging_name, target.name
+                )
             if created and not completed:
                 if root_fd is not None:
                     _remove_partial_restore(
-                        parent_fd, target.name, root_fd, objects_fd
+                        parent_fd, staging_name, root_fd, objects_fd
                     )
                 elif parent_fd is not None:
                     try:
-                        os.rmdir(target.name, dir_fd=parent_fd)
+                        os.rmdir(staging_name, dir_fd=parent_fd)
                         os.fsync(parent_fd)
                     except OSError:
                         pass
@@ -2335,6 +2386,47 @@ class RepeatabilityComparisonRegistry:
                     except OSError:
                         pass
         return restored
+
+    @classmethod
+    def recover_torn_journal_tail(
+        cls,
+        root: str | Path,
+        *,
+        expected_registry_id: str,
+        expected_registry_epoch_sha256: str,
+        expected_state_head_sha256: str,
+    ) -> int:
+        """Operator maintenance: remove an unterminated trailing journal line.
+
+        Reopening a registry whose journal ends in a torn line fails closed,
+        and nothing repairs it automatically.  This explicit entry point takes
+        the exclusive registry lock without waiting (a registry in use,
+        including the caller's own fence, is refused by the non-blocking
+        flock) and truncates only the bytes after the
+        last newline, and only when every complete line chains to exactly the
+        retained head under the retained identity.  It returns the number of
+        bytes removed (``0`` when there is no torn tail); then reopen with the
+        same retained values.
+        """
+
+        _require_registry_class_integrity(cls)
+        return _recover_torn_journal_tail(
+            _snapshot_path(root),
+            expected_registry_id=expected_registry_id,
+            expected_registry_epoch_sha256=expected_registry_epoch_sha256,
+            expected_state_head_sha256=expected_state_head_sha256,
+            parse_metadata=_torn_tail_metadata,
+            genesis_sha256=_metadata_genesis_sha256,
+            parse_entry=lambda line: contract_from_canonical_bytes(
+                RepeatabilityComparisonJournalEntry, line
+            ),
+            entry_sha256=_journal_entry_sha256,
+            max_journal_bytes=4 * 1024 * 1024,
+            max_entries=MAX_REGISTERED_COMPARISONS,
+            process_lock=_REGISTRY_PROCESS_LOCK,
+            error=RepeatabilityComparisonRegistryUnsafe,
+            label="D07 comparison registry",
+        )
 
 
 _REGISTRY_METHOD_SEAL = MappingProxyType(
@@ -2364,6 +2456,7 @@ _REGISTRY_METHOD_SEAL = MappingProxyType(
             "list_selectors",
             "backup_bytes",
             "restore",
+            "recover_torn_journal_tail",
             "close",
         )
     }
