@@ -46,7 +46,9 @@ reader_authorization -> d10_context -> d09_summary -> d01_linkage -> d04_history
 
 Every mutation of each store needs that store's exclusive lock (or, for D01
 and D04, the D01 SQLite write lock), so no writer in any process can land
-while the composite hold is active.
+while the composite hold is active, with one exception: E04 catalog rows.
+Another process can still import into or recover the E04 catalog; see
+"Store that could not be fully composed: E04 catalog content" below.
 
 ### Edges the order is derived from
 

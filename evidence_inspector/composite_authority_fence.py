@@ -558,6 +558,8 @@ class _CatalogTrustAdapter(_Adapter):
     ``ResultCatalog.trust_authority_fence`` takes both, in that order, and
     marks this thread so every catalog verification inside reuses the one
     held trust snapshot.  Trust add/revoke and catalog trust use block on it.
+    Catalog *rows* have no cross-process fence: another process can still
+    import into this catalog (see docs/COMPOSITE-AUTHORITY-FENCE.md).
     """
 
     step = CompositeLockStep.E04_CATALOG_TRUST
