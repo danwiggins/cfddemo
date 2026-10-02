@@ -131,9 +131,11 @@ receipt is shown: `authority_stale` or `permission_denied`.
 `stage=diff` and `stage=results` run the same steps; only `results` returns
 rows, so the view always shows the diff first.
 
-1. Gate (configured scopes), resolve the opaque selector through
-   `registry.resolve` under a `CompositeAuthorityFence`, then gate again for
-   the saved object's own scope before using any of it.
+1. Gate for every configured scope (the saved page and Reopen are only for a
+   reader whose own grant covers all of them, so no saved selector or object
+   is read under a grant for another measurement), resolve the opaque
+   selector through `registry.resolve` under a `CompositeAuthorityFence`,
+   require the saved scope to be a configured one, and gate again for it.
 2. Under that gate: re-derive the live anchor candidate page for the saved
    anchor-policy approval (its digest is the request's anchor version), the
    D05 version diff of the saved version, and the selector's versions.
@@ -143,10 +145,15 @@ rows, so the view always shows the diff first.
    `comparison_state`. `current` only when the registry reports current, no
    commitment or head changed, the publication was composite-fenced, and the
    rebuilt replay digest equals the saved one.
-5. Results: `current` returns the rebuilt projection. `stale` returns
-   `StaleSourceRow`s (identity, timepoint, lineage, availability, outcome and
-   action; no values, no comparison numbers), `stale_segments=[]` and the
-   refresh action `start_new_comparison_at_current_authority`.
+5. Results: `current` returns the rebuilt projection only after a final
+   composite hold re-reads the head vector (it must equal the saved one) and
+   re-authorizes the reader inside the hold; otherwise `authority_stale` or
+   the denial shell and no result. `stale` returns only the saved object's
+   immutable commitments (`historical_commitments`, without the reader-grant
+   commitment): the saved bytes hold no rows, and rows rebuilt from current
+   authority would relabel current state as the saved comparison. No values,
+   comparison numbers or segments (`stale_segments=[]`), plus the refresh
+   action `start_new_comparison_at_current_authority`.
 
 Saved bytes are never rewritten; the response carries their digest only.
 
@@ -154,7 +161,8 @@ Saved bytes are never rewritten; the response carries their digest only.
 
 The longitudinal section appears after a reader launch is exchanged
 (`app.js` dispatches `traceback:longitudinal` with the CSRF token, kept in
-page memory). Journey: cohort version → measurement → anchor-policy approval
+page memory). Journey: cohort version → authorized measurement scope (the
+configured scopes the grant covers) → measurement → anchor-policy approval
 → explicit anchor candidate (no default) → D09 policy → filters → "Show
 version diff" → "Show results" (enabled only for the exact selection whose
 diff was shown).
@@ -220,8 +228,10 @@ screen-reader and 200% zoom audits remain E14 evidence.
   quickstart (`docs/quickstarts/LONGITUDINAL-SYNTHETIC.md`) and the rollback
   rehearsal (`docs/rollback/LONGITUDINAL-REHEARSAL.md`) still need a packaged
   store-installation command and its pinned identities.
-- The selector step authorizes per configured scope; the saved-comparison page
-  lists opaque selectors to any reader holding a configured scope (Reopen
+- The selector step authorizes per configured scope; the saved page and Reopen
+  require a grant covering every configured scope (with one configured scope,
+  the default, this is the same grant). Finer per-scope listing needs a
+  registry read that maps selectors to scopes without opening objects (Reopen
   enforces the saved object's own scope).
 - Each workspace, source-detail, save and reopen request rebuilds the
   workspace (about 5 s on the synthetic world); there is no cache.

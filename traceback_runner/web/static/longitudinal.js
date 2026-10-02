@@ -435,6 +435,10 @@
       ["Members added", String(diff.added_member_count)],
       ["Members removed", String(diff.removed_member_count)],
       ["Members unchanged", String(diff.unchanged_member_count)],
+      ["Added member set digest", diff.added_member_set_sha256],
+      ["Removed member set digest", diff.removed_member_set_sha256],
+      ["Selected manifest digest", diff.selected_manifest_sha256],
+      ["Predecessor manifest digest", text(diff.predecessor_manifest_sha256)],
       ["Changes", (diff.reasons || []).map(words).join(", ") || "none"],
       ["D03 policy change", words(diff.d03_policy_change)],
       ["Silent upgrade", "never"],
@@ -453,6 +457,12 @@
       ["Changed dependencies", (diff.stale_dependencies || []).map(words).join(", ") || "none"],
       ["Changed commitments", (diff.changes || []).map(words).join(", ") || "none"],
       ["Saved cohort version", `${diff.saved_selection.cohort_selector_id} version ${diff.saved_selection.cohort_version}`],
+      ["Saved measurement", `${words(diff.saved_selection.measurement.quantity_id)} (${diff.saved_selection.measurement.unit}); definition ${diff.saved_selection.measurement.measurement_definition_sha256}`],
+      ["Saved anchor", `${diff.saved_selection.anchor_policy_selector_id} approval ${diff.saved_selection.anchor_policy_version}; candidate ${diff.saved_selection.approved_anchor_selector_id}`],
+      ["Saved projection policy", `${diff.saved_selection.projection_policy_selector_id} version ${diff.saved_selection.projection_policy_version}`],
+      ["Saved D09 policy", `${diff.saved_selection.d09_policy_selector_id} version ${diff.saved_selection.d09_policy_version}`],
+      ["Saved replay digest", diff.saved_workspace_replay_sha256],
+      ["Rebuilt replay digest", text(diff.rebuilt_workspace_replay_sha256)],
       ["Newer cohort version", diff.newer_cohort_version_available ? `available (version ${diff.latest_cohort_version}); not applied` : "none"],
       ["Rebuild", diff.rebuild_error ? `failed: ${words(diff.rebuild_error)}` : "rebuilt from current authority"],
       ["Saved bytes", "immutable; never rewritten or relabelled as current"],
@@ -461,10 +471,14 @@
     if (diff.cohort_version_diff) renderVersionDiff(doc, container, diff.cohort_version_diff);
   };
 
-  const renderStaleRows = (doc, ui, rows) => {
-    renderRows(doc, ui, rows.map((row) => Object.assign({}, row, {
-      value_state: null, history_state: "not shown", compatibility_reasons: [],
-    })), null);
+  // A stale saved comparison shows only its immutable commitments: the saved
+  // bytes hold no rows, and current rows must not be relabelled as saved ones.
+  const renderHistorical = (doc, container, commitments) => {
+    const list = el(doc, "dl");
+    pairs(doc, list, Object.entries(commitments || {}).map(([name, value]) => [words(name), value]));
+    container.replaceChildren(
+      el(doc, "p", "Historical saved commitments (immutable). No values, comparisons or segments are shown for a stale comparison.", { class: "help" }),
+      list);
   };
 
   const renderWorkspace = (doc, ui, workspace, context, onDetails) => {
@@ -491,6 +505,7 @@
       problemFix: byId("lg-problem-fix"),
       retry: byId("lg-retry"),
       cohort: byId("lg-cohort"),
+      scope: byId("lg-scope"),
       measurement: byId("lg-measurement"),
       anchorPolicy: byId("lg-anchor-policy"),
       anchor: byId("lg-anchor"),
@@ -615,7 +630,7 @@
     };
     const scopeParams = () => {
       const chosen = catalog && catalog.measurement_options[Number(ui.measurement.value)];
-      const scope = chosen ? chosen.measurement : scopes[0];
+      const scope = chosen ? chosen.measurement : scopes[Number(ui.scope.value || 0)];
       return { family: scope.family, quantity_id: scope.quantity_id, unit: scope.unit };
     };
 
@@ -658,6 +673,9 @@
       const payload = await runStage("cohort selectors", () => call("GET", "/api/v1/longitudinal/selectors"));
       if (!payload) return;
       scopes = payload.measurement_scopes;
+      ui.scope.replaceChildren(...scopes.map((item, index) => option(String(index),
+        `${words(item.quantity_id)} (${item.unit}; ${words(item.family)})`)));
+      ui.scope.value = "0";
       fill(ui.cohort, payload.cohorts.map((item) => option(
         `${item.cohort_selector_id}|${item.cohort_version}`,
         `${item.cohort_selector_id.slice(0, 24)} version ${item.cohort_version} (${words(item.authority_state)}; ${item.member_count} members)`,
@@ -832,7 +850,8 @@
           return;
         }
         ui.results.hidden = false;
-        renderStaleRows(doc, ui, results.stale_rows || []);
+        ui.rows.replaceChildren();
+        renderHistorical(doc, ui.covariates, results.historical_commitments);
         ui.chart.replaceChildren(el(doc, "p", "Stale: no current segments are drawn for a stale saved comparison.", { class: "help" }));
         setState("stale");
         ui.status.textContent = "Stale: authority differs from the saved comparison. Comparisons and segments are suppressed. Required action: start a new comparison at current authority.";
@@ -847,6 +866,12 @@
     };
 
     ui.cohort.addEventListener("change", () => { diffShownFor = null; loadCohortOptions(); });
+    ui.scope.addEventListener("change", () => {
+      diffShownFor = null;
+      catalog = null;
+      ui.measurement.value = "";
+      loadCohortOptions();
+    });
     ui.measurement.addEventListener("change", () => { diffShownFor = null; refreshResultsButton(); });
     ui.anchorPolicy.addEventListener("change", () => {
       diffShownFor = null;
@@ -898,7 +923,7 @@
     focusables,
     problemFor,
     renderReopenDiff,
-    renderStaleRows,
+    renderHistorical,
     renderVersionDiff,
     renderWorkspace,
     renderDrawer,

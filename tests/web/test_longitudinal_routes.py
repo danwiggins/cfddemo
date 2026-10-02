@@ -233,7 +233,10 @@ def test_save_publishes_once_and_reopens_current_after_the_diff(fresh: Env) -> N
     assert status == 200, content
     diff_stage = _json(content)
     assert diff_stage["stage"] == "diff"
-    assert diff_stage["current_workspace"] is None and diff_stage["stale_rows"] == []
+    assert (
+        diff_stage["current_workspace"] is None
+        and diff_stage["historical_commitments"] is None
+    )
     diff = diff_stage["diff"]
     assert diff["comparison_state"] == "current" and diff["changes"] == []
     assert diff["saved_bytes_rewritten"] is False and diff["silent_upgrade"] is False
@@ -277,10 +280,15 @@ def test_stale_authority_reopens_stale_without_current_segments(fresh: Env) -> N
     assert results["current_workspace"] is None
     assert results["stale_segments"] == []
     assert results["refresh_action"] == "start_new_comparison_at_current_authority"
-    assert {row["comparison_state"] for row in results["stale_rows"]} <= {
-        "anchor_reference",
-        "suppressed_stale_authority",
-    }
+    # Only the immutable saved commitments: no current rows relabelled as saved.
+    historical = results["historical_commitments"]
+    saved = json.loads(next(iter(files.values())))
+    assert (
+        historical["cohort_manifest_sha256"]
+        == (saved["commitments"]["cohort_manifest_sha256"])
+    )
+    assert "reader_grant_sha256" not in historical
+    assert b'"rows"' not in content and b"source_alias" not in content
     for forbidden in (b'"delta"', b'"member_value"', b'"segments"', b'"comparison":'):
         assert forbidden not in content
     assert _object_files(fresh) == files
@@ -593,4 +601,67 @@ def test_controller_reopen_shows_diff_then_stale_results(
     assert stale["state"] == "stale" and stale["paths"] == 0
     assert "Comparisons and segments are suppressed" in stale["status"]
     assert stale["saveDisabled"] is True
-    assert "suppressed: saved comparison is stale" in stale["resultsText"]
+    assert "Historical saved commitments (immutable)" in stale["resultsText"]
+    assert stale["rows"] == 0
+
+
+def test_reopen_current_needs_the_final_fence(
+    fresh: Env, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    receipt = _json(_save(fresh)[1])
+    world = fresh.world
+    original = longitudinal_module.SavedComparisonDependencyScopeV1
+
+    def advance_then_scope(**kwargs):
+        # Runs after the current/stale decision, before the final hold.
+        identity = world.reader.identity()
+        world.reader.add_grant(
+            synthetic_reader_grant(
+                registry_id=identity.registry_id,
+                registry_epoch_sha256=identity.registry_epoch_sha256,
+                grant_selector="reader_grant_" + "5" * 32,
+                cohort_registry_ids=(selector_cohort_registry_id(world.cohort),),
+                measurement_scopes=(world.extra["scope"],),
+                issued_at=NOW - timedelta(hours=1),
+                expires_at=NOW + timedelta(days=1),
+            )
+        )
+        return original(**kwargs)
+
+    monkeypatch.setattr(
+        longitudinal_module, "SavedComparisonDependencyScopeV1", advance_then_scope
+    )
+    status, content = _reopen(fresh, receipt, "results")
+    assert status == 409, content
+    assert b"current_workspace" not in content and b"rows" not in content
+
+
+def test_saved_routes_need_every_configured_scope(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from evidence_inspector.reader_authorization_registry import MeasurementScope
+
+    monkeypatch.setattr(reader_module, "_PROCESS_PROFILE", {})
+    other = MeasurementScope(
+        family="fragment_measurement",
+        quantity_id="qty_fragment_other",
+        unit="unit_bp",
+    )
+    env = _make_env(tmp_path, extra_scopes=(other,))
+    try:
+        assert _json(_save(env)[1])["applied"] is True
+        catalog = _json(env.get("selectors")[1])
+        assert len(catalog["measurement_scopes"]) == 1  # only the granted one
+        _assert_denied(*env.get("saved"))
+        _assert_denied(
+            *env.post(
+                "reopen",
+                {
+                    "saved_selector_id": "saved_comparison_" + "1" * 40,
+                    "comparison_version": 1,
+                    "stage": "diff",
+                },
+            )
+        )
+    finally:
+        env.close()

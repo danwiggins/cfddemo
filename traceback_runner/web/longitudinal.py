@@ -47,11 +47,8 @@ from evidence_inspector.anchor_policy_registry import (
     AnchorPolicyRegistry,
 )
 from evidence_inspector.cohort_import import (
-    CohortRecordAvailability,
     CohortRecordCatalog,
-    CohortRecordWithheldReason,
 )
-from evidence_inspector.cohort_manifest import MemberLineageRole
 from evidence_inspector.cohort_registry import CohortAuthorityState, CohortRegistry
 from evidence_inspector.cohort_summary import CohortSummaryState
 from evidence_inspector.composite_authority_fence import (
@@ -86,7 +83,6 @@ from evidence_inspector.longitudinal_comparison_registry import (
     build_saved_longitudinal_comparison,
 )
 from evidence_inspector.longitudinal_compatibility import (
-    LongitudinalNextAction,
     LongitudinalOutcome,
 )
 from evidence_inspector.longitudinal_decision_registry import (
@@ -454,25 +450,20 @@ class LongitudinalReopenDiff(RegistryContract):
     shown_before_results: Literal[True] = True
 
 
-class HistoricalComparisonState(StrEnum):
-    ANCHOR_REFERENCE = "anchor_reference"
-    SUPPRESSED_STALE_AUTHORITY = "suppressed_stale_authority"
+class PublicSavedCommitments(RegistryContract):
+    """The saved object's immutable authority digests (no reader grant)."""
 
-
-class StaleSourceRow(RegistryContract):
-    """A source row under a stale reopen: no comparison numbers, no segment."""
-
-    row_ordinal: int = Field(ge=1, strict=True)
-    source_alias: str = Field(pattern=r"^source_[0-9a-f]{16}$")
-    timepoint_ordinal: int = Field(ge=1, strict=True)
-    offset_seconds: int = Field(strict=True)
-    lineage_role: MemberLineageRole
-    denominator_contributor: bool
-    record_availability: CohortRecordAvailability
-    withheld_reason: CohortRecordWithheldReason | None
-    compatibility_state: RowCompatibilityState
-    next_action: LongitudinalNextAction | None
-    comparison_state: HistoricalComparisonState
+    cohort_manifest_sha256: str = Field(pattern=r"^[0-9a-f]{64}$")
+    d03_anchor_policy_sha256: str = Field(pattern=r"^[0-9a-f]{64}$")
+    d07_envelope_sha256: str = Field(pattern=r"^[0-9a-f]{64}$")
+    approved_anchor_sha256: str = Field(pattern=r"^[0-9a-f]{64}$")
+    d03_decision_sha256: str = Field(pattern=r"^[0-9a-f]{64}$")
+    d07_comparisons_sha256: str = Field(pattern=r"^[0-9a-f]{64}$")
+    d09_summary_sha256: str = Field(pattern=r"^[0-9a-f]{64}$")
+    d10_context_sha256: str = Field(pattern=r"^[0-9a-f]{64}$")
+    d04_record_history_sha256: str = Field(pattern=r"^[0-9a-f]{64}$")
+    source_commitments_sha256: str = Field(pattern=r"^[0-9a-f]{64}$")
+    projection_policy_sha256: str = Field(pattern=r"^[0-9a-f]{64}$")
 
 
 class LongitudinalReopenResponse(RegistryContract):
@@ -482,7 +473,10 @@ class LongitudinalReopenResponse(RegistryContract):
     stage: Literal["diff", "results"]
     diff: LongitudinalReopenDiff
     current_workspace: LongitudinalWorkspaceProjection | None = None
-    stale_rows: tuple[StaleSourceRow, ...] = Field(default=(), max_length=1_000)
+    # A stale reopen shows only the immutable saved commitments: the saved
+    # bytes hold no rows, and current rows would relabel current authority as
+    # the saved comparison.  No values, no comparison numbers, no segments.
+    historical_commitments: PublicSavedCommitments | None = None
     stale_segments: tuple[LongitudinalSegment, ...] = Field(default=(), max_length=0)
     refresh_action: Literal["start_new_comparison_at_current_authority"] | None = None
     release_control: Literal["disabled"] = "disabled"
@@ -842,6 +836,20 @@ def _authorized_scopes(
     if not allowed:
         raise _Denied
     return tuple(allowed)
+
+
+def _all_scopes(
+    binder: ReaderSessionBinder,
+    request: BrowserRequest,
+    source: LongitudinalExplorerSource,
+) -> None:
+    """Saved comparisons are listed and resolved only for a reader whose own
+    grant covers every configured scope: a saved selector or object is never
+    read under a grant for another measurement."""
+
+    for scope in source.measurement_scopes:
+        with _Gate(binder, request, source, scope):
+            pass
 
 
 def _scope_of(measurement: LongitudinalMeasurementSelection) -> MeasurementScope:
@@ -1850,7 +1858,7 @@ def saved_page(
     params: Mapping[str, Sequence[str]],
 ) -> dict[str, object]:
     binder = _require_binder(binder)
-    _authorized_scopes(binder, request, source)
+    _all_scopes(binder, request, source)
     if set(params) - {"after_selector_id", "after_version"}:
         _invalid()
     after_id = _single(params, "after_selector_id")
@@ -1894,7 +1902,7 @@ def saved_page(
             next_after_version=page.next_after_version,
         )
     )
-    _authorized_scopes(binder, request, source)
+    _all_scopes(binder, request, source)
     return payload
 
 
@@ -1946,23 +1954,15 @@ def _public_selection(saved: SavedLongitudinalComparisonV1) -> PublicSavedSelect
     )
 
 
-def _stale_row(row: LongitudinalSourceRow) -> StaleSourceRow:
-    return StaleSourceRow(
-        row_ordinal=row.row_ordinal,
-        source_alias=row.source_alias,
-        timepoint_ordinal=row.timepoint_ordinal,
-        offset_seconds=row.offset_seconds,
-        lineage_role=row.lineage_role,
-        denominator_contributor=row.denominator_contributor,
-        record_availability=row.record_availability,
-        withheld_reason=row.withheld_reason,
-        compatibility_state=row.compatibility_state,
-        next_action=row.next_action,
-        comparison_state=(
-            HistoricalComparisonState.ANCHOR_REFERENCE
-            if row.compatibility_state is RowCompatibilityState.ANCHOR
-            else HistoricalComparisonState.SUPPRESSED_STALE_AUTHORITY
-        ),
+def _historical_commitments(
+    saved: SavedLongitudinalComparisonV1,
+) -> PublicSavedCommitments:
+    values = saved.commitments.model_dump(
+        mode="python", exclude={"reader_grant_sha256"}
+    )
+    return PublicSavedCommitments(
+        **values,
+        projection_policy_sha256=saved.family_projection_request.projection_policy_sha256,
     )
 
 
@@ -1973,7 +1973,7 @@ def reopen(
     body: object,
 ) -> dict[str, object]:
     binder = _require_binder(binder)
-    _authorized_scopes(binder, request, source)
+    _all_scopes(binder, request, source)
     if (
         not isinstance(body, dict)
         or set(body) != {"saved_selector_id", "comparison_version", "stage"}
@@ -2009,6 +2009,8 @@ def reopen(
         _registry_failure(failure)
     saved = registered.saved
     scope = saved.selection.measurement.scope
+    if scope not in source.measurement_scopes:
+        raise _Denied
     # The saved object's own scope must be authorized before anything of it
     # is presented or replayed.
     with _Gate(binder, request, source, scope) as first:
@@ -2122,14 +2124,39 @@ def reopen(
         response = LongitudinalReopenResponse(
             stage="results",
             diff=diff,
-            stale_rows=(
-                tuple(_stale_row(row) for row in rebuilt.rows) if rebuilt else ()
-            ),
+            historical_commitments=_historical_commitments(saved),
             refresh_action="start_new_comparison_at_current_authority",
         )
     payload = _public(response)
-    with _Gate(binder, request, source, scope) as final:
-        _same_grant(first, final)
+    if not current:
+        with _Gate(binder, request, source, scope) as final:
+            _same_grant(first, final)
+        return payload
+    # A current reopen is returned only if, under one final composite hold,
+    # every dependency head still equals the saved (and rebuilt) vector and
+    # the reader is still authorized; otherwise nothing is presented.
+    assert rebuilt is not None
+    dependency_scope = SavedComparisonDependencyScopeV1(
+        cohort_selector_id=selection.cohort_selector_id,
+        cohort_version=selection.cohort_version,
+    )
+    failure = None
+    try:
+        with _composite_fence(source).hold() as held:
+            if held.read_heads(dependency_scope) != saved.dependency_heads:
+                raise LongitudinalComparisonRegistryStale("authority moved")
+            final = binder.reader_authorization_in_held_fence(
+                request,
+                cohort_registry_id=_cohort_registry_id(source),
+                measurement_scope=scope,
+            )
+            _same_grant(first, final)
+    except (_Denied, ReaderAuthorizationDenied):
+        raise _Denied from None
+    except LongitudinalComparisonRegistryError as exc:
+        failure = exc
+    if failure is not None:
+        _registry_failure(failure)
     return payload
 
 

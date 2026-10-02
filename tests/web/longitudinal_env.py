@@ -161,7 +161,9 @@ def _bind(service, grant_selector: str) -> tuple[str, str]:
     return cookie, csrf
 
 
-def _make_env(root: Path, *, with_registry: bool = True, now=None) -> Env:
+def _make_env(
+    root: Path, *, with_registry: bool = True, now=None, extra_scopes=()
+) -> Env:
     world = make_world(root / "world")
     closers: list[object] = [world]
     saved = None
@@ -173,7 +175,7 @@ def _make_env(root: Path, *, with_registry: bool = True, now=None) -> Env:
         closers.append(saved)
     source = LongitudinalExplorerSource(
         stores=world.stores(),
-        measurement_scopes=(world.extra["scope"],),
+        measurement_scopes=(world.extra["scope"], *extra_scopes),
         comparison_registry=saved,
         now=now,
     )
