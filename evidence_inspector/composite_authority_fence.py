@@ -513,7 +513,8 @@ class _HistoryAdapter(_Adapter):
             snapshot.linkage_store_epoch_sha256,
             snapshot.linkage_state_head_sha256,
         ) != (linkage.store_id, linkage.store_epoch_sha256, linkage.state_head_sha256):
-            raise CompositeAuthorityRetry("record history is not bound to live linkage")
+            # D01 is held, so the two cannot legitimately diverge here.
+            raise CompositeAuthorityUnsafe("record history is not bound to live linkage")
         return {
             DependencySlot.D04_HISTORY: _head(
                 snapshot.ledger_id,

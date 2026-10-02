@@ -20,9 +20,9 @@ authority that moves while an operation runs.
 
 ## Global lock order
 
-Every operation that holds more than one E12 store lock takes them in this
-order (the saved-comparison registry takes its own lock last, inside
-`CompositeAuthorityFence.hold()`):
+Every multi-lock operation of the merged stores, and the composite path
+itself, takes E12 store locks in this order (the saved-comparison registry
+takes its own lock last, inside `CompositeAuthorityFence.hold()`):
 
 reader_authorization -> d10_context -> d09_summary -> d01_linkage -> d04_history -> d05_cohort -> e04_catalog_trust -> d06_record_catalog -> e06_source -> d03_decision -> d07_comparison -> family_source -> anchor_policy -> projection_policy
 
@@ -32,7 +32,7 @@ reader_authorization -> d10_context -> d09_summary -> d01_linkage -> d04_history
 | `d10_context` | `CovariateContextRegistry` | pinned `_lock(shared)` | pinned `_load_state` head |
 | `d09_summary` | `DenominatorPolicyRegistry` | pinned `_lock(shared)` | pinned `_load_state` head |
 | `d01_linkage` | `ProviderLinkageStore` | public `authority_read_fence` (store RLock + SQLite `BEGIN IMMEDIATE`) | `active_snapshot` (nests as a SAVEPOINT) |
-| `d04_history` | `RecordSupersessionStore` | nothing of its own: fenced by D01 | `active_snapshot` (nests in the D01 fence) |
+| `d04_history` | `RecordSupersessionStore` | nothing of its own: fenced by D01 | `active_snapshot` (nests in the D01 fence). During capture and revalidation it takes D04's module lock (`_SQLITE_OPEN_LOCK`) and a D04 SQLite `BEGIN IMMEDIATE` inside the held D01 fence, and may advance D04 (refreshing invalidations); every D04 writer needs D01 first, so this cannot deadlock and a first-read advance is stable for the rest of the hold. |
 | `d05_cohort` | `CohortRegistry` | **new** public `authority_read_fence` (shared lock) | **new** `head_in_fence` |
 | `e04_catalog_trust` | `ResultCatalog` + `ResultTrustRegistry` | public `trust_authority_fence` (catalog connection lock, then trust read fence) | `authority_snapshot`; trust journal via pinned `_snapshot_locked` |
 | `d06_record_catalog` | `CohortRecordCatalog` | **new** public `record_status_read_fence` (root shared flock) | **new** `record_status_in_fence(scope)` |
@@ -71,9 +71,21 @@ actually take (A -> B: B is acquired while A is held):
 - Reader authorization, result trust (alone) and projection policy take no
   other store's lock.
 
-No store takes a lock that precedes its own in this order while holding its
-own, so every multi-lock operation is consistent with it and the order is
-acquirable.
+No merged store takes a lock that precedes its own in this order while
+holding its own, and the composite path acquires in exactly this order (it
+refuses entry when its thread already holds any store lock), so every
+multi-lock operation of the merged stores and the composite path is
+consistent with it and the order is acquirable.
+
+### Forbidden edge: saved-comparison registry -> any dependency store
+
+The saved-comparison registry reads dependency heads *inside* its own lock.
+A fence that served those reads through the stores' public reads (the
+retired `LiveRegistryDependencyFence`, kind `direct_head_reread`) took
+every other store's lock after the saved registry's, the reverse of this
+order, and could permanently deadlock a composite hold in-process. That
+fence is deleted and the registry refuses the `direct_head_reread` kind on
+every operation. `CompositeAuthorityFence.read_heads` takes no lock.
 
 ### Deviations from the plan's order
 
@@ -135,8 +147,8 @@ pin D05; D07 reads D01's fence holder). No store's fence semantics changed.
   `record_status_for_manifest`, reusing the held fences, so several cohort
   versions can be read in one hold.
 - `ResultViewSourceRegistry.registry_identity()`: lock-free immutable
-  registry ID/epoch and bound cohort registry. `LiveRegistryDependencyFence`
-  now uses it instead of E06's private `_metadata`.
+  registry ID/epoch and bound cohort registry, replacing reads of E06's
+  private `_metadata`.
 
 The existing public `record_status_authority_fence`,
 `record_status_for_manifest`, `resolve_history` and every other merged read
@@ -247,6 +259,15 @@ and before trust), plus a committed catalog content version/head added to
 the E04 dependency head. That needs its own reviewed E04 PR and a new
 saved-head schema version (the E04 head definition changes).
 
+## D08 rule for E04 rows
+
+D08 consumes E04 rows only through D06 status (rows bound to the cohort and
+re-verified inside the held D06 root fence). It never treats a direct E04
+catalog query made inside the hold as authority. The E04 catalog-content
+lock plus a content head (a new saved-head schema version) is required
+before any feature surfaces unbound E04 rows, and before Save claims that
+E04 content is fenced.
+
 ## Open items
 
 - E04 catalog content (above).
@@ -257,8 +278,7 @@ saved-head schema version (the E04 head definition changes).
   `_resolve_history_in_fence`; only the anchor registry was moved to the new
   public D05 API.
 - The `family_source` saved-head slot prefix (`familysrc_registry_`) is not
-  yet pinned in `_SLOT_ID_PREFIXES`; the live fence still leaves the slot
-  `None`, so its saves reopen `stale` against a composite read.
+  yet pinned in `_SLOT_ID_PREFIXES`.
 - Whole-store heads are conservative: any advance of a captured dependency
   head marks every saved comparison stale (unchanged from the
   saved-comparison registry). E04 catalog-row changes do not change the E04

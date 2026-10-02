@@ -7,20 +7,17 @@ retry is idempotent, and the same selector/version with other bytes, or a
 retry after any dependency authority moved, is a conflict.
 
 Every operation that depends on other stores runs inside a caller-supplied
-``SavedComparisonDependencyFence``.  The fence is the seam between this
-registry and the composite authority-fence coordinator that the E12 plan
-requires but that does not exist yet:
+``SavedComparisonDependencyFence``.  The production fence is
+``evidence_inspector.composite_authority_fence.CompositeAuthorityFence``: its
+``hold()`` acquires every dependency store's read fence in the documented
+global order before this registry takes its own lock (it is last in that
+order), and its ``read_heads`` serves heads captured under those held fences,
+so reading heads inside this registry's lock takes no other store lock.
 
-- ``LiveRegistryDependencyFence`` (this module) re-reads every merged
-  dependency head directly through each store's public read.  It holds no
-  cross-store lock, so it narrows but cannot close the window between the
-  final head check and the returned value.  Its ``fence_kind`` is
-  ``direct_head_reread`` and every journal entry, receipt and read result
-  records it, so D08 can keep Save unavailable until a publication carries
-  ``composite_authority_fence``.
-- The coordinator will supply a fence whose ``hold()`` acquires every store's
-  read fence in the documented global order and whose ``read_heads`` reads
-  already-fenced snapshots.  This registry does not change when it lands.
+A fence that re-reads dependency heads through the stores' own public reads
+(the retired ``direct_head_reread`` kind) would take every other store's lock
+*inside* this registry's lock, the reverse of the global order, and can
+deadlock a composite hold.  Every operation refuses that kind.
 
 Publication writes a durable candidate/recovery record before the object,
 then the object, then one journal entry (the commit point).  Startup and the
@@ -46,7 +43,7 @@ from abc import ABC, abstractmethod
 from collections.abc import Iterator
 from contextlib import AbstractContextManager, contextmanager
 from dataclasses import dataclass
-from datetime import UTC, datetime
+from datetime import datetime
 from enum import StrEnum
 from pathlib import Path
 from types import MappingProxyType
@@ -54,19 +51,11 @@ from typing import Annotated, Literal
 
 from pydantic import Field, StringConstraints, model_validator
 
-from evidence_inspector.anchor_policy_registry import AnchorPolicyRegistry
 from evidence_inspector.cohort_import import (
     CohortRecordAvailability,
-    CohortRecordCatalog,
 )
 from evidence_inspector.cohort_manifest import MemberLineageRole
-from evidence_inspector.cohort_registry import CohortRegistry
-from evidence_inspector.covariate_context_registry import CovariateContextRegistry
-from evidence_inspector.denominator_policy_registry import DenominatorPolicyRegistry
 from evidence_inspector.longitudinal_compatibility import LongitudinalOutcome
-from evidence_inspector.longitudinal_decision_registry import (
-    LongitudinalDecisionRegistry,
-)
 from evidence_inspector.method_registry import (
     RegistryContract,
     canonical_contract_bytes,
@@ -82,26 +71,15 @@ from evidence_inspector.projection_policy_registry import (
     CnaSegmentStatistic,
     FragmentStatistic,
     ProjectionFamily,
-    ProjectionPolicyRegistry,
     ProjectionSelectionRule,
     StatisticUnit,
 )
-from evidence_inspector.provider_linkage_store import ProviderLinkageStore
 from evidence_inspector.reader_authorization_registry import (
     MeasurementScope,
-    ReaderAuthorizationRegistry,
 )
-from evidence_inspector.record_supersession_store import RecordSupersessionStore
-from evidence_inspector.repeatability_comparison_registry import (
-    RepeatabilityComparisonRegistry,
-)
-from evidence_inspector.result_catalog import ResultCatalog, catalog_authority_sha256
-from evidence_inspector.result_trust_registry import ResultTrustRegistry
 from evidence_inspector.result_view import NormalizedResultFilters
 from evidence_inspector.result_view_source_registry import (
     MAX_SOURCE_VERSIONS,
-    ResultViewSourceRegistry,
-    ResultViewSourceRegistryIdentity,
 )
 from evidence_inspector.safe_ingress import (
     bounded_json_loads,
@@ -224,13 +202,22 @@ class SavedComparisonAuthorityState(StrEnum):
 class DependencyFenceKind(StrEnum):
     """How the dependency heads were fenced during one operation.
 
-    ``direct_head_reread`` is the interim ``LiveRegistryDependencyFence``: no
-    cross-store lock is held.  ``composite_authority_fence`` is reserved for
-    the reviewed coordinator that holds every store's read fence.
+    ``composite_authority_fence`` is the only kind production accepts.
+    ``direct_head_reread`` is retired and always refused: re-reading heads
+    through the stores' public reads takes their locks inside this registry's
+    lock, the reverse of the global order.  ``test_only_unfenced`` exists
+    only for this registry's own unit tests and is refused unless
+    ``_TEST_ONLY_FENCE_ALLOWED`` is set (tests only; in-process mutation is
+    outside the threat model).
     """
 
     DIRECT_HEAD_REREAD = "direct_head_reread"
     COMPOSITE_AUTHORITY_FENCE = "composite_authority_fence"
+    TEST_ONLY_UNFENCED = "test_only_unfenced"
+
+
+# Never set outside tests.
+_TEST_ONLY_FENCE_ALLOWED = False
 
 
 class DependencySlot(StrEnum):
@@ -254,9 +241,9 @@ class DependencySlot(StrEnum):
 
 
 # Exact registry-ID prefix per slot, from each merged store's own ID type.
-# ``e04_catalog_`` is derived here (E04 exposes no registry ID; see
-# ``LiveRegistryDependencyFence``).  The family-source registry is not merged,
-# so its slot accepts any ``<prefix>_<32 hex>`` ID until it is.
+# ``e04_catalog_`` is derived here (E04 exposes no registry ID): the storage
+# identity prefix.  The family-source slot is optional in v1 and accepts any
+# ``<prefix>_<32 hex>`` ID.
 _SLOT_ID_PREFIXES: MappingProxyType[DependencySlot, str | None] = MappingProxyType(
     {
         DependencySlot.D01_LINKAGE: "store_",
@@ -957,212 +944,6 @@ def _capture_scope(scope: SavedComparisonDependencyScopeV1) -> bytes:
     )
 
 
-class LiveRegistryDependencyFence(SavedComparisonDependencyFence):
-    """Interim fence that re-reads every merged dependency head directly.
-
-    Each head comes from the store's own public bounded read, under that
-    store's own lock.  No cross-store lock is held, so two reads in one
-    operation can still straddle an authority change; the registry's
-    pre-commit and final rechecks then fail closed.  The composite coordinator
-    replaces this class; nothing in the registry changes when it does.
-
-    Identity sources per slot (real fields of the merged stores):
-
-    - D01 ``ProviderLinkageStore.active_snapshot``: store ID, epoch, head.
-    - D04 ``RecordSupersessionStore.active_snapshot``: ledger ID, epoch, head.
-    - D05, D03, D07, D09, D10, anchor- and projection-policy registries:
-      ``list_selectors(limit=1)`` page registry ID, epoch and state head.
-    - Reader authorization ``identity()``; result trust ``current_trust()``.
-    - D06 ``record_status_for_manifest(scope)``: the D05 registry ID/epoch
-      plus the cohort status digest (D06 has no global head of its own).
-    - E04 ``authority_snapshot()``: E04 has no registry ID or head, so the ID
-      is ``e04_catalog_`` + the storage-identity prefix, the epoch is the
-      storage identity, and the head is ``catalog_authority_sha256``.
-    - E06 ``list_selectors(scope, limit=1)`` page head; its registry ID/epoch
-      and cohort-registry binding for the startup binding come from its
-      public lock-free ``registry_identity()``.
-    - Family-source registry: not merged; the slot is ``None``.
-    """
-
-    def __init__(
-        self,
-        *,
-        linkage_store: ProviderLinkageStore,
-        record_history_store: RecordSupersessionStore,
-        cohort_registry: CohortRegistry,
-        reader_registry: ReaderAuthorizationRegistry,
-        record_catalog: CohortRecordCatalog,
-        result_catalog: ResultCatalog,
-        result_trust_registry: ResultTrustRegistry,
-        source_registry: ResultViewSourceRegistry,
-        decision_registry: LongitudinalDecisionRegistry,
-        comparison_registry: RepeatabilityComparisonRegistry,
-        d09_registry: DenominatorPolicyRegistry,
-        d10_registry: CovariateContextRegistry,
-        anchor_registry: AnchorPolicyRegistry,
-        projection_registry: ProjectionPolicyRegistry,
-    ) -> None:
-        expected = (
-            (linkage_store, ProviderLinkageStore),
-            (record_history_store, RecordSupersessionStore),
-            (cohort_registry, CohortRegistry),
-            (reader_registry, ReaderAuthorizationRegistry),
-            (record_catalog, CohortRecordCatalog),
-            (result_catalog, ResultCatalog),
-            (result_trust_registry, ResultTrustRegistry),
-            (source_registry, ResultViewSourceRegistry),
-            (decision_registry, LongitudinalDecisionRegistry),
-            (comparison_registry, RepeatabilityComparisonRegistry),
-            (d09_registry, DenominatorPolicyRegistry),
-            (d10_registry, CovariateContextRegistry),
-            (anchor_registry, AnchorPolicyRegistry),
-            (projection_registry, ProjectionPolicyRegistry),
-        )
-        if any(type(value) is not kind for value, kind in expected):
-            raise TypeError("dependency fence requires the exact merged store types")
-        self._stores = MappingProxyType(
-            {
-                "linkage": linkage_store,
-                "history": record_history_store,
-                "cohort": cohort_registry,
-                "reader": reader_registry,
-                "records": record_catalog,
-                "results": result_catalog,
-                "trust": result_trust_registry,
-                "sources": source_registry,
-                "d03": decision_registry,
-                "d07": comparison_registry,
-                "d09": d09_registry,
-                "d10": d10_registry,
-                "anchor": anchor_registry,
-                "projection": projection_registry,
-            }
-        )
-
-    @contextmanager
-    def hold(self) -> Iterator[HeldSavedComparisonDependencies]:
-        yield _DirectHeldDependencies(self._stores)
-
-
-def _page_head(page: object) -> DependencyHeadV1:
-    return DependencyHeadV1(
-        id=page.registry_id,  # type: ignore[attr-defined]
-        epoch=page.registry_epoch_sha256,  # type: ignore[attr-defined]
-        head=page.state_head_sha256,  # type: ignore[attr-defined]
-    )
-
-
-class _DirectHeldDependencies(HeldSavedComparisonDependencies):
-    def __init__(self, stores: MappingProxyType[str, object]) -> None:
-        self._stores = stores
-
-    @property
-    def fence_kind(self) -> DependencyFenceKind:
-        return DependencyFenceKind.DIRECT_HEAD_REREAD
-
-    def read_heads(
-        self, scope: SavedComparisonDependencyScopeV1
-    ) -> SavedComparisonDependencyHeadsV1:
-        _capture_scope(scope)
-        stores = self._stores
-        linkage = ProviderLinkageStore.active_snapshot(stores["linkage"])
-        history = RecordSupersessionStore.active_snapshot(stores["history"])
-        reader = ReaderAuthorizationRegistry.identity(stores["reader"])
-        status = CohortRecordCatalog.record_status_for_manifest(
-            stores["records"], scope.cohort_selector_id, scope.cohort_version
-        )
-        authority = ResultCatalog.authority_snapshot(stores["results"])
-        trust = ResultTrustRegistry.current_trust(stores["trust"])
-        return SavedComparisonDependencyHeadsV1(
-            d01_linkage=DependencyHeadV1(
-                id=linkage.store_id,
-                epoch=linkage.store_epoch_sha256,
-                head=linkage.state_head_sha256,
-            ),
-            d04_history=DependencyHeadV1(
-                id=history.ledger_id,
-                epoch=history.ledger_epoch_sha256,
-                head=history.state_head_sha256,
-            ),
-            d05_cohort=_page_head(
-                CohortRegistry.list_selectors(stores["cohort"], limit=1)
-            ),
-            reader_authorization=DependencyHeadV1(
-                id=reader.registry_id,
-                epoch=reader.registry_epoch_sha256,
-                head=reader.state_head_sha256,
-            ),
-            d06_record_catalog=DependencyHeadV1(
-                id=status.registry_id,
-                epoch=status.registry_epoch_sha256,
-                head=status.status_sha256,
-            ),
-            e04_catalog=DependencyHeadV1(
-                id="e04_catalog_" + authority.storage_identity_sha256[:32],
-                epoch=authority.storage_identity_sha256,
-                head=catalog_authority_sha256(authority),
-            ),
-            result_trust=DependencyHeadV1(
-                id=trust.registry_id,
-                epoch=trust.registry_epoch_sha256,
-                head=trust.state_head_sha256,
-            ),
-            e06_source=_page_head(
-                ResultViewSourceRegistry.list_selectors(
-                    stores["sources"],
-                    scope.cohort_selector_id,
-                    scope.cohort_version,
-                    limit=1,
-                )
-            ),
-            d03_decision=_page_head(
-                LongitudinalDecisionRegistry.list_selectors(stores["d03"], limit=1)
-            ),
-            d07_comparison=_page_head(
-                RepeatabilityComparisonRegistry.list_selectors(stores["d07"], limit=1)
-            ),
-            d09_summary=_page_head(
-                DenominatorPolicyRegistry.list_selectors(stores["d09"], limit=1)
-            ),
-            d10_context=_page_head(
-                CovariateContextRegistry.list_selectors(stores["d10"], limit=1)
-            ),
-            family_source=None,
-            anchor_policy=_page_head(
-                AnchorPolicyRegistry.list_selectors(stores["anchor"], limit=1)
-            ),
-            projection_policy=_page_head(
-                ProjectionPolicyRegistry.list_selectors(stores["projection"], limit=1)
-            ),
-        )
-
-    def read_bindings(self) -> SavedComparisonRegistryBindingsV1:
-        stores = self._stores
-        cohort = CohortRegistry.list_selectors(stores["cohort"], limit=1)
-        history = RecordSupersessionStore.active_snapshot(stores["history"])
-        reader = ReaderAuthorizationRegistry.identity(stores["reader"])
-        authority = ResultCatalog.authority_snapshot(stores["results"])
-        source_metadata = ResultViewSourceRegistry.registry_identity(stores["sources"])
-        if type(source_metadata) is not ResultViewSourceRegistryIdentity:
-            raise TypeError("E06 source registry identity is invalid")
-        if (
-            source_metadata.cohort_registry_id,
-            source_metadata.cohort_registry_epoch_sha256,
-        ) != (cohort.registry_id, cohort.registry_epoch_sha256):
-            raise ValueError("E06 source registry is bound to another cohort registry")
-        return SavedComparisonRegistryBindingsV1(
-            cohort_registry_id=cohort.registry_id,
-            cohort_registry_epoch_sha256=cohort.registry_epoch_sha256,
-            d04_ledger_id=history.ledger_id,
-            d04_ledger_epoch_sha256=history.ledger_epoch_sha256,
-            reader_registry_id=reader.registry_id,
-            reader_registry_epoch_sha256=reader.registry_epoch_sha256,
-            d06_catalog_storage_identity_sha256=authority.storage_identity_sha256,
-            e06_registry_id=source_metadata.registry_id,
-            e06_registry_epoch_sha256=source_metadata.registry_epoch_sha256,
-        )
-
-
 # --- canonical bytes -----------------------------------------------------------
 
 
@@ -1255,6 +1036,15 @@ def _captured_fence_kind(held: object) -> DependencyFenceKind:
         ) from None
     if type(kind) is not DependencyFenceKind:
         raise LongitudinalComparisonRegistryUnsafe("dependency fence kind is invalid")
+    if kind is DependencyFenceKind.DIRECT_HEAD_REREAD or (
+        kind is DependencyFenceKind.TEST_ONLY_UNFENCED
+        and globals().get("_TEST_ONLY_FENCE_ALLOWED") is not True
+    ):
+        # Reading heads through public store reads inside this registry's
+        # lock inverts the global lock order.
+        raise LongitudinalComparisonRegistryUnsafe(
+            "dependency fence kind is not a composite authority fence"
+        )
     return kind
 
 
@@ -1786,6 +1576,7 @@ class LongitudinalComparisonRegistry:
         try:
             with _held(dependency_fence) as held:
                 held = _require_held(held)
+                _captured_fence_kind(held)
                 bindings = _read_bindings(held)
                 try:
                     self._open_storage(bindings, expected_values)
@@ -2874,6 +2665,7 @@ class LongitudinalComparisonRegistry:
             )
         with _held(dependency_fence) as held:
             held = _require_held(held)
+            _captured_fence_kind(held)
             if _read_bindings(held) != backup.metadata.bindings():
                 raise LongitudinalComparisonRegistryConflict(
                     "saved comparison backup is bound to other dependency stores"
@@ -3210,7 +3002,6 @@ __all__ = [
     "DependencyHeadV1",
     "DependencySlot",
     "HeldSavedComparisonDependencies",
-    "LiveRegistryDependencyFence",
     "LongitudinalComparisonRegistry",
     "LongitudinalComparisonRegistryConflict",
     "LongitudinalComparisonRegistryError",

@@ -96,9 +96,7 @@ what stands in for them. D06 status and the E06 page are scoped to one cohort
 version (`SavedComparisonDependencyScopeV1`), taken from the saved selection.
 
 The family-source slot is optional in schema v1 and accepts any
-`<prefix>_<32 hex>` ID. `CompositeAuthorityFence` fills it; the live fence
-leaves it `None`, so a save made through the live fence reopens `stale`
-against a composite read. No schema bump is needed.
+`<prefix>_<32 hex>` ID. `CompositeAuthorityFence` fills it. No schema bump is needed.
 
 Staleness is conservative: slots are whole-store heads, so any advance of a
 captured dependency head (for example, a grant issued to another reader, or
@@ -119,21 +117,23 @@ second (the saved-comparison registry is last in the global order), calls
 value from canonical bytes; a fence that returns a wrong type fails with
 `integrity_failure`, and one that raises fails with `authority_stale`.
 
-- `LiveRegistryDependencyFence` is the interim implementation. It takes
-  exact instances of the 14 merged stores and reads each head through that
-  store's own public bounded read under that store's own lock. It holds **no
-  cross-store lock**, so two reads can straddle an authority change; the
-  registry's pre-commit and final rechecks then fail closed, but the window
-  between the final recheck and the caller's use of the receipt is not
-  closed. Its `fence_kind` is `direct_head_reread`. The startup binding of
-  the E06 registry ID/epoch comes from E06's public lock-free
-  `registry_identity()`.
 - `CompositeAuthorityFence`
   (`evidence_inspector/composite_authority_fence.py`, see
   `docs/COMPOSITE-AUTHORITY-FENCE.md`) implements the same interface:
   `hold()` acquires every store's read fence in the global order,
   `read_heads` reads already-fenced snapshots, and `fence_kind` is
-  `composite_authority_fence`. The registry did not change when it landed.
+  `composite_authority_fence`. It is the only production fence. Its
+  `read_heads` serves heads captured under the held fences, so the reads
+  this registry makes inside its own lock take no other store's lock.
+
+The retired `direct_head_reread` kind (the former `LiveRegistryDependencyFence`,
+which re-read each head through the store's own public read) is refused by
+register, resolve, reopen, list, the constructor and restore with
+`integrity_failure`. It took every other store's lock *inside* this
+registry's lock, the reverse of the global lock order, and could deadlock a
+composite hold in-process. `test_only_unfenced` is for this registry's unit
+tests only and is refused unless the module's `_TEST_ONLY_FENCE_ALLOWED` is
+set (tests only).
 
 Every journal entry, receipt, page and reopen records the fence kind. D08
 must refuse Save, and must not present a publication as fenced, unless the
@@ -142,10 +142,9 @@ kind is `composite_authority_fence`.
 On reads, `_ensure_recovered` may take the registry lock alone, before the
 fence, to resolve a pending recovery; it reads no dependency authority.
 
-Because the live fence reads other stores while this registry's lock is
-held, it acquires those stores' locks after this one. No store ever takes
-this registry's lock, so this cannot deadlock; the coordinator removes the
-inversion by acquiring everything first.
+No store takes this registry's lock, and every dependency lock is acquired
+by the composite fence before this registry's lock, so the registry is last
+in the global order.
 
 ## Publication
 
@@ -241,7 +240,7 @@ index) and the raw committed objects in journal order. It is bounded at
 `restore(root, content, dependency_fence=…, expected_registry_id,
 expected_registry_epoch_sha256, expected_state_head_sha256)` verifies the
 whole chain, every object digest, canonical form and journal binding, and
-the backup's dependency-store bindings against the live fence before
+the backup's dependency-store bindings against the dependency fence before
 publishing into a new private target (the target must not exist). The
 restored root reopens through the normal constructor. A truncated or altered
 backup, a wrong expected identity or head, other dependency stores, an
@@ -274,11 +273,9 @@ protected identity.
 ## Open items
 
 - D08 Save stays disabled until it publishes through
-  `CompositeAuthorityFence`; `direct_head_reread` publications remain
-  unfenced.
-- The family-source registry slot (optional in v1; see above). The
-  composite fence fills it; the live fence still leaves it `None`, and its
-  ID prefix (`familysrc_registry_`) is not yet pinned in `_SLOT_ID_PREFIXES`.
+  `CompositeAuthorityFence`.
+- The family-source slot is optional in v1; its ID prefix
+  (`familysrc_registry_`) is not yet pinned in `_SLOT_ID_PREFIXES`.
 - Root-creation crash recovery: like the siblings, an interrupted root
   creation (root without metadata) fails closed.
 - Reads parse one object per selected row; full-state parsing happens only in

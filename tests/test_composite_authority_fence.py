@@ -40,9 +40,11 @@ from evidence_inspector.composite_authority_fence import (
 from evidence_inspector.covariate_context_registry import CovariateContextRegistry
 from evidence_inspector.denominator_policy_registry import DenominatorPolicyRegistry
 from evidence_inspector.longitudinal_comparison_registry import (
+    _bindings_from_heads as registry_bindings_from_heads,
+)
+from evidence_inspector.longitudinal_comparison_registry import (
     DependencyFenceKind,
     DependencySlot,
-    LiveRegistryDependencyFence,
     LongitudinalComparisonRegistry,
     LongitudinalComparisonRegistryError,
     LongitudinalComparisonRegistryStale,
@@ -75,6 +77,7 @@ from evidence_inspector.repeatability_comparison_registry import (
 from evidence_inspector.result_catalog import (
     DEFAULT_RESULT_BUNDLE_READER_REGISTRY,
     ResultCatalog,
+    catalog_authority_sha256,
 )
 from evidence_inspector.result_trust_registry import ResultTrustRegistry
 from evidence_inspector.result_view_source_registry import (
@@ -159,10 +162,6 @@ class World:
             "projection_registry": self.projections,
         }
 
-    def live_fence(self) -> LiveRegistryDependencyFence:
-        arguments = self.store_arguments()
-        arguments.pop("family_source_registry")
-        return LiveRegistryDependencyFence(**arguments)
 
 
 def make_world(tmp_path: Path) -> tuple[World, list[object]]:
@@ -418,19 +417,63 @@ def test_snapshot_matches_every_store_public_read(world, coordinator) -> None:
     assert type(snapshot) is CompositeAuthoritySnapshotV1
     assert snapshot.fence_kind is DependencyFenceKind.COMPOSITE_AUTHORITY_FENCE
     assert snapshot.lock_order == GLOBAL_LOCK_ORDER
-    with world.live_fence().hold() as held:
-        public = held.read_heads(world.scope)
-        public_bindings = held.read_bindings()
-    for slot in DependencySlot:
-        if slot is DependencySlot.FAMILY_SOURCE:
-            continue
-        assert getattr(snapshot.heads, slot.value) == getattr(public, slot.value), slot
-    family = snapshot.heads.family_source
-    assert family is not None and family.id.startswith("familysrc_registry_")
-    assert family.head == world.family.list_selectors(
-        world.cohort_selector_id, 1, limit=1
-    ).state_head_sha256
-    assert snapshot.bindings == public_bindings
+    # Each head equals the store's own public read, taken outside the hold.
+    heads = snapshot.heads
+
+    def page(value) -> tuple[str, str, str]:
+        return (value.registry_id, value.registry_epoch_sha256, value.state_head_sha256)
+
+    def slot(name: str) -> tuple[str, str, str]:
+        head = getattr(heads, name)
+        return (head.id, head.epoch, head.head)
+
+    linkage = world.linkage.active_snapshot()
+    assert slot("d01_linkage") == (
+        linkage.store_id,
+        linkage.store_epoch_sha256,
+        linkage.state_head_sha256,
+    )
+    history = world.history.active_snapshot()
+    assert slot("d04_history") == (
+        history.ledger_id,
+        history.ledger_epoch_sha256,
+        history.state_head_sha256,
+    )
+    assert slot("d05_cohort") == page(world.cohort.list_selectors(limit=1))
+    reader = world.reader.identity()
+    assert slot("reader_authorization") == page(reader)
+    status = world.records.record_status_for_manifest(world.cohort_selector_id, 1)
+    assert slot("d06_record_catalog") == (
+        status.registry_id,
+        status.registry_epoch_sha256,
+        status.status_sha256,
+    )
+    authority = world.results.authority_snapshot()
+    assert slot("e04_catalog") == (
+        "e04_catalog_" + authority.storage_identity_sha256[:32],
+        authority.storage_identity_sha256,
+        catalog_authority_sha256(authority),
+    )
+    assert slot("result_trust") == page(world.trust.current_trust())
+    assert slot("e06_source") == page(
+        world.sources.list_selectors(world.cohort_selector_id, 1, limit=1)
+    )
+    assert slot("d03_decision") == page(world.d03.list_selectors(limit=1))
+    assert slot("d07_comparison") == page(world.d07.list_selectors(limit=1))
+    assert slot("d09_summary") == page(world.d09.list_selectors(limit=1))
+    assert slot("d10_context") == page(world.d10.list_selectors(limit=1))
+    assert slot("family_source") == page(
+        world.family.list_selectors(world.cohort_selector_id, 1, limit=1)
+    )
+    assert heads.family_source.id.startswith("familysrc_registry_")
+    assert slot("anchor_policy") == page(world.anchors.list_selectors(limit=1))
+    assert slot("projection_policy") == page(world.projections.list_selectors(limit=1))
+    identity = world.sources.registry_identity()
+    assert snapshot.bindings == registry_bindings_from_heads(heads)
+    assert (snapshot.bindings.e06_registry_id, snapshot.bindings.e06_registry_epoch_sha256) == (
+        identity.registry_id,
+        identity.registry_epoch_sha256,
+    )
     assert coordinator.snapshot(world.scope) == snapshot
 
 
