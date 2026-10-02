@@ -50,7 +50,7 @@ from __future__ import annotations
 
 import hashlib
 from collections.abc import Callable, Iterable
-from datetime import datetime
+from datetime import UTC, datetime
 from enum import StrEnum
 from typing import Annotated, Any, Literal, NoReturn, TypeVar
 
@@ -1196,6 +1196,16 @@ class LongitudinalAuthorityCommitments(RegistryContract):
     d03_series_decision_sha256: Sha256 | None
     d10_context_state: CovariateContextState
 
+    @model_validator(mode="after")
+    def exact_public_slots(self) -> LongitudinalAuthorityCommitments:
+        if tuple(item.slot for item in self.heads) != tuple(
+            slot
+            for slot in DependencySlot
+            if slot is not DependencySlot.READER_AUTHORIZATION
+        ):
+            raise ValueError("public heads are exactly the non-reader slots in order")
+        return self
+
 
 class _WorkspaceCore(RegistryContract):
     authority: LongitudinalAuthorityCommitments
@@ -1774,6 +1784,29 @@ def filters_sha256(filters: LongitudinalWorkspaceFilters) -> str:
     )
 
 
+_REPLAY_TIME_PLACEHOLDER = datetime(1970, 1, 1, tzinfo=UTC)
+
+
+def _row_replay_bytes(row: ProtectedLongitudinalRow) -> bytes:
+    """Row commitment without D07's live ``replayed_at`` instant.
+
+    ``replayed_at`` is the authority clock at the read, so it differs across
+    rebuilds of unchanged authority; it stays in the protected row only.
+    """
+
+    if row.comparison is None:
+        return canonical_contract_bytes(row)
+    return canonical_contract_bytes(
+        row.model_copy(
+            update={
+                "comparison": row.comparison.model_copy(
+                    update={"replayed_at": _REPLAY_TIME_PLACEHOLDER}
+                )
+            }
+        )
+    )
+
+
 def _replay_sha256(
     inputs: WorkspaceAuthorityInputs,
     protected_rows: tuple[ProtectedLongitudinalRow, ...],
@@ -1793,7 +1826,7 @@ def _replay_sha256(
         canonical_contract_bytes(inputs.covariate_context),
         canonical_contract_bytes(inputs.version_diff),
         inputs.anchor_record_sha256.encode("ascii"),
-        *(canonical_contract_bytes(item) for item in protected_rows),
+        *(_row_replay_bytes(item) for item in protected_rows),
         *(canonical_contract_bytes(item) for item in rows),
         *(canonical_contract_bytes(item) for item in segments),
     )

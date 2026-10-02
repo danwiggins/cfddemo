@@ -1258,6 +1258,38 @@ def test_stable_stale_series_is_an_authority_error(
     assert error.remediation.value == "refresh_decision_registration"
 
 
+def test_replay_digest_ignores_the_live_d07_replay_instant(base) -> None:
+    world, workspace = base
+    rows = list(workspace.protected_rows)
+    index = next(i for i, row in enumerate(rows) if row.comparison is not None)
+    later = rows[index].comparison.replayed_at.replace(year=2030)
+    rows[index] = _edit(
+        rows[index],
+        comparison=rows[index].comparison.model_copy(update={"replayed_at": later}),
+    )
+    derived = _derive(world, workspace, rows)
+    assert derived.replay_sha256 == workspace.replay_sha256
+    assert longitudinal_projection_bytes(
+        project_longitudinal_workspace(derived)
+    ) == longitudinal_projection_bytes(project_longitudinal_workspace(workspace))
+
+
+def test_public_heads_admit_no_reader_slot(base) -> None:
+    _, workspace = base
+    heads = list(workspace.authority.heads)
+    reader = workspace.authority.heads[0].model_copy(
+        update={
+            "slot": "reader_authorization",
+            "head": workspace.dependency_heads.reader_authorization,
+        }
+    )
+    for forged in ((reader, *heads[1:]), (*heads[:-1], heads[0])):
+        with pytest.raises(ValueError):
+            workspace.authority.model_validate(
+                {**workspace.authority.model_dump(mode="python"), "heads": forged}
+            )
+
+
 def test_public_comparison_carries_no_timestamp(base) -> None:
     _, workspace = base
     public = longitudinal_projection_bytes(project_longitudinal_workspace(workspace))
