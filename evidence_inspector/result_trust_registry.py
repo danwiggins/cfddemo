@@ -797,9 +797,6 @@ class ResultTrustRegistry:
 
     @contextmanager
     def _lock(self, *, exclusive: bool) -> Iterator[None]:
-        descriptor = self._lock_fd
-        if descriptor is None:
-            raise ResultTrustRegistryUnsafe("result trust registry is closed")
         # flock is per open file description and converts in place, so a nested
         # acquisition on one thread would silently upgrade or release the outer
         # lock.  Refuse it instead.
@@ -808,9 +805,21 @@ class ResultTrustRegistry:
                 "result trust registry lock is not reentrant"
             )
         with _REGISTRY_PROCESS_LOCK, self._process_lock:
+            # Read the descriptor only under the process lock, which close()
+            # also holds, so a concurrent close cannot hand us a reused number.
+            descriptor = self._lock_fd
+            if descriptor is None:
+                raise ResultTrustRegistryUnsafe("result trust registry is closed")
             _LOCK_DEPTH.value = 1
             try:
-                fcntl.flock(descriptor, fcntl.LOCK_EX if exclusive else fcntl.LOCK_SH)
+                try:
+                    fcntl.flock(
+                        descriptor, fcntl.LOCK_EX if exclusive else fcntl.LOCK_SH
+                    )
+                except OSError:
+                    raise ResultTrustRegistryUnsafe(
+                        "result trust registry lock is unavailable"
+                    ) from None
                 try:
                     _RT_VALIDATE_STORAGE(self)
                     yield
@@ -961,13 +970,16 @@ class ResultTrustRegistry:
         try:
             _write_all(descriptor, content)
             os.fsync(descriptor)
-        except OSError:
-            # Remove any torn suffix so the committed chain stays readable.
+        except BaseException as error:
+            # Remove any torn suffix so the committed chain stays readable,
+            # including when an interrupt lands between partial writes.
             try:
                 os.ftruncate(descriptor, committed_size)
                 os.fsync(descriptor)
             except OSError:
                 pass
+            if not isinstance(error, OSError):
+                raise
             raise ResultTrustRegistryUnsafe(
                 "result trust registry journal append failed"
             ) from None

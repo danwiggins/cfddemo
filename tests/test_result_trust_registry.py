@@ -303,6 +303,19 @@ def test_torn_append_is_truncated_and_the_event_retries(
         trust.revoke_key(RESULT_KEY.key_id)
     monkeypatch.undo()
     assert journal.read_bytes() == committed
+
+    def interrupted_write(descriptor: int, content) -> int:
+        data = bytes(content)
+        if b"result-trust-journal-entry" in data:
+            original_write(descriptor, data[: len(data) // 2])
+            raise KeyboardInterrupt
+        return original_write(descriptor, content)
+
+    monkeypatch.setattr(os, "write", interrupted_write)
+    with pytest.raises(KeyboardInterrupt):
+        trust.revoke_key(RESULT_KEY.key_id)
+    monkeypatch.undo()
+    assert journal.read_bytes() == committed
     assert trust.revoke_key(RESULT_KEY.key_id).state_version == 2
 
 
@@ -375,6 +388,12 @@ def test_read_fence_blocks_trust_events_until_exit(trust: ResultTrustRegistry) -
     worker.join(timeout=2)
     assert finished.is_set()
     assert trust.current_trust().document.keys[0].revoked
+
+
+def test_closed_registry_lock_fails_closed(trust: ResultTrustRegistry) -> None:
+    trust.close()
+    with pytest.raises(ResultTrustRegistryUnsafe, match="closed"):
+        trust.current_trust()
 
 
 def test_callable_and_authority_replacement_is_rejected(
