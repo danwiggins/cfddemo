@@ -1266,6 +1266,27 @@ def test_a_waiting_writer_holds_no_connection_lock_a_holder_needs(
             catalog.close()
 
 
+@pytest.mark.skipif(not hasattr(os, "fork"), reason="fork is unavailable")
+def test_a_forked_child_inherits_no_content_gate_holder(tmp_path: Path) -> None:
+    catalog, _, _ = _catalog(tmp_path)
+    try:
+        with catalog.content_authority_fence():
+            assert catalog_module.content_lock_held_by_current_thread()
+            pid = os.fork()
+            if pid == 0:  # pragma: no cover - child process
+                os._exit(
+                    0
+                    if not catalog_module.content_lock_held_by_current_thread()
+                    and not catalog_module._CONTENT_GATE_STATE
+                    else 1
+                )
+            _, status = os.waitpid(pid, 0)
+        assert os.WIFEXITED(status) and os.WEXITSTATUS(status) == 0
+        assert not catalog_module.content_lock_held_by_current_thread()
+    finally:
+        catalog.close()
+
+
 def test_the_content_lock_file_is_private_and_bound(tmp_path: Path) -> None:
     catalog, _, _ = _catalog(tmp_path)
     try:

@@ -980,6 +980,38 @@ def test_record_status_fence_requires_the_e04_content_lock(world) -> None:
                     pass
 
 
+@pytest.mark.parametrize("through", ["same_instance", "other_instance"])
+def test_d06_entry_is_refused_while_an_e04_content_lock_is_held(world, through) -> None:
+    """D06 needs D01 first; holding E04 content it could wait behind an import."""
+
+    other = ResultCatalog(
+        world.results.root,
+        import_roots={"root_primary": world.root / "imports"},
+        result_trust_registry=world.trust,
+        reader_registry=DEFAULT_RESULT_BUNDLE_READER_REGISTRY,
+    )
+    try:
+        fence = (
+            world.results.trust_authority_fence
+            if through == "same_instance"
+            else other.content_authority_fence
+        )
+        with fence():
+            for operation in (
+                lambda: world.records.record_status_for_manifest(
+                    world.cohort_selector_id, 1
+                ),
+                lambda: world.records.bindings_for_manifest(world.cohort_selector_id, 1),
+            ):
+                with pytest.raises(
+                    CohortImportError, match="before any E04 content lock"
+                ):
+                    operation()
+    finally:
+        other.close()
+    assert world.records.record_status_for_manifest(world.cohort_selector_id, 1)
+
+
 def test_a_shared_e04_content_hold_is_never_upgraded(world) -> None:
     relative = _extra_bundle(world, "upgrade")
     with world.results.trust_authority_fence():

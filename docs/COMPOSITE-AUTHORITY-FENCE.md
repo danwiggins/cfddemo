@@ -57,7 +57,7 @@ actually take (A -> B: B is acquired while A is held):
 - D10 registry -> D09 resolve (D09 lock -> D01 ...) and D10 -> D03 resolve
   (D01 -> D03), via the live D10 build (#64).
 - D09 registry lock -> D09 summary builder -> D06 status fence (D01 -> D05
-  -> E04 connection -> E04 content -> trust -> D06 root) (#59).
+  -> E04 content (gate, connection lock, flock) -> trust -> D06 root) (#59).
 - D06 status fence: D01 -> D05 -> E04 content (shared, with the connection
   lock) -> result trust (registry read fence) -> D06 root.
 - E04: catalog-content lock (in-process per-inode gate, then the catalog
@@ -259,9 +259,14 @@ E04 rows are fenced across processes (`docs/RESULT-CATALOG.md`,
   preparation, staging, adoption, finish, compensation, discard, coordinated
   candidate register/finish, publication recovery and schema initialization.
 - The composite E04 step holds it **shared** through
-  `trust_authority_fence` (connection lock -> content lock -> trust), as do
+  `trust_authority_fence` (content gate -> connection lock -> content
+  `flock` -> trust read fence), as do
   D06 status and binding reads. D06 imports and D06 open-time recovery take
-  it exclusively before the D06 root.
+  it exclusively before the D06 root. D06's fence entry refuses a thread
+  that already holds any E04 content lock (through this or another catalog
+  instance), as the coordinator's entry check does. The in-process gate is
+  reader-preferring, so a stream of composite reads can delay an in-process
+  E04 writer (liveness, not deadlock).
 - The E04 head is `catalog_dependency_head_sha256(authority, content)`:
   catalog authority (storage, trust, reader registry) plus a digest of every
   committed catalog row, read under the held lock and revalidated in reverse
@@ -298,10 +303,3 @@ vector.
   saved-comparison registry). In v2 any E04 catalog-row change marks every
   save stale; the E04 content digest is linear in catalog size.
 - The D08 workspace builder is not built here.
-- Several `ResultCatalog` instances on one root in one process: the E04
-  content lock refuses a second-instance request on the holding thread, and
-  the coordinator refuses entry while any content lock is held, but D06's
-  own entry points do not preflight against a content lock held through
-  another instance; a thread holding one must not call a D06 catalog bound
-  to another instance on the same root (it can wait on D01 behind a D06
-  import that waits on that content lock).

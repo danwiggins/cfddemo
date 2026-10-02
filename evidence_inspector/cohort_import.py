@@ -71,6 +71,7 @@ from evidence_inspector.result_catalog import (
     _authority_value_fingerprint,
     bound_catalog_authority,
     catalog_authority_sha256,
+    content_lock_held_by_current_thread,
 )
 from evidence_inspector.result_trust_registry import ResultTrustSnapshot
 from evidence_inspector.safe_ingress import contract_type_graph, exact_model_bytes
@@ -106,6 +107,7 @@ _PINNED_RESULT_QUERY = ResultCatalog.query
 _PINNED_RESULT_AUTHORITY = ResultCatalog.authority_snapshot
 _PINNED_RESULT_TRUST_FENCE = ResultCatalog.trust_authority_fence
 _PINNED_RESULT_CONTENT_FENCE = ResultCatalog.content_authority_fence
+_PINNED_RESULT_CONTENT_LOCK_HELD = content_lock_held_by_current_thread
 _PINNED_RESULT_PREPARE = ResultCatalog.prepare_bundle_import
 _PINNED_RESULT_STAGE = ResultCatalog.stage_prepared_import
 _PINNED_RESULT_ADOPT = ResultCatalog.adopt_prepared_import
@@ -1374,6 +1376,8 @@ class CohortRecordCatalog:
             is not _PINNED_RESULT_MODULE_TRUST_RESOLVE
             or result_catalog_module._RC_ASSERT_RUNTIME
             is not _PINNED_RESULT_RUNTIME_ASSERT
+            or result_catalog_module.content_lock_held_by_current_thread
+            is not _PINNED_RESULT_CONTENT_LOCK_HELD
             or cohort_manifest_module._PINNED_ACTIVE_SNAPSHOT
             is not _PINNED_MANIFEST_ACTIVE_SNAPSHOT
             or cohort_manifest_module._PINNED_STORE_CALLABLES
@@ -1473,6 +1477,13 @@ class CohortRecordCatalog:
         """
 
         _CC_ASSERT_RUNTIME(self)
+        # D01 comes first: entering with any E04 content lock already held
+        # (through this catalog or another instance on its root) would wait
+        # on D01 behind an import that waits on that content lock.
+        if _PINNED_RESULT_CONTENT_LOCK_HELD():
+            raise CohortImportError(
+                "cohort catalog fence must be entered before any E04 content lock"
+            )
         if type(exclusive_content) is not bool:
             raise CohortImportError("catalog content fence mode is invalid")
         if (

@@ -103,10 +103,11 @@ took the content lock exclusively first; a trust mutation on the
 holding thread raises instead of deadlocking. The TrustStore path yields
 `None` and holds nothing.
 
-Lock order: catalog `_connection_lock`, the catalog-content lock, then the
-result-trust read fence. This is the order D06 already used for the TrustStore
-lock (catalog connection lock, then the trust lock), so D06 keeps its fence
-order: linkage fence, D05 lock, catalog connection lock, catalog content,
+Lock order: the catalog-content lock (in-process gate, then the catalog
+`_connection_lock`, then `flock`), then the result-trust read fence. The
+connection lock still precedes trust, as D06 already used for the TrustStore
+lock (catalog connection lock, then the trust lock), so D06's fence order is:
+linkage fence, D05 lock, catalog content (gate, connection lock, flock),
 result trust, D06 root; E06 takes the D06 fence and
 then its own lock; D07 takes linkage fence, result trust, then its own lock.
 Code holding a trust read fence taken directly from the registry (as D07 does)
@@ -162,7 +163,13 @@ under a held shared lock raises `CatalogConflict` (never upgraded). A thread
 holding a root's content lock through one instance that asks for it through
 another instance on the same root gets `CatalogConflict` instead of waiting
 for itself. A caller must not hold a catalog's connection lock when it asks
-for that catalog's content lock (D06 takes the content fence first).
+for that catalog's content lock (D06 takes the content fence first), and
+D06's fence entry (`_registered_authority_fence`, behind imports, binding
+reads and record status) refuses a thread that already holds any content
+lock, since D06 needs D01 first. The gate is reader-preferring: a steady
+stream of shared holders (composite reads) can delay an in-process writer
+indefinitely; that is a liveness limit, not a deadlock. A forked child resets
+the gate (`os.register_at_fork`); it inherits no parent holders.
 
 `content_head_in_fence()` (requires this thread's content lock) and
 `content_snapshot()` (takes it shared) return `CatalogContentSnapshot`: a

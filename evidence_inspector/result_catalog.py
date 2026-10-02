@@ -115,6 +115,18 @@ def _acquire_content_gate(
             readers[current] = catalog
 
 
+def _reset_content_gate_after_fork() -> None:
+    """A forked child holds none of its parent's content locks or gates."""
+
+    global _CONTENT_GATE
+    _CONTENT_GATE = threading.Condition(threading.Lock())
+    _CONTENT_GATE_STATE.clear()
+
+
+if hasattr(os, "register_at_fork"):
+    os.register_at_fork(after_in_child=_reset_content_gate_after_fork)
+
+
 def content_lock_held_by_current_thread() -> bool:
     """True if this thread holds any catalog's content lock in this process.
 
@@ -1791,8 +1803,8 @@ class ResultCatalog:
                 _RC_VALIDATE_STORAGE(self)
 
     def _initialize(self) -> None:
-        # Lock order: connection lock, exclusive content lock, then the
-        # module SQLite open lock (as every catalog writer's first connect).
+        # Lock order: exclusive content lock (gate, connection lock, flock),
+        # then the module SQLite open lock (as every writer's first connect).
         with (
             _RC_CONTENT_LOCK(self, exclusive=True),
             _SQLITE_OPEN_LOCK,
@@ -1990,8 +2002,8 @@ class ResultCatalog:
         )
         object_path = self._bound_objects / bundle_sha256
         try:
-            # Lock order: connection lock (taken by the content lock),
-            # exclusive content lock, trust.
+            # Lock order: exclusive content lock (gate, connection lock,
+            # flock), then the trust read fence.
             with (
                 _RC_CONTENT_LOCK(self, exclusive=True),
                 _RC_TRUST_FENCE(self) as (trust_store, _),
@@ -2163,8 +2175,8 @@ class ResultCatalog:
         )
         object_path = self._bound_objects / bundle_sha256
         try:
-            # Lock order: connection lock (taken by the content lock),
-            # exclusive content lock, trust.
+            # Lock order: exclusive content lock (gate, connection lock,
+            # flock), then the trust read fence.
             with (
                 _RC_CONTENT_LOCK(self, exclusive=True),
                 _RC_TRUST_FENCE(self) as (trust_store, _),
