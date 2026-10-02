@@ -712,7 +712,11 @@ caller assertions and is therefore prohibited:
   (#60), the E06 result-view-source registry (#62), D10 live D09 binding plus the
   d10_context_registry (#64), the projection-policy registry (#65), the
   anchor-policy registry (#66), the reader-authorization registry plus B01
-  session binding (#67), and the result-trust store wired into D07 (#68). Each
+  session binding (#67), the result-trust store wired into D07 (#68), the local
+  operator reader authority (#73), E04 and `traceback verify` wired to the
+  result-trust store (#74), the family-source artifact registry (#75), the
+  closed source-value projection adapters (#76), the durable saved-comparison
+  registry (#77), and a D04 concurrent-initialisation race fix (#78). Each
   registry derives its object itself, replays it against live authority on every
   read, and returns nothing when stale. Each result is valid as of one authority
   snapshot; composing them still needs the composite fence below.
@@ -735,9 +739,9 @@ caller assertions and is therefore prohibited:
 - Result trust: the forward-only result-trust store (#68) closes the revocation
   gap for D07 registries opened with it. A revocation makes the affected
   comparisons stale on the next read, and old trust cannot revive revoked keys.
-  E04 (`result_catalog`) and the runner CLI still take a caller-supplied
-  `TrustStore`; wiring them is a follow-up PR (analysis in
-  `docs/RESULT-TRUST-REGISTRY.md`).
+  E04 (`result_catalog`) and `traceback verify` are wired to it too (#74), with
+  lock order catalog connection lock → trust fence; the `TrustStore` and D07
+  fixed-document paths remain and could be retired later.
 - E06: the source registry live-verifies member, D06 binding, E04 catalog and
   trust, and result/bundle/method identity. It cannot verify the denominator
   ledger, labels, compatibility-policy pin, or the fields in
@@ -760,8 +764,9 @@ caller assertions and is therefore prohibited:
   - A bound session is ended only by changes to its own grant or signing key
     (revocation, expiry, scope, untrusted or rotated-out key), not by unrelated
     registry changes.
-  The local operator profile, CLI, and launch exchange route are a build item
-  in the merge order below; the relaxed head check is part of it.
+  Built in #73: `traceback reader authority|grant|launch`, a fragment-carried
+  one-use launch link exchanged at `POST /api/v1/session/reader-launch`, and
+  the own-grant session check.
 - Standalone numeric values require the applicable E07, E08, or E09 replayable
   artifact and the closed family adapter above, bound through the exact E04/E06
   source and requested D02 identity/coordinate. A measurement without that
@@ -783,12 +788,18 @@ caller assertions and is therefore prohibited:
 - The current D01/D04/D06/E04 and downstream APIs do not expose the composable
   cross-store fence required above. See the lock-order findings. The
   authority-fence adapter prerequisites must merge before builder work.
-- No durable saved-comparison registry exists. It is a separate required PR;
-  in-memory or filesystem artifact writing inside D08 cannot satisfy the Save
-  and reopen journey.
-- The family adapters need durable family-source artifact discovery (the
-  `measurement_source_artifact_registry`) and its read fence; the adapters
-  alone do not locate E07/E08/E09 artifacts.
+- The saved-comparison registry (#77) publishes through a caller-supplied
+  dependency fence. Its built-in `LiveRegistryDependencyFence` re-reads heads
+  without a cross-store lock (`direct_head_reread`), so D08 keeps Save disabled
+  until publications carry `composite_authority_fence`.
+- The family-source registry (#75) derives E07 fragment artifacts only. E08 needs
+  cell-origin bundle import and verification, and E09 needs a binding to E04/E06
+  results plus authority from E04/E01. Per the one-measurement first
+  implementation, E12 shows fragment standalone values and marks E08/E09 values
+  explicitly unavailable. The projection adapters (#76) support all three
+  families once artifacts exist; the E12 builder must resolve every projection
+  policy from the registry, because the adapter cannot tell a valid unregistered
+  policy from a registered one.
 - Shared storage follow-up across the D03, D05, D07, D09, D10, E06, anchor,
   projection, reader, and result-trust registries: crash recovery for interrupted
   root creation, torn-journal tails found on reopen, and staged restore (every
@@ -796,13 +807,9 @@ caller assertions and is therefore prohibited:
   lock-descriptor ordering and truncate-on-any-exception to the others. Every read
   also parses every committed object, which is fine at synthetic scale only.
 
-The remaining merge order is E04 and runner wiring to the result-trust store,
-the local operator reader authority (profile, grant CLI, launch exchange, and
-own-grant session check),
-family-source artifact discovery registry, family-specific measurement-source
-adapters,
-composable authority-fence adapters/coordinator, D08 read model, durable
-saved-comparison registry, browser integration, then installed quickstart and
+The remaining merge order is the composable authority-fence
+adapters/coordinator, D08 read model, browser integration, then installed
+quickstart and
 rollback rehearsal evidence. E14 may automate renderer checks afterward;
 observed keyboard, screen-reader, 200% zoom, approved-host performance, and
 five-provider evidence remain separate gates.
