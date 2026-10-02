@@ -35,10 +35,14 @@ to an older journal or backup, and stale dependency authority.
 - `SavedLongitudinalComparisonV1`: the canonical selection
   (`SavedComparisonSelectionV1`: cohort, anchor-policy, approved-anchor,
   projection-policy and D09-policy selectors/versions, requested D02
-  measurement, normalized filters), comparison version, commitments
+  measurement, normalized filters), comparison version, the exact family
+  source-value projection request (`SavedFamilyProjectionRequestV1`: family,
+  selection rule, family-checked statistic and unit, projection-policy
+  selector/version/digest, component count; the digest pins the immutable
+  registered policy and so every family coordinate), commitments
   (`SavedComparisonCommitmentsV1`: manifest, D03 policy, D07 envelope,
-  approved anchor, projection policy, family projection request, D03, D07,
-  D09, D10, D04, source and reader-grant digests), exact E06 source-registry
+  approved anchor, D03, D07, D09, D10, D04, source and reader-grant
+  digests), exact E06 source-registry
   ID/epoch/state head and source selectors/versions, the full dependency-head
   vector it was built against, workspace replay digest, whole-second UTC
   creation time, literal `local_only`, `synthetic_only` and disabled
@@ -178,18 +182,25 @@ follows its own spec.
 base state version, head and journal byte length, and the exact intended
 journal entry. Recovery runs under the exclusive lock at startup, at the
 start of every publication, and before any read that observes pending state.
-It never uses temporary files as evidence; it always deletes them.
+It never uses temporary files as evidence. It deletes a `.tmp-<32 hex>`
+file only when it is exactly what an interrupted private write leaves (an
+owner-only, single-link regular file within the object bound); a link,
+directory, FIFO or other file under that name fails closed.
 
 | State found | Action |
 | --- | --- |
-| Journal = base + exact intended entry | Committed: verify the object bytes, adopt, delete the record |
+| Journal = base + exact intended entry | Committed: verify the object bytes, fsync the journal and objects, then delete the record |
 | Journal = base, or base + a strict prefix of the entry | Uncommitted: truncate to base, delete the candidate's object only if its bytes hash to the candidate digest, delete the record |
 | Anything else, or an invalid, linked, FIFO or foreign record | Fail closed (`integrity_failure`) |
 
-A substituted candidate object is never deleted or adopted. If startup adopts
-a committed entry, it also accepts the record's base head as the retained
-expected head, because the crash happened before the receipt reached the
-operator.
+A substituted candidate object is never deleted or adopted.
+
+A publication can commit without returning a receipt: a crash after the
+journal fsync, or a failed final dependency recheck. The operator then holds
+the predecessor head. Startup accepts a retained head that is exactly one
+committed entry behind the verified chain head (forward movement, never a
+rollback); it does not depend on the recovery record, which may already be
+consumed. Any older head is rejected.
 
 ## Reads
 
@@ -232,7 +243,8 @@ bytes or blesses an older head.
 
 A new root mints a random registry ID and epoch and binds the live
 dependency-store identities. An existing root requires the independently
-retained registry ID, epoch and head; missing metadata never bootstraps a
+retained registry ID, epoch and head (or the head one committed entry
+behind it, see "Crash recovery"); missing metadata never bootstraps a
 new identity, and changed dependency-store identities fail closed. The root
 is `0700`; metadata, journal, lock, record and objects are `0600`,
 single-link regular files opened through bound descriptors.

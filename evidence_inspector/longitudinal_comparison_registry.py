@@ -72,7 +72,17 @@ from evidence_inspector.method_registry import (
     canonical_contract_bytes,
     contract_from_canonical_bytes,
 )
-from evidence_inspector.projection_policy_registry import ProjectionPolicyRegistry
+from evidence_inspector.projection_policy_registry import (
+    MAX_FINITE_COMPONENTS,
+    CellOriginStatistic,
+    CnaChromosomeStatistic,
+    CnaSegmentStatistic,
+    FragmentStatistic,
+    ProjectionFamily,
+    ProjectionPolicyRegistry,
+    ProjectionSelectionRule,
+    StatisticUnit,
+)
 from evidence_inspector.provider_linkage_store import ProviderLinkageStore
 from evidence_inspector.reader_authorization_registry import (
     MeasurementScope,
@@ -512,6 +522,51 @@ class SavedComparisonSelectionV1(RegistryContract):
     filters: SavedComparisonFiltersV1
 
 
+_FAMILY_STATISTICS: MappingProxyType[ProjectionFamily, type[StrEnum]] = (
+    MappingProxyType(
+        {
+            ProjectionFamily.FRAGMENT: FragmentStatistic,
+            ProjectionFamily.CELL_ORIGIN: CellOriginStatistic,
+            ProjectionFamily.CNA_CHROMOSOME: CnaChromosomeStatistic,
+            ProjectionFamily.CNA_SEGMENT: CnaSegmentStatistic,
+        }
+    )
+)
+
+
+class SavedFamilyProjectionRequestV1(RegistryContract):
+    """The exact family source-value projection request the workspace used.
+
+    The family coordinates live in the immutable registered projection
+    policy; ``projection_policy_sha256`` pins that exact policy (and with it
+    every panel/bin, contributor, chromosome or segment coordinate) at the
+    selector/version below.
+    """
+
+    schema_version: Literal["traceback.saved-family-projection-request.v1"] = (
+        "traceback.saved-family-projection-request.v1"
+    )
+    family: ProjectionFamily
+    selection_rule: ProjectionSelectionRule
+    statistic: (
+        FragmentStatistic
+        | CellOriginStatistic
+        | CnaChromosomeStatistic
+        | CnaSegmentStatistic
+    )
+    statistic_unit: StatisticUnit
+    projection_policy_selector_id: ProjectionPolicySelectorId
+    projection_policy_version: int = Field(ge=1, le=MAX_SELECTOR_VERSION, strict=True)
+    projection_policy_sha256: Sha256
+    component_count: int = Field(ge=1, le=MAX_FINITE_COMPONENTS, strict=True)
+
+    @model_validator(mode="after")
+    def statistic_matches_family(self) -> SavedFamilyProjectionRequestV1:
+        if type(self.statistic) is not _FAMILY_STATISTICS[self.family]:
+            raise ValueError("projection statistic does not belong to its family")
+        return self
+
+
 class SavedComparisonCommitmentsV1(RegistryContract):
     """Exact digests of every authority-derived input the workspace replayed."""
 
@@ -519,8 +574,6 @@ class SavedComparisonCommitmentsV1(RegistryContract):
     d03_anchor_policy_sha256: Sha256
     d07_envelope_sha256: Sha256
     approved_anchor_sha256: Sha256
-    projection_policy_sha256: Sha256
-    family_projection_request_sha256: Sha256
     d03_decision_sha256: Sha256
     d07_comparisons_sha256: Sha256
     d09_summary_sha256: Sha256
@@ -543,6 +596,7 @@ class SavedLongitudinalComparisonV1(RegistryContract):
     )
     selection: SavedComparisonSelectionV1
     comparison_version: int = Field(ge=1, le=MAX_SAVED_COMPARISONS, strict=True)
+    family_projection_request: SavedFamilyProjectionRequestV1
     commitments: SavedComparisonCommitmentsV1
     e06_registry_id: str = Field(pattern=r"^e06_registry_[0-9a-f]{32}$")
     e06_registry_epoch_sha256: Sha256
@@ -579,6 +633,15 @@ class SavedLongitudinalComparisonV1(RegistryContract):
             self.e06_state_head_sha256,
         ):
             raise ValueError("E06 source registry head does not match the vector")
+        request = self.family_projection_request
+        if (
+            request.projection_policy_selector_id,
+            request.projection_policy_version,
+        ) != (
+            self.selection.projection_policy_selector_id,
+            self.selection.projection_policy_version,
+        ):
+            raise ValueError("family projection request does not match the selection")
         if self.content_sha256 != saved_comparison_content_sha256(self):
             raise ValueError("saved comparison content digest is invalid")
         return self
@@ -1772,14 +1835,17 @@ class LongitudinalComparisonRegistry:
                 self._metadata.registry_id,
                 self._metadata.registry_epoch_sha256,
             )
-            adopted_from = _CR_RECOVER(self)
+            _CR_RECOVER(self)
             index = _CR_LOAD_INDEX(self, accept_head=False)
-            # A crash after the journal commit but before the receipt leaves
-            # the operator holding the base head.  Startup accepts it only when
-            # the durable recovery record proves the one adopted extension.
+            # A publication can commit without returning a receipt (a crash
+            # after the journal fsync, or a failed final dependency recheck),
+            # leaving the operator holding the predecessor head.  Startup
+            # accepts exactly that one committed extension: it is forward
+            # movement along the verified chain, never a rollback, and needs
+            # no recovery record (which may already have been consumed).
             accepted_heads = {index.head}
-            if adopted_from is not None:
-                accepted_heads.add(adopted_from)
+            if index.journal:
+                accepted_heads.add(index.journal[-1].previous_entry_sha256)
             if root_created:
                 if any(item is not None for item in expected_values):
                     raise LongitudinalComparisonRegistryUnsafe(
@@ -2153,23 +2219,37 @@ class LongitudinalComparisonRegistry:
             ) from None
         return any(name == _CANDIDATE_NAME or _is_temporary_name(name) for name in names)
 
-    def _recover(self) -> str | None:
+    def _recover(self) -> None:
         """Resolve one interrupted publication; caller holds the exclusive lock.
 
         Only the durable candidate record decides: temporary files are never
-        evidence and are always removed.  A committed entry whose exact object
-        is present is adopted.  An uncommitted candidate loses only its own
+        evidence.  A temporary file is removed only when it is exactly what
+        ``_publish_file`` leaves behind (an owner-only, single-link regular
+        file within the object bound); anything else under a temporary name
+        fails closed.  A committed entry whose exact object is present is made
+        durable and adopted.  An uncommitted candidate loses only its own
         object (verified by digest) and its own torn journal suffix.  Anything
-        else fails closed.  Returns the record's base head when it adopted a
-        committed entry, else ``None``.
+        else fails closed.
         """
 
         assert self._root_fd is not None and self._objects_fd is not None
         try:
             for directory in (self._root_fd, self._objects_fd):
                 for name in os.listdir(directory):
-                    if _is_temporary_name(name):
-                        os.unlink(name, dir_fd=directory)
+                    if not _is_temporary_name(name):
+                        continue
+                    observed = os.stat(name, dir_fd=directory, follow_symlinks=False)
+                    if (
+                        not stat.S_ISREG(observed.st_mode)
+                        or stat.S_IMODE(observed.st_mode) != 0o600
+                        or observed.st_uid != os.geteuid()
+                        or observed.st_nlink != 1
+                        or observed.st_size > MAX_OBJECT_BYTES
+                    ):
+                        raise LongitudinalComparisonRegistryUnsafe(
+                            "saved comparison registry temporary file is unsafe"
+                        )
+                    os.unlink(name, dir_fd=directory)
                 os.fsync(directory)
         except OSError:
             raise LongitudinalComparisonRegistryUnsafe(
@@ -2178,7 +2258,7 @@ class LongitudinalComparisonRegistry:
         try:
             os.stat(_CANDIDATE_NAME, dir_fd=self._root_fd, follow_symlinks=False)
         except FileNotFoundError:
-            return None
+            return
         except OSError:
             raise LongitudinalComparisonRegistryUnsafe(
                 "saved comparison registry recovery is unsafe"
@@ -2225,11 +2305,17 @@ class LongitudinalComparisonRegistry:
         intended = _entry_bytes(record.entry) + b"\n"
         suffix = journal[record.base_journal_bytes :]
         object_name = f"{record.entry.object_sha256}.json"
-        adopted_from: str | None = None
         if suffix == intended:
-            # Committed: adopt only the exact object bytes the entry names.
+            # Committed: adopt only the exact object bytes the entry names, and
+            # make the append durable before the record that proves it goes.
             _read_object(self._objects_fd, record.entry)
-            adopted_from = record.base_state_head_sha256
+            try:
+                os.fsync(self._journal_fd)
+                os.fsync(self._objects_fd)
+            except OSError:
+                raise LongitudinalComparisonRegistryUnsafe(
+                    "saved comparison recovery fsync failed"
+                ) from None
         elif intended.startswith(suffix) and record.entry.object_sha256 not in (
             base_index.by_digest
         ):
@@ -2271,7 +2357,6 @@ class LongitudinalComparisonRegistry:
             raise LongitudinalComparisonRegistryUnsafe(
                 "saved comparison recovery is unsafe"
             ) from None
-        return adopted_from
 
     def _ensure_recovered(self) -> None:
         if _CR_RECOVERY_PENDING(self):
@@ -3133,6 +3218,7 @@ __all__ = [
     "SavedComparisonSelectorPageV1",
     "SavedComparisonSelectorRecordV1",
     "SavedE06SourceRefV1",
+    "SavedFamilyProjectionRequestV1",
     "SavedLongitudinalComparisonV1",
     "build_saved_longitudinal_comparison",
     "saved_comparison_backup_from_bytes",

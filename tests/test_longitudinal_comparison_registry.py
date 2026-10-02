@@ -42,12 +42,20 @@ from evidence_inspector.longitudinal_comparison_registry import (
     SavedComparisonRecoveryRecordV1,
     SavedComparisonSelectionV1,
     SavedE06SourceRefV1,
+    SavedFamilyProjectionRequestV1,
     SavedLongitudinalComparisonV1,
     build_saved_longitudinal_comparison,
     saved_comparison_backup_from_bytes,
     saved_comparison_object_bytes,
 )
 from evidence_inspector.method_registry import MethodFamily
+from evidence_inspector.projection_policy_registry import (
+    CnaSegmentStatistic,
+    FragmentStatistic,
+    ProjectionFamily,
+    ProjectionSelectionRule,
+    StatisticUnit,
+)
 from evidence_inspector.reader_authorization_registry import MeasurementScope
 
 CREATED_AT = datetime(2026, 10, 1, 12, tzinfo=UTC)
@@ -129,6 +137,21 @@ class FakeFence(SavedComparisonDependencyFence):
         yield FakeHeld(self)
 
 
+def family_request(**overrides) -> SavedFamilyProjectionRequestV1:
+    values = {
+        "family": ProjectionFamily.FRAGMENT,
+        "selection_rule": ProjectionSelectionRule.FINITE_COMPONENTS,
+        "statistic": FragmentStatistic.FRACTION,
+        "statistic_unit": StatisticUnit.FRACTION,
+        "projection_policy_selector_id": "projection_policy_" + "4" * 40,
+        "projection_policy_version": 1,
+        "projection_policy_sha256": "7" * 64,
+        "component_count": 1,
+    }
+    values.update(overrides)
+    return SavedFamilyProjectionRequestV1(**values)
+
+
 def make_saved(
     heads: SavedComparisonDependencyHeadsV1,
     *,
@@ -160,6 +183,7 @@ def make_saved(
             filters=SavedComparisonFiltersV1(),
         ),
         comparison_version=version,
+        family_projection_request=family_request(),
         commitments=SavedComparisonCommitmentsV1(
             **{name: "b" * 64 for name in SavedComparisonCommitmentsV1.model_fields}
         ),
@@ -324,6 +348,73 @@ def test_final_head_race_returns_no_receipt_and_reopens_stale(registry, fence) -
     # An exact retry after authority moved is a conflict, never a receipt.
     with pytest.raises(LongitudinalComparisonRegistryStale):
         registry.register(saved, dependency_fence=fence)
+
+
+def test_a_receiptless_commit_reopens_from_the_retained_predecessor_head(
+    registry, fence
+) -> None:
+    registry.register(make_saved(fence.heads), dependency_fence=fence)
+    retained = registry.identity()
+
+    def move_on_final_read(state: FakeFence) -> None:
+        if state.reads == reads + 3:
+            state.heads = advance(state.heads, DependencySlot.D10_CONTEXT)
+
+    reads = fence.reads
+    fence.on_read = move_on_final_read
+    with pytest.raises(LongitudinalComparisonRegistryStale, match="final return"):
+        registry.register(make_saved(fence.heads, anchor_version=2), dependency_fence=fence)
+    fence.on_read = None
+    assert "publication-candidate.json" not in root_names(registry)
+    reopened = reopen_with(registry.root, fence, retained)
+    try:
+        assert reopened.identity()[2] == 2
+    finally:
+        reopened.close()
+    # Only one committed extension is accepted, never an older head.
+    registry.register(make_saved(fence.heads, anchor_version=3), dependency_fence=fence)
+    with pytest.raises(LongitudinalComparisonRegistryUnsafe):
+        reopen_with(registry.root, fence, retained)
+
+
+def test_unsafe_temporary_names_fail_closed(registry, fence, tmp_path) -> None:
+    registry.register(make_saved(fence.heads), dependency_fence=fence)
+    target = tmp_path / "keep.txt"
+    target.write_bytes(b"not registry data")
+    link = registry.root / "objects" / (".tmp-" + "9" * 32)
+    link.symlink_to(target)
+    with pytest.raises(LongitudinalComparisonRegistryUnsafe):
+        registry.list_selectors(dependency_fence=fence)
+    assert target.read_bytes() == b"not registry data"
+    link.unlink()
+    directory = registry.root / (".tmp-" + "8" * 32)
+    directory.mkdir()
+    with pytest.raises(LongitudinalComparisonRegistryUnsafe):
+        registry.list_selectors(dependency_fence=fence)
+    directory.rmdir()
+    leftover = registry.root / (".tmp-" + "7" * 32)
+    leftover.write_bytes(b"partial")
+    leftover.chmod(0o600)
+    assert registry.list_selectors(dependency_fence=fence).state_version == 1
+    assert not leftover.exists()
+
+
+def test_family_projection_request_is_exact() -> None:
+    with pytest.raises(ValidationError):
+        family_request(statistic=CnaSegmentStatistic.MEDIAN_LOG2)
+    with pytest.raises(ValidationError):
+        family_request(component_count=0)
+    heads = make_heads()
+    saved = make_saved(heads)
+    with pytest.raises(ValidationError):
+        SavedLongitudinalComparisonV1.model_validate(
+            {
+                **saved.model_dump(),
+                "family_projection_request": family_request(
+                    projection_policy_version=2
+                ).model_dump(),
+            }
+        )
 
 
 def test_exact_retry_after_authority_moved_is_a_conflict(registry, fence) -> None:
