@@ -1094,7 +1094,24 @@ DX DUAL VOICES — CONSENSUS TABLE:
 - **Security ordering with H1/H6.** CEO (both), Eng (both) -> taste T2 and premise P6.
 - **"Every stage exists" undercounts composition work.** CEO (Codex), Eng (both: authority store and E06 persistence did not exist). Effort rose from about 16 to about 21.5 human days.
 
-## Pending user gates
+## Gate decisions (resolved 2026-10-02)
+
+The operator instructed: "build when gates are in", taking the reviews' recommendations unless one reverses an explicit operator decision. None did.
+
+| Gate | Decision |
+|---|---|
+| UC1: milestone split | **Accepted.** Milestone 1 DoD = DoD steps 1–4 plus `traceback run` writing the honest HTML report, opened from `R/records/<id>/report.html`. Items: A1, A2, A4, B1 (database path only; `explorer=None` stays), B2, B3a, B3b, B4, B7. **Milestone 2** = B5a → B5b → B6 → B8 plus DoD steps 5–7. A3 and A5 land after the E12 browser PR. |
+| UC2: E0 and demand | **Accepted.** E0 protocol work and the PRODUCT-PLAN demand interviews start now, in parallel, as operator work. The "one outside reader sees the record" step waits for P1. |
+| UC3: reference matching | **Keep WARN** (name + length; a missing `M5`/`AS` is a warning, a mismatch blocks). |
+| UC4: timeouts | **Accepted.** The production SQLite timeout stays at 10 s. Only test waits are raised, each followed by an assertion that the thread or process finished. |
+| P1 | Rule: the source BAM's provenance and consent are written down (operator) before any record from it is shown to anyone outside the team. |
+| P6 | Rule: no donor data until security H1 and H6-min land. |
+| Other premises (P2, P4, P5, P7) | Accepted as written. P3 is covered by UC2. |
+| Taste T1–T8 | Accepted as auto-decided. |
+
+The original gate text follows for the record.
+
+## Pending user gates (now resolved, see above)
 
 Nothing below is decided. The spec body reflects the user's stated direction plus auto-decided fixes; each gate says what changes if answered the other way.
 
