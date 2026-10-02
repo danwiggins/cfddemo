@@ -422,7 +422,10 @@ def _authority_rotate(
             pins = directory.read_pins()
             trust = pins.trust
             if len(trust.keys) >= MAX_KEYS:
-                raise OperatorAuthorityError("operator trust key limit reached")
+                raise OperatorAuthorityError(
+                    "operator trust holds 16 key versions (15 rotations); "
+                    "initialize a new authority and registry"
+                )
             old_active = [
                 key.key_version
                 for key in trust.keys

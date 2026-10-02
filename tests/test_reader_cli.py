@@ -371,3 +371,14 @@ def test_launch_refuses_an_inactive_grant(operator, tmp_path: Path) -> None:
     )
     assert code == 3 and "not active" in err
     assert "http://" not in out
+
+
+def test_rotation_stops_at_the_trust_key_bound(
+    operator, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(reader_cli, "MAX_KEYS", 2)
+    assert operator("authority", "rotate")[0] == 0
+    code, _, err = operator("authority", "rotate")
+    assert code == 3 and "15 rotations" in err
+    assert (operator.authority / "reader-key-v2.pem").exists()
+    assert not (operator.authority / "reader-key-v3.pem").exists()

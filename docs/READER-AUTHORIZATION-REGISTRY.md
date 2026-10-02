@@ -141,9 +141,10 @@ before for every non-E12 route.
    to the session's own grant or signing key end it: its revocation, its
    expiry, a request outside its scope, its key being revoked or rotated out,
    or a trust that no longer names its authority and key. Other grants,
-   revocations and trust revisions that leave its key active do not. The caller builds its result
-   inside the block. On exit the session and the grant are re-resolved before
-   the fence is released; any difference denies the return.
+   revocations and trust revisions that leave its key active do not. The
+   caller builds its result inside the block. On exit the session and the
+   grant are re-resolved before the fence is released; any difference denies
+   the return.
 
 Every failure is `ReaderAuthorizationDenied` with `code` and text
 `permission_denied`. It carries a closed `reason` for tests and diagnostics
@@ -207,7 +208,8 @@ The provider authority is a local operator authority, managed by
 - `authority rotate` appends a trust revision adding key version N+1, then a
   revision revoking every previously active key, and deletes the old key
   file. Grants signed by the old key stop authorizing and must be reissued.
-  The 64-revision trust bound allows about 31 rotations per registry.
+  Revoked keys stay in the trust, so the 16-key bound allows 15 rotations
+  per registry; after that a new authority and registry are needed.
 - `authority recover` re-pins after a crash between a registry append and the
   pins write. It accepts the journal tail only when the retained head is in
   the journal and the registry then opens and replays at that tail.
