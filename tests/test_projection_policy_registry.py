@@ -13,6 +13,7 @@ import pytest
 from pydantic import ValidationError
 
 import evidence_inspector.projection_policy_registry as registry_module
+from tests import registry_storage_checks as storage_checks
 from evidence_inspector.cna_explorer import CnaSource, CoordinateGridLayer
 from evidence_inspector.cohort_manifest import MeasurementAnchor
 from evidence_inspector.fragment_explorer import FragmentQuantity, PanelId
@@ -1331,7 +1332,12 @@ def test_failed_restore_root_open_removes_the_empty_target(
     original_open = os.open
 
     def failing_open(path, *args, **kwargs):
-        if path == target.name and kwargs.get("dir_fd") is not None:
+        # The restore root is staged under a hidden sibling name first.
+        if (
+            isinstance(path, str)
+            and path.startswith(f".{target.name}.staging-")
+            and kwargs.get("dir_fd") is not None
+        ):
             raise OSError("descriptor exhausted")
         return original_open(path, *args, **kwargs)
 
@@ -1340,6 +1346,7 @@ def test_failed_restore_root_open_removes_the_empty_target(
         ProjectionPolicyRegistry.restore(target, backup, **_restore_values(receipt))
     monkeypatch.undo()
     assert not target.exists()
+    assert not list(tmp_path.glob(f".{target.name}.staging-*"))
 
 
 def test_failed_restore_reopen_removes_the_target_and_can_retry(
@@ -1380,3 +1387,90 @@ def test_interpreter_warning_registry_does_not_disable_the_registry(
     receipt = registry.register_policy(_fragment())
     monkeypatch.setitem(registry_module.__dict__, "__warningregistry__", {})
     assert registry.resolve(receipt.selector_id, 1).object_sha256 == receipt.object_sha256
+
+
+# --- shared storage behaviour (tests/registry_storage_checks.py) ----------------
+
+
+def test_storage_torn_tail_needs_explicit_operator_recovery(
+    registry: ProjectionPolicyRegistry,
+) -> None:
+    storage_checks.check_torn_tail_recovery(
+        registry,
+        lambda: registry.register_policy(_fragment()),
+        lambda values: _reopen(registry, values),
+        ProjectionPolicyRegistryUnsafe,
+    )
+
+
+def test_storage_interrupted_append_truncates_on_any_exception(
+    registry: ProjectionPolicyRegistry, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    storage_checks.check_append_interrupt_truncates(
+        registry,
+        registry_module,
+        lambda: registry.register_policy(_fragment()),
+        monkeypatch,
+    )
+
+
+def test_storage_lock_descriptor_is_read_under_the_process_lock(
+    registry: ProjectionPolicyRegistry, tmp_path: Path
+) -> None:
+    storage_checks.check_lock_reads_descriptor_under_process_lock(
+        registry, ProjectionPolicyRegistryUnsafe, tmp_path
+    )
+
+
+def test_storage_owned_temporaries_are_swept_and_directories_fail_closed(
+    registry: ProjectionPolicyRegistry,
+) -> None:
+    registry.register_policy(_fragment())
+    storage_checks.check_owned_temporaries(
+        registry,
+        lambda values: _reopen(registry, values),
+        ProjectionPolicyRegistryUnsafe,
+    )
+
+
+def test_storage_interrupted_creation_is_recoverable(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    storage_checks.check_interrupted_creation(
+        ProjectionPolicyRegistry,
+        lambda root, values: ProjectionPolicyRegistry(
+            root, **storage_checks.expected(values)
+        ),
+        tmp_path / "created",
+        registry_module,
+        "_commit_staged_root",
+        "_discard_staged_root",
+        monkeypatch,
+    )
+
+
+def test_storage_interrupted_restore_is_staged(
+    registry: ProjectionPolicyRegistry,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    registry.register_policy(_fragment())
+    storage_checks.check_interrupted_restore(
+        registry,
+        lambda target, backup, values: ProjectionPolicyRegistry.restore(
+            target, backup, **storage_checks.expected(values)
+        ),
+        registry_module,
+        tmp_path,
+        monkeypatch,
+    )
+
+
+def test_storage_creation_under_a_symlinked_parent(tmp_path: Path) -> None:
+    storage_checks.check_creation_under_symlinked_parent(
+        lambda root: ProjectionPolicyRegistry(root),
+        lambda root, values: ProjectionPolicyRegistry(
+            root, **storage_checks.expected(values)
+        ),
+        tmp_path,
+    )

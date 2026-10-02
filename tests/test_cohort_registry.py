@@ -35,6 +35,7 @@ from tests.test_provider_linkage import (
     _token,
 )
 from tests.test_provider_linkage_store import _pins, _store
+from tests import registry_storage_checks as storage_checks
 
 
 @pytest.fixture
@@ -1026,7 +1027,12 @@ def test_failed_restore_root_open_removes_the_empty_target(
     original_open = os.open
 
     def failing_open(path, *args, **kwargs):
-        if path == target.name and kwargs.get("dir_fd") is not None:
+        # The restore root is staged under a hidden sibling name first.
+        if (
+            isinstance(path, str)
+            and path.startswith(f".{target.name}.staging-")
+            and kwargs.get("dir_fd") is not None
+        ):
             raise OSError("descriptor exhausted")
         return original_open(path, *args, **kwargs)
 
@@ -1035,6 +1041,7 @@ def test_failed_restore_root_open_removes_the_empty_target(
         CohortRegistry.restore(target, backup, **_restore_values(receipt, live))
     monkeypatch.undo()
     assert not target.exists()
+    assert not list(tmp_path.glob(f".{target.name}.staging-*"))
 
 
 def test_failed_restore_keeps_contents_of_an_unverified_substituted_root(
@@ -1051,18 +1058,23 @@ def test_failed_restore_keeps_contents_of_an_unverified_substituted_root(
     (victim / "keep.txt").write_text("keep")
     original_mkdir = os.mkdir
 
+    staged: list[Path] = []
+
     def substituting_mkdir(path, *args, **kwargs):
         result = original_mkdir(path, *args, **kwargs)
-        if path == target.name:
-            os.rmdir(target)
-            victim.rename(target)
+        # The restore root is staged under a hidden sibling name first.
+        if isinstance(path, str) and path.startswith(f".{target.name}.staging-"):
+            staged.append(tmp_path / path)
+            os.rmdir(staged[0])
+            victim.rename(staged[0])
         return result
 
     monkeypatch.setattr(os, "mkdir", substituting_mkdir)
     with pytest.raises(CohortRegistryUnsafe, match="root changed"):
         CohortRegistry.restore(target, backup, **_restore_values(receipt, live))
     monkeypatch.undo()
-    assert (target / "keep.txt").read_text() == "keep"
+    assert (staged[0] / "keep.txt").read_text() == "keep"
+    assert not target.exists()
 
 
 def test_failed_restore_never_removes_entries_it_did_not_create(
@@ -1076,10 +1088,14 @@ def test_failed_restore_never_removes_entries_it_did_not_create(
     target = tmp_path / "foreign-entry-restore"
     original_link = os.link
 
+    staged: list[Path] = []
+
     def failing_link(source, destination, *args, **kwargs):
         if destination == "registry-journal.jsonl":
-            (target / "foreign.txt").write_text("foreign")
-            (target / "objects" / "foreign.txt").write_text("foreign")
+            # The restore root is staged under a hidden sibling name first.
+            staged.extend(tmp_path.glob(f".{target.name}.staging-*"))
+            (staged[0] / "foreign.txt").write_text("foreign")
+            (staged[0] / "objects" / "foreign.txt").write_text("foreign")
             raise OSError("disk full")
         return original_link(source, destination, *args, **kwargs)
 
@@ -1087,8 +1103,9 @@ def test_failed_restore_never_removes_entries_it_did_not_create(
     with pytest.raises(CohortRegistryUnsafe, match="restore failed"):
         CohortRegistry.restore(target, backup, **_restore_values(receipt, live))
     monkeypatch.undo()
-    assert (target / "foreign.txt").read_text() == "foreign"
-    assert (target / "objects" / "foreign.txt").read_text() == "foreign"
+    assert (staged[0] / "foreign.txt").read_text() == "foreign"
+    assert (staged[0] / "objects" / "foreign.txt").read_text() == "foreign"
+    assert not target.exists()
 
 
 def test_failed_restore_reopen_removes_the_restored_target_and_can_retry(
@@ -1197,3 +1214,95 @@ def test_failed_restore_reopen_keeps_a_target_whose_journal_changed(
     monkeypatch.setattr(cohort_registry_module, "_CR_CONSTRUCT", original_construct)
     assert (target / "registry-journal.jsonl").read_bytes().endswith(b"peer\n")
     assert (target / "registry-metadata.json").exists()
+
+
+# --- shared storage behaviour (tests/registry_storage_checks.py) ----------------
+
+
+def test_storage_torn_tail_needs_explicit_operator_recovery(
+    registry: CohortRegistry, live
+) -> None:
+    storage_checks.check_torn_tail_recovery(
+        registry,
+        lambda: registry.register(_first(live)),
+        lambda values: CohortRegistry(registry.root, **_restore_values(values, live)),
+        CohortRegistryUnsafe,
+    )
+
+
+def test_storage_interrupted_append_truncates_on_any_exception(
+    registry: CohortRegistry, live, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    storage_checks.check_append_interrupt_truncates(
+        registry,
+        cohort_registry_module,
+        lambda: registry.register(_first(live)),
+        monkeypatch,
+    )
+
+
+def test_storage_lock_descriptor_is_read_under_the_process_lock(
+    registry: CohortRegistry, live, tmp_path: Path
+) -> None:
+    storage_checks.check_lock_reads_descriptor_under_process_lock(
+        registry, CohortRegistryUnsafe, tmp_path
+    )
+
+
+def test_storage_owned_temporaries_are_swept_and_directories_fail_closed(
+    registry: CohortRegistry,
+    live,
+) -> None:
+    registry.register(_first(live))
+    storage_checks.check_owned_temporaries(
+        registry,
+        lambda values: CohortRegistry(registry.root, **_restore_values(values, live)),
+        CohortRegistryUnsafe,
+    )
+
+
+def test_storage_interrupted_creation_is_recoverable(
+    registry: CohortRegistry, live, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    storage_checks.check_interrupted_creation(
+        lambda root: CohortRegistry(
+            root,
+            linkage_store=live[0],
+            expected_trust_snapshot_sha256_by_provider=_pins(),
+        ),
+        lambda root, values: CohortRegistry(root, **_restore_values(values, live)),
+        tmp_path / "created-by-storage-check",
+        cohort_registry_module,
+        "_commit_staged_root",
+        "_discard_staged_root",
+        monkeypatch,
+    )
+
+
+def test_storage_interrupted_restore_is_staged(
+    registry: CohortRegistry, live, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    registry.register(_first(live))
+    storage_checks.check_interrupted_restore(
+        registry,
+        lambda target, backup, values: CohortRegistry.restore(
+            target, backup, **_restore_values(values, live)
+        ),
+        cohort_registry_module,
+        tmp_path,
+        monkeypatch,
+    )
+
+
+def test_storage_creation_under_a_symlinked_parent(
+    registry: CohortRegistry, live, tmp_path: Path
+) -> None:
+    storage_checks.check_creation_under_symlinked_parent(
+        lambda root: CohortRegistry(
+            root,
+            linkage_store=live[0],
+            expected_trust_snapshot_sha256_by_provider=_pins(),
+        ),
+        lambda root, values: CohortRegistry(root, **_restore_values(values, live)),
+        tmp_path,
+    )

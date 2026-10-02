@@ -116,6 +116,12 @@ object remnant. The metadata binds the D09 and D03 registry IDs and epochs.
 Construction, reopen, and restore require exact `DenominatorPolicyRegistry` and
 `LongitudinalDecisionRegistry` instances whose identities match and which read
 one shared linkage store.
+Crash recovery follows the shared storage behaviour in
+`docs/REGISTRY-STORAGE.md`. Creation and restore are staged in a hidden
+sibling and published with one rename. A torn journal tail fails closed on
+reopen until an operator runs `recover_torn_journal_tail` with the retained
+identity and head. Owned `.tmp-<32 hex>` names are swept under the
+exclusive lock (the D05 rule). A failed append truncates on any exception.
 
 One object holds at most 4 MiB and 1,000 members. The registry holds at most
 10,000 objects and 256 MiB of committed object bytes. A backup contains

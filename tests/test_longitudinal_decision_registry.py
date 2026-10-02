@@ -40,6 +40,7 @@ from tests.test_longitudinal_compatibility import (
     _policy,
     _record,
 )
+from tests import registry_storage_checks as storage_checks
 
 PINS = {PROVIDER: TRUST_SHA256}
 
@@ -789,7 +790,12 @@ def test_failed_restore_root_open_removes_the_empty_target(
     original_open = os.open
 
     def failing_open(path, *args, **kwargs):
-        if path == target.name and kwargs.get("dir_fd") is not None:
+        # The restore root is staged under a hidden sibling name first.
+        if (
+            isinstance(path, str)
+            and path.startswith(f".{target.name}.staging-")
+            and kwargs.get("dir_fd") is not None
+        ):
             raise OSError("descriptor exhausted")
         return original_open(path, *args, **kwargs)
 
@@ -806,6 +812,7 @@ def test_failed_restore_root_open_removes_the_empty_target(
         )
     monkeypatch.undo()
     assert not target.exists()
+    assert not list(tmp_path.glob(f".{target.name}.staging-*"))
 
 
 def test_interpreter_warning_registry_does_not_disable_the_registry(
@@ -860,3 +867,108 @@ def test_failed_restore_reopen_removes_the_target_and_can_retry(
         )
     finally:
         restored.close()
+
+
+# --- shared storage behaviour (tests/registry_storage_checks.py) ----------------
+
+
+def test_storage_torn_tail_needs_explicit_operator_recovery(
+    registry: LongitudinalDecisionRegistry, live
+) -> None:
+    storage_checks.check_torn_tail_recovery(
+        registry,
+        lambda: _register(registry, live),
+        lambda values: _reopen(registry, live, values),
+        LongitudinalDecisionRegistryUnsafe,
+    )
+
+
+def test_storage_interrupted_append_truncates_on_any_exception(
+    registry: LongitudinalDecisionRegistry, live, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    storage_checks.check_append_interrupt_truncates(
+        registry, registry_module, lambda: _register(registry, live), monkeypatch
+    )
+
+
+def test_storage_lock_descriptor_is_read_under_the_process_lock(
+    registry: LongitudinalDecisionRegistry, live, tmp_path: Path
+) -> None:
+    storage_checks.check_lock_reads_descriptor_under_process_lock(
+        registry, LongitudinalDecisionRegistryUnsafe, tmp_path
+    )
+
+
+def test_storage_owned_temporaries_are_swept_and_directories_fail_closed(
+    registry: LongitudinalDecisionRegistry,
+    live,
+) -> None:
+    _register(registry, live)
+    storage_checks.check_owned_temporaries(
+        registry,
+        lambda values: _reopen(registry, live, values),
+        LongitudinalDecisionRegistryUnsafe,
+    )
+
+
+def test_storage_interrupted_creation_is_recoverable(
+    registry: LongitudinalDecisionRegistry,
+    live,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    storage_checks.check_interrupted_creation(
+        lambda root: LongitudinalDecisionRegistry(
+            root, linkage_store=live[0], expected_trust_snapshot_sha256_by_provider=PINS
+        ),
+        lambda root, values: LongitudinalDecisionRegistry(
+            root,
+            linkage_store=live[0],
+            expected_trust_snapshot_sha256_by_provider=PINS,
+            **storage_checks.expected(values),
+        ),
+        tmp_path / "created-by-storage-check",
+        registry_module,
+        "_commit_staged_root",
+        "_discard_staged_root",
+        monkeypatch,
+    )
+
+
+def test_storage_interrupted_restore_is_staged(
+    registry: LongitudinalDecisionRegistry,
+    live,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _register(registry, live)
+    storage_checks.check_interrupted_restore(
+        registry,
+        lambda target, backup, values: LongitudinalDecisionRegistry.restore(
+            target,
+            backup,
+            linkage_store=live[0],
+            expected_trust_snapshot_sha256_by_provider=PINS,
+            **storage_checks.expected(values),
+        ),
+        registry_module,
+        tmp_path,
+        monkeypatch,
+    )
+
+
+def test_storage_creation_under_a_symlinked_parent(
+    registry: LongitudinalDecisionRegistry, live, tmp_path: Path
+) -> None:
+    storage_checks.check_creation_under_symlinked_parent(
+        lambda root: LongitudinalDecisionRegistry(
+            root, linkage_store=live[0], expected_trust_snapshot_sha256_by_provider=PINS
+        ),
+        lambda root, values: LongitudinalDecisionRegistry(
+            root,
+            linkage_store=live[0],
+            expected_trust_snapshot_sha256_by_provider=PINS,
+            **storage_checks.expected(values),
+        ),
+        tmp_path,
+    )

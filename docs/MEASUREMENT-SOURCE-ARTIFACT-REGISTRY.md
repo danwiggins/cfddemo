@@ -214,6 +214,12 @@ files; the journal is the commit point and at most one uncommitted object is
 tolerated; a failed journal append truncates its torn suffix; `backup_bytes`
 and `restore` into a new root, where a failed restore, including a failed final
 reopen, removes its target.
+Crash recovery follows the shared storage behaviour in
+`docs/REGISTRY-STORAGE.md`. Creation and restore are staged in a hidden
+sibling and published with one rename. A torn journal tail fails closed on
+reopen until an operator runs `recover_torn_journal_tail` with the retained
+identity and head. Owned `.tmp-<32 hex>` names are swept under the
+exclusive lock (the D05 rule). A failed append truncates on any exception.
 
 The metadata binds the E06 registry ID, epoch and metadata digest; the E06
 metadata binds the cohort registry, D01 linkage store, E04 catalog storage and
@@ -249,8 +255,7 @@ not defend against a hostile process running as the same user.
   without any caller input.
 - The method-authority head is the import-time head pinned by E04, as in E06
   (`method_authority_head_current_verified=false`).
-- The crash-recovery gaps shared by every registry (interrupted root creation,
-  torn tails found on reopen, staged restore) and parse-everything reads apply
-  here too.
+- Every read parses every committed object, which is fine at synthetic scale
+  only.
 - The rollback fence is per process. A fresh process trusts the retained head
   it is given.

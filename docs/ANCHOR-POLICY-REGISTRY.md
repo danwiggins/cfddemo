@@ -315,17 +315,13 @@ In scope:
   as an unavailable comparison state.
 - **D05 in-fence API.** The private D05 in-fence read should become a reviewed
   public API in the authority-fence adapter PR.
-- **Recovery.** The follow-up shared with the D03, D05, D07 and D09 registries
-  applies here too. In-process failures are handled: a failed append truncates
-  its torn suffix, and a failed restore removes its target. A process that dies
-  in three places leaves state that fails closed and needs manual repair:
-  - mid-append, leaving a torn journal tail that reopen rejects;
-  - during root creation; or
-  - during restore, leaving a partial target that blocks a retry at that path.
-
-  The fix is reopen-time tail truncation plus staged creation and restore with
-  an atomic rename. Every read parses every committed object, which is fine at
-  synthetic scale only.
+- **Recovery.** Shared with the sibling registries; see
+  `docs/REGISTRY-STORAGE.md`. Creation and restore are staged and published
+  with one rename, so neither leaves a partial target. A torn journal tail
+  from a crash mid-append still fails closed on reopen until an operator runs
+  `recover_torn_journal_tail` with the retained identity and head. Reopen
+  never repairs it automatically. Every read parses every committed object,
+  which is fine at synthetic scale only.
 
 All fixtures are synthetic/local. Candidate eligibility describes technical
 D03 admissibility only and carries no clinical interpretation.
