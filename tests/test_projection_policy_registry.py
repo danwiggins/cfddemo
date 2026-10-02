@@ -360,6 +360,11 @@ def test_value_ranked_fragment_selection_is_structurally_unrepresentable(
         "rank-1",
         "argmax",
         "highest:fraction",
+        "top1",
+        "rank1",
+        "max2",
+        "minimum3",
+        "TopContributor",
     ),
 )
 def test_value_ranked_contributor_alias_is_rejected(contributor: str) -> None:
@@ -371,6 +376,19 @@ def test_value_ranked_contributor_alias_is_rejected(contributor: str) -> None:
     payload["atlas_id"] = contributor
     with pytest.raises(ValidationError, match="value-ranked"):
         _validate(CellOriginProjectionPolicyV1, payload)
+
+
+def test_real_contributor_words_are_not_mistaken_for_ranking() -> None:
+    for contributor in ("luminal_epithelial", "maximal_dummy", "minor_cell", "T-cell"):
+        payload = _payload(_cell_origin())
+        payload["components"][0]["contributor_id"] = contributor
+        assert _validate(CellOriginProjectionPolicyV1, payload)
+
+
+@pytest.mark.parametrize("contig", ("top", "chr1_max", "rank2"))
+def test_value_ranked_grid_contig_is_rejected(contig: str) -> None:
+    with pytest.raises(ValidationError, match="value-ranked"):
+        _segment(coordinate_grid=_grid(CnaSource.SEGMENTED_CNA, ("chr1", contig)))
 
 
 def test_cell_origin_rejects_privacy_terms_and_unsorted_contributors() -> None:

@@ -86,9 +86,13 @@ minimum/maximum, or any other value-ranked choice:
 
 - the rule and statistic vocabularies are closed enums, and extra fields are
   rejected;
-- a contributor ID or atlas ID containing a ranking lexeme (`top`, `max`,
-  `min`, `largest`, `most`, `rank`, `argmax`, …) is rejected, so a registered
-  "contributor" cannot be an alias for a ranked choice;
+- every coordinate is matched by exact equality, never by value;
+- as a label guard, a contributor ID, atlas ID, or grid contig whose words
+  include a ranking word (`top`, `max`, `min`, `largest`, `most`, `rank`,
+  `argmax`, …) is rejected. Words split at every non-letter and at camel-case
+  boundaries, so `top1`, `rank-1` and `mostChanged` are caught while
+  `luminal` or `minor_cell` are not. The guard is defense in depth; the
+  structural rules above are the guarantee;
 - an import-time guard fails the module if a rule, statistic, or unit member is
   added with a ranking lexeme or without a controlled unit.
 
@@ -160,9 +164,12 @@ committed size; the journal is the commit point and at most one uncommitted
 object is tolerated and removed by the next registration; method, alias and
 instance-state seals; and `backup_bytes`/`restore` into a new root, with a
 failed restore (including a failed final reopen) removing its target. The
-metadata binds no external store. The shared storage follow-up in the E12 plan
-(interrupted root creation, torn tails found on reopen, staged restore, and
-parse-everything reads) applies here too.
+metadata binds no external store. As in D03, reads tolerate one uncommitted
+object without parsing it; the next registration reads it and fails closed if
+its bytes do not match its name, which blocks registration until an operator
+removes it. The shared storage follow-up in the E12 plan (interrupted root
+creation, torn tails found on reopen, staged restore, and parse-everything
+reads) applies here too.
 
 Threat model: in-process code mutation and same-user filesystem races are out
 of scope. The seals and storage checks fail closed on accidental drift; they do

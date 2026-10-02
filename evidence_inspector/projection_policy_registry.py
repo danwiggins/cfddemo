@@ -226,13 +226,27 @@ def _statistic_order(statistic: StrEnum) -> int:
     return tuple(type(statistic)).index(statistic)
 
 
+def _identifier_words(value: str) -> tuple[str, ...]:
+    """Split an identifier into lowercase letter-only words.
+
+    Words break at every non-letter (digits, ``_``, ``.``, ``:``, ``-``) and at
+    a lower-to-upper camel-case boundary, so ``top1``, ``rank-1``, ``max2`` and
+    ``mostChanged`` all expose their ranking word.
+    """
+
+    spaced = re.sub(r"([a-z])([A-Z])", r"\1 \2", value)
+    return tuple(item for item in re.split(r"[^a-z]+", spaced.lower()) if item)
+
+
 def _reject_value_ranked_identifier(value: str, label: str) -> None:
-    lowered = value.lower()
-    segments = [item for item in re.split(r"[^a-z0-9]+", lowered) if item]
-    if any(item in _VALUE_RANKED_LEXEMES for item in segments) or any(
-        lexeme in re.sub(r"[^a-z0-9]+", "", lowered)
-        for lexeme in ("mostchanged", "argmax", "argmin")
-    ):
+    """Reject an identifier that reads as a ranked choice.
+
+    This is a label guard, not the guarantee.  The guarantee is structural: no
+    rule, statistic or field consults a value, and every coordinate is resolved
+    by exact equality.  The guard keeps a registered name from posing as one.
+    """
+
+    if any(word in _VALUE_RANKED_LEXEMES for word in _identifier_words(value)):
         raise ValueError(f"{label} names a value-ranked selection")
 
 
@@ -496,6 +510,8 @@ def _check_cna_grid(
         raise ValueError("CNA coordinate grid belongs to the other E09 source")
     if cna_coordinate_grid_sha256(grid) != digest:
         raise ValueError("CNA coordinate-grid digest is invalid")
+    for contig in grid.contig_order:
+        _reject_value_ranked_identifier(contig, "CNA contig")
 
 
 class CnaChromosomeProjectionPolicyV1(RegistryContract):
