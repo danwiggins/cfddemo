@@ -50,6 +50,7 @@ from evidence_inspector.reader_authorization_synthetic import (
     synthetic_reader_grant,
     synthetic_reader_trust,
 )
+from tests import registry_storage_checks as storage_checks
 
 NOW = datetime(2026, 9, 1, 12, tzinfo=UTC)
 COHORT = "cohort_registry_" + "b" * 32
@@ -1174,3 +1175,97 @@ def test_forked_child_unwinding_the_fence_does_not_release_it(registry) -> None:
             os._exit(0)
         os.close(probe)
     authorize(registry, bind(registry))
+
+
+def _storage_reopen(values) -> dict[str, object]:
+    trust = synthetic_reader_trust()
+    return {
+        "profile": SYNTHETIC,
+        "configured_trust": trust,
+        "expected_trust_sha256": reader_trust_sha256(trust),
+        "time_source": AuthorityTimeSource.fixed(NOW),
+        **storage_checks.expected(values),
+    }
+
+
+# --- shared storage behaviour (tests/registry_storage_checks.py) ----------------
+
+
+def test_storage_torn_tail_needs_explicit_operator_recovery(
+    registry: ReaderAuthorizationRegistry,
+) -> None:
+    storage_checks.check_torn_tail_recovery(
+        registry,
+        lambda: registry.add_grant(grant_for(registry)),
+        lambda values: ReaderAuthorizationRegistry(
+            registry.root, **_storage_reopen(values)
+        ),
+        ReaderAuthorizationRegistryUnsafe,
+    )
+
+
+def test_storage_interrupted_append_truncates_on_any_exception(
+    registry: ReaderAuthorizationRegistry, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    storage_checks.check_append_interrupt_truncates(
+        registry,
+        registry_module,
+        lambda: registry.add_grant(grant_for(registry)),
+        monkeypatch,
+    )
+
+
+def test_storage_lock_descriptor_is_read_under_the_process_lock(
+    registry: ReaderAuthorizationRegistry, tmp_path: Path
+) -> None:
+    storage_checks.check_lock_reads_descriptor_under_process_lock(
+        registry, ReaderAuthorizationRegistryUnsafe, tmp_path
+    )
+
+
+def test_storage_owned_temporaries_are_swept_and_directories_fail_closed(
+    registry: ReaderAuthorizationRegistry,
+) -> None:
+    registry.add_grant(grant_for(registry))
+    storage_checks.check_owned_temporaries(
+        registry,
+        lambda values: ReaderAuthorizationRegistry(
+            registry.root, **_storage_reopen(values)
+        ),
+        ReaderAuthorizationRegistryUnsafe,
+    )
+
+
+def test_storage_interrupted_creation_is_recoverable(
+    registry: ReaderAuthorizationRegistry,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    storage_checks.check_interrupted_creation(
+        lambda root: create_registry(root),
+        lambda root, values: ReaderAuthorizationRegistry(
+            root, **_storage_reopen(values)
+        ),
+        tmp_path / "created-by-storage-check",
+        registry_module,
+        "_commit_staging_directory",
+        "_remove_partial_target",
+        monkeypatch,
+    )
+
+
+def test_storage_interrupted_restore_is_staged(
+    registry: ReaderAuthorizationRegistry,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    registry.add_grant(grant_for(registry))
+    storage_checks.check_interrupted_restore(
+        registry,
+        lambda target, backup, values: ReaderAuthorizationRegistry.restore(
+            target, backup, **_storage_reopen(values)
+        ),
+        registry_module,
+        tmp_path,
+        monkeypatch,
+    )

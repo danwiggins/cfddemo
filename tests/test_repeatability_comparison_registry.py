@@ -62,6 +62,7 @@ from tests.test_repeatability_comparison import (
     _envelope,
     _observation,
 )
+from tests import registry_storage_checks as storage_checks
 
 PINS = {PROVIDER: TRUST_SHA256}
 
@@ -1174,3 +1175,92 @@ def test_replay_rejects_a_live_time_before_registration(
         assert registry._replay_in_fence(stored, NOW) == stored.comparison
         with pytest.raises(RepeatabilityComparisonRegistryStale):
             registry._replay_in_fence(stored, NOW - timedelta(seconds=1))
+
+
+# --- shared storage behaviour (tests/registry_storage_checks.py) ----------------
+
+
+def test_storage_torn_tail_needs_explicit_operator_recovery(
+    registry: RepeatabilityComparisonRegistry, live: Live
+) -> None:
+    storage_checks.check_torn_tail_recovery(
+        registry,
+        lambda: _register(registry, live),
+        lambda values: _reopen(registry, live, values),
+        RepeatabilityComparisonRegistryUnsafe,
+    )
+
+
+def test_storage_interrupted_append_truncates_on_any_exception(
+    registry: RepeatabilityComparisonRegistry,
+    live: Live,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    storage_checks.check_append_interrupt_truncates(
+        registry, registry_module, lambda: _register(registry, live), monkeypatch
+    )
+
+
+def test_storage_lock_descriptor_is_read_under_the_process_lock(
+    registry: RepeatabilityComparisonRegistry, live: Live, tmp_path: Path
+) -> None:
+    storage_checks.check_lock_reads_descriptor_under_process_lock(
+        registry, RepeatabilityComparisonRegistryUnsafe, tmp_path
+    )
+
+
+def test_storage_owned_temporaries_are_swept_and_directories_fail_closed(
+    registry: RepeatabilityComparisonRegistry,
+    live: Live,
+) -> None:
+    _register(registry, live)
+    storage_checks.check_owned_temporaries(
+        registry,
+        lambda values: _reopen(registry, live, values),
+        RepeatabilityComparisonRegistryUnsafe,
+    )
+
+
+def test_storage_interrupted_creation_is_recoverable(
+    registry: RepeatabilityComparisonRegistry,
+    live: Live,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    storage_checks.check_interrupted_creation(
+        lambda root: _open(root, live),
+        lambda root, values: _open(root, live, **storage_checks.expected(values)),
+        tmp_path / "created-by-storage-check",
+        registry_module,
+        "_commit_staged_root",
+        "_discard_staged_root",
+        monkeypatch,
+    )
+
+
+def test_storage_interrupted_restore_is_staged(
+    registry: RepeatabilityComparisonRegistry,
+    live: Live,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _register(registry, live)
+    storage_checks.check_interrupted_restore(
+        registry,
+        lambda target, backup, values: RepeatabilityComparisonRegistry.restore(
+            target, backup, **_restore_values(live, values)
+        ),
+        registry_module,
+        tmp_path,
+        monkeypatch,
+    )
+
+
+def test_storage_creation_under_a_symlinked_parent(
+    registry: RepeatabilityComparisonRegistry, live: Live, tmp_path: Path
+) -> None:
+    storage_checks.check_creation_under_symlinked_parent(
+        lambda root: _open(root, live),
+        lambda root, values: _open(root, live, **storage_checks.expected(values)),
+        tmp_path,
+    )

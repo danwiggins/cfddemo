@@ -224,6 +224,12 @@ The journal is the commit point. A failed journal append truncates any torn
 suffix; reads tolerate at most one uncommitted object, which the next
 registration removes unless it holds the exact bytes being registered. A failed
 restore removes the partial target it created.
+Crash recovery follows the shared storage behaviour in
+`docs/REGISTRY-STORAGE.md`. Creation and restore are staged in a hidden
+sibling and published with one rename. A torn journal tail fails closed on
+reopen until an operator runs `recover_torn_journal_tail` with the retained
+identity and head. Owned `.tmp-<32 hex>` names are swept under the
+exclusive lock (the D05 rule). A failed append truncates on any exception.
 
 One object is about 43 KB for a fixture pair and is bounded to 1 MiB of
 canonical bytes; the registry holds at most 10,000 comparisons and 256 MiB of

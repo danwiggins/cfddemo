@@ -63,6 +63,7 @@ from traceback_runner.signing import (
     development_trust_document_bytes,
     generate_development_keypair,
 )
+from tests import registry_storage_checks as storage_checks
 
 RESULT_KEY = RESULT_TRUST_DOCUMENT.keys[0]
 
@@ -873,3 +874,96 @@ def test_projection_matches_the_whole_document_digest_for_one_key() -> None:
         project_result_trust_document(RESULT_TRUST_DOCUMENT, (SIGNING_KEY.key_id,))
     ) == RESULT_TRUST_SHA256
     assert PROVIDER
+
+
+# --- shared storage behaviour (tests/registry_storage_checks.py) ----------------
+
+
+def test_storage_torn_tail_needs_explicit_operator_recovery(
+    trust: ResultTrustRegistry,
+) -> None:
+    registry = trust
+    storage_checks.check_torn_tail_recovery(
+        registry,
+        lambda: trust.add_key(RESULT_KEY),
+        lambda values: ResultTrustRegistry(
+            trust.root, **storage_checks.expected(values)
+        ),
+        ResultTrustRegistryUnsafe,
+    )
+
+
+def test_storage_interrupted_append_truncates_on_any_exception(
+    trust: ResultTrustRegistry, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    registry = trust
+    storage_checks.check_append_interrupt_truncates(
+        registry, trust_module, lambda: trust.add_key(RESULT_KEY), monkeypatch
+    )
+
+
+def test_storage_lock_descriptor_is_read_under_the_process_lock(
+    trust: ResultTrustRegistry, tmp_path: Path
+) -> None:
+    registry = trust
+    storage_checks.check_lock_reads_descriptor_under_process_lock(
+        registry, ResultTrustRegistryUnsafe, tmp_path
+    )
+
+
+def test_storage_owned_temporaries_are_swept_and_directories_fail_closed(
+    trust: ResultTrustRegistry,
+) -> None:
+    registry = trust
+    trust.add_key(RESULT_KEY)
+    storage_checks.check_owned_temporaries(
+        registry,
+        lambda values: ResultTrustRegistry(
+            trust.root, **storage_checks.expected(values)
+        ),
+        ResultTrustRegistryUnsafe,
+    )
+
+
+def test_storage_interrupted_creation_is_recoverable(
+    trust: ResultTrustRegistry, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    storage_checks.check_interrupted_creation(
+        lambda root: ResultTrustRegistry(root),
+        lambda root, values: ResultTrustRegistry(
+            root, **storage_checks.expected(values)
+        ),
+        tmp_path / "created-by-storage-check",
+        trust_module,
+        "_commit_staged_root",
+        "_discard_staged_root",
+        monkeypatch,
+    )
+
+
+def test_storage_interrupted_restore_is_staged(
+    trust: ResultTrustRegistry, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    registry = trust
+    trust.add_key(RESULT_KEY)
+    storage_checks.check_interrupted_restore(
+        registry,
+        lambda target, backup, values: ResultTrustRegistry.restore(
+            target, backup, **storage_checks.expected(values)
+        ),
+        trust_module,
+        tmp_path,
+        monkeypatch,
+    )
+
+
+def test_storage_creation_under_a_symlinked_parent(
+    trust: ResultTrustRegistry, tmp_path: Path
+) -> None:
+    storage_checks.check_creation_under_symlinked_parent(
+        lambda root: ResultTrustRegistry(root),
+        lambda root, values: ResultTrustRegistry(
+            root, **storage_checks.expected(values)
+        ),
+        tmp_path,
+    )

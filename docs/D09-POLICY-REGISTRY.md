@@ -164,6 +164,12 @@ failed restore removes the partial target it created. That includes a target
 whose final reopen fails. Policy history is validated in journal order: each
 selector's versions must be committed as 1, 2, … N. A gap or a reordered
 history fails closed on load and on restore.
+Crash recovery follows the shared storage behaviour in
+`docs/REGISTRY-STORAGE.md`. Creation and restore are staged in a hidden
+sibling and published with one rename. A torn journal tail fails closed on
+reopen until an operator runs `recover_torn_journal_tail` with the retained
+identity and head. Owned `.tmp-<32 hex>` names are swept under the
+exclusive lock (the D05 rule). A failed append truncates on any exception.
 
 One object holds at most 32 MiB of canonical bytes. Each disposition rule set
 holds at most 100,000 member commitments. The registry holds at most 10,000
