@@ -107,10 +107,13 @@ Items 5 and 6 port the result-trust registry's hardening to the family.
 - A hard crash during staging leaves a `.<name>.staging-<32 hex>` sibling in
   the parent directory. It is never adopted and never blocks a retry. An
   operator may delete it when no creation or restore is running.
-- A crash after the rename but before the constructor returns leaves a
-  complete registry whose identity the caller never received. The identity is
-  in `registry-metadata.json` and the head is the genesis (or, for restore,
-  the backup's retained head).
+- A failure or interrupt after the rename but before the constructor or
+  restore returns is cleaned up by inode: the directory the root descriptor
+  holds is removed under whichever name it now has. A new root's identity was
+  never returned, so a retry creates a fresh one. Only a hard crash in that
+  window leaves a complete registry whose identity the caller never received.
+  That identity is in `registry-metadata.json`, and the head is the genesis
+  (or, for restore, the backup's retained head).
 - A half-built root left by code from before this change (a root without
   metadata) still fails closed and needs manual removal.
 - `rename(2)` replaces an empty directory created at the final path in the

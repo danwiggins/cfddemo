@@ -106,6 +106,25 @@ def check_torn_tail_recovery(
     finally:
         os.close(holder)
     assert journal.read_bytes() == committed + torn
+    # Another thread holding the registry's process lock: refused, not queued.
+    module_lock = sys.modules[cls.__module__]._REGISTRY_PROCESS_LOCK
+    held, release = threading.Event(), threading.Event()
+
+    def hold() -> None:
+        with module_lock:
+            held.set()
+            release.wait(timeout=10)
+
+    holder_thread = threading.Thread(target=hold, daemon=True)
+    holder_thread.start()
+    try:
+        assert held.wait(timeout=5)
+        with pytest.raises(unsafe, match="in use"):
+            cls.recover_torn_journal_tail(root, **expected(values))
+    finally:
+        release.set()
+        holder_thread.join(timeout=5)
+    assert journal.read_bytes() == committed + torn
     assert cls.recover_torn_journal_tail(root, **expected(values)) == len(torn)
     assert journal.read_bytes() == committed
     assert cls.recover_torn_journal_tail(root, **expected(values)) == 0
@@ -280,6 +299,18 @@ def check_interrupted_creation(
 
     # An interrupt with cleanup: the staged tree is removed too.
     before = _staged(root)
+    with pytest.raises(KeyboardInterrupt):
+        create(root)
+    assert not os.path.lexists(root)
+    assert _staged(root) == before
+
+    # An interrupt after the rename but before the constructor learns of it:
+    # the new root (whose identity was never returned) is removed by inode.
+    def crash_after_rename(*args, **kwargs):
+        original_commit(*args, **kwargs)
+        raise KeyboardInterrupt
+
+    monkeypatch.setattr(module, commit_name, crash_after_rename)
     with pytest.raises(KeyboardInterrupt):
         create(root)
     assert not os.path.lexists(root)

@@ -232,15 +232,23 @@ def commit_staged_root(staged: Path, final: Path, root_fd: int) -> None:
         os.close(parent_fd)
 
 
-def discard_staged_root(staged: Path) -> None:
-    """Best-effort removal of a staged root whose creation did not complete."""
+def discard_staged_root(staged: Path, final: Path, root_fd: int | None) -> None:
+    """Best-effort removal of a staged root whose creation did not complete.
+
+    If the failure landed after ``rename(2)``, the directory ``root_fd``
+    holds is now at ``final``; it is a brand-new registry whose identity was
+    never returned, so it is removed under that name instead.
+    """
 
     try:
         parent_fd = _open_parent(staged.parent)
     except OSError:
         return
     try:
-        remove_staging_directory(parent_fd, staged.name)
+        name = staged.name
+        if root_fd is not None:
+            name = bound_name(parent_fd, root_fd, staged.name, final.name)
+        remove_staging_directory(parent_fd, name)
     finally:
         os.close(parent_fd)
 

@@ -777,6 +777,8 @@ class ResultTrustRegistry:
                 _RT_ACCEPT_OBSERVED_HEAD(self, journal, head, check_instance=False)
                 _seal_registry_instance(self)
         except BaseException:
+            if staged_root is not None:
+                _discard_staged_root(staged_root, final_root, self._root_fd)
             for name in ("_journal_fd", "_metadata_fd", "_lock_fd", "_root_fd"):
                 descriptor = getattr(self, name, None)
                 if descriptor is not None:
@@ -785,8 +787,6 @@ class ResultTrustRegistry:
                     except OSError:
                         pass
                     setattr(self, name, None)
-            if staged_root is not None:
-                _discard_staged_root(staged_root)
             raise
 
     def close(self) -> None:

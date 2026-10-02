@@ -1191,6 +1191,8 @@ class DenominatorPolicyRegistry:
                 )
                 _seal_registry_instance(self)
         except BaseException:
+            if staged_root is not None:
+                _discard_staged_root(staged_root, final_root, self._root_fd)
             # Construction has not installed the instance seal yet, so cleanup
             # cannot pass through the public integrity-checked close boundary.
             for name in (
@@ -1207,8 +1209,6 @@ class DenominatorPolicyRegistry:
                     except OSError:
                         pass
                     setattr(self, name, None)
-            if staged_root is not None:
-                _discard_staged_root(staged_root)
             raise
 
     def close(self) -> None:
