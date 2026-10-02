@@ -1295,6 +1295,8 @@ DX DUAL VOICES — CONSENSUS TABLE:
 | Challenges 2–4: cuts | **Accepted.** H7 cut. H4 deferred until an E9 retention runbook exists, after storage consolidation. H3 deferred until the host OS is chosen. |
 | H1 placement | **A separate PR after the browser PR lands**, not folded into it. |
 
+| X1: host | **Resolved 2026-10-02.** For now the host is a team member's own macOS workstation (the operator's or a co-founder's), not a provider PC. Windows (P3) stays unsupported. The cross-account test is not applicable on single-user machines. H3's trigger moves from "host OS chosen" to **"first non-team user or first real donor data"**; when it fires, use macOS Keychain as the key backend. P2 relies on FileVault. |
+
 The original gate text follows for the record.
 
 ## Pending user gates (now resolved, see above)
