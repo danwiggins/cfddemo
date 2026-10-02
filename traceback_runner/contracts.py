@@ -15,7 +15,9 @@ from pydantic import BaseModel, ConfigDict, Field, StringConstraints, field_vali
 
 from evidence_inspector.models import Sha256
 
-from .serialization import canonical_json_bytes, canonical_model_from_bytes, sha256_bytes
+from .serialization import canonical_json_bytes, sha256_bytes
+# Re-exported: traceback_runner/__init__.py and bundles.py import it from here.
+from .serialization import canonical_model_from_bytes as canonical_model_from_bytes
 
 Identifier = Annotated[str, StringConstraints(min_length=1, max_length=128, pattern=r"^[A-Za-z0-9][A-Za-z0-9_.:-]*$")]
 NonEmptyText = Annotated[str, StringConstraints(strip_whitespace=True, min_length=1, max_length=2048)]

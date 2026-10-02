@@ -5,7 +5,6 @@ import hashlib
 import json
 import sqlite3
 import time
-from pathlib import Path
 from unittest.mock import patch
 
 import pytest
@@ -154,7 +153,8 @@ def test_invalid_existing_record_preserved_and_valid_sibling_reused(tmp_path, ca
 
 def test_exclusive_publication_never_replaces_existing_empty_directory(tmp_path):
     source, destination = tmp_path / "private", tmp_path / "final"
-    source.mkdir(); destination.mkdir()
+    source.mkdir()
+    destination.mkdir()
     (source / "record").write_text("complete")
     with pytest.raises(FileExistsError):
         cli._rename_directory_exclusive(source, destination)

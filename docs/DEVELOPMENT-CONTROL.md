@@ -92,3 +92,39 @@ Report the branch, commit, PR URL, owned files, commands run and their results,
 public module interfaces, dependency status, and remaining limitations. Report
 actual blockers explicitly. Never treat a stub, metadata fixture, skipped test,
 or self-declared approval as a completed release gate.
+
+## CI
+
+`.github/workflows/ci.yml` runs on every pull request and on pushes to `main`,
+on `ubuntu-latest` and `macos-latest` with Python 3.11. Each job runs
+`uv sync --frozen`, `uvx ruff@0.7.4 check .`, and
+`pytest -m "not slow" --timeout 600` in two steps: everything except the
+local web service tests under `pytest -n auto`, then `tests/web` and
+`tests/test_reader_cli.py` serially. The serial step exists because every
+running local web service holds one host-wide `/tmp` lock; it folds back into
+the parallel step once golden-path item A3 (per-state-root web lock) lands.
+
+`.github/workflows/slow.yml` runs `pytest -m slow` nightly, on demand, and on
+pull requests that touch `traceback_runner/product_gates.py`,
+`traceback_runner/web/`, or the product-gates fixture. Today the only slow test
+compares the live product-gates harness with the frozen
+`tests/fixtures/product_gates/foundation_report.json`. After a contract change,
+regenerate the fixture with
+`uv run python scripts/regenerate_product_gate_fixture.py`; never hand-edit it.
+
+Branch protection is a manual repository-admin action (golden-path decision
+D8). The operator runs, once both CI checks have reported on a pull request:
+
+```
+gh api -X PUT repos/danwiggins/cfddemo/branches/main/protection \
+  -H "Accept: application/vnd.github+json" \
+  -F 'required_status_checks[strict]=true' \
+  -f 'required_status_checks[contexts][]=ci (ubuntu-latest)' \
+  -f 'required_status_checks[contexts][]=ci (macos-latest)' \
+  -F 'enforce_admins=false' -F 'required_pull_request_reviews=null' -F 'restrictions=null'
+```
+
+`-F` sends `true`, `false`, and `null` as JSON literals; `-f` would send the
+string `"true"` where the endpoint expects a boolean. The `slow` workflow is
+deliberately not a required check: it is path-filtered and would block
+unrelated pull requests.
