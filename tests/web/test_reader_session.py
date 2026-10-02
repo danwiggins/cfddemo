@@ -258,8 +258,8 @@ def test_revoked_expired_and_stale_bindings_are_denied(
     boundary, _, binder, _ = web
     revoked = _bound_session(boundary, binder)
     registry.revoke_grant(SELECTOR, reason=ReaderRevocationReason.PROVIDER_REQUEST)
-    # Any registry advance after binding is a stale head for that session.
-    with _denied(ReaderDenialReason.STALE_HEAD):
+    # Its own revocation ends the session.
+    with _denied(ReaderDenialReason.GRANT_REVOKED):
         _read(binder, revoked)
     with _denied(ReaderDenialReason.GRANT_REVOKED):
         _bound_session(boundary, binder)
@@ -332,7 +332,7 @@ def test_revocation_cannot_land_before_final_return(web, registry) -> None:
         worker.join(timeout=30)
         assert finished.is_set()
         assert response["grant"] == authorization.grant_sha256
-        with _denied(ReaderDenialReason.STALE_HEAD):
+        with _denied(ReaderDenialReason.GRANT_REVOKED):
             _read(binder, grant)
     finally:
         peer.close()

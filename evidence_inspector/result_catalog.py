@@ -49,14 +49,29 @@ from evidence_inspector.method_registry import (
     RevocationTarget,
     replay_current_capability,
 )
+from evidence_inspector.result_trust_registry import (
+    ResultTrustRegistry,
+    ResultTrustRegistryError,
+    ResultTrustSnapshot,
+)
 from traceback_runner.bundles import VerifiedBundle, verify_bundle
 from traceback_runner.contracts import ResultBundleManifestV2
 from traceback_runner.filesystem import rename_directory_exclusive_at
 from traceback_runner.serialization import canonical_json_bytes
-from traceback_runner.signing import TrustStore
+from traceback_runner.signing import (
+    TrustStore,
+    development_trust_document_bytes,
+    load_development_trust,
+)
 
 _PINNED_VERIFY_BUNDLE = verify_bundle
 _PINNED_TRUST_RESOLVE = TrustStore.resolve
+_PINNED_TRUST_READ_FENCE = ResultTrustRegistry.read_fence
+_PINNED_LOAD_TRUST = load_development_trust
+_PINNED_TRUST_DOCUMENT_BYTES = development_trust_document_bytes
+_PINNED_TRUST_READ_FENCE_SEAL = _PINNED_TRUST_READ_FENCE
+_PINNED_LOAD_TRUST_SEAL = _PINNED_LOAD_TRUST
+_PINNED_TRUST_DOCUMENT_BYTES_SEAL = _PINNED_TRUST_DOCUMENT_BYTES
 _PINNED_FAULT_SNAPSHOT = fault_controller_snapshot
 _PINNED_FAULT_HIT = DeterministicFaultController.hit
 
@@ -337,12 +352,27 @@ DEFAULT_RESULT_BUNDLE_READER_REGISTRY = ResultBundleReaderRegistry(
 _PINNED_READER_SELECT = ResultBundleReaderRegistry.select
 
 
-class CatalogAuthoritySnapshot(CatalogModel):
-    """Opaque identity of the exact catalog storage and verification authority."""
+CATALOG_AUTHORITY_SCHEMA_V1 = "traceback.catalog-authority.v1"
+CATALOG_AUTHORITY_SCHEMA_V2 = "traceback.catalog-authority.v2"
+# Every catalog authority version a retained digest may name, oldest first.
+CATALOG_AUTHORITY_SCHEMA_VERSIONS = (
+    CATALOG_AUTHORITY_SCHEMA_V1,
+    CATALOG_AUTHORITY_SCHEMA_V2,
+)
 
-    schema_version: Literal["traceback.catalog-authority.v1"] = (
-        "traceback.catalog-authority.v1"
-    )
+
+class CatalogAuthoritySnapshot(CatalogModel):
+    """Opaque identity of the exact catalog storage and verification authority.
+
+    ``v1``: ``trust_snapshot_sha256`` hashes the keys of a caller-held
+    ``TrustStore``. ``v2``: it binds a protected ``ResultTrustRegistry`` by
+    registry ID, epoch, state version, head, and current document digest, so
+    every trust event changes the catalog authority digest.
+    """
+
+    schema_version: Literal[
+        "traceback.catalog-authority.v1", "traceback.catalog-authority.v2"
+    ] = CATALOG_AUTHORITY_SCHEMA_V1
     storage_identity_sha256: Sha256
     trust_snapshot_sha256: Sha256
     reader_registry_sha256: Sha256
@@ -352,6 +382,60 @@ def catalog_authority_sha256(snapshot: CatalogAuthoritySnapshot) -> str:
     return hashlib.sha256(
         b"traceback-catalog-authority-v1\0" + canonical_json_bytes(snapshot)
     ).hexdigest()
+
+
+def registry_trust_snapshot_sha256(snapshot: ResultTrustSnapshot) -> str:
+    """Bind one exact result-trust registry head for a v2 catalog authority."""
+
+    return hashlib.sha256(
+        b"traceback-catalog-result-trust-registry-v1\0"
+        + canonical_json_bytes(
+            {
+                "registry_id": snapshot.registry_id,
+                "registry_epoch_sha256": snapshot.registry_epoch_sha256,
+                "state_version": snapshot.state_version,
+                "state_head_sha256": snapshot.state_head_sha256,
+                "document_sha256": snapshot.document_sha256,
+            }
+        )
+    ).hexdigest()
+
+
+def bound_catalog_authority(
+    *,
+    storage_identity_sha256: str,
+    trust_snapshot_sha256: str,
+    reader_registry_sha256: str,
+    expected_catalog_authority_sha256: str,
+) -> CatalogAuthoritySnapshot | None:
+    """Rebuild the retained authority whose digest is exactly the one given.
+
+    The schema version is inside the digest, so at most one version matches.
+    """
+
+    for version in CATALOG_AUTHORITY_SCHEMA_VERSIONS:
+        candidate = CatalogAuthoritySnapshot(
+            schema_version=version,
+            storage_identity_sha256=storage_identity_sha256,
+            trust_snapshot_sha256=trust_snapshot_sha256,
+            reader_registry_sha256=reader_registry_sha256,
+        )
+        if catalog_authority_sha256(candidate) == expected_catalog_authority_sha256:
+            return candidate
+    return None
+
+
+def _trust_registry_identity(registry: ResultTrustRegistry) -> tuple[str, str]:
+    """Read a trust registry's immutable identity without invoking its hooks."""
+
+    try:
+        metadata = object.__getattribute__(registry, "__dict__")["_metadata"]
+        identity = (metadata.registry_id, metadata.registry_epoch_sha256)
+    except (AttributeError, KeyError, TypeError):
+        raise CatalogError("catalog trust registry is unsupported") from None
+    if not all(type(item) is str for item in identity):
+        raise CatalogError("catalog trust registry is unsupported")
+    return identity
 
 
 class ExecutionState(StrEnum):
@@ -844,6 +928,10 @@ class ResultCatalog:
             "_fault_controller",
             "_fault_controller_identity",
             "_fault_controller_configuration",
+            "trust_store",
+            "result_trust_registry",
+            "_result_trust_identity",
+            "_trust_fence_holders",
         }
     )
 
@@ -857,10 +945,19 @@ class ResultCatalog:
         root: str | Path,
         *,
         import_roots: Mapping[str, str | Path],
-        trust_store: TrustStore,
+        trust_store: TrustStore | None = None,
+        result_trust_registry: ResultTrustRegistry | None = None,
         reader_registry: ResultBundleReaderRegistry = DEFAULT_RESULT_BUNDLE_READER_REGISTRY,
         fault_controller: DeterministicFaultController = NO_FAULTS,
     ) -> None:
+        """Open one catalog bound to exactly one result trust authority.
+
+        ``result_trust_registry`` is the protected, forward-only path: every
+        verification reads the registry's current trust under its read fence,
+        so a revocation applies to the next verification without reopening.
+        ``trust_store`` is the earlier caller-held store, kept for callers that
+        build one directly.
+        """
         if not import_roots or len(import_roots) > MAX_IMPORT_ROOTS:
             raise CatalogFilesystemError("catalog import root count is invalid")
         self.root = Path(root).absolute()
@@ -877,13 +974,31 @@ class ResultCatalog:
             or ResultBundleReaderRegistry.select is not _PINNED_READER_SELECT
         ):
             raise CatalogUnsupportedSchema("bundle reader registry is unsupported")
-        if (
-            type(trust_store) is not TrustStore
-            or "resolve" in vars(trust_store)
-            or TrustStore.resolve is not _PINNED_TRUST_RESOLVE
-        ):
-            raise CatalogError("catalog trust store is unsupported")
+        if (trust_store is None) == (result_trust_registry is None):
+            raise CatalogError("catalog requires exactly one result trust authority")
+        if trust_store is not None:
+            if (
+                type(trust_store) is not TrustStore
+                or "resolve" in vars(trust_store)
+                or TrustStore.resolve is not _PINNED_TRUST_RESOLVE
+            ):
+                raise CatalogError("catalog trust store is unsupported")
+            self._result_trust_identity = None
+        else:
+            if (
+                type(result_trust_registry) is not ResultTrustRegistry
+                or ResultTrustRegistry.read_fence is not _PINNED_TRUST_READ_FENCE
+            ):
+                raise CatalogError("catalog trust registry is unsupported")
+            self._result_trust_identity = _trust_registry_identity(
+                result_trust_registry
+            )
         self.trust_store = trust_store
+        self.result_trust_registry = result_trust_registry
+        # Thread ident -> the trust snapshot whose read fence that thread holds
+        # through this catalog.  Only touched under ``_connection_lock``.
+        self._trust_fence_holders: dict[int, ResultTrustSnapshot] = {}
+        self._trust_high_water: tuple[int, str] | None = None
         try:
             self.reader_registry = ResultBundleReaderRegistry.model_validate_json(
                 canonical_json_bytes(reader_registry)
@@ -950,12 +1065,22 @@ class ResultCatalog:
             raise
 
     def _validate_verification_authority(self) -> None:
-        if (
-            type(self.trust_store) is not TrustStore
-            or "resolve" in vars(self.trust_store)
-            or TrustStore.resolve is not _PINNED_TRUST_RESOLVE
+        registry = self.result_trust_registry
+        if registry is None:
+            if (
+                type(self.trust_store) is not TrustStore
+                or "resolve" in vars(self.trust_store)
+                or TrustStore.resolve is not _PINNED_TRUST_RESOLVE
+                or self._result_trust_identity is not None
+            ):
+                raise CatalogError("catalog trust store is unsupported")
+        elif (
+            self.trust_store is not None
+            or type(registry) is not ResultTrustRegistry
+            or ResultTrustRegistry.read_fence is not _PINNED_TRUST_READ_FENCE
+            or _trust_registry_identity(registry) != self._result_trust_identity
         ):
-            raise CatalogError("catalog trust store is unsupported")
+            raise CatalogError("catalog trust registry is unsupported")
         if (
             type(self.reader_registry) is not ResultBundleReaderRegistry
             or "select" in vars(self.reader_registry)
@@ -977,25 +1102,34 @@ class ResultCatalog:
 
         _RC_VALIDATE_STORAGE(self)
         _RC_VALIDATE_VERIFICATION_AUTHORITY(self)
-        try:
-            with self.trust_store._lock:
-                keys = tuple(
-                    {
-                        "key_id": key.key_id,
-                        "purpose": key.purpose.value,
-                        "namespace": key.namespace.value,
-                        "public_key_hex": key.public_key_bytes.hex(),
-                        "revoked": key.revoked,
-                    }
-                    for key in sorted(
-                        self.trust_store._keys.values(), key=lambda item: item.key_id
+        if self.result_trust_registry is not None:
+            schema_version = CATALOG_AUTHORITY_SCHEMA_V2
+            with _RC_TRUST_FENCE(self) as (_, trust):
+                if type(trust) is not ResultTrustSnapshot:
+                    raise CatalogError("catalog trust registry changed")
+                trust_sha256 = registry_trust_snapshot_sha256(trust)
+        else:
+            schema_version = CATALOG_AUTHORITY_SCHEMA_V1
+            try:
+                with self.trust_store._lock:
+                    keys = tuple(
+                        {
+                            "key_id": key.key_id,
+                            "purpose": key.purpose.value,
+                            "namespace": key.namespace.value,
+                            "public_key_hex": key.public_key_bytes.hex(),
+                            "revoked": key.revoked,
+                        }
+                        for key in sorted(
+                            self.trust_store._keys.values(),
+                            key=lambda item: item.key_id,
+                        )
                     )
-                )
-        except Exception:  # noqa: BLE001 - normalize hostile trust-store state
-            raise CatalogError("catalog trust store is unsupported") from None
-        trust_sha256 = hashlib.sha256(
-            b"traceback-catalog-trust-v1\0" + canonical_json_bytes(keys)
-        ).hexdigest()
+            except Exception:  # noqa: BLE001 - normalize hostile trust-store state
+                raise CatalogError("catalog trust store is unsupported") from None
+            trust_sha256 = hashlib.sha256(
+                b"traceback-catalog-trust-v1\0" + canonical_json_bytes(keys)
+            ).hexdigest()
         storage_sha256 = hashlib.sha256(
             b"traceback-catalog-storage-v1\0"
             + canonical_json_bytes(
@@ -1010,12 +1144,94 @@ class ResultCatalog:
             )
         ).hexdigest()
         return CatalogAuthoritySnapshot(
+            schema_version=schema_version,
             storage_identity_sha256=storage_sha256,
             trust_snapshot_sha256=trust_sha256,
             reader_registry_sha256=hashlib.sha256(
                 b"traceback-catalog-reader-registry-v1\0" + self._reader_registry_bytes
             ).hexdigest(),
         )
+
+    @contextmanager
+    def _trust_fence(self) -> Iterator[tuple[TrustStore, ResultTrustSnapshot | None]]:
+        """Yield the trust store every verification in the body must use.
+
+        Registry path: hold this catalog's ``_connection_lock`` and then the
+        registry read fence through the body, and yield a fresh ``TrustStore``
+        built from the yielded snapshot.  A nested entry on the same thread
+        reuses the held snapshot (the registry lock is not reentrant), so one
+        operation sees one trust head.  Lock order: ``_connection_lock``, then
+        the trust read fence.
+
+        TrustStore path: yields the caller-held store and holds nothing, as
+        before.
+        """
+
+        registry = self.result_trust_registry
+        if registry is None:
+            yield self.trust_store, None
+            return
+        thread = threading.get_ident()
+        with self._connection_lock:
+            _RC_VALIDATE_VERIFICATION_AUTHORITY(self)
+            held = self._trust_fence_holders.get(thread)
+            if held is not None:
+                yield (
+                    _PINNED_LOAD_TRUST(_PINNED_TRUST_DOCUMENT_BYTES(held.document)),
+                    held,
+                )
+                return
+            phase = "enter"
+            try:
+                with _PINNED_TRUST_READ_FENCE(registry) as snapshot:
+                    if (
+                        type(snapshot) is not ResultTrustSnapshot
+                        or (snapshot.registry_id, snapshot.registry_epoch_sha256)
+                        != self._result_trust_identity
+                    ):
+                        raise CatalogError("catalog trust registry changed")
+                    high_water = self._trust_high_water
+                    if high_water is not None and (
+                        snapshot.state_version < high_water[0]
+                        or (
+                            snapshot.state_version == high_water[0]
+                            and snapshot.state_head_sha256 != high_water[1]
+                        )
+                    ):
+                        raise CatalogError("catalog result trust rolled back")
+                    store = _PINNED_LOAD_TRUST(
+                        _PINNED_TRUST_DOCUMENT_BYTES(snapshot.document)
+                    )
+                    self._trust_high_water = (
+                        snapshot.state_version,
+                        snapshot.state_head_sha256,
+                    )
+                    self._trust_fence_holders[thread] = snapshot
+                    phase = "body"
+                    try:
+                        yield store, snapshot
+                    finally:
+                        self._trust_fence_holders.pop(thread, None)
+                    phase = "exit"
+            except ResultTrustRegistryError:
+                if phase == "body":
+                    raise
+                raise CatalogError("catalog result trust is unavailable") from None
+
+    @contextmanager
+    def trust_authority_fence(self) -> Iterator[ResultTrustSnapshot | None]:
+        """Hold this catalog's trust authority for a composing caller's body.
+
+        On the registry path this holds ``_connection_lock`` and the trust
+        read fence, so every catalog verification in the body uses the yielded
+        snapshot and no trust event commits until the body exits.  The
+        TrustStore path yields ``None`` and holds nothing.  The body must not
+        open a linkage fence, call a D07 registry, or mutate the trust
+        registry.
+        """
+
+        with _RC_TRUST_FENCE(self) as (_, snapshot):
+            yield snapshot
 
     def _fault(self, point: str) -> None:
         controller = self._fault_controller
@@ -1400,132 +1616,133 @@ class ResultCatalog:
         )
         object_path = self._bound_objects / bundle_sha256
         try:
-            _RC_VALIDATE_VERIFICATION_AUTHORITY(self)
-            verified = _PINNED_VERIFY_BUNDLE(temporary, self.trust_store)
-            _PINNED_READER_SELECT(self.reader_registry, verified)
-            if not isinstance(verified.manifest, ResultBundleManifestV2):
-                raise CatalogUnsupportedSchema("bundle schema is unsupported")
-            if (
-                verified.manifest.method.method_id != capability.method_ref.method_id
-                or verified.manifest.method.version != capability.method_ref.version
-                or verified.manifest.method.method_definition_sha256
-                != capability.method_definition_sha256
-            ):
-                raise CatalogConflict("bundle method identity conflicts")
-            reference = _RC_REFERENCE(
-                verified,
-                bundle_sha256=bundle_sha256,
-                manifest_sha256=manifest_sha256,
-                capability=capability,
-            )
-            _fsync_tree(temporary)
-            _seal_tree(temporary)
-            _RC_VALIDATE_STORAGE(self)
-            parent_fd = self._objects_fd
-            try:
-                try:
-                    rename_directory_exclusive_at(
-                        parent_fd, temporary.name, object_path.name
-                    )
-                    os.fsync(parent_fd)
-                except FileExistsError:
-                    try:
-                        existing_fd = _open_directory_at(parent_fd, object_path.name)
-                    except OSError:
-                        raise CatalogConflict("catalog object identity conflicts")
-                    try:
-                        existing_sha256, existing_manifest, _ = _copy_exact_bundle(
-                            existing_fd, None
-                        )
-                    finally:
-                        os.close(existing_fd)
-                    if (
-                        existing_sha256 != bundle_sha256
-                        or existing_manifest != manifest_sha256
-                    ):
-                        raise CatalogConflict("catalog object identity conflicts")
-                    _remove_tree(temporary)
-            finally:
+            with _RC_TRUST_FENCE(self) as (trust_store, _):
+                _RC_VALIDATE_VERIFICATION_AUTHORITY(self)
+                verified = _PINNED_VERIFY_BUNDLE(temporary, trust_store)
+                _PINNED_READER_SELECT(self.reader_registry, verified)
+                if not isinstance(verified.manifest, ResultBundleManifestV2):
+                    raise CatalogUnsupportedSchema("bundle schema is unsupported")
+                if (
+                    verified.manifest.method.method_id != capability.method_ref.method_id
+                    or verified.manifest.method.version != capability.method_ref.version
+                    or verified.manifest.method.method_definition_sha256
+                    != capability.method_definition_sha256
+                ):
+                    raise CatalogConflict("bundle method identity conflicts")
+                reference = _RC_REFERENCE(
+                    verified,
+                    bundle_sha256=bundle_sha256,
+                    manifest_sha256=manifest_sha256,
+                    capability=capability,
+                )
+                _fsync_tree(temporary)
+                _seal_tree(temporary)
                 _RC_VALIDATE_STORAGE(self)
-            _RC_FAULT(self, "after_object_publish")
-            with _RC_CONNECT(self) as connection:
-                connection.execute("BEGIN IMMEDIATE")
+                parent_fd = self._objects_fd
                 try:
-                    existing = connection.execute(
-                        """SELECT r.ref_json,
-                           EXISTS(SELECT 1 FROM coordinated_results c
-                                  WHERE c.result_id=r.result_id),
-                           EXISTS(SELECT 1 FROM result_publications p
-                                  WHERE p.result_id=r.result_id AND p.state='adopted')
-                           FROM results r
-                           WHERE r.result_id=? OR r.bundle_sha256=? OR r.bundle_record_id=?""",
-                        (
-                            reference.result_id,
-                            reference.bundle_sha256,
-                            reference.bundle_record_id,
-                        ),
-                    ).fetchone()
-                    if existing is not None:
-                        if existing[1] and not existing[2]:
-                            raise CatalogConflict(
-                                "catalog result publication is pending"
-                            )
-                        parsed = CatalogResultRef.model_validate_json(existing[0])
-                        alias_row = connection.execute(
-                            """SELECT display_alias, run_alias, timepoint_alias
-                               FROM opaque_aliases WHERE result_id=?""",
-                            (parsed.result_id,),
-                        ).fetchone()
-                        if (
-                            parsed != reference
-                            or alias_row is None
-                            or tuple(alias_row)
-                            != (
-                                aliases.display_alias,
-                                aliases.run_alias,
-                                aliases.timepoint_alias,
-                            )
-                        ):
-                            raise CatalogConflict("catalog identity conflict")
-                        connection.commit()
-                        _RC_VALIDATE_STORAGE(self)
-                        return parsed
-                    connection.execute(
-                        """INSERT INTO results VALUES(?,?,?,?,?,?,?,?,?,?)""",
-                        (
-                            reference.result_id,
-                            reference.bundle_sha256,
-                            reference.bundle_record_id,
-                            reference.method_ref.method_id,
-                            reference.method_ref.version,
-                            reference.execution_state.value,
-                            reference.information_state.value,
-                            reference.trust_state.value,
-                            reference.qualification_state.value,
-                            canonical_json_bytes(reference),
-                        ),
-                    )
                     try:
-                        connection.execute(
-                            "INSERT INTO opaque_aliases VALUES(?,?,?,?)",
+                        rename_directory_exclusive_at(
+                            parent_fd, temporary.name, object_path.name
+                        )
+                        os.fsync(parent_fd)
+                    except FileExistsError:
+                        try:
+                            existing_fd = _open_directory_at(parent_fd, object_path.name)
+                        except OSError:
+                            raise CatalogConflict("catalog object identity conflicts")
+                        try:
+                            existing_sha256, existing_manifest, _ = _copy_exact_bundle(
+                                existing_fd, None
+                            )
+                        finally:
+                            os.close(existing_fd)
+                        if (
+                            existing_sha256 != bundle_sha256
+                            or existing_manifest != manifest_sha256
+                        ):
+                            raise CatalogConflict("catalog object identity conflicts")
+                        _remove_tree(temporary)
+                finally:
+                    _RC_VALIDATE_STORAGE(self)
+                _RC_FAULT(self, "after_object_publish")
+                with _RC_CONNECT(self) as connection:
+                    connection.execute("BEGIN IMMEDIATE")
+                    try:
+                        existing = connection.execute(
+                            """SELECT r.ref_json,
+                               EXISTS(SELECT 1 FROM coordinated_results c
+                                      WHERE c.result_id=r.result_id),
+                               EXISTS(SELECT 1 FROM result_publications p
+                                      WHERE p.result_id=r.result_id AND p.state='adopted')
+                               FROM results r
+                               WHERE r.result_id=? OR r.bundle_sha256=? OR r.bundle_record_id=?""",
                             (
                                 reference.result_id,
-                                aliases.display_alias,
-                                aliases.run_alias,
-                                aliases.timepoint_alias,
+                                reference.bundle_sha256,
+                                reference.bundle_record_id,
+                            ),
+                        ).fetchone()
+                        if existing is not None:
+                            if existing[1] and not existing[2]:
+                                raise CatalogConflict(
+                                    "catalog result publication is pending"
+                                )
+                            parsed = CatalogResultRef.model_validate_json(existing[0])
+                            alias_row = connection.execute(
+                                """SELECT display_alias, run_alias, timepoint_alias
+                                   FROM opaque_aliases WHERE result_id=?""",
+                                (parsed.result_id,),
+                            ).fetchone()
+                            if (
+                                parsed != reference
+                                or alias_row is None
+                                or tuple(alias_row)
+                                != (
+                                    aliases.display_alias,
+                                    aliases.run_alias,
+                                    aliases.timepoint_alias,
+                                )
+                            ):
+                                raise CatalogConflict("catalog identity conflict")
+                            connection.commit()
+                            _RC_VALIDATE_STORAGE(self)
+                            return parsed
+                        connection.execute(
+                            """INSERT INTO results VALUES(?,?,?,?,?,?,?,?,?,?)""",
+                            (
+                                reference.result_id,
+                                reference.bundle_sha256,
+                                reference.bundle_record_id,
+                                reference.method_ref.method_id,
+                                reference.method_ref.version,
+                                reference.execution_state.value,
+                                reference.information_state.value,
+                                reference.trust_state.value,
+                                reference.qualification_state.value,
+                                canonical_json_bytes(reference),
                             ),
                         )
-                    except sqlite3.IntegrityError:
-                        raise CatalogConflict(
-                            "catalog alias identity conflict"
-                        ) from None
-                    _RC_FAULT(self, "before_catalog_commit")
-                    connection.commit()
-                    _RC_VALIDATE_STORAGE(self)
-                except BaseException:
-                    connection.rollback()
-                    raise
-            return reference
+                        try:
+                            connection.execute(
+                                "INSERT INTO opaque_aliases VALUES(?,?,?,?)",
+                                (
+                                    reference.result_id,
+                                    aliases.display_alias,
+                                    aliases.run_alias,
+                                    aliases.timepoint_alias,
+                                ),
+                            )
+                        except sqlite3.IntegrityError:
+                            raise CatalogConflict(
+                                "catalog alias identity conflict"
+                            ) from None
+                        _RC_FAULT(self, "before_catalog_commit")
+                        connection.commit()
+                        _RC_VALIDATE_STORAGE(self)
+                    except BaseException:
+                        connection.rollback()
+                        raise
+                return reference
         except BaseException:
             if temporary.exists():
                 _remove_tree(temporary)
@@ -1567,128 +1784,129 @@ class ResultCatalog:
         )
         object_path = self._bound_objects / bundle_sha256
         try:
-            authority = _RC_AUTHORITY_SNAPSHOT(self)
-            verified = _PINNED_VERIFY_BUNDLE(temporary, self.trust_store)
-            reader = _PINNED_READER_SELECT(self.reader_registry, verified)
-            if not isinstance(verified.manifest, ResultBundleManifestV2):
-                raise CatalogUnsupportedSchema("bundle schema is unsupported")
-            if (
-                verified.manifest.method.method_id != capability.method_ref.method_id
-                or verified.manifest.method.version != capability.method_ref.version
-                or verified.manifest.method.method_definition_sha256
-                != capability.method_definition_sha256
-            ):
-                raise CatalogConflict("bundle method identity conflicts")
-            reference = _RC_REFERENCE(
-                verified,
-                bundle_sha256=bundle_sha256,
-                manifest_sha256=manifest_sha256,
-                capability=capability,
-            )
-            _fsync_tree(temporary)
-            _seal_tree(temporary)
-            _RC_VALIDATE_STORAGE(self)
-            try:
-                try:
-                    rename_directory_exclusive_at(
-                        self._objects_fd, temporary.name, object_path.name
-                    )
-                    os.fsync(self._objects_fd)
-                except FileExistsError:
-                    try:
-                        existing_fd = _open_directory_at(
-                            self._objects_fd, object_path.name
-                        )
-                    except OSError:
-                        raise CatalogConflict("catalog object identity conflicts")
-                    try:
-                        existing_sha256, existing_manifest, _ = _copy_exact_bundle(
-                            existing_fd, None
-                        )
-                    finally:
-                        os.close(existing_fd)
-                    if (
-                        existing_sha256 != bundle_sha256
-                        or existing_manifest != manifest_sha256
-                    ):
-                        raise CatalogConflict("catalog object identity conflicts")
-                    _remove_tree(temporary)
-            finally:
-                _RC_VALIDATE_STORAGE(self)
-            _RC_FAULT(self, "after_object_publish")
-            already_visible = False
-            already_owned = False
-            publication_id = ""
-            with _RC_CONNECT(self) as connection:
-                connection.execute("BEGIN")
-                try:
-                    existing = connection.execute(
-                        """SELECT r.ref_json, a.display_alias, a.run_alias,
-                              a.timepoint_alias,
-                              EXISTS(SELECT 1 FROM coordinated_results c
-                                     WHERE c.result_id=r.result_id),
-                              EXISTS(SELECT 1 FROM result_publications p
-                                     WHERE p.result_id=r.result_id
-                                     AND p.state='adopted')
-                       FROM results r
-                       LEFT JOIN opaque_aliases a ON a.result_id=r.result_id
-                       WHERE r.result_id=? OR r.bundle_sha256=? OR r.bundle_record_id=?""",
-                        (
-                            reference.result_id,
-                            reference.bundle_sha256,
-                            reference.bundle_record_id,
-                        ),
-                    ).fetchone()
-                    owner = None
-                    if existing is not None:
-                        owner = connection.execute(
-                            """SELECT publication_id, state FROM result_publications
-                           WHERE result_id=? AND recovery_scope_sha256=?""",
-                            (reference.result_id, recovery_scope_sha256),
-                        ).fetchone()
-                    connection.commit()
-                except BaseException:
-                    connection.rollback()
-                    raise
-            if existing is not None:
-                parsed = CatalogResultRef.model_validate_json(existing[0])
-                if parsed != reference or tuple(existing[1:4]) != (
-                    aliases.display_alias,
-                    aliases.run_alias,
-                    aliases.timepoint_alias,
+            with _RC_TRUST_FENCE(self) as (trust_store, _):
+                authority = _RC_AUTHORITY_SNAPSHOT(self)
+                verified = _PINNED_VERIFY_BUNDLE(temporary, trust_store)
+                reader = _PINNED_READER_SELECT(self.reader_registry, verified)
+                if not isinstance(verified.manifest, ResultBundleManifestV2):
+                    raise CatalogUnsupportedSchema("bundle schema is unsupported")
+                if (
+                    verified.manifest.method.method_id != capability.method_ref.method_id
+                    or verified.manifest.method.version != capability.method_ref.version
+                    or verified.manifest.method.method_definition_sha256
+                    != capability.method_definition_sha256
                 ):
-                    raise CatalogConflict("catalog identity conflict")
-                already_visible = not bool(existing[4]) or bool(existing[5])
-                if owner is not None:
-                    if owner[1] != "adopted":
-                        raise CatalogConflict("catalog result publication is pending")
-                    publication_id = owner[0]
-                    already_owned = True
-            if not publication_id:
-                seed = canonical_json_bytes(
-                    {
-                        "nonce": uuid.uuid4().hex,
-                        "result_id": reference.result_id,
-                        "authority": catalog_authority_sha256(authority),
-                    }
+                    raise CatalogConflict("bundle method identity conflicts")
+                reference = _RC_REFERENCE(
+                    verified,
+                    bundle_sha256=bundle_sha256,
+                    manifest_sha256=manifest_sha256,
+                    capability=capability,
                 )
-                publication_id = (
-                    f"publication_{recovery_scope_sha256[:16]}_"
-                    + hashlib.sha256(seed).hexdigest()
+                _fsync_tree(temporary)
+                _seal_tree(temporary)
+                _RC_VALIDATE_STORAGE(self)
+                try:
+                    try:
+                        rename_directory_exclusive_at(
+                            self._objects_fd, temporary.name, object_path.name
+                        )
+                        os.fsync(self._objects_fd)
+                    except FileExistsError:
+                        try:
+                            existing_fd = _open_directory_at(
+                                self._objects_fd, object_path.name
+                            )
+                        except OSError:
+                            raise CatalogConflict("catalog object identity conflicts")
+                        try:
+                            existing_sha256, existing_manifest, _ = _copy_exact_bundle(
+                                existing_fd, None
+                            )
+                        finally:
+                            os.close(existing_fd)
+                        if (
+                            existing_sha256 != bundle_sha256
+                            or existing_manifest != manifest_sha256
+                        ):
+                            raise CatalogConflict("catalog object identity conflicts")
+                        _remove_tree(temporary)
+                finally:
+                    _RC_VALIDATE_STORAGE(self)
+                _RC_FAULT(self, "after_object_publish")
+                already_visible = False
+                already_owned = False
+                publication_id = ""
+                with _RC_CONNECT(self) as connection:
+                    connection.execute("BEGIN")
+                    try:
+                        existing = connection.execute(
+                            """SELECT r.ref_json, a.display_alias, a.run_alias,
+                                  a.timepoint_alias,
+                                  EXISTS(SELECT 1 FROM coordinated_results c
+                                         WHERE c.result_id=r.result_id),
+                                  EXISTS(SELECT 1 FROM result_publications p
+                                         WHERE p.result_id=r.result_id
+                                         AND p.state='adopted')
+                           FROM results r
+                           LEFT JOIN opaque_aliases a ON a.result_id=r.result_id
+                           WHERE r.result_id=? OR r.bundle_sha256=? OR r.bundle_record_id=?""",
+                            (
+                                reference.result_id,
+                                reference.bundle_sha256,
+                                reference.bundle_record_id,
+                            ),
+                        ).fetchone()
+                        owner = None
+                        if existing is not None:
+                            owner = connection.execute(
+                                """SELECT publication_id, state FROM result_publications
+                               WHERE result_id=? AND recovery_scope_sha256=?""",
+                                (reference.result_id, recovery_scope_sha256),
+                            ).fetchone()
+                        connection.commit()
+                    except BaseException:
+                        connection.rollback()
+                        raise
+                if existing is not None:
+                    parsed = CatalogResultRef.model_validate_json(existing[0])
+                    if parsed != reference or tuple(existing[1:4]) != (
+                        aliases.display_alias,
+                        aliases.run_alias,
+                        aliases.timepoint_alias,
+                    ):
+                        raise CatalogConflict("catalog identity conflict")
+                    already_visible = not bool(existing[4]) or bool(existing[5])
+                    if owner is not None:
+                        if owner[1] != "adopted":
+                            raise CatalogConflict("catalog result publication is pending")
+                        publication_id = owner[0]
+                        already_owned = True
+                if not publication_id:
+                    seed = canonical_json_bytes(
+                        {
+                            "nonce": uuid.uuid4().hex,
+                            "result_id": reference.result_id,
+                            "authority": catalog_authority_sha256(authority),
+                        }
+                    )
+                    publication_id = (
+                        f"publication_{recovery_scope_sha256[:16]}_"
+                        + hashlib.sha256(seed).hexdigest()
+                    )
+                prepared = PreparedCatalogImport(
+                    publication_id=publication_id,
+                    recovery_scope_sha256=recovery_scope_sha256,
+                    reference=reference,
+                    aliases=aliases,
+                    authority=authority,
+                    authority_sha256=catalog_authority_sha256(authority),
+                    reader_id=reader.reader_id,
+                    already_visible=already_visible,
+                    already_owned=already_owned,
                 )
-            prepared = PreparedCatalogImport(
-                publication_id=publication_id,
-                recovery_scope_sha256=recovery_scope_sha256,
-                reference=reference,
-                aliases=aliases,
-                authority=authority,
-                authority_sha256=catalog_authority_sha256(authority),
-                reader_id=reader.reader_id,
-                already_visible=already_visible,
-                already_owned=already_owned,
-            )
-            self._prepared_imports[publication_id] = prepared
-            return prepared
+                self._prepared_imports[publication_id] = prepared
+                return prepared
         except BaseException:
             if temporary.exists():
                 _remove_tree(temporary)
@@ -1717,76 +1935,77 @@ class ResultCatalog:
     ) -> None:
         """Create a durable pending row that catalog queries cannot observe."""
 
-        normalized = _RC_REQUIRE_PREPARED(self, prepared)
-        if normalized.already_owned:
-            return
-        reference, aliases = normalized.reference, normalized.aliases
-        with _RC_CONNECT(self) as connection:
-            connection.execute("BEGIN IMMEDIATE")
-            try:
-                existing = connection.execute(
-                    """SELECT r.ref_json, a.display_alias, a.run_alias,
-                              a.timepoint_alias
-                       FROM results r
-                       LEFT JOIN opaque_aliases a ON a.result_id=r.result_id
-                       WHERE r.result_id=? OR r.bundle_sha256=? OR r.bundle_record_id=?""",
-                    (
-                        reference.result_id,
-                        reference.bundle_sha256,
-                        reference.bundle_record_id,
-                    ),
-                ).fetchone()
-                if existing is not None:
-                    if CatalogResultRef.model_validate_json(
-                        existing[0]
-                    ) != reference or tuple(existing[1:4]) != (
-                        aliases.display_alias,
-                        aliases.run_alias,
-                        aliases.timepoint_alias,
-                    ):
-                        raise CatalogConflict("catalog identity conflict")
-                else:
-                    connection.execute(
-                        "INSERT INTO results VALUES(?,?,?,?,?,?,?,?,?,?)",
+        with _RC_TRUST_FENCE(self):
+            normalized = _RC_REQUIRE_PREPARED(self, prepared)
+            if normalized.already_owned:
+                return
+            reference, aliases = normalized.reference, normalized.aliases
+            with _RC_CONNECT(self) as connection:
+                connection.execute("BEGIN IMMEDIATE")
+                try:
+                    existing = connection.execute(
+                        """SELECT r.ref_json, a.display_alias, a.run_alias,
+                                  a.timepoint_alias
+                           FROM results r
+                           LEFT JOIN opaque_aliases a ON a.result_id=r.result_id
+                           WHERE r.result_id=? OR r.bundle_sha256=? OR r.bundle_record_id=?""",
                         (
                             reference.result_id,
                             reference.bundle_sha256,
                             reference.bundle_record_id,
-                            reference.method_ref.method_id,
-                            reference.method_ref.version,
-                            reference.execution_state.value,
-                            reference.information_state.value,
-                            reference.trust_state.value,
-                            reference.qualification_state.value,
-                            canonical_json_bytes(reference),
                         ),
-                    )
-                    connection.execute(
-                        "INSERT INTO opaque_aliases VALUES(?,?,?,?)",
-                        (
-                            reference.result_id,
+                    ).fetchone()
+                    if existing is not None:
+                        if CatalogResultRef.model_validate_json(
+                            existing[0]
+                        ) != reference or tuple(existing[1:4]) != (
                             aliases.display_alias,
                             aliases.run_alias,
                             aliases.timepoint_alias,
+                        ):
+                            raise CatalogConflict("catalog identity conflict")
+                    else:
+                        connection.execute(
+                            "INSERT INTO results VALUES(?,?,?,?,?,?,?,?,?,?)",
+                            (
+                                reference.result_id,
+                                reference.bundle_sha256,
+                                reference.bundle_record_id,
+                                reference.method_ref.method_id,
+                                reference.method_ref.version,
+                                reference.execution_state.value,
+                                reference.information_state.value,
+                                reference.trust_state.value,
+                                reference.qualification_state.value,
+                                canonical_json_bytes(reference),
+                            ),
+                        )
+                        connection.execute(
+                            "INSERT INTO opaque_aliases VALUES(?,?,?,?)",
+                            (
+                                reference.result_id,
+                                aliases.display_alias,
+                                aliases.run_alias,
+                                aliases.timepoint_alias,
+                            ),
+                        )
+                        connection.execute(
+                            "INSERT INTO coordinated_results VALUES(?)",
+                            (reference.result_id,),
+                        )
+                    connection.execute(
+                        "INSERT INTO result_publications VALUES(?,?,?,?)",
+                        (
+                            normalized.publication_id,
+                            reference.result_id,
+                            normalized.recovery_scope_sha256,
+                            "pending",
                         ),
                     )
-                    connection.execute(
-                        "INSERT INTO coordinated_results VALUES(?)",
-                        (reference.result_id,),
-                    )
-                connection.execute(
-                    "INSERT INTO result_publications VALUES(?,?,?,?)",
-                    (
-                        normalized.publication_id,
-                        reference.result_id,
-                        normalized.recovery_scope_sha256,
-                        "pending",
-                    ),
-                )
-                connection.commit()
-            except BaseException:
-                connection.rollback()
-                raise
+                    connection.commit()
+                except BaseException:
+                    connection.rollback()
+                    raise
 
     def adopt_prepared_import(
         self,
@@ -1800,44 +2019,45 @@ class ResultCatalog:
         transaction.
         """
 
-        normalized = _RC_REQUIRE_PREPARED(self, prepared)
-        if normalized.already_owned:
-            _RC_VERIFY_REFERENCE(self, normalized.reference)
+        with _RC_TRUST_FENCE(self):
+            normalized = _RC_REQUIRE_PREPARED(self, prepared)
+            if normalized.already_owned:
+                _RC_VERIFY_REFERENCE(self, normalized.reference)
+                return normalized.reference
+            _RC_VERIFY_PREPARED_OBJECT(self, normalized)
+            with _RC_CONNECT(self) as connection:
+                connection.execute("BEGIN IMMEDIATE")
+                try:
+                    row = connection.execute(
+                        """SELECT r.ref_json, p.state FROM results r
+                           JOIN result_publications p ON p.result_id=r.result_id
+                           WHERE r.result_id=? AND p.publication_id=?""",
+                        (normalized.reference.result_id, normalized.publication_id),
+                    ).fetchone()
+                    if (
+                        row is None
+                        or CatalogResultRef.model_validate_json(row[0])
+                        != normalized.reference
+                        or row[1] != "pending"
+                    ):
+                        raise CatalogConflict("pending catalog publication is invalid")
+                    _RC_VERIFY_PREPARED_OBJECT(self, normalized)
+                    connection.execute(
+                        """UPDATE result_publications SET state='adopted'
+                           WHERE result_id=? AND publication_id=?
+                           AND recovery_scope_sha256=? AND state='pending'""",
+                        (
+                            normalized.reference.result_id,
+                            normalized.publication_id,
+                            normalized.recovery_scope_sha256,
+                        ),
+                    )
+                    _RC_VERIFY_PREPARED_OBJECT(self, normalized)
+                    connection.commit()
+                except BaseException:
+                    connection.rollback()
+                    raise
             return normalized.reference
-        _RC_VERIFY_PREPARED_OBJECT(self, normalized)
-        with _RC_CONNECT(self) as connection:
-            connection.execute("BEGIN IMMEDIATE")
-            try:
-                row = connection.execute(
-                    """SELECT r.ref_json, p.state FROM results r
-                       JOIN result_publications p ON p.result_id=r.result_id
-                       WHERE r.result_id=? AND p.publication_id=?""",
-                    (normalized.reference.result_id, normalized.publication_id),
-                ).fetchone()
-                if (
-                    row is None
-                    or CatalogResultRef.model_validate_json(row[0])
-                    != normalized.reference
-                    or row[1] != "pending"
-                ):
-                    raise CatalogConflict("pending catalog publication is invalid")
-                _RC_VERIFY_PREPARED_OBJECT(self, normalized)
-                connection.execute(
-                    """UPDATE result_publications SET state='adopted'
-                       WHERE result_id=? AND publication_id=?
-                       AND recovery_scope_sha256=? AND state='pending'""",
-                    (
-                        normalized.reference.result_id,
-                        normalized.publication_id,
-                        normalized.recovery_scope_sha256,
-                    ),
-                )
-                _RC_VERIFY_PREPARED_OBJECT(self, normalized)
-                connection.commit()
-            except BaseException:
-                connection.rollback()
-                raise
-        return normalized.reference
 
     def finish_prepared_import(
         self, prepared: PreparedCatalogImport | Mapping[str, object]
@@ -1900,28 +2120,29 @@ class ResultCatalog:
     def verify_prepared_object(
         self, prepared: PreparedCatalogImport | Mapping[str, object]
     ) -> tuple[VerifiedBundle, ResultBundleReader]:
-        normalized = _RC_REQUIRE_PREPARED(self, prepared)
-        reference = normalized.reference
-        try:
-            object_fd = _open_directory_at(self._objects_fd, reference.bundle_sha256)
-        except OSError:
-            raise CatalogFilesystemError("catalog object is unavailable") from None
-        try:
-            observed_sha256, manifest_sha256, _ = _copy_exact_bundle(object_fd, None)
-            if (
-                observed_sha256 != reference.bundle_sha256
-                or manifest_sha256 != reference.bundle_manifest_sha256
-            ):
-                raise CatalogConflict("catalog object identity conflicts")
-            verified = _PINNED_VERIFY_BUNDLE(
-                _descriptor_path(object_fd), self.trust_store
-            )
-            reader = _PINNED_READER_SELECT(self.reader_registry, verified)
-            if reader.reader_id != normalized.reader_id:
-                raise CatalogConflict("catalog reader changed during import")
-            return verified, reader
-        finally:
-            os.close(object_fd)
+        with _RC_TRUST_FENCE(self) as (trust_store, _):
+            normalized = _RC_REQUIRE_PREPARED(self, prepared)
+            reference = normalized.reference
+            try:
+                object_fd = _open_directory_at(self._objects_fd, reference.bundle_sha256)
+            except OSError:
+                raise CatalogFilesystemError("catalog object is unavailable") from None
+            try:
+                observed_sha256, manifest_sha256, _ = _copy_exact_bundle(object_fd, None)
+                if (
+                    observed_sha256 != reference.bundle_sha256
+                    or manifest_sha256 != reference.bundle_manifest_sha256
+                ):
+                    raise CatalogConflict("catalog object identity conflicts")
+                verified = _PINNED_VERIFY_BUNDLE(
+                    _descriptor_path(object_fd), trust_store
+                )
+                reader = _PINNED_READER_SELECT(self.reader_registry, verified)
+                if reader.reader_id != normalized.reader_id:
+                    raise CatalogConflict("catalog reader changed during import")
+                return verified, reader
+            finally:
+                os.close(object_fd)
 
     def discard_prepared_import(
         self, prepared: PreparedCatalogImport | Mapping[str, object]
@@ -2215,55 +2436,56 @@ class ResultCatalog:
     ) -> tuple[VerifiedBundle, ResultBundleReader]:
         """Reverify one indexed immutable object against current offline trust."""
 
-        try:
-            normalized = CatalogResultRef.model_validate_json(
-                canonical_json_bytes(reference)
-            )
-        except Exception:  # noqa: BLE001 - normalize hostile reference input
-            raise CatalogConflict("catalog reference is invalid") from None
-        with _RC_CONNECT(self) as connection:
-            row = connection.execute(
-                """SELECT r.ref_json FROM results r WHERE r.result_id=? AND
-                   (NOT EXISTS(SELECT 1 FROM coordinated_results c
-                               WHERE c.result_id=r.result_id)
-                    OR EXISTS(SELECT 1 FROM result_publications p
-                              WHERE p.result_id=r.result_id AND p.state='adopted'))""",
-                (normalized.result_id,),
-            ).fetchone()
-        if row is None or CatalogResultRef.model_validate_json(row[0]) != normalized:
-            raise CatalogConflict("catalog reference is not indexed exactly")
-        _RC_VALIDATE_STORAGE(self)
-        try:
-            object_fd = _open_directory_at(self._objects_fd, normalized.bundle_sha256)
-        except OSError:
-            raise CatalogFilesystemError("catalog object is unavailable") from None
-        try:
-            observed_sha256, manifest_sha256, _ = _copy_exact_bundle(object_fd, None)
-            if (
-                observed_sha256 != normalized.bundle_sha256
-                or manifest_sha256 != normalized.bundle_manifest_sha256
-            ):
-                raise CatalogConflict("catalog object identity conflicts")
-            _RC_VALIDATE_VERIFICATION_AUTHORITY(self)
-            verified = _PINNED_VERIFY_BUNDLE(
-                _descriptor_path(object_fd), self.trust_store
-            )
-            reader = _PINNED_READER_SELECT(self.reader_registry, verified)
-            manifest = verified.manifest
-            if not isinstance(manifest, ResultBundleManifestV2):
-                raise CatalogUnsupportedSchema("bundle schema is unsupported")
-            if (
-                manifest.record_id != normalized.bundle_record_id
-                or manifest.workflow_release_id != normalized.workflow_release_id
-                or manifest.method.method_id != normalized.method_ref.method_id
-                or manifest.method.version != normalized.method_ref.version
-                or manifest.method.method_definition_sha256
-                != normalized.method_definition_sha256
-            ):
-                raise CatalogConflict("catalog reference conflicts with bundle")
-            return verified, reader
-        finally:
-            os.close(object_fd)
+        with _RC_TRUST_FENCE(self) as (trust_store, _):
+            try:
+                normalized = CatalogResultRef.model_validate_json(
+                    canonical_json_bytes(reference)
+                )
+            except Exception:  # noqa: BLE001 - normalize hostile reference input
+                raise CatalogConflict("catalog reference is invalid") from None
+            with _RC_CONNECT(self) as connection:
+                row = connection.execute(
+                    """SELECT r.ref_json FROM results r WHERE r.result_id=? AND
+                       (NOT EXISTS(SELECT 1 FROM coordinated_results c
+                                   WHERE c.result_id=r.result_id)
+                        OR EXISTS(SELECT 1 FROM result_publications p
+                                  WHERE p.result_id=r.result_id AND p.state='adopted'))""",
+                    (normalized.result_id,),
+                ).fetchone()
+            if row is None or CatalogResultRef.model_validate_json(row[0]) != normalized:
+                raise CatalogConflict("catalog reference is not indexed exactly")
+            _RC_VALIDATE_STORAGE(self)
+            try:
+                object_fd = _open_directory_at(self._objects_fd, normalized.bundle_sha256)
+            except OSError:
+                raise CatalogFilesystemError("catalog object is unavailable") from None
+            try:
+                observed_sha256, manifest_sha256, _ = _copy_exact_bundle(object_fd, None)
+                if (
+                    observed_sha256 != normalized.bundle_sha256
+                    or manifest_sha256 != normalized.bundle_manifest_sha256
+                ):
+                    raise CatalogConflict("catalog object identity conflicts")
+                _RC_VALIDATE_VERIFICATION_AUTHORITY(self)
+                verified = _PINNED_VERIFY_BUNDLE(
+                    _descriptor_path(object_fd), trust_store
+                )
+                reader = _PINNED_READER_SELECT(self.reader_registry, verified)
+                manifest = verified.manifest
+                if not isinstance(manifest, ResultBundleManifestV2):
+                    raise CatalogUnsupportedSchema("bundle schema is unsupported")
+                if (
+                    manifest.record_id != normalized.bundle_record_id
+                    or manifest.workflow_release_id != normalized.workflow_release_id
+                    or manifest.method.method_id != normalized.method_ref.method_id
+                    or manifest.method.version != normalized.method_ref.version
+                    or manifest.method.method_definition_sha256
+                    != normalized.method_definition_sha256
+                ):
+                    raise CatalogConflict("catalog reference conflicts with bundle")
+                return verified, reader
+            finally:
+                os.close(object_fd)
 
     @staticmethod
     def _reference(
@@ -2446,6 +2668,7 @@ _RESULT_METHOD_SEAL = MappingProxyType(
             "_reference",
             "_remove_publication_owner",
             "_require_prepared",
+            "_trust_fence",
             "_validate_storage",
             "_validate_verification_authority",
             "adopt_prepared_import",
@@ -2462,6 +2685,7 @@ _RESULT_METHOD_SEAL = MappingProxyType(
             "recover_pending_publication",
             "recovery_publications",
             "stage_prepared_import",
+            "trust_authority_fence",
             "verify_prepared_object",
             "verify_reference",
         )
@@ -2547,6 +2771,11 @@ _RESULT_PINNED_FINGERPRINTS = MappingProxyType(
         "verify_bundle": _authority_value_fingerprint(_PINNED_VERIFY_BUNDLE),
         "reader_select": _authority_value_fingerprint(_PINNED_READER_SELECT),
         "trust_resolve": _authority_value_fingerprint(_PINNED_TRUST_RESOLVE),
+        "trust_read_fence": _authority_value_fingerprint(_PINNED_TRUST_READ_FENCE),
+        "load_trust": _authority_value_fingerprint(_PINNED_LOAD_TRUST),
+        "trust_document_bytes": _authority_value_fingerprint(
+            _PINNED_TRUST_DOCUMENT_BYTES
+        ),
     }
 )
 
@@ -2584,7 +2813,20 @@ def _assert_result_runtime(
         or globals().get("_PINNED_READER_SELECT") is not expected_reader_select
         or globals().get("_PINNED_TRUST_RESOLVE") is not expected_trust_resolve
         or TrustStore.resolve is not expected_trust_resolve
-        or "resolve" in vars(catalog.trust_store)
+        or (
+            catalog.trust_store is not None and "resolve" in vars(catalog.trust_store)
+        )
+        or globals().get("_PINNED_TRUST_READ_FENCE") is not _PINNED_TRUST_READ_FENCE_SEAL
+        or ResultTrustRegistry.read_fence is not _PINNED_TRUST_READ_FENCE_SEAL
+        or globals().get("_PINNED_LOAD_TRUST") is not _PINNED_LOAD_TRUST_SEAL
+        or globals().get("_PINNED_TRUST_DOCUMENT_BYTES")
+        is not _PINNED_TRUST_DOCUMENT_BYTES_SEAL
+        or _authority_value_fingerprint(_PINNED_TRUST_READ_FENCE)
+        != _RESULT_PINNED_FINGERPRINTS["trust_read_fence"]
+        or _authority_value_fingerprint(_PINNED_LOAD_TRUST)
+        != _RESULT_PINNED_FINGERPRINTS["load_trust"]
+        or _authority_value_fingerprint(_PINNED_TRUST_DOCUMENT_BYTES)
+        != _RESULT_PINNED_FINGERPRINTS["trust_document_bytes"]
         or _authority_value_fingerprint(_PINNED_VERIFY_BUNDLE)
         != _RESULT_PINNED_FINGERPRINTS["verify_bundle"]
         or _authority_value_fingerprint(_PINNED_READER_SELECT)
@@ -2606,6 +2848,7 @@ _RC_OPEN_SQLITE_CONNECTION = ResultCatalog._open_sqlite_connection
 _RC_REFERENCE = ResultCatalog._reference
 _RC_REMOVE_OWNER = ResultCatalog._remove_publication_owner
 _RC_REQUIRE_PREPARED = ResultCatalog._require_prepared
+_RC_TRUST_FENCE = ResultCatalog._trust_fence
 _RC_VALIDATE_STORAGE = ResultCatalog._validate_storage
 _RC_VALIDATE_VERIFICATION_AUTHORITY = ResultCatalog._validate_verification_authority
 _RC_VERIFY_PREPARED_OBJECT = ResultCatalog.verify_prepared_object
@@ -2624,6 +2867,7 @@ _RESULT_ALIAS_SEAL = MappingProxyType(
             "_RC_REFERENCE",
             "_RC_REMOVE_OWNER",
             "_RC_REQUIRE_PREPARED",
+            "_RC_TRUST_FENCE",
             "_RC_VALIDATE_STORAGE",
             "_RC_VALIDATE_VERIFICATION_AUTHORITY",
             "_RC_VERIFY_PREPARED_OBJECT",
@@ -2643,10 +2887,12 @@ _CATALOG_VALIDATE_STORAGE = ResultCatalog._validate_storage
 _CATALOG_QUERY = ResultCatalog.query
 _CATALOG_REFERENCE = ResultCatalog._reference
 _CATALOG_FAULT = ResultCatalog._fault
+_CATALOG_TRUST_FENCE = ResultCatalog._trust_fence
 _VERIFY_CATALOG_BUNDLE = verify_bundle
 _CATALOG_PROTECTED_NAMES = (
     "get_verified",
     "_connect",
+    "_trust_fence",
     "_validate_storage",
     "_open_sqlite_connection",
     "_reference",
@@ -2689,10 +2935,20 @@ def _assert_live_catalog_reader(reader: CatalogLiveReader) -> None:
         or catalog._objects_fd != reader._objects_fd
         or catalog._database_fd != reader._database_fd
         or catalog._sqlite_database_fd != reader._sqlite_database_fd
+        or _CATALOG_TRUST_FENCE is not reader._trust_fence_catalog
         or catalog._connection_lock is not reader._connection_lock
         or catalog.trust_store is not reader._trust_store
-        or id(catalog.trust_store._keys) != reader._trust_keys_identity
-        or tuple(sorted(catalog.trust_store._keys.items())) != reader._trust_snapshot
+        or catalog.result_trust_registry is not reader._trust_registry
+        or catalog._result_trust_identity != reader._trust_registry_identity
+        or (reader._trust_store is None) == (reader._trust_registry is None)
+        or (
+            reader._trust_store is not None
+            and (
+                id(catalog.trust_store._keys) != reader._trust_keys_identity
+                or tuple(sorted(catalog.trust_store._keys.items()))
+                != reader._trust_snapshot
+            )
+        )
         or catalog._connection is not reader._connection
         or reader._connection is None
     ):
@@ -2727,7 +2983,10 @@ class CatalogLiveReader:
         "_root_path",
         "_sealed",
         "_sqlite_database_fd",
+        "_trust_fence_catalog",
         "_trust_keys_identity",
+        "_trust_registry",
+        "_trust_registry_identity",
         "_trust_snapshot",
         "_trust_store",
         "_validate_storage",
@@ -2751,6 +3010,7 @@ class CatalogLiveReader:
         ),
         _reference_verified: Callable[..., CatalogResultRef] = _CATALOG_REFERENCE,
         _replay_capability: Callable[..., None] = replay_current_capability,
+        _trust_fence_catalog: Callable[..., object] = _CATALOG_TRUST_FENCE,
         _result_ref_from_json: Callable[..., CatalogResultRef] = (
             CatalogResultRef.model_validate_json
         ),
@@ -2785,9 +3045,17 @@ class CatalogLiveReader:
         self._database_fd = catalog._database_fd
         self._sqlite_database_fd = catalog._sqlite_database_fd
         self._connection_lock = catalog._connection_lock
+        self._trust_fence_catalog = _trust_fence_catalog
         self._trust_store = catalog.trust_store
-        self._trust_keys_identity = id(catalog.trust_store._keys)
-        self._trust_snapshot = tuple(sorted(catalog.trust_store._keys.items()))
+        self._trust_registry = catalog.result_trust_registry
+        self._trust_registry_identity = catalog._result_trust_identity
+        # TrustStore path: freeze the exact key map; a registry is read live.
+        if catalog.trust_store is not None:
+            self._trust_keys_identity = id(catalog.trust_store._keys)
+            self._trust_snapshot = tuple(sorted(catalog.trust_store._keys.items()))
+        else:
+            self._trust_keys_identity = None
+            self._trust_snapshot = None
         self._connection = catalog._connection
         self._validate_storage = _validate_storage
         self._verification_context_from_json = _verification_context_from_json
@@ -2823,7 +3091,12 @@ class CatalogLiveReader:
         normalized_context = self._verification_context_from_json(
             self._canonicalize(context)
         )
-        with self._connection_lock:
+        # Lock order: catalog connection lock, then the catalog trust fence
+        # (the registry read fence on the registry path), held through return.
+        with (
+            self._connection_lock,
+            self._trust_fence_catalog(self._catalog) as (trust_store, _),
+        ):
             self._assert_live(self)
             assert self._connection is not None
             self._connection.execute("BEGIN IMMEDIATE")
@@ -2861,7 +3134,7 @@ class CatalogLiveReader:
                 self._assert_live(self)
                 verified = self._verify_bundle(
                     self._descriptor_resolver(self._objects_fd) / stored.bundle_sha256,
-                    self._trust_store,
+                    trust_store,
                 )
                 current = self._reference_verified(
                     verified,
@@ -2892,6 +3165,9 @@ def bind_catalog_live_reader(catalog: ResultCatalog) -> CatalogLiveReader:
 
 
 __all__ = [
+    "CATALOG_AUTHORITY_SCHEMA_V1",
+    "CATALOG_AUTHORITY_SCHEMA_V2",
+    "CATALOG_AUTHORITY_SCHEMA_VERSIONS",
     "DEFAULT_RESULT_BUNDLE_READER_REGISTRY",
     "CatalogAliases",
     "CatalogAuthoritySnapshot",
@@ -2917,5 +3193,7 @@ __all__ = [
     "ResultCatalog",
     "TrustState",
     "bind_catalog_live_reader",
+    "bound_catalog_authority",
     "catalog_authority_sha256",
+    "registry_trust_snapshot_sha256",
 ]

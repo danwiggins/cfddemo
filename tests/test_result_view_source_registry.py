@@ -48,6 +48,7 @@ from evidence_inspector.result_catalog import (
     DEFAULT_RESULT_BUNDLE_READER_REGISTRY,
     ResultCatalog,
 )
+from evidence_inspector.result_trust_registry import ResultTrustRegistry
 from evidence_inspector.result_view import ResultViewSource
 from evidence_inspector.result_view_source_registry import (
     CALLER_ASSERTED_FIELDS,
@@ -74,6 +75,7 @@ from tests.test_cohort_manifest import _authority as _linkage_authority
 from tests.test_cohort_summary import _ledger
 from tests.test_provider_linkage import _consume, _create_approval
 from tests.test_provider_linkage_store import _pins
+from tests.test_result_catalog_trust_registry import RegistryTrust, public_result_key
 from traceback_runner.bundles import build_result_bundle
 from traceback_runner.signing import (
     KeyPurpose,
@@ -110,7 +112,9 @@ class Live:
     results: ResultCatalog
     cohorts: CohortRecordCatalog
     cohort_registry: CohortRegistry
-    trust: TrustStore
+    # A caller-held TrustStore, or the result-trust registry behind the same
+    # mutation surface (``revoke``/``add_signing_key``).
+    trust: TrustStore | RegistryTrust
     key: object
     selector_id: str
     cohort_version: int
@@ -183,8 +187,14 @@ def _policy(record: VerifiedMeasurementRecord) -> CompatibilityPolicy:
     )
 
 
+# Parametrize ``live`` indirectly with "registry" to back E04 by the
+# protected result-trust registry; the default is a caller-held TrustStore.
+TRUST_MODES = ("store", "registry")
+
+
 @pytest.fixture
-def live(tmp_path: Path):
+def live(tmp_path: Path, request: pytest.FixtureRequest):
+    trust_mode = getattr(request, "param", "store")
     store = _store(tmp_path / "protected")
     for digit in ("c", "d"):
         _commit(store, digit)
@@ -233,11 +243,19 @@ def live(tmp_path: Path):
             method=method,
             signing_key=key,
         )
+    trust_registry = None
+    if trust_mode == "registry":
+        trust_registry = ResultTrustRegistry(tmp_path / "result-trust")
+        trust_registry.add_key(public_result_key(key))
+        trust = RegistryTrust(trust_registry)
+        trust_authority = {"result_trust_registry": trust_registry}
+    else:
+        trust_authority = {"trust_store": trust}
     results = ResultCatalog(
         tmp_path / "results",
         import_roots={"root_primary": imports},
-        trust_store=trust,
         reader_registry=DEFAULT_RESULT_BUNDLE_READER_REGISTRY,
+        **trust_authority,
     )
     cohort_registry = CohortRegistry(
         tmp_path / "cohort-registry",
@@ -293,6 +311,8 @@ def live(tmp_path: Path):
         cohorts.close()
         results.close()
         store.close()
+        if trust_registry is not None:
+            trust_registry.close()
 
 
 @pytest.fixture
@@ -517,6 +537,7 @@ def test_resolve_requires_exact_selector_version_and_commitments(
             )
 
 
+@pytest.mark.parametrize("live", TRUST_MODES, indirect=True)
 def test_result_key_revocation_makes_source_stale(
     registry: ResultViewSourceRegistry, live: Live
 ) -> None:
@@ -532,6 +553,7 @@ def test_result_key_revocation_makes_source_stale(
         _register(registry, live)
 
 
+@pytest.mark.parametrize("live", TRUST_MODES, indirect=True)
 def test_trust_store_mutation_makes_source_stale(
     registry: ResultViewSourceRegistry, live: Live
 ) -> None:
@@ -552,6 +574,7 @@ def test_linkage_advance_makes_source_stale(
         registry.list_selectors(live.selector_id, live.cohort_version)
 
 
+@pytest.mark.parametrize("live", TRUST_MODES, indirect=True)
 def test_resolve_holds_d06_fence_through_exact_return(
     registry: ResultViewSourceRegistry,
     live: Live,
@@ -973,6 +996,7 @@ def test_instance_authority_state_replacement_is_rejected(
     assert _resolve(registry, live, receipt).object_sha256 == receipt.object_sha256
 
 
+@pytest.mark.parametrize("live", TRUST_MODES, indirect=True)
 def test_concurrent_resolve_and_revoke_terminate_with_exact_outcomes(
     registry: ResultViewSourceRegistry, live: Live
 ) -> None:

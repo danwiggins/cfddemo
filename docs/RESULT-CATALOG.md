@@ -68,6 +68,64 @@ nullability, uniqueness, foreign keys, and ordered index columns. Existing
 partial, altered, or extra schemas fail closed and are never repaired
 implicitly.
 
+## Result trust
+
+A catalog is opened with exactly one result trust authority:
+
+- `result_trust_registry=` (the protected path): a
+  `ResultTrustRegistry` (`docs/RESULT-TRUST-REGISTRY.md`). Every verification
+  reads the registry's current trust under its read fence and builds a fresh
+  `TrustStore` from that head, so a key revoked in the registry is rejected by
+  the next import, reference verification, prepared adoption, or live read on
+  the same open catalog and reader, without reopening anything. The registry
+  is forward-only, and the catalog also keeps a high-water mark of the
+  (state version, head) it has seen and rejects any older or forked head, so
+  old trust cannot come back through this catalog.
+- `trust_store=` (the earlier path, kept for callers that build one): a
+  caller-held `TrustStore`. Revocation reaches the catalog only through that
+  same instance. The live reader freezes its key map at bind time.
+
+Each operation holds one trust head from verification through return. On the
+registry path an import, a preparation, staging, adoption, reference
+verification, and a live read each hold the catalog `_connection_lock` and
+then the registry read fence until they return, so no trust event can commit
+between verification and the indexed or returned result. A preparation binds
+the trust head into its authority snapshot; a trust event before staging or
+adoption makes that preparation fail with `catalog authority changed during
+import`, so a key revoked mid-import is never published.
+
+`trust_authority_fence()` exposes the same fence to composing callers (D06).
+Catalog calls made inside it on the same thread reuse the held head, because
+the registry lock is not reentrant. The body must not open a linkage fence,
+call a D07 registry, or mutate the trust registry; a trust mutation on the
+holding thread raises instead of deadlocking. The TrustStore path yields
+`None` and holds nothing.
+
+Lock order: catalog `_connection_lock`, then the result-trust read fence. This
+is the order D06 already used for the TrustStore lock (catalog connection lock,
+then the trust lock), so D06 keeps its fence order: linkage fence, D05 lock,
+catalog connection lock, result trust, D06 root; E06 takes the D06 fence and
+then its own lock; D07 takes linkage fence, result trust, then its own lock.
+Code holding a trust read fence taken directly from the registry (as D07 does)
+must not call the catalog: the catalog would wait for its connection lock while
+holding trust, the reverse of D06.
+
+`CatalogAuthoritySnapshot` is versioned. `traceback.catalog-authority.v1` hashes
+the keys of a caller-held `TrustStore`. `traceback.catalog-authority.v2` (the
+registry path) sets `trust_snapshot_sha256` to a digest of the registry ID,
+epoch, state version, head, and current document digest, so every trust event
+changes the catalog authority digest, and a D06 or E06 artifact that binds it
+becomes stale. The field set is unchanged; the version is inside the authority
+digest, so `bound_catalog_authority` rebuilds a retained authority from its
+digest unambiguously, and `CATALOG_AUTHORITY_SCHEMA_VERSIONS` lists every
+version a retained digest may name. A D06 binding made under a v1 catalog keeps
+replaying after that catalog is reopened on the registry path and is
+re-verified against the registry.
+
+The binding of a catalog to its trust registry is not persisted in the catalog
+database: reopening a catalog root with a different authority is the caller's
+choice (see `docs/RESULT-TRUST-REGISTRY.md`, open decisions).
+
 ## Read model
 
 `CatalogResultRef` contains immutable bundle, method, registry, and authority
@@ -102,5 +160,7 @@ clinical interpretation layer, donor registry, or plugin interface.
 The adversarial test suite covers idempotence, conflicting identities, source
 mutation, root replacement, traversal, symlinks, special and extra files,
 oversize inputs, simulated pre-commit failure, unsupported catalog schemas, and
-stale/revoked authority. A deterministic synthetic 10,000-result test requires
+stale/revoked authority. `tests/test_result_catalog_trust_registry.py` covers
+the registry path: revocation without reopen, refusal of old trust, the trust
+fence held through return, composing fences, and concurrent trust events. A deterministic synthetic 10,000-result test requires
 p95 filtered page latency at or below 250 ms.

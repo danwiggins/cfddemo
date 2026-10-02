@@ -43,6 +43,9 @@ traceback resume JOB_ID [--root ROOT] [--json]
 traceback retry JOB_ID [--root ROOT] [--json]
 traceback inspect BUNDLE [--json]
 traceback verify BUNDLE --trust-store TRUST_STORE [--json]
+traceback verify BUNDLE --trust-registry REGISTRY_ROOT \
+  --trust-registry-id ID --trust-registry-epoch EPOCH \
+  --trust-registry-head HEAD [--json]
 traceback assets install --release-evidence ENVELOPE \
   --trust-store TRUST_STORE --role-policy POLICY \
   --authority-head HEAD --asset ASSET_ID --version VERSION \
@@ -53,6 +56,13 @@ traceback assets verify --release-evidence ENVELOPE \
   [--root ROOT] [--json]
 traceback support-bundle JOB_ID --output OUTPUT [--root ROOT] [--json]
 ```
+
+`verify --trust-registry` checks a result bundle against the current trust of a
+protected result-trust registry (`docs/RESULT-TRUST-REGISTRY.md`). It needs the
+independently retained registry ID, epoch, and current head, refuses an older
+head, and never creates a registry. A key revoked in the registry fails
+verification. `assets` commands verify release signatures and take
+`--trust-store` only; the result-trust registry holds result keys only.
 
 `preflight` is technical inspection only. A passing report does not approve
 real-data execution. `run` rejects real-data execution in this wave rather than

@@ -479,13 +479,76 @@ def test_wrong_scope_is_denied(registry) -> None:
         authorize(registry, binding, cohort="*")
 
 
-def test_any_registry_advance_makes_a_bound_head_stale(registry) -> None:
+def test_unrelated_registry_changes_do_not_end_a_bound_session(registry) -> None:
     registry.add_grant(grant_for(registry))
     binding = bind(registry)
+    # Another grant, its revocation, and a trust revision that only adds a key
+    # all move the head; none of them touches this grant or its signing key.
     registry.add_grant(grant_for(registry, selector=OTHER_SELECTOR))
-    with denied(ReaderDenialReason.STALE_HEAD):
+    authorize(registry, binding)
+    registry.revoke_grant(
+        OTHER_SELECTOR, reason=ReaderRevocationReason.OPERATOR_REQUEST
+    )
+    authorize(registry, binding)
+    first = synthetic_reader_trust()
+    second = synthetic_reader_trust(revision=2, previous=first)
+    registry.rotate_trust(second, expected_trust_sha256=reader_trust_sha256(second))
+    authorization = authorize(registry, binding)
+    assert authorization.state_head_sha256 == registry.identity().state_head_sha256
+    assert authorization.state_head_sha256 != binding.state_head_sha256
+    # Its own revocation ends it.
+    registry.revoke_grant(SELECTOR, reason=ReaderRevocationReason.OPERATOR_REQUEST)
+    with denied(ReaderDenialReason.GRANT_REVOKED):
         authorize(registry, binding)
-    authorize(registry, bind(registry))
+
+
+def test_rotating_out_the_bound_grants_key_ends_the_session(registry) -> None:
+    registry.add_grant(grant_for(registry))
+    binding = bind(registry)
+    first = synthetic_reader_trust()
+    second = synthetic_reader_trust(revision=2, previous=first)
+    registry.rotate_trust(second, expected_trust_sha256=reader_trust_sha256(second))
+    authorize(registry, binding)
+    third = synthetic_reader_trust(
+        revision=3, previous=second, statuses={1: ReaderKeyStatus.REVOKED}
+    )
+    registry.rotate_trust(third, expected_trust_sha256=reader_trust_sha256(third))
+    with denied(ReaderDenialReason.UNTRUSTED_KEY):
+        authorize(registry, binding)
+
+
+def test_a_head_outside_the_committed_chain_is_stale(registry) -> None:
+    registry.add_grant(grant_for(registry))
+    binding = bind(registry)
+    with denied(ReaderDenialReason.STALE_HEAD):
+        authorize(
+            registry, binding.model_copy(update={"state_head_sha256": "0" * 64})
+        )
+
+
+def test_grant_states_list_selectors_and_states_only(
+    registry, clock: AuthorityTimeSource
+) -> None:
+    from evidence_inspector.reader_authorization_registry import (
+        ReaderGrantListing,
+        ReaderGrantState,
+    )
+
+    assert registry.grant_states() == ()
+    registry.add_grant(grant_for(registry))
+    registry.add_grant(
+        grant_for(registry, selector=OTHER_SELECTOR, expires_at=NOW + timedelta(hours=1))
+    )
+    registry.revoke_grant(SELECTOR, reason=ReaderRevocationReason.OPERATOR_REQUEST)
+    assert set(ReaderGrantListing.model_fields) == {"grant_selector", "state"}
+    assert registry.grant_states() == (
+        ReaderGrantListing(grant_selector=SELECTOR, state=ReaderGrantState.REVOKED),
+        ReaderGrantListing(
+            grant_selector=OTHER_SELECTOR, state=ReaderGrantState.ACTIVE
+        ),
+    )
+    clock.advance_to(NOW + timedelta(hours=1))
+    assert registry.grant_states()[1].state is ReaderGrantState.EXPIRED
 
 
 def test_missing_grant_is_denied(registry) -> None:
@@ -674,7 +737,7 @@ def test_cross_process_revocation_waits_for_the_read_fence(registry) -> None:
     stdout, stderr = process.communicate(timeout=60)
     assert process.returncode == 0, stderr
     assert stdout.split() == ["opened", "revoked"]
-    with denied(ReaderDenialReason.STALE_HEAD):
+    with denied(ReaderDenialReason.GRANT_REVOKED):
         authorize(registry, binding)
     with denied(ReaderDenialReason.GRANT_REVOKED):
         bind(registry)
