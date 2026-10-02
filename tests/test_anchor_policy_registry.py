@@ -345,14 +345,35 @@ def test_resolve_returns_the_exact_protected_approval_and_anchor(
     assert resolved.candidate_page_sha256 == page.candidate_page_sha256
     assert resolved.cohort_selector_id == live.selector_id
     assert resolved.cohort_manifest_sha256 == live.manifest_sha256
+    payload = resolved.model_dump()
     with pytest.raises(ValueError, match="anchor key"):
         ResolvedApprovedAnchor.model_validate(
             {
-                **resolved.model_dump(),
+                **payload,
                 "anchor_record": live.records[1],
                 "anchor_record_sha256": longitudinal_record_sha256(live.records[1]),
             }
         )
+    # Re-pointing provenance digests or swapping in another valid policy or
+    # envelope no longer validates against the carried candidate page.
+    swapped_policy = _policy(live.records[0]).model_copy(update={"version": "1.0.1"})
+    swapped_envelope = _envelope(live.records[0], limit=0.05)
+    for update in (
+        {"candidate_page_sha256": "e" * 64},
+        {"cohort_manifest_sha256": "e" * 64},
+        {"object_sha256": "e" * 64},
+        {
+            "policy": swapped_policy,
+            "policy_sha256": longitudinal_anchor_policy_sha256(swapped_policy),
+        },
+        {
+            "envelope": swapped_envelope,
+            "envelope_sha256": repeatability_envelope_sha256(swapped_envelope),
+        },
+        {"envelope": _envelope(live.records[0]).model_copy(update={"unit": "unit_other"})},
+    ):
+        with pytest.raises(ValueError):
+            ResolvedApprovedAnchor.model_validate({**payload, **update})
 
 
 def test_injected_stale_cross_policy_and_cross_registry_selectors_fail_closed(
@@ -647,15 +668,20 @@ def test_selector_page_reports_live_counts_and_paginates(
     assert all(row.candidate_count == 1 and row.eligible_count == 1 for row in whole.records)
     keys = [(row.selector_id, row.approval_version) for row in whole.records]
     assert keys == sorted(keys)
-    first_page = registry.list_selectors(limit=2)
-    assert len(first_page.records) == 2
-    rest = registry.list_selectors(
-        after_selector_id=first_page.next_after_selector_id,
-        after_approval_version=first_page.next_after_approval_version,
-        limit=2,
-    )
-    assert [*first_page.records, *rest.records] == list(whole.records)
-    assert rest.next_after_selector_id is None
+    # One row per page crosses every boundary, including between two versions
+    # of one selector.
+    collected = []
+    cursor: dict[str, object] = {}
+    while True:
+        step = registry.list_selectors(limit=1, **cursor)
+        collected.extend(step.records)
+        if step.next_after_selector_id is None:
+            break
+        cursor = {
+            "after_selector_id": step.next_after_selector_id,
+            "after_approval_version": step.next_after_approval_version,
+        }
+    assert collected == list(whole.records)
     page = registry.derive_candidate_page(first.selector_id, 1)
     assert whole.records[keys.index((first.selector_id, 1))].candidate_page_sha256 == (
         page.candidate_page_sha256

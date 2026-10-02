@@ -461,6 +461,7 @@ class ResolvedApprovedAnchor(RegistryContract):
     envelope_sha256: Sha256
     expected_authority_head_sha256: Sha256
     candidate_page_sha256: Sha256
+    candidate_page: AnchorCandidatePage
     candidate: AnchorCandidate
     anchor_record: LongitudinalRecord
     anchor_record_sha256: Sha256
@@ -481,6 +482,37 @@ class ResolvedApprovedAnchor(RegistryContract):
             != self.policy.anchor_key_sha256
         ):
             raise ValueError("resolved anchor is not the policy's anchor key")
+        if not _envelope_binds_anchor_key(self.envelope, self.anchor_record):
+            raise ValueError("resolved anchor envelope does not bind its anchor key")
+        page = self.candidate_page
+        if (
+            page.registry_id,
+            page.registry_epoch_sha256,
+            page.state_version,
+            page.state_head_sha256,
+            page.policy_selector_id,
+            page.approval_version,
+            page.object_sha256,
+            page.policy_sha256,
+            page.envelope_sha256,
+            page.anchor_key_sha256,
+            page.cohort_manifest_sha256,
+            page.candidate_page_sha256,
+        ) != (
+            self.registry_id,
+            self.registry_epoch_sha256,
+            self.state_version,
+            self.state_head_sha256,
+            self.policy_selector_id,
+            self.approval_version,
+            self.object_sha256,
+            self.policy_sha256,
+            self.envelope_sha256,
+            self.policy.anchor_key_sha256,
+            self.cohort_manifest_sha256,
+            self.candidate_page_sha256,
+        ) or self.candidate not in page.candidates:
+            raise ValueError("resolved anchor does not bind its candidate page")
         if self.candidate.anchor_selector_id != _anchor_selector_id(
             self.registry_epoch_sha256, self.object_sha256, self.anchor_record_sha256
         ):
@@ -2168,6 +2200,7 @@ class AnchorPolicyRegistry:
                 envelope_sha256=value.envelope_sha256,
                 expected_authority_head_sha256=value.expected_authority_head_sha256,
                 candidate_page_sha256=page.candidate_page_sha256,
+                candidate_page=page,
                 candidate=candidate,
                 anchor_record=record,
                 anchor_record_sha256=longitudinal_record_sha256(record),

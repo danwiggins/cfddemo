@@ -124,11 +124,21 @@ It returns a protected `ResolvedApprovedAnchor` with:
 - the D05 binding;
 - the exact policy and envelope and their digests;
 - the E01 head pin;
-- the page digest and the candidate row; and
+- the exact candidate page, its digest and the selected row; and
 - the anchor record and its digest.
 
-Its validator re-derives the anchor selector from the epoch, the approval
-object digest and the record digest.
+Its validator:
+
+- re-derives the anchor selector from the epoch, the approval object digest
+  and the record digest;
+- requires the carried page to bind the same registry, head, approval, object,
+  policy, envelope, anchor-key and manifest digests;
+- requires the selected row to be on that page; and
+- reapplies the envelope-to-anchor-key binding.
+
+The validator checks internal consistency only. It cannot authenticate a
+wholly re-derived forgery. E12 must accept a resolution only as the return
+value of its own `resolve_anchor` call, never from a caller.
 
 These fail closed:
 
@@ -305,9 +315,17 @@ In scope:
   as an unavailable comparison state.
 - **D05 in-fence API.** The private D05 in-fence read should become a reviewed
   public API in the authority-fence adapter PR.
-- **Recovery.** The staged-creation/restore follow-up shared with the D03, D05,
-  D07 and D09 registries applies here too. Every read parses every committed
-  object, which is fine at synthetic scale only.
+- **Recovery.** The follow-up shared with the D03, D05, D07 and D09 registries
+  applies here too. In-process failures are handled: a failed append truncates
+  its torn suffix, and a failed restore removes its target. A process that dies
+  in three places leaves state that fails closed and needs manual repair:
+  - mid-append, leaving a torn journal tail that reopen rejects;
+  - during root creation; or
+  - during restore, leaving a partial target that blocks a retry at that path.
+
+  The fix is reopen-time tail truncation plus staged creation and restore with
+  an atomic rename. Every read parses every committed object, which is fine at
+  synthetic scale only.
 
 All fixtures are synthetic/local. Candidate eligibility describes technical
 D03 admissibility only and carries no clinical interpretation.
