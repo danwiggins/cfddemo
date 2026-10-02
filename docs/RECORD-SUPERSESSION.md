@@ -92,7 +92,11 @@ bounded to 100,000 records and comparisons and 1,000 members per comparison.
 
 The ledger root and SQLite files are private, no-follow regular filesystem
 objects bound to protected descriptors, owner/mode checks, and exact inode
-identity. Each connection proves the database descriptor it opened. Schema,
+identity. Each connection proves the database descriptor it opened by diffing
+the process descriptor table under a process-wide open lock; every descriptor
+the store opens onto the database, including during first-time initialization,
+is opened under that lock so concurrent in-process initializers serialize
+instead of failing each other's proof. Schema,
 canonical row bytes, content digests, complete supersession
 history, row counts, state version, and state head are revalidated in every
 transaction. SQLite uses foreign keys, WAL, full synchronous writes, immediate
