@@ -349,7 +349,9 @@ run_app(
     audit_runner=deterministic_runner("supported-length"),
 )
 """,
-        default_timeout=10,
+        # A ceiling, not a wait: under a loaded machine (parallel suites) a
+        # script run exceeded 10 s and failed with "AppTest script run timed out".
+        default_timeout=60,
     ).run()
 
     assert not app.exception
