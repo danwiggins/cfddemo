@@ -65,7 +65,9 @@ artifact.
    artifact validator itself uses; E09 `replay_cna_explorer_snapshot` over
    reparsed inputs). Only the reparsed artifact is read after that;
 5. resolves each coordinate from both the chart/layer and the exact table, and
-   requires each to match exactly once and to agree;
+   requires each to match exactly once and to agree. Each representation is
+   indexed once by its exact key (duplicates kept), so a complete vector costs
+   time linear in the artifact;
 6. returns a `SourceValueProjectionSetV1`, ordered by coordinate then statistic.
 
 `verify_source_value_projection` reparses a projection set, reruns

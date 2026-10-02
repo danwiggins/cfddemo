@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import inspect
+import time
 from pathlib import Path
 from typing import Any
 
@@ -751,6 +752,16 @@ def test_cna_dosage_chart_layer_drift_fails_closed(
     )
     with pytest.raises(SourceValueCoordinateUnresolved, match="matched 2"):
         case.project(artifact=doubled)
+    grids = snapshot.layers.coordinate_grids
+    two_grids = snapshot.model_copy(
+        update={
+            "layers": snapshot.layers.model_copy(
+                update={"coordinate_grids": (grids[0], grids[0], grids[1])}
+            )
+        }
+    )
+    with pytest.raises(SourceValueCoordinateUnresolved, match="E09 grid.*matched 2"):
+        case.project(artifact=two_grids)
 
 
 # --- cross-family closure ----------------------------------------------------
@@ -981,6 +992,73 @@ def test_nested_caller_subclasses_are_rejected_not_normalized(tmp_path: Path) ->
     disguised = result.model_copy(update={"projections": (first, *result.projections[1:])})
     with pytest.raises(SourceValueProjectionForged):
         case.verify(disguised)
+
+
+def test_anchor_and_source_identity_reject_extra_state_and_subclasses(
+    tmp_path: Path,
+) -> None:
+    case = _fragment_case(tmp_path)
+    with pytest.raises(SourceValueMeasurementMismatch):
+        case.project(source_measurement=case.source.model_copy(update={"bogus": 1}))
+    with pytest.raises(SourceValueMeasurementMismatch):
+        case.project(measurement_anchor=case.anchor.model_copy(update={"bogus": 1}))
+
+    class Reference(type(case.source.method_ref)):  # type: ignore[misc]
+        pass
+
+    nested = case.source.model_copy(
+        update={"method_ref": Reference.model_validate(case.source.method_ref.model_dump())}
+    )
+    with pytest.raises(SourceValueMeasurementMismatch):
+        case.project(source_measurement=nested)
+
+
+def test_canonical_all_segments_resolve_in_linear_time(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, cna_artifact
+) -> None:
+    """Each row is indexed once; a per-component scan would be quadratic."""
+
+    snapshot, inputs = cna_artifact
+    count = 4000
+    base = snapshot.layers.segments[0]
+    segments = tuple(
+        base.model_copy(update={"segment_index": index, "start": index * 10,
+                                "end": index * 10 + 10})
+        for index in range(count)
+    )
+    upstream = tuple(
+        inputs.segmented.segments[0].model_copy(
+            update={"start": index * 10, "end": index * 10 + 10}
+        )
+        for index in range(count)
+    )
+    large = snapshot.model_copy(
+        update={
+            "layers": snapshot.layers.model_copy(update={"segments": segments}),
+            "chart": snapshot.chart.model_copy(update={"segments": segments}),
+            "tables": snapshot.tables.model_copy(update={"segments": segments}),
+        }
+    )
+    large_inputs = CnaReplayInputs(
+        dosage=inputs.dosage,
+        segmented=inputs.segmented.model_copy(update={"segments": upstream}),
+        dosage_authority=inputs.dosage_authority,
+        segmented_authority=inputs.segmented_authority,
+    )
+    _bypass_replay(monkeypatch, "_replay_cna")
+    monkeypatch.setattr(module, "_capture_cna_inputs", lambda value: value)
+    case = _cna_case(
+        tmp_path,
+        cna_artifact,
+        "segment",
+        selection_rule=ALL,
+        components=(),
+        all_component_statistics=tuple(CnaSegmentStatistic),
+    )
+    started = time.perf_counter()
+    result = case.project(artifact=large, cna_inputs=large_inputs)
+    assert len(result.projections) == count * len(CnaSegmentStatistic)
+    assert time.perf_counter() - started < 10
 
 
 def test_projection_binds_the_exact_registry_head(tmp_path: Path) -> None:

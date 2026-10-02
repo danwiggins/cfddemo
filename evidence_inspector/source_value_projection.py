@@ -496,6 +496,8 @@ _EXACT_GRAPHS: dict[type[BaseModel], tuple[frozenset[Any], frozenset[Any]]] = {
         CnvDevelopmentResult,
         ExplorerInputAuthority,
         SourceValueProjectionSetV1,
+        MeasurementAnchor,
+        SourceMeasurementIdentity,
     )
 }
 # Generous structural bounds: every family artifact is also bounded by its own
@@ -564,6 +566,7 @@ def _capture_contract(model: type[ContractT], value: object, label: str) -> Cont
     if type(value) is not model:
         raise SourceValueMeasurementMismatch(f"{label} is not an exact contract")
     try:
+        _require_exact_graph(value, model)
         return _reparse_exact(model, canonical_contract_bytes(value))  # type: ignore[arg-type]
     except (ValidationError, *_REPLAY_FAILURES) as exc:
         raise SourceValueMeasurementMismatch(f"{label} is invalid") from exc
@@ -622,6 +625,35 @@ def _exactly_one(
             f"{label} must match exactly one row, matched {len(matches)}"
         )
     return matches[0]
+
+
+class _RowIndex:
+    """Rows grouped once by an exact key, so each lookup is constant time.
+
+    Duplicates are kept, not collapsed: a lookup still requires exactly one.
+    """
+
+    def __init__(self, rows: Iterable[Any], key: Callable[[Any], Any], label: str):
+        self._label = label
+        self._rows: dict[Any, list[Any]] = {}
+        for row in rows:
+            self._rows.setdefault(key(row), []).append(row)
+
+    def one(self, key: Any) -> Any:
+        matches = self._rows.get(key, ())
+        if len(matches) != 1:
+            raise SourceValueCoordinateUnresolved(
+                f"{self._label} must match exactly one row, matched {len(matches)}"
+            )
+        return matches[0]
+
+
+def _bounds(row: Any) -> tuple[int, int | None]:
+    return (row.lower_inclusive, row.upper_exclusive)
+
+
+def _interval(row: Any) -> tuple[str, int, int]:
+    return (row.contig, row.start, row.end)
 
 
 def _statistics_for(policy: Any) -> tuple[Any, ...]:
@@ -710,31 +742,30 @@ def _fragment_projections(
         "bundle_sha256": source.record.bundle_sha256,
         "chart_sha256": hashlib.sha256(canonical_json_bytes(source.chart)).hexdigest(),
     }
+    chart_index = _RowIndex(chart_rows, _bounds, "E07 chart bin")
+    panel_index = _RowIndex(panel.rows, _bounds, "E07 panel bin")
+    table_index = _RowIndex(
+        (row for row in view.accessible_rows if row.panel == policy.panel),
+        _bounds,
+        "E07 table bin",
+    )
     projections = []
     for bin_, statistic in requested:
         bounds = (bin_.lower_inclusive, bin_.upper_exclusive)
         if bin_.bin_index >= len(chart_rows):
             raise SourceValueCoordinateUnresolved("E07 bin is outside the chart")
         chart_row = chart_rows[bin_.bin_index]
-        if (chart_row.lower_inclusive, chart_row.upper_exclusive) != bounds:
+        if _bounds(chart_row) != bounds:
             raise SourceValueCoordinateUnresolved("E07 bin boundaries are shifted")
-
-        def same_bounds(row: Any) -> bool:
-            return (row.lower_inclusive, row.upper_exclusive) == bounds
-
-        _exactly_one(chart_rows, same_bounds, "E07 chart bin")
+        chart_index.one(bounds)
         table_entry = histogram[bin_.bin_index]
         if (
             table_entry.bin.lower_inclusive,
             table_entry.bin.upper_exclusive,
         ) != bounds or table_entry.count != chart_row.count:
             raise SourceValueRepresentationDrift("E02 chart and table rows differ")
-        panel_row = _exactly_one(panel.rows, same_bounds, "E07 panel bin")
-        table_row = _exactly_one(
-            view.accessible_rows,
-            lambda row: row.panel == policy.panel and same_bounds(row),
-            "E07 table bin",
-        )
+        panel_row = panel_index.one(bounds)
+        table_row = table_index.one(bounds)
         if not (
             panel_row.count == table_row.count == chart_row.count
             and panel_row.fraction_numerator == table_row.fraction_numerator
@@ -858,23 +889,22 @@ def _cell_origin_projections(
         "atlas_sha256": binding.atlas_sha256,
         "authority_head_sha256": binding.authority_head_sha256,
     }
+    estimate_index = _RowIndex(
+        deconvolution.estimates,
+        lambda item: item.cell_type_id,
+        "E08 registered contributor",
+    )
+    dot_index = _RowIndex(
+        view.dot_interval_rows, lambda row: row.contributor_id, "E08 dot row"
+    )
+    table_index = _RowIndex(
+        view.exact_table_rows, lambda row: row.contributor_id, "E08 table row"
+    )
     projections = []
     for contributor, statistic in requested:
-        estimate = _exactly_one(
-            deconvolution.estimates,
-            lambda item: item.cell_type_id == contributor,
-            "E08 registered contributor",
-        )
-        dot = _exactly_one(
-            view.dot_interval_rows,
-            lambda row: row.contributor_id == contributor,
-            "E08 dot row",
-        )
-        table = _exactly_one(
-            view.exact_table_rows,
-            lambda row: row.contributor_id == contributor,
-            "E08 table row",
-        )
+        estimate = estimate_index.one(contributor)
+        dot = dot_index.one(contributor)
+        table = table_index.one(contributor)
         if _table_fields(dot) != _table_fields(table):
             raise SourceValueRepresentationDrift("E08 dot and table rows differ")
         interval = intervals.get(contributor)
@@ -1021,17 +1051,21 @@ def _cna_chromosome_projections(
         "artifact_sha256": artifact_sha256,
         **cna_binding,
     }
+    def chromosome_of(item: Any) -> str:
+        return str(item.chromosome)
+
+    chart_index = _RowIndex(
+        snapshot.chart.dosage_chromosomes, chromosome_of, "E09 dosage chart"
+    )
+    layer_index = _RowIndex(layers.dosage_chromosomes, chromosome_of, "E09 dosage layer")
+    table_index = _RowIndex(inputs.dosage.chromosomes, chromosome_of, "E09 dosage table")
     projections = []
     for chromosome, statistic in requested:
         if chromosome not in declared:
             raise SourceValueCoordinateUnresolved("chromosome is not on the dosage grid")
-
-        def same(item: Any, chromosome: str = chromosome) -> bool:
-            return item.chromosome == chromosome
-
-        chart = _exactly_one(snapshot.chart.dosage_chromosomes, same, "E09 dosage chart")
-        layer = _exactly_one(layers.dosage_chromosomes, same, "E09 dosage layer")
-        table = _exactly_one(inputs.dosage.chromosomes, same, "E09 dosage table")
+        chart = chart_index.one(chromosome)
+        layer = layer_index.one(chromosome)
+        table = table_index.one(chromosome)
         if chart != layer or any(
             getattr(table, field) != getattr(layer, field)
             for field in (
@@ -1106,25 +1140,29 @@ def _cna_segment_projections(
         **cna_binding,
     }
     upstream = inputs.segmented.segments
+
+    def index_of(item: Any) -> int:
+        return int(item.segment_index)
+
+    chart_by_index = _RowIndex(snapshot.chart.segments, index_of, "E09 segment chart")
+    chart_by_interval = _RowIndex(snapshot.chart.segments, _interval, "E09 segment chart")
+    table_by_index = _RowIndex(snapshot.tables.segments, index_of, "E09 segment table")
+    table_by_interval = _RowIndex(
+        snapshot.tables.segments, _interval, "E09 segment table"
+    )
+    layer_by_index = _RowIndex(layers.segments, index_of, "E09 segment layer")
     projections = []
     for segment, statistic in requested:
         if segment.contig not in declared:
             raise SourceValueCoordinateUnresolved("segment is not on the segmented grid")
         interval = (segment.contig, segment.start, segment.end)
-
-        def same_index(item: Any, index: int = segment.segment_index) -> bool:
-            return item.segment_index == index
-
-        def same_interval(item: Any, interval: tuple[Any, ...] = interval) -> bool:
-            return (item.contig, item.start, item.end) == interval
-
-        chart = _exactly_one(snapshot.chart.segments, same_index, "E09 segment chart")
-        if (chart.contig, chart.start, chart.end) != interval:
+        chart = chart_by_index.one(segment.segment_index)
+        if _interval(chart) != interval:
             raise SourceValueCoordinateUnresolved("E09 segment interval is shifted")
-        _exactly_one(snapshot.chart.segments, same_interval, "E09 segment chart")
-        table = _exactly_one(snapshot.tables.segments, same_index, "E09 segment table")
-        _exactly_one(snapshot.tables.segments, same_interval, "E09 segment table")
-        layer = _exactly_one(layers.segments, same_index, "E09 segment layer")
+        chart_by_interval.one(interval)
+        table = table_by_index.one(segment.segment_index)
+        table_by_interval.one(interval)
+        layer = layer_by_index.one(segment.segment_index)
         if not chart == table == layer:
             raise SourceValueRepresentationDrift("E09 segment chart and table differ")
         if segment.segment_index >= len(upstream):
