@@ -489,7 +489,18 @@ def test_anchor_selection_is_explicit_and_fails_closed(world: World) -> None:
 
 
 @pytest.mark.parametrize("hook", ["_history_map", "_gather"])
-@pytest.mark.parametrize("writer", ["linkage", "projection", "trust", "reader"])
+@pytest.mark.parametrize(
+    "writer",
+    [
+        "linkage",
+        "projection",
+        "trust",
+        "reader",
+        "e04_import",
+        "d06_import",
+        "d05_register",
+    ],
+)
 def test_authority_change_during_construction_is_a_read_conflict(
     world: World, monkeypatch: pytest.MonkeyPatch, writer: str, hook: str
 ) -> None:
@@ -508,6 +519,10 @@ def test_authority_change_during_construction_is_a_read_conflict(
             world.projections.register_policy(policy.model_copy(update={"version": 2}))
         elif writer == "trust":
             world.trust.revoke_key(SIGNING_KEY.key_id)
+        elif writer in {"e04_import", "d06_import"}:
+            _import_writer(world, writer)
+        elif writer == "d05_register":
+            _register_writer(world)
         else:
             world.reader.revoke_grant(
                 world.grant.payload.grant_selector,
@@ -529,6 +544,83 @@ def test_authority_change_during_construction_is_a_read_conflict(
     }
     if writer != "reader":
         assert error.code is LongitudinalErrorCode.READ_CONFLICT
+
+
+def _new_bundle(world: World, name: str) -> None:
+    from tests.test_bundles import _measurement, _provenance
+    from traceback_runner.bundles import build_result_bundle
+
+    capability = world.capability
+    build_result_bundle(
+        world.extra["imports"] / name,
+        measurement=_measurement(),
+        provenance=_provenance(run_token=f"synthetic.run.{name}"),
+        method={
+            "method_id": capability.method_ref.method_id,
+            "version": capability.method_ref.version,
+            "method_definition_sha256": capability.method_definition_sha256,
+        },
+        signing_key=world.extra["key"],
+    )
+
+
+def _import_writer(world: World, writer: str) -> None:
+    """Write E04 rows (raw import) or a D06 binding (import for member C)."""
+
+    from tests.test_result_catalog import ALIASES
+
+    extra = world.extra
+    if writer == "e04_import":
+        _new_bundle(world, "race-e04")
+        world.results.import_bundle(
+            root_id="root_primary",
+            relative_path="race-e04",
+            registry=extra["method_registry"],
+            authority_head=extra["head"],
+            expected_authority_head_sha256=extra["head_sha256"],
+            capability=world.capability,
+            aliases=ALIASES.model_copy(
+                update={
+                    "display_alias": "dsp_99999999",
+                    "run_alias": "rnx_99999999",
+                    "timepoint_alias": "tpt_99999999",
+                }
+            ),
+        )
+        return
+    _new_bundle(world, "race-d06")
+    member_c = next(
+        m for m in world.manifest.members if m.linkage_id.endswith("4" * 32)
+    )
+    world.records.import_bundle(
+        selector_id=extra["selector_id"],
+        cohort_version=1,
+        provider_namespace=member_c.provider_namespace,
+        analysis_record_id=member_c.analysis_record_id,
+        root_id="root_primary",
+        relative_path="race-d06",
+        registry=extra["method_registry"],
+        authority_head=extra["head"],
+        expected_authority_head_sha256=extra["head_sha256"],
+        capability=world.capability,
+    )
+
+
+def _register_writer(world: World) -> None:
+    """Register a second cohort in the same D05 registry."""
+
+    from tests.test_cohort_manifest import _authority as _provider_authority
+    from tests.test_cohort_manifest import _manifest
+
+    member = world.manifest.members[0]
+    world.cohort.register(
+        _manifest(
+            _provider_authority(world.linkage.active_snapshot()),
+            (member,),
+            cohort_id="cohort_" + "2" * 32,
+            measurement_anchor=world.manifest.measurement_anchor,
+        )
+    )
 
 
 @pytest.mark.parametrize(
@@ -567,7 +659,15 @@ def test_stable_key_revocation_is_a_withheld_row_not_an_error(world: World) -> N
         assert row.values == () and row.comparison is None
         assert row.catalog_result_sha256 is None
     assert workspace.segments == ()
-    assert workspace.population.declared_members == 4
+    population = workspace.population
+    assert population.declared_members == 4
+    # Zero included units: A is policy-excluded, B is now withheld (unavailable).
+    assert (population.included_members, population.included_denominator_units) == (
+        0,
+        0,
+    )
+    assert population.state.value == "no_included_units"
+    assert population.unavailable_members == 2
 
 
 def test_missing_d07_suppresses_numbers_but_keeps_source_values(
@@ -1304,3 +1404,33 @@ def test_public_comparison_carries_no_timestamp(base) -> None:
     assert b"2026-" not in public
     protected = next(row for row in workspace.protected_rows if row.comparison)
     assert protected.comparison.replayed_at.tzinfo is not None
+
+
+@pytest.mark.parametrize(
+    ("part", "field"),
+    [
+        ("d09_population", "record_status_sha256"),
+        ("d09_population", "population_sha256"),
+        ("d03_series", "object_sha256"),
+    ],
+)
+def test_d10_context_must_derive_from_this_builds_d09_and_d03(
+    world: World, monkeypatch: pytest.MonkeyPatch, part: str, field: str
+) -> None:
+    from evidence_inspector.covariate_context_registry import CovariateContextRegistry
+
+    original = workspace_module._call
+
+    def doctored(store, cls, name, *args, **kwargs):
+        value = original(store, cls, name, *args, **kwargs)
+        if (cls, name) != (CovariateContextRegistry, "resolve"):
+            return value
+        live = value.live
+        changed = getattr(live, part).model_copy(update={field: "0" * 64})
+        return value.model_copy(
+            update={"live": live.model_copy(update={part: changed})}
+        )
+
+    monkeypatch.setattr(workspace_module, "_call", doctored)
+    error = _boundary(world.build)
+    assert error.code is LongitudinalErrorCode.READ_CONFLICT

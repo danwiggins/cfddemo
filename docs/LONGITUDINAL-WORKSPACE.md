@@ -103,19 +103,27 @@ The builder therefore brackets the reads with two composite snapshots:
 6. `H2 = coordinator.snapshot(scope)` and re-authorize (`A2`);
 7. require `H2 == H1` and `A2 == A1` (except `evaluated_at`), then derive.
 
-Every store head is an append-only hash chain with rollback detection, and the
-D06 scoped head is the status digest recomputed under the D06 fence. `H1 == H2`
-means no committed mutation of any fenced store landed between the two holds,
-so every read in between observed the `H1` state. If any read fails, the
+Chained heads (append-only journals with rollback detection) are covered by
+`H2 == H1`: no committed mutation of those stores landed between the two
+holds. Two heads are content digests rather than chains: the D06 scoped head
+(the status digest of the selected cohort version, derived from E04 rows that
+can be removed and re-added) and the E04 head, which since #81 includes a
+digest of every committed catalog row under the cross-process content lock. A
+remove-and-re-add between the holds can restore an equal digest, so every
+D06-derived read (D06 status, E06 sources, family artifacts, D09 summary, D10
+context) is also bound to the `H1` status digest. A read that observed the
+intermediate state either fails that binding (`read_conflict`) or fails its
+own replay and surfaces as `authority_stale`; a retry resolves it. If any read fails, the
 builder re-snapshots: if authority moved, the failure is reported as
 `read_conflict`, never as stale or scientific unavailability. The workspace is
 a point-in-time record of `H1`, not a lease.
 
 Known limits of this protocol:
 
-- E04 catalog rows are not fenced by the composite (see
-  `docs/COMPOSITE-AUTHORITY-FENCE.md`). D08 consumes E04 rows only through D06
-  bindings, which D06 re-verifies against E04 inside its own fence.
+- E04 catalog rows are fenced by the composite since #81 (content lock plus
+  an E04 head over row content). D08 still consumes E04 rows only through D06
+  bindings, which D06 re-verifies against E04 inside its own fence; the
+  content-digest ABA case is described above.
 - Time-dependent state (reader grant expiry, D07 envelope validity) is
   evaluated at each read. D07 `replayed_at` is the as-of time of a comparison;
   it stays in the protected row (an absolute timestamp never reaches public
@@ -274,7 +282,7 @@ measurement anchor and provider authority changes. D03 policy change is
 ## Privacy boundary
 
 The public projection's schema has no protected-row, member, reader or
-credential field. Public rows use a keyed `source_<16 hex>` alias, ordinals,
+credential field. Public rows use a domain-separated digest alias `source_<16 hex>`, ordinals,
 offsets, controlled states, method references and digests of results,
 sources, decisions and comparisons. Tests seed provider, subject, collection,
 specimen, run, analysis, linkage, result, bundle, receipt, timepoint, path and
@@ -351,4 +359,3 @@ Release, export and diagnostic interpretation fields are literally false.
 - D10 requires the anchor to be outside the D09 included set (above).
 - D05 committed receipts (current at manifest time) and D04 activation
   receipts differ; D08 matches D04 records by linkage revision, not receipt.
-- The E04 catalog-content fence and content head (composite open item).

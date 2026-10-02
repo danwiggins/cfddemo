@@ -140,6 +140,8 @@ from traceback_runner.serialization import canonical_json_bytes
 from traceback_runner.signing import KeyPurpose, generate_development_keypair
 
 NOW = datetime(2026, 9, 29, 12, 0, tzinfo=UTC)
+# A sequence-like protected token seeded into a caller-asserted E06 label.
+SEQUENCE_TOKEN = "ACGTTGCAACGTTGCAACGTTGCA"
 SUBJECT = _token("subject", "5")
 DAY = {
     name: datetime(2026, 9, day, 12, tzinfo=UTC)
@@ -528,7 +530,7 @@ def make_world(
             expected_policy_sha256=compatibility_policy_sha256(policy),
             denominator=_ledger(),
             accessible_label="Research aggregate",
-            qc_label="Qualified research result",
+            qc_label=f"Qualified research result {SEQUENCE_TOKEN}",
         )
         if with_family:
             family.register_fragment_artifact(
@@ -743,7 +745,17 @@ def make_world(
         capability=capability,
         grant=grant,
         closers=closers,
-        extra={"key": key, "series": series, "approval": approval, "scope": scope},
+        extra={
+            "key": key,
+            "series": series,
+            "approval": approval,
+            "scope": scope,
+            "method_registry": method_registry,
+            "head": head,
+            "head_sha256": head_sha256,
+            "imports": imports,
+            "selector_id": selector.selector_id,
+        },
     )
 
 
@@ -792,5 +804,14 @@ def protected_tokens(world: World) -> tuple[str, ...]:
                 record.linkage_revision.technical.measurement_id,
             }
         )
-    tokens.update({str(world.root), "imports", "bundle1", "bundle2", "synthetic.run.1"})
+    tokens.update(
+        {
+            str(world.root),
+            "imports",
+            "bundle1",
+            "bundle2",
+            "synthetic.run.1",
+            SEQUENCE_TOKEN,
+        }
+    )
     return tuple(sorted(item for item in tokens if item))

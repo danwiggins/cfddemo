@@ -27,16 +27,21 @@ the stores' public reads cannot run inside it.  The builder therefore:
 6. requires ``H2 == H1`` and ``A2 == A1`` (up to ``evaluated_at``), then derives
    the workspace from the captured reads only.
 
-Every store head is an append-only hash chain with rollback detection (D06's
-scoped head is the status digest of the selected cohort version, recomputed
-under its fence).  ``H1 == H2`` therefore means no committed mutation of any
-fenced store landed between the two holds, so every read in between observed
-the exact ``H1`` state, and each read is additionally bound to its ``H1`` head.
-The returned workspace is a point-in-time record of ``H1``, never a lease.
-Two documented exceptions: E04 catalog rows are not fenced by the composite
-(D08 consumes E04 rows only through D06 status bindings), and time-dependent
-replays (reader grant expiry, D07 envelope validity) are evaluated live at
-each read; D07 ``replayed_at`` is the as-of time of a comparison.
+Chained heads (append-only journals with rollback detection) are covered by
+``H2 == H1``: no committed mutation of those stores landed between the holds.
+Two heads are content digests, not chains: the D06 scoped head (the status
+digest of the selected cohort version, derived from E04 rows that can be
+removed and re-added) and the E04 head, which since #81 also covers a digest
+of every committed catalog row.  A remove-and-re-add between the holds can
+restore an equal digest, so every D06-derived read (D06 status, E06 sources,
+family artifacts, D09 summary, D10 context) is additionally bound to the
+``H1`` status digest; a read that observed the intermediate state fails that
+binding (``read_conflict``) or fails its own replay (``authority_stale``,
+which a retry resolves).  The returned workspace is a point-in-time record of
+``H1``, never a lease.  D08 consumes E04 rows only through D06 status
+bindings.  Time-dependent replays (reader grant expiry, D07 envelope validity)
+are evaluated live at each read; D07 ``replayed_at`` is the as-of time of a
+comparison.
 
 No family adapter, parser or derivation runs while any store fence is held:
 the adapters run between the bracketing snapshots.
@@ -2779,7 +2784,9 @@ def _gather(
     # D07 comparisons, matched by exact D03 decision, policy and envelope.
     comparisons = _comparison_index(d07_comparison_registry, heads, anchor)
     # D10 covariate context for this D09 population and D03 series.
-    covariate = _covariate_context(d10_context_registry, heads, request, anchor, series)
+    covariate = _covariate_context(
+        d10_context_registry, heads, request, anchor, series, status, population
+    )
     # Rows.
     anchor_record = anchor.anchor_record
     anchor_matches = [
@@ -3214,10 +3221,7 @@ def _comparison_index(
                 heads.d07_comparison,
                 (page.registry_id, page.registry_epoch_sha256, page.state_head_sha256),
             )
-            and (
-                page.result_trust_state_head_sha256 is None
-                or page.result_trust_state_head_sha256 == heads.result_trust.head
-            )
+            and page.result_trust_state_head_sha256 == heads.result_trust.head
         )
         for item in page.records:
             if (
@@ -3256,10 +3260,7 @@ def _row_comparison(
                 resolved.state_head_sha256,
             ),
         )
-        and (
-            resolved.result_trust_state_head_sha256 is None
-            or resolved.result_trust_state_head_sha256 == heads.result_trust.head
-        )
+        and resolved.result_trust_state_head_sha256 == heads.result_trust.head
         and resolved.object_sha256 == row.object_sha256
     )
     fields = _comparison_fields(resolved)
@@ -3274,6 +3275,8 @@ def _covariate_context(
     request: LongitudinalWorkspaceRequest,
     anchor: ResolvedApprovedAnchor,
     series: RegisteredLongitudinalSeriesDecision | None,
+    status: CohortManifestRecordStatus,
+    population: CohortPopulationProjection,
 ) -> PublicCovariateContext:
     if series is None:
         return PublicCovariateContext(state=CovariateContextState.NOT_APPLICABLE)
@@ -3323,6 +3326,14 @@ def _covariate_context(
                 and live.d03_series.selector_id == series.selector_id
                 and live.context.d02_anchor_policy_sha256 == anchor.policy_sha256
             ):
+                # The context must derive from this build's exact D09
+                # population, D06 status and D03 series object.
+                _require(
+                    live.d09_population.record_status_sha256 == status.status_sha256
+                    and live.d09_population.population_sha256
+                    == population.population_sha256
+                    and live.d03_series.object_sha256 == series.object_sha256
+                )
                 matched.append(resolved)
     if len(matched) > 1:
         return PublicCovariateContext(state=CovariateContextState.AMBIGUOUS)
