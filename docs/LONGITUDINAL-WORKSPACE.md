@@ -3,8 +3,8 @@
 Status: local, synthetic, release-disabled. This is the protected D08 read
 model and its public projection from `docs/E12-INTEGRATION-PLAN.md`
 ("Required implementation cut"). It authorizes no release, export, provider
-operation or clinical interpretation. Save/Reopen, browser routes and HTML are
-later PRs.
+operation or clinical interpretation. Browser routes, the view, Save and
+Reopen are in `docs/LONGITUDINAL-BROWSER.md`.
 
 Code: `evidence_inspector/longitudinal_workspace.py`. Tests:
 `tests/test_longitudinal_workspace.py` (world:
@@ -276,7 +276,8 @@ the same registered history: added/removed/unchanged member counts, set
 digests, and controlled reasons for membership, inclusion, exclusion,
 missingness, unit of analysis, replicate and reanalysis rules, time axis,
 measurement anchor and provider authority changes. D03 policy change is
-`not_comparable` (it needs the prior saved comparison; Reopen is later).
+`not_comparable` here; Reopen reports a D03 policy change through the saved
+commitments (`docs/LONGITUDINAL-BROWSER.md`).
 `silent_upgrade` is literally false.
 
 ## Privacy boundary
@@ -331,25 +332,21 @@ Release, export and diagnostic interpretation fields are literally false.
 - E06 cannot verify capability against a current method-authority head
   (`method_authority_head_not_current_verified`).
 
-## Saved comparison (not wired)
+## Saved comparison
 
-`LongitudinalComparisonRegistry` exists and accepts only
-`composite_authority_fence` publications. Wiring Save needs:
-
-- a `SavedLongitudinalComparisonV1` built from `LongitudinalWorkspace`:
-  normalized request, projection request, authority commitments and replay
-  digest, plus the reader grant commitment from `reader_authorization`;
-- publication through `CompositeAuthorityFence(coordinator)` with a dependency
-  scope of the workspace's cohort selector/version, requiring the
-  publication's head vector to equal `workspace.dependency_heads` (the
-  protected `H1` vector; the public `authority.heads` omits the reader-registry
-  head), so a save never records heads the workspace was not built from;
-- reader re-authorization under the same final fences as publication (the
-  composite hold includes the reader fence, but the registry exposes no
-  in-hold authorize call for the saved-registry path);
-- Reopen: resolve the saved selector, show `derive_version_diff` against the
-  current version, rebuild with `build_longitudinal_workspace` and compare
-  replay digests; a different digest is `stale` with no current segments.
+Wired by the browser integration (`docs/LONGITUDINAL-BROWSER.md`, "Save" and
+"Reopen"): `SavedLongitudinalComparisonV1` is built from the workspace
+(normalized selection, projection request, `saved_commitments`, E06 sources,
+`dependency_heads`, replay digest and the reader-grant commitment) and
+published through `LongitudinalComparisonRegistry.register` with a
+`CompositeAuthorityFence`; the published head vector must equal
+`workspace.dependency_heads`, and a final composite hold re-reads it and
+re-authorizes the reader before any receipt is shown. Reopen shows the
+version/authority/policy diff first, rebuilds from the saved selectors, and is
+`current` only when the registry is current and the rebuilt replay digest
+equals the saved one; otherwise it is `stale` with no comparison numbers or
+segments. The version diff's `d03_policy_change` stays `not_comparable`; the
+reopen diff reports D03 policy changes through the saved commitments.
 
 ## Open items
 

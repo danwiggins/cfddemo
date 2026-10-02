@@ -188,6 +188,10 @@
     status.textContent = response.ok
       ? "Longitudinal reader session bound"
       : "Longitudinal reader launch was denied; ask the operator for a new link";
+    if (response.ok) {
+      // The E12 view (longitudinal.js) keeps the CSRF token in page memory only.
+      window.dispatchEvent(new CustomEvent("traceback:longitudinal", { detail: { csrfToken } }));
+    }
     return response.ok;
   };
   if (!bootstrap) {

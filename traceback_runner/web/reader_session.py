@@ -36,6 +36,7 @@ from evidence_inspector.reader_authorization_registry import (
     ReaderAuthorizationRegistry,
     ReaderAuthorizationRegistryError,
     ReaderDenialReason,
+    ReaderGrantBinding,
 )
 
 from .auth import (
@@ -313,6 +314,54 @@ class ReaderSessionBinder:
             raise ReaderAuthorizationDenied(
                 ReaderDenialReason.REGISTRY_UNAVAILABLE
             ) from None
+
+    def session_credential(self, request: BrowserRequest) -> ReaderGrantBinding:
+        """The session's sealed binding, as the D08 builder's credential input.
+
+        It is never a caller value: the grant commitment and bound head come
+        from server-side session state.  The builder re-resolves it under the
+        reader-registry fence; callers authorize first.
+        """
+
+        self._boundary.authorize(request)
+        try:
+            binding = self._broker().reader_binding(
+                request.session_token, authority=self._boundary.config.authority
+            )
+        except BoundaryDenied:
+            raise ReaderAuthorizationDenied(
+                ReaderDenialReason.SESSION_UNBOUND
+            ) from None
+        if binding is None:
+            raise ReaderAuthorizationDenied(ReaderDenialReason.SESSION_UNBOUND)
+        return ReaderGrantBinding(
+            grant_sha256=binding.grant_sha256,
+            state_head_sha256=binding.registry_head_sha256,
+        )
+
+    def reader_authorization_in_held_fence(
+        self,
+        request: BrowserRequest,
+        *,
+        cohort_registry_id: str,
+        measurement_scope: MeasurementScope,
+    ) -> ReaderAuthorization:
+        """Re-resolve the session's grant while this thread already holds the
+        reader-registry fence (inside a composite authority hold).
+
+        Without the held fence the registry refuses the read and this denies.
+        """
+
+        self._boundary.authorize(request)
+        registry = self._registry
+        if registry is None:
+            raise ReaderAuthorizationDenied(ReaderDenialReason.AUTHORITY_ABSENT)
+        return self._checked(
+            registry,
+            request,
+            cohort_registry_id=cohort_registry_id,
+            measurement_scope=measurement_scope,
+        )
 
     def _checked(
         self,

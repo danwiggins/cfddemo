@@ -49,7 +49,124 @@
         <h2 id="jobs-title">Local jobs</h2>
         <ul id="jobs" aria-label="Local jobs"></ul>
       </section>
+      <section id="longitudinal" class="lg" aria-labelledby="lg-title" data-state="loading" hidden>
+        <h2 id="lg-title">Longitudinal comparison</h2>
+        <p class="help">Local research inspection only. Comparisons are descriptive technical differences with no causal or clinical interpretation. Release and export are not authorized.</p>
+        <p id="lg-status" class="lg-status" role="status" aria-live="polite">Loading: reader session</p>
+        <div id="lg-problem" class="lg-problem" hidden>
+          <h3 id="lg-problem-title">Problem</h3>
+          <p id="lg-problem-text"></p>
+          <p id="lg-problem-fix"></p>
+          <button type="button" id="lg-retry">Retry</button>
+        </div>
+        <form id="lg-journey" class="lg-journey" novalidate>
+          <fieldset>
+            <legend>1. Cohort and exact version</legend>
+            <label>Cohort version <select id="lg-cohort" required></select></label>
+          </fieldset>
+          <fieldset>
+            <legend>2. Measurement</legend>
+            <label>Measurement and projection policy <select id="lg-measurement" required></select></label>
+          </fieldset>
+          <fieldset>
+            <legend>3. Approved anchor</legend>
+            <label>Anchor policy approval <select id="lg-anchor-policy" required></select></label>
+            <label>Approved anchor candidate (explicit choice) <select id="lg-anchor" required></select></label>
+          </fieldset>
+          <fieldset>
+            <legend>4. Denominator policy</legend>
+            <label>D09 policy <select id="lg-d09" required></select></label>
+          </fieldset>
+          <fieldset id="lg-filters">
+            <legend>Row filters (never change counts)</legend>
+            <label class="lg-check"><input type="checkbox" name="lineage_roles" value="biological_draw"> Biological draws</label>
+            <label class="lg-check"><input type="checkbox" name="lineage_roles" value="technical_replicate"> Technical replicates</label>
+            <label class="lg-check"><input type="checkbox" name="lineage_roles" value="reanalysis"> Reanalyses</label>
+            <label class="lg-check"><input type="checkbox" name="record_availability" value="available"> Available records</label>
+            <label class="lg-check"><input type="checkbox" name="record_availability" value="missing"> Missing records</label>
+            <label class="lg-check"><input type="checkbox" name="record_availability" value="withheld"> Withheld records</label>
+          </fieldset>
+          <div class="lg-buttons">
+            <button type="button" id="lg-show-diff">Show version diff</button>
+            <button type="submit" id="lg-show-results" disabled>Show results</button>
+          </div>
+        </form>
+        <section id="lg-diff" class="lg-panel" aria-labelledby="lg-diff-title" hidden>
+          <h3 id="lg-diff-title">Version, authority and policy diff</h3>
+          <div id="lg-diff-body"></div>
+        </section>
+        <div id="lg-results" class="lg-results" hidden>
+          <div class="lg-main">
+            <section id="lg-identity" class="lg-panel" aria-labelledby="lg-identity-title">
+              <h3 id="lg-identity-title">Comparison identity, version and authority</h3>
+              <dl id="lg-identity-body"></dl>
+            </section>
+            <section id="lg-outcome" class="lg-panel" aria-labelledby="lg-outcome-title">
+              <h3 id="lg-outcome-title">Compatibility outcome, reasons and next action</h3>
+              <div id="lg-outcome-body"></div>
+            </section>
+            <section id="lg-denominators" class="lg-panel" aria-labelledby="lg-denominators-title">
+              <h3 id="lg-denominators-title">Denominators</h3>
+              <ul id="lg-denominator-strip" class="lg-strip"></ul>
+            </section>
+            <section id="lg-table-section" class="lg-panel" aria-labelledby="lg-table-title">
+              <h3 id="lg-table-title">Source records (authoritative exact values)</h3>
+              <div class="table-wrap" role="region" aria-labelledby="lg-table-title" tabindex="0">
+                <table id="lg-table">
+                  <caption>Every source record of the selected cohort version; technical replicates and reanalyses stay at their biological timepoint.</caption>
+                  <thead>
+                    <tr>
+                      <th scope="col">Row</th>
+                      <th scope="col">Timepoint</th>
+                      <th scope="col">Offset (seconds)</th>
+                      <th scope="col">Lineage role</th>
+                      <th scope="col">Denominator unit</th>
+                      <th scope="col">Record</th>
+                      <th scope="col">History</th>
+                      <th scope="col">Compatibility outcome</th>
+                      <th scope="col">Reasons</th>
+                      <th scope="col">Next action</th>
+                      <th scope="col">Standalone value</th>
+                      <th scope="col">D07 comparison</th>
+                      <th scope="col">Source details</th>
+                    </tr>
+                  </thead>
+                  <tbody id="lg-rows"></tbody>
+                </table>
+              </div>
+            </section>
+            <figure id="lg-chart" class="lg-panel lg-chart">
+              <figcaption id="lg-chart-caption">Supplementary chart. The exact values table above is authoritative.</figcaption>
+              <div id="lg-chart-body"></div>
+            </figure>
+            <section id="lg-covariates" class="lg-panel" aria-labelledby="lg-covariates-title">
+              <h3 id="lg-covariates-title">Covariate limitations (aggregate)</h3>
+              <div id="lg-covariates-body"></div>
+            </section>
+            <div id="lg-actions" class="lg-panel lg-actions">
+              <button type="button" id="lg-save" disabled>Save comparison</button>
+              <button type="button" id="lg-release" disabled aria-describedby="lg-release-note">Release (disabled)</button>
+              <button type="button" id="lg-export" disabled aria-describedby="lg-release-note">Export (disabled)</button>
+              <p id="lg-release-note" class="help">Release and export are not authorized. Saving does not authorize export.</p>
+              <p id="lg-save-state" class="help"></p>
+              <div id="lg-receipt" role="status" aria-live="polite"></div>
+            </div>
+          </div>
+          <aside id="lg-drawer" class="lg-drawer" role="dialog" aria-labelledby="lg-drawer-title" aria-modal="false" hidden>
+            <div class="lg-drawer-head">
+              <h3 id="lg-drawer-title">Source provenance</h3>
+              <button type="button" id="lg-drawer-close">Close source details</button>
+            </div>
+            <div id="lg-drawer-body"></div>
+          </aside>
+        </div>
+        <section id="lg-saved" class="lg-panel" aria-labelledby="lg-saved-title">
+          <h3 id="lg-saved-title">Saved comparisons</h3>
+          <ul id="lg-saved-list"></ul>
+        </section>
+      </section>
     </main>
     <script src="/assets/app.js" defer></script>
+    <script src="/assets/longitudinal.js" defer></script>
   </body>
 </html>
