@@ -2,7 +2,7 @@
 
 This module groups opaque batch, protocol, and preanalytical metadata. It does
 not alter measurements, establish comparability, or attribute biological or
-clinical meaning. The v1 D09 boundary is digest-only. D03 decisions are either
+clinical meaning. The D09 digest-input boundary is digest-only. D03 decisions are either
 caller-supplied (marked unverified) or resolved from the protected D03 decision
 registry, which replays them against live linkage before D10 uses them. The
 live path derives the population itself from the protected D09 policy
@@ -36,7 +36,8 @@ from evidence_inspector.safe_ingress import contract_type_graph, exact_model_byt
 
 MAX_COVARIATE_MEMBERS = 1_000
 MAX_GRAPH_DEPTH = 32
-MAX_GRAPH_NODES_PER_MEMBER = 64
+# v2 member contexts carry one D03 role, which costs two graph nodes.
+MAX_GRAPH_NODES_PER_MEMBER = 66
 MAX_GRAPH_NODES = 1_032 + MAX_GRAPH_NODES_PER_MEMBER * MAX_COVARIATE_MEMBERS
 MAX_CONTRACT_BYTES_PER_MEMBER = 4 * 1_024
 MAX_CONTRACT_BYTES = (
@@ -128,11 +129,24 @@ class CovariateValue(RegistryContract):
         return self
 
 
+class D03Role(StrEnum):
+    """A population member's place in its D03 series.
+
+    D03 decides every series member against one pinned anchor and never
+    decides the anchor against itself, so an ``anchor`` row carries no D03
+    decision digest or outcome.
+    """
+
+    ANCHOR = "anchor"
+    MEMBER = "member"
+
+
 class MemberCovariateContext(RegistryContract):
     member_sha256: Sha256
     biological_timepoint_sha256: Sha256
-    d03_decision_sha256: Sha256
-    d03_outcome: LongitudinalOutcome
+    d03_role: D03Role = D03Role.MEMBER
+    d03_decision_sha256: Sha256 | None
+    d03_outcome: LongitudinalOutcome | None
     values: tuple[CovariateValue, ...] = Field(
         min_length=len(ALL_COVARIATE_DIMENSIONS),
         max_length=len(ALL_COVARIATE_DIMENSIONS),
@@ -142,12 +156,19 @@ class MemberCovariateContext(RegistryContract):
     def complete_dimensions(self) -> MemberCovariateContext:
         if tuple(value.dimension for value in self.values) != ALL_COVARIATE_DIMENSIONS:
             raise ValueError("member covariates must contain every dimension in order")
+        decided = (self.d03_decision_sha256, self.d03_outcome)
+        if self.d03_role is D03Role.ANCHOR:
+            if any(item is not None for item in decided):
+                raise ValueError("the D03 anchor row cannot carry a D03 decision")
+        elif any(item is None for item in decided):
+            raise ValueError("a D03 member row requires its D03 decision")
         return self
 
 
 class D10CovariateInput(RegistryContract):
-    schema_version: Literal["traceback.d10-covariate-input.v1"] = (
-        "traceback.d10-covariate-input.v1"
+    # v2: member rows carry a D03 role; the anchor row carries no decision.
+    schema_version: Literal["traceback.d10-covariate-input.v2"] = (
+        "traceback.d10-covariate-input.v2"
     )
     population: D09PopulationDigestInput
     members: tuple[MemberCovariateContext, ...] = Field(
@@ -159,7 +180,13 @@ class D10CovariateInput(RegistryContract):
         member_digests = tuple(member.member_sha256 for member in self.members)
         if len(member_digests) != len(set(member_digests)):
             raise ValueError("covariate members must be unique")
-        decision_digests = tuple(member.d03_decision_sha256 for member in self.members)
+        if sum(member.d03_role is D03Role.ANCHOR for member in self.members) > 1:
+            raise ValueError("a D10 population has at most one D03 anchor row")
+        decision_digests = tuple(
+            member.d03_decision_sha256
+            for member in self.members
+            if member.d03_role is D03Role.MEMBER
+        )
         if len(decision_digests) != len(set(decision_digests)):
             raise ValueError("each member must bind a unique D03 decision digest")
         if tuple(sorted(member_digests)) != self.population.included_member_sha256s:
@@ -167,11 +194,16 @@ class D10CovariateInput(RegistryContract):
         token_dimensions: dict[str, CovariateDimension] = {}
         decision_outcomes: dict[str, LongitudinalOutcome] = {}
         for member in self.members:
-            prior_outcome = decision_outcomes.setdefault(
-                member.d03_decision_sha256, member.d03_outcome
-            )
-            if prior_outcome is not member.d03_outcome:
-                raise ValueError("one D03 decision digest cannot claim two outcomes")
+            if member.d03_role is D03Role.MEMBER:
+                assert member.d03_decision_sha256 is not None
+                assert member.d03_outcome is not None
+                prior_outcome = decision_outcomes.setdefault(
+                    member.d03_decision_sha256, member.d03_outcome
+                )
+                if prior_outcome is not member.d03_outcome:
+                    raise ValueError(
+                        "one D03 decision digest cannot claim two outcomes"
+                    )
             for value in member.values:
                 if value.token is None:
                     continue
@@ -205,8 +237,9 @@ class CovariateGroup(RegistryContract):
 
 
 class CovariateContextResult(RegistryContract):
-    schema_version: Literal["traceback.covariate-context-result.v1"] = (
-        "traceback.covariate-context-result.v1"
+    # v2: member contexts carry a D03 role (see ``D10CovariateInput`` v2).
+    schema_version: Literal["traceback.covariate-context-result.v2"] = (
+        "traceback.covariate-context-result.v2"
     )
     input_sha256: Sha256
     cohort_manifest_sha256: Sha256
@@ -795,8 +828,32 @@ def build_covariate_context(
     expected_d02_anchor_policy_sha256: str,
     d03_member_decisions: tuple[LongitudinalMemberDecision, ...],
 ) -> CovariateContextResult:
-    """Build descriptive context from exact pinned digest inputs."""
+    """Build descriptive context from exact pinned digest inputs.
 
+    Every member row must be a decided D03 member; this caller-supplied path
+    admits no anchor row.  Only the live path, which derives the anchor from
+    the registered D03 series, may admit one.
+    """
+
+    return _build_covariate_context(
+        value,
+        expected_d09_status_sha256=expected_d09_status_sha256,
+        expected_d09_population_sha256=expected_d09_population_sha256,
+        expected_d02_anchor_policy_sha256=expected_d02_anchor_policy_sha256,
+        d03_member_decisions=d03_member_decisions,
+        d03_anchor_result_sha256=None,
+    )
+
+
+def _build_covariate_context(
+    value: D10CovariateInput,
+    *,
+    expected_d09_status_sha256: str,
+    expected_d09_population_sha256: str,
+    expected_d02_anchor_policy_sha256: str,
+    d03_member_decisions: tuple[LongitudinalMemberDecision, ...],
+    d03_anchor_result_sha256: str | None,
+) -> CovariateContextResult:
     replayed = _canonical_d10_input(value)
     decisions = _capture_d03_decisions(d03_member_decisions)
     decisions_by_member = {
@@ -808,7 +865,26 @@ def build_covariate_context(
     if len(decision_sha256s) != len(set(decision_sha256s)):
         raise ValueError("D03 decision artifacts must be unique")
     population = replayed.population
-    if set(decisions_by_member) != set(population.included_member_sha256s):
+    anchor_rows = tuple(
+        member.member_sha256
+        for member in replayed.members
+        if member.d03_role is D03Role.ANCHOR
+    )
+    # An anchor row is admitted only for the one pinned D03 series anchor,
+    # which every decision must name and none may decide.
+    if anchor_rows and (
+        d03_anchor_result_sha256 is None
+        or anchor_rows != (d03_anchor_result_sha256,)
+        or d03_anchor_result_sha256 in decisions_by_member
+        or any(
+            decision.anchor_result_sha256 != d03_anchor_result_sha256
+            for decision in decisions
+        )
+    ):
+        raise ValueError("D10 anchor row does not match the D03 series anchor")
+    if set(decisions_by_member) | set(anchor_rows) != set(
+        population.included_member_sha256s
+    ) or set(decisions_by_member) & set(anchor_rows):
         raise ValueError("D03 decisions do not cover the exact population")
     if any(
         decision.policy_sha256 != population.d02_anchor_policy_sha256
@@ -820,6 +896,7 @@ def build_covariate_context(
         != _d03_decision_sha256(decisions_by_member[member.member_sha256])
         or member.d03_outcome is not decisions_by_member[member.member_sha256].outcome
         for member in replayed.members
+        if member.d03_role is D03Role.MEMBER
     ):
         raise ValueError("D03 member decision artifact does not match covariate input")
     for actual, expected, label in (
@@ -1040,21 +1117,36 @@ class LiveCovariateMemberValues(RegistryContract):
 
 
 class LiveD09MemberCrosswalk(RegistryContract):
-    """How one D09-included member was matched to exactly one D03 decision."""
+    """How one D09-included member was matched to the registered D03 series.
+
+    A ``member`` row matched exactly one D03 decision.  The ``anchor`` row is
+    the included member whose catalog result is the series anchor; D03 never
+    decides its anchor, so it carries no decision digest.  Either way the row
+    names the D03 result digest (the decision's member result, or the series
+    anchor result) that the D10 member context uses.
+    """
 
     d09_ordinal: int = Field(ge=0, le=100_000, strict=True)
     d09_member_sha256: Sha256
     catalog_result_sha256: Sha256
     result_id: LiveResultId
-    d03_member_result_sha256: Sha256
-    d03_decision_sha256: Sha256
+    d03_role: D03Role
+    d03_result_sha256: Sha256
+    d03_decision_sha256: Sha256 | None
+
+    @model_validator(mode="after")
+    def role_matches_decision(self) -> LiveD09MemberCrosswalk:
+        if (self.d03_role is D03Role.ANCHOR) != (self.d03_decision_sha256 is None):
+            raise ValueError("only the D03 anchor row omits its D03 decision")
+        return self
 
 
 class LiveD09PopulationBinding(RegistryContract):
     """Exact D09 registry identity a live D10 context was derived from."""
 
-    schema_version: Literal["traceback.d10-live-d09-population-binding.v1"] = (
-        "traceback.d10-live-d09-population-binding.v1"
+    # v2: crosswalk rows carry a D03 role and admit the series anchor.
+    schema_version: Literal["traceback.d10-live-d09-population-binding.v2"] = (
+        "traceback.d10-live-d09-population-binding.v2"
     )
     registry_id: str = Field(pattern=r"^d09_registry_[0-9a-f]{32}$")
     registry_epoch_sha256: Sha256
@@ -1087,12 +1179,18 @@ class LiveD09PopulationBinding(RegistryContract):
             "d09_member_sha256",
             "catalog_result_sha256",
             "result_id",
-            "d03_member_result_sha256",
+            "d03_result_sha256",
             "d03_decision_sha256",
         ):
-            values = [getattr(item, name) for item in self.included_members]
+            values = [
+                getattr(item, name)
+                for item in self.included_members
+                if getattr(item, name) is not None
+            ]
             if len(values) != len(set(values)):
                 raise ValueError("D09 crosswalk identities must be unique")
+        if sum(item.d03_role is D03Role.ANCHOR for item in self.included_members) > 1:
+            raise ValueError("D09 crosswalk admits at most one D03 anchor row")
         return self
 
 
@@ -1123,7 +1221,8 @@ class LiveCovariateContext(RegistryContract):
 
     The population is the exact D09 included set returned by the D09 policy
     registry's protected population read, each member is matched to exactly
-    one D03 registry decision, and both reads observed one linkage snapshot.
+    one D03 registry decision (or, for the included series anchor, to the
+    series' own anchor identity), and both reads observed one linkage snapshot.
     A stored copy is never authority by itself; ``verify_live_covariate_context``
     re-resolves both registries and rebuilds it.
     """
@@ -1150,13 +1249,14 @@ class LiveCovariateContext(RegistryContract):
         ):
             raise ValueError("live D10 context does not bind its D09 population")
         crosswalk = {
-            item.d03_member_result_sha256: item.d03_decision_sha256
-            for item in population.included_members
+            item.d03_result_sha256: item for item in population.included_members
         }
         if context.included_member_sha256s != tuple(sorted(crosswalk)):
             raise ValueError("live D10 members are not the D09 included set")
         if any(
-            member.d03_decision_sha256 != crosswalk[member.member_sha256]
+            member.d03_role is not crosswalk[member.member_sha256].d03_role
+            or member.d03_decision_sha256
+            != crosswalk[member.member_sha256].d03_decision_sha256
             for member in context.member_contexts
         ):
             raise ValueError("live D10 decisions do not match the D09 crosswalk")
@@ -1281,72 +1381,105 @@ def _live_from_authority(
     included = population.members.included_members
     if len(included) > MAX_COVARIATE_MEMBERS:
         raise ValueError("D09 included population exceeds the D10 member bound")
+    series_decision = series.decision
     by_result_id: dict[str, LongitudinalMemberDecision] = {}
-    for decision in series.decision.decisions:
+    for decision in series_decision.decisions:
         if by_result_id.setdefault(decision.member_result_id, decision) is not decision:
             raise ValueError("D03 registry series repeats a member result")
+    if series_decision.anchor_result_id in by_result_id:
+        raise ValueError("D03 registry series decides its own anchor")
     rows = {row.ordinal: row for row in population.members.population.rows}
     decisions: list[LongitudinalMemberDecision] = []
     crosswalk: list[LiveD09MemberCrosswalk] = []
-    timepoints: dict[str, str] = {}
+    # D03 result digest -> (biological timepoint digest, D03 decision or None).
+    resolved: dict[str, tuple[str, LongitudinalMemberDecision | None]] = {}
+    anchor_result_sha256: str | None = None
     for item in included:
         member = item.member
         reference = item.catalog_result
-        decision = by_result_id.get(reference.result_id)
-        # The D09 member and the D03 decision must name the same E04 result
-        # bundle and the same committed D01 linkage revision and receipt.
-        if (
-            decision is None
-            or decision.member_bundle_sha256 != reference.bundle_sha256
-            or decision.member_linkage_revision_sha256
-            != member.linkage_revision_sha256
-            or decision.member_linkage_receipt_sha256 is None
-            or decision.member_linkage_receipt_sha256
-            != member.committed_receipt_sha256
-        ):
-            raise ValueError("D03 registry series does not cover the D09 population")
+        timepoint = _biological_timepoint_sha256(member.biological_timepoint_id)
+        if reference.result_id == series_decision.anchor_result_id:
+            # D03 never decides its anchor, so the anchor is admitted on the
+            # series' own anchor identity: the same E04 result bundle and the
+            # same committed D01 linkage revision and receipt as the D09 member.
+            if (
+                series_decision.anchor_bundle_sha256 != reference.bundle_sha256
+                or series_decision.anchor_linkage_revision_sha256
+                != member.linkage_revision_sha256
+                or series_decision.anchor_linkage_receipt_sha256 is None
+                or series_decision.anchor_linkage_receipt_sha256
+                != member.committed_receipt_sha256
+            ):
+                raise ValueError("D03 registry series anchor does not match D09")
+            anchor_result_sha256 = series_decision.anchor_result_sha256
+            result_sha256 = anchor_result_sha256
+            decision_sha256 = None
+            role = D03Role.ANCHOR
+            resolved[result_sha256] = (timepoint, None)
+        else:
+            decision = by_result_id.get(reference.result_id)
+            # The D09 member and the D03 decision must name the same E04
+            # result bundle and the same committed D01 linkage revision and
+            # receipt.
+            if (
+                decision is None
+                or decision.member_bundle_sha256 != reference.bundle_sha256
+                or decision.member_linkage_revision_sha256
+                != member.linkage_revision_sha256
+                or decision.member_linkage_receipt_sha256 is None
+                or decision.member_linkage_receipt_sha256
+                != member.committed_receipt_sha256
+            ):
+                raise ValueError(
+                    "D03 registry series does not cover the D09 population"
+                )
+            result_sha256 = decision.member_result_sha256
+            decision_sha256 = _d03_decision_sha256(decision)
+            role = D03Role.MEMBER
+            decisions.append(decision)
+            resolved[result_sha256] = (timepoint, decision)
         row = rows[item.ordinal]
-        decision_sha256 = _d03_decision_sha256(decision)
-        decisions.append(decision)
-        timepoints[decision.member_result_sha256] = _biological_timepoint_sha256(
-            member.biological_timepoint_id
-        )
         crosswalk.append(
             LiveD09MemberCrosswalk(
                 d09_ordinal=item.ordinal,
                 d09_member_sha256=row.member_sha256,
                 catalog_result_sha256=row.catalog_result_sha256,
                 result_id=reference.result_id,
-                d03_member_result_sha256=decision.member_result_sha256,
+                d03_role=role,
+                d03_result_sha256=result_sha256,
                 d03_decision_sha256=decision_sha256,
             )
         )
     by_member = {item.member_sha256: item for item in covariates}
-    if set(by_member) != set(timepoints) or len(timepoints) != len(decisions):
+    if set(by_member) != set(resolved) or len(resolved) != len(included):
         raise ValueError("covariates must bind every and only D09 included member")
     members = tuple(
         MemberCovariateContext(
-            member_sha256=decision.member_result_sha256,
-            biological_timepoint_sha256=timepoints[decision.member_result_sha256],
-            d03_decision_sha256=_d03_decision_sha256(decision),
-            d03_outcome=decision.outcome,
-            values=by_member[decision.member_result_sha256].values,
+            member_sha256=result_sha256,
+            biological_timepoint_sha256=timepoint,
+            d03_role=D03Role.MEMBER if decision is not None else D03Role.ANCHOR,
+            d03_decision_sha256=(
+                _d03_decision_sha256(decision) if decision is not None else None
+            ),
+            d03_outcome=decision.outcome if decision is not None else None,
+            values=by_member[result_sha256].values,
         )
-        for decision in decisions
+        for result_sha256, (timepoint, decision) in resolved.items()
     )
     population_input = D09PopulationDigestInput(
         cohort_manifest_sha256=summary.cohort_manifest_sha256,
         d09_status_sha256=population.summary.object_sha256,
         d09_population_sha256=summary.population.population_sha256,
         d02_anchor_policy_sha256=series.decision.policy_sha256,
-        included_member_sha256s=tuple(sorted(timepoints)),
+        included_member_sha256s=tuple(sorted(resolved)),
     )
-    context = build_covariate_context(
+    context = _build_covariate_context(
         D10CovariateInput(population=population_input, members=members),
         expected_d09_status_sha256=population_input.d09_status_sha256,
         expected_d09_population_sha256=population_input.d09_population_sha256,
         expected_d02_anchor_policy_sha256=expected_d02_anchor_policy_sha256,
         d03_member_decisions=tuple(decisions),
+        d03_anchor_result_sha256=anchor_result_sha256,
     )
     policy_summary = population.summary
     binding = LiveD09PopulationBinding(
@@ -1394,7 +1527,11 @@ def build_live_covariate_context(
     protected population read.  Each included member must match exactly one
     D03 registry decision on result ID, result bundle, D01 linkage revision and
     committed receipt, and the D09 and D03 reads must have observed the same
-    linkage snapshot.  Callers supply covariate tokens only.
+    linkage snapshot.  The one exception is the series anchor: D03 never
+    decides its anchor, so an included member whose catalog result is the
+    series anchor is admitted as an ``anchor`` row with no decision, on the
+    series' anchor result bundle, D01 linkage revision and committed receipt.
+    Callers supply covariate tokens only.
 
     Neither registry read can run inside the other's fence (the D09 rebuild
     takes the D01 fence itself and the D03 resolve holds it), so the two
@@ -1476,6 +1613,7 @@ __all__ = [
     "CovariateReason",
     "CovariateValue",
     "CovariateValueState",
+    "D03Role",
     "D09PopulationDigestInput",
     "D10CovariateInput",
     "LiveCovariateContext",
