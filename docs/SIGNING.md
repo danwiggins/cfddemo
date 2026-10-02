@@ -15,7 +15,11 @@ upload exists in this path.
   `development-synthetic` namespace;
 - `sign_bytes` and `verify_signature`, which require an explicit `release` or
   `result` purpose;
-- `TrustStore`, with independently supplied public keys and local revocation;
+- `TrustStore`, with independently supplied public keys and local revocation.
+  `TrustStore.revoke` mutates only that instance; the protected, forward-only
+  result trust authority is `evidence_inspector.result_trust_registry`
+  (`docs/RESULT-TRUST-REGISTRY.md`), which can return a fresh `TrustStore` for
+  its current head;
 - `development_trust_bytes` and `load_development_trust` for strict, canonical,
   public-only trust files. Private keys are never serialized.
 

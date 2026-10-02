@@ -33,8 +33,9 @@ While one `ProviderLinkageStore` authority fence is held, it:
 2. derives the D03 member decision with the pinned `decide_longitudinal_member`
    and rejects the D03 invalid-input sentinel;
 3. derives the comparison with the pinned `compare_repeatability_in_fence`,
-   using the registry's linkage trust pins and its configured result trust
-   document;
+   using the registry's linkage trust pins and its result trust (the
+   configured document, or the trust registry's current trust read under its
+   held fence);
 4. captures inputs, derived decision, and comparison as one canonical
    `RegisteredComparisonObject`, whose validator binds the comparison's record,
    policy, decision, and envelope digests to the stored inputs;
@@ -74,8 +75,11 @@ and are not reported as stale; a store failure that D03 itself absorbs into its
 closed decision surfaces as a non-replaying decision, and so as stale.
 
 A comparison becomes stale on any linkage commit (the D03 decision binds the
-linkage snapshot head), linkage approval expiry, result trust change or key
-revocation, an envelope that expires after registration, an envelope that was
+linkage snapshot head), linkage approval expiry, a result trust change or key
+revocation (on the trust registry path, only one that touches the
+comparison's own signing keys or, for a comparison whose keys were never
+added, any trust event), an envelope that expires after registration, an
+envelope that was
 not yet valid at registration and has since opened, or a live time earlier
 than registration.
 
@@ -135,21 +139,71 @@ authority is not current, every row is stale.
 
 ## Result trust
 
-The result trust document and its pin are registry configuration supplied at
-open and restore, not stored per object and not bound in metadata. Replacing
-it, for example to revoke a key, is therefore possible by reopening the
-registry, and makes every comparison whose output changes stale. The instance
-seal re-hashes the configured document on every call.
+A registry has exactly one result trust authority, chosen when it is created
+and bound for its lifetime.
 
-Limitation: result trust has no protected, monotonic authority. Revocation is
-effective only in registry instances opened with the new document. An instance
-still open with the old document keeps resolving and registering under it, and
-reopening with an old self-consistent document and its pin resurrects revoked
-comparisons. This is the same trust model D07 already has (caller-supplied
-document plus independent pin), not a gap the registry introduces. Closing it
-needs a protected result-trust authority with a monotonic head and a read
-fence held through registration, replay, commit, and return; that is a
-separate prerequisite and a product decision.
+### Protected trust registry (preferred)
+
+Pass `result_trust_registry=` (a `ResultTrustRegistry`, see
+`docs/RESULT-TRUST-REGISTRY.md`) instead of a document and pin. The registry
+then:
+
+- records the trust registry's ID and epoch in its own metadata (schema
+  `traceback.d07-comparison-registry-metadata.v2`), so it can never be
+  reopened or restored with a caller-supplied trust document or with another
+  trust registry, including a fresh one in which a revoked key is still
+  active;
+- reads current trust under the trust registry's read fence on every
+  `register_comparison`, `resolve`, and `list_selectors`, held through
+  evaluation, replay, publication, and construction of the returned value. A
+  revocation therefore makes affected comparisons stale on the next read of
+  any open instance, with no reopen, and a trust event cannot commit between
+  the replay and the return;
+- evaluates each comparison against the current trust restricted to the two
+  keys its observations' signatures name. Signature verification resolves only
+  the named key, so the outcome is identical to using the whole document, but
+  the comparison's `result_trust_sha256` now changes only when one of its own
+  keys is added or revoked. Adding or revoking an unrelated key leaves other
+  comparisons current. If neither key was ever added, the whole current
+  document is used, and adding either key later makes the (unavailable)
+  comparison stale. That fallback means an unavailable comparison whose keys
+were never added goes stale on any trust event, which is fail-safe; re-register
+it to refresh. D07 requires at least one key in a result trust document,
+  so registration against a trust registry with no keys (fresh, or only
+  tombstones) is rejected; once a key is added the registry can never be empty
+  again, so stored comparisons never hit this case on replay;
+- returns `result_trust_registry_id` and `result_trust_state_head_sha256` on
+  receipts, resolved comparisons, and selector pages, so E12 can bind the
+  trust head each read used. They are `null` on the fixed-document path. These
+  three result contracts are now schema `v2`; backups of a trust-bound registry
+  are `traceback.d07-comparison-backup.v2`, while fixed-document backups stay
+  `v1` with unchanged bytes.
+
+The trust registry is append-only and revocation is permanent, so a revoked
+comparison cannot be revived by any later trust state. Its process-wide head
+fence and retained-head reopen reject rollback to an older trust journal.
+
+Lock order is the linkage authority fence, then the trust registry's read
+fence, then this registry's lock. Nothing takes them in another order, and the
+trust registry is a separate `flock` from the linkage store's SQLite fence, so
+they compose (tested: a revocation started during registration stays blocked
+until the receipt is built, and linkage writes proceed afterwards). The trust
+registry's lock is not reentrant on one thread; trust events must not be
+issued from inside a D07 call.
+
+### Fixed document (kept for compatibility)
+
+The original path is unchanged: `result_trust_document=` and
+`expected_result_trust_sha256=` are registry configuration supplied at open
+and restore, not stored per object and not bound in metadata (schema v1). The
+instance seal re-hashes the configured document on every call. A registry
+created this way cannot be reopened with a trust registry.
+
+Its limitation remains: revocation is effective only in instances opened with
+the new document, and reopening with an old self-consistent document and its
+pin resurrects revoked comparisons. The path is kept because existing callers
+and tests use it and removing it is not needed for safety of the new path.
+New E12 wiring should use the trust registry.
 
 ## Storage and bounds
 
@@ -161,8 +215,8 @@ process-wide monotonic head fence against rollback, inode-bound control files,
 a process-private instance seal (including result trust), and sealed class
 methods, pinned authority callables (linkage fence, snapshot, authority time,
 D03 member decide, invalid-input sentinel, D07 in-fence evaluator, comparison
-digest, result trust digest), and sealed result-constructor and helper
-aliases. There is no whole-module namespace seal; Python writes
+digest, result trust digest, trust registry read fence, trust projection),
+and sealed result-constructor and helper aliases. There is no whole-module namespace seal; Python writes
 `__warningregistry__` into module globals, and a test pins that this does not
 disable the registry.
 
@@ -180,8 +234,9 @@ require an exact canonical round trip.
 
 `backup_bytes` and `restore` follow the D03 registry. Restore requires the
 independently retained registry ID, epoch, and state head, the same linkage
-store identity and trust pins, a matching result trust document and pin, and an
-empty target. Any failure, including the final open that rechecks live
+store identity and trust pins, the same result trust authority (a matching
+document and pin, or the bound trust registry), and an empty target. Any
+failure, including the final open that rechecks live
 authority, removes the files the restore created so it can be retried. Cleanup
 is best-effort: if a foreign entry (for example a non-empty directory) appears
 in the target, the target stays and a retry needs a new path.
