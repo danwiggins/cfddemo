@@ -87,14 +87,14 @@ minimum/maximum, or any other value-ranked choice:
 - the rule and statistic vocabularies are closed enums, and extra fields are
   rejected;
 - every coordinate is matched by exact equality, never by value;
-- as a label guard, a contributor ID, atlas ID, or grid contig whose words
-  include a ranking word (`top`, `max`, `min`, `largest`, `most`, `rank`,
-  `argmax`, …) is rejected. Words split at every non-letter and at camel-case
-  boundaries, so `top1`, `rank-1` and `mostChanged` are caught while
-  `luminal` or `minor_cell` are not. The guard is defense in depth; the
-  structural rules above are the guarantee;
 - an import-time guard fails the module if a rule, statistic, or unit member is
-  added with a ranking lexeme or without a controlled unit.
+  added whose words include a ranking word (`top`, `max`, `min`, `largest`,
+  `most`, `rank`, …) or that has no controlled unit.
+
+Upstream-registered identifiers (E08 contributor and atlas IDs, E09 contigs)
+are not word-checked. They are biology vocabulary matched exactly, so a word
+check could only reject real names such as `BEST4_enterocyte`; a contributor
+whose name contains a ranking word is still one named contributor.
 
 ## Registration and versions
 
@@ -146,7 +146,8 @@ source. A mismatch raises `ProjectionPolicyRegistryConflict`.
 ## Selector page
 
 `list_selectors(after_selector_id=None, after_policy_version=None, limit=50)`
-returns 1 to 100 rows ordered by `(selector, version)`. A row carries only the
+takes a page limit of 1 to 100 and returns up to that many rows (none for an
+empty registry or an exhausted cursor), ordered by `(selector, version)`. A row carries only the
 selector, version, `latest_version`, object and policy digests, family,
 selection rule, component count, D02 measurement-definition digest, and D05
 anchor-definition digest. It never contains the policy ID, method or quantity

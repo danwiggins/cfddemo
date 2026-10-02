@@ -117,9 +117,8 @@ ChromosomeId = Annotated[
 ]
 PolicyVersion = Annotated[int, Field(ge=1, le=MAX_POLICY_VERSION, strict=True)]
 
-# Lexemes that name a value-derived choice.  A coordinate identifier that
-# contains one is rejected so a registered "contributor" cannot be an alias for
-# "whichever component ranks first".
+# Words that name a value-derived choice.  No member of this module's closed
+# rule, statistic or unit vocabularies may contain one (checked at import).
 _VALUE_RANKED_LEXEMES = frozenset(
     {
         "argmax",
@@ -239,11 +238,13 @@ def _identifier_words(value: str) -> tuple[str, ...]:
 
 
 def _reject_value_ranked_identifier(value: str, label: str) -> None:
-    """Reject an identifier that reads as a ranked choice.
+    """Reject one of this module's own vocabulary words that names a ranking.
 
-    This is a label guard, not the guarantee.  The guarantee is structural: no
-    rule, statistic or field consults a value, and every coordinate is resolved
-    by exact equality.  The guard keeps a registered name from posing as one.
+    It is applied only to the closed rule/statistic/unit enums below.  It is
+    deliberately not applied to upstream-registered identifiers (E08
+    contributor and atlas IDs, E09 contigs): those are biology vocabulary
+    matched by exact equality, so a word check there could only reject real
+    names (``BEST4_enterocyte``) without making any selection value-ranked.
     """
 
     if any(word in _VALUE_RANKED_LEXEMES for word in _identifier_words(value)):
@@ -260,15 +261,20 @@ _CLOSED_VOCABULARIES: tuple[type[StrEnum], ...] = (
     CnaSegmentStatistic,
     StatisticUnit,
 )
-for _vocabulary in _CLOSED_VOCABULARIES:
-    for _member in _vocabulary:
-        _reject_value_ranked_identifier(_member.value, _vocabulary.__name__)
-        if (
-            _vocabulary not in (StatisticUnit, ProjectionSelectionRule)
-            and _member not in _STATISTIC_UNIT
-        ):
-            raise ValueError(f"{_vocabulary.__name__} member has no controlled unit")
-del _vocabulary, _member
+
+
+def _require_closed_vocabularies(vocabularies: tuple[type[StrEnum], ...]) -> None:
+    for vocabulary in vocabularies:
+        for member in vocabulary:
+            _reject_value_ranked_identifier(member.value, vocabulary.__name__)
+            if (
+                vocabulary not in (StatisticUnit, ProjectionSelectionRule)
+                and member not in _STATISTIC_UNIT
+            ):
+                raise ValueError(f"{vocabulary.__name__} member has no controlled unit")
+
+
+_require_closed_vocabularies(_CLOSED_VOCABULARIES)
 
 
 def cna_coordinate_grid_sha256(grid: CoordinateGridLayer) -> str:
@@ -444,7 +450,6 @@ class CellOriginProjectionComponent(RegistryContract):
     @model_validator(mode="after")
     def exact_component(self) -> CellOriginProjectionComponent:
         _check_component_unit(self.statistic, self.statistic_unit)
-        _reject_value_ranked_identifier(self.contributor_id, "contributor ID")
         if not _E08_SAFE_CONTRIBUTOR_ID(self.contributor_id):
             raise ValueError("contributor ID contains a reserved privacy term")
         return self
@@ -482,7 +487,6 @@ class CellOriginProjectionPolicyV1(RegistryContract):
             statistic_type=CellOriginStatistic,
             component_count=len(self.components),
         )
-        _reject_value_ranked_identifier(self.atlas_id, "atlas ID")
         keys = [
             (item.contributor_id, _statistic_order(item.statistic))
             for item in self.components
@@ -510,8 +514,6 @@ def _check_cna_grid(
         raise ValueError("CNA coordinate grid belongs to the other E09 source")
     if cna_coordinate_grid_sha256(grid) != digest:
         raise ValueError("CNA coordinate-grid digest is invalid")
-    for contig in grid.contig_order:
-        _reject_value_ranked_identifier(contig, "CNA contig")
 
 
 class CnaChromosomeProjectionPolicyV1(RegistryContract):

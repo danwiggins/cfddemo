@@ -347,48 +347,20 @@ def test_value_ranked_fragment_selection_is_structurally_unrepresentable(
         _validate(FragmentProjectionPolicyV1, payload)
 
 
-@pytest.mark.parametrize(
-    "contributor",
-    (
-        "top",
-        "max",
-        "Largest",
-        "most_changed",
-        "mostChanged",
-        "top_contributor",
-        "contributor.max",
-        "rank-1",
-        "argmax",
-        "highest:fraction",
-        "top1",
-        "rank1",
-        "max2",
-        "minimum3",
-        "TopContributor",
-    ),
-)
-def test_value_ranked_contributor_alias_is_rejected(contributor: str) -> None:
-    payload = _payload(_cell_origin())
-    payload["components"][0]["contributor_id"] = contributor
-    with pytest.raises(ValidationError, match="value-ranked"):
-        _validate(CellOriginProjectionPolicyV1, payload)
-    payload = _payload(_cell_origin())
-    payload["atlas_id"] = contributor
-    with pytest.raises(ValidationError, match="value-ranked"):
-        _validate(CellOriginProjectionPolicyV1, payload)
+def test_registered_identifiers_are_exact_names_not_selection_rules() -> None:
+    """Contributor IDs and contigs are upstream vocabulary matched exactly.
 
+    A contributor whose name contains a ranking word (``BEST4_enterocyte``) is
+    still one named contributor; nothing in the policy can turn a name into a
+    value-ranked choice, because rules and statistics are closed enums.
+    """
 
-def test_real_contributor_words_are_not_mistaken_for_ranking() -> None:
-    for contributor in ("luminal_epithelial", "maximal_dummy", "minor_cell", "T-cell"):
+    for contributor in ("BEST4_enterocyte", "luminal_epithelial", "T-cell"):
         payload = _payload(_cell_origin())
         payload["components"][0]["contributor_id"] = contributor
-        assert _validate(CellOriginProjectionPolicyV1, payload)
-
-
-@pytest.mark.parametrize("contig", ("top", "chr1_max", "rank2"))
-def test_value_ranked_grid_contig_is_rejected(contig: str) -> None:
-    with pytest.raises(ValidationError, match="value-ranked"):
-        _segment(coordinate_grid=_grid(CnaSource.SEGMENTED_CNA, ("chr1", contig)))
+        policy = _validate(CellOriginProjectionPolicyV1, payload)
+        assert [item.contributor_id for item in policy.components] == [contributor]
+    assert _segment(coordinate_grid=_grid(CnaSource.SEGMENTED_CNA, ("chr1", "chr2")))
 
 
 def test_cell_origin_rejects_privacy_terms_and_unsorted_contributors() -> None:
@@ -499,6 +471,19 @@ def test_rule_and_statistic_vocabularies_are_exactly_pinned() -> None:
     payload["selection_rule"] = "top"
     with pytest.raises(ValidationError):
         _validate(FragmentProjectionPolicyV1, payload)
+
+
+def test_import_guard_rejects_a_ranked_or_unitless_vocabulary_member() -> None:
+    from enum import StrEnum
+
+    registry_module._require_closed_vocabularies(registry_module._CLOSED_VOCABULARIES)
+    for value in ("max", "top_k", "mostChanged", "rank1", "largest_fraction"):
+        ranked = StrEnum("RankedStatistic", {"RANKED": value})
+        with pytest.raises(ValueError, match="value-ranked"):
+            registry_module._require_closed_vocabularies((ranked,))
+    unitless = StrEnum("UnitlessStatistic", {"MEAN": "mean"})
+    with pytest.raises(ValueError, match="controlled unit"):
+        registry_module._require_closed_vocabularies((unitless,))
 
 
 def test_statistics_and_units_are_closed_per_family() -> None:
@@ -678,8 +663,8 @@ def test_registration_accepts_only_exact_validated_family_policies(
             "components": (
                 CellOriginProjectionComponent.model_construct(
                     statistic=CellOriginStatistic.ESTIMATED_FRACTION,
-                    statistic_unit=StatisticUnit.FRACTION,
-                    contributor_id="top",
+                    statistic_unit=StatisticUnit.READ_COUNT,
+                    contributor_id="hepatocyte",
                 ),
             ),
         }
