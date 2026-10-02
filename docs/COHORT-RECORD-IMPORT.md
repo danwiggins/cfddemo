@@ -11,7 +11,14 @@ derived chart/report, method identity, and current method authority are checked
 before a result can become visible in the index.
 
 The cohort layer pins the exact result-catalog object, storage identity, trust
-store, reader authority, live D05 registry, and linkage store. Import and read
+authority (the catalog's caller-held `TrustStore` or its protected
+`ResultTrustRegistry`), reader authority, live D05 registry, and linkage store.
+Its authority fence holds, in order, the linkage fence, the D05 lock, the
+catalog connection lock, result trust (the TrustStore lock, or the registry
+read fence through the catalog's `trust_authority_fence`), and the binding
+root; catalog calls inside it reuse the held trust head. A binding's retained
+catalog authority is rebuilt from its digest across catalog-authority v1 and
+v2, so bindings made before a catalog moved to the registry keep replaying. Import and read
 APIs accept only a registry selector and cohort version; they resolve the exact
 registered history under one linkage/registry authority fence and never accept
 a caller-built manifest sequence. Each verified result is bound to one exact

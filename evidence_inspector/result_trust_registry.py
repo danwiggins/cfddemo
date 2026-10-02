@@ -1360,14 +1360,22 @@ def _require_registry_integrity(registry: ResultTrustRegistry) -> None:
         "_head_key",
         "_trusted_head_sha256",
     )
-    initialized = tuple(name in instance for name in initialized_names)
-    if not any(initialized):
-        return
-    if not all(initialized):
-        raise ResultTrustRegistryUnsafe("result trust registry authority state changed")
-    expected = _REGISTRY_INSTANCE_SEALS.get(registry)
-    if expected is None or _registry_instance_snapshot(registry) != expected:
-        raise ResultTrustRegistryUnsafe("result trust registry authority state changed")
+    # A trust event updates the trusted head and then the instance seal under
+    # this lock; compare them under it too, or a concurrent reader on another
+    # thread can observe the head without its seal and fail spuriously.
+    with _REGISTRY_PROCESS_LOCK:
+        initialized = tuple(name in instance for name in initialized_names)
+        if not any(initialized):
+            return
+        if not all(initialized):
+            raise ResultTrustRegistryUnsafe(
+                "result trust registry authority state changed"
+            )
+        expected = _REGISTRY_INSTANCE_SEALS.get(registry)
+        if expected is None or _registry_instance_snapshot(registry) != expected:
+            raise ResultTrustRegistryUnsafe(
+                "result trust registry authority state changed"
+            )
 
 
 _RT_CONSTRUCT = ResultTrustRegistry

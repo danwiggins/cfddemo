@@ -47,6 +47,7 @@ from evidence_inspector.result_catalog import (
     ResultBundleReaderRegistry,
     ResultCatalog,
 )
+from evidence_inspector.result_trust_registry import ResultTrustRegistry
 from tests.test_bundles import _bundle, _downgrade_to_v1
 from tests.test_cohort_manifest import _known_run_revision, _manifest
 from tests.test_method_registry import (
@@ -60,10 +61,15 @@ from tests.test_method_registry import (
 )
 from tests.test_provider_linkage import _consume, _create_approval
 from tests.test_provider_linkage_store import _pins
+from tests.test_result_catalog_trust_registry import RegistryTrust, public_result_key
 from traceback_runner.serialization import canonical_json_bytes
 from traceback_runner.signing import RevokedKeyError, TrustStore
 
 pytest_plugins = ("tests.test_cohort_manifest",)
+
+# "store": a caller-held TrustStore; "registry": the protected result-trust
+# registry, exercised through the same mutation surface (RegistryTrust).
+TRUST_MODES = ("store", "registry")
 
 
 def _authority():
@@ -103,7 +109,7 @@ def _authority():
     return registry, head, head_sha256, capability
 
 
-def _setup(tmp_path: Path, live, fault_controller=NO_FAULTS):
+def _setup(tmp_path: Path, live, fault_controller=NO_FAULTS, trust_mode="store"):
     store, _, authority, member = live
     registry, head, head_sha256, capability = _authority()
     import_root = tmp_path / "imports"
@@ -122,11 +128,18 @@ def _setup(tmp_path: Path, live, fault_controller=NO_FAULTS):
         authority_sha256="a" * 64,
     )
     manifest = _manifest(authority, (member,), measurement_anchor=anchor)
+    if trust_mode == "registry":
+        trust_registry = ResultTrustRegistry(tmp_path / "result-trust")
+        trust_registry.add_key(public_result_key(key))
+        trust = RegistryTrust(trust_registry)
+        trust_authority = {"result_trust_registry": trust_registry}
+    else:
+        trust_authority = {"trust_store": trust}
     results = ResultCatalog(
         tmp_path / "results",
         import_roots={"root_primary": import_root},
-        trust_store=trust,
         reader_registry=DEFAULT_RESULT_BUNDLE_READER_REGISTRY,
+        **trust_authority,
     )
     cohort_registry = CohortRegistry(
         tmp_path / "cohort-registry",
@@ -308,10 +321,11 @@ def test_protected_status_replays_exact_member_to_verified_result_bridge(
     assert receipt.catalog_authority_sha256 == binding.catalog_authority_sha256
 
 
+@pytest.mark.parametrize("trust_mode", TRUST_MODES)
 def test_manifest_record_status_preserves_missing_available_and_withheld_member(
-    tmp_path: Path, live
+    tmp_path: Path, live, trust_mode: str
 ) -> None:
-    values = _setup(tmp_path, live)
+    values = _setup(tmp_path, live, trust_mode=trust_mode)
     missing = _status(values)
     assert len(missing.members) == 1
     assert missing.members[0].availability is CohortRecordAvailability.MISSING
@@ -387,11 +401,12 @@ def test_final_read_and_idempotent_return_hold_linkage_fence_through_return(
         ("before_idempotent_return", "idempotent"),
     ),
 )
+@pytest.mark.parametrize("trust_mode", TRUST_MODES)
 def test_final_return_holds_result_trust_fence_through_return(
-    tmp_path: Path, live, point: str, operation: str
+    tmp_path: Path, live, point: str, operation: str, trust_mode: str
 ) -> None:
     controller = DeterministicFaultController(point, action=FaultAction.PAUSE)
-    values = _setup(tmp_path, live, controller)
+    values = _setup(tmp_path, live, controller, trust_mode=trust_mode)
     _import(values)
     call = {
         "read": lambda: _bindings(values),
@@ -422,10 +437,11 @@ def test_final_return_holds_result_trust_fence_through_return(
     )
 
 
+@pytest.mark.parametrize("trust_mode", TRUST_MODES)
 def test_public_status_authority_fence_holds_result_trust_until_consumer_exit(
-    tmp_path: Path, live
+    tmp_path: Path, live, trust_mode: str
 ) -> None:
-    values = _setup(tmp_path, live)
+    values = _setup(tmp_path, live, trust_mode=trust_mode)
     _import(values)
     selector_id, cohort_version = _selection(values)
     mutation_started = threading.Event()
@@ -623,10 +639,11 @@ def test_nonmember_and_wrong_measurement_anchor_reject_before_result_index(
     assert values[1].query(CatalogQuery()).empty
 
 
+@pytest.mark.parametrize("trust_mode", TRUST_MODES)
 def test_revocation_after_import_withholds_binding_on_read(
-    tmp_path: Path, live
+    tmp_path: Path, live, trust_mode: str
 ) -> None:
-    values = _setup(tmp_path, live)
+    values = _setup(tmp_path, live, trust_mode=trust_mode)
     _import(values)
     values[6].revoke(values[5].key_id)
     with pytest.raises(RevokedKeyError):
@@ -1277,11 +1294,12 @@ def test_binding_bytes_are_canonical_and_permissions_private(
         "after_visibility_commit",
     ),
 )
+@pytest.mark.parametrize("trust_mode", TRUST_MODES)
 def test_trust_revocation_waits_at_every_publication_window(
-    tmp_path: Path, live, point: str
+    tmp_path: Path, live, point: str, trust_mode: str
 ) -> None:
     controller = DeterministicFaultController(point, action=FaultAction.PAUSE)
-    values = _setup(tmp_path / point, live, controller)
+    values = _setup(tmp_path / point, live, controller, trust_mode=trust_mode)
     mutation_started = threading.Event()
 
     def revoke() -> None:
@@ -2288,6 +2306,125 @@ def test_shared_result_retains_each_coordinator_owner_until_last_cleanup(
         for cohort in catalogs:
             cohort.close()
         values[1].close()
+
+
+def test_v1_bindings_replay_and_revoke_under_a_registry_bound_catalog(
+    tmp_path: Path, live
+) -> None:
+    values = _setup(tmp_path, live)
+    binding = _import(values)
+    values[0].close()
+    values[1].close()
+    trust_registry = ResultTrustRegistry(tmp_path / "result-trust")
+    trust_registry.add_key(public_result_key(values[5]))
+    results = ResultCatalog(
+        tmp_path / "results",
+        import_roots={"root_primary": tmp_path / "imports"},
+        result_trust_registry=trust_registry,
+        reader_registry=DEFAULT_RESULT_BUNDLE_READER_REGISTRY,
+    )
+    cohorts = CohortRecordCatalog(
+        tmp_path / "cohort-records",
+        result_catalog=results,
+        linkage_store=live[0],
+        cohort_registry=values[11],
+        expected_trust_snapshot_sha256_by_provider=_pins(),
+        reader_registry=DEFAULT_RESULT_BUNDLE_READER_REGISTRY,
+    )
+    rebound = (cohorts, results, *values[2:])
+    try:
+        # The retained binding names a v1 catalog authority; it still replays
+        # and is re-verified against the registry's current trust.
+        assert results.authority_snapshot().schema_version.endswith(".v2")
+        status = _status(rebound)
+        assert status.members[0].availability is CohortRecordAvailability.AVAILABLE
+        assert status.members[0].binding == binding
+        trust_registry.revoke_key(values[5].key_id)
+        withheld = _status(rebound)
+        assert withheld.members[0].availability is CohortRecordAvailability.WITHHELD
+        assert (
+            withheld.members[0].withheld_reason
+            is CohortRecordWithheldReason.RESULT_KEY_REVOKED
+        )
+    finally:
+        cohorts.close()
+        results.close()
+        trust_registry.close()
+
+
+def test_d06_e04_and_d07_order_trust_fences_compose_without_deadlock(
+    tmp_path: Path, live
+) -> None:
+    """D06 (linkage, D05, catalog, trust), E04 (catalog, trust), and the D07
+    order (linkage, trust) share one trust registry and all terminate."""
+
+    from tests.test_result_catalog import _verification_context
+
+    values = _setup(tmp_path, live, trust_mode="registry")
+    binding = _import(values)
+    selector_id, cohort_version = _selection(values)
+    trust_registry = values[6].registry
+    results = values[1]
+    errors: list[BaseException] = []
+    outcomes: list[str] = []
+    extra_keys = [
+        _bundle(tmp_path / f"extra-{index}")[1] for index in range(3)
+    ]
+
+    def d06_status() -> None:
+        for _ in range(8):
+            try:
+                status = values[0].record_status_for_manifest(
+                    selector_id, cohort_version
+                )
+                outcomes.append(status.members[0].availability.value)
+            except BaseException as exc:  # noqa: BLE001 - exact thread outcome
+                errors.append(exc)
+
+    def e04_reads() -> None:
+        for _ in range(8):
+            try:
+                results.get_verified(binding.result.result_id, _verification_context())
+                results.verify_reference(binding.result)
+                outcomes.append("verified")
+            except RevokedKeyError:
+                outcomes.append("revoked")
+            except BaseException as exc:  # noqa: BLE001
+                errors.append(exc)
+
+    def d07_order() -> None:
+        for _ in range(8):
+            try:
+                with live[0].authority_read_fence():
+                    with trust_registry.read_fence():
+                        pass
+                outcomes.append("d07")
+            except BaseException as exc:  # noqa: BLE001
+                errors.append(exc)
+
+    def trust_events() -> None:
+        try:
+            for key in extra_keys:
+                values[6].add_signing_key(key)
+            values[6].revoke(values[5].key_id)
+        except BaseException as exc:  # noqa: BLE001
+            errors.append(exc)
+
+    threads = [
+        threading.Thread(target=target)
+        for target in (d06_status, d06_status, e04_reads, d07_order, trust_events)
+    ]
+    for thread in threads:
+        thread.start()
+    for thread in threads:
+        thread.join(timeout=30)
+    assert not any(thread.is_alive() for thread in threads)
+    assert not errors
+    assert len(outcomes) == 32
+    assert (
+        _status(values).members[0].availability
+        is CohortRecordAvailability.WITHHELD
+    )
 
 
 def stat_mode(path: Path) -> int:

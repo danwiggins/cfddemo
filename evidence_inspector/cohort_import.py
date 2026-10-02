@@ -68,6 +68,7 @@ from evidence_inspector.result_catalog import (
     ResultCatalog,
     ResultId,
     _authority_value_fingerprint,
+    bound_catalog_authority,
     catalog_authority_sha256,
 )
 from evidence_inspector.safe_ingress import contract_type_graph, exact_model_bytes
@@ -97,6 +98,7 @@ _PINNED_RESULT_IMPORT = ResultCatalog.import_bundle
 _PINNED_RESULT_VERIFY = ResultCatalog.verify_reference
 _PINNED_RESULT_QUERY = ResultCatalog.query
 _PINNED_RESULT_AUTHORITY = ResultCatalog.authority_snapshot
+_PINNED_RESULT_TRUST_FENCE = ResultCatalog.trust_authority_fence
 _PINNED_RESULT_PREPARE = ResultCatalog.prepare_bundle_import
 _PINNED_RESULT_STAGE = ResultCatalog.stage_prepared_import
 _PINNED_RESULT_ADOPT = ResultCatalog.adopt_prepared_import
@@ -552,6 +554,7 @@ class CohortRecordCatalog:
             "_result_catalog",
             "_result_catalog_identity",
             "_result_trust_store",
+            "_result_trust_registry",
             "_result_trust_lock",
             "_result_trust_lock_identity",
             "_result_reader_registry",
@@ -597,6 +600,7 @@ class CohortRecordCatalog:
             ("verify_reference", _PINNED_RESULT_VERIFY),
             ("query", _PINNED_RESULT_QUERY),
             ("authority_snapshot", _PINNED_RESULT_AUTHORITY),
+            ("trust_authority_fence", _PINNED_RESULT_TRUST_FENCE),
             ("prepare_bundle_import", _PINNED_RESULT_PREPARE),
             ("stage_prepared_import", _PINNED_RESULT_STAGE),
             ("adopt_prepared_import", _PINNED_RESULT_ADOPT),
@@ -662,9 +666,20 @@ class CohortRecordCatalog:
         authority = _PINNED_RESULT_AUTHORITY(result_catalog)
         self._result_catalog = result_catalog
         self._result_catalog_identity = id(result_catalog)
+        # Exactly one of the two is set: a caller-held TrustStore (whose lock
+        # this fence holds) or the protected result-trust registry (whose read
+        # fence the catalog's trust_authority_fence holds).
         self._result_trust_store = result_catalog.trust_store
-        self._result_trust_lock = result_catalog.trust_store._lock
-        self._result_trust_lock_identity = id(result_catalog.trust_store._lock)
+        self._result_trust_registry = result_catalog.result_trust_registry
+        trust_lock = (
+            None
+            if result_catalog.trust_store is None
+            else result_catalog.trust_store._lock
+        )
+        self._result_trust_lock = trust_lock
+        self._result_trust_lock_identity = (
+            None if trust_lock is None else id(trust_lock)
+        )
         self._result_reader_registry = result_catalog.reader_registry
         self._catalog_storage_identity_sha256 = authority.storage_identity_sha256
         self._catalog_reader_identity_sha256 = authority.reader_registry_sha256
@@ -1293,8 +1308,17 @@ class CohortRecordCatalog:
             type(catalog) is not ResultCatalog
             or id(catalog) != self._result_catalog_identity
             or catalog.trust_store is not self._result_trust_store
-            or catalog.trust_store._lock is not self._result_trust_lock
-            or id(catalog.trust_store._lock) != self._result_trust_lock_identity
+            or catalog.result_trust_registry is not self._result_trust_registry
+            or (self._result_trust_store is None)
+            == (self._result_trust_registry is None)
+            or (
+                self._result_trust_store is not None
+                and (
+                    catalog.trust_store._lock is not self._result_trust_lock
+                    or id(catalog.trust_store._lock)
+                    != self._result_trust_lock_identity
+                )
+            )
             or catalog.reader_registry is not self._result_reader_registry
             or catalog._connection_lock is not self._catalog_connection_lock
             or id(catalog._connection_lock)
@@ -1305,6 +1329,7 @@ class CohortRecordCatalog:
             ("verify_reference", _PINNED_RESULT_VERIFY),
             ("query", _PINNED_RESULT_QUERY),
             ("authority_snapshot", _PINNED_RESULT_AUTHORITY),
+            ("trust_authority_fence", _PINNED_RESULT_TRUST_FENCE),
             ("prepare_bundle_import", _PINNED_RESULT_PREPARE),
             ("stage_prepared_import", _PINNED_RESULT_STAGE),
             ("adopt_prepared_import", _PINNED_RESULT_ADOPT),
@@ -1442,8 +1467,13 @@ class CohortRecordCatalog:
             _PINNED_REGISTRY_REQUIRE_INTEGRITY(registry)
             stack.enter_context(_PINNED_LINKAGE_AUTHORITY_FENCE(self._linkage_store))
             stack.enter_context(_PINNED_REGISTRY_LOCK(registry, exclusive=False))
+            # Lock order: linkage fence, D05 lock, catalog connection lock,
+            # then result trust (the TrustStore lock, or the registry read
+            # fence held by the catalog's trust_authority_fence).
             stack.enter_context(self._catalog_connection_lock)
-            stack.enter_context(self._result_trust_lock)
+            if self._result_trust_lock is not None:
+                stack.enter_context(self._result_trust_lock)
+            stack.enter_context(_PINNED_RESULT_TRUST_FENCE(self._result_catalog))
             history = _CC_RESOLVE_REGISTERED_HISTORY_IN_FENCE(
                 self, selector_id, cohort_version
             )
@@ -2373,14 +2403,14 @@ class CohortRecordCatalog:
                 self._reader_registry
             ):
                 raise CohortImportConflict("cohort record reader registry changed")
-            bound_authority = CatalogAuthoritySnapshot(
+            bound_authority = bound_catalog_authority(
                 storage_identity_sha256=binding.catalog_storage_identity_sha256,
                 trust_snapshot_sha256=binding.result_trust_snapshot_sha256,
                 reader_registry_sha256=authority.reader_registry_sha256,
+                expected_catalog_authority_sha256=binding.catalog_authority_sha256,
             )
             if (
-                binding.catalog_authority_sha256
-                != catalog_authority_sha256(bound_authority)
+                bound_authority is None
                 or binding.catalog_storage_identity_sha256
                 != authority.storage_identity_sha256
             ):
@@ -2636,14 +2666,14 @@ class CohortRecordCatalog:
                     )
                 )
                 continue
-            bound_authority = CatalogAuthoritySnapshot(
+            bound_authority = bound_catalog_authority(
                 storage_identity_sha256=binding.catalog_storage_identity_sha256,
                 trust_snapshot_sha256=binding.result_trust_snapshot_sha256,
                 reader_registry_sha256=authority.reader_registry_sha256,
+                expected_catalog_authority_sha256=binding.catalog_authority_sha256,
             )
             if (
-                binding.catalog_authority_sha256
-                != catalog_authority_sha256(bound_authority)
+                bound_authority is None
                 or binding.catalog_storage_identity_sha256
                 != authority.storage_identity_sha256
                 or binding.reader_registry_sha256
@@ -2779,6 +2809,7 @@ def _cohort_instance_snapshot(catalog: CohortRecordCatalog) -> tuple[object, ...
         id(state.get("_result_catalog")),
         state.get("_result_catalog_identity"),
         id(state.get("_result_trust_store")),
+        id(state.get("_result_trust_registry")),
         id(state.get("_result_trust_lock")),
         state.get("_result_trust_lock_identity"),
         id(state.get("_result_reader_registry")),
@@ -2876,6 +2907,9 @@ _COHORT_PINNED_FINGERPRINTS = MappingProxyType(
         "finish_candidate": _authority_value_fingerprint(
             _PINNED_RESULT_FINISH_CANDIDATE
         ),
+        "result_trust_fence": _authority_value_fingerprint(
+            _PINNED_RESULT_TRUST_FENCE
+        ),
         **{
             f"store:{name}": _authority_value_fingerprint(value)
             for name, value in _PINNED_MANIFEST_STORE_CALLABLES.items()
@@ -2945,6 +2979,8 @@ def _assert_cohort_runtime(
         != _COHORT_PINNED_FINGERPRINTS["candidates"]
         or _authority_value_fingerprint(_PINNED_RESULT_FINISH_CANDIDATE)
         != _COHORT_PINNED_FINGERPRINTS["finish_candidate"]
+        or _authority_value_fingerprint(_PINNED_RESULT_TRUST_FENCE)
+        != _COHORT_PINNED_FINGERPRINTS["result_trust_fence"]
         or any(
             _authority_value_fingerprint(value)
             != _COHORT_PINNED_FINGERPRINTS[f"store:{name}"]

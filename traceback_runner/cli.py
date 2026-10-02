@@ -98,7 +98,16 @@ def _parser() -> argparse.ArgumentParser:
 
     verify = commands.add_parser("verify", help="verify a bundle against local trust")
     verify.add_argument("bundle", type=Path)
-    verify.add_argument("--trust-store", required=True, type=Path)
+    trust_source = verify.add_mutually_exclusive_group(required=True)
+    trust_source.add_argument("--trust-store", type=Path)
+    trust_source.add_argument(
+        "--trust-registry",
+        type=Path,
+        help="protected result-trust registry root (needs the retained ID, epoch, head)",
+    )
+    verify.add_argument("--trust-registry-id")
+    verify.add_argument("--trust-registry-epoch")
+    verify.add_argument("--trust-registry-head")
     verify.add_argument("--json", action="store_true", dest="as_json")
 
     assets = commands.add_parser("assets", help="manage offline synthetic assets")
@@ -759,10 +768,60 @@ def _inspect(args: argparse.Namespace) -> tuple[ExitCode, dict[str, Any]]:
     )
 
 
+def _verify_with_trust_registry(
+    args: argparse.Namespace,
+) -> tuple[ExitCode, dict[str, Any]]:
+    """Verify against the current trust of a protected result-trust registry.
+
+    Opening requires the independently retained registry ID, epoch, and head,
+    and the registry rejects any older head, so a revoked key cannot be
+    revived by an old trust file or an older copy of the registry.
+    """
+
+    from evidence_inspector.result_trust_registry import ResultTrustRegistry
+
+    from .bundles import verify_bundle
+    from .signing import development_trust_document_bytes, load_development_trust
+
+    root = args.trust_registry
+    if root.is_symlink() or not root.is_dir():
+        # Never let a read-only command create a registry root.
+        raise FileNotFoundError("result trust registry is absent")
+    with ResultTrustRegistry(
+        root,
+        expected_registry_id=args.trust_registry_id,
+        expected_registry_epoch_sha256=args.trust_registry_epoch,
+        expected_state_head_sha256=args.trust_registry_head,
+    ) as registry:
+        # Hold the read fence through verification so the result is consistent
+        # with the reported head.
+        with registry.read_fence() as snapshot:
+            trust = load_development_trust(
+                development_trust_document_bytes(snapshot.document)
+            )
+            verified = verify_bundle(args.bundle, trust)
+            data = {
+                "verified": True,
+                "record_id": verified.manifest.record_id,
+                "development_trust_only": True,
+                "trust_registry_id": snapshot.registry_id,
+                "trust_registry_state_version": snapshot.state_version,
+                "trust_registry_state_head_sha256": snapshot.state_head_sha256,
+            }
+    return ExitCode.OK, _result(
+        "verify",
+        "ok",
+        "Signed local record verified with development trust; nothing was uploaded",
+        data=data,
+    )
+
+
 def _verify(args: argparse.Namespace) -> tuple[ExitCode, dict[str, Any]]:
     from .bundles import verify_bundle
     from .signing import load_development_trust
 
+    if args.trust_registry is not None:
+        return _verify_with_trust_registry(args)
     trust_path = args.trust_store
     if trust_path.is_dir():
         trust_path = trust_path / _TRUST_RELATIVE.name
@@ -1184,13 +1243,34 @@ def _dispatch(args: argparse.Namespace) -> tuple[ExitCode, dict[str, Any]]:
     raise AssertionError(f"unhandled command {args.command}")
 
 
+def _require_trust_registry_identity(
+    parser: argparse.ArgumentParser, args: argparse.Namespace
+) -> None:
+    if args.command != "verify":
+        return
+    identity = (
+        args.trust_registry_id,
+        args.trust_registry_epoch,
+        args.trust_registry_head,
+    )
+    if args.trust_registry is not None and any(item is None for item in identity):
+        parser.error(
+            "--trust-registry requires --trust-registry-id, "
+            "--trust-registry-epoch, and --trust-registry-head"
+        )
+    if args.trust_registry is None and any(item is not None for item in identity):
+        parser.error("--trust-registry-id/epoch/head require --trust-registry")
+
+
 def main(argv: Sequence[str] | None = None) -> int:
     raw = list(sys.argv[1:] if argv is None else argv)
     if raw[:1] == ["reader"]:  # local operator reader authority (E12)
         from .reader_cli import main as reader_main
 
         return reader_main(raw[1:])
-    args = _parser().parse_args(argv)
+    parser = _parser()
+    args = parser.parse_args(argv)
+    _require_trust_registry_identity(parser, args)
     try:
         mutation = (
             _operator_lock(args.root)
@@ -1227,6 +1307,7 @@ def main(argv: Sequence[str] | None = None) -> int:
             "WrongPurposeError",
             "InvalidSignatureError",
             "TrustNamespaceError",
+            "ResultTrustRegistryError",
         }
         if any(base.__name__ in verification_error_names for base in type(exc).mro()):
             asset_failure = args.command == "assets"

@@ -19,7 +19,9 @@ upload exists in this path.
   `TrustStore.revoke` mutates only that instance; the protected, forward-only
   result trust authority is `evidence_inspector.result_trust_registry`
   (`docs/RESULT-TRUST-REGISTRY.md`), which can return a fresh `TrustStore` for
-  its current head;
+  its current head. D07, the E04 result catalog (`result_trust_registry=`),
+  and `traceback verify --trust-registry` read that registry live, so a
+  revocation there applies to their next verification;
 - `development_trust_bytes` and `load_development_trust` for strict, canonical,
   public-only trust files. Private keys are never serialized.
 

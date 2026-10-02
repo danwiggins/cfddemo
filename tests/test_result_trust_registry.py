@@ -411,6 +411,38 @@ def test_read_fence_blocks_trust_events_until_exit(trust: ResultTrustRegistry) -
     assert trust.current_trust().document.keys[0].revoked
 
 
+def test_concurrent_reads_and_trust_events_on_one_instance_never_fail_spuriously(
+    trust: ResultTrustRegistry,
+) -> None:
+    # A trust event updates the instance's trusted head and then its seal;
+    # a reader's integrity check on another thread must not see one without
+    # the other.
+    errors: list[BaseException] = []
+    stop = threading.Event()
+
+    def reader() -> None:
+        while not stop.is_set():
+            try:
+                trust.current_trust()
+            except BaseException as exc:  # noqa: BLE001 - exact thread outcome
+                errors.append(exc)
+                return
+
+    readers = [threading.Thread(target=reader) for _ in range(4)]
+    for thread in readers:
+        thread.start()
+    try:
+        for _ in range(24):
+            trust.add_key(_public(generate_development_keypair(KeyPurpose.RESULT)))
+    finally:
+        stop.set()
+        for thread in readers:
+            thread.join(timeout=10)
+    assert not any(thread.is_alive() for thread in readers)
+    assert not errors
+    assert trust.current_trust().state_version == 24
+
+
 def test_closed_registry_lock_fails_closed(trust: ResultTrustRegistry) -> None:
     trust.close()
     with pytest.raises(ResultTrustRegistryUnsafe, match="closed"):
