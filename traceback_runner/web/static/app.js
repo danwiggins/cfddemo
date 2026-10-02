@@ -172,7 +172,23 @@
   right.addEventListener("change", renderSelection);
   const fragment = new URLSearchParams(window.location.hash.slice(1));
   const bootstrap = fragment.get("bootstrap");
+  const readerLaunch = fragment.get("reader_launch");
   window.history.replaceState(null, "", `${window.location.pathname}${window.location.search}`);
+  // The reader launch credential stays in page memory only; it is sent once,
+  // in a same-origin POST body carrying the session cookie, Origin and CSRF.
+  const exchangeReaderLaunch = async (csrfToken) => {
+    if (!readerLaunch) return;
+    const response = await fetch("/api/v1/session/reader-launch", {
+      method: "POST",
+      credentials: "same-origin",
+      headers: { "Content-Type": "application/json", "X-Traceback-CSRF": csrfToken },
+      body: JSON.stringify({ launch: readerLaunch }),
+    });
+    document.documentElement.dataset.readerSession = response.ok ? "bound" : "denied";
+    status.textContent = response.ok
+      ? "Longitudinal reader session bound"
+      : "Longitudinal reader launch was denied; ask the operator for a new link";
+  };
   if (!bootstrap) {
     status.textContent = "Relaunch from the local Traceback command";
     return;
@@ -184,7 +200,8 @@
     body: JSON.stringify({ bootstrap }),
   }).then(async (response) => {
     if (!response.ok) throw new Error("Local session unavailable");
-    await response.json();
+    const session = await response.json();
+    await exchangeReaderLaunch(session.csrf_token);
     await renderJobs();
     try {
       await loadCatalog();

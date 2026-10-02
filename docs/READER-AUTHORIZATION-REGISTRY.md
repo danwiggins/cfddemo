@@ -1,8 +1,9 @@
 # Protected reader-authorization registry and B01 session binding
 
-Status: E12 prerequisite, synthetic/local only. It does not authorize real
-provider operation, clinical use, export, or release. No E12 route exists yet;
-this change provides the registry and the boundary those routes must call.
+Status: E12 prerequisite, local only. It does not authorize clinical use,
+export, or release. No E12 read route exists yet; this provides the registry,
+the local operator authority, the launch exchange route, and the boundary
+those routes must call.
 
 `evidence_inspector/reader_authorization_registry.py` holds the
 `ReaderAuthorizationRegistry`. `traceback_runner/web/reader_session.py` binds a
@@ -133,9 +134,14 @@ before for every non-E12 route.
    `with binder.reader_authorization(request, cohort_registry_id=...,
    measurement_scope=...) as authorization:`. B01 transport checks run first
    and keep their own errors. Under the fence, the bound grant must exist, be
-   unrevoked, verify against an active key in the current trust, be inside its
-   validity window, be at exactly the bound registry head, and include the
-   requested cohort registry and measurement. The caller builds its result
+   unrevoked, verify against a key that is active in the current trust, be
+   inside its validity window, and include the requested cohort registry and
+   measurement. The bound registry head must still be in the committed journal
+   chain, so a replaced, restored or rolled-back registry denies. Only changes
+   to the session's own grant or signing key end it: its revocation, its
+   expiry, a request outside its scope, its key being revoked or rotated out,
+   or a trust that no longer names its authority and key. Other grants,
+   revocations and trust revisions that leave its key active do not. The caller builds its result
    inside the block. On exit the session and the grant are re-resolved before
    the fence is released; any difference denies the return.
 
@@ -179,11 +185,57 @@ Time comes from the package-owned `AuthorityTimeSource`. A check whose time is
 earlier than the newest record time is denied (`clock_rollback`), which
 bounds how far a rolled-back clock can resurrect an expired grant.
 
-## Known gaps
+## Local operator authority (decided 2026-10-01)
 
-- Any registry mutation (another grant, a revocation, a rotation) moves the
-  head, so every bound session must re-bootstrap. This is the strict reading
-  of "no longer at the expected head".
+The provider authority is a local operator authority, managed by
+`traceback reader` (`traceback_runner/reader_cli.py`):
+
+- It is a configuration of the `provider` profile, not a new profile. That
+  profile already refuses the synthetic authority ID and every synthetic key,
+  and the registry cannot see where a private key is kept, so an `operator`
+  profile would add an enum value and no check.
+- `traceback reader authority init` generates one Ed25519 key (version 1), a
+  random `reader_authority_` ID and trust revision 1, and creates the
+  registry. The key is an unencrypted PKCS#8 PEM file, mode `0600`, in a
+  private `0700` authority directory that may not overlap the registry root.
+  It is never printed or logged. **This is local-file custody, not production
+  custody.**
+- The same directory holds the operator's retained pins (`authority.json`:
+  registry ID, epoch, head, trust and trust digest). Every command opens the
+  registry with them and re-pins the head after each mutation, under an
+  operator lock file.
+- `authority rotate` appends a trust revision adding key version N+1, then a
+  revision revoking every previously active key, and deletes the old key
+  file. Grants signed by the old key stop authorizing and must be reissued.
+  The 64-revision trust bound allows about 31 rotations per registry.
+- `authority recover` re-pins after a crash between a registry append and the
+  pins write. It accepts the journal tail only when the retained head is in
+  the journal and the registry then opens and replays at that tail.
+- `grant issue --cohort ID --measurement FAMILY:QUANTITY:UNIT
+  --expires-in-days N` signs and registers one grant (N is 1 to 90) and prints
+  its selector. `grant revoke SELECTOR` revokes it. `grant list` prints
+  selectors and states (`active`, `revoked`, `expired`, `not_yet_valid`,
+  `untrusted_key`) only.
+- `launch --grant SELECTOR` checks the grant is active, starts the loopback
+  server with the registry, and prints a one-use launch link to the terminal;
+  Enter prints a fresh one.
+
+### Launch flow
+
+The link is `http://127.0.0.1:PORT/#bootstrap=CODE&reader_launch=CREDENTIAL`.
+Both secrets are in the fragment, which the browser never sends to the server
+or in a Referer (responses also set `Referrer-Policy: no-referrer`, and the
+server writes no access log). The packaged page clears the fragment, exchanges
+the bootstrap for a session cookie and CSRF token, then POSTs
+`{"launch": CREDENTIAL}` to `/api/v1/session/reader-launch` with the cookie,
+`Origin` and `X-Traceback-CSRF`. The route runs the B01 mutation checks before
+reading the body and calls `ReaderSessionBinder.exchange_launch_credential`,
+which repeats them. A GET page that auto-submits a form was not needed: the
+page script already holds the CSRF token in memory after the bootstrap, and a
+plain form could not carry the CSRF header. Both secrets live 60 seconds and
+are single-use.
+
+## Known gaps
 - The rollback fence is per process; a fresh process trusts the retained head
   it is given. A crash-partial create or restore target still needs manual
   removal, as in D03/D05.
@@ -191,19 +243,15 @@ bounds how far a rolled-back clock can resurrect an expired grant.
   one root, so running the original and a restored copy at the same time
   splits it: a revocation in one is invisible to the other. Operators must
   retire the original before opening a restored copy.
-- There is no HTTP route for the launch exchange yet, and the launch
-  credential's delivery to the browser is not defined.
+- No E12 read route consumes a bound session yet.
+- Launch credentials live in the `launch` process's memory, so a link can be
+  issued only by the process serving it.
 - The composite E12 fence coordinator does not exist; this registry provides
   the shared fence and the in-fence reads it will compose.
 
-## Decisions this change does not make
+## Decisions still open
 
-- Who the external provider authority is, how its trust document is
-  provisioned, and who may authorize a trust rotation.
-- How real grants are issued and delivered, and who may revoke them.
-- How the launcher chooses the grant selector for a launch.
-- Whether head equality should be relaxed to "same grant, not revoked, head
-  extends the bound head".
+- An external provider authority and production key custody.
 
-All tests use the checked-in synthetic authority or keys generated inside the
+Tests use the checked-in synthetic authority or keys generated inside the
 test.

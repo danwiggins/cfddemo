@@ -119,6 +119,7 @@ def _parser() -> argparse.ArgumentParser:
         "--package", required=True, type=Path
     )
 
+    commands.add_parser("reader", help="local operator reader authority (E12)")
     support = commands.add_parser(
         "support-bundle", help="write allowlisted redacted diagnostics"
     )
@@ -1184,6 +1185,11 @@ def _dispatch(args: argparse.Namespace) -> tuple[ExitCode, dict[str, Any]]:
 
 
 def main(argv: Sequence[str] | None = None) -> int:
+    raw = list(sys.argv[1:] if argv is None else argv)
+    if raw[:1] == ["reader"]:  # local operator reader authority (E12)
+        from .reader_cli import main as reader_main
+
+        return reader_main(raw[1:])
     args = _parser().parse_args(argv)
     try:
         mutation = (
