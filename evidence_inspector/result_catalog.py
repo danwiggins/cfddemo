@@ -115,6 +115,20 @@ def _acquire_content_gate(
             readers[current] = catalog
 
 
+def content_lock_held_by_current_thread() -> bool:
+    """True if this thread holds any catalog's content lock in this process.
+
+    For composing entry checks that must be the first lock a thread takes.
+    """
+
+    current = (os.getpid(), threading.get_ident())
+    with _CONTENT_GATE:
+        return any(
+            current in readers or any(holder == current for holder, _ in writer)
+            for writer, readers in _CONTENT_GATE_STATE.values()
+        )
+
+
 def _release_content_gate(
     inode: tuple[int, int] | None, current: tuple[int, int]
 ) -> None:
@@ -3593,5 +3607,6 @@ __all__ = [
     "bound_catalog_authority",
     "catalog_authority_sha256",
     "catalog_dependency_head_sha256",
+    "content_lock_held_by_current_thread",
     "registry_trust_snapshot_sha256",
 ]

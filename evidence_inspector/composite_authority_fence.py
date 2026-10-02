@@ -1052,6 +1052,10 @@ class CompositeAuthorityCoordinator:
             _instance_state(stores["linkage"]).get("_lock")._is_owned(),  # type: ignore[union-attr]
             _instance_state(stores["results"]).get("_connection_lock")._is_owned(),  # type: ignore[union-attr]
             bool(getattr(trust_module._LOCK_DEPTH, "value", 0)),
+            # Any E04 content lock, through any catalog instance on any root:
+            # held through another instance on this root it would wait for
+            # this thread's own D01 successors.
+            e04_module.content_lock_held_by_current_thread(),
         )
         if any(owned):
             raise CompositeAuthorityUnsafe(

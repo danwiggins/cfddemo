@@ -189,8 +189,9 @@ D03, and so on).
 Entry rule: the coordinator must be the first lock its thread takes. Entry
 is refused with `CompositeAuthorityUnsafe` before any acquisition if this
 thread already owns any store's in-process lock (every store module's
-process lock, the D01 store lock, the E04 connection lock, or the
-result-trust lock depth). Entering under, for example, E04's public
+process lock, the D01 store lock, the E04 connection lock, any E04
+catalog-content lock held through any catalog instance, or the result-trust
+lock depth). Entering under, for example, E04's public
 `trust_authority_fence` would hold E04 while waiting for D01, the reverse of
 D06's own order.
 
@@ -297,3 +298,10 @@ vector.
   saved-comparison registry). In v2 any E04 catalog-row change marks every
   save stale; the E04 content digest is linear in catalog size.
 - The D08 workspace builder is not built here.
+- Several `ResultCatalog` instances on one root in one process: the E04
+  content lock refuses a second-instance request on the holding thread, and
+  the coordinator refuses entry while any content lock is held, but D06's
+  own entry points do not preflight against a content lock held through
+  another instance; a thread holding one must not call a D06 catalog bound
+  to another instance on the same root (it can wait on D01 behind a D06
+  import that waits on that content lock).

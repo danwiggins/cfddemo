@@ -1369,6 +1369,20 @@ def test_entry_while_holding_any_store_fence_is_refused(world, coordinator) -> N
     with world.linkage.authority_read_fence(), world.cohort.authority_read_fence():
         with pytest.raises(CompositeAuthorityUnsafe, match="before any store fence"):
             coordinator.snapshot(world.scope)
+    # E04's content lock held through another catalog instance on the same
+    # root (no lock of the coordinator's own catalog is held) is refused too.
+    other = ResultCatalog(
+        world.results.root,
+        import_roots={"root_primary": world.root / "imports"},
+        result_trust_registry=world.trust,
+        reader_registry=DEFAULT_RESULT_BUNDLE_READER_REGISTRY,
+    )
+    try:
+        with other.content_authority_fence():
+            with pytest.raises(CompositeAuthorityUnsafe, match="before any store fence"):
+                coordinator.snapshot(world.scope)
+    finally:
+        other.close()
     # The scenario itself terminates: a concurrent D06 status read and a
     # thread that tries to enter under E04 both finish.
     errors: list[BaseException] = []
