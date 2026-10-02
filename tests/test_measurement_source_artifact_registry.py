@@ -1070,3 +1070,17 @@ def test_storage_interrupted_restore_is_staged(
         tmp_path,
         monkeypatch,
     )
+
+
+def test_storage_creation_under_a_symlinked_parent(
+    registry: MeasurementSourceArtifactRegistry, e06, live: Live, tmp_path: Path
+) -> None:
+    storage_checks.check_creation_under_symlinked_parent(
+        lambda root: MeasurementSourceArtifactRegistry(
+            root, result_view_source_registry=e06
+        ),
+        lambda root, values: MeasurementSourceArtifactRegistry(
+            root, result_view_source_registry=e06, **storage_checks.expected(values)
+        ),
+        tmp_path,
+    )

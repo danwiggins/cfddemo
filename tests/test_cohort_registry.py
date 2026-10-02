@@ -1292,3 +1292,17 @@ def test_storage_interrupted_restore_is_staged(
         tmp_path,
         monkeypatch,
     )
+
+
+def test_storage_creation_under_a_symlinked_parent(
+    registry: CohortRegistry, live, tmp_path: Path
+) -> None:
+    storage_checks.check_creation_under_symlinked_parent(
+        lambda root: CohortRegistry(
+            root,
+            linkage_store=live[0],
+            expected_trust_snapshot_sha256_by_provider=_pins(),
+        ),
+        lambda root, values: CohortRegistry(root, **_restore_values(values, live)),
+        tmp_path,
+    )

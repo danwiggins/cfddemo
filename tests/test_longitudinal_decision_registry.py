@@ -955,3 +955,20 @@ def test_storage_interrupted_restore_is_staged(
         tmp_path,
         monkeypatch,
     )
+
+
+def test_storage_creation_under_a_symlinked_parent(
+    registry: LongitudinalDecisionRegistry, live, tmp_path: Path
+) -> None:
+    storage_checks.check_creation_under_symlinked_parent(
+        lambda root: LongitudinalDecisionRegistry(
+            root, linkage_store=live[0], expected_trust_snapshot_sha256_by_provider=PINS
+        ),
+        lambda root, values: LongitudinalDecisionRegistry(
+            root,
+            linkage_store=live[0],
+            expected_trust_snapshot_sha256_by_provider=PINS,
+            **storage_checks.expected(values),
+        ),
+        tmp_path,
+    )

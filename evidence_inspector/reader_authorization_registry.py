@@ -2091,8 +2091,9 @@ class ReaderAuthorizationRegistry:
 
         Reopening a registry whose journal ends in a torn line fails closed,
         and nothing repairs it automatically.  This explicit entry point takes
-        the exclusive registry lock without waiting (a registry in use is
-        refused) and truncates only the bytes after the
+        the exclusive registry lock without waiting (a registry in use,
+        including the caller's own fence, is refused by the non-blocking
+        flock) and truncates only the bytes after the
         last newline, and only when every complete line chains to exactly the
         retained head under the retained identity.  It returns the number of
         bytes removed (``0`` when there is no torn tail); then reopen with the

@@ -188,6 +188,9 @@ def remove_staging_directory(parent_fd: int, name: str) -> None:
 
 
 def _open_parent(path: Path) -> int:
+    # Resolve symlinked ancestors (for example macOS /tmp) first, as the
+    # pre-staging mkdir did; the inode check then binds the real directory.
+    path = Path(os.path.realpath(path))
     parent_lstat = os.stat(path, follow_symlinks=False)
     parent_fd = os.open(path, _DIRECTORY_FLAGS)
     bound = os.fstat(parent_fd)
@@ -312,7 +315,10 @@ def recover_torn_journal_tail(
     """Remove an unterminated trailing journal line; return the bytes removed.
 
     Operator-invoked only; nothing calls it on reopen.  It takes the registry's
-    exclusive lock without waiting (a registry in use is refused), then checks the private root, metadata, and journal; requires
+    exclusive lock without waiting: another thread holding the process lock,
+    or any live flock (including the caller's own fence, which re-enters the
+    process RLock), is refused as "in use".  It then checks the private root,
+    metadata, and journal; requires
     the metadata identity to equal the retained identity; and requires every
     complete line to chain from the metadata genesis to exactly the retained
     head.  Only then does it truncate the bytes after the last newline.  A
@@ -346,9 +352,11 @@ def recover_torn_journal_tail(
         lock_fd = _open_private(
             ".registry.lock", os.O_RDWR | _FILE_FLAGS, root_fd, directory=False
         )
-        # Never wait: maintenance on a registry that a live instance holds (in
-        # this or another process or thread, or this thread's own fence) is
-        # refused rather than queued, so it cannot deadlock a fence.
+        # Never wait: maintenance on a registry that a live instance holds is
+        # refused rather than queued, so it cannot deadlock a fence.  Another
+        # thread holding the process lock is refused here; the process lock is
+        # an RLock, so the caller's own fence re-enters it and is refused by
+        # the non-blocking flock below instead.
         if not process_lock.acquire(blocking=False):
             raise error(f"{label} is in use")
         try:

@@ -63,10 +63,11 @@ as the same user.
    )
    ```
 
-   It takes the exclusive registry lock without waiting. A registry that any
-   live instance holds, including the caller's own fence, is refused ("in
-   use") rather than waited on, so recovery cannot deadlock. It checks the
-   private root, lock,
+   It takes the exclusive registry lock without waiting, so recovery cannot
+   deadlock. Another thread holding the registry's process lock is refused
+   ("in use"). The process lock is an RLock, so the caller's own fence
+   re-enters it; the non-blocking `flock` then refuses it, as it refuses any
+   live instance in another process. It checks the private root, lock,
    metadata and journal. The metadata identity must equal the retained
    identity, and every complete line must chain from the metadata genesis to
    exactly the retained head. Only then does it truncate the bytes after the
@@ -108,8 +109,11 @@ Items 5 and 6 port the result-trust registry's hardening to the family.
   the parent directory. It is never adopted and never blocks a retry. An
   operator may delete it when no creation or restore is running.
 - A failure or interrupt after the rename but before the constructor or
-  restore returns is cleaned up by inode: the directory the root descriptor
-  holds is removed under whichever name it now has. A new root's identity was
+  restore returns, including one raised as the registry lock or the
+  authority fence exits, is cleaned up by inode: the directory the root
+  descriptor holds is removed under whichever name it now has. The
+  constructor clears its cleanup handle only as the last statement, after
+  the lock and every fence have exited. A new root's identity was
   never returned, so a retry creates a fresh one. Only a hard crash in that
   window leaves a complete registry whose identity the caller never received.
   That identity is in `registry-metadata.json`, and the head is the genesis
@@ -119,3 +123,7 @@ Items 5 and 6 port the result-trust registry's hardening to the family.
 - `rename(2)` replaces an empty directory created at the final path in the
   instant between the absence check and the rename. That is a same-user race
   and out of scope.
+- Constructors resolve a symlinked parent (for example macOS `/tmp`) before
+  staging, as `mkdir` did before this change. `restore()` and the reader
+  registry's `create()` still refuse a symlinked parent, as they did before;
+  pass a resolved path.

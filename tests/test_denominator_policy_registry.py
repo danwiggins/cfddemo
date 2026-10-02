@@ -1189,3 +1189,18 @@ def test_storage_interrupted_restore_is_staged(
         tmp_path,
         monkeypatch,
     )
+
+
+def test_storage_creation_under_a_symlinked_parent(env: Env, tmp_path: Path) -> None:
+    storage_checks.check_creation_under_symlinked_parent(
+        lambda root: DenominatorPolicyRegistry(
+            root, cohort_registry=env.cohort_registry, record_catalog=env.catalog
+        ),
+        lambda root, values: DenominatorPolicyRegistry(
+            root,
+            cohort_registry=env.cohort_registry,
+            record_catalog=env.catalog,
+            **storage_checks.expected(values),
+        ),
+        tmp_path,
+    )

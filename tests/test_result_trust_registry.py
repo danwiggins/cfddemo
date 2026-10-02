@@ -955,3 +955,15 @@ def test_storage_interrupted_restore_is_staged(
         tmp_path,
         monkeypatch,
     )
+
+
+def test_storage_creation_under_a_symlinked_parent(
+    trust: ResultTrustRegistry, tmp_path: Path
+) -> None:
+    storage_checks.check_creation_under_symlinked_parent(
+        lambda root: ResultTrustRegistry(root),
+        lambda root, values: ResultTrustRegistry(
+            root, **storage_checks.expected(values)
+        ),
+        tmp_path,
+    )

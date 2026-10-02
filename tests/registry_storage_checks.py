@@ -326,6 +326,36 @@ def check_interrupted_creation(
     assert not os.path.lexists(root)
     assert _staged(root) == before
 
+    # A failure as the registry lock exits, after the instance is sealed: the
+    # cleanup handle is still live, so the unreturned root is removed.
+    sealed = {"on": False}
+
+    def sealing(*args, **kwargs):
+        result = original_seal(*args, **kwargs)
+        sealed["on"] = True
+        return result
+
+    class _FailingUnlock:
+        def __getattr__(self, name):
+            return getattr(fcntl, name)
+
+        @staticmethod
+        def flock(descriptor, operation):
+            if sealed["on"] and operation == fcntl.LOCK_UN:
+                fcntl.flock(descriptor, operation)
+                raise KeyboardInterrupt
+            return fcntl.flock(descriptor, operation)
+
+    monkeypatch.setattr(module, "_seal_registry_instance", sealing)
+    monkeypatch.setattr(module, "fcntl", _FailingUnlock())
+    with pytest.raises(KeyboardInterrupt):
+        create(root)
+    monkeypatch.setattr(module, "fcntl", fcntl)
+    monkeypatch.setattr(module, "_seal_registry_instance", original_seal)
+    assert sealed["on"]
+    assert not os.path.lexists(root)
+    assert _staged(root) == before
+
     created = create(root)
     try:
         values = retained(created)
@@ -383,3 +413,25 @@ def check_interrupted_restore(
     finally:
         restored.close()
     assert _staged(target) == [stale]
+
+
+def check_creation_under_symlinked_parent(
+    create: Callable[[Path], object],
+    reopen_at: Callable[[Path, SimpleNamespace], object],
+    tmp_path: Path,
+) -> None:
+    """A registry can be created and reopened beneath a symlinked parent."""
+
+    real = tmp_path / f"real-parent-{secrets.token_hex(4)}"
+    real.mkdir()
+    link = tmp_path / f"linked-parent-{secrets.token_hex(4)}"
+    link.symlink_to(real, target_is_directory=True)
+    root = link / "registry"
+    created = create(root)
+    try:
+        values = retained(created)
+    finally:
+        created.close()
+    assert (real / "registry" / "registry-metadata.json").is_file()
+    assert not list(real.glob(".registry.staging-*"))
+    reopen_at(root, values).close()

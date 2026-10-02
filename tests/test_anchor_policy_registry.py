@@ -1183,3 +1183,13 @@ def test_storage_interrupted_restore_is_staged(
         tmp_path,
         monkeypatch,
     )
+
+
+def test_storage_creation_under_a_symlinked_parent(
+    registry: AnchorPolicyRegistry, live: Live, tmp_path: Path
+) -> None:
+    storage_checks.check_creation_under_symlinked_parent(
+        lambda root: _open(root, live),
+        lambda root, values: _open(root, live, **storage_checks.expected(values)),
+        tmp_path,
+    )

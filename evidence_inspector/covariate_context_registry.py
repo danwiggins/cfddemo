@@ -1018,8 +1018,9 @@ class CovariateContextRegistry:
                     self, _CR_LOAD_JOURNAL(self), head, check_instance=False
                 )
                 _seal_registry_instance(self)
-                # Until here a failure still removes the new root by inode.
-                staged_root = None
+            # Cleared only after the lock and any fence have exited: until
+            # here a failure still removes the new root by inode.
+            staged_root = None
         except BaseException:
             if staged_root is not None:
                 _discard_staged_root(staged_root, final_root, self._root_fd)
@@ -1916,8 +1917,9 @@ class CovariateContextRegistry:
 
         Reopening a registry whose journal ends in a torn line fails closed,
         and nothing repairs it automatically.  This explicit entry point takes
-        the exclusive registry lock without waiting (a registry in use is
-        refused) and truncates only the bytes after the
+        the exclusive registry lock without waiting (a registry in use,
+        including the caller's own fence, is refused by the non-blocking
+        flock) and truncates only the bytes after the
         last newline, and only when every complete line chains to exactly the
         retained head under the retained identity.  It returns the number of
         bytes removed (``0`` when there is no torn tail); then reopen with the
