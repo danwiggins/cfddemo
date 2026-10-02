@@ -2418,7 +2418,23 @@ def build_longitudinal_workspace(
         _fail(code, remediation)
     assert gathered is not None
     inputs, protected_rows, positions = gathered
-    second = _snapshot(coordinator, dependency_scope)
+    second: CompositeAuthoritySnapshotV1 | None = None
+    second_code: LongitudinalErrorCode | None = None
+    second_remediation = LongitudinalRemediation.RETRY_READ
+    try:
+        second = _snapshot(coordinator, dependency_scope)
+    except LongitudinalWorkspaceBoundaryError as exc:
+        # The first snapshot succeeded for this exact scope: a stale scope now
+        # means authority moved during the build.
+        second_code = (
+            LongitudinalErrorCode.READ_CONFLICT
+            if exc.code is LongitudinalErrorCode.AUTHORITY_STALE
+            else exc.code
+        )
+        if second_code is not LongitudinalErrorCode.READ_CONFLICT:
+            second_remediation = exc.remediation
+    if second_code is not None:
+        _fail(second_code, second_remediation)
     second_authorization = _authorize(
         reader_authorization_registry,
         credential,

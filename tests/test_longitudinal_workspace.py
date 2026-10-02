@@ -119,7 +119,9 @@ def _boundary(operation) -> LongitudinalWorkspaceBoundaryError:
     return error
 
 
-def _rows_by_digit(workspace: LongitudinalWorkspace) -> dict[str, LongitudinalSourceRow]:
+def _rows_by_digit(
+    workspace: LongitudinalWorkspace,
+) -> dict[str, LongitudinalSourceRow]:
     """Map the world's member digits to public rows (A=1, R=3, B=2, C=4)."""
 
     result = {}
@@ -234,9 +236,12 @@ def test_live_workspace_from_every_registry(base) -> None:
 def test_rebuild_is_byte_identical(base) -> None:
     world, workspace = base
     again = world.build()
-    assert again.model_copy(
-        update={"reader_authorization": workspace.reader_authorization}
-    ) == workspace
+    assert (
+        again.model_copy(
+            update={"reader_authorization": workspace.reader_authorization}
+        )
+        == workspace
+    )
     assert longitudinal_projection_bytes(
         project_longitudinal_workspace(again)
     ) == longitudinal_projection_bytes(project_longitudinal_workspace(workspace))
@@ -338,7 +343,9 @@ def test_reader_must_hold_a_current_scoped_grant(world: World) -> None:
         grant_sha256="0" * 64, state_head_sha256=world.credential.state_head_sha256
     )
     for credential in (forged, {"grant_sha256": "0" * 64}, "token", 0):
-        error = _boundary(lambda credential=credential: world.build(credential=credential))
+        error = _boundary(
+            lambda credential=credential: world.build(credential=credential)
+        )
         assert error.code is LongitudinalErrorCode.PERMISSION_DENIED
     wrong_scope = world.request.model_copy(
         update={
@@ -407,7 +414,9 @@ def test_caller_objects_never_supply_authority(world: World) -> None:
     # source, decision, comparison, policy, anchor or value.
     import inspect
 
-    names = set(inspect.signature(workspace_module.build_longitudinal_workspace).parameters)
+    names = set(
+        inspect.signature(workspace_module.build_longitudinal_workspace).parameters
+    )
     assert not names & {
         "manifest",
         "status",
@@ -475,7 +484,9 @@ def test_authority_change_during_construction_is_a_read_conflict(
 
     def write() -> None:
         if writer == "linkage":
-            world.linkage.commit_authorized_revision(_extra_record("8").authorized_linkage)
+            world.linkage.commit_authorized_revision(
+                _extra_record("8").authorized_linkage
+            )
         elif writer == "projection":
             policy = world.projections.resolve(
                 world.request.projection_policy_selector_id, 1
@@ -612,7 +623,8 @@ def test_cohort_over_the_bound_is_rejected_before_member_traversal(
         monkeypatch.setattr(
             workspace_module,
             name,
-            lambda *a, _inner=inner, _name=name, **k: reads.append(_name) or _inner(*a, **k),
+            lambda *a, _inner=inner, _name=name, **k: reads.append(_name)
+            or _inner(*a, **k),
         )
     monkeypatch.setattr(workspace_module, "_call", page)
     count = MAX_WORKSPACE_MEMBERS + 1
@@ -638,11 +650,16 @@ def test_every_d03_outcome_is_distinct_and_only_two_can_carry_numbers(base) -> N
     seen = {}
     for outcome in LongitudinalOutcome:
         decision = rows[index].decision.model_copy(update={"outcome": outcome})
-        edited = rows[:index] + [_edit(rows[index], decision=decision)] + rows[index + 1 :]
+        edited = (
+            rows[:index] + [_edit(rows[index], decision=decision)] + rows[index + 1 :]
+        )
         row = _derive(world, workspace, edited).rows[index]
         seen[outcome] = row.compatibility_state
         assert row.compatibility_state.value == outcome.value
-        if outcome in {LongitudinalOutcome.EQUIVALENT, LongitudinalOutcome.QUALIFIED_COMPATIBLE}:
+        if outcome in {
+            LongitudinalOutcome.EQUIVALENT,
+            LongitudinalOutcome.QUALIFIED_COMPATIBLE,
+        }:
             assert row.comparison is not None
         else:
             assert row.comparison is None
@@ -666,7 +683,9 @@ def test_every_unavailable_d07_state_strips_all_comparison_fields(base, state) -
     world, workspace = base
     rows = list(workspace.protected_rows)
     index = next(i for i, row in enumerate(rows) if row.comparison is not None)
-    edited = rows[:index] + [_edit(rows[index], comparison_state=state, comparison=None)]
+    edited = rows[:index] + [
+        _edit(rows[index], comparison_state=state, comparison=None)
+    ]
     edited += rows[index + 1 :]
     derived = _derive(world, workspace, edited)
     row = derived.rows[index]
@@ -687,7 +706,9 @@ def test_every_unavailable_d07_state_strips_all_comparison_fields(base, state) -
         }
     ],
 )
-def test_unavailable_d07_classification_never_publishes_numbers(base, classification) -> None:
+def test_unavailable_d07_classification_never_publishes_numbers(
+    base, classification
+) -> None:
     world, workspace = base
     rows = list(workspace.protected_rows)
     index = next(i for i, row in enumerate(rows) if row.comparison is not None)
@@ -713,13 +734,17 @@ def test_unavailable_d07_classification_never_publishes_numbers(base, classifica
             },
         }
     )
-    edited = rows[:index] + [
-        _edit(
-            rows[index],
-            comparison_state=ComparisonRegistryState.UNAVAILABLE,
-            comparison=comparison,
-        )
-    ] + rows[index + 1 :]
+    edited = (
+        rows[:index]
+        + [
+            _edit(
+                rows[index],
+                comparison_state=ComparisonRegistryState.UNAVAILABLE,
+                comparison=comparison,
+            )
+        ]
+        + rows[index + 1 :]
+    )
     derived = _derive(world, workspace, edited)
     row = derived.rows[index]
     assert row.comparison is None
@@ -732,7 +757,11 @@ def test_unavailable_d07_classification_never_publishes_numbers(base, classifica
 @pytest.mark.parametrize(
     ("field", "value", "reason"),
     [
-        ("repeatability_envelope_sha256", "e" * 64, SuppressionReason.D07_BINDING_MISMATCH),
+        (
+            "repeatability_envelope_sha256",
+            "e" * 64,
+            SuppressionReason.D07_BINDING_MISMATCH,
+        ),
         ("anchor_policy_sha256", "e" * 64, SuppressionReason.D07_BINDING_MISMATCH),
         ("d03_decision_sha256", "e" * 64, SuppressionReason.D07_BINDING_MISMATCH),
         ("anchor_record_sha256", "e" * 64, SuppressionReason.D07_BINDING_MISMATCH),
@@ -745,7 +774,9 @@ def test_d07_comparison_must_bind_the_resolved_anchor_policy_and_envelope(
     rows = list(workspace.protected_rows)
     index = next(i for i, row in enumerate(rows) if row.comparison is not None)
     comparison = rows[index].comparison.model_copy(update={field: value})
-    edited = rows[:index] + [_edit(rows[index], comparison=comparison)] + rows[index + 1 :]
+    edited = (
+        rows[:index] + [_edit(rows[index], comparison=comparison)] + rows[index + 1 :]
+    )
     row = _derive(world, workspace, edited).rows[index]
     assert row.comparison is None and reason in row.suppression_reasons
 
@@ -754,15 +785,29 @@ def test_d07_comparison_must_bind_the_resolved_anchor_policy_and_envelope(
     ("target", "updates", "reason"),
     [
         ("member", {"status": "missing"}, SuppressionReason.RECORD_NOT_AVAILABLE),
-        ("anchor", {"status": "missing"}, SuppressionReason.ANCHOR_RECORD_NOT_AVAILABLE),
+        (
+            "anchor",
+            {"status": "missing"},
+            SuppressionReason.ANCHOR_RECORD_NOT_AVAILABLE,
+        ),
         ("member", {"history": "superseded"}, SuppressionReason.HISTORY_NOT_ACTIVE),
-        ("anchor", {"history": "superseded"}, SuppressionReason.ANCHOR_HISTORY_NOT_ACTIVE),
+        (
+            "anchor",
+            {"history": "superseded"},
+            SuppressionReason.ANCHOR_HISTORY_NOT_ACTIVE,
+        ),
         ("member", {"history": "not_recorded"}, SuppressionReason.HISTORY_NOT_ACTIVE),
         ("member", {"receipt": "f" * 64}, SuppressionReason.LINKAGE_BINDING_MISMATCH),
-        ("member", {"result": "result_" + "f" * 40}, SuppressionReason.RESULT_BINDING_MISMATCH),
+        (
+            "member",
+            {"result": "result_" + "f" * 40},
+            SuppressionReason.RESULT_BINDING_MISMATCH,
+        ),
     ],
 )
-def test_each_live_gate_suppresses_comparison_and_segment(base, target, updates, reason) -> None:
+def test_each_live_gate_suppresses_comparison_and_segment(
+    base, target, updates, reason
+) -> None:
     world, workspace = base
     rows = list(workspace.protected_rows)
     member_index = next(i for i, row in enumerate(rows) if row.comparison is not None)
@@ -799,7 +844,9 @@ def test_each_live_gate_suppresses_comparison_and_segment(base, target, updates,
     if "result" in updates:
         row = _edit(
             row,
-            decision=row.decision.model_copy(update={"member_result_id": updates["result"]}),
+            decision=row.decision.model_copy(
+                update={"member_result_id": updates["result"]}
+            ),
         )
     rows[index] = row
     derived = _derive(world, workspace, rows)
@@ -844,6 +891,9 @@ def test_incompatible_middle_member_cannot_connect_compatible_endpoints(base) ->
         update={"row_ordinal": 2, "lineage_role": MemberLineageRole.TECHNICAL_REPLICATE}
     )
     assert derive_segments((anchor, replicate)) == derive_segments((anchor,))
+    # Two eligible draws at one timepoint are ambiguous: no segment touches it.
+    sibling = eligible.model_copy(update={"row_ordinal": 3, "timepoint_ordinal": 2})
+    assert derive_segments((anchor, good_middle, sibling)) == ()
     assert rows  # protected rows unchanged
 
 
@@ -869,9 +919,15 @@ def test_filters_select_rows_without_changing_counts_or_roles(base) -> None:
     baseline = _derive(world, workspace, rows)
     cases = [
         LongitudinalWorkspaceFilters(timepoint_ordinals=(1,)),
-        LongitudinalWorkspaceFilters(lineage_roles=(MemberLineageRole.TECHNICAL_REPLICATE,)),
-        LongitudinalWorkspaceFilters(record_availability=(CohortRecordAvailability.MISSING,)),
-        LongitudinalWorkspaceFilters(compatibility_states=(RowCompatibilityState.UNKNOWN,)),
+        LongitudinalWorkspaceFilters(
+            lineage_roles=(MemberLineageRole.TECHNICAL_REPLICATE,)
+        ),
+        LongitudinalWorkspaceFilters(
+            record_availability=(CohortRecordAvailability.MISSING,)
+        ),
+        LongitudinalWorkspaceFilters(
+            compatibility_states=(RowCompatibilityState.UNKNOWN,)
+        ),
     ]
     replay = {baseline.replay_sha256}
     for filters in cases:
@@ -924,7 +980,15 @@ def test_filter_order_is_normalized_and_byte_identical(world: World) -> None:
 
 @pytest.mark.parametrize(
     "change",
-    ["member", "decision", "comparison", "source", "denominator", "covariate", "policy"],
+    [
+        "member",
+        "decision",
+        "comparison",
+        "source",
+        "denominator",
+        "covariate",
+        "policy",
+    ],
 )
 def test_every_commitment_changes_the_replay_digest(base, change) -> None:
     world, workspace = base
@@ -934,17 +998,23 @@ def test_every_commitment_changes_the_replay_digest(base, change) -> None:
     if change == "member":
         rows[index] = _edit(
             rows[index],
-            history=rows[index].history.model_copy(update={"affected_comparison_count": 1}),
+            history=rows[index].history.model_copy(
+                update={"affected_comparison_count": 1}
+            ),
         )
     elif change == "decision":
         rows[index] = _edit(
             rows[index],
-            decision=rows[index].decision.model_copy(update={"decision_sha256": "d" * 64}),
+            decision=rows[index].decision.model_copy(
+                update={"decision_sha256": "d" * 64}
+            ),
         )
     elif change == "comparison":
         rows[index] = _edit(
             rows[index],
-            comparison=rows[index].comparison.model_copy(update={"comparison_sha256": "c" * 64}),
+            comparison=rows[index].comparison.model_copy(
+                update={"comparison_sha256": "c" * 64}
+            ),
         )
     elif change == "source":
         rows[index] = _edit(
@@ -974,10 +1044,13 @@ def test_unequal_intervals_and_shared_collection_positions(base) -> None:
     assert sorted(positions.values()) == [(1, 0), (2, 86_400), (3, 172_800)]
     members = world.manifest.members
     draw = next(m for m in members if m.linkage_id.endswith("1" * 32))
-    replicate = next(m for m in members if m.lineage_role is MemberLineageRole.TECHNICAL_REPLICATE)
-    assert positions[(draw.time_coordinate, draw.biological_timepoint_id)] == positions[
-        (replicate.time_coordinate, replicate.biological_timepoint_id)
-    ]
+    replicate = next(
+        m for m in members if m.lineage_role is MemberLineageRole.TECHNICAL_REPLICATE
+    )
+    assert (
+        positions[(draw.time_coordinate, draw.biological_timepoint_id)]
+        == positions[(replicate.time_coordinate, replicate.biological_timepoint_id)]
+    )
 
 
 def test_version_diff_reports_membership_and_policy_changes(base) -> None:
@@ -987,12 +1060,18 @@ def test_version_diff_reports_membership_and_policy_changes(base) -> None:
         update={
             "version": 2,
             "members": first.members[:3],
-            "policies": first.policies.model_copy(update={"missingness_sha256": "4" * 64}),
+            "policies": first.policies.model_copy(
+                update={"missingness_sha256": "4" * 64}
+            ),
         }
     )
     diff = derive_version_diff((first, second))
     assert diff.kind is VersionDiffKind.PREDECESSOR
-    assert (diff.added_member_count, diff.removed_member_count, diff.unchanged_member_count) == (
+    assert (
+        diff.added_member_count,
+        diff.removed_member_count,
+        diff.unchanged_member_count,
+    ) == (
         0,
         1,
         3,
@@ -1007,7 +1086,9 @@ def test_version_diff_reports_membership_and_policy_changes(base) -> None:
         assert member.linkage_id not in text and member.subject_token not in text
 
 
-def test_exactly_the_bound_derives_deterministically_and_one_more_is_rejected(base) -> None:
+def test_exactly_the_bound_derives_deterministically_and_one_more_is_rejected(
+    base,
+) -> None:
     world, workspace = base
     template = workspace.protected_rows[3]  # a missing draw
     positions = {}
@@ -1034,7 +1115,9 @@ def test_exactly_the_bound_derives_deterministically_and_one_more_is_rejected(ba
                     "row_ordinal": index + 1,
                     "member": member,
                     "member_sha256": digest,
-                    "status": template.status.model_copy(update={"member_sha256": digest}),
+                    "status": template.status.model_copy(
+                        update={"member_sha256": digest}
+                    ),
                     "is_anchor": index == 0,
                     "decision_state": DecisionState.ANCHOR
                     if index == 0
@@ -1080,10 +1163,14 @@ def test_protected_row_rejects_result_details_on_unavailable_records(base) -> No
 
 def test_reason_codes_and_actions_are_copied_exactly(base) -> None:
     _, workspace = base
-    protected = next(row for row in workspace.protected_rows if row.decision is not None)
+    protected = next(
+        row for row in workspace.protected_rows if row.decision is not None
+    )
     public = workspace.rows[protected.row_ordinal - 1]
-    assert public.compatibility_reasons == protected.decision.reason_codes == (
-        LongitudinalReason.EXACT_MATCH,
+    assert (
+        public.compatibility_reasons
+        == protected.decision.reason_codes
+        == (LongitudinalReason.EXACT_MATCH,)
     )
     assert public.next_action is protected.decision.next_action
     assert public.bridge_execution_state == "not_executed"
