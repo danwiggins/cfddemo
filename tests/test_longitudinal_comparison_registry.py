@@ -141,8 +141,8 @@ def family_request(**overrides) -> SavedFamilyProjectionRequestV1:
     values = {
         "family": ProjectionFamily.FRAGMENT,
         "selection_rule": ProjectionSelectionRule.FINITE_COMPONENTS,
-        "statistic": FragmentStatistic.FRACTION,
-        "statistic_unit": StatisticUnit.FRACTION,
+        "statistics": (FragmentStatistic.FRACTION,),
+        "statistic_units": (StatisticUnit.FRACTION,),
         "projection_policy_selector_id": "projection_policy_" + "4" * 40,
         "projection_policy_version": 1,
         "projection_policy_sha256": "7" * 64,
@@ -387,6 +387,13 @@ def test_unsafe_temporary_names_fail_closed(registry, fence, tmp_path) -> None:
         registry.list_selectors(dependency_fence=fence)
     assert target.read_bytes() == b"not registry data"
     link.unlink()
+    target.chmod(0o600)
+    foreign = registry.root / "objects" / (".tmp-" + "6" * 32)
+    os.link(target, foreign)
+    with pytest.raises(LongitudinalComparisonRegistryUnsafe):
+        registry.list_selectors(dependency_fence=fence)
+    assert foreign.exists()
+    foreign.unlink()
     directory = registry.root / (".tmp-" + "8" * 32)
     directory.mkdir()
     with pytest.raises(LongitudinalComparisonRegistryUnsafe):
@@ -400,10 +407,36 @@ def test_unsafe_temporary_names_fail_closed(registry, fence, tmp_path) -> None:
 
 
 def test_family_projection_request_is_exact() -> None:
-    with pytest.raises(ValidationError):
-        family_request(statistic=CnaSegmentStatistic.MEDIAN_LOG2)
-    with pytest.raises(ValidationError):
-        family_request(component_count=0)
+    both = (FragmentStatistic.COUNT, FragmentStatistic.FRACTION)
+    canonical = family_request(
+        selection_rule=ProjectionSelectionRule.CANONICAL_ALL_COMPONENTS,
+        statistics=both,
+        statistic_units=(StatisticUnit.ALIGNMENT_COUNT, StatisticUnit.FRACTION),
+        component_count=0,
+    )
+    assert canonical.component_count == 0
+    for overrides in (
+        {"statistics": (CnaSegmentStatistic.MEDIAN_LOG2,)},
+        {"component_count": 0},
+        {
+            "selection_rule": ProjectionSelectionRule.CANONICAL_ALL_COMPONENTS,
+            "component_count": 1,
+        },
+        {
+            "statistics": (FragmentStatistic.COUNT,),
+            "statistic_units": (StatisticUnit.FRACTION,),
+        },
+        {
+            "statistics": tuple(reversed(both)),
+            "statistic_units": (StatisticUnit.FRACTION, StatisticUnit.ALIGNMENT_COUNT),
+        },
+        {
+            "statistics": (FragmentStatistic.FRACTION, FragmentStatistic.FRACTION),
+            "statistic_units": (StatisticUnit.FRACTION, StatisticUnit.FRACTION),
+        },
+    ):
+        with pytest.raises(ValidationError):
+            family_request(**overrides)
     heads = make_heads()
     saved = make_saved(heads)
     with pytest.raises(ValidationError):
@@ -775,6 +808,19 @@ def _crash_child(root: Path, identity, heads, saved, point: str) -> None:
     original_open = registry_module._open_private_file
 
     def publish(directory_fd, name, content):
+        linked = (
+            point == "object_linked" and name != "publication-candidate.json"
+        ) or (point == "candidate_linked" and name == "publication-candidate.json")
+        if linked:
+            # Crash after link(temp, name) and before unlink(temp).
+            temporary = ".tmp-" + "c" * 32
+            descriptor = os.open(
+                temporary, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600, dir_fd=directory_fd
+            )
+            os.write(descriptor, content)
+            os.fsync(descriptor)
+            os.link(temporary, name, src_dir_fd=directory_fd, dst_dir_fd=directory_fd)
+            os._exit(0)
         if name != "publication-candidate.json":
             if point == "before_object":
                 os._exit(0)
@@ -829,7 +875,9 @@ COMMITTED_POINTS = {"journal_unsynced", "after_commit"}
     "point",
     [
         "candidate_temporary",
+        "candidate_linked",
         "before_object",
+        "object_linked",
         "object_temporary",
         "before_journal",
         "torn_journal",

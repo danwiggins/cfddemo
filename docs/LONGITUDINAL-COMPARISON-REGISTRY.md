@@ -37,9 +37,12 @@ to an older journal or backup, and stale dependency authority.
   projection-policy and D09-policy selectors/versions, requested D02
   measurement, normalized filters), comparison version, the exact family
   source-value projection request (`SavedFamilyProjectionRequestV1`: family,
-  selection rule, family-checked statistic and unit, projection-policy
-  selector/version/digest, component count; the digest pins the immutable
-  registered policy and so every family coordinate), commitments
+  selection rule, the family's statistics in canonical order with the
+  projection registry's controlled unit for each, projection-policy
+  selector/version/digest, and explicit component count, which is at least 1
+  for `finite_components` and 0 for `canonical_all_components`; the digest
+  pins the immutable registered policy and so every family coordinate),
+  commitments
   (`SavedComparisonCommitmentsV1`: manifest, D03 policy, D07 envelope,
   approved anchor, D03, D07, D09, D10, D04, source and reader-grant
   digests), exact E06 source-registry
@@ -183,9 +186,11 @@ base state version, head and journal byte length, and the exact intended
 journal entry. Recovery runs under the exclusive lock at startup, at the
 start of every publication, and before any read that observes pending state.
 It never uses temporary files as evidence. It deletes a `.tmp-<32 hex>`
-file only when it is exactly what an interrupted private write leaves (an
-owner-only, single-link regular file within the object bound); a link,
-directory, FIFO or other file under that name fails closed.
+file only when it is exactly what an interrupted private write leaves: an
+owner-only regular file within the bound with one link, or with two links
+when the other link is a published non-temporary name in the same directory
+(a crash between `link` and the temporary `unlink`). A symlink, directory,
+FIFO, foreign hard link or other file under that name fails closed.
 
 | State found | Action |
 | --- | --- |

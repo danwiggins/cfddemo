@@ -73,6 +73,9 @@ from evidence_inspector.method_registry import (
     contract_from_canonical_bytes,
 )
 from evidence_inspector.projection_policy_registry import (
+    _STATISTIC_UNIT as _PROJECTION_STATISTIC_UNIT,
+)
+from evidence_inspector.projection_policy_registry import (
     MAX_FINITE_COMPONENTS,
     CellOriginStatistic,
     CnaChromosomeStatistic,
@@ -548,22 +551,41 @@ class SavedFamilyProjectionRequestV1(RegistryContract):
     )
     family: ProjectionFamily
     selection_rule: ProjectionSelectionRule
-    statistic: (
+    # The distinct statistics the policy projects, in the family's canonical
+    # order, and the controlled unit of each (the projection registry's own
+    # statistic-to-unit table).
+    statistics: tuple[
         FragmentStatistic
         | CellOriginStatistic
         | CnaChromosomeStatistic
-        | CnaSegmentStatistic
-    )
-    statistic_unit: StatisticUnit
+        | CnaSegmentStatistic,
+        ...,
+    ] = Field(min_length=1, max_length=4)
+    statistic_units: tuple[StatisticUnit, ...] = Field(min_length=1, max_length=4)
     projection_policy_selector_id: ProjectionPolicySelectorId
     projection_policy_version: int = Field(ge=1, le=MAX_SELECTOR_VERSION, strict=True)
     projection_policy_sha256: Sha256
-    component_count: int = Field(ge=1, le=MAX_FINITE_COMPONENTS, strict=True)
+    # Explicit components: at least one for ``finite_components``; zero for
+    # ``canonical_all_components`` (mirrors the projection registry's rule).
+    component_count: int = Field(ge=0, le=MAX_FINITE_COMPONENTS, strict=True)
 
     @model_validator(mode="after")
-    def statistic_matches_family(self) -> SavedFamilyProjectionRequestV1:
-        if type(self.statistic) is not _FAMILY_STATISTICS[self.family]:
+    def coherent_request(self) -> SavedFamilyProjectionRequestV1:
+        family_type = _FAMILY_STATISTICS[self.family]
+        if any(type(item) is not family_type for item in self.statistics):
             raise ValueError("projection statistic does not belong to its family")
+        order = list(family_type)
+        indices = [order.index(item) for item in self.statistics]
+        if indices != sorted(set(indices)):
+            raise ValueError("projection statistics must use canonical order")
+        if self.statistic_units != tuple(
+            _PROJECTION_STATISTIC_UNIT[item] for item in self.statistics
+        ):
+            raise ValueError("projection statistic units do not match")
+        if (self.selection_rule is ProjectionSelectionRule.FINITE_COMPONENTS) != (
+            self.component_count >= 1
+        ):
+            raise ValueError("projection component count does not match its rule")
         return self
 
 
@@ -2235,16 +2257,28 @@ class LongitudinalComparisonRegistry:
         assert self._root_fd is not None and self._objects_fd is not None
         try:
             for directory in (self._root_fd, self._objects_fd):
-                for name in os.listdir(directory):
+                names = os.listdir(directory)
+                # ``_publish_file`` links the destination before unlinking its
+                # temporary name, so a crash there leaves a two-link temporary
+                # file whose other link is the published, non-temporary name.
+                published = {
+                    _identity(os.stat(name, dir_fd=directory, follow_symlinks=False))
+                    for name in names
+                    if not _is_temporary_name(name)
+                }
+                for name in names:
                     if not _is_temporary_name(name):
                         continue
                     observed = os.stat(name, dir_fd=directory, follow_symlinks=False)
+                    links_ok = observed.st_nlink == 1 or (
+                        observed.st_nlink == 2 and _identity(observed) in published
+                    )
                     if (
                         not stat.S_ISREG(observed.st_mode)
                         or stat.S_IMODE(observed.st_mode) != 0o600
                         or observed.st_uid != os.geteuid()
-                        or observed.st_nlink != 1
-                        or observed.st_size > MAX_OBJECT_BYTES
+                        or not links_ok
+                        or observed.st_size > MAX_JOURNAL_BYTES
                     ):
                         raise LongitudinalComparisonRegistryUnsafe(
                             "saved comparison registry temporary file is unsafe"
