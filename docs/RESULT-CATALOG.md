@@ -154,7 +154,13 @@ is held only under `_connection_lock`, so one thread per catalog instance owns
 it; nested entries on that thread reuse the held mode, and an exclusive request
 under a held shared lock raises `CatalogConflict` (never upgraded). Two
 instances on one root in one process contend through separate open files, as
-two processes do.
+two processes do. Ownership is also recorded per lock-file inode for the
+process: a thread holding a root's content lock through one instance that
+asks for it through another instance on the same root gets `CatalogConflict`
+(before that instance's connection lock is taken) instead of waiting behind
+its own `flock`. A fence body must not call another catalog instance over the
+same root at all: even a plain read there waits for that instance's
+connection lock, which a blocked writer of that instance may hold.
 
 `content_head_in_fence()` (requires this thread's content lock) and
 `content_snapshot()` (takes it shared) return `CatalogContentSnapshot`: a

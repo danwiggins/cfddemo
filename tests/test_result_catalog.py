@@ -1188,6 +1188,38 @@ def test_a_shared_content_hold_blocks_another_instance_writer(tmp_path: Path) ->
         catalog.close()
 
 
+def test_one_thread_cannot_take_the_content_lock_through_two_instances(
+    tmp_path: Path,
+) -> None:
+    """Refused instead of waiting behind this thread's own ``flock``."""
+
+    catalog, _, import_root = _catalog(tmp_path)
+    other = ResultCatalog(
+        tmp_path / "catalog",
+        import_roots={"root_primary": import_root},
+        trust_store=catalog.trust_store,
+    )
+    try:
+        for exclusive in (False, True):
+            with catalog.content_authority_fence(exclusive=exclusive):
+                with pytest.raises(CatalogConflict, match="another catalog instance"):
+                    with other.content_authority_fence(exclusive=True):
+                        pass
+                with pytest.raises(CatalogConflict, match="another catalog instance"):
+                    other.content_snapshot()
+                with pytest.raises(CatalogConflict, match="another catalog instance"):
+                    _import(other)
+                # The same instance stays reentrant.
+                with catalog.content_authority_fence():
+                    catalog.content_head_in_fence()
+        # Released: the other instance proceeds.
+        _import(other)
+        assert other.content_snapshot() == catalog.content_snapshot()
+    finally:
+        other.close()
+        catalog.close()
+
+
 def test_the_content_lock_file_is_private_and_bound(tmp_path: Path) -> None:
     catalog, _, _ = _catalog(tmp_path)
     try:

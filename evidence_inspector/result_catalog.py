@@ -83,6 +83,9 @@ MAX_QUERY_LIMIT = 100
 MAX_FILTER_VALUES = 32
 
 _SQLITE_OPEN_LOCK = threading.RLock()
+# Content-lock inode -> {(pid, thread ident): catalog instance holding it}.
+_CONTENT_LOCK_HOLDERS: dict[tuple[int, int] | None, dict[tuple[int, int], object]] = {}
+_CONTENT_LOCK_HOLDERS_LOCK = threading.Lock()
 
 
 def _normalize_schema_sql(statement: str) -> str:
@@ -1347,7 +1350,6 @@ class ResultCatalog:
         """
 
         with (
-            self._connection_lock,
             _RC_CONTENT_LOCK(self, exclusive=False),
             _RC_TRUST_FENCE(self) as (_, snapshot),
         ):
@@ -1408,13 +1410,27 @@ class ResultCatalog:
         read fence (and before ``_SQLITE_OPEN_LOCK``).  Reentrant on the
         owning thread: a nested entry reuses the held mode, and an exclusive
         request under a held shared lock is refused, never upgraded.
+
+        It takes ``_connection_lock`` itself.  Ownership is also recorded per
+        lock-file inode for the process: a thread that holds the content lock
+        of a root through one catalog instance is refused (before taking this
+        instance's connection lock) when it asks for it through another
+        instance on the same root, since that request would wait behind its
+        own ``flock``.
         """
 
         if type(exclusive) is not bool:
             raise CatalogError("catalog content lock mode is invalid")
+        current = (os.getpid(), threading.get_ident())
+        inode = self._content_lock_identity
+        with _CONTENT_LOCK_HOLDERS_LOCK:
+            other = _CONTENT_LOCK_HOLDERS.get(inode, {}).get(current)
+        if other is not None and other is not self:
+            raise CatalogConflict(
+                "catalog content lock is held through another catalog instance"
+            )
         with self._connection_lock:
             owner = self._content_lock_owner
-            current = (os.getpid(), threading.get_ident())
             if owner is not None:
                 if owner[:2] != current:
                     raise CatalogError("catalog content lock owner is invalid")
@@ -1445,9 +1461,17 @@ class ResultCatalog:
             fcntl.flock(descriptor, fcntl.LOCK_EX if exclusive else fcntl.LOCK_SH)
             try:
                 self._content_lock_owner = (*current, exclusive)
+                with _CONTENT_LOCK_HOLDERS_LOCK:
+                    _CONTENT_LOCK_HOLDERS.setdefault(inode, {})[current] = self
                 try:
                     yield
                 finally:
+                    with _CONTENT_LOCK_HOLDERS_LOCK:
+                        holders = _CONTENT_LOCK_HOLDERS.get(inode, {})
+                        if holders.get(current) is self:
+                            del holders[current]
+                        if not holders:
+                            _CONTENT_LOCK_HOLDERS.pop(inode, None)
                     self._content_lock_owner = None
             finally:
                 fcntl.flock(descriptor, fcntl.LOCK_UN)
@@ -1465,7 +1489,7 @@ class ResultCatalog:
         hold is never upgraded.
         """
 
-        with self._connection_lock, _RC_CONTENT_LOCK(self, exclusive=exclusive):
+        with _RC_CONTENT_LOCK(self, exclusive=exclusive):
             yield
 
     def _content_sha256_locked(self) -> str:
@@ -1517,7 +1541,7 @@ class ResultCatalog:
     def content_snapshot(self) -> CatalogContentSnapshot:
         """Return the catalog content head under a shared content lock."""
 
-        with self._connection_lock, _RC_CONTENT_LOCK(self, exclusive=False):
+        with _RC_CONTENT_LOCK(self, exclusive=False):
             return _RC_CONTENT_HEAD_IN_FENCE(self)
 
     def _fault(self, point: str) -> None:
@@ -1718,7 +1742,6 @@ class ResultCatalog:
         # Lock order: connection lock, exclusive content lock, then the
         # module SQLite open lock (as every catalog writer's first connect).
         with (
-            self._connection_lock,
             _RC_CONTENT_LOCK(self, exclusive=True),
             _SQLITE_OPEN_LOCK,
             _RC_CONNECT(self) as connection,
@@ -1915,9 +1938,9 @@ class ResultCatalog:
         )
         object_path = self._bound_objects / bundle_sha256
         try:
-            # Lock order: connection lock, exclusive content lock, trust.
+            # Lock order: connection lock (taken by the content lock),
+            # exclusive content lock, trust.
             with (
-                self._connection_lock,
                 _RC_CONTENT_LOCK(self, exclusive=True),
                 _RC_TRUST_FENCE(self) as (trust_store, _),
             ):
@@ -2088,9 +2111,9 @@ class ResultCatalog:
         )
         object_path = self._bound_objects / bundle_sha256
         try:
-            # Lock order: connection lock, exclusive content lock, trust.
+            # Lock order: connection lock (taken by the content lock),
+            # exclusive content lock, trust.
             with (
-                self._connection_lock,
                 _RC_CONTENT_LOCK(self, exclusive=True),
                 _RC_TRUST_FENCE(self) as (trust_store, _),
             ):
@@ -2245,7 +2268,6 @@ class ResultCatalog:
         """Create a durable pending row that catalog queries cannot observe."""
 
         with (
-            self._connection_lock,
             _RC_CONTENT_LOCK(self, exclusive=True),
             _RC_TRUST_FENCE(self),
         ):
@@ -2333,7 +2355,6 @@ class ResultCatalog:
         """
 
         with (
-            self._connection_lock,
             _RC_CONTENT_LOCK(self, exclusive=True),
             _RC_TRUST_FENCE(self),
         ):
@@ -2381,7 +2402,7 @@ class ResultCatalog:
     ) -> None:
         """Forget an adopted preparation after its coordinator completes."""
 
-        with self._connection_lock, _RC_CONTENT_LOCK(self, exclusive=True):
+        with _RC_CONTENT_LOCK(self, exclusive=True):
             normalized = _RC_REQUIRE_PREPARED(self, prepared, require_authority=False)
             if not normalized.already_owned:
                 with _RC_CONNECT(self) as connection:
@@ -2402,7 +2423,7 @@ class ResultCatalog:
     ) -> None:
         """Remove this operation's exact pending or adopted row after coordinator failure."""
 
-        with self._connection_lock, _RC_CONTENT_LOCK(self, exclusive=True):
+        with _RC_CONTENT_LOCK(self, exclusive=True):
             normalized = _RC_REQUIRE_PREPARED(self, prepared, require_authority=False)
             if not normalized.already_owned:
                 with _RC_CONNECT(self) as connection:
@@ -2468,7 +2489,7 @@ class ResultCatalog:
     ) -> None:
         """Remove only this operation's invisible pending row; retain shared object bytes."""
 
-        with self._connection_lock, _RC_CONTENT_LOCK(self, exclusive=True):
+        with _RC_CONTENT_LOCK(self, exclusive=True):
             normalized = _RC_REQUIRE_PREPARED(self, prepared, require_authority=False)
             if not normalized.already_owned:
                 with _RC_CONNECT(self) as connection:
@@ -2505,7 +2526,7 @@ class ResultCatalog:
     ) -> None:
         """Durably bind one exact coordinator attempt before filesystem visibility."""
 
-        with self._connection_lock, _RC_CONTENT_LOCK(self, exclusive=True):
+        with _RC_CONTENT_LOCK(self, exclusive=True):
             if (
                 type(prepared) is not PreparedCatalogImport
                 or type(candidate) is not CoordinatedCatalogCandidate
@@ -2575,7 +2596,7 @@ class ResultCatalog:
     ) -> None:
         """Remove the exact candidate row; this is the durable commit point."""
 
-        with self._connection_lock, _RC_CONTENT_LOCK(self, exclusive=True):
+        with _RC_CONTENT_LOCK(self, exclusive=True):
             if type(candidate) is not CoordinatedCatalogCandidate:
                 raise CatalogConflict("catalog candidate is invalid")
             encoded = canonical_json_bytes(candidate)
@@ -2608,7 +2629,7 @@ class ResultCatalog:
     ) -> Literal["absent", "pending_removed", "adopted"]:
         """Idempotently remove an exact pending publication after process recovery."""
 
-        with self._connection_lock, _RC_CONTENT_LOCK(self, exclusive=True):
+        with _RC_CONTENT_LOCK(self, exclusive=True):
             if type(publication_id) is not str or type(recovery_scope_sha256) is not str:
                 raise CatalogConflict("catalog publication identity is invalid")
             if type(retain_adopted) is not bool:
