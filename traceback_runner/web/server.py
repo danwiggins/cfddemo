@@ -23,6 +23,10 @@ from types import TracebackType
 from typing import Any, Self
 from urllib.parse import parse_qs, urlsplit
 
+from evidence_inspector.reader_authorization_registry import (
+    ReaderAuthorizationDenied,
+    ReaderAuthorizationRegistry,
+)
 from evidence_inspector.result_catalog import CatalogQuery
 from traceback_runner.serialization import canonical_json_bytes
 from traceback_runner.store import JobStore
@@ -42,6 +46,7 @@ from .explorer import (
     prepare_explorer_comparison_response,
     prepare_explorer_document_response,
 )
+from .reader_session import ReaderSessionBinder
 from .source import JobStoreProjectionSource
 
 MAX_REQUEST_BYTES = 4096
@@ -55,6 +60,7 @@ _STABLE_LOCK_ROOT = Path("/tmp").resolve(strict=True)
 _JOB_ROUTE = re.compile(r"^/api/v1/jobs/(job_[0-9a-f]{32})$")
 _EXPLORER_RESULT_ROUTE = re.compile(r"^/api/v1/explorer/results/(result_[0-9a-f]{40})$")
 _EXPLORER_COMPARE_ROUTE = "/api/v1/explorer/compare"
+_READER_LAUNCH_ROUTE = "/api/v1/session/reader-launch"
 _COOKIE_NAME = re.compile(r"^[!#$%&'*+\-.^_`|~0-9A-Za-z]+$")
 _COOKIE_VALUE = re.compile(r"^[A-Za-z0-9_-]{0,256}$")
 _SECURITY_HEADERS = {
@@ -568,6 +574,7 @@ class _Application:
     assets: dict[str, tuple[str, bytes]]
     explorer: IntegratedExplorerSource | None = None
     explorer_http: _ExplorerHttpBoundary | None = None
+    reader: ReaderSessionBinder | None = None
 
 
 class _LoopbackHttpServer(http.server.ThreadingHTTPServer):
@@ -1019,8 +1026,30 @@ class _Handler(http.server.BaseHTTPRequestHandler, metaclass=_SealedHandlerType)
                 self.application.boundary.authorize(request)
                 self._json(200, {"authorized": True})
                 return
+            if parsed.path == _READER_LAUNCH_ROUTE:
+                # Full B01 mutation checks (Host, session, Origin, CSRF) run
+                # before the body is read; the binder repeats them and requires
+                # POST.  The credential arrives only in this JSON body.
+                self.application.boundary.authorize(request)
+                reader = self.application.reader
+                if reader is None:
+                    raise ApiProblem(404, self.application.kernel.not_found_problem)
+                payload = self._body_json()
+                if set(payload) != {"launch"} or not isinstance(
+                    payload["launch"], str
+                ):
+                    raise ValueError("reader launch request shape is invalid")
+                reader.exchange_launch_credential(request, payload["launch"])
+                self._json(200, {"reader_bound": True})
+                return
         except BoundaryDenied as exc:
             self._deny(exc)
+            return
+        except ReaderAuthorizationDenied:
+            self._json(403, {"error": {"code": "permission_denied"}})
+            return
+        except ApiProblem as exc:
+            self._json(exc.status_code, exc.problem.model_dump(mode="json"))
             return
         except (TypeError, ValueError, json.JSONDecodeError):
             self._json(400, {"error": {"code": "TBX-WEB-400"}})
@@ -1058,6 +1087,7 @@ class _RunningLocalWebRuntime:
     instance_id: str
     watchdog_stop: threading.Event
     watchdog_thread: threading.Thread
+    reader: ReaderSessionBinder | None = None
 
 
 _RUNTIME_LOCK = threading.Lock()
@@ -1102,7 +1132,14 @@ class RunningLocalWebService:
         state_directory: Path,
         ipv6: bool = False,
         explorer: IntegratedExplorerSource | None = None,
+        reader_registry: ReaderAuthorizationRegistry | None = None,
     ) -> Self:
+        """Start the loopback service.
+
+        ``reader_registry`` enables the E12 reader launch exchange route for
+        that protected registry; without it the route answers not found.
+        """
+
         state_directory = state_directory.absolute()
         startup_anchor: _StartupAnchor | None = None
         state_fd: int | None = None
@@ -1182,12 +1219,18 @@ class RunningLocalWebService:
                 ),
             )
             explorer_http.assert_intact()
+            reader = (
+                None
+                if reader_registry is None
+                else ReaderSessionBinder(boundary=boundary, registry=reader_registry)
+            )
             application = _Application(
                 kernel,
                 boundary,
                 _packaged_assets(),
                 explorer,
                 explorer_http,
+                reader,
             )
             server.application = application
 
@@ -1200,6 +1243,7 @@ class RunningLocalWebService:
                     or application.boundary is not boundary
                     or application.kernel is not kernel
                     or application.explorer_http is not explorer_http
+                    or application.reader is not reader
                 ):
                     raise LocalWebServerError("installed HTTP application changed")
                 if server.RequestHandlerClass is not _Handler:
@@ -1263,6 +1307,7 @@ class RunningLocalWebService:
                 instance_id=instance_id,
                 watchdog_stop=watchdog_stop,
                 watchdog_thread=watchdog_thread,
+                reader=reader,
             )
             with _RUNTIME_LOCK:
                 _RUNTIMES[runtime_id] = runtime
@@ -1318,6 +1363,30 @@ class RunningLocalWebService:
             if runtime is None:
                 raise LocalWebServerError("local web service is closed")
             return runtime.boundary.issue_bootstrap()
+
+    def issue_reader_launch_url(self, grant_selector: str) -> str:
+        """Return a one-use launch link binding a new session to one grant.
+
+        The link carries a fresh B01 bootstrap code and a fresh one-use reader
+        launch credential only in the URL fragment, which browsers never send
+        to the server or in a Referer.  The packaged page clears the fragment,
+        exchanges the bootstrap, then POSTs the credential with Origin and
+        CSRF to the reader launch route.  The link is for the operator's
+        terminal only; it is never logged or written to disk here.
+        """
+
+        with _RUNTIME_LOCK:
+            runtime = _RUNTIMES.get(self._runtime_id)
+            if runtime is None:
+                raise LocalWebServerError("local web service is closed")
+            if runtime.reader is None:
+                raise LocalWebServerError("reader authorization is not configured")
+            credential = runtime.reader.issue_launch_credential(grant_selector)
+            bootstrap = runtime.boundary.issue_bootstrap()
+        fragment = runtime.boundary.broker.launch_fragment(bootstrap)
+        if not BootstrapBroker._strong_token(credential):
+            raise LocalWebServerError("reader launch credential is invalid")
+        return f"{self.config.allowed_origins[0]}/{fragment}&reader_launch={credential}"
 
     def close(self) -> None:
         with _RUNTIME_LOCK:

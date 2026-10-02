@@ -174,6 +174,16 @@ class ReaderRevocationReason(StrEnum):
     KEY_COMPROMISE = "key_compromise"
 
 
+class ReaderGrantState(StrEnum):
+    """Operator-visible state of one registered grant."""
+
+    ACTIVE = "active"
+    REVOKED = "revoked"
+    EXPIRED = "expired"
+    NOT_YET_VALID = "not_yet_valid"
+    UNTRUSTED_KEY = "untrusted_key"
+
+
 class ReaderRecordKind(StrEnum):
     TRUST = "trust"
     GRANT = "grant"
@@ -376,6 +386,13 @@ class ReaderGrantBinding(ReaderContract):
 
     grant_sha256: Sha256
     state_head_sha256: Sha256
+
+
+class ReaderGrantListing(ReaderContract):
+    """One listed grant: its opaque selector and state only."""
+
+    grant_selector: ReaderGrantSelector
+    state: ReaderGrantState
 
 
 class ReaderAuthorization(ReaderContract):
@@ -1005,6 +1022,7 @@ class ReaderAuthorizationRegistry:
             "backup_bytes",
             "bind_grant_in_fence",
             "close",
+            "grant_states",
             "identity",
             "revoke_grant",
             "rotate_trust",
@@ -1851,6 +1869,35 @@ class ReaderAuthorizationRegistry:
                 trust_sha256=state.trust_sha256,
             )
 
+    def grant_states(self) -> tuple[ReaderGrantListing, ...]:
+        """List every registered grant's selector and state, in record order."""
+
+        _require_registry_integrity(self)
+        with _RR_LOCK(self, exclusive=False):
+            state = _RR_LOAD_STATE(self)
+            assert state.trust is not None
+            try:
+                now = self._now(state)
+            except ReaderAuthorizationDenied:
+                raise ReaderAuthorizationRegistryConflict(
+                    "reader registry clock moved backwards"
+                ) from None
+            listings = []
+            for digest, (grant, selector) in state.grants.items():
+                payload = grant.payload
+                if digest in state.revoked:
+                    status = ReaderGrantState.REVOKED
+                elif not _signature_valid(grant, state.trust):
+                    status = ReaderGrantState.UNTRUSTED_KEY
+                elif now >= payload.expires_at:
+                    status = ReaderGrantState.EXPIRED
+                elif now < payload.issued_at:
+                    status = ReaderGrantState.NOT_YET_VALID
+                else:
+                    status = ReaderGrantState.ACTIVE
+                listings.append(_RR_LISTING(grant_selector=selector, state=status))
+            return tuple(listings)
+
     def _current_grant(
         self, state: _ReaderState, grant_sha256: str
     ) -> tuple[SignedReaderGrant, datetime]:
@@ -1892,7 +1939,13 @@ class ReaderAuthorizationRegistry:
         cohort_registry_id: str,
         measurement_scope: MeasurementScope,
     ) -> ReaderAuthorization:
-        """Re-resolve a bound grant for one exact requested scope."""
+        """Re-resolve a bound grant for one exact requested scope.
+
+        The bound head must be in the current committed chain.  The grant must
+        be registered, unrevoked, signed by a key that is active in the current
+        trust, inside its validity window, and in scope.  Registry records that
+        do not touch this grant or its key do not deny.
+        """
 
         _require_registry_integrity(self)
         _RR_REQUIRE_FENCE(self)
@@ -1907,7 +1960,11 @@ class ReaderAuthorizationRegistry:
         except ReaderAuthorizationRegistryConflict:
             raise ReaderAuthorizationDenied(ReaderDenialReason.SCOPE_MISMATCH) from None
         state = _RR_LOAD_STATE(self)
-        if state.head != expected_state_head_sha256:
+        # Only this grant and its signing key can end a bound session.  The
+        # bound head must still be in this registry's committed history (a
+        # replaced, restored or rolled-back registry denies), but unrelated
+        # grants, revocations and trust revisions appended after it do not.
+        if expected_state_head_sha256 not in state.chain:
             raise ReaderAuthorizationDenied(ReaderDenialReason.STALE_HEAD)
         grant, now = _RR_CURRENT_GRANT(self, state, grant_sha256)
         payload = grant.payload
@@ -2047,6 +2104,7 @@ _REGISTRY_METHOD_SEAL = MappingProxyType(
             "revoke_grant",
             "rotate_trust",
             "identity",
+            "grant_states",
             "_current_grant",
             "bind_grant_in_fence",
             "authorize_reader_in_fence",
@@ -2113,6 +2171,7 @@ _RR_RECEIPT = ReaderRegistryReceipt
 _RR_IDENTITY = ReaderRegistryIdentity
 _RR_BINDING = ReaderGrantBinding
 _RR_AUTHORIZATION = ReaderAuthorization
+_RR_LISTING = ReaderGrantListing
 _REGISTRY_AUTHORITY_SEAL = MappingProxyType(
     {
         "_PINNED_TIME_READ": _PINNED_TIME_READ,
@@ -2141,6 +2200,7 @@ _REGISTRY_ALIAS_SEAL = MappingProxyType(
             "_RR_IDENTITY",
             "_RR_BINDING",
             "_RR_AUTHORIZATION",
+            "_RR_LISTING",
         )
     }
 )
@@ -2163,8 +2223,10 @@ __all__ = [
     "ReaderAuthorizationRegistryUnsafe",
     "ReaderDenialReason",
     "ReaderGrantBinding",
+    "ReaderGrantListing",
     "ReaderGrantPayload",
     "ReaderGrantRevocation",
+    "ReaderGrantState",
     "ReaderJournalEntry",
     "ReaderKeyStatus",
     "ReaderProviderTrust",

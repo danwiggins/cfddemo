@@ -262,9 +262,10 @@ class ReaderSessionBinder:
 
         B01 transport checks run first and keep their own errors.  Then, under
         the reader-registry fence, the session's bound grant must exist, be
-        unrevoked, signed by an active trusted key, current, at the exact bound
-        registry head, and in scope for the requested cohort registry and
-        measurement.  The fence stays held while the caller builds its result
+        unrevoked, signed by a key active in the current trust, current, and in
+        scope for the requested cohort registry and measurement, and the bound
+        registry head must still be in the committed chain.  Unrelated grants,
+        revocations and trust revisions do not end the session.  The fence stays held while the caller builds its result
         and the authorization is re-resolved before the fence is released, so
         no grant add, revocation or key rotation can land in between.
         """

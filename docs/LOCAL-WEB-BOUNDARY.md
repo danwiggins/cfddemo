@@ -80,6 +80,12 @@ fence on every read or save. The session record stores only the grant
 commitment and registry head. Non-E12 routes never consult it. See
 `docs/READER-AUTHORIZATION-REGISTRY.md`.
 
+`traceback reader launch` starts the service with a reader registry and prints
+a one-use link whose fragment carries a bootstrap code and a reader launch
+credential. The page exchanges the bootstrap, then POSTs the credential to
+`/api/v1/session/reader-launch` with the session cookie, exact Origin and
+CSRF token. Without a reader registry that route answers not found.
+
 ## Frozen response contracts
 
 `ProblemDetail` carries a registered safe code, bounded problem/cause/fix,
