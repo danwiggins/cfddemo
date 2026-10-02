@@ -13,6 +13,14 @@ from cryptography.hazmat.primitives import serialization
 from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
 from pydantic import ValidationError
 
+from scripts.regenerate_product_gate_fixture import (
+    CAPTURED_AT,
+    REPO_ROOT,
+    REPORT_FIXTURE,
+    RUN_ID,
+    run_live_report,
+    structural_projection,
+)
 from traceback_runner.product_gates import (
     CATALOG_RECORDS,
     FILTER_P95_TARGET_US,
@@ -38,7 +46,6 @@ from traceback_runner.product_gates import (
     deny_external_network,
     derive_release_gate,
     load_screenshot_manifest,
-    run_foundation_gates,
 )
 from traceback_runner.serialization import canonical_json_bytes, sha256_bytes
 from traceback_runner.signing import (
@@ -57,10 +64,23 @@ FIXTURE = Path("tests/fixtures/product_gates/screenshot_manifest.json")
 
 @pytest.fixture(scope="module")
 def report() -> ProductGateReport:
-    return run_foundation_gates(
-        screenshot_manifest_path=FIXTURE,
-        run_id="gate_run_20260929",
-        captured_at=datetime(2026, 9, 29, tzinfo=UTC),
+    # Frozen output of the live harness; regenerate with
+    # scripts/regenerate_product_gate_fixture.py, never by hand. The slow test
+    # below checks that the live harness still matches it.
+    return ProductGateReport.model_validate_json(
+        (REPO_ROOT / REPORT_FIXTURE).read_bytes()
+    )
+
+
+@pytest.mark.slow
+def test_live_harness_structure_matches_frozen_fixture(
+    report: ProductGateReport,
+) -> None:
+    live = run_live_report()
+    assert live.host_run.run_id == RUN_ID
+    assert live.host_run.captured_at == CAPTURED_AT
+    assert structural_projection(live.model_dump(mode="json")) == (
+        structural_projection(report.model_dump(mode="json"))
     )
 
 

@@ -1,0 +1,346 @@
+{
+  "schema_version": "traceback.product-gate-report.v2",
+  "host_run": {
+    "schema_version": "traceback.host-run-evidence.v1",
+    "run_id": "gate_run_20260929",
+    "captured_at": "2026-09-29T00:00:00Z",
+    "python_version": "3.11.15",
+    "operating_system": "Darwin",
+    "machine": "arm64",
+    "processor": "arm",
+    "approved_host_reference": null
+  },
+  "filter_performance": {
+    "name": "filter_sort",
+    "record_count": 10000,
+    "samples_us": [
+      6782,
+      5611,
+      4266,
+      4713,
+      6254,
+      5644,
+      6276,
+      7404,
+      10683,
+      12604,
+      6427,
+      6344,
+      5546,
+      6185,
+      6405,
+      5550,
+      7993,
+      12024,
+      10665,
+      4265
+    ],
+    "p95_us": 12024,
+    "target_us": 250000,
+    "target_met": true
+  },
+  "initial_render": {
+    "name": "initial_render",
+    "record_count": 10000,
+    "samples_us": [
+      11235,
+      6556,
+      12944,
+      19640,
+      8482,
+      8593,
+      8876,
+      8603,
+      11118,
+      13226
+    ],
+    "p95_us": 19640,
+    "target_us": 2000000,
+    "target_met": true
+  },
+  "stress_memory": {
+    "record_count": 100000,
+    "peak_bytes": 4063170,
+    "target_bytes": 268435456,
+    "target_met": true
+  },
+  "screenshot_manifest_sha256": "23a2ba79a48f8fe5ffccef655b61f4aac7c6e7ef89f9ef1ff8aabe9071a45007",
+  "local_service_evidence": {
+    "schema_version": "traceback.local-service-gate-evidence.v1",
+    "request_path": "/api/v1/explorer/catalog?limit=100",
+    "unauthorized_status": 401,
+    "bootstrap_status": 200,
+    "authenticated_status": 200,
+    "repeated_status": 200,
+    "result_count": 100,
+    "response_sha256": "a9a312f9662cadc0d0a225b0ea80331b4ede4caf05654d6b234f71f6211460fd",
+    "repeated_response_sha256": "a9a312f9662cadc0d0a225b0ea80331b4ede4caf05654d6b234f71f6211460fd",
+    "packaged_assets_sha256": "a1c36e7d0fbda8a73f3bd045c3a0787d8b7ae7c895460b68e0c1385e5d401877",
+    "privacy_rejection_response_sha256": [
+      "6410c5fc9bfa2733e7a3cff83b1fb98e4ec8138ac9b8ee6b7d95fdfd8fe87d41",
+      "6410c5fc9bfa2733e7a3cff83b1fb98e4ec8138ac9b8ee6b7d95fdfd8fe87d41",
+      "6410c5fc9bfa2733e7a3cff83b1fb98e4ec8138ac9b8ee6b7d95fdfd8fe87d41",
+      "6410c5fc9bfa2733e7a3cff83b1fb98e4ec8138ac9b8ee6b7d95fdfd8fe87d41"
+    ],
+    "deterministic": true,
+    "outbound_network_enabled": false,
+    "release_explorer_allowed": false,
+    "release_export_allowed": false,
+    "e12_state": "unavailable_not_implemented"
+  },
+  "network_denial_evidence": {
+    "schema_version": "traceback.network-denial-evidence.v2",
+    "harness_version": "traceback-product-gates.v3",
+    "run_id": "gate_run_20260929",
+    "host_run_sha256": "ba13325b790f73d8814480df4892728dd51f9fe7b85405fc851346b966299b81",
+    "local_service_sha256": "b6166ce9dc02cf32bb7e896df779bf75ff7c2b86b775eaf5e002f31d1803996d",
+    "observations": [
+      {
+        "operation": "connect_ex",
+        "target": "192.0.2.1:443",
+        "denial_observed": true,
+        "guard_recorded": true,
+        "payload_sha256": null
+      },
+      {
+        "operation": "sendto",
+        "target": "192.0.2.1:443",
+        "denial_observed": true,
+        "guard_recorded": true,
+        "payload_sha256": "adec0dfae2d0a71de661d8c3f8a0e0975e935995e94b43e9810a4ff4616b3dc5"
+      }
+    ],
+    "intercepted_attempts": [
+      {
+        "operation": "connect_ex",
+        "target_sha256": "024fe8e32cbea1d6f21c6a47d9a4e7c3e06bacc096e3bed3f55213325a9b90c9"
+      },
+      {
+        "operation": "sendto",
+        "target_sha256": "024fe8e32cbea1d6f21c6a47d9a4e7c3e06bacc096e3bed3f55213325a9b90c9"
+      }
+    ]
+  },
+  "privacy_sentinel_evidence": {
+    "schema_version": "traceback.privacy-sentinel-evidence.v2",
+    "harness_version": "traceback-product-gates.v3",
+    "run_id": "gate_run_20260929",
+    "host_run_sha256": "ba13325b790f73d8814480df4892728dd51f9fe7b85405fc851346b966299b81",
+    "output_payload_sha256": "ecfa8b9725384848a78bce1694b327d2d87e18d0a9b2e75eaa368f93d6cd5358",
+    "serialized_output_clean": true,
+    "observations": [
+      {
+        "sentinel_class": "absolute_path",
+        "sentinel_sha256": "4b68fdbe90bbe0a561fa65c6c70a12c2d1bd1d081abb6f00bf4b36d4b8f26fbd",
+        "path": "catalog",
+        "rejected": true
+      },
+      {
+        "sentinel_class": "absolute_path",
+        "sentinel_sha256": "4b68fdbe90bbe0a561fa65c6c70a12c2d1bd1d081abb6f00bf4b36d4b8f26fbd",
+        "path": "problem_response",
+        "rejected": true
+      },
+      {
+        "sentinel_class": "absolute_path",
+        "sentinel_sha256": "4b68fdbe90bbe0a561fa65c6c70a12c2d1bd1d081abb6f00bf4b36d4b8f26fbd",
+        "path": "screenshot",
+        "rejected": true
+      },
+      {
+        "sentinel_class": "donor_identifier",
+        "sentinel_sha256": "9f33bcf6b21337bd977af070e69fd839bd51315f5371d946c51d09ab1739ca79",
+        "path": "catalog",
+        "rejected": true
+      },
+      {
+        "sentinel_class": "donor_identifier",
+        "sentinel_sha256": "9f33bcf6b21337bd977af070e69fd839bd51315f5371d946c51d09ab1739ca79",
+        "path": "problem_response",
+        "rejected": true
+      },
+      {
+        "sentinel_class": "donor_identifier",
+        "sentinel_sha256": "9f33bcf6b21337bd977af070e69fd839bd51315f5371d946c51d09ab1739ca79",
+        "path": "screenshot",
+        "rejected": true
+      },
+      {
+        "sentinel_class": "raw_sequence",
+        "sentinel_sha256": "5b63fe1b91add0ff274cb0d3449e1abf53775cd5fc7b330dc76f9a99cc4cbffe",
+        "path": "catalog",
+        "rejected": true
+      },
+      {
+        "sentinel_class": "raw_sequence",
+        "sentinel_sha256": "5b63fe1b91add0ff274cb0d3449e1abf53775cd5fc7b330dc76f9a99cc4cbffe",
+        "path": "problem_response",
+        "rejected": true
+      },
+      {
+        "sentinel_class": "raw_sequence",
+        "sentinel_sha256": "5b63fe1b91add0ff274cb0d3449e1abf53775cd5fc7b330dc76f9a99cc4cbffe",
+        "path": "screenshot",
+        "rejected": true
+      },
+      {
+        "sentinel_class": "read_identifier",
+        "sentinel_sha256": "131c5ab957aa33b015e9ac7df5133be3350a970260a6699c1e943d78e352a746",
+        "path": "catalog",
+        "rejected": true
+      },
+      {
+        "sentinel_class": "read_identifier",
+        "sentinel_sha256": "131c5ab957aa33b015e9ac7df5133be3350a970260a6699c1e943d78e352a746",
+        "path": "problem_response",
+        "rejected": true
+      },
+      {
+        "sentinel_class": "read_identifier",
+        "sentinel_sha256": "131c5ab957aa33b015e9ac7df5133be3350a970260a6699c1e943d78e352a746",
+        "path": "screenshot",
+        "rejected": true
+      }
+    ],
+    "local_service_observations": [
+      {
+        "sentinel_class": "absolute_path",
+        "sentinel_sha256": "4b68fdbe90bbe0a561fa65c6c70a12c2d1bd1d081abb6f00bf4b36d4b8f26fbd",
+        "status_code": 400,
+        "response_sha256": "6410c5fc9bfa2733e7a3cff83b1fb98e4ec8138ac9b8ee6b7d95fdfd8fe87d41",
+        "sentinel_absent": true
+      },
+      {
+        "sentinel_class": "donor_identifier",
+        "sentinel_sha256": "9f33bcf6b21337bd977af070e69fd839bd51315f5371d946c51d09ab1739ca79",
+        "status_code": 400,
+        "response_sha256": "6410c5fc9bfa2733e7a3cff83b1fb98e4ec8138ac9b8ee6b7d95fdfd8fe87d41",
+        "sentinel_absent": true
+      },
+      {
+        "sentinel_class": "raw_sequence",
+        "sentinel_sha256": "5b63fe1b91add0ff274cb0d3449e1abf53775cd5fc7b330dc76f9a99cc4cbffe",
+        "status_code": 400,
+        "response_sha256": "6410c5fc9bfa2733e7a3cff83b1fb98e4ec8138ac9b8ee6b7d95fdfd8fe87d41",
+        "sentinel_absent": true
+      },
+      {
+        "sentinel_class": "read_identifier",
+        "sentinel_sha256": "131c5ab957aa33b015e9ac7df5133be3350a970260a6699c1e943d78e352a746",
+        "status_code": 400,
+        "response_sha256": "6410c5fc9bfa2733e7a3cff83b1fb98e4ec8138ac9b8ee6b7d95fdfd8fe87d41",
+        "sentinel_absent": true
+      }
+    ]
+  },
+  "external_requirements": [
+    {
+      "requirement_id": "approved_host",
+      "state": "unmet_no_observed_evidence",
+      "detail": "No approved workstation profile or approved-host run was supplied",
+      "evidence_sha256": null
+    },
+    {
+      "requirement_id": "five_provider_tasks",
+      "state": "unmet_no_observed_evidence",
+      "detail": "Five-provider frozen task matrix has not been observed",
+      "evidence_sha256": null
+    },
+    {
+      "requirement_id": "keyboard_only",
+      "state": "unmet_no_observed_evidence",
+      "detail": "Keyboard-only task audit has not been observed",
+      "evidence_sha256": null
+    },
+    {
+      "requirement_id": "reviewed_screenshots",
+      "state": "unmet_no_observed_evidence",
+      "detail": "Reviewed browser captures have not been supplied",
+      "evidence_sha256": null
+    },
+    {
+      "requirement_id": "screen_reader",
+      "state": "unmet_no_observed_evidence",
+      "detail": "Screen-reader task audit has not been observed",
+      "evidence_sha256": null
+    },
+    {
+      "requirement_id": "zoom_200",
+      "state": "unmet_no_observed_evidence",
+      "detail": "200 percent zoom and reflow audit has not been observed",
+      "evidence_sha256": null
+    }
+  ],
+  "release_control_evidence": {
+    "schema_version": "traceback.e14-release-control-evidence.v1",
+    "local_service_sha256": "b6166ce9dc02cf32bb7e896df779bf75ff7c2b86b775eaf5e002f31d1803996d",
+    "external_requirements_sha256": "e2a2d4d5001197b786c3b8e22f4699d3dd0a7172b97e60b310a2e5c6c385593c",
+    "e12_dependency_state": "blocked_unavailable_not_implemented",
+    "release_explorer_allowed": false,
+    "release_export_allowed": false,
+    "capability_enabled": false
+  },
+  "gate_evidence": [
+    {
+      "gate_id": "accessibility",
+      "status": "required_external",
+      "detail": "Keyboard, screen-reader, and 200 percent zoom audits remain unmet",
+      "evidence_sha256": null
+    },
+    {
+      "gate_id": "approved_host",
+      "status": "required_external",
+      "detail": "Current machine is recorded but has no approved-host reference",
+      "evidence_sha256": null
+    },
+    {
+      "gate_id": "filter_performance",
+      "status": "fixture_only",
+      "detail": "Private-SQL timing over 10000 E04-shaped fixture rows only; 10000 verified E04 imports are unavailable",
+      "evidence_sha256": "551a5d6a1d14bb0162508596cd815f66b7f15a6e6ef02191a90f86644ec1a3c0"
+    },
+    {
+      "gate_id": "five_provider_study",
+      "status": "required_external",
+      "detail": "Five-provider task evidence has not been collected",
+      "evidence_sha256": null
+    },
+    {
+      "gate_id": "initial_render",
+      "status": "fixture_only",
+      "detail": "Python projection serialization only; HTTP, JavaScript, layout, and DOM-ready browser timing are unavailable",
+      "evidence_sha256": "c565eb5c1edcffa1c476c56cc558620b98fac045c92673fe174704893a171ae6"
+    },
+    {
+      "gate_id": "local_service_determinism",
+      "status": "observed_pass",
+      "detail": "Packaged loopback catalog repeated byte-identically with release controls disabled",
+      "evidence_sha256": "b6166ce9dc02cf32bb7e896df779bf75ff7c2b86b775eaf5e002f31d1803996d"
+    },
+    {
+      "gate_id": "no_external_network",
+      "status": "observed_pass",
+      "detail": "Socket connect_ex and sendto probes were denied during the complete harness run",
+      "evidence_sha256": "f2be2cf66612c72e67575842b4b5ef1c79c34970a6ff34e2732f6d5e12e63019"
+    },
+    {
+      "gate_id": "privacy_sentinels",
+      "status": "observed_pass",
+      "detail": "Every forbidden class was rejected by catalog, problem, screenshot, and packaged HTTP paths",
+      "evidence_sha256": "1ee35e5b5bfce2a83fc3c7552995505970f3f2c5185748af6c46ac7809123e10"
+    },
+    {
+      "gate_id": "screenshots",
+      "status": "required_external",
+      "detail": "Synthetic metadata is present but reviewed browser captures remain unmet",
+      "evidence_sha256": null
+    },
+    {
+      "gate_id": "stress_memory",
+      "status": "fixture_only",
+      "detail": "tracemalloc peak for 100000 private-SQL fixture rows only; process RSS, SQLite and native allocations, and browser memory are unavailable",
+      "evidence_sha256": "4129544b281155820d9e23e3698ddb3954673d0c1c4d5534fb7bc3e896c27f31"
+    }
+  ],
+  "capability_enabled": false
+}
