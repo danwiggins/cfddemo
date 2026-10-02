@@ -38,10 +38,13 @@ from evidence_inspector.cohort_summary import (
     CohortDispositionPolicy,
     CohortSummaryState,
     RegisteredCohortDenominatorSummary,
+    RegisteredCohortPopulationMembers,
     build_registered_cohort_denominator_summary,
+    build_registered_cohort_population_members,
     cohort_denominator_policy_sha256,
     cohort_member_exclusion_set_sha256,
     registered_cohort_denominator_summary_bytes,
+    registered_cohort_population_members_bytes,
 )
 from evidence_inspector.method_registry import (
     RegistryContract,
@@ -75,6 +78,8 @@ _REGISTRY_INSTANCE_SEALS: weakref.WeakKeyDictionary[
 ] = weakref.WeakKeyDictionary()
 _PINNED_BUILD_SUMMARY = build_registered_cohort_denominator_summary
 _PINNED_SUMMARY_BYTES = registered_cohort_denominator_summary_bytes
+_PINNED_BUILD_POPULATION = build_registered_cohort_population_members
+_PINNED_POPULATION_BYTES = registered_cohort_population_members_bytes
 _PINNED_POLICY_SHA256 = cohort_denominator_policy_sha256
 _PINNED_MEMBER_SET_SHA256 = cohort_member_exclusion_set_sha256
 _PINNED_COHORT_LIST = CohortRegistry.list_selectors
@@ -266,6 +271,32 @@ class RegisteredDenominatorPolicySummary(RegistryContract):
             raise ValueError("registered D09 selector does not match its summary")
         if self.denominator_policy_sha256 != population.denominator_policy_sha256:
             raise ValueError("registered D09 policy digest does not match its summary")
+        return self
+
+
+class RegisteredDenominatorPolicyPopulation(RegistryContract):
+    """Protected D09 summary plus the member derivation behind it.
+
+    Returned only by ``resolve_population``.  The ``summary`` is the same
+    aggregate result ``resolve`` returns; ``members`` carries the row-bearing
+    population and the included members' exact D05 members and D06 catalog
+    references from the same fenced rebuild.  Protected and local only: it is
+    never a selector row, aggregate projection, or export payload.
+    """
+
+    schema_version: Literal["traceback.d09-registered-policy-population.v1"] = (
+        "traceback.d09-registered-policy-population.v1"
+    )
+    summary: RegisteredDenominatorPolicySummary
+    members: RegisteredCohortPopulationMembers
+    protected_local_only: Literal[True] = True
+    synthetic_only: Literal[True] = True
+    clinical_use_authorized: Literal[False] = False
+
+    @model_validator(mode="after")
+    def same_derivation(self) -> RegisteredDenominatorPolicyPopulation:
+        if self.members.summary != self.summary.summary:
+            raise ValueError("D09 protected members do not match the summary")
         return self
 
 
@@ -937,6 +968,27 @@ def _seal_registry_instance(registry: DenominatorPolicyRegistry) -> None:
     _REGISTRY_INSTANCE_SEALS[registry] = _registry_instance_snapshot(registry)
 
 
+def _require_summary_binds_object(
+    summary: RegisteredCohortDenominatorSummary,
+    value: RegisteredDenominatorPolicyObject,
+) -> None:
+    """Any drift from the stored binding means the rebuild is not current."""
+
+    if (
+        summary.registry_id != value.cohort_registry_id
+        or summary.registry_epoch_sha256 != value.cohort_registry_epoch_sha256
+        or summary.selector_id != value.cohort_selector_id
+        or summary.cohort_version != value.cohort_version
+        or summary.cohort_manifest_sha256 != value.cohort_manifest_sha256
+        or summary.population.denominator_policy_sha256
+        != _PINNED_POLICY_SHA256(value.policy)
+        or summary.population.denominator_policy_id != value.policy.policy_id
+    ):
+        raise DenominatorPolicyRegistryStale(
+            "D09 policy no longer derives a summary from live authority"
+        )
+
+
 class DenominatorPolicyRegistry:
     """Descriptor-relative immutable D09 policy publication with live rebuild."""
 
@@ -949,6 +1001,7 @@ class DenominatorPolicyRegistry:
             "list_selectors",
             "register_policy",
             "resolve",
+            "resolve_population",
         ):
             instance = object.__getattribute__(self, "__dict__")
             if name in instance:
@@ -1577,20 +1630,37 @@ class DenominatorPolicyRegistry:
             raise DenominatorPolicyRegistryStale(
                 "D09 policy no longer derives a summary from live authority"
             ) from None
-        if (
-            summary.registry_id != value.cohort_registry_id
-            or summary.registry_epoch_sha256 != value.cohort_registry_epoch_sha256
-            or summary.selector_id != value.cohort_selector_id
-            or summary.cohort_version != value.cohort_version
-            or summary.cohort_manifest_sha256 != value.cohort_manifest_sha256
-            or summary.population.denominator_policy_sha256
-            != _PINNED_POLICY_SHA256(value.policy)
-            or summary.population.denominator_policy_id != value.policy.policy_id
-        ):
+        _PR_REQUIRE_SUMMARY_BINDS(summary, value)
+        return summary
+
+    def _build_live_population(
+        self, value: RegisteredDenominatorPolicyObject
+    ) -> RegisteredCohortPopulationMembers:
+        """Derive the summary and its protected members in one D05/D06 fence.
+
+        Same fence and checks as ``_build_live_summary``; the pinned population
+        builder runs the identical derivation and also returns the included
+        members captured inside that fence.
+        """
+
+        try:
+            members = _PINNED_BUILD_POPULATION(
+                registry=self._cohort_registry,
+                selector_id=value.cohort_selector_id,
+                cohort_version=value.cohort_version,
+                record_catalog=self._record_catalog,
+                policy=value.policy,
+                disposition_policy=value.disposition_policy,
+            )
+            members = RegisteredCohortPopulationMembers.model_validate_json(
+                _PINNED_POPULATION_BYTES(members)
+            )
+        except Exception:
             raise DenominatorPolicyRegistryStale(
                 "D09 policy no longer derives a summary from live authority"
-            )
-        return summary
+            ) from None
+        _PR_REQUIRE_SUMMARY_BINDS(members.summary, value)
+        return members
 
     def register_policy(
         self,
@@ -1750,40 +1820,90 @@ class DenominatorPolicyRegistry:
             raise DenominatorPolicyRegistryConflict("D09 policy selector is invalid")
         with _PR_LOCK(self, exclusive=False):
             loaded, head = _PR_LOAD_STATE(self)
-            epoch = self._metadata.registry_epoch_sha256
-            matches = [
-                (digest, value)
-                for digest, (value, _) in loaded.items()
-                if _PR_SELECTOR_ID(
-                    epoch,
-                    value.cohort_registry_id,
-                    value.cohort_selector_id,
-                    value.cohort_version,
-                    value.policy.policy_id,
-                )
-                == selector_id
-                and value.policy.version == policy_version
-            ]
-            if len(matches) != 1:
-                raise DenominatorPolicyRegistryConflict(
-                    "D09 policy selector is unavailable"
-                )
-            digest, value = matches[0]
+            digest, value = _PR_SELECT(self, loaded, selector_id, policy_version)
             summary = _PR_BUILD_LIVE_SUMMARY(self, value)
-            return _PR_RESOLVED(
-                registry_id=self._metadata.registry_id,
-                registry_epoch_sha256=epoch,
-                state_version=len(loaded),
-                state_head_sha256=head,
-                selector_id=selector_id,
-                policy_version=policy_version,
-                object_sha256=digest,
-                denominator_policy_sha256=_PINNED_POLICY_SHA256(value.policy),
-                disposition_policy_sha256=_PR_DISPOSITION_SHA256(
-                    value.disposition_policy
-                ),
-                summary=summary,
+            return _PR_POLICY_SUMMARY(
+                self, loaded, head, selector_id, policy_version, digest, value, summary
             )
+
+    def resolve_population(
+        self, selector_id: str, policy_version: int
+    ) -> RegisteredDenominatorPolicyPopulation:
+        """Return the live summary plus its protected member derivation.
+
+        Protected and local only, for D10 and E12 composition.  It holds the
+        same shared D09 lock and runs the same D05/D06 fence as ``resolve``;
+        the summary is derived once, together with the included members, so
+        the two cannot come from different snapshots.
+        """
+
+        _require_registry_integrity(self)
+        if not _is_policy_selector(selector_id) or not _is_policy_version(
+            policy_version
+        ):
+            raise DenominatorPolicyRegistryConflict("D09 policy selector is invalid")
+        with _PR_LOCK(self, exclusive=False):
+            loaded, head = _PR_LOAD_STATE(self)
+            digest, value = _PR_SELECT(self, loaded, selector_id, policy_version)
+            members = _PR_BUILD_LIVE_POPULATION(self, value)
+            summary = _PR_POLICY_SUMMARY(
+                self,
+                loaded,
+                head,
+                selector_id,
+                policy_version,
+                digest,
+                value,
+                members.summary,
+            )
+            return _PR_RESOLVED_POPULATION(summary=summary, members=members)
+
+    def _select(
+        self,
+        loaded: dict[str, tuple[RegisteredDenominatorPolicyObject, int]],
+        selector_id: str,
+        policy_version: int,
+    ) -> tuple[str, RegisteredDenominatorPolicyObject]:
+        epoch = self._metadata.registry_epoch_sha256
+        matches = [
+            (digest, value)
+            for digest, (value, _) in loaded.items()
+            if _PR_SELECTOR_ID(
+                epoch,
+                value.cohort_registry_id,
+                value.cohort_selector_id,
+                value.cohort_version,
+                value.policy.policy_id,
+            )
+            == selector_id
+            and value.policy.version == policy_version
+        ]
+        if len(matches) != 1:
+            raise DenominatorPolicyRegistryConflict("D09 policy selector is unavailable")
+        return matches[0]
+
+    def _policy_summary(
+        self,
+        loaded: dict[str, tuple[RegisteredDenominatorPolicyObject, int]],
+        head: str,
+        selector_id: str,
+        policy_version: int,
+        digest: str,
+        value: RegisteredDenominatorPolicyObject,
+        summary: RegisteredCohortDenominatorSummary,
+    ) -> RegisteredDenominatorPolicySummary:
+        return _PR_RESOLVED(
+            registry_id=self._metadata.registry_id,
+            registry_epoch_sha256=self._metadata.registry_epoch_sha256,
+            state_version=len(loaded),
+            state_head_sha256=head,
+            selector_id=selector_id,
+            policy_version=policy_version,
+            object_sha256=digest,
+            denominator_policy_sha256=_PINNED_POLICY_SHA256(value.policy),
+            disposition_policy_sha256=_PR_DISPOSITION_SHA256(value.disposition_policy),
+            summary=summary,
+        )
 
     def list_selectors(
         self,
@@ -2100,8 +2220,12 @@ _REGISTRY_METHOD_SEAL = MappingProxyType(
             "_accept_observed_head",
             "_load_state",
             "_build_live_summary",
+            "_build_live_population",
+            "_select",
+            "_policy_summary",
             "register_policy",
             "resolve",
+            "resolve_population",
             "list_selectors",
             "backup_bytes",
             "restore",
@@ -2127,6 +2251,12 @@ def _require_registry_integrity(registry: DenominatorPolicyRegistry) -> None:
         "_PINNED_BUILD_SUMMARY": d09_module.build_registered_cohort_denominator_summary,
         "_PINNED_SUMMARY_BYTES": (
             d09_module.registered_cohort_denominator_summary_bytes
+        ),
+        "_PINNED_BUILD_POPULATION": (
+            d09_module.build_registered_cohort_population_members
+        ),
+        "_PINNED_POPULATION_BYTES": (
+            d09_module.registered_cohort_population_members_bytes
         ),
         "_PINNED_POLICY_SHA256": d09_module.cohort_denominator_policy_sha256,
         "_PINNED_MEMBER_SET_SHA256": d09_module.cohort_member_exclusion_set_sha256,
@@ -2176,10 +2306,15 @@ _PR_APPEND_JOURNAL = DenominatorPolicyRegistry._append_journal
 _PR_ACCEPT_OBSERVED_HEAD = DenominatorPolicyRegistry._accept_observed_head
 _PR_LOAD_STATE = DenominatorPolicyRegistry._load_state
 _PR_BUILD_LIVE_SUMMARY = DenominatorPolicyRegistry._build_live_summary
+_PR_BUILD_LIVE_POPULATION = DenominatorPolicyRegistry._build_live_population
+_PR_SELECT = DenominatorPolicyRegistry._select
+_PR_POLICY_SUMMARY = DenominatorPolicyRegistry._policy_summary
 # Result constructors and identity helpers are sealed so a module-global
 # replacement cannot pair one selector with another policy's summary.
 _PR_RECEIPT = DenominatorPolicyRegistrationReceipt
 _PR_RESOLVED = RegisteredDenominatorPolicySummary
+_PR_RESOLVED_POPULATION = RegisteredDenominatorPolicyPopulation
+_PR_REQUIRE_SUMMARY_BINDS = _require_summary_binds_object
 _PR_SELECTOR_RECORD = DenominatorPolicySelectorRecord
 _PR_SELECTOR_PAGE = DenominatorPolicySelectorPage
 _PR_SELECTOR_ID = _selector_id
@@ -2188,6 +2323,8 @@ _REGISTRY_AUTHORITY_SEAL = MappingProxyType(
     {
         "_PINNED_BUILD_SUMMARY": _PINNED_BUILD_SUMMARY,
         "_PINNED_SUMMARY_BYTES": _PINNED_SUMMARY_BYTES,
+        "_PINNED_BUILD_POPULATION": _PINNED_BUILD_POPULATION,
+        "_PINNED_POPULATION_BYTES": _PINNED_POPULATION_BYTES,
         "_PINNED_POLICY_SHA256": _PINNED_POLICY_SHA256,
         "_PINNED_MEMBER_SET_SHA256": _PINNED_MEMBER_SET_SHA256,
         "_PINNED_COHORT_LIST": _PINNED_COHORT_LIST,
@@ -2210,8 +2347,13 @@ _REGISTRY_ALIAS_SEAL = MappingProxyType(
             "_PR_ACCEPT_OBSERVED_HEAD",
             "_PR_LOAD_STATE",
             "_PR_BUILD_LIVE_SUMMARY",
+            "_PR_BUILD_LIVE_POPULATION",
+            "_PR_SELECT",
+            "_PR_POLICY_SUMMARY",
             "_PR_RECEIPT",
             "_PR_RESOLVED",
+            "_PR_RESOLVED_POPULATION",
+            "_PR_REQUIRE_SUMMARY_BINDS",
             "_PR_SELECTOR_RECORD",
             "_PR_SELECTOR_PAGE",
             "_PR_SELECTOR_ID",
@@ -2236,6 +2378,7 @@ __all__ = [
     "DenominatorPolicySelectorRecord",
     "PolicyAuthorityState",
     "RegisteredDenominatorPolicyObject",
+    "RegisteredDenominatorPolicyPopulation",
     "RegisteredDenominatorPolicySummary",
     "denominator_policy_backup_from_bytes",
     "registered_policy_object_bytes",

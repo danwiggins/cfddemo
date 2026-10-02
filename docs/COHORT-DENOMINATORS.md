@@ -53,6 +53,15 @@ registry, linkage, catalog, policy, manifest, and protected-population digests,
 but embeds only reconciled aggregate counts. Per-member commitments, result IDs,
 provider tokens, and other record lineage remain outside that aggregate boundary.
 
+`build_registered_cohort_population_members` takes the same inputs and fence and
+runs the same derivation. It returns `RegisteredCohortPopulationMembers`: the
+unchanged v3 summary, the protected row-bearing `CohortDenominatorSummary` whose
+digest is the v3 `population_sha256`, and each included row's exact D05
+`CohortMember` and D06 `CatalogResultRef`. Its validator binds all of them to
+the rows. It is protected and local only and exists so D10 can derive its
+population without re-implementing these dispositions
+(`docs/COVARIATE-CONTEXT.md`).
+
 The registered path accepts no caller-authored result, compatibility, ledger, or
 comparison evidence. D09 depends only on D05 and D06, so every registered row is
 derived from fenced authority in fixed precedence: collapsed technical

@@ -1021,3 +1021,88 @@ def test_resolve_cannot_run_inside_a_held_linkage_fence(env: Env) -> None:
     assert env.registry.resolve(receipt.selector_id, 1).object_sha256 == (
         receipt.object_sha256
     )
+
+
+def test_resolve_population_returns_protected_members_from_the_same_rebuild(
+    env: Env,
+) -> None:
+    receipt = _register(env)
+    empty = env.registry.resolve_population(receipt.selector_id, 1)
+    assert empty.members.included_members == ()
+    assert empty.summary == env.registry.resolve(receipt.selector_id, 1)
+
+    _import_cohort_record(env.values)
+    resolved = env.registry.resolve(receipt.selector_id, 1)
+    population = env.registry.resolve_population(receipt.selector_id, 1)
+    assert population.summary == resolved
+    assert population.protected_local_only is True
+    members = population.members
+    assert members.summary == resolved.summary
+    assert (
+        members.population.population_sha256
+        == resolved.summary.population.population_sha256
+    )
+    (included,) = members.included_members
+    assert included.member == env.manifest.members[0]
+    row = members.population.rows[0]
+    assert row.disposition.value == "included"
+    assert included.catalog_result.result_id == row.result_id
+
+    # Nothing protected reaches the aggregate summary or a selector row.
+    public = canonical_contract_bytes(resolved) + canonical_contract_bytes(
+        env.registry.list_selectors()
+    )
+    for secret in (
+        row.member_sha256,
+        row.result_id,
+        row.catalog_result_sha256,
+        included.member.subject_token,
+        included.member.analysis_record_id,
+    ):
+        assert secret.encode() not in public
+
+
+def test_protected_population_rejects_rows_that_do_not_bind_the_summary(
+    env: Env,
+) -> None:
+    receipt = _register(env)
+    _import_cohort_record(env.values)
+    members = env.registry.resolve_population(receipt.selector_id, 1).members
+    (included,) = members.included_members
+    values = members.model_dump(mode="python")
+    wrong_member = included.member.model_copy(
+        update={"analysis_record_id": _token("analysis", "e")}
+    )
+    for update in (
+        {"included_members": ()},
+        {"included_members": (included.model_copy(update={"member": wrong_member}),)},
+        {"included_members": (included.model_copy(update={"ordinal": 1}),)},
+        {
+            "population": members.population.model_copy(
+                update={"population_sha256": "f" * 64}
+            )
+        },
+    ):
+        with pytest.raises(ValueError):
+            type(members).model_validate({**values, **update})
+
+
+def test_resolve_population_cannot_run_inside_a_held_linkage_fence(
+    env: Env,
+) -> None:
+    receipt = _register(env)
+    store = env.cohort_registry._linkage_store
+    with type(store).authority_read_fence(store):
+        with pytest.raises(DenominatorPolicyRegistryStale):
+            env.registry.resolve_population(receipt.selector_id, 1)
+
+
+def test_pinned_population_builder_replacement_is_rejected(
+    env: Env, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    receipt = _register(env)
+    monkeypatch.setattr(
+        registry_module, "_PINNED_BUILD_POPULATION", lambda **kwargs: None
+    )
+    with pytest.raises(DenominatorPolicyRegistryUnsafe):
+        env.registry.resolve_population(receipt.selector_id, 1)
