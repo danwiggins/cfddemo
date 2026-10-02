@@ -1089,3 +1089,25 @@ def test_forked_child_cannot_use_the_parent_lock(registry) -> None:
         _, status = os.waitpid(pid, 0)
     assert os.WEXITSTATUS(status) == 0
     authorize(registry, bind(registry))
+
+
+def test_forked_child_unwinding_the_fence_does_not_release_it(registry) -> None:
+    registry.add_grant(grant_for(registry))
+    probe = os.open(registry.root / ".registry.lock", os.O_RDWR)
+    pid = None
+    try:
+        with registry.authority_read_fence():
+            pid = os.fork()
+            if pid != 0:
+                os.waitpid(pid, 0)
+                # The child unwound the inherited fence; it is still held.
+                with pytest.raises(BlockingIOError):
+                    fcntl.flock(probe, fcntl.LOCK_EX | fcntl.LOCK_NB)
+    except ReaderAuthorizationRegistryUnsafe:
+        if pid != 0:
+            raise
+    finally:
+        if pid == 0:  # pragma: no cover - child process
+            os._exit(0)
+        os.close(probe)
+    authorize(registry, bind(registry))

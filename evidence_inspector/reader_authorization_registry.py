@@ -1424,9 +1424,17 @@ class ReaderAuthorizationRegistry:
             try:
                 _RR_VALIDATE_STORAGE(self)
                 yield
+                if self._owner_pid != os.getpid():
+                    raise ReaderAuthorizationRegistryUnsafe(
+                        "reader registry belongs to another process"
+                    )
                 _RR_VALIDATE_STORAGE(self)
             finally:
-                fcntl.flock(descriptor, fcntl.LOCK_UN)
+                # A child forked inside the fence shares this lock's open
+                # file description; its unwinding must not release the
+                # parent's fence.
+                if self._owner_pid == os.getpid():
+                    fcntl.flock(descriptor, fcntl.LOCK_UN)
 
     @contextmanager
     def authority_read_fence(self) -> Iterator[None]:
