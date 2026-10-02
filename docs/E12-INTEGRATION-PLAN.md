@@ -392,6 +392,19 @@ resolve before this order is final:
 - The E06 source registry takes the D06 record-status fence (which itself holds
   D01, the D05 lock, the E04 catalog and trust locks, and the D06 root) and then
   its own lock, never the reverse.
+- The live D10 build (#64) fails inside held D01 or D06 fences and works inside
+  held D09 or D03 registry locks, so the D10 context lock comes first:
+  D10 → D09 → D01/D05/D06 and D10 → D01 → D03. That is acyclic but, like D09,
+  conflicts with the order above.
+- The anchor-policy registry (#66) takes the linkage fence, then the D05 shared
+  lock, then its own lock, matching the order above. It calls the cohort
+  registry's private in-fence read (`_lock` plus `_resolve_history_in_fence`);
+  the coordinator should turn that into a reviewed public API.
+- The result-trust store (#68) is read under its own shared lock between the D01
+  fence and the D07 lock: D01 → result trust → D07. Never touch the linkage store
+  or call D07 while holding a trust fence.
+- The reader-authorization registry (#67) supplies one cross-process fence plus
+  in-fence reads (`authorize_reader_in_fence`). It is first in the order above.
 
 The private root is mode `0700`; metadata, journal, lock, recovery records and
 objects are owner-only regular files with bound descriptors. Cross-process
@@ -693,33 +706,36 @@ source checkout, or a successful synthetic quickstart cannot claim those gates.
 At current main, implementing the builder would still require accepting weaker
 caller assertions and is therefore prohibited:
 
-- Merged prerequisites: corrected D09 (#52), D10 (#54), the protected D03
-  decision registry (#56), D10 resolving its D03 decisions from that registry
-  (#57), the D05 bounded stale-history read (#58), the protected D09
-  policy/summary registry (#59), and the protected D07 comparison registry
-  (#60). The E06 result-view-source registry is #62. Each registry derives
-  its object itself, replays it against live authority on every read, and
-  returns nothing when stale. Each result is valid as of one authority snapshot;
-  composing them still needs the composite fence below.
-- D09's registered v3 summary carries aggregate counts only. E12 must consume
-  it through the D09 policy registry, not reproduce denominator logic. Policy
+- Merged prerequisites: corrected D09 (#52), D10 (#54), the D03 decision
+  registry (#56, #61), D10 resolving D03 from it (#57), the D05 stale-history
+  read (#58), the D09 policy/summary registry (#59), the D07 comparison registry
+  (#60), the E06 result-view-source registry (#62), D10 live D09 binding plus the
+  d10_context_registry (#64), the projection-policy registry (#65), the
+  anchor-policy registry (#66), the reader-authorization registry plus B01
+  session binding (#67), and the result-trust store wired into D07 (#68). Each
+  registry derives its object itself, replays it against live authority on every
+  read, and returns nothing when stale. Each result is valid as of one authority
+  snapshot; composing them still needs the composite fence below.
+- D09's registered v3 summary carries aggregate counts only; its protected member
+  projection (`resolve_population`, #64) is for D10 and never public. Policy
   versions are not superseded: an older version that still rebuilds stays
   current. Rows on one D09 selector page may reflect different D06 snapshots.
-- D10's D09 input is still `declared_digest_only`
-  (`live_d09_registry_verified=false`). A D10 integration step must derive
-  context from the D09 policy registry's population behind the
-  `d10_context_registry` fence. Its D03 binding is done (#57).
+- D10 `build_live_covariate_context` (#64) takes its population from the D09
+  policy registry and its decisions from the D03 registry, joined on four keys.
+  Covariate tokens (batch, protocol, preanalytics) are still caller-registered;
+  no upstream authority for them exists.
 - D05 `resolve_history_view` returns a `CohortHistoryView` that is always
   `presented_as_current=false` and labelled `current|stale`. History and reopen
   use it; current authority still comes only from `resolve_history`.
 - D07 comparisons are evaluated at the linkage store's authority clock, and every
   read re-evaluates at live time. Use the returned `replayed_at`, not
   `evaluated_at`, as the as-of time.
-- Result trust has no protected, forward-only authority store. D07 and E04
-  take a caller-supplied trust document plus pin, so a key revocation reaches
-  only instances opened with the new document, and an old consistent document
-  can revive revoked comparisons. Closing this needs a new protected
-  result-trust store (decision pending).
+- Result trust: the forward-only result-trust store (#68) closes the revocation
+  gap for D07 registries opened with it. A revocation makes the affected
+  comparisons stale on the next read, and old trust cannot revive revoked keys.
+  E04 (`result_catalog`) and the runner CLI still take a caller-supplied
+  `TrustStore`; wiring them is a follow-up PR (analysis in
+  `docs/RESULT-TRUST-REGISTRY.md`).
 - E06: the source registry live-verifies member, D06 binding, E04 catalog and
   trust, and result/bundle/method identity. It cannot verify the denominator
   ledger, labels, compatibility-policy pin, or the fields in
@@ -729,23 +745,29 @@ caller assertions and is therefore prohibited:
   method-authority store exists. Who may author denominator ledgers, and
   whether one result may represent members of two cohort versions, are open
   product decisions.
-- B01 authenticates a local browser session but has no externally authorized
-  longitudinal reader-role authority. Add a protected, durable and bounded
-  `ReaderAuthorizationRegistry` whose grants are provider-signed, scoped,
-  expiring and revocable; bind bootstrap/session state to one live grant; add
-  its composable read fence; and require live replay before every selector,
-  builder, source-detail and save operation. A caller role string, local session
-  alone, or checked-in synthetic grant cannot authorize non-synthetic access.
+- Reader authorization (#67) works in the synthetic profile. Open product
+  decisions: the real external provider authority and how its trust is
+  provisioned and rotated; how real grants are issued, delivered, and revoked
+  (there is no HTTP launch route yet); and whether any registry change should
+  force every bound session to re-bootstrap (current) or only changes to that
+  session's grant.
 - Standalone numeric values require the applicable E07, E08, or E09 replayable
   artifact and the closed family adapter above, bound through the exact E04/E06
   source and requested D02 identity/coordinate. A measurement without that
   reviewed projection remains explicitly unavailable in E12; D07 observations
   and comparison inputs are not a substitute source-value authority.
-- No protected anchor-policy registry exists. It must bind the approved D03
-  policy, D07 envelope and bounded live anchor-candidate projection behind an
-  opaque selector/version; a caller-provided policy digest or anchor identity is
-  not authority. Until it exists, D07 envelope and policy pins come from the
-  registrant, and E12 must bind each comparison's envelope digest to it.
+- The anchor-policy registry (#66) binds approved D03 policy and D07 envelope
+  pairs and a live candidate page. A D03 v1 policy pins one complete anchor key,
+  so each approval admits one anchor; a real multi-anchor choice needs an
+  anchor-agnostic D03 policy schema, or one (policy, envelope) pair per anchor.
+  Open decisions: whether anchors are restricted to biological draws, and envelope
+  expiry, which D07 reports as unavailable. E12 must bind each D07 comparison's
+  envelope digest to the resolved anchor policy.
+- The projection-policy registry (#65) holds closed per-family policies and
+  replays no live authority. The E12 builder must call
+  `require_projection_policy_binding` with its live D05 anchor and E04/E06
+  source. E08 and E09 policies bind the registrant's exact D02 tuple, because
+  those contracts pin no quantity or unit.
 - The current D01/D04/D06/E04 and downstream APIs do not expose the composable
   cross-store fence required above. See the lock-order findings. The
   authority-fence adapter prerequisites must merge before builder work.
@@ -755,15 +777,14 @@ caller assertions and is therefore prohibited:
 - The family adapters need durable family-source artifact discovery (the
   `measurement_source_artifact_registry`) and its read fence; the adapters
   alone do not locate E07/E08/E09 artifacts.
-- Shared storage follow-up across the D03, D05, D07, D09 and E06 registries:
-  crash recovery for interrupted root creation, torn-journal tails found on
-  reopen, and staged restore. Every registry fails closed today. Every read also
-  parses every committed object, which is fine at synthetic scale only.
+- Shared storage follow-up across the D03, D05, D07, D09, D10, E06, anchor,
+  projection, reader, and result-trust registries: crash recovery for interrupted
+  root creation, torn-journal tails found on reopen, and staged restore (every
+  registry fails closed today), plus porting the result-trust store's
+  lock-descriptor ordering and truncate-on-any-exception to the others. Every read
+  also parses every committed object, which is fine at synthetic scale only.
 
-The remaining merge order is protected
-reader-authorization registry plus B01 session binding, D10 live D09 integration
-and context registry, protected anchor-policy
-and projection-policy registries, a protected result-trust store if approved,
+The remaining merge order is E04 and runner wiring to the result-trust store,
 family-source artifact discovery registry, family-specific measurement-source
 adapters,
 composable authority-fence adapters/coordinator, D08 read model, durable
