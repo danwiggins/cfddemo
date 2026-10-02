@@ -57,6 +57,12 @@ from evidence_inspector.method_registry import (
 )
 from evidence_inspector.provider_linkage import Base64PublicKey, Base64Signature
 from evidence_inspector.provider_linkage_store import AuthorityTimeSource
+from evidence_inspector.registry_storage import (
+    commit_staging_directory as _commit_staging_directory,
+    make_staging_directory as _make_staging_directory,
+    recover_torn_journal_tail as _recover_torn_journal_tail,
+    remove_owned_temporaries as _remove_owned_temporaries,
+)
 from evidence_inspector.safe_ingress import (
     bounded_json_loads,
     contract_type_graph,
@@ -1016,6 +1022,7 @@ class ReaderAuthorizationRegistry:
     def __getattribute__(self, name: str) -> object:
         # Keep this list literal so a mutable module global cannot disable it.
         if name in (
+            "recover_torn_journal_tail",
             "add_grant",
             "authority_read_fence",
             "authorize_reader_in_fence",
@@ -1305,6 +1312,7 @@ class ReaderAuthorizationRegistry:
         root_fd: int | None = None
         objects_fd: int | None = None
         created = False
+        staging_name = target.name
         completed = False
         try:
             parent_lstat = os.stat(target.parent, follow_symlinks=False)
@@ -1317,10 +1325,10 @@ class ReaderAuthorizationRegistry:
                 raise ReaderAuthorizationRegistryUnsafe(
                     "reader registry parent changed"
                 )
-            os.mkdir(target.name, 0o700, dir_fd=parent_fd)
+            staging_name = _make_staging_directory(parent_fd, target.name)
             created = True
-            root_lstat = os.stat(target.name, dir_fd=parent_fd, follow_symlinks=False)
-            root_fd = os.open(target.name, _DIRECTORY_FLAGS, dir_fd=parent_fd)
+            root_lstat = os.stat(staging_name, dir_fd=parent_fd, follow_symlinks=False)
+            root_fd = os.open(staging_name, _DIRECTORY_FLAGS, dir_fd=parent_fd)
             root_bound = os.fstat(root_fd)
             if (root_lstat.st_dev, root_lstat.st_ino) != (
                 root_bound.st_dev,
@@ -1355,6 +1363,9 @@ class ReaderAuthorizationRegistry:
             os.fsync(objects_fd)
             os.fsync(root_fd)
             os.fsync(parent_fd)
+            # The staged root becomes the target only once it is complete.
+            _commit_staging_directory(parent_fd, staging_name, target.name, root_fd)
+            staging_name = target.name
             # Reopen through every normal check before the target counts as
             # complete; a target that cannot reopen is removed for a retry.
             opened = _RR_CONSTRUCT(
@@ -1379,10 +1390,10 @@ class ReaderAuthorizationRegistry:
         finally:
             if created and not completed:
                 if root_fd is not None:
-                    _remove_partial_target(parent_fd, target.name, root_fd, objects_fd)
+                    _remove_partial_target(parent_fd, staging_name, root_fd, objects_fd)
                 elif parent_fd is not None:
                     try:
-                        os.rmdir(target.name, dir_fd=parent_fd)
+                        os.rmdir(staging_name, dir_fd=parent_fd)
                         os.fsync(parent_fd)
                     except OSError:
                         pass
@@ -1424,9 +1435,6 @@ class ReaderAuthorizationRegistry:
 
     @contextmanager
     def _lock(self, *, exclusive: bool) -> Iterator[None]:
-        descriptor = self._lock_fd
-        if descriptor is None:
-            raise ReaderAuthorizationRegistryUnsafe("reader registry is closed")
         if self._owner_pid != os.getpid():
             raise ReaderAuthorizationRegistryUnsafe(
                 "reader registry belongs to another process"
@@ -1437,6 +1445,11 @@ class ReaderAuthorizationRegistry:
                 "reader registry fence is already held"
             )
         with _REGISTRY_PROCESS_LOCK, self._process_lock:
+            # Read the descriptor only under the process lock, which close()
+            # also holds, so a concurrent close cannot hand us a reused number.
+            descriptor = self._lock_fd
+            if descriptor is None:
+                raise ReaderAuthorizationRegistryUnsafe("reader registry is closed")
             fcntl.flock(descriptor, fcntl.LOCK_EX if exclusive else fcntl.LOCK_SH)
             try:
                 _RR_VALIDATE_STORAGE(self)
@@ -1525,19 +1538,15 @@ class ReaderAuthorizationRegistry:
             ) from None
 
     def _recover_temporary_objects(self) -> None:
-        if self._objects_fd is None:
+        # D05 rule: an owned ``.tmp-<32 hex>`` name in the registry's private
+        # root or objects directory is always unlinked under the exclusive
+        # lock; a directory under that name makes unlink fail, so recovery
+        # fails closed.
+        if self._root_fd is None or self._objects_fd is None:
             raise ReaderAuthorizationRegistryUnsafe("reader registry is closed")
         try:
-            names = os.listdir(self._objects_fd)
-            for name in names:
-                if (
-                    type(name) is str
-                    and len(name) == 37
-                    and name.startswith(".tmp-")
-                    and all(character in "0123456789abcdef" for character in name[5:])
-                ):
-                    os.unlink(name, dir_fd=self._objects_fd)
-            os.fsync(self._objects_fd)
+            for directory_fd in (self._root_fd, self._objects_fd):
+                _remove_owned_temporaries(directory_fd)
         except OSError:
             raise ReaderAuthorizationRegistryUnsafe(
                 "reader registry recovery is unsafe"
@@ -1591,7 +1600,7 @@ class ReaderAuthorizationRegistry:
         try:
             _write_all(descriptor, content)
             os.fsync(descriptor)
-        except OSError:
+        except BaseException as error:
             # Truncate any torn suffix so the committed chain stays readable;
             # the object it named stays an uncommitted remnant for cleanup.
             try:
@@ -1599,6 +1608,9 @@ class ReaderAuthorizationRegistry:
                 os.fsync(descriptor)
             except OSError:
                 pass
+            # An interrupt or other non-OS failure keeps its own type.
+            if not isinstance(error, OSError):
+                raise
             raise ReaderAuthorizationRegistryUnsafe(
                 "reader registry journal append failed"
             ) from None
@@ -1697,6 +1709,7 @@ class ReaderAuthorizationRegistry:
 
         content = reader_object_bytes(value)
         digest = hashlib.sha256(content).hexdigest()
+        _RR_RECOVER_TEMPORARY_OBJECTS(self)
         state = _RR_LOAD_STATE(self)
         assert self._objects_fd is not None
         # The journal is the commit point: an object without an entry is an
@@ -2055,6 +2068,48 @@ class ReaderAuthorizationRegistry:
             time_source=time_source,
         )
 
+    @classmethod
+    def recover_torn_journal_tail(
+        cls,
+        root: str | Path,
+        *,
+        expected_registry_id: str,
+        expected_registry_epoch_sha256: str,
+        expected_state_head_sha256: str,
+    ) -> int:
+        """Operator maintenance: remove an unterminated trailing journal line.
+
+        Reopening a registry whose journal ends in a torn line fails closed,
+        and nothing repairs it automatically.  This explicit entry point takes
+        the exclusive registry lock without waiting (a registry in use is
+        refused) and truncates only the bytes after the
+        last newline, and only when every complete line chains to exactly the
+        retained head under the retained identity.  It returns the number of
+        bytes removed (``0`` when there is no torn tail); then reopen with the
+        same retained values.
+        """
+
+        _require_registry_class_integrity(cls)
+        return _recover_torn_journal_tail(
+            _snapshot_path(root),
+            expected_registry_id=expected_registry_id,
+            expected_registry_epoch_sha256=expected_registry_epoch_sha256,
+            expected_state_head_sha256=expected_state_head_sha256,
+            parse_metadata=lambda content: _parse_exact(
+                content, ReaderRegistryMetadata, _METADATA_TYPES, 4096
+            ),
+            genesis_sha256=_metadata_genesis_sha256,
+            parse_entry=lambda line: _parse_exact(
+                line, ReaderJournalEntry, _ENTRY_TYPES, 1024
+            ),
+            entry_sha256=_journal_entry_sha256,
+            max_journal_bytes=MAX_JOURNAL_BYTES,
+            max_entries=MAX_RECORDS,
+            process_lock=_REGISTRY_PROCESS_LOCK,
+            error=ReaderAuthorizationRegistryUnsafe,
+            label="reader registry",
+        )
+
 
 def _read_time(time_source: AuthorityTimeSource) -> datetime:
     try:
@@ -2110,6 +2165,7 @@ _REGISTRY_METHOD_SEAL = MappingProxyType(
             "authorize_reader_in_fence",
             "backup_bytes",
             "restore",
+            "recover_torn_journal_tail",
         )
     }
 )
