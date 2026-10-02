@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import inspect
 import secrets
+import sqlite3
 import threading
 import time
 from dataclasses import dataclass
@@ -49,6 +50,7 @@ from evidence_inspector.longitudinal_comparison_registry import (
     LongitudinalComparisonRegistryError,
     LongitudinalComparisonRegistryStale,
     LongitudinalComparisonRegistryUnsafe,
+    SAVED_DEPENDENCY_HEADS_SCHEMA_V2,
     SavedComparisonAuthorityState,
     SavedComparisonDependencyScopeV1,
 )
@@ -76,8 +78,12 @@ from evidence_inspector.repeatability_comparison_registry import (
 )
 from evidence_inspector.result_catalog import (
     DEFAULT_RESULT_BUNDLE_READER_REGISTRY,
+    CatalogAliases,
+    CatalogConflict,
+    CatalogResultRef,
     ResultCatalog,
     catalog_authority_sha256,
+    catalog_dependency_head_sha256,
 )
 from evidence_inspector.result_trust_registry import ResultTrustRegistry
 from evidence_inspector.result_view_source_registry import (
@@ -449,11 +455,15 @@ def test_snapshot_matches_every_store_public_read(world, coordinator) -> None:
         status.status_sha256,
     )
     authority = world.results.authority_snapshot()
+    content = world.results.content_snapshot()
+    assert heads.schema_version == SAVED_DEPENDENCY_HEADS_SCHEMA_V2
     assert slot("e04_catalog") == (
         "e04_catalog_" + authority.storage_identity_sha256[:32],
         authority.storage_identity_sha256,
-        catalog_authority_sha256(authority),
+        catalog_dependency_head_sha256(authority, content),
     )
+    # The v2 E04 head binds content: it is not the v1 authority-only head.
+    assert heads.e04_catalog.head != catalog_authority_sha256(authority)
     assert slot("result_trust") == page(world.trust.current_trust())
     assert slot("e06_source") == page(
         world.sources.list_selectors(world.cohort_selector_id, 1, limit=1)
@@ -754,6 +764,262 @@ def test_a_writer_in_another_process_blocks_until_the_hold_releases(
     assert after.result_trust != before.result_trust
 
 
+# --- E04 catalog content ------------------------------------------------------------
+
+EXTRA_ALIASES = CatalogAliases(
+    display_alias="dsp_extraaaa",
+    run_alias="rnx_extrabbb",
+    timepoint_alias="tpt_extraccc",
+)
+
+
+def _extra_bundle(world: World, token: str) -> str:
+    """Build a new bundle (new record ID) signed by a newly trusted key."""
+
+    from traceback_runner.bundles import build_result_bundle
+    from traceback_runner.signing import KeyPurpose, generate_development_keypair
+
+    from tests.test_bundles import _measurement, _provenance
+
+    key = generate_development_keypair(KeyPurpose.RESULT)
+    world.trust.add_key(public_result_key(key))
+    *_, capability = _method_authority()
+    build_result_bundle(
+        world.root / "imports" / f"extra-{token}" / "record",
+        measurement=_measurement(),
+        provenance=_provenance(run_token=f"synthetic.run.{token}"),
+        method={
+            "method_id": capability.method_ref.method_id,
+            "version": capability.method_ref.version,
+            "method_definition_sha256": capability.method_definition_sha256,
+        },
+        signing_key=key,
+    )
+    return f"extra-{token}/record"
+
+
+def _import_arguments(relative: str, aliases: CatalogAliases | None = None) -> dict:
+    registry, head, head_sha256, capability = _method_authority()
+    return {
+        "root_id": "root_primary",
+        "relative_path": relative,
+        "registry": registry,
+        "authority_head": head,
+        "expected_authority_head_sha256": head_sha256,
+        "capability": capability,
+        "aliases": aliases or EXTRA_ALIASES,
+    }
+
+
+def _e04_writer_child(
+    results_root, import_root, trust_root, identity, operation, payload, ready, go, queue
+) -> None:
+    # Both stores open (and E04 initializes) before the parent's hold.
+    trust = ResultTrustRegistry(
+        trust_root,
+        expected_registry_id=identity[0],
+        expected_registry_epoch_sha256=identity[1],
+        expected_state_head_sha256=identity[2],
+    )
+    catalog = ResultCatalog(
+        results_root,
+        import_roots={"root_primary": import_root},
+        result_trust_registry=trust,
+        reader_registry=DEFAULT_RESULT_BUNDLE_READER_REGISTRY,
+    )
+    try:
+        ready.set()
+        go.wait(JOIN_SECONDS)
+        if operation == "import":
+            catalog.import_bundle(**_import_arguments(payload))
+            outcome = "imported"
+        else:
+            publication_id, reference_json, scope = payload
+            outcome = catalog.recover_pending_publication(
+                publication_id=publication_id,
+                reference=CatalogResultRef.model_validate_json(reference_json),
+                recovery_scope_sha256=scope,
+                retain_adopted=False,
+            )
+        queue.put((outcome, time.monotonic()))
+    except BaseException as error:  # noqa: BLE001 - reported to the parent
+        queue.put(("error", repr(error)))
+    finally:
+        catalog.close()
+        trust.close()
+
+
+@pytest.mark.parametrize("operation", ["import", "recover"])
+def test_an_e04_writer_in_another_process_blocks_until_the_hold_releases(
+    world, coordinator, operation
+) -> None:
+    """A second process importing into, or recovering, E04 waits for release.
+
+    The child opens its own catalog and trust registry before the hold; its
+    write starts during the hold and must commit only after release.  The
+    E04 head (authority plus content) is unchanged throughout the hold and
+    advances afterwards.
+    """
+
+    relative = _extra_bundle(world, "child")
+    if operation == "import":
+        payload: object = relative
+        expected = "imported"
+    else:
+        scope = secrets.token_hex(32)
+        prepared = world.results.prepare_bundle_import(
+            **_import_arguments(relative), recovery_scope_sha256=scope
+        )
+        world.results.stage_prepared_import(prepared)
+        payload = (
+            prepared.publication_id,
+            prepared.reference.model_dump_json(),
+            scope,
+        )
+        expected = "pending_removed"
+    current = world.trust.current_trust()
+    identity = (
+        current.registry_id,
+        current.registry_epoch_sha256,
+        current.state_head_sha256,
+    )
+    before = coordinator.snapshot(world.scope).heads
+    context = get_context("spawn")
+    ready = context.Event()
+    go = context.Event()
+    queue = context.Queue()
+    process = context.Process(
+        target=_e04_writer_child,
+        args=(
+            world.results.root,
+            world.root / "imports",
+            world.trust.root,
+            identity,
+            operation,
+            payload,
+            ready,
+            go,
+            queue,
+        ),
+    )
+    process.start()
+    try:
+        assert ready.wait(JOIN_SECONDS)
+        fence = CompositeAuthorityFence(coordinator)
+        with fence.hold() as held:
+            go.set()
+            time.sleep(0.75)
+            assert queue.empty()
+            assert held.read_heads(world.scope) == before
+            released_at = time.monotonic()
+        result = queue.get(timeout=JOIN_SECONDS)
+    finally:
+        go.set()
+        process.join(JOIN_SECONDS)
+    assert process.exitcode == 0
+    assert result[0] == expected and result[1] >= released_at
+    after = coordinator.snapshot(world.scope).heads
+    assert (after.e04_catalog.id, after.e04_catalog.epoch) == (
+        before.e04_catalog.id,
+        before.e04_catalog.epoch,
+    )
+    assert after.e04_catalog.head != before.e04_catalog.head
+    assert after.result_trust == before.result_trust
+
+
+def test_e04_content_that_moves_under_the_hold_raises_retry(
+    world, coordinator, monkeypatch
+) -> None:
+    """A catalog row that changes between capture and revalidation is a retry.
+
+    Cooperating writers cannot land under the hold; this simulates a row
+    change by writing the SQLite file directly (outside the threat model),
+    which only the content head can observe.
+    """
+
+    original = fence_module._CompositeHold.revalidate
+    calls = {"count": 0}
+
+    def drift(self):
+        calls["count"] += 1
+        if calls["count"] == 1:
+            connection = sqlite3.connect(world.results.database)
+            try:
+                connection.execute(
+                    "INSERT INTO coordinated_results VALUES(?)",
+                    ("result_" + secrets.token_hex(20),),
+                )
+                connection.commit()
+            finally:
+                connection.close()
+        return original(self)
+
+    before = coordinator.snapshot(world.scope).heads
+    monkeypatch.setattr(fence_module._CompositeHold, "revalidate", drift)
+    with pytest.raises(CompositeAuthorityRetry):
+        coordinator.snapshot(world.scope)
+    monkeypatch.undo()
+    # Every fence was released; the new content is a new E04 head.
+    after = coordinator.snapshot(world.scope).heads
+    assert after.e04_catalog.head != before.e04_catalog.head
+    assert after.result_trust == before.result_trust
+    world.trust.add_key(_extra_result_key())
+
+
+def test_record_status_fence_requires_the_e04_content_lock(world) -> None:
+    """The D06 step refuses a trust fence held without the content lock."""
+
+    with world.linkage.authority_read_fence():
+        with world.cohort.authority_read_fence():
+            with world.results._trust_fence():
+                with pytest.raises(CohortImportError, match="result trust fence"):
+                    with world.records.record_status_read_fence():
+                        pass
+            with world.results.trust_authority_fence():
+                with world.records.record_status_read_fence():
+                    pass
+
+
+@pytest.mark.parametrize("through", ["same_instance", "other_instance"])
+def test_d06_entry_is_refused_while_an_e04_content_lock_is_held(world, through) -> None:
+    """D06 needs D01 first; holding E04 content it could wait behind an import."""
+
+    other = ResultCatalog(
+        world.results.root,
+        import_roots={"root_primary": world.root / "imports"},
+        result_trust_registry=world.trust,
+        reader_registry=DEFAULT_RESULT_BUNDLE_READER_REGISTRY,
+    )
+    try:
+        fence = (
+            world.results.trust_authority_fence
+            if through == "same_instance"
+            else other.content_authority_fence
+        )
+        with fence():
+            for operation in (
+                lambda: world.records.record_status_for_manifest(
+                    world.cohort_selector_id, 1
+                ),
+                lambda: world.records.bindings_for_manifest(world.cohort_selector_id, 1),
+            ):
+                with pytest.raises(
+                    CohortImportError, match="before any E04 content lock"
+                ):
+                    operation()
+    finally:
+        other.close()
+    assert world.records.record_status_for_manifest(world.cohort_selector_id, 1)
+
+
+def test_a_shared_e04_content_hold_is_never_upgraded(world) -> None:
+    relative = _extra_bundle(world, "upgrade")
+    with world.results.trust_authority_fence():
+        with pytest.raises(CatalogConflict, match="upgraded"):
+            world.results.import_bundle(**_import_arguments(relative))
+    assert world.results.import_bundle(**_import_arguments(relative))
+
+
 # --- saved-comparison fence ----------------------------------------------------------
 
 
@@ -875,7 +1141,31 @@ def test_opposing_mutation_read_and_save_operations_terminate(world, coordinator
         "trust_add": lambda: world.trust.add_key(_extra_result_key()),
         "linkage_commit": lambda: _advance_linkage(world, next(digits)),
         "projection_register": lambda: world.projections.register_policy(next(policies)),
+        "e04_content": lambda: world.results.content_snapshot(),
+        # A second catalog instance on the same root: its content lock is a
+        # separate open file, so it contends with the hold through flock.
+        "e04_import_other_instance": lambda: other_catalog.import_bundle(
+            **next(extra_imports)
+        ),
     }
+    extra_imports = iter(
+        _import_arguments(
+            _extra_bundle(world, f"opposing{index}"),
+            CatalogAliases(
+                display_alias=f"dsp_opposing{index}",
+                run_alias=f"rnx_opposing{index}",
+                timepoint_alias=f"tpt_opposing{index}",
+            ),
+        )
+        for index in range(3)
+    )
+    extra_imports = iter(tuple(extra_imports))
+    other_catalog = ResultCatalog(
+        world.results.root,
+        import_roots={"root_primary": world.root / "imports"},
+        result_trust_registry=world.trust,
+        reader_registry=DEFAULT_RESULT_BUNDLE_READER_REGISTRY,
+    )
     # The D01 advance makes the registered cohort version non-current, so it
     # runs once, after the first composite snapshot and save have succeeded,
     # while the remaining rounds still contend with it.
@@ -924,7 +1214,10 @@ def test_opposing_mutation_read_and_save_operations_terminate(world, coordinator
     finally:
         if not any(thread.is_alive() for thread in threads):
             saved_registry.close()
+            other_catalog.close()
     assert not failures, failures
+    assert successes["e04_import_other_instance"] == 3
+    assert successes["e04_content"] == 3
     assert successes["snapshot"] >= 1 and successes["save"] >= 1
     assert successes["d09_live_summary"] >= 1 and successes["d10_live_context"] >= 1
     assert successes["trust_add"] == 2 and successes["projection_register"] == 3
@@ -1108,6 +1401,20 @@ def test_entry_while_holding_any_store_fence_is_refused(world, coordinator) -> N
     with world.linkage.authority_read_fence(), world.cohort.authority_read_fence():
         with pytest.raises(CompositeAuthorityUnsafe, match="before any store fence"):
             coordinator.snapshot(world.scope)
+    # E04's content lock held through another catalog instance on the same
+    # root (no lock of the coordinator's own catalog is held) is refused too.
+    other = ResultCatalog(
+        world.results.root,
+        import_roots={"root_primary": world.root / "imports"},
+        result_trust_registry=world.trust,
+        reader_registry=DEFAULT_RESULT_BUNDLE_READER_REGISTRY,
+    )
+    try:
+        with other.content_authority_fence():
+            with pytest.raises(CompositeAuthorityUnsafe, match="before any store fence"):
+                coordinator.snapshot(world.scope)
+    finally:
+        other.close()
     # The scenario itself terminates: a concurrent D06 status read and a
     # thread that tries to enter under E04 both finish.
     errors: list[BaseException] = []

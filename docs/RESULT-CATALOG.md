@@ -94,17 +94,21 @@ the trust head into its authority snapshot; a trust event before staging or
 adoption makes that preparation fail with `catalog authority changed during
 import`, so a key revoked mid-import is never published.
 
-`trust_authority_fence()` exposes the same fence to composing callers (D06).
-Catalog calls made inside it on the same thread reuse the held head, because
-the registry lock is not reentrant. The body must not open a linkage fence,
-call a D07 registry, or mutate the trust registry; a trust mutation on the
+`trust_authority_fence()` exposes the same fence to composing callers (D06),
+and also holds the catalog-content lock shared (below). Catalog calls made
+inside it on the same thread reuse the held head, because the registry lock
+is not reentrant. The body must not open a linkage fence, call a D07
+registry, mutate the trust registry, or write this catalog unless the caller
+took the content lock exclusively first; a trust mutation on the
 holding thread raises instead of deadlocking. The TrustStore path yields
 `None` and holds nothing.
 
-Lock order: catalog `_connection_lock`, then the result-trust read fence. This
-is the order D06 already used for the TrustStore lock (catalog connection lock,
-then the trust lock), so D06 keeps its fence order: linkage fence, D05 lock,
-catalog connection lock, result trust, D06 root; E06 takes the D06 fence and
+Lock order: the catalog-content lock (in-process gate, then the catalog
+`_connection_lock`, then `flock`), then the result-trust read fence. The
+connection lock still precedes trust, as D06 already used for the TrustStore
+lock (catalog connection lock, then the trust lock), so D06's fence order is:
+linkage fence, D05 lock, catalog content (gate, connection lock, flock),
+result trust, D06 root; E06 takes the D06 fence and
 then its own lock; D07 takes linkage fence, result trust, then its own lock.
 Code holding a trust read fence taken directly from the registry (as D07 does)
 must not call the catalog: the catalog would wait for its connection lock while
@@ -121,6 +125,59 @@ digest unambiguously, and `CATALOG_AUTHORITY_SCHEMA_VERSIONS` lists every
 version a retained digest may name. A D06 binding made under a v1 catalog keeps
 replaying after that catalog is reopened on the registry path and is
 re-verified against the registry.
+
+## Catalog-content lock and content head
+
+The SQLite transaction is not held between operations, so it cannot fence
+catalog rows for a composing reader. A separate cross-process content lock
+does: `flock` on `catalog-content.lock` (private, `0600`, owned by the
+effective user, inode bound at open and rechecked on every acquisition) in the
+catalog root.
+
+- Every catalog-row writer holds it **exclusively**: `import_bundle`,
+  `prepare_bundle_import`, `stage_prepared_import`, `adopt_prepared_import`,
+  `finish_prepared_import`, `compensate_prepared_import`,
+  `discard_prepared_import`, `register_coordinated_candidate`,
+  `finish_coordinated_candidate`, `recover_pending_publication`, and schema
+  initialization at open. Both trust paths (registry and TrustStore) take it.
+- `trust_authority_fence()` holds it **shared** for its whole body, so no
+  row write commits, from any process, while a composing reader (the
+  composite fence's E04 step, D06's status and binding reads) holds it.
+- `content_authority_fence(exclusive=...)` exposes it to a composing caller.
+  D06 imports take it exclusively, and D06's open-time recovery takes it
+  exclusively, before the D06 root; D06 reads take it shared.
+- Plain reads (`query`, `verify_reference`, recovery enumeration, the live
+  reader) take no content lock.
+
+Lock order: the content lock, then the result-trust read fence (and
+`_SQLITE_OPEN_LOCK` on a first connect). The content lock itself is taken in
+three parts: an in-process gate per lock-file inode (a reader/writer gate
+shared by every catalog instance on that root), then the instance's
+`_connection_lock`, then the `flock` that excludes other processes. So no
+thread waits for the content lock while holding a connection lock: a writer
+of instance B that waits behind a holder of instance A holds nothing the
+holder may need, and the holder can still read through B. The connection
+lock is held through the body, so one thread per instance owns the lock;
+nested entries on that thread reuse the held mode, and an exclusive request
+under a held shared lock raises `CatalogConflict` (never upgraded). A thread
+holding a root's content lock through one instance that asks for it through
+another instance on the same root gets `CatalogConflict` instead of waiting
+for itself. A caller must not hold a catalog's connection lock when it asks
+for that catalog's content lock (D06 takes the content fence first), and
+D06's fence entry (`_registered_authority_fence`, behind imports, binding
+reads and record status) refuses a thread that already holds any content
+lock, since D06 needs D01 first. The gate is reader-preferring: a steady
+stream of shared holders (composite reads) can delay an in-process writer
+indefinitely; that is a liveness limit, not a deadlock. A forked child resets
+the gate (`os.register_at_fork`); it inherits no parent holders.
+
+`content_head_in_fence()` (requires this thread's content lock) and
+`content_snapshot()` (takes it shared) return `CatalogContentSnapshot`: a
+digest over every row of every catalog table (metadata, results, aliases,
+publications, coordinated rows, candidates) in primary-key order, read in one
+SQLite read transaction. Any committed row change changes it; reads do not.
+`catalog_dependency_head_sha256(authority, content)` is the E04 head of saved
+dependency-head schema v2. The digest is linear in catalog size.
 
 The binding of a catalog to its trust registry is not persisted in the catalog
 database: reopening a catalog root with a different authority is the caller's

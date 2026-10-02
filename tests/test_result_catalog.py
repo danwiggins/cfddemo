@@ -2,10 +2,12 @@
 
 from __future__ import annotations
 
+import fcntl
 import hashlib
 import os
 import shutil
 import sqlite3
+import stat
 import threading
 import time
 from datetime import UTC, datetime
@@ -1118,3 +1120,213 @@ def test_ten_thousand_result_query_p95_is_below_250ms(tmp_path: Path) -> None:
         assert page.next_cursor is not None
     p95 = sorted(durations)[int(len(durations) * 0.95) - 1]
     assert p95 <= 0.250
+
+
+# --- catalog-content lock and content head -------------------------------------
+
+
+def test_every_row_writer_changes_the_content_head_and_reads_do_not(
+    tmp_path: Path,
+) -> None:
+    catalog, _, _ = _catalog(tmp_path)
+    try:
+        heads = [catalog.content_snapshot()]
+        catalog.query(CatalogQuery())
+        assert catalog.content_snapshot() == heads[-1]
+        prepared = _prepare(catalog)
+        catalog.stage_prepared_import(prepared)
+        heads.append(catalog.content_snapshot())
+        catalog.discard_prepared_import(prepared)
+        heads.append(catalog.content_snapshot())
+        _import(catalog)
+        heads.append(catalog.content_snapshot())
+        # Discarding a staged row restores the exact earlier content.
+        assert heads[2] == heads[0]
+        assert len({heads[0], heads[1], heads[3]}) == 3
+        with pytest.raises(CatalogError, match="content fence is absent"):
+            catalog.content_head_in_fence()
+        with catalog.content_authority_fence():
+            assert catalog.content_head_in_fence() == heads[-1]
+    finally:
+        catalog.close()
+
+
+def test_a_shared_content_hold_blocks_another_instance_writer(tmp_path: Path) -> None:
+    """TrustStore path: a second instance's import waits for the shared hold."""
+
+    catalog, _, import_root = _catalog(tmp_path)
+    other = ResultCatalog(
+        tmp_path / "catalog",
+        import_roots={"root_primary": import_root},
+        trust_store=catalog.trust_store,
+    )
+    done = threading.Event()
+    errors: list[BaseException] = []
+
+    def run() -> None:
+        try:
+            _import(other)
+        except BaseException as error:  # noqa: BLE001 - surfaced below
+            errors.append(error)
+        finally:
+            done.set()
+
+    worker = threading.Thread(target=run)
+    try:
+        before = catalog.content_snapshot()
+        with catalog.trust_authority_fence() as snapshot:
+            assert snapshot is None
+            worker.start()
+            assert not done.wait(0.5)
+            assert catalog.content_head_in_fence() == before
+            with pytest.raises(CatalogConflict, match="upgraded"):
+                _import(catalog)
+        worker.join(10)
+        assert not worker.is_alive() and not errors
+        assert catalog.content_snapshot() != before
+    finally:
+        other.close()
+        catalog.close()
+
+
+def test_one_thread_cannot_take_the_content_lock_through_two_instances(
+    tmp_path: Path,
+) -> None:
+    """Refused instead of waiting behind this thread's own ``flock``."""
+
+    catalog, _, import_root = _catalog(tmp_path)
+    other = ResultCatalog(
+        tmp_path / "catalog",
+        import_roots={"root_primary": import_root},
+        trust_store=catalog.trust_store,
+    )
+    try:
+        for exclusive in (False, True):
+            with catalog.content_authority_fence(exclusive=exclusive):
+                with pytest.raises(CatalogConflict, match="another catalog instance"):
+                    with other.content_authority_fence(exclusive=True):
+                        pass
+                with pytest.raises(CatalogConflict, match="another catalog instance"):
+                    other.content_snapshot()
+                with pytest.raises(CatalogConflict, match="another catalog instance"):
+                    _import(other)
+                # The same instance stays reentrant.
+                with catalog.content_authority_fence():
+                    catalog.content_head_in_fence()
+        # Released: the other instance proceeds.
+        _import(other)
+        assert other.content_snapshot() == catalog.content_snapshot()
+    finally:
+        other.close()
+        catalog.close()
+
+
+def test_a_waiting_writer_holds_no_connection_lock_a_holder_needs(
+    tmp_path: Path,
+) -> None:
+    """T1 holds A's content lock; T2's B writer waits; T1 still reads B."""
+
+    catalog, _, import_root = _catalog(tmp_path)
+    other = ResultCatalog(
+        tmp_path / "catalog",
+        import_roots={"root_primary": import_root},
+        trust_store=catalog.trust_store,
+    )
+    done = threading.Event()
+    errors: list[BaseException] = []
+
+    def write() -> None:
+        try:
+            _import(other)
+        except BaseException as error:  # noqa: BLE001 - surfaced below
+            errors.append(error)
+        finally:
+            done.set()
+
+    writer = threading.Thread(target=write, daemon=True)
+    read: dict[str, object] = {}
+
+    def hold_and_read() -> None:
+        with catalog.content_authority_fence():
+            writer.start()
+            assert not done.wait(0.5)
+            read["page"] = other.query(CatalogQuery())
+            assert not done.is_set()
+
+    holder = threading.Thread(target=hold_and_read, daemon=True)
+    try:
+        holder.start()
+        holder.join(20)
+        writer.join(20)
+        assert not holder.is_alive() and not writer.is_alive(), "deadlock"
+        assert read["page"].empty and not errors
+        assert other.query(CatalogQuery()).results
+    finally:
+        if not holder.is_alive() and not writer.is_alive():
+            other.close()
+            catalog.close()
+
+
+@pytest.mark.skipif(not hasattr(os, "fork"), reason="fork is unavailable")
+def test_a_forked_child_inherits_no_content_gate_holder(tmp_path: Path) -> None:
+    catalog, _, _ = _catalog(tmp_path)
+    try:
+        with catalog.content_authority_fence():
+            assert catalog_module.content_lock_held_by_current_thread()
+            pid = os.fork()
+            if pid == 0:  # pragma: no cover - child process
+                os._exit(
+                    0
+                    if not catalog_module.content_lock_held_by_current_thread()
+                    and not catalog_module._CONTENT_GATE_STATE
+                    else 1
+                )
+            _, status = os.waitpid(pid, 0)
+        assert os.WIFEXITED(status) and os.WEXITSTATUS(status) == 0
+        assert not catalog_module.content_lock_held_by_current_thread()
+    finally:
+        catalog.close()
+
+
+@pytest.mark.skipif(not hasattr(os, "fork"), reason="fork is unavailable")
+def test_a_forked_child_unwinding_a_hold_keeps_the_parent_lock(tmp_path: Path) -> None:
+    """The child shares the parent's flock; its unwind must not release it."""
+
+    catalog, _, _ = _catalog(tmp_path)
+    lock = tmp_path / "catalog" / catalog_module.CATALOG_CONTENT_LOCK_NAME
+    probe = os.open(lock, os.O_RDWR)
+
+    class ChildUnwind(Exception):
+        pass
+
+    try:
+        try:
+            with catalog.content_authority_fence(exclusive=True):
+                pid = os.fork()
+                if pid == 0:  # pragma: no cover - child process
+                    # Unwind the inherited hold through its context manager.
+                    raise ChildUnwind
+                _, status = os.waitpid(pid, 0)
+                assert os.WIFEXITED(status) and os.WEXITSTATUS(status) == 0
+                with pytest.raises(BlockingIOError):
+                    fcntl.flock(probe, fcntl.LOCK_SH | fcntl.LOCK_NB)
+        except ChildUnwind:  # pragma: no cover - child process
+            os._exit(0)
+        fcntl.flock(probe, fcntl.LOCK_SH | fcntl.LOCK_NB)
+        fcntl.flock(probe, fcntl.LOCK_UN)
+    finally:
+        os.close(probe)
+        catalog.close()
+
+
+def test_the_content_lock_file_is_private_and_bound(tmp_path: Path) -> None:
+    catalog, _, _ = _catalog(tmp_path)
+    try:
+        lock = tmp_path / "catalog" / catalog_module.CATALOG_CONTENT_LOCK_NAME
+        assert stat.S_IMODE(lock.stat().st_mode) == 0o600
+        lock.unlink()
+        lock.write_bytes(b"")
+        with pytest.raises(CatalogFilesystemError, match="content lock changed"):
+            catalog.content_snapshot()
+    finally:
+        catalog.close()

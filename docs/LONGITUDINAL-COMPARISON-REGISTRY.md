@@ -69,6 +69,20 @@ record identity.
 
 ### Dependency-head vector
 
+Schema versions (`SAVED_DEPENDENCY_HEADS_SCHEMA_VERSIONS`; the class keeps
+the name `SavedComparisonDependencyHeadsV1` and one field set):
+
+- `traceback.saved-comparison-dependency-heads.v1`: `e04_catalog.head` is
+  the catalog authority digest alone; it does not move when rows change.
+- `traceback.saved-comparison-dependency-heads.v2` (the default, and what
+  `CompositeAuthorityFence` writes): `e04_catalog.head` binds authority and
+  catalog content.
+
+Retained v1 objects, journal entries, recovery records and backups keep their
+exact bytes and digests and still read. A v1 vector never equals a v2 one;
+`stale_dependency_slots` reports `e04_catalog` stale across versions, so a v1
+save reopens `stale` (at that slot only, when nothing else moved).
+
 `SavedComparisonDependencyHeadsV1` is closed: one `DependencyHeadV1(id,
 epoch, head)` per slot, in the plan's lock order. Each slot's ID must carry
 its store's own prefix.
@@ -80,7 +94,7 @@ its store's own prefix.
 | `d05_cohort` | `CohortRegistry.list_selectors(limit=1)` | registry ID, epoch, state head |
 | `reader_authorization` | `ReaderAuthorizationRegistry.identity()` (#67) | registry ID, epoch, state head |
 | `d06_record_catalog` | `CohortRecordCatalog.record_status_for_manifest(scope)` | D05 registry ID/epoch, cohort status digest |
-| `e04_catalog` | `ResultCatalog.authority_snapshot()` | `e04_catalog_`+storage prefix, storage identity, `catalog_authority_sha256` |
+| `e04_catalog` | `ResultCatalog.authority_snapshot()` + `content_snapshot()` | `e04_catalog_`+storage prefix, storage identity; head: v2 `catalog_dependency_head_sha256(authority, content)`, v1 `catalog_authority_sha256` |
 | `result_trust` | `ResultTrustRegistry.current_trust()` (#68) | registry ID, epoch, state head |
 | `e06_source` | `ResultViewSourceRegistry.list_selectors(scope, limit=1)` (#62) | registry ID, epoch, state head |
 | `d03_decision` | `LongitudinalDecisionRegistry.list_selectors(limit=1)` (#56) | registry ID, epoch, state head |
@@ -100,9 +114,11 @@ The family-source slot is optional in schema v1 and accepts any
 
 Staleness is conservative: slots are whole-store heads, so any advance of a
 captured dependency head (for example, a grant issued to another reader, or
-another cohort's D09 policy) marks every saved comparison `stale`. The E04
-slot is the catalog *authority* head (storage, trust, reader registry); E04
-catalog-row imports do not change it. That never shows a
+another cohort's D09 policy) marks every saved comparison `stale`. In
+schema v2 the E04 slot binds the catalog authority (storage, trust, reader
+registry) and the committed catalog content (every row, read under E04's
+cross-process content lock), so any E04 import, staging, adoption,
+compensation or recovery marks saves stale. That never shows a
 stale comparison as current; current values come only from a fresh E12
 replay in any case.
 

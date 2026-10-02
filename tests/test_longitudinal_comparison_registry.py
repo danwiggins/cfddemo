@@ -275,6 +275,102 @@ def test_publication_is_content_addressed_and_reopens_current(registry, fence) -
     assert reopened.state_head_sha256 == receipt.state_head_sha256
 
 
+V1_HEADS = "traceback.saved-comparison-dependency-heads.v1"
+V2_HEADS = "traceback.saved-comparison-dependency-heads.v2"
+# sha256 of the canonical bytes, and content digest, of
+# ``make_saved(golden_v1_heads())`` as written by the pre-v2 registry module
+# (origin/main at bec4644).  Retained v1 objects must keep both.
+GOLDEN_V1_OBJECT_SHA256 = (
+    "3c625d6117639a13bf3074abac02164ac39dede644de1e085d1513f0b1bc83c2"
+)
+GOLDEN_V1_CONTENT_SHA256 = (
+    "948b65236cc2747c008c19e6ebc60b8958ad5d01daa3385ec58727b347fba1fc"
+)
+
+
+def golden_v1_heads() -> SavedComparisonDependencyHeadsV1:
+    def head(prefix: str, digit: str) -> DependencyHeadV1:
+        return DependencyHeadV1(id=prefix + digit * 32, epoch=digit * 64, head="f" * 64)
+
+    d05 = head("cohort_registry_", "1")
+    return SavedComparisonDependencyHeadsV1(
+        schema_version=V1_HEADS,
+        d01_linkage=head("store_", "2"),
+        d04_history=head("ledger_", "3"),
+        d05_cohort=d05,
+        reader_authorization=head("reader_registry_", "4"),
+        d06_record_catalog=DependencyHeadV1(id=d05.id, epoch=d05.epoch, head="e" * 64),
+        e04_catalog=head("e04_catalog_", "5"),
+        result_trust=head("result_trust_registry_", "6"),
+        e06_source=head("e06_registry_", "7"),
+        d03_decision=head("d03_registry_", "8"),
+        d07_comparison=head("d07_registry_", "9"),
+        d09_summary=head("d09_registry_", "a"),
+        d10_context=head("d10_registry_", "b"),
+        anchor_policy=head("anchor_registry_", "c"),
+        projection_policy=head("projection_registry_", "d"),
+    )
+
+
+def test_retained_v1_objects_keep_their_exact_bytes_and_digests() -> None:
+    saved = make_saved(golden_v1_heads())
+    content = saved_comparison_object_bytes(saved)
+    assert hashlib.sha256(content).hexdigest() == GOLDEN_V1_OBJECT_SHA256
+    assert saved.content_sha256 == GOLDEN_V1_CONTENT_SHA256
+    assert json.loads(content)["dependency_heads"]["schema_version"] == V1_HEADS
+    assert registry_module.saved_comparison_object_from_bytes(content) == saved
+    # New vectors default to v2; an unknown version is refused.
+    assert make_heads().schema_version == V2_HEADS
+    assert registry_module.SAVED_DEPENDENCY_HEADS_SCHEMA_VERSIONS == (V1_HEADS, V2_HEADS)
+    with pytest.raises(ValidationError):
+        SavedComparisonDependencyHeadsV1(
+            **{
+                **golden_v1_heads().model_dump(mode="python"),
+                "schema_version": "traceback.saved-comparison-dependency-heads.v3",
+            }
+        )
+
+
+def test_a_v1_save_still_reads_and_reopens_stale_only_at_e04(
+    tmp_path, registry, fence
+) -> None:
+    v1 = SavedComparisonDependencyHeadsV1(
+        **{**fence.heads.model_dump(mode="python"), "schema_version": V1_HEADS}
+    )
+    fence.heads = v1
+    receipt = registry.register(make_saved(v1), dependency_fence=fence)
+    assert receipt.dependency_heads.schema_version == V1_HEADS
+    current = registry.resolve(receipt.selector_id, 1, dependency_fence=fence)
+    assert current.authority_state is SavedComparisonAuthorityState.CURRENT
+    # The live fence now serves v2 vectors with every other slot unchanged:
+    # the E04 head definition changed, so exactly that slot is stale.
+    fence.heads = SavedComparisonDependencyHeadsV1(
+        **{**v1.model_dump(mode="python"), "schema_version": V2_HEADS}
+    )
+    stale = registry.resolve(receipt.selector_id, 1, dependency_fence=fence)
+    assert stale.authority_state is SavedComparisonAuthorityState.STALE
+    assert stale.stale_dependencies == (DependencySlot.E04_CATALOG,)
+    assert stale.saved.dependency_heads.schema_version == V1_HEADS
+    page = registry.list_selectors(dependency_fence=fence)
+    assert page.records[0].stale_dependencies == (DependencySlot.E04_CATALOG,)
+    # Backup and restore carry the v1 entry unchanged.
+    registry_id, epoch, _, head = registry.identity()
+    restored = LongitudinalComparisonRegistry.restore(
+        tmp_path / "restored",
+        registry.backup_bytes(),
+        dependency_fence=fence,
+        expected_registry_id=registry_id,
+        expected_registry_epoch_sha256=epoch,
+        expected_state_head_sha256=head,
+    )
+    try:
+        again = restored.resolve(receipt.selector_id, 1, dependency_fence=fence)
+        assert again.saved_object_json == stale.saved_object_json
+        assert again.stale_dependencies == (DependencySlot.E04_CATALOG,)
+    finally:
+        restored.close()
+
+
 def test_exact_retry_is_idempotent(registry, fence) -> None:
     saved = make_saved(fence.heads)
     first = registry.register(saved, dependency_fence=fence)
