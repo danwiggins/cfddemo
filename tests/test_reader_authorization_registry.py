@@ -1054,23 +1054,6 @@ def test_denials_and_errors_carry_no_reader_or_scope_identifier(registry) -> Non
         assert failure.__cause__ is None
 
 
-def test_crash_torn_journal_suffix_is_dropped_on_reopen(registry) -> None:
-    kwargs = reopen_kwargs(registry)
-    journal = registry.root / "registry-journal.jsonl"
-    committed = journal.read_bytes()
-    with journal.open("ab") as handle:
-        handle.write(b'{"entry_sha256":"00')
-    with pytest.raises(ReaderAuthorizationRegistryUnsafe, match="incomplete"):
-        registry.identity()
-    reopened = ReaderAuthorizationRegistry(registry.root, **kwargs)
-    try:
-        assert journal.read_bytes() == committed
-        assert reopened.identity().state_version == 1
-        reopened.add_grant(grant_for(reopened))
-    finally:
-        reopened.close()
-
-
 def test_forked_child_cannot_use_the_parent_lock(registry) -> None:
     registry.add_grant(grant_for(registry))
     with registry.authority_read_fence():

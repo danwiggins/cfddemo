@@ -1145,7 +1145,6 @@ class ReaderAuthorizationRegistry:
                 )
             with _RR_LOCK(self, exclusive=True):
                 _RR_RECOVER_TEMPORARY_OBJECTS(self)
-                _RR_RECOVER_TORN_JOURNAL(self)
                 state = _RR_LOAD_STATE(self, check_trusted_head=False)
                 if state.head != expected_state_head_sha256:
                     raise ReaderAuthorizationRegistryUnsafe(
@@ -1521,25 +1520,6 @@ class ReaderAuthorizationRegistry:
                 ):
                     os.unlink(name, dir_fd=self._objects_fd)
             os.fsync(self._objects_fd)
-        except OSError:
-            raise ReaderAuthorizationRegistryUnsafe(
-                "reader registry recovery is unsafe"
-            ) from None
-
-    def _recover_torn_journal(self) -> None:
-        """Drop a crash-torn suffix: an entry commits only with its newline."""
-
-        descriptor = self._journal_fd
-        if descriptor is None:
-            raise ReaderAuthorizationRegistryUnsafe("reader registry is closed")
-        try:
-            content = os.pread(descriptor, MAX_JOURNAL_BYTES + 1, 0)
-            if len(content) > MAX_JOURNAL_BYTES or not content or content.endswith(
-                b"\n"
-            ):
-                return
-            os.ftruncate(descriptor, content.rfind(b"\n") + 1)
-            os.fsync(descriptor)
         except OSError:
             raise ReaderAuthorizationRegistryUnsafe(
                 "reader registry recovery is unsafe"
@@ -2057,7 +2037,6 @@ _REGISTRY_METHOD_SEAL = MappingProxyType(
             "_require_fence",
             "_validate_storage",
             "_recover_temporary_objects",
-            "_recover_torn_journal",
             "_load_journal",
             "_append_journal",
             "_accept_observed_head",
@@ -2122,7 +2101,6 @@ _RR_HELD = ReaderAuthorizationRegistry._held_by_current_thread
 _RR_REQUIRE_FENCE = ReaderAuthorizationRegistry._require_fence
 _RR_VALIDATE_STORAGE = ReaderAuthorizationRegistry._validate_storage
 _RR_RECOVER_TEMPORARY_OBJECTS = ReaderAuthorizationRegistry._recover_temporary_objects
-_RR_RECOVER_TORN_JOURNAL = ReaderAuthorizationRegistry._recover_torn_journal
 _RR_LOAD_JOURNAL = ReaderAuthorizationRegistry._load_journal
 _RR_APPEND_JOURNAL = ReaderAuthorizationRegistry._append_journal
 _RR_ACCEPT_OBSERVED_HEAD = ReaderAuthorizationRegistry._accept_observed_head
@@ -2153,7 +2131,6 @@ _REGISTRY_ALIAS_SEAL = MappingProxyType(
             "_RR_REQUIRE_FENCE",
             "_RR_VALIDATE_STORAGE",
             "_RR_RECOVER_TEMPORARY_OBJECTS",
-            "_RR_RECOVER_TORN_JOURNAL",
             "_RR_LOAD_JOURNAL",
             "_RR_APPEND_JOURNAL",
             "_RR_ACCEPT_OBSERVED_HEAD",

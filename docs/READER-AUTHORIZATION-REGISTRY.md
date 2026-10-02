@@ -161,9 +161,11 @@ first, trust rotation rules, grants bound to this registry and recorded while
 current under an active key, unique selectors, one revocation per registered
 grant, non-decreasing record times).
 
-A failed journal append truncates any torn suffix. If a crash leaves a suffix
-without its terminating newline, the next open (under the exclusive lock)
-truncates it, because an entry commits only with its newline. At most one uncommitted
+A failed journal append truncates any torn suffix back to the last committed
+entry, so the chain stays readable and the mutation can be retried. A crash,
+rather than a caught failure, can still leave a torn journal tail that makes
+the registry fail closed on reopen until repaired; crash recovery on reopen is
+the shared follow-up across the registries (D03, D05, D07, D09, E06). At most one uncommitted
 object is tolerated and it is removed by the next mutation. A failed create or
 restore, including a failed final reopen, removes the target it created.
 
