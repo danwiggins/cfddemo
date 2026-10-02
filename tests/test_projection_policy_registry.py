@@ -690,6 +690,17 @@ def test_registration_accepts_only_exact_validated_family_policies(
     assert registry.list_selectors().state_version == 0
 
 
+def _object_sha256_for(registry_id: str, epoch: str, policy) -> str:
+    import hashlib
+
+    stored = registry_module.RegisteredProjectionPolicyObject(
+        registry_id=registry_id, registry_epoch_sha256=epoch, policy=policy
+    )
+    return hashlib.sha256(
+        registry_module.registered_projection_object_bytes(stored)
+    ).hexdigest()
+
+
 def test_resolved_policy_contract_rejects_rebinding() -> None:
     policy = _fragment()
     epoch = "e" * 64
@@ -704,6 +715,11 @@ def test_resolved_policy_contract_rejects_rebinding() -> None:
         "policy_sha256": projection_policy_sha256(policy),
         "policy": policy,
     }
+    with pytest.raises(ValidationError, match="object digest"):
+        ResolvedProjectionPolicy(**values)
+    values["object_sha256"] = _object_sha256_for(
+        values["registry_id"], epoch, policy
+    )
     assert ResolvedProjectionPolicy(**values)
     for field, value in (
         ("selector_id", registry_module._selector_id(epoch, "projpol_other")),

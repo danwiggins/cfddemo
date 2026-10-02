@@ -781,6 +781,15 @@ class ResolvedProjectionPolicy(RegistryContract):
             raise ValueError("resolved projection version does not match its policy")
         if self.policy_sha256 != projection_policy_sha256(self.policy):
             raise ValueError("resolved projection policy digest is invalid")
+        stored = RegisteredProjectionPolicyObject(
+            registry_id=self.registry_id,
+            registry_epoch_sha256=self.registry_epoch_sha256,
+            policy=self.policy,
+        )
+        if self.object_sha256 != hashlib.sha256(
+            registered_projection_object_bytes(stored)
+        ).hexdigest():
+            raise ValueError("resolved projection object digest is invalid")
         return self
 
 
