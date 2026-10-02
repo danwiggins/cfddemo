@@ -105,6 +105,7 @@ _PINNED_RESULT_VERIFY = ResultCatalog.verify_reference
 _PINNED_RESULT_QUERY = ResultCatalog.query
 _PINNED_RESULT_AUTHORITY = ResultCatalog.authority_snapshot
 _PINNED_RESULT_TRUST_FENCE = ResultCatalog.trust_authority_fence
+_PINNED_RESULT_CONTENT_FENCE = ResultCatalog.content_authority_fence
 _PINNED_RESULT_PREPARE = ResultCatalog.prepare_bundle_import
 _PINNED_RESULT_STAGE = ResultCatalog.stage_prepared_import
 _PINNED_RESULT_ADOPT = ResultCatalog.adopt_prepared_import
@@ -608,6 +609,7 @@ class CohortRecordCatalog:
             ("query", _PINNED_RESULT_QUERY),
             ("authority_snapshot", _PINNED_RESULT_AUTHORITY),
             ("trust_authority_fence", _PINNED_RESULT_TRUST_FENCE),
+            ("content_authority_fence", _PINNED_RESULT_CONTENT_FENCE),
             ("prepare_bundle_import", _PINNED_RESULT_PREPARE),
             ("stage_prepared_import", _PINNED_RESULT_STAGE),
             ("adopt_prepared_import", _PINNED_RESULT_ADOPT),
@@ -746,7 +748,11 @@ class CohortRecordCatalog:
         ).hexdigest()
         try:
             _seal_cohort_instance(self)
-            with self._catalog_connection_lock:
+            # Lock order: E04 connection lock, E04 content lock (exclusive:
+            # recovery writes E04 rows), then this root inside recovery.
+            with self._catalog_connection_lock, _PINNED_RESULT_CONTENT_FENCE(
+                self._result_catalog, exclusive=True
+            ):
                 _CC_RECOVER_PENDING(self)
         except BaseException:
             self.close()
@@ -1337,6 +1343,7 @@ class CohortRecordCatalog:
             ("query", _PINNED_RESULT_QUERY),
             ("authority_snapshot", _PINNED_RESULT_AUTHORITY),
             ("trust_authority_fence", _PINNED_RESULT_TRUST_FENCE),
+            ("content_authority_fence", _PINNED_RESULT_CONTENT_FENCE),
             ("prepare_bundle_import", _PINNED_RESULT_PREPARE),
             ("stage_prepared_import", _PINNED_RESULT_STAGE),
             ("adopt_prepared_import", _PINNED_RESULT_ADOPT),
@@ -1452,13 +1459,21 @@ class CohortRecordCatalog:
 
     @contextmanager
     def _registered_authority_fence(
-        self, selector_id: str, cohort_version: int
+        self, selector_id: str, cohort_version: int, *, exclusive_content: bool = False
     ) -> Iterator[
         tuple[RegisteredCohortHistory, ActiveLinkageSnapshot, tuple[str, ...]]
     ]:
-        """Fence linkage, registry and exact selector authority through return."""
+        """Fence linkage, registry and exact selector authority through return.
+
+        ``exclusive_content`` holds the E04 catalog-content lock exclusively
+        (imports, which write E04 rows under the D06 root); readers hold it
+        shared.  Either way it is taken before the D06 root, as in the
+        composite order.
+        """
 
         _CC_ASSERT_RUNTIME(self)
+        if type(exclusive_content) is not bool:
+            raise CohortImportError("catalog content fence mode is invalid")
         if (
             type(selector_id) is not str
             or len(selector_id) != 56
@@ -1475,9 +1490,15 @@ class CohortRecordCatalog:
             stack.enter_context(_PINNED_LINKAGE_AUTHORITY_FENCE(self._linkage_store))
             stack.enter_context(_PINNED_REGISTRY_LOCK(registry, exclusive=False))
             # Lock order: linkage fence, D05 lock, catalog connection lock,
-            # then result trust (the TrustStore lock, or the registry read
-            # fence held by the catalog's trust_authority_fence).
+            # catalog-content lock, then result trust (the TrustStore lock,
+            # or the registry read fence held by the catalog's
+            # trust_authority_fence, which reuses the held content lock).
             stack.enter_context(self._catalog_connection_lock)
+            stack.enter_context(
+                _PINNED_RESULT_CONTENT_FENCE(
+                    self._result_catalog, exclusive=exclusive_content
+                )
+            )
             if self._result_trust_lock is not None:
                 stack.enter_context(self._result_trust_lock)
             stack.enter_context(_PINNED_RESULT_TRUST_FENCE(self._result_catalog))
@@ -1788,7 +1809,7 @@ class CohortRecordCatalog:
         assert isinstance(authority_head, AuthorityHead)
         assert isinstance(capability, CurrentMethodCapability)
         with _CC_REGISTERED_AUTHORITY_FENCE(
-            self, selector_id, cohort_version
+            self, selector_id, cohort_version, exclusive_content=True
         ) as (registered_history, linkage_snapshot, registry_state_heads):
             with self._catalog_connection_lock:
                 return _CC_IMPORT_BODY(
@@ -2582,8 +2603,8 @@ class CohortRecordCatalog:
 
         Order: linkage ``authority_read_fence``, then the cohort registry's
         ``authority_read_fence``, then this catalog's E04
-        ``trust_authority_fence`` on the result-trust-registry path, all held
-        by this thread.  The TrustStore path has no cross-process trust fence
+        ``trust_authority_fence`` (which holds the E04 catalog-content lock)
+        on the result-trust-registry path, all held by this thread.  The TrustStore path has no cross-process trust fence
         and is not composable.
         """
 
@@ -2605,13 +2626,15 @@ class CohortRecordCatalog:
                 "record status fence requires the held cohort registry fence"
             ) from None
         catalog = self._result_catalog
-        holders = object.__getattribute__(catalog, "__dict__").get(
-            "_trust_fence_holders"
-        )
+        catalog_state = object.__getattribute__(catalog, "__dict__")
+        holders = catalog_state.get("_trust_fence_holders")
+        content_owner = catalog_state.get("_content_lock_owner")
         if (
             self._result_trust_registry is None
             or type(holders) is not dict
             or type(holders.get(thread)) is not ResultTrustSnapshot
+            or type(content_owner) is not tuple
+            or content_owner[:2] != (os.getpid(), thread)
         ):
             raise CohortImportError(
                 "record status fence requires the held result trust fence"
@@ -2622,8 +2645,9 @@ class CohortRecordCatalog:
         """Hold the D06 record root shared for a composite authority fence.
 
         This is the D06 step of the E12 global lock order (D01 linkage, D05
-        cohort registry, E04 catalog connection, result trust, then this
-        root); the caller must already hold the first four on this thread.
+        cohort registry, E04 catalog connection and content lock, result
+        trust, then this root); the caller must already hold the earlier
+        steps on this thread.
         Import publication, recovery and cleanup need the exclusive root lock
         and cannot land, from any process, until this context exits.  Only
         ``record_status_in_fence`` may read inside it.  Not reentrant.

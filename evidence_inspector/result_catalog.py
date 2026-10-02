@@ -7,6 +7,7 @@ through descriptor-relative, no-follow opens before invoking the merged verifier
 
 from __future__ import annotations
 
+import fcntl
 import hashlib
 import os
 import shutil
@@ -382,6 +383,106 @@ def catalog_authority_sha256(snapshot: CatalogAuthoritySnapshot) -> str:
     return hashlib.sha256(
         b"traceback-catalog-authority-v1\0" + canonical_json_bytes(snapshot)
     ).hexdigest()
+
+
+CATALOG_CONTENT_SCHEMA_V1 = "traceback.catalog-content.v1"
+CATALOG_CONTENT_LOCK_NAME = "catalog-content.lock"
+
+
+class CatalogContentSnapshot(CatalogModel):
+    """Digest of every committed catalog row, read under the content lock.
+
+    ``content_sha256`` covers the exact rows of every catalog table (results,
+    aliases, publications, coordinated rows and candidates) and the schema
+    metadata, in primary-key order.  Any committed import, staging,
+    adoption, compensation, discard, candidate change or recovery changes it.
+    """
+
+    schema_version: Literal["traceback.catalog-content.v1"] = CATALOG_CONTENT_SCHEMA_V1
+    content_sha256: Sha256
+
+
+def catalog_dependency_head_sha256(
+    authority: CatalogAuthoritySnapshot, content: CatalogContentSnapshot
+) -> str:
+    """E04 dependency head for saved-head schema v2: authority plus content.
+
+    Saved-head schema v1 used ``catalog_authority_sha256`` alone, which does
+    not change when catalog rows change.
+    """
+
+    if (
+        type(authority) is not CatalogAuthoritySnapshot
+        or type(content) is not CatalogContentSnapshot
+    ):
+        raise CatalogError("catalog dependency head inputs are invalid")
+    return hashlib.sha256(
+        b"traceback-e04-dependency-head-v2\0"
+        + canonical_json_bytes(
+            {
+                "catalog_authority_sha256": catalog_authority_sha256(authority),
+                "catalog_content_sha256": content.content_sha256,
+            }
+        )
+    ).hexdigest()
+
+
+# Every catalog table in content-digest order, with its exact columns and key.
+_CONTENT_TABLES: tuple[tuple[str, tuple[str, ...], str], ...] = (
+    ("metadata", ("key", "value"), "key"),
+    (
+        "results",
+        (
+            "result_id",
+            "bundle_sha256",
+            "bundle_record_id",
+            "method_id",
+            "method_version",
+            "execution_state",
+            "information_state",
+            "trust_state",
+            "qualification_state",
+            "ref_json",
+        ),
+        "result_id",
+    ),
+    (
+        "opaque_aliases",
+        ("result_id", "display_alias", "run_alias", "timepoint_alias"),
+        "result_id",
+    ),
+    (
+        "result_publications",
+        ("publication_id", "result_id", "recovery_scope_sha256", "state"),
+        "publication_id",
+    ),
+    ("coordinated_results", ("result_id",), "result_id"),
+    (
+        "coordinated_candidates",
+        (
+            "operation_id",
+            "publication_id",
+            "result_id",
+            "recovery_scope_sha256",
+            "candidate_json",
+        ),
+        "operation_id",
+    ),
+)
+
+
+def _content_value_bytes(value: object) -> bytes:
+    if value is None:
+        return b"n"
+    if type(value) is int:
+        encoded = str(value).encode("ascii")
+        return b"i" + len(encoded).to_bytes(8, "big") + encoded
+    if type(value) is str:
+        encoded = value.encode("utf-8")
+        return b"s" + len(encoded).to_bytes(8, "big") + encoded
+    if type(value) is bytes:
+        return b"b" + len(value).to_bytes(8, "big") + value
+    raise CatalogUnsupportedSchema("catalog content value is unsupported")
 
 
 def registry_trust_snapshot_sha256(snapshot: ResultTrustSnapshot) -> str:
@@ -1046,7 +1147,18 @@ class ResultCatalog:
         self._database_identity: tuple[int, int] | None = None
         self._connection: sqlite3.Connection | None = None
         self._connection_lock = threading.RLock()
+        # Cross-process catalog-content lock (``flock`` on a lock file in the
+        # root).  Held only under ``_connection_lock``, so at most one thread
+        # of this instance owns it: (pid, thread ident, exclusive) or None.
+        self._content_lock_fd: int | None = None
+        self._content_lock_identity: tuple[int, int] | None = None
+        self._content_lock_owner: tuple[int, int, bool] | None = None
         self._prepared_imports: dict[str, PreparedCatalogImport] = {}
+        try:
+            self._open_content_lock()
+        except BaseException:
+            self.close()
+            raise
         try:
             database_stat = os.stat(
                 "catalog.sqlite3", dir_fd=self._root_fd, follow_symlinks=False
@@ -1222,16 +1334,191 @@ class ResultCatalog:
     def trust_authority_fence(self) -> Iterator[ResultTrustSnapshot | None]:
         """Hold this catalog's trust authority for a composing caller's body.
 
-        On the registry path this holds ``_connection_lock`` and the trust
-        read fence, so every catalog verification in the body uses the yielded
-        snapshot and no trust event commits until the body exits.  The
-        TrustStore path yields ``None`` and holds nothing.  The body must not
-        open a linkage fence, call a D07 registry, or mutate the trust
-        registry.
+        Lock order: ``_connection_lock``, then the catalog-content lock held
+        shared (or the exclusive content lock this thread already holds),
+        then the trust read fence.  On the registry path every catalog
+        verification in the body uses the yielded snapshot and no trust event
+        commits until the body exits; on both paths no E04 import, staging,
+        adoption, compensation, recovery or other catalog-row write commits,
+        from any process, until the body exits.  The TrustStore path yields
+        ``None`` and holds no trust lock.  The body must not open a linkage
+        fence, call a D07 registry, mutate the trust registry, or write this
+        catalog (a shared content lock is never upgraded).
         """
 
-        with _RC_TRUST_FENCE(self) as (_, snapshot):
+        with (
+            self._connection_lock,
+            _RC_CONTENT_LOCK(self, exclusive=False),
+            _RC_TRUST_FENCE(self) as (_, snapshot),
+        ):
             yield snapshot
+
+    def _open_content_lock(self) -> None:
+        """Open (creating once) the root's private catalog-content lock file.
+
+        Open-existing first, then exclusive create, retried a bounded number
+        of times: concurrent ``O_CREAT`` opens of one name can fail with
+        ``ENOENT`` on some filesystems.
+        """
+
+        flags = (
+            os.O_RDWR | getattr(os, "O_CLOEXEC", 0) | getattr(os, "O_NOFOLLOW", 0)
+        )
+        descriptor: int | None = None
+        for _ in range(16):
+            try:
+                descriptor = os.open(
+                    CATALOG_CONTENT_LOCK_NAME, flags, dir_fd=self._root_fd
+                )
+                break
+            except FileNotFoundError:
+                pass
+            except OSError:
+                raise CatalogFilesystemError("catalog content lock is unsafe") from None
+            try:
+                descriptor = os.open(
+                    CATALOG_CONTENT_LOCK_NAME,
+                    flags | os.O_CREAT | os.O_EXCL,
+                    0o600,
+                    dir_fd=self._root_fd,
+                )
+                break
+            except (FileExistsError, FileNotFoundError):
+                continue
+            except OSError:
+                raise CatalogFilesystemError("catalog content lock is unsafe") from None
+        if descriptor is None:
+            raise CatalogFilesystemError("catalog content lock is unsafe")
+        metadata = os.fstat(descriptor)
+        if not stat.S_ISREG(metadata.st_mode) or metadata.st_uid != os.geteuid():
+            os.close(descriptor)
+            raise CatalogFilesystemError("catalog content lock is unsafe")
+        self._content_lock_fd = descriptor
+        self._content_lock_identity = _inode_identity(metadata)
+
+    @contextmanager
+    def _content_lock(self, *, exclusive: bool) -> Iterator[None]:
+        """Hold the cross-process catalog-content lock through the body.
+
+        Every catalog-row writer (import, preparation, staging, adoption,
+        finish, compensation, discard, candidate registration/finish,
+        recovery, schema initialization) holds it exclusively; composing
+        readers (``trust_authority_fence``, ``content_authority_fence``) hold
+        it shared.  It sits after ``_connection_lock`` and before the trust
+        read fence (and before ``_SQLITE_OPEN_LOCK``).  Reentrant on the
+        owning thread: a nested entry reuses the held mode, and an exclusive
+        request under a held shared lock is refused, never upgraded.
+        """
+
+        if type(exclusive) is not bool:
+            raise CatalogError("catalog content lock mode is invalid")
+        with self._connection_lock:
+            owner = self._content_lock_owner
+            current = (os.getpid(), threading.get_ident())
+            if owner is not None:
+                if owner[:2] != current:
+                    raise CatalogError("catalog content lock owner is invalid")
+                if exclusive and not owner[2]:
+                    raise CatalogConflict(
+                        "catalog content lock cannot be upgraded to exclusive"
+                    )
+                yield
+                return
+            descriptor = self._content_lock_fd
+            if descriptor is None:
+                raise CatalogFilesystemError("catalog is closed")
+            try:
+                named = os.stat(
+                    CATALOG_CONTENT_LOCK_NAME,
+                    dir_fd=self._root_fd,
+                    follow_symlinks=False,
+                )
+                held = os.fstat(descriptor)
+            except OSError:
+                raise CatalogFilesystemError("catalog content lock changed") from None
+            if (
+                not stat.S_ISREG(named.st_mode)
+                or _inode_identity(named) != self._content_lock_identity
+                or _inode_identity(held) != self._content_lock_identity
+            ):
+                raise CatalogFilesystemError("catalog content lock changed")
+            fcntl.flock(descriptor, fcntl.LOCK_EX if exclusive else fcntl.LOCK_SH)
+            try:
+                self._content_lock_owner = (*current, exclusive)
+                try:
+                    yield
+                finally:
+                    self._content_lock_owner = None
+            finally:
+                fcntl.flock(descriptor, fcntl.LOCK_UN)
+
+    @contextmanager
+    def content_authority_fence(self, *, exclusive: bool = False) -> Iterator[None]:
+        """Hold this catalog's content lock for a composing caller's body.
+
+        Shared: no catalog-row write commits, from any process, until the
+        body exits (other shared holders proceed).  Exclusive: for a
+        composing writer (the D06 import) that will call this catalog's
+        writers inside the body.  Lock order: after ``_connection_lock``,
+        before the trust read fence; the composing caller takes it before
+        ``trust_authority_fence``.  Reentrant on the owning thread; a shared
+        hold is never upgraded.
+        """
+
+        with self._connection_lock, _RC_CONTENT_LOCK(self, exclusive=exclusive):
+            yield
+
+    def _content_sha256_locked(self) -> str:
+        owner = self._content_lock_owner
+        if owner is None or owner[:2] != (os.getpid(), threading.get_ident()):
+            raise CatalogError("catalog content fence is absent")
+        digest = hashlib.sha256(b"traceback-catalog-content-v1\0")
+        with _RC_CONNECT(self) as connection:
+            if connection.in_transaction:
+                raise CatalogError("catalog content read is nested in a transaction")
+            connection.execute("BEGIN")
+            try:
+                for table, columns, key in _CONTENT_TABLES:
+                    name = table.encode("ascii")
+                    digest.update(b"t" + len(name).to_bytes(8, "big") + name)
+                    count = 0
+                    cursor = connection.execute(
+                        f"SELECT {', '.join(columns)} FROM {table} ORDER BY {key}"
+                    )
+                    for row in cursor:
+                        count += 1
+                        digest.update(b"r")
+                        for value in tuple(row):
+                            digest.update(_content_value_bytes(value))
+                    digest.update(b"c" + count.to_bytes(8, "big"))
+                connection.commit()
+            except BaseException as error:
+                connection.rollback()
+                if isinstance(error, sqlite3.DatabaseError):
+                    raise CatalogUnsupportedSchema(
+                        "catalog content is unreadable"
+                    ) from None
+                raise
+        return digest.hexdigest()
+
+    def content_head_in_fence(self) -> CatalogContentSnapshot:
+        """Return the catalog content head; requires this thread's content lock.
+
+        The composing caller holds ``trust_authority_fence`` or
+        ``content_authority_fence``; this read takes no lock of its own.
+        """
+
+        with self._connection_lock:
+            _RC_VALIDATE_STORAGE(self)
+            return CatalogContentSnapshot(
+                content_sha256=_RC_CONTENT_SHA256_LOCKED(self)
+            )
+
+    def content_snapshot(self) -> CatalogContentSnapshot:
+        """Return the catalog content head under a shared content lock."""
+
+        with self._connection_lock, _RC_CONTENT_LOCK(self, exclusive=False):
+            return _RC_CONTENT_HEAD_IN_FENCE(self)
 
     def _fault(self, point: str) -> None:
         controller = self._fault_controller
@@ -1270,7 +1557,12 @@ class ResultCatalog:
                 pass
             self._connection = None
             self._sqlite_database_fd = None
-        for attribute in ("_database_fd", "_objects_fd", "_root_fd"):
+        for attribute in (
+            "_database_fd",
+            "_content_lock_fd",
+            "_objects_fd",
+            "_root_fd",
+        ):
             descriptor = getattr(self, attribute, None)
             if descriptor is not None:
                 try:
@@ -1423,7 +1715,14 @@ class ResultCatalog:
                 _RC_VALIDATE_STORAGE(self)
 
     def _initialize(self) -> None:
-        with self._connection_lock, _SQLITE_OPEN_LOCK, _RC_CONNECT(self) as connection:
+        # Lock order: connection lock, exclusive content lock, then the
+        # module SQLite open lock (as every catalog writer's first connect).
+        with (
+            self._connection_lock,
+            _RC_CONTENT_LOCK(self, exclusive=True),
+            _SQLITE_OPEN_LOCK,
+            _RC_CONNECT(self) as connection,
+        ):
             connection.execute("PRAGMA synchronous=FULL")
             connection.execute("BEGIN EXCLUSIVE")
             try:
@@ -1616,7 +1915,12 @@ class ResultCatalog:
         )
         object_path = self._bound_objects / bundle_sha256
         try:
-            with _RC_TRUST_FENCE(self) as (trust_store, _):
+            # Lock order: connection lock, exclusive content lock, trust.
+            with (
+                self._connection_lock,
+                _RC_CONTENT_LOCK(self, exclusive=True),
+                _RC_TRUST_FENCE(self) as (trust_store, _),
+            ):
                 _RC_VALIDATE_VERIFICATION_AUTHORITY(self)
                 verified = _PINNED_VERIFY_BUNDLE(temporary, trust_store)
                 _PINNED_READER_SELECT(self.reader_registry, verified)
@@ -1784,7 +2088,12 @@ class ResultCatalog:
         )
         object_path = self._bound_objects / bundle_sha256
         try:
-            with _RC_TRUST_FENCE(self) as (trust_store, _):
+            # Lock order: connection lock, exclusive content lock, trust.
+            with (
+                self._connection_lock,
+                _RC_CONTENT_LOCK(self, exclusive=True),
+                _RC_TRUST_FENCE(self) as (trust_store, _),
+            ):
                 authority = _RC_AUTHORITY_SNAPSHOT(self)
                 verified = _PINNED_VERIFY_BUNDLE(temporary, trust_store)
                 reader = _PINNED_READER_SELECT(self.reader_registry, verified)
@@ -1935,7 +2244,11 @@ class ResultCatalog:
     ) -> None:
         """Create a durable pending row that catalog queries cannot observe."""
 
-        with _RC_TRUST_FENCE(self):
+        with (
+            self._connection_lock,
+            _RC_CONTENT_LOCK(self, exclusive=True),
+            _RC_TRUST_FENCE(self),
+        ):
             normalized = _RC_REQUIRE_PREPARED(self, prepared)
             if normalized.already_owned:
                 return
@@ -2019,7 +2332,11 @@ class ResultCatalog:
         transaction.
         """
 
-        with _RC_TRUST_FENCE(self):
+        with (
+            self._connection_lock,
+            _RC_CONTENT_LOCK(self, exclusive=True),
+            _RC_TRUST_FENCE(self),
+        ):
             normalized = _RC_REQUIRE_PREPARED(self, prepared)
             if normalized.already_owned:
                 _RC_VERIFY_REFERENCE(self, normalized.reference)
@@ -2064,58 +2381,60 @@ class ResultCatalog:
     ) -> None:
         """Forget an adopted preparation after its coordinator completes."""
 
-        normalized = _RC_REQUIRE_PREPARED(self, prepared, require_authority=False)
-        if not normalized.already_owned:
-            with _RC_CONNECT(self) as connection:
-                row = connection.execute(
-                    """SELECT state FROM result_publications
-                       WHERE result_id=? AND publication_id=?""",
-                    (
-                        normalized.reference.result_id,
-                        normalized.publication_id,
-                    ),
-                ).fetchone()
-            if row is None or row[0] != "adopted":
-                raise CatalogConflict("catalog publication is not adopted")
-        self._prepared_imports.pop(normalized.publication_id, None)
+        with self._connection_lock, _RC_CONTENT_LOCK(self, exclusive=True):
+            normalized = _RC_REQUIRE_PREPARED(self, prepared, require_authority=False)
+            if not normalized.already_owned:
+                with _RC_CONNECT(self) as connection:
+                    row = connection.execute(
+                        """SELECT state FROM result_publications
+                           WHERE result_id=? AND publication_id=?""",
+                        (
+                            normalized.reference.result_id,
+                            normalized.publication_id,
+                        ),
+                    ).fetchone()
+                if row is None or row[0] != "adopted":
+                    raise CatalogConflict("catalog publication is not adopted")
+            self._prepared_imports.pop(normalized.publication_id, None)
 
     def compensate_prepared_import(
         self, prepared: PreparedCatalogImport | Mapping[str, object]
     ) -> None:
         """Remove this operation's exact pending or adopted row after coordinator failure."""
 
-        normalized = _RC_REQUIRE_PREPARED(self, prepared, require_authority=False)
-        if not normalized.already_owned:
-            with _RC_CONNECT(self) as connection:
-                connection.execute("BEGIN IMMEDIATE")
-                try:
-                    row = connection.execute(
-                        """SELECT r.ref_json FROM results r
-                           JOIN result_publications p ON p.result_id=r.result_id
-                           WHERE r.result_id=? AND p.publication_id=?""",
-                        (
-                            normalized.reference.result_id,
-                            normalized.publication_id,
-                        ),
-                    ).fetchone()
-                    if row is not None:
-                        if (
-                            CatalogResultRef.model_validate_json(row[0])
-                            != normalized.reference
-                        ):
-                            raise CatalogConflict(
-                                "catalog publication compensation conflicts"
+        with self._connection_lock, _RC_CONTENT_LOCK(self, exclusive=True):
+            normalized = _RC_REQUIRE_PREPARED(self, prepared, require_authority=False)
+            if not normalized.already_owned:
+                with _RC_CONNECT(self) as connection:
+                    connection.execute("BEGIN IMMEDIATE")
+                    try:
+                        row = connection.execute(
+                            """SELECT r.ref_json FROM results r
+                               JOIN result_publications p ON p.result_id=r.result_id
+                               WHERE r.result_id=? AND p.publication_id=?""",
+                            (
+                                normalized.reference.result_id,
+                                normalized.publication_id,
+                            ),
+                        ).fetchone()
+                        if row is not None:
+                            if (
+                                CatalogResultRef.model_validate_json(row[0])
+                                != normalized.reference
+                            ):
+                                raise CatalogConflict(
+                                    "catalog publication compensation conflicts"
+                                )
+                            _RC_REMOVE_OWNER(
+                                connection,
+                                normalized.publication_id,
+                                normalized.reference.result_id,
                             )
-                        _RC_REMOVE_OWNER(
-                            connection,
-                            normalized.publication_id,
-                            normalized.reference.result_id,
-                        )
-                    connection.commit()
-                except BaseException:
-                    connection.rollback()
-                    raise
-        self._prepared_imports.pop(normalized.publication_id, None)
+                        connection.commit()
+                    except BaseException:
+                        connection.rollback()
+                        raise
+            self._prepared_imports.pop(normalized.publication_id, None)
 
     def verify_prepared_object(
         self, prepared: PreparedCatalogImport | Mapping[str, object]
@@ -2149,34 +2468,35 @@ class ResultCatalog:
     ) -> None:
         """Remove only this operation's invisible pending row; retain shared object bytes."""
 
-        normalized = _RC_REQUIRE_PREPARED(self, prepared, require_authority=False)
-        if not normalized.already_owned:
-            with _RC_CONNECT(self) as connection:
-                connection.execute("BEGIN IMMEDIATE")
-                try:
-                    row = connection.execute(
-                        """SELECT state FROM result_publications
-                           WHERE result_id=? AND publication_id=?""",
-                        (
-                            normalized.reference.result_id,
-                            normalized.publication_id,
-                        ),
-                    ).fetchone()
-                    if row is not None:
-                        if row[0] != "pending":
-                            raise CatalogConflict(
-                                "adopted catalog publication cannot be discarded"
+        with self._connection_lock, _RC_CONTENT_LOCK(self, exclusive=True):
+            normalized = _RC_REQUIRE_PREPARED(self, prepared, require_authority=False)
+            if not normalized.already_owned:
+                with _RC_CONNECT(self) as connection:
+                    connection.execute("BEGIN IMMEDIATE")
+                    try:
+                        row = connection.execute(
+                            """SELECT state FROM result_publications
+                               WHERE result_id=? AND publication_id=?""",
+                            (
+                                normalized.reference.result_id,
+                                normalized.publication_id,
+                            ),
+                        ).fetchone()
+                        if row is not None:
+                            if row[0] != "pending":
+                                raise CatalogConflict(
+                                    "adopted catalog publication cannot be discarded"
+                                )
+                            _RC_REMOVE_OWNER(
+                                connection,
+                                normalized.publication_id,
+                                normalized.reference.result_id,
                             )
-                        _RC_REMOVE_OWNER(
-                            connection,
-                            normalized.publication_id,
-                            normalized.reference.result_id,
-                        )
-                    connection.commit()
-                except BaseException:
-                    connection.rollback()
-                    raise
-        self._prepared_imports.pop(normalized.publication_id, None)
+                        connection.commit()
+                    except BaseException:
+                        connection.rollback()
+                        raise
+            self._prepared_imports.pop(normalized.publication_id, None)
 
     def register_coordinated_candidate(
         self,
@@ -2185,43 +2505,44 @@ class ResultCatalog:
     ) -> None:
         """Durably bind one exact coordinator attempt before filesystem visibility."""
 
-        if (
-            type(prepared) is not PreparedCatalogImport
-            or type(candidate) is not CoordinatedCatalogCandidate
-        ):
-            raise CatalogConflict("catalog candidate is invalid")
-        normalized = _RC_REQUIRE_PREPARED(self, prepared)
-        if (
-            candidate.publication_id != normalized.publication_id
-            or candidate.result_id != normalized.reference.result_id
-            or candidate.recovery_scope_sha256 != normalized.recovery_scope_sha256
-        ):
-            raise CatalogConflict("catalog candidate conflicts with preparation")
-        encoded = canonical_json_bytes(candidate)
-        with _RC_CONNECT(self) as connection:
-            connection.execute("BEGIN IMMEDIATE")
-            try:
-                row = connection.execute(
-                    "SELECT candidate_json FROM coordinated_candidates WHERE operation_id=?",
-                    (candidate.operation_id,),
-                ).fetchone()
-                if row is None:
-                    connection.execute(
-                        "INSERT INTO coordinated_candidates VALUES(?,?,?,?,?)",
-                        (
-                            candidate.operation_id,
-                            candidate.publication_id,
-                            candidate.result_id,
-                            candidate.recovery_scope_sha256,
-                            encoded,
-                        ),
-                    )
-                elif bytes(row[0]) != encoded:
-                    raise CatalogConflict("catalog candidate identity conflicts")
-                connection.commit()
-            except BaseException:
-                connection.rollback()
-                raise
+        with self._connection_lock, _RC_CONTENT_LOCK(self, exclusive=True):
+            if (
+                type(prepared) is not PreparedCatalogImport
+                or type(candidate) is not CoordinatedCatalogCandidate
+            ):
+                raise CatalogConflict("catalog candidate is invalid")
+            normalized = _RC_REQUIRE_PREPARED(self, prepared)
+            if (
+                candidate.publication_id != normalized.publication_id
+                or candidate.result_id != normalized.reference.result_id
+                or candidate.recovery_scope_sha256 != normalized.recovery_scope_sha256
+            ):
+                raise CatalogConflict("catalog candidate conflicts with preparation")
+            encoded = canonical_json_bytes(candidate)
+            with _RC_CONNECT(self) as connection:
+                connection.execute("BEGIN IMMEDIATE")
+                try:
+                    row = connection.execute(
+                        "SELECT candidate_json FROM coordinated_candidates WHERE operation_id=?",
+                        (candidate.operation_id,),
+                    ).fetchone()
+                    if row is None:
+                        connection.execute(
+                            "INSERT INTO coordinated_candidates VALUES(?,?,?,?,?)",
+                            (
+                                candidate.operation_id,
+                                candidate.publication_id,
+                                candidate.result_id,
+                                candidate.recovery_scope_sha256,
+                                encoded,
+                            ),
+                        )
+                    elif bytes(row[0]) != encoded:
+                        raise CatalogConflict("catalog candidate identity conflicts")
+                    connection.commit()
+                except BaseException:
+                    connection.rollback()
+                    raise
 
     def coordinated_candidates(
         self, recovery_scope_sha256: str
@@ -2254,27 +2575,28 @@ class ResultCatalog:
     ) -> None:
         """Remove the exact candidate row; this is the durable commit point."""
 
-        if type(candidate) is not CoordinatedCatalogCandidate:
-            raise CatalogConflict("catalog candidate is invalid")
-        encoded = canonical_json_bytes(candidate)
-        with _RC_CONNECT(self) as connection:
-            connection.execute("BEGIN IMMEDIATE")
-            try:
-                row = connection.execute(
-                    "SELECT candidate_json FROM coordinated_candidates WHERE operation_id=?",
-                    (candidate.operation_id,),
-                ).fetchone()
-                if row is not None:
-                    if bytes(row[0]) != encoded:
-                        raise CatalogConflict("catalog candidate identity conflicts")
-                    connection.execute(
-                        "DELETE FROM coordinated_candidates WHERE operation_id=?",
+        with self._connection_lock, _RC_CONTENT_LOCK(self, exclusive=True):
+            if type(candidate) is not CoordinatedCatalogCandidate:
+                raise CatalogConflict("catalog candidate is invalid")
+            encoded = canonical_json_bytes(candidate)
+            with _RC_CONNECT(self) as connection:
+                connection.execute("BEGIN IMMEDIATE")
+                try:
+                    row = connection.execute(
+                        "SELECT candidate_json FROM coordinated_candidates WHERE operation_id=?",
                         (candidate.operation_id,),
-                    )
-                connection.commit()
-            except BaseException:
-                connection.rollback()
-                raise
+                    ).fetchone()
+                    if row is not None:
+                        if bytes(row[0]) != encoded:
+                            raise CatalogConflict("catalog candidate identity conflicts")
+                        connection.execute(
+                            "DELETE FROM coordinated_candidates WHERE operation_id=?",
+                            (candidate.operation_id,),
+                        )
+                    connection.commit()
+                except BaseException:
+                    connection.rollback()
+                    raise
 
     def recover_pending_publication(
         self,
@@ -2286,45 +2608,46 @@ class ResultCatalog:
     ) -> Literal["absent", "pending_removed", "adopted"]:
         """Idempotently remove an exact pending publication after process recovery."""
 
-        if type(publication_id) is not str or type(recovery_scope_sha256) is not str:
-            raise CatalogConflict("catalog publication identity is invalid")
-        if type(retain_adopted) is not bool:
-            raise CatalogConflict("catalog recovery disposition is invalid")
-        if type(reference) is not CatalogResultRef:
-            raise CatalogConflict("catalog reference is invalid")
-        reference = CatalogResultRef.model_validate_json(
-            canonical_json_bytes(reference)
-        )
-        try:
-            scope = TypeAdapter(Sha256).validate_python(recovery_scope_sha256)
-        except Exception:  # noqa: BLE001 - normalize hostile recovery scope
-            raise CatalogConflict("catalog recovery scope is invalid") from None
-        if not publication_id.startswith(f"publication_{scope[:16]}_"):
-            raise CatalogConflict("catalog publication recovery scope conflicts")
-        with _RC_CONNECT(self) as connection:
-            connection.execute("BEGIN IMMEDIATE")
+        with self._connection_lock, _RC_CONTENT_LOCK(self, exclusive=True):
+            if type(publication_id) is not str or type(recovery_scope_sha256) is not str:
+                raise CatalogConflict("catalog publication identity is invalid")
+            if type(retain_adopted) is not bool:
+                raise CatalogConflict("catalog recovery disposition is invalid")
+            if type(reference) is not CatalogResultRef:
+                raise CatalogConflict("catalog reference is invalid")
+            reference = CatalogResultRef.model_validate_json(
+                canonical_json_bytes(reference)
+            )
             try:
-                row = connection.execute(
-                    """SELECT r.ref_json, p.state FROM results r
-                       JOIN result_publications p ON p.result_id=r.result_id
-                       WHERE r.result_id=? AND p.publication_id=?
-                       AND p.recovery_scope_sha256=?""",
-                    (reference.result_id, publication_id, scope),
-                ).fetchone()
-                if row is None:
+                scope = TypeAdapter(Sha256).validate_python(recovery_scope_sha256)
+            except Exception:  # noqa: BLE001 - normalize hostile recovery scope
+                raise CatalogConflict("catalog recovery scope is invalid") from None
+            if not publication_id.startswith(f"publication_{scope[:16]}_"):
+                raise CatalogConflict("catalog publication recovery scope conflicts")
+            with _RC_CONNECT(self) as connection:
+                connection.execute("BEGIN IMMEDIATE")
+                try:
+                    row = connection.execute(
+                        """SELECT r.ref_json, p.state FROM results r
+                           JOIN result_publications p ON p.result_id=r.result_id
+                           WHERE r.result_id=? AND p.publication_id=?
+                           AND p.recovery_scope_sha256=?""",
+                        (reference.result_id, publication_id, scope),
+                    ).fetchone()
+                    if row is None:
+                        connection.commit()
+                        return "absent"
+                    if CatalogResultRef.model_validate_json(row[0]) != reference:
+                        raise CatalogConflict("recovered catalog publication conflicts")
+                    if row[1] == "adopted" and retain_adopted:
+                        connection.commit()
+                        return "adopted"
+                    _RC_REMOVE_OWNER(connection, publication_id, reference.result_id)
                     connection.commit()
-                    return "absent"
-                if CatalogResultRef.model_validate_json(row[0]) != reference:
-                    raise CatalogConflict("recovered catalog publication conflicts")
-                if row[1] == "adopted" and retain_adopted:
-                    connection.commit()
-                    return "adopted"
-                _RC_REMOVE_OWNER(connection, publication_id, reference.result_id)
-                connection.commit()
-                return "pending_removed"
-            except BaseException:
-                connection.rollback()
-                raise
+                    return "pending_removed"
+                except BaseException:
+                    connection.rollback()
+                    raise
 
     def pending_publications(
         self, recovery_scope_sha256: str
@@ -2674,6 +2997,12 @@ _RESULT_METHOD_SEAL = MappingProxyType(
             "adopt_prepared_import",
             "authority_snapshot",
             "compensate_prepared_import",
+            "content_authority_fence",
+            "content_head_in_fence",
+            "content_snapshot",
+            "_content_lock",
+            "_content_sha256_locked",
+            "_open_content_lock",
             "coordinated_candidates",
             "finish_prepared_import",
             "finish_coordinated_candidate",
@@ -2843,6 +3172,9 @@ _RC_AUTHORITY_SNAPSHOT = ResultCatalog.authority_snapshot
 _RC_BIND_DATABASE_DESCRIPTOR = ResultCatalog._bind_database_descriptor
 _RC_CAPTURE = ResultCatalog._capture
 _RC_CONNECT = ResultCatalog._connect
+_RC_CONTENT_LOCK = ResultCatalog._content_lock
+_RC_CONTENT_SHA256_LOCKED = ResultCatalog._content_sha256_locked
+_RC_CONTENT_HEAD_IN_FENCE = ResultCatalog.content_head_in_fence
 _RC_FAULT = ResultCatalog._fault
 _RC_OPEN_SQLITE_CONNECTION = ResultCatalog._open_sqlite_connection
 _RC_REFERENCE = ResultCatalog._reference
@@ -2862,6 +3194,9 @@ _RESULT_ALIAS_SEAL = MappingProxyType(
             "_RC_BIND_DATABASE_DESCRIPTOR",
             "_RC_CAPTURE",
             "_RC_CONNECT",
+            "_RC_CONTENT_LOCK",
+            "_RC_CONTENT_SHA256_LOCKED",
+            "_RC_CONTENT_HEAD_IN_FENCE",
             "_RC_FAULT",
             "_RC_OPEN_SQLITE_CONNECTION",
             "_RC_REFERENCE",
@@ -3168,10 +3503,13 @@ __all__ = [
     "CATALOG_AUTHORITY_SCHEMA_V1",
     "CATALOG_AUTHORITY_SCHEMA_V2",
     "CATALOG_AUTHORITY_SCHEMA_VERSIONS",
+    "CATALOG_CONTENT_LOCK_NAME",
+    "CATALOG_CONTENT_SCHEMA_V1",
     "DEFAULT_RESULT_BUNDLE_READER_REGISTRY",
     "CatalogAliases",
     "CatalogAuthoritySnapshot",
     "CatalogConflict",
+    "CatalogContentSnapshot",
     "CatalogEmptyReason",
     "CatalogError",
     "CatalogFilesystemError",
@@ -3195,5 +3533,6 @@ __all__ = [
     "bind_catalog_live_reader",
     "bound_catalog_authority",
     "catalog_authority_sha256",
+    "catalog_dependency_head_sha256",
     "registry_trust_snapshot_sha256",
 ]

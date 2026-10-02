@@ -29,7 +29,8 @@ is derived from and every deviation from the integration plan)::
 
     reader authorization -> D10 context -> D09 summary -> D01 linkage
     (D04 history is fenced by D01) -> D05 cohort registry
-    -> E04 catalog connection + result trust -> D06 record root
+    -> E04 catalog connection + catalog content (shared) + result trust
+    -> D06 record root
     -> E06 source -> D03 decision -> D07 comparison -> family-source
     -> anchor policy -> projection policy -> saved-comparison registry
 
@@ -81,6 +82,7 @@ from evidence_inspector.longitudinal_comparison_registry import (
     HeldSavedComparisonDependencies,
     LongitudinalComparisonRegistryStale,
     LongitudinalComparisonRegistryUnsafe,
+    SAVED_DEPENDENCY_HEADS_SCHEMA_V2,
     SavedComparisonDependencyFence,
     SavedComparisonDependencyHeadsV1,
     SavedComparisonDependencyScopeV1,
@@ -114,8 +116,9 @@ from evidence_inspector.repeatability_comparison_registry import (
 )
 from evidence_inspector.result_catalog import (
     CatalogAuthoritySnapshot,
+    CatalogContentSnapshot,
     ResultCatalog,
-    catalog_authority_sha256,
+    catalog_dependency_head_sha256,
 )
 from evidence_inspector.result_trust_registry import (
     ResultTrustRegistry,
@@ -225,6 +228,7 @@ _PINNED_READER_FENCE = ReaderAuthorizationRegistry.authority_read_fence
 _PINNED_READER_LOAD_STATE = ReaderAuthorizationRegistry._load_state
 _PINNED_CATALOG_TRUST_FENCE = ResultCatalog.trust_authority_fence
 _PINNED_CATALOG_AUTHORITY = ResultCatalog.authority_snapshot
+_PINNED_CATALOG_CONTENT_HEAD = ResultCatalog.content_head_in_fence
 _PINNED_TRUST_SNAPSHOT_LOCKED = ResultTrustRegistry._snapshot_locked
 _PINNED_STATUS_FENCE = CohortRecordCatalog.record_status_read_fence
 _PINNED_STATUS_IN_FENCE = CohortRecordCatalog.record_status_in_fence
@@ -257,6 +261,7 @@ _CLASS_PINS: MappingProxyType[type, MappingProxyType[str, object]] = MappingProx
             {
                 "trust_authority_fence": _PINNED_CATALOG_TRUST_FENCE,
                 "authority_snapshot": _PINNED_CATALOG_AUTHORITY,
+                "content_head_in_fence": _PINNED_CATALOG_CONTENT_HEAD,
             }
         ),
         ResultTrustRegistry: MappingProxyType(
@@ -554,13 +559,14 @@ class _CohortAdapter(_Adapter):
 
 
 class _CatalogTrustAdapter(_Adapter):
-    """E04 catalog connection lock, then the result-trust read fence.
+    """E04 connection lock, E04 catalog-content lock (shared), result trust.
 
-    ``ResultCatalog.trust_authority_fence`` takes both, in that order, and
-    marks this thread so every catalog verification inside reuses the one
-    held trust snapshot.  Trust add/revoke and catalog trust use block on it.
-    Catalog *rows* have no cross-process fence: another process can still
-    import into this catalog (see docs/COMPOSITE-AUTHORITY-FENCE.md).
+    ``ResultCatalog.trust_authority_fence`` takes all three, in that order,
+    and marks this thread so every catalog verification inside reuses the
+    one held trust snapshot.  Trust add/revoke, and every E04 catalog-row
+    writer (import, staging, adoption, finish, compensation, discard,
+    candidates, recovery), in any process, block on it.  The E04 head is the
+    saved-head v2 definition: catalog authority plus catalog content.
     """
 
     step = CompositeLockStep.E04_CATALOG_TRUST
@@ -591,6 +597,10 @@ class _CatalogTrustAdapter(_Adapter):
         authority = _PINNED_CATALOG_AUTHORITY(self.store)
         if type(authority) is not CatalogAuthoritySnapshot:
             raise CompositeAuthorityUnsafe("catalog authority is invalid")
+        # Read under the held shared content lock; takes no lock of its own.
+        content = _PINNED_CATALOG_CONTENT_HEAD(self.store)
+        if type(content) is not CatalogContentSnapshot:
+            raise CompositeAuthorityUnsafe("catalog content head is invalid")
         # Re-read the trust journal directly: the shared trust lock is held
         # by this thread and is not reentrant.
         trust = _PINNED_TRUST_SNAPSHOT_LOCKED(self.trust)
@@ -604,7 +614,7 @@ class _CatalogTrustAdapter(_Adapter):
             DependencySlot.E04_CATALOG: _head(
                 "e04_catalog_" + storage[:32],
                 storage,
-                catalog_authority_sha256(authority),
+                catalog_dependency_head_sha256(authority, content),
             ),
             DependencySlot.RESULT_TRUST: _head(
                 trust.registry_id, trust.registry_epoch_sha256, trust.state_head_sha256
@@ -723,6 +733,7 @@ class _CompositeHold:
         base = self._base
         try:
             return SavedComparisonDependencyHeadsV1(
+                schema_version=SAVED_DEPENDENCY_HEADS_SCHEMA_V2,
                 d01_linkage=base[DependencySlot.D01_LINKAGE],
                 d04_history=base[DependencySlot.D04_HISTORY],
                 d05_cohort=base[DependencySlot.D05_COHORT],
