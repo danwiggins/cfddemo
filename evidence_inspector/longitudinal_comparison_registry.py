@@ -277,6 +277,17 @@ class DependencyHeadV1(RegistryContract):
     head: Sha256
 
 
+SAVED_DEPENDENCY_HEADS_SCHEMA_V1 = "traceback.saved-comparison-dependency-heads.v1"
+SAVED_DEPENDENCY_HEADS_SCHEMA_V2 = "traceback.saved-comparison-dependency-heads.v2"
+# Every head-vector version a retained object, journal entry, recovery record
+# or backup may name, oldest first.  The fields are identical; only the
+# definition of the ``e04_catalog`` head differs.
+SAVED_DEPENDENCY_HEADS_SCHEMA_VERSIONS = (
+    SAVED_DEPENDENCY_HEADS_SCHEMA_V1,
+    SAVED_DEPENDENCY_HEADS_SCHEMA_V2,
+)
+
+
 class SavedComparisonDependencyHeadsV1(RegistryContract):
     """Closed dependency-head vector, one slot per authority in the lock order.
 
@@ -284,11 +295,25 @@ class SavedComparisonDependencyHeadsV1(RegistryContract):
     registry is not merged yet.  Schema v1 accepts ``None`` there; when that
     registry merges, the live fence fills the slot and every vector read
     before then compares unequal, so older saves reopen as ``stale``.
+
+    Schema versions (the class name is kept for API stability):
+
+    - ``v1``: the ``e04_catalog`` head is E04's catalog authority digest
+      (storage, trust, reader registry); it does not change when catalog
+      rows change.
+    - ``v2`` (written by the composite fence): the ``e04_catalog`` head is
+      ``catalog_dependency_head_sha256`` (authority plus the committed
+      catalog content head, read under E04's cross-process content lock).
+
+    Retained v1 vectors still parse with their exact bytes and digests; a v1
+    vector never equals a v2 one, and ``stale_dependency_slots`` reports the
+    ``e04_catalog`` slot stale across versions, so v1 saves reopen as stale.
     """
 
-    schema_version: Literal["traceback.saved-comparison-dependency-heads.v1"] = (
-        "traceback.saved-comparison-dependency-heads.v1"
-    )
+    schema_version: Literal[
+        "traceback.saved-comparison-dependency-heads.v1",
+        "traceback.saved-comparison-dependency-heads.v2",
+    ] = SAVED_DEPENDENCY_HEADS_SCHEMA_V2
     d01_linkage: DependencyHeadV1
     d04_history: DependencyHeadV1
     d05_cohort: DependencyHeadV1
@@ -331,12 +356,18 @@ class SavedComparisonDependencyHeadsV1(RegistryContract):
 def stale_dependency_slots(
     saved: SavedComparisonDependencyHeadsV1, live: SavedComparisonDependencyHeadsV1
 ) -> tuple[DependencySlot, ...]:
-    """Return the slots whose ID, epoch or head differ, in lock order."""
+    """Return the slots whose ID, epoch or head differ, in lock order.
 
+    Across head-vector schema versions the ``e04_catalog`` head has another
+    definition, so that slot is stale whatever its value.
+    """
+
+    versions_differ = saved.schema_version != live.schema_version
     return tuple(
         slot
         for slot in DependencySlot
         if getattr(saved, slot.value) != getattr(live, slot.value)
+        or (versions_differ and slot is DependencySlot.E04_CATALOG)
     )
 
 
@@ -3017,6 +3048,9 @@ __all__ = [
     "SavedComparisonBackupObjectV1",
     "SavedComparisonCommitmentsV1",
     "SavedComparisonDependencyFence",
+    "SAVED_DEPENDENCY_HEADS_SCHEMA_V1",
+    "SAVED_DEPENDENCY_HEADS_SCHEMA_V2",
+    "SAVED_DEPENDENCY_HEADS_SCHEMA_VERSIONS",
     "SavedComparisonDependencyHeadsV1",
     "SavedComparisonDependencyScopeV1",
     "SavedComparisonFiltersV1",
