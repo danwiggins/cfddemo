@@ -117,7 +117,9 @@ Known limits of this protocol:
   `docs/COMPOSITE-AUTHORITY-FENCE.md`). D08 consumes E04 rows only through D06
   bindings, which D06 re-verifies against E04 inside its own fence.
 - Time-dependent state (reader grant expiry, D07 envelope validity) is
-  evaluated at each read. D07 `replayed_at` is the as-of time of a comparison.
+  evaluated at each read. D07 `replayed_at` is the as-of time of a comparison;
+  it stays in the protected row (an absolute timestamp never reaches public
+  bytes).
 - The family adapter, request capture and derivation run outside every store
   fence, between the two snapshots.
 
@@ -189,14 +191,16 @@ count and `bridge_execution_state=not_executed`.
 
 The anchor row is `anchor`; members the D03 series does not decide are
 `not_evaluated`. The D03 series is found by policy digest, anchor key and the
-resolved anchor record; zero, several or stale matches leave every member
-`not_evaluated` with a series state.
+resolved anchor record; zero or several matches leave every member
+`not_evaluated` with a series state. A not-current series with that policy and
+anchor key, with no current match, is `authority_stale` (it cannot be proven
+unrelated to this anchor).
 
 ### Comparisons and segments
 
 D07 numbers (anchor/member values, both uncertainty intervals, both
-comparison denominators, delta, maximum absolute delta, classification,
-`replayed_at`) appear only when every gate passes for that exact comparison
+comparison denominators, delta, maximum absolute delta, classification) appear
+only when every gate passes for that exact comparison
 (`comparison_suppression`):
 
 - D06: member and anchor rows are `available`;
@@ -283,14 +287,19 @@ text.
 | --- | --- |
 | `invalid_request` | request capture fails; unknown/invalid selector; anchor, projection or D09 policy for another cohort or measurement; cohort over 1,000 members |
 | `permission_denied` | missing, forged, revoked, expired, wrong-scope or stale-head grant; registry unavailable |
-| `authority_stale` | a stable store read reports not-current authority (cohort, anchor page, source, policy) |
+| `authority_stale` | a stable store read reports not-current authority (cohort, anchor page, D09 policy, a member's latest E06 source or its E07 artifact, an unmatched D03 series) |
 | `trust_revoked` | trust authority failure raised by a read |
 | `integrity_failure` | wrong store type, class/instance shadow, store `Unsafe`, incoherent results |
 | `storage_failure` | filesystem errors |
 | `read_conflict` | a read does not bind `H1`, `H2 != H1`, or any read failed after authority moved |
 
 Stable verified `missing`, `withheld`, `incompatible`, `unknown` and D07
-`unavailable` states remain ordinary row states.
+`unavailable` states remain ordinary row states. Two not-current states stay
+row/context states by decision of the plan: a stale D07 comparison (the plan
+lists "stale comparison states" among the suppressed D07 states, and an
+expired envelope is D07 `unavailable`), and a stale D10 context (context only;
+it never changes values or eligibility, and a stale context cannot be proven
+to belong to this workspace).
 
 ## Limitations
 

@@ -10,7 +10,6 @@ from __future__ import annotations
 
 import base64
 import json
-from datetime import UTC, datetime
 from pathlib import Path
 
 import pytest
@@ -433,24 +432,35 @@ def test_caller_objects_never_supply_authority(world: World) -> None:
 
 
 def test_store_substitution_and_method_shadows_fail_closed(world: World) -> None:
-    class Shadow(ResultViewSourceRegistry):
+    from evidence_inspector.repeatability_comparison_registry import (
+        RepeatabilityComparisonRegistry,
+    )
+
+    class Shadow(RepeatabilityComparisonRegistry):
         pass
 
     error = _boundary(lambda: world.build(cohort_registry=world.records))
     assert error.code is LongitudinalErrorCode.INTEGRITY_FAILURE
-    object.__setattr__(world.sources, "resolve", lambda *a, **k: None)
+    object.__setattr__(world.d07, "resolve", lambda *a, **k: None)
     try:
         error = _boundary(world.build)
         assert error.code is LongitudinalErrorCode.INTEGRITY_FAILURE
     finally:
-        del world.sources.__dict__["resolve"]
-    original = world.sources.__class__
-    world.sources.__class__ = Shadow
+        del world.d07.__dict__["resolve"]
+    original = world.d07.__class__
+    world.d07.__class__ = Shadow
     try:
         error = _boundary(world.build)
         assert error.code is LongitudinalErrorCode.INTEGRITY_FAILURE
     finally:
-        world.sources.__class__ = original
+        world.d07.__class__ = original
+    # A shadowed store read before authorization denies uniformly.
+    object.__setattr__(world.sources, "registry_identity", lambda *a, **k: None)
+    try:
+        error = _boundary(world.build)
+        assert error.code is LongitudinalErrorCode.PERMISSION_DENIED
+    finally:
+        del world.sources.__dict__["registry_identity"]
 
 
 def test_anchor_selection_is_explicit_and_fails_closed(world: World) -> None:
@@ -1174,5 +1184,79 @@ def test_reason_codes_and_actions_are_copied_exactly(base) -> None:
     )
     assert public.next_action is protected.decision.next_action
     assert public.bridge_execution_state == "not_executed"
-    assert datetime.now(UTC) > public.comparison.replayed_at.replace(year=2000)
     assert MeasurementScope  # imported scope contract stays the reader scope type
+
+
+def test_unauthorized_caller_learns_nothing_about_store_health(world: World) -> None:
+    forged = ReaderGrantBinding(
+        grant_sha256="0" * 64, state_head_sha256=world.credential.state_head_sha256
+    )
+    for overrides in (
+        {"cohort_registry": world.records},
+        {"result_view_source_registry": world.family},
+        {},
+    ):
+        error = _boundary(
+            lambda overrides=overrides: world.build(credential=forged, **overrides)
+        )
+        assert error.code is LongitudinalErrorCode.PERMISSION_DENIED
+
+
+def _doctor_page(monkeypatch, cls, name: str, update) -> None:
+    original = workspace_module._call
+
+    def doctored(store, store_cls, method, *args, **kwargs):
+        value = original(store, store_cls, method, *args, **kwargs)
+        if (store_cls, method) != (cls, name):
+            return value
+        return value.model_copy(
+            update={"records": tuple(update(item) for item in value.records)}
+        )
+
+    monkeypatch.setattr(workspace_module, "_call", doctored)
+
+
+def test_stable_stale_source_is_an_authority_error_not_a_missing_source(
+    world: World, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from evidence_inspector.result_view_source_registry import SourceAuthorityState
+
+    _doctor_page(
+        monkeypatch,
+        ResultViewSourceRegistry,
+        "list_selectors",
+        lambda item: item.model_copy(
+            update={"authority_state": SourceAuthorityState.STALE}
+        ),
+    )
+    error = _boundary(world.build)
+    assert error.code is LongitudinalErrorCode.AUTHORITY_STALE
+
+
+def test_stable_stale_series_is_an_authority_error(
+    world: World, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from evidence_inspector.longitudinal_decision_registry import (
+        LongitudinalDecisionRegistry,
+        SeriesAuthorityState,
+    )
+
+    _doctor_page(
+        monkeypatch,
+        LongitudinalDecisionRegistry,
+        "list_selectors",
+        lambda item: item.model_copy(
+            update={"authority_state": SeriesAuthorityState.STALE}
+        ),
+    )
+    error = _boundary(world.build)
+    assert error.code is LongitudinalErrorCode.AUTHORITY_STALE
+
+
+def test_public_comparison_carries_no_timestamp(base) -> None:
+    _, workspace = base
+    public = longitudinal_projection_bytes(project_longitudinal_workspace(workspace))
+    assert b"replayed_at" not in public
+    assert b"2026-" not in public
+    protected = next(row for row in workspace.protected_rows if row.comparison)
+    assert protected.comparison.replayed_at.tzinfo is not None

@@ -916,7 +916,6 @@ class PublicComparison(RegistryContract):
     anchor_denominator_count: int
     member_denominator_count: int
     maximum_absolute_delta: float
-    replayed_at: datetime
     anchor_relative: Literal[True] = True
     interpretation: Literal[
         "descriptive_technical_difference_only_no_causal_or_clinical_meaning"
@@ -1598,7 +1597,6 @@ def _public_row(
             anchor_denominator_count=value.anchor_denominator_count,
             member_denominator_count=value.member_denominator_count,
             maximum_absolute_delta=value.maximum_absolute_delta,
-            replayed_at=value.replayed_at,
         )
     return LongitudinalSourceRow(
         row_ordinal=row.row_ordinal,
@@ -1952,10 +1950,20 @@ def _authorize(
     registry: ReaderAuthorizationRegistry,
     credential: ReaderGrantBinding,
     *,
-    cohort_registry_id: str,
+    sources: ResultViewSourceRegistry,
     scope: MeasurementScope,
 ) -> ReaderAuthorization:
+    """Authorize first; every failure here is the same ``permission_denied``.
+
+    The cohort registry the grant must cover is the E06 registry's immutable
+    lock-free identity binding; reading it, or finding any store unhealthy or
+    mis-typed, denies without revealing which.
+    """
+
     def operation() -> ReaderAuthorization:
+        cohort_registry_id = _call(
+            sources, ResultViewSourceRegistry, "registry_identity"
+        ).cohort_registry_id
         fence = _call(registry, ReaderAuthorizationRegistry, "authority_read_fence")
         with fence:
             return _call(
@@ -2252,17 +2260,13 @@ def _source_matches_measurement(
     )
 
 
-def _latest_current(records: Iterable[Any], *, version_field: str) -> dict[str, Any]:
-    """Highest current version per selector (versions are append-only)."""
+def _latest_versions(records: Iterable[Any]) -> dict[str, Any]:
+    """Highest registered version per E06 selector (versions are append-only)."""
 
     chosen: dict[str, Any] = {}
     for item in records:
-        if item.authority_state is not SourceAuthorityState.CURRENT:
-            continue
         known = chosen.get(item.selector_id)
-        if known is None or getattr(item, version_field) > getattr(
-            known, version_field
-        ):
+        if known is None or item.source_version > known.source_version:
             chosen[item.selector_id] = item
     return chosen
 
@@ -2297,6 +2301,19 @@ def build_longitudinal_workspace(
 
     captured = _capture_request(request)
     credential = _capture_credential(reader_session_credential)
+    measurement = captured.measurement
+    scope = MeasurementScope(
+        family=measurement.family,
+        quantity_id=measurement.quantity_id,
+        unit=measurement.unit,
+    )
+    # 1. The reader grant, before any protected selector or workspace read.
+    first_authorization = _authorize(
+        reader_authorization_registry,
+        credential,
+        sources=result_view_source_registry,
+        scope=scope,
+    )
     stores = (
         (reader_authorization_registry, ReaderAuthorizationRegistry),
         (linkage_store, ProviderLinkageStore),
@@ -2334,24 +2351,6 @@ def build_longitudinal_workspace(
             anchor_registry=anchor_policy_registry,
             projection_registry=projection_policy_registry,
         )
-    )
-    identity = _guarded(
-        lambda: _call(
-            result_view_source_registry, ResultViewSourceRegistry, "registry_identity"
-        )
-    )
-    measurement = captured.measurement
-    scope = MeasurementScope(
-        family=measurement.family,
-        quantity_id=measurement.quantity_id,
-        unit=measurement.unit,
-    )
-    # 1. The reader grant, before any protected selector or workspace read.
-    first_authorization = _authorize(
-        reader_authorization_registry,
-        credential,
-        cohort_registry_id=identity.cohort_registry_id,
-        scope=scope,
     )
     # 2. The bounded registry selection check, before any per-member traversal.
     selector_row = _selector_record(
@@ -2438,7 +2437,7 @@ def build_longitudinal_workspace(
     second_authorization = _authorize(
         reader_authorization_registry,
         credential,
-        cohort_registry_id=identity.cohort_registry_id,
+        sources=result_view_source_registry,
         scope=scope,
     )
     _require(
@@ -2674,10 +2673,7 @@ def _gather(
                 (page.registry_id, page.registry_epoch_sha256, page.state_head_sha256),
             )
         )
-    e06_current = _latest_current(
-        (item for page in e06_pages for item in page.records),
-        version_field="source_version",
-    )
+    e06_current = _latest_versions(item for page in e06_pages for item in page.records)
     family_pages = _scan_pages(
         lambda cursor: _guarded(
             lambda: _call(
@@ -2909,6 +2905,16 @@ def _row_source(
         )
     )
     listed = e06_current.get(selector)
+    if (
+        listed is not None
+        and listed.authority_state is not SourceAuthorityState.CURRENT
+    ):
+        # This member's latest registered source no longer replays under the
+        # stable snapshot: an authority failure, never a missing source.
+        _fail(
+            LongitudinalErrorCode.AUTHORITY_STALE,
+            LongitudinalRemediation.REFRESH_SOURCE_REGISTRATION,
+        )
     if listed is None:
         return (
             SourceState.NOT_REGISTERED,
@@ -3100,7 +3106,12 @@ def _resolve_series(
     if len(matched) > 1:
         return DecisionState.SERIES_AMBIGUOUS, None
     if stale:
-        return DecisionState.SERIES_STALE, None
+        # A not-current series for this policy and anchor key cannot be proven
+        # unrelated to this anchor: fail closed rather than show "not decided".
+        _fail(
+            LongitudinalErrorCode.AUTHORITY_STALE,
+            LongitudinalRemediation.REFRESH_SOURCE_REGISTRATION,
+        )
     return DecisionState.SERIES_NOT_REGISTERED, None
 
 
