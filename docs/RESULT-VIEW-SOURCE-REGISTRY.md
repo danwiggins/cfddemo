@@ -101,9 +101,13 @@ the counterpart record as well as the subject: the E05 decision depends on the
 counterpart's information state, the four unmapped compatibility-key
 sub-fields, and its other unmapped fields.
 
-Who may author an E06 denominator ledger, and whether E12 should show one at
-all next to the D09 v3 counts, is a product decision this registry does not
-make.
+Decision (Dan, 2026-10-01): a denominator ledger is authoritative only when
+the analysis pipeline computes it. Until a pipeline derivation exists, every
+E06 ledger is operator-entered and unverified. E12 must either hide it or show
+it explicitly labelled "operator-entered, unverified", and must never present
+it next to the D09 v3 counts as equivalent to them. This registry keeps
+`denominator_verified=false` and accepts the ledger as caller input on that
+basis.
 
 ## Registration derives the source
 
@@ -145,9 +149,11 @@ enforces the same rule, so tampered or restored state cannot break it.
 The scope of that rule is one cohort selector and version, which is the scope
 of one E12 workspace. Across cohort versions the same result may appear under
 a different member commitment, because D06 deliberately lets one verified
-record bind to a new manifest version whose member contents changed. Whether
-E12 should also forbid that across versions is a product decision; the
-registry does not make it.
+record bind to a new manifest version whose member contents changed.
+Decision (Dan, 2026-10-01): this stays allowed. Reusing a result across
+cohort versions is normal for a revised cohort, and E12 compares within one
+selected cohort version, so a result cannot be counted twice within one
+comparison.
 
 ## Every read re-verifies
 
