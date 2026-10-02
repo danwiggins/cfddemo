@@ -12,6 +12,7 @@ import fcntl
 import hashlib
 import os
 import secrets
+import sqlite3
 import stat
 import threading
 import weakref
@@ -60,6 +61,10 @@ _REGISTRY_PROCESS_HEADS: dict[tuple[int, int, str, str], str] = {}
 _REGISTRY_INSTANCE_SEALS: weakref.WeakKeyDictionary[
     object, tuple[object, ...]
 ] = weakref.WeakKeyDictionary()
+# Holder (process, thread) of each registry's public ``authority_read_fence``.
+_READ_FENCE_HOLDERS: weakref.WeakKeyDictionary[object, tuple[int, int]] = (
+    weakref.WeakKeyDictionary()
+)
 _PINNED_AUTHORITY_READ_FENCE = ProviderLinkageStore.authority_read_fence
 _PINNED_ACTIVE_SNAPSHOT = ProviderLinkageStore.active_snapshot
 _PINNED_VALIDATE_MANIFEST_IN_FENCE = (
@@ -164,6 +169,18 @@ class RegisteredCohortHistory(RegistryContract):
     state_head_sha256: Sha256
     selected_manifest_sha256: Sha256
     manifests: tuple[CohortManifest, ...] = Field(min_length=1, max_length=100_000)
+
+
+class CohortRegistryHead(RegistryContract):
+    """Registry identity and committed head read inside ``authority_read_fence``."""
+
+    schema_version: Literal["traceback.cohort-registry-head.v1"] = (
+        "traceback.cohort-registry-head.v1"
+    )
+    registry_id: RegistryId
+    registry_epoch_sha256: Sha256
+    state_version: int = Field(ge=0, le=MAX_REGISTERED_MANIFESTS)
+    state_head_sha256: Sha256
 
 
 class CohortHistoryView(RegistryContract):
@@ -665,6 +682,30 @@ def _publish_restored_file(
     created.append(name)
 
 
+def _require_held_linkage_fence(linkage_store: object) -> None:
+    """Require that this thread holds ``linkage_store.authority_read_fence``.
+
+    ``authority_read_fence`` marks its holder (process, thread) for exactly its
+    body while it holds one BEGIN IMMEDIATE transaction; another store
+    transaction, another thread's fence, and a forked child do not match.
+    """
+
+    if type(linkage_store) is not ProviderLinkageStore:
+        raise CohortRegistryUnsafe("cohort registry linkage authority changed")
+    state = object.__getattribute__(linkage_store, "__dict__")
+    connection = state.get("_connection") if type(state) is dict else None
+    holder = state.get("_authority_fence_thread") if type(state) is dict else None
+    if (
+        type(holder) is not tuple
+        or holder != (os.getpid(), threading.get_ident())
+        or type(connection) is not sqlite3.Connection
+        or not connection.in_transaction
+    ):
+        raise CohortRegistryUnsafe(
+            "cohort registry read fence requires the held linkage fence"
+        )
+
+
 def _registry_instance_snapshot(registry: CohortRegistry) -> tuple[object, ...]:
     """Capture authority-critical state without invoking caller-owned hooks."""
 
@@ -791,12 +832,15 @@ class CohortRegistry:
         # Keep this list literal: consulting a mutable module global here would let
         # an attacker disable the guard before installing an instance shadow.
         if name in (
+            "authority_read_fence",
             "backup_bytes",
             "close",
+            "head_in_fence",
             "list_selectors",
             "register",
             "resolve",
             "resolve_history",
+            "resolve_history_in_fence",
             "resolve_history_view",
         ):
             instance = object.__getattribute__(self, "__dict__")
@@ -1789,6 +1833,63 @@ class CohortRegistry:
             manifests=tuple(item[2] for item in matches),
         )
 
+    def _held_by_current_thread(self) -> bool:
+        return _READ_FENCE_HOLDERS.get(self) == (os.getpid(), threading.get_ident())
+
+    @contextmanager
+    def authority_read_fence(self) -> Iterator[None]:
+        """Hold this registry's shared lock for a composing caller.
+
+        Global order is D01 linkage, then D05: the caller must already hold
+        the bound linkage store's ``authority_read_fence`` on this thread.
+        Every public D05 read takes that linkage fence itself and so cannot
+        run inside; only ``resolve_history_in_fence`` and ``head_in_fence``
+        may.  Registration needs the exclusive lock and cannot land, from any
+        process, until this context exits.  The fence is not reentrant (a
+        nested ``flock`` would release the outer one on exit).
+        """
+
+        _require_registry_integrity(self)
+        _require_held_linkage_fence(self._linkage_store)
+        if _CR_HELD(self):
+            raise CohortRegistryUnsafe("cohort registry read fence is already held")
+        with _CR_LOCK(self, exclusive=False):
+            _READ_FENCE_HOLDERS[self] = (os.getpid(), threading.get_ident())
+            try:
+                yield
+            finally:
+                _READ_FENCE_HOLDERS.pop(self, None)
+
+    def _require_read_fence(self) -> None:
+        _require_registry_integrity(self)
+        if not _CR_HELD(self):
+            raise CohortRegistryUnsafe("cohort registry read fence is absent")
+        _require_held_linkage_fence(self._linkage_store)
+
+    def resolve_history_in_fence(
+        self, selector_id: str, cohort_version: int
+    ) -> RegisteredCohortHistory:
+        """Return current registered history while ``authority_read_fence`` is held.
+
+        Identical to ``resolve_history`` except that it reuses the caller's
+        held linkage fence and registry lock instead of taking them.
+        """
+
+        _CR_REQUIRE_READ_FENCE(self)
+        return _CR_RESOLVE_HISTORY_IN_FENCE(self, selector_id, cohort_version)
+
+    def head_in_fence(self) -> CohortRegistryHead:
+        """Return identity and committed head while ``authority_read_fence`` is held."""
+
+        _CR_REQUIRE_READ_FENCE(self)
+        loaded, head = _CR_LOAD_STATE(self)
+        return CohortRegistryHead(
+            registry_id=self._metadata.registry_id,
+            registry_epoch_sha256=self._metadata.registry_epoch_sha256,
+            state_version=len(loaded),
+            state_head_sha256=head,
+        )
+
     def resolve_history_view(
         self, selector_id: str, cohort_version: int
     ) -> CohortHistoryView:
@@ -1955,6 +2056,11 @@ _REGISTRY_METHOD_SEAL = MappingProxyType(
             "_accept_observed_head",
             "_load_state",
             "_resolve_history_in_fence",
+            "_held_by_current_thread",
+            "authority_read_fence",
+            "_require_read_fence",
+            "resolve_history_in_fence",
+            "head_in_fence",
             "register",
             "backup_bytes",
             "restore",
@@ -2025,6 +2131,8 @@ _CR_APPEND_JOURNAL = CohortRegistry._append_journal
 _CR_ACCEPT_OBSERVED_HEAD = CohortRegistry._accept_observed_head
 _CR_LOAD_STATE = CohortRegistry._load_state
 _CR_RESOLVE_HISTORY_IN_FENCE = CohortRegistry._resolve_history_in_fence
+_CR_HELD = CohortRegistry._held_by_current_thread
+_CR_REQUIRE_READ_FENCE = CohortRegistry._require_read_fence
 _REGISTRY_AUTHORITY_SEAL = MappingProxyType(
     {
         "_PINNED_AUTHORITY_READ_FENCE": _PINNED_AUTHORITY_READ_FENCE,
@@ -2050,6 +2158,8 @@ _REGISTRY_ALIAS_SEAL = MappingProxyType(
             "_CR_ACCEPT_OBSERVED_HEAD",
             "_CR_LOAD_STATE",
             "_CR_RESOLVE_HISTORY_IN_FENCE",
+            "_CR_HELD",
+            "_CR_REQUIRE_READ_FENCE",
         )
     }
 )
@@ -2064,6 +2174,7 @@ __all__ = [
     "CohortRegistryBackupObject",
     "CohortRegistryConflict",
     "CohortRegistryError",
+    "CohortRegistryHead",
     "CohortRegistryUnsafe",
     "CohortSelectorPage",
     "CohortSelectorRecord",

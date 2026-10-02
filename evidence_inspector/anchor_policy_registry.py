@@ -98,8 +98,8 @@ _PINNED_AUTHORITY_READ_FENCE = ProviderLinkageStore.authority_read_fence
 _PINNED_ACTIVE_SNAPSHOT = ProviderLinkageStore.active_snapshot
 _PINNED_DECIDE_MEMBER = decide_longitudinal_member
 _PINNED_COHORT_LIST = CohortRegistry.list_selectors
-_PINNED_COHORT_LOCK = CohortRegistry._lock
-_PINNED_COHORT_RESOLVE_IN_FENCE = CohortRegistry._resolve_history_in_fence
+_PINNED_COHORT_READ_FENCE = CohortRegistry.authority_read_fence
+_PINNED_COHORT_RESOLVE_IN_FENCE = CohortRegistry.resolve_history_in_fence
 _PINNED_COHORT_INTEGRITY = d05_module._require_registry_integrity
 
 RegistryId = Annotated[
@@ -1393,12 +1393,12 @@ class AnchorPolicyRegistry:
 
         This is the fixed E12 global order.  D05 public reads take the linkage
         fence themselves and cannot nest inside it, so the D05 history is read
-        through its already-fenced internal operation while this fence holds.
+        through D05's public in-fence read while its public read fence holds.
         """
 
         with _PINNED_AUTHORITY_READ_FENCE(self._linkage_store):
             _PINNED_COHORT_INTEGRITY(self._cohort_registry)
-            with _PINNED_COHORT_LOCK(self._cohort_registry, exclusive=False):
+            with _PINNED_COHORT_READ_FENCE(self._cohort_registry):
                 with _AP_LOCK(self, exclusive=exclusive):
                     yield
 
@@ -2559,8 +2559,8 @@ def _require_registry_integrity(registry: AnchorPolicyRegistry) -> None:
         "_PINNED_ACTIVE_SNAPSHOT": ProviderLinkageStore.active_snapshot,
         "_PINNED_DECIDE_MEMBER": decide_longitudinal_member,
         "_PINNED_COHORT_LIST": CohortRegistry.list_selectors,
-        "_PINNED_COHORT_LOCK": CohortRegistry._lock,
-        "_PINNED_COHORT_RESOLVE_IN_FENCE": CohortRegistry._resolve_history_in_fence,
+        "_PINNED_COHORT_READ_FENCE": CohortRegistry.authority_read_fence,
+        "_PINNED_COHORT_RESOLVE_IN_FENCE": CohortRegistry.resolve_history_in_fence,
         "_PINNED_COHORT_INTEGRITY": d05_module._require_registry_integrity,
     }
     if any(
@@ -2626,7 +2626,7 @@ _REGISTRY_AUTHORITY_SEAL = MappingProxyType(
         "_PINNED_ACTIVE_SNAPSHOT": _PINNED_ACTIVE_SNAPSHOT,
         "_PINNED_DECIDE_MEMBER": _PINNED_DECIDE_MEMBER,
         "_PINNED_COHORT_LIST": _PINNED_COHORT_LIST,
-        "_PINNED_COHORT_LOCK": _PINNED_COHORT_LOCK,
+        "_PINNED_COHORT_READ_FENCE": _PINNED_COHORT_READ_FENCE,
         "_PINNED_COHORT_RESOLVE_IN_FENCE": _PINNED_COHORT_RESOLVE_IN_FENCE,
         "_PINNED_COHORT_INTEGRITY": _PINNED_COHORT_INTEGRITY,
     }

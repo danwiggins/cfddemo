@@ -125,12 +125,14 @@ value from canonical bytes; a fence that returns a wrong type fails with
   registry's pre-commit and final rechecks then fail closed, but the window
   between the final recheck and the caller's use of the receipt is not
   closed. Its `fence_kind` is `direct_head_reread`. The startup binding of
-  the E06 registry ID/epoch is read from E06's private `_metadata`, because
-  E06 has no public unscoped identity read.
-- The composite coordinator (not built here) will implement the same
-  interface: `hold()` acquires every store's read fence in the global order,
+  the E06 registry ID/epoch comes from E06's public lock-free
+  `registry_identity()`.
+- `CompositeAuthorityFence`
+  (`evidence_inspector/composite_authority_fence.py`, see
+  `docs/COMPOSITE-AUTHORITY-FENCE.md`) implements the same interface:
+  `hold()` acquires every store's read fence in the global order,
   `read_heads` reads already-fenced snapshots, and `fence_kind` is
-  `composite_authority_fence`. The registry does not change when it lands.
+  `composite_authority_fence`. The registry did not change when it landed.
 
 Every journal entry, receipt, page and reopen records the fence kind. D08
 must refuse Save, and must not present a publication as fenced, unless the
@@ -270,11 +272,12 @@ protected identity.
 
 ## Open items
 
-- The composite authority-fence coordinator and its adapters. Until it
-  exists, publications are `direct_head_reread` and D08 Save stays disabled.
-- The family-source registry slot (optional in v1; see above).
-- A public unscoped identity read on the E06 source registry, to replace the
-  private `_metadata` read in `LiveRegistryDependencyFence.read_bindings`.
+- D08 Save stays disabled until it publishes through
+  `CompositeAuthorityFence`; `direct_head_reread` publications remain
+  unfenced.
+- The family-source registry slot (optional in v1; see above). The
+  composite fence fills it; the live fence still leaves it `None`, and its
+  ID prefix (`familysrc_registry_`) is not yet pinned in `_SLOT_ID_PREFIXES`.
 - Root-creation crash recovery: like the siblings, an interrupted root
   creation (root without metadata) fails closed.
 - Reads parse one object per selected row; full-state parsing happens only in

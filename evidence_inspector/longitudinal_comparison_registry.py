@@ -101,7 +101,7 @@ from evidence_inspector.result_view import NormalizedResultFilters
 from evidence_inspector.result_view_source_registry import (
     MAX_SOURCE_VERSIONS,
     ResultViewSourceRegistry,
-    ResultViewSourceRegistryMetadata,
+    ResultViewSourceRegistryIdentity,
 )
 from evidence_inspector.safe_ingress import (
     bounded_json_loads,
@@ -979,8 +979,8 @@ class LiveRegistryDependencyFence(SavedComparisonDependencyFence):
       is ``e04_catalog_`` + the storage-identity prefix, the epoch is the
       storage identity, and the head is ``catalog_authority_sha256``.
     - E06 ``list_selectors(scope, limit=1)`` page head; its registry ID/epoch
-      for the startup binding is read from its private ``_metadata`` (no
-      public unscoped identity read exists; the coordinator should add one).
+      and cohort-registry binding for the startup binding come from its
+      public lock-free ``registry_identity()``.
     - Family-source registry: not merged; the slot is ``None``.
     """
 
@@ -1142,9 +1142,9 @@ class _DirectHeldDependencies(HeldSavedComparisonDependencies):
         history = RecordSupersessionStore.active_snapshot(stores["history"])
         reader = ReaderAuthorizationRegistry.identity(stores["reader"])
         authority = ResultCatalog.authority_snapshot(stores["results"])
-        source_metadata = object.__getattribute__(stores["sources"], "_metadata")
-        if type(source_metadata) is not ResultViewSourceRegistryMetadata:
-            raise TypeError("E06 source registry metadata is invalid")
+        source_metadata = ResultViewSourceRegistry.registry_identity(stores["sources"])
+        if type(source_metadata) is not ResultViewSourceRegistryIdentity:
+            raise TypeError("E06 source registry identity is invalid")
         if (
             source_metadata.cohort_registry_id,
             source_metadata.cohort_registry_epoch_sha256,

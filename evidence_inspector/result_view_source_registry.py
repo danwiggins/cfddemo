@@ -188,6 +188,23 @@ _METADATA_MODEL_TYPES, _METADATA_ENUM_TYPES = contract_type_graph(
 )
 
 
+class ResultViewSourceRegistryIdentity(RegistryContract):
+    """Immutable registry identity and its bound D05 cohort registry.
+
+    These values are fixed when the registry is opened and never change for
+    the instance, so the read takes no lock and is safe inside any fence.  It
+    carries no state head; heads change and are read under the registry lock.
+    """
+
+    schema_version: Literal["traceback.e06-source-registry-identity.v1"] = (
+        "traceback.e06-source-registry-identity.v1"
+    )
+    registry_id: RegistryId
+    registry_epoch_sha256: Sha256
+    cohort_registry_id: CohortRegistryId
+    cohort_registry_epoch_sha256: Sha256
+
+
 class RegisteredResultViewSourceObject(RegistryContract):
     """Protected stored inputs plus the source the registry derived from them."""
 
@@ -1103,6 +1120,7 @@ class ResultViewSourceRegistry:
             "close",
             "list_selectors",
             "register_source",
+            "registry_identity",
             "resolve",
             "selector_for_member",
         ):
@@ -2003,6 +2021,18 @@ class ResultViewSourceRegistry:
             raise ResultViewSourceRegistryConflict("E06 source selector is unavailable")
         return matches[0]
 
+    def registry_identity(self) -> ResultViewSourceRegistryIdentity:
+        """Return this registry's immutable identity and cohort-registry binding."""
+
+        _require_registry_integrity(self)
+        metadata = self._metadata
+        return ResultViewSourceRegistryIdentity(
+            registry_id=metadata.registry_id,
+            registry_epoch_sha256=metadata.registry_epoch_sha256,
+            cohort_registry_id=metadata.cohort_registry_id,
+            cohort_registry_epoch_sha256=metadata.cohort_registry_epoch_sha256,
+        )
+
     def resolve(
         self,
         selector_id: str,
@@ -2405,6 +2435,7 @@ _REGISTRY_METHOD_SEAL = MappingProxyType(
             "_find",
             "selector_for_member",
             "register_source",
+            "registry_identity",
             "resolve",
             "list_selectors",
             "backup_bytes",
@@ -2541,6 +2572,7 @@ __all__ = [
     "ResultViewSourceRegistry",
     "ResultViewSourceRegistryConflict",
     "ResultViewSourceRegistryError",
+    "ResultViewSourceRegistryIdentity",
     "ResultViewSourceRegistryMetadata",
     "ResultViewSourceRegistryStale",
     "ResultViewSourceRegistryUnsafe",
