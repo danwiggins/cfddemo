@@ -922,6 +922,7 @@ def _registry_instance_snapshot(
         "_head_key",
         "_trusted_head_sha256",
         "_metadata_fd",
+        "_owner_pid",
     )
     if type(instance) is not dict or any(name not in instance for name in required):
         raise ReaderAuthorizationRegistryUnsafe(
@@ -972,6 +973,7 @@ def _registry_instance_snapshot(
         instance["_journal_identity"],
         instance["_metadata_identity"],
         id(instance["_process_lock"]),
+        instance["_owner_pid"],
         metadata_bytes,
         instance["_genesis_head_sha256"],
         instance["_head_key"],
@@ -1059,6 +1061,9 @@ class ReaderAuthorizationRegistry:
         self._metadata_fd: int | None = None
         self._journal_fd: int | None = None
         self._process_lock = threading.RLock()
+        # flock locks belong to the open file description, which a fork()
+        # shares; a forked child must never use this instance's lock.
+        self._owner_pid = os.getpid()
         try:
             try:
                 root_lstat = os.stat(self.root, follow_symlinks=False)
@@ -1140,6 +1145,7 @@ class ReaderAuthorizationRegistry:
                 )
             with _RR_LOCK(self, exclusive=True):
                 _RR_RECOVER_TEMPORARY_OBJECTS(self)
+                _RR_RECOVER_TORN_JOURNAL(self)
                 state = _RR_LOAD_STATE(self, check_trusted_head=False)
                 if state.head != expected_state_head_sha256:
                     raise ReaderAuthorizationRegistryUnsafe(
@@ -1404,6 +1410,10 @@ class ReaderAuthorizationRegistry:
         descriptor = self._lock_fd
         if descriptor is None:
             raise ReaderAuthorizationRegistryUnsafe("reader registry is closed")
+        if self._owner_pid != os.getpid():
+            raise ReaderAuthorizationRegistryUnsafe(
+                "reader registry belongs to another process"
+            )
         if _RR_HELD(self):
             # flock would silently convert the held shared fence in place.
             raise ReaderAuthorizationRegistryUnsafe(
@@ -1503,6 +1513,25 @@ class ReaderAuthorizationRegistry:
                 ):
                     os.unlink(name, dir_fd=self._objects_fd)
             os.fsync(self._objects_fd)
+        except OSError:
+            raise ReaderAuthorizationRegistryUnsafe(
+                "reader registry recovery is unsafe"
+            ) from None
+
+    def _recover_torn_journal(self) -> None:
+        """Drop a crash-torn suffix: an entry commits only with its newline."""
+
+        descriptor = self._journal_fd
+        if descriptor is None:
+            raise ReaderAuthorizationRegistryUnsafe("reader registry is closed")
+        try:
+            content = os.pread(descriptor, MAX_JOURNAL_BYTES + 1, 0)
+            if len(content) > MAX_JOURNAL_BYTES or not content or content.endswith(
+                b"\n"
+            ):
+                return
+            os.ftruncate(descriptor, content.rfind(b"\n") + 1)
+            os.fsync(descriptor)
         except OSError:
             raise ReaderAuthorizationRegistryUnsafe(
                 "reader registry recovery is unsafe"
@@ -2020,6 +2049,7 @@ _REGISTRY_METHOD_SEAL = MappingProxyType(
             "_require_fence",
             "_validate_storage",
             "_recover_temporary_objects",
+            "_recover_torn_journal",
             "_load_journal",
             "_append_journal",
             "_accept_observed_head",
@@ -2084,6 +2114,7 @@ _RR_HELD = ReaderAuthorizationRegistry._held_by_current_thread
 _RR_REQUIRE_FENCE = ReaderAuthorizationRegistry._require_fence
 _RR_VALIDATE_STORAGE = ReaderAuthorizationRegistry._validate_storage
 _RR_RECOVER_TEMPORARY_OBJECTS = ReaderAuthorizationRegistry._recover_temporary_objects
+_RR_RECOVER_TORN_JOURNAL = ReaderAuthorizationRegistry._recover_torn_journal
 _RR_LOAD_JOURNAL = ReaderAuthorizationRegistry._load_journal
 _RR_APPEND_JOURNAL = ReaderAuthorizationRegistry._append_journal
 _RR_ACCEPT_OBSERVED_HEAD = ReaderAuthorizationRegistry._accept_observed_head
@@ -2114,6 +2145,7 @@ _REGISTRY_ALIAS_SEAL = MappingProxyType(
             "_RR_REQUIRE_FENCE",
             "_RR_VALIDATE_STORAGE",
             "_RR_RECOVER_TEMPORARY_OBJECTS",
+            "_RR_RECOVER_TORN_JOURNAL",
             "_RR_LOAD_JOURNAL",
             "_RR_APPEND_JOURNAL",
             "_RR_ACCEPT_OBSERVED_HEAD",

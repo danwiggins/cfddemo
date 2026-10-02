@@ -186,7 +186,7 @@ def test_launch_credential_is_one_use_expiring_and_selector_only(web) -> None:
     with _denied(ReaderDenialReason.LAUNCH_CREDENTIAL_INVALID):
         binder.exchange_launch_credential(_post(other), credential)
     expiring = binder.issue_launch_credential(SELECTOR)
-    clock.value += 61
+    clock.value += 60
     with _denied(ReaderDenialReason.LAUNCH_CREDENTIAL_INVALID):
         binder.exchange_launch_credential(_post(other), expiring)
     for role in ("longitudinal_reader", "*", "reader_grant_*"):

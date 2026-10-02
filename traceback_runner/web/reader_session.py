@@ -132,7 +132,7 @@ class ReaderSessionBinder:
         with self._lock:
             now = self._now()
             for digest in [
-                key for key, item in self._pending.items() if now > item.expires_at
+                key for key, item in self._pending.items() if now >= item.expires_at
             ]:
                 self._pending.pop(digest, None)
             if len(self._pending) >= self._max_pending:
@@ -180,7 +180,7 @@ class ReaderSessionBinder:
                     matched = self._pending.pop(digest)
             if (
                 matched is None
-                or now > matched.expires_at
+                or now >= matched.expires_at
                 or matched.authority != self._boundary.config.authority
             ):
                 raise ReaderAuthorizationDenied(

@@ -94,7 +94,16 @@ reader check and the work it protects are in progress. Opening a registry also
 takes the exclusive lock briefly. The fence is not reentrant, and a mutation
 attempted by the thread that holds it fails instead of silently converting the
 shared lock. Within a process, a module lock serializes all registry
-instances.
+instances. `flock` locks belong to the open file description, which `fork()`
+shares, so an instance refuses every locked operation in a process other than
+the one that opened it.
+
+The fence covers construction of the protected result, not its transmission:
+an E12 handler must build the immutable response object inside the
+`reader_authorization` block. The fence is released after final revalidation
+and that construction, matching the E12 coordinator contract ("releases after
+return-value construction"). Bytes already built may be sent after a
+revocation that lands later; they were authorized as of the fence.
 
 In the E12 global order (D01, D04, D05, reader authorization, D06, ...) this
 fence is acquired after D05. The registry calls no other store while holding
@@ -152,7 +161,9 @@ first, trust rotation rules, grants bound to this registry and recorded while
 current under an active key, unique selectors, one revocation per registered
 grant, non-decreasing record times).
 
-A failed journal append truncates any torn suffix. At most one uncommitted
+A failed journal append truncates any torn suffix. If a crash leaves a suffix
+without its terminating newline, the next open (under the exclusive lock)
+truncates it, because an entry commits only with its newline. At most one uncommitted
 object is tolerated and it is removed by the next mutation. A failed create or
 restore, including a failed final reopen, removes the target it created.
 
@@ -172,7 +183,12 @@ bounds how far a rolled-back clock can resurrect an expired grant.
   head, so every bound session must re-bootstrap. This is the strict reading
   of "no longer at the expected head".
 - The rollback fence is per process; a fresh process trusts the retained head
-  it is given. Crash recovery beyond a caught failure matches D03/D05.
+  it is given. A crash-partial create or restore target still needs manual
+  removal, as in D03/D05.
+- A restore is a replacement, not a replica. The fence is the lock file inside
+  one root, so running the original and a restored copy at the same time
+  splits it: a revocation in one is invisible to the other. Operators must
+  retire the original before opening a restored copy.
 - There is no HTTP route for the launch exchange yet, and the launch
   credential's delivery to the browser is not defined.
 - The composite E12 fence coordinator does not exist; this registry provides
