@@ -1580,12 +1580,13 @@ class ProjectionPolicyRegistry:
                 if staged_root is not None:
                     _commit_staged_root(staged_root, final_root, self._root_fd)
                     self.root = final_root
-                    staged_root = None
                 self._trusted_head_sha256 = head
                 _PP_ACCEPT_OBSERVED_HEAD(
                     self, _PP_LOAD_JOURNAL(self), head, check_instance=False
                 )
                 _seal_registry_instance(self)
+                # Until here a failure still removes the new root by inode.
+                staged_root = None
         except BaseException:
             if staged_root is not None:
                 _discard_staged_root(staged_root, final_root, self._root_fd)

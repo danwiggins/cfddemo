@@ -317,6 +317,15 @@ def check_interrupted_creation(
     assert _staged(root) == before
     monkeypatch.setattr(module, commit_name, original_commit)
 
+    # An interrupt after publication, while the instance is still being sealed.
+    original_seal = module._seal_registry_instance
+    monkeypatch.setattr(module, "_seal_registry_instance", crash)
+    with pytest.raises(KeyboardInterrupt):
+        create(root)
+    monkeypatch.setattr(module, "_seal_registry_instance", original_seal)
+    assert not os.path.lexists(root)
+    assert _staged(root) == before
+
     created = create(root)
     try:
         values = retained(created)
