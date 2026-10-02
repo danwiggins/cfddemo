@@ -34,7 +34,7 @@ reader_authorization -> d10_context -> d09_summary -> d01_linkage -> d04_history
 | `d01_linkage` | `ProviderLinkageStore` | public `authority_read_fence` (store RLock + SQLite `BEGIN IMMEDIATE`) | `active_snapshot` (nests as a SAVEPOINT) |
 | `d04_history` | `RecordSupersessionStore` | nothing of its own: fenced by D01 | `active_snapshot` (nests in the D01 fence). During capture and revalidation it takes D04's module lock (`_SQLITE_OPEN_LOCK`) and a D04 SQLite `BEGIN IMMEDIATE` inside the held D01 fence, and may advance D04 (refreshing invalidations); every D04 writer needs D01 first, so this cannot deadlock and a first-read advance is stable for the rest of the hold. |
 | `d05_cohort` | `CohortRegistry` | **new** public `authority_read_fence` (shared lock) | **new** `head_in_fence` |
-| `e04_catalog_trust` | `ResultCatalog` + `ResultTrustRegistry` | public `trust_authority_fence` (catalog connection lock, then trust read fence) | `authority_snapshot`; trust journal via pinned `_snapshot_locked` |
+| `e04_catalog_trust` | `ResultCatalog` + `ResultTrustRegistry` | public `trust_authority_fence` (catalog connection lock, **catalog-content lock shared**, then trust read fence) | `authority_snapshot` + **new** `content_head_in_fence` (E04 head = `catalog_dependency_head_sha256`, saved-head v2); trust journal via pinned `_snapshot_locked` |
 | `d06_record_catalog` | `CohortRecordCatalog` | **new** public `record_status_read_fence` (root shared flock) | **new** `record_status_in_fence(scope)` |
 | `e06_source` | `ResultViewSourceRegistry` | pinned `_lock(shared)` | pinned `_load_state` head; identity from **new** `registry_identity` |
 | `d03_decision` | `LongitudinalDecisionRegistry` | pinned `_lock(shared)` | pinned `_load_state` head |
@@ -45,10 +45,9 @@ reader_authorization -> d10_context -> d09_summary -> d01_linkage -> d04_history
 | (last) | `LongitudinalComparisonRegistry` | its own lock, inside `hold()` | — |
 
 Every mutation of each store needs that store's exclusive lock (or, for D01
-and D04, the D01 SQLite write lock), so no writer in any process can land
-while the composite hold is active, with one exception: E04 catalog rows.
-Another process can still import into or recover the E04 catalog; see
-"Store that could not be fully composed: E04 catalog content" below.
+and D04, the D01 SQLite write lock; for E04 catalog rows, the E04
+catalog-content lock), so no writer in any process can land while the
+composite hold is active. See "E04 catalog content" below.
 
 ### Edges the order is derived from
 
@@ -58,10 +57,17 @@ actually take (A -> B: B is acquired while A is held):
 - D10 registry -> D09 resolve (D09 lock -> D01 ...) and D10 -> D03 resolve
   (D01 -> D03), via the live D10 build (#64).
 - D09 registry lock -> D09 summary builder -> D06 status fence (D01 -> D05
-  -> E04 connection -> trust -> D06 root) (#59).
-- D06 status fence: D01 -> D05 -> E04 connection lock -> result trust
-  (registry read fence) -> D06 root.
-- E04: connection lock -> trust read fence (`_trust_fence`).
+  -> E04 connection -> E04 content -> trust -> D06 root) (#59).
+- D06 status fence: D01 -> D05 -> E04 connection lock -> E04 content
+  (shared) -> result trust (registry read fence) -> D06 root.
+- E04: connection lock -> catalog-content lock -> trust read fence
+  (`trust_authority_fence`; every E04 row writer takes the content lock
+  exclusively in the same position, then `_SQLITE_OPEN_LOCK` on a first
+  connect).
+- D06 import: D01 -> D05 -> E04 connection lock -> E04 content (exclusive)
+  -> trust -> D06 root (exclusive) -> nested E04 writes, which reuse the held
+  content lock. D06 open-time recovery: E04 connection lock -> E04 content
+  (exclusive) -> D06 root. Neither takes E04 content after the D06 root.
 - E06 and family-source: D06 status fence -> own lock; family-source never
   holds its lock while resolving E06 (#62, family-source registry).
 - D07: D01 -> trust read fence -> D07 lock (#60, #68).
@@ -232,45 +238,50 @@ in-fence reads refusing without their fences; public store reads failing
 inside the hold without breaking it; entry under any store fence refused
 (including the E04-then-D01 inversion with a concurrent D06 read); a store
 integrity failure typed unsafe and fully released; and type, wiring, class
-and instance shadow failures.
+and instance shadow failures. E04 content: a separate-process E04 import and
+a separate-process publication recovery each block until release (heads
+unchanged during the hold, E04 head advanced after); an E04 row changed
+between capture and revalidation raises `CompositeAuthorityRetry`; the D06
+step refuses a trust fence held without the content lock; a shared content
+hold is never upgraded; and the opposing-operations test adds an E04 import
+through a second catalog instance and E04 content reads.
 
-## Store that could not be fully composed: E04 catalog content
+## E04 catalog content
 
-E04 (`ResultCatalog`) has no cross-process fence over its catalog rows.
-`trust_authority_fence` holds the in-process connection lock and the
-cross-process result-trust read fence, so trust changes and same-process
-catalog use are excluded, but another process can still import into, or
-recover pending publications in, the catalog's SQLite file while the
-composite hold is active. E04's head (`catalog_authority_sha256`) covers
-storage identity, trust and the reader registry, not rows, so such a write
-neither blocks nor changes a captured head.
+E04 rows are fenced across processes (`docs/RESULT-CATALOG.md`,
+"Catalog-content lock and content head"):
 
-What the composite does guarantee for E04: every result a D06 cohort binds
-is re-verified against E04 inside the held D06 root fence (D06 imports,
-recovery and cleanup need the exclusive root lock), and the D06 status
-digest is the captured head for that.
+- A cross-process content lock (`flock` on `catalog-content.lock` in the
+  catalog root) is taken **exclusively** by every E04 row writer: import,
+  preparation, staging, adoption, finish, compensation, discard, coordinated
+  candidate register/finish, publication recovery and schema initialization.
+- The composite E04 step holds it **shared** through
+  `trust_authority_fence` (connection lock -> content lock -> trust), as do
+  D06 status and binding reads. D06 imports and D06 open-time recovery take
+  it exclusively before the D06 root.
+- The E04 head is `catalog_dependency_head_sha256(authority, content)`:
+  catalog authority (storage, trust, reader registry) plus a digest of every
+  committed catalog row, read under the held lock and revalidated in reverse
+  order like every other head. Its change needed saved-head schema v2
+  (`traceback.saved-comparison-dependency-heads.v2`); v1 vectors still read
+  and reopen stale at `e04_catalog`.
 
-Composing E04 content fully needs a change to E04's merged fence semantics,
-which this prerequisite does not make: a cross-process catalog-content lock
-(for example a root `flock` or a SQLite write transaction) taken by every
-E04 import, staging, finish, compensation and recovery path, held shared by
-`trust_authority_fence` (or a new E04 read fence after the connection lock
-and before trust), plus a committed catalog content version/head added to
-the E04 dependency head. That needs its own reviewed E04 PR and a new
-saved-head schema version (the E04 head definition changes).
+So a second process importing into, staging, finishing, compensating or
+recovering the E04 catalog blocks until the hold releases, and any committed
+row change between holds changes the captured E04 head.
 
 ## D08 rule for E04 rows
 
-D08 consumes E04 rows only through D06 status (rows bound to the cohort and
-re-verified inside the held D06 root fence). It never treats a direct E04
-catalog query made inside the hold as authority. The E04 catalog-content
-lock plus a content head (a new saved-head schema version) is required
-before any feature surfaces unbound E04 rows, and before Save claims that
-E04 content is fenced.
+D08 still consumes E04 rows through D06 status (rows bound to the cohort and
+re-verified inside the held D06 root fence) and never runs caller code inside
+the hold. Unbound E04 rows may be surfaced only when the read that produced
+them is bound to an E04 head captured by a composite snapshot (an E04 row
+read outside the hold is authority only if the E04 head is unchanged when it
+is checked again); Save may claim E04 content is fenced only with a v2 head
+vector.
 
 ## Open items
 
-- E04 catalog content (above).
 - Lock-only registries still expose no public in-fence read; the adapters
   pin their private `_lock` / `_load_state`. Promote a uniform
   `authority_read_fence` / `head_in_fence` pair if reviewers prefer.
@@ -281,6 +292,6 @@ E04 content is fenced.
   yet pinned in `_SLOT_ID_PREFIXES`.
 - Whole-store heads are conservative: any advance of a captured dependency
   head marks every saved comparison stale (unchanged from the
-  saved-comparison registry). E04 catalog-row changes do not change the E04
-  head (see above) and so do not, by themselves, mark anything stale.
+  saved-comparison registry). In v2 any E04 catalog-row change marks every
+  save stale; the E04 content digest is linear in catalog size.
 - The D08 workspace builder is not built here.
