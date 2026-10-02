@@ -8,6 +8,7 @@ import json
 import os
 import threading
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 
@@ -97,7 +98,8 @@ def _with(record: VerifiedMeasurementRecord, **updates) -> VerifiedMeasurementRe
 @pytest.fixture
 def live(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
     monkeypatch.setattr(e06_tests, "_authority", _fragment_authority)
-    fixture = e06_tests.live.__wrapped__(tmp_path)
+    # The E06 fixture is parametrized over trust modes; use its default store mode.
+    fixture = e06_tests.live.__wrapped__(tmp_path, SimpleNamespace())
     value = next(fixture)
     monkeypatch.undo()
     # E06 records whose caller-asserted result digest is the E04 measurement.
