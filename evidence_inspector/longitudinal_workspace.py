@@ -154,9 +154,6 @@ from evidence_inspector.method_registry import (
     contract_from_canonical_bytes,
 )
 from evidence_inspector.projection_policy_registry import (
-    CellOriginProjectionPolicyV1,
-    CnaChromosomeProjectionPolicyV1,
-    CnaSegmentProjectionPolicyV1,
     FragmentProjectionPolicyV1,
     FragmentStatistic,
     ProjectionFamily,
@@ -176,7 +173,6 @@ from evidence_inspector.record_supersession_store import (
     MAX_HISTORY_PAGE_RECORDS,
     RecordHistoryEntry,
     RecordHistorySnapshot,
-    RecordHistoryState,
     RecordSupersessionStore,
     record_sha256,
 )
@@ -2073,7 +2069,6 @@ def _history_for(
         record.linkage_id != member.linkage_id
         or record.linkage_revision != member.linkage_revision
         or record.linkage_revision_sha256 != member.linkage_revision_sha256
-        or record.activation_receipt_sha256 != member.committed_receipt_sha256
         or record.bundle_sha256 != binding.result.bundle_sha256
     ):
         return ProtectedHistory(state=HistoryState.BINDING_MISMATCH)
