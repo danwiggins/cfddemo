@@ -136,6 +136,9 @@ Every journal entry, receipt, page and reopen records the fence kind. D08
 must refuse Save, and must not present a publication as fenced, unless the
 kind is `composite_authority_fence`.
 
+On reads, `_ensure_recovered` may take the registry lock alone, before the
+fence, to resolve a pending recovery; it reads no dependency authority.
+
 Because the live fence reads other stores while this registry's lock is
 held, it acquires those stores' locks after this one. No store ever takes
 this registry's lock, so this cannot deadlock; the coordinator removes the
@@ -185,12 +188,11 @@ follows its own spec.
 base state version, head and journal byte length, and the exact intended
 journal entry. Recovery runs under the exclusive lock at startup, at the
 start of every publication, and before any read that observes pending state.
-It never uses temporary files as evidence. It deletes a `.tmp-<32 hex>`
-file only when it is exactly what an interrupted private write leaves: an
-owner-only regular file within the bound with one link, or with two links
-when the other link is a published non-temporary name in the same directory
-(a crash between `link` and the temporary `unlink`). A symlink, directory,
-FIFO, foreign hard link or other file under that name fails closed.
+It never uses temporary files as evidence. A `.tmp-<32 hex>` name inside the
+registry's private `0700` directories is owned by the registry and is always
+unlinked (the merged D05 rule). `unlink(2)` never follows a symlink and never
+destroys data that has another link; a directory under that name makes
+`unlink` fail, so recovery fails closed.
 
 | State found | Action |
 | --- | --- |

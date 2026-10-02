@@ -377,52 +377,36 @@ def test_a_receiptless_commit_reopens_from_the_retained_predecessor_head(
         reopen_with(registry.root, fence, retained)
 
 
-def test_unsafe_temporary_names_fail_closed(registry, fence, tmp_path) -> None:
+def test_temporary_names_are_owned_and_unlinked_without_touching_data(
+    registry, fence, tmp_path
+) -> None:
     registry.register(make_saved(fence.heads), dependency_fence=fence)
     target = tmp_path / "keep.txt"
     target.write_bytes(b"not registry data")
+    # A symlink under a temporary name: the name goes, the target is untouched.
     link = registry.root / "objects" / (".tmp-" + "9" * 32)
     link.symlink_to(target)
-    with pytest.raises(LongitudinalComparisonRegistryUnsafe):
-        registry.list_selectors(dependency_fence=fence)
+    assert registry.list_selectors(dependency_fence=fence).state_version == 1
+    assert not os.path.lexists(link)
     assert target.read_bytes() == b"not registry data"
-    link.unlink()
-    target.chmod(0o600)
-    foreign = registry.root / "objects" / (".tmp-" + "6" * 32)
-    os.link(target, foreign)
-    with pytest.raises(LongitudinalComparisonRegistryUnsafe):
-        registry.list_selectors(dependency_fence=fence)
-    assert foreign.exists()
-    foreign.unlink()
-    # A temporary hard-linked to a non-destination name is never removed.
-    stray = registry.root / "objects" / "foreign.json"
-    stray.write_bytes(b"x")
-    stray.chmod(0o600)
-    linked = registry.root / "objects" / (".tmp-" + "5" * 32)
-    os.link(stray, linked)
-    with pytest.raises(LongitudinalComparisonRegistryUnsafe):
-        registry.list_selectors(dependency_fence=fence)
-    assert linked.exists()
-    linked.unlink()
-    stray.unlink()
-    # An object-directory temporary larger than any object is impossible residue.
-    oversized = registry.root / "objects" / (".tmp-" + "4" * 32)
-    oversized.write_bytes(b"x" * (registry_module.MAX_OBJECT_BYTES + 1))
-    oversized.chmod(0o600)
-    with pytest.raises(LongitudinalComparisonRegistryUnsafe):
-        registry.list_selectors(dependency_fence=fence)
-    assert oversized.exists()
-    oversized.unlink()
+    # A hard link under a temporary name: the name goes, the other name still
+    # reads the same bytes.
+    linked = registry.root / (".tmp-" + "6" * 32)
+    os.link(target, linked)
+    assert registry.list_selectors(dependency_fence=fence).state_version == 1
+    assert not linked.exists()
+    assert target.read_bytes() == b"not registry data"
+    # Ordinary interrupted-write residue is removed.
+    leftover = registry.root / (".tmp-" + "7" * 32)
+    leftover.write_bytes(b"partial")
+    assert registry.list_selectors(dependency_fence=fence).state_version == 1
+    assert not leftover.exists()
+    # A directory under a temporary name makes unlink fail: fail closed.
     directory = registry.root / (".tmp-" + "8" * 32)
     directory.mkdir()
     with pytest.raises(LongitudinalComparisonRegistryUnsafe):
         registry.list_selectors(dependency_fence=fence)
-    directory.rmdir()
-    leftover = registry.root / (".tmp-" + "7" * 32)
-    leftover.write_bytes(b"partial")
-    leftover.chmod(0o600)
-    assert registry.list_selectors(dependency_fence=fence).state_version == 1
-    assert not leftover.exists()
+    assert directory.is_dir()
 
 
 def test_family_projection_request_is_exact() -> None:

@@ -2251,57 +2251,23 @@ class LongitudinalComparisonRegistry:
     def _recover(self) -> None:
         """Resolve one interrupted publication; caller holds the exclusive lock.
 
-        Only the durable candidate record decides: temporary files are never
-        evidence.  A temporary file is removed only when it is exactly what
-        ``_publish_file`` leaves behind (an owner-only, single-link regular
-        file within the object bound); anything else under a temporary name
-        fails closed.  A committed entry whose exact object is present is made
-        durable and adopted.  An uncommitted candidate loses only its own
-        object (verified by digest) and its own torn journal suffix.  Anything
-        else fails closed.
+        Only the durable candidate record decides; temporary files are never
+        evidence.  A ``.tmp-<32 hex>`` name inside the registry's private
+        ``0700`` directories is owned by the registry and is always unlinked
+        (the merged D05 rule): unlink(2) never follows a symlink and never
+        destroys data that has another link, and a directory under that name
+        makes unlink fail, so it fails closed.  A committed entry whose exact
+        object is present is made durable and adopted.  An uncommitted
+        candidate loses only its own object (verified by digest) and its own
+        torn journal suffix.  Anything else fails closed.
         """
 
         assert self._root_fd is not None and self._objects_fd is not None
         try:
-            for directory, is_destination, size_bound in (
-                (
-                    self._root_fd,
-                    lambda name: name in (_CANDIDATE_NAME, _METADATA_NAME),
-                    MAX_RECOVERY_BYTES,
-                ),
-                (
-                    self._objects_fd,
-                    lambda name: _is_hex(name[:-5], 64) and name.endswith(".json"),
-                    MAX_OBJECT_BYTES,
-                ),
-            ):
-                names = os.listdir(directory)
-                # ``_publish_file`` links the destination before unlinking its
-                # temporary name, so a crash there leaves a two-link temporary
-                # file whose other link is a valid publication destination.
-                published = {
-                    _identity(os.stat(name, dir_fd=directory, follow_symlinks=False))
-                    for name in names
-                    if is_destination(name)
-                }
-                for name in names:
-                    if not _is_temporary_name(name):
-                        continue
-                    observed = os.stat(name, dir_fd=directory, follow_symlinks=False)
-                    links_ok = observed.st_nlink == 1 or (
-                        observed.st_nlink == 2 and _identity(observed) in published
-                    )
-                    if (
-                        not stat.S_ISREG(observed.st_mode)
-                        or stat.S_IMODE(observed.st_mode) != 0o600
-                        or observed.st_uid != os.geteuid()
-                        or not links_ok
-                        or observed.st_size > size_bound
-                    ):
-                        raise LongitudinalComparisonRegistryUnsafe(
-                            "saved comparison registry temporary file is unsafe"
-                        )
-                    os.unlink(name, dir_fd=directory)
+            for directory in (self._root_fd, self._objects_fd):
+                for name in os.listdir(directory):
+                    if _is_temporary_name(name):
+                        os.unlink(name, dir_fd=directory)
                 os.fsync(directory)
         except OSError:
             raise LongitudinalComparisonRegistryUnsafe(
