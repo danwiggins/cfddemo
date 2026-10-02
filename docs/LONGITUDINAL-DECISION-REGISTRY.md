@@ -82,8 +82,12 @@ A failed journal append truncates any torn suffix back to the last committed
 entry, so the chain stays readable and the registration can be retried. A
 failed restore, including a failed final reopen of the restored registry,
 removes the partial target it created, so a retry is possible.
-Both gaps also exist in the merged D05 cohort registry and are a follow-up
-there.
+Crash recovery follows the shared storage behaviour in
+`docs/REGISTRY-STORAGE.md`. Creation and restore are staged in a hidden
+sibling and published with one rename. A torn journal tail fails closed on
+reopen until an operator runs `recover_torn_journal_tail` with the retained
+identity and head. Owned `.tmp-<32 hex>` names are swept under the
+exclusive lock (the D05 rule). A failed append truncates on any exception.
 
 The journal is the commit point. An object without a journal entry is the
 remnant of an interrupted registration. Reads tolerate at most one. The next
