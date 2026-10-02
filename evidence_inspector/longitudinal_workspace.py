@@ -1149,6 +1149,14 @@ class PublicDependencyHead(RegistryContract):
     slot: DependencySlot
     head: DependencyHeadV1
 
+    @model_validator(mode="after")
+    def never_the_reader_registry(self) -> PublicDependencyHead:
+        if self.slot is DependencySlot.READER_AUTHORIZATION or self.head.id.startswith(
+            "reader_registry_"
+        ):
+            raise ValueError("the reader-registry head is never public")
+        return self
+
 
 def public_dependency_heads(
     heads: SavedComparisonDependencyHeadsV1,

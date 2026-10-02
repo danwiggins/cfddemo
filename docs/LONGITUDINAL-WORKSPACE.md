@@ -257,7 +257,9 @@ head vector omits the reader-registry head, which is normally the session's
 bound head), the time axis,
 population, covariate context, version diff, anchor record digest, every
 protected and public row and every segment; the reader authorization is
-excluded.
+excluded, and each protected row's D07 `replayed_at` is replaced by a fixed
+placeholder before hashing (it is the live authority clock at the read, so it
+would change the digest of unchanged authority).
 
 ## Version diff
 

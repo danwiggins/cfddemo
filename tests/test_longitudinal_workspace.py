@@ -1283,7 +1283,14 @@ def test_public_heads_admit_no_reader_slot(base) -> None:
             "head": workspace.dependency_heads.reader_authorization,
         }
     )
-    for forged in ((reader, *heads[1:]), (*heads[:-1], heads[0])):
+    relabelled = heads[0].model_copy(
+        update={"head": workspace.dependency_heads.reader_authorization}
+    )
+    for forged in (
+        (reader, *heads[1:]),
+        (*heads[:-1], heads[0]),
+        (relabelled, *heads[1:]),
+    ):
         with pytest.raises(ValueError):
             workspace.authority.model_validate(
                 {**workspace.authority.model_dump(mode="python"), "heads": forged}
