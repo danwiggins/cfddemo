@@ -971,6 +971,93 @@ def test_concurrent_initialization_converges_on_one_exact_schema(
         linkage.close()
 
 
+def test_concurrent_initializer_cannot_open_ledger_inside_connection_proof(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """Force the interleaving behind the flaky convergence test.
+
+    Initializer A is paused inside its SQLite open, i.e. inside the window in
+    which _connect diffs the process descriptor table to prove which fd SQLite
+    opened. Initializer B is then started on the same root. B must not be able
+    to open a descriptor onto the ledger database inside A's window; it waits,
+    and both converge on one ledger.
+    """
+    linkage = _store(tmp_path / "linkage")
+    root = tmp_path / "records"
+    database_name = "record-supersession.sqlite3"
+    original_connect = sqlite3.connect
+    original_open = os.open
+    a_paused = Event()
+    release_a = Event()
+    b_opened_ledger = Event()
+    b_reached_ledger_or_lock = Event()
+    b_thread: list[int] = []
+    paused_once: list[bool] = []
+    original_lock = supersession_module._SQLITE_OPEN_LOCK
+
+    class ObservedLock:
+        """Delegating lock that reports when B first tries to take it."""
+
+        def acquire(self, *args, **kwargs):
+            if b_thread and get_ident() == b_thread[0]:
+                b_reached_ledger_or_lock.set()
+            return original_lock.acquire(*args, **kwargs)
+
+        def release(self) -> None:
+            original_lock.release()
+
+        def __enter__(self):
+            return self.acquire()
+
+        def __exit__(self, *exc_info) -> None:
+            self.release()
+
+    def paused_connect(database, *args, **kwargs):
+        if str(database).endswith(database_name) and not paused_once:
+            paused_once.append(True)
+            a_paused.set()
+            if not release_a.wait(timeout=10):
+                raise AssertionError("paused initializer was not released")
+        return original_connect(database, *args, **kwargs)
+
+    def observed_open(path, flags, *args, **kwargs):
+        if b_thread and get_ident() == b_thread[0] and str(path) == database_name:
+            b_opened_ledger.set()
+            b_reached_ledger_or_lock.set()
+        return original_open(path, flags, *args, **kwargs)
+
+    def initialize_b() -> RecordSupersessionStore:
+        b_thread.append(get_ident())
+        return RecordSupersessionStore(root, linkage_store=linkage)
+
+    monkeypatch.setattr(supersession_module.sqlite3, "connect", paused_connect)
+    monkeypatch.setattr(supersession_module.os, "open", observed_open)
+    monkeypatch.setattr(supersession_module, "_SQLITE_OPEN_LOCK", ObservedLock())
+    try:
+        with ThreadPoolExecutor(max_workers=2) as pool:
+            first_future = pool.submit(
+                RecordSupersessionStore, root, linkage_store=linkage
+            )
+            assert a_paused.wait(timeout=10)
+            second_future = pool.submit(initialize_b)
+            # B either opens the ledger database (the race) or blocks on the
+            # open lock first (the fix); whichever happens first is decisive.
+            assert b_reached_ledger_or_lock.wait(timeout=10)
+            opened_inside_window = b_opened_ledger.is_set()
+            release_a.set()
+            stores = [first_future.result(timeout=20), second_future.result(timeout=20)]
+        assert not opened_inside_window
+        assert b_opened_ledger.is_set()
+        first, second = (store.active_snapshot() for store in stores)
+        assert first == second
+    finally:
+        release_a.set()
+        monkeypatch.setattr(supersession_module.sqlite3, "connect", original_connect)
+        monkeypatch.setattr(supersession_module.os, "open", original_open)
+        monkeypatch.setattr(supersession_module, "_SQLITE_OPEN_LOCK", original_lock)
+        linkage.close()
+
+
 def test_tamper_schema_and_content_are_detected_without_private_text(durable) -> None:
     _, ledger, _, first, _ = durable
     ledger.commit_record(first)
