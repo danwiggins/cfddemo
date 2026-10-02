@@ -49,8 +49,12 @@ from evidence_inspector.cohort_import import (
 from evidence_inspector.cohort_registry import CohortRegistry
 from evidence_inspector.compatibility import (
     CompatibilityContractError,
+    CompatibilityDecision,
     CompatibilityPolicy,
     CompatibilityRequest,
+    ExecutionState,
+    InformationState,
+    TrustState,
     VerifiedMeasurementRecord,
     compatibility_policy_sha256,
     replay_compatibility_decision,
@@ -1039,6 +1043,37 @@ def _fragment_source(
     return candidates[0]
 
 
+def _reproduces_decision(
+    record: VerifiedMeasurementRecord,
+    counterpart_record: VerifiedMeasurementRecord,
+    information_state: InformationState,
+    policy: CompatibilityPolicy,
+    decision: CompatibilityDecision,
+) -> bool:
+    """Return whether E05 replays ``decision`` with this counterpart state."""
+
+    try:
+        candidate = VerifiedMeasurementRecord.model_validate(
+            {
+                **counterpart_record.model_dump(mode="python"),
+                "information_state": information_state,
+            }
+        )
+        _PINNED_REPLAY_DECISION(
+            CompatibilityRequest(
+                left=record,
+                right=candidate,
+                policy=policy,
+                trusted_policy_sha256=decision.binding.trusted_policy_sha256,
+                trusted_authority_head_sha256=decision.binding.authority_head_sha256,
+            ),
+            decision,
+        )
+    except (CompatibilityContractError, ValueError):
+        return False
+    return True
+
+
 def _decision_semantics(decision: object) -> tuple[object, ...]:
     return (
         decision.outcome,
@@ -1861,23 +1896,34 @@ class MeasurementSourceArtifactRegistry:
                 "counterpart record is not the E06 counterpart member"
             )
         decision = resolved.source.compatibility_decision
-        try:
-            _PINNED_REPLAY_DECISION(
-                CompatibilityRequest(
-                    left=record,
-                    right=counterpart_record,
-                    policy=policy,
-                    trusted_policy_sha256=decision.binding.trusted_policy_sha256,
-                    trusted_authority_head_sha256=(
-                        decision.binding.authority_head_sha256
-                    ),
-                ),
-                decision,
+        # E06 admits a counterpart only when its live catalog result is complete
+        # and verified, so those two states are fixed.  The decision binds every
+        # other counterpart field except ``information_state``; E05 itself (the
+        # pinned replay) decides whether the decision determines it.  If more
+        # than one value reproduces the decision, the caller could choose panel
+        # B's state, so the source has no deterministic artifact.
+        if (
+            counterpart_record.execution_state is not ExecutionState.COMPLETE
+            or counterpart_record.trust_state is not TrustState.VERIFIED
+        ):
+            raise MeasurementSourceArtifactRegistryConflict(
+                "counterpart record is not the E06-verified counterpart"
             )
-        except (CompatibilityContractError, ValueError):
+        reproducing = tuple(
+            state
+            for state in InformationState
+            if _reproduces_decision(
+                record, counterpart_record, state, policy, decision
+            )
+        )
+        if counterpart_record.information_state not in reproducing:
             raise MeasurementSourceArtifactRegistryConflict(
                 "counterpart record and policy do not reproduce the E06 decision"
-            ) from None
+            )
+        if len(reproducing) != 1:
+            raise MeasurementSourceArtifactNotApplicable(
+                "E06 decision does not determine the counterpart record"
+            )
         if record.method.family is not MethodFamily.FRAGMENT_MEASUREMENT:
             raise MeasurementSourceArtifactNotApplicable(
                 "E06 source is not a fragment measurement"

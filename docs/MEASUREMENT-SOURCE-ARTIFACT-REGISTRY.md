@@ -30,18 +30,28 @@ before the registry and constrains what the registry claims.
 
 ### Can the registry derive the artifact itself?
 
-E07: yes. Given one E06 source, every E07 input is either live authority or
-pinned by the E06 source:
+E07: yes, for E06 sources whose decision determines the counterpart record.
+For those, every E07 input is either live authority or pinned by the E06
+source:
 
 - The subject record is the E06 record. E06 verified it against the live D06
   binding and E04 `CatalogResultRef` under the D06 fence.
 - The counterpart record and the policy are not returned by E06 `resolve`, so
-  the caller supplies them. They are accepted only if
-  `replay_compatibility_decision` reproduces the E06 decision byte for byte.
-  The decision binds both records' identities (result, digests, bundle ID,
-  method, capability digest, compatibility-key digest), the policy digest and
-  the trusted pins, so the caller has no freedom beyond the counterpart fields
-  E06 already lists as caller-asserted.
+  the caller supplies them. The decision binds the policy digest, the trusted
+  pins, and every counterpart field except the three states (result, digests,
+  bundle ID, method through its definition digest, capability digest,
+  compatibility-key digest). E06 admits a counterpart only when its live E04
+  result is complete and verified, so the registry requires exactly those
+  execution and trust states. For `information_state`, the registry asks E05
+  itself: it replays the E06 decision with each `InformationState` value and
+  requires exactly one to reproduce it, and that one must be the caller's.
+  When more than one reproduces it (E05 returned before inspecting
+  information, or stopped at the information gate, where `insufficient` and
+  `unknown` give the same decision), the caller could choose panel B's state,
+  so the source is `MeasurementSourceArtifactNotApplicable`. In practice an
+  artifact exists only when the E06 decision got past E05's information gate:
+  `comparable`, `incompatible`, `different_quantity`, or an `unknown` decided
+  after that gate.
 - The two E02 bundles come from `verify_reference` on the two live
   `CatalogResultRef`s, inside the D06 fence.
 - Selections, panel order and controls are fixed: subject in panel A, the E06
@@ -87,8 +97,9 @@ The resolved contract states both facts as literals
 ### Is the artifact deterministic and replayable?
 
 E07: yes. `build_fragment_explorer_view` is pure; the view embeds its request,
-and `replay_fragment_explorer_view` rebuilds it from that request. Two
-registries deriving the same E06 source produce byte-identical artifacts (test
+and `replay_fragment_explorer_view` rebuilds it from that request. With the
+counterpart determined as above, two registries deriving the same E06 source
+produce byte-identical artifacts (test
 `test_artifact_derivation_is_deterministic_across_registries`).
 
 E08 is pure and replays through its artifact validator; E09 replays through
@@ -129,7 +140,8 @@ expected_member_sha256, expected_result_id, counterpart_record, policy)`:
    status digest to equal the one E06 verified, so no D01, D05, D06 or E04
    change landed in between;
 4. finds both member bindings by the digests E06 returned;
-5. replays the E05 decision from the E06 record, counterpart record and policy;
+5. replays the E05 decision from the E06 record, counterpart record and policy,
+   and requires the counterpart to be the only record that reproduces it;
 6. re-verifies both E04 bundles with the pinned `verify_reference`;
 7. builds the two E07 sources and the view with the fixed parameters and checks
    the comparison semantics against E06; and
@@ -227,10 +239,14 @@ not defend against a hostile process running as the same user.
 
 - E08 and E09 artifacts cannot be bound to an E06 source; see above.
 - The E06 counterpart record and policy are not exposed by E06 `resolve`, so
-  this registry stores the caller's copies, pinned by exact decision replay.
-  When the E06 decision is not `comparable`, the counterpart's
-  `information_state` is only partly pinned (E06 lists it as caller-asserted),
-  and it can change panel B's state. Panel A, the subject, is fully derived.
+  this registry stores the caller's copies, pinned by exact decision replay
+  and the uniqueness rule above. A subject whose E06 decision stops before or
+  at E05's information gate (stale policy or authority pin, missing metadata,
+  revoked, not complete, or either record not sufficient) therefore has no
+  artifact and no standalone value, even though its own panel would be fully
+  derived. Open decision: have E06 `resolve` return (or attest) its exact
+  stored counterpart record and policy, which would lift this restriction
+  without any caller input.
 - The method-authority head is the import-time head pinned by E04, as in E06
   (`method_authority_head_current_verified=false`).
 - The crash-recovery gaps shared by every registry (interrupted root creation,

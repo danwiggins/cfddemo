@@ -18,6 +18,8 @@ import tests.test_result_view_source_registry as e06_tests
 from evidence_inspector.cohort_import import CohortRecordCatalog
 from evidence_inspector.compatibility import (
     CompatibilityOutcome,
+    InformationState,
+    TrustState,
     VerifiedMeasurementRecord,
     compatibility_policy_sha256,
 )
@@ -305,7 +307,14 @@ def test_exact_retry_is_idempotent_and_each_e06_source_has_its_own_selector(
 
 @pytest.mark.parametrize(
     "mutation",
-    ("counterpart_bundle_id", "counterpart_is_subject", "policy_flag", "policy_pin"),
+    (
+        "counterpart_bundle_id",
+        "counterpart_is_subject",
+        "counterpart_information",
+        "counterpart_trust",
+        "policy_flag",
+        "policy_pin",
+    ),
 )
 def test_inputs_that_do_not_reproduce_the_e06_decision_are_rejected(
     registry: MeasurementSourceArtifactRegistry, e06, live: Live, mutation: str
@@ -317,6 +326,14 @@ def test_inputs_that_do_not_reproduce_the_e06_decision_are_rejected(
         updates["counterpart_record"] = _with(live.records[1], bundle_id="bundle_other")
     elif mutation == "counterpart_is_subject":
         updates["counterpart_record"] = live.records[0]
+    elif mutation == "counterpart_information":
+        updates["counterpart_record"] = _with(
+            live.records[1], information_state=InformationState.INSUFFICIENT
+        )
+    elif mutation == "counterpart_trust":
+        updates["counterpart_record"] = _with(
+            live.records[1], trust_state=TrustState.UNVERIFIED
+        )
     elif mutation == "policy_flag":
         rule = policy.measurement_policies[0].model_copy(
             update={"delta_allowed_when_comparable": False}
@@ -334,6 +351,47 @@ def test_inputs_that_do_not_reproduce_the_e06_decision_are_rejected(
     with pytest.raises(MeasurementSourceArtifactRegistryConflict):
         _register(registry, live, e06_receipt, **updates)
     assert registry.list_selectors(live.selector_id, live.cohort_version).records == ()
+
+
+@pytest.mark.parametrize("counterpart_state", tuple(InformationState))
+def test_e06_decision_that_does_not_determine_the_counterpart_is_not_applicable(
+    registry: MeasurementSourceArtifactRegistry,
+    e06,
+    live: Live,
+    counterpart_state: InformationState,
+) -> None:
+    # A stale policy pin makes E05 return before it inspects information
+    # state, so the counterpart's state (panel B) would be the caller's choice.
+    counterpart = _with(live.records[1], information_state=counterpart_state)
+    e06_receipt = _e06_register(
+        e06, live, counterpart_record=counterpart, expected_policy_sha256="f" * 64
+    )
+    resolved = e06.resolve(
+        e06_receipt.selector_id,
+        e06_receipt.source_version,
+        expected_member_sha256=live.bindings[0].member_sha256,
+        expected_result_id=live.bindings[0].result.result_id,
+    )
+    assert resolved.source.compatibility_decision.outcome is (
+        CompatibilityOutcome.UNKNOWN
+    )
+    with pytest.raises(MeasurementSourceArtifactNotApplicable, match="determine"):
+        _register(registry, live, e06_receipt, counterpart_record=counterpart)
+
+
+def test_counterpart_information_state_is_bound_when_e05_inspects_it(
+    registry: MeasurementSourceArtifactRegistry, e06, live: Live
+) -> None:
+    # Subject sufficient, counterpart insufficient: E05 stops at the
+    # information gate, where "insufficient" and "unknown" give the same
+    # decision, so the counterpart is not determined and there is no artifact.
+    counterpart = _with(live.records[1], information_state=InformationState.INSUFFICIENT)
+    e06_receipt = _e06_register(e06, live, counterpart_record=counterpart)
+    with pytest.raises(MeasurementSourceArtifactNotApplicable, match="determine"):
+        _register(registry, live, e06_receipt, counterpart_record=counterpart)
+    # Both sufficient: the comparable decision pins the counterpart exactly.
+    receipt, _ = _registered(registry, e06, live)
+    assert receipt.state_version == 1
 
 
 def test_e06_source_without_the_e04_measurement_digest_is_not_applicable(
