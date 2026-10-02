@@ -11,6 +11,7 @@ from __future__ import annotations
 import fcntl
 import hashlib
 import os
+import sqlite3
 import stat
 import threading
 import weakref
@@ -71,6 +72,7 @@ from evidence_inspector.result_catalog import (
     bound_catalog_authority,
     catalog_authority_sha256,
 )
+from evidence_inspector.result_trust_registry import ResultTrustSnapshot
 from evidence_inspector.safe_ingress import contract_type_graph, exact_model_bytes
 from traceback_runner.serialization import canonical_json_bytes
 from traceback_runner.signing import RevokedKeyError
@@ -94,6 +96,10 @@ _PROCESS_LOCK = threading.RLock()
 _COHORT_INSTANCE_SEALS: weakref.WeakKeyDictionary[
     object, tuple[object, ...]
 ] = weakref.WeakKeyDictionary()
+# Holder (process, thread) of each catalog's ``record_status_read_fence``.
+_STATUS_FENCE_HOLDERS: weakref.WeakKeyDictionary[object, tuple[int, int]] = (
+    weakref.WeakKeyDictionary()
+)
 _PINNED_RESULT_IMPORT = ResultCatalog.import_bundle
 _PINNED_RESULT_VERIFY = ResultCatalog.verify_reference
 _PINNED_RESULT_QUERY = ResultCatalog.query
@@ -128,6 +134,7 @@ _PINNED_REGISTRY_REQUIRE_INTEGRITY = (
 _PINNED_REGISTRY_LOCK = CohortRegistry._lock
 _PINNED_REGISTRY_RESOLVE_IN_FENCE = CohortRegistry._resolve_history_in_fence
 _PINNED_REGISTRY_LOAD_JOURNAL = CohortRegistry._load_journal
+_PINNED_REGISTRY_HEAD_IN_FENCE = CohortRegistry.head_in_fence
 _PINNED_REGISTRY_LIST = CohortRegistry.list_selectors
 _PINNED_EXACT_MODEL_BYTES = exact_model_bytes
 _PINNED_FAULT_SNAPSHOT = fault_controller_snapshot
@@ -2570,6 +2577,165 @@ class CohortRecordCatalog:
         ) as (_, status):
             return status
 
+    def _require_composite_prefix_held(self) -> None:
+        """Require the D01, D05 and E04/trust fences that precede the D06 root.
+
+        Order: linkage ``authority_read_fence``, then the cohort registry's
+        ``authority_read_fence``, then this catalog's E04
+        ``trust_authority_fence`` on the result-trust-registry path, all held
+        by this thread.  The TrustStore path has no cross-process trust fence
+        and is not composable.
+        """
+
+        state = object.__getattribute__(self._linkage_store, "__dict__")
+        connection = state.get("_connection") if type(state) is dict else None
+        holder = state.get("_authority_fence_thread") if type(state) is dict else None
+        thread = threading.get_ident()
+        if (
+            type(holder) is not tuple
+            or holder != (os.getpid(), thread)
+            or type(connection) is not sqlite3.Connection
+            or not connection.in_transaction
+        ):
+            raise CohortImportError("record status fence requires the held linkage fence")
+        try:
+            _PINNED_REGISTRY_HEAD_IN_FENCE(self._cohort_registry)
+        except Exception:
+            raise CohortImportError(
+                "record status fence requires the held cohort registry fence"
+            ) from None
+        catalog = self._result_catalog
+        holders = object.__getattribute__(catalog, "__dict__").get(
+            "_trust_fence_holders"
+        )
+        if (
+            self._result_trust_registry is None
+            or type(holders) is not dict
+            or type(holders.get(thread)) is not ResultTrustSnapshot
+        ):
+            raise CohortImportError(
+                "record status fence requires the held result trust fence"
+            )
+
+    @contextmanager
+    def record_status_read_fence(self) -> Iterator[None]:
+        """Hold the D06 record root shared for a composite authority fence.
+
+        This is the D06 step of the E12 global lock order (D01 linkage, D05
+        cohort registry, E04 catalog connection, result trust, then this
+        root); the caller must already hold the first four on this thread.
+        Import publication, recovery and cleanup need the exclusive root lock
+        and cannot land, from any process, until this context exits.  Only
+        ``record_status_in_fence`` may read inside it.  Not reentrant.
+        """
+
+        _CC_ASSERT_RUNTIME(self)
+        _CC_REQUIRE_COMPOSITE_PREFIX(self)
+        current = (os.getpid(), threading.get_ident())
+        if _STATUS_FENCE_HOLDERS.get(self) == current:
+            raise CohortImportError("record status fence is already held")
+        with self._catalog_connection_lock:
+            with _PROCESS_LOCK:
+                _CC_VALIDATE_ROOT(self)
+                descriptor = os.open(
+                    ".",
+                    os.O_RDONLY
+                    | getattr(os, "O_DIRECTORY", 0)
+                    | getattr(os, "O_CLOEXEC", 0)
+                    | getattr(os, "O_NOFOLLOW", 0),
+                    dir_fd=self._root_fd,
+                )
+                try:
+                    if _file_identity(os.fstat(descriptor)) != _file_identity(
+                        os.fstat(self._root_fd)
+                    ):
+                        raise CohortImportFilesystemError("cohort record root changed")
+                    fcntl.flock(descriptor, fcntl.LOCK_SH)
+                    _STATUS_FENCE_HOLDERS[self] = current
+                    try:
+                        yield
+                    finally:
+                        _STATUS_FENCE_HOLDERS.pop(self, None)
+                finally:
+                    fcntl.flock(descriptor, fcntl.LOCK_UN)
+                    os.close(descriptor)
+
+    def record_status_in_fence(
+        self, selector_id: str, cohort_version: int
+    ) -> CohortManifestRecordStatus:
+        """Return one status while ``record_status_read_fence`` is held.
+
+        The same derivation and final registry/linkage recheck as
+        ``record_status_for_manifest``, reusing the caller's held fences
+        instead of taking them, so it can run for several cohort versions in
+        one composite hold.
+        """
+
+        _CC_ASSERT_RUNTIME(self)
+        if _STATUS_FENCE_HOLDERS.get(self) != (os.getpid(), threading.get_ident()):
+            raise CohortImportError("record status fence is absent")
+        _CC_REQUIRE_COMPOSITE_PREFIX(self)
+        if (
+            type(selector_id) is not str
+            or len(selector_id) != 56
+            or not selector_id.startswith("cohort_selector_")
+            or any(character not in "0123456789abcdef" for character in selector_id[16:])
+            or type(cohort_version) is not int
+            or not 1 <= cohort_version <= 100_000
+        ):
+            raise CohortImportError("cohort registry selector is invalid")
+        registry = self._cohort_registry
+        try:
+            _PINNED_REGISTRY_REQUIRE_INTEGRITY(registry)
+            history = _CC_RESOLVE_REGISTERED_HISTORY_IN_FENCE(
+                self, selector_id, cohort_version
+            )
+            linkage_snapshot = _capture_linkage_snapshot(
+                _PINNED_MANIFEST_ACTIVE_SNAPSHOT(self._linkage_store)
+            )
+            journal = _PINNED_REGISTRY_LOAD_JOURNAL(registry)
+            registry_state_heads = (
+                object.__getattribute__(registry, "_genesis_head_sha256"),
+                *(item.entry_sha256 for item in journal),
+            )
+            if history.state_version != len(journal):
+                raise CohortImportConflict("cohort registry state changed")
+            status = _CC_STATUS_BODY(
+                self,
+                selector_id,
+                cohort_version,
+                history,
+                linkage_snapshot,
+                registry_state_heads,
+            )
+            final_history = _CC_RESOLVE_REGISTERED_HISTORY_IN_FENCE(
+                self, selector_id, cohort_version, expected=history
+            )
+            final_snapshot = _capture_linkage_snapshot(
+                _PINNED_MANIFEST_ACTIVE_SNAPSHOT(self._linkage_store)
+            )
+            final_journal = _PINNED_REGISTRY_LOAD_JOURNAL(registry)
+            final_heads = (
+                object.__getattribute__(registry, "_genesis_head_sha256"),
+                *(item.entry_sha256 for item in final_journal),
+            )
+            if (
+                final_history != history
+                or final_snapshot != linkage_snapshot
+                or final_heads != registry_state_heads
+            ):
+                raise CohortImportConflict(
+                    "cohort registry or linkage authority changed"
+                )
+            _PINNED_REGISTRY_REQUIRE_INTEGRITY(registry)
+        except CohortImportError:
+            raise
+        except Exception:
+            raise CohortImportError(
+                "cohort registry selection is not current and trusted"
+            ) from None
+        return status
+
     def _record_status_for_manifest_body(
         self,
         selector_id: str,
@@ -2867,6 +3033,9 @@ _COHORT_METHOD_SEAL = MappingProxyType(
             "import_bundle",
             "record_status_for_manifest",
             "record_status_authority_fence",
+            "_require_composite_prefix_held",
+            "record_status_read_fence",
+            "record_status_in_fence",
         )
     }
 )
@@ -3011,6 +3180,7 @@ _CC_VALIDATE_READER_REGISTRY = CohortRecordCatalog._validate_reader_registry
 _CC_VALIDATE_ROOT = CohortRecordCatalog._validate_root
 _CC_WRITE_PENDING = CohortRecordCatalog._write_pending
 _CC_WRITE_ROLLBACK = CohortRecordCatalog._write_rollback_marker
+_CC_REQUIRE_COMPOSITE_PREFIX = CohortRecordCatalog._require_composite_prefix_held
 _COHORT_ALIAS_SEAL = MappingProxyType(
     {
         name: globals()[name]
@@ -3035,6 +3205,7 @@ _COHORT_ALIAS_SEAL = MappingProxyType(
             "_CC_VALIDATE_ROOT",
             "_CC_WRITE_PENDING",
             "_CC_WRITE_ROLLBACK",
+            "_CC_REQUIRE_COMPOSITE_PREFIX",
             "_PINNED_RESULT_REGISTER_CANDIDATE",
             "_PINNED_RESULT_CANDIDATES",
             "_PINNED_RESULT_FINISH_CANDIDATE",
@@ -3043,6 +3214,7 @@ _COHORT_ALIAS_SEAL = MappingProxyType(
             "_PINNED_REGISTRY_LOCK",
             "_PINNED_REGISTRY_RESOLVE_IN_FENCE",
             "_PINNED_REGISTRY_LOAD_JOURNAL",
+            "_PINNED_REGISTRY_HEAD_IN_FENCE",
             "_PINNED_REGISTRY_LIST",
             "_PINNED_EXACT_MODEL_BYTES",
         )

@@ -128,7 +128,7 @@ class FakeFence(SavedComparisonDependencyFence):
 
     def __init__(self, heads: SavedComparisonDependencyHeadsV1 | None = None) -> None:
         self.heads = heads or make_heads()
-        self.kind = DependencyFenceKind.DIRECT_HEAD_REREAD
+        self.kind = DependencyFenceKind.TEST_ONLY_UNFENCED
         self.reads = 0
         self.on_read: Callable[[FakeFence], None] | None = None
 
@@ -199,6 +199,18 @@ def make_saved(
     )
 
 
+@pytest.fixture(autouse=True)
+def _allow_test_only_fence() -> Iterator[None]:
+    # FakeFence is not a composite fence; production refuses its kind.  Not
+    # via ``monkeypatch``: tests' own monkeypatch undo must run before the
+    # registry fixture closes.
+    registry_module._TEST_ONLY_FENCE_ALLOWED = True
+    try:
+        yield
+    finally:
+        registry_module._TEST_ONLY_FENCE_ALLOWED = False
+
+
 @pytest.fixture
 def fence() -> FakeFence:
     return FakeFence()
@@ -244,7 +256,7 @@ def test_publication_is_content_addressed_and_reopens_current(registry, fence) -
     assert receipt.state_version == 1
     assert receipt.object_sha256 == hashlib.sha256(content).hexdigest()
     assert receipt.dependency_heads == fence.heads
-    assert receipt.dependency_fence_kind is DependencyFenceKind.DIRECT_HEAD_REREAD
+    assert receipt.dependency_fence_kind is DependencyFenceKind.TEST_ONLY_UNFENCED
     assert receipt.saving_authorizes_export is False
     assert object_names(registry) == {f"{receipt.object_sha256}.json"}
     assert (registry.root / "objects" / f"{receipt.object_sha256}.json").read_bytes() == (
@@ -968,7 +980,7 @@ def _pending_record(registry, fence, saved) -> SavedComparisonRecoveryRecordV1:
         object_sha256=hashlib.sha256(content).hexdigest(),
         object_bytes=len(content),
         dependency_heads=fence.heads,
-        dependency_fence_kind=DependencyFenceKind.DIRECT_HEAD_REREAD,
+        dependency_fence_kind=DependencyFenceKind.TEST_ONLY_UNFENCED,
     )
     return registry_module._build_recovery_record(
         registry_id=registry_id,
@@ -1413,140 +1425,62 @@ def test_saved_objects_are_immutable_contracts(fence) -> None:
     )
 
 
-# --- interim live fence over the merged stores ------------------------------------
+# --- fence kinds ---------------------------------------------------------------------
 
 
-@pytest.fixture
-def live_fence(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
-    import evidence_inspector.reader_authorization_registry as reader_module
-    from evidence_inspector.anchor_policy_registry import AnchorPolicyRegistry
-    from evidence_inspector.covariate_context_registry import CovariateContextRegistry
-    from evidence_inspector.projection_policy_registry import ProjectionPolicyRegistry
-    from evidence_inspector.provider_linkage_store import AuthorityTimeSource
-    from evidence_inspector.reader_authorization_registry import (
-        ReaderAuthorizationProfile,
-        ReaderAuthorizationRegistry,
-        reader_trust_sha256,
-    )
-    from evidence_inspector.reader_authorization_synthetic import synthetic_reader_trust
-    from evidence_inspector.record_supersession_store import RecordSupersessionStore
-    from evidence_inspector.repeatability_comparison_registry import (
-        RepeatabilityComparisonRegistry,
-    )
-    from evidence_inspector.result_trust_registry import ResultTrustRegistry
-    from evidence_inspector.result_view_source_registry import ResultViewSourceRegistry
-    from tests.test_covariate_context_live import make_live
-    from tests.test_provider_linkage_store import _pins
-
-    monkeypatch.setattr(reader_module, "_PROCESS_PROFILE", {})
-    live, closers = make_live(tmp_path / "live")
-    try:
-        trust = ResultTrustRegistry(tmp_path / "trust")
-        closers.append(trust)
-        history = RecordSupersessionStore(tmp_path / "d04", linkage_store=live.store)
-        closers.append(history)
-        reader_trust = synthetic_reader_trust()
-        reader = ReaderAuthorizationRegistry.create(
-            tmp_path / "reader",
-            profile=ReaderAuthorizationProfile.SYNTHETIC,
-            configured_trust=reader_trust,
-            expected_trust_sha256=reader_trust_sha256(reader_trust),
-            time_source=AuthorityTimeSource.fixed(CREATED_AT),
-        )
-        closers.append(reader)
-        sources = ResultViewSourceRegistry(tmp_path / "e06", record_catalog=live.catalog)
-        closers.append(sources)
-        d07 = RepeatabilityComparisonRegistry(
-            tmp_path / "d07",
-            linkage_store=live.store,
-            expected_trust_snapshot_sha256_by_provider=_pins(),
-            result_trust_registry=trust,
-        )
-        closers.append(d07)
-        d10 = CovariateContextRegistry(
-            tmp_path / "d10", d09_registry=live.d09, decision_registry=live.d03
-        )
-        closers.append(d10)
-        anchors = AnchorPolicyRegistry(
-            tmp_path / "anchors",
-            linkage_store=live.store,
-            cohort_registry=live.cohort_registry,
-            expected_trust_snapshot_sha256_by_provider=_pins(),
-        )
-        closers.append(anchors)
-        projections = ProjectionPolicyRegistry(tmp_path / "projections")
-        closers.append(projections)
-        fence = registry_module.LiveRegistryDependencyFence(
-            linkage_store=live.store,
-            record_history_store=history,
-            cohort_registry=live.cohort_registry,
-            reader_registry=reader,
-            record_catalog=live.catalog,
-            result_catalog=live.values[1],
-            result_trust_registry=trust,
-            source_registry=sources,
-            decision_registry=live.d03,
-            comparison_registry=d07,
-            d09_registry=live.d09,
-            d10_registry=d10,
-            anchor_registry=anchors,
-            projection_registry=projections,
-        )
-        yield live, fence, trust
-    finally:
-        for item in reversed(closers):
-            item.close()
-
-
-def test_live_fence_reads_real_heads_and_detects_a_trust_advance(
-    tmp_path, live_fence
+@pytest.mark.parametrize(
+    "kind", [DependencyFenceKind.DIRECT_HEAD_REREAD, DependencyFenceKind.TEST_ONLY_UNFENCED]
+)
+def test_non_composite_fence_kinds_are_refused(
+    tmp_path, registry, fence, monkeypatch, kind
 ) -> None:
-    live, fence, trust = live_fence
-    scope = registry_module.SavedComparisonDependencyScopeV1(
-        cohort_selector_id=live.cohort_selector_id, cohort_version=1
-    )
-    with fence.hold() as held:
-        heads = held.read_heads(scope)
-        assert held.read_heads(scope) == heads
-        assert held.fence_kind is DependencyFenceKind.DIRECT_HEAD_REREAD
-        bindings = held.read_bindings()
-    assert heads.family_source is None
-    assert heads.d05_cohort.id.startswith("cohort_registry_")
-    assert heads.d03_decision.id == live.d03_receipt.registry_id
-    assert heads.d09_summary.id == live.d09_receipt.registry_id
-    assert bindings == registry_module._bindings_from_heads(heads)
-    registry = LongitudinalComparisonRegistry(tmp_path / "saved", dependency_fence=fence)
-    try:
-        saved = make_saved(heads, cohort=live.cohort_selector_id)
-        receipt = registry.register(saved, dependency_fence=fence)
-        assert receipt.dependency_fence_kind is DependencyFenceKind.DIRECT_HEAD_REREAD
-        current = registry.resolve(receipt.selector_id, 1, dependency_fence=fence)
-        assert current.authority_state is SavedComparisonAuthorityState.CURRENT
-        trust.revoke_key("dev-result-" + "0" * 24)
-        stale = registry.resolve(receipt.selector_id, 1, dependency_fence=fence)
-        assert stale.authority_state is SavedComparisonAuthorityState.STALE
-        assert DependencySlot.RESULT_TRUST in stale.stale_dependencies
-        assert stale.saved_object_json == current.saved_object_json
-    finally:
-        registry.close()
+    """A public-read fence would take store locks inside this registry's lock."""
+
+    saved = make_saved(fence.heads)
+    receipt = registry.register(saved, dependency_fence=fence)
+    if kind is DependencyFenceKind.TEST_ONLY_UNFENCED:
+        monkeypatch.setattr(registry_module, "_TEST_ONLY_FENCE_ALLOWED", False)
+    other = FakeFence(fence.heads)
+    other.kind = kind
+    before = registry.identity()
+    for operation in (
+        lambda: registry.register(make_saved(fence.heads, version=2), dependency_fence=other),
+        lambda: registry.resolve(receipt.selector_id, 1, dependency_fence=other),
+        lambda: registry.reopen(receipt.selector_id, 1, dependency_fence=other),
+        lambda: registry.list_selectors(dependency_fence=other),
+        lambda: reopen(registry, other),
+        lambda: LongitudinalComparisonRegistry(tmp_path / "fresh", dependency_fence=other),
+    ):
+        with pytest.raises(LongitudinalComparisonRegistryUnsafe, match="composite"):
+            operation()
+    assert registry.identity() == before
+    assert not (tmp_path / "fresh").exists() or not os.listdir(tmp_path / "fresh")
 
 
-def test_live_fence_requires_exact_store_types() -> None:
-    names = (
-        "linkage_store",
-        "record_history_store",
-        "cohort_registry",
-        "reader_registry",
-        "record_catalog",
-        "result_catalog",
-        "result_trust_registry",
-        "source_registry",
-        "decision_registry",
-        "comparison_registry",
-        "d09_registry",
-        "d10_registry",
-        "anchor_registry",
-        "projection_registry",
+def _storage_bytes(root: Path) -> dict[str, bytes]:
+    return {
+        str(path.relative_to(root)): path.read_bytes()
+        for path in sorted(root.rglob("*"))
+        if path.is_file()
+    }
+
+
+@pytest.mark.parametrize("operation", ["resolve", "reopen", "list_selectors"])
+def test_a_refused_fence_leaves_pending_recovery_untouched(
+    registry, fence, operation
+) -> None:
+    first = registry.register(make_saved(fence.heads), dependency_fence=fence)
+    _write_candidate(
+        registry, _pending_record(registry, fence, make_saved(fence.heads, anchor_version=2))
     )
-    with pytest.raises(TypeError):
-        registry_module.LiveRegistryDependencyFence(**{name: object() for name in names})
+    before = _storage_bytes(registry.root)
+    refused = FakeFence(fence.heads)
+    refused.kind = DependencyFenceKind.DIRECT_HEAD_REREAD
+    calls = {
+        "resolve": lambda: registry.resolve(first.selector_id, 1, dependency_fence=refused),
+        "reopen": lambda: registry.reopen(first.selector_id, 1, dependency_fence=refused),
+        "list_selectors": lambda: registry.list_selectors(dependency_fence=refused),
+    }
+    with pytest.raises(LongitudinalComparisonRegistryUnsafe, match="composite"):
+        calls[operation]()
+    assert _storage_bytes(registry.root) == before
