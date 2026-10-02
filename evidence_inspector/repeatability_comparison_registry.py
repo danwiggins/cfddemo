@@ -32,6 +32,7 @@ from pydantic import Field, StringConstraints, model_validator
 
 import evidence_inspector.longitudinal_compatibility as d03_module
 import evidence_inspector.repeatability_comparison as d07_module
+import evidence_inspector.result_trust_registry as trust_registry_module
 from evidence_inspector.cohort_manifest import (
     capture_expected_trust_pins,
     trust_pins_sha256,
@@ -68,6 +69,11 @@ from evidence_inspector.repeatability_comparison import (
     repeatability_envelope_sha256,
     result_trust_document_sha256,
 )
+from evidence_inspector.result_trust_registry import (
+    ResultTrustRegistry,
+    ResultTrustSnapshot,
+    project_result_trust_document,
+)
 from evidence_inspector.safe_ingress import (
     bounded_json_loads,
     contract_type_graph,
@@ -101,8 +107,13 @@ _PINNED_INVALID_MEMBER_BYTES = d03_module._INVALID_INPUT_MEMBER_DECISION_BYTES
 _PINNED_COMPARE_IN_FENCE = compare_repeatability_in_fence
 _PINNED_COMPARISON_SHA256 = repeatability_comparison_sha256
 _PINNED_RESULT_TRUST_SHA256 = result_trust_document_sha256
+_PINNED_TRUST_READ_FENCE = ResultTrustRegistry.read_fence
+_PINNED_PROJECT_TRUST = project_result_trust_document
 
 RegistryId = Annotated[str, StringConstraints(pattern=r"^d07_registry_[0-9a-f]{32}$")]
+ResultTrustRegistryId = Annotated[
+    str, StringConstraints(pattern=r"^result_trust_registry_[0-9a-f]{32}$")
+]
 ComparisonSelectorId = Annotated[
     str, StringConstraints(pattern=r"^d07_comparison_[0-9a-f]{40}$")
 ]
@@ -144,9 +155,46 @@ class RepeatabilityComparisonRegistryMetadata(RegistryContract):
     linkage_trust_pins_sha256: Sha256
 
 
-_METADATA_MODEL_TYPES, _METADATA_ENUM_TYPES = contract_type_graph(
-    RepeatabilityComparisonRegistryMetadata
+class RepeatabilityComparisonRegistryTrustBoundMetadata(RegistryContract):
+    """Metadata of a registry whose result trust is a protected trust registry.
+
+    A separate schema keeps every existing fixed-document registry's metadata
+    bytes, and so its journal genesis, unchanged.  The bound trust registry
+    identity means the registry can never be reopened with a caller-supplied
+    trust document or another trust registry.
+    """
+
+    schema_version: Literal["traceback.d07-comparison-registry-metadata.v2"] = (
+        "traceback.d07-comparison-registry-metadata.v2"
+    )
+    registry_id: RegistryId
+    registry_epoch_sha256: Sha256
+    linkage_store_id: str = Field(pattern=r"^store_[0-9a-f]{32}$")
+    linkage_store_epoch_sha256: Sha256
+    linkage_storage_identity_sha256: Sha256
+    linkage_trust_pins_sha256: Sha256
+    result_trust_registry_id: str = Field(pattern=r"^result_trust_registry_[0-9a-f]{32}$")
+    result_trust_registry_epoch_sha256: Sha256
+
+
+_METADATA_TYPES = MappingProxyType(
+    {
+        model: contract_type_graph(model)
+        for model in (
+            RepeatabilityComparisonRegistryMetadata,
+            RepeatabilityComparisonRegistryTrustBoundMetadata,
+        )
+    }
 )
+
+
+def _require_trust_binding(value: object) -> None:
+    """A result names its trust registry and head together, or neither."""
+
+    registry_id = getattr(value, "result_trust_registry_id")
+    head = getattr(value, "result_trust_state_head_sha256")
+    if (registry_id is None) != (head is None):
+        raise ValueError("result trust registry binding is incomplete")
 
 
 def _utc_instant(value: object) -> bool:
@@ -237,6 +285,8 @@ class ComparisonRegistrationReceipt(RegistryContract):
     comparison_sha256: Sha256
     availability: ComparisonAvailability
     classification: RepeatabilityClassification
+    result_trust_registry_id: ResultTrustRegistryId | None = None
+    result_trust_state_head_sha256: Sha256 | None = None
 
     @model_validator(mode="after")
     def exact_selector(self) -> ComparisonRegistrationReceipt:
@@ -244,6 +294,7 @@ class ComparisonRegistrationReceipt(RegistryContract):
             self.registry_epoch_sha256, self.object_sha256
         ):
             raise ValueError("comparison receipt selector does not match its object")
+        _require_trust_binding(self)
         return self
 
 
@@ -268,6 +319,8 @@ class RegisteredRepeatabilityComparison(RegistryContract):
     comparison_sha256: Sha256
     comparison: RepeatabilityComparison
     replayed_at: datetime
+    result_trust_registry_id: ResultTrustRegistryId | None = None
+    result_trust_state_head_sha256: Sha256 | None = None
     replayed_against_live_linkage: Literal[True] = True
     synthetic_only: Literal[True] = True
     clinical_use_authorized: Literal[False] = False
@@ -284,6 +337,7 @@ class RegisteredRepeatabilityComparison(RegistryContract):
             self.replayed_at < self.comparison.evaluated_at
         ):
             raise ValueError("registered comparison replay time is invalid")
+        _require_trust_binding(self)
         return self
 
 
@@ -313,6 +367,13 @@ class ComparisonSelectorPage(RegistryContract):
     state_head_sha256: Sha256
     records: tuple[ComparisonSelectorRecord, ...] = Field(max_length=MAX_SELECTOR_PAGE)
     next_after_selector_id: ComparisonSelectorId | None
+    result_trust_registry_id: ResultTrustRegistryId | None = None
+    result_trust_state_head_sha256: Sha256 | None = None
+
+    @model_validator(mode="after")
+    def exact_trust_binding(self) -> ComparisonSelectorPage:
+        _require_trust_binding(self)
+        return self
 
 
 class RepeatabilityComparisonBackupObject(RegistryContract):
@@ -327,7 +388,10 @@ class RepeatabilityComparisonBackup(RegistryContract):
     schema_version: Literal["traceback.d07-comparison-backup.v1"] = (
         "traceback.d07-comparison-backup.v1"
     )
-    metadata: RepeatabilityComparisonRegistryMetadata
+    metadata: (
+        RepeatabilityComparisonRegistryMetadata
+        | RepeatabilityComparisonRegistryTrustBoundMetadata
+    )
     state_version: int = Field(ge=0, le=MAX_REGISTERED_COMPARISONS)
     state_head_sha256: Sha256
     journal: tuple[RepeatabilityComparisonJournalEntry, ...] = Field(
@@ -689,6 +753,7 @@ def _registry_instance_snapshot(
         "_trust_pins",
         "_result_trust_document",
         "_result_trust_sha256",
+        "_result_trust_registry",
         "_root_identity",
         "_objects_identity",
         "_lock_identity",
@@ -705,12 +770,19 @@ def _registry_instance_snapshot(
             "D07 comparison registry authority state changed"
         )
     metadata = instance["_metadata"]
+    trust_registry = instance["_result_trust_registry"]
+    metadata_model = (
+        RepeatabilityComparisonRegistryMetadata
+        if trust_registry is None
+        else RepeatabilityComparisonRegistryTrustBoundMetadata
+    )
+    metadata_types = _METADATA_TYPES[metadata_model]
     try:
         metadata_bytes = exact_model_bytes(
             metadata,
-            RepeatabilityComparisonRegistryMetadata,
-            model_types=_METADATA_MODEL_TYPES,
-            enum_types=_METADATA_ENUM_TYPES,
+            metadata_model,
+            model_types=metadata_types[0],
+            enum_types=metadata_types[1],
             max_bytes=4096,
             max_nodes=64,
             max_depth=8,
@@ -787,27 +859,45 @@ def _registry_instance_snapshot(
             "D07 comparison registry authority state changed"
         ) from None
     result_trust_sha256 = instance["_result_trust_sha256"]
-    try:
-        observed_result_trust_sha256 = _PINNED_RESULT_TRUST_SHA256(
-            instance["_result_trust_document"]
-        )
-    except Exception:
-        raise RepeatabilityComparisonRegistryUnsafe(
-            "D07 comparison registry authority state changed"
-        ) from None
-    if (
-        not _is_sha256(result_trust_sha256)
-        or observed_result_trust_sha256 != result_trust_sha256
-    ):
-        raise RepeatabilityComparisonRegistryUnsafe(
-            "D07 comparison registry authority state changed"
-        )
+    if trust_registry is not None:
+        # The trust registry is the only result trust authority; there is no
+        # fixed document to fall back to.
+        if (
+            type(trust_registry) is not ResultTrustRegistry
+            or instance["_result_trust_document"] is not None
+            or result_trust_sha256 is not None
+            or (
+                metadata.result_trust_registry_id,
+                metadata.result_trust_registry_epoch_sha256,
+            )
+            != _trust_registry_identity(trust_registry)
+        ):
+            raise RepeatabilityComparisonRegistryUnsafe(
+                "D07 comparison registry authority state changed"
+            )
+    else:
+        try:
+            observed_result_trust_sha256 = _PINNED_RESULT_TRUST_SHA256(
+                instance["_result_trust_document"]
+            )
+        except Exception:
+            raise RepeatabilityComparisonRegistryUnsafe(
+                "D07 comparison registry authority state changed"
+            ) from None
+        if (
+            not _is_sha256(result_trust_sha256)
+            or observed_result_trust_sha256 != result_trust_sha256
+        ):
+            raise RepeatabilityComparisonRegistryUnsafe(
+                "D07 comparison registry authority state changed"
+            )
     return (
         id(instance["root"]),
         id(instance["_linkage_store"]),
         tuple(sorted(captured_pins.items())),
         id(instance["_result_trust_document"]),
         result_trust_sha256,
+        id(trust_registry),
         instance["_root_identity"],
         instance["_objects_identity"],
         instance["_lock_identity"],
@@ -819,6 +909,27 @@ def _registry_instance_snapshot(
         instance["_head_key"],
         instance["_trusted_head_sha256"],
     )
+
+
+def _trust_registry_identity(trust_registry: ResultTrustRegistry) -> tuple[str, str]:
+    """Read a trust registry's immutable identity without invoking its hooks."""
+
+    try:
+        metadata = object.__getattribute__(trust_registry, "__dict__")["_metadata"]
+        return (metadata.registry_id, metadata.registry_epoch_sha256)
+    except (AttributeError, KeyError, TypeError):
+        raise RepeatabilityComparisonRegistryUnsafe(
+            "D07 comparison registry result trust registry is invalid"
+        ) from None
+
+
+def _trust_binding(trust: ResultTrustSnapshot | None) -> dict[str, str | None]:
+    if trust is None:
+        return {}
+    return {
+        "result_trust_registry_id": trust.registry_id,
+        "result_trust_state_head_sha256": trust.state_head_sha256,
+    }
 
 
 def _seal_registry_instance(registry: RepeatabilityComparisonRegistry) -> None:
@@ -851,12 +962,20 @@ class RepeatabilityComparisonRegistry:
         *,
         linkage_store: ProviderLinkageStore,
         expected_trust_snapshot_sha256_by_provider: Mapping[str, str],
-        result_trust_document: DevelopmentTrustDocument,
-        expected_result_trust_sha256: str,
+        result_trust_document: DevelopmentTrustDocument | None = None,
+        expected_result_trust_sha256: str | None = None,
+        result_trust_registry: ResultTrustRegistry | None = None,
         expected_state_head_sha256: str | None = None,
         expected_registry_id: str | None = None,
         expected_registry_epoch_sha256: str | None = None,
     ) -> None:
+        """Open one registry with exactly one result trust authority.
+
+        Either ``result_trust_registry`` (the protected, forward-only path) or
+        a fixed ``result_trust_document`` with its independent pin.  A registry
+        created with one kind can never be reopened with the other.
+        """
+
         _require_registry_integrity(self)
         if type(linkage_store) is not ProviderLinkageStore:
             raise TypeError("D07 comparison registry requires the exact linkage store type")
@@ -892,25 +1011,41 @@ class RepeatabilityComparisonRegistry:
             raise RepeatabilityComparisonRegistryUnsafe(
                 "D07 comparison registry trust pins are invalid"
             )
-        # Result trust is live registry configuration, not stored per object:
-        # replacing or revoking it makes every comparison it changes stale.
-        try:
-            observed_result_trust_sha256 = _PINNED_RESULT_TRUST_SHA256(
-                result_trust_document
-            )
-        except Exception:
-            raise RepeatabilityComparisonRegistryUnsafe(
-                "D07 comparison registry result trust is invalid"
-            ) from None
-        if (
-            not _is_sha256(expected_result_trust_sha256)
-            or observed_result_trust_sha256 != expected_result_trust_sha256
-        ):
-            raise RepeatabilityComparisonRegistryUnsafe(
-                "D07 comparison registry result trust is invalid"
-            )
-        self._result_trust_document = result_trust_document
-        self._result_trust_sha256 = observed_result_trust_sha256
+        if result_trust_registry is not None:
+            if result_trust_document is not None or expected_result_trust_sha256 is not None:
+                raise RepeatabilityComparisonRegistryUnsafe(
+                    "D07 comparison registry result trust must be a registry or a "
+                    "document, not both"
+                )
+            if type(result_trust_registry) is not ResultTrustRegistry:
+                raise RepeatabilityComparisonRegistryUnsafe(
+                    "D07 comparison registry result trust registry is invalid"
+                )
+            _trust_registry_identity(result_trust_registry)
+            self._result_trust_document = None
+            self._result_trust_sha256 = None
+        else:
+            # Fixed result trust is live registry configuration, not stored per
+            # object: replacing or revoking it makes every comparison it changes
+            # stale.
+            try:
+                observed_result_trust_sha256 = _PINNED_RESULT_TRUST_SHA256(
+                    result_trust_document
+                )
+            except Exception:
+                raise RepeatabilityComparisonRegistryUnsafe(
+                    "D07 comparison registry result trust is invalid"
+                ) from None
+            if (
+                not _is_sha256(expected_result_trust_sha256)
+                or observed_result_trust_sha256 != expected_result_trust_sha256
+            ):
+                raise RepeatabilityComparisonRegistryUnsafe(
+                    "D07 comparison registry result trust is invalid"
+                )
+            self._result_trust_document = result_trust_document
+            self._result_trust_sha256 = observed_result_trust_sha256
+        self._result_trust_registry = result_trust_registry
         self._root_fd: int | None = None
         self._objects_fd: int | None = None
         self._lock_fd: int | None = None
@@ -1216,7 +1351,10 @@ class RepeatabilityComparisonRegistry:
 
     def _load_or_create_metadata(
         self, *, allow_create: bool
-    ) -> RepeatabilityComparisonRegistryMetadata:
+    ) -> (
+        RepeatabilityComparisonRegistryMetadata
+        | RepeatabilityComparisonRegistryTrustBoundMetadata
+    ):
         assert self._root_fd is not None
         try:
             descriptor = os.open(
@@ -1230,14 +1368,29 @@ class RepeatabilityComparisonRegistry:
                     "D07 comparison registry metadata is missing"
                 ) from None
             snapshot = _PINNED_ACTIVE_SNAPSHOT(self._linkage_store)
-            metadata = RepeatabilityComparisonRegistryMetadata(
-                registry_id=f"d07_registry_{secrets.token_hex(16)}",
-                registry_epoch_sha256=secrets.token_hex(32),
-                linkage_store_id=snapshot.store_id,
-                linkage_store_epoch_sha256=snapshot.store_epoch_sha256,
-                linkage_storage_identity_sha256=snapshot.storage_identity_sha256,
-                linkage_trust_pins_sha256=snapshot.trust_pins_sha256,
+            values = {
+                "registry_id": f"d07_registry_{secrets.token_hex(16)}",
+                "registry_epoch_sha256": secrets.token_hex(32),
+                "linkage_store_id": snapshot.store_id,
+                "linkage_store_epoch_sha256": snapshot.store_epoch_sha256,
+                "linkage_storage_identity_sha256": snapshot.storage_identity_sha256,
+                "linkage_trust_pins_sha256": snapshot.trust_pins_sha256,
+            }
+            metadata: (
+                RepeatabilityComparisonRegistryMetadata
+                | RepeatabilityComparisonRegistryTrustBoundMetadata
             )
+            if self._result_trust_registry is None:
+                metadata = RepeatabilityComparisonRegistryMetadata(**values)
+            else:
+                trust_id, trust_epoch = _trust_registry_identity(
+                    self._result_trust_registry
+                )
+                metadata = RepeatabilityComparisonRegistryTrustBoundMetadata(
+                    **values,
+                    result_trust_registry_id=trust_id,
+                    result_trust_registry_epoch_sha256=trust_epoch,
+                )
             try:
                 _CR_PUBLISH(
                     self,
@@ -1262,15 +1415,29 @@ class RepeatabilityComparisonRegistry:
         except BaseException:
             os.close(descriptor)
             raise
+        metadata_model = (
+            RepeatabilityComparisonRegistryMetadata
+            if self._result_trust_registry is None
+            else RepeatabilityComparisonRegistryTrustBoundMetadata
+        )
         try:
-            metadata = contract_from_canonical_bytes(
-                RepeatabilityComparisonRegistryMetadata, content
-            )
+            metadata = contract_from_canonical_bytes(metadata_model, content)
         except Exception:
             os.close(descriptor)
+            # The other metadata schema is a result trust authority mismatch:
+            # a trust-registry-bound registry never accepts a fixed document,
+            # and a fixed-document registry never silently changes authority.
             raise RepeatabilityComparisonRegistryUnsafe(
-                "D07 comparison registry metadata is invalid"
+                "D07 comparison registry metadata is invalid for its result trust"
             ) from None
+        if self._result_trust_registry is not None and (
+            metadata.result_trust_registry_id,
+            metadata.result_trust_registry_epoch_sha256,
+        ) != _trust_registry_identity(self._result_trust_registry):
+            os.close(descriptor)
+            raise RepeatabilityComparisonRegistryUnsafe(
+                "D07 comparison registry result trust registry changed"
+            )
         self._metadata_fd = descriptor
         self._metadata_identity = (observed.st_dev, observed.st_ino)
         snapshot = _PINNED_ACTIVE_SNAPSHOT(self._linkage_store)
@@ -1455,13 +1622,78 @@ class RepeatabilityComparisonRegistry:
                 )
         return loaded, head
 
+    @contextmanager
+    def _result_trust_fence(self) -> Iterator[ResultTrustSnapshot | None]:
+        """Hold the trust registry's read fence, if any, for the caller's body.
+
+        Lock order is linkage fence, then this trust fence, then the registry
+        lock; nothing takes them in another order.  A fixed-document registry
+        yields ``None`` and holds nothing.
+        """
+
+        trust_registry = self._result_trust_registry
+        if trust_registry is None:
+            yield None
+            return
+        with _PINNED_TRUST_READ_FENCE(trust_registry) as snapshot:
+            if (
+                type(snapshot) is not ResultTrustSnapshot
+                or (snapshot.registry_id, snapshot.registry_epoch_sha256)
+                != (
+                    self._metadata.result_trust_registry_id,
+                    self._metadata.result_trust_registry_epoch_sha256,
+                )
+            ):
+                raise RepeatabilityComparisonRegistryUnsafe(
+                    "D07 comparison registry result trust registry changed"
+                )
+            yield snapshot
+
+    def _result_trust_for(
+        self,
+        value: RegisteredComparisonObject,
+        trust: ResultTrustSnapshot | None,
+    ) -> tuple[DevelopmentTrustDocument, str]:
+        """Return the exact result trust document and pin for one evaluation.
+
+        On the trust-registry path the document is the current trust restricted
+        to the two keys the stored observations' signatures name, so a trust
+        event changes only the comparisons whose keys it touched.  If neither
+        key was ever added, the whole current document is used.
+        """
+
+        if self._result_trust_registry is None:
+            if trust is not None:
+                raise RepeatabilityComparisonRegistryUnsafe(
+                    "D07 comparison registry result trust changed"
+                )
+            return self._result_trust_document, self._result_trust_sha256
+        if type(trust) is not ResultTrustSnapshot:
+            raise RepeatabilityComparisonRegistryUnsafe(
+                "D07 comparison registry requires the held result trust fence"
+            )
+        document = _PINNED_PROJECT_TRUST(
+            trust.document,
+            (
+                value.anchor_observation.receipt.signature.key_id,
+                value.member_observation.receipt.signature.key_id,
+            ),
+        )
+        if not document.keys:
+            document = trust.document
+        return document, _PINNED_RESULT_TRUST_SHA256(document)
+
     def _compare_in_fence(
         self,
         value: RegisteredComparisonObject,
         evaluated_at: datetime,
+        trust: ResultTrustSnapshot | None = None,
     ) -> RepeatabilityComparison:
         """Run the pinned already-fenced D07 evaluator on exact stored inputs."""
 
+        result_trust_document, result_trust_sha256 = _CR_RESULT_TRUST_FOR(
+            self, value, trust
+        )
         return _PINNED_COMPARE_IN_FENCE(
             value.anchor,
             value.member,
@@ -1475,8 +1707,8 @@ class RepeatabilityComparisonRegistry:
             expected_authority_head_sha256=value.expected_authority_head_sha256,
             expected_linkage_trust_snapshot_sha256_by_provider=dict(self._trust_pins),
             linkage_store=self._linkage_store,
-            result_trust_document=self._result_trust_document,
-            expected_result_trust_sha256=self._result_trust_sha256,
+            result_trust_document=result_trust_document,
+            expected_result_trust_sha256=result_trust_sha256,
             expected_envelope_sha256=value.expected_envelope_sha256,
             expected_evidence_sha256=value.expected_evidence_sha256,
             expected_protocol_sha256=value.expected_protocol_sha256,
@@ -1499,7 +1731,10 @@ class RepeatabilityComparisonRegistry:
         return _PINNED_AUTHORITY_TIME_IN_FENCE(self._linkage_store)
 
     def _replay_in_fence(
-        self, value: RegisteredComparisonObject, live_time: datetime
+        self,
+        value: RegisteredComparisonObject,
+        live_time: datetime,
+        trust: ResultTrustSnapshot | None = None,
     ) -> RepeatabilityComparison:
         """Return the stored comparison only if it is exactly reproduced now.
 
@@ -1520,7 +1755,7 @@ class RepeatabilityComparisonRegistry:
             registered_time = value.comparison.evaluated_at
             if live_time < registered_time:
                 raise stale
-            at_live_time = _CR_COMPARE_IN_FENCE(self, value, live_time)
+            at_live_time = _CR_COMPARE_IN_FENCE(self, value, live_time, trust)
             if (
                 _CR_COMPARISON_SHA256(
                     at_live_time.model_copy(update={"evaluated_at": registered_time})
@@ -1583,7 +1818,10 @@ class RepeatabilityComparisonRegistry:
             raise RepeatabilityComparisonRegistryConflict(
                 "D07 comparison registration pins are invalid"
             )
-        with _PINNED_AUTHORITY_READ_FENCE(self._linkage_store):
+        with (
+            _PINNED_AUTHORITY_READ_FENCE(self._linkage_store),
+            _CR_RESULT_TRUST_FENCE(self) as trust,
+        ):
             evaluated_at = _CR_LIVE_TIME_IN_FENCE(self)
             decision = _PINNED_DECIDE_MEMBER(
                 anchor,
@@ -1624,7 +1862,9 @@ class RepeatabilityComparisonRegistry:
                         expected_repeatability_authority_sha256
                     ),
                 )
-                comparison = _CR_COMPARE_IN_FENCE(self, provisional, evaluated_at)
+                comparison = _CR_COMPARE_IN_FENCE(
+                    self, provisional, evaluated_at, trust
+                )
                 captured = RegisteredComparisonObject(
                     anchor=anchor,
                     member=member,
@@ -1654,7 +1894,7 @@ class RepeatabilityComparisonRegistry:
             digest = hashlib.sha256(content).hexdigest()
             # The stored bytes, not the caller's objects, must reproduce the
             # comparison before anything is published.
-            replayed = _CR_REPLAY_IN_FENCE(self, captured, evaluated_at)
+            replayed = _CR_REPLAY_IN_FENCE(self, captured, evaluated_at, trust)
             with _CR_LOCK(self, exclusive=True):
                 _CR_RECOVER_TEMPORARY_OBJECTS(self)
                 loaded, head = _CR_LOAD_STATE(self)
@@ -1717,6 +1957,7 @@ class RepeatabilityComparisonRegistry:
                     comparison_sha256=_CR_COMPARISON_SHA256(replayed),
                     availability=replayed.availability,
                     classification=replayed.classification,
+                    **_trust_binding(trust),
                 )
 
     def resolve(self, selector_id: str) -> RegisteredRepeatabilityComparison:
@@ -1727,7 +1968,10 @@ class RepeatabilityComparisonRegistry:
             raise RepeatabilityComparisonRegistryConflict(
                 "D07 comparison selector is invalid"
             )
-        with _PINNED_AUTHORITY_READ_FENCE(self._linkage_store):
+        with (
+            _PINNED_AUTHORITY_READ_FENCE(self._linkage_store),
+            _CR_RESULT_TRUST_FENCE(self) as trust,
+        ):
             with _CR_LOCK(self, exclusive=False):
                 loaded, head = _CR_LOAD_STATE(self)
                 matches = [
@@ -1742,7 +1986,7 @@ class RepeatabilityComparisonRegistry:
                     )
                 digest, value = matches[0]
                 live_time = _CR_LIVE_TIME_IN_FENCE(self)
-                comparison = _CR_REPLAY_IN_FENCE(self, value, live_time)
+                comparison = _CR_REPLAY_IN_FENCE(self, value, live_time, trust)
                 return _CR_RESOLVED(
                     registry_id=self._metadata.registry_id,
                     registry_epoch_sha256=self._metadata.registry_epoch_sha256,
@@ -1753,6 +1997,7 @@ class RepeatabilityComparisonRegistry:
                     comparison_sha256=_CR_COMPARISON_SHA256(comparison),
                     comparison=comparison,
                     replayed_at=live_time,
+                    **_trust_binding(trust),
                 )
 
     def list_selectors(
@@ -1772,7 +2017,10 @@ class RepeatabilityComparisonRegistry:
             raise RepeatabilityComparisonRegistryConflict(
                 "D07 comparison selector cursor is invalid"
             )
-        with _PINNED_AUTHORITY_READ_FENCE(self._linkage_store):
+        with (
+            _PINNED_AUTHORITY_READ_FENCE(self._linkage_store),
+            _CR_RESULT_TRUST_FENCE(self) as trust,
+        ):
             with _CR_LOCK(self, exclusive=False):
                 loaded, head = _CR_LOAD_STATE(self)
                 ordered = sorted(
@@ -1799,7 +2047,7 @@ class RepeatabilityComparisonRegistry:
                             raise RepeatabilityComparisonRegistryStale(
                                 "D07 comparison linkage authority is not current"
                             )
-                        _CR_REPLAY_IN_FENCE(self, value, live_time)
+                        _CR_REPLAY_IN_FENCE(self, value, live_time, trust)
                     except RepeatabilityComparisonRegistryStale:
                         authority_state = ComparisonAuthorityState.STALE
                     else:
@@ -1829,6 +2077,7 @@ class RepeatabilityComparisonRegistry:
                     state_head_sha256=head,
                     records=tuple(rows),
                     next_after_selector_id=(rows[-1].selector_id if more and rows else None),
+                    **_trust_binding(trust),
                 )
 
     def backup_bytes(self) -> bytes:
@@ -1864,11 +2113,12 @@ class RepeatabilityComparisonRegistry:
         *,
         linkage_store: ProviderLinkageStore,
         expected_trust_snapshot_sha256_by_provider: Mapping[str, str],
-        result_trust_document: DevelopmentTrustDocument,
-        expected_result_trust_sha256: str,
         expected_registry_id: str,
         expected_registry_epoch_sha256: str,
         expected_state_head_sha256: str,
+        result_trust_document: DevelopmentTrustDocument | None = None,
+        expected_result_trust_sha256: str | None = None,
+        result_trust_registry: ResultTrustRegistry | None = None,
     ) -> RepeatabilityComparisonRegistry:
         """Restore a verified bundle into one new private registry root."""
 
@@ -1903,19 +2153,37 @@ class RepeatabilityComparisonRegistry:
             raise RepeatabilityComparisonRegistryConflict(
                 "D07 comparison registry backup authority is invalid"
             )
-        try:
-            observed_result_trust_sha256 = _PINNED_RESULT_TRUST_SHA256(
-                result_trust_document
-            )
-        except Exception:
-            observed_result_trust_sha256 = None
-        if (
-            not _is_sha256(expected_result_trust_sha256)
-            or observed_result_trust_sha256 != expected_result_trust_sha256
-        ):
-            raise RepeatabilityComparisonRegistryConflict(
-                "D07 comparison registry backup result trust is invalid"
-            )
+        if result_trust_registry is not None:
+            if (
+                result_trust_document is not None
+                or expected_result_trust_sha256 is not None
+                or type(result_trust_registry) is not ResultTrustRegistry
+                or type(backup.metadata)
+                is not RepeatabilityComparisonRegistryTrustBoundMetadata
+                or (
+                    backup.metadata.result_trust_registry_id,
+                    backup.metadata.result_trust_registry_epoch_sha256,
+                )
+                != _trust_registry_identity(result_trust_registry)
+            ):
+                raise RepeatabilityComparisonRegistryConflict(
+                    "D07 comparison registry backup result trust is invalid"
+                )
+        else:
+            try:
+                observed_result_trust_sha256 = _PINNED_RESULT_TRUST_SHA256(
+                    result_trust_document
+                )
+            except Exception:
+                observed_result_trust_sha256 = None
+            if (
+                type(backup.metadata) is not RepeatabilityComparisonRegistryMetadata
+                or not _is_sha256(expected_result_trust_sha256)
+                or observed_result_trust_sha256 != expected_result_trust_sha256
+            ):
+                raise RepeatabilityComparisonRegistryConflict(
+                    "D07 comparison registry backup result trust is invalid"
+                )
         target = _snapshot_path(root)
         parent = target.parent
         directory_flags = (
@@ -2009,6 +2277,7 @@ class RepeatabilityComparisonRegistry:
                 expected_trust_snapshot_sha256_by_provider=pins,
                 result_trust_document=result_trust_document,
                 expected_result_trust_sha256=expected_result_trust_sha256,
+                result_trust_registry=result_trust_registry,
                 expected_registry_id=expected_registry_id,
                 expected_registry_epoch_sha256=expected_registry_epoch_sha256,
                 expected_state_head_sha256=expected_state_head_sha256,
@@ -2060,6 +2329,8 @@ _REGISTRY_METHOD_SEAL = MappingProxyType(
             "_append_journal",
             "_accept_observed_head",
             "_load_state",
+            "_result_trust_fence",
+            "_result_trust_for",
             "_compare_in_fence",
             "_live_time_in_fence",
             "_replay_in_fence",
@@ -2101,6 +2372,8 @@ def _require_registry_integrity(registry: RepeatabilityComparisonRegistry) -> No
         "_PINNED_COMPARE_IN_FENCE": d07_module.compare_repeatability_in_fence,
         "_PINNED_COMPARISON_SHA256": d07_module.repeatability_comparison_sha256,
         "_PINNED_RESULT_TRUST_SHA256": d07_module.result_trust_document_sha256,
+        "_PINNED_TRUST_READ_FENCE": trust_registry_module.ResultTrustRegistry.read_fence,
+        "_PINNED_PROJECT_TRUST": trust_registry_module.project_result_trust_document,
     }
     if any(
         globals().get(name) is not expected or authority_sources[name] is not expected
@@ -2146,6 +2419,8 @@ _CR_LOAD_JOURNAL = RepeatabilityComparisonRegistry._load_journal
 _CR_APPEND_JOURNAL = RepeatabilityComparisonRegistry._append_journal
 _CR_ACCEPT_OBSERVED_HEAD = RepeatabilityComparisonRegistry._accept_observed_head
 _CR_LOAD_STATE = RepeatabilityComparisonRegistry._load_state
+_CR_RESULT_TRUST_FENCE = RepeatabilityComparisonRegistry._result_trust_fence
+_CR_RESULT_TRUST_FOR = RepeatabilityComparisonRegistry._result_trust_for
 _CR_COMPARE_IN_FENCE = RepeatabilityComparisonRegistry._compare_in_fence
 _CR_LIVE_TIME_IN_FENCE = RepeatabilityComparisonRegistry._live_time_in_fence
 _CR_REPLAY_IN_FENCE = RepeatabilityComparisonRegistry._replay_in_fence
@@ -2167,6 +2442,8 @@ _REGISTRY_AUTHORITY_SEAL = MappingProxyType(
         "_PINNED_COMPARE_IN_FENCE": _PINNED_COMPARE_IN_FENCE,
         "_PINNED_COMPARISON_SHA256": _PINNED_COMPARISON_SHA256,
         "_PINNED_RESULT_TRUST_SHA256": _PINNED_RESULT_TRUST_SHA256,
+        "_PINNED_TRUST_READ_FENCE": _PINNED_TRUST_READ_FENCE,
+        "_PINNED_PROJECT_TRUST": _PINNED_PROJECT_TRUST,
     }
 )
 _REGISTRY_ALIAS_SEAL = MappingProxyType(
@@ -2184,6 +2461,8 @@ _REGISTRY_ALIAS_SEAL = MappingProxyType(
             "_CR_APPEND_JOURNAL",
             "_CR_ACCEPT_OBSERVED_HEAD",
             "_CR_LOAD_STATE",
+            "_CR_RESULT_TRUST_FENCE",
+            "_CR_RESULT_TRUST_FOR",
             "_CR_COMPARE_IN_FENCE",
             "_CR_LIVE_TIME_IN_FENCE",
             "_CR_REPLAY_IN_FENCE",
@@ -2213,6 +2492,7 @@ __all__ = [
     "RepeatabilityComparisonRegistryError",
     "RepeatabilityComparisonRegistryMetadata",
     "RepeatabilityComparisonRegistryStale",
+    "RepeatabilityComparisonRegistryTrustBoundMetadata",
     "RepeatabilityComparisonRegistryUnsafe",
     "registered_comparison_object_bytes",
     "registered_comparison_object_from_bytes",
