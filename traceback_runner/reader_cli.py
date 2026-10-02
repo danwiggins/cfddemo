@@ -442,58 +442,71 @@ def _authority_init(
 def _authority_rotate(
     args: argparse.Namespace, time_source: AuthorityTimeSource, out: TextIO
 ) -> int:
+    """Add key version N+1, then revoke every older active key.
+
+    Resumable: if an earlier rotation stopped after adding its key (more than
+    one key active), this run only finishes it by revoking all but the newest
+    active key.  Every run deletes the private key files of revoked versions.
+    """
+
     directory = _AuthorityDirectory(Path(args.authority_dir), create=False)
     try:
         with directory.lock(exclusive=True):
             pins = directory.read_pins()
             trust = pins.trust
-            if len(trust.keys) >= MAX_KEYS:
-                raise OperatorAuthorityError(
-                    "operator trust holds 16 key versions (15 rotations); "
-                    "initialize a new authority and registry"
-                )
-            old_active = [
+            active = [
                 key.key_version
                 for key in trust.keys
                 if key.status is ReaderKeyStatus.ACTIVE
             ]
-            version = max(key.key_version for key in trust.keys) + 1
+            resuming = len(active) > 1
+            if not resuming and len(trust.keys) >= MAX_KEYS:
+                raise OperatorAuthorityError(
+                    "operator trust holds 16 key versions (15 rotations); "
+                    "initialize a new authority and registry"
+                )
             registry = _open_registry(pins, time_source)
             try:
-                # A key file left by an interrupted rotation is reused, never
-                # overwritten.
-                if directory.has_key(version):
-                    key = directory.load_key(version)
+                if resuming:
+                    version = max(active)
+                    added = trust
                 else:
-                    key = Ed25519PrivateKey.generate()
-                    directory.write_key(version, key)
-                added = _rotated(
-                    trust,
-                    (
-                        *trust.keys,
-                        ReaderAuthorityKey(
-                            key_version=version,
-                            public_key_base64=_public_base64(key),
-                            status=ReaderKeyStatus.ACTIVE,
+                    version = max(key.key_version for key in trust.keys) + 1
+                    # A key file left by an interrupted rotation is reused,
+                    # never overwritten.
+                    if directory.has_key(version):
+                        key = directory.load_key(version)
+                    else:
+                        key = Ed25519PrivateKey.generate()
+                        directory.write_key(version, key)
+                    added = _rotated(
+                        trust,
+                        (
+                            *trust.keys,
+                            ReaderAuthorityKey(
+                                key_version=version,
+                                public_key_base64=_public_base64(key),
+                                status=ReaderKeyStatus.ACTIVE,
+                            ),
                         ),
-                    ),
-                )
-                receipt = registry.rotate_trust(
-                    added, expected_trust_sha256=reader_trust_sha256(added)
-                )
-                pins = pins.model_copy(
-                    update={
-                        "trust": added,
-                        "trust_sha256": receipt.trust_sha256,
-                        "state_head_sha256": receipt.state_head_sha256,
-                    }
-                )
-                directory.write_pins(pins)
+                    )
+                    receipt = registry.rotate_trust(
+                        added, expected_trust_sha256=reader_trust_sha256(added)
+                    )
+                    pins = pins.model_copy(
+                        update={
+                            "trust": added,
+                            "trust_sha256": receipt.trust_sha256,
+                            "state_head_sha256": receipt.state_head_sha256,
+                        }
+                    )
+                    directory.write_pins(pins)
+                retiring = [item for item in active if item != version]
                 retired = _rotated(
                     added,
                     tuple(
                         key.model_copy(update={"status": ReaderKeyStatus.REVOKED})
-                        if key.key_version in old_active
+                        if key.key_version in retiring
                         else key
                         for key in added.keys
                     ),
@@ -512,13 +525,17 @@ def _authority_rotate(
                 )
             finally:
                 registry.close()
-            for old in old_active:
-                directory.remove_key(old)
+            for key in retired.keys:
+                if key.status is ReaderKeyStatus.REVOKED:
+                    directory.remove_key(key.key_version)
     finally:
         directory.close()
-    print(f"signing key v{version} added and active", file=out)
+    if resuming:
+        print(f"finished an interrupted rotation; signing key v{version} active", file=out)
+    else:
+        print(f"signing key v{version} added and active", file=out)
     print(
-        "revoked key versions: " + ", ".join(f"v{item}" for item in old_active),
+        "revoked key versions: " + ", ".join(f"v{item}" for item in retiring),
         file=out,
     )
     print(

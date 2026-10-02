@@ -208,6 +208,9 @@ The provider authority is a local operator authority, managed by
 - `authority rotate` appends a trust revision adding key version N+1, then a
   revision revoking every previously active key, and deletes the old key
   file. Grants signed by the old key stop authorizing and must be reissued.
+  If a rotation stopped after adding its key (run `authority recover`
+  first if the pins lag), the next `rotate` only finishes it: it revokes all
+  but the newest active key and deletes every revoked key file.
   Revoked keys stay in the trust, so the 16-key bound allows 15 rotations
   per registry; after that a new authority and registry are needed.
 - `authority recover` re-pins after a crash between a registry append and the

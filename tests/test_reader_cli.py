@@ -459,3 +459,35 @@ def test_interrupted_writes_leave_no_partial_key(operator, monkeypatch) -> None:
     assert not (operator.authority / "reader-key-v2.pem").exists()
     assert not list(operator.authority.glob(".tmp-*"))
     assert operator("authority", "rotate")[0] == 0
+
+
+def test_interrupted_rotation_is_recovered_finished_and_old_key_deleted(
+    operator, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    old = operator.issue()
+    real_write_pins = reader_cli._AuthorityDirectory.write_pins
+
+    def crash(self, pins):
+        raise KeyboardInterrupt
+
+    # Crash right after the "add key" trust revision is appended.
+    monkeypatch.setattr(reader_cli._AuthorityDirectory, "write_pins", crash)
+    with pytest.raises(KeyboardInterrupt):
+        operator("authority", "rotate")
+    monkeypatch.setattr(reader_cli._AuthorityDirectory, "write_pins", real_write_pins)
+    assert operator("grant", "list")[0] == 3
+    code, _, err = operator("authority", "recover")
+    assert code == 0, err
+    pins = operator.pins()
+    assert [key["status"] for key in pins["trust"]["keys"]] == ["active", "active"]
+    assert operator.states() == {old: "active"}
+    code, out, err = operator("authority", "rotate")
+    assert code == 0, err
+    assert "finished an interrupted rotation" in out
+    keys = operator.pins()["trust"]["keys"]
+    assert [(key["key_version"], key["status"]) for key in keys] == [
+        (1, "revoked"),
+        (2, "active"),
+    ]
+    assert not (operator.authority / "reader-key-v1.pem").exists()
+    assert operator.states() == {old: "untrusted_key"}
