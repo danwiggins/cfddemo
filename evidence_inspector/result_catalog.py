@@ -1534,9 +1534,14 @@ class ResultCatalog:
                     finally:
                         self._content_lock_owner = None
                 finally:
-                    fcntl.flock(descriptor, fcntl.LOCK_UN)
+                    # A forked child shares this flock with its parent (one
+                    # open file description): unwinding the inherited hold in
+                    # the child must not release the parent's lock.
+                    if os.getpid() == current[0]:
+                        fcntl.flock(descriptor, fcntl.LOCK_UN)
         finally:
-            _release_content_gate(inode, current)
+            if os.getpid() == current[0]:
+                _release_content_gate(inode, current)
 
     @contextmanager
     def content_authority_fence(self, *, exclusive: bool = False) -> Iterator[None]:

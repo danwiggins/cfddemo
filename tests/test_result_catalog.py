@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import fcntl
 import hashlib
 import os
 import shutil
@@ -1284,6 +1285,37 @@ def test_a_forked_child_inherits_no_content_gate_holder(tmp_path: Path) -> None:
         assert os.WIFEXITED(status) and os.WEXITSTATUS(status) == 0
         assert not catalog_module.content_lock_held_by_current_thread()
     finally:
+        catalog.close()
+
+
+@pytest.mark.skipif(not hasattr(os, "fork"), reason="fork is unavailable")
+def test_a_forked_child_unwinding_a_hold_keeps_the_parent_lock(tmp_path: Path) -> None:
+    """The child shares the parent's flock; its unwind must not release it."""
+
+    catalog, _, _ = _catalog(tmp_path)
+    lock = tmp_path / "catalog" / catalog_module.CATALOG_CONTENT_LOCK_NAME
+    probe = os.open(lock, os.O_RDWR)
+
+    class ChildUnwind(Exception):
+        pass
+
+    try:
+        try:
+            with catalog.content_authority_fence(exclusive=True):
+                pid = os.fork()
+                if pid == 0:  # pragma: no cover - child process
+                    # Unwind the inherited hold through its context manager.
+                    raise ChildUnwind
+                _, status = os.waitpid(pid, 0)
+                assert os.WIFEXITED(status) and os.WEXITSTATUS(status) == 0
+                with pytest.raises(BlockingIOError):
+                    fcntl.flock(probe, fcntl.LOCK_SH | fcntl.LOCK_NB)
+        except ChildUnwind:  # pragma: no cover - child process
+            os._exit(0)
+        fcntl.flock(probe, fcntl.LOCK_SH | fcntl.LOCK_NB)
+        fcntl.flock(probe, fcntl.LOCK_UN)
+    finally:
+        os.close(probe)
         catalog.close()
 
 
