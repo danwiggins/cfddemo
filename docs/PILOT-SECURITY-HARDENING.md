@@ -1286,7 +1286,18 @@ DX DUAL VOICES — CONSENSUS TABLE:
 5. **Unix-domain socket transport (Approach C).** Trigger: a POSIX host is chosen and cross-account risk is judged material. P3.
 6. **`traceback doctor --profile provider` go/no-go gate.** Trigger: a composition root exists. P3.
 
-## Pending user gates
+## Gate decisions (resolved 2026-10-02 by the operator)
+
+| Gate | Decision |
+|---|---|
+| Premises | Accepted the review's view: E9 is **not** near-term enough to drive build order. CI and the golden path come first; security work follows reachability. Windows support waits until providers answer on host OS (X1). |
+| Challenge 1: sequencing | **Re-sequence.** Now: CI → H1 core → H6-min → H2-status-min → H5 validator. Everything else is deferred behind the named triggers below. |
+| Challenges 2–4: cuts | **Accepted.** H7 cut. H4 deferred until an E9 retention runbook exists, after storage consolidation. H3 deferred until the host OS is chosen. |
+| H1 placement | **A separate PR after the browser PR lands**, not folded into it. |
+
+The original gate text follows for the record.
+
+## Pending user gates (now resolved, see above)
 
 These are **not decided**. The plan as written stands until Dan answers.
 
