@@ -164,9 +164,20 @@ D03, and so on).
    order, scope, head vector, bindings).
 7. Revalidate again on hold exit, then release in reverse order.
 
-A store that cannot produce current authority inside the fence raises
-`CompositeAuthorityStale`; a type, pin, binding or hold misuse raises
-`CompositeAuthorityUnsafe`. A hold is single-thread: another thread's use of
+Entry rule: the coordinator must be the first lock its thread takes. Entry
+is refused with `CompositeAuthorityUnsafe` before any acquisition if this
+thread already owns any store's in-process lock (every store module's
+process lock, the D01 store lock, the E04 connection lock, or the
+result-trust lock depth). Entering under, for example, E04's public
+`trust_authority_fence` would hold E04 while waiting for D01, the reverse of
+D06's own order.
+
+Error typing: a head that differs on revalidation raises
+`CompositeAuthorityRetry`; a store integrity failure (every merged store's
+`...Unsafe` class, D06/E04 filesystem errors, E04 unsupported schema) raises
+`CompositeAuthorityUnsafe`; any other store failure inside the fence (not
+current, conflict, busy) raises `CompositeAuthorityStale`; a type, pin,
+binding or hold misuse raises `CompositeAuthorityUnsafe`. A hold is single-thread: another thread's use of
 it, use after exit, and a nested hold on the same coordinator fail closed.
 Holds of one coordinator from different threads serialize.
 
@@ -204,16 +215,39 @@ D06 status, live D09 and D10 builds, E06, family, D07, D03, anchor and D05
 pages, D04 history, E04 authority, reader identity, trust add, D01 commit,
 projection register) running concurrently to termination; the new public
 in-fence reads refusing without their fences; public store reads failing
-inside the hold without breaking it; and type, wiring, class and instance
-shadow failures.
+inside the hold without breaking it; entry under any store fence refused
+(including the E04-then-D01 inversion with a concurrent D06 read); a store
+integrity failure typed unsafe and fully released; and type, wiring, class
+and instance shadow failures.
+
+## Store that could not be fully composed: E04 catalog content
+
+E04 (`ResultCatalog`) has no cross-process fence over its catalog rows.
+`trust_authority_fence` holds the in-process connection lock and the
+cross-process result-trust read fence, so trust changes and same-process
+catalog use are excluded, but another process can still import into, or
+recover pending publications in, the catalog's SQLite file while the
+composite hold is active. E04's head (`catalog_authority_sha256`) covers
+storage identity, trust and the reader registry, not rows, so such a write
+neither blocks nor changes a captured head.
+
+What the composite does guarantee for E04: every result a D06 cohort binds
+is re-verified against E04 inside the held D06 root fence (D06 imports,
+recovery and cleanup need the exclusive root lock), and the D06 status
+digest is the captured head for that.
+
+Composing E04 content fully needs a change to E04's merged fence semantics,
+which this prerequisite does not make: a cross-process catalog-content lock
+(for example a root `flock` or a SQLite write transaction) taken by every
+E04 import, staging, finish, compensation and recovery path, held shared by
+`trust_authority_fence` (or a new E04 read fence after the connection lock
+and before trust), plus a committed catalog content version/head added to
+the E04 dependency head. That needs its own reviewed E04 PR and a new
+saved-head schema version (the E04 head definition changes).
 
 ## Open items
 
-- E04 catalog *content* is fenced in-process only. Its head
-  (`catalog_authority_sha256`) covers storage identity, trust and the reader
-  registry, not catalog rows, and `trust_authority_fence` blocks other
-  threads but not another process's import into the catalog's SQLite file.
-  Cohort-relevant results are fenced through the D06 root and status digest.
+- E04 catalog content (above).
 - Lock-only registries still expose no public in-fence read; the adapters
   pin their private `_lock` / `_load_state`. Promote a uniform
   `authority_read_fence` / `head_in_fence` pair if reviewers prefer.

@@ -61,6 +61,10 @@ import evidence_inspector.projection_policy_registry as projection_module
 import evidence_inspector.reader_authorization_registry as reader_module
 import evidence_inspector.repeatability_comparison_registry as d07_module
 import evidence_inspector.result_trust_registry as trust_module
+import evidence_inspector.longitudinal_comparison_registry as saved_module
+import evidence_inspector.provider_linkage_store as d01_module
+import evidence_inspector.record_supersession_store as d04_module
+import evidence_inspector.result_catalog as e04_module
 import evidence_inspector.result_view_source_registry as e06_module
 from evidence_inspector.anchor_policy_registry import AnchorPolicyRegistry
 from evidence_inspector.cohort_import import (
@@ -787,15 +791,63 @@ class _CompositeHold:
                     )
 
 
+# Store failures that mean tamper, corruption or a broken fence rather than
+# authority that is merely not current.  They must not be retried as stale.
+_UNSAFE_STORE_ERRORS: tuple[type[BaseException], ...] = (
+    d01_module.ProviderLinkageStoreUnsafe,
+    d04_module.RecordSupersessionUnsafe,
+    d05_module.CohortRegistryUnsafe,
+    reader_module.ReaderAuthorizationRegistryUnsafe,
+    d06_module.CohortImportFilesystemError,
+    e04_module.CatalogFilesystemError,
+    e04_module.CatalogUnsupportedSchema,
+    trust_module.ResultTrustRegistryUnsafe,
+    e06_module.ResultViewSourceRegistryUnsafe,
+    d03_module.LongitudinalDecisionRegistryUnsafe,
+    d07_module.RepeatabilityComparisonRegistryUnsafe,
+    d09_module.DenominatorPolicyRegistryUnsafe,
+    d10_module.CovariateContextRegistryUnsafe,
+    family_module.MeasurementSourceArtifactRegistryUnsafe,
+    anchor_module.AnchorPolicyRegistryUnsafe,
+    projection_module.ProjectionPolicyRegistryUnsafe,
+)
+
+
 def _guard(operation: Callable[[], object]) -> object:
-    """Map a store failure inside the fence to a sanitized composite error."""
+    """Map a store failure inside the fence to a sanitized composite error.
+
+    Integrity failures become ``CompositeAuthorityUnsafe``; any other store
+    failure (not current, conflict, busy) becomes ``CompositeAuthorityStale``.
+    ``CompositeAuthorityRetry`` is reserved for an observed head mismatch.
+    """
 
     try:
         return operation()
     except CompositeAuthorityError:
         raise
+    except _UNSAFE_STORE_ERRORS:
+        raise CompositeAuthorityUnsafe("dependency store integrity failed") from None
     except Exception:
         raise CompositeAuthorityStale("dependency authority is unavailable") from None
+
+
+# Module-level process locks every store fence of these modules takes first.
+_MODULE_PROCESS_LOCKS = (
+    reader_module._REGISTRY_PROCESS_LOCK,
+    d10_module._REGISTRY_PROCESS_LOCK,
+    d09_module._REGISTRY_PROCESS_LOCK,
+    d04_module._SQLITE_OPEN_LOCK,
+    d05_module._REGISTRY_PROCESS_LOCK,
+    trust_module._REGISTRY_PROCESS_LOCK,
+    d06_module._PROCESS_LOCK,
+    e06_module._REGISTRY_PROCESS_LOCK,
+    d03_module._REGISTRY_PROCESS_LOCK,
+    d07_module._REGISTRY_PROCESS_LOCK,
+    family_module._REGISTRY_PROCESS_LOCK,
+    anchor_module._REGISTRY_PROCESS_LOCK,
+    projection_module._REGISTRY_PROCESS_LOCK,
+    saved_module._REGISTRY_PROCESS_LOCK,
+)
 
 
 class CompositeAuthorityCoordinator:
@@ -969,6 +1021,28 @@ class CompositeAuthorityCoordinator:
             raise CompositeAuthorityUnsafe("E06 is bound to another cohort registry")
         return tuple(adapter.bind() for adapter in self._adapters)
 
+    def _require_no_store_lock_held(self) -> None:
+        """Refuse entry while this thread already holds any store lock.
+
+        The coordinator must be the first lock any thread takes: entering it
+        under, say, E04's public ``trust_authority_fence`` would hold E04
+        while waiting for D01, the reverse of D06's own order.  Every store
+        fence takes one of these in-process locks first, so "this thread owns
+        none of them" means "this thread holds no store fence".
+        """
+
+        stores = self._stores
+        owned = (
+            *(lock._is_owned() for lock in _MODULE_PROCESS_LOCKS),
+            _instance_state(stores["linkage"]).get("_lock")._is_owned(),  # type: ignore[union-attr]
+            _instance_state(stores["results"]).get("_connection_lock")._is_owned(),  # type: ignore[union-attr]
+            bool(getattr(trust_module._LOCK_DEPTH, "value", 0)),
+        )
+        if any(owned):
+            raise CompositeAuthorityUnsafe(
+                "composite authority must be entered before any store fence"
+            )
+
     @contextmanager
     def _hold(self) -> Iterator[_CompositeHold]:
         """Acquire in order, capture, yield, revalidate in reverse, release.
@@ -984,6 +1058,7 @@ class CompositeAuthorityCoordinator:
         if self._hold_owner == thread:
             # A nested hold would re-enter non-reentrant store fences.
             raise CompositeAuthorityUnsafe("composite authority hold is already active")
+        self._require_no_store_lock_held()
         with self._hold_lock:
             self._hold_owner = thread
             body_failed = False

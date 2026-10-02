@@ -1026,3 +1026,68 @@ def test_unknown_scope_is_stale_and_releases_every_fence(world, coordinator) -> 
         coordinator.snapshot(unknown)
     world.trust.add_key(_extra_result_key())
     assert coordinator.snapshot(world.scope)
+
+
+def test_store_integrity_failure_is_unsafe_not_stale_and_releases(
+    world, coordinator
+) -> None:
+    extra = world.projections.root / "objects" / "notes.txt"
+    extra.write_text("private")
+    with pytest.raises(CompositeAuthorityUnsafe):
+        coordinator.snapshot(world.scope)
+    fence = CompositeAuthorityFence(coordinator)
+    with pytest.raises(LongitudinalComparisonRegistryUnsafe):
+        with fence.hold():
+            pass
+    extra.unlink()
+    # Every fence was released on the failure path.
+    world.trust.add_key(_extra_result_key())
+    assert coordinator.snapshot(world.scope)
+
+
+def test_entry_while_holding_any_store_fence_is_refused(world, coordinator) -> None:
+    """The coordinator must be a thread's first lock.
+
+    Entering under E04's public fence would hold E04 while waiting for D01,
+    the reverse of D06's own order, and deadlock against a concurrent D06
+    status read.  Entry is refused before any acquisition instead.
+    """
+
+    for fence in (
+        lambda: world.results.trust_authority_fence(),
+        lambda: world.linkage.authority_read_fence(),
+        lambda: world.reader.authority_read_fence(),
+        lambda: world.trust.read_fence(),
+    ):
+        with fence():
+            with pytest.raises(CompositeAuthorityUnsafe, match="before any store fence"):
+                coordinator.snapshot(world.scope)
+    with world.linkage.authority_read_fence(), world.cohort.authority_read_fence():
+        with pytest.raises(CompositeAuthorityUnsafe, match="before any store fence"):
+            coordinator.snapshot(world.scope)
+    # The scenario itself terminates: a concurrent D06 status read and a
+    # thread that tries to enter under E04 both finish.
+    errors: list[BaseException] = []
+    entered = threading.Event()
+
+    def under_e04() -> None:
+        with world.results.trust_authority_fence():
+            entered.set()
+            time.sleep(0.2)
+            _capture(errors, lambda: coordinator.snapshot(world.scope))
+
+    first = threading.Thread(target=under_e04, daemon=True)
+    second = threading.Thread(
+        target=lambda: (
+            entered.wait(JOIN_SECONDS),
+            world.records.record_status_for_manifest(world.cohort_selector_id, 1),
+        ),
+        daemon=True,
+    )
+    first.start()
+    second.start()
+    first.join(JOIN_SECONDS)
+    second.join(JOIN_SECONDS)
+    assert not first.is_alive() and not second.is_alive()
+    assert [type(error) for error in errors] == [CompositeAuthorityUnsafe]
+    assert coordinator.snapshot(world.scope)
