@@ -128,6 +128,7 @@ def _parser() -> argparse.ArgumentParser:
         "--package", required=True, type=Path
     )
 
+    commands.add_parser("reader", help="local operator reader authority (E12)")
     support = commands.add_parser(
         "support-bundle", help="write allowlisted redacted diagnostics"
     )
@@ -1262,6 +1263,11 @@ def _require_trust_registry_identity(
 
 
 def main(argv: Sequence[str] | None = None) -> int:
+    raw = list(sys.argv[1:] if argv is None else argv)
+    if raw[:1] == ["reader"]:  # local operator reader authority (E12)
+        from .reader_cli import main as reader_main
+
+        return reader_main(raw[1:])
     parser = _parser()
     args = parser.parse_args(argv)
     _require_trust_registry_identity(parser, args)
