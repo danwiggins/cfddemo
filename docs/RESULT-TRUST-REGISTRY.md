@@ -141,34 +141,55 @@ the final open. Restore cleanup is best-effort, as in the sibling registries.
 `result_trust_document=` and `expected_result_trust_sha256=`. See
 `docs/REPEATABILITY-COMPARISON-REGISTRY.md` ("Result trust").
 
-## E04 follow-up
+## E04 and runner wiring
 
-E04 (`evidence_inspector/result_catalog.py`) is not rewired here. It holds a
-live `TrustStore`, pins `TrustStore.resolve`, reads `trust_store._lock` and
-`_keys` for its authority snapshot, and `CatalogLiveReader` binds the store's
-identity and a snapshot of `_keys`. Wiring it would mean:
+`ResultCatalog` accepts `result_trust_registry=` in place of `trust_store=`
+(exactly one of the two). See `docs/RESULT-CATALOG.md` ("Result trust"). Against
+the follow-up analysis written with this registry:
 
-1. `ResultCatalog` takes a `ResultTrustRegistry` in place of the store, and
-   verification runs on a fresh `TrustStore` from `read_fence` (or
-   `current_trust_store`) per operation. The `TrustStore.resolve` pin stays.
-2. `CatalogAuthoritySnapshot.trust_snapshot_sha256` binds the trust registry
-   ID, epoch, and head (or the snapshot's document digest) instead of hashing
-   `_keys`, so a revocation changes the catalog authority digest.
-3. `CatalogLiveReader` binds the trust registry instance and its identity
-   instead of `id(_keys)` and the `_keys` tuple, and each verified read holds
-   the trust read fence through the reverification and return. Lock order:
-   trust read fence, then the catalog `_connection_lock`.
-4. Import and publication reverify under the same fence, so a key revoked
-   mid-import cannot be published.
-5. The CLI and runner paths that load a trust file (`traceback_runner/cli.py`)
-   keep the document path or gain a registry option; that is a product choice.
+1. Done. Each catalog verification builds a fresh `TrustStore` from the snapshot
+   its read fence yields. The `TrustStore.resolve` pin stays.
+2. Done, as a new contract version. `traceback.catalog-authority.v2` sets
+   `trust_snapshot_sha256` to a digest of the registry ID, epoch, state version,
+   head, and document digest. The TrustStore path keeps
+   `traceback.catalog-authority.v1`. D06 rebuilds a retained authority from its
+   digest across both versions (`CATALOG_AUTHORITY_SCHEMA_VERSIONS`).
+3. Done, with the opposite lock order. `CatalogLiveReader` binds the registry
+   instance and its (ID, epoch) instead of `id(_keys)` and the key tuple, and
+   holds the trust fence through reverification and return. The order is the
+   catalog `_connection_lock` first, then the trust read fence, not trust first:
+   D06 already held the catalog connection lock before the TrustStore lock, and
+   D06 and E06 call the catalog while holding that connection lock, so trust
+   first would deadlock against them (a mutation test inverts the order and
+   the D06/E04/D07 composition test hangs).
+4. Done. Import, preparation, staging, adoption, and reference verification
+   each hold one fence through return; a trust event between preparation and
+   adoption fails the adoption.
+5. Done for `verify`: `traceback verify BUNDLE --trust-registry ROOT
+   --trust-registry-id ID --trust-registry-epoch EPOCH --trust-registry-head
+   HEAD` verifies against the registry's current trust under its read fence,
+   and `--trust-store` still works. A retained head older than the registry's
+   is refused. The `assets` commands keep `--trust-store` only: they verify
+   release-purpose signatures, and this registry holds result keys only and
+   rejects release keys, so a registry option there could never verify.
 
-That touches the catalog's authority snapshot, the reader seal, and several
-tests that build a `TrustStore` directly, so it is a separate change.
+Full lock order, as composed and tested: linkage fence, D05 lock, catalog
+connection lock, result-trust read fence, D06 root, then E06's lock; D07 takes
+linkage fence, result-trust read fence, then its own lock. A thread holding a
+trust read fence taken directly from the registry must not call the catalog.
+
+This change also fixes a race in the registry: a trust event updates the
+instance's trusted head and then its instance seal, and the integrity check at
+the start of a public call on another thread could read the new head with the
+old seal and fail with `authority state changed`. The check now runs under the
+process registry lock that trust events hold.
 
 ## Open decisions
 
 - Signed trust administration (a pinned administration key for additions)
   once production key custody exists.
-- Whether E04 and the runner CLI move to the registry, and whether the
-  fixed-document D07 path is then removed.
+- Whether the TrustStore path in E04 and the fixed-document D07 path are
+  removed now that both accept the registry.
+- Whether a catalog root persists its trust-registry binding, so a catalog
+  opened once on the registry path can never be reopened with a caller-held
+  `TrustStore` or another registry (a catalog schema v4 migration).
