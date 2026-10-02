@@ -723,7 +723,9 @@ caller assertions and is therefore prohibited:
 - D10 `build_live_covariate_context` (#64) takes its population from the D09
   policy registry and its decisions from the D03 registry, joined on four keys.
   Covariate tokens (batch, protocol, preanalytics) are still caller-registered;
-  no upstream authority for them exists.
+  no upstream authority for them exists. Decided (Dan, 2026-10-01): they are
+  operator-entered, and E12 labels them "operator-entered, unverified", as for
+  E06 ledgers.
 - D05 `resolve_history_view` returns a `CohortHistoryView` that is always
   `presented_as_current=false` and labelled `current|stale`. History and reopen
   use it; current authority still comes only from `resolve_history`.
@@ -748,12 +750,18 @@ caller assertions and is therefore prohibited:
   "operator-entered, unverified", never presenting it as equivalent to D09
   counts. One result may represent members of different cohort versions; E12
   compares within one selected cohort version.
-- Reader authorization (#67) works in the synthetic profile. Open product
-  decisions: the real external provider authority and how its trust is
-  provisioned and rotated; how real grants are issued, delivered, and revoked
-  (there is no HTTP launch route yet); and whether any registry change should
-  force every bound session to re-bootstrap (current) or only changes to that
-  session's grant.
+- Reader authorization (#67) works in the synthetic profile. Decided (Dan,
+  2026-10-01, simplest operationally for now):
+  - The provider authority is a local operator authority: one signing key
+    generated on the workstation, held by the operator, with trust provisioned
+    and rotated through a runner CLI command. There is no external provider yet.
+  - The operator issues and revokes grants with the CLI. A grant is delivered by
+    printing a one-use launch link to the terminal, as a notebook token is.
+  - A bound session is ended only by changes to its own grant or signing key
+    (revocation, expiry, scope, untrusted or rotated-out key), not by unrelated
+    registry changes.
+  The local operator profile, CLI, and launch exchange route are a build item
+  in the merge order below; the relaxed head check is part of it.
 - Standalone numeric values require the applicable E07, E08, or E09 replayable
   artifact and the closed family adapter above, bound through the exact E04/E06
   source and requested D02 identity/coordinate. A measurement without that
@@ -761,10 +769,11 @@ caller assertions and is therefore prohibited:
   and comparison inputs are not a substitute source-value authority.
 - The anchor-policy registry (#66) binds approved D03 policy and D07 envelope
   pairs and a live candidate page. A D03 v1 policy pins one complete anchor key,
-  so each approval admits one anchor; a real multi-anchor choice needs an
-  anchor-agnostic D03 policy schema, or one (policy, envelope) pair per anchor.
-  Open decisions: whether anchors are restricted to biological draws, and envelope
-  expiry, which D07 reports as unavailable. E12 must bind each D07 comparison's
+  so each approval admits one anchor. Decided (Dan, 2026-10-01, simplest
+  operationally for now): multiple anchors are offered as multiple approvals,
+  with no D03 schema change; any record the policy admits may be an anchor,
+  with no lineage-role restriction; and an expired envelope surfaces as D07
+  `unavailable`, as it does today. E12 must bind each D07 comparison's
   envelope digest to the resolved anchor policy.
 - The projection-policy registry (#65) holds closed per-family policies and
   replays no live authority. The E12 builder must call
@@ -788,6 +797,8 @@ caller assertions and is therefore prohibited:
   also parses every committed object, which is fine at synthetic scale only.
 
 The remaining merge order is E04 and runner wiring to the result-trust store,
+the local operator reader authority (profile, grant CLI, launch exchange, and
+own-grant session check),
 family-source artifact discovery registry, family-specific measurement-source
 adapters,
 composable authority-fence adapters/coordinator, D08 read model, durable
