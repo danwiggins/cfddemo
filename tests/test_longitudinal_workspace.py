@@ -133,6 +133,7 @@ def _inputs(workspace: LongitudinalWorkspace, **updates) -> WorkspaceAuthorityIn
     values = {
         "request": workspace.request,
         "reader_authorization": workspace.reader_authorization,
+        "dependency_heads": workspace.dependency_heads,
         "authority": workspace.authority,
         "time_axis": workspace.time_axis,
         "population": workspace.population,
@@ -275,7 +276,10 @@ def test_public_projection_carries_no_protected_identifier(base) -> None:
         assert protected.member_sha256 not in public
     # The reader grant and session credential never reach public bytes.
     assert world.credential.grant_sha256 not in public
+    assert world.credential.state_head_sha256 not in public
     assert workspace.reader_authorization.grant_sha256 not in public
+    assert workspace.dependency_heads.reader_authorization.head not in public
+    assert workspace.dependency_heads.reader_authorization.id not in public
 
 
 def test_public_time_axis_bytes_carry_offsets_not_timestamps(base) -> None:
@@ -1251,6 +1255,7 @@ def test_stable_stale_series_is_an_authority_error(
     )
     error = _boundary(world.build)
     assert error.code is LongitudinalErrorCode.AUTHORITY_STALE
+    assert error.remediation.value == "refresh_decision_registration"
 
 
 def test_public_comparison_carries_no_timestamp(base) -> None:

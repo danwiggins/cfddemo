@@ -252,7 +252,9 @@ Filters (timepoint ordinals, lineage roles, record availability,
 compatibility states) select visible rows after construction. The projection
 keeps `total_row_count`, the full population and only segments whose
 endpoints are both visible. `filters_sha256` binds the normalized filters.
-`replay_sha256` binds the request, every authority commitment, the time axis,
+`replay_sha256` binds the request, every authority commitment (the public
+head vector omits the reader-registry head, which is normally the session's
+bound head), the time axis,
 population, covariate context, version diff, anchor record digest, every
 protected and public row and every segment; the reader authorization is
 excluded.
@@ -325,8 +327,9 @@ Release, export and diagnostic interpretation fields are literally false.
   digest, plus the reader grant commitment from `reader_authorization`;
 - publication through `CompositeAuthorityFence(coordinator)` with a dependency
   scope of the workspace's cohort selector/version, requiring the
-  publication's head vector to equal `workspace.authority.heads` (the `H1`
-  vector), so a save never records heads the workspace was not built from;
+  publication's head vector to equal `workspace.dependency_heads` (the
+  protected `H1` vector; the public `authority.heads` omits the reader-registry
+  head), so a save never records heads the workspace was not built from;
 - reader re-authorization under the same final fences as publication (the
   composite hold includes the reader fence, but the registry exposes no
   in-hold authorize call for the saved-registry path);

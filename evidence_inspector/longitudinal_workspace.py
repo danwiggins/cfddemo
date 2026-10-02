@@ -121,6 +121,7 @@ from evidence_inspector.denominator_policy_registry import (
 from evidence_inspector.fragment_explorer import FragmentQuantity, PanelId
 from evidence_inspector.longitudinal_comparison_registry import (
     DependencyHeadV1,
+    DependencySlot,
     SavedComparisonDependencyHeadsV1,
     SavedComparisonDependencyScopeV1,
 )
@@ -262,6 +263,7 @@ class LongitudinalRemediation(StrEnum):
     RESELECT_ANCHOR = "reselect_anchor"
     RESELECT_POLICY = "reselect_policy"
     REFRESH_SOURCE_REGISTRATION = "refresh_source_registration"
+    REFRESH_DECISION_REGISTRATION = "refresh_decision_registration"
     RETRY_READ = "retry_read"
     VERIFY_STORE_INTEGRITY = "verify_store_integrity"
     CHECK_LOCAL_STORAGE = "check_local_storage"
@@ -1141,10 +1143,35 @@ class LimitationCode(StrEnum):
     )
 
 
+class PublicDependencyHead(RegistryContract):
+    """One dependency store's ID, epoch and head as built from (``H1``)."""
+
+    slot: DependencySlot
+    head: DependencyHeadV1
+
+
+def public_dependency_heads(
+    heads: SavedComparisonDependencyHeadsV1,
+) -> tuple[PublicDependencyHead, ...]:
+    """Every head except the reader registry's.
+
+    The reader-registry head is the session credential's bound head in the
+    normal case, so it never enters public bytes or the replay digest.
+    """
+
+    return tuple(
+        PublicDependencyHead(slot=slot, head=getattr(heads, slot.value))
+        for slot in DependencySlot
+        if slot is not DependencySlot.READER_AUTHORIZATION
+    )
+
+
 class LongitudinalAuthorityCommitments(RegistryContract):
     """Every exact authority identity the workspace was built from."""
 
-    heads: SavedComparisonDependencyHeadsV1
+    heads: tuple[PublicDependencyHead, ...] = Field(
+        min_length=len(DependencySlot) - 1, max_length=len(DependencySlot) - 1
+    )
     cohort_selector_id: CohortSelectorId
     cohort_version: int = Field(ge=1, le=100_000, strict=True)
     cohort_manifest_sha256: Sha256
@@ -1237,6 +1264,7 @@ class LongitudinalWorkspace(_WorkspaceCore):
     protected_only: Literal[True] = True
     request: LongitudinalWorkspaceRequest
     reader_authorization: ReaderAuthorization
+    dependency_heads: SavedComparisonDependencyHeadsV1
     anchor_record_sha256: Sha256
     protected_rows: tuple[ProtectedLongitudinalRow, ...] = Field(
         min_length=1, max_length=MAX_WORKSPACE_MEMBERS
@@ -1260,6 +1288,8 @@ class LongitudinalWorkspace(_WorkspaceCore):
         ) or not set(self.visible_row_ordinals) <= set(ordinals):
             raise ValueError("visible rows must be canonical row ordinals")
         _validate_segments(self.rows, self.segments)
+        if self.authority.heads != public_dependency_heads(self.dependency_heads):
+            raise ValueError("public heads must be the protected head vector")
         return self
 
 
@@ -1728,6 +1758,7 @@ class WorkspaceAuthorityInputs(RegistryContract):
 
     request: LongitudinalWorkspaceRequest
     reader_authorization: ReaderAuthorization
+    dependency_heads: SavedComparisonDependencyHeadsV1
     authority: LongitudinalAuthorityCommitments
     time_axis: PublicTimeAxis
     population: CohortPopulationProjection
@@ -1811,6 +1842,7 @@ def derive_workspace(
         replay_sha256=_replay_sha256(inputs, protected_rows, rows, segments),
         request=inputs.request,
         reader_authorization=inputs.reader_authorization,
+        dependency_heads=inputs.dependency_heads,
         anchor_record_sha256=inputs.anchor_record_sha256,
         protected_rows=protected_rows,
         rows=rows,
@@ -2807,7 +2839,7 @@ def _gather(
     if prerequisite is not None:
         limitations.append(LimitationCode.STANDALONE_VALUES_UNAVAILABLE)
     authority = LongitudinalAuthorityCommitments(
-        heads=heads,
+        heads=public_dependency_heads(heads),
         cohort_selector_id=selector_id,
         cohort_version=version,
         cohort_manifest_sha256=history.selected_manifest_sha256,
@@ -2835,6 +2867,7 @@ def _gather(
     inputs = WorkspaceAuthorityInputs(
         request=request,
         reader_authorization=authorization,
+        dependency_heads=heads,
         authority=authority,
         time_axis=_time_axis(manifest),
         population=population,
@@ -3110,7 +3143,7 @@ def _resolve_series(
         # unrelated to this anchor: fail closed rather than show "not decided".
         _fail(
             LongitudinalErrorCode.AUTHORITY_STALE,
-            LongitudinalRemediation.REFRESH_SOURCE_REGISTRATION,
+            LongitudinalRemediation.REFRESH_DECISION_REGISTRATION,
         )
     return DecisionState.SERIES_NOT_REGISTERED, None
 
