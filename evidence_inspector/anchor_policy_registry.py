@@ -257,6 +257,19 @@ class RegisteredAnchorPolicyObject(RegistryContract):
         digests = [longitudinal_record_sha256(item) for item in self.anchor_candidates]
         if digests != sorted(digests) or len(digests) != len(set(digests)):
             raise ValueError("anchor candidates must be uniquely sorted by record")
+        # One linkage revision is one D05 member; two record snapshots of it
+        # (for example differing only in result state) would be two candidates
+        # for one member.
+        linkages = {
+            (
+                item.linkage_revision.provider_namespace,
+                item.linkage_revision.linkage_id,
+                item.linkage_revision.revision,
+            )
+            for item in self.anchor_candidates
+        }
+        if len(linkages) != len(self.anchor_candidates):
+            raise ValueError("anchor candidates must bind distinct linkage revisions")
         for record in self.anchor_candidates:
             if record.activation_receipt is None:
                 raise ValueError("anchor candidates require an activation receipt")

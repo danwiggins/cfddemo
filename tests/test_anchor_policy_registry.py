@@ -50,6 +50,7 @@ from evidence_inspector.provider_linkage import (
     OptionalOpaqueToken,
     TechnicalLineage,
     UnitOfAnalysis,
+    linkage_revision_sha256,
 )
 from evidence_inspector.provider_linkage_store import ProviderLinkageStore
 from evidence_inspector.repeatability_comparison import repeatability_envelope_sha256
@@ -999,29 +1000,47 @@ def test_d03_rejected_or_non_live_candidates_are_never_admitted(
     unsupported = _policy(anchor).model_copy(update={"engine_version": "9.9.9"})
     with pytest.raises(AnchorPolicyRegistryConflict, match="live selection"):
         _register(registry, live, policy=unsupported)
-    # A record with the same anchor key but a signed linkage proof and receipt
-    # that are not the live ones is not admitted, and one non-admitted
-    # candidate rejects the whole approval rather than being dropped.
+    # A record with the same anchor key under another, never-committed linkage
+    # (with a self-consistent but non-live receipt) is not admitted, and one
+    # non-admitted candidate rejects the whole approval rather than being
+    # dropped.
     assert anchor.activation_receipt is not None
-    alternate, _ = _consume(
-        anchor.linkage_revision, (_create_approval(anchor.linkage_revision, "9"),)
+    revision = anchor.linkage_revision.model_copy(
+        update={"linkage_id": _token("linkage", "8")}
     )
+    alternate, _ = _consume(revision, (_create_approval(revision, "8"),))
     variant = anchor.model_copy(
         update={
+            "linkage_revision": revision,
             "authorized_linkage": alternate,
             "activation_receipt": anchor.activation_receipt.model_copy(
                 update={
+                    "linkage_id": revision.linkage_id,
+                    "linkage_revision_sha256": linkage_revision_sha256(revision),
                     "authorized_record_sha256": hashlib.sha256(
                         canonical_contract_bytes(alternate)
-                    ).hexdigest()
+                    ).hexdigest(),
                 }
             ),
         }
     )
+    LongitudinalRecord.model_validate_json(variant.model_dump_json())
     with pytest.raises(AnchorPolicyRegistryConflict, match="live and admitted"):
         _register(registry, live, candidates=(anchor, variant))
     with pytest.raises(AnchorPolicyRegistryConflict, match="live selection"):
         _register(registry, live, candidates=(variant,))
+    # Two snapshots of one member's record (here differing only in result
+    # state) cannot both be candidates.
+    snapshot = anchor.model_copy(
+        update={
+            "measurement": anchor.measurement.model_copy(
+                update={"information_state": InformationState.INSUFFICIENT}
+            )
+        }
+    )
+    assert longitudinal_record_sha256(snapshot) != longitudinal_record_sha256(anchor)
+    with pytest.raises(AnchorPolicyRegistryConflict, match="exact canonical"):
+        _register(registry, live, candidates=(anchor, snapshot))
     assert registry.list_selectors().state_version == 0
 
 

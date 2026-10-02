@@ -31,7 +31,8 @@ It never accepts a candidate page, a selection, or a decision. The stored
 - the policy and envelope digests to equal their pins;
 - every candidate's comparison-key digest to equal `policy.anchor_key_sha256`;
 - every candidate to carry its activation receipt, uniquely sorted by record
-  digest; and
+  digest, with at most one candidate per linkage revision (one D05 member), so
+  two snapshots of one member's record cannot both be offered; and
 - the envelope to bind the anchor key: the same method reference, method
   definition, quantity and unit, and the key's known uncertainty-method and
   denominator-semantics dimensions equal to the envelope's. This is the
@@ -93,12 +94,21 @@ implicit first, latest or provider-primary choice.
 A v1 `LongitudinalAnchorPolicy` pins one complete `anchor_key_sha256`, and the
 comparison key binds one result (`result_id`, `result_sha256`, bundle and E01
 authority). Every admitted candidate under one approval therefore shares that
-exact result. In practice a page holds one candidate. The 1,000 bound and the
-page protocol still apply, and nothing here assumes one. Offering several
+exact result. With at most one candidate per linkage revision, a page holds one
+candidate per live linkage of that result, which is normally one. The 1,000
+bound and the page protocol still apply, and nothing here assumes one. Offering several
 distinct anchors for one cohort means registering several approvals: one per
 anchor, each with its own policy and envelope. See "Open decisions".
 
 ## Explicit selection
+
+The E12 request's two selector/version pairs map to this registry as:
+
+- anchor-policy selector/version = `(selector_id, approval_version)`; and
+- approved-anchor selector/version = `(anchor_selector_id,
+  candidate_page_sha256)`. The anchor "version" is the content digest of the
+  page the operator chose from, not a counter. A counter could not detect a
+  changed page that keeps the same selector.
 
 `resolve_anchor(selector_id, approval_version, anchor_selector_id, *,
 expected_candidate_page_sha256)` has no defaults. Under the authority fence it:
