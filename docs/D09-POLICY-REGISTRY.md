@@ -117,6 +117,27 @@ paths, or free text. Each row is rebuilt through its own D05/D06 fence while the
 D09 shared lock is held, so rows in one page can reflect different D06
 snapshots.
 
+## Protected population read
+
+`resolve_population(selector_id, policy_version)` is the protected read D10
+uses (see `docs/COVARIATE-CONTEXT.md`). It takes the same shared D09 lock and
+the same D05/D06 fence as `resolve`, and it applies the same checks. It calls
+the pinned `build_registered_cohort_population_members`, which runs the
+identical derivation and also returns the row-bearing population plus each
+included row's exact D05 `CohortMember` and D06 `CatalogResultRef`, captured
+inside that fence. The result, `RegisteredDenominatorPolicyPopulation`, holds:
+
+- `summary`: the same `RegisteredDenominatorPolicySummary` that `resolve`
+  returns for that snapshot; and
+- `members`: `RegisteredCohortPopulationMembers`, whose validator requires its
+  population digest and projection to equal the v3 summary's, and each included
+  member's D05 and catalog digests to equal its row.
+
+This read is protected and local only. Its member data never reaches the v3
+summary, selector rows, or any aggregate projection. `resolve` and
+`list_selectors` are unchanged. It cannot run inside a held linkage fence,
+like `resolve`. A test pins this.
+
 ## Storage and bounds
 
 Storage follows the D03 decision registry (`docs/LONGITUDINAL-DECISION-REGISTRY.md`),
@@ -163,8 +184,9 @@ D03 decision registry. Seals cover:
 
 - the registry's methods (the method seal);
 - the instance's authority state (the instance seal);
-- the pinned authority callables: the D09 builder, summary bytes, policy and
-  member-set digests, D05 `list_selectors`, and the D05 integrity check; and
+- the pinned authority callables: the D09 summary and population builders,
+  summary and population bytes, policy and member-set digests, D05
+  `list_selectors`, and the D05 integrity check; and
 - the sealed result-constructor and helper aliases.
 
 They detect accidental or naive replacement of those objects. In-process code
@@ -176,7 +198,9 @@ registry until it was reverted.
 
 ## Not in scope
 
-The composable E12 authority-fence adapter, D10 live D09/D03 integration, and
-the E12 builder are separate prerequisites in the E12 merge order. All fixtures
+The composable E12 authority-fence adapter and the E12 builder are separate
+prerequisites in the E12 merge order. D10 consumes this registry through
+`resolve_population` (`docs/COVARIATE-CONTEXT.md`,
+`docs/D10-CONTEXT-REGISTRY.md`). All fixtures
 are synthetic/local. A D09 `included` count never implies comparison
 eligibility.

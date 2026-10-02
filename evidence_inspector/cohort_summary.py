@@ -811,22 +811,12 @@ def _registered_row(
     )
 
 
-def build_registered_cohort_denominator_summary(
-    *,
+def _capture_registered_inputs(
     registry: CohortRegistry,
-    selector_id: str,
-    cohort_version: int,
     record_catalog: CohortRecordCatalog,
     policy: CohortDenominatorPolicy,
     disposition_policy: CohortDispositionPolicy,
-) -> RegisteredCohortDenominatorSummary:
-    """Derive one D09 population from exact live D05/D06 authority state only.
-
-    No caller-authored result, compatibility, ledger, or comparison evidence
-    is accepted: every disposition comes from the fenced D05 manifest and
-    policy and the fenced D06 record status.
-    """
-
+) -> tuple[CohortDenominatorPolicy, CohortDispositionPolicy]:
     if type(registry) is not CohortRegistry:
         raise TypeError("cohort registry type is invalid")
     if type(record_catalog) is not CohortRecordCatalog:
@@ -854,35 +844,79 @@ def build_registered_cohort_denominator_summary(
         replayed_disposition_policy = _replay_disposition_policy(disposition_policy)
     except (TypeError, ValueError):
         raise ValueError("cohort summary input is not canonical") from None
+    return replayed_policy, replayed_disposition_policy
 
-    with _PINNED_RECORD_STATUS_FENCE(
-        record_catalog,
-        selector_id,
-        cohort_version,
-        expected_registry=registry,
-    ) as (history, status):
-        manifest = _validate_record_status(history, status)
-        _validate_policy_binds_manifest(replayed_policy, manifest)
-        _validate_disposition_policy(
-            policy=replayed_policy,
-            manifest=manifest,
-            disposition_policy=replayed_disposition_policy,
+
+def _derive_registered_in_fence(
+    *,
+    history: RegisteredCohortHistory,
+    status: CohortManifestRecordStatus,
+    selector_id: str,
+    cohort_version: int,
+    policy: CohortDenominatorPolicy,
+    disposition_policy: CohortDispositionPolicy,
+) -> tuple[RegisteredCohortDenominatorSummary, CohortDenominatorSummary, CohortManifest]:
+    """Derive the protected rows and their aggregate v3 summary in one fence.
+
+    The registered v3 summary and the protected row-bearing population both
+    come from this single derivation, so they cannot disagree.
+    """
+
+    manifest = _validate_record_status(history, status)
+    _validate_policy_binds_manifest(policy, manifest)
+    _validate_disposition_policy(
+        policy=policy,
+        manifest=manifest,
+        disposition_policy=disposition_policy,
+    )
+    rows = tuple(
+        _registered_row(
+            ordinal=ordinal,
+            member=member,
+            status=member_status,
+            disposition_policy=disposition_policy,
         )
-        rows = tuple(
-            _registered_row(
-                ordinal=ordinal,
-                member=member,
-                status=member_status,
-                disposition_policy=replayed_disposition_policy,
-            )
-            for ordinal, (member, member_status) in enumerate(
-                zip(manifest.members, status.members, strict=True)
-            )
+        for ordinal, (member, member_status) in enumerate(
+            zip(manifest.members, status.members, strict=True)
         )
-        population = _summary_from_rows(
-            manifest=manifest, policy=replayed_policy, rows=rows
-        )
-        population_values = population.model_dump(
+    )
+    population = _summary_from_rows(manifest=manifest, policy=policy, rows=rows)
+    payload = {
+        "registry_id": history.registry_id,
+        "registry_epoch_sha256": history.registry_epoch_sha256,
+        "registry_state_version": history.state_version,
+        "registry_state_head_sha256": history.state_head_sha256,
+        "selector_id": selector_id,
+        "cohort_version": cohort_version,
+        "cohort_manifest_sha256": history.selected_manifest_sha256,
+        "linkage_snapshot_sha256": status.linkage_snapshot_sha256,
+        "catalog_authority_sha256": status.catalog_authority_sha256,
+        "record_status_sha256": status.status_sha256,
+        "record_status_policy_sha256": status.record_status_policy_sha256,
+        "population": _project_population(population),
+    }
+    placeholder = RegisteredCohortDenominatorSummary.model_construct(
+        **payload,
+        summary_sha256="0" * 64,
+        synthetic_only=True,
+        clinical_use_authorized=False,
+        scientific_qualification_claimed=False,
+    )
+    result = RegisteredCohortDenominatorSummary(
+        **payload,
+        summary_sha256=_sha256_exact(placeholder, RegisteredCohortDenominatorSummary),
+    )
+    registered = RegisteredCohortDenominatorSummary.model_validate_json(
+        registered_cohort_denominator_summary_bytes(result)
+    )
+    return registered, population, manifest
+
+
+def _project_population(
+    population: CohortDenominatorSummary,
+) -> CohortPopulationProjection:
+    return CohortPopulationProjection(
+        **population.model_dump(
             mode="python",
             exclude={
                 "schema_version",
@@ -892,36 +926,185 @@ def build_registered_cohort_denominator_summary(
                 "scientific_qualification_claimed",
             },
         )
-        population_projection = CohortPopulationProjection(**population_values)
-        payload = {
-            "registry_id": history.registry_id,
-            "registry_epoch_sha256": history.registry_epoch_sha256,
-            "registry_state_version": history.state_version,
-            "registry_state_head_sha256": history.state_head_sha256,
-            "selector_id": selector_id,
-            "cohort_version": cohort_version,
-            "cohort_manifest_sha256": history.selected_manifest_sha256,
-            "linkage_snapshot_sha256": status.linkage_snapshot_sha256,
-            "catalog_authority_sha256": status.catalog_authority_sha256,
-            "record_status_sha256": status.status_sha256,
-            "record_status_policy_sha256": status.record_status_policy_sha256,
-            "population": population_projection,
-        }
-        placeholder = RegisteredCohortDenominatorSummary.model_construct(
-            **payload,
-            summary_sha256="0" * 64,
-            synthetic_only=True,
-            clinical_use_authorized=False,
-            scientific_qualification_claimed=False,
+    )
+
+
+def build_registered_cohort_denominator_summary(
+    *,
+    registry: CohortRegistry,
+    selector_id: str,
+    cohort_version: int,
+    record_catalog: CohortRecordCatalog,
+    policy: CohortDenominatorPolicy,
+    disposition_policy: CohortDispositionPolicy,
+) -> RegisteredCohortDenominatorSummary:
+    """Derive one D09 population from exact live D05/D06 authority state only.
+
+    No caller-authored result, compatibility, ledger, or comparison evidence
+    is accepted: every disposition comes from the fenced D05 manifest and
+    policy and the fenced D06 record status.
+    """
+
+    replayed_policy, replayed_disposition_policy = _capture_registered_inputs(
+        registry, record_catalog, policy, disposition_policy
+    )
+    with _PINNED_RECORD_STATUS_FENCE(
+        record_catalog,
+        selector_id,
+        cohort_version,
+        expected_registry=registry,
+    ) as (history, status):
+        registered, _, _ = _derive_registered_in_fence(
+            history=history,
+            status=status,
+            selector_id=selector_id,
+            cohort_version=cohort_version,
+            policy=replayed_policy,
+            disposition_policy=replayed_disposition_policy,
         )
-        result = RegisteredCohortDenominatorSummary(
-            **payload,
-            summary_sha256=_sha256_exact(
-                placeholder, RegisteredCohortDenominatorSummary
-            ),
+        return registered
+
+
+class RegisteredIncludedMember(RegistryContract):
+    """Protected identity of one D09-included member; never an export field."""
+
+    ordinal: int = Field(ge=0, le=MAX_COHORT_SUMMARY_MEMBERS, strict=True)
+    member: CohortMember
+    catalog_result: CatalogResultRef
+
+
+class RegisteredCohortPopulationMembers(RegistryContract):
+    """Protected per-member derivation behind one registered v3 summary.
+
+    The v3 summary's ``population_sha256`` already commits to the row-bearing
+    ``CohortDenominatorSummary``.  This contract carries those rows plus the
+    exact D05 member and D06 catalog reference of every included row, all from
+    the same fenced derivation.  It is protected and local only and is never
+    projected into the aggregate v3 summary, selector rows, or export bytes.
+    """
+
+    schema_version: Literal["traceback.registered-cohort-population-members.v1"] = (
+        "traceback.registered-cohort-population-members.v1"
+    )
+    summary: RegisteredCohortDenominatorSummary
+    population: CohortDenominatorSummary
+    included_members: tuple[RegisteredIncludedMember, ...] = Field(
+        max_length=MAX_COHORT_SUMMARY_MEMBERS
+    )
+    protected_local_only: Literal[True] = True
+    synthetic_only: Literal[True] = True
+    clinical_use_authorized: Literal[False] = False
+    scientific_qualification_claimed: Literal[False] = False
+
+    @model_validator(mode="after")
+    def exact_derivation(self) -> RegisteredCohortPopulationMembers:
+        population = self.population
+        if (
+            population.population_sha256
+            != self.summary.population.population_sha256
+            or _project_population(population) != self.summary.population
+        ):
+            raise ValueError("protected population does not match the v3 summary")
+        included_rows = tuple(
+            row
+            for row in population.rows
+            if row.disposition is MemberDisposition.INCLUDED
         )
-        return RegisteredCohortDenominatorSummary.model_validate_json(
-            registered_cohort_denominator_summary_bytes(result)
+        if len(included_rows) != len(self.included_members):
+            raise ValueError("protected included members do not match the rows")
+        for row, item in zip(included_rows, self.included_members, strict=True):
+            if (
+                item.ordinal != row.ordinal
+                or row.catalog_result_sha256 is None
+                or item.catalog_result.result_id != row.result_id
+                or _sha256_exact(item.member, CohortMember) != row.member_sha256
+                or _sha256_exact(item.catalog_result, CatalogResultRef)
+                != row.catalog_result_sha256
+            ):
+                raise ValueError("protected included member does not bind its row")
+        return self
+
+
+MAX_POPULATION_MEMBERS_BYTES = 64 * 1024 * 1024
+MAX_POPULATION_MEMBERS_NODES = 8_000_000
+_POPULATION_MEMBERS_MODEL_TYPES, _POPULATION_MEMBERS_ENUM_TYPES = (
+    contract_type_graph(RegisteredCohortPopulationMembers)
+)
+
+
+def registered_cohort_population_members_bytes(
+    value: RegisteredCohortPopulationMembers,
+) -> bytes:
+    """Exact canonical bytes of one protected population; never export bytes."""
+
+    return exact_model_bytes(
+        value,
+        RegisteredCohortPopulationMembers,
+        model_types=_POPULATION_MEMBERS_MODEL_TYPES,
+        enum_types=_POPULATION_MEMBERS_ENUM_TYPES,
+        max_bytes=MAX_POPULATION_MEMBERS_BYTES,
+        max_nodes=MAX_POPULATION_MEMBERS_NODES,
+        max_depth=MAX_COHORT_INPUT_DEPTH,
+        max_collection_items=MAX_COHORT_SUMMARY_MEMBERS,
+        max_string_bytes=4_096,
+    )
+
+
+def build_registered_cohort_population_members(
+    *,
+    registry: CohortRegistry,
+    selector_id: str,
+    cohort_version: int,
+    record_catalog: CohortRecordCatalog,
+    policy: CohortDenominatorPolicy,
+    disposition_policy: CohortDispositionPolicy,
+) -> RegisteredCohortPopulationMembers:
+    """Derive the registered v3 summary together with its protected members.
+
+    Same inputs, fence, and derivation as
+    ``build_registered_cohort_denominator_summary``.  It also returns the
+    included rows' exact D05 members and D06 catalog references captured in
+    that fence.  Protected and local only.
+    """
+
+    replayed_policy, replayed_disposition_policy = _capture_registered_inputs(
+        registry, record_catalog, policy, disposition_policy
+    )
+    with _PINNED_RECORD_STATUS_FENCE(
+        record_catalog,
+        selector_id,
+        cohort_version,
+        expected_registry=registry,
+    ) as (history, status):
+        registered, population, manifest = _derive_registered_in_fence(
+            history=history,
+            status=status,
+            selector_id=selector_id,
+            cohort_version=cohort_version,
+            policy=replayed_policy,
+            disposition_policy=replayed_disposition_policy,
+        )
+        included: list[RegisteredIncludedMember] = []
+        for row in population.rows:
+            if row.disposition is not MemberDisposition.INCLUDED:
+                continue
+            binding = status.members[row.ordinal].binding
+            if binding is None:
+                raise ValueError("included cohort member has no exact binding")
+            included.append(
+                RegisteredIncludedMember(
+                    ordinal=row.ordinal,
+                    member=manifest.members[row.ordinal],
+                    catalog_result=binding.result,
+                )
+            )
+        result = RegisteredCohortPopulationMembers(
+            summary=registered,
+            population=population,
+            included_members=tuple(included),
+        )
+        return RegisteredCohortPopulationMembers.model_validate_json(
+            registered_cohort_population_members_bytes(result)
         )
 
 
@@ -1235,12 +1418,16 @@ __all__ = [
     "MissingValueRule",
     "UnavailableUnitRule",
     "RegisteredCohortDenominatorSummary",
+    "RegisteredCohortPopulationMembers",
+    "RegisteredIncludedMember",
     "build_cohort_denominator_summary",
     "build_registered_cohort_denominator_summary",
+    "build_registered_cohort_population_members",
     "cohort_denominator_policy_sha256",
     "cohort_member_exclusion_set_sha256",
     "cohort_denominator_summary_bytes",
     "cohort_denominator_summary_from_bytes",
     "registered_cohort_denominator_summary_bytes",
     "registered_cohort_denominator_summary_from_bytes",
+    "registered_cohort_population_members_bytes",
 ]

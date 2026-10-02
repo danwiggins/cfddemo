@@ -5,15 +5,17 @@ protocol, and preanalytical context for a declared D09 population. It does not
 alter measurement values, change D02/D03 eligibility, correct batch effects,
 or assign biological or clinical meaning.
 
-## D09 adapter boundary
+## D09 input: two paths
 
 The registered D09 v3 summary (`build_registered_cohort_denominator_summary`)
 derives aggregate counts from D05/D06 authority only and deliberately carries no
-D03 member decisions or per-member identities. D10 needs both, so it cannot
-consume that summary directly. Binding D10 to live D09 authority is E12
-integration work (see `docs/E12-INTEGRATION-PLAN.md`). D03 binding is covered
-below. Until then, `D09PopulationDigestInput` is a versioned digest-only adapter
-that binds:
+D03 member decisions or per-member identities. D10 needs the exact included
+member set, so it cannot consume that summary directly. There are two paths.
+
+The live path (`build_live_covariate_context`, below) derives the population
+from the D09 policy registry and is marked `live_d09_registry_verified=true`.
+The v1 path is unchanged: `D09PopulationDigestInput` is a versioned digest-only
+adapter that binds:
 
 - the exact cohort-manifest digest;
 - the declared future D09 status and population digests;
@@ -22,9 +24,9 @@ that binds:
 
 The adapter is permanently marked `declared_digest_only`,
 `live_d09_registry_verified=false`, `synthetic_only=true`, and
-`clinical_use_authorized=false`. This implementation therefore does not claim
-that D09 registry evidence was read or verified. E12 must replace the adapter
-at this explicit boundary and recheck live D09 authority.
+`clinical_use_authorized=false`. That path does not claim that D09 registry
+evidence was read or verified. E12 must use the live path or the D10 context
+registry instead of this adapter.
 
 ## Covariates and classification
 
@@ -86,6 +88,94 @@ be identical. Unrelated registrations may advance the registry head; the
 returned wrapper carries the current head. Any linkage change makes both build
 and verification fail. The aggregate projection is unchanged and still reports
 `d03_authority_verified=false`, because it cannot prove its source on its own.
+
+## Live D09 path
+
+`build_live_covariate_context(covariates, *, d09_registry, d09_selector_id,
+d09_policy_version, decision_registry, series_selector_id,
+expected_d02_anchor_policy_sha256)` takes no population and no decisions. The
+caller supplies only `LiveCovariateMemberValues`: a D03 member-result digest
+and its three ordered covariate values.
+
+### Where the included set comes from
+
+The D09 v3 summary is aggregate-only, but its `population_sha256` is the digest
+of the protected row-bearing `CohortDenominatorSummary`, so v3 already commits
+to every member row. `DenominatorPolicyRegistry.resolve_population` returns
+`RegisteredDenominatorPolicyPopulation`. This is the same live summary
+`resolve` returns, plus `RegisteredCohortPopulationMembers`: the row-bearing
+population and, for each included row, its exact D05 `CohortMember` and D06
+`CatalogResultRef`. Both come from one derivation inside one D05/D06 fence
+(`build_registered_cohort_population_members`). The contract's validator
+re-checks the population digest, the projection, and each included member's
+D05 and catalog digests against its row. It is protected and local only. It
+never enters the v3 summary, D09 selector rows, or D10 aggregate bytes, and the
+v3 contract is unchanged.
+
+Options considered: re-deriving the included set in D10 from the D05 manifest,
+D06 status, and disposition policy would duplicate D09's disposition precedence.
+The disposition policy is also only stored inside the D09 registry. Checking a
+declared set against D09's aggregate counts would not prove which members were
+included. Two different sets can have the same counts. Both were rejected.
+
+### Matching D09 members to D03 decisions
+
+D09 identifies a member by the digest of its D05 `CohortMember`. D03 and D10
+identify a member by the E05 result digest. No existing contract maps one to
+the other. The live builder joins each included member to exactly one D03
+decision. All four keys must be equal:
+
+- result ID (`CatalogResultRef.result_id` = `member_result_id`);
+- result bundle (`bundle_sha256` = `member_bundle_sha256`);
+- D01 linkage revision (`CohortMember.linkage_revision_sha256` =
+  `member_linkage_revision_sha256`); and
+- committed linkage receipt (`committed_receipt_sha256` =
+  `member_linkage_receipt_sha256`, which must be present).
+
+A missing or ambiguous match fails. D03 series members that D09 did not include
+are ignored. The covariates must cover every and only the matched members.
+
+The D09 rebuild and the D03 replay each take the D01 linkage fence themselves,
+so neither can run inside the other. They run one after the other. The D09
+summary's `linkage_snapshot_sha256` and the D03 series decision's
+`linkage_snapshot_sha256` are the same digest of the active linkage snapshot.
+The builder requires them to be equal, which proves both reads saw one D01
+state. A D03 series without a linkage snapshot is rejected.
+
+### What the live result binds
+
+The result is `LiveCovariateContext`. It wraps the unchanged v1
+`CovariateContextResult` with the #57 `RegisteredD03SeriesBinding` and a new
+`LiveD09PopulationBinding`. The binding holds D09 registry identity, selector,
+policy version, object and policy digests, D05 selection, manifest, v3 summary,
+population, record-status, catalog-authority, and linkage-snapshot digests. It
+also holds one crosswalk row per included member (D09 member digest, catalog
+result digest, result ID, D03 member-result digest, D03 decision digest).
+The wrapper is marked `live_d09_registry_verified=true` and
+`d03_authority_verified=true`. The inner v1 result still reports both as
+`false`, because it cannot prove its sources on its own.
+
+On this path the v1 fields are filled from authority:
+
+- `d09_status_sha256` is the D09 registered policy object digest;
+- `d09_population_sha256` is the v3 `population_sha256`;
+- `cohort_manifest_sha256` comes from the v3 summary; and
+- each member's `biological_timepoint_sha256` is
+  `sha256("traceback-d10-biological-timepoint-v1\0" + biological_timepoint_id)`
+  of its D05 member, not a caller value.
+
+`verify_live_covariate_context` re-resolves D09 and D03 by the bound selectors,
+rebuilds from the stored covariate values, and requires an identical v1
+result, the same D03 binding fields as #57, and the same D09 registry identity,
+selector, version, object, policy and manifest digests, population digest,
+linkage snapshot, and crosswalk. The D09 state head, v3 summary digest (it binds
+the D05 registry head), record-status digest, and catalog-authority digest are
+as-of values. Unrelated activity may advance them, and the returned context
+carries the current ones. A D06 change to the population (for example a
+revoked result key) or any linkage change makes verification fail.
+
+The protected `d10_context_registry` that stores the covariate tokens and
+rebuilds on every read is documented in `docs/D10-CONTEXT-REGISTRY.md`.
 
 ## Protected and aggregate outputs
 

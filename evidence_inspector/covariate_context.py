@@ -1,11 +1,12 @@
-"""Synthetic/local D10 covariate context over a future D09 population digest.
+"""Synthetic/local D10 covariate context over a D09 population.
 
 This module groups opaque batch, protocol, and preanalytical metadata. It does
 not alter measurements, establish comparability, or attribute biological or
-clinical meaning. The D09 boundary is digest-only until its live registry
-contract is finalized. D03 decisions are either caller-supplied (marked
-unverified) or resolved from the protected D03 decision registry, which replays
-them against live linkage before D10 uses them.
+clinical meaning. The v1 D09 boundary is digest-only. D03 decisions are either
+caller-supplied (marked unverified) or resolved from the protected D03 decision
+registry, which replays them against live linkage before D10 uses them. The
+live path derives the population itself from the protected D09 policy
+registry and marks the result ``live_d09_registry_verified``.
 """
 
 from __future__ import annotations
@@ -18,6 +19,10 @@ from typing import Annotated, Literal, TypeVar
 
 from pydantic import Field, StringConstraints, model_validator
 
+from evidence_inspector.denominator_policy_registry import (
+    DenominatorPolicyRegistry,
+    RegisteredDenominatorPolicyPopulation,
+)
 from evidence_inspector.longitudinal_compatibility import (
     LongitudinalMemberDecision,
     LongitudinalOutcome,
@@ -1010,6 +1015,455 @@ def verify_registered_covariate_context(
     return rebuilt
 
 
+LiveResultId = Annotated[str, StringConstraints(pattern=r"^result_[0-9a-f]{40}$")]
+
+
+class LiveCovariateMemberValues(RegistryContract):
+    """Covariate tokens for one D03 member result; nothing else is caller-owned.
+
+    On the live path the population, the biological timepoint, and the D03
+    decision digest and outcome are all derived from authority.  Only the
+    ordered batch, protocol, and preanalytical values come from the caller.
+    """
+
+    member_sha256: Sha256
+    values: tuple[CovariateValue, ...] = Field(
+        min_length=len(ALL_COVARIATE_DIMENSIONS),
+        max_length=len(ALL_COVARIATE_DIMENSIONS),
+    )
+
+    @model_validator(mode="after")
+    def complete_dimensions(self) -> LiveCovariateMemberValues:
+        if tuple(value.dimension for value in self.values) != ALL_COVARIATE_DIMENSIONS:
+            raise ValueError("member covariates must contain every dimension in order")
+        return self
+
+
+class LiveD09MemberCrosswalk(RegistryContract):
+    """How one D09-included member was matched to exactly one D03 decision."""
+
+    d09_ordinal: int = Field(ge=0, le=100_000, strict=True)
+    d09_member_sha256: Sha256
+    catalog_result_sha256: Sha256
+    result_id: LiveResultId
+    d03_member_result_sha256: Sha256
+    d03_decision_sha256: Sha256
+
+
+class LiveD09PopulationBinding(RegistryContract):
+    """Exact D09 registry identity a live D10 context was derived from."""
+
+    schema_version: Literal["traceback.d10-live-d09-population-binding.v1"] = (
+        "traceback.d10-live-d09-population-binding.v1"
+    )
+    registry_id: str = Field(pattern=r"^d09_registry_[0-9a-f]{32}$")
+    registry_epoch_sha256: Sha256
+    state_version: int = Field(ge=1, le=10_000, strict=True)
+    state_head_sha256: Sha256
+    selector_id: str = Field(pattern=r"^d09_policy_[0-9a-f]{40}$")
+    policy_version: int = Field(ge=1, le=100_000, strict=True)
+    object_sha256: Sha256
+    denominator_policy_sha256: Sha256
+    disposition_policy_sha256: Sha256
+    cohort_registry_id: str = Field(pattern=r"^cohort_registry_[0-9a-f]{32}$")
+    cohort_selector_id: str = Field(pattern=r"^cohort_selector_[0-9a-f]{40}$")
+    cohort_version: int = Field(ge=1, le=100_000, strict=True)
+    cohort_manifest_sha256: Sha256
+    summary_sha256: Sha256
+    population_sha256: Sha256
+    record_status_sha256: Sha256
+    catalog_authority_sha256: Sha256
+    linkage_snapshot_sha256: Sha256
+    included_members: tuple[LiveD09MemberCrosswalk, ...] = Field(
+        max_length=MAX_COVARIATE_MEMBERS
+    )
+
+    @model_validator(mode="after")
+    def canonical_crosswalk(self) -> LiveD09PopulationBinding:
+        ordinals = tuple(item.d09_ordinal for item in self.included_members)
+        if ordinals != tuple(sorted(set(ordinals))):
+            raise ValueError("D09 crosswalk must use canonical population order")
+        for name in (
+            "d09_member_sha256",
+            "catalog_result_sha256",
+            "result_id",
+            "d03_member_result_sha256",
+            "d03_decision_sha256",
+        ):
+            values = [getattr(item, name) for item in self.included_members]
+            if len(values) != len(set(values)):
+                raise ValueError("D09 crosswalk identities must be unique")
+        return self
+
+
+# Fields a verified D09 binding must reproduce exactly.  The D09 registry state
+# version/head, the v3 summary digest (it binds the D05 registry head), the D06
+# record-status digest and the catalog authority digest are as-of values that
+# unrelated D05/D06/D09 activity may advance; they are excluded.
+_STABLE_D09_BINDING_FIELDS = (
+    "registry_id",
+    "registry_epoch_sha256",
+    "selector_id",
+    "policy_version",
+    "object_sha256",
+    "denominator_policy_sha256",
+    "disposition_policy_sha256",
+    "cohort_registry_id",
+    "cohort_selector_id",
+    "cohort_version",
+    "cohort_manifest_sha256",
+    "population_sha256",
+    "linkage_snapshot_sha256",
+    "included_members",
+)
+
+
+class LiveCovariateContext(RegistryContract):
+    """Protected D10 context derived from the live D09 population and D03 series.
+
+    The population is the exact D09 included set returned by the D09 policy
+    registry's protected population read, each member is matched to exactly
+    one D03 registry decision, and both reads observed one linkage snapshot.
+    A stored copy is never authority by itself; ``verify_live_covariate_context``
+    re-resolves both registries and rebuilds it.
+    """
+
+    schema_version: Literal["traceback.live-covariate-context.v1"] = (
+        "traceback.live-covariate-context.v1"
+    )
+    context: CovariateContextResult
+    d03_series: RegisteredD03SeriesBinding
+    d09_population: LiveD09PopulationBinding
+    d03_authority_verified: Literal[True] = True
+    live_d09_registry_verified: Literal[True] = True
+    synthetic_only: Literal[True] = True
+    protected_local_only: Literal[True] = True
+
+    @model_validator(mode="after")
+    def exact_cross_binding(self) -> LiveCovariateContext:
+        context = self.context
+        population = self.d09_population
+        if (
+            context.cohort_manifest_sha256 != population.cohort_manifest_sha256
+            or context.d09_status_sha256 != population.object_sha256
+            or context.d09_population_sha256 != population.population_sha256
+        ):
+            raise ValueError("live D10 context does not bind its D09 population")
+        crosswalk = {
+            item.d03_member_result_sha256: item.d03_decision_sha256
+            for item in population.included_members
+        }
+        if context.included_member_sha256s != tuple(sorted(crosswalk)):
+            raise ValueError("live D10 members are not the D09 included set")
+        if any(
+            member.d03_decision_sha256 != crosswalk[member.member_sha256]
+            for member in context.member_contexts
+        ):
+            raise ValueError("live D10 decisions do not match the D09 crosswalk")
+        if (
+            self.d03_series.linkage_snapshot_sha256 is None
+            or self.d03_series.linkage_snapshot_sha256
+            != population.linkage_snapshot_sha256
+        ):
+            raise ValueError("live D10 D03 and D09 reads used different linkage")
+        return self
+
+
+_LIVE_TYPES, _LIVE_ENUMS = contract_type_graph(LiveCovariateContext)
+_LIVE_MEMBER_TYPES, _LIVE_MEMBER_ENUMS = contract_type_graph(LiveCovariateMemberValues)
+# The live wrapper adds two fixed bindings and one crosswalk row per member.
+_LIVE_EXTRA_NODES = 256 + 16 * MAX_COVARIATE_MEMBERS
+_LIVE_EXTRA_BYTES = 16 * 1_024 + 1_024 * MAX_COVARIATE_MEMBERS
+_TIMEPOINT_DOMAIN = b"traceback-d10-biological-timepoint-v1\0"
+
+
+def _live_bytes(value: object) -> bytes:
+    try:
+        return exact_model_bytes(
+            value,
+            LiveCovariateContext,
+            model_types=_LIVE_TYPES,
+            enum_types=_LIVE_ENUMS,
+            max_bytes=MAX_CONTRACT_BYTES + _LIVE_EXTRA_BYTES,
+            max_nodes=MAX_GRAPH_NODES + _LIVE_EXTRA_NODES,
+            max_depth=MAX_GRAPH_DEPTH,
+            max_collection_items=MAX_TUPLE_LENGTH,
+            max_string_bytes=MAX_SCALAR_LENGTH,
+            max_int_bits=64,
+        )
+    except (TypeError, ValueError):
+        raise TypeError("live covariate context object graph is invalid") from None
+
+
+def live_covariate_context_bytes(value: LiveCovariateContext) -> bytes:
+    """Return exact canonical bytes for one protected live D10 context."""
+
+    encoded = _live_bytes(value)
+    replayed = LiveCovariateContext.model_validate_json(encoded)
+    if _live_bytes(replayed) != encoded:
+        raise ValueError("live covariate context does not replay canonically")
+    return encoded
+
+
+def _live_member_bytes(value: object) -> bytes:
+    return exact_model_bytes(
+        value,
+        LiveCovariateMemberValues,
+        model_types=_LIVE_MEMBER_TYPES,
+        enum_types=_LIVE_MEMBER_ENUMS,
+        max_bytes=MAX_CONTRACT_BYTES_PER_MEMBER,
+        max_nodes=MAX_GRAPH_NODES_PER_MEMBER,
+        max_depth=MAX_GRAPH_DEPTH,
+        max_collection_items=len(ALL_COVARIATE_DIMENSIONS),
+        max_string_bytes=MAX_SCALAR_LENGTH,
+        max_int_bits=64,
+    )
+
+
+def capture_live_covariates(
+    covariates: object,
+) -> tuple[LiveCovariateMemberValues, ...]:
+    """Capture caller covariates as exact contracts, sorted by member digest."""
+
+    if type(covariates) is not tuple or len(covariates) > MAX_COVARIATE_MEMBERS:
+        raise TypeError("live covariates must use one bounded exact tuple")
+    captured: list[LiveCovariateMemberValues] = []
+    for item in covariates:
+        try:
+            encoded = _live_member_bytes(item)
+            replayed = LiveCovariateMemberValues.model_validate_json(encoded)
+            if _live_member_bytes(replayed) != encoded:
+                raise ValueError("live covariate is not canonical")
+        except (TypeError, ValueError):
+            raise TypeError("live covariate is not an exact canonical contract") from None
+        captured.append(replayed)
+    ordered = tuple(sorted(captured, key=lambda item: item.member_sha256))
+    members = [item.member_sha256 for item in ordered]
+    if len(members) != len(set(members)):
+        raise ValueError("live covariates must bind unique members")
+    return ordered
+
+
+def _biological_timepoint_sha256(timepoint_id: str) -> str:
+    return hashlib.sha256(_TIMEPOINT_DOMAIN + timepoint_id.encode("ascii")).hexdigest()
+
+
+def _resolve_d09_population(
+    d09_registry: DenominatorPolicyRegistry, selector_id: str, policy_version: int
+) -> RegisteredDenominatorPolicyPopulation:
+    if type(d09_registry) is not DenominatorPolicyRegistry:
+        raise TypeError("D10 requires the exact D09 policy registry type")
+    # resolve_population rebuilds the summary and its protected members from
+    # live D05/D06 authority under the D09 lock and raises
+    # DenominatorPolicyRegistryStale rather than return a stale population.
+    return d09_registry.resolve_population(selector_id, policy_version)
+
+
+def _live_from_authority(
+    covariates: tuple[LiveCovariateMemberValues, ...],
+    *,
+    population: RegisteredDenominatorPolicyPopulation,
+    series: RegisteredLongitudinalSeriesDecision,
+    expected_d02_anchor_policy_sha256: str,
+) -> LiveCovariateContext:
+    if (
+        type(expected_d02_anchor_policy_sha256) is not str
+        or len(expected_d02_anchor_policy_sha256) != 64
+        or series.decision.policy_sha256 != expected_d02_anchor_policy_sha256
+    ):
+        raise ValueError("D03 registry series policy does not match D02 anchor policy")
+    summary = population.summary.summary
+    if (
+        series.decision.linkage_snapshot_sha256 is None
+        or series.decision.linkage_snapshot_sha256 != summary.linkage_snapshot_sha256
+    ):
+        raise ValueError("D09 population and D03 series used different linkage")
+    included = population.members.included_members
+    if len(included) > MAX_COVARIATE_MEMBERS:
+        raise ValueError("D09 included population exceeds the D10 member bound")
+    by_result_id: dict[str, LongitudinalMemberDecision] = {}
+    for decision in series.decision.decisions:
+        if by_result_id.setdefault(decision.member_result_id, decision) is not decision:
+            raise ValueError("D03 registry series repeats a member result")
+    rows = {row.ordinal: row for row in population.members.population.rows}
+    decisions: list[LongitudinalMemberDecision] = []
+    crosswalk: list[LiveD09MemberCrosswalk] = []
+    timepoints: dict[str, str] = {}
+    for item in included:
+        member = item.member
+        reference = item.catalog_result
+        decision = by_result_id.get(reference.result_id)
+        # The D09 member and the D03 decision must name the same E04 result
+        # bundle and the same committed D01 linkage revision and receipt.
+        if (
+            decision is None
+            or decision.member_bundle_sha256 != reference.bundle_sha256
+            or decision.member_linkage_revision_sha256
+            != member.linkage_revision_sha256
+            or decision.member_linkage_receipt_sha256 is None
+            or decision.member_linkage_receipt_sha256
+            != member.committed_receipt_sha256
+        ):
+            raise ValueError("D03 registry series does not cover the D09 population")
+        row = rows[item.ordinal]
+        decision_sha256 = _d03_decision_sha256(decision)
+        decisions.append(decision)
+        timepoints[decision.member_result_sha256] = _biological_timepoint_sha256(
+            member.biological_timepoint_id
+        )
+        crosswalk.append(
+            LiveD09MemberCrosswalk(
+                d09_ordinal=item.ordinal,
+                d09_member_sha256=row.member_sha256,
+                catalog_result_sha256=row.catalog_result_sha256,
+                result_id=reference.result_id,
+                d03_member_result_sha256=decision.member_result_sha256,
+                d03_decision_sha256=decision_sha256,
+            )
+        )
+    by_member = {item.member_sha256: item for item in covariates}
+    if set(by_member) != set(timepoints) or len(timepoints) != len(decisions):
+        raise ValueError("covariates must bind every and only D09 included member")
+    members = tuple(
+        MemberCovariateContext(
+            member_sha256=decision.member_result_sha256,
+            biological_timepoint_sha256=timepoints[decision.member_result_sha256],
+            d03_decision_sha256=_d03_decision_sha256(decision),
+            d03_outcome=decision.outcome,
+            values=by_member[decision.member_result_sha256].values,
+        )
+        for decision in decisions
+    )
+    population_input = D09PopulationDigestInput(
+        cohort_manifest_sha256=summary.cohort_manifest_sha256,
+        d09_status_sha256=population.summary.object_sha256,
+        d09_population_sha256=summary.population.population_sha256,
+        d02_anchor_policy_sha256=series.decision.policy_sha256,
+        included_member_sha256s=tuple(sorted(timepoints)),
+    )
+    context = build_covariate_context(
+        D10CovariateInput(population=population_input, members=members),
+        expected_d09_status_sha256=population_input.d09_status_sha256,
+        expected_d09_population_sha256=population_input.d09_population_sha256,
+        expected_d02_anchor_policy_sha256=expected_d02_anchor_policy_sha256,
+        d03_member_decisions=tuple(decisions),
+    )
+    policy_summary = population.summary
+    binding = LiveD09PopulationBinding(
+        registry_id=policy_summary.registry_id,
+        registry_epoch_sha256=policy_summary.registry_epoch_sha256,
+        state_version=policy_summary.state_version,
+        state_head_sha256=policy_summary.state_head_sha256,
+        selector_id=policy_summary.selector_id,
+        policy_version=policy_summary.policy_version,
+        object_sha256=policy_summary.object_sha256,
+        denominator_policy_sha256=policy_summary.denominator_policy_sha256,
+        disposition_policy_sha256=policy_summary.disposition_policy_sha256,
+        cohort_registry_id=summary.registry_id,
+        cohort_selector_id=summary.selector_id,
+        cohort_version=summary.cohort_version,
+        cohort_manifest_sha256=summary.cohort_manifest_sha256,
+        summary_sha256=summary.summary_sha256,
+        population_sha256=summary.population.population_sha256,
+        record_status_sha256=summary.record_status_sha256,
+        catalog_authority_sha256=summary.catalog_authority_sha256,
+        linkage_snapshot_sha256=summary.linkage_snapshot_sha256,
+        included_members=tuple(crosswalk),
+    )
+    result = LiveCovariateContext(
+        context=context,
+        d03_series=_series_binding(series),
+        d09_population=binding,
+    )
+    return LiveCovariateContext.model_validate_json(live_covariate_context_bytes(result))
+
+
+def build_live_covariate_context(
+    covariates: tuple[LiveCovariateMemberValues, ...],
+    *,
+    d09_registry: DenominatorPolicyRegistry,
+    d09_selector_id: str,
+    d09_policy_version: int,
+    decision_registry: LongitudinalDecisionRegistry,
+    series_selector_id: str,
+    expected_d02_anchor_policy_sha256: str,
+) -> LiveCovariateContext:
+    """Build D10 context over the live D09 population and live D03 decisions.
+
+    The population is the exact included set from the D09 policy registry's
+    protected population read.  Each included member must match exactly one
+    D03 registry decision on result ID, result bundle, D01 linkage revision and
+    committed receipt, and the D09 and D03 reads must have observed the same
+    linkage snapshot.  Callers supply covariate tokens only.
+
+    Neither registry read can run inside the other's fence (the D09 rebuild
+    takes the D01 fence itself and the D03 resolve holds it), so the two
+    reads are sequential.  The shared linkage-snapshot digest is what proves
+    they describe one D01 state.
+    """
+
+    captured = capture_live_covariates(covariates)
+    population = _resolve_d09_population(
+        d09_registry, d09_selector_id, d09_policy_version
+    )
+    series = _resolve_registered_series(decision_registry, series_selector_id)
+    return _live_from_authority(
+        captured,
+        population=population,
+        series=series,
+        expected_d02_anchor_policy_sha256=expected_d02_anchor_policy_sha256,
+    )
+
+
+def verify_live_covariate_context(
+    value: LiveCovariateContext,
+    *,
+    d09_registry: DenominatorPolicyRegistry,
+    decision_registry: LongitudinalDecisionRegistry,
+) -> LiveCovariateContext:
+    """Re-resolve D09 and D03 and rebuild the context; never trust it stored.
+
+    Returns a freshly bound context.  Registry heads and as-of digests may
+    advance through unrelated activity; the D09 and D03 identities, the D09
+    population and crosswalk, the linkage snapshot, and the rebuilt context
+    must all be unchanged.
+    """
+
+    if type(value) is not LiveCovariateContext:
+        raise TypeError("live covariate context requires the exact type")
+    captured = LiveCovariateContext.model_validate_json(
+        live_covariate_context_bytes(value)
+    )
+    binding = captured.d09_population
+    rebuilt = build_live_covariate_context(
+        tuple(
+            LiveCovariateMemberValues(
+                member_sha256=member.member_sha256, values=member.values
+            )
+            for member in captured.context.member_contexts
+        ),
+        d09_registry=d09_registry,
+        d09_selector_id=binding.selector_id,
+        d09_policy_version=binding.policy_version,
+        decision_registry=decision_registry,
+        series_selector_id=captured.d03_series.selector_id,
+        expected_d02_anchor_policy_sha256=captured.context.d02_anchor_policy_sha256,
+    )
+    if any(
+        getattr(rebuilt.d03_series, name) != getattr(captured.d03_series, name)
+        for name in _STABLE_BINDING_FIELDS
+    ):
+        raise ValueError("live covariate context D03 binding is not current")
+    if any(
+        getattr(rebuilt.d09_population, name) != getattr(binding, name)
+        for name in _STABLE_D09_BINDING_FIELDS
+    ):
+        raise ValueError("live covariate context D09 binding is not current")
+    if rebuilt.context != captured.context:
+        raise ValueError("live covariate context does not rebuild exactly")
+    return rebuilt
+
+
 __all__ = [
     "ALL_COVARIATE_DIMENSIONS",
     "MAX_COVARIATE_MEMBERS",
@@ -1024,18 +1478,26 @@ __all__ = [
     "CovariateValueState",
     "D09PopulationDigestInput",
     "D10CovariateInput",
+    "LiveCovariateContext",
+    "LiveCovariateMemberValues",
+    "LiveD09MemberCrosswalk",
+    "LiveD09PopulationBinding",
     "MemberCovariateContext",
     "RegisteredCovariateContext",
     "RegisteredD03SeriesBinding",
     "aggregate_covariate_summary_bytes",
     "aggregate_covariate_summary_sha256",
     "build_covariate_context",
+    "build_live_covariate_context",
     "build_registered_covariate_context",
+    "capture_live_covariates",
     "covariate_context_result_sha256",
     "d09_population_digest_input_sha256",
     "d10_covariate_input_sha256",
+    "live_covariate_context_bytes",
     "member_covariate_context_sha256",
     "project_aggregate_covariate_summary",
     "registered_covariate_context_bytes",
+    "verify_live_covariate_context",
     "verify_registered_covariate_context",
 ]
