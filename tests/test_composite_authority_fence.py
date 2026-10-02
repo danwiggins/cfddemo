@@ -1109,7 +1109,31 @@ def test_opposing_mutation_read_and_save_operations_terminate(world, coordinator
         "trust_add": lambda: world.trust.add_key(_extra_result_key()),
         "linkage_commit": lambda: _advance_linkage(world, next(digits)),
         "projection_register": lambda: world.projections.register_policy(next(policies)),
+        "e04_content": lambda: world.results.content_snapshot(),
+        # A second catalog instance on the same root: its content lock is a
+        # separate open file, so it contends with the hold through flock.
+        "e04_import_other_instance": lambda: other_catalog.import_bundle(
+            **next(extra_imports)
+        ),
     }
+    extra_imports = iter(
+        _import_arguments(
+            _extra_bundle(world, f"opposing{index}"),
+            CatalogAliases(
+                display_alias=f"dsp_opposing{index}",
+                run_alias=f"rnx_opposing{index}",
+                timepoint_alias=f"tpt_opposing{index}",
+            ),
+        )
+        for index in range(3)
+    )
+    extra_imports = iter(tuple(extra_imports))
+    other_catalog = ResultCatalog(
+        world.results.root,
+        import_roots={"root_primary": world.root / "imports"},
+        result_trust_registry=world.trust,
+        reader_registry=DEFAULT_RESULT_BUNDLE_READER_REGISTRY,
+    )
     # The D01 advance makes the registered cohort version non-current, so it
     # runs once, after the first composite snapshot and save have succeeded,
     # while the remaining rounds still contend with it.
@@ -1158,7 +1182,10 @@ def test_opposing_mutation_read_and_save_operations_terminate(world, coordinator
     finally:
         if not any(thread.is_alive() for thread in threads):
             saved_registry.close()
+            other_catalog.close()
     assert not failures, failures
+    assert successes["e04_import_other_instance"] == 3
+    assert successes["e04_content"] == 3
     assert successes["snapshot"] >= 1 and successes["save"] >= 1
     assert successes["d09_live_summary"] >= 1 and successes["d10_live_context"] >= 1
     assert successes["trust_add"] == 2 and successes["projection_register"] == 3

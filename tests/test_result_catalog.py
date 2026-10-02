@@ -6,6 +6,7 @@ import hashlib
 import os
 import shutil
 import sqlite3
+import stat
 import threading
 import time
 from datetime import UTC, datetime
@@ -1118,3 +1119,83 @@ def test_ten_thousand_result_query_p95_is_below_250ms(tmp_path: Path) -> None:
         assert page.next_cursor is not None
     p95 = sorted(durations)[int(len(durations) * 0.95) - 1]
     assert p95 <= 0.250
+
+
+# --- catalog-content lock and content head -------------------------------------
+
+
+def test_every_row_writer_changes_the_content_head_and_reads_do_not(
+    tmp_path: Path,
+) -> None:
+    catalog, _, _ = _catalog(tmp_path)
+    try:
+        heads = [catalog.content_snapshot()]
+        catalog.query(CatalogQuery())
+        assert catalog.content_snapshot() == heads[-1]
+        prepared = _prepare(catalog)
+        catalog.stage_prepared_import(prepared)
+        heads.append(catalog.content_snapshot())
+        catalog.discard_prepared_import(prepared)
+        heads.append(catalog.content_snapshot())
+        _import(catalog)
+        heads.append(catalog.content_snapshot())
+        # Discarding a staged row restores the exact earlier content.
+        assert heads[2] == heads[0]
+        assert len({heads[0], heads[1], heads[3]}) == 3
+        with pytest.raises(CatalogError, match="content fence is absent"):
+            catalog.content_head_in_fence()
+        with catalog.content_authority_fence():
+            assert catalog.content_head_in_fence() == heads[-1]
+    finally:
+        catalog.close()
+
+
+def test_a_shared_content_hold_blocks_another_instance_writer(tmp_path: Path) -> None:
+    """TrustStore path: a second instance's import waits for the shared hold."""
+
+    catalog, _, import_root = _catalog(tmp_path)
+    other = ResultCatalog(
+        tmp_path / "catalog",
+        import_roots={"root_primary": import_root},
+        trust_store=catalog.trust_store,
+    )
+    done = threading.Event()
+    errors: list[BaseException] = []
+
+    def run() -> None:
+        try:
+            _import(other)
+        except BaseException as error:  # noqa: BLE001 - surfaced below
+            errors.append(error)
+        finally:
+            done.set()
+
+    worker = threading.Thread(target=run)
+    try:
+        before = catalog.content_snapshot()
+        with catalog.trust_authority_fence() as snapshot:
+            assert snapshot is None
+            worker.start()
+            assert not done.wait(0.5)
+            assert catalog.content_head_in_fence() == before
+            with pytest.raises(CatalogConflict, match="upgraded"):
+                _import(catalog)
+        worker.join(10)
+        assert not worker.is_alive() and not errors
+        assert catalog.content_snapshot() != before
+    finally:
+        other.close()
+        catalog.close()
+
+
+def test_the_content_lock_file_is_private_and_bound(tmp_path: Path) -> None:
+    catalog, _, _ = _catalog(tmp_path)
+    try:
+        lock = tmp_path / "catalog" / catalog_module.CATALOG_CONTENT_LOCK_NAME
+        assert stat.S_IMODE(lock.stat().st_mode) == 0o600
+        lock.unlink()
+        lock.write_bytes(b"")
+        with pytest.raises(CatalogFilesystemError, match="content lock changed"):
+            catalog.content_snapshot()
+    finally:
+        catalog.close()
