@@ -16,6 +16,11 @@ protected projection-policy registry (`docs/PROJECTION-POLICY-REGISTRY.md`).
 The adapter takes an artifact and a policy. It does not find artifacts and does
 not re-verify live source authority. The E12 builder must:
 
+- pass a policy it obtained from `ProjectionPolicyRegistry.resolve` under the
+  composite fence. The adapter revalidates the policy contract but cannot prove
+  registry membership: every digest in `ResolvedProjectionPolicy` is unkeyed, so
+  a validly constructed policy that was never registered is indistinguishable.
+  Provenance belongs to the registry and the builder, as for artifacts;
 - pass an artifact it resolved from the family-source registry under the
   composite authority fence, after E04/E06 current-authority re-verification;
 - pass the D05 `MeasurementAnchor` of its live-resolved manifest;
@@ -52,7 +57,9 @@ artifact.
 2. captures the anchor and source identity the same way, then calls
    `require_projection_policy_binding` with them;
 3. requires `cna_inputs` exactly when the policy family is CNA;
-4. captures the artifact as canonical bytes, reparses it with the family
+4. rejects an artifact or CNA input whose object graph holds a foreign or
+   subclassed node (`exact_model_bytes` over the family's type graph), then
+   captures the artifact as canonical bytes, reparses it with the family
    parser, and reruns the family replay function (E07
    `replay_fragment_explorer_view`; E08 `_build_replay_view`, the function the
    artifact validator itself uses; E09 `replay_cna_explorer_snapshot` over
@@ -70,8 +77,9 @@ projection moved onto another artifact or policy fails with
 ## Contracts
 
 All are closed (`extra="forbid"`), frozen and versioned. Every projection
-carries a `ProjectionPolicyBindingV1` (registry ID and epoch, selector,
-version, object and policy digests, rule) and a `ProjectionMeasurementV1` (D02
+carries a `ProjectionPolicyBindingV1` (registry ID and epoch, the exact
+registry state version and head it was resolved under, selector, version,
+object and policy digests, rule) and a `ProjectionMeasurementV1` (D02
 method reference, E01 method digest, quantity, unit, D02 measurement-definition
 digest, D05 anchor), plus the SHA-256 of the canonical artifact bytes. The
 statistic unit must be the registry's controlled unit for the statistic.
@@ -143,7 +151,10 @@ before any value is returned:
 ## Threat model
 
 In-process code mutation is out of scope. Caller-built objects are not trusted:
-artifacts, policies and inputs are reparsed and replayed before use. The
+artifacts, policies, inputs and projection sets are checked for exact object
+graphs, reparsed and replayed before use. A caller that builds a fully valid
+policy or artifact from invented content is not detectable here; resolving
+both from their protected registries is the builder's obligation. The
 adapter checks only what the artifact and policy carry; live authority belongs
 to the caller.
 
@@ -172,5 +183,8 @@ and verification equality.
   the E02 chart alone, is open.
 - E08 replay uses the private `_build_replay_view`; E08 exports no public
   replay function.
+- The projection binds the registry state head, so the same policy resolved
+  after an unrelated registration yields a different projection. E12 must
+  decide whether to compare projections across heads by policy digest only.
 - A projection set can hold up to `MAX_PROJECTED_COMPONENTS` (every E09
   segment times every segment statistic). No smaller E12 bound is set yet.

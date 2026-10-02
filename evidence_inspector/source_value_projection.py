@@ -28,7 +28,7 @@ from collections.abc import Callable, Iterable, Sequence
 from dataclasses import dataclass
 from typing import Annotated, Any, Literal, TypeVar
 
-from pydantic import Field, ValidationError, model_validator
+from pydantic import BaseModel, Field, ValidationError, model_validator
 
 from evidence_inspector.cell_origin_explorer import (
     CellOriginExplorerArtifact,
@@ -87,6 +87,7 @@ from evidence_inspector.projection_policy_registry import (
     MAX_OBJECT_GRAPH_DEPTH,
     MAX_OBJECT_GRAPH_NODES,
     MAX_OBJECT_STRING_BYTES,
+    MAX_REGISTERED_POLICIES,
     CellOriginProjectionPolicyV1,
     CellOriginStatistic,
     ChromosomeId,
@@ -204,6 +205,8 @@ class ProjectionPolicyBindingV1(RegistryContract):
     )
     registry_id: RegistryId
     registry_epoch_sha256: Sha256
+    state_version: int = Field(ge=1, le=MAX_REGISTERED_POLICIES, strict=True)
+    state_head_sha256: Sha256
     selector_id: PolicySelectorId
     policy_version: PolicyVersion
     object_sha256: Sha256
@@ -483,6 +486,44 @@ ContractT = TypeVar("ContractT", bound=RegistryContract)
 
 
 _RESOLVED_MODEL_TYPES, _RESOLVED_ENUM_TYPES = contract_type_graph(ResolvedProjectionPolicy)
+_EXACT_GRAPHS: dict[type[BaseModel], tuple[frozenset[Any], frozenset[Any]]] = {
+    model: contract_type_graph(model)
+    for model in (
+        FragmentExplorerView,
+        CellOriginExplorerArtifact,
+        CnaExplorerSnapshot,
+        DosageQcResultBundle,
+        CnvDevelopmentResult,
+        ExplorerInputAuthority,
+        SourceValueProjectionSetV1,
+    )
+}
+# Generous structural bounds: every family artifact is also bounded by its own
+# contract (E07 bins, E08 canonical bytes, E09 bins and segments).
+_MAX_CAPTURE_BYTES = 256 * 1024 * 1024
+_MAX_CAPTURE_NODES = 64_000_000
+_MAX_CAPTURE_ITEMS = 2_000_000
+
+
+def _require_exact_graph(value: object, model: type[BaseModel]) -> None:
+    """Reject a caller object whose graph holds a foreign or subclassed node.
+
+    Serializing and reparsing would silently normalize a nested subclass, a
+    ``model_construct`` node or private/extra state; this rejects it instead.
+    """
+
+    model_types, enum_types = _EXACT_GRAPHS[model]
+    exact_model_bytes(
+        value,
+        model,
+        model_types=model_types,
+        enum_types=enum_types,
+        max_bytes=_MAX_CAPTURE_BYTES,
+        max_nodes=_MAX_CAPTURE_NODES,
+        max_depth=MAX_OBJECT_GRAPH_DEPTH * 2,
+        max_collection_items=_MAX_CAPTURE_ITEMS,
+        max_string_bytes=MAX_OBJECT_STRING_BYTES,
+    )
 
 
 def _reparse_exact(model: type[ContractT], content: bytes) -> ContractT:
@@ -532,6 +573,8 @@ def _policy_binding(resolved: ResolvedProjectionPolicy) -> ProjectionPolicyBindi
     return ProjectionPolicyBindingV1(
         registry_id=resolved.registry_id,
         registry_epoch_sha256=resolved.registry_epoch_sha256,
+        state_version=resolved.state_version,
+        state_head_sha256=resolved.state_head_sha256,
         selector_id=resolved.selector_id,
         policy_version=resolved.policy_version,
         object_sha256=resolved.object_sha256,
@@ -596,6 +639,7 @@ def _replay_fragment(view: object) -> tuple[FragmentExplorerView, str]:
     if type(view) is not FragmentExplorerView:
         raise SourceValueFamilyMismatch("fragment policy requires an E07 view")
     try:
+        _require_exact_graph(view, FragmentExplorerView)
         content = canonical_fragment_explorer_bytes(view)
         parsed = fragment_explorer_from_canonical_bytes(FragmentExplorerView, content)
         replayed = replay_fragment_explorer_view(parsed.request, parsed)
@@ -726,6 +770,7 @@ def _replay_cell_origin(artifact: object) -> tuple[CellOriginExplorerArtifact, s
     if type(artifact) is not CellOriginExplorerArtifact:
         raise SourceValueFamilyMismatch("cell-origin policy requires an E08 artifact")
     try:
+        _require_exact_graph(artifact, CellOriginExplorerArtifact)
         content = canonical_cell_origin_explorer_bytes(artifact)
         parsed = cell_origin_explorer_from_canonical_bytes(content)
         if _build_replay_view(parsed.request) != parsed.view:
@@ -876,6 +921,7 @@ def _capture_cna_inputs(inputs: object) -> CnaReplayInputs:
         for value, model in expected:
             if type(value) is not model:
                 raise TypeError("CNA replay input is not an exact model")
+            _require_exact_graph(value, model)
             captured.append(model.model_validate_json(value.model_dump_json()))
     except (ValidationError, *_REPLAY_FAILURES) as exc:
         raise SourceValueReplayRejected("CNA replay inputs are invalid") from exc
@@ -888,6 +934,7 @@ def _replay_cna(
     if type(snapshot) is not CnaExplorerSnapshot:
         raise SourceValueFamilyMismatch("CNA policy requires an E09 snapshot")
     try:
+        _require_exact_graph(snapshot, CnaExplorerSnapshot)
         content = cna_explorer_snapshot_bytes(snapshot)
         parsed = cna_explorer_snapshot_from_bytes(content)
         replayed = replay_cna_explorer_snapshot(
@@ -1197,6 +1244,7 @@ def verify_source_value_projection(
     if type(projection) is not SourceValueProjectionSetV1:
         raise SourceValueProjectionForged("projection is not an exact projection set")
     try:
+        _require_exact_graph(projection, SourceValueProjectionSetV1)
         captured = _reparse_exact(
             SourceValueProjectionSetV1, canonical_contract_bytes(projection)
         )

@@ -954,3 +954,48 @@ def test_chromosome_policy_components_use_registry_units() -> None:
         chromosome="chr1",
     )
     assert module._STATISTIC_UNIT[component.statistic] == component.statistic_unit
+
+
+def test_nested_caller_subclasses_are_rejected_not_normalized(tmp_path: Path) -> None:
+    from evidence_inspector.fragment_explorer import ExplorerBinRow
+
+    class Row(ExplorerBinRow):
+        pass
+
+    case = _fragment_case(tmp_path)
+    view = case.artifact
+    rows = (
+        view.left.rows[0],
+        Row.model_validate(view.left.rows[1].model_dump()),
+        *view.left.rows[2:],
+    )
+    nested = view.model_copy(update={"left": view.left.model_copy(update={"rows": rows})})
+    with pytest.raises(SourceValueReplayRejected):
+        case.project(artifact=nested)
+
+    class Projection(FragmentLongitudinalValueProjectionV1):
+        pass
+
+    result = case.project()
+    first = Projection.model_validate(result.projections[0].model_dump())
+    disguised = result.model_copy(update={"projections": (first, *result.projections[1:])})
+    with pytest.raises(SourceValueProjectionForged):
+        case.verify(disguised)
+
+
+def test_projection_binds_the_exact_registry_head(tmp_path: Path) -> None:
+    policy, definition = _fragment_policy()
+    other, _ = _fragment_policy(policy_id="projpol_fragment_other")
+    with ProjectionPolicyRegistry(tmp_path / "registry") as registry:
+        receipt = registry.register_policy(policy)
+        before = registry.resolve(receipt.selector_id, 1)
+        registry.register_policy(other)
+        after = registry.resolve(receipt.selector_id, 1)
+    view = _fragment_view()
+    first = Case(before, view, definition).project()
+    second = Case(after, view, definition).project()
+    assert first.policy.state_head_sha256 == before.state_head_sha256
+    assert (first.policy.state_version, second.policy.state_version) == (1, 2)
+    assert first != second
+    with pytest.raises(SourceValueProjectionForged):
+        Case(after, view, definition).verify(first)
