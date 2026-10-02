@@ -273,8 +273,9 @@ class RepeatabilityComparisonJournalEntry(RegistryContract):
 
 
 class ComparisonRegistrationReceipt(RegistryContract):
-    schema_version: Literal["traceback.d07-comparison-registration-receipt.v1"] = (
-        "traceback.d07-comparison-registration-receipt.v1"
+    # v2 adds the result trust registry binding fields.
+    schema_version: Literal["traceback.d07-comparison-registration-receipt.v2"] = (
+        "traceback.d07-comparison-registration-receipt.v2"
     )
     registry_id: RegistryId
     registry_epoch_sha256: Sha256
@@ -307,8 +308,9 @@ class RegisteredRepeatabilityComparison(RegistryContract):
     it is the as-of instant of this read.
     """
 
-    schema_version: Literal["traceback.d07-registered-comparison.v1"] = (
-        "traceback.d07-registered-comparison.v1"
+    # v2 adds the result trust registry binding fields.
+    schema_version: Literal["traceback.d07-registered-comparison.v2"] = (
+        "traceback.d07-registered-comparison.v2"
     )
     registry_id: RegistryId
     registry_epoch_sha256: Sha256
@@ -358,8 +360,9 @@ class ComparisonSelectorRecord(RegistryContract):
 
 
 class ComparisonSelectorPage(RegistryContract):
-    schema_version: Literal["traceback.d07-comparison-selector-page.v1"] = (
-        "traceback.d07-comparison-selector-page.v1"
+    # v2 adds the result trust registry binding fields.
+    schema_version: Literal["traceback.d07-comparison-selector-page.v2"] = (
+        "traceback.d07-comparison-selector-page.v2"
     )
     registry_id: RegistryId
     registry_epoch_sha256: Sha256
@@ -385,9 +388,11 @@ class RepeatabilityComparisonBackupObject(RegistryContract):
 
 
 class RepeatabilityComparisonBackup(RegistryContract):
-    schema_version: Literal["traceback.d07-comparison-backup.v1"] = (
-        "traceback.d07-comparison-backup.v1"
-    )
+    # v1 bundles (fixed result trust) keep their exact bytes; v2 bundles carry
+    # trust-registry-bound metadata.
+    schema_version: Literal[
+        "traceback.d07-comparison-backup.v1", "traceback.d07-comparison-backup.v2"
+    ] = "traceback.d07-comparison-backup.v1"
     metadata: (
         RepeatabilityComparisonRegistryMetadata
         | RepeatabilityComparisonRegistryTrustBoundMetadata
@@ -400,6 +405,15 @@ class RepeatabilityComparisonBackup(RegistryContract):
     objects: tuple[RepeatabilityComparisonBackupObject, ...] = Field(
         max_length=MAX_REGISTERED_COMPARISONS
     )
+
+    @model_validator(mode="after")
+    def exact_version(self) -> RepeatabilityComparisonBackup:
+        trust_bound = (
+            type(self.metadata) is RepeatabilityComparisonRegistryTrustBoundMetadata
+        )
+        if trust_bound != (self.schema_version == "traceback.d07-comparison-backup.v2"):
+            raise ValueError("D07 comparison backup version does not match its metadata")
+        return self
 
 
 _BACKUP_MODEL_TYPES, _BACKUP_ENUM_TYPES = contract_type_graph(
@@ -2093,6 +2107,11 @@ class RepeatabilityComparisonRegistry:
         with _CR_LOCK(self, exclusive=False):
             loaded, head = _CR_LOAD_STATE(self)
             backup = RepeatabilityComparisonBackup(
+                schema_version=(
+                    "traceback.d07-comparison-backup.v1"
+                    if self._result_trust_registry is None
+                    else "traceback.d07-comparison-backup.v2"
+                ),
                 metadata=self._metadata,
                 state_version=len(loaded),
                 state_head_sha256=head,

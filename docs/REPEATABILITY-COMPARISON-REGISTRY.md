@@ -164,13 +164,18 @@ then:
   keys is added or revoked. Adding or revoking an unrelated key leaves other
   comparisons current. If neither key was ever added, the whole current
   document is used, and adding either key later makes the (unavailable)
-  comparison stale. D07 requires at least one key in a result trust document,
+  comparison stale. That fallback means an unavailable comparison whose keys
+were never added goes stale on any trust event, which is fail-safe; re-register
+it to refresh. D07 requires at least one key in a result trust document,
   so registration against a trust registry with no keys (fresh, or only
   tombstones) is rejected; once a key is added the registry can never be empty
   again, so stored comparisons never hit this case on replay;
 - returns `result_trust_registry_id` and `result_trust_state_head_sha256` on
   receipts, resolved comparisons, and selector pages, so E12 can bind the
-  trust head each read used. They are `null` on the fixed-document path.
+  trust head each read used. They are `null` on the fixed-document path. These
+  three result contracts are now schema `v2`; backups of a trust-bound registry
+  are `traceback.d07-comparison-backup.v2`, while fixed-document backups stay
+  `v1` with unchanged bytes.
 
 The trust registry is append-only and revocation is permanent, so a revoked
 comparison cannot be revived by any later trust state. Its process-wide head

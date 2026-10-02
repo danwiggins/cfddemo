@@ -716,6 +716,13 @@ def test_d07_backup_restore_keeps_the_trust_registry_binding(
 ) -> None:
     receipt = _register(d07, live)
     backup = d07.backup_bytes()
+    assert b'"schema_version":"traceback.d07-comparison-backup.v2"' in backup
+    downgraded = backup.replace(
+        b'"schema_version":"traceback.d07-comparison-backup.v2"',
+        b'"schema_version":"traceback.d07-comparison-backup.v1"',
+    )
+    with pytest.raises(RepeatabilityComparisonRegistryConflict, match="invalid"):
+        d07_registry_module.repeatability_comparison_backup_from_bytes(downgraded)
     values = {
         "linkage_store": live.store,
         "expected_trust_snapshot_sha256_by_provider": PINS,
