@@ -259,6 +259,8 @@ saved-head schema version (the E04 head definition changes).
 - The `family_source` saved-head slot prefix (`familysrc_registry_`) is not
   yet pinned in `_SLOT_ID_PREFIXES`; the live fence still leaves the slot
   `None`, so its saves reopen `stale` against a composite read.
-- Whole-store heads are conservative: any advance of any store marks every
-  saved comparison stale (unchanged from the saved-comparison registry).
+- Whole-store heads are conservative: any advance of a captured dependency
+  head marks every saved comparison stale (unchanged from the
+  saved-comparison registry). E04 catalog-row changes do not change the E04
+  head (see above) and so do not, by themselves, mark anything stale.
 - The D08 workspace builder is not built here.
