@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import dataclasses
 import hashlib
 import hmac
 import ipaddress
@@ -110,11 +111,40 @@ class SessionGrant:
     cookie_secure: Literal[False] = False
 
 
+def _is_sha256_hex(value: object) -> bool:
+    return (
+        type(value) is str
+        and len(value) == 64
+        and all(character in "0123456789abcdef" for character in value)
+    )
+
+
+@dataclass(frozen=True, slots=True)
+class ReaderSessionBinding:
+    """Server-side E12 reader binding: grant commitment and registry head only.
+
+    A bare B01 session is transport authentication.  This binding is added only
+    by ``traceback_runner.web.reader_session`` after a one-use launch credential
+    resolved to a current grant under the reader-registry fence; it never
+    leaves the server and is re-resolved on every E12 read or save.
+    """
+
+    grant_sha256: str
+    registry_head_sha256: str
+
+    def __post_init__(self) -> None:
+        if not _is_sha256_hex(self.grant_sha256) or not _is_sha256_hex(
+            self.registry_head_sha256
+        ):
+            raise ValueError("reader session binding is invalid")
+
+
 @dataclass(frozen=True, slots=True)
 class _SessionRecord:
     csrf_sha256: bytes
     expires_at: float
     authority: str
+    reader_binding: ReaderSessionBinding | None = None
 
 
 class BootstrapBroker:
@@ -268,6 +298,31 @@ class BootstrapBroker:
                     self._sessions.pop(digest, None)
                 raise BoundaryDenied(401, "TBX-AUTH-001")
             return record
+
+    def bind_reader_session(
+        self,
+        session_token: str | None,
+        *,
+        authority: str,
+        binding: ReaderSessionBinding,
+    ) -> None:
+        """Attach one reader binding to a live session; never rebinds."""
+
+        if type(binding) is not ReaderSessionBinding:
+            raise TypeError("reader session binding has the wrong type")
+        with self._lock:
+            record = self.require_session(session_token, authority=authority)
+            if record.reader_binding is not None:
+                raise BoundaryDenied(403, "TBX-AUTH-006")
+            assert session_token is not None
+            self._sessions[self._digest(session_token)] = dataclasses.replace(
+                record, reader_binding=binding
+            )
+
+    def reader_binding(
+        self, session_token: str | None, *, authority: str
+    ) -> ReaderSessionBinding | None:
+        return self.require_session(session_token, authority=authority).reader_binding
 
     def require_csrf(self, record: _SessionRecord, csrf_token: str | None) -> None:
         if csrf_token is None or not hmac.compare_digest(
