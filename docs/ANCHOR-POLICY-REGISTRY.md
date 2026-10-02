@@ -206,6 +206,14 @@ timepoint handles, paths or free text. Tests seed these values and check their
 absence. `ResolvedApprovedAnchor` is protected (`protected_only=true`) and must
 not cross the browser boundary.
 
+Selectors are opaque but not secret-keyed, as for the D05 and D09 selectors.
+The policy selector is an unkeyed digest of the registry epoch, the D05
+selection and `policy_id`. A holder of the public epoch and the D05 selection
+could therefore confirm a guessed `policy_id`. Policy IDs are controlled,
+non-identifying registry names, not provider or subject identity. The anchor
+selector also binds the protected record digest, which is not guessable.
+Keyed (HMAC) selectors across all registries are a possible shared follow-up.
+
 ## Storage and bounds
 
 Storage follows the D03 decision registry
