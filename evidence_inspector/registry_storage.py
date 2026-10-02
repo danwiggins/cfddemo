@@ -139,6 +139,24 @@ def commit_staging_directory(
         raise OSError(errno.ESTALE, "registry staging publication changed")
 
 
+def bound_name(parent_fd: int, root_fd: int, staged_name: str, final_name: str) -> str:
+    """Return whichever of the two names holds the directory ``root_fd`` holds.
+
+    A failure or interrupt can land after ``rename(2)`` but before the caller
+    learns of it; cleanup must then address the published name, not the
+    vanished staging name.
+    """
+
+    try:
+        bound = os.fstat(root_fd)
+        observed = os.stat(final_name, dir_fd=parent_fd, follow_symlinks=False)
+    except OSError:
+        return staged_name
+    if (observed.st_dev, observed.st_ino) == (bound.st_dev, bound.st_ino):
+        return final_name
+    return staged_name
+
+
 def remove_staging_directory(parent_fd: int, name: str) -> None:
     """Best-effort removal of one abandoned staging tree (two levels deep)."""
 
@@ -320,10 +338,12 @@ def recover_torn_journal_tail(
         lock_fd = _open_private(
             ".registry.lock", os.O_RDWR | _FILE_FLAGS, root_fd, directory=False
         )
-        with process_lock:
-            # Never wait: maintenance on a registry that a live instance (in
-            # this or another process, or this thread's own fence) holds is
-            # refused rather than queued, so it cannot deadlock a fence.
+        # Never wait: maintenance on a registry that a live instance holds (in
+        # this or another process or thread, or this thread's own fence) is
+        # refused rather than queued, so it cannot deadlock a fence.
+        if not process_lock.acquire(blocking=False):
+            raise error(f"{label} is in use")
+        try:
             try:
                 fcntl.flock(lock_fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
             except BlockingIOError:
@@ -383,6 +403,8 @@ def recover_torn_journal_tail(
                 return removed
             finally:
                 fcntl.flock(lock_fd, fcntl.LOCK_UN)
+        finally:
+            process_lock.release()
     except OSError:
         raise error(f"{label} torn-tail recovery failed") from None
     finally:
@@ -398,6 +420,7 @@ __all__ = [
     "STAGING_INFIX",
     "TEMPORARY_PREFIX",
     "begin_staged_root",
+    "bound_name",
     "commit_staged_root",
     "commit_staging_directory",
     "discard_staged_root",

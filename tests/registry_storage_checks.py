@@ -13,6 +13,7 @@ from __future__ import annotations
 import fcntl
 import os
 import secrets
+import sys
 import threading
 import time
 from collections.abc import Callable
@@ -74,7 +75,10 @@ def check_torn_tail_recovery(
     for override in (
         {"expected_state_head_sha256": "0" * 64},
         {"expected_registry_epoch_sha256": "f" * 64},
-        {"expected_registry_id": values.registry_id[:-1] + "0"},
+        {
+            "expected_registry_id": values.registry_id[:-1]
+            + ("1" if values.registry_id.endswith("0") else "0")
+        },
     ):
         arguments = {**expected(values), **override}
         if arguments == expected(values):
@@ -152,8 +156,23 @@ def check_lock_reads_descriptor_under_process_lock(
     decoy_path = tmp_path / f"decoy-{secrets.token_hex(4)}"
     decoys: list[int] = []
     holder: int | None = None
+    module = sys.modules[type(registry).__module__]
+    module_lock = module._REGISTRY_PROCESS_LOCK
+    reached = threading.Event()
+
+    class _Signalling:
+        # Signals once the waiter reaches the process-lock boundary; any
+        # descriptor read before this point is the bug under test.
+        def __enter__(self):
+            reached.set()
+            return module_lock.__enter__()
+
+        def __exit__(self, *exc):
+            return module_lock.__exit__(*exc)
+
     process_lock = registry._process_lock
     process_lock.acquire()
+    module._REGISTRY_PROCESS_LOCK = _Signalling()
     try:
         lock_number = registry._lock_fd
 
@@ -166,7 +185,8 @@ def check_lock_reads_descriptor_under_process_lock(
 
         thread = threading.Thread(target=waiter, daemon=True)
         thread.start()
-        time.sleep(0.2)  # the waiter is now blocked on the process lock
+        assert reached.wait(timeout=5)
+        time.sleep(0.05)  # let it block on the instance lock we hold
         # Exactly what close() does, under the lock close() holds.
         for name in _FD_NAMES:
             descriptor = registry.__dict__.get(name)
@@ -195,6 +215,7 @@ def check_lock_reads_descriptor_under_process_lock(
         thread.join(timeout=5)
         for descriptor in decoys:
             os.close(descriptor)
+        module._REGISTRY_PROCESS_LOCK = module_lock
     assert not stuck, "lock waiter used a reused descriptor number"
     assert len(errors) == 1 and isinstance(errors[0], unsafe)
     assert "closed" in str(errors[0])
@@ -296,6 +317,19 @@ def check_interrupted_restore(
         raise KeyboardInterrupt
 
     monkeypatch.setattr(module, "_commit_staging_directory", crash)
+    with pytest.raises(KeyboardInterrupt):
+        restore(target, backup, values)
+    monkeypatch.setattr(module, "_commit_staging_directory", original_commit)
+    assert not os.path.lexists(target)
+    assert _staged(target) == [stale]
+
+    # An interrupt after the rename but before the caller learns of it:
+    # cleanup follows the published inode, so no empty target blocks a retry.
+    def crash_after_rename(*args, **kwargs):
+        original_commit(*args, **kwargs)
+        raise KeyboardInterrupt
+
+    monkeypatch.setattr(module, "_commit_staging_directory", crash_after_rename)
     with pytest.raises(KeyboardInterrupt):
         restore(target, backup, values)
     monkeypatch.setattr(module, "_commit_staging_directory", original_commit)

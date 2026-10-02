@@ -58,6 +58,7 @@ from evidence_inspector.method_registry import (
 from evidence_inspector.provider_linkage import Base64PublicKey, Base64Signature
 from evidence_inspector.provider_linkage_store import AuthorityTimeSource
 from evidence_inspector.registry_storage import (
+    bound_name as _bound_name,
     commit_staging_directory as _commit_staging_directory,
     make_staging_directory as _make_staging_directory,
     recover_torn_journal_tail as _recover_torn_journal_tail,
@@ -1388,6 +1389,15 @@ class ReaderAuthorizationRegistry:
                 "reader registry materialization failed"
             ) from None
         finally:
+            if (
+                created
+                and not completed
+                and root_fd is not None
+                and parent_fd is not None
+            ):
+                staging_name = _bound_name(
+                    parent_fd, root_fd, staging_name, target.name
+                )
             if created and not completed:
                 if root_fd is not None:
                     _remove_partial_target(parent_fd, staging_name, root_fd, objects_fd)

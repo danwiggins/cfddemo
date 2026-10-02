@@ -76,6 +76,7 @@ from evidence_inspector.result_trust_registry import (
 )
 from evidence_inspector.registry_storage import (
     begin_staged_root as _begin_staged_root,
+    bound_name as _bound_name,
     commit_staged_root as _commit_staged_root,
     commit_staging_directory as _commit_staging_directory,
     discard_staged_root as _discard_staged_root,
@@ -2356,6 +2357,15 @@ class RepeatabilityComparisonRegistry:
                 "D07 comparison registry restore failed"
             ) from None
         finally:
+            if (
+                created
+                and not completed
+                and root_fd is not None
+                and parent_fd is not None
+            ):
+                staging_name = _bound_name(
+                    parent_fd, root_fd, staging_name, target.name
+                )
             if created and not completed:
                 if root_fd is not None:
                     _remove_partial_restore(
