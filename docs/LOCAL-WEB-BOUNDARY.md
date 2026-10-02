@@ -71,6 +71,15 @@ cookie is intentionally not marked `Secure`; browsers do not treat arbitrary
 loopback HTTP as a secure transport. The service must never bind beyond
 loopback to compensate for that constraint.
 
+## Longitudinal reader binding
+
+A B01 session is transport authentication only. E12 routes additionally bind
+a session to one protected `longitudinal_reader` grant through a separate
+one-use launch credential, and re-resolve that grant under the reader-registry
+fence on every read or save. The session record stores only the grant
+commitment and registry head. Non-E12 routes never consult it. See
+`docs/READER-AUTHORIZATION-REGISTRY.md`.
+
 ## Frozen response contracts
 
 `ProblemDetail` carries a registered safe code, bounded problem/cause/fix,
