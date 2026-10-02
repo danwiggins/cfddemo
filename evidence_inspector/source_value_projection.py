@@ -46,7 +46,6 @@ from evidence_inspector.cell_origin_models import (
     DeconvolutionOutputV2,
 )
 from evidence_inspector.cna_explorer import (
-    MAX_SEGMENTS,
     CnaExplorerError,
     CnaExplorerSnapshot,
     CnaSource,
@@ -82,6 +81,7 @@ from evidence_inspector.method_registry import (
 )
 from evidence_inspector.projection_policy_registry import (
     _STATISTIC_UNIT,
+    MAX_FINITE_COMPONENTS,
     MAX_OBJECT_BYTES,
     MAX_OBJECT_COLLECTION_ITEMS,
     MAX_OBJECT_GRAPH_DEPTH,
@@ -113,10 +113,13 @@ from evidence_inspector.projection_policy_registry import (
 from evidence_inspector.safe_ingress import contract_type_graph, exact_model_bytes
 from traceback_runner.serialization import canonical_json_bytes
 
-# The largest complete vector any family artifact can carry: every E09 segment
-# times every segment statistic.  Each family is also bounded by its own
-# artifact contract (E07 bins, E08 contributors, 22 chromosomes).
-MAX_PROJECTED_COMPONENTS = MAX_SEGMENTS * len(CnaSegmentStatistic)
+# One projection set holds at most the registry's finite-component bound.  It
+# covers every complete E07 (4096 bins x 2), E08 (512 contributors) and dosage
+# (22 x 3) vector; a canonical-all segment vector beyond it fails closed (see
+# docs/SOURCE-VALUE-PROJECTION.md, open decisions).  Each projection repeats
+# its bindings (~2 KiB canonical), so the bound also keeps verification
+# practical.
+MAX_PROJECTED_COMPONENTS = MAX_FINITE_COMPONENTS
 _CHROMOSOMES = tuple(f"chr{index}" for index in range(1, 23))
 _REPLAY_FAILURES = (
     ValueError,
@@ -158,6 +161,10 @@ class SourceValueWithheld(SourceValueProjectionError):
 
 class SourceValueReplayRejected(SourceValueProjectionError):
     """The artifact did not reparse canonically or replay exactly."""
+
+
+class SourceValueVectorTooLarge(SourceValueProjectionError):
+    """A complete canonical vector would exceed ``MAX_PROJECTED_COMPONENTS``."""
 
 
 class SourceValueProjectionForged(SourceValueProjectionError):
@@ -660,6 +667,11 @@ def _statistics_for(policy: Any) -> tuple[Any, ...]:
     return tuple(policy.all_component_statistics)
 
 
+def _require_vector_bound(coordinates: int, statistics: int) -> None:
+    if coordinates * statistics > MAX_PROJECTED_COMPONENTS:
+        raise SourceValueVectorTooLarge("complete projection vector exceeds its bound")
+
+
 def _is_all(policy: Any) -> bool:
     return policy.selection_rule == ProjectionSelectionRule.CANONICAL_ALL_COMPONENTS
 
@@ -717,6 +729,7 @@ def _fragment_projections(
         raise SourceValueRepresentationDrift("E02 chart and table differ in length")
 
     if _is_all(policy):
+        _require_vector_bound(len(chart_rows), len(_statistics_for(policy)))
         requested = [
             (FragmentBinCoordinate(
                 bin_index=index,
@@ -866,6 +879,7 @@ def _cell_origin_projections(
             raise SourceValueRepresentationDrift(
                 "E08 registered contributors differ between chart and table"
             )
+        _require_vector_bound(len(registered), len(_statistics_for(policy)))
         # Canonical order is contributor ID, never the view's estimate rank.
         requested = [
             (contributor, statistic)
@@ -1037,6 +1051,7 @@ def _cna_chromosome_projections(
     if _is_all(policy):
         if tuple(item.chromosome for item in layers.dosage_chromosomes) != _CHROMOSOMES:
             raise SourceValueRepresentationDrift("E09 dosage layer is not canonical")
+        _require_vector_bound(len(_CHROMOSOMES), len(_statistics_for(policy)))
         requested = [
             (chromosome, statistic)
             for chromosome in _CHROMOSOMES
@@ -1117,6 +1132,7 @@ def _cna_segment_projections(
             snapshot.chart.segments == snapshot.tables.segments == layers.segments
         ) or len(layers.segments) != len(inputs.segmented.segments):
             raise SourceValueRepresentationDrift("E09 segment chart and table differ")
+        _require_vector_bound(len(layers.segments), len(_statistics_for(policy)))
         requested = [
             (
                 CnaSegmentCoordinate(
@@ -1320,6 +1336,7 @@ __all__ = [
     "SourceValueProjectionSetV1",
     "SourceValueReplayRejected",
     "SourceValueRepresentationDrift",
+    "SourceValueVectorTooLarge",
     "SourceValueWithheld",
     "project_source_values",
     "verify_source_value_projection",

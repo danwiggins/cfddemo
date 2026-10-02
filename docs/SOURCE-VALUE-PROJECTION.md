@@ -148,6 +148,7 @@ before any value is returned:
 | `SourceValueRepresentationDrift` | chart/layer and table representations disagree |
 | `SourceValueWithheld` | the artifact withholds values for the source |
 | `SourceValueReplayRejected` | the artifact or CNA inputs do not reparse or replay |
+| `SourceValueVectorTooLarge` | a complete canonical vector would exceed `MAX_PROJECTED_COMPONENTS` |
 | `SourceValueProjectionForged` | a projection is not the adapter's exact output |
 
 ## Threat model
@@ -156,7 +157,10 @@ In-process code mutation is out of scope. Caller-built objects are not trusted:
 artifacts, policies, inputs and projection sets are checked for exact object
 graphs, reparsed and replayed before use. A caller that builds a fully valid
 policy or artifact from invented content is not detectable here; resolving
-both from their protected registries is the builder's obligation. The
+both from their protected registries is the builder's obligation. A primitive
+that pydantic coerces without loss (an integer `0` in a float field) is
+normalized on reparse rather than rejected; replay then runs on the normalized,
+equal value. The
 adapter checks only what the artifact and policy carry; live authority belongs
 to the caller.
 
@@ -188,5 +192,10 @@ and verification equality.
 - The projection binds the registry state head, so the same policy resolved
   after an unrelated registration yields a different projection. E12 must
   decide whether to compare projections across heads by policy digest only.
-- A projection set can hold up to `MAX_PROJECTED_COMPONENTS` (every E09
-  segment times every segment statistic). No smaller E12 bound is set yet.
+- A projection set holds at most `MAX_PROJECTED_COMPONENTS`, the registry's
+  finite-component bound (8192). That covers every complete E07, E08 and
+  dosage vector, and canonical-all segment vectors up to 2048 segments with all
+  four statistics. A larger segment vector fails closed with
+  `SourceValueVectorTooLarge`. Each projection repeats its bindings (about
+  2 KiB canonical), so raising the bound needs a compact set encoding that
+  carries the shared bindings once.

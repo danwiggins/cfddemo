@@ -63,6 +63,7 @@ from evidence_inspector.source_value_projection import (
     SourceValueProjectionSetV1,
     SourceValueReplayRejected,
     SourceValueRepresentationDrift,
+    SourceValueVectorTooLarge,
     SourceValueWithheld,
     project_source_values,
     verify_source_value_projection,
@@ -1013,17 +1014,13 @@ def test_anchor_and_source_identity_reject_extra_state_and_subclasses(
         case.project(source_measurement=nested)
 
 
-def test_canonical_all_segments_resolve_in_linear_time(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, cna_artifact
-) -> None:
-    """Each row is indexed once; a per-component scan would be quadratic."""
-
+def _many_segments(cna_artifact: Any, count: int) -> tuple[Any, CnaReplayInputs]:
     snapshot, inputs = cna_artifact
-    count = 4000
     base = snapshot.layers.segments[0]
     segments = tuple(
-        base.model_copy(update={"segment_index": index, "start": index * 10,
-                                "end": index * 10 + 10})
+        base.model_copy(
+            update={"segment_index": index, "start": index * 10, "end": index * 10 + 10}
+        )
         for index in range(count)
     )
     upstream = tuple(
@@ -1039,12 +1036,26 @@ def test_canonical_all_segments_resolve_in_linear_time(
             "tables": snapshot.tables.model_copy(update={"segments": segments}),
         }
     )
-    large_inputs = CnaReplayInputs(
+    return large, CnaReplayInputs(
         dosage=inputs.dosage,
         segmented=inputs.segmented.model_copy(update={"segments": upstream}),
         dosage_authority=inputs.dosage_authority,
         segmented_authority=inputs.segmented_authority,
     )
+
+
+def test_canonical_all_segments_resolve_and_verify_at_the_vector_bound(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, cna_artifact
+) -> None:
+    """Each row is indexed once; a per-component scan would be quadratic.
+
+    Replay and input capture are bypassed only because the synthetic upstream
+    fixture cannot hold thousands of coherent segments.
+    """
+
+    statistics = len(CnaSegmentStatistic)
+    count = module.MAX_PROJECTED_COMPONENTS // statistics
+    large, large_inputs = _many_segments(cna_artifact, count)
     _bypass_replay(monkeypatch, "_replay_cna")
     monkeypatch.setattr(module, "_capture_cna_inputs", lambda value: value)
     case = _cna_case(
@@ -1057,8 +1068,13 @@ def test_canonical_all_segments_resolve_in_linear_time(
     )
     started = time.perf_counter()
     result = case.project(artifact=large, cna_inputs=large_inputs)
-    assert len(result.projections) == count * len(CnaSegmentStatistic)
-    assert time.perf_counter() - started < 10
+    assert len(result.projections) == module.MAX_PROJECTED_COMPONENTS
+    assert case.verify(result, artifact=large, cna_inputs=large_inputs) == result
+    assert time.perf_counter() - started < 30
+
+    over, over_inputs = _many_segments(cna_artifact, count + 1)
+    with pytest.raises(SourceValueVectorTooLarge):
+        case.project(artifact=over, cna_inputs=over_inputs)
 
 
 def test_projection_binds_the_exact_registry_head(tmp_path: Path) -> None:
