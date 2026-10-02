@@ -34,7 +34,10 @@ from evidence_inspector.cohort_manifest import (
 )
 from evidence_inspector.cohort_registry import CohortRegistry
 from evidence_inspector.compatibility import compatibility_policy_sha256
-from evidence_inspector.covariate_context import CovariateDimension, LiveCovariateMemberValues
+from evidence_inspector.covariate_context import (
+    CovariateDimension,
+    LiveCovariateMemberValues,
+)
 from evidence_inspector.covariate_context_registry import CovariateContextRegistry
 from evidence_inspector.denominator_policy_registry import DenominatorPolicyRegistry
 from evidence_inspector.fragment_explorer import FragmentQuantity, PanelId
@@ -45,7 +48,9 @@ from evidence_inspector.longitudinal_compatibility import (
     provider_measurement_id,
     provider_projection_ref,
 )
-from evidence_inspector.longitudinal_decision_registry import LongitudinalDecisionRegistry
+from evidence_inspector.longitudinal_decision_registry import (
+    LongitudinalDecisionRegistry,
+)
 from evidence_inspector.longitudinal_workspace import (
     LongitudinalMeasurementSelection,
     LongitudinalWorkspaceFilters,
@@ -136,7 +141,10 @@ from traceback_runner.signing import KeyPurpose, generate_development_keypair
 
 NOW = datetime(2026, 9, 29, 12, 0, tzinfo=UTC)
 SUBJECT = _token("subject", "5")
-DAY = {name: datetime(2026, 9, day, 12, tzinfo=UTC) for name, day in (("1", 1), ("2", 2), ("4", 3))}
+DAY = {
+    name: datetime(2026, 9, day, 12, tzinfo=UTC)
+    for name, day in (("1", 1), ("2", 2), ("4", 3))
+}
 IMPORTED = ("1", "2")
 
 
@@ -145,7 +153,9 @@ def _unknown() -> OptionalOpaqueToken:
 
 
 def _known(prefix: str, digit: str) -> OptionalOpaqueToken:
-    return OptionalOpaqueToken(state=OptionalLineageState.KNOWN, token=_token(prefix, digit))
+    return OptionalOpaqueToken(
+        state=OptionalLineageState.KNOWN, token=_token(prefix, digit)
+    )
 
 
 def linkage_revision(
@@ -244,7 +254,13 @@ class World:
             item.close()
 
 
-def make_world(tmp_path: Path, *, with_d10: bool = True, with_family: bool = True) -> World:
+def make_world(
+    tmp_path: Path,
+    *,
+    with_d10: bool = True,
+    with_family: bool = True,
+    with_d07: bool = True,
+) -> World:
     closers: list[object] = []
     linkage = ProviderLinkageStore(
         tmp_path / "linkage",
@@ -538,7 +554,10 @@ def make_world(tmp_path: Path, *, with_d10: bool = True, with_family: bool = Tru
                 quantity_id=definition.quantity_id,
                 unit=definition.unit,
                 measurement_definition_sha256=measurement_definition_sha256(
-                    definition.method_ref, digest, definition.quantity_id, definition.unit
+                    definition.method_ref,
+                    digest,
+                    definition.quantity_id,
+                    definition.unit,
                 ),
             ),
             measurement_anchor=anchor,
@@ -573,7 +592,9 @@ def make_world(tmp_path: Path, *, with_d10: bool = True, with_family: bool = Tru
         expected_envelope_sha256=repeatability_envelope_sha256(envelope),
         expected_authority_head_sha256=authority_head,
     )
-    page = anchors.derive_candidate_page(approval.selector_id, approval.approval_version)
+    page = anchors.derive_candidate_page(
+        approval.selector_id, approval.approval_version
+    )
     # D03 series and D07 comparison.
     d03 = LongitudinalDecisionRegistry(
         tmp_path / "d03",
@@ -595,20 +616,21 @@ def make_world(tmp_path: Path, *, with_d10: bool = True, with_family: bool = Tru
         result_trust_registry=trust,
     )
     closers.append(d07)
-    d07.register_comparison(
-        anchor_record,
-        member_record,
-        d03_policy,
-        _observation(anchor_record, 0.5),
-        _observation(member_record, 0.55),
-        envelope,
-        expected_policy_sha256=longitudinal_anchor_policy_sha256(d03_policy),
-        expected_authority_head_sha256=authority_head,
-        expected_envelope_sha256=repeatability_envelope_sha256(envelope),
-        expected_evidence_sha256=EVIDENCE_SHA256,
-        expected_protocol_sha256=PROTOCOL_SHA256,
-        expected_repeatability_authority_sha256=AUTHORITY_SHA256,
-    )
+    if with_d07:
+        d07.register_comparison(
+            anchor_record,
+            member_record,
+            d03_policy,
+            _observation(anchor_record, 0.5),
+            _observation(member_record, 0.55),
+            envelope,
+            expected_policy_sha256=longitudinal_anchor_policy_sha256(d03_policy),
+            expected_authority_head_sha256=authority_head,
+            expected_envelope_sha256=repeatability_envelope_sha256(envelope),
+            expected_evidence_sha256=EVIDENCE_SHA256,
+            expected_protocol_sha256=PROTOCOL_SHA256,
+            expected_repeatability_authority_sha256=AUTHORITY_SHA256,
+        )
     # D09 and D10.
     d09 = DenominatorPolicyRegistry(
         tmp_path / "d09", cohort_registry=cohort, record_catalog=records
@@ -621,7 +643,9 @@ def make_world(tmp_path: Path, *, with_d10: bool = True, with_family: bool = Tru
         disposition,
         expected_cohort_manifest_sha256=cohort_manifest_sha256(manifest),
     )
-    d10 = CovariateContextRegistry(tmp_path / "d10", d09_registry=d09, decision_registry=d03)
+    d10 = CovariateContextRegistry(
+        tmp_path / "d10", d09_registry=d09, decision_registry=d03
+    )
     closers.append(d10)
     if with_d10:
         d10.register_context(

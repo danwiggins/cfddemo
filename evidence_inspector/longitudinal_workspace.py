@@ -278,9 +278,10 @@ class LongitudinalWorkspaceBoundaryError(Exception):
     def __init__(
         self, code: LongitudinalErrorCode, remediation: LongitudinalRemediation
     ) -> None:
-        if type(code) is not LongitudinalErrorCode or type(
-            remediation
-        ) is not LongitudinalRemediation:
+        if (
+            type(code) is not LongitudinalErrorCode
+            or type(remediation) is not LongitudinalRemediation
+        ):
             code = LongitudinalErrorCode.INTEGRITY_FAILURE
             remediation = LongitudinalRemediation.VERIFY_STORE_INTEGRITY
         super().__init__(f"{code.value}:{remediation.value}")
@@ -288,7 +289,9 @@ class LongitudinalWorkspaceBoundaryError(Exception):
         self.remediation = remediation
 
 
-def _fail(code: LongitudinalErrorCode, remediation: LongitudinalRemediation) -> NoReturn:
+def _fail(
+    code: LongitudinalErrorCode, remediation: LongitudinalRemediation
+) -> NoReturn:
     raise LongitudinalWorkspaceBoundaryError(code, remediation)
 
 
@@ -371,7 +374,10 @@ def _guarded(
             LongitudinalRemediation.OBTAIN_CURRENT_READER_GRANT,
         )
     except CompositeAuthorityRetry:
-        failure = (LongitudinalErrorCode.READ_CONFLICT, LongitudinalRemediation.RETRY_READ)
+        failure = (
+            LongitudinalErrorCode.READ_CONFLICT,
+            LongitudinalRemediation.RETRY_READ,
+        )
     except _UNSAFE_ERRORS:
         failure = (
             LongitudinalErrorCode.INTEGRITY_FAILURE,
@@ -497,7 +503,9 @@ _REQUEST_TYPES, _REQUEST_ENUMS = contract_type_graph(LongitudinalWorkspaceReques
 _CREDENTIAL_TYPES, _CREDENTIAL_ENUMS = contract_type_graph(ReaderGrantBinding)
 
 
-def normalize_filters(filters: LongitudinalWorkspaceFilters) -> LongitudinalWorkspaceFilters:
+def normalize_filters(
+    filters: LongitudinalWorkspaceFilters,
+) -> LongitudinalWorkspaceFilters:
     """Canonical order for every filter axis, so caller order never matters."""
 
     return LongitudinalWorkspaceFilters(
@@ -544,7 +552,10 @@ def _capture_request(request: object) -> LongitudinalWorkspaceRequest:
     except Exception:
         captured = None
     if captured is None:
-        _fail(LongitudinalErrorCode.INVALID_REQUEST, LongitudinalRemediation.CORRECT_REQUEST)
+        _fail(
+            LongitudinalErrorCode.INVALID_REQUEST,
+            LongitudinalRemediation.CORRECT_REQUEST,
+        )
     return captured
 
 
@@ -717,7 +728,9 @@ class ProtectedValues(RegistryContract):
     def coherent(self) -> ProtectedValues:
         if (self.state is ValueState.PROJECTED) != (self.projection is not None):
             raise ValueError("values are present only when projected")
-        if (self.state is ValueState.PROJECTION_REJECTED) != (self.rejection is not None):
+        if (self.state is ValueState.PROJECTION_REJECTED) != (
+            self.rejection is not None
+        ):
             raise ValueError("a rejection reason is present only when rejected")
         if (self.state is ValueState.FAMILY_PREREQUISITE_MISSING) != (
             self.prerequisite is not None
@@ -829,14 +842,19 @@ class ProtectedLongitudinalRow(RegistryContract):
             or self.values.state is not ValueState.SOURCE_UNAVAILABLE
         ):
             raise ValueError("an unavailable record carries no source or values")
-        if (self.decision_state is DecisionState.DECIDED) != (self.decision is not None):
+        if (self.decision_state is DecisionState.DECIDED) != (
+            self.decision is not None
+        ):
             raise ValueError("a decision is present only when decided")
         if self.is_anchor != (self.decision_state is DecisionState.ANCHOR):
             raise ValueError("only the anchor row has the anchor decision state")
-        if (self.comparison_state in {
-            ComparisonRegistryState.AVAILABLE,
-            ComparisonRegistryState.UNAVAILABLE,
-        }) != (self.comparison is not None):
+        if (
+            self.comparison_state
+            in {
+                ComparisonRegistryState.AVAILABLE,
+                ComparisonRegistryState.UNAVAILABLE,
+            }
+        ) != (self.comparison is not None):
             raise ValueError("a comparison is present only when D07 returned one")
         return self
 
@@ -1220,6 +1238,7 @@ class LongitudinalWorkspace(_WorkspaceCore):
     protected_only: Literal[True] = True
     request: LongitudinalWorkspaceRequest
     reader_authorization: ReaderAuthorization
+    anchor_record_sha256: Sha256
     protected_rows: tuple[ProtectedLongitudinalRow, ...] = Field(
         min_length=1, max_length=MAX_WORKSPACE_MEMBERS
     )
@@ -1232,9 +1251,10 @@ class LongitudinalWorkspace(_WorkspaceCore):
     @model_validator(mode="after")
     def coherent(self) -> LongitudinalWorkspace:
         ordinals = [row.row_ordinal for row in self.rows]
-        if ordinals != list(range(1, len(self.rows) + 1)) or [
-            row.row_ordinal for row in self.protected_rows
-        ] != ordinals:
+        if (
+            ordinals != list(range(1, len(self.rows) + 1))
+            or [row.row_ordinal for row in self.protected_rows] != ordinals
+        ):
             raise ValueError("rows must use canonical ordinals")
         if self.visible_row_ordinals != tuple(
             sorted(set(self.visible_row_ordinals))
@@ -1288,7 +1308,9 @@ def member_set_sha256(member_sha256s: Iterable[str]) -> str:
     )
 
 
-def _source_alias(cohort_selector_id: str, cohort_version: int, member_sha256: str) -> str:
+def _source_alias(
+    cohort_selector_id: str, cohort_version: int, member_sha256: str
+) -> str:
     digest = _sha256(
         b"traceback-e12-source-alias-v1",
         cohort_selector_id.encode("ascii"),
@@ -1298,7 +1320,9 @@ def _source_alias(cohort_selector_id: str, cohort_version: int, member_sha256: s
     return f"source_{digest[:16]}"
 
 
-def timepoint_positions(manifest: CohortManifest) -> dict[tuple[int, str], tuple[int, int]]:
+def timepoint_positions(
+    manifest: CohortManifest,
+) -> dict[tuple[int, str], tuple[int, int]]:
     """Public (ordinal, offset) per protected (coordinate, timepoint handle).
 
     The same derivation as the anchor-policy candidate page: biological
@@ -1309,12 +1333,13 @@ def timepoint_positions(manifest: CohortManifest) -> dict[tuple[int, str], tuple
     """
 
     keys = sorted(
-        {(item.time_coordinate, item.biological_timepoint_id) for item in manifest.members}
+        {
+            (item.time_coordinate, item.biological_timepoint_id)
+            for item in manifest.members
+        }
     )
     origin = keys[0][0]
-    return {
-        key: (index, key[0] - origin) for index, key in enumerate(keys, start=1)
-    }
+    return {key: (index, key[0] - origin) for index, key in enumerate(keys, start=1)}
 
 
 def _time_axis(manifest: CohortManifest) -> PublicTimeAxis:
@@ -1491,7 +1516,9 @@ def comparison_suppression(
             or comparison.repeatability_envelope_sha256 != envelope_sha256
         ):
             reasons.append(SuppressionReason.D07_BINDING_MISMATCH)
-    return tuple(sorted(set(reasons), key=lambda item: list(SuppressionReason).index(item)))
+    return tuple(
+        sorted(set(reasons), key=lambda item: list(SuppressionReason).index(item))
+    )
 
 
 def _public_values(values: ProtectedValues) -> tuple[PublicFragmentValue, ...]:
@@ -1533,7 +1560,9 @@ def _public_row(
     anchor_record_sha256: str,
 ) -> LongitudinalSourceRow:
     member = row.member
-    timepoint, offset = positions[(member.time_coordinate, member.biological_timepoint_id)]
+    timepoint, offset = positions[
+        (member.time_coordinate, member.biological_timepoint_id)
+    ]
     binding = row.status.binding
     source = row.source
     decision = row.decision
@@ -1573,7 +1602,9 @@ def _public_row(
         )
     return LongitudinalSourceRow(
         row_ordinal=row.row_ordinal,
-        source_alias=_source_alias(cohort_selector_id, cohort_version, row.member_sha256),
+        source_alias=_source_alias(
+            cohort_selector_id, cohort_version, row.member_sha256
+        ),
         timepoint_ordinal=timepoint,
         offset_seconds=offset,
         lineage_role=member.lineage_role,
@@ -1613,7 +1644,9 @@ def _public_row(
     )
 
 
-def derive_segments(rows: tuple[LongitudinalSourceRow, ...]) -> tuple[LongitudinalSegment, ...]:
+def derive_segments(
+    rows: tuple[LongitudinalSourceRow, ...],
+) -> tuple[LongitudinalSegment, ...]:
     """Segments between adjacent biological timepoints whose single draw is eligible.
 
     A timepoint qualifies only when it has exactly one biological-draw row and
@@ -1658,7 +1691,9 @@ def derive_segments(rows: tuple[LongitudinalSourceRow, ...]) -> tuple[Longitudin
                 to_delta=following.comparison.delta if following.comparison else None,
             )
         )
-    return tuple(sorted(segments, key=lambda item: (item.from_row_ordinal, item.to_row_ordinal)))
+    return tuple(
+        sorted(segments, key=lambda item: (item.from_row_ordinal, item.to_row_ordinal))
+    )
 
 
 def filter_rows(
@@ -1668,7 +1703,10 @@ def filter_rows(
 
     def keep(row: LongitudinalSourceRow) -> bool:
         return (
-            (not filters.timepoint_ordinals or row.timepoint_ordinal in filters.timepoint_ordinals)
+            (
+                not filters.timepoint_ordinals
+                or row.timepoint_ordinal in filters.timepoint_ordinals
+            )
             and (not filters.lineage_roles or row.lineage_role in filters.lineage_roles)
             and (
                 not filters.record_availability
@@ -1702,7 +1740,9 @@ class WorkspaceAuthorityInputs(RegistryContract):
 
 
 def filters_sha256(filters: LongitudinalWorkspaceFilters) -> str:
-    return _sha256(b"traceback-e12-workspace-filters-v1", canonical_contract_bytes(filters))
+    return _sha256(
+        b"traceback-e12-workspace-filters-v1", canonical_contract_bytes(filters)
+    )
 
 
 def _replay_sha256(
@@ -1740,7 +1780,10 @@ def derive_workspace(
     """Pure derivation from captured authority; no store, callback or I/O."""
 
     anchors = [row for row in protected_rows if row.is_anchor]
-    if len(anchors) != 1 or anchors[0].row_ordinal != inputs.authority.anchor_row_ordinal:
+    if (
+        len(anchors) != 1
+        or anchors[0].row_ordinal != inputs.authority.anchor_row_ordinal
+    ):
         raise ValueError("workspace requires exactly one pinned anchor row")
     anchor = anchors[0]
     authority = inputs.authority
@@ -1770,6 +1813,7 @@ def derive_workspace(
         replay_sha256=_replay_sha256(inputs, protected_rows, rows, segments),
         request=inputs.request,
         reader_authorization=inputs.reader_authorization,
+        anchor_record_sha256=inputs.anchor_record_sha256,
         protected_rows=protected_rows,
         rows=rows,
         visible_row_ordinals=filter_rows(rows, filters),
@@ -2036,7 +2080,11 @@ def _history_map(
         for entry in page.records:
             record = entry.record
             entries.setdefault(
-                (record.provider_namespace, record.analysis_record_id, record.result_id),
+                (
+                    record.provider_namespace,
+                    record.analysis_record_id,
+                    record.result_id,
+                ),
                 [],
             ).append(entry)
         cursor = page.next_cursor
@@ -2180,7 +2228,9 @@ def _project_fragment(
             rejection=rejection or ValueRejection.INVALID,
             **commitments,
         )
-    return ProtectedValues(state=ValueState.PROJECTED, projection=projection, **commitments)
+    return ProtectedValues(
+        state=ValueState.PROJECTED, projection=projection, **commitments
+    )
 
 
 def _source_matches_measurement(
@@ -2210,7 +2260,9 @@ def _latest_current(records: Iterable[Any], *, version_field: str) -> dict[str, 
         if item.authority_state is not SourceAuthorityState.CURRENT:
             continue
         known = chosen.get(item.selector_id)
-        if known is None or getattr(item, version_field) > getattr(known, version_field):
+        if known is None or getattr(item, version_field) > getattr(
+            known, version_field
+        ):
             chosen[item.selector_id] = item
     return chosen
 
@@ -2326,23 +2378,46 @@ def build_longitudinal_workspace(
             ),
         )
     )
-    inputs, protected_rows, positions = _gather(
-        captured,
-        heads,
-        first_authorization,
-        selector_row,
-        cohort_registry=cohort_registry,
-        cohort_record_catalog=cohort_record_catalog,
-        supersession_store=supersession_store,
-        anchor_policy_registry=anchor_policy_registry,
-        projection_policy_registry=projection_policy_registry,
-        result_view_source_registry=result_view_source_registry,
-        measurement_source_artifact_registry=measurement_source_artifact_registry,
-        d03_decision_registry=d03_decision_registry,
-        d07_comparison_registry=d07_comparison_registry,
-        d09_summary_registry=d09_summary_registry,
-        d10_context_registry=d10_context_registry,
-    )
+    failure: LongitudinalWorkspaceBoundaryError | None = None
+    gathered = None
+    try:
+        gathered = _gather(
+            captured,
+            heads,
+            first_authorization,
+            selector_row,
+            cohort_registry=cohort_registry,
+            cohort_record_catalog=cohort_record_catalog,
+            supersession_store=supersession_store,
+            anchor_policy_registry=anchor_policy_registry,
+            projection_policy_registry=projection_policy_registry,
+            result_view_source_registry=result_view_source_registry,
+            measurement_source_artifact_registry=measurement_source_artifact_registry,
+            d03_decision_registry=d03_decision_registry,
+            d07_comparison_registry=d07_comparison_registry,
+            d09_summary_registry=d09_summary_registry,
+            d10_context_registry=d10_context_registry,
+        )
+    except LongitudinalWorkspaceBoundaryError as exc:
+        failure = exc
+    if failure is not None:
+        # A read failed: if any authority moved since the first snapshot, the
+        # failure is a read race, never a stable scientific or stale state.
+        moved = False
+        if failure.code is not LongitudinalErrorCode.PERMISSION_DENIED:
+            try:
+                moved = _PINNED_SNAPSHOT(coordinator, dependency_scope) != first
+            except Exception:
+                moved = True
+        code, remediation = (
+            (LongitudinalErrorCode.READ_CONFLICT, LongitudinalRemediation.RETRY_READ)
+            if moved
+            else (failure.code, failure.remediation)
+        )
+        failure = None
+        _fail(code, remediation)
+    assert gathered is not None
+    inputs, protected_rows, positions = gathered
     second = _snapshot(coordinator, dependency_scope)
     second_authorization = _authorize(
         reader_authorization_registry,
@@ -2404,7 +2479,11 @@ def _gather(
     _require(
         _same_head(
             heads.d05_cohort,
-            (history.registry_id, history.registry_epoch_sha256, history.state_head_sha256),
+            (
+                history.registry_id,
+                history.registry_epoch_sha256,
+                history.state_head_sha256,
+            ),
         )
         and history.selected_manifest_sha256 == selector_row.manifest_sha256
         and history.registry_id == authorization.cohort_registry_id
@@ -2446,7 +2525,10 @@ def _gather(
         or policy.measurement.measurement_definition_sha256
         != measurement.measurement_definition_sha256
     ):
-        _fail(LongitudinalErrorCode.INVALID_REQUEST, LongitudinalRemediation.RESELECT_POLICY)
+        _fail(
+            LongitudinalErrorCode.INVALID_REQUEST,
+            LongitudinalRemediation.RESELECT_POLICY,
+        )
     # Anchor policy, D07 envelope and the explicitly selected anchor.
     anchor: ResolvedApprovedAnchor = _guarded(
         lambda: _call(
@@ -2464,7 +2546,11 @@ def _gather(
     _require(
         _same_head(
             heads.anchor_policy,
-            (anchor.registry_id, anchor.registry_epoch_sha256, anchor.state_head_sha256),
+            (
+                anchor.registry_id,
+                anchor.registry_epoch_sha256,
+                anchor.state_head_sha256,
+            ),
         )
     )
     anchor_key = anchor.anchor_record.comparison_key
@@ -2483,7 +2569,10 @@ def _gather(
         )
         != measurement.measurement_definition_sha256
     ):
-        _fail(LongitudinalErrorCode.INVALID_REQUEST, LongitudinalRemediation.RESELECT_ANCHOR)
+        _fail(
+            LongitudinalErrorCode.INVALID_REQUEST,
+            LongitudinalRemediation.RESELECT_ANCHOR,
+        )
     # D06 status for the exact selected version.
     status: CohortManifestRecordStatus = _guarded(
         lambda: _call(
@@ -2514,7 +2603,9 @@ def _gather(
             item.member_sha256 == digest
             and item.provider_namespace == member.provider_namespace
             and item.analysis_record_id == member.analysis_record_id
-            for item, member, digest in zip(status.members, members, member_digests, strict=True)
+            for item, member, digest in zip(
+                status.members, members, member_digests, strict=True
+            )
         )
     )
     # D09 population context (not a gate).
@@ -2542,7 +2633,10 @@ def _gather(
         or summary.cohort_version != version
         or summary.cohort_manifest_sha256 != history.selected_manifest_sha256
     ):
-        _fail(LongitudinalErrorCode.INVALID_REQUEST, LongitudinalRemediation.RESELECT_POLICY)
+        _fail(
+            LongitudinalErrorCode.INVALID_REQUEST,
+            LongitudinalRemediation.RESELECT_POLICY,
+        )
     population = summary.population
     _require(
         summary.record_status_sha256 == status.status_sha256
@@ -2600,20 +2694,22 @@ def _gather(
     # D07 comparisons, matched by exact D03 decision, policy and envelope.
     comparisons = _comparison_index(d07_comparison_registry, heads, anchor)
     # D10 covariate context for this D09 population and D03 series.
-    covariate = _covariate_context(
-        d10_context_registry, heads, request, anchor, series
-    )
+    covariate = _covariate_context(d10_context_registry, heads, request, anchor, series)
     # Rows.
     anchor_record = anchor.anchor_record
     anchor_matches = [
         index
         for index, member in enumerate(members)
-        if member.provider_namespace == anchor_record.linkage_revision.provider_namespace
+        if member.provider_namespace
+        == anchor_record.linkage_revision.provider_namespace
         and member.linkage_id == anchor_record.linkage_revision.linkage_id
         and member.linkage_revision == anchor_record.linkage_revision.revision
     ]
     if len(anchor_matches) != 1:
-        _fail(LongitudinalErrorCode.INVALID_REQUEST, LongitudinalRemediation.RESELECT_ANCHOR)
+        _fail(
+            LongitudinalErrorCode.INVALID_REQUEST,
+            LongitudinalRemediation.RESELECT_ANCHOR,
+        )
     anchor_index = anchor_matches[0]
     family = policy.family
     prerequisite = {
@@ -2652,7 +2748,9 @@ def _gather(
         elif series_state is not DecisionState.DECIDED:
             decision_state = series_state
         else:
-            raw = decisions.get(binding.result.result_id) if binding is not None else None
+            raw = (
+                decisions.get(binding.result.result_id) if binding is not None else None
+            )
             if raw is None:
                 decision_state = DecisionState.NOT_IN_SERIES
             else:
@@ -2731,9 +2829,7 @@ def _gather(
         covariate_context=covariate,
         version_diff=derive_version_diff(history.manifests),
         anchor_record_sha256=anchor.anchor_record_sha256,
-        limitations=tuple(
-            item for item in LimitationCode if item in set(limitations)
-        ),
+        limitations=tuple(item for item in LimitationCode if item in set(limitations)),
     )
     return inputs, tuple(protected_rows), timepoint_positions(manifest)
 
@@ -2818,7 +2914,11 @@ def _row_source(
     _require(
         _same_head(
             heads.e06_source,
-            (resolved.registry_id, resolved.registry_epoch_sha256, resolved.state_head_sha256),
+            (
+                resolved.registry_id,
+                resolved.registry_epoch_sha256,
+                resolved.state_head_sha256,
+            ),
         )
         and resolved.record_status_sha256 == status.status_sha256
         and resolved.object_sha256 == listed.object_sha256
@@ -2900,7 +3000,11 @@ def _row_source(
     _require(
         _same_head(
             heads.family_source,
-            (artifact.registry_id, artifact.registry_epoch_sha256, artifact.state_head_sha256),
+            (
+                artifact.registry_id,
+                artifact.registry_epoch_sha256,
+                artifact.state_head_sha256,
+            ),
         )
         and artifact.e06_state_head_sha256 == heads.e06_source.head
         and artifact.record_status_sha256 == status.status_sha256
@@ -2912,8 +3016,10 @@ def _row_source(
             LongitudinalErrorCode.INTEGRITY_FAILURE,
             LongitudinalRemediation.VERIFY_STORE_INTEGRITY,
         )
-    return SourceState.VERIFIED, source, _project_fragment(
-        projection, artifact, manifest, source
+    return (
+        SourceState.VERIFIED,
+        source,
+        _project_fragment(projection, artifact, manifest, source),
     )
 
 
@@ -2961,7 +3067,11 @@ def _resolve_series(
         _require(
             _same_head(
                 heads.d03_decision,
-                (resolved.registry_id, resolved.registry_epoch_sha256, resolved.state_head_sha256),
+                (
+                    resolved.registry_id,
+                    resolved.registry_epoch_sha256,
+                    resolved.state_head_sha256,
+                ),
             )
         )
         if (
@@ -3039,7 +3149,11 @@ def _row_comparison(
     _require(
         _same_head(
             heads.d07_comparison,
-            (resolved.registry_id, resolved.registry_epoch_sha256, resolved.state_head_sha256),
+            (
+                resolved.registry_id,
+                resolved.registry_epoch_sha256,
+                resolved.state_head_sha256,
+            ),
         )
         and (
             resolved.result_trust_state_head_sha256 is None
@@ -3114,7 +3228,9 @@ def _covariate_context(
     if not matched:
         return PublicCovariateContext(
             state=(
-                CovariateContextState.STALE if stale else CovariateContextState.NOT_REGISTERED
+                CovariateContextState.STALE
+                if stale
+                else CovariateContextState.NOT_REGISTERED
             )
         )
     aggregate = project_aggregate_covariate_summary(matched[0].live.context)
