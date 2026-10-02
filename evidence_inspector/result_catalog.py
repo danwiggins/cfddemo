@@ -83,9 +83,50 @@ MAX_QUERY_LIMIT = 100
 MAX_FILTER_VALUES = 32
 
 _SQLITE_OPEN_LOCK = threading.RLock()
-# Content-lock inode -> {(pid, thread ident): catalog instance holding it}.
-_CONTENT_LOCK_HOLDERS: dict[tuple[int, int] | None, dict[tuple[int, int], object]] = {}
-_CONTENT_LOCK_HOLDERS_LOCK = threading.Lock()
+# In-process gate over each content-lock inode, taken before any catalog
+# instance's connection lock: inode -> (exclusive holder, shared holders),
+# each holder keyed by (pid, thread ident) and naming its catalog instance.
+_CONTENT_GATE = threading.Condition(threading.Lock())
+_CONTENT_GATE_STATE: dict[
+    tuple[int, int] | None,
+    tuple[list[tuple[tuple[int, int], object]], dict[tuple[int, int], object]],
+] = {}
+
+
+def _acquire_content_gate(
+    inode: tuple[int, int] | None,
+    current: tuple[int, int],
+    catalog: object,
+    exclusive: bool,
+) -> None:
+    with _CONTENT_GATE:
+        writer, readers = _CONTENT_GATE_STATE.setdefault(inode, ([], {}))
+        if current in readers or any(holder == current for holder, _ in writer):
+            # This thread holds the root's content lock through another
+            # instance; waiting would wait for itself.
+            raise CatalogConflict(
+                "catalog content lock is held through another catalog instance"
+            )
+        while writer or (exclusive and readers):
+            _CONTENT_GATE.wait()
+        if exclusive:
+            writer.append((current, catalog))
+        else:
+            readers[current] = catalog
+
+
+def _release_content_gate(
+    inode: tuple[int, int] | None, current: tuple[int, int]
+) -> None:
+    with _CONTENT_GATE:
+        state = _CONTENT_GATE_STATE.get(inode)
+        if state is not None:
+            writer, readers = state
+            writer[:] = [item for item in writer if item[0] != current]
+            readers.pop(current, None)
+            if not writer and not readers:
+                del _CONTENT_GATE_STATE[inode]
+        _CONTENT_GATE.notify_all()
 
 
 def _normalize_schema_sql(statement: str) -> str:
@@ -1337,9 +1378,9 @@ class ResultCatalog:
     def trust_authority_fence(self) -> Iterator[ResultTrustSnapshot | None]:
         """Hold this catalog's trust authority for a composing caller's body.
 
-        Lock order: ``_connection_lock``, then the catalog-content lock held
-        shared (or the exclusive content lock this thread already holds),
-        then the trust read fence.  On the registry path every catalog
+        Lock order: the catalog-content lock held shared (its in-process gate,
+        then ``_connection_lock``, then its ``flock``; or the exclusive
+        content lock this thread already holds), then the trust read fence.  On the registry path every catalog
         verification in the body uses the yielded snapshot and no trust event
         commits until the body exits; on both paths no E04 import, staging,
         adoption, compensation, recovery or other catalog-row write commits,
@@ -1406,75 +1447,70 @@ class ResultCatalog:
         finish, compensation, discard, candidate registration/finish,
         recovery, schema initialization) holds it exclusively; composing
         readers (``trust_authority_fence``, ``content_authority_fence``) hold
-        it shared.  It sits after ``_connection_lock`` and before the trust
-        read fence (and before ``_SQLITE_OPEN_LOCK``).  Reentrant on the
+        it shared.  It sits before the trust read fence (and before
+        ``_SQLITE_OPEN_LOCK``).  Reentrant on the
         owning thread: a nested entry reuses the held mode, and an exclusive
         request under a held shared lock is refused, never upgraded.
 
-        It takes ``_connection_lock`` itself.  Ownership is also recorded per
-        lock-file inode for the process: a thread that holds the content lock
-        of a root through one catalog instance is refused (before taking this
-        instance's connection lock) when it asks for it through another
-        instance on the same root, since that request would wait behind its
-        own ``flock``.
+        In-process the lock is a per-inode gate taken *before* this
+        instance's ``_connection_lock`` (so no thread waits for the content
+        lock while holding a connection lock another holder may need); then
+        the connection lock; then the ``flock`` that excludes other
+        processes.  A thread holding a root's content lock through one
+        catalog instance is refused when it asks through another instance on
+        the same root, instead of waiting for itself.
         """
 
         if type(exclusive) is not bool:
             raise CatalogError("catalog content lock mode is invalid")
         current = (os.getpid(), threading.get_ident())
-        inode = self._content_lock_identity
-        with _CONTENT_LOCK_HOLDERS_LOCK:
-            other = _CONTENT_LOCK_HOLDERS.get(inode, {}).get(current)
-        if other is not None and other is not self:
-            raise CatalogConflict(
-                "catalog content lock is held through another catalog instance"
-            )
-        with self._connection_lock:
-            owner = self._content_lock_owner
-            if owner is not None:
-                if owner[:2] != current:
-                    raise CatalogError("catalog content lock owner is invalid")
+        owner = self._content_lock_owner
+        if owner is not None and owner[:2] == current:
+            # Reentrant entry on the owning thread (only it sets its ident).
+            with self._connection_lock:
                 if exclusive and not owner[2]:
                     raise CatalogConflict(
                         "catalog content lock cannot be upgraded to exclusive"
                     )
                 yield
-                return
-            descriptor = self._content_lock_fd
-            if descriptor is None:
-                raise CatalogFilesystemError("catalog is closed")
-            try:
-                named = os.stat(
-                    CATALOG_CONTENT_LOCK_NAME,
-                    dir_fd=self._root_fd,
-                    follow_symlinks=False,
-                )
-                held = os.fstat(descriptor)
-            except OSError:
-                raise CatalogFilesystemError("catalog content lock changed") from None
-            if (
-                not stat.S_ISREG(named.st_mode)
-                or _inode_identity(named) != self._content_lock_identity
-                or _inode_identity(held) != self._content_lock_identity
-            ):
-                raise CatalogFilesystemError("catalog content lock changed")
-            fcntl.flock(descriptor, fcntl.LOCK_EX if exclusive else fcntl.LOCK_SH)
-            try:
-                self._content_lock_owner = (*current, exclusive)
-                with _CONTENT_LOCK_HOLDERS_LOCK:
-                    _CONTENT_LOCK_HOLDERS.setdefault(inode, {})[current] = self
+            return
+        inode = self._content_lock_identity
+        _acquire_content_gate(inode, current, self, exclusive)
+        try:
+            with self._connection_lock:
+                if self._content_lock_owner is not None:
+                    raise CatalogError("catalog content lock owner is invalid")
+                descriptor = self._content_lock_fd
+                if descriptor is None:
+                    raise CatalogFilesystemError("catalog is closed")
                 try:
-                    yield
+                    named = os.stat(
+                        CATALOG_CONTENT_LOCK_NAME,
+                        dir_fd=self._root_fd,
+                        follow_symlinks=False,
+                    )
+                    held = os.fstat(descriptor)
+                except OSError:
+                    raise CatalogFilesystemError(
+                        "catalog content lock changed"
+                    ) from None
+                if (
+                    not stat.S_ISREG(named.st_mode)
+                    or _inode_identity(named) != inode
+                    or _inode_identity(held) != inode
+                ):
+                    raise CatalogFilesystemError("catalog content lock changed")
+                fcntl.flock(descriptor, fcntl.LOCK_EX if exclusive else fcntl.LOCK_SH)
+                try:
+                    self._content_lock_owner = (*current, exclusive)
+                    try:
+                        yield
+                    finally:
+                        self._content_lock_owner = None
                 finally:
-                    with _CONTENT_LOCK_HOLDERS_LOCK:
-                        holders = _CONTENT_LOCK_HOLDERS.get(inode, {})
-                        if holders.get(current) is self:
-                            del holders[current]
-                        if not holders:
-                            _CONTENT_LOCK_HOLDERS.pop(inode, None)
-                    self._content_lock_owner = None
-            finally:
-                fcntl.flock(descriptor, fcntl.LOCK_UN)
+                    fcntl.flock(descriptor, fcntl.LOCK_UN)
+        finally:
+            _release_content_gate(inode, current)
 
     @contextmanager
     def content_authority_fence(self, *, exclusive: bool = False) -> Iterator[None]:
@@ -1483,9 +1519,11 @@ class ResultCatalog:
         Shared: no catalog-row write commits, from any process, until the
         body exits (other shared holders proceed).  Exclusive: for a
         composing writer (the D06 import) that will call this catalog's
-        writers inside the body.  Lock order: after ``_connection_lock``,
-        before the trust read fence; the composing caller takes it before
-        ``trust_authority_fence``.  Reentrant on the owning thread; a shared
+        writers inside the body.  Lock order: in-process gate,
+        ``_connection_lock`` (held through the body), ``flock``; before the
+        trust read fence.  The composing caller takes it before
+        ``trust_authority_fence`` and must not already hold this catalog's
+        connection lock.  Reentrant on the owning thread; a shared
         hold is never upgraded.
         """
 

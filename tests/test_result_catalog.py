@@ -1220,6 +1220,52 @@ def test_one_thread_cannot_take_the_content_lock_through_two_instances(
         catalog.close()
 
 
+def test_a_waiting_writer_holds_no_connection_lock_a_holder_needs(
+    tmp_path: Path,
+) -> None:
+    """T1 holds A's content lock; T2's B writer waits; T1 still reads B."""
+
+    catalog, _, import_root = _catalog(tmp_path)
+    other = ResultCatalog(
+        tmp_path / "catalog",
+        import_roots={"root_primary": import_root},
+        trust_store=catalog.trust_store,
+    )
+    done = threading.Event()
+    errors: list[BaseException] = []
+
+    def write() -> None:
+        try:
+            _import(other)
+        except BaseException as error:  # noqa: BLE001 - surfaced below
+            errors.append(error)
+        finally:
+            done.set()
+
+    writer = threading.Thread(target=write, daemon=True)
+    read: dict[str, object] = {}
+
+    def hold_and_read() -> None:
+        with catalog.content_authority_fence():
+            writer.start()
+            assert not done.wait(0.5)
+            read["page"] = other.query(CatalogQuery())
+            assert not done.is_set()
+
+    holder = threading.Thread(target=hold_and_read, daemon=True)
+    try:
+        holder.start()
+        holder.join(20)
+        writer.join(20)
+        assert not holder.is_alive() and not writer.is_alive(), "deadlock"
+        assert read["page"].empty and not errors
+        assert other.query(CatalogQuery()).results
+    finally:
+        if not holder.is_alive() and not writer.is_alive():
+            other.close()
+            catalog.close()
+
+
 def test_the_content_lock_file_is_private_and_bound(tmp_path: Path) -> None:
     catalog, _, _ = _catalog(tmp_path)
     try:

@@ -34,7 +34,7 @@ reader_authorization -> d10_context -> d09_summary -> d01_linkage -> d04_history
 | `d01_linkage` | `ProviderLinkageStore` | public `authority_read_fence` (store RLock + SQLite `BEGIN IMMEDIATE`) | `active_snapshot` (nests as a SAVEPOINT) |
 | `d04_history` | `RecordSupersessionStore` | nothing of its own: fenced by D01 | `active_snapshot` (nests in the D01 fence). During capture and revalidation it takes D04's module lock (`_SQLITE_OPEN_LOCK`) and a D04 SQLite `BEGIN IMMEDIATE` inside the held D01 fence, and may advance D04 (refreshing invalidations); every D04 writer needs D01 first, so this cannot deadlock and a first-read advance is stable for the rest of the hold. |
 | `d05_cohort` | `CohortRegistry` | **new** public `authority_read_fence` (shared lock) | **new** `head_in_fence` |
-| `e04_catalog_trust` | `ResultCatalog` + `ResultTrustRegistry` | public `trust_authority_fence` (catalog connection lock, **catalog-content lock shared**, then trust read fence) | `authority_snapshot` + **new** `content_head_in_fence` (E04 head = `catalog_dependency_head_sha256`, saved-head v2); trust journal via pinned `_snapshot_locked` |
+| `e04_catalog_trust` | `ResultCatalog` + `ResultTrustRegistry` | public `trust_authority_fence` (**catalog-content lock shared**: in-process gate, catalog connection lock, `flock`; then trust read fence) | `authority_snapshot` + **new** `content_head_in_fence` (E04 head = `catalog_dependency_head_sha256`, saved-head v2); trust journal via pinned `_snapshot_locked` |
 | `d06_record_catalog` | `CohortRecordCatalog` | **new** public `record_status_read_fence` (root shared flock) | **new** `record_status_in_fence(scope)` |
 | `e06_source` | `ResultViewSourceRegistry` | pinned `_lock(shared)` | pinned `_load_state` head; identity from **new** `registry_identity` |
 | `d03_decision` | `LongitudinalDecisionRegistry` | pinned `_lock(shared)` | pinned `_load_state` head |
@@ -58,16 +58,18 @@ actually take (A -> B: B is acquired while A is held):
   (D01 -> D03), via the live D10 build (#64).
 - D09 registry lock -> D09 summary builder -> D06 status fence (D01 -> D05
   -> E04 connection -> E04 content -> trust -> D06 root) (#59).
-- D06 status fence: D01 -> D05 -> E04 connection lock -> E04 content
-  (shared) -> result trust (registry read fence) -> D06 root.
-- E04: connection lock -> catalog-content lock -> trust read fence
+- D06 status fence: D01 -> D05 -> E04 content (shared, with the connection
+  lock) -> result trust (registry read fence) -> D06 root.
+- E04: catalog-content lock (in-process per-inode gate, then the catalog
+  connection lock, then the cross-process `flock`) -> trust read fence
   (`trust_authority_fence`; every E04 row writer takes the content lock
   exclusively in the same position, then `_SQLITE_OPEN_LOCK` on a first
-  connect).
-- D06 import: D01 -> D05 -> E04 connection lock -> E04 content (exclusive)
-  -> trust -> D06 root (exclusive) -> nested E04 writes, which reuse the held
-  content lock. D06 open-time recovery: E04 connection lock -> E04 content
-  (exclusive) -> D06 root. Neither takes E04 content after the D06 root.
+  connect). Nothing waits for the content lock while holding a catalog
+  connection lock.
+- D06 import: D01 -> D05 -> E04 content (exclusive, with the E04 connection
+  lock) -> trust -> D06 root (exclusive) -> nested E04 writes, which reuse
+  the held content lock. D06 open-time recovery: E04 content (exclusive) ->
+  D06 root. Neither takes E04 content after the D06 root.
 - E06 and family-source: D06 status fence -> own lock; family-source never
   holds its lock while resolving E06 (#62, family-source registry).
 - D07: D01 -> trust read fence -> D07 lock (#60, #68).

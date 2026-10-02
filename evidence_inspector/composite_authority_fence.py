@@ -29,7 +29,7 @@ is derived from and every deviation from the integration plan)::
 
     reader authorization -> D10 context -> D09 summary -> D01 linkage
     (D04 history is fenced by D01) -> D05 cohort registry
-    -> E04 catalog connection + catalog content (shared) + result trust
+    -> E04 catalog content (shared, with the connection lock) + result trust
     -> D06 record root
     -> E06 source -> D03 decision -> D07 comparison -> family-source
     -> anchor policy -> projection policy -> saved-comparison registry
@@ -559,9 +559,10 @@ class _CohortAdapter(_Adapter):
 
 
 class _CatalogTrustAdapter(_Adapter):
-    """E04 connection lock, E04 catalog-content lock (shared), result trust.
+    """E04 catalog-content lock (shared; it takes the E04 connection lock),
+    then result trust.
 
-    ``ResultCatalog.trust_authority_fence`` takes all three, in that order,
+    ``ResultCatalog.trust_authority_fence`` takes both, in that order,
     and marks this thread so every catalog verification inside reuses the
     one held trust snapshot.  Trust add/revoke, and every E04 catalog-row
     writer (import, staging, adoption, finish, compensation, discard,

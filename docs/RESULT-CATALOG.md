@@ -148,19 +148,21 @@ catalog root.
 - Plain reads (`query`, `verify_reference`, recovery enumeration, the live
   reader) take no content lock.
 
-Lock order: catalog `_connection_lock`, then the content lock, then the
-result-trust read fence (and `_SQLITE_OPEN_LOCK` on a first connect). The lock
-is held only under `_connection_lock`, so one thread per catalog instance owns
-it; nested entries on that thread reuse the held mode, and an exclusive request
-under a held shared lock raises `CatalogConflict` (never upgraded). Two
-instances on one root in one process contend through separate open files, as
-two processes do. Ownership is also recorded per lock-file inode for the
-process: a thread holding a root's content lock through one instance that
-asks for it through another instance on the same root gets `CatalogConflict`
-(before that instance's connection lock is taken) instead of waiting behind
-its own `flock`. A fence body must not call another catalog instance over the
-same root at all: even a plain read there waits for that instance's
-connection lock, which a blocked writer of that instance may hold.
+Lock order: the content lock, then the result-trust read fence (and
+`_SQLITE_OPEN_LOCK` on a first connect). The content lock itself is taken in
+three parts: an in-process gate per lock-file inode (a reader/writer gate
+shared by every catalog instance on that root), then the instance's
+`_connection_lock`, then the `flock` that excludes other processes. So no
+thread waits for the content lock while holding a connection lock: a writer
+of instance B that waits behind a holder of instance A holds nothing the
+holder may need, and the holder can still read through B. The connection
+lock is held through the body, so one thread per instance owns the lock;
+nested entries on that thread reuse the held mode, and an exclusive request
+under a held shared lock raises `CatalogConflict` (never upgraded). A thread
+holding a root's content lock through one instance that asks for it through
+another instance on the same root gets `CatalogConflict` instead of waiting
+for itself. A caller must not hold a catalog's connection lock when it asks
+for that catalog's content lock (D06 takes the content fence first).
 
 `content_head_in_fence()` (requires this thread's content lock) and
 `content_snapshot()` (takes it shared) return `CatalogContentSnapshot`: a

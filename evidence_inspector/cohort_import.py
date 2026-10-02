@@ -748,11 +748,12 @@ class CohortRecordCatalog:
         ).hexdigest()
         try:
             _seal_cohort_instance(self)
-            # Lock order: E04 connection lock, E04 content lock (exclusive:
-            # recovery writes E04 rows), then this root inside recovery.
-            with self._catalog_connection_lock, _PINNED_RESULT_CONTENT_FENCE(
+            # Lock order: E04 content lock (exclusive: recovery writes E04
+            # rows; it takes the E04 connection lock itself, after its
+            # in-process gate), then this root inside recovery.
+            with _PINNED_RESULT_CONTENT_FENCE(
                 self._result_catalog, exclusive=True
-            ):
+            ), self._catalog_connection_lock:
                 _CC_RECOVER_PENDING(self)
         except BaseException:
             self.close()
@@ -1489,16 +1490,17 @@ class CohortRecordCatalog:
             _PINNED_REGISTRY_REQUIRE_INTEGRITY(registry)
             stack.enter_context(_PINNED_LINKAGE_AUTHORITY_FENCE(self._linkage_store))
             stack.enter_context(_PINNED_REGISTRY_LOCK(registry, exclusive=False))
-            # Lock order: linkage fence, D05 lock, catalog connection lock,
-            # catalog-content lock, then result trust (the TrustStore lock,
+            # Lock order: linkage fence, D05 lock, catalog-content lock
+            # (which takes the catalog connection lock after its in-process
+            # gate, and holds it), then result trust (the TrustStore lock,
             # or the registry read fence held by the catalog's
             # trust_authority_fence, which reuses the held content lock).
-            stack.enter_context(self._catalog_connection_lock)
             stack.enter_context(
                 _PINNED_RESULT_CONTENT_FENCE(
                     self._result_catalog, exclusive=exclusive_content
                 )
             )
+            stack.enter_context(self._catalog_connection_lock)
             if self._result_trust_lock is not None:
                 stack.enter_context(self._result_trust_lock)
             stack.enter_context(_PINNED_RESULT_TRUST_FENCE(self._result_catalog))
