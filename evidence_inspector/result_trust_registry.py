@@ -39,6 +39,7 @@ from evidence_inspector.method_registry import (
     canonical_contract_bytes,
     contract_from_canonical_bytes,
 )
+from evidence_inspector.repeatability_comparison import MAX_RESULT_TRUST_KEYS
 from evidence_inspector.safe_ingress import (
     bounded_json_loads,
     contract_type_graph,
@@ -57,9 +58,9 @@ from traceback_runner.signing import (
     trusted_key_id,
 )
 
-# D07 bounds one result trust document to 32 keys; the registry never grows a
-# document past that, revoked keys included.
-MAX_TRUST_KEYS = 32
+# D07 bounds one result trust document to MAX_RESULT_TRUST_KEYS keys; the
+# registry never grows a document past that, revoked keys included.
+MAX_TRUST_KEYS = MAX_RESULT_TRUST_KEYS
 MAX_TRUST_EVENTS = 256
 # Revocations of never-added IDs (tombstones) have their own bound, so they can
 # never use up the journal capacity reserved for adding and then revoking every

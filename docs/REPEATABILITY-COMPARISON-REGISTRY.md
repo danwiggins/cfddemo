@@ -77,7 +77,9 @@ closed decision surfaces as a non-replaying decision, and so as stale.
 A comparison becomes stale on any linkage commit (the D03 decision binds the
 linkage snapshot head), linkage approval expiry, a result trust change or key
 revocation (on the trust registry path, only one that touches the
-comparison's own signing keys), an envelope that expires after registration, an envelope that was
+comparison's own signing keys or, for a comparison whose keys were never
+added, any trust event), an envelope that expires after registration, an
+envelope that was
 not yet valid at registration and has since opened, or a live time earlier
 than registration.
 

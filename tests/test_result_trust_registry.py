@@ -264,6 +264,27 @@ def test_restoring_an_older_backup_is_rejected_and_cleaned_up(
     assert not target.exists()
 
 
+def test_same_identity_copy_behind_the_process_head_fails_closed(
+    trust: ResultTrustRegistry, tmp_path: Path
+) -> None:
+    current = trust.add_key(RESULT_KEY)
+    copy = ResultTrustRegistry.restore(
+        tmp_path / "same-identity-copy", trust.backup_bytes(), **_identity(current)
+    )
+    try:
+        assert copy.current_trust().state_head_sha256 == current.state_head_sha256
+        trust.revoke_key(RESULT_KEY.key_id)
+        # The copy is internally consistent but still shows the key as active;
+        # the identity-keyed head fence refuses it rather than serve it.
+        with pytest.raises(ResultTrustRegistryUnsafe, match="rollback"):
+            copy.current_trust()
+        with pytest.raises(ResultTrustRegistryUnsafe, match="rollback"):
+            with copy.read_fence():
+                pass
+    finally:
+        copy.close()
+
+
 def test_journal_that_re_adds_a_revoked_key_fails_closed(
     trust: ResultTrustRegistry,
 ) -> None:

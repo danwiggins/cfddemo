@@ -65,7 +65,9 @@ trust-administration key. Under this threat model, any code that can call
 key, and development keys have no custody story, so a second key would add
 ceremony without adding a boundary. A signed administration key becomes
 meaningful with production key custody, which is out of scope; it is listed
-as an open decision below.
+as an open decision below. The open handle is the capability and there is no
+read-only handle, so every D07 registry bound to a trust registry holds a
+handle that can also add keys.
 
 Revocation needs no extra authority. It only ever removes trust, and the
 registry never restores it, so making revocation easy is the fail-safe
@@ -76,10 +78,19 @@ direction.
 - Opening an existing registry requires the independently retained registry
   ID, epoch, and current head. An older head is rejected. A new root refuses
   inherited expectations.
-- A process-wide head fence, keyed by registry ID and epoch (not by root
-  inode), rejects any journal that does not contain the newest head this
-  process has seen for that registry. That covers a journal truncated in place
-  and a restore of an older backup into another directory.
+- A process-wide head fence, keyed by registry ID and epoch rather than by
+  root inode (the sibling registries key by inode), rejects any journal that
+  does not contain the newest head this process has seen for that registry.
+  That covers a journal truncated in place and a restore of an older backup
+  into another directory. Consequence, deliberate: two roots with the same
+  registry identity in one process are held to one head. A same-identity copy
+  that is behind the newest head this process has seen fails closed with
+  `state rollback detected` even though it is internally consistent, and only
+  one of two such roots can advance. A trust copy that is behind would present
+  revoked keys as active, which is the hazard this registry exists to close,
+  so this is required behaviour here, not the false rollback it would be for a
+  non-trust registry. D07 binds its trust registry by the same (ID, epoch) key,
+  so the fence and the binding agree on what 'the same trust registry' means.
 - Across processes, the retained head is the defence, as in the sibling
   registries.
 
