@@ -172,6 +172,12 @@ class _AuthorityDirectory:
             _require_private(descriptor, directory=False)
             fcntl.flock(descriptor, fcntl.LOCK_EX if exclusive else fcntl.LOCK_SH)
             try:
+                if exclusive:
+                    # An interrupted write can leave a temporary copy (possibly
+                    # of a private key); remove it under the exclusive lock.
+                    for entry in os.listdir(self.fd):
+                        if entry.startswith(".tmp-"):
+                            os.unlink(entry, dir_fd=self.fd)
                 yield
             finally:
                 fcntl.flock(descriptor, fcntl.LOCK_UN)
@@ -195,19 +201,40 @@ class _AuthorityDirectory:
         return content
 
     def _write_new(self, name: str, content: bytes) -> None:
+        """Publish ``name`` complete or not at all; never overwrite it."""
+
+        temporary = self._write_temporary(content)
+        try:
+            os.link(
+                temporary,
+                name,
+                src_dir_fd=self.fd,
+                dst_dir_fd=self.fd,
+                follow_symlinks=False,
+            )
+        finally:
+            os.unlink(temporary, dir_fd=self.fd)
+        os.fsync(self.fd)
+
+    def _write_temporary(self, content: bytes) -> str:
+        name = f".tmp-{secrets.token_hex(16)}"
         descriptor = os.open(
             name, os.O_WRONLY | os.O_CREAT | os.O_EXCL | _FILE_FLAGS, 0o600, dir_fd=self.fd
         )
         try:
-            os.fchmod(descriptor, 0o600)
-            _require_private(descriptor, directory=False)
-            view = memoryview(content)
-            while view:
-                view = view[os.write(descriptor, view) :]
-            os.fsync(descriptor)
-        finally:
-            os.close(descriptor)
-        os.fsync(self.fd)
+            try:
+                os.fchmod(descriptor, 0o600)
+                _require_private(descriptor, directory=False)
+                view = memoryview(content)
+                while view:
+                    view = view[os.write(descriptor, view) :]
+                os.fsync(descriptor)
+            finally:
+                os.close(descriptor)
+        except BaseException:
+            os.unlink(name, dir_fd=self.fd)
+            raise
+        return name
 
     # -- private keys ------------------------------------------------------
 
@@ -275,8 +302,7 @@ class _AuthorityDirectory:
         content = json.dumps(
             pins.model_dump(mode="json"), sort_keys=True, separators=(",", ":")
         ).encode() + b"\n"
-        temporary = f".{_PINS_NAME}.{secrets.token_hex(8)}.tmp"
-        self._write_new(temporary, content)
+        temporary = self._write_temporary(content)
         try:
             os.rename(temporary, _PINS_NAME, src_dir_fd=self.fd, dst_dir_fd=self.fd)
         except BaseException:
@@ -523,16 +549,20 @@ def _authority_recover(
                 content = stream.read(2 * 1024 * 1024 + 1)
             entries = [json.loads(line) for line in content.splitlines() if line]
             heads = [entry.get("entry_sha256") for entry in entries]
-            if pins.state_head_sha256 not in heads:
+            if pins.state_head_sha256 not in heads or any(
+                type(head) is not str for head in heads
+            ):
                 raise OperatorAuthorityError(
                     "retained head is not in the registry history; refusing to re-pin"
                 )
             tail = heads[-1]
             trust = pins.trust
             registry = None
-            # Only trust revisions this operator signed can follow the pin;
-            # the registry replay rejects any other.
+            # Only a trust whose active keys this operator holds is adopted;
+            # the registry replay then proves the tail extends the pin.
             for candidate in _candidate_trusts(pins, entries):
+                if not _held_by_operator(candidate, directory):
+                    continue
                 try:
                     registry = _open_registry(
                         pins.model_copy(
@@ -564,6 +594,23 @@ def _authority_recover(
         directory.close()
     print("operator pins now match the registry head", file=out)
     return 0
+
+
+def _held_by_operator(
+    trust: ReaderProviderTrust, directory: _AuthorityDirectory
+) -> bool:
+    """A recovered trust must be one this operator provisioned: same authority,
+    and every active key matches a private key held in the authority dir."""
+
+    active = [key for key in trust.keys if key.status is ReaderKeyStatus.ACTIVE]
+    for key in active:
+        if not directory.has_key(key.key_version):
+            return False
+        try:
+            directory.read_key(key.key_version, public_key_base64=key.public_key_base64)
+        except OperatorAuthorityError:
+            return False
+    return bool(active)
 
 
 def _candidate_trusts(
@@ -760,7 +807,11 @@ def _launch(
                 file=out,
             )
             while True:
-                print(service.issue_reader_launch_url(args.grant), file=out, flush=True)
+                try:
+                    link = service.issue_reader_launch_url(args.grant)
+                except RuntimeError:
+                    link = "Too many unused links; wait 60 seconds, then press Enter."
+                print(link, file=out, flush=True)
                 try:
                     line = stdin.readline()
                 except KeyboardInterrupt:

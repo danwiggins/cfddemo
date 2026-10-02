@@ -382,3 +382,80 @@ def test_rotation_stops_at_the_trust_key_bound(
     assert code == 3 and "15 rotations" in err
     assert (operator.authority / "reader-key-v2.pem").exists()
     assert not (operator.authority / "reader-key-v3.pem").exists()
+
+
+def test_recover_refuses_a_trust_the_operator_did_not_provision(
+    operator, tmp_path: Path
+) -> None:
+    from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
+
+    from evidence_inspector.reader_authorization_registry import (
+        ReaderAuthorityKey,
+        ReaderKeyStatus,
+        ReaderProviderTrust,
+        reader_trust_sha256,
+    )
+
+    pins = operator.pins()
+    trust = ReaderProviderTrust.model_validate(pins["trust"])
+    foreign = ReaderProviderTrust(
+        profile=trust.profile,
+        authority_id=trust.authority_id,
+        revision=2,
+        previous_trust_sha256=reader_trust_sha256(trust),
+        keys=(
+            *trust.keys,
+            ReaderAuthorityKey(
+                key_version=2,
+                public_key_base64=reader_cli._public_base64(
+                    Ed25519PrivateKey.generate()
+                ),
+                status=ReaderKeyStatus.ACTIVE,
+            ),
+        ),
+    )
+    registry = reader_cli._open_registry(
+        reader_cli.OperatorAuthorityPins.model_validate(pins), operator.clock
+    )
+    try:
+        registry.rotate_trust(foreign, expected_trust_sha256=reader_trust_sha256(foreign))
+    finally:
+        registry.close()
+    code, _, err = operator("authority", "recover")
+    assert code == 3 and "could not be re-pinned" in err
+    assert operator.pins() == pins
+
+
+def test_launch_survives_too_many_unused_links(operator, tmp_path: Path) -> None:
+    selector = operator.issue()
+
+    class _Enter:
+        count = 0
+
+        def readline(self) -> str:
+            self.count += 1
+            return "\n" if self.count <= 17 else ""
+
+    code, out, err = operator(
+        "launch", "--grant", selector, "--root", str(tmp_path / "runner"),
+        stdin=_Enter(),
+    )
+    assert code == 0, err
+    lines = out.splitlines()
+    assert sum(line.startswith("http://") for line in lines) == 16
+    assert "Too many unused links" in out
+
+
+def test_interrupted_writes_leave_no_partial_key(operator, monkeypatch) -> None:
+    real_write = os.write
+
+    def failing_write(descriptor, data):
+        raise OSError("disk full")
+
+    monkeypatch.setattr(reader_cli.os, "write", failing_write)
+    code, _, _ = operator("authority", "rotate")
+    monkeypatch.setattr(reader_cli.os, "write", real_write)
+    assert code == 6
+    assert not (operator.authority / "reader-key-v2.pem").exists()
+    assert not list(operator.authority.glob(".tmp-*"))
+    assert operator("authority", "rotate")[0] == 0

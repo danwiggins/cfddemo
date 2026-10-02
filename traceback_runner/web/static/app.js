@@ -177,7 +177,7 @@
   // The reader launch credential stays in page memory only; it is sent once,
   // in a same-origin POST body carrying the session cookie, Origin and CSRF.
   const exchangeReaderLaunch = async (csrfToken) => {
-    if (!readerLaunch) return;
+    if (!readerLaunch) return true;
     const response = await fetch("/api/v1/session/reader-launch", {
       method: "POST",
       credentials: "same-origin",
@@ -188,6 +188,7 @@
     status.textContent = response.ok
       ? "Longitudinal reader session bound"
       : "Longitudinal reader launch was denied; ask the operator for a new link";
+    return response.ok;
   };
   if (!bootstrap) {
     status.textContent = "Relaunch from the local Traceback command";
@@ -201,7 +202,8 @@
   }).then(async (response) => {
     if (!response.ok) throw new Error("Local session unavailable");
     const session = await response.json();
-    await exchangeReaderLaunch(session.csrf_token);
+    // A denied reader launch stops here so its message stays visible.
+    if (!(await exchangeReaderLaunch(session.csrf_token))) return;
     await renderJobs();
     try {
       await loadCatalog();
