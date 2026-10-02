@@ -586,6 +586,13 @@ class SavedFamilyProjectionRequestV1(RegistryContract):
             self.component_count >= 1
         ):
             raise ValueError("projection component count does not match its rule")
+        # Each finite component carries exactly one statistic, so every listed
+        # statistic needs at least one component.
+        if (
+            self.selection_rule is ProjectionSelectionRule.FINITE_COMPONENTS
+            and self.component_count < len(self.statistics)
+        ):
+            raise ValueError("projection statistics exceed their components")
         return self
 
 
@@ -2256,15 +2263,26 @@ class LongitudinalComparisonRegistry:
 
         assert self._root_fd is not None and self._objects_fd is not None
         try:
-            for directory in (self._root_fd, self._objects_fd):
+            for directory, is_destination, size_bound in (
+                (
+                    self._root_fd,
+                    lambda name: name in (_CANDIDATE_NAME, _METADATA_NAME),
+                    MAX_RECOVERY_BYTES,
+                ),
+                (
+                    self._objects_fd,
+                    lambda name: _is_hex(name[:-5], 64) and name.endswith(".json"),
+                    MAX_OBJECT_BYTES,
+                ),
+            ):
                 names = os.listdir(directory)
                 # ``_publish_file`` links the destination before unlinking its
                 # temporary name, so a crash there leaves a two-link temporary
-                # file whose other link is the published, non-temporary name.
+                # file whose other link is a valid publication destination.
                 published = {
                     _identity(os.stat(name, dir_fd=directory, follow_symlinks=False))
                     for name in names
-                    if not _is_temporary_name(name)
+                    if is_destination(name)
                 }
                 for name in names:
                     if not _is_temporary_name(name):
@@ -2278,7 +2296,7 @@ class LongitudinalComparisonRegistry:
                         or stat.S_IMODE(observed.st_mode) != 0o600
                         or observed.st_uid != os.geteuid()
                         or not links_ok
-                        or observed.st_size > MAX_JOURNAL_BYTES
+                        or observed.st_size > size_bound
                     ):
                         raise LongitudinalComparisonRegistryUnsafe(
                             "saved comparison registry temporary file is unsafe"

@@ -277,3 +277,13 @@ protected identity.
   creation (root without metadata) fails closed.
 - Reads parse one object per selected row; full-state parsing happens only in
   backup.
+- `SavedFamilyProjectionRequestV1` checks family, statistic order, units,
+  rule/count and statistics-versus-components, but not family-specific
+  component maxima (for example the CNA-chromosome policy bound). The policy
+  digest still pins the exact registered policy; E12 must resolve it and
+  compare before replay.
+- Backup generation and parsing hold several full copies of the object bytes;
+  near the 520 MiB bound, peak memory is roughly 1–1.5 GiB. Streaming is a
+  follow-up.
+- A selector page fails as a whole (`authority_stale`) if any row's scoped
+  dependency heads cannot be read; it does not degrade that row alone.

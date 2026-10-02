@@ -394,6 +394,25 @@ def test_unsafe_temporary_names_fail_closed(registry, fence, tmp_path) -> None:
         registry.list_selectors(dependency_fence=fence)
     assert foreign.exists()
     foreign.unlink()
+    # A temporary hard-linked to a non-destination name is never removed.
+    stray = registry.root / "objects" / "foreign.json"
+    stray.write_bytes(b"x")
+    stray.chmod(0o600)
+    linked = registry.root / "objects" / (".tmp-" + "5" * 32)
+    os.link(stray, linked)
+    with pytest.raises(LongitudinalComparisonRegistryUnsafe):
+        registry.list_selectors(dependency_fence=fence)
+    assert linked.exists()
+    linked.unlink()
+    stray.unlink()
+    # An object-directory temporary larger than any object is impossible residue.
+    oversized = registry.root / "objects" / (".tmp-" + "4" * 32)
+    oversized.write_bytes(b"x" * (registry_module.MAX_OBJECT_BYTES + 1))
+    oversized.chmod(0o600)
+    with pytest.raises(LongitudinalComparisonRegistryUnsafe):
+        registry.list_selectors(dependency_fence=fence)
+    assert oversized.exists()
+    oversized.unlink()
     directory = registry.root / (".tmp-" + "8" * 32)
     directory.mkdir()
     with pytest.raises(LongitudinalComparisonRegistryUnsafe):
@@ -416,6 +435,11 @@ def test_family_projection_request_is_exact() -> None:
     )
     assert canonical.component_count == 0
     for overrides in (
+        {
+            "statistics": both,
+            "statistic_units": (StatisticUnit.ALIGNMENT_COUNT, StatisticUnit.FRACTION),
+            "component_count": 1,
+        },
         {"statistics": (CnaSegmentStatistic.MEDIAN_LOG2,)},
         {"component_count": 0},
         {
