@@ -373,10 +373,10 @@ def test_baseline_and_logs_inside_the_repository_are_refused(
     inside = REPO / "canary-should-not-exist"
     record = canary.run("--record-baseline", baseline=inside / "b.json", logs=tmp_path / "l")
     assert record.returncode == 2
-    assert "inside the repository" in record.stderr
+    assert "inside a Git work tree" in record.stderr
     logs = canary.run(baseline=baseline, logs=inside / "logs")
     assert logs.returncode == 2
-    assert "inside the repository" in logs.stderr
+    assert "inside a Git work tree" in logs.stderr
     assert not inside.exists()
 
 
@@ -413,3 +413,102 @@ def test_install_refuses_a_baseline_inside_the_repository(tmp_path: Path) -> Non
     )
     assert completed.returncode == 2
     assert "outside the repository" in completed.stderr
+
+
+def test_any_git_work_tree_is_refused_for_baseline_logs_and_work(
+    recorded: tuple[Canary, Path, Path], tmp_path: Path
+) -> None:
+    canary, baseline, _ = recorded
+    other = tmp_path / "another-clone"
+    (other / ".git").mkdir(parents=True)
+    record = canary.run("--record-baseline", baseline=other / "b.json", logs=tmp_path / "l")
+    assert record.returncode == 2 and "baseline inside a Git work tree" in record.stderr
+    logs = canary.run(baseline=baseline, logs=other / "deep" / "logs")
+    assert logs.returncode == 2 and "logs inside a Git work tree" in logs.stderr
+    completed = subprocess.run(
+        [sys.executable, str(CANARY), "--fasta", str(canary.inputs.fasta_path),
+         "--bam", str(canary.inputs.bam_path), "--baseline", str(baseline),
+         "--log-dir", str(tmp_path / "l"), "--work-dir", str(other), "--no-notify"],
+        env=_environment(canary.home), capture_output=True, text=True, check=False,
+    )
+    assert completed.returncode == 2
+    assert "temporary roots inside a Git work tree" in completed.stderr
+    assert sorted(path.name for path in other.iterdir()) == [".git"]
+
+
+def test_unwritable_log_directory_fails_without_a_traceback(
+    recorded: tuple[Canary, Path, Path], tmp_path: Path
+) -> None:
+    canary, baseline, _ = recorded
+    blocker = tmp_path / "not-a-directory"
+    blocker.write_text("x", encoding="utf-8")
+    completed = canary.run(baseline=baseline, logs=blocker)
+    assert completed.returncode == 1, completed.stdout + completed.stderr
+    assert "could not write the result" in completed.stdout
+    assert "Traceback (most recent call last)" not in completed.stderr
+
+
+def _installer_inputs(tmp_path: Path) -> tuple[Path, Path]:
+    fasta = tmp_path / "in" / "ref.fa"
+    bam = tmp_path / "in" / "s.bam"
+    fasta.parent.mkdir(exist_ok=True)
+    for path in (fasta, Path(f"{fasta}.fai"), bam, Path(f"{bam}.bai")):
+        path.write_text("x", encoding="ascii")
+    return fasta, bam
+
+
+@pytest.mark.skipif(shutil.which("bash") is None, reason="the installer needs bash")
+def test_installer_refuses_git_work_trees_including_symlinks(tmp_path: Path) -> None:
+    fasta, bam = _installer_inputs(tmp_path)
+    other = tmp_path / "clone"
+    (other / ".git").mkdir(parents=True)
+    (tmp_path / "link").symlink_to(other)
+    (tmp_path / "out").mkdir()
+    base = {**_environment(tmp_path), "PYTHON": sys.executable, "UV": "/opt/example/bin/uv"}
+    cases = {
+        "launchd plist": {"TRACEBACK_CANARY_LAUNCH_AGENTS": str(other / "agents")},
+        "log directory": {"TRACEBACK_CANARY_LOG_DIR": str(tmp_path / "link" / "x" / "logs")},
+        "baseline": {
+            "TRACEBACK_CANARY_BASELINE": str(tmp_path / "out" / ".." / "clone" / "b.json")
+        },
+    }
+    for label, extra in cases.items():
+        environment = {
+            **base, "TRACEBACK_CANARY_LAUNCH_AGENTS": str(tmp_path / "agents"), **extra,
+        }
+        completed = subprocess.run(
+            ["bash", str(INSTALLER), "render", "--fasta", str(fasta), "--bam", str(bam)],
+            env=environment, capture_output=True, text=True, check=False,
+        )
+        assert completed.returncode == 2, label
+        assert f"the {label} must live outside the repository" in completed.stderr
+
+
+@pytest.mark.skipif(shutil.which("bash") is None, reason="the installer needs bash")
+def test_status_reads_the_installed_log_directory(tmp_path: Path) -> None:
+    fasta, bam = _installer_inputs(tmp_path)
+    custom = tmp_path / "custom-logs"
+    custom.mkdir()
+    (custom / "latest.json").write_text(json.dumps({
+        "status": "pass", "finished_at": "2026-10-03T03:31:00+00:00", "runs": [],
+        "reproducible": True, "warnings": [], "failures": [],
+    }), encoding="utf-8")
+    agents = tmp_path / "agents"
+    agents.mkdir()
+    environment = {
+        **_environment(tmp_path), "PYTHON": sys.executable, "UV": "/opt/example/bin/uv",
+        "TRACEBACK_CANARY_LAUNCH_AGENTS": str(agents),
+    }
+    rendered = subprocess.run(
+        ["bash", str(INSTALLER), "render", "--fasta", str(fasta), "--bam", str(bam),
+         "--log-dir", str(custom)],
+        env=environment, capture_output=True, text=True, check=True,
+    )
+    plist = agents / "com.traceback.real-bam-canary.plist"
+    plist.write_text(rendered.stdout, encoding="utf-8")
+    status = subprocess.run(
+        ["bash", str(INSTALLER), "status"],
+        env=environment, capture_output=True, text=True, check=False,
+    )
+    assert status.returncode == 0, status.stderr
+    assert "last result: PASS" in status.stdout

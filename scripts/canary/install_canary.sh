@@ -63,9 +63,28 @@ parse_inputs() {
   [ -f "$BAM.bai" ] || die "the BAM has no .bai index (samtools index)"
   case "$BASELINE" in /*) ;; *) BASELINE="$PWD/$BASELINE" ;; esac
   case "$LOG_DIR" in /*) ;; *) LOG_DIR="$PWD/$LOG_DIR" ;; esac
-  # Real-sample counts must never land in the (public) repository.
-  case "$BASELINE/" in "$REPO"/*) die "the baseline must live outside the repository" ;; esac
-  case "$LOG_DIR/" in "$REPO"/*) die "the log directory must live outside the repository" ;; esac
+  # Real-sample counts and input paths must never land in a Git work tree
+  # (the repository is public).
+  in_work_tree "$BASELINE" && die "the baseline must live outside the repository"
+  in_work_tree "$LOG_DIR" && die "the log directory must live outside the repository"
+  in_work_tree "$AGENTS_DIR" && die "the launchd plist must live outside the repository"
+  return 0
+}
+
+in_work_tree() {
+  # in_work_tree PATH -> 0 when PATH (resolved through its nearest existing
+  # ancestor, so symlinks and .. count) lies in any Git work tree.
+  local path="$1"
+  while [ ! -d "$path" ]; do
+    path="$(dirname "$path")"
+  done
+  local directory
+  directory="$(cd "$path" && pwd -P)"
+  while :; do
+    [ -e "$directory/.git" ] && return 0
+    [ "$directory" = "/" ] && return 1
+    directory="$(dirname "$directory")"
+  done
 }
 
 uv_path() {
@@ -134,13 +153,24 @@ command_status() {
     launchctl print "gui/$(id -u)/$LABEL" 2>/dev/null \
       | grep -E '^\s*(state|last exit code|runs) =' || echo "launchd: not loaded"
   fi
-  local latest="$LOG_DIR/latest.json"
+  local -a python
+  if [ -n "${PYTHON:-}" ]; then read -r -a python <<<"$PYTHON"; else python=(python3); fi
+  local log_dir="$LOG_DIR" installed=""
+  if [ -f "$PLIST" ]; then
+    # Use the log directory the installed agent actually writes to.
+    installed="$("${python[@]}" - "$PLIST" <<'PY' 2>/dev/null || true
+import plistlib, sys
+arguments = plistlib.load(open(sys.argv[1], "rb"))["ProgramArguments"]
+print(arguments[arguments.index("--log-dir") + 1])
+PY
+)"
+    [ -n "$installed" ] && log_dir="$installed"
+  fi
+  local latest="$log_dir/latest.json"
   if [ ! -f "$latest" ]; then
     echo "last result: none yet"
     return
   fi
-  local -a python
-  if [ -n "${PYTHON:-}" ]; then read -r -a python <<<"$PYTHON"; else python=(python3); fi
   "${python[@]}" - "$latest" <<'PY'
 import json, sys
 result = json.load(open(sys.argv[1], encoding="utf-8"))

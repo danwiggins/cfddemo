@@ -49,7 +49,6 @@ TRUST_RELATIVE = Path("trust/development-result-trust.json")
 MEASUREMENT_RELATIVE = Path("measurements/fragment-length.v1.json")
 SLOW_FACTOR = 2.0
 EXIT_PASS, EXIT_FAIL, EXIT_REFUSED = 0, 1, 2
-REPO_ROOT = Path(__file__).resolve().parents[2]
 
 # The measurement JSON (traceback.fragment-measurement.v2) carries no per-run
 # field: no timestamp, job, key or record ID (checked by running the same BAM
@@ -384,10 +383,18 @@ def _load_json(path: Path) -> Any:
         return None
 
 
-def _inside(path: Path, directory: Path) -> bool:
-    resolved = os.path.realpath(path)
-    parent = os.path.realpath(directory)
-    return resolved == parent or resolved.startswith(parent + os.sep)
+def inside_git_worktree(path: Path) -> bool:
+    """True when ``path`` (resolved, existing or not) lies in any Git work tree.
+
+    Covers this checkout, its linked worktrees and any other clone: the public
+    repository must never receive real-sample counts or sealed inputs.
+    """
+
+    current = Path(os.path.realpath(path))
+    for directory in (current, *current.parents):
+        if (directory / ".git").exists():
+            return True
+    return False
 
 
 def write_result(log_dir: Path, result: dict[str, Any], stamp: str) -> Path:
@@ -467,6 +474,9 @@ def parse_args(argv: list[str] | None) -> argparse.Namespace:
 
 def main(argv: list[str] | None = None) -> int:
     args = parse_args(argv)
+    # The CLI gets absolute paths, so the locator check covers every spelling.
+    args.fasta = Path(os.path.abspath(args.fasta))
+    args.bam = Path(os.path.abspath(args.bam))
     baseline_path = args.baseline or _default_baseline()
     log_dir = args.log_dir or _default_log_dir()
     started = _utc_now()
@@ -490,11 +500,14 @@ def main(argv: list[str] | None = None) -> int:
                     "the temporary roots would sit under an input's directory; "
                     "pass --work-dir elsewhere"
                 )
-        # Real-sample counts must never land in the (public) repository.
-        if args.record_baseline and _inside(baseline_path, REPO_ROOT):
-            raise Refused("refusing to write a baseline inside the repository")
-        if _inside(log_dir, REPO_ROOT):
-            raise Refused("refusing to write canary logs inside the repository")
+        # Real-sample counts and sealed inputs must never land in a Git work
+        # tree (the repository is public).
+        if args.record_baseline and inside_git_worktree(baseline_path):
+            raise Refused("refusing to write a baseline inside a Git work tree")
+        if inside_git_worktree(log_dir):
+            raise Refused("refusing to write canary logs inside a Git work tree")
+        if inside_git_worktree(Path(work_parent)):
+            raise Refused("refusing to put temporary roots inside a Git work tree")
         if args.record_baseline and baseline_path.exists() and not args.force:
             raise Refused(
                 "a baseline already exists; refusing to overwrite it (pass --force "
@@ -567,6 +580,8 @@ def main(argv: list[str] | None = None) -> int:
                 _write_private(baseline_path, payload, exclusive=not args.force)
             except FileExistsError:
                 failures.append("baseline appeared during the run; not overwritten")
+            except OSError as exc:
+                failures.append(f"could not write the baseline: {type(exc).__name__}")
             else:
                 baseline_report["recorded"] = True
                 log("baseline recorded (mode 0600)")
@@ -624,7 +639,12 @@ def main(argv: list[str] | None = None) -> int:
         result["failures"].append("an input path reached the result; it was scrubbed")
         result["status"] = status = "fail"
         failures = result["failures"]
-    written = write_result(log_dir, result, stamp)
+    try:
+        written: Path | None = write_result(log_dir, result, stamp)
+    except OSError as exc:
+        written = None
+        failures.append(f"could not write the result: {type(exc).__name__}")
+        status = "fail"
 
     for line in warnings:
         log(f"WARN  {line}")
@@ -636,7 +656,8 @@ def main(argv: list[str] | None = None) -> int:
     log(f"measurement sha256: {metrics.get('measurement_sha256')}")
     if reproducible is not None:
         log(f"reproducible across {args.repeat} runs: {reproducible}")
-    print(f"result: {written.name} in the canary log directory")
+    if written is not None:
+        print(f"result: {written.name} in the canary log directory")
     print(f"CANARY {status.upper()}")
     if failures:
         notify(f"Golden-path canary FAILED: {failures[0]}", not args.no_notify)
