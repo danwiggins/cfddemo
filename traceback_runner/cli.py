@@ -323,6 +323,13 @@ def _file_sha256(path: Path) -> str:
     return digest.hexdigest()
 
 
+def _readable_sha256(path: Path) -> str | None:
+    try:
+        return _file_sha256(path)
+    except OSError:
+        return None
+
+
 def _doctor_references(root: Path, *, deep: bool) -> list[dict[str, Any]]:
     from .references import list_reference_ids, load_reference
 
@@ -353,7 +360,9 @@ def _doctor_references(root: Path, *, deep: bool) -> list[dict[str, Any]]:
             status, detail = "warn", "registered FASTA is missing; existing records stay valid"
         elif metadata.st_size != loaded.source.fasta_size_bytes:
             status, detail = "warn", "registered FASTA size changed since registration"
-        elif deep and _file_sha256(fasta) != loaded.registered.asset_sha256:
+        elif deep and (digest := _readable_sha256(fasta)) is None:
+            status, detail = "warn", "registered FASTA could not be read"
+        elif deep and digest != loaded.registered.asset_sha256:
             status, detail = "warn", "registered FASTA bytes changed since registration"
         else:
             status = "pass"
@@ -393,16 +402,33 @@ def _doctor_trust(root: Path) -> dict[str, Any]:
             "pass",
             "development trust parses; no result-trust registry under ROOT yet",
         )
-    from evidence_inspector.result_trust_registry import ResultTrustRegistry
-
+    # Opening a registry needs its independently retained ID, epoch and head,
+    # which doctor does not have; check the structure only. `verify
+    # --trust-registry` performs the full identity-bound check.
     try:
-        with ResultTrustRegistry(registry) as opened:
-            opened.current_trust()
-    except Exception:
+        metadata = registry.lstat()
+        registry_metadata = (registry / "registry-metadata.json").lstat()
+    except OSError:
+        metadata = registry_metadata = None
+    if (
+        metadata is None
+        or registry_metadata is None
+        or not stat.S_ISDIR(metadata.st_mode)
+        or stat.S_IMODE(metadata.st_mode) != 0o700
+        or metadata.st_uid != os.geteuid()
+        or not stat.S_ISREG(registry_metadata.st_mode)
+    ):
         return _doctor_check(
-            "trust", "blocked", "result-trust registry under ROOT/trust does not open"
+            "trust",
+            "blocked",
+            "result-trust registry under ROOT/trust is not a private registry directory",
         )
-    return _doctor_check("trust", "pass", "development trust and result-trust registry parse")
+    return _doctor_check(
+        "trust",
+        "pass",
+        "development trust parses; result-trust registry present "
+        "(identity is checked by verify --trust-registry)",
+    )
 
 
 def _doctor(args: argparse.Namespace) -> tuple[ExitCode, dict[str, Any]]:

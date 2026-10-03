@@ -180,3 +180,33 @@ def test_trust_blocked_when_result_trust_registry_does_not_open(
     code, payload = _doctor(capsys, root)
     assert code == ExitCode.BLOCKED
     assert _one(payload, "trust")["status"] == "blocked"
+
+
+def test_trust_passes_with_a_valid_result_trust_registry(tmp_path: Path, capsys) -> None:
+    from evidence_inspector.result_trust_registry import ResultTrustRegistry
+
+    root = tmp_path / "root"
+    assert main(["demo", "--root", str(root), "--json"]) == ExitCode.OK
+    capsys.readouterr()
+    ResultTrustRegistry(root / "trust" / "result-trust-registry").close()
+    code, payload = _doctor(capsys, root)
+    assert code == ExitCode.OK
+    assert _one(payload, "trust")["status"] == "pass"
+
+
+def test_reference_deep_warns_when_fasta_is_unreadable(tmp_path: Path, capsys) -> None:
+    root = tmp_path / "root"
+    fasta = _write_fasta(tmp_path / "ref")
+    register_reference(root, fasta, "tiny")
+    fasta.chmod(0)
+    try:
+        code, payload = _doctor(capsys, root, "--deep")
+    finally:
+        fasta.chmod(0o600)
+    assert code == ExitCode.OK
+    assert _one(payload, "reference") == {
+        "name": "reference",
+        "status": "warn",
+        "detail": "registered FASTA could not be read",
+        "reference_id": "tiny",
+    }
