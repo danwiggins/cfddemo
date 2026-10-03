@@ -4,8 +4,10 @@ Each registry test module wires these checks to its own fixtures, so every
 registry in the family is held to the same behaviour: torn-tail recovery is
 operator-invoked only, interrupted creation and restore leave no half-built
 root, owned temporary names are swept (D05 rule), a failed journal append is
-truncated on any exception, and the lock descriptor is read only under the
-process lock that ``close()`` also holds.
+truncated on any exception, the lock descriptor is read only under the
+process lock that ``close()`` also holds, and the instance-seal integrity
+check compares the trusted head with its seal under the instance process
+lock that a head acceptance holds.
 """
 
 from __future__ import annotations
@@ -238,6 +240,56 @@ def check_lock_reads_descriptor_under_process_lock(
     assert not stuck, "lock waiter used a reused descriptor number"
     assert len(errors) == 1 and isinstance(errors[0], unsafe)
     assert "closed" in str(errors[0])
+
+
+def check_integrity_reads_head_and_seal_under_process_lock(
+    registry, write_one: Callable[[], object]
+) -> None:
+    """Head acceptance and the integrity check share the instance process lock.
+
+    ``_accept_observed_head`` assigns the new trusted head and then re-seals
+    the instance.  The integrity check that every public method runs first
+    compares the instance with that seal.  Both must hold the instance's
+    ``_process_lock``; otherwise a reader on another thread can observe the
+    new head with the old seal and fail with "authority state changed" while a
+    concurrent registration of the same bytes is in flight.  This records, on
+    the calling thread, whether that lock is held at every seal write and at
+    every snapshot taken for this registry, so it is deterministic: a check
+    that takes the lock only around something other than the comparison still
+    fails.
+    """
+
+    module = sys.modules[type(registry).__module__]
+    process_lock = registry.__dict__["_process_lock"]
+    original_seal = module._seal_registry_instance
+    original_snapshot = module._registry_instance_snapshot
+    seal_held: list[bool] = []
+    snapshot_held: list[bool] = []
+
+    def recording_seal(target):
+        if target is registry:
+            seal_held.append(process_lock._is_owned())
+        return original_seal(target)
+
+    def recording_snapshot(target):
+        if target is registry:
+            snapshot_held.append(process_lock._is_owned())
+        return original_snapshot(target)
+
+    module._seal_registry_instance = recording_seal
+    try:
+        module._registry_instance_snapshot = recording_snapshot
+        try:
+            write_one()
+            module._require_registry_integrity(registry)
+        finally:
+            module._registry_instance_snapshot = original_snapshot
+    finally:
+        module._seal_registry_instance = original_seal
+    assert seal_held and all(seal_held), "head re-sealed outside the instance lock"
+    assert snapshot_held and all(snapshot_held), (
+        "integrity snapshot taken outside the instance lock"
+    )
 
 
 def check_owned_temporaries(
