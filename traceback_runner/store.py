@@ -534,7 +534,9 @@ class JobStore:
             and row["lease_owner"] == lease.worker_id
             and row["current_stage"] == lease.stage
             and row["lease_expires_at"] is not None
-            and row["lease_expires_at"] >= now
+            # Exclusive, like acquire_lease's takeover test: at the instant of
+            # expiry the lease is already another worker's to take.
+            and row["lease_expires_at"] > now
         )
 
     def publish_attempt(self, lease: AttemptLease, publish: Callable[[], None]) -> None:

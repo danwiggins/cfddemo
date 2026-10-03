@@ -1075,6 +1075,49 @@ def test_takeover_after_keeper_shutdown_cannot_publish_stale_bytes(
     assert state == JobState.RUNNING.value
 
 
+def test_publication_at_the_exact_expiry_instant_is_refused(tmp_path: Path) -> None:
+    clock = FakeClock()
+    runner = Runner(
+        tmp_path / "state",
+        clock=clock,
+        lease_seconds=5.0,
+        heartbeat_seconds=0.01,
+        synthetic_enabled=True,
+    )
+    source, files = _source(tmp_path)
+    job = runner.submit(_request(source, files), source, files)
+    real_publish = runner.store.publish_attempt
+
+    def publish_at_expiry(lease_arg, publish):
+        clock.now = lease_arg.expires_at  # takeover is already allowed here
+        return real_publish(lease_arg, publish)
+
+    runner.store.publish_attempt = publish_at_expiry  # type: ignore[method-assign]
+    with pytest.raises(StaleLease):
+        runner.execute(job.job_id, [_stage()], worker_id="worker-a")
+    assert list((runner.artifacts_dir / job.job_id).glob("measure/*")) == []
+
+
+def test_lease_authority_and_takeover_agree_at_the_expiry_instant(tmp_path: Path) -> None:
+    clock = FakeClock()
+    source, files = _source(tmp_path)
+    runner = Runner(tmp_path / "state", clock=clock, synthetic_enabled=True)
+    job = runner.submit(_request(source, files), source, files)
+    runner.store.transition(job.job_id, JobState.RUNNING, "test worker started")
+    first = runner.store.acquire_lease(job.job_id, "measure", "a" * 64, "worker-a", 5)
+    clock.now = first.expires_at
+    for refused in (
+        lambda: runner.store.heartbeat(first, 5),
+        lambda: runner.store.fail_attempt(first, "late", retryable=False),
+        lambda: runner.store.publish_attempt(first, lambda: None),
+        lambda: runner.store.commit_attempt(first, "r/receipt.json", "b" * 64),
+    ):
+        with pytest.raises(StaleLease):
+            refused()
+    second = runner.store.acquire_lease(job.job_id, "measure", "a" * 64, "worker-b", 5)
+    assert second.token > first.token
+
+
 def test_lost_lease_and_stage_error_record_no_failure(tmp_path: Path) -> None:
     # Conjunction: the keeper has recorded an expired lease AND the stage then
     # raises its own error.  The worker surfaces the lost lease and records
