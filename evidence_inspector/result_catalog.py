@@ -53,10 +53,12 @@ from evidence_inspector.method_registry import (
 from evidence_inspector.result_trust_registry import (
     ResultTrustRegistry,
     ResultTrustRegistryError,
+    AnyResultTrustSnapshot,
     ResultTrustSnapshot,
+    ResultTrustSnapshotV2,
 )
 from traceback_runner.bundles import VerifiedBundle, verify_bundle
-from traceback_runner.contracts import ResultBundleManifestV2
+from traceback_runner.contracts import ResultBundleManifestV2, ResultBundleManifestV3
 from traceback_runner.filesystem import rename_directory_exclusive_at
 from traceback_runner.serialization import canonical_json_bytes
 from traceback_runner.signing import (
@@ -409,16 +411,33 @@ class ResultBundleReaderRegistry(CatalogModel):
         return reader
 
 
-DEFAULT_RESULT_BUNDLE_READER_REGISTRY = ResultBundleReaderRegistry(
-    readers=(
-        ResultBundleReader(
-            reader_id="reader_result_bundle_v2",
-            minimum_version=2,
-            maximum_version=2,
-            measurement_schema_versions=("traceback.fragment-measurement.v1",),
-        ),
-    )
+_READER_RESULT_BUNDLE_V2 = ResultBundleReader(
+    reader_id="reader_result_bundle_v2",
+    minimum_version=2,
+    maximum_version=2,
+    measurement_schema_versions=("traceback.fragment-measurement.v1",),
 )
+_READER_RESULT_BUNDLE_V3 = ResultBundleReader(
+    reader_id="reader_result_bundle_v3",
+    minimum_version=3,
+    maximum_version=3,
+    measurement_schema_versions=("traceback.fragment-measurement.v2",),
+)
+# The default registry is unchanged (v2 reader only), so the reader-registry
+# digest, and with it every existing catalog authority digest and retained
+# binding, stays byte-identical.
+DEFAULT_RESULT_BUNDLE_READER_REGISTRY = ResultBundleReaderRegistry(
+    readers=(_READER_RESULT_BUNDLE_V2,)
+)
+# Catalogs that hold local records opt in to this registry: one reader per
+# bundle version, each matching its measurement tuple exactly.  v2 bundles carry
+# fragment-measurement.v1 (synthetic); v3 bundles carry fragment-measurement.v2
+# (unapproved_local, development-local signature).
+LOCAL_RESULT_BUNDLE_READER_REGISTRY = ResultBundleReaderRegistry(
+    readers=(_READER_RESULT_BUNDLE_V2, _READER_RESULT_BUNDLE_V3)
+)
+# Manifest classes that bind a method identity; v1 manifests carry none.
+_METHOD_BOUND_MANIFESTS = (ResultBundleManifestV2, ResultBundleManifestV3)
 
 _PINNED_READER_SELECT = ResultBundleReaderRegistry.select
 
@@ -555,11 +574,30 @@ def _content_value_bytes(value: object) -> bytes:
     raise CatalogUnsupportedSchema("catalog content value is unsupported")
 
 
-def registry_trust_snapshot_sha256(snapshot: ResultTrustSnapshot) -> str:
-    """Bind one exact result-trust registry head for a v2 catalog authority."""
+# Exact snapshot classes a catalog accepts from its result-trust registry.
+_TRUST_SNAPSHOT_TYPES = (ResultTrustSnapshot, ResultTrustSnapshotV2)
 
+
+def registry_trust_snapshot_sha256(snapshot: AnyResultTrustSnapshot) -> str:
+    """Bind one exact result-trust registry head for a v2 catalog authority.
+
+    A v2 registry snapshot (either development namespace) uses its own domain
+    tag, so it can never collide with a v1 snapshot binding.
+    """
+
+    if type(snapshot) not in _TRUST_SNAPSHOT_TYPES or snapshot.schema_version != (
+        "traceback.result-trust-snapshot.v2"
+        if type(snapshot) is ResultTrustSnapshotV2
+        else "traceback.result-trust-snapshot.v1"
+    ):
+        raise CatalogError("catalog trust registry is unsupported")
+    domain = (
+        b"traceback-catalog-result-trust-registry-v2\0"
+        if type(snapshot) is ResultTrustSnapshotV2
+        else b"traceback-catalog-result-trust-registry-v1\0"
+    )
     return hashlib.sha256(
-        b"traceback-catalog-result-trust-registry-v1\0"
+        domain
         + canonical_json_bytes(
             {
                 "registry_id": snapshot.registry_id,
@@ -1168,7 +1206,7 @@ class ResultCatalog:
         self.result_trust_registry = result_trust_registry
         # Thread ident -> the trust snapshot whose read fence that thread holds
         # through this catalog.  Only touched under ``_connection_lock``.
-        self._trust_fence_holders: dict[int, ResultTrustSnapshot] = {}
+        self._trust_fence_holders: dict[int, AnyResultTrustSnapshot] = {}
         self._trust_high_water: tuple[int, str] | None = None
         try:
             self.reader_registry = ResultBundleReaderRegistry.model_validate_json(
@@ -1287,7 +1325,7 @@ class ResultCatalog:
         if self.result_trust_registry is not None:
             schema_version = CATALOG_AUTHORITY_SCHEMA_V2
             with _RC_TRUST_FENCE(self) as (_, trust):
-                if type(trust) is not ResultTrustSnapshot:
+                if type(trust) not in _TRUST_SNAPSHOT_TYPES:
                     raise CatalogError("catalog trust registry changed")
                 trust_sha256 = registry_trust_snapshot_sha256(trust)
         else:
@@ -1335,7 +1373,9 @@ class ResultCatalog:
         )
 
     @contextmanager
-    def _trust_fence(self) -> Iterator[tuple[TrustStore, ResultTrustSnapshot | None]]:
+    def _trust_fence(
+        self,
+    ) -> Iterator[tuple[TrustStore, AnyResultTrustSnapshot | None]]:
         """Yield the trust store every verification in the body must use.
 
         Registry path: hold this catalog's ``_connection_lock`` and then the
@@ -1367,7 +1407,7 @@ class ResultCatalog:
             try:
                 with _PINNED_TRUST_READ_FENCE(registry) as snapshot:
                     if (
-                        type(snapshot) is not ResultTrustSnapshot
+                        type(snapshot) not in _TRUST_SNAPSHOT_TYPES
                         or (snapshot.registry_id, snapshot.registry_epoch_sha256)
                         != self._result_trust_identity
                     ):
@@ -1401,7 +1441,7 @@ class ResultCatalog:
                 raise CatalogError("catalog result trust is unavailable") from None
 
     @contextmanager
-    def trust_authority_fence(self) -> Iterator[ResultTrustSnapshot | None]:
+    def trust_authority_fence(self) -> Iterator[AnyResultTrustSnapshot | None]:
         """Hold this catalog's trust authority for a composing caller's body.
 
         Lock order: the catalog-content lock held shared (its in-process gate,
@@ -2016,7 +2056,7 @@ class ResultCatalog:
                 _RC_VALIDATE_VERIFICATION_AUTHORITY(self)
                 verified = _PINNED_VERIFY_BUNDLE(temporary, trust_store)
                 _PINNED_READER_SELECT(self.reader_registry, verified)
-                if not isinstance(verified.manifest, ResultBundleManifestV2):
+                if not isinstance(verified.manifest, _METHOD_BOUND_MANIFESTS):
                     raise CatalogUnsupportedSchema("bundle schema is unsupported")
                 if (
                     verified.manifest.method.method_id != capability.method_ref.method_id
@@ -2189,7 +2229,7 @@ class ResultCatalog:
                 authority = _RC_AUTHORITY_SNAPSHOT(self)
                 verified = _PINNED_VERIFY_BUNDLE(temporary, trust_store)
                 reader = _PINNED_READER_SELECT(self.reader_registry, verified)
-                if not isinstance(verified.manifest, ResultBundleManifestV2):
+                if not isinstance(verified.manifest, _METHOD_BOUND_MANIFESTS):
                     raise CatalogUnsupportedSchema("bundle schema is unsupported")
                 if (
                     verified.manifest.method.method_id != capability.method_ref.method_id
@@ -2885,7 +2925,7 @@ class ResultCatalog:
                 )
                 reader = _PINNED_READER_SELECT(self.reader_registry, verified)
                 manifest = verified.manifest
-                if not isinstance(manifest, ResultBundleManifestV2):
+                if not isinstance(manifest, _METHOD_BOUND_MANIFESTS):
                     raise CatalogUnsupportedSchema("bundle schema is unsupported")
                 if (
                     manifest.record_id != normalized.bundle_record_id
@@ -3596,6 +3636,7 @@ __all__ = [
     "CATALOG_CONTENT_LOCK_NAME",
     "CATALOG_CONTENT_SCHEMA_V1",
     "DEFAULT_RESULT_BUNDLE_READER_REGISTRY",
+    "LOCAL_RESULT_BUNDLE_READER_REGISTRY",
     "CatalogAliases",
     "CatalogAuthoritySnapshot",
     "CatalogConflict",
