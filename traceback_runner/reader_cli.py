@@ -80,6 +80,10 @@ _DIRECTORY_FLAGS = (
 _FILE_FLAGS = getattr(os, "O_CLOEXEC", 0) | getattr(os, "O_NOFOLLOW", 0)
 
 
+class _LocalMaterialNotFound(RuntimeError):
+    """Local runner material the command needs is absent (exit 4)."""
+
+
 class OperatorAuthorityError(RuntimeError):
     """Sanitized operator-authority failure; never carries key material."""
 
@@ -808,7 +812,14 @@ def _launch(
         if states.get(args.grant) is not ReaderGrantState.ACTIVE:
             raise OperatorAuthorityError("grant is not active")
         root = Path(args.root)
-        store = JobStore(root / "runner.sqlite3")
+        # The same database ``traceback demo`` writes and ``status`` reads.
+        database = root / "runner" / "runner.sqlite3"
+        if not database.is_file():
+            raise _LocalMaterialNotFound(
+                "runner database not found under ROOT; "
+                "run `traceback demo` or `traceback run` first"
+            )
+        store = JobStore(database)
         with RunningLocalWebService.start(
             store=store,
             state_directory=root / "reader-web",
@@ -948,6 +959,9 @@ def run(
             }[args.grant_command]
             return handler(args, clock, out)
         return _launch(args, clock, out, stdin or sys.stdin)
+    except _LocalMaterialNotFound as exc:
+        print(f"error: {exc}", file=err)
+        return 4
     except OperatorAuthorityError as exc:
         print(f"error: {exc}", file=err)
         return 3
