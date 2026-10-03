@@ -671,6 +671,21 @@ def test_saved_routes_need_every_configured_scope(
                 },
             )
         )
+        # A revocation after the view was built still yields the denial shell
+        # on the partial-grant listing path.
+        original = longitudinal_module._AuthorizedView.__init__
+
+        def build_then_revoke(self, *args, **kwargs):
+            original(self, *args, **kwargs)
+            env.world.reader.revoke_grant(
+                env.world.grant.payload.grant_selector,
+                reason=ReaderRevocationReason.OPERATOR_REQUEST,
+            )
+
+        monkeypatch.setattr(
+            longitudinal_module._AuthorizedView, "__init__", build_then_revoke
+        )
+        _assert_denied(*env.get("saved"))
     finally:
         env.close()
 

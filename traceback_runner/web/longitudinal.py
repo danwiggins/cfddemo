@@ -1857,6 +1857,11 @@ def saved_page(
     # No authorized scope at all: the denial shell (at view construction).
     # Some but not every configured scope: an empty page, no saved read.
     if view.granted != view.configured:
+        # Re-check every granted scope under the live gate before answering,
+        # so a grant revoked during the request still gets the denial shell.
+        for scope in view.granted:
+            with view.gate(scope):
+                pass
         return _public(
             LongitudinalSavedPage(
                 save=save_availability(source),
