@@ -580,3 +580,32 @@ def test_service_store_survives_another_store_closing_last(tmp_path: Path) -> No
     gc.collect()
     # The anchor is released with the service.
     assert not wal.exists()
+
+
+def test_failed_start_releases_the_journal_anchor_even_if_cleanup_fails(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """If start() fails after taking the journal anchor, the anchor is
+    released even when an earlier cleanup step itself raises."""
+
+    import gc
+
+    store, job_id = _store(tmp_path)
+    store.get(job_id.removeprefix("job_"))
+    wal = Path(f"{store.path}-wal")
+
+    def fail_start(*_args: object, **_kwargs: object) -> None:
+        raise RuntimeError("injected start failure")
+
+    def fail_cleanup(*_args: object, **_kwargs: object) -> None:
+        raise OSError("injected cleanup failure")
+
+    monkeypatch.setattr(server_module, "_RunningLocalWebRuntime", fail_start)
+    monkeypatch.setattr(server_module, "_close_startup_anchor", fail_cleanup)
+    with pytest.raises(OSError, match="injected cleanup failure") as excinfo:
+        RunningLocalWebService.start(store=store, state_directory=tmp_path / "state")
+    # Keep the store and the traceback (which holds start()'s frame) alive, so
+    # only an explicit anchor close, not garbage collection, can drop the WAL.
+    gc.collect()
+    assert excinfo.value is not None and store.path
+    assert not wal.exists()

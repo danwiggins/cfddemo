@@ -1331,30 +1331,35 @@ class RunningLocalWebService:
                 _launch_url=launch_url,
             )
         except BaseException:
-            if watchdog_stop is not None:
-                watchdog_stop.set()
-            if server is not None:
-                if thread is not None and thread.is_alive():
-                    server.shutdown()
-                server.server_close()
-            if thread is not None and thread.ident is not None:
-                thread.join(timeout=5)
-            if watchdog_thread is not None and watchdog_thread.ident is not None:
-                watchdog_thread.join(timeout=5)
-            if state_fd is not None and instance_id is not None:
-                try:
-                    _unlink_instance_state(state_fd, expected_instance_id=instance_id)
-                except LocalWebServerError:
-                    pass
-            if lease_fd is not None:
-                fcntl.flock(lease_fd, fcntl.LOCK_UN)
-                os.close(lease_fd)
-            if state_fd is not None:
-                fcntl.flock(state_fd, fcntl.LOCK_UN)
-                os.close(state_fd)
-            if startup_anchor is not None:
-                _close_startup_anchor(startup_anchor)
-            journal.close()
+            try:
+                if watchdog_stop is not None:
+                    watchdog_stop.set()
+                if server is not None:
+                    if thread is not None and thread.is_alive():
+                        server.shutdown()
+                    server.server_close()
+                if thread is not None and thread.ident is not None:
+                    thread.join(timeout=5)
+                if watchdog_thread is not None and watchdog_thread.ident is not None:
+                    watchdog_thread.join(timeout=5)
+                if state_fd is not None and instance_id is not None:
+                    try:
+                        _unlink_instance_state(
+                            state_fd, expected_instance_id=instance_id
+                        )
+                    except LocalWebServerError:
+                        pass
+                if lease_fd is not None:
+                    fcntl.flock(lease_fd, fcntl.LOCK_UN)
+                    os.close(lease_fd)
+                if state_fd is not None:
+                    fcntl.flock(state_fd, fcntl.LOCK_UN)
+                    os.close(state_fd)
+                if startup_anchor is not None:
+                    _close_startup_anchor(startup_anchor)
+            finally:
+                # Release the job-store anchor even when earlier cleanup fails.
+                journal.close()
             raise
 
     @property
