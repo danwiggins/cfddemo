@@ -624,6 +624,11 @@ def test_conflict_and_crash_leave_no_partial_catalog_state(tmp_path: Path) -> No
     assert _import(reopened)
 
 
+def _inode_and_ctime(metadata: os.stat_result) -> tuple[int, int, int]:
+    # ctime as well as the inode number: a filesystem may reuse a freed inode.
+    return metadata.st_dev, metadata.st_ino, metadata.st_ctime_ns
+
+
 def test_failed_publisher_never_unlinks_an_object_adopted_concurrently(
     tmp_path: Path,
 ) -> None:
@@ -631,7 +636,6 @@ def test_failed_publisher_never_unlinks_an_object_adopted_concurrently(
     import_root.mkdir()
     *_, capability = _authority()
     _, _, trust = _bundle(import_root / "incoming", method=_bundle_method(capability))
-    adopted = threading.Event()
     controller = DeterministicFaultController(
         "after_object_publish", action=FaultAction.PAUSE_RAISE
     )
@@ -648,6 +652,7 @@ def test_failed_publisher_never_unlinks_an_object_adopted_concurrently(
         trust_store=trust,
     )
     errors: list[BaseException] = []
+    adopted: list[CatalogResultRef] = []
 
     def losing_import() -> None:
         try:
@@ -655,24 +660,59 @@ def test_failed_publisher_never_unlinks_an_object_adopted_concurrently(
         except BaseException as error:  # noqa: BLE001 - collect thread outcome
             errors.append(error)
 
+    def adopting_import() -> None:
+        adopted.append(_import(second))
+
+    # The paused publisher holds the exclusive catalog-content lock, so the
+    # adopting import cannot commit until the publisher fails and releases
+    # it.  Calling ``_import(second)`` on this thread before ``release()``
+    # deadlocked until the controller's 30 s pause timeout broke it.
     worker = threading.Thread(target=losing_import)
     worker.start()
     assert controller.wait_until_reached()
-    committed = _import(second)
-    adopted.set()
+    published = {
+        entry.name: _inode_and_ctime(entry.stat(follow_symlinks=False))
+        for entry in os.scandir(first._bound_objects)
+        if not entry.name.startswith(".")
+    }
+    assert len(published) == 1
+    adopter = threading.Thread(target=adopting_import)
+    adopter.start()
+    adopter.join(timeout=0.2)
+    assert adopter.is_alive() and not adopted
     controller.release()
-    worker.join(timeout=10)
-
+    worker.join(timeout=30)
     assert not worker.is_alive()
+    adopter.join(timeout=30)
+    assert not adopter.is_alive()
+
     assert len(errors) == 1
     assert isinstance(errors[0], InjectedFault)
+    assert str(errors[0]) == "injected fault at after_object_publish"
+    assert len(adopted) == 1
+    committed = adopted[0]
     object_path = second._bound_objects / committed.bundle_sha256
     assert object_path.is_dir()
+    # The adopter took over the failed publisher's object; it was never
+    # unlinked and republished.
+    assert published == {
+        committed.bundle_sha256: _inode_and_ctime(
+            object_path.stat(follow_symlinks=False)
+        )
+    }
     assert (
         verify_bundle(object_path, trust).manifest.record_id
         == committed.bundle_record_id
     )
     assert second.query(CatalogQuery()).results == (committed,)
+
+
+def test_default_catalog_connection_keeps_the_30_second_busy_timeout(
+    tmp_path: Path,
+) -> None:
+    catalog, _, _ = _catalog(tmp_path)
+    with catalog._connect() as connection:
+        assert connection.execute("PRAGMA busy_timeout").fetchone()[0] == 30000
 
 
 def test_destination_and_database_replacement_fail_closed(tmp_path: Path) -> None:
