@@ -950,20 +950,17 @@ def _demo(args: argparse.Namespace) -> tuple[ExitCode, dict[str, Any]]:
         workflow_release_sha256=hashlib.sha256(_WORKFLOW_ID.encode("ascii")).hexdigest(),
     )
     runner = Runner(root / "runner", synthetic_enabled=True)
-    # As in run: keep the store's WAL/SHM identities stable while another
-    # process (pause, status, a web service) opens the same store.
-    with runner.store.journal_anchor():
-        record = _execute_signed_run(
-            root,
-            runner,
-            request,
-            source,
-            relative_files,
-            _demo_stages,
-            namespace=TrustNamespace.DEVELOPMENT_SYNTHETIC,
-            worker_id="synthetic-cli",
-        )
-        verified, published = _publish_signed_record(root, runner, record.job_id)
+    record = _execute_signed_run(
+        root,
+        runner,
+        request,
+        source,
+        relative_files,
+        _demo_stages,
+        namespace=TrustNamespace.DEVELOPMENT_SYNTHETIC,
+        worker_id="synthetic-cli",
+    )
+    verified, published = _publish_signed_record(root, runner, record.job_id)
     bundle_token = published.relative_to(root).as_posix()
     return ExitCode.OK, _result(
         "demo",
@@ -1522,10 +1519,7 @@ def _run_sealed(
     from .runner import Runner
 
     runner = Runner(root / "runner", local_unqualified_enabled=True)
-    # Keep the runner store's WAL/SHM identities stable while another process
-    # (traceback pause/status) opens the same store during a long run.
-    with runner.store.journal_anchor():
-        return _run_with_runner(root, runner, request, source, relative_files, loaded, progress)
+    return _run_with_runner(root, runner, request, source, relative_files, loaded, progress)
 
 
 def _run_with_runner(
@@ -1826,8 +1820,7 @@ def _resume(
     _append_development_trust(args.root / _TRUST_RELATIVE, development_trust_bytes(signing_key))
     stages = make_stages(signing_key)
     worker_id = "local-cli" if local else "synthetic-cli"
-    with runner.store.journal_anchor():
-        return _resume_execute(args, runner, record, stages, worker_id, local=local)
+    return _resume_execute(args, runner, record, stages, worker_id, local=local)
 
 
 def _resume_execute(

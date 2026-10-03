@@ -1223,7 +1223,6 @@ class RunningLocalWebService:
         watchdog_thread: threading.Thread | None = None
         journal = ExitStack()
         try:
-            journal.enter_context(store.journal_anchor())
             startup_anchor = _open_startup_anchor(state_directory)
             _require_startup_anchor(startup_anchor)
             state_fd = _open_state_directory(state_directory)

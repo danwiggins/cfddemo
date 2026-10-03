@@ -347,10 +347,7 @@ class Runner:
     def execute(
         self, job_id: str, stages: Sequence[StageSpec], *, worker_id: str
     ) -> JobRecord:
-        # Concurrent operator commands (pause, status) open their own store;
-        # the anchor keeps the store's pinned WAL/SHM identities valid.
-        with self.store.journal_anchor():
-            return self._execute(job_id, stages, worker_id=worker_id)
+        return self._execute(job_id, stages, worker_id=worker_id)
 
     def _execute(
         self, job_id: str, stages: Sequence[StageSpec], *, worker_id: str
