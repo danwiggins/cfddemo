@@ -382,10 +382,10 @@ def test_view_states_series_spacing_drawer_and_focus(env: Env, tmp_path: Path) -
     second_gap = xs[5] - xs[member["row_ordinal"]]
     assert second_gap == pytest.approx(2 * first_gap)
     renders = report["renders"]
-    paths = lambda render: (
-        json.dumps(render["chart"]).count('"tag": "PATH"')
-        + json.dumps(render["chart"]).count('"tag":"PATH"')
-    )
+    def paths(render):
+        return json.dumps(render["chart"]).count('"tag": "PATH"') + json.dumps(
+            render["chart"]
+        ).count('"tag":"PATH"')
     assert [paths(r) for r in renders[3:7]] == [1, 1, 2, 0]
     # Native table semantics and controlled state text.
     rows_text = renders[0]["rowsText"]
