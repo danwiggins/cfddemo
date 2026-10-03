@@ -2,13 +2,16 @@
 
 from __future__ import annotations
 
+import gc
 import json
 import os
 import sqlite3
 import stat
+import threading
+import time
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
-from threading import Event
+from threading import Condition, Event
 
 import pytest
 
@@ -22,6 +25,7 @@ from traceback_runner.runner import (
     StageResult,
     StageSpec,
     SyntheticExecutionDisabled,
+    TerminalStageError,
 )
 from traceback_runner.snapshots import (
     SnapshotViolation,
@@ -819,3 +823,638 @@ def test_callback_snapshot_mutation_cannot_publish(tmp_path: Path) -> None:
         )
     assert runner.status(job.job_id).state == JobState.TERMINAL_FAILURE
     assert not (runner.artifacts_dir / job.job_id).exists()
+
+
+class _RenewalCounter:
+    """Wrap ``JobStore.heartbeat`` to count renewals and failed renewals."""
+
+    def __init__(self, store: JobStore) -> None:
+        self.condition = Condition()
+        self.renewed = 0
+        self.failed = 0
+        real = store.heartbeat
+
+        def heartbeat(lease, seconds):
+            try:
+                result = real(lease, seconds)
+            except BaseException:
+                with self.condition:
+                    self.failed += 1
+                    self.condition.notify_all()
+                raise
+            with self.condition:
+                self.renewed += 1
+                self.condition.notify_all()
+            return result
+
+        store.heartbeat = heartbeat  # type: ignore[method-assign]
+
+    def wait_for(self, predicate, timeout: float = 10.0) -> bool:
+        with self.condition:
+            return self.condition.wait_for(predicate, timeout)
+
+
+def _keeper_threads() -> list[threading.Thread]:
+    return [t for t in threading.enumerate() if t.name == "traceback-lease-keeper"]
+
+
+def test_slow_snapshot_verification_keeps_the_lease_alive(tmp_path: Path) -> None:
+    # The real-data failure: re-hashing a 2 GB sealed snapshot before and
+    # after a stage outlasted the 30 s lease, because only stage callbacks
+    # renewed it.  Here each verification spans three lease lengths on the
+    # store clock and the callback never heartbeats.
+    clock = FakeClock()
+    lease = 5.0
+    runner = Runner(
+        tmp_path / "state",
+        clock=clock,
+        lease_seconds=lease,
+        heartbeat_seconds=0.01,
+        synthetic_enabled=True,
+    )
+    source, files = _source(tmp_path)
+    job = runner.submit(_request(source, files), source, files)
+    counter = _RenewalCounter(runner.store)
+    real_verify = runner._verify_job_snapshot
+    slow_verifications = []
+
+    def slow_verify(job_id: str) -> None:
+        real_verify(job_id)
+        if runner.store.get(job_id).lease_owner is None:
+            return  # execute()'s check before any lease; nothing to keep alive
+        slow_verifications.append(job_id)
+        for _ in range(6):
+            seen = counter.renewed
+            clock.now += lease / 2
+            # Two renewals after the advance: the second started after it.
+            assert counter.wait_for(lambda: counter.renewed >= seen + 2 or counter.failed)
+            assert counter.failed == 0
+
+    runner._verify_job_snapshot = slow_verify  # type: ignore[method-assign]
+
+    record = runner.execute(job.job_id, [_stage()], worker_id="worker")
+
+    assert record.state == JobState.COMPLETE
+    assert len(slow_verifications) == 2  # before and after the callback
+    assert counter.failed == 0
+    assert not _keeper_threads()
+
+
+def test_superseded_lease_still_stops_the_worker_before_publication(
+    tmp_path: Path,
+) -> None:
+    clock = FakeClock()
+    lease = 5.0
+    runner = Runner(
+        tmp_path / "state",
+        clock=clock,
+        lease_seconds=lease,
+        heartbeat_seconds=0.01,
+        synthetic_enabled=True,
+    )
+    source, files = _source(tmp_path)
+    job = runner.submit(_request(source, files), source, files)
+    counter = _RenewalCounter(runner.store)
+    takeover = JobStore(runner.store.path, clock=clock)
+    real_verify = runner._verify_job_snapshot
+    verified_under_lease = []
+    second = []
+
+    def verify(job_id: str) -> None:
+        if runner.store.get(job_id).lease_owner is not None:
+            verified_under_lease.append(job_id)
+        real_verify(job_id)
+
+    def stalled_then_superseded(context: object) -> StageResult:
+        # The worker stalls past its lease; a second runner takes the job over.
+        clock.now += lease + 1
+        second.append(
+            takeover.acquire_lease(job.job_id, "measure", "a" * 64, "worker-b", lease)
+        )
+        # The keeper's next renewal meets the superseded fence and stops.
+        assert counter.wait_for(lambda: counter.failed >= 1)
+        (context.attempt_dir / "result.json").write_text("{}")  # type: ignore[attr-defined]
+        return StageResult({"result": "result.json"})
+
+    runner._verify_job_snapshot = verify  # type: ignore[method-assign]
+
+    with pytest.raises(StaleLease):
+        runner.execute(
+            job.job_id,
+            [StageSpec("measure", "v1", stalled_then_superseded)],
+            worker_id="worker-a",
+        )
+
+    # The first worker stopped at the callback boundary: no post-callback
+    # verification, no publication, and the second runner keeps the lease.
+    assert len(verified_under_lease) == 1
+    assert not (runner.artifacts_dir / job.job_id).exists()
+    owner, token, _ = _job_row(runner, job.job_id)
+    assert owner == "worker-b"
+    assert token == second[0].token
+    assert not _keeper_threads()
+
+
+def test_late_keeper_failure_blocks_publication_after_a_good_heartbeat(
+    tmp_path: Path,
+) -> None:
+    # A keeper renewal fails after the callback-boundary checks; the worker's
+    # own fenced heartbeat then succeeds.  The recorded failure still stops the
+    # worker before it publishes.
+    armed = Event()
+    failed = Event()
+
+    def fault(point: str) -> None:
+        if point == "after_receipt":
+            armed.set()
+            assert failed.wait(10)
+
+    runner = Runner(
+        tmp_path / "state",
+        lease_seconds=30,
+        heartbeat_seconds=0.01,
+        synthetic_enabled=True,
+        fault_injector=fault,
+    )
+    source, files = _source(tmp_path)
+    job = runner.submit(_request(source, files), source, files)
+    real = runner.store.heartbeat
+
+    def heartbeat(lease, seconds):
+        on_keeper = threading.current_thread().name == "traceback-lease-keeper"
+        if on_keeper and armed.is_set() and not failed.is_set():
+            failed.set()
+            raise sqlite3.OperationalError("database is locked")
+        return real(lease, seconds)
+
+    runner.store.heartbeat = heartbeat  # type: ignore[method-assign]
+
+    with pytest.raises(StaleLease, match="lease renewal failed"):
+        runner.execute(job.job_id, [_stage()], worker_id="worker")
+
+    assert list((runner.artifacts_dir / job.job_id).glob("measure/*")) == []
+    assert runner.status(job.job_id).state == JobState.RETRYABLE_FAILURE
+    assert not _keeper_threads()
+
+
+@pytest.mark.parametrize("error", [RuntimeError, SnapshotViolation])
+def test_failed_worker_stops_renewing_before_it_records_the_failure(
+    tmp_path: Path, error: type[Exception]
+) -> None:
+    runner = Runner(
+        tmp_path / "state", lease_seconds=30, heartbeat_seconds=0.01, synthetic_enabled=True
+    )
+    source, files = _source(tmp_path)
+    job = runner.submit(_request(source, files), source, files)
+    real_fail = runner.store.fail_attempt
+    keepers_at_failure = []
+
+    def fail_attempt(*args, **kwargs):
+        keepers_at_failure.append(len(_keeper_threads()))
+        return real_fail(*args, **kwargs)
+
+    def broken(context: object) -> StageResult:
+        raise error("stage failed")
+
+    runner.store.fail_attempt = fail_attempt  # type: ignore[method-assign]
+    with pytest.raises(error):
+        runner.execute(job.job_id, [StageSpec("measure", "v1", broken)], worker_id="w")
+    assert keepers_at_failure == [0]
+
+
+def _job_row(runner: Runner, job_id: str) -> tuple[str | None, int, str]:
+    # Raw read: a second JobStore instance outside a journal anchor can trip the
+    # pinned WAL/SHM identity check (a pre-existing multi-instance hazard).
+    with sqlite3.connect(runner.store.path) as connection:
+        return connection.execute(
+            "SELECT lease_owner, lease_token, state FROM jobs WHERE job_id=?", (job_id,)
+        ).fetchone()
+
+
+def _attempt_statuses(runner: Runner, job_id: str) -> list[str]:
+    with sqlite3.connect(runner.store.path) as connection:
+        rows = connection.execute(
+            "SELECT status FROM attempts WHERE job_id=? ORDER BY attempt", (job_id,)
+        ).fetchall()
+    return [row[0] for row in rows]
+
+
+def test_takeover_after_keeper_shutdown_cannot_publish_stale_bytes(
+    tmp_path: Path,
+) -> None:
+    # The worker's last fenced heartbeat succeeds and its keeper stops; it then
+    # stalls past the lease and a second runner takes over before the rename.
+    clock = FakeClock()
+    lease = 5.0
+    runner = Runner(
+        tmp_path / "state",
+        clock=clock,
+        lease_seconds=lease,
+        heartbeat_seconds=0.01,
+        synthetic_enabled=True,
+    )
+    source, files = _source(tmp_path)
+    job = runner.submit(_request(source, files), source, files)
+    takeover = JobStore(runner.store.path, clock=clock)
+    real_publish = runner.store.publish_attempt
+    keepers_at_publish = []
+
+    def stalled_publish(lease_arg, publish):
+        keepers_at_publish.append(len(_keeper_threads()))
+        clock.now += lease + 1
+        takeover.acquire_lease(job.job_id, "measure", "a" * 64, "worker-b", lease)
+        return real_publish(lease_arg, publish)
+
+    runner.store.publish_attempt = stalled_publish  # type: ignore[method-assign]
+
+    with pytest.raises(StaleLease):
+        runner.execute(job.job_id, [_stage()], worker_id="worker-a")
+
+    assert keepers_at_publish == [0]
+    assert list((runner.artifacts_dir / job.job_id).glob("measure/*")) == []
+    owner, _, state = _job_row(runner, job.job_id)
+    assert owner == "worker-b"
+    assert state == JobState.RUNNING.value
+
+
+def test_publication_at_the_exact_expiry_instant_is_refused(tmp_path: Path) -> None:
+    clock = FakeClock()
+    runner = Runner(
+        tmp_path / "state",
+        clock=clock,
+        lease_seconds=5.0,
+        heartbeat_seconds=0.01,
+        synthetic_enabled=True,
+    )
+    source, files = _source(tmp_path)
+    job = runner.submit(_request(source, files), source, files)
+    real_publish = runner.store.publish_attempt
+
+    def publish_at_expiry(lease_arg, publish):
+        clock.now = lease_arg.expires_at  # takeover is already allowed here
+        return real_publish(lease_arg, publish)
+
+    runner.store.publish_attempt = publish_at_expiry  # type: ignore[method-assign]
+    with pytest.raises(StaleLease):
+        runner.execute(job.job_id, [_stage()], worker_id="worker-a")
+    assert list((runner.artifacts_dir / job.job_id).glob("measure/*")) == []
+
+
+def test_lease_authority_and_takeover_agree_at_the_expiry_instant(tmp_path: Path) -> None:
+    clock = FakeClock()
+    source, files = _source(tmp_path)
+    runner = Runner(tmp_path / "state", clock=clock, synthetic_enabled=True)
+    job = runner.submit(_request(source, files), source, files)
+    runner.store.transition(job.job_id, JobState.RUNNING, "test worker started")
+    first = runner.store.acquire_lease(job.job_id, "measure", "a" * 64, "worker-a", 5)
+    clock.now = first.expires_at
+    for refused in (
+        lambda: runner.store.heartbeat(first, 5),
+        lambda: runner.store.fail_attempt(first, "late", retryable=False),
+        lambda: runner.store.publish_attempt(first, lambda: None),
+        lambda: runner.store.commit_attempt(first, "r/receipt.json", "b" * 64),
+    ):
+        with pytest.raises(StaleLease):
+            refused()
+    second = runner.store.acquire_lease(job.job_id, "measure", "a" * 64, "worker-b", 5)
+    assert second.token > first.token
+
+
+def test_lost_lease_and_stage_error_record_no_failure(tmp_path: Path) -> None:
+    # Conjunction: the keeper has recorded an expired lease AND the stage then
+    # raises its own error.  The worker surfaces the lost lease and records
+    # nothing; the job's failure state is left to whoever holds the fence.
+    clock = FakeClock()
+    lease = 5.0
+    runner = Runner(
+        tmp_path / "state",
+        clock=clock,
+        lease_seconds=lease,
+        heartbeat_seconds=0.01,
+        synthetic_enabled=True,
+    )
+    source, files = _source(tmp_path)
+    job = runner.submit(_request(source, files), source, files)
+    counter = _RenewalCounter(runner.store)
+
+    def expired_then_broken(context: object) -> StageResult:
+        clock.now += lease + 1
+        assert counter.wait_for(lambda: counter.failed >= 1)
+        raise TerminalStageError("refused after the lease expired")
+
+    with pytest.raises(StaleLease, match="lease expired or was superseded"):
+        runner.execute(
+            job.job_id, [StageSpec("measure", "v1", expired_then_broken)], worker_id="w"
+        )
+    assert runner.status(job.job_id).state == JobState.RUNNING
+    assert _attempt_statuses(runner, job.job_id) == ["running"]
+
+
+def test_fail_attempt_refuses_an_expired_lease(tmp_path: Path) -> None:
+    # The keeper has not noticed (long interval), so only the store's fence
+    # on token AND expiry stops an expired worker from recording a failure.
+    clock = FakeClock()
+    lease = 5.0
+    runner = Runner(
+        tmp_path / "state",
+        clock=clock,
+        lease_seconds=lease,
+        heartbeat_seconds=lease * 0.99,
+        synthetic_enabled=True,
+    )
+    source, files = _source(tmp_path)
+    job = runner.submit(_request(source, files), source, files)
+
+    def expired_then_broken(context: object) -> StageResult:
+        clock.now += lease + 1
+        raise RuntimeError("stage failed after the lease expired")
+
+    with pytest.raises(StaleLease, match="cannot record failure"):
+        runner.execute(
+            job.job_id, [StageSpec("measure", "v1", expired_then_broken)], worker_id="w"
+        )
+    assert runner.status(job.job_id).state == JobState.RUNNING
+    assert _attempt_statuses(runner, job.job_id) == ["running"]
+
+
+def test_heartbeat_interval_must_be_shorter_than_the_lease(tmp_path: Path) -> None:
+    for name, interval in (("equal", 1), ("zero", 0)):
+        with pytest.raises(ValueError, match="heartbeat_seconds"):
+            Runner(
+                tmp_path / name,
+                lease_seconds=1,
+                heartbeat_seconds=interval,
+                synthetic_enabled=True,
+            )
+    assert Runner(tmp_path / "default", synthetic_enabled=True).heartbeat_seconds == 10.0
+
+
+def _submitted_store(tmp_path: Path) -> tuple[JobStore, str]:
+    source, files = _source(tmp_path)
+    store = JobStore(tmp_path / "state" / "jobs.sqlite3")
+    return store, store.submit(_request(source, files)).job_id
+
+
+def test_concurrent_stores_never_trip_the_pinned_sidecar_identities(
+    tmp_path: Path,
+) -> None:
+    # The class behind the run/pause race, the 16-concurrent-web-start
+    # FileNotFoundError and the concurrent-submit flake: one store pins the
+    # WAL/SHM identities while another connection's last close deletes them.
+    # Each store's lifetime anchor means no such close is ever the last one.
+    shared, job_id = _submitted_store(tmp_path)
+    errors: list[BaseException] = []
+    start = Event()
+
+    def shared_reader() -> None:
+        start.wait(5)
+        for _ in range(40):
+            shared.get(job_id)
+
+    def transient_store() -> None:
+        start.wait(5)
+        for _ in range(40):
+            JobStore(shared.path).get(job_id)  # opens, reads, closes (refcount)
+
+    def guarded(body):
+        def run() -> None:
+            try:
+                body()
+            except BaseException as exc:  # noqa: BLE001 - reported below
+                errors.append(exc)
+
+        return run
+
+    threads = [
+        threading.Thread(target=guarded(shared_reader if i % 2 else transient_store))
+        for i in range(16)
+    ]
+    for thread in threads:
+        thread.start()
+    start.set()
+    for thread in threads:
+        thread.join(60)
+    assert errors == []
+
+
+def test_store_lifetime_anchor_releases_its_descriptors(tmp_path: Path) -> None:
+    store, job_id = _submitted_store(tmp_path)
+    fd_dir = "/dev/fd" if os.path.isdir("/dev/fd") else f"/proc/{os.getpid()}/fd"
+    baseline = len(os.listdir(fd_dir))
+    for _ in range(100):
+        JobStore(store.path).get(job_id)
+    with JobStore(store.path) as scoped:
+        scoped.get(job_id)
+    assert len(os.listdir(fd_dir)) <= baseline + 2
+
+
+def test_closed_store_refuses_use_and_journal_anchor_is_a_nested_no_op(
+    tmp_path: Path,
+) -> None:
+    store, job_id = _submitted_store(tmp_path)
+    with store.journal_anchor(), store.journal_anchor():
+        assert store.get(job_id).job_id == job_id
+    store.close()
+    store.close()  # idempotent
+    with pytest.raises(StoreError, match="closed"):
+        store.get(job_id)
+    with pytest.raises(StoreError, match="closed"):
+        with store.journal_anchor():
+            pass
+
+
+@pytest.mark.skipif(not hasattr(os, "fork"), reason="requires fork")
+def test_forked_child_dropping_an_inherited_store_leaves_the_parent_anchor(
+    tmp_path: Path,
+) -> None:
+    from tests.forking import run_in_child
+
+    store, job_id = _submitted_store(tmp_path)
+    wal = Path(f"{store.path}-wal")
+    before = wal.stat().st_ino
+
+    def child() -> None:
+        store.close()  # inherited anchor: kept alive, not closed, in the child
+        JobStore(store.path).get(job_id)
+
+    assert run_in_child(child) == 0
+    assert wal.exists() and wal.stat().st_ino == before
+    assert store.get(job_id).job_id == job_id
+
+
+def test_recovery_adopts_a_crashed_publication_at_the_exact_expiry_instant(
+    tmp_path: Path,
+) -> None:
+    # Recovery must agree with takeover: at expiry the crashed worker's lease is
+    # no longer live, so its verified publication is adopted, not held busy.
+    source, files = _source(tmp_path)
+    clock = FakeClock()
+
+    def crash(point: str) -> None:
+        if point == "after_publication":
+            raise InjectedCrash(point)
+
+    state = tmp_path / "state"
+    runner = Runner(state, clock=clock, synthetic_enabled=True, fault_injector=crash)
+    job = runner.submit(_request(source, files), source, files)
+    with pytest.raises(InjectedCrash):
+        runner.execute(job.job_id, [_stage()], worker_id="worker-a")
+    with sqlite3.connect(runner.store.path) as connection:
+        clock.now = connection.execute(
+            "SELECT lease_expires_at FROM jobs WHERE job_id=?", (job.job_id,)
+        ).fetchone()[0]
+
+    recovered = Runner(state, clock=clock, synthetic_enabled=True)
+    assert recovered.recover(job.job_id).adopted == ("measure",)
+
+
+def test_store_pins_no_sidecar_before_its_anchor_exists(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # Store B starts while store A is the only connection.  Before B's anchor
+    # opens, A closes last (SQLite deletes the sidecars) and another connection
+    # recreates them with new inodes.  B must not have pinned A's sidecars.
+    first, job_id = _submitted_store(tmp_path)
+    wal = Path(f"{first.path}-wal")
+    before = wal.stat().st_ino
+    other: list[sqlite3.Connection] = []
+    real_connect = JobStore._connect
+
+    def connect(self, *, anchor: bool = False):
+        if anchor and not other:
+            first.close()
+            gc.collect()
+            assert not wal.exists()
+            recreated = sqlite3.connect(first.path, check_same_thread=False)
+            recreated.execute("SELECT count(*) FROM jobs").fetchall()
+            other.append(recreated)
+            assert wal.exists() and wal.stat().st_ino != before
+        return real_connect(self, anchor=anchor)
+
+    monkeypatch.setattr(JobStore, "_connect", connect)
+    second = JobStore(first.path)
+    monkeypatch.setattr(JobStore, "_connect", real_connect)
+    try:
+        assert second.get(job_id).job_id == job_id
+    finally:
+        second.close()
+        other[0].close()
+
+
+def test_close_waits_for_admitted_operations_and_refuses_new_ones(
+    tmp_path: Path,
+) -> None:
+    store, job_id = _submitted_store(tmp_path)
+    admitted = store._connect()  # an operation already in flight
+    closed = Event()
+
+    def close() -> None:
+        store.close()
+        closed.set()
+
+    closer = threading.Thread(target=close)
+    closer.start()
+    try:
+        assert not closed.wait(0.3)  # close() cannot return under a live operation
+        with pytest.raises(StoreError, match="closed"):
+            store.get(job_id)  # ...and no new operation is admitted meanwhile
+        assert admitted.execute("SELECT count(*) FROM jobs").fetchone()[0] == 1
+    finally:
+        admitted.close()
+    assert closed.wait(5)
+    closer.join(5)
+    assert store._anchor is None
+
+
+def test_recovery_quarantines_a_private_orphan_at_the_exact_expiry_instant(
+    tmp_path: Path,
+) -> None:
+    source, files = _source(tmp_path)
+    clock = FakeClock()
+
+    def crash(point: str) -> None:
+        if point == "after_receipt":
+            raise InjectedCrash(point)
+
+    state = tmp_path / "state"
+    runner = Runner(state, clock=clock, synthetic_enabled=True, fault_injector=crash)
+    job = runner.submit(_request(source, files), source, files)
+    with pytest.raises(InjectedCrash):
+        runner.execute(job.job_id, [_stage()], worker_id="worker-a")
+    with sqlite3.connect(runner.store.path) as connection:
+        clock.now = connection.execute(
+            "SELECT lease_expires_at FROM jobs WHERE job_id=?", (job.job_id,)
+        ).fetchone()[0]
+
+    recovered = Runner(state, clock=clock, synthetic_enabled=True)
+    assert len(recovered.recover(job.job_id).quarantined) == 1
+
+
+def test_a_reclaimed_unclosed_connection_cannot_block_store_close(
+    tmp_path: Path,
+) -> None:
+    store, _ = _submitted_store(tmp_path)
+    leaked = store._connect()
+    del leaked  # reclaimed without close()
+    gc.collect()
+    closed = Event()
+    closer = threading.Thread(target=lambda: (store.close(), closed.set()), daemon=True)
+    closer.start()
+    assert closed.wait(5)
+
+
+def _hold_store_lock(store: JobStore) -> tuple[Event, threading.Thread]:
+    held, release = Event(), Event()
+
+    def hold() -> None:
+        with store._storage_lock:
+            held.set()
+            release.wait(30)
+
+    thread = threading.Thread(target=hold, daemon=True)
+    thread.start()
+    assert held.wait(5)
+    return release, thread
+
+
+@pytest.mark.skipif(not hasattr(os, "fork"), reason="requires fork")
+def test_forked_child_closes_an_inherited_store_without_its_locks(tmp_path: Path) -> None:
+    # Another parent thread owns the store lock at fork(); in the child that
+    # owner does not exist, so close() must not touch the lock at all.
+    from tests.forking import start_child
+
+    store, _ = _submitted_store(tmp_path)
+    release, holder = _hold_store_lock(store)
+    try:
+        pid = start_child(store.close)
+        deadline = time.monotonic() + 10
+        status = 0
+        while time.monotonic() < deadline:
+            done, status = os.waitpid(pid, os.WNOHANG)
+            if done:
+                break
+            time.sleep(0.05)
+        else:
+            os.kill(pid, 9)
+            os.waitpid(pid, 0)
+            pytest.fail("forked child hung closing an inherited store")
+        assert os.waitstatus_to_exitcode(status) == 0
+    finally:
+        release.set()
+        holder.join(5)
+
+
+def test_store_finalizers_never_block_on_a_held_lock(tmp_path: Path) -> None:
+    store, _ = _submitted_store(tmp_path)
+    leaked = store._connect()
+    release, holder = _hold_store_lock(store)
+    try:
+        started = time.monotonic()
+        leaked.__del__()  # the connection finalizer's admission release
+        store.__del__()  # the store finalizer
+        assert time.monotonic() - started < 5
+        assert store._anchor is None
+    finally:
+        release.set()
+        holder.join(5)
+        leaked.close()

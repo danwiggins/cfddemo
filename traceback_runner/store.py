@@ -6,6 +6,7 @@ import json
 import os
 import sqlite3
 import stat
+import threading
 import time
 import uuid
 from collections.abc import Callable, Iterator
@@ -17,6 +18,15 @@ from .contracts import JobRequest, JobState, job_key, validate_transition
 from .serialization import canonical_json_bytes
 
 SCHEMA_VERSION = 1
+
+# Anchor connections a forked child inherited.  The parent owns them; closing
+# one in the child would run SQLite's close path on the parent's database
+# state, so the child keeps them unreferenced-but-alive until it exits.
+_INHERITED_ANCHORS: list[sqlite3.Connection] = []
+
+# How long a finalizer waits for a store lock before giving up instead of
+# blocking garbage collection or interpreter shutdown.
+_FINALIZER_LOCK_SECONDS = 1.0
 
 
 class StoreError(RuntimeError):
@@ -71,8 +81,54 @@ class AttemptLease:
     expires_at: float
 
 
+class _ClosingConnection(sqlite3.Connection):
+    """A connection whose ``with`` block also closes it.
+
+    ``sqlite3.Connection.__exit__`` only commits or rolls back, leaving the
+    close to garbage collection.  A store's lifetime anchor holds a lock on the
+    database inode, and while any connection in the process holds one, SQLite
+    defers closing every other connection's descriptor, so per-operation
+    connections closed late leak descriptors until the anchor closes.
+    """
+
+    def __exit__(self, *exc_info: object) -> bool:
+        try:
+            return bool(super().__exit__(*exc_info))
+        finally:
+            self.close()
+
+    def close(self) -> None:
+        try:
+            super().close()
+        finally:
+            release = self.__dict__.pop("_release", None)
+            if release is not None:
+                release()
+
+    def __del__(self) -> None:
+        # A connection reclaimed without close() still releases its admission,
+        # so JobStore.close() (and its finalizer) can never wait forever.
+        release = self.__dict__.pop("_release", None)
+        if release is not None:
+            try:
+                release(finalizer=True)
+            except Exception:  # noqa: BLE001 - finalizers must not raise
+                pass
+
+
 class JobStore:
-    """Small connection-per-operation SQLite store with monotonic fencing."""
+    """Small connection-per-operation SQLite store with monotonic fencing.
+
+    Each instance also holds one idle *anchor* connection for its whole
+    lifetime (opened first in ``__init__``, released by :meth:`close`, context
+    exit or garbage collection).  SQLite deletes ``-wal``/``-shm`` when the
+    last connection to a database closes; the store pins those sidecars'
+    identities, so a deletion and recreation between two of its operations
+    would read as tampering.  With the anchor open, no other close (another
+    thread's operation, another store, another process) is the last one, so
+    the sidecars can only disappear when no store is alive to observe it.  The
+    anchor holds no transaction, so WAL readers and writers are not blocked.
+    """
 
     def __init__(self, path: Path, *, clock: Callable[[], float] = time.time) -> None:
         self.path = path
@@ -85,13 +141,87 @@ class JobStore:
         self._directory_identity = (parent.st_dev, parent.st_ino)
         self._database_identity: tuple[int, int] | None = None
         self._sidecar_identities: dict[Path, tuple[int, int]] = {}
+        # The runner's lease keeper thread uses this store concurrently with
+        # the worker thread; the pinned-identity bookkeeping is not atomic.
+        self._storage_lock = threading.RLock()
+        self._anchor: sqlite3.Connection | None = None
+        self._anchor_pid = os.getpid()
+        self._closed = False
+        # Admitted per-operation connections; close() waits for them to finish
+        # so no operation runs on, or outlives, a closed store.
+        self._active = 0
+        self._idle = threading.Condition(self._storage_lock)
         self._secure_storage()
-        self._initialize()
-        self._secure_storage()
-        database = self.path.lstat()
-        self._database_identity = (database.st_dev, database.st_ino)
+        try:
+            self._initialize()
+            self._secure_storage()
+            database = self.path.lstat()
+            self._database_identity = (database.st_dev, database.st_ino)
+        except BaseException:
+            self.close()
+            raise
+
+    def close(self) -> None:
+        """Release the lifetime anchor; the store refuses further use.
+
+        New operations are refused at once; close waits for operations already
+        admitted to finish.  Do not call it from inside a store operation.
+        """
+
+        self._close(wait=True)
+
+    def _close(self, *, wait: bool) -> None:
+        idle = getattr(self, "_idle", None)
+        if idle is None:
+            return
+        if os.getpid() != self._anchor_pid:
+            # A forked child inherits the parent's locks, possibly owned by a
+            # thread that does not exist here: touch none of them, wait for
+            # nothing, and keep the parent's anchor open.
+            self._closed = True
+            anchor, self._anchor = self._anchor, None
+            if anchor is not None:
+                _INHERITED_ANCHORS.append(anchor)
+            return
+        # A finalizer (wait=False) must never block: no operation can be running
+        # once the store is collected, so a lock it cannot get promptly is held
+        # by something broken, and closing without it is the safe choice.
+        locked = idle.acquire() if wait else idle.acquire(timeout=_FINALIZER_LOCK_SECONDS)
+        try:
+            self._closed = True
+            if wait:
+                idle.wait_for(lambda: self._active == 0)
+            anchor, self._anchor = self._anchor, None
+        finally:
+            if locked:
+                idle.release()
+        if anchor is None:
+            return
+        try:
+            anchor.close()
+        except sqlite3.Error:
+            pass
+
+    def __enter__(self) -> "JobStore":
+        return self
+
+    def __exit__(self, *exc_info: object) -> None:
+        self.close()
+
+    def __del__(self) -> None:
+        # Never wait in a finalizer: an operation in progress holds a reference
+        # to the store, so none can be running once it is being collected (and
+        # a wait at interpreter shutdown could hang the process).
+        try:
+            self._close(wait=False)
+        except Exception:  # noqa: BLE001 - finalizers must not raise
+            pass
 
     def _secure_storage(self) -> None:
+        with self._storage_lock:
+            self._secure_storage_locked()
+
+    def _secure_storage_locked(self) -> None:
         parent = self.path.parent.lstat()
         if (
             not stat.S_ISDIR(parent.st_mode)
@@ -124,10 +254,18 @@ class JobStore:
                     or stat.S_IMODE(metadata.st_mode) != 0o600
                 ):
                     raise StoreError("runner store database identity changed")
+            elif self._anchor is None:
+                # Before this store's anchor exists another connection's last
+                # close may still delete and recreate the sidecars: validate
+                # them, but pin nothing until the anchor holds them in place.
+                continue
             else:
                 previous = self._sidecar_identities.get(candidate)
                 if previous is None:
-                    os.chmod(candidate, 0o600)
+                    try:
+                        os.chmod(candidate, 0o600)
+                    except FileNotFoundError:
+                        continue  # removed since lstat: absent, nothing to pin
                     self._sidecar_identities[candidate] = identity
                 elif previous != identity or stat.S_IMODE(metadata.st_mode) != 0o600:
                     raise StoreError("runner store sidecar identity changed")
@@ -139,33 +277,60 @@ class JobStore:
             if (database.st_dev, database.st_ino) != self._database_identity:
                 raise StoreError("runner store database identity changed")
 
-    def _connect(self) -> sqlite3.Connection:
-        self._secure_storage()
-        connection = sqlite3.connect(self.path, timeout=30, isolation_level=None)
-        connection.row_factory = sqlite3.Row
-        connection.execute("PRAGMA foreign_keys=ON")
-        connection.execute("PRAGMA busy_timeout=30000")
-        self._secure_storage()
-        return connection
+    def _release_connection(self, *, finalizer: bool = False) -> None:
+        if os.getpid() != self._anchor_pid:
+            return  # inherited from the parent; its count is not ours
+        # From a finalizer, give up rather than hang (see _close).
+        if not self._idle.acquire(timeout=_FINALIZER_LOCK_SECONDS if finalizer else -1):
+            return
+        try:
+            self._active -= 1
+            if self._active == 0:
+                self._idle.notify_all()
+        finally:
+            self._idle.release()
+
+    def _connect(self, *, anchor: bool = False) -> sqlite3.Connection:
+        with self._idle:
+            if self._closed:
+                raise StoreError("runner store is closed")
+            if not anchor:
+                self._active += 1
+        connection: sqlite3.Connection | None = None
+        try:
+            self._secure_storage()
+            # The anchor may be closed from another thread (close() or __del__).
+            connection = sqlite3.connect(
+                self.path,
+                timeout=30,
+                isolation_level=None,
+                check_same_thread=not anchor,
+                factory=_ClosingConnection,
+            )
+            if not anchor:
+                connection._release = self._release_connection  # type: ignore[attr-defined]
+            connection.row_factory = sqlite3.Row
+            connection.execute("PRAGMA foreign_keys=ON")
+            connection.execute("PRAGMA busy_timeout=30000")
+            self._secure_storage()
+            return connection
+        except BaseException:
+            if connection is not None:
+                connection.close()  # releases the admission
+            elif not anchor:
+                self._release_connection()
+            raise
 
     @contextmanager
     def journal_anchor(self) -> Iterator[None]:
-        """Hold one read connection so the WAL and SHM sidecars stay in place.
+        """Compatibility no-op: every store now holds its anchor for its lifetime.
 
-        SQLite deletes ``-wal``/``-shm`` when the last connection closes.  If
-        another store instance (for example ``traceback pause`` in a second
-        process) opens and closes the database between two of this instance's
-        calls, the sidecars come back with new inodes and the pinned-identity
-        check above refuses them.  While this anchor is open, no other close is
-        the last one, so the sidecars and their identities persist.
+        Nested and repeated use is safe; it only refuses a closed store.
         """
 
-        connection = self._connect()
-        try:
-            connection.execute("SELECT count(*) FROM jobs").fetchone()
-            yield
-        finally:
-            connection.close()
+        if self._closed:
+            raise StoreError("runner store is closed")
+        yield
 
     @contextmanager
     def _transaction(self) -> Iterator[sqlite3.Connection]:
@@ -182,75 +347,87 @@ class JobStore:
 
     def _initialize(self) -> None:
         new = not self.path.exists()
-        with self._connect() as connection:
-            if new:
-                connection.executescript(
-                    """
-                    PRAGMA journal_mode=WAL;
-                    PRAGMA synchronous=FULL;
-                    CREATE TABLE metadata (
-                        key TEXT PRIMARY KEY,
-                        value TEXT NOT NULL
-                    );
-                    INSERT INTO metadata(key, value) VALUES ('schema_version', '1');
-                    CREATE TABLE jobs (
-                        job_id TEXT PRIMARY KEY,
-                        idempotency_key TEXT NOT NULL UNIQUE,
-                        request_key TEXT NOT NULL UNIQUE,
-                        request_json BLOB NOT NULL,
-                        state TEXT NOT NULL,
-                        snapshot_id TEXT,
-                        snapshot_manifest_sha256 TEXT,
-                        snapshot_summary_json BLOB,
-                        current_stage TEXT,
-                        lease_token INTEGER NOT NULL DEFAULT 0,
-                        lease_owner TEXT,
-                        lease_expires_at REAL,
-                        created_at REAL NOT NULL,
-                        updated_at REAL NOT NULL,
-                        last_error TEXT
-                    );
-                    CREATE TABLE audit (
-                        sequence INTEGER PRIMARY KEY AUTOINCREMENT,
-                        job_id TEXT NOT NULL REFERENCES jobs(job_id),
-                        occurred_at REAL NOT NULL,
-                        previous_state TEXT,
-                        next_state TEXT NOT NULL,
-                        reason TEXT NOT NULL,
-                        lease_token INTEGER NOT NULL
-                    );
-                    CREATE TABLE attempts (
-                        job_id TEXT NOT NULL REFERENCES jobs(job_id),
-                        stage TEXT NOT NULL,
-                        attempt INTEGER NOT NULL,
-                        lease_token INTEGER NOT NULL,
-                        stage_definition_sha256 TEXT NOT NULL,
-                        worker_id TEXT NOT NULL,
-                        status TEXT NOT NULL,
-                        started_at REAL NOT NULL,
-                        receipt_path TEXT,
-                        receipt_sha256 TEXT,
-                        PRIMARY KEY(job_id, stage, attempt),
-                        UNIQUE(job_id, lease_token)
-                    );
-                    """
+        # The first connection this store opens becomes its lifetime anchor, so
+        # no connection of ours closes before the anchor exists.
+        anchor = self._connect(anchor=True)
+        self._anchor = anchor
+        self._initialize_schema(anchor, new)
+        # Leave the anchor idle: no open statement, so no read snapshot that
+        # would hold back WAL checkpoints.
+        anchor.execute("SELECT count(*) FROM jobs").fetchall()
+
+    @staticmethod
+    def _initialize_schema(connection: sqlite3.Connection, new: bool) -> None:
+        # Not ``with connection``: on a closing connection that would close the
+        # anchor.  Every statement here autocommits (isolation_level=None).
+        if new:
+            connection.executescript(
+                """
+                PRAGMA journal_mode=WAL;
+                PRAGMA synchronous=FULL;
+                CREATE TABLE metadata (
+                    key TEXT PRIMARY KEY,
+                    value TEXT NOT NULL
+                );
+                INSERT INTO metadata(key, value) VALUES ('schema_version', '1');
+                CREATE TABLE jobs (
+                    job_id TEXT PRIMARY KEY,
+                    idempotency_key TEXT NOT NULL UNIQUE,
+                    request_key TEXT NOT NULL UNIQUE,
+                    request_json BLOB NOT NULL,
+                    state TEXT NOT NULL,
+                    snapshot_id TEXT,
+                    snapshot_manifest_sha256 TEXT,
+                    snapshot_summary_json BLOB,
+                    current_stage TEXT,
+                    lease_token INTEGER NOT NULL DEFAULT 0,
+                    lease_owner TEXT,
+                    lease_expires_at REAL,
+                    created_at REAL NOT NULL,
+                    updated_at REAL NOT NULL,
+                    last_error TEXT
+                );
+                CREATE TABLE audit (
+                    sequence INTEGER PRIMARY KEY AUTOINCREMENT,
+                    job_id TEXT NOT NULL REFERENCES jobs(job_id),
+                    occurred_at REAL NOT NULL,
+                    previous_state TEXT,
+                    next_state TEXT NOT NULL,
+                    reason TEXT NOT NULL,
+                    lease_token INTEGER NOT NULL
+                );
+                CREATE TABLE attempts (
+                    job_id TEXT NOT NULL REFERENCES jobs(job_id),
+                    stage TEXT NOT NULL,
+                    attempt INTEGER NOT NULL,
+                    lease_token INTEGER NOT NULL,
+                    stage_definition_sha256 TEXT NOT NULL,
+                    worker_id TEXT NOT NULL,
+                    status TEXT NOT NULL,
+                    started_at REAL NOT NULL,
+                    receipt_path TEXT,
+                    receipt_sha256 TEXT,
+                    PRIMARY KEY(job_id, stage, attempt),
+                    UNIQUE(job_id, lease_token)
+                );
+                """
+            )
+        else:
+            try:
+                row = connection.execute(
+                    "SELECT value FROM metadata WHERE key='schema_version'"
+                ).fetchone()
+            except sqlite3.DatabaseError as exc:
+                raise UnsupportedSchema(
+                    "database has no recognized schema"
+                ) from exc
+            if row is None or int(row[0]) != SCHEMA_VERSION:
+                found = "missing" if row is None else row[0]
+                raise UnsupportedSchema(
+                    f"database schema {found!r} is unsupported; expected {SCHEMA_VERSION}"
                 )
-            else:
-                try:
-                    row = connection.execute(
-                        "SELECT value FROM metadata WHERE key='schema_version'"
-                    ).fetchone()
-                except sqlite3.DatabaseError as exc:
-                    raise UnsupportedSchema(
-                        "database has no recognized schema"
-                    ) from exc
-                if row is None or int(row[0]) != SCHEMA_VERSION:
-                    found = "missing" if row is None else row[0]
-                    raise UnsupportedSchema(
-                        f"database schema {found!r} is unsupported; expected {SCHEMA_VERSION}"
-                    )
-                connection.execute("PRAGMA journal_mode=WAL")
-                connection.execute("PRAGMA synchronous=FULL")
+            connection.execute("PRAGMA journal_mode=WAL").fetchall()
+            connection.execute("PRAGMA synchronous=FULL")
 
     @staticmethod
     def _record(row: sqlite3.Row) -> StoredJobRecord:
@@ -526,8 +703,27 @@ class JobStore:
             and row["lease_owner"] == lease.worker_id
             and row["current_stage"] == lease.stage
             and row["lease_expires_at"] is not None
-            and row["lease_expires_at"] >= now
+            # Exclusive, like acquire_lease's takeover test: at the instant of
+            # expiry the lease is already another worker's to take.
+            and row["lease_expires_at"] > now
         )
+
+    def publish_attempt(self, lease: AttemptLease, publish: Callable[[], None]) -> None:
+        """Run ``publish`` only while ``lease`` is current, fenced against takeover.
+
+        The check and ``publish`` run inside one ``BEGIN IMMEDIATE`` write
+        transaction; ``acquire_lease`` needs the same write lock, so no other
+        worker can take the job over between the fence check and the rename.
+        Keep ``publish`` short (a rename, chmod and fsync).
+        """
+
+        with self._transaction() as connection:
+            row = connection.execute(
+                "SELECT * FROM jobs WHERE job_id=?", (lease.job_id,)
+            ).fetchone()
+            if row is None or not self._lease_matches(row, lease, self.clock()):
+                raise StaleLease("stale worker cannot publish a stage")
+            publish()
 
     def commit_attempt(
         self, lease: AttemptLease, receipt_path: str, receipt_sha256: str
@@ -601,7 +797,7 @@ class JobStore:
                 return False
             if (
                 row["lease_owner"] is not None
-                and row["lease_expires_at"] >= self.clock()
+                and row["lease_expires_at"] > self.clock()
             ):
                 raise LeaseBusy("publication still belongs to a live worker")
             connection.execute(
@@ -662,7 +858,7 @@ class JobStore:
             if row["lease_owner"] is not None:
                 if (
                     row["lease_expires_at"] is not None
-                    and row["lease_expires_at"] >= now
+                    and row["lease_expires_at"] > now
                 ):
                     active = f"{row['current_stage']}-{row['lease_token']}"
                 else:
@@ -687,7 +883,9 @@ class JobStore:
                 "SELECT * FROM jobs WHERE job_id=?", (lease.job_id,)
             ).fetchone()
             now = self.clock()
-            if row is None or row["lease_token"] != lease.token:
+            # Same fence as heartbeat and commit: an expired or superseded
+            # worker has no authority to decide the job's failure state.
+            if row is None or not self._lease_matches(row, lease, now):
                 raise StaleLease("stale worker cannot record failure")
             previous = JobState(row["state"])
             validate_transition(previous, target)
@@ -715,18 +913,19 @@ class JobStore:
         if destination.exists():
             raise FileExistsError(destination)
         source = self._connect()
-        target = sqlite3.connect(destination)
         try:
-            source.backup(target)
-            target.execute("PRAGMA integrity_check").fetchone()
-        except BaseException:
+            target = sqlite3.connect(destination)
+            try:
+                source.backup(target)
+                target.execute("PRAGMA integrity_check").fetchone()
+            except BaseException:
+                target.close()
+                if destination.exists():
+                    destination.unlink()
+                raise
             target.close()
+        finally:
             source.close()
-            if destination.exists():
-                destination.unlink()
-            raise
-        target.close()
-        source.close()
         os.chmod(destination, 0o600)
         return destination
 
