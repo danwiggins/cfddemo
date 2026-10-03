@@ -99,7 +99,8 @@ The D10 lock is therefore the outermost lock, ahead of D09 and D03. No D01,
 D05, D06, D09, or D03 code takes the D10 lock, so the order is acyclic. The E12
 plan lists D10 after D09 in its global fence order. As with D09, the
 composable authority-fence adapter must reconcile this. This registry does not
-change the plan.
+change the plan. Resolved in #80: the global lock order in
+`docs/COMPOSITE-AUTHORITY-FENCE.md` takes D10 before D09, and both before D01.
 
 The returned context is as-of one snapshot. A consumer that needs D01, D05,
 D06, D09, and D03 to stay unchanged through a later step needs the composite

@@ -247,13 +247,10 @@ authority, removes the files the restore created so it can be retried. Cleanup
 is best-effort: if a foreign entry (for example a non-empty directory) appears
 in the target, the target stays and a retry needs a new path.
 
-Known recovery gaps, shared with the D03 decision and D05 cohort registries
-and left for a common follow-up: a process that dies part-way through creating
-a new registry root leaves a root that fails closed on reopen and must be
-removed by hand, and restore cleanup is best-effort as above. Both fail closed;
-neither can return a comparison. The fix is staged creation and restore in a
-private sibling directory with an atomic rename into place. A backup contains protected records, signed observations, and
-values, and is not an export artifact.
+The former shared recovery gap (a process dying part-way through creating a
+root left one that failed closed on reopen) is closed by the staged creation
+and restore described above (#82). A backup contains protected records, signed
+observations, and values, and is not an export artifact.
 
 ## Not in scope
 

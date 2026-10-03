@@ -48,7 +48,10 @@ bound to the same E04 catalog. It adds the reader-authorized
 `/api/v1/longitudinal/*` routes and the longitudinal section of the packaged
 page (cohort/version, measurement, explicit anchor, version diff, source table,
 segment-only chart, covariate panel, provenance drawer, Save and Reopen). See
-`docs/LONGITUDINAL-BROWSER.md`.
+`docs/LONGITUDINAL-BROWSER.md`. The adapter is built and tested on synthetic
+stores, but no production composition root constructs it: `traceback reader
+launch` starts the service without an explorer, so its E12 routes answer not
+found.
 
 The API is session-authorized and bounded to 100 catalog references per page.
 Unknown filters, malformed identities, and unavailable detail documents fail

@@ -97,7 +97,9 @@ Consequences:
   inside them. The composable authority-fence adapter must reconcile this. For
   example, it could take the D09 lock first, or D06 could expose an in-fence
   builder entry point. Both change other layers and are left to that
-  prerequisite.
+  prerequisite. Resolved in #80: the global lock order in
+  `docs/COMPOSITE-AUTHORITY-FENCE.md` takes D10 and D09 before D01, D05 and
+  D06.
 
 ## Selector projection
 

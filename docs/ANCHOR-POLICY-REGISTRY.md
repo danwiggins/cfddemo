@@ -185,10 +185,10 @@ through construction of the returned value. A test starts a linkage writer
 inside `resolve_anchor` and observes it blocked at return. Concurrent readers
 interleaved with D05 public reads terminate.
 
-The D05 already-fenced read is a private method, pinned unbound at import and
-covered by this registry's authority seal. The composable authority-fence
-adapter prerequisite should make it a reviewed public in-fence API. Merged D05
-code is unchanged.
+The D05 already-fenced read is pinned unbound at import and covered by this
+registry's authority seal. It was a private method when this registry merged;
+#80 made it a reviewed public in-fence API (`CohortRegistry.authority_read_fence`
+and `CohortRegistry.resolve_history_in_fence`), which this registry now pins.
 
 A linkage commit stales every approval. The D05 manifest binds the linkage
 head, and D03 requires the candidate's receipt at the current head. A
@@ -313,8 +313,8 @@ In scope:
   compared with the D03 key. Its digests are not defined in D03 terms.
 - **Envelope validity window.** Validity is not gated here. D07 reports expiry
   as an unavailable comparison state.
-- **D05 in-fence API.** The private D05 in-fence read should become a reviewed
-  public API in the authority-fence adapter PR.
+- **D05 in-fence API.** Resolved in #80: the D05 in-fence read is a reviewed
+  public API.
 - **Recovery.** Shared with the sibling registries; see
   `docs/REGISTRY-STORAGE.md`. Creation and restore are staged and published
   with one rename, so neither leaves a partial target. A torn journal tail

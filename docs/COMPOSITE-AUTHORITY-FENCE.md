@@ -1,8 +1,9 @@
 # Composite authority fence
 
 Status: local, synthetic, release-disabled prerequisite for E12 Save and the
-future D08 workspace builder (`docs/E12-INTEGRATION-PLAN.md`, "Composable
-authority-fence prerequisite"). It builds no workspace and does not enable
+D08 workspace builder (`docs/E12-INTEGRATION-PLAN.md`, "Composable
+authority-fence prerequisite"). Both consumers have since merged: the D08 read
+model (#83) and browser Save and Reopen (#93). It builds no workspace and does not enable
 Save by itself. It authorizes no release, export, provider operation or
 clinical interpretation.
 
