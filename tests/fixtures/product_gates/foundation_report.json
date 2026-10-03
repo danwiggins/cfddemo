@@ -14,28 +14,28 @@
     "name": "filter_sort",
     "record_count": 10000,
     "samples_us": [
-      16646,
-      15827,
-      9245,
-      9048,
-      9349,
-      31696,
-      41481,
-      16838,
-      26516,
-      12715,
-      21404,
-      25835,
-      26254,
-      17984,
-      16504,
-      15050,
-      9086,
-      9207,
-      9166,
-      9271
+      13741,
+      13320,
+      10667,
+      8336,
+      10226,
+      11278,
+      8127,
+      8634,
+      13724,
+      12875,
+      11744,
+      10885,
+      10791,
+      15431,
+      11209,
+      12667,
+      11601,
+      12457,
+      11863,
+      14556
     ],
-    "p95_us": 31696,
+    "p95_us": 14556,
     "target_us": 250000,
     "target_met": true
   },
@@ -43,24 +43,24 @@
     "name": "initial_render",
     "record_count": 10000,
     "samples_us": [
-      31533,
-      17886,
-      18641,
-      20328,
-      20320,
-      25706,
-      12399,
-      17883,
-      35555,
-      25592
+      15949,
+      14956,
+      17564,
+      16731,
+      14687,
+      15234,
+      17675,
+      15669,
+      14613,
+      16177
     ],
-    "p95_us": 35555,
+    "p95_us": 17675,
     "target_us": 2000000,
     "target_met": true
   },
   "stress_memory": {
     "record_count": 100000,
-    "peak_bytes": 4067390,
+    "peak_bytes": 4063484,
     "target_bytes": 268435456,
     "target_met": true
   },
@@ -75,7 +75,7 @@
     "result_count": 100,
     "response_sha256": "a9a312f9662cadc0d0a225b0ea80331b4ede4caf05654d6b234f71f6211460fd",
     "repeated_response_sha256": "a9a312f9662cadc0d0a225b0ea80331b4ede4caf05654d6b234f71f6211460fd",
-    "packaged_assets_sha256": "0865515f0deb0c96e989b85c80f53fb08f3f0e44b2207f4a7fba8683d53d871b",
+    "packaged_assets_sha256": "658ea72d03930870a787b80c10007a526f3b11f9cb3182d25bc1c6a766ca124c",
     "privacy_rejection_response_sha256": [
       "6410c5fc9bfa2733e7a3cff83b1fb98e4ec8138ac9b8ee6b7d95fdfd8fe87d41",
       "6410c5fc9bfa2733e7a3cff83b1fb98e4ec8138ac9b8ee6b7d95fdfd8fe87d41",
@@ -93,7 +93,7 @@
     "harness_version": "traceback-product-gates.v3",
     "run_id": "gate_run_20260929",
     "host_run_sha256": "ba13325b790f73d8814480df4892728dd51f9fe7b85405fc851346b966299b81",
-    "local_service_sha256": "f13cd249f213b98366f6b1adb42a8fb4904a9d119f97d9e4df9cd54947094215",
+    "local_service_sha256": "8d051e0959e45298a5e064a5b3569be12abfd4a78f04764524421e135d9da16b",
     "observations": [
       {
         "operation": "connect_ex",
@@ -126,7 +126,7 @@
     "harness_version": "traceback-product-gates.v3",
     "run_id": "gate_run_20260929",
     "host_run_sha256": "ba13325b790f73d8814480df4892728dd51f9fe7b85405fc851346b966299b81",
-    "output_payload_sha256": "39d593b509f0e698a6b94c74eab9060aea3d0ea1532b3b2526a30138d867d607",
+    "output_payload_sha256": "fd08673cbf21d4410bb46ee1a28e4b27a235e8777d6c21c55631a41e1b63288c",
     "serialized_output_clean": true,
     "observations": [
       {
@@ -273,7 +273,7 @@
   ],
   "release_control_evidence": {
     "schema_version": "traceback.e14-release-control-evidence.v1",
-    "local_service_sha256": "f13cd249f213b98366f6b1adb42a8fb4904a9d119f97d9e4df9cd54947094215",
+    "local_service_sha256": "8d051e0959e45298a5e064a5b3569be12abfd4a78f04764524421e135d9da16b",
     "external_requirements_sha256": "e2a2d4d5001197b786c3b8e22f4699d3dd0a7172b97e60b310a2e5c6c385593c",
     "e12_dependency_state": "blocked_unavailable_not_implemented",
     "release_explorer_allowed": false,
@@ -297,7 +297,7 @@
       "gate_id": "filter_performance",
       "status": "fixture_only",
       "detail": "Private-SQL timing over 10000 E04-shaped fixture rows only; 10000 verified E04 imports are unavailable",
-      "evidence_sha256": "d44e4d94ef26db9a5b947ca505d9d83ce0c45ce4935d3768822f30e75cd176fe"
+      "evidence_sha256": "62da10e03187f685e1a530ea00c1eca3d4ca91bca5ebbac965eda2495d208863"
     },
     {
       "gate_id": "five_provider_study",
@@ -309,25 +309,25 @@
       "gate_id": "initial_render",
       "status": "fixture_only",
       "detail": "Python projection serialization only; HTTP, JavaScript, layout, and DOM-ready browser timing are unavailable",
-      "evidence_sha256": "6801f3bb823efe955132d4d587314dae9a77c2ed587ff6db4aab588c9e8d8ec5"
+      "evidence_sha256": "6ef9470b503c8b131aef8bca37f32d0a0958c5cd7db723f85a248f43de6a4009"
     },
     {
       "gate_id": "local_service_determinism",
       "status": "observed_pass",
       "detail": "Packaged loopback catalog repeated byte-identically with release controls disabled",
-      "evidence_sha256": "f13cd249f213b98366f6b1adb42a8fb4904a9d119f97d9e4df9cd54947094215"
+      "evidence_sha256": "8d051e0959e45298a5e064a5b3569be12abfd4a78f04764524421e135d9da16b"
     },
     {
       "gate_id": "no_external_network",
       "status": "observed_pass",
       "detail": "Socket connect_ex and sendto probes were denied during the complete harness run",
-      "evidence_sha256": "5b136538292f87723861e655ec923a1f2a5546c27e98688dc13935a5a7e03e6c"
+      "evidence_sha256": "5be311358d78a2fe506d0531c72071973d8cd7786ca9b3ae50902b834b186a20"
     },
     {
       "gate_id": "privacy_sentinels",
       "status": "observed_pass",
       "detail": "Every forbidden class was rejected by catalog, problem, screenshot, and packaged HTTP paths",
-      "evidence_sha256": "5202280cff102c4759b721314b47259e030463af525babb8e0852868b76eddfa"
+      "evidence_sha256": "db52756132b8414d4ae43ffe6917890e3e80e03db0b39a4c46d6652cbc2e479f"
     },
     {
       "gate_id": "screenshots",
@@ -339,7 +339,7 @@
       "gate_id": "stress_memory",
       "status": "fixture_only",
       "detail": "tracemalloc peak for 100000 private-SQL fixture rows only; process RSS, SQLite and native allocations, and browser memory are unavailable",
-      "evidence_sha256": "b03f2a6d0d23f3edca510cb145b90c409ceb363e86c098fe2aa02c75cefc5c24"
+      "evidence_sha256": "118e71e27238f6165dfe03cab6fa71815a93539ccf4333ad7005dfb90d4f238b"
     }
   ],
   "capability_enabled": false
