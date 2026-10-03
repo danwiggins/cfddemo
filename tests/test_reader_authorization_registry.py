@@ -51,6 +51,7 @@ from evidence_inspector.reader_authorization_synthetic import (
     synthetic_reader_trust,
 )
 from tests import registry_storage_checks as storage_checks
+from tests.forking import CHILD_RAISED, run_in_child, wait_child
 
 NOW = datetime(2026, 9, 1, 12, tzinfo=UTC)
 COHORT = "cohort_registry_" + "b" * 32
@@ -1137,21 +1138,15 @@ def test_crash_torn_journal_tail_fails_closed_without_repair(registry) -> None:
 
 def test_forked_child_cannot_use_the_parent_lock(registry) -> None:
     registry.add_grant(grant_for(registry))
+    def child() -> None:  # pragma: no cover - child process
+        with pytest.raises(ReaderAuthorizationRegistryUnsafe):
+            registry.revoke_grant(
+                SELECTOR, reason=ReaderRevocationReason.OPERATOR_REQUEST
+            )
+
     with registry.authority_read_fence():
-        pid = os.fork()
-        if pid == 0:  # pragma: no cover - child process
-            code = 3
-            try:
-                registry.revoke_grant(
-                    SELECTOR, reason=ReaderRevocationReason.OPERATOR_REQUEST
-                )
-                code = 1
-            except ReaderAuthorizationRegistryUnsafe:
-                code = 0
-            finally:
-                os._exit(code)
-        _, status = os.waitpid(pid, 0)
-    assert os.WEXITSTATUS(status) == 0
+        status = run_in_child(child)
+    assert status == 0
     authorize(registry, bind(registry))
 
 
@@ -1159,20 +1154,25 @@ def test_forked_child_unwinding_the_fence_does_not_release_it(registry) -> None:
     registry.add_grant(grant_for(registry))
     probe = os.open(registry.root / ".registry.lock", os.O_RDWR)
     pid = None
+    child_code = CHILD_RAISED
     try:
         with registry.authority_read_fence():
             pid = os.fork()
             if pid != 0:
-                os.waitpid(pid, 0)
+                assert wait_child(pid) == 0
                 # The child unwound the inherited fence; it is still held.
                 with pytest.raises(BlockingIOError):
                     fcntl.flock(probe, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        if pid == 0:  # pragma: no cover - child process
+            child_code = 0
     except ReaderAuthorizationRegistryUnsafe:
         if pid != 0:
             raise
+        child_code = 0  # pragma: no cover - child process
     finally:
+        # Every child path ends here; it never returns into pytest.
         if pid == 0:  # pragma: no cover - child process
-            os._exit(0)
+            os._exit(child_code)
         os.close(probe)
     authorize(registry, bind(registry))
 

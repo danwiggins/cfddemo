@@ -48,6 +48,7 @@ from evidence_inspector.result_catalog import (
     _copy_exact_bundle,
     bind_catalog_live_reader,
 )
+from tests.forking import CHILD_RAISED, run_in_child, wait_child
 from tests.test_bundles import _bundle, _downgrade_to_v1
 from tests.test_method_registry import (
     T0,
@@ -559,6 +560,48 @@ def test_import_rejects_source_mutation_and_root_swap(tmp_path: Path) -> None:
 
     error = _paused_error(root_fault, lambda: _import(swapped), swap)
     assert isinstance(error, CatalogFilesystemError) and "root changed" in str(error)
+
+
+@pytest.mark.skipif(
+    not Path("/proc/self/fd").is_dir(), reason="the /proc descriptor path is Linux-only"
+)
+def test_proc_descriptor_path_resolves_to_the_held_directory(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The bundle reader rejects symlinks, so /proc/self/fd/N must be resolved,
+    and the resolved path must still name the descriptor's directory."""
+
+    held = tmp_path / "held"
+    held.mkdir()
+    other = tmp_path / "other"
+    other.mkdir()
+    descriptor = os.open(held, os.O_RDONLY | os.O_DIRECTORY)
+    try:
+        resolved = catalog_module._descriptor_path(descriptor)
+        assert resolved == held and not resolved.is_symlink()
+
+        # A path swapped in between readlink and the identity check is refused.
+        with monkeypatch.context() as patch:
+            patch.setattr(catalog_module.os, "readlink", lambda path: str(other))
+            with pytest.raises(CatalogFilesystemError, match="descriptor path changed"):
+                catalog_module._descriptor_path(descriptor)
+
+        held.rename(tmp_path / "moved")
+        held.mkdir()  # a different directory now sits at the old path
+        assert catalog_module._descriptor_path(descriptor) == tmp_path / "moved"
+
+        (tmp_path / "moved").rmdir()
+        with pytest.raises(CatalogFilesystemError, match="descriptor path"):
+            catalog_module._descriptor_path(descriptor)
+    finally:
+        os.close(descriptor)
+
+    file_descriptor = os.open(tmp_path / "plain", os.O_RDWR | os.O_CREAT, 0o600)
+    try:
+        with pytest.raises(CatalogFilesystemError, match="descriptor path changed"):
+            catalog_module._descriptor_path(file_descriptor)
+    finally:
+        os.close(file_descriptor)
 
 
 def test_conflict_and_crash_leave_no_partial_catalog_state(tmp_path: Path) -> None:
@@ -1337,16 +1380,13 @@ def test_a_forked_child_inherits_no_content_gate_holder(tmp_path: Path) -> None:
     try:
         with catalog.content_authority_fence():
             assert catalog_module.content_lock_held_by_current_thread()
-            pid = os.fork()
-            if pid == 0:  # pragma: no cover - child process
-                os._exit(
-                    0
-                    if not catalog_module.content_lock_held_by_current_thread()
-                    and not catalog_module._CONTENT_GATE_STATE
-                    else 1
-                )
-            _, status = os.waitpid(pid, 0)
-        assert os.WIFEXITED(status) and os.WEXITSTATUS(status) == 0
+
+            def child() -> None:  # pragma: no cover - child process
+                assert not catalog_module.content_lock_held_by_current_thread()
+                assert not catalog_module._CONTENT_GATE_STATE
+
+            status = run_in_child(child)
+        assert status == 0
         assert not catalog_module.content_lock_held_by_current_thread()
     finally:
         catalog.close()
@@ -1363,6 +1403,8 @@ def test_a_forked_child_unwinding_a_hold_keeps_the_parent_lock(tmp_path: Path) -
     class ChildUnwind(Exception):
         pass
 
+    pid = -1
+    child_code = CHILD_RAISED
     try:
         try:
             with catalog.content_authority_fence(exclusive=True):
@@ -1370,12 +1412,15 @@ def test_a_forked_child_unwinding_a_hold_keeps_the_parent_lock(tmp_path: Path) -
                 if pid == 0:  # pragma: no cover - child process
                     # Unwind the inherited hold through its context manager.
                     raise ChildUnwind
-                _, status = os.waitpid(pid, 0)
-                assert os.WIFEXITED(status) and os.WEXITSTATUS(status) == 0
+                assert wait_child(pid) == 0
                 with pytest.raises(BlockingIOError):
                     fcntl.flock(probe, fcntl.LOCK_SH | fcntl.LOCK_NB)
         except ChildUnwind:  # pragma: no cover - child process
-            os._exit(0)
+            child_code = 0
+        finally:
+            # Every child path ends here; it never returns into pytest.
+            if pid == 0:  # pragma: no cover - child process
+                os._exit(child_code)
         fcntl.flock(probe, fcntl.LOCK_SH | fcntl.LOCK_NB)
         fcntl.flock(probe, fcntl.LOCK_UN)
     finally:

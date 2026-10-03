@@ -48,6 +48,7 @@ from evidence_inspector.result_catalog import (
     ResultCatalog,
 )
 from evidence_inspector.result_trust_registry import ResultTrustRegistry
+from tests.forking import run_in_child, start_child, wait_child
 from tests.test_bundles import _bundle, _downgrade_to_v1
 from tests.test_cohort_manifest import _known_run_revision, _manifest
 from tests.test_method_registry import (
@@ -1659,12 +1660,8 @@ def test_crash_recovery_reconciles_journal_and_catalog_publication(
         live,
         DeterministicFaultController(point, action=FaultAction.EXIT, exit_code=71),
     )
-    pid = os.fork()
-    if pid == 0:  # pragma: no cover - abrupt crash path cannot report assertions
-        _import(values)
-        os._exit(72)
-    _, status = os.waitpid(pid, 0)
-    assert os.waitstatus_to_exitcode(status) == 71
+    # The fault controller exits 71 mid-import; returning normally exits 0.
+    assert run_in_child(lambda: _import(values)) == 71
     values[0].close()
     values[1].close()
     results = ResultCatalog(
@@ -1702,12 +1699,7 @@ def test_adopted_pending_without_marker_rolls_back_as_incomplete(
             "after_visibility_commit", action=FaultAction.EXIT, exit_code=75
         ),
     )
-    pid = os.fork()
-    if pid == 0:  # pragma: no cover - abrupt crash path
-        _import(values)
-        os._exit(76)
-    _, status = os.waitpid(pid, 0)
-    assert os.waitstatus_to_exitcode(status) == 75
+    assert run_in_child(lambda: _import(values)) == 75
     values[0].close()
     values[1].close()
     markers = tuple((tmp_path / "cohort-records").glob(".rollback.*"))
@@ -1769,12 +1761,12 @@ def test_marker_recovers_exact_candidate_and_preserves_committed_peer(
         ),
     )
     crashing_values = (crashing, *values[1:])
-    pid = os.fork()
-    if pid == 0:  # pragma: no cover - abrupt crash path
-        _import(crashing_values, manifest_history=(previous, second))
-        os._exit(78)
-    _, status = os.waitpid(pid, 0)
-    assert os.waitstatus_to_exitcode(status) == 77
+    assert (
+        run_in_child(
+            lambda: _import(crashing_values, manifest_history=(previous, second))
+        )
+        == 77
+    )
     recovery_scope = crashing._recovery_scope_sha256
     crashing.close()
     values[1].close()
@@ -1847,11 +1839,12 @@ def test_swapped_marker_cannot_delete_committed_peer_or_publish_candidate(
             "after_visibility_commit", action=FaultAction.EXIT, exit_code=79
         ),
     )
-    pid = os.fork()
-    if pid == 0:  # pragma: no cover - abrupt crash path
-        _import((crashing, *values[1:]), manifest_history=(previous, second))
-        os._exit(80)
-    assert os.waitstatus_to_exitcode(os.waitpid(pid, 0)[1]) == 79
+    assert (
+        run_in_child(
+            lambda: _import((crashing, *values[1:]), manifest_history=(previous, second))
+        )
+        == 79
+    )
     crashing.close()
     values[1].close()
     pending = tuple((tmp_path / "cohort-records").glob(".pending.*"))
@@ -2076,12 +2069,7 @@ def test_corrupt_or_missing_real_journal_cannot_strand_pending_row(
         live,
         DeterministicFaultController(point, action=FaultAction.EXIT, exit_code=73),
     )
-    pid = os.fork()
-    if pid == 0:  # pragma: no cover - abrupt crash path
-        _import(values)
-        os._exit(74)
-    _, status = os.waitpid(pid, 0)
-    assert os.waitstatus_to_exitcode(status) == 73
+    assert run_in_child(lambda: _import(values)) == 73
     values[0].close()
     values[1].close()
     journals = tuple((tmp_path / "cohort-records").glob(".pending.*"))
@@ -2135,44 +2123,30 @@ def test_concurrent_restart_recovery_is_idempotent(tmp_path: Path, live) -> None
             "after_result_stage", action=FaultAction.EXIT, exit_code=75
         ),
     )
-    crashing = os.fork()
-    if crashing == 0:  # pragma: no cover - abrupt crash path
-        _import(values)
-        os._exit(76)
-    _, status = os.waitpid(crashing, 0)
-    assert os.waitstatus_to_exitcode(status) == 75
+    assert run_in_child(lambda: _import(values)) == 75
     values[0].close()
     values[1].close()
 
-    workers: list[int] = []
-    for _ in range(2):
-        pid = os.fork()
-        if pid == 0:  # pragma: no cover - child recovery process
-            try:
-                result = ResultCatalog(
-                    tmp_path / "results",
-                    import_roots={"root_primary": tmp_path / "imports"},
-                    trust_store=values[6],
-                    reader_registry=DEFAULT_RESULT_BUNDLE_READER_REGISTRY,
-                )
-                cohort = CohortRecordCatalog(
-                    tmp_path / "cohort-records",
-                    result_catalog=result,
-                    linkage_store=live[0],
+    def recover() -> None:  # pragma: no cover - child recovery process
+        result = ResultCatalog(
+            tmp_path / "results",
+            import_roots={"root_primary": tmp_path / "imports"},
+            trust_store=values[6],
+            reader_registry=DEFAULT_RESULT_BUNDLE_READER_REGISTRY,
+        )
+        cohort = CohortRecordCatalog(
+            tmp_path / "cohort-records",
+            result_catalog=result,
+            linkage_store=live[0],
             cohort_registry=values[11],
-                    expected_trust_snapshot_sha256_by_provider=_pins(),
-                    reader_registry=DEFAULT_RESULT_BUNDLE_READER_REGISTRY,
-                )
-                cohort.close()
-                result.close()
-            except BaseException:  # noqa: BLE001 - child reports only exit status
-                os._exit(77)
-            os._exit(0)
-        workers.append(pid)
-    assert [os.waitstatus_to_exitcode(os.waitpid(pid, 0)[1]) for pid in workers] == [
-        0,
-        0,
-    ]
+            expected_trust_snapshot_sha256_by_provider=_pins(),
+            reader_registry=DEFAULT_RESULT_BUNDLE_READER_REGISTRY,
+        )
+        cohort.close()
+        result.close()
+
+    workers = [start_child(recover) for _ in range(2)]
+    assert [wait_child(pid) for pid in workers] == [0, 0]
 
     results = ResultCatalog(
         tmp_path / "results",
@@ -2209,12 +2183,7 @@ def test_recovery_scope_cannot_compensate_another_binding_root(
         ),
     )
     original_scope = values[0]._recovery_scope_sha256
-    crashing = os.fork()
-    if crashing == 0:  # pragma: no cover - abrupt crash path
-        _import(values)
-        os._exit(79)
-    _, status = os.waitpid(crashing, 0)
-    assert os.waitstatus_to_exitcode(status) == 78
+    assert run_in_child(lambda: _import(values)) == 78
     values[0].close()
     values[1].close()
 
