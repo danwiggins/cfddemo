@@ -16,6 +16,7 @@ from evidence_inspector.covariate_context import (
     CovariateReason,
     CovariateValue,
     CovariateValueState,
+    D03Role,
     D09PopulationDigestInput,
     D10CovariateInput,
     MemberCovariateContext,
@@ -737,3 +738,109 @@ def test_maximum_member_population_remains_bounded_and_valid() -> None:
             UnexpectedSerializer(),
         )
     assert serializer_calls == 0
+
+
+def _anchor_row(member_sha256: str, *, batch: str = "1") -> MemberCovariateContext:
+    return MemberCovariateContext(
+        member_sha256=member_sha256,
+        biological_timepoint_sha256=_sha("0"),
+        d03_role=D03Role.ANCHOR,
+        d03_decision_sha256=None,
+        d03_outcome=None,
+        values=(
+            _value(CovariateDimension.BATCH, batch),
+            _value(CovariateDimension.PROTOCOL, "2"),
+            _value(CovariateDimension.PREANALYTICS, "3"),
+        ),
+    )
+
+
+def _build_anchored(value, decisions, anchor_sha256):
+    return covariate_module._build_covariate_context(
+        value,
+        expected_d09_status_sha256=_sha("b"),
+        expected_d09_population_sha256=_sha("c"),
+        expected_d02_anchor_policy_sha256=D02_POLICY_SHA256,
+        d03_member_decisions=decisions,
+        d03_anchor_result_sha256=anchor_sha256,
+    )
+
+
+def test_anchor_row_carries_no_d03_decision_and_members_require_one() -> None:
+    member = _member("1")
+    fields = member.model_dump()
+    with pytest.raises(ValueError, match="anchor row cannot carry"):
+        MemberCovariateContext.model_validate({**fields, "d03_role": "anchor"})
+    for update in ({"d03_decision_sha256": None}, {"d03_outcome": None}):
+        with pytest.raises(ValueError, match="requires its D03 decision"):
+            MemberCovariateContext.model_validate({**fields, **update})
+    with pytest.raises(ValueError, match="at most one D03 anchor"):
+        _input(_anchor_row(_sha("9")), _anchor_row(_sha("8")))
+    assert member.d03_role is D03Role.MEMBER
+
+
+def test_only_the_pinned_series_anchor_is_admitted_without_a_decision() -> None:
+    member = _member("5")
+    decision = _d03_decision(member.member_sha256, member.d03_outcome)
+    anchor_sha256 = decision.anchor_result_sha256
+    source = _input(_anchor_row(anchor_sha256, batch="4"), member)
+
+    result = _build_anchored(source, (decision,), anchor_sha256)
+    rows = {item.member_sha256: item for item in result.member_contexts}
+    assert rows[anchor_sha256].d03_role is D03Role.ANCHOR
+    assert rows[anchor_sha256].d03_decision_sha256 is None
+    assert result.included_member_sha256s == tuple(sorted(rows))
+    # The anchor's covariates take part in grouping and classification.
+    assert result.classification is CovariateClassification.MIXED
+    assert len(result.groups) == 2
+    assert result.schema_version == "traceback.covariate-context-result.v2"
+
+    # The caller-supplied path admits no anchor row at all.
+    with pytest.raises(ValueError, match="does not match the D03 series anchor"):
+        _build(source, (decision,))
+    # The anchor row must be the pinned series anchor ...
+    with pytest.raises(ValueError, match="does not match the D03 series anchor"):
+        _build_anchored(source, (decision,), _sha("e"))
+    # ... even when the pin and every decision agree on another anchor ...
+    elsewhere = decision.model_copy(update={"anchor_result_sha256": _sha("e")})
+    with pytest.raises(ValueError, match="does not match the D03 series anchor"):
+        _build_anchored(source, (elsewhere,), _sha("e"))
+    # ... which every decision names ...
+    with pytest.raises(ValueError, match="does not match the D03 series anchor"):
+        _build_anchored(
+            source,
+            (decision.model_copy(update={"anchor_result_sha256": _sha("e")}),),
+            anchor_sha256,
+        )
+    # ... and none decides.
+    reflexive = _d03_decision(anchor_sha256, LongitudinalOutcome.EQUIVALENT)
+    with pytest.raises(ValueError, match="does not match the D03 series anchor"):
+        _build_anchored(source, (decision, reflexive), anchor_sha256)
+    # A decided member still needs its decision; the anchor pin cannot cover it.
+    with pytest.raises(ValueError, match="do not cover the exact population"):
+        _build_anchored(source, (), anchor_sha256)
+
+
+def test_v1_d10_contracts_fail_closed() -> None:
+    result = _build(_input(_member("1")))
+    encoded = covariate_module._exact_bytes(
+        result,
+        covariate_module.CovariateContextResult,
+        covariate_module._CODECS[covariate_module.CovariateContextResult][0],
+    )
+    assert b'"traceback.covariate-context-result.v2"' in encoded
+    legacy = encoded.replace(
+        b"traceback.covariate-context-result.v2",
+        b"traceback.covariate-context-result.v1",
+    )
+    with pytest.raises(ValueError):
+        covariate_module.CovariateContextResult.model_validate_json(legacy)
+    source = _input(_member("1"))
+    assert source.schema_version == "traceback.d10-covariate-input.v2"
+    with pytest.raises(ValueError):
+        D10CovariateInput.model_validate(
+            {
+                **source.model_dump(),
+                "schema_version": "traceback.d10-covariate-input.v1",
+            }
+        )

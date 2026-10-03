@@ -20,8 +20,33 @@ In-process code mutation and same-user filesystem races are out of scope.
 Caller-supplied objects, rollback to an older journal or backup, interrupted
 writes, and concurrent readers and writers are in scope.
 
-Only the `development-synthetic` namespace exists. Production key custody,
-external release keys, and signed administration are out of scope.
+Production key custody, external release keys, and signed administration are
+out of scope.
+
+## Schema versions and namespaces
+
+A `v1` registry (`traceback.result-trust-registry-metadata.v1`, journal entry,
+receipt, snapshot and backup all `v1`) holds `development-synthetic` result
+keys only. Every registry created before the `development-local` namespace is
+`v1`; it reopens with its retained ID, epoch and head and verifies v1/v2
+bundles exactly as before (frozen fixture `tests/fixtures/result_trust_registry/v1/`).
+A `v1` registry refuses `development-local` keys and `devlocal-result-…`
+revocations; it keeps accepting synthetic keys as `v1` entries, which older
+code still reads.
+
+A `v2` registry is created only on request: `ResultTrustRegistry(root,
+create_version=2)`. Its metadata, journal entries (`namespace` per key),
+receipts, snapshot and backup are all `v2`, under their own hash-domain tags.
+It accepts `development-synthetic` (`dev-result-…`) and `development-local`
+(`devlocal-result-…`) result keys. The key ID is derived from the namespace,
+so one key is valid for exactly one namespace. `ResultTrustSnapshotV2` carries
+a `DevelopmentTrustDocumentV2` and `data_origin` (the sorted origins its keys
+sign: `synthetic`, `local_unqualified`) in place of `synthetic_only`. A journal
+line of the other version fails closed on load.
+
+The E04 catalog accepts both snapshot versions and binds a v2 snapshot under
+its own digest domain. D07, cohort import and the composite authority fence
+still accept only v1 snapshots, so they fail closed on a v2 registry.
 
 ## Event model
 
@@ -29,12 +54,14 @@ The journal is append-only and hash-chained from a genesis digest over the
 immutable metadata (registry ID, random epoch, namespace, purpose). Each entry
 is one event:
 
-- `add_key`: one `PublicTrustedKey` in `development-synthetic` with purpose
-  `result`. The key must be exact, not revoked, and its key ID must be the
+- `add_key`: one public key with purpose `result`: a `PublicTrustedKey` in
+  `development-synthetic`, or (v2 registries only) a `PublicTrustedKeyV2` in
+  either development namespace. The key must be exact, not revoked, and its key ID must be the
   namespace- and purpose-bound ID of its public key (`trusted_key_id`). Release
   keys are rejected: this is a result trust authority, and D07 and E04 verify
   only `result` signatures.
-- `revoke_key`: one `dev-result-…` key ID, with no public key.
+- `revoke_key`: one `dev-result-…` key ID (v2 registries: also
+  `devlocal-result-…`), with no public key.
 
 Rules, enforced when appending and again when loading the journal:
 
