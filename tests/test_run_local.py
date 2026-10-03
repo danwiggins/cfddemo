@@ -343,6 +343,16 @@ def test_pause_between_stages_then_resume_completes(
     assert _records(root) == []
     monkeypatch.setattr(cli, "_local_stages", original)
 
+    # A damaged local method authority refuses the resume before any signing.
+    registry_file = root / "authority" / "ref" / "method-registry.json"
+    good = registry_file.read_bytes()
+    registry_file.write_bytes(good.replace(b"registry_traceback_local", b"registry_traceback_locax"))
+    code, refused = _json(capsys, "resume", paused["data"]["job_id"], "--root", root)
+    assert code == cli.ExitCode.BLOCKED, refused
+    assert refused["data"]["code"] == "TBX-AUTH-LOCAL-001"
+    assert _records(root) == []
+    registry_file.write_bytes(good)
+
     code, resumed = _json(capsys, "resume", paused["data"]["job_id"], "--root", root)
     assert code == cli.ExitCode.OK, resumed
     assert resumed["data_origin"] == "local_unqualified"

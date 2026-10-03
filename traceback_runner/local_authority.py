@@ -593,6 +593,19 @@ def _forward_head(directory: Path, pinned_head: str) -> str | None:
     return chain[-1]
 
 
+def _is_empty_registry(directory: Path) -> bool:
+    """A real registry directory whose journal holds no event at all."""
+
+    if directory.is_symlink() or not directory.is_dir():
+        return False
+    journal = directory / "registry-journal.jsonl"
+    try:
+        metadata = os.stat(journal, follow_symlinks=False)
+    except FileNotFoundError:
+        return False
+    return stat.S_ISREG(metadata.st_mode) and metadata.st_size == 0
+
+
 def open_local_result_trust_registry(
     root: Path, *, create: bool = False
 ) -> ResultTrustRegistry:
@@ -626,6 +639,15 @@ def open_local_result_trust_registry(
             registry.close()
             raise
         return registry
+    if create and not (pin_path.exists() or pin_path.is_symlink()) and _is_empty_registry(
+        directory
+    ):
+        # A crash between creating the registry and writing its pin leaves a
+        # registry with no key events (keys are added only after the pin is
+        # written).  It holds nothing and nothing binds its identity, so it is
+        # replaced by a fresh, pinned registry.
+        shutil.rmtree(directory)
+        return open_local_result_trust_registry(root, create=True)
     try:
         pin = canonical_model_from_bytes(LocalTrustRegistryPin, _read_private(pin_path))
     except FileNotFoundError:

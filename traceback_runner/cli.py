@@ -1979,6 +1979,10 @@ def _resume(
         _refuse_unsealed_job(runner, record)
         reference_id = request.sample_token[len(_LOCAL_SAMPLE_PREFIX):]
         loaded = load_reference(args.root, reference_id)
+        # The same authority check as `run`: a damaged store refuses the resume.
+        from .local_authority import ensure_local_method_authority
+
+        ensure_local_method_authority(args.root, loaded.registered)
         names = _sealed_local_names(runner, record.job_id)
         if names is None:
             return ExitCode.BLOCKED, _result(

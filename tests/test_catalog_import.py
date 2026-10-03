@@ -521,3 +521,40 @@ def test_trust_registry_is_never_reached_through_a_trust_store(world) -> None:
             assert catalog.result_trust_registry is trust
         finally:
             catalog.close()
+
+
+def test_interrupted_first_registry_creation_recovers(world) -> None:
+    root, (record_id, _), _ = world
+    # A registry created but never pinned (crash between the two) and empty.
+    with ResultTrustRegistry(root / "trust" / "result-trust-registry", create_version=2):
+        pass
+    assert not (root / "trust" / "result-trust-registry.pin.json").exists()
+    code, payload = _import(root, record_id)
+    assert code == cli.ExitCode.OK, payload
+    # A registry that holds events but has no pin is never discarded.
+    os.unlink(root / "trust" / "result-trust-registry.pin.json")
+    code, payload = _import(root, record_id)
+    assert code == cli.ExitCode.BLOCKED, payload
+    assert payload["data"]["code"] == "TBX-AUTH-LOCAL-002"
+    assert (root / "trust" / "result-trust-registry" / "registry-journal.jsonl").stat().st_size > 0
+
+
+def test_explorer_file_modes_are_enforced_and_repaired(world) -> None:
+    root, (record_id, _), _ = world
+    result_id = _import(root, record_id)[1]["data"]["result_id"]
+    artifact_path, _ = explorer_paths(root, result_id)
+    artifact_path.chmod(0o644)
+    assert load_explorer_artifacts(root).skipped == 1
+    code, payload = _import(root, record_id)
+    assert code == cli.ExitCode.OK
+    assert payload["data"]["explorer_artifact"] == "repaired"
+    assert artifact_path.stat().st_mode & 0o777 == 0o600
+    assert load_explorer_artifacts(root).skipped == 0
+
+
+def test_orphan_binding_is_counted_as_skipped(world) -> None:
+    root, (record_id, _), _ = world
+    result_id = _import(root, record_id)[1]["data"]["result_id"]
+    explorer_paths(root, result_id)[0].unlink()
+    loaded = load_explorer_artifacts(root)
+    assert loaded.records == () and loaded.skipped == 1

@@ -422,6 +422,12 @@ def _persist_once(path: Path, content: bytes) -> str:
             raise OSError("explorer file path is not a regular file")
         existing = path.read_bytes()
         if existing == content:
+            metadata = os.stat(path, follow_symlinks=False)
+            if metadata.st_uid != os.geteuid():
+                raise OSError("explorer file is owned by another user")
+            if stat.S_IMODE(metadata.st_mode) != 0o600:
+                os.chmod(path, 0o600)
+                return "repaired"
             return "unchanged"
     temporary = directory / f".{path.name}.{os.getpid()}.tmp"
     temporary.unlink(missing_ok=True)
@@ -481,8 +487,13 @@ def _read_bounded_regular(path: Path, maximum: int) -> bytes:
     descriptor = os.open(path, os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0))
     try:
         metadata = os.fstat(descriptor)
-        if not stat.S_ISREG(metadata.st_mode) or metadata.st_size > maximum:
-            raise ValueError("explorer file is not a bounded regular file")
+        if (
+            not stat.S_ISREG(metadata.st_mode)
+            or metadata.st_size > maximum
+            or metadata.st_uid != os.geteuid()
+            or stat.S_IMODE(metadata.st_mode) != 0o600
+        ):
+            raise ValueError("explorer file is not a private bounded regular file")
         chunks = []
         remaining = maximum + 1
         while remaining > 0:
@@ -546,6 +557,13 @@ def load_explorer_artifacts(root: Path) -> LoadedExplorerArtifacts:
             continue
         records.append(record)
         bindings.append(binding)
+    if bindings_dir.is_dir() and not bindings_dir.is_symlink():
+        # A binding without its artifact (a crash between the two writes) is
+        # unpaired: counted, never served.
+        artifact_names = {path.name for path in artifacts_dir.glob("*.json")}
+        skipped += sum(
+            1 for path in bindings_dir.glob("*.json") if path.name not in artifact_names
+        )
     return LoadedExplorerArtifacts(
         records=tuple(records), bindings=tuple(bindings), skipped=skipped
     )
