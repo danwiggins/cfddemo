@@ -587,15 +587,19 @@ def test_service_store_survives_another_store_closing_last(tmp_path: Path) -> No
         assert status == 200
         assert [item["job_id"] for item in json.loads(content)["jobs"]] == [job_id]
     gc.collect()
-    # The anchor is released with the service.
+    # The caller's store keeps its lifetime anchor after the service stops; the
+    # WAL goes only once that store closes too (the service holds no other).
+    assert wal.exists() and wal.stat().st_ino == before
+    store.close()
+    gc.collect()
     assert not wal.exists()
 
 
 def test_failed_start_releases_the_journal_anchor_even_if_cleanup_fails(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """If start() fails after taking the journal anchor, the anchor is
-    released even when an earlier cleanup step itself raises."""
+    """If start() fails, it leaves no database connection behind beyond the
+    store's own lifetime anchor, even when a cleanup step itself raises."""
 
     import gc
 
@@ -622,6 +626,10 @@ def test_failed_start_releases_the_journal_anchor_even_if_cleanup_fails(
     # only an explicit anchor close, not garbage collection, can drop the WAL.
     gc.collect()
     assert excinfo.value is not None and store.path
+    # The store's own lifetime anchor is the only connection left: closing it
+    # removes the WAL, so the failed start leaked none.
+    assert wal.exists()
+    store.close()
     assert not wal.exists()
 
 

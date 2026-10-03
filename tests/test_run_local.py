@@ -439,13 +439,13 @@ def test_runner_executes_one_origin_and_labels_transitions(tmp_path: Path, input
     assert not any("synthetic" in str(reason) for reason in reasons)
 
 
-def test_journal_anchor_keeps_wal_identity_across_another_store_closing(
+def test_store_lifetime_anchor_keeps_wal_identity_across_another_store_closing(
     tmp_path: Path, inputs, capsys
 ) -> None:
     """Deterministic form of a CI failure: a second store (for example
-    `traceback pause` in another process) closing last deletes -wal/-shm, so
-    the first store's pinned sidecar identity no longer matches the files
-    SQLite recreates. The runner holds an anchor while it executes."""
+    `traceback pause` in another process) closing last deleted -wal/-shm, so
+    the first store's pinned sidecar identity no longer matched the files
+    SQLite recreated. Every store now holds an anchor for its lifetime."""
 
     root = tmp_path / "root"
     _register(capsys, root, inputs.fasta_path)
@@ -453,19 +453,19 @@ def test_journal_anchor_keeps_wal_identity_across_another_store_closing(
     database = root / "runner" / "runner.sqlite3"
     wal = Path(f"{database}-wal")
     job_id = payload["data"]["job_id"]
-    first = JobStore(database)
 
-    # Store connections close when garbage-collected, so collect explicitly to
-    # make the "last close" deterministic.
-    # Control: without an anchor, another store's last close removes the WAL.
-    first.get(job_id)
-    JobStore(database).get(job_id)
+    # Stores release their anchor when garbage-collected, so collect explicitly
+    # to make the "last close" deterministic.
+    first = JobStore(database)
+    before = wal.stat().st_ino
+    JobStore(database).get(job_id)  # another store opens and closes
+    gc.collect()
+    assert wal.exists() and wal.stat().st_ino == before
+    first.get(job_id)  # the pinned identity still matches
+    with first.journal_anchor(), first.journal_anchor():  # compatibility no-op
+        first.get(job_id)
+
+    # Control: once no store is alive, the last close removes the WAL.
+    first.close()
     gc.collect()
     assert not wal.exists()
-
-    with first.journal_anchor():
-        before = wal.stat().st_ino
-        JobStore(database).get(job_id)  # another store opens and closes
-        gc.collect()
-        assert wal.exists() and wal.stat().st_ino == before
-        first.get(job_id)  # the pinned identity still matches

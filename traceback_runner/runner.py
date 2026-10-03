@@ -12,6 +12,7 @@ from __future__ import annotations
 import hashlib
 import fcntl
 import os
+import threading
 import time
 from dataclasses import dataclass, field
 from contextlib import contextmanager
@@ -31,7 +32,14 @@ from .receipts import (
 )
 from .snapshots import InputSnapshot, SnapshotViolation, capture_snapshot, verify_snapshot
 from .serialization import canonical_json_bytes
-from .store import AttemptLease, JobStore, StoredJobRecord, StoreError, LeaseBusy
+from .store import (
+    AttemptLease,
+    JobStore,
+    LeaseBusy,
+    StaleLease,
+    StoredJobRecord,
+    StoreError,
+)
 
 
 class RunnerError(RuntimeError):
@@ -119,6 +127,55 @@ class StageSpec:
         ).hexdigest()
 
 
+class _LeaseKeeper:
+    """Renew one attempt's lease from a background thread while it is held.
+
+    The worker thread does long synchronous work under the lease that no stage
+    callback covers: re-hashing the sealed snapshot before and after the
+    callback, hashing outputs and sealing the receipt.  The keeper renews the
+    lease until the worker's fenced heartbeat just before publication.  It
+    stays fail-closed: the first failed renewal (expired or superseded fence,
+    or any store error) stops it for good and is recorded; it never
+    re-acquires.  The worker checks :meth:`raise_if_lost` at its own
+    boundaries and, after joining the keeper, before publishing; the fenced
+    heartbeat and fenced commit remain the authority either way.
+    """
+
+    def __init__(self, renew: Callable[[], None], interval: float) -> None:
+        self._renew = renew
+        self._interval = interval
+        self._stop = threading.Event()
+        self._lost: BaseException | None = None
+        self._thread = threading.Thread(
+            target=self._run, name="traceback-lease-keeper", daemon=True
+        )
+        self._thread.start()
+
+    def stop(self) -> None:
+        self._stop.set()
+        self._thread.join()
+
+    def _run(self) -> None:
+        while not self._stop.wait(self._interval):
+            try:
+                self._renew()
+            except BaseException as exc:  # recorded; the worker raises it
+                self._lost = exc
+                return
+
+    @property
+    def lost(self) -> bool:
+        return self._lost is not None
+
+    def raise_if_lost(self) -> None:
+        lost = self._lost
+        if lost is None:
+            return
+        if isinstance(lost, StaleLease):
+            raise StaleLease(str(lost)) from lost
+        raise StaleLease(f"lease renewal failed: {lost}") from lost
+
+
 @dataclass(frozen=True)
 class RecoveryReport:
     adopted: tuple[str, ...]
@@ -134,17 +191,23 @@ class Runner:
         *,
         clock: Callable[[], float] = time.time,
         lease_seconds: float = 30.0,
+        heartbeat_seconds: float | None = None,
         synthetic_enabled: bool = False,
         local_unqualified_enabled: bool = False,
         fault_injector: Callable[[str], None] | None = None,
     ) -> None:
         if lease_seconds <= 0:
             raise ValueError("lease_seconds must be positive")
+        if heartbeat_seconds is None:
+            heartbeat_seconds = lease_seconds / 3
+        if not 0 < heartbeat_seconds < lease_seconds:
+            raise ValueError("heartbeat_seconds must be positive and below lease_seconds")
         if synthetic_enabled and local_unqualified_enabled:
             raise ValueError("a runner executes one data origin, never both")
         self.root = root
         self.clock = clock
         self.lease_seconds = lease_seconds
+        self.heartbeat_seconds = heartbeat_seconds
         self.synthetic_enabled = synthetic_enabled
         self.local_unqualified_enabled = local_unqualified_enabled
         # Audit transition text names the enabled origin; synthetic text is unchanged.
@@ -284,10 +347,7 @@ class Runner:
     def execute(
         self, job_id: str, stages: Sequence[StageSpec], *, worker_id: str
     ) -> JobRecord:
-        # Concurrent operator commands (pause, status) open their own store;
-        # the anchor keeps the store's pinned WAL/SHM identities valid.
-        with self.store.journal_anchor():
-            return self._execute(job_id, stages, worker_id=worker_id)
+        return self._execute(job_id, stages, worker_id=worker_id)
 
     def _execute(
         self, job_id: str, stages: Sequence[StageSpec], *, worker_id: str
@@ -345,10 +405,12 @@ class Runner:
             attempt_dir = self.attempts_dir / job_id / f"{stage.name.value}-{lease.token}"
             attempt_dir.mkdir(parents=True, mode=0o700)
             current_lease = lease
+            lease_lock = threading.Lock()
 
             def heartbeat() -> None:
                 nonlocal current_lease
-                current_lease = self.store.heartbeat(current_lease, self.lease_seconds)
+                with lease_lock:
+                    current_lease = self.store.heartbeat(current_lease, self.lease_seconds)
 
             context = StageContext(
                 job_id=job_id,
@@ -360,10 +422,18 @@ class Runner:
                 attempt_dir=attempt_dir,
                 heartbeat=heartbeat,
             )
+            # Renew the lease through every long step the worker owns, not only
+            # inside stage callbacks: re-hashing a 2 GB sealed snapshot alone can
+            # outlast the lease.  Stopped in ``finally``, before any crash or
+            # failure leaves this frame, so a dead worker never keeps a lease.
+            keeper = _LeaseKeeper(heartbeat, self.heartbeat_seconds)
             try:
                 self._verify_job_snapshot(job_id)
+                keeper.raise_if_lost()
                 result = stage.callback(context)
+                keeper.raise_if_lost()
                 self._verify_job_snapshot(job_id)
+                keeper.raise_if_lost()
                 if not result.postconditions or not all(result.postconditions.values()):
                     raise OutputCorrupt("stage postconditions did not all pass")
                 outputs = hash_outputs(attempt_dir, result.outputs)
@@ -385,16 +455,27 @@ class Runner:
                 write_receipt(attempt_dir, receipt)
                 self._seal_attempt(attempt_dir)
                 self._fault("after_receipt")
-                current_lease = self.store.heartbeat(
-                    current_lease, self.lease_seconds
-                )
+                heartbeat()
+                # The fenced heartbeat just renewed a full lease and only short
+                # steps remain, so stop the keeper here: joined, its record is
+                # final, and any renewal failure since the last check (even one
+                # this heartbeat outlived) stops the worker before it publishes.
+                keeper.stop()
+                keeper.raise_if_lost()
                 publication = self._publication_path(receipt)
                 publication.parent.mkdir(parents=True, exist_ok=True)
-                if publication.exists():
-                    raise StoreError("publication identity already exists")
-                os.replace(attempt_dir, publication)
-                publication.chmod(0o555)
-                self._fsync_directory(publication.parent)
+
+                def publish() -> None:
+                    if publication.exists():
+                        raise StoreError("publication identity already exists")
+                    os.replace(attempt_dir, publication)
+                    publication.chmod(0o555)
+                    self._fsync_directory(publication.parent)
+
+                # The rename runs under the store's write lock after a fresh
+                # token-and-expiry check, so a worker that stalled past its
+                # lease (or was taken over) cannot place bytes in artifacts/.
+                self.store.publish_attempt(current_lease, publish)
                 self._fault("after_publication")
                 self.store.commit_attempt(
                     current_lease,
@@ -414,14 +495,22 @@ class Runner:
             except InjectedCrash:
                 raise
             except (SnapshotViolation, TerminalStageError) as exc:
+                keeper.stop()  # a failed worker stops renewing before it records
+                if keeper.lost:
+                    self._fail_after_lost_renewal(keeper, current_lease, exc)
                 # A pending pause can only end retryably (state table); the
                 # refusal repeats on the next attempt and then ends terminally.
                 pending_pause = self.store.get(job_id).state == JobState.PAUSE_REQUESTED
                 self.store.fail_attempt(current_lease, str(exc), retryable=pending_pause)
                 raise
             except Exception as exc:
+                keeper.stop()  # a failed worker stops renewing before it records
+                if keeper.lost:
+                    self._fail_after_lost_renewal(keeper, current_lease, exc)
                 self.store.fail_attempt(current_lease, str(exc), retryable=True)
                 raise
+            finally:
+                keeper.stop()
 
             if self.status(job_id).state == JobState.PAUSE_REQUESTED:
                 self.store.transition(job_id, JobState.PAUSED, "paused at stage boundary")
@@ -433,6 +522,23 @@ class Runner:
         )
         self.store.transition(job_id, JobState.COMPLETE, f"{self._origin_label} workflow complete")
         return self.status(job_id)
+
+    def _fail_after_lost_renewal(
+        self, keeper: _LeaseKeeper, lease: AttemptLease, exc: BaseException
+    ) -> None:
+        """Surface a recorded renewal failure instead of the stage's own error.
+
+        ``fail_attempt`` is fenced on token and expiry, so it records only if
+        the lease is in fact still this worker's (a transient renewal error),
+        and then only a retryable failure: a worker whose renewal failed never
+        decides a terminal outcome.  An expired or superseded lease records
+        nothing.  Either way the keeper's ``StaleLease`` is raised.
+        """
+
+        try:
+            self.store.fail_attempt(lease, str(exc), retryable=True)
+        finally:
+            keeper.raise_if_lost()
 
     def recover(self, job_id: str) -> RecoveryReport:
         """Adopt exactly-current publications and quarantine every other orphan."""
