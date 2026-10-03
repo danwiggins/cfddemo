@@ -392,3 +392,34 @@ def test_register_refuses_unreadable_fai_and_endless_header(
     with pytest.raises(ReferenceProblem) as header:
         digest_fasta(endless)
     assert header.value.code == "TBX-REF-001"
+
+
+def test_index_rebuild_runs_outside_the_process_holding_the_lease(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """In-process pysam.index holds the GIL and starves the stage heartbeat.
+
+    On a 2 GB BAM the rebuild took 65 s, past the runner's 30 s lease, so
+    ``traceback run`` failed at validate. The rebuild must use a child process.
+    """
+
+    fasta = _write_fasta(tmp_path / "ref")
+    bam = _write_bam(tmp_path / "bam", _plain_sq())
+    root = tmp_path / "root"
+    code, _ = _run(
+        capsys, "reference", "register", "--fasta", str(fasta), "--id", "tiny",
+        "--root", str(root),
+    )
+    assert code == ExitCode.OK
+
+    def in_process_index(*_: object, **__: object) -> None:
+        raise AssertionError("pysam.index ran in the lease-holding process")
+
+    monkeypatch.setattr(pysam, "index", in_process_index)
+    code, payload = _run(
+        capsys, "preflight", str(bam), "--reference", "tiny", "--root", str(root)
+    )
+    assert code == ExitCode.OK
+    checks = payload["data"]["report"]["checks"]
+    index_check = next(c for c in checks if "index reconciles" in c["problem"])
+    assert index_check["outcome"] == "pass"
