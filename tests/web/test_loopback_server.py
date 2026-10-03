@@ -550,3 +550,33 @@ def test_ipv6_listener_is_family_bound_when_available(tmp_path: Path) -> None:
         assert service.config.bind_host == "::1"
         assert service.config.authority.startswith("[::1]:")
         assert _request(service, "GET", "/")[0] == 200
+
+
+def test_service_store_survives_another_store_closing_last(tmp_path: Path) -> None:
+    """A runner process opening and closing the same job store while the web
+    service runs must not invalidate the service store's pinned WAL/SHM
+    identities: the service holds a journal anchor for its lifetime."""
+
+    import gc
+
+    store, job_id = _store(tmp_path)
+    store.get(job_id.removeprefix("job_"))  # the service store reads (and pins) first
+    wal = Path(f"{store.path}-wal")
+    with RunningLocalWebService.start(
+        store=store, state_directory=tmp_path / "state"
+    ) as service:
+        before = wal.stat().st_ino
+        other = JobStore(store.path)  # e.g. `traceback run` or `pause`
+        other.get(job_id.removeprefix("job_"))
+        del other
+        gc.collect()  # connections close on collection; force the "last close"
+        assert wal.exists() and wal.stat().st_ino == before
+        cookie, _ = _exchange(service)
+        status, _, content = _request(
+            service, "GET", "/api/v1/jobs", headers={"Cookie": cookie}
+        )
+        assert status == 200
+        assert [item["job_id"] for item in json.loads(content)["jobs"]] == [job_id]
+    gc.collect()
+    # The anchor is released with the service.
+    assert not wal.exists()

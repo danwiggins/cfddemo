@@ -949,17 +949,20 @@ def _demo(args: argparse.Namespace) -> tuple[ExitCode, dict[str, Any]]:
         workflow_release_sha256=hashlib.sha256(_WORKFLOW_ID.encode("ascii")).hexdigest(),
     )
     runner = Runner(root / "runner", synthetic_enabled=True)
-    record = _execute_signed_run(
-        root,
-        runner,
-        request,
-        source,
-        relative_files,
-        _demo_stages,
-        namespace=TrustNamespace.DEVELOPMENT_SYNTHETIC,
-        worker_id="synthetic-cli",
-    )
-    verified, published = _publish_signed_record(root, runner, record.job_id)
+    # As in run: keep the store's WAL/SHM identities stable while another
+    # process (pause, status, a web service) opens the same store.
+    with runner.store.journal_anchor():
+        record = _execute_signed_run(
+            root,
+            runner,
+            request,
+            source,
+            relative_files,
+            _demo_stages,
+            namespace=TrustNamespace.DEVELOPMENT_SYNTHETIC,
+            worker_id="synthetic-cli",
+        )
+        verified, published = _publish_signed_record(root, runner, record.job_id)
     bundle_token = published.relative_to(root).as_posix()
     return ExitCode.OK, _result(
         "demo",
