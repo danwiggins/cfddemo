@@ -129,6 +129,15 @@ job database. The preserved Streamlit demo is not this service.
 - The packaged page never requests jobs or explorer routes from a reader
   session; it hides those sections and shows the longitudinal view.
 
+- Two CLI entry points start this service. `traceback reader launch` starts
+  it with a reader registry and `explorer=None`, and prints reader links.
+  `traceback serve --root ROOT` (golden-path B6) starts it with ROOT's runner
+  store and the read-only local catalog explorer, no reader registry, and
+  prints only operator links. `serve` therefore adds no reader exposure: no
+  reader link is issued, and a reader session still gets 403 `TBX-AUTH-007`
+  on every jobs and explorer route. Its state directory is `ROOT/web`, so the
+  per-state-path lock gives one `serve` per ROOT.
+
 The current contract uses plain HTTP on a literal loopback origin, so the
 cookie is intentionally not marked `Secure`; browsers do not treat arbitrary
 loopback HTTP as a secure transport. The service must never bind beyond

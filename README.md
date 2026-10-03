@@ -54,6 +54,13 @@ uv run pytest
 uv run streamlit run app.py
 ```
 
+To take one local BAM through the CLI (reference register, preflight, run,
+verify, catalog import, `serve`), follow
+[Real local BAM (unqualified)](docs/OPERATOR-GUIDE.md#real-local-bam-unqualified)
+in the operator guide. It needs `samtools` (`brew install samtools`) to index
+the inputs. Every record it makes is unqualified, local and not for clinical
+use.
+
 The checked-in public demo bundles contain aggregate measurements and
 provenance only. They do not contain BAMs, read IDs, local paths, source
 documents, or credentials.

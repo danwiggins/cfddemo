@@ -65,7 +65,8 @@ def base(tmp_path_factory: pytest.TempPathFactory):
     record_id, job_id = payload["data"]["record_id"], payload["data"]["job_id"]
     code, payload = _main_json("catalog", "import", root / "records" / record_id, "--root", root)
     assert code == 0, payload
-    return root, payload["data"]["result_id"], job_id
+    # The web projection names jobs ``job_<hex>``.
+    return root, payload["data"]["result_id"], f"job_{job_id}"
 
 
 @pytest.fixture
@@ -196,6 +197,7 @@ def test_missing_runner_database_or_catalog_is_refused_without_a_listener(world)
     assert "TBX-SERVE-001" in text and "traceback run" in text
     assert "docs/OPERATOR-GUIDE.md#tbx-serve-001" in text
     (root / "runner" / "moved.sqlite3").rename(root / "runner" / "runner.sqlite3")
+    subprocess.run(["chmod", "-R", "u+w", str(root / "catalog")], check=True)
     shutil.rmtree(root / "catalog")
     code, text = _main_text("serve", "--root", root)
     assert code == cli.ExitCode.NOT_FOUND
