@@ -17,6 +17,7 @@ from traceback_runner.cli import ExitCode, main
 from traceback_runner.references import register_reference
 
 _Usage = namedtuple("_Usage", "total used free")
+_REAL_RUN = subprocess.run
 
 
 @pytest.fixture(autouse=True)
@@ -79,6 +80,25 @@ def test_samtools_warns_when_version_does_not_parse(
     )
     _, payload = _doctor(capsys, tmp_path / "r")
     assert _one(payload, "samtools")["status"] == "warn"
+
+
+def test_samtools_version_with_non_utf8_bytes_still_parses(
+    tmp_path: Path, capsys, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Debian's samtools prints a Latin-1 copyright sign in --version."""
+
+    fake = tmp_path / "samtools"
+    fake.write_bytes(
+        b"#!/bin/sh\nprintf 'samtools 1.16.1\\nCopyright (C) 2022 Genome Research Ltd. \\251\\n'\n"
+    )
+    fake.chmod(0o755)
+    monkeypatch.setattr(shutil, "which", lambda name: str(fake))
+    monkeypatch.setattr(subprocess, "run", _REAL_RUN)
+    code, payload = _doctor(capsys, tmp_path / "r")
+    assert code == ExitCode.OK
+    assert _one(payload, "samtools") == {
+        "name": "samtools", "status": "pass", "detail": "samtools 1.16.1"
+    }
 
 
 def test_disk_pass_and_warn_under_ten_gib(

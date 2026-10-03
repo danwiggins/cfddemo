@@ -399,6 +399,7 @@ def _tool_version(executable: str) -> tuple[bool, str | None]:
             check=False,
             capture_output=True,
             text=True,
+            errors="replace",  # Debian's samtools prints Latin-1 bytes
             timeout=10,
         )
     except (OSError, subprocess.SubprocessError):

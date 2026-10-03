@@ -937,7 +937,24 @@ def _inode_identity(value: os.stat_result) -> tuple[int, int]:
 def _descriptor_path(descriptor: int) -> Path:
     proc_path = Path("/proc/self/fd") / str(descriptor)
     if Path("/proc/self/fd").is_dir():
-        return proc_path
+        # /proc/self/fd/N is a magic symlink, which the bundle reader rejects.
+        # Resolve it to the real path, then prove that path still names the
+        # descriptor's inode (a deleted or replaced directory fails here).
+        try:
+            resolved = Path(os.readlink(proc_path))
+            held = os.fstat(descriptor)
+            named = os.stat(resolved, follow_symlinks=False)
+        except (OSError, ValueError):
+            raise CatalogFilesystemError(
+                "catalog descriptor path is unavailable"
+            ) from None
+        if (
+            not resolved.is_absolute()
+            or not stat.S_ISDIR(named.st_mode)
+            or _descriptor_identity(named) != _descriptor_identity(held)
+        ):
+            raise CatalogFilesystemError("catalog descriptor path changed")
+        return resolved
     import fcntl
 
     raw = fcntl.fcntl(descriptor, 50, b"\0" * 1024)
