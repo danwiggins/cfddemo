@@ -49,6 +49,7 @@ TRUST_RELATIVE = Path("trust/development-result-trust.json")
 MEASUREMENT_RELATIVE = Path("measurements/fragment-length.v1.json")
 SLOW_FACTOR = 2.0
 EXIT_PASS, EXIT_FAIL, EXIT_REFUSED = 0, 1, 2
+REPO_ROOT = Path(__file__).resolve().parents[2]
 
 # The measurement JSON (traceback.fragment-measurement.v2) carries no per-run
 # field: no timestamp, job, key or record ID (checked by running the same BAM
@@ -236,6 +237,10 @@ def run_once(
         failures.append("preflight outcome is blocked")
     if not report["fragment_measurement_eligible"]:
         failures.append("preflight did not make the BAM fragment-measurement eligible")
+    if pre_json.get("data_origin") != "local_unqualified" or (
+        pre_json["data"].get("qualified") is not False
+    ):
+        failures.append("preflight result is not labelled local and unqualified")
 
     run = step("run", ["run", str(bam), "--reference", REFERENCE_ID, "--root", str(root),
                        "--json"])
@@ -251,6 +256,8 @@ def run_once(
     }
     if run_json.get("data_origin") != "local_unqualified":
         failures.append("run result is not labelled local_unqualified")
+    if data.get("qualified") is not False or data.get("development_trust_only") is not True:
+        failures.append("run result is not unqualified with development trust only")
     record_id = data["record_id"]
     if data.get("bundle") != f"records/{record_id}":
         failures.append("run did not publish at records/<record_id>")
@@ -339,10 +346,14 @@ def diff_metrics(expected: Any, actual: Any) -> list[str]:
 
 
 def slow_steps(baseline_wall: dict[str, float] | None, wall: dict[str, float]) -> list[str]:
-    warnings = []
-    for name, seconds in sorted((baseline_wall or {}).items()):
+    warnings: list[str] = []
+    if not isinstance(baseline_wall, dict):
+        return warnings
+    for name, seconds in sorted(baseline_wall.items()):
         current = wall.get(name)
-        if current is not None and seconds is not None and current > SLOW_FACTOR * seconds:
+        if not all(isinstance(value, (int, float)) for value in (seconds, current)):
+            continue
+        if current > SLOW_FACTOR * seconds:
             warnings.append(
                 f"step {name} took {current:.1f}s, over {SLOW_FACTOR:g}x its baseline "
                 f"{seconds:.1f}s"
@@ -364,6 +375,19 @@ def _write_private(path: Path, payload: dict[str, Any], *, exclusive: bool) -> N
         handle.write(text)
     os.chmod(temporary, 0o600)
     os.replace(temporary, path)
+
+
+def _load_json(path: Path) -> Any:
+    try:
+        return json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return None
+
+
+def _inside(path: Path, directory: Path) -> bool:
+    resolved = os.path.realpath(path)
+    parent = os.path.realpath(directory)
+    return resolved == parent or resolved.startswith(parent + os.sep)
 
 
 def write_result(log_dir: Path, result: dict[str, Any], stamp: str) -> Path:
@@ -466,6 +490,11 @@ def main(argv: list[str] | None = None) -> int:
                     "the temporary roots would sit under an input's directory; "
                     "pass --work-dir elsewhere"
                 )
+        # Real-sample counts must never land in the (public) repository.
+        if args.record_baseline and _inside(baseline_path, REPO_ROOT):
+            raise Refused("refusing to write a baseline inside the repository")
+        if _inside(log_dir, REPO_ROOT):
+            raise Refused("refusing to write canary logs inside the repository")
         if args.record_baseline and baseline_path.exists() and not args.force:
             raise Refused(
                 "a baseline already exists; refusing to overwrite it (pass --force "
@@ -477,16 +506,26 @@ def main(argv: list[str] | None = None) -> int:
 
     print("Traceback golden-path canary (unqualified, local, not for clinical use)")
     log("inputs: hashing FASTA and BAM (paths are never recorded)")
-    inputs = {"fasta": file_identity(args.fasta), "bam": file_identity(args.bam)}
-
     failures: list[str] = []
     warnings: list[str] = []
     runs: list[dict[str, Any]] = []
-    for index in range(args.repeat):
+    inputs: dict[str, Any] | None
+    try:
+        inputs = {"fasta": file_identity(args.fasta), "bam": file_identity(args.bam)}
+    except OSError as exc:
+        inputs = None
+        failures.append(f"cannot read the inputs: {type(exc).__name__}: {scrub(str(exc))}")
+    for index in range(args.repeat if inputs is not None else 0):
         work = Path(tempfile.mkdtemp(prefix="traceback-canary.", dir=args.work_dir))
         log(f"run {index + 1}/{args.repeat}")
         try:
             outcome = run_once(args.fasta, args.bam, work, scrub, args.step_timeout, log)
+        except Exception as exc:  # noqa: BLE001 - any surprise is a canary failure
+            outcome = {
+                "metrics": {},
+                "wall_seconds": {},
+                "failures": [f"internal error: {type(exc).__name__}: {scrub(str(exc))}"],
+            }
         finally:
             if args.keep:
                 print(f"  kept root: {work}")
@@ -496,7 +535,7 @@ def main(argv: list[str] | None = None) -> int:
         failures.extend(f"run {index + 1}: {item}" for item in outcome["failures"])
 
     reproducible: bool | None = None
-    if args.repeat > 1:
+    if len(runs) > 1:
         first = runs[0]["metrics"]
         mismatches = [
             (index, diff_metrics(first, other["metrics"]))
@@ -508,9 +547,11 @@ def main(argv: list[str] | None = None) -> int:
                 failures.append(f"not reproducible: run 1 vs run {index}: {line}")
 
     baseline_report: dict[str, Any] = {"recorded": False, "compared": False, "diff": []}
-    metrics = runs[0]["metrics"]
-    wall = runs[0]["wall_seconds"]
-    if args.record_baseline:
+    metrics = runs[0]["metrics"] if runs else {}
+    wall = runs[0]["wall_seconds"] if runs else {}
+    if inputs is None:
+        pass  # nothing ran; the input failure is already recorded
+    elif args.record_baseline:
         if failures:
             failures.append("baseline not recorded: the run failed")
         else:
@@ -533,11 +574,12 @@ def main(argv: list[str] | None = None) -> int:
         failures.append(
             "no baseline: run once with --record-baseline (see docs/CANARIES.md)"
         )
+    elif not isinstance(baseline := _load_json(baseline_path), dict) or (
+        baseline.get("schema_version") != BASELINE_SCHEMA
+    ):
+        failures.append(f"the baseline is unreadable or not {BASELINE_SCHEMA}")
     else:
-        baseline = json.loads(baseline_path.read_text(encoding="utf-8"))
         baseline_report["compared"] = True
-        if baseline.get("schema_version") != BASELINE_SCHEMA:
-            failures.append(f"baseline schema is not {BASELINE_SCHEMA}")
         # A committed synthetic baseline sets inputs to null: the generated BAM's
         # compressed bytes may differ by platform while its records do not.
         if baseline.get("inputs") is not None:

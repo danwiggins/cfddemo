@@ -324,6 +324,7 @@ def test_plist_template_renders_to_valid_plist(tmp_path: Path) -> None:
     assert arguments[5] == f"{REPO}/scripts/canary/real_bam_canary.py"
     assert plist["WorkingDirectory"] == str(REPO)
     assert plist["StandardOutPath"].startswith(str(tmp_path / "logs"))
+    assert plist["Umask"] == 0o077
     # render has no side effects.
     assert not (tmp_path / "agents").exists()
 
@@ -363,3 +364,52 @@ def test_locator_check_finds_input_paths_and_scrubs_them(tmp_path: Path) -> None
     (record / "b.log").write_bytes(f"opened {tmp_path / 'inputs'}/other\n".encode())
     assert scrub.leaks_in(record) == ["b.log", "charts/a.json"]
     assert scrub(f"read {bam} and {fasta}") == "read <BAM> and <FASTA>"
+
+
+def test_baseline_and_logs_inside_the_repository_are_refused(
+    recorded: tuple[Canary, Path, Path], tmp_path: Path
+) -> None:
+    canary, baseline, _ = recorded
+    inside = REPO / "canary-should-not-exist"
+    record = canary.run("--record-baseline", baseline=inside / "b.json", logs=tmp_path / "l")
+    assert record.returncode == 2
+    assert "inside the repository" in record.stderr
+    logs = canary.run(baseline=baseline, logs=inside / "logs")
+    assert logs.returncode == 2
+    assert "inside the repository" in logs.stderr
+    assert not inside.exists()
+
+
+def test_unreadable_baseline_is_a_failure_not_a_crash(
+    recorded: tuple[Canary, Path, Path], tmp_path: Path
+) -> None:
+    canary, _, _ = recorded
+    broken = tmp_path / "broken.json"
+    broken.write_text("{", encoding="utf-8")
+    logs = tmp_path / "logs"
+    completed = canary.run(baseline=broken, logs=logs)
+    assert completed.returncode == 1, completed.stdout + completed.stderr
+    assert "Traceback (most recent call last)" not in completed.stderr
+    assert any("unreadable" in line for line in _latest(logs)["failures"])
+
+
+@pytest.mark.skipif(shutil.which("bash") is None, reason="the installer needs bash")
+def test_install_refuses_a_baseline_inside_the_repository(tmp_path: Path) -> None:
+    fasta = tmp_path / "in" / "ref.fa"
+    bam = tmp_path / "in" / "s.bam"
+    fasta.parent.mkdir()
+    for path in (fasta, Path(f"{fasta}.fai"), bam, Path(f"{bam}.bai")):
+        path.write_text("x", encoding="ascii")
+    environment = {
+        **_environment(tmp_path),
+        "PYTHON": sys.executable,
+        "UV": "/opt/example/bin/uv",
+        "TRACEBACK_CANARY_LAUNCH_AGENTS": str(tmp_path / "agents"),
+    }
+    completed = subprocess.run(
+        ["bash", str(INSTALLER), "render", "--fasta", str(fasta), "--bam", str(bam),
+         "--baseline", str(SYNTHETIC_BASELINE)],
+        env=environment, capture_output=True, text=True, check=False,
+    )
+    assert completed.returncode == 2
+    assert "outside the repository" in completed.stderr

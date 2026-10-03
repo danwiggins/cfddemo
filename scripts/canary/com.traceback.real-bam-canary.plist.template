@@ -45,6 +45,8 @@
   </dict>
   <key>RunAtLoad</key>
   <false/>
+  <key>Umask</key>
+  <integer>63</integer>
   <key>LowPriorityIO</key>
   <true/>
   <key>Nice</key>

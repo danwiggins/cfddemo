@@ -18,7 +18,7 @@ set -euo pipefail
 
 LABEL="com.traceback.real-bam-canary"
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-REPO="$(cd "$SCRIPT_DIR/../.." && pwd)"
+REPO="$(cd "$SCRIPT_DIR/../.." && pwd -P)"
 TEMPLATE="$SCRIPT_DIR/$LABEL.plist.template"
 AGENTS_DIR="${TRACEBACK_CANARY_LAUNCH_AGENTS:-$HOME/Library/LaunchAgents}"
 PLIST="$AGENTS_DIR/$LABEL.plist"
@@ -63,6 +63,9 @@ parse_inputs() {
   [ -f "$BAM.bai" ] || die "the BAM has no .bai index (samtools index)"
   case "$BASELINE" in /*) ;; *) BASELINE="$PWD/$BASELINE" ;; esac
   case "$LOG_DIR" in /*) ;; *) LOG_DIR="$PWD/$LOG_DIR" ;; esac
+  # Real-sample counts must never land in the (public) repository.
+  case "$BASELINE/" in "$REPO"/*) die "the baseline must live outside the repository" ;; esac
+  case "$LOG_DIR/" in "$REPO"/*) die "the log directory must live outside the repository" ;; esac
 }
 
 uv_path() {
@@ -102,8 +105,12 @@ command_install() {
   parse_inputs "$@"
   [ -f "$BASELINE" ] || die "no baseline at the configured path; record one first:
   uv run python scripts/canary/real_bam_canary.py --fasta F --bam B --record-baseline"
+  chmod 600 "$BASELINE"
   mkdir -p "$AGENTS_DIR"
   mkdir -p "$LOG_DIR" && chmod 700 "$LOG_DIR"
+  # launchd appends to these; keep them private like the results.
+  (umask 077 && touch "$LOG_DIR/launchd.out.log" "$LOG_DIR/launchd.err.log")
+  chmod 600 "$LOG_DIR/launchd.out.log" "$LOG_DIR/launchd.err.log"
   local rendered
   rendered="$(mktemp "${TMPDIR:-/tmp}/traceback-canary-plist.XXXXXX")"
   render >"$rendered"
