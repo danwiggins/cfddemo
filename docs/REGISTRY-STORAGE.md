@@ -100,8 +100,23 @@ as the same user.
    descriptor only after taking the process lock, which `close()` also holds.
    A waiter therefore cannot `flock` a descriptor number that a concurrent
    `close()` freed and the process reused.
+7. **Instance seal compared under the instance process lock.** Accepting a
+   new head assigns `_trusted_head_sha256` and then re-seals the instance,
+   inside `_lock`, which holds the instance's `_process_lock`. `close()`
+   clears descriptors under that same lock. The integrity check that every
+   public method runs first compares the instance with its seal under it
+   too. Without that, a reader on another thread could see the new head with
+   the old seal (or a half-closed instance) and fail with "authority state
+   changed" while a concurrent registration is in flight, for example two
+   callers adopting the same bytes. The check takes the instance lock, not
+   the module `_REGISTRY_PROCESS_LOCK`, so a finalizer closing an unreachable
+   registry never waits on a lock another thread holds. Rollback and tamper
+   detection are unchanged: the comparison is the same, and only its timing
+   is serialized with the writer.
 
 Items 5 and 6 port the result-trust registry's hardening to the family.
+Item 7 replaces the result-trust registry's module-lock version of the same
+guard and applies it to all 12 registries.
 
 ## Limits
 
