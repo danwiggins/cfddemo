@@ -1,11 +1,15 @@
 """Strict, immutable, versioned contracts for the local Traceback runner.
 
-All release objects in this first wave are synthetic-only and explicitly
-unapproved for real genomic data, hardware, scientific, or protocol use.
+Every object here is explicitly unapproved for protocol, scientific, or
+clinical use.  v1 measurement contracts are synthetic-only; the v2 measurement
+contracts may also carry ``unapproved_local`` (a real local input processed by
+an unqualified development method).
 """
 
 from __future__ import annotations
 
+import json
+from collections.abc import Mapping
 from datetime import date, datetime
 from enum import StrEnum
 from pathlib import PurePosixPath
@@ -41,6 +45,9 @@ class InputKind(StrEnum):
 
 class ApprovalState(StrEnum):
     UNAPPROVED_SYNTHETIC = "unapproved_synthetic"
+    # A real local input processed by an unqualified development method.  Not
+    # approved for any protocol, scientific, or clinical use.
+    UNAPPROVED_LOCAL = "unapproved_local"
 
 
 class PreflightOutcome(StrEnum):
@@ -227,6 +234,41 @@ class FragmentMeasurementPolicy(RunnerContract):
         return self
 
 
+class FragmentMeasurementPolicyV2(RunnerContract):
+    """v1 policy shape plus an explicit synthetic-or-local approval label.
+
+    A separate class, never a widened v1: v1 policy bytes stay
+    ``unapproved_synthetic`` only.
+    """
+
+    schema_version: Literal["traceback.fragment-policy.v2"] = "traceback.fragment-policy.v2"
+    definition_id: Identifier
+    approval_state: Literal[ApprovalState.UNAPPROVED_SYNTHETIC, ApprovalState.UNAPPROVED_LOCAL]
+    reference_id: Identifier
+    contigs: tuple[Identifier, ...] = Field(min_length=1)
+    min_mapping_quality: int = Field(ge=0, le=255)
+    consumed_cigar_operations: tuple[Literal["M", "D", "N", "=", "X"], ...] = ("M", "D", "N", "=", "X")
+    exclude_unmapped: Literal[True] = True
+    exclude_secondary: Literal[True] = True
+    exclude_supplementary: Literal[True] = True
+    exclude_qc_failure: Literal[True] = True
+    exclude_duplicate: Literal[True] = True
+    pairing_rule: Literal["count_each_eligible_primary_alignment"] = "count_each_eligible_primary_alignment"
+    bins: tuple[HistogramBin, ...] = Field(min_length=1)
+
+    @model_validator(mode="after")
+    def ordered_policy(self) -> FragmentMeasurementPolicyV2:
+        if len(self.contigs) != len(set(self.contigs)):
+            raise ValueError("contigs must be unique")
+        if self.consumed_cigar_operations != ("M", "D", "N", "=", "X"):
+            raise ValueError("v2 consumed CIGAR operations are locked to M,D,N,=,X")
+        _validate_histogram_bins(self.bins)
+        return self
+
+
+AnyFragmentMeasurementPolicy = FragmentMeasurementPolicy | FragmentMeasurementPolicyV2
+
+
 class WorkflowStage(RunnerContract):
     name: StageName
     depends_on: tuple[StageName, ...] = ()
@@ -410,6 +452,91 @@ class FragmentMeasurement(RunnerContract):
         return self
 
 
+class FragmentMeasurementV2(RunnerContract):
+    """v1 measurement shape plus an explicit synthetic-or-local approval label.
+
+    A separate class, never a widened v1.  Only ``traceback.result-bundle.v3``
+    carries this measurement.
+    """
+
+    schema_version: Literal["traceback.fragment-measurement.v2"] = "traceback.fragment-measurement.v2"
+    definition_id: Identifier
+    approval_state: Literal[ApprovalState.UNAPPROVED_SYNTHETIC, ApprovalState.UNAPPROVED_LOCAL]
+    reference_id: Identifier
+    completion: CompletionState
+    records_scanned: int = Field(ge=0)
+    eligible_alignments: int = Field(ge=0)
+    exclusions: ExclusionCounts
+    histogram: tuple[HistogramCount, ...] = Field(min_length=1)
+
+    @model_validator(mode="after")
+    def reconciles(self) -> FragmentMeasurementV2:
+        _validate_histogram_bins(tuple(item.bin for item in self.histogram))
+        if self.records_scanned != self.eligible_alignments + self.exclusions.total:
+            raise ValueError("records_scanned must reconcile eligible and excluded records")
+        if sum(item.count for item in self.histogram) != self.eligible_alignments:
+            raise ValueError("histogram counts must equal eligible_alignments")
+        if self.completion != CompletionState.COMPLETE:
+            raise ValueError("interrupted or capped scans cannot construct a measurement")
+        if self.eligible_alignments == 0:
+            raise ValueError("zero eligible alignments is measurement unavailable")
+        return self
+
+
+AnyFragmentMeasurement = FragmentMeasurement | FragmentMeasurementV2
+
+FRAGMENT_MEASUREMENT_V1 = "traceback.fragment-measurement.v1"
+FRAGMENT_MEASUREMENT_V2 = "traceback.fragment-measurement.v2"
+# The one dispatch table from a measurement schema literal to its exact class.
+FRAGMENT_MEASUREMENT_MODELS: dict[str, type[FragmentMeasurement] | type[FragmentMeasurementV2]] = {
+    FRAGMENT_MEASUREMENT_V1: FragmentMeasurement,
+    FRAGMENT_MEASUREMENT_V2: FragmentMeasurementV2,
+}
+FRAGMENT_POLICY_V1 = "traceback.fragment-policy.v1"
+FRAGMENT_POLICY_V2 = "traceback.fragment-policy.v2"
+# Measurement schema each policy schema finalizes into.
+FRAGMENT_POLICY_MEASUREMENT_SCHEMAS: dict[str, str] = {
+    FRAGMENT_POLICY_V1: FRAGMENT_MEASUREMENT_V1,
+    FRAGMENT_POLICY_V2: FRAGMENT_MEASUREMENT_V2,
+}
+
+
+def _measurement_model(schema_version: object) -> type[FragmentMeasurement] | type[FragmentMeasurementV2]:
+    if type(schema_version) is not str or schema_version not in FRAGMENT_MEASUREMENT_MODELS:
+        raise ValueError("fragment measurement schema is unsupported")
+    return FRAGMENT_MEASUREMENT_MODELS[schema_version]
+
+
+def parse_fragment_measurement(content: bytes) -> AnyFragmentMeasurement:
+    """Parse exact canonical measurement bytes, dispatching on ``schema_version``.
+
+    The single reader for every measurement schema: bundles, export, and the
+    catalog call this rather than naming one measurement class.
+    """
+
+    try:
+        raw = json.loads(content)
+    except (UnicodeDecodeError, json.JSONDecodeError) as exc:
+        raise ValueError("content is not valid UTF-8 JSON") from exc
+    if not isinstance(raw, dict):
+        raise ValueError("fragment measurement must be a JSON object")
+    return canonical_model_from_bytes(_measurement_model(raw.get("schema_version")), content)
+
+
+def validate_fragment_measurement(value: object) -> AnyFragmentMeasurement:
+    """Strictly re-validate a measurement model or mapping by its schema version."""
+
+    if isinstance(value, (FragmentMeasurement, FragmentMeasurementV2)):
+        # Dispatch on the schema literal, never the caller's class, so a
+        # subclass is normalized to the exact contract class.
+        return _measurement_model(value.schema_version).model_validate(
+            value.model_dump(mode="json")
+        )
+    if not isinstance(value, Mapping):
+        raise ValueError("fragment measurement must be a model or mapping")
+    return _measurement_model(value.get("schema_version")).model_validate(value)
+
+
 class BundleContent(RunnerContract):
     relative_path: Annotated[str, StringConstraints(pattern=r"^[A-Za-z0-9_.-]+(?:/[A-Za-z0-9_.-]+)*$")]
     sha256: Sha256
@@ -455,6 +582,31 @@ class ResultBundleManifestV2(RunnerContract):
 
     @model_validator(mode="after")
     def ordered_contents(self) -> ResultBundleManifestV2:
+        paths = [item.relative_path for item in self.contents]
+        if paths != sorted(paths) or len(paths) != len(set(paths)):
+            raise ValueError("bundle contents must have unique sorted paths")
+        return self
+
+
+class ResultBundleManifestV3(RunnerContract):
+    """v2 manifest shape for bundles carrying ``fragment-measurement.v2``.
+
+    Signed under the ``development-local`` trust namespace.
+    """
+
+    schema_version: Literal["traceback.result-bundle.v3"] = (
+        "traceback.result-bundle.v3"
+    )
+    record_id: Identifier
+    workflow_release_id: Identifier
+    measurement_schema_versions: tuple[Identifier, ...] = Field(min_length=1)
+    method: BundleMethodIdentity
+    contents: tuple[BundleContent, ...] = Field(min_length=1)
+    signing_key_id: Identifier
+    development_trust_only: Literal[True] = True
+
+    @model_validator(mode="after")
+    def ordered_contents(self) -> ResultBundleManifestV3:
         paths = [item.relative_path for item in self.contents]
         if paths != sorted(paths) or len(paths) != len(set(paths)):
             raise ValueError("bundle contents must have unique sorted paths")

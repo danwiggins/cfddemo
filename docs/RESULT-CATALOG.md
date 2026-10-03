@@ -3,6 +3,26 @@
 `ResultCatalog` is a local-only index over verified deterministic result bundles.
 It does not discover files, contact a service, or expose donor/run identifiers.
 
+## Bundle readers
+
+`DEFAULT_RESULT_BUNDLE_READER_REGISTRY` is unchanged: it holds only
+`reader_result_bundle_v2`, so its digest, and every existing catalog authority
+digest and retained binding, stays byte-identical. A catalog that holds local
+records opens with `reader_registry=LOCAL_RESULT_BUNDLE_READER_REGISTRY`, which
+holds one reader per bundle version; each reader matches the manifest's
+measurement tuple exactly:
+
+| Reader | Bundle | Measurement | Signing namespace |
+|---|---|---|---|
+| `reader_result_bundle_v2` | `traceback.result-bundle.v2` | `traceback.fragment-measurement.v1` (synthetic) | `development-synthetic` |
+| `reader_result_bundle_v3` | `traceback.result-bundle.v3` | `traceback.fragment-measurement.v2` (`unapproved_local`) | `development-local` |
+
+A v3 manifest listing `fragment-measurement.v1`, or a v2 manifest listing
+`fragment-measurement.v2`, fails with `CatalogUnsupportedSchema` (and the
+bundle verifier rejects both first). A v3 record is unqualified, local, and not
+for clinical use; the catalog's `qualification_state` still comes from the
+method capability (B5 supplies a development-unqualified local authority).
+
 ## Import boundary
 
 Callers configure at most eight named import roots and provide one exact relative
