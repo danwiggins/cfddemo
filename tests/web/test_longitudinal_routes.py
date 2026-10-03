@@ -652,7 +652,11 @@ def test_saved_routes_need_every_configured_scope(
         assert _json(_save(env)[1])["applied"] is True
         catalog = _json(env.get("selectors")[1])
         assert len(catalog["measurement_scopes"]) == 1  # only the granted one
-        _assert_denied(*env.get("saved"))
+        status, content = env.get("saved")
+        page = _json(content)
+        assert status == 200
+        assert page["listing_state"] == "requires_every_configured_scope"
+        assert page["records"] == [] and b"saved_comparison_" not in content
         _assert_denied(
             *env.post(
                 "reopen",

@@ -568,8 +568,18 @@
       delete ui.results.dataset.drawer;
       ui.save.disabled = true;
     };
+    // The bounded denial shell: no result, selector, diff or saved selector
+    // from the formerly authorized session stays rendered.
     const deny = () => {
       hideResults();
+      [ui.cohort, ui.scope, ui.measurement, ui.anchorPolicy, ui.anchor, ui.d09, ui.diffBody, ui.savedList]
+        .forEach((node) => node.replaceChildren());
+      ui.diff.hidden = true;
+      catalog = null;
+      scopes = [];
+      diffShownFor = null;
+      currentRequest = null;
+      ui.showResults.disabled = true;
       lastView = null;
       setState("permission-denied");
       ui.status.textContent = "Permission denied.";
@@ -842,7 +852,12 @@
         return;
       }
       ui.savedList.replaceChildren();
+      if (result.status === 403) { deny(); return; }
       if (result.status !== 200 || !result.payload) return;
+      if (result.payload.listing_state === "requires_every_configured_scope") {
+        ui.savedList.append(el(doc, "li", "Saved comparisons need a reader grant for every configured measurement."));
+        return;
+      }
       result.payload.records.forEach((record) => {
         const item = el(doc, "li", `${record.saved_selector_id} version ${record.comparison_version} (${words(record.authority_state)}) `);
         const button = el(doc, "button", `Reopen version ${record.comparison_version}`, { type: "button" });

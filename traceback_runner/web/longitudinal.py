@@ -368,6 +368,9 @@ class LongitudinalSavedPage(RegistryContract):
         "traceback.e12-longitudinal-saved-page.v1"
     )
     save: PublicSaveAvailability
+    # ``requires_every_configured_scope``: the grant covers some configured
+    # scopes but not all, so no saved selector is listed (Reopen is refused).
+    listing_state: Literal["listed", "requires_every_configured_scope"] = "listed"
     records: tuple[PublicSavedComparisonRow, ...] = Field(max_length=SAVED_PAGE_LIMIT)
     next_after_selector_id: str | None = None
     next_after_version: int | None = None
@@ -1445,7 +1448,8 @@ def source_detail(
         _invalid()
     built, first = _build(binder, request, source, workspace_request)
     projection = _PINNED_PROJECT(built)
-    rows = [row for row in built.rows if row.row_ordinal == ordinal]
+    # Only a row the request's filters make visible, and only visible segments.
+    rows = [row for row in projection.rows if row.row_ordinal == ordinal]
     if len(rows) != 1:
         _invalid()
     authority = projection.authority
@@ -1453,7 +1457,7 @@ def source_detail(
         row=rows[0],
         segments=tuple(
             item
-            for item in built.segments
+            for item in projection.segments
             if ordinal in (item.from_row_ordinal, item.to_row_ordinal)
         ),
         time_axis=projection.time_axis,
@@ -1858,6 +1862,18 @@ def saved_page(
     params: Mapping[str, Sequence[str]],
 ) -> dict[str, object]:
     binder = _require_binder(binder)
+    # No authorized scope at all: the denial shell.  Some but not every
+    # configured scope: an empty page, no saved selector read.
+    if len(_authorized_scopes(binder, request, source)) != len(
+        source.measurement_scopes
+    ):
+        return _public(
+            LongitudinalSavedPage(
+                save=save_availability(source),
+                listing_state="requires_every_configured_scope",
+                records=(),
+            )
+        )
     _all_scopes(binder, request, source)
     if set(params) - {"after_selector_id", "after_version"}:
         _invalid()

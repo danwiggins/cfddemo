@@ -231,6 +231,15 @@ def test_source_detail_reresolves_one_row(env: Env) -> None:
         "source", {"request": env.request_json, "row_ordinal": 99}
     )
     assert status == 400
+    # A row the request's filters hide is not served, nor is its segment.
+    hidden = env.request_json
+    hidden["filters"]["lineage_roles"] = ["technical_replicate"]
+    status, content = env.post("source", {"request": hidden, "row_ordinal": 3})
+    assert status == 400 and b"comparison" not in content
+    anchor_only = env.request_json
+    anchor_only["filters"]["compatibility_states"] = ["anchor"]
+    status, content = env.post("source", {"request": anchor_only, "row_ordinal": 1})
+    assert status == 200 and _json(content)["segments"] == []
 
 
 def test_no_protected_identifier_reaches_any_route(env: Env) -> None:
@@ -573,3 +582,8 @@ def test_controller_denial_clears_every_result_and_filters_reach_the_request(
     assert denied["rows"] == 0 and denied["paths"] == 0
     assert denied["resultsText"].strip() == ""
     assert denied["saveDisabled"] is True
+    # The bounded shell: no selector, diff or saved selector stays rendered.
+    assert all(values == [] for values in denied["options"].values())
+    assert denied["diffHidden"] is True and denied["diffText"].strip() == ""
+    assert denied["saved"].strip() == ""
+    assert denied["showResultsDisabled"] is True

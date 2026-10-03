@@ -43,9 +43,9 @@ need the B01 Origin and CSRF checks.
 | --- | --- | --- |
 | `GET selectors` | none, or cohort selector/version + D02 scope, optionally + anchor-policy selector/version | `LongitudinalSelectorCatalog`: cohort versions (bounded page); for one version, the measurement options (projection policies bound to the manifest's measurement anchor and the scope), anchor-policy approvals and D09 policies for that manifest; the explicit anchor candidate page |
 | `GET diff` | cohort selector/version + D02 scope | `LongitudinalVersionDiffResponse` (D08 `derive_version_diff`: counts, set digests, controlled reasons) |
-| `GET saved` | optional cursor | `LongitudinalSavedPage`: opaque saved selectors with `current`/`stale` and stale slots |
+| `GET saved` | optional cursor | `LongitudinalSavedPage`: opaque saved selectors with `current`/`stale` and stale slots; a grant covering only some configured scopes gets an empty page (`listing_state=requires_every_configured_scope`), no grant the denial shell |
 | `POST workspace` | `{"request": LongitudinalWorkspaceRequest}` | `LongitudinalWorkspaceResponse`: the D08 `LongitudinalWorkspaceProjection`, Save availability, literal disabled release/export |
-| `POST source` | `{"request", "row_ordinal"}` | `LongitudinalSourceDetail`: one public row, the segments that touch it, authority digests, a fresh replay digest |
+| `POST source` | `{"request", "row_ordinal"}` | `LongitudinalSourceDetail`: one row the request's filters make visible, the visible segments that touch it, authority digests, a fresh replay digest |
 | `POST save` | `{"request"}` | `PublicSaveReceipt` (below) |
 | `POST reopen` | `{"saved_selector_id", "comparison_version", "stage": "diff" \| "results"}` | `LongitudinalReopenResponse` (below) |
 
