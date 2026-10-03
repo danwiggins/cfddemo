@@ -263,6 +263,7 @@ def _doctor_samtools() -> dict[str, Any]:
             [executable, "--version"],
             capture_output=True,
             text=True,
+            errors="replace",  # Debian's samtools prints Latin-1 bytes
             timeout=10,
             check=False,
         )

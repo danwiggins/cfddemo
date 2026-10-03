@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import hashlib
 import json
-import os
 import threading
 from datetime import timedelta, tzinfo
 from typing import ClassVar
@@ -49,6 +48,7 @@ from evidence_inspector.repeatability_comparison import (
     repeatability_envelope_sha256,
     result_trust_document_sha256,
 )
+from tests.forking import run_in_child
 from tests.test_longitudinal_compatibility import (
     HEAD_SHA256,
     NOW,
@@ -1628,16 +1628,9 @@ def test_in_fence_variant_checks_the_fence_before_any_unavailable_result() -> No
             unavailable = compare_repeatability_in_fence(*inputs, **arguments)
             # A child forked inside the fence inherits the mark and an open
             # transaction but does not hold the parent's fence.
-            child = os.fork()
-            if child == 0:
-                code = 1
-                try:
+            def child() -> None:  # pragma: no cover - child process
+                with pytest.raises(LongitudinalDecisionReplayError):
                     compare_repeatability_in_fence(*inputs, **arguments)
-                except LongitudinalDecisionReplayError:
-                    code = 0
-                except BaseException:
-                    code = 2
-                os._exit(code)
-            _, status = os.waitpid(child, 0)
-            assert os.waitstatus_to_exitcode(status) == 0
+
+            assert run_in_child(child) == 0
         assert unavailable.reason_codes == (RepeatabilityReason.EVIDENCE_MISSING,)
