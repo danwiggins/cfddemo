@@ -600,7 +600,12 @@ def test_failed_start_releases_the_journal_anchor_even_if_cleanup_fails(
     def fail_start(*_args: object, **_kwargs: object) -> None:
         raise RuntimeError("injected start failure")
 
-    def fail_cleanup(*_args: object, **_kwargs: object) -> None:
+    real_close_startup_anchor = server_module._close_startup_anchor
+
+    def fail_cleanup(*args: object, **kwargs: object) -> None:
+        # Release the real host-wide startup lock first, so later tests can
+        # start a service, then fail as a broken cleanup step would.
+        real_close_startup_anchor(*args, **kwargs)
         raise OSError("injected cleanup failure")
 
     monkeypatch.setattr(server_module, "_RunningLocalWebRuntime", fail_start)
