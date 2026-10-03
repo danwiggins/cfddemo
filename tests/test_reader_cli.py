@@ -333,13 +333,23 @@ class _FollowingStdin:
         return "\n" if self.remaining else ""
 
 
+def _runner_root(tmp_path: Path) -> str:
+    """A ROOT holding an empty runner database at ``ROOT/runner/runner.sqlite3``."""
+
+    from traceback_runner.store import JobStore
+
+    root = tmp_path / "runner"
+    JobStore(root / "runner" / "runner.sqlite3")
+    return str(root)
+
+
 def test_launch_prints_a_one_use_fragment_link_that_binds_over_http(
     operator, tmp_path: Path, capfd: pytest.CaptureFixture[str]
 ) -> None:
     selector = operator.issue()
     stdin = _FollowingStdin(operator, follow=2)
     code, out, err = operator(
-        "launch", "--grant", selector, "--root", str(tmp_path / "runner"), stdin=stdin
+        "launch", "--grant", selector, "--root", _runner_root(tmp_path), stdin=stdin
     )
     assert code == 0, err
     links = [line for line in out.splitlines() if line.startswith("http://")]
@@ -371,6 +381,61 @@ def test_launch_refuses_an_inactive_grant(operator, tmp_path: Path) -> None:
     )
     assert code == 3 and "not active" in err
     assert "http://" not in out
+
+
+def test_launch_opens_the_runner_database_demo_writes(
+    operator, tmp_path: Path, capsys: pytest.CaptureFixture[str],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from traceback_runner.store import JobStore
+    from traceback_runner.web.server import RunningLocalWebService
+
+    root = tmp_path / "root"
+    assert cli.main(["demo", "--root", str(root), "--json"]) == 0
+    job_id = json.loads(capsys.readouterr().out)["data"]["job_id"]
+    selector = operator.issue()
+    opened: list[JobStore] = []
+    original_start = RunningLocalWebService.start
+
+    def recording_start(*, store, **kwargs):
+        opened.append(store)
+        return original_start(store=store, **kwargs)
+
+    monkeypatch.setattr(RunningLocalWebService, "start", recording_start)
+    args = reader_cli._parser().parse_args(
+        [
+            "launch",
+            "--grant",
+            selector,
+            "--root",
+            str(root),
+            "--authority-dir",
+            str(operator.authority),
+        ]
+    )
+    code = reader_cli._launch(args, operator.clock, io.StringIO(), io.StringIO(""))
+    assert code == 0
+    assert [store.path for store in opened] == [root / "runner" / "runner.sqlite3"]
+    assert opened[0].get(job_id).job_id == job_id
+    assert [record.job_id for record in opened[0].list_jobs()] == [job_id]
+    assert not (root / "runner.sqlite3").exists()
+
+
+def test_launch_without_a_runner_database_exits_4_and_creates_nothing(
+    operator, tmp_path: Path
+) -> None:
+    selector = operator.issue()
+    root = tmp_path / "empty-root"
+    code, out, err = operator(
+        "launch", "--grant", selector, "--root", str(root), stdin=io.StringIO("")
+    )
+    assert code == 4
+    assert (
+        "runner database not found under ROOT; "
+        "run `traceback demo` or `traceback run` first"
+    ) in err
+    assert "http://" not in out
+    assert not root.exists()
 
 
 def test_rotation_stops_at_the_trust_key_bound(
@@ -437,7 +502,7 @@ def test_launch_survives_too_many_unused_links(operator, tmp_path: Path) -> None
             return "\n" if self.count <= 17 else ""
 
     code, out, err = operator(
-        "launch", "--grant", selector, "--root", str(tmp_path / "runner"),
+        "launch", "--grant", selector, "--root", _runner_root(tmp_path),
         stdin=_Enter(),
     )
     assert code == 0, err
