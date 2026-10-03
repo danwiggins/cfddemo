@@ -2517,11 +2517,22 @@ def _require_registry_integrity(registry: RepeatabilityComparisonRegistry) -> No
         raise RepeatabilityComparisonRegistryUnsafe(
             "D07 comparison registry authority state changed"
         )
-    expected = _REGISTRY_INSTANCE_SEALS.get(registry)
-    if expected is None or _registry_instance_snapshot(registry) != expected:
-        raise RepeatabilityComparisonRegistryUnsafe(
-            "D07 comparison registry authority state changed"
-        )
+    # A head acceptance assigns the trusted head and then re-seals the
+    # instance under this instance's process lock, and close() clears the
+    # descriptors under it.  Compare the instance with its seal under it too,
+    # or a reader on another thread can observe the new head with the old
+    # seal (or a half-closed instance) and fail spuriously.  The instance
+    # lock, not the module lock: a finalizer closing an unreachable registry
+    # must never wait on a lock another thread holds.
+    process_lock = instance.get("_process_lock")
+    if process_lock is None:
+        raise RepeatabilityComparisonRegistryUnsafe("D07 comparison registry authority state changed")
+    with process_lock:
+        expected = _REGISTRY_INSTANCE_SEALS.get(registry)
+        if expected is None or _registry_instance_snapshot(registry) != expected:
+            raise RepeatabilityComparisonRegistryUnsafe(
+                "D07 comparison registry authority state changed"
+            )
 
 
 _CR_CONSTRUCT = RepeatabilityComparisonRegistry
