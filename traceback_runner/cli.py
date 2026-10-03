@@ -1,4 +1,10 @@
-"""Local, synthetic-only Traceback operator CLI."""
+"""Local Traceback operator CLI.
+
+``demo`` runs the signed synthetic development workflow.  ``run`` measures a
+local BAM against a registered reference with a locked, unqualified method and
+signs the record with a development-local key: unqualified, local, not for
+clinical use.  Nothing is uploaded.
+"""
 
 from __future__ import annotations
 
@@ -8,12 +14,13 @@ import hmac
 import json
 import os
 import platform
+import re
 import shutil
 import stat
 import sys
 import tempfile
 import uuid
-from collections.abc import Iterator, Sequence
+from collections.abc import Callable, Iterator, Sequence
 from contextlib import contextmanager, nullcontext
 from datetime import UTC, datetime
 from enum import IntEnum
@@ -25,6 +32,7 @@ from .filesystem import rename_directory_exclusive_at
 from .operator import build_job_view, support_payload
 from .protocol import render_protocol, synthetic_protocol_manifest
 from .references import DOCS_ANCHOR, ReferenceProblem, validate_reference_id
+from .runner import TerminalStageError
 from .serialization import canonical_json_bytes
 
 _TRUST_RELATIVE = Path("trust/development-result-trust.json")
@@ -131,8 +139,20 @@ def _parser() -> argparse.ArgumentParser:
     _root_argument(preflight)
     preflight.add_argument("--json", action="store_true", dest="as_json")
 
-    run = commands.add_parser("run", help="process a real input (disabled)")
+    run = commands.add_parser(
+        "run",
+        help="measure a local BAM against a registered reference "
+        "(unqualified, local, not for clinical use)",
+    )
     run.add_argument("input", type=Path)
+    run.add_argument("--index", type=Path, help="BAM index (default: BAM.bai)")
+    run.add_argument(
+        "--reference",
+        dest="reference_id",
+        type=_reference_id_argument,
+        help="registered reference ID under ROOT (required)",
+    )
+    _root_argument(run)
     run.add_argument("--json", action="store_true", dest="as_json")
 
     for name in ("status", "logs", "pause", "resume", "retry"):
@@ -146,9 +166,17 @@ def _parser() -> argparse.ArgumentParser:
     inspect.add_argument("--json", action="store_true", dest="as_json")
 
     verify = commands.add_parser("verify", help="verify a bundle against local trust")
-    verify.add_argument("bundle", type=Path)
+    verify.add_argument(
+        "bundle", type=Path, help="bundle directory, or a record ID with --root"
+    )
     trust_source = verify.add_mutually_exclusive_group(required=True)
     trust_source.add_argument("--trust-store", type=Path)
+    trust_source.add_argument(
+        "--root",
+        dest="verify_root",
+        type=Path,
+        help="resolve the record ID under ROOT/records and use ROOT's trust store",
+    )
     trust_source.add_argument(
         "--trust-registry",
         type=Path,
@@ -205,6 +233,49 @@ def _result(
     }
 
 
+LOCAL_DATA_ORIGIN = "local_unqualified"
+
+
+def _local_envelope(payload: dict[str, Any]) -> dict[str, Any]:
+    """Re-label a v1 envelope as ``traceback.cli-result.v2`` for local data.
+
+    v1 hard-codes ``synthetic_only: true``; a result about a real local input
+    carries ``data_origin: "local_unqualified"`` instead.  Commands that touch
+    only synthetic material keep their v1 bytes.
+    """
+
+    if payload.get("schema_version") != "traceback.cli-result.v1":
+        return payload
+    relabelled = {key: value for key, value in payload.items() if key != "synthetic_only"}
+    relabelled["schema_version"] = "traceback.cli-result.v2"
+    relabelled["data_origin"] = LOCAL_DATA_ORIGIN
+    return relabelled
+
+
+class RunProblem(ReferenceProblem):
+    """A ``traceback run`` failure with the same six operator fields.
+
+    ``data`` adds measured facts (for example required and available bytes);
+    it never carries a host path.
+    """
+
+    def __init__(
+        self,
+        code: str,
+        summary: str,
+        *,
+        cause: str,
+        fix: str,
+        exit_code: int = 3,
+        retryable: bool = False,
+        data: dict[str, Any] | None = None,
+    ) -> None:
+        super().__init__(
+            code, summary, cause=cause, fix=fix, exit_code=exit_code, retryable=retryable
+        )
+        self.data = dict(data or {})
+
+
 def _problem(
     command: str,
     problem: ReferenceProblem,
@@ -216,6 +287,7 @@ def _problem(
         "not_found" if problem.exit_code == ExitCode.NOT_FOUND else "blocked",
         problem.summary,
         data={
+            **getattr(problem, "data", {}),
             "code": problem.code,
             "cause": problem.cause,
             "fix": problem.fix,
@@ -472,7 +544,10 @@ def _doctor(args: argparse.Namespace) -> tuple[ExitCode, dict[str, Any]]:
     elif trust_blocked:
         summary = "Records exist under ROOT but their trust material is missing or invalid"
     else:
-        summary = "Real-data execution is not enabled; synthetic local runtime is available"
+        summary = (
+            "Synthetic local runtime is available; local runs "
+            "(traceback run --reference) are unqualified and not for clinical use"
+        )
         if warnings:
             summary += f" ({warnings} warning{'s' if warnings != 1 else ''})"
     blocked = runtime_blocked or trust_blocked
@@ -504,10 +579,13 @@ def _real_run_blocked() -> tuple[ExitCode, dict[str, Any]]:
     return ExitCode.BLOCKED, _result(
         "run",
         "blocked",
-        "Real-data execution is not enabled; no job was created",
+        "A local run needs a registered reference; no job was created",
         data={
             "code": "TBX-RUN-003",
-            "fix": "Use traceback demo for the synthetic development workflow",
+            "fix": (
+                "Register the FASTA with traceback reference register, then pass "
+                "--reference ID; use traceback demo for the synthetic workflow"
+            ),
             "retryable": False,
         },
     )
@@ -559,26 +637,19 @@ def _append_development_trust(path: Path, content: bytes) -> None:
     """Add public keys without replacing historical entries or revocations.
 
     The caller holds the workspace mutation lock. Private keys remain ephemeral.
+    All-synthetic trust stays a v1 document (unchanged bytes); adding a
+    ``development-local`` key writes a v2 document holding every key.
     """
     from .signing import (
-        DevelopmentTrustDocument,
-        SigningError,
         development_trust_document_bytes,
-        load_development_trust,
+        merge_development_trust_documents,
+        parse_development_trust_document,
     )
 
-    load_development_trust(content)
-    incoming = DevelopmentTrustDocument.model_validate_json(content)
-    keys = {}
+    documents = [parse_development_trust_document(content)]
     if path.exists():
-        previous = path.read_bytes()
-        load_development_trust(previous)
-        keys = {key.key_id: key for key in DevelopmentTrustDocument.model_validate_json(previous).keys}
-    for key in incoming.keys:
-        if key.key_id in keys and keys[key.key_id] != key:
-            raise SigningError("existing development trust entry cannot be changed")
-        keys[key.key_id] = key
-    merged = DevelopmentTrustDocument(keys=tuple(keys[key] for key in sorted(keys)))
+        documents.insert(0, parse_development_trust_document(path.read_bytes()))
+    merged = merge_development_trust_documents(*documents)
     path.parent.mkdir(parents=True, exist_ok=True)
     descriptor, name = tempfile.mkstemp(prefix=".trust-", dir=path.parent)
     temporary = Path(name)
@@ -773,7 +844,13 @@ def _publish_verified_record(root: Path, verified: Any, source: Path) -> Path:
     trust = load_development_trust((root / _TRUST_RELATIVE).read_bytes())
     records = root / "records"
     records.mkdir(parents=True, exist_ok=True)
-    name = f"{verified.manifest.record_id}-{verified.manifest.signing_key_id}"
+    # Local (v3) records publish at ROOT/records/<record_id>, the path the
+    # golden path names; synthetic records keep their key-suffixed name.
+    name = (
+        verified.manifest.record_id
+        if verified.manifest.schema_version == "traceback.result-bundle.v3"
+        else f"{verified.manifest.record_id}-{verified.manifest.signing_key_id}"
+    )
     destination = records / name
     # Preserve invalid user-visible output. A previous valid recovery copy can
     # be reused, otherwise publish a new verified sibling without clobbering it.
@@ -810,16 +887,58 @@ def _publish_verified_record(root: Path, verified: Any, source: Path) -> Path:
             shutil.rmtree(staging)
 
 
-def _demo(args: argparse.Namespace) -> tuple[ExitCode, dict[str, Any]]:
+def _execute_signed_run(
+    root: Path,
+    runner: Any,
+    request: Any,
+    source: Path,
+    relative_files: tuple[str, ...],
+    stages: Callable[[Any], tuple[Any, ...]],
+    *,
+    namespace: Any,
+    worker_id: str,
+    on_submitted: Callable[[Any], None] | None = None,
+) -> Any:
+    """Seal the input, then run the signed stages unless the job is complete.
+
+    Shared by ``demo`` (synthetic) and ``run`` (local).  A fresh ephemeral
+    signing key in ``namespace`` is generated only when stages must run, and
+    its public half is appended to ``ROOT``'s development trust first.
+    """
+    from .signing import KeyPurpose, development_trust_bytes, generate_development_keypair
+
+    record = runner.submit(request, source, relative_files)
+    if on_submitted is not None:
+        on_submitted(record)
+    if record.state != JobState.COMPLETE:
+        _reject_live_worker(runner, record.job_id)
+        signing_key = generate_development_keypair(KeyPurpose.RESULT, namespace=namespace)
+        _append_development_trust(root / _TRUST_RELATIVE, development_trust_bytes(signing_key))
+        job_stages = stages(signing_key)
+        if record.state in {JobState.PAUSED, JobState.RETRYABLE_FAILURE}:
+            record = runner.resume(record.job_id, job_stages, worker_id=worker_id)
+        else:
+            record = runner.execute(record.job_id, job_stages, worker_id=worker_id)
+    return record
+
+
+def _publish_signed_record(root: Path, runner: Any, job_id: str) -> tuple[Any, Path]:
+    """Verify the runner's signed bundle, publish it under ROOT/records, re-verify."""
     from .bundles import verify_bundle
+    from .signing import load_development_trust
+
+    trust_store = load_development_trust((root / _TRUST_RELATIVE).read_bytes())
+    runner_bundle = _signed_bundle_from_outputs(runner, job_id)
+    verified = verify_bundle(runner_bundle, trust_store)
+    published = _publish_verified_record(root, verified, runner_bundle)
+    verify_bundle(published, trust_store)
+    return verified, published
+
+
+def _demo(args: argparse.Namespace) -> tuple[ExitCode, dict[str, Any]]:
     from .contracts import InputKind, JobRequest
     from .runner import Runner
-    from .signing import (
-        KeyPurpose,
-        development_trust_bytes,
-        generate_development_keypair,
-        load_development_trust,
-    )
+    from .signing import TrustNamespace
     from .snapshots import input_tree_sha256
 
     root = args.root
@@ -831,24 +950,20 @@ def _demo(args: argparse.Namespace) -> tuple[ExitCode, dict[str, Any]]:
         workflow_release_sha256=hashlib.sha256(_WORKFLOW_ID.encode("ascii")).hexdigest(),
     )
     runner = Runner(root / "runner", synthetic_enabled=True)
-    record = runner.submit(request, source, relative_files)
-    trust_path = root / _TRUST_RELATIVE
-
-    if record.state != JobState.COMPLETE:
-        _reject_live_worker(runner, record.job_id)
-        signing_key = generate_development_keypair(KeyPurpose.RESULT)
-        _append_development_trust(trust_path, development_trust_bytes(signing_key))
-        stages = _demo_stages(signing_key)
-        if record.state in {JobState.PAUSED, JobState.RETRYABLE_FAILURE}:
-            record = runner.resume(record.job_id, stages, worker_id="synthetic-cli")
-        else:
-            record = runner.execute(record.job_id, stages, worker_id="synthetic-cli")
-
-    trust_store = load_development_trust(trust_path.read_bytes())
-    runner_bundle = _signed_bundle_from_outputs(runner, record.job_id)
-    verified = verify_bundle(runner_bundle, trust_store)
-    published = _publish_verified_record(root, verified, runner_bundle)
-    verify_bundle(published, trust_store)
+    # As in run: keep the store's WAL/SHM identities stable while another
+    # process (pause, status, a web service) opens the same store.
+    with runner.store.journal_anchor():
+        record = _execute_signed_run(
+            root,
+            runner,
+            request,
+            source,
+            relative_files,
+            _demo_stages,
+            namespace=TrustNamespace.DEVELOPMENT_SYNTHETIC,
+            worker_id="synthetic-cli",
+        )
+        verified, published = _publish_signed_record(root, runner, record.job_id)
     bundle_token = published.relative_to(root).as_posix()
     return ExitCode.OK, _result(
         "demo",
@@ -864,6 +979,593 @@ def _demo(args: argparse.Namespace) -> tuple[ExitCode, dict[str, Any]]:
             "development_trust_only": True,
         },
     )
+
+
+# --- traceback run: one local BAM, a registered reference, unqualified ------
+
+_LOCAL_WORKFLOW_ID = "local-unqualified-v0"
+_LOCAL_SAMPLE_PREFIX = "local-"
+_LOCAL_PREFLIGHT_POLICY = "local-unqualified-preflight-v1"
+_PROVENANCE_KEY_RELATIVE = Path("trust/provenance-hmac.key")
+_INDEX_SUFFIXES = (".bai", ".csi")
+_STAGE_HEARTBEAT_SECONDS = 5.0
+_PROBLEM_CODE = re.compile(r"^(TBX-[A-Z]+-[0-9]{3})\b")
+
+
+class LocalStageRefusal(TerminalStageError):
+    """A local stage refused its sealed input; retrying cannot change that.
+
+    The message starts with the operator code, so the runner's stored
+    failure reason names it without naming any input locator.
+    """
+
+    def __init__(self, code: str, summary: str, *, cause: str, fix: str) -> None:
+        super().__init__(f"{code}: {summary}")
+        self.code = code
+        self.summary = summary
+        self.cause = cause
+        self.fix = fix
+
+
+def _local_workflow_sha256() -> str:
+    return hashlib.sha256(_LOCAL_WORKFLOW_ID.encode("ascii")).hexdigest()
+
+
+def _is_local_request(request: Any) -> bool:
+    return request.workflow_release_sha256 == _local_workflow_sha256() and (
+        request.sample_token.startswith(_LOCAL_SAMPLE_PREFIX)
+    )
+
+
+def _provenance_hmac_key(root: Path) -> bytes:
+    """Return ROOT's 32-byte provenance HMAC key, creating it once (0600).
+
+    A per-root random key means the same BAM run under two roots yields
+    unlinkable ``provider_hmac_sha256`` commitments.
+    """
+
+    path = root / _PROVENANCE_KEY_RELATIVE
+    path.parent.mkdir(parents=True, exist_ok=True)
+    nofollow = getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_CLOEXEC", 0)
+    try:
+        descriptor = os.open(
+            path, os.O_WRONLY | os.O_CREAT | os.O_EXCL | nofollow, 0o600
+        )
+    except FileExistsError:
+        pass
+    else:
+        with os.fdopen(descriptor, "wb") as stream:
+            stream.write(os.urandom(32))
+            stream.flush()
+            os.fsync(stream.fileno())
+        _fsync_directory(path.parent)
+    try:
+        descriptor = os.open(path, os.O_RDONLY | nofollow)
+    except OSError:
+        descriptor = -1
+    key = b""
+    regular = False
+    if descriptor >= 0:
+        with os.fdopen(descriptor, "rb") as stream:
+            metadata = os.fstat(stream.fileno())
+            regular = (
+                stat.S_ISREG(metadata.st_mode)
+                and metadata.st_uid == os.geteuid()
+                and not stat.S_IMODE(metadata.st_mode) & 0o077
+            )
+            key = stream.read(33)
+    if not regular or len(key) != 32:
+        raise RunProblem(
+            "TBX-RUN-006",
+            "The provenance key under ROOT/trust is not a private 32-byte file",
+            cause=(
+                "ROOT/trust/provenance-hmac.key was edited, truncated, replaced, "
+                "or is readable by other users (it must be 0600 and yours)"
+            ),
+            fix="Use a fresh --root; never edit files under ROOT/trust",
+        )
+    return key
+
+
+@contextmanager
+def _stage_heartbeat(context: Any) -> Iterator[None]:
+    """Keep a long stage's worker lease alive while it reads a large BAM."""
+    import threading
+
+    stop = threading.Event()
+
+    def beat() -> None:
+        while not stop.wait(_STAGE_HEARTBEAT_SECONDS):
+            try:
+                context.heartbeat()
+            except Exception:
+                return  # the runner's own post-stage heartbeat reports a lost lease
+
+    thread = threading.Thread(target=beat, name="traceback-stage-heartbeat", daemon=True)
+    thread.start()
+    try:
+        yield
+    finally:
+        stop.set()
+        thread.join()
+
+
+def _policy_lines(policy: Any) -> list[str]:
+    bins = " ".join(
+        f"[{item.lower_inclusive},{'inf' if item.upper_exclusive is None else item.upper_exclusive})"
+        for item in policy.bins
+    )
+    return [
+        f"POLICY  {policy.definition_id} (locked; unqualified, local, not for clinical use)",
+        f"CONTIGS  {len(policy.contigs)}: {' '.join(policy.contigs)}",
+        f"FILTERS  MAPQ >= {policy.min_mapping_quality}; primary, mapped, non-duplicate, "
+        "non-QC-fail alignments only",
+        f"BINS  {bins} bp",
+    ]
+
+
+def _local_stages(
+    root: Path,
+    loaded: Any,
+    bam_name: str,
+    index_name: str,
+    signing_key: Any,
+    progress: Callable[[str], None],
+) -> tuple[Any, ...]:
+    from .bundles import build_result_bundle
+    from .contracts import (
+        ArtifactCommitment,
+        ExportRunProvenance,
+        InputKind,
+        PreflightOutcome,
+        PreflightReport,
+        StageName,
+        parse_fragment_measurement,
+    )
+    from .local_authority import local_fragment_policy, local_method_identity
+    from .measurement import (
+        MeasurementUnavailableError,
+        finalize_measurement,
+        scan_aligned_reference_spans,
+    )
+    from .preflight import BamPreflightPolicy, validate_bam_snapshot
+    from .runner import StageResult, StageSpec
+
+    registered = loaded.registered
+    policy = local_fragment_policy(registered)
+    preflight_policy = BamPreflightPolicy(policy_id=_LOCAL_PREFLIGHT_POLICY)
+
+    def reference_match(report: Any) -> str:
+        outcome = next(
+            check.outcome for check in report.checks if check.code == "TBX-BAM-002"
+        )
+        return (
+            "registered_digests"
+            if outcome == PreflightOutcome.PASS
+            else "name_and_length_only"
+        )
+
+    def preflight_stage(context: Any) -> Any:
+        progress("STAGE  preflight: inspecting the sealed BAM copy")
+        with _stage_heartbeat(context):
+            report = validate_bam_snapshot(
+                context.sealed_input_dir / bam_name,
+                context.sealed_input_dir / index_name,
+                registered,
+                preflight_policy,
+                compare_assembly=loaded.source.assembly_declared,
+            )
+        if (
+            report.outcome == PreflightOutcome.BLOCKED
+            or not report.fragment_measurement_eligible
+        ):
+            blocked = [
+                check for check in report.checks if check.outcome == PreflightOutcome.BLOCKED
+            ]
+            codes = sorted({check.code for check in blocked})
+            code = "TBX-BAM-002" if "TBX-BAM-002" in codes else (codes or ["TBX-BAM-001"])[0]
+            raise LocalStageRefusal(
+                code,
+                "Preflight blocked fragment measurement; no record was made",
+                cause="; ".join(check.problem for check in blocked)
+                or "the input is not eligible for fragment measurement",
+                fix="Run traceback preflight BAM --reference ID for each check's remediation",
+            )
+        output = context.attempt_dir / "preflight.json"
+        output.write_bytes(canonical_json_bytes(report))
+        progress(f"STAGE  preflight {report.outcome.value}: fragment measurement eligible")
+        return StageResult(
+            outputs={"preflight_report": output.name},
+            metadata={
+                "fragment_measurement_eligible": True,
+                "future_methylation_eligible": report.future_methylation_eligible,
+                "preflight_outcome": report.outcome.value,
+                "reference_match": reference_match(report),
+                "data_origin": LOCAL_DATA_ORIGIN,
+            },
+        )
+
+    def measurement_stage(context: Any) -> Any:
+        progress("STAGE  measure: scanning every record of the sealed BAM copy")
+        with _stage_heartbeat(context):
+            scan = scan_aligned_reference_spans(context.sealed_input_dir / bam_name, policy)
+        try:
+            measurement = finalize_measurement(scan)
+        except MeasurementUnavailableError as exc:
+            raise LocalStageRefusal(
+                "TBX-RUN-005",
+                "Measurement unavailable: no complete eligible denominator",
+                cause=(
+                    f"scan {scan.completion.value}; {scan.records_scanned} records "
+                    f"scanned, {scan.eligible_alignments} eligible"
+                ),
+                fix=(
+                    "Check that the BAM's contig names match the policy contigs, that "
+                    "alignments reach MAPQ 20, and that they are not all duplicate, "
+                    "secondary, supplementary or QC-fail"
+                ),
+            ) from exc
+        output = context.attempt_dir / "measurement.json"
+        output.write_bytes(canonical_json_bytes(measurement))
+        progress(
+            f"STAGE  measure: {measurement.eligible_alignments} eligible alignments "
+            f"of {measurement.records_scanned} records"
+        )
+        return StageResult(
+            outputs={"fragment_measurement": output.name},
+            metadata={
+                "records_scanned": measurement.records_scanned,
+                "eligible_alignments": measurement.eligible_alignments,
+                "complete": True,
+                "data_origin": LOCAL_DATA_ORIGIN,
+            },
+        )
+
+    def signing_stage(context: Any) -> Any:
+        progress("STAGE  sign: development-local key (development trust only)")
+        report = PreflightReport.model_validate_json(
+            (context.prior_stage_dirs[0] / "preflight.json").read_bytes()
+        )
+        measurement = parse_fragment_measurement(
+            (context.prior_stage_dirs[-1] / "measurement.json").read_bytes()
+        )
+        manifest = json.loads(
+            (context.sealed_input_dir / "input-manifest.local.json").read_bytes()
+        )
+        sealed = {item["relative_path"]: item for item in manifest["files"]}
+        provider_hmac = hmac.new(
+            _provenance_hmac_key(root),
+            b"traceback.provider-artifact.v1|"
+            + bytes.fromhex(sealed[bam_name]["sha256_local"]),
+            hashlib.sha256,
+        ).hexdigest()
+        provenance = ExportRunProvenance(
+            run_token=f"local-run-{context.job_id[:16]}",
+            input_kind=InputKind.MODBAM,
+            protocol_run_token="no-approved-protocol",
+            workflow_release_id=_LOCAL_WORKFLOW_ID,
+            artifacts=(
+                ArtifactCommitment(
+                    role="analysis_bam",
+                    artifact_token="local-analysis-bam",
+                    size_bytes=int(sealed[bam_name]["size_bytes"]),
+                    provider_hmac_sha256=provider_hmac,
+                ),
+            ),
+        )
+        bundle = build_result_bundle(
+            context.attempt_dir / "bundle",
+            measurement=measurement,
+            provenance=provenance,
+            method=local_method_identity(policy),
+            signing_key=signing_key,
+            reference_match=reference_match(report),
+        )
+        bundle_files = sorted(path for path in bundle.rglob("*") if path.is_file())
+        outputs = {
+            f"bundle_{index:02d}": path.relative_to(context.attempt_dir).as_posix()
+            for index, path in enumerate(bundle_files)
+        }
+        return StageResult(
+            outputs=outputs,
+            metadata={
+                "signed": True,
+                "development_trust_only": True,
+                "data_origin": LOCAL_DATA_ORIGIN,
+            },
+        )
+
+    return (
+        StageSpec(
+            name=StageName.VALIDATE,
+            version="1",
+            callback=preflight_stage,
+            parameters={
+                "policy": preflight_policy.policy_id,
+                "reference_id": registered.reference_id,
+                "reference_asset_sha256": registered.asset_sha256,
+                "compare_assembly": loaded.source.assembly_declared,
+                "data_origin": LOCAL_DATA_ORIGIN,
+            },
+        ),
+        StageSpec(
+            name=StageName.MEASURE,
+            version="1",
+            callback=measurement_stage,
+            parameters={
+                "definition": policy.definition_id,
+                "policy_sha256": hashlib.sha256(canonical_json_bytes(policy)).hexdigest(),
+                "data_origin": LOCAL_DATA_ORIGIN,
+            },
+        ),
+        StageSpec(
+            name=StageName.SIGN,
+            version="1",
+            callback=signing_stage,
+            parameters={
+                "key_id": signing_key.key_id,
+                "development_trust_only": True,
+                "data_origin": LOCAL_DATA_ORIGIN,
+            },
+        ),
+    )
+
+
+def _local_input_files(bam: Path, index: Path) -> tuple[Path, tuple[str, str]]:
+    """Return the snapshot source root and the BAM and index names under it.
+
+    Paths are only resolved here; they are never echoed.
+    """
+
+    bam_abs = Path(os.path.abspath(bam))
+    index_abs = Path(os.path.abspath(index))
+    if index_abs.suffix not in _INDEX_SUFFIXES or bam_abs.suffix in _INDEX_SUFFIXES:
+        raise RunProblem(
+            "TBX-BAM-001",
+            "The BAM index must be a .bai or .csi file beside a BAM",
+            cause="the --index file name does not end in .bai or .csi",
+            fix="Index the BAM with samtools index and pass that file with --index",
+        )
+    for path in (bam_abs, index_abs):
+        if path.is_symlink() or not path.is_file():
+            raise FileNotFoundError("local input is missing or not a regular file")
+    source = Path(os.path.commonpath([bam_abs.parent, index_abs.parent]))
+    return source, (
+        bam_abs.relative_to(source).as_posix(),
+        index_abs.relative_to(source).as_posix(),
+    )
+
+
+def _require_free_space(root: Path, input_bytes: int) -> None:
+    required = 2 * input_bytes
+    available = shutil.disk_usage(_existing_ancestor(root)).free
+    if available < required:
+        raise RunProblem(
+            "TBX-RUN-004",
+            "Not enough space under ROOT; need 2x the input size",
+            cause=(
+                f"ROOT's volume has {available} bytes free; sealing the BAM and "
+                f"index needs {required} bytes"
+            ),
+            fix="Free space on ROOT's volume, or pass a --root on a larger volume",
+            retryable=True,
+            data={"required_bytes": required, "available_bytes": available},
+        )
+
+
+def _no_space_problem(exc: Exception) -> RunProblem | None:
+    import errno
+    import sqlite3
+
+    sqlite_full = isinstance(exc, sqlite3.OperationalError) and (
+        "database or disk is full" in str(exc)
+    )
+    os_full = isinstance(exc, OSError) and exc.errno in {errno.ENOSPC, errno.EDQUOT}
+    if not (sqlite_full or os_full):
+        return None
+    # The job that hit ENOSPC may hold no sealed snapshot, and the runner never
+    # reseals a failed job, so this ROOT cannot finish that input.
+    return RunProblem(
+        "TBX-RUN-004",
+        "ROOT's volume filled during the run; no record was made",
+        cause="ROOT's volume ran out of space while sealing, measuring or publishing",
+        fix="Free space, then run again under a fresh --root (need 2x the input size)",
+        retryable=False,
+    )
+
+
+@contextmanager
+def _no_space_mapped() -> Iterator[None]:
+    import sqlite3
+
+    try:
+        yield
+    except (OSError, sqlite3.OperationalError) as exc:
+        problem = _no_space_problem(exc)
+        if problem is None:
+            raise
+        raise problem from exc
+
+
+def _refusal_problem(refusal: LocalStageRefusal) -> RunProblem:
+    return RunProblem(refusal.code, refusal.summary, cause=refusal.cause, fix=refusal.fix)
+
+
+_SEALING_STATES = frozenset({JobState.DISCOVERED, JobState.SNAPSHOTTING, JobState.VALIDATING})
+
+
+def _refuse_unsealed_job(runner: Any, record: Any) -> None:
+    """Refuse a job that left sealing without a snapshot (e.g. ROOT filled up).
+
+    The runner never reseals such a job, so retry/resume/run would only end it
+    in a terminal snapshot failure.
+    """
+
+    stored = runner.store.get(record.job_id)
+    if record.state in _SEALING_STATES or record.state == JobState.TERMINAL_FAILURE:
+        return
+    if stored.snapshot_id is None:
+        raise RunProblem(
+            "TBX-RUN-004",
+            "This input's earlier run failed before it was sealed; no record was made",
+            cause=f"job {record.job_id} has no sealed input (for example ROOT filled up)",
+            fix="Free space, then run again under a fresh --root (need 2x the input size)",
+            data={"job_id": record.job_id, "state": record.state.value},
+        )
+
+
+def _refuse_failed_job(runner: Any) -> Callable[[Any], None]:
+    def check(record: Any) -> None:
+        _refuse_unsealed_job(runner, record)
+        stored = runner.store.get(record.job_id)
+        if record.state != JobState.TERMINAL_FAILURE:
+            return
+        last_error = stored.last_error or ""
+        match = _PROBLEM_CODE.match(last_error)
+        raise RunProblem(
+            match.group(1) if match else "TBX-JOB-001",
+            "This input already failed terminally on this ROOT; no record was made",
+            cause=f"job {record.job_id} ended in terminal_failure",
+            fix=(
+                f"Inspect traceback status {record.job_id}; fix the input and run "
+                "it again under a fresh --root"
+            ),
+            data={"job_id": record.job_id, "state": record.state.value},
+        )
+
+    return check
+
+
+def _local_run_result(
+    root: Path, runner: Any, record: Any, reference_id: str
+) -> tuple[ExitCode, dict[str, Any]]:
+    import shlex
+
+    from .contracts import PreflightReport
+
+    verified, published = _publish_signed_record(root, runner, record.job_id)
+    report = PreflightReport.model_validate_json(
+        runner.outputs(record.job_id, "validate")["preflight_report"].read_bytes()
+    )
+    measurement = verified.measurement
+    absolute_root = Path(os.path.abspath(root))
+    bundle_path = absolute_root / published.relative_to(root)
+    trust_path = absolute_root / _TRUST_RELATIVE
+    return ExitCode.OK, _result(
+        "run",
+        "ok",
+        "Signed local record ready (development trust, unqualified, not for clinical "
+        "use); nothing was uploaded",
+        data={
+            "job_id": record.job_id,
+            "state": record.state.value,
+            "record_id": verified.manifest.record_id,
+            "reference_id": reference_id,
+            "preflight_outcome": report.outcome.value,
+            "reference_match": verified.limitations.reference_match,
+            "records_scanned": measurement.records_scanned,
+            "eligible_alignments": measurement.eligible_alignments,
+            "bundle": published.relative_to(root).as_posix(),
+            "trust_store": _TRUST_RELATIVE.as_posix(),
+            "bundle_path": str(bundle_path),
+            "trust_store_path": str(trust_path),
+            "report_path": str(bundle_path / "report.html"),
+            "next_commands": [
+                f"traceback verify {shlex.quote(str(bundle_path))} "
+                f"--trust-store {shlex.quote(str(trust_path))}",
+            ],
+            "verification": "verified",
+            "development_trust_only": True,
+            "qualified": False,
+        },
+    )
+
+
+def _run(
+    args: argparse.Namespace, progress: Callable[[str], None]
+) -> tuple[ExitCode, dict[str, Any]]:
+    from .contracts import InputKind, JobRequest
+    from .local_authority import local_fragment_policy
+    from .references import load_reference
+    from .snapshots import input_tree_sha256
+
+    if args.reference_id is None:
+        return _real_run_blocked()
+    root = args.root
+    loaded = load_reference(root, args.reference_id)
+    source, relative_files = _local_input_files(
+        args.input, args.index or Path(f"{args.input}.bai")
+    )
+    _require_free_space(
+        root, sum((source / name).stat().st_size for name in relative_files)
+    )
+    for line in _policy_lines(local_fragment_policy(loaded.registered)):
+        progress(line)
+    progress("STAGE  seal: copying the BAM and index under ROOT")
+    request = JobRequest(
+        sample_token=f"{_LOCAL_SAMPLE_PREFIX}{args.reference_id}",
+        input_kind=InputKind.MODBAM,
+        input_tree_sha256_local=input_tree_sha256(source, relative_files),
+        workflow_release_sha256=_local_workflow_sha256(),
+    )
+    return _run_sealed(root, request, source, relative_files, loaded, progress)
+
+
+def _run_sealed(
+    root: Path,
+    request: Any,
+    source: Path,
+    relative_files: tuple[str, str],
+    loaded: Any,
+    progress: Callable[[str], None],
+) -> tuple[ExitCode, dict[str, Any]]:
+    from .runner import Runner
+
+    runner = Runner(root / "runner", local_unqualified_enabled=True)
+    # Keep the runner store's WAL/SHM identities stable while another process
+    # (traceback pause/status) opens the same store during a long run.
+    with runner.store.journal_anchor():
+        return _run_with_runner(root, runner, request, source, relative_files, loaded, progress)
+
+
+def _run_with_runner(
+    root: Path,
+    runner: Any,
+    request: Any,
+    source: Path,
+    relative_files: tuple[str, str],
+    loaded: Any,
+    progress: Callable[[str], None],
+) -> tuple[ExitCode, dict[str, Any]]:
+    from .signing import TrustNamespace
+
+    bam_name, index_name = relative_files
+    try:
+        record = _execute_signed_run(
+            root,
+            runner,
+            request,
+            source,
+            relative_files,
+            lambda key: _local_stages(root, loaded, bam_name, index_name, key, progress),
+            namespace=TrustNamespace.DEVELOPMENT_LOCAL,
+            worker_id="local-cli",
+            on_submitted=_refuse_failed_job(runner),
+        )
+    except LocalStageRefusal as refusal:
+        raise _refusal_problem(refusal) from refusal
+    if record.state == JobState.PAUSED:
+        return ExitCode.OK, _result(
+            "run",
+            "ok",
+            "Run paused at a stage boundary; no record yet",
+            data={
+                "job_id": record.job_id,
+                "state": record.state.value,
+                "next_action": f"traceback resume {record.job_id} --root <same-root>",
+            },
+        )
+    return _local_run_result(root, runner, record, loaded.registered.reference_id)
 
 
 def _preflight(args: argparse.Namespace) -> tuple[ExitCode, dict[str, Any]]:
@@ -966,13 +1668,22 @@ def _reference_register(args: argparse.Namespace) -> tuple[ExitCode, dict[str, A
     )
 
 
-def _existing_runner(root: Path, *, synthetic_enabled: bool = False) -> Any:
+def _existing_runner(
+    root: Path,
+    *,
+    synthetic_enabled: bool = False,
+    local_unqualified_enabled: bool = False,
+) -> Any:
     from .runner import Runner
 
     runner_root = root / "runner"
     if not (runner_root / "runner.sqlite3").is_file():
         raise FileNotFoundError("runner database not found")
-    return Runner(runner_root, synthetic_enabled=synthetic_enabled)
+    return Runner(
+        runner_root,
+        synthetic_enabled=synthetic_enabled,
+        local_unqualified_enabled=local_unqualified_enabled,
+    )
 
 
 def _record_is_verified(root: Path, runner: Any, job_id: str) -> bool:
@@ -998,6 +1709,7 @@ def _status(args: argparse.Namespace) -> tuple[ExitCode, dict[str, Any]]:
         state=record.state,
         observed_at=datetime.now(UTC),
         signature_verified=verified,
+        local_unqualified=_is_local_request(runner.store.request(record.job_id)),
     )
     return ExitCode.OK, _result(
         "status",
@@ -1051,20 +1763,36 @@ def _retry(args: argparse.Namespace) -> tuple[ExitCode, dict[str, Any]]:
     )
 
 
-def _resume(args: argparse.Namespace) -> tuple[ExitCode, dict[str, Any]]:
-    from .bundles import verify_bundle
+def _sealed_local_names(runner: Any, job_id: str) -> tuple[str, str] | None:
+    """Recover a local job's sealed BAM and index names from its snapshot."""
+
+    names = [str(item["relative_path"]) for item in runner.snapshot(job_id)["files"]]
+    indexes = [name for name in names if Path(name).suffix in _INDEX_SUFFIXES]
+    bams = [name for name in names if Path(name).suffix not in _INDEX_SUFFIXES]
+    if len(names) != 2 or len(indexes) != 1 or len(bams) != 1:
+        return None
+    return bams[0], indexes[0]
+
+
+def _resume(
+    args: argparse.Namespace, progress: Callable[[str], None] = lambda line: None
+) -> tuple[ExitCode, dict[str, Any]]:
+    from .references import load_reference
     from .signing import (
         KeyPurpose,
+        TrustNamespace,
         development_trust_bytes,
         generate_development_keypair,
-        load_development_trust,
     )
 
-    runner = _existing_runner(args.root, synthetic_enabled=True)
-    record = runner.status(args.job_id)
-    request = runner.store.request(record.job_id)
-    if (request.workflow_release_sha256 != hashlib.sha256(_WORKFLOW_ID.encode("ascii")).hexdigest()
-            or request.sample_token != "synthetic-sample-token"):
+    probe = _existing_runner(args.root)
+    record = probe.status(args.job_id)
+    request = probe.store.request(record.job_id)
+    local = _is_local_request(request)
+    if not local and (
+        request.workflow_release_sha256 != hashlib.sha256(_WORKFLOW_ID.encode("ascii")).hexdigest()
+        or request.sample_token != "synthetic-sample-token"
+    ):
         return ExitCode.BLOCKED, _result(
             "resume", "blocked", "Only the registered synthetic demo workflow can resume",
         )
@@ -1075,20 +1803,57 @@ def _resume(args: argparse.Namespace) -> tuple[ExitCode, dict[str, Any]]:
             f"Job cannot resume from state {record.state.value}",
             data={"job_id": record.job_id, "state": record.state.value},
         )
-    _reject_live_worker(runner, record.job_id)
-    signing_key = generate_development_keypair(KeyPurpose.RESULT)
-    trust_path = args.root / _TRUST_RELATIVE
-    _append_development_trust(trust_path, development_trust_bytes(signing_key))
-    stages = _demo_stages(signing_key)
-    if record.state == JobState.QUEUED:
-        record = runner.execute(record.job_id, stages, worker_id="synthetic-cli")
+    _reject_live_worker(probe, record.job_id)
+    if local:
+        runner = _existing_runner(args.root, local_unqualified_enabled=True)
+        _refuse_unsealed_job(runner, record)
+        reference_id = request.sample_token[len(_LOCAL_SAMPLE_PREFIX):]
+        loaded = load_reference(args.root, reference_id)
+        names = _sealed_local_names(runner, record.job_id)
+        if names is None:
+            return ExitCode.BLOCKED, _result(
+                "resume", "blocked", "The local job's sealed input is not one BAM and one index",
+            )
+        namespace = TrustNamespace.DEVELOPMENT_LOCAL
+
+        def make_stages(key: Any) -> tuple[Any, ...]:
+            return _local_stages(args.root, loaded, names[0], names[1], key, progress)
     else:
-        record = runner.resume(record.job_id, stages, worker_id="synthetic-cli")
-    trust = load_development_trust(trust_path.read_bytes())
-    runner_bundle = _signed_bundle_from_outputs(runner, record.job_id)
-    verified = verify_bundle(runner_bundle, trust)
-    published = _publish_verified_record(args.root, verified, runner_bundle)
-    verify_bundle(published, trust)
+        runner = _existing_runner(args.root, synthetic_enabled=True)
+        namespace = TrustNamespace.DEVELOPMENT_SYNTHETIC
+        make_stages = _demo_stages
+    signing_key = generate_development_keypair(KeyPurpose.RESULT, namespace=namespace)
+    _append_development_trust(args.root / _TRUST_RELATIVE, development_trust_bytes(signing_key))
+    stages = make_stages(signing_key)
+    worker_id = "local-cli" if local else "synthetic-cli"
+    with runner.store.journal_anchor():
+        return _resume_execute(args, runner, record, stages, worker_id, local=local)
+
+
+def _resume_execute(
+    args: argparse.Namespace,
+    runner: Any,
+    record: Any,
+    stages: tuple[Any, ...],
+    worker_id: str,
+    *,
+    local: bool,
+) -> tuple[ExitCode, dict[str, Any]]:
+    try:
+        if record.state == JobState.QUEUED:
+            record = runner.execute(record.job_id, stages, worker_id=worker_id)
+        else:
+            record = runner.resume(record.job_id, stages, worker_id=worker_id)
+    except LocalStageRefusal as refusal:
+        raise _refusal_problem(refusal) from refusal
+    if local and record.state == JobState.PAUSED:
+        return ExitCode.OK, _result(
+            "resume",
+            "ok",
+            "Run paused at a stage boundary; no record yet",
+            data={"job_id": record.job_id, "state": record.state.value},
+        )
+    verified, published = _publish_signed_record(args.root, runner, record.job_id)
     return ExitCode.OK, _result(
         "resume",
         "ok",
@@ -1162,17 +1927,58 @@ def _verify_with_trust_registry(
     )
 
 
+def _record_under_root(root: Path, record: str) -> Path:
+    """Resolve a record ID (or a record directory name) under ROOT/records.
+
+    Local records live at ``<record_id>``; synthetic ones at
+    ``<record_id>-<signing key ID>``.  Otherwise a record ID resolves only when
+    exactly one published directory (recovered copies included) carries it.
+    """
+
+    if not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9_.-]*", record):
+        raise FileNotFoundError("record ID is not a plain record name")
+    records = root / "records"
+    exact = records / record
+    if exact.is_dir() and not exact.is_symlink():
+        return exact
+    candidates = sorted(
+        path
+        for path in records.glob(f"{record}-*")
+        if path.is_dir() and not path.is_symlink()
+    )
+    if len(candidates) != 1:
+        raise FileNotFoundError("record ID does not name exactly one published record")
+    return candidates[0]
+
+
+def _manifest_is_local(bundle: Path) -> bool:
+    """Peek (unverified) at a bundle's manifest version, only to label output."""
+
+    try:
+        manifest = json.loads((bundle / "bundle-manifest.json").read_bytes())
+    except Exception:
+        return False
+    return isinstance(manifest, dict) and (
+        manifest.get("schema_version") == "traceback.result-bundle.v3"
+    )
+
+
 def _verify(args: argparse.Namespace) -> tuple[ExitCode, dict[str, Any]]:
     from .bundles import verify_bundle
     from .signing import load_development_trust
 
     if args.trust_registry is not None:
         return _verify_with_trust_registry(args)
-    trust_path = args.trust_store
-    if trust_path.is_dir():
-        trust_path = trust_path / _TRUST_RELATIVE.name
+    if args.verify_root is not None:
+        bundle = _record_under_root(args.verify_root, str(args.bundle))
+        trust_path = args.verify_root / _TRUST_RELATIVE
+    else:
+        bundle = args.bundle
+        trust_path = args.trust_store
+        if trust_path.is_dir():
+            trust_path = trust_path / _TRUST_RELATIVE.name
     trust = load_development_trust(trust_path.read_bytes())
-    verified = verify_bundle(args.bundle, trust)
+    verified = verify_bundle(bundle, trust)
     return ExitCode.OK, _result(
         "verify",
         "ok",
@@ -1557,7 +2363,9 @@ def _support_bundle(args: argparse.Namespace) -> tuple[ExitCode, dict[str, Any]]
     )
 
 
-def _dispatch(args: argparse.Namespace) -> tuple[ExitCode, dict[str, Any]]:
+def _dispatch(
+    args: argparse.Namespace, progress: Callable[[str], None] = lambda line: None
+) -> tuple[ExitCode, dict[str, Any]]:
     if args.command == "doctor":
         return _doctor(args)
     if args.command == "protocol":
@@ -1569,7 +2377,7 @@ def _dispatch(args: argparse.Namespace) -> tuple[ExitCode, dict[str, Any]]:
     if args.command == "reference":
         return _reference_register(args)
     if args.command == "run":
-        return _real_run_blocked()
+        return _run(args, progress)
     if args.command == "status":
         return _status(args)
     if args.command == "logs":
@@ -1577,7 +2385,7 @@ def _dispatch(args: argparse.Namespace) -> tuple[ExitCode, dict[str, Any]]:
     if args.command == "pause":
         return _pause(args)
     if args.command == "resume":
-        return _resume(args)
+        return _resume(args, progress)
     if args.command == "retry":
         return _retry(args)
     if args.command == "inspect":
@@ -1610,6 +2418,46 @@ def _require_trust_registry_identity(
         parser.error("--trust-registry-id/epoch/head require --trust-registry")
 
 
+_JOB_COMMANDS = frozenset({"status", "logs", "pause", "resume", "retry", "support-bundle"})
+
+
+def _concerns_local_data(args: argparse.Namespace) -> bool:
+    """Whether this command's result is about a real local input.
+
+    Such results use ``traceback.cli-result.v2`` with ``data_origin``; every
+    other command keeps its v1 bytes.  This only labels output.
+    """
+
+    command = args.command
+    if command in {"run", "reference"}:
+        return True
+    if command == "preflight":
+        return args.reference_id is not None
+    if command == "verify":
+        if args.trust_registry is not None:
+            return _manifest_is_local(args.bundle)
+        try:
+            bundle = (
+                _record_under_root(args.verify_root, str(args.bundle))
+                if args.verify_root is not None
+                else args.bundle
+            )
+        except Exception:
+            return False
+        return _manifest_is_local(bundle)
+    if command in _JOB_COMMANDS:
+        try:
+            from .store import JobStore
+
+            database = args.root / "runner" / "runner.sqlite3"
+            if not database.is_file():
+                return False
+            return _is_local_request(JobStore(database).request(args.job_id))
+        except Exception:
+            return False
+    return False
+
+
 def main(argv: Sequence[str] | None = None) -> int:
     raw = list(sys.argv[1:] if argv is None else argv)
     if raw[:1] == ["reader"]:  # local operator reader authority (E12)
@@ -1619,16 +2467,30 @@ def main(argv: Sequence[str] | None = None) -> int:
     parser = _parser()
     args = parser.parse_args(argv)
     _require_trust_registry_identity(parser, args)
+    as_json = getattr(args, "as_json", False)
+
+    def progress(line: str) -> None:
+        if not as_json:
+            print(line, flush=True)
+
     try:
         mutation = (
             _operator_lock(args.root)
             if args.command in {"demo", "resume", "retry"}
+            # The TBX-RUN-003 refusal (no --reference) touches nothing on disk.
+            or (args.command == "run" and args.reference_id is not None)
             or (args.command == "assets" and args.asset_command == "install")
             or (args.command == "reference" and args.reference_command == "register")
             else nullcontext()
         )
-        with mutation:
-            code, payload = _dispatch(args)
+        # Local work maps a full ROOT volume (OS or SQLite) to TBX-RUN-004.
+        no_space = (
+            _no_space_mapped()
+            if args.command in {"run", "resume"} and _concerns_local_data(args)
+            else nullcontext()
+        )
+        with mutation, no_space:
+            code, payload = _dispatch(args, progress)
     except ReferenceProblem as problem:
         command = (
             f"{args.command} {args.reference_command}"
@@ -1698,6 +2560,14 @@ def main(argv: Sequence[str] | None = None) -> int:
                 "Local asset storage operation failed; retry after checking the filesystem",
                 data={"retryable": True},
             )
+        elif args.command == "run":
+            code, payload = ExitCode.RETRYABLE_FAILURE, _result(
+                args.command,
+                "retryable_failure",
+                "Local run failed without a record; inspect traceback status and "
+                "logs before retrying",
+                data={"code": "TBX-JOB-001", "retryable": True},
+            )
         elif args.command in {"demo", "resume", "retry", "pause"}:
             code, payload = ExitCode.RETRYABLE_FAILURE, _result(
                 args.command,
@@ -1711,7 +2581,9 @@ def main(argv: Sequence[str] | None = None) -> int:
                 "blocked",
                 "Command was blocked without exposing local input details",
             )
-    _emit(payload, as_json=getattr(args, "as_json", False))
+    if _concerns_local_data(args):
+        payload = _local_envelope(payload)
+    _emit(payload, as_json=as_json)
     return int(code)
 
 

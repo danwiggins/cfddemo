@@ -15,6 +15,7 @@ import socket
 import stat
 import threading
 from collections.abc import Callable
+from contextlib import ExitStack
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from importlib.resources import files
@@ -1156,6 +1157,9 @@ class _RunningLocalWebRuntime:
     watchdog_stop: threading.Event
     watchdog_thread: threading.Thread
     reader: ReaderSessionBinder | None = None
+    # Keeps the job store's WAL/SHM sidecars (and their pinned identities)
+    # stable while runner processes open and close the same database.
+    journal: ExitStack | None = None
 
 
 _RUNTIME_LOCK = threading.Lock()
@@ -1217,7 +1221,9 @@ class RunningLocalWebService:
         thread: threading.Thread | None = None
         watchdog_stop: threading.Event | None = None
         watchdog_thread: threading.Thread | None = None
+        journal = ExitStack()
         try:
+            journal.enter_context(store.journal_anchor())
             startup_anchor = _open_startup_anchor(state_directory)
             _require_startup_anchor(startup_anchor)
             state_fd = _open_state_directory(state_directory)
@@ -1396,6 +1402,7 @@ class RunningLocalWebService:
                 watchdog_stop=watchdog_stop,
                 watchdog_thread=watchdog_thread,
                 reader=reader,
+                journal=journal,
             )
             with _RUNTIME_LOCK:
                 _RUNTIMES[runtime_id] = runtime
@@ -1412,29 +1419,35 @@ class RunningLocalWebService:
                 _launch_url=launch_url,
             )
         except BaseException:
-            if watchdog_stop is not None:
-                watchdog_stop.set()
-            if server is not None:
-                if thread is not None and thread.is_alive():
-                    server.shutdown()
-                server.server_close()
-            if thread is not None and thread.ident is not None:
-                thread.join(timeout=5)
-            if watchdog_thread is not None and watchdog_thread.ident is not None:
-                watchdog_thread.join(timeout=5)
-            if state_fd is not None and instance_id is not None:
-                try:
-                    _unlink_instance_state(state_fd, expected_instance_id=instance_id)
-                except LocalWebServerError:
-                    pass
-            if lease_fd is not None:
-                fcntl.flock(lease_fd, fcntl.LOCK_UN)
-                os.close(lease_fd)
-            if state_fd is not None:
-                fcntl.flock(state_fd, fcntl.LOCK_UN)
-                os.close(state_fd)
-            if startup_anchor is not None:
-                _close_startup_anchor(startup_anchor)
+            try:
+                if watchdog_stop is not None:
+                    watchdog_stop.set()
+                if server is not None:
+                    if thread is not None and thread.is_alive():
+                        server.shutdown()
+                    server.server_close()
+                if thread is not None and thread.ident is not None:
+                    thread.join(timeout=5)
+                if watchdog_thread is not None and watchdog_thread.ident is not None:
+                    watchdog_thread.join(timeout=5)
+                if state_fd is not None and instance_id is not None:
+                    try:
+                        _unlink_instance_state(
+                            state_fd, expected_instance_id=instance_id
+                        )
+                    except LocalWebServerError:
+                        pass
+                if lease_fd is not None:
+                    fcntl.flock(lease_fd, fcntl.LOCK_UN)
+                    os.close(lease_fd)
+                if state_fd is not None:
+                    fcntl.flock(state_fd, fcntl.LOCK_UN)
+                    os.close(state_fd)
+                if startup_anchor is not None:
+                    _close_startup_anchor(startup_anchor)
+            finally:
+                # Release the job-store anchor even when earlier cleanup fails.
+                journal.close()
             raise
 
     @property
@@ -1504,7 +1517,11 @@ class RunningLocalWebService:
                     fcntl.flock(runtime.state_directory_fd, fcntl.LOCK_UN)
                     os.close(runtime.state_directory_fd)
                 finally:
-                    _close_startup_anchor(runtime.startup_anchor)
+                    try:
+                        _close_startup_anchor(runtime.startup_anchor)
+                    finally:
+                        if runtime.journal is not None:
+                            runtime.journal.close()
 
     def __enter__(self) -> Self:
         return self

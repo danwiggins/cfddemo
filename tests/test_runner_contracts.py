@@ -101,7 +101,9 @@ def test_cli_doctor_and_demo_are_explicitly_synthetic(
     capsys: pytest.CaptureFixture[str], tmp_path: Path
 ) -> None:
     assert main(["doctor", "--root", str(tmp_path / "root")]) == 0
-    assert "Real-data execution is not enabled" in capsys.readouterr().out
+    output = capsys.readouterr().out
+    assert "Synthetic local runtime is available" in output
+    assert "not for clinical use" in output
 
 
 def test_nested_contracts_are_immutable_and_nonfinite_is_rejected() -> None:

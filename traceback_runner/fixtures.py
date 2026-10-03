@@ -2,6 +2,9 @@
 
 The generated files are artificial and must not be used to claim real-data,
 scientific, protocol, Dorado, chemistry, or hardware qualification.
+
+``create_local_golden_path_inputs`` generates the tiny FASTA and small BAM the
+golden-path acceptance run uses in CI in place of a real local BAM.
 """
 
 from __future__ import annotations
@@ -9,6 +12,7 @@ from __future__ import annotations
 import array
 import hashlib
 import json
+import random
 from dataclasses import dataclass
 from enum import StrEnum
 from pathlib import Path
@@ -184,3 +188,123 @@ def create_synthetic_minknow_run(directory: Path, *, completed: bool = True) -> 
     (root / "final_summary.json").write_text(json.dumps({"completed": completed}, sort_keys=True), encoding="utf-8")
     (pod5 / "inventory.json").write_text(json.dumps({"files": [], "synthetic_only": True}, sort_keys=True), encoding="utf-8")
     return root
+
+
+class LocalHeaderDigests(StrEnum):
+    """How the generated BAM header carries ``M5``/``AS`` for each ``@SQ``."""
+
+    ABSENT = "absent"  # the D1 WARN path: names and lengths only
+    MATCHING = "matching"
+    WRONG_M5 = "wrong_m5"  # a present-but-different M5 blocks preflight
+
+
+@dataclass(frozen=True)
+class LocalGoldenPathFixture:
+    """Local locators for generated golden-path inputs; never export these."""
+
+    fasta_path: Path
+    bam_path: Path
+    index_path: Path
+    reads: int
+    expected_eligible_alignments: int
+
+
+_GOLDEN_CONTIGS = (("tiny_a", 20_000), ("tiny_b", 6_000))
+
+
+def create_local_golden_path_inputs(
+    directory: Path,
+    *,
+    reads: int = 1_000,
+    header_digests: LocalHeaderDigests = LocalHeaderDigests.ABSENT,
+    eligible: bool = True,
+    seed: int = 20261002,
+) -> LocalGoldenPathFixture:
+    """Write a 2-contig FASTA (+ ``.fai``) and a coordinate-sorted, indexed BAM.
+
+    About 85% of reads are eligible primary alignments with MAPQ 60; the rest
+    exercise each exclusion (low MAPQ, duplicate, secondary, supplementary,
+    QC failure, unmapped).  ``eligible=False`` gives every mapped read MAPQ 5,
+    so a run finds no eligible denominator.  Output is deterministic per seed.
+    """
+
+    if reads < 10:
+        raise ValueError("generate at least 10 reads")
+    directory.mkdir(parents=True, exist_ok=True)
+    generator = random.Random(seed)
+    sequences = {
+        name: "".join(generator.choice("ACGT") for _ in range(length))
+        for name, length in _GOLDEN_CONTIGS
+    }
+    fasta = directory / "golden-reference.fa"
+    lines: list[str] = []
+    for name, sequence in sequences.items():
+        lines.append(f">{name} generated golden-path contig")
+        lines.extend(sequence[start : start + 60] for start in range(0, len(sequence), 60))
+    fasta.write_text("\n".join(lines) + "\n", encoding="ascii")
+    pysam.faidx(str(fasta))
+
+    sq: list[dict[str, Any]] = []
+    for name, sequence in sequences.items():
+        line: dict[str, Any] = {"SN": name, "LN": len(sequence)}
+        if header_digests != LocalHeaderDigests.ABSENT:
+            digest = hashlib.md5(sequence.encode("ascii")).hexdigest()
+            line["M5"] = "0" * 32 if header_digests == LocalHeaderDigests.WRONG_M5 else digest
+            line["AS"] = "golden-assembly"
+        sq.append(line)
+    header = pysam.AlignmentHeader.from_dict(
+        {"HD": {"VN": "1.6", "SO": "coordinate"}, "SQ": sq}
+    )
+    exclusion_flags = (256, 1024, 2048, 512)
+    placed: list[tuple[int, int, pysam.AlignedSegment]] = []
+    unplaced: list[pysam.AlignedSegment] = []
+    expected = 0
+    for index in range(reads):
+        segment = pysam.AlignedSegment(header)
+        segment.query_name = f"golden-{index:05d}"
+        roll = generator.random()
+        if roll < 0.02:
+            segment.flag = 4
+            segment.query_sequence = "A" * 50
+            segment.query_qualities = pysam.qualitystring_to_array("I" * 50)
+            unplaced.append(segment)
+            continue
+        contig = 0 if generator.random() < 0.75 else 1
+        span = generator.choice((generator.randint(40, 99), generator.randint(100, 220),
+                                 generator.randint(221, 700)))
+        deletion = 5 if generator.random() < 0.1 else 0
+        start = generator.randint(0, _GOLDEN_CONTIGS[contig][1] - span - 1)
+        query_length = span - deletion
+        cigar = ([(0, query_length)] if not deletion else
+                 [(0, query_length // 2), (2, deletion), (0, query_length - query_length // 2)])
+        segment.flag = 0
+        mapq = 60
+        if roll < 0.06:
+            mapq = 10
+        elif roll < 0.14:
+            segment.flag = exclusion_flags[index % len(exclusion_flags)]
+        if not eligible:
+            mapq = 5
+        segment.reference_id = contig
+        segment.reference_start = start
+        segment.mapping_quality = mapq
+        segment.cigartuples = cigar
+        segment.query_sequence = "".join(generator.choice("ACGT") for _ in range(query_length))
+        segment.query_qualities = pysam.qualitystring_to_array("I" * query_length)
+        if segment.flag == 0 and mapq >= 20:
+            expected += 1
+        placed.append((contig, start, segment))
+    bam = directory / "golden-aligned.bam"
+    with pysam.AlignmentFile(str(bam), "wb", header=header) as output:
+        for _, _, segment in sorted(placed, key=lambda item: (item[0], item[1], item[2].query_name)):
+            output.write(segment)
+        for segment in unplaced:
+            output.write(segment)
+    pysam.index(str(bam))
+    return LocalGoldenPathFixture(
+        fasta_path=fasta,
+        bam_path=bam,
+        index_path=Path(f"{bam}.bai"),
+        reads=reads,
+        expected_eligible_alignments=expected,
+    )

@@ -84,6 +84,7 @@ def build_job_view(
     now: datetime | None = None,
     signature_verified: bool = False,
     blocker: OperatorBlocker | None = None,
+    local_unqualified: bool = False,
 ) -> OperatorJobView:
     """Map a runner state to an operator view without overstating completion."""
 
@@ -137,7 +138,9 @@ def build_job_view(
         headline = "Job paused"
         next_action = "Resume when the local runner is ready"
     elif state in _PROCESSING:
-        headline = "Synthetic job processing"
+        headline = (
+            "Local unqualified job processing" if local_unqualified else "Synthetic job processing"
+        )
         next_action = "Wait for the next verified checkpoint"
     elif state in {
         JobState.DISCOVERED,
@@ -145,7 +148,7 @@ def build_job_view(
         JobState.READY,
         JobState.QUEUED,
     }:
-        headline = "Synthetic job queued"
+        headline = "Local unqualified job queued" if local_unqualified else "Synthetic job queued"
         next_action = f"Run traceback resume {job_id} --root <same-root> to start local execution"
     else:
         headline = f"Job {state.value.replace('_', ' ')}"

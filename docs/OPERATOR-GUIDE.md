@@ -1,6 +1,7 @@
 # Traceback synthetic operator guide
 
-Status: first development wave; synthetic data only.
+Status: first development wave; synthetic data, plus one unqualified local-BAM
+path (see "Real local BAM (unqualified)").
 
 This guide covers the local CLI implemented for the synthetic vertical slice.
 It does not qualify hardware, MinKNOW, Dorado, a wet-lab protocol, a reference,
@@ -98,6 +99,48 @@ An existing object may remain integrity-valid when authority is unknown or
 revoked. It remains unavailable for use and is not silently deleted. Asset
 installation never authorizes execution, real input, or a qualification probe.
 
+## Real local BAM (unqualified)
+
+Milestone 1 of the golden path (`docs/GOLDEN-PATH-MVP-SLICE.md`). Every record
+made this way is unqualified, local, not for clinical use, and signed with a
+development key only. Nothing is uploaded. B8 (Milestone 2) extends this
+section with catalog import and `serve`.
+
+Prerequisites: `uv sync`; a FASTA with its `.fai` (`samtools faidx`); a
+coordinate-sorted BAM with its `.bai` (`samtools index`); free space on ROOT's
+volume of at least twice the BAM plus index (the input is sealed by copy).
+
+```bash
+uv run traceback reference register --fasta REF.fa --id ref --root R
+uv run traceback preflight SAMPLE.bam --reference ref --root R
+uv run traceback run SAMPLE.bam --reference ref --root R
+uv run traceback verify RECORD_ID --root R
+```
+
+`run` prints the locked policy (`aligned-reference-span-local-v2`: chr1-chr22,
+chrX, chrY when registered, else every registered contig; MAPQ >= 20; primary,
+mapped, non-duplicate, non-QC-fail alignments; bins 0, 100, 150, 200, 300, 500,
+1000 bp), one line per stage, then the absolute record path, the absolute trust
+store path and the exact `verify` command. Open `R/records/<record>/report.html`
+for the local report. `--json` results use `traceback.cli-result.v2` with
+`data_origin: "local_unqualified"`. Re-running the same BAM on the same ROOT
+returns the existing record.
+
+Without `--assembly`, a registration's assembly label is its ID; it is never
+shown as an assembly name. A BAM header without `M5`/`AS` matches by contig name
+and length only (TBX-BAM-002 WARN); the report says so.
+
+| Code | Meaning | Fix |
+|---|---|---|
+| TBX-RUN-003 | `run` without `--reference` | Register the FASTA, then pass `--reference ID` |
+| TBX-RUN-004 | Free space under 2x the input (retryable); reports required and available bytes | Free space or choose a `--root` on a larger volume |
+| TBX-RUN-005 | No complete eligible denominator; the job fails, no record | Check contig names against the policy, MAPQ 20, duplicate/secondary/supplementary/QC-fail flags |
+| TBX-BAM-002 | Preflight blocked the sealed copy (reference mismatch); the job fails, no record | Realign against the registered reference |
+| TBX-REF-001..003 | Reference registration or lookup problems | See the `fix` field |
+
+Cleanup: sealed records are read-only, so remove a root with
+`chmod -R u+w R && rm -rf R`.
+
 ## Stable exit codes
 
 | Code | Meaning |
@@ -129,7 +172,8 @@ the same exit code as human output.
   development trust store was configured independently from the bundle and
   rerun `verify`.
 - **Blocked preflight:** correct the named input or compatibility problem.
-  Passing preflight still does not enable real-data processing.
+  Passing preflight alone processes nothing; `run --reference` makes an
+  unqualified local record.
 
 ## Protocol & Setup boundary
 

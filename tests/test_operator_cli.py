@@ -107,8 +107,8 @@ def test_doctor_human_and_json_share_success_semantics(capsys, tmp_path: Path) -
     root = str(tmp_path / "root")
     assert main(["doctor", "--root", root]) == ExitCode.OK
     human = capsys.readouterr().out
-    assert "synthetic local runtime is available" in human
-    assert "Real-data execution is not enabled" in human
+    assert "Synthetic local runtime is available" in human
+    assert "unqualified and not for clinical use" in human
 
     assert main(["doctor", "--root", root, "--json"]) == ExitCode.OK
     payload = json.loads(capsys.readouterr().out)
@@ -130,7 +130,10 @@ def test_protocol_cli_withholds_unapproved_instructions(capsys) -> None:
     assert wet_lab["content"] == "Instruction withheld pending scientific approval"
 
 
-def test_real_run_fails_explicitly_without_echoing_input_path(capsys) -> None:
+def test_real_run_fails_explicitly_without_echoing_input_path(
+    capsys, tmp_path: Path, monkeypatch
+) -> None:
+    monkeypatch.chdir(tmp_path)
     private_path = "/private/provider/real-sample.bam"
     assert main(["run", private_path, "--json"]) == ExitCode.BLOCKED
     output = capsys.readouterr().out
@@ -139,3 +142,5 @@ def test_real_run_fails_explicitly_without_echoing_input_path(capsys) -> None:
     payload = json.loads(output)
     assert payload["status"] == "blocked"
     assert payload["data"]["code"] == "TBX-RUN-003"
+    # The refusal creates nothing, not even the default ROOT's operator lock.
+    assert not (tmp_path / ".traceback").exists()

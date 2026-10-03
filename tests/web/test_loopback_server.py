@@ -553,3 +553,67 @@ def test_ipv6_listener_is_family_bound_when_available(tmp_path: Path) -> None:
         assert service.config.bind_host == "::1"
         assert service.config.authority.startswith("[::1]:")
         assert _request(service, "GET", "/")[0] == 200
+
+
+def test_service_store_survives_another_store_closing_last(tmp_path: Path) -> None:
+    """A runner process opening and closing the same job store while the web
+    service runs must not invalidate the service store's pinned WAL/SHM
+    identities: the service holds a journal anchor for its lifetime."""
+
+    import gc
+
+    store, job_id = _store(tmp_path)
+    store.get(job_id.removeprefix("job_"))  # the service store reads (and pins) first
+    wal = Path(f"{store.path}-wal")
+    with RunningLocalWebService.start(
+        store=store, state_directory=tmp_path / "state"
+    ) as service:
+        before = wal.stat().st_ino
+        other = JobStore(store.path)  # e.g. `traceback run` or `pause`
+        other.get(job_id.removeprefix("job_"))
+        del other
+        gc.collect()  # connections close on collection; force the "last close"
+        assert wal.exists() and wal.stat().st_ino == before
+        cookie, _ = _exchange(service)
+        status, _, content = _request(
+            service, "GET", "/api/v1/jobs", headers={"Cookie": cookie}
+        )
+        assert status == 200
+        assert [item["job_id"] for item in json.loads(content)["jobs"]] == [job_id]
+    gc.collect()
+    # The anchor is released with the service.
+    assert not wal.exists()
+
+
+def test_failed_start_releases_the_journal_anchor_even_if_cleanup_fails(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """If start() fails after taking the journal anchor, the anchor is
+    released even when an earlier cleanup step itself raises."""
+
+    import gc
+
+    store, job_id = _store(tmp_path)
+    store.get(job_id.removeprefix("job_"))
+    wal = Path(f"{store.path}-wal")
+
+    def fail_start(*_args: object, **_kwargs: object) -> None:
+        raise RuntimeError("injected start failure")
+
+    real_close_startup_anchor = server_module._close_startup_anchor
+
+    def fail_cleanup(*args: object, **kwargs: object) -> None:
+        # Release the real host-wide startup lock first, so later tests can
+        # start a service, then fail as a broken cleanup step would.
+        real_close_startup_anchor(*args, **kwargs)
+        raise OSError("injected cleanup failure")
+
+    monkeypatch.setattr(server_module, "_RunningLocalWebRuntime", fail_start)
+    monkeypatch.setattr(server_module, "_close_startup_anchor", fail_cleanup)
+    with pytest.raises(OSError, match="injected cleanup failure") as excinfo:
+        RunningLocalWebService.start(store=store, state_directory=tmp_path / "state")
+    # Keep the store and the traceback (which holds start()'s frame) alive, so
+    # only an explicit anchor close, not garbage collection, can drop the WAL.
+    gc.collect()
+    assert excinfo.value is not None and store.path
+    assert not wal.exists()
