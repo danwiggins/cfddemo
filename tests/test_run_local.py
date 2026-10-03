@@ -211,6 +211,25 @@ def test_disk_full_while_sealing_maps_to_tbx_run_004(
     assert code == cli.ExitCode.BLOCKED and again["data"]["code"] == "TBX-RUN-004"
     (job_id,) = _job_ids(root)
     assert JobStore(root / "runner" / "runner.sqlite3").get(job_id).state == JobState.RETRYABLE_FAILURE
+    # retry + resume of the unsealed job is refused the same way.
+    assert cli.main(["retry", job_id, "--root", str(root), "--json"]) == cli.ExitCode.OK
+    capsys.readouterr()
+    code, resumed = _json(capsys, "resume", job_id, "--root", root)
+    assert code == cli.ExitCode.BLOCKED and resumed["data"]["code"] == "TBX-RUN-004"
+    code, again = _run(capsys, root, inputs.bam_path)
+    assert code == cli.ExitCode.BLOCKED and again["data"]["code"] == "TBX-RUN-004"
+
+
+def test_shared_readable_provenance_key_is_refused(tmp_path: Path, inputs, capsys) -> None:
+    root = tmp_path / "root"
+    _register(capsys, root, inputs.fasta_path)
+    key = root / "trust" / "provenance-hmac.key"
+    key.parent.mkdir(parents=True, exist_ok=True)
+    key.write_bytes(b"k" * 32)
+    key.chmod(0o644)
+    code, payload = _run(capsys, root, inputs.bam_path)
+    assert code == cli.ExitCode.BLOCKED and payload["data"]["code"] == "TBX-RUN-006"
+    assert _records(root) == []
 
 
 def test_local_job_status_headline_is_not_synthetic() -> None:

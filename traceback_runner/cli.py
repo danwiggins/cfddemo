@@ -1043,13 +1043,21 @@ def _provenance_hmac_key(root: Path) -> bytes:
     regular = False
     if descriptor >= 0:
         with os.fdopen(descriptor, "rb") as stream:
-            regular = stat.S_ISREG(os.fstat(stream.fileno()).st_mode)
+            metadata = os.fstat(stream.fileno())
+            regular = (
+                stat.S_ISREG(metadata.st_mode)
+                and metadata.st_uid == os.geteuid()
+                and not stat.S_IMODE(metadata.st_mode) & 0o077
+            )
             key = stream.read(33)
     if not regular or len(key) != 32:
         raise RunProblem(
             "TBX-RUN-006",
-            "The provenance key under ROOT/trust is not a 32-byte regular file",
-            cause="ROOT/trust/provenance-hmac.key was edited, truncated or replaced",
+            "The provenance key under ROOT/trust is not a private 32-byte file",
+            cause=(
+                "ROOT/trust/provenance-hmac.key was edited, truncated, replaced, "
+                "or is readable by other users (it must be 0600 and yours)"
+            ),
             fix="Use a fresh --root; never edit files under ROOT/trust",
         )
     return key
@@ -1341,10 +1349,15 @@ def _require_free_space(root: Path, input_bytes: int) -> None:
         )
 
 
-def _no_space_problem(exc: OSError) -> RunProblem | None:
+def _no_space_problem(exc: Exception) -> RunProblem | None:
     import errno
+    import sqlite3
 
-    if exc.errno not in {errno.ENOSPC, errno.EDQUOT}:
+    sqlite_full = isinstance(exc, sqlite3.OperationalError) and (
+        "database or disk is full" in str(exc)
+    )
+    os_full = isinstance(exc, OSError) and exc.errno in {errno.ENOSPC, errno.EDQUOT}
+    if not (sqlite_full or os_full):
         return None
     # The job that hit ENOSPC may hold no sealed snapshot, and the runner never
     # reseals a failed job, so this ROOT cannot finish that input.
@@ -1359,9 +1372,11 @@ def _no_space_problem(exc: OSError) -> RunProblem | None:
 
 @contextmanager
 def _no_space_mapped() -> Iterator[None]:
+    import sqlite3
+
     try:
         yield
-    except OSError as exc:
+    except (OSError, sqlite3.OperationalError) as exc:
         problem = _no_space_problem(exc)
         if problem is None:
             raise
@@ -1372,17 +1387,33 @@ def _refusal_problem(refusal: LocalStageRefusal) -> RunProblem:
     return RunProblem(refusal.code, refusal.summary, cause=refusal.cause, fix=refusal.fix)
 
 
+_SEALING_STATES = frozenset({JobState.DISCOVERED, JobState.SNAPSHOTTING, JobState.VALIDATING})
+
+
+def _refuse_unsealed_job(runner: Any, record: Any) -> None:
+    """Refuse a job that left sealing without a snapshot (e.g. ROOT filled up).
+
+    The runner never reseals such a job, so retry/resume/run would only end it
+    in a terminal snapshot failure.
+    """
+
+    stored = runner.store.get(record.job_id)
+    if record.state in _SEALING_STATES or record.state == JobState.TERMINAL_FAILURE:
+        return
+    if stored.snapshot_id is None:
+        raise RunProblem(
+            "TBX-RUN-004",
+            "This input's earlier run failed before it was sealed; no record was made",
+            cause=f"job {record.job_id} has no sealed input (for example ROOT filled up)",
+            fix="Free space, then run again under a fresh --root (need 2x the input size)",
+            data={"job_id": record.job_id, "state": record.state.value},
+        )
+
+
 def _refuse_failed_job(runner: Any) -> Callable[[Any], None]:
     def check(record: Any) -> None:
+        _refuse_unsealed_job(runner, record)
         stored = runner.store.get(record.job_id)
-        if record.state == JobState.RETRYABLE_FAILURE and stored.snapshot_id is None:
-            raise RunProblem(
-                "TBX-RUN-004",
-                "This input's earlier run failed before it was sealed; no record was made",
-                cause=f"job {record.job_id} has no sealed input (for example ROOT filled up)",
-                fix="Free space, then run again under a fresh --root (need 2x the input size)",
-                data={"job_id": record.job_id, "state": record.state.value},
-            )
         if record.state != JobState.TERMINAL_FAILURE:
             return
         last_error = stored.last_error or ""
@@ -1473,8 +1504,7 @@ def _run(
         input_tree_sha256_local=input_tree_sha256(source, relative_files),
         workflow_release_sha256=_local_workflow_sha256(),
     )
-    with _no_space_mapped():
-        return _run_sealed(root, request, source, relative_files, loaded, progress)
+    return _run_sealed(root, request, source, relative_files, loaded, progress)
 
 
 def _run_sealed(
@@ -1756,6 +1786,7 @@ def _resume(
     _reject_live_worker(probe, record.job_id)
     if local:
         runner = _existing_runner(args.root, local_unqualified_enabled=True)
+        _refuse_unsealed_job(runner, record)
         reference_id = request.sample_token[len(_LOCAL_SAMPLE_PREFIX):]
         loaded = load_reference(args.root, reference_id)
         names = _sealed_local_names(runner, record.job_id)
@@ -1775,8 +1806,7 @@ def _resume(
     _append_development_trust(args.root / _TRUST_RELATIVE, development_trust_bytes(signing_key))
     stages = make_stages(signing_key)
     worker_id = "local-cli" if local else "synthetic-cli"
-    with _no_space_mapped() if local else nullcontext():
-        return _resume_execute(args, runner, record, stages, worker_id, local=local)
+    return _resume_execute(args, runner, record, stages, worker_id, local=local)
 
 
 def _resume_execute(
@@ -2432,7 +2462,13 @@ def main(argv: Sequence[str] | None = None) -> int:
             or (args.command == "reference" and args.reference_command == "register")
             else nullcontext()
         )
-        with mutation:
+        # Local work maps a full ROOT volume (OS or SQLite) to TBX-RUN-004.
+        no_space = (
+            _no_space_mapped()
+            if args.command in {"run", "resume"} and _concerns_local_data(args)
+            else nullcontext()
+        )
+        with mutation, no_space:
             code, payload = _dispatch(args, progress)
     except ReferenceProblem as problem:
         command = (
