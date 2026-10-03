@@ -333,7 +333,14 @@ def _readable_sha256(path: Path) -> str | None:
 def _doctor_references(root: Path, *, deep: bool) -> list[dict[str, Any]]:
     from .references import list_reference_ids, load_reference
 
-    identifiers = list_reference_ids(root)
+    try:
+        identifiers = list_reference_ids(root)
+    except OSError:
+        return [
+            _doctor_check(
+                "reference", "warn", "ROOT/references cannot be read; check its permissions"
+            )
+        ]
     if not identifiers:
         return [
             _doctor_check(

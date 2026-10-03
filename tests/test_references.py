@@ -370,3 +370,25 @@ def test_load_rejects_registration_whose_id_differs(tmp_path: Path) -> None:
     with pytest.raises(ReferenceProblem) as raised:
         load_reference(root, "renamed")
     assert raised.value.code == "TBX-REF-003"
+
+
+def test_register_refuses_unreadable_fai_and_endless_header(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    import traceback_runner.references as references
+
+    fasta = _write_fasta(tmp_path / "ref")
+    fai = Path(f"{fasta}.fai")
+    fai.unlink()
+    fai.mkdir()
+    with pytest.raises(ReferenceProblem) as unreadable:
+        register_reference(tmp_path / "root", fasta, "tiny")
+    assert unreadable.value.code == "TBX-REF-001"
+
+    endless = tmp_path / "endless.fa"
+    endless.write_bytes(b">" + b"x" * 200)
+    monkeypatch.setattr(references, "_CHUNK_BYTES", 16)
+    monkeypatch.setattr(references, "_MAX_HEADER_BYTES", 64)
+    with pytest.raises(ReferenceProblem) as header:
+        digest_fasta(endless)
+    assert header.value.code == "TBX-REF-001"

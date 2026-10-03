@@ -230,3 +230,18 @@ def test_trust_blocked_when_registry_structure_is_damaged(
     code, payload = _doctor(capsys, root)
     assert code == ExitCode.BLOCKED
     assert _one(payload, "trust")["status"] == "blocked"
+
+
+def test_reference_warns_when_references_directory_is_unreadable(
+    tmp_path: Path, capsys
+) -> None:
+    root = tmp_path / "root"
+    register_reference(root, _write_fasta(tmp_path / "ref"), "tiny")
+    (root / "references").chmod(0)
+    try:
+        code, payload = _doctor(capsys, root)
+    finally:
+        (root / "references").chmod(0o700)
+    assert code == ExitCode.OK
+    assert _one(payload, "reference")["status"] == "warn"
+    assert payload["data"]["root"] == str(root)

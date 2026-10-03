@@ -38,6 +38,7 @@ DOCS_ANCHOR = "docs/OPERATOR-GUIDE.md#real-local-bam-unqualified"
 _CHUNK_BYTES = 16 * 1024 * 1024
 _MAX_FAI_BYTES = 64 * 1024 * 1024
 _MAX_JSON_BYTES = 64 * 1024 * 1024
+_MAX_HEADER_BYTES = 64 * 1024
 _WHITESPACE = b" \t\r\n\v\f"
 _UPPERCASE = bytes.maketrans(
     b"abcdefghijklmnopqrstuvwxyz", b"ABCDEFGHIJKLMNOPQRSTUVWXYZ"
@@ -129,6 +130,8 @@ def read_fai(path: Path) -> tuple[tuple[str, int], ...]:
         content = path.read_bytes()
     except FileNotFoundError as exc:
         raise _fai_problem("no `.fai` index next to the FASTA") from exc
+    except OSError as exc:
+        raise _fai_problem("the `.fai` index is not a readable file") from exc
     rows: list[tuple[str, int]] = []
     try:
         text = content.decode("ascii")
@@ -237,6 +240,8 @@ def digest_fasta(path: Path) -> tuple[str, int, tuple[ReferenceContig, ...]]:
             cut = data.rfind(b"\n") + 1
             if cut == 0:
                 if data.startswith(b">"):
+                    if len(data) > _MAX_HEADER_BYTES:
+                        raise _fasta_problem("a FASTA header line is implausibly long")
                     carry = data
                 else:
                     # One long unwrapped sequence line: no header can start
