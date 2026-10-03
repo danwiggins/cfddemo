@@ -290,8 +290,9 @@ protected identity.
 
 ## Open items
 
-- D08 Save stays disabled until it publishes through
-  `CompositeAuthorityFence`.
+- D08 Save publishes only through `CompositeAuthorityFence` (wired in
+  `docs/LONGITUDINAL-BROWSER.md`); it stays disabled when this registry is
+  absent, unhealthy or full.
 - The family-source slot is optional in v1; its ID prefix
   (`familysrc_registry_`) is not yet pinned in `_SLOT_ID_PREFIXES`.
 - Root-creation crash recovery: like the siblings, an interrupted root

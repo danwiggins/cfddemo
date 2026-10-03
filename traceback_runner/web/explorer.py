@@ -43,6 +43,7 @@ from evidence_inspector.sensitivity_comparison import (
 from traceback_runner.contracts import ResultBundleManifestV2, RunnerContract
 from traceback_runner.serialization import canonical_json_bytes, sha256_bytes
 from traceback_runner.web.contracts import validate_public_projection
+from traceback_runner.web.longitudinal import LongitudinalExplorerSource
 
 MAX_EXPLORER_PAGE_SIZE = 100
 MAX_EXPLORER_ARTIFACT_BYTES = 64 * 1024 * 1024
@@ -496,6 +497,7 @@ def _build_integrated_explorer_source_type(
             "_artifacts",
             "_authority",
             "_get_verified",
+            "_longitudinal",
             "_query",
             "_reader",
         )
@@ -506,7 +508,17 @@ def _build_integrated_explorer_source_type(
             catalog: ResultCatalog,
             authority: CatalogAuthorityIndex,
             artifacts: CanonicalExplorerArtifactRepository,
+            longitudinal: LongitudinalExplorerSource | None = None,
         ) -> None:
+            # The one optional E12 longitudinal adapter: exact type, bound to
+            # this explorer's own E04 catalog.
+            if longitudinal is not None and (
+                type(longitudinal) is not LongitudinalExplorerSource
+                or longitudinal.result_catalog is not catalog
+            ):
+                raise TypeError(
+                    "longitudinal source must be exact and bound to this catalog"
+                )
             if globals().get("bind_catalog_live_reader") is not reader_factory:
                 raise TypeError("explorer requires the package-owned reader factory")
             reader = reader_factory(catalog)
@@ -521,6 +533,7 @@ def _build_integrated_explorer_source_type(
             object.__setattr__(self, "_query", reader.query)
             object.__setattr__(self, "_authority", authority)
             object.__setattr__(self, "_artifacts", artifacts)
+            object.__setattr__(self, "_longitudinal", longitudinal)
             self._assert_installed_reader()
 
         def __getattribute__(self, name: str) -> object:
@@ -607,6 +620,15 @@ def _build_integrated_explorer_source_type(
             self._assert_installed_reader()
             return _compare_explorer_documents(self, left_result_id, right_result_id)
 
+        def longitudinal_source(self) -> LongitudinalExplorerSource | None:
+            """The optional E12 adapter; ``None`` disables every E12 route."""
+
+            self._assert_installed_reader()
+            value = object.__getattribute__(self, "_longitudinal")
+            if value is not None and type(value) is not LongitudinalExplorerSource:
+                raise TypeError("longitudinal source changed")
+            return value
+
     protected_methods.update(
         {
             name: IntegratedExplorerSource.__dict__[name]
@@ -616,6 +638,7 @@ def _build_integrated_explorer_source_type(
                 "_reverify",
                 "compare",
                 "get",
+                "longitudinal_source",
                 "query",
             )
         }

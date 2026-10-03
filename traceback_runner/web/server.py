@@ -46,6 +46,15 @@ from .explorer import (
     prepare_explorer_comparison_response,
     prepare_explorer_document_response,
 )
+from .longitudinal import (
+    GET_ROUTE_PATHS as _LONGITUDINAL_GET_ROUTES,
+)
+from .longitudinal import (
+    POST_ROUTE_PATHS as _LONGITUDINAL_POST_ROUTES,
+)
+from .longitudinal import (
+    handle_longitudinal_route,
+)
 from .reader_session import ReaderSessionBinder
 from .source import JobStoreProjectionSource
 
@@ -491,6 +500,10 @@ def _packaged_assets() -> dict[str, tuple[str, bytes]]:
             "text/css; charset=utf-8",
             root.joinpath("styles.css").read_bytes(),
         ),
+        "/assets/longitudinal.js": (
+            "text/javascript; charset=utf-8",
+            root.joinpath("longitudinal.js").read_bytes(),
+        ),
     }
     for _, content in assets.values():
         lowered = content.lower()
@@ -540,6 +553,7 @@ class _ExplorerHttpBoundary:
     prepare_comparison: Callable[..., dict[str, object]]
     validate_public: Callable[..., None]
     canonicalize: Callable[[object], bytes]
+    longitudinal: Callable[..., tuple[int, dict[str, object]]]
     identities: tuple[_CallableIdentity, ...]
 
     def assert_intact(self) -> None:
@@ -564,6 +578,7 @@ _INSTALLED_EXPLORER_HTTP_DEPENDENCIES = (
     prepare_explorer_comparison_response,
     validate_public_projection,
     canonical_json_bytes,
+    handle_longitudinal_route,
 )
 
 
@@ -798,6 +813,52 @@ class _Handler(http.server.BaseHTTPRequestHandler, metaclass=_SealedHandlerType)
             raise TypeError("request body must be an object")
         return payload
 
+    def _longitudinal(
+        self, path: str, query: str, request: BrowserRequest, *, post: bool
+    ) -> None:
+        """E12 routes: B01 checks, then the reader gate inside the handler."""
+
+        try:
+            self.application.boundary.authorize(request)
+            explorer = self.application.explorer
+            source = None if explorer is None else explorer.longitudinal_source()
+            if source is None:
+                raise ApiProblem(404, self.application.kernel.not_found_problem)
+            explorer_http = self.application.explorer_http
+            if explorer_http is None:
+                raise TypeError("explorer HTTP boundary is unavailable")
+            explorer_http.assert_intact()
+            body: object = None
+            params: dict[str, list[str]] = {}
+            if post:
+                body = self._body_json()
+            elif query:
+                params = parse_qs(
+                    query,
+                    keep_blank_values=False,
+                    strict_parsing=True,
+                    max_num_fields=12,
+                )
+            status, payload = explorer_http.longitudinal(
+                "POST" if post else "GET",
+                path,
+                binder=self.application.reader,
+                request=request,
+                source=source,
+                params=params,
+                body=body,
+            )
+        except BoundaryDenied as exc:
+            self._deny(exc)
+            return
+        except ApiProblem as exc:
+            self._json(exc.status_code, exc.problem.model_dump(mode="json"))
+            return
+        except (TypeError, ValueError, json.JSONDecodeError):
+            self._json(400, {"error": {"code": "TBX-WEB-400"}})
+            return
+        self._json(status, payload)
+
     def do_HEAD(self) -> None:
         self.do_GET()
 
@@ -817,6 +878,7 @@ class _Handler(http.server.BaseHTTPRequestHandler, metaclass=_SealedHandlerType)
         if parsed.query and parsed.path not in {
             "/api/v1/explorer/catalog",
             _EXPLORER_COMPARE_ROUTE,
+            *_LONGITUDINAL_GET_ROUTES,
         }:
             self._json(404, {"error": {"code": "TBX-WEB-404"}})
             return
@@ -832,6 +894,9 @@ class _Handler(http.server.BaseHTTPRequestHandler, metaclass=_SealedHandlerType)
             self._send(200, asset[0], asset[1])
             return
         request = self._request(parsed.path)
+        if parsed.path in _LONGITUDINAL_GET_ROUTES:
+            self._longitudinal(parsed.path, parsed.query, request, post=False)
+            return
         try:
             if parsed.path == "/api/v1/jobs":
                 jobs = self.application.kernel.list_jobs(request)
@@ -991,6 +1056,9 @@ class _Handler(http.server.BaseHTTPRequestHandler, metaclass=_SealedHandlerType)
             self._json(404, {"error": {"code": "TBX-WEB-404"}})
             return
         request = self._request(parsed.path)
+        if parsed.path in _LONGITUDINAL_POST_ROUTES:
+            self._longitudinal(parsed.path, "", request, post=True)
+            return
         try:
             if parsed.path == "/api/v1/session/bootstrap":
                 self.application.boundary.authorize_bootstrap_request(request)
@@ -1197,6 +1265,7 @@ class RunningLocalWebService:
                 prepare_comparison,
                 validate_public,
                 canonicalize,
+                longitudinal_dispatch,
             ) = _INSTALLED_EXPLORER_HTTP_DEPENDENCIES
             tracked_callables = (
                 *explorer_dispatch,
@@ -1204,7 +1273,10 @@ class RunningLocalWebService:
                 prepare_comparison,
                 validate_public,
                 canonicalize,
+                longitudinal_dispatch,
                 _Handler.do_GET,
+                _Handler.do_POST,
+                _Handler._longitudinal,
                 _Handler._json,
                 _Handler._public_json,
             )
@@ -1214,11 +1286,27 @@ class RunningLocalWebService:
                 prepare_comparison=prepare_comparison,
                 validate_public=validate_public,
                 canonicalize=canonicalize,
+                longitudinal=longitudinal_dispatch,
                 identities=tuple(
                     _CallableIdentity.capture(item) for item in tracked_callables
                 ),
             )
             explorer_http.assert_intact()
+            # A replaced or foreign explorer is not an E12 installation; its
+            # own routes still fail closed per request as before.
+            longitudinal_source = None
+            if type(explorer) is IntegratedExplorerSource:
+                try:
+                    longitudinal_source = explorer.longitudinal_source()
+                except TypeError:
+                    longitudinal_source = None
+            if longitudinal_source is not None and (
+                reader_registry is None
+                or longitudinal_source.reader_registry is not reader_registry
+            ):
+                raise LocalWebServerError(
+                    "longitudinal routes require their own reader registry"
+                )
             reader = (
                 None
                 if reader_registry is None

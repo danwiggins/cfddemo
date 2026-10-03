@@ -39,7 +39,16 @@ network dependencies. It presents:
 - optional registered E07-E11 and E13 fragment, cell-origin, CNA, provenance,
   sensitivity, and portable-view contracts, including their exact values, units,
   uncertainty, and missingness states;
-- an explicit unavailable state for E12, which is not implemented.
+- an explicit unavailable state for E12 inside each result document (the
+  per-result `longitudinal_state` field is unchanged).
+
+E12 longitudinal comparison is a separate, optional adapter:
+`IntegratedExplorerSource(..., longitudinal=LongitudinalExplorerSource(...))`,
+bound to the same E04 catalog. It adds the reader-authorized
+`/api/v1/longitudinal/*` routes and the longitudinal section of the packaged
+page (cohort/version, measurement, explicit anchor, version diff, source table,
+segment-only chart, covariate panel, provenance drawer, Save and Reopen). See
+`docs/LONGITUDINAL-BROWSER.md`.
 
 The API is session-authorized and bounded to 100 catalog references per page.
 Unknown filters, malformed identities, and unavailable detail documents fail
@@ -79,8 +88,9 @@ audits, and the exact five-provider task matrix. Synthetic fixtures and local
 browser checks do not satisfy those gates. Keyboard-only operation,
 screen-reader operation, 200 percent zoom/reflow, reviewed browser captures,
 the approved host run, and the five-provider study remain explicitly unmet
-external requirements. E12 is still unavailable, so the evidence report binds
-that missing dependency to disabled release explorer/export controls.
+external requirements. The E14 evidence report does not cover the E12
+longitudinal view, so it binds that missing evidence to disabled release
+explorer/export controls.
 
 ## Validation
 

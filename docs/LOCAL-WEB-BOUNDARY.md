@@ -86,6 +86,15 @@ credential. The page exchanges the bootstrap, then POSTs the credential to
 `/api/v1/session/reader-launch` with the session cookie, exact Origin and
 CSRF token. Without a reader registry that route answers not found.
 
+The E12 routes (`/api/v1/longitudinal/selectors|diff|saved` GET and
+`workspace|source|save|reopen` POST) exist only when the explorer carries a
+`LongitudinalExplorerSource`, and startup refuses one whose reader registry is
+not the service's. They run the B01 checks first, then re-resolve the bound
+grant through `ReaderSessionBinder.reader_authorization` before any protected
+read and again before returning. A bare B01 session, and every grant failure,
+gets the same `403 {"error":{"code":"permission_denied"}}` with no counts,
+selectors or timing detail. See `docs/LONGITUDINAL-BROWSER.md`.
+
 ## Frozen response contracts
 
 `ProblemDetail` carries a registered safe code, bounded problem/cause/fix,
