@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # Golden-path acceptance run (docs/GOLDEN-PATH-MVP-SLICE.md, "Definition of
-# done", steps 1-5), from a fresh mktemp root:
+# done", steps 1-7), from a fresh mktemp root:
 #
 #   1. traceback reference register --fasta F --id ref --root R
 #   2. traceback preflight BAM --reference ref --root R   (exit 0, not blocked)
@@ -11,10 +11,14 @@
 #      library-level check: IntegratedExplorerSource over R's catalog and the
 #      persisted explorer artifacts lists the record as development_unqualified
 #      and serves its detail.
-#
-# TODO(Milestone 2, B6): steps 6-7 (traceback serve --root R in the background,
-# and an operator-session GET of /api/v1/explorer/catalog?limit=10 that lists the
-# record with qualification_state="development_unqualified").
+#   6. traceback serve --root R in the background; the one-use operator launch
+#      link is read from its first stdout line (never echoed).
+#   7. the link's bootstrap is exchanged with the loopback tests' helper
+#      (tests/web/test_loopback_server.py _exchange), the port is polled for up to
+#      10 s, and an operator-session GET /api/v1/explorer/catalog?limit=10 must
+#      list the record with qualification_state="development_unqualified".
+#      serve is stopped with SIGTERM (and by the EXIT trap on any failure) and
+#      must exit 0, releasing ROOT's web lock.
 #
 # Inputs:
 #   FASTA, BAM   optional; a FASTA with .fai and a coordinate-sorted BAM with .bai.
@@ -32,12 +36,23 @@ set -euo pipefail
 read -r -a TRACEBACK_CMD <<<"${TRACEBACK:-uv run traceback}"
 read -r -a PYTHON_CMD <<<"${PYTHON:-uv run python}"
 
+REPO="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 WORK="$(mktemp -d "${TMPDIR:-/tmp}/traceback-golden.XXXXXX")"
 R="$WORK/root"
 OUT="$WORK/out"
 mkdir -p "$OUT"
 
+SERVE_PID=""
+stop_serve() {
+  if [ -n "$SERVE_PID" ] && kill -0 "$SERVE_PID" 2>/dev/null; then
+    kill -TERM "$SERVE_PID" 2>/dev/null || true
+    wait "$SERVE_PID" 2>/dev/null || true
+  fi
+  SERVE_PID=""
+}
+
 cleanup() {
+  stop_serve
   if [ -n "${KEEP_ROOT:-}" ]; then
     echo "kept root: $R"
     return
@@ -149,7 +164,7 @@ step 5b "catalog import (again)" "$OUT/5b.json" -- \
 [ "$(json_get "$OUT/5b.json" data.result_id)" = "$RESULT_ID" ] \
   || fail "re-import changed the result ID"
 
-# Library-level explorer check (step 7's assertion without the HTTP server, B6).
+# Library-level explorer check (the same assertion as step 7, without HTTP).
 "${PYTHON_CMD[@]}" - "$R" "$RESULT_ID" >"$OUT/explorer.json" <<'PY' \
   || fail "the explorer over ROOT's catalog does not list the record"
 import json, sys
@@ -174,6 +189,89 @@ with open_local_explorer(root) as explorer:
 PY
 EXPLORER_LISTED="$(json_get "$OUT/explorer.json" listed)"
 
+# Steps 6-7: serve in the background, operator session over real HTTP.
+started="$(now)"
+"${TRACEBACK_CMD[@]}" serve --root "$R" </dev/null >"$OUT/serve.out" 2>"$OUT/serve.err" &
+SERVE_PID=$!
+LAUNCH_URL=""
+for _ in $(seq 1 100); do
+  if [ -s "$OUT/serve.out" ]; then
+    LAUNCH_URL="$(head -n 1 "$OUT/serve.out")"
+    case "$LAUNCH_URL" in *"#bootstrap="*) break ;; esac
+  fi
+  kill -0 "$SERVE_PID" 2>/dev/null || break
+  perl -e 'select(undef, undef, undef, 0.1)'
+done
+case "$LAUNCH_URL" in
+  http://127.0.0.1:*/\#bootstrap=*) ;;
+  *) grep -hv "bootstrap=" "$OUT/serve.out" "$OUT/serve.err" >&2 2>/dev/null || true
+     fail "serve did not print an operator launch link on its first stdout line" ;;
+esac
+ended="$(now)"
+STEP_LINES+=("6  serve (background)  started  $(perl -e "printf '%.1f', $ended - $started")s")
+echo "step 6  serve (background)  started"
+
+started="$(now)"
+cat >"$WORK/step7.py" <<'PY'
+import json, socket, sys, time
+from types import SimpleNamespace
+from urllib.parse import parse_qs, urlsplit
+
+from tests.web.test_loopback_server import _exchange, _request
+from traceback_runner.web.auth import build_loopback_config
+
+result_id = sys.argv[1]
+link = urlsplit(sys.stdin.readline().strip())
+port = link.port
+deadline = time.monotonic() + 10
+while True:  # poll the port for up to 10 s
+    try:
+        socket.create_connection(("127.0.0.1", port), timeout=1).close()
+        break
+    except OSError:
+        if time.monotonic() > deadline:
+            raise SystemExit("serve port did not open within 10 s")
+        time.sleep(0.1)
+config = build_loopback_config(port=port)
+service = SimpleNamespace(config=config, base_url=config.allowed_origins[0])
+cookie, _ = _exchange(service, parse_qs(link.fragment)["bootstrap"][0])
+status, _, content = _request(
+    service, "GET", "/api/v1/explorer/catalog?limit=10", headers={"Cookie": cookie}
+)
+assert status == 200, status
+rows = {item["ref"]["result_id"]: item for item in json.loads(content)["results"]}
+row = rows[result_id]
+assert row["ref"]["qualification_state"] == "development_unqualified", row["ref"]
+assert row["has_registered_view"] is True
+status, _, _ = _request(service, "GET", "/api/v1/jobs", headers={"Cookie": cookie})
+assert status == 200, status
+print(json.dumps({
+    "listed": len(rows),
+    "qualification_state": row["ref"]["qualification_state"],
+}, sort_keys=True))
+PY
+# The link goes in on stdin, never on a command line or in a log.
+printf '%s\n' "$LAUNCH_URL" | PYTHONPATH="$REPO${PYTHONPATH:+:$PYTHONPATH}" \
+  "${PYTHON_CMD[@]}" "$WORK/step7.py" "$RESULT_ID" >"$OUT/7.json" \
+  || fail "operator-session GET /api/v1/explorer/catalog did not list the record"
+ended="$(now)"
+SERVED_QUALIFICATION="$(json_get "$OUT/7.json" qualification_state)"
+SERVED_LISTED="$(json_get "$OUT/7.json" listed)"
+STEP_LINES+=("7  GET /api/v1/explorer/catalog (operator)  status=200  $(perl -e "printf '%.1f', $ended - $started")s")
+echo "step 7  GET /api/v1/explorer/catalog (operator)  status=200"
+
+kill -TERM "$SERVE_PID"
+set +e
+wait "$SERVE_PID"
+SERVE_STATUS=$?
+set -e
+SERVE_PID=""
+[ "$SERVE_STATUS" -eq 0 ] || fail "serve exited $SERVE_STATUS on SIGTERM"
+grep -qF "Stopped; the web lock for ROOT is released." "$OUT/serve.out" \
+  || fail "serve did not report a clean stop"
+# The one-use link was exchanged and the server is gone; drop it anyway.
+: >"$OUT/serve.out"
+
 REPORT="$RECORD/report.html"
 [ -f "$REPORT" ] || fail "record has no report.html"
 grep -qF "Unqualified. Local development record. Not for clinical use. Development signing key only." \
@@ -193,7 +291,7 @@ for locator in "$FASTA_ABS" "$BAM_ABS" "$(dirname "$BAM_ABS")"; do
 done
 
 echo
-echo "Golden-path summary, DoD steps 1-5 (unqualified, local, not for clinical use)"
+echo "Golden-path summary, DoD steps 1-7 (unqualified, local, not for clinical use)"
 for line in "${STEP_LINES[@]}"; do echo "  $line"; done
 echo "  preflight outcome: $PREFLIGHT_OUTCOME"
 echo "  records scanned: $SCANNED"
@@ -201,4 +299,7 @@ echo "  eligible alignments: $ELIGIBLE"
 echo "  verify: $VERIFIED"
 echo "  catalog qualification_state: $QUALIFICATION"
 echo "  explorer rows listed: $EXPLORER_LISTED"
-echo "ACCEPTANCE PASSED (DoD steps 1-5; steps 6-7 wait for B6 serve)"
+echo "  served catalog rows listed: $SERVED_LISTED"
+echo "  served qualification_state: $SERVED_QUALIFICATION"
+echo "  serve stopped: exit=$SERVE_STATUS"
+echo "ACCEPTANCE PASSED (DoD steps 1-7)"

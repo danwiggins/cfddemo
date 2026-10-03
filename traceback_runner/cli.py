@@ -187,6 +187,14 @@ def _parser() -> argparse.ArgumentParser:
     _root_argument(catalog_import)
     catalog_import.add_argument("--json", action="store_true", dest="as_json")
 
+    serve = commands.add_parser(
+        "serve",
+        help="serve ROOT's jobs and catalog on loopback to an operator browser session "
+        "(unqualified, local, not for clinical use)",
+    )
+    _root_argument(serve)
+    serve.add_argument("--ipv6", action="store_true", help="bind ::1 instead of 127.0.0.1")
+
     inspect = commands.add_parser("inspect", help="inspect an unverified local bundle")
     inspect.add_argument("bundle", type=Path)
     inspect.add_argument("--json", action="store_true", dest="as_json")
@@ -316,9 +324,15 @@ def _problem(
             "cause": problem.cause,
             "fix": problem.fix,
             "retryable": problem.retryable,
-            "docs": DOCS_ANCHOR,
+            "docs": _docs_anchor(problem.code),
         },
     )
+
+
+def _docs_anchor(code: str) -> str:
+    """The operator guide's troubleshooting anchor for one ``TBX-*`` code."""
+
+    return f"{DOCS_ANCHOR.split('#', 1)[0]}#{code.lower()}"
 
 
 def _emit(payload: dict[str, Any], *, as_json: bool) -> None:
@@ -606,6 +620,7 @@ def _real_run_blocked() -> tuple[ExitCode, dict[str, Any]]:
         "A local run needs a registered reference; no job was created",
         data={
             "code": "TBX-RUN-003",
+            "docs": _docs_anchor("TBX-RUN-003"),
             "fix": (
                 "Register the FASTA with traceback reference register, then pass "
                 "--reference ID; use traceback demo for the synthetic workflow"
@@ -1707,6 +1722,220 @@ def _catalog_import(args: argparse.Namespace) -> tuple[ExitCode, dict[str, Any]]
     )
 
 
+class ServeProblem(ReferenceProblem):
+    """A ``traceback serve`` refusal with the six operator fields; no listener started."""
+
+
+def _no_catalog() -> ServeProblem:
+    return ServeProblem(
+        "TBX-SERVE-002",
+        "No catalog under ROOT; nothing was started",
+        cause="ROOT/catalog does not exist: no record has been imported",
+        fix="Run `traceback catalog import ROOT/records/RECORD_ID --root ROOT` first",
+        exit_code=ExitCode.NOT_FOUND,
+    )
+
+
+def _serve_material(root: Path) -> Path:
+    """Refuse before any listener unless ROOT holds a runner database and a valid catalog.
+
+    Returns the runner database path.  Read-only: nothing under ROOT is created
+    or changed (the trust registry and authority stores are only reopened).
+    """
+
+    from .local_authority import validate_local_method_authorities
+
+    database = root / "runner" / "runner.sqlite3"
+    if not database.is_file():
+        raise ServeProblem(
+            "TBX-SERVE-001",
+            "No runner database under ROOT; nothing was started",
+            cause="ROOT/runner/runner.sqlite3 does not exist (wrong --root, or no run yet)",
+            fix="Run `traceback run BAM --reference ID --root ROOT` first, or pass the right --root",
+            exit_code=ExitCode.NOT_FOUND,
+        )
+    if not (root / "catalog").is_dir():
+        raise _no_catalog()
+    # A catalog without a valid authority is partial state: refuse, exit 3.
+    validate_local_method_authorities(root)
+    return database
+
+
+def _serve_start_problem(exc: Exception) -> ServeProblem:
+    """Map a listener start failure; its message is a fixed string with no path."""
+
+    message = str(exc)
+    busy = message == "local web startup lock is busy"
+    return ServeProblem(
+        "TBX-SERVE-003",
+        "The local web service did not start; nothing was served",
+        cause=(
+            f"{message}: another `traceback serve` already serves this ROOT"
+            if message == "local web service is already running"
+            else f"{message}: another local web service is starting right now"
+            if busy
+            else message
+        ),
+        fix=(
+            "Use the running service, or stop it (Ctrl-C in its terminal) and start again"
+            if not busy
+            else "Wait a few seconds and start again"
+        ),
+        retryable=busy,
+    )
+
+
+def _serve(
+    args: argparse.Namespace,
+    *,
+    out: Any,
+    stdin: Any,
+    stop: Any,
+    ready: Callable[[Any], None] = lambda service: None,
+) -> int:
+    """Run the loopback service for ROOT until ``stop`` is set (B6).
+
+    The first line on ``out`` is the one-use operator launch link (bootstrap
+    in the URL fragment only).  Stdin is read only when it is a TTY: Enter
+    prints a fresh link and end of input stops.  Otherwise only ``stop`` (set
+    by SIGINT/SIGTERM in ``main``) ends the service, so it can run in the
+    background.  The service, store, catalog and trust registry are closed in
+    that order on every exit, which releases the web anchor and lease.
+    """
+
+    import threading
+
+    from .local_catalog import open_local_explorer
+    from .store import JobStore
+    from .web.auth import BootstrapBroker
+    from .web.server import LocalWebServerError, LocalWebServerStopped, RunningLocalWebService
+
+    root = args.root
+    database = _serve_material(root)
+    with open_local_explorer(root) as explorer:
+        if explorer is None:  # removed between the check and the open
+            raise _no_catalog()
+        store = JobStore(database)
+        try:
+            try:
+                service = RunningLocalWebService.start(
+                    store=store,
+                    state_directory=root / "web",
+                    ipv6=args.ipv6,
+                    explorer=explorer.source,
+                )
+            except LocalWebServerError as exc:
+                raise _serve_start_problem(exc) from None
+            with service:
+                print(service.launch_url, file=out, flush=True)
+                print(
+                    "Open this one-use operator link in a browser on this machine "
+                    "within 60 seconds; do not share it.",
+                    file=out,
+                )
+                print(
+                    f"Serving {explorer.views} cataloged record view(s)"
+                    + (
+                        f"; {explorer.skipped} invalid explorer file(s) skipped"
+                        if explorer.skipped
+                        else ""
+                    )
+                    + ". Unqualified, local, not for clinical use.",
+                    file=out,
+                )
+                interactive = False
+                try:
+                    interactive = bool(stdin.isatty())
+                except (AttributeError, OSError, ValueError):
+                    interactive = False
+                print(
+                    "Press Enter for a fresh link; Ctrl-C stops the server."
+                    if interactive
+                    else "Ctrl-C or SIGTERM stops the server.",
+                    file=out,
+                    flush=True,
+                )
+                stopped_by_watchdog = threading.Event()
+
+                def read_terminal() -> None:
+                    while not stop.is_set():
+                        try:
+                            line = stdin.readline()
+                        except (OSError, ValueError):
+                            line = ""
+                        if not line:
+                            stop.set()
+                            return
+                        try:
+                            code = service.issue_bootstrap()
+                        except LocalWebServerStopped:
+                            stopped_by_watchdog.set()
+                            stop.set()
+                            return
+                        link = f"{service.base_url}/{BootstrapBroker.launch_fragment(code)}"
+                        print(link, file=out, flush=True)
+
+                if interactive:
+                    threading.Thread(
+                        target=read_terminal, name="traceback-serve-stdin", daemon=True
+                    ).start()
+                ready(service)
+                while not stop.wait(0.2):
+                    if not service.is_running:
+                        stopped_by_watchdog.set()
+                        break
+                if stopped_by_watchdog.is_set():
+                    raise ServeProblem(
+                        "TBX-SERVE-004",
+                        "The local web service stopped itself; no further links are issued",
+                        cause="a security check of the running service failed "
+                        "(its state directory or listener changed)",
+                        fix="Restart `traceback serve --root ROOT`",
+                    )
+        finally:
+            store.close()
+    print("Stopped; the web lock for ROOT is released.", file=out, flush=True)
+    return int(ExitCode.OK)
+
+
+def _serve_main(args: argparse.Namespace) -> int:
+    """Foreground ``traceback serve``: SIGINT and SIGTERM stop it cleanly."""
+
+    import signal
+    import threading
+
+    stop = threading.Event()
+    previous: dict[int, Any] = {}
+    if threading.current_thread() is threading.main_thread():
+        for number in (signal.SIGINT, signal.SIGTERM):
+            previous[number] = signal.signal(number, lambda *_: stop.set())
+    try:
+        try:
+            return _serve(args, out=sys.stdout, stdin=sys.stdin, stop=stop)
+        except KeyboardInterrupt:
+            return int(ExitCode.OK)
+    except ReferenceProblem as problem:
+        _emit(_local_envelope(_problem("serve", problem)), as_json=False)
+        return int(problem.exit_code)
+    except Exception:
+        # For example a damaged catalog database.  No detail: it may name a path.
+        _emit(
+            _local_envelope(
+                _result(
+                    "serve",
+                    "blocked",
+                    "ROOT's catalog or runner database could not be opened; nothing was "
+                    "started (check it with `traceback doctor --root ROOT`)",
+                )
+            ),
+            as_json=False,
+        )
+        return int(ExitCode.BLOCKED)
+    finally:
+        for number, handler in previous.items():
+            signal.signal(number, handler)
+
+
 def _preflight(args: argparse.Namespace) -> tuple[ExitCode, dict[str, Any]]:
     from .contracts import PreflightOutcome
     from .fixtures import SYNTHETIC_MODIFIED_BASE_MODEL, synthetic_registered_reference
@@ -2720,6 +2949,8 @@ def main(argv: Sequence[str] | None = None) -> int:
     parser = _parser()
     args = parser.parse_args(argv)
     _require_trust_registry_identity(parser, args)
+    if args.command == "serve":  # long-running; its first stdout line is the link
+        return _serve_main(args)
     as_json = getattr(args, "as_json", False)
 
     def progress(line: str) -> None:

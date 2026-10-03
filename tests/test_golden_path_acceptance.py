@@ -1,4 +1,4 @@
-"""Run scripts/golden_path_acceptance.sh (DoD steps 1-5) on generated inputs."""
+"""Run scripts/golden_path_acceptance.sh (DoD steps 1-7) on generated inputs."""
 
 from __future__ import annotations
 
@@ -16,7 +16,7 @@ SCRIPT = Path(__file__).resolve().parents[1] / "scripts" / "golden_path_acceptan
 
 @pytest.mark.skipif(shutil.which("bash") is None or shutil.which("perl") is None,
                     reason="the acceptance script needs bash and perl")
-def test_golden_path_milestone_1_acceptance(tmp_path: Path) -> None:
+def test_golden_path_acceptance_steps_1_to_7(tmp_path: Path) -> None:
     python = shlex.quote(sys.executable)
     environment = {
         **os.environ,
@@ -37,9 +37,15 @@ def test_golden_path_milestone_1_acceptance(tmp_path: Path) -> None:
         check=False,
     )
     assert completed.returncode == 0, completed.stdout + completed.stderr
-    assert "ACCEPTANCE PASSED (DoD steps 1-5" in completed.stdout
+    assert "ACCEPTANCE PASSED (DoD steps 1-7)" in completed.stdout
     assert "preflight outcome: partial" in completed.stdout
     assert "catalog qualification_state: development_unqualified" in completed.stdout
     assert "explorer rows listed: 1" in completed.stdout
+    # Steps 6-7: serve in the background, operator GET of the catalog over HTTP.
+    assert "served catalog rows listed: 1" in completed.stdout
+    assert "served qualification_state: development_unqualified" in completed.stdout
+    assert "serve stopped: exit=0" in completed.stdout
+    # The one-use operator link is never echoed to a log.
+    assert "bootstrap=" not in completed.stdout + completed.stderr
     # The script removes its temporary root.
     assert not any(tmp_path.glob("traceback-golden.*"))

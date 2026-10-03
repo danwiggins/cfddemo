@@ -68,7 +68,7 @@ from .contracts import (
     Sha256,
 )
 from .filesystem import rename_directory_exclusive_at
-from .references import ReferenceProblem, validate_reference_id
+from .references import ReferenceProblem, load_reference, validate_reference_id
 from .serialization import canonical_json_bytes, canonical_model_from_bytes
 
 if TYPE_CHECKING:
@@ -493,6 +493,40 @@ def open_local_method_authority(
     )
 
 
+def validate_local_method_authorities(root: Path) -> tuple[str, ...]:
+    """Reopen and validate every reference's authority store under ROOT; never writes.
+
+    ``traceback serve`` (B6) calls this before it starts a listener: a catalog
+    whose authority is missing or fails validation is refused (exit 3) rather
+    than served in a partial state.  Leftover staging directories are ignored,
+    not removed.  Returns the validated reference IDs.
+    """
+
+    directory = root / AUTHORITY_DIRECTORY
+    try:
+        metadata = os.stat(directory, follow_symlinks=False)
+    except FileNotFoundError:
+        raise _authority_problem("no local method authority under ROOT/authority") from None
+    if (
+        not stat.S_ISDIR(metadata.st_mode)
+        or stat.S_IMODE(metadata.st_mode) != 0o700
+        or metadata.st_uid != os.geteuid()
+    ):
+        raise _authority_problem("ROOT/authority is not a private directory")
+    reference_ids = sorted(
+        entry.name for entry in directory.iterdir() if not entry.name.startswith(_STAGING_PREFIX)
+    )
+    if not reference_ids:
+        raise _authority_problem("no local method authority under ROOT/authority")
+    for reference_id in reference_ids:
+        try:
+            validate_reference_id(reference_id)
+        except ValueError:
+            raise _authority_problem("ROOT/authority holds an unexpected entry") from None
+        open_local_method_authority(root, load_reference(root, reference_id).registered)
+    return tuple(reference_ids)
+
+
 def ensure_local_method_authority(
     root: Path,
     reference: RegisteredReference,
@@ -787,4 +821,5 @@ __all__ = [
     "open_local_method_authority",
     "open_local_result_trust_registry",
     "sync_local_result_trust",
+    "validate_local_method_authorities",
 ]
