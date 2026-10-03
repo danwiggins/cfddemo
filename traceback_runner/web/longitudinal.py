@@ -128,6 +128,7 @@ from evidence_inspector.reader_authorization_registry import (
     ReaderAuthorization,
     ReaderAuthorizationDenied,
     ReaderAuthorizationRegistry,
+    ReaderGrantBinding,
 )
 from evidence_inspector.record_supersession_store import RecordSupersessionStore
 from evidence_inspector.repeatability_comparison_registry import (
@@ -475,6 +476,7 @@ class LongitudinalReopenResponse(RegistryContract):
     )
     stage: Literal["diff", "results"]
     diff: LongitudinalReopenDiff
+    save: PublicSaveAvailability
     current_workspace: LongitudinalWorkspaceProjection | None = None
     # A stale reopen shows only the immutable saved commitments: the saved
     # bytes hold no rows, and current rows would relabel current authority as
@@ -786,14 +788,11 @@ def _cohort_registry_id(source: LongitudinalExplorerSource) -> str:
         raise _Denied from None
 
 
-def _require_binder(binder: ReaderSessionBinder | None) -> ReaderSessionBinder:
-    if type(binder) is not ReaderSessionBinder or not binder.enabled:
-        raise _Denied
-    return binder
-
-
 class _Gate:
-    """``with`` one reader authorization for one exact scope under its fence."""
+    """``with`` one reader authorization for one exact scope under its fence.
+
+    Private to :class:`_AuthorizedView`; routes never construct it.
+    """
 
     def __init__(
         self,
@@ -821,47 +820,72 @@ class _Gate:
             raise _Denied from None
 
 
-def _authorized_scopes(
-    binder: ReaderSessionBinder,
-    request: BrowserRequest,
-    source: LongitudinalExplorerSource,
-) -> tuple[MeasurementScope, ...]:
-    """Configured scopes the session's own grant currently covers; none denies."""
+class _AuthorizedView:
+    """One request's reader authorization, built before any route runs.
 
-    allowed: list[MeasurementScope] = []
-    for scope in source.measurement_scopes:
-        try:
-            with _Gate(binder, request, source, scope):
+    ``configured`` is the operator's measurement set; ``granted`` is the part
+    the session's own grant currently covers (``configured`` intersected with
+    the grant).  No grant over any configured scope denies at construction.
+    Routes read authority only through :meth:`gate` (deny unless the scope is
+    in ``granted``, then the live reader gate) and :meth:`saved_gate` (deny
+    unless ``granted == configured``), so no route derives scope itself.
+    """
+
+    __slots__ = ("_binder", "_request", "_source", "configured", "granted")
+
+    def __init__(
+        self,
+        binder: ReaderSessionBinder | None,
+        request: BrowserRequest,
+        source: LongitudinalExplorerSource,
+    ) -> None:
+        if type(binder) is not ReaderSessionBinder or not binder.enabled:
+            raise _Denied
+        self._binder = binder
+        self._request = request
+        self._source = source
+        self.configured: tuple[MeasurementScope, ...] = tuple(source.measurement_scopes)
+        granted: list[MeasurementScope] = []
+        for scope in self.configured:
+            try:
+                with _Gate(binder, request, source, scope):
+                    pass
+            except _Denied:
+                continue
+            granted.append(scope)
+        if not granted:
+            raise _Denied
+        self.granted: tuple[MeasurementScope, ...] = tuple(granted)
+
+    def gate(self, scope: MeasurementScope) -> _Gate:
+        """The live reader gate for one configured, granted scope."""
+
+        if type(scope) is not MeasurementScope or scope not in self.granted:
+            raise _Denied
+        return _Gate(self._binder, self._request, self._source, scope)
+
+    def saved_gate(self) -> None:
+        """Saved selectors and objects need a grant over every configured scope."""
+
+        if self.granted != self.configured:
+            raise _Denied
+        for scope in self.configured:
+            with self.gate(scope):
                 pass
-        except _Denied:
-            continue
-        allowed.append(scope)
-    if not allowed:
-        raise _Denied
-    return tuple(allowed)
 
+    def session_credential(self) -> ReaderGrantBinding:
+        return self._binder.session_credential(self._request)
 
-def _all_scopes(
-    binder: ReaderSessionBinder,
-    request: BrowserRequest,
-    source: LongitudinalExplorerSource,
-) -> None:
-    """Saved comparisons are listed and resolved only for a reader whose own
-    grant covers every configured scope: a saved selector or object is never
-    read under a grant for another measurement."""
+    def held_authorization(self, scope: MeasurementScope) -> ReaderAuthorization:
+        """Re-authorize inside a composite hold (which holds the reader fence)."""
 
-    for scope in source.measurement_scopes:
-        with _Gate(binder, request, source, scope):
-            pass
-
-
-def _require_configured(
-    source: LongitudinalExplorerSource, scope: MeasurementScope
-) -> None:
-    """Only operator-configured measurements are served, whatever the grant."""
-
-    if scope not in source.measurement_scopes:
-        raise _Denied
+        if type(scope) is not MeasurementScope or scope not in self.granted:
+            raise _Denied
+        return self._binder.reader_authorization_in_held_fence(
+            self._request,
+            cohort_registry_id=_cohort_registry_id(self._source),
+            measurement_scope=scope,
+        )
 
 
 def _scope_of(measurement: LongitudinalMeasurementSelection) -> MeasurementScope:
@@ -1195,7 +1219,7 @@ def _candidate_page(
 
 
 def selector_catalog(
-    binder: ReaderSessionBinder | None,
+    view: _AuthorizedView,
     request: BrowserRequest,
     source: LongitudinalExplorerSource,
     params: Mapping[str, Sequence[str]],
@@ -1211,8 +1235,7 @@ def selector_catalog(
         "anchor_policy_selector_id",
         "anchor_policy_version",
     }
-    binder = _require_binder(binder)
-    scopes = _authorized_scopes(binder, request, source)
+    scopes = view.granted
     if allowed:
         _invalid()
     cohort_id = _single(params, "cohort_selector_id")
@@ -1238,11 +1261,9 @@ def selector_catalog(
         _invalid()
     if anchor_id is not None and cohort_id is None:
         _invalid()
-    if scope is not None:
-        _require_configured(source, scope)
     gate_scope = scope if scope is not None else scopes[0]
     cohort = source.store("cohort_registry")
-    with _Gate(binder, request, source, gate_scope) as authorization:
+    with view.gate(gate_scope) as authorization:
         save = save_availability(source)
         if cohort_id is None:
             page = _cohort_page(
@@ -1329,12 +1350,11 @@ def _version_diff(
 
 
 def version_diff(
-    binder: ReaderSessionBinder | None,
+    view: _AuthorizedView,
     request: BrowserRequest,
     source: LongitudinalExplorerSource,
     params: Mapping[str, Sequence[str]],
 ) -> dict[str, object]:
-    binder = _require_binder(binder)
     if set(params) - {
         "cohort_selector_id",
         "cohort_version",
@@ -1342,25 +1362,18 @@ def version_diff(
         "quantity_id",
         "unit",
     }:
-        _authorized_scopes(binder, request, source)
         _invalid()
-    try:
-        scope = _scope_param(params)
-        selector_id = _single(params, "cohort_selector_id")
-        version = _int_param(params, "cohort_version")
-    except _RouteFailure:
-        _authorized_scopes(binder, request, source)
-        raise
+    scope = _scope_param(params)
+    selector_id = _single(params, "cohort_selector_id")
+    version = _int_param(params, "cohort_version")
     if (
         scope is None
         or selector_id is None
         or version is None
         or not (_COHORT_SELECTOR.fullmatch(selector_id))
     ):
-        _authorized_scopes(binder, request, source)
         _invalid()
-    _require_configured(source, scope)
-    with _Gate(binder, request, source, scope) as authorization:
+    with view.gate(scope) as authorization:
         diff = _version_diff(source, authorization, selector_id, version)
         payload = _public(
             LongitudinalVersionDiffResponse(cohort_selector_id=selector_id, diff=diff)
@@ -1372,18 +1385,16 @@ def version_diff(
 
 
 def _build(
-    binder: ReaderSessionBinder,
-    request: BrowserRequest,
+    view: _AuthorizedView,
     source: LongitudinalExplorerSource,
     workspace_request: LongitudinalWorkspaceRequest,
 ) -> tuple[LongitudinalWorkspace, ReaderAuthorization]:
     """Authorize first, then build from live authority with the session binding."""
 
     scope = _scope_of(workspace_request.measurement)
-    _require_configured(source, scope)
-    with _Gate(binder, request, source, scope) as first:
+    with view.gate(scope) as first:
         pass
-    credential = binder.session_credential(request)
+    credential = view.session_credential()
     failure: LongitudinalWorkspaceBoundaryError | None = None
     workspace: LongitudinalWorkspace | None = None
     try:
@@ -1402,64 +1413,44 @@ def _build(
     return workspace, first
 
 
-def _workspace_body(
-    binder: ReaderSessionBinder,
-    request: BrowserRequest,
-    source: LongitudinalExplorerSource,
-    body: object,
-    keys: set[str],
-) -> dict[str, Any]:
+def _workspace_body(body: object, keys: set[str]) -> dict[str, Any]:
     if not isinstance(body, dict) or set(body) != keys:
-        _authorized_scopes(binder, request, source)
         _invalid()
     return body
 
 
 def workspace(
-    binder: ReaderSessionBinder | None,
+    view: _AuthorizedView,
     request: BrowserRequest,
     source: LongitudinalExplorerSource,
     body: object,
 ) -> dict[str, object]:
-    binder = _require_binder(binder)
-    values = _workspace_body(binder, request, source, body, {"request"})
-    try:
-        workspace_request = _parse_workspace_request(values["request"])
-    except _RouteFailure:
-        _authorized_scopes(binder, request, source)
-        raise
-    built, first = _build(binder, request, source, workspace_request)
+    values = _workspace_body(body, {"request"})
+    workspace_request = _parse_workspace_request(values["request"])
+    built, first = _build(view, source, workspace_request)
     projection = _PINNED_PROJECT(built)
     payload = _public(
         LongitudinalWorkspaceResponse(
             workspace=projection, save=save_availability(source)
         )
     )
-    with _Gate(
-        binder, request, source, _scope_of(workspace_request.measurement)
-    ) as final:
+    with view.gate(_scope_of(workspace_request.measurement)) as final:
         _same_grant(first, final)
     return payload
 
 
 def source_detail(
-    binder: ReaderSessionBinder | None,
+    view: _AuthorizedView,
     request: BrowserRequest,
     source: LongitudinalExplorerSource,
     body: object,
 ) -> dict[str, object]:
-    binder = _require_binder(binder)
-    values = _workspace_body(binder, request, source, body, {"request", "row_ordinal"})
-    try:
-        workspace_request = _parse_workspace_request(values["request"])
-    except _RouteFailure:
-        _authorized_scopes(binder, request, source)
-        raise
+    values = _workspace_body(body, {"request", "row_ordinal"})
+    workspace_request = _parse_workspace_request(values["request"])
     ordinal = values["row_ordinal"]
     if type(ordinal) is not int or not 1 <= ordinal <= 1_000:
-        _authorized_scopes(binder, request, source)
         _invalid()
-    built, first = _build(binder, request, source, workspace_request)
+    built, first = _build(view, source, workspace_request)
     projection = _PINNED_PROJECT(built)
     # Only a row the request's filters make visible, and only visible segments.
     rows = [row for row in projection.rows if row.row_ordinal == ordinal]
@@ -1485,9 +1476,7 @@ def source_detail(
         filters_sha256=projection.filters_sha256,
     )
     payload = _public(detail)
-    with _Gate(
-        binder, request, source, _scope_of(workspace_request.measurement)
-    ) as final:
+    with view.gate(_scope_of(workspace_request.measurement)) as final:
         _same_grant(first, final)
     return payload
 
@@ -1759,26 +1748,21 @@ def _resolve_saved(
 
 
 def save(
-    binder: ReaderSessionBinder | None,
+    view: _AuthorizedView,
     request: BrowserRequest,
     source: LongitudinalExplorerSource,
     body: object,
 ) -> dict[str, object]:
-    binder = _require_binder(binder)
-    values = _workspace_body(binder, request, source, body, {"request"})
-    try:
-        workspace_request = _parse_workspace_request(values["request"])
-    except _RouteFailure:
-        _authorized_scopes(binder, request, source)
-        raise
+    values = _workspace_body(body, {"request"})
+    workspace_request = _parse_workspace_request(values["request"])
     scope = _scope_of(workspace_request.measurement)
-    with _Gate(binder, request, source, scope):
+    with view.gate(scope):
         availability = save_availability(source)
     if availability.state is not SaveState.AVAILABLE:
         raise _RouteFailure(409, "save_unavailable", availability.state.value)
     registry = source.comparison_registry
     assert registry is not None
-    built, first = _build(binder, request, source, workspace_request)
+    built, first = _build(view, source, workspace_request)
     try:
         _, epoch, _, _ = _call(registry, LongitudinalComparisonRegistry, "identity")
     except LongitudinalComparisonRegistryError as exc:
@@ -1840,11 +1824,7 @@ def save(
         with _composite_fence(source).hold() as held:
             if held.read_heads(dependency_scope) != receipt.dependency_heads:
                 raise LongitudinalComparisonRegistryStale("published authority moved")
-            final = binder.reader_authorization_in_held_fence(
-                request,
-                cohort_registry_id=_cohort_registry_id(source),
-                measurement_scope=scope,
-            )
+            final = view.held_authorization(scope)
             _same_grant(first, final)
             response = PublicSaveReceipt(
                 saved_selector_id=receipt.selector_id,
@@ -1869,17 +1849,14 @@ def save(
 
 
 def saved_page(
-    binder: ReaderSessionBinder | None,
+    view: _AuthorizedView,
     request: BrowserRequest,
     source: LongitudinalExplorerSource,
     params: Mapping[str, Sequence[str]],
 ) -> dict[str, object]:
-    binder = _require_binder(binder)
-    # No authorized scope at all: the denial shell.  Some but not every
-    # configured scope: an empty page, no saved selector read.
-    if len(_authorized_scopes(binder, request, source)) != len(
-        source.measurement_scopes
-    ):
+    # No authorized scope at all: the denial shell (at view construction).
+    # Some but not every configured scope: an empty page, no saved read.
+    if view.granted != view.configured:
         return _public(
             LongitudinalSavedPage(
                 save=save_availability(source),
@@ -1887,7 +1864,7 @@ def saved_page(
                 records=(),
             )
         )
-    _all_scopes(binder, request, source)
+    view.saved_gate()
     if set(params) - {"after_selector_id", "after_version"}:
         _invalid()
     after_id = _single(params, "after_selector_id")
@@ -1931,7 +1908,7 @@ def saved_page(
             next_after_version=page.next_after_version,
         )
     )
-    _all_scopes(binder, request, source)
+    view.saved_gate()
     return payload
 
 
@@ -1996,13 +1973,12 @@ def _historical_commitments(
 
 
 def reopen(
-    binder: ReaderSessionBinder | None,
+    view: _AuthorizedView,
     request: BrowserRequest,
     source: LongitudinalExplorerSource,
     body: object,
 ) -> dict[str, object]:
-    binder = _require_binder(binder)
-    _all_scopes(binder, request, source)
+    view.saved_gate()
     if (
         not isinstance(body, dict)
         or set(body) != {"saved_selector_id", "comparison_version", "stage"}
@@ -2038,11 +2014,9 @@ def reopen(
         _registry_failure(failure)
     saved = registered.saved
     scope = saved.selection.measurement.scope
-    if scope not in source.measurement_scopes:
-        raise _Denied
-    # The saved object's own scope must be authorized before anything of it
-    # is presented or replayed.
-    with _Gate(binder, request, source, scope) as first:
+    # The saved object's own scope must be configured and granted before
+    # anything of it is presented or replayed.
+    with view.gate(scope) as first:
         selection = saved.selection
         page_sha256: str | None = None
         try:
@@ -2076,9 +2050,7 @@ def reopen(
         rebuild_error = LongitudinalErrorCode.AUTHORITY_STALE
     else:
         try:
-            rebuilt, _ = _build(
-                binder, request, source, _reopen_request(saved, page_sha256)
-            )
+            rebuilt, _ = _build(view, source, _reopen_request(saved, page_sha256))
         except _RouteFailure as exc:
             rebuild_error = LongitudinalErrorCode(exc.code)
     changes: list[CommitmentChange] = []
@@ -2141,24 +2113,28 @@ def reopen(
         comparison_state=state,
     )
     if stage == "diff":
-        response = LongitudinalReopenResponse(stage="diff", diff=diff)
+        response = LongitudinalReopenResponse(
+            stage="diff", diff=diff, save=save_availability(source)
+        )
     elif current:
         assert rebuilt is not None
         response = LongitudinalReopenResponse(
             stage="results",
             diff=diff,
+            save=save_availability(source),
             current_workspace=_PINNED_PROJECT(rebuilt),
         )
     else:
         response = LongitudinalReopenResponse(
             stage="results",
             diff=diff,
+            save=save_availability(source),
             historical_commitments=_historical_commitments(saved),
             refresh_action="start_new_comparison_at_current_authority",
         )
     payload = _public(response)
     if not current:
-        with _Gate(binder, request, source, scope) as final:
+        with view.gate(scope) as final:
             _same_grant(first, final)
         return payload
     # A current reopen is returned only if, under one final composite hold,
@@ -2174,11 +2150,7 @@ def reopen(
         with _composite_fence(source).hold() as held:
             if held.read_heads(dependency_scope) != saved.dependency_heads:
                 raise LongitudinalComparisonRegistryStale("authority moved")
-            final = binder.reader_authorization_in_held_fence(
-                request,
-                cohort_registry_id=_cohort_registry_id(source),
-                measurement_scope=scope,
-            )
+            final = view.held_authorization(scope)
             _same_grant(first, final)
     except (_Denied, ReaderAuthorizationDenied):
         raise _Denied from None
@@ -2231,9 +2203,13 @@ def handle_longitudinal_route(
     if handler is None:
         return 404, {"error": {"code": "TBX-WEB-404"}}
     try:
+        # Reader authorization first, for every route and before any input
+        # parsing: a session without a grant over a configured scope gets the
+        # same bounded shell whatever it sent.
+        view = _AuthorizedView(binder, request, source)
         if method == "GET":
-            return 200, handler(binder, request, source, params or {})
-        return 200, handler(binder, request, source, body)
+            return 200, handler(view, request, source, params or {})
+        return 200, handler(view, request, source, body)
     except BoundaryDenied:
         raise
     except (_Denied, ReaderAuthorizationDenied):

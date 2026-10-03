@@ -28,16 +28,20 @@ from tests.longitudinal_workspace_world import (
     selector_cohort_registry_id,
 )
 from tests.web.longitudinal_env import (
+    DENIED,
     PREFIX,
     STATIC,
     Env,
     _assert_denied,
     _assert_no_protected,
+    _bind,
     _cohort_query,
     _contrast,
     _controller_layout,
     _deny_everywhere,
     _http,
+    _journey_responses,
+    _journey_steps,
     _json,
     _layout,
     _lg_rules,
@@ -745,3 +749,128 @@ def test_controller_current_reopen_details_reresolve_source(
     assert source_fetch["body"]["request"] == results["current_workspace"]["request"]
     drawer = report["snapshots"][-1]
     assert drawer["drawerHidden"] is False and drawer["state"] == "partial"
+
+
+def test_every_route_refuses_a_granted_but_unconfigured_measurement(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """grant ⊋ configured: the extra granted scope is refused uniformly.
+
+    No saved-comparison registry is installed, so Save would otherwise answer
+    ``save_unavailable``; the scope gate must answer first (S1).
+    """
+
+    from evidence_inspector.reader_authorization_registry import MeasurementScope
+
+    monkeypatch.setattr(reader_module, "_PROCESS_PROFILE", {})
+    other = MeasurementScope(
+        family="fragment_measurement",
+        quantity_id="qty_fragment_other",
+        unit="unit_bp",
+    )
+    env = _make_env(tmp_path, with_registry=False, scopes=(other,))
+    try:
+        world = env.world
+        identity = world.reader.identity()
+        world.reader.add_grant(
+            synthetic_reader_grant(
+                registry_id=identity.registry_id,
+                registry_epoch_sha256=identity.registry_epoch_sha256,
+                grant_selector="reader_grant_" + "6" * 32,
+                cohort_registry_ids=(selector_cohort_registry_id(world.cohort),),
+                measurement_scopes=(world.extra["scope"], other),
+                issued_at=NOW - timedelta(hours=1),
+                expires_at=NOW + timedelta(days=1),
+            )
+        )
+        cookie, csrf = _bind(env.service, "reader_grant_" + "6" * 32)
+        # The configured scope is granted: the session is a reader.
+        status, content = env.get("selectors", cookie=cookie)
+        assert status == 200, content
+        assert _json(content)["measurement_scopes"] == [
+            json.loads(other.model_dump_json())
+        ]
+        request = env.request_json  # the world's (granted, unconfigured) scope
+        routes = [
+            ("GET", "selectors", _cohort_query(env)),
+            ("GET", "diff", _cohort_query(env)),
+            ("POST", "workspace", {"request": request}),
+            ("POST", "source", {"request": request, "row_ordinal": 1}),
+            ("POST", "save", {"request": request}),
+        ]
+        for method, route, value in routes:
+            if method == "GET":
+                result = env.get(route, value, cookie=cookie)
+            else:
+                result = env.post(route, value, cookie=cookie, csrf=csrf)
+            assert result == (
+                403,
+                (json.dumps(DENIED, separators=(",", ":")) + "\n").encode(),
+            ), route
+    finally:
+        env.close()
+
+
+@needs_node
+def test_controller_reopen_resets_the_journey_and_announces_drawer_errors(
+    fresh: Env, tmp_path: Path
+) -> None:
+    receipt = _json(_save(fresh)[1])
+    responses = _journey_responses(fresh)
+    responses["/api/v1/longitudinal/saved"] = [
+        {"status": 200, "payload": _json(fresh.get("saved")[1])}
+    ]
+    diff = _json(_reopen(fresh, receipt, "diff")[1])
+    results = _json(_reopen(fresh, receipt, "results")[1])
+    assert diff["diff"]["comparison_state"] == "current"
+    assert results["save"]["state"] == "available"
+    responses["/api/v1/longitudinal/reopen"] = [
+        {"status": 200, "payload": diff},
+        {"status": 200, "payload": results},
+    ]
+    responses["/api/v1/longitudinal/source"] = [
+        {
+            "status": 409,
+            "payload": {
+                "error": {"code": "read_conflict", "remediation": "retry_read"}
+            },
+        }
+    ]
+    steps = _journey_steps(fresh, 1440)
+    steps = steps[: next(i for i, s in enumerate(steps) if s["do"] == "width")]
+    steps += [
+        {"do": "clickText", "text": "Reopen version 1", "snapshot": "reopen-diff"},
+        {"do": "hide"},
+        {"do": "show", "snapshot": "returned"},
+        {"do": "submit", "snapshot": "submit-under-reopen"},
+        {"do": "clickText", "text": "Show reopened results", "snapshot": "reopened"},
+        {"do": "details", "index": 0, "snapshot": "drawer-error"},
+    ]
+    report = _run_harness(
+        tmp_path,
+        {
+            "controller": {
+                "layout": _controller_layout(),
+                "responses": responses,
+                "steps": steps,
+            }
+        },
+    )
+    snaps = {s["label"]: s for s in report["snapshots"]}
+    routes = [f["url"].split("?")[0] for f in report["fetches"]]
+    # C3: a diff-only reopen is never "success" while results are hidden.
+    assert snaps["reopen-diff"]["state"] == "partial"
+    assert snaps["reopen-diff"]["resultsHidden"] is True
+    # C1/C2: returning to the tab or submitting does not rebuild the earlier
+    # workspace under the reopen diff.
+    assert routes.count("/api/v1/longitudinal/workspace") == 1
+    assert snaps["submit-under-reopen"]["resultsHidden"] is True
+    assert snaps["submit-under-reopen"]["showResultsDisabled"] is True
+    # C5: the real Save availability for a current reopen.
+    assert snaps["reopened"]["saveDisabled"] is False
+    assert "Save is disabled" not in snaps["reopened"]["resultsText"]
+    # C4: a drawer failure is announced in the polite status region.
+    error = snaps["drawer-error"]
+    assert error["state"] == "error"
+    assert error["status"] == "Error: source details failed."
+    assert error["problem"].startswith("read_conflict:")

@@ -60,10 +60,14 @@ credentials, sequences).
 
 1. B01 Host/session (and for POST Origin/CSRF) checks run first and keep their
    own errors.
-2. Before any protected read, the route enters
-   `ReaderSessionBinder.reader_authorization` for the request's scope (or, when
-   the scope is not known yet or the input is malformed, for each configured
-   scope). A missing binding, missing/forged/revoked/expired/wrong-scope grant,
+2. Before any route runs or parses its input, `handle_longitudinal_route`
+   builds one `_AuthorizedView`: `configured` (the operator's scopes) and
+   `granted` (`configured` intersected with the session's own grant, each
+   checked through `ReaderSessionBinder.reader_authorization`); an empty
+   `granted` denies. Routes read authority only through `view.gate(scope)`
+   (deny unless the scope is in `granted`, then the live reader gate) and
+   `view.saved_gate()` (deny unless `granted == configured`); no route
+   derives scope itself. A missing binding, missing/forged/revoked/expired/wrong-scope grant,
    untrusted key, stale bound head, or an unavailable/replaced registry all
    answer exactly `403 {"error":{"code":"permission_denied"}}`: no counts,
    selectors or detail. Only the lock-free E06 identity binding (the cohort
@@ -249,3 +253,15 @@ screen-reader and 200% zoom audits remain E14 evidence.
   workspace (about 5 s on the synthetic world); there is no cache.
 - Browser-level evidence (real Chromium, screen reader, 200% zoom) is not
   produced here; the DOM harness checks the packaged script's behaviour only.
+- Follow-up (structural review): restructure the client to render from one
+  state object instead of mutating panels per step; the current code clears
+  every surface on denial, error and reopen, which is correct but fragile.
+- Follow-up (S2): `GET saved` lists rows whose saved scope is no longer
+  configured; only Reopen refuses them. Filtering needs a registry read that
+  maps a selector to its scope without opening the object.
+- Product decision needed: the saved commitments include
+  `reader_grant_sha256`, so a reopen under any other grant (another reader,
+  or a re-issued grant) reports `reader_grant_changed` and is stale. With
+  more than one reader a current reopen is practically unreachable; decide
+  whether the grant belongs in the commitments or only in the publication
+  record.

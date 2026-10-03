@@ -792,9 +792,18 @@
       ui.drawerClose.focus();
       if (!currentRequest) return;
       const result = await call("POST", "/api/v1/longitudinal/source", { request: currentRequest, row_ordinal: row.row_ordinal });
-      if (result.status === 200 && result.payload) renderDrawer(doc, ui, result.payload.row, result.payload);
-      else if (result.status === 403) deny();
-      else { hideResults(); setState("error"); showProblem(result.payload && result.payload.error ? result.payload.error.code : "storage_failure"); }
+      if (result.status === 200 && result.payload) {
+        renderDrawer(doc, ui, result.payload.row, result.payload);
+        ui.status.textContent = `Source details for row ${row.row_ordinal} re-resolved at current authority.`;
+      } else if (result.status === 403) {
+        deny();
+      } else {
+        const error = result.payload && result.payload.error ? result.payload.error : {};
+        hideResults();
+        setState("error");
+        ui.status.textContent = "Error: source details failed.";
+        showProblem(error.code || "storage_failure", error.remediation);
+      }
     };
     const closeDrawer = () => {
       ui.drawer.hidden = true;
@@ -824,7 +833,7 @@
       const request = buildRequest();
       if (!request || requestKey(request) !== diffShownFor) return;
       const payload = await runStage("workspace build", () => call("POST", "/api/v1/longitudinal/workspace", { request }));
-      if (!payload) return;
+      if (!payload || requestKey(request) !== diffShownFor) return;
       currentRequest = request;
       lastView = { kind: "workspace" };
       ui.receipt.replaceChildren();
@@ -872,6 +881,12 @@
     const reopen = async (record) => {
       retryStep = () => reopen(record);
       hideResults();
+      // A reopen replaces the fresh journey: no visibility refresh, Show
+      // results or Save may act on the earlier workspace under this diff.
+      currentRequest = null;
+      lastView = null;
+      diffShownFor = null;
+      ui.showResults.disabled = true;
       const body = { saved_selector_id: record.saved_selector_id, comparison_version: record.comparison_version, stage: "diff" };
       const payload = await runStage("reopen diff", () => call("POST", "/api/v1/longitudinal/reopen", body));
       if (!payload) return;
@@ -880,11 +895,12 @@
       const confirm = el(doc, "button", "Show reopened results", { type: "button" });
       confirm.addEventListener("click", () => showReopenResults(record, body));
       ui.diffBody.append(confirm);
-      setState("stale");
+      // Diff only, results hidden: "stale" for a stale comparison, otherwise
+      // "partial" (never "success" before any result is shown).
+      setState(payload.diff.comparison_state === "current" ? "partial" : "stale");
       ui.status.textContent = payload.diff.comparison_state === "current"
         ? "Diff shown: the saved comparison replays at current authority. Confirm to show results."
         : "Diff shown: the saved comparison is stale. Confirm to inspect it without current comparisons.";
-      if (payload.diff.comparison_state === "current") setState("success");
     };
 
     const showReopenResults = async (record, body) => {
@@ -898,7 +914,7 @@
       if (results.current_workspace) {
         // The exact rebuilt request, so Details re-resolves source detail.
         currentRequest = results.current_workspace.request;
-        presentWorkspace({ workspace: results.current_workspace, save: { state: "registry_absent" } }, "current: saved comparison replays exactly");
+        presentWorkspace({ workspace: results.current_workspace, save: results.save }, "current: saved comparison replays exactly");
         return;
       }
       ui.results.hidden = false;
