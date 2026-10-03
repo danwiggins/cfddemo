@@ -8,7 +8,6 @@ evidence.  Run it with ``python -m tests.executor.conformance``.
 from __future__ import annotations
 
 import argparse
-import json
 import platform
 import shutil
 import subprocess

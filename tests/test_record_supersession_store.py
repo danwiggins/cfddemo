@@ -1352,7 +1352,9 @@ def test_action_approval_requires_full_trust_and_evaluation_window(
                 )
             }
         )
-        operation = lambda: ledger.commit_record(candidate)
+
+        def operation():
+            return ledger.commit_record(candidate)
     else:
         ledger.commit_record(second)
         comparison = _comparison(first, second, ledger.active_snapshot())
@@ -1365,7 +1367,10 @@ def test_action_approval_requires_full_trust_and_evaluation_window(
                 )
             }
         )
-        operation = lambda: ledger.register_comparison(comparison)
+
+        def operation():
+            return ledger.register_comparison(comparison)
+
     if advance_to is not None:
         linkage._time_source.advance_to(advance_to)
     with pytest.raises(RecordSupersessionConflict, match="authority is invalid"):

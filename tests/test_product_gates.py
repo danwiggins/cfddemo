@@ -13,6 +13,14 @@ from cryptography.hazmat.primitives import serialization
 from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
 from pydantic import ValidationError
 
+from scripts.regenerate_product_gate_fixture import (
+    CAPTURED_AT,
+    REPO_ROOT,
+    REPORT_FIXTURE,
+    RUN_ID,
+    run_live_report,
+    structural_projection,
+)
 from traceback_runner.product_gates import (
     CATALOG_RECORDS,
     FILTER_P95_TARGET_US,
@@ -38,7 +46,6 @@ from traceback_runner.product_gates import (
     deny_external_network,
     derive_release_gate,
     load_screenshot_manifest,
-    run_foundation_gates,
 )
 from traceback_runner.serialization import canonical_json_bytes, sha256_bytes
 from traceback_runner.signing import (
@@ -57,11 +64,60 @@ FIXTURE = Path("tests/fixtures/product_gates/screenshot_manifest.json")
 
 @pytest.fixture(scope="module")
 def report() -> ProductGateReport:
-    return run_foundation_gates(
-        screenshot_manifest_path=FIXTURE,
-        run_id="gate_run_20260929",
-        captured_at=datetime(2026, 9, 29, tzinfo=UTC),
+    # Frozen output of the live harness; regenerate with
+    # scripts/regenerate_product_gate_fixture.py, never by hand. The slow test
+    # below checks that the live harness still matches it.
+    return ProductGateReport.model_validate_json(
+        (REPO_ROOT / REPORT_FIXTURE).read_bytes()
     )
+
+
+def test_fixture_projection_masks_only_volatile_values(
+    report: ProductGateReport,
+) -> None:
+    baseline = structural_projection(report)
+    volatile = report.model_copy(
+        update={
+            "host_run": report.host_run.model_copy(
+                update={"operating_system": "Linux", "machine": "x86_64"}
+            ),
+            "filter_performance": report.filter_performance.model_copy(
+                update={"p95_us": report.filter_performance.p95_us + 1}
+            ),
+            "stress_memory": report.stress_memory.model_copy(
+                update={"peak_bytes": report.stress_memory.peak_bytes + 1}
+            ),
+            "privacy_sentinel_evidence": report.privacy_sentinel_evidence.model_copy(
+                update={"output_payload_sha256": "0" * 64}
+            ),
+        }
+    )
+    assert structural_projection(volatile) == baseline
+    stable_drifts = (
+        {"screenshot_manifest_sha256": "0" * 64},
+        {
+            "local_service_evidence": report.local_service_evidence.model_copy(
+                update={"packaged_assets_sha256": "0" * 64}
+            )
+        },
+        {
+            "stress_memory": report.stress_memory.model_copy(
+                update={"record_count": report.stress_memory.record_count + 1}
+            )
+        },
+    )
+    for update in stable_drifts:
+        assert structural_projection(report.model_copy(update=update)) != baseline
+
+
+@pytest.mark.slow
+def test_live_harness_structure_matches_frozen_fixture(
+    report: ProductGateReport,
+) -> None:
+    live = run_live_report()
+    assert live.host_run.run_id == RUN_ID
+    assert live.host_run.captured_at == CAPTURED_AT
+    assert structural_projection(live) == structural_projection(report)
 
 
 def test_harness_records_10k_stress_memory_and_exact_host_run(

@@ -27,7 +27,6 @@ from evidence_inspector.method_registry import (
 )
 from evidence_inspector.provenance_drawer import (
     BoundAssetEvidence,
-    ComparisonFieldKey,
     CountEvidence,
     CountRole,
     DenominatorEvidence,

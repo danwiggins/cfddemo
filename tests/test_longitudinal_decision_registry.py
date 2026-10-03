@@ -13,7 +13,6 @@ import pytest
 import evidence_inspector.longitudinal_decision_registry as registry_module
 from evidence_inspector.longitudinal_compatibility import (
     LongitudinalOutcome,
-    LongitudinalSeriesDecision,
     decide_longitudinal_series,
     longitudinal_anchor_policy_sha256,
 )
