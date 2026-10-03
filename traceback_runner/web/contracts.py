@@ -20,7 +20,65 @@ _SAFE_OPERATOR_TEXT = re.compile(r"^[A-Za-z0-9][A-Za-z0-9 .,'()%;:!?+_-]*$")
 _IUPAC_SEQUENCE = re.compile(r"^[ACGTURYSWKMBDHVN]{24,}$", re.IGNORECASE)
 _SHA256_TEXT = re.compile(r"^[0-9a-f]{64}$")
 _MD5_TEXT = re.compile(r"^[0-9a-f]{32}$")
-_DIGEST_FIELDS = ("sha256", "sha256s", "md5", "md5s")
+# ``sha256_value`` is the typed digest slot of an E13 portable table cell.
+_DIGEST_FIELDS = ("sha256", "sha256s", "sha256_value", "md5", "md5s")
+# Words that, followed by ``id``/``identifier``, name a private identifier in
+# public text.  ``source`` stays here for values (H5); see _IDENTIFIER_KEY.
+_IDENTIFIER_WORDS = (
+    "source|donor|patient|sample|read|query|path"
+    "|subject|specimen|collection|run|provider|flowcell"
+)
+_IDENTIFIER_TEXT = re.compile(
+    rf"\b(?:{_IDENTIFIER_WORDS})[ _-]*(?:id|identifier)\b", re.IGNORECASE
+)
+_MRN_TEXT = re.compile(r"(?i)\bmrn[\s:#-]*\d{5,}\b")
+_DATE_OF_BIRTH_TEXT = re.compile(
+    r"(?i)\b(?:dob|birth\s*date|date\s*of\s*birth|born)\b\W{0,3}\d{4}-\d{2}-\d{2}"
+)
+
+# --- public dict keys (H5) ------------------------------------------------------
+# One key grammar for every public projection (B01/E14 explorer and the E12
+# longitudinal routes).  Keys are checked by grammar and name, never by the
+# value-text regex: a value rule over keys would reject the public, opaque
+# ``source_id`` of the E13 portable view.
+PUBLIC_KEY = re.compile(r"^[a-z0-9_]{1,64}$")
+# Field names of protected identifier and session material.  None may appear in
+# any public response at any depth: defence in depth beside closed schemas.
+PROTECTED_PUBLIC_KEYS = frozenset(
+    {
+        "protected_rows",
+        "protected_only",
+        "reader_authorization",
+        "member",
+        "member_sha256",
+        "member_result_id",
+        "linkage_id",
+        "subject_token",
+        "collection_token",
+        "specimen_token",
+        "analysis_record_id",
+        "run_token",
+        "provider_namespace",
+        "time_coordinate",
+        "time_coordinate_sha256",
+        "biological_timepoint_id",
+        "grant_sha256",
+        "reader_grant_sha256",
+        "credential",
+        "session_token",
+        "csrf_token",
+    }
+)
+# A key segment naming a private identifier, token, MRN, or date of birth.
+# ``source`` is deliberately absent: ``source_id`` is the portable view's
+# controlled opaque token, and its value still passes validate_public_text.
+_IDENTIFIER_KEY = re.compile(
+    r"(?:^|_)(?:"
+    r"(?:donor|patient|sample|read|query|path|subject|specimen|collection|run"
+    r"|provider|flowcell)_?(?:id|ids|identifier|identifiers|token|tokens)"
+    r"|mrn|dob|birth_?date|date_of_birth"
+    r")(?:_|$)"
+)
 
 
 def _canonicalize_path_separators(value: str) -> str:
@@ -70,10 +128,10 @@ def validate_public_text(value: str) -> str:
         or any(root in lowered for root in ("/users/", "/home/", "/volumes/"))
     ):
         raise ValueError("public text cannot contain a path")
-    if re.search(
-        r"\b(?:source|donor|patient|sample|read|query|path)[ _-]*(?:id|identifier)\b",
-        decoded,
-        flags=re.IGNORECASE,
+    if (
+        _IDENTIFIER_TEXT.search(decoded)
+        or _MRN_TEXT.search(decoded)
+        or _DATE_OF_BIRTH_TEXT.search(decoded)
     ):
         raise ValueError("public text cannot contain a private identifier")
     if re.search(
@@ -88,12 +146,30 @@ def validate_public_text(value: str) -> str:
     return value
 
 
+def validate_public_key(
+    name: object, *, protected: frozenset[str] = PROTECTED_PUBLIC_KEYS
+) -> str:
+    """Accept a dict key only if it is a controlled, non-identifier name."""
+
+    if type(name) is not str or not PUBLIC_KEY.fullmatch(name):
+        raise ValueError("public key is not a controlled name")
+    if name in protected:
+        raise ValueError("protected field reached the public boundary")
+    if _IDENTIFIER_KEY.search(name):
+        raise ValueError("public key names a private identifier")
+    return name
+
+
 def validate_public_projection(value: Any, *, field_name: str = "") -> None:
-    """Recursively enforce the public-text boundary, except typed digests."""
+    """Recursively enforce the public-text boundary, except typed digests.
+
+    Every dict key must pass validate_public_key; every string value passes
+    validate_public_text unless it is a typed digest under a digest field.
+    """
 
     if isinstance(value, Mapping):
         for key, nested in value.items():
-            validate_public_projection(nested, field_name=str(key))
+            validate_public_projection(nested, field_name=validate_public_key(key))
     elif isinstance(value, Sequence) and not isinstance(value, (str, bytes, bytearray)):
         for nested in value:
             validate_public_projection(nested, field_name=field_name)

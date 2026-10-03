@@ -140,7 +140,11 @@ from evidence_inspector.result_trust_registry import ResultTrustRegistry
 from evidence_inspector.result_view_source_registry import ResultViewSourceRegistry
 
 from .auth import BoundaryDenied, BrowserRequest
-from .contracts import validate_public_text
+from .contracts import (
+    PROTECTED_PUBLIC_KEYS,
+    validate_public_key,
+    validate_public_text,
+)
 from .reader_session import ReaderSessionBinder
 
 ROUTE_PREFIX = "/api/v1/longitudinal/"
@@ -151,41 +155,22 @@ SELECTOR_PAGE_LIMIT = 50
 SAVED_PAGE_LIMIT = 20
 _PERMISSION_DENIED = {"error": {"code": "permission_denied"}}
 _HEX64 = re.compile(r"^[0-9a-f]{64}$")
-_KEY = re.compile(r"^[a-z0-9_]{1,64}$")
 _COHORT_SELECTOR = re.compile(r"^cohort_selector_[0-9a-f]{40}$")
 _ANCHOR_POLICY_SELECTOR = re.compile(r"^anchor_policy_[0-9a-f]{40}$")
 _SAVED_SELECTOR = re.compile(r"^saved_comparison_[0-9a-f]{40}$")
 _IDENTIFIER = re.compile(r"^[a-z0-9_]{1,96}$")
 # Field names of protected D08/registry models.  None may appear in a public
-# response at any depth: defence in depth beside the closed public schemas.
-_PROTECTED_KEYS = frozenset(
+# response at any depth: defence in depth beside the closed public schemas.  The
+# shared identifier/session names and the key grammar live in web/contracts.py;
+# these are the E12-only additions (E04 ``result_id``/``bundle_id`` are public in
+# the explorer, so they are protected here only).
+_PROTECTED_KEYS = PROTECTED_PUBLIC_KEYS | frozenset(
     {
-        "protected_rows",
-        "protected_only",
-        "reader_authorization",
         "dependency_heads",
         "live_dependency_heads",
-        "member",
-        "member_sha256",
-        "member_result_id",
-        "linkage_id",
-        "subject_token",
-        "collection_token",
-        "specimen_token",
-        "analysis_record_id",
-        "run_token",
-        "provider_namespace",
-        "time_coordinate",
-        "time_coordinate_sha256",
-        "biological_timepoint_id",
         "committed_receipt_sha256",
-        "grant_sha256",
-        "reader_grant_sha256",
         "state_head_sha256_binding",
         "saved_object_json",
-        "credential",
-        "session_token",
-        "csrf_token",
         "result_id",
         "bundle_id",
     }
@@ -755,11 +740,9 @@ def validate_longitudinal_public(value: object, *, key: str = "") -> None:
 
     if isinstance(value, Mapping):
         for name, nested in value.items():
-            if type(name) is not str or not _KEY.fullmatch(name):
-                raise ValueError("public key is not a controlled name")
-            if name in _PROTECTED_KEYS:
-                raise ValueError("protected field reached the public boundary")
-            validate_longitudinal_public(nested, key=name)
+            validate_longitudinal_public(
+                nested, key=validate_public_key(name, protected=_PROTECTED_KEYS)
+            )
     elif isinstance(value, (list, tuple)):
         for nested in value:
             validate_longitudinal_public(nested, key=key)
