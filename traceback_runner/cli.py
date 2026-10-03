@@ -23,7 +23,7 @@ import uuid
 from collections.abc import Callable, Iterator, Sequence
 from contextlib import contextmanager, nullcontext
 from datetime import UTC, datetime
-from enum import IntEnum
+from enum import IntEnum, StrEnum
 from pathlib import Path
 from typing import Any
 
@@ -82,6 +82,12 @@ def _assembly_argument(value: str) -> str:
             "assembly name must match ^[A-Za-z0-9][A-Za-z0-9_.:-]{0,127}$"
         )
     return value
+
+
+def _trust_registry_identity_arguments(parser: argparse.ArgumentParser) -> None:
+    parser.add_argument("--trust-registry-id")
+    parser.add_argument("--trust-registry-epoch")
+    parser.add_argument("--trust-registry-head")
 
 
 def _parser() -> argparse.ArgumentParser:
@@ -160,6 +166,14 @@ def _parser() -> argparse.ArgumentParser:
         command.add_argument("job_id")
         _root_argument(command)
         command.add_argument("--json", action="store_true", dest="as_json")
+        if name == "status":
+            command.add_argument(
+                "--trust-registry",
+                type=Path,
+                help="protected result-trust registry root: check the record "
+                "against its current trust (needs the retained ID, epoch, head)",
+            )
+            _trust_registry_identity_arguments(command)
 
     inspect = commands.add_parser("inspect", help="inspect an unverified local bundle")
     inspect.add_argument("bundle", type=Path)
@@ -182,9 +196,7 @@ def _parser() -> argparse.ArgumentParser:
         type=Path,
         help="protected result-trust registry root (needs the retained ID, epoch, head)",
     )
-    verify.add_argument("--trust-registry-id")
-    verify.add_argument("--trust-registry-epoch")
-    verify.add_argument("--trust-registry-head")
+    _trust_registry_identity_arguments(verify)
     verify.add_argument("--json", action="store_true", dest="as_json")
 
     assets = commands.add_parser("assets", help="manage offline synthetic assets")
@@ -1686,36 +1698,147 @@ def _existing_runner(
     )
 
 
-def _record_is_verified(root: Path, runner: Any, job_id: str) -> bool:
+class TrustState(StrEnum):
+    """What ``traceback status`` can truthfully say about a record's signature."""
+
+    VERIFIED = "verified"
+    NOT_VERIFIED = "not_verified"
+    UNKNOWN = "unknown"
+
+
+class TrustSource(StrEnum):
+    """Which trust ``traceback status`` used (H2-status-min).
+
+    ``trust_registry`` is live: a registry revocation reaches it.
+    ``development_file`` is the fixed ``ROOT/trust`` document, which a registry
+    revocation never reaches.  ``none``: no trust was available, so the state is
+    ``unknown``.  ``no_record``: the job has no complete signed record.
+    """
+
+    TRUST_REGISTRY = "trust_registry"
+    TRUST_REGISTRY_ERROR = "trust_registry_error"
+    DEVELOPMENT_FILE = "development_file"
+    DEVELOPMENT_FILE_ERROR = "development_file_error"
+    NONE = "none"
+    NO_RECORD = "no_record"
+
+
+_STATUS_TRUST_HINTS = {
+    TrustSource.TRUST_REGISTRY: "Checked against the current result-trust registry",
+    TrustSource.TRUST_REGISTRY_ERROR: (
+        "The result-trust registry did not open at the retained ID, epoch and "
+        "head; pass its current head, or run traceback doctor"
+    ),
+    TrustSource.DEVELOPMENT_FILE: (
+        "Checked against the fixed development trust file, which registry "
+        "revocations do not reach; pass --trust-registry for current trust"
+    ),
+    TrustSource.DEVELOPMENT_FILE_ERROR: (
+        "The development trust file under ROOT could not be read; run traceback doctor"
+    ),
+    TrustSource.NONE: (
+        "No trust is available under ROOT; pass --trust-registry with its retained "
+        "ID, epoch and head"
+    ),
+    TrustSource.NO_RECORD: "The job has no complete signed record to check",
+}
+
+
+def _registry_record_trust(args: argparse.Namespace, bundle: Path) -> TrustState:
+    """Check ``bundle`` under the registry's read fence.
+
+    Raises when the registry cannot be opened or read; a bundle that fails
+    verification against the current trust is ``not_verified``.
+    """
+
+    from evidence_inspector.result_trust_registry import ResultTrustRegistry
+
+    from .bundles import verify_bundle
+    from .signing import development_trust_document_bytes, load_development_trust
+
+    root = args.trust_registry
+    if root.is_symlink() or not root.is_dir():
+        # Never let a read-only command create a registry root.
+        raise FileNotFoundError("result trust registry is absent")
+    with ResultTrustRegistry(
+        root,
+        expected_registry_id=args.trust_registry_id,
+        expected_registry_epoch_sha256=args.trust_registry_epoch,
+        expected_state_head_sha256=args.trust_registry_head,
+    ) as registry:
+        # Hold the read fence through verification so the answer is
+        # consistent with the head the registry was opened at.
+        with registry.read_fence() as snapshot:
+            trust = load_development_trust(
+                development_trust_document_bytes(snapshot.document)
+            )
+            try:
+                verify_bundle(bundle, trust)
+            except Exception:
+                state = TrustState.NOT_VERIFIED
+            else:
+                state = TrustState.VERIFIED
+    return state
+
+
+def _record_trust(
+    args: argparse.Namespace, runner: Any, job_id: str
+) -> tuple[TrustState, TrustSource]:
+    """Report a complete record's signature state and the trust it used.
+
+    Never raises: ``status`` reports state and does not gate it (taste T6).
+    """
+
     from .bundles import verify_bundle
     from .signing import load_development_trust
 
     try:
-        trust = load_development_trust((root / _TRUST_RELATIVE).read_bytes())
-        verify_bundle(_signed_bundle_from_outputs(runner, job_id), trust)
+        bundle = _signed_bundle_from_outputs(runner, job_id)
     except Exception:
-        return False
-    return True
+        return TrustState.NOT_VERIFIED, TrustSource.NO_RECORD
+    if args.trust_registry is not None:
+        try:
+            return _registry_record_trust(args, bundle), TrustSource.TRUST_REGISTRY
+        except Exception:
+            return TrustState.NOT_VERIFIED, TrustSource.TRUST_REGISTRY_ERROR
+    trust_path = args.root / _TRUST_RELATIVE
+    if not (trust_path.exists() or trust_path.is_symlink()):
+        return TrustState.UNKNOWN, TrustSource.NONE
+    try:
+        trust = load_development_trust(trust_path.read_bytes())
+    except Exception:
+        return TrustState.NOT_VERIFIED, TrustSource.DEVELOPMENT_FILE_ERROR
+    try:
+        verify_bundle(bundle, trust)
+    except Exception:
+        return TrustState.NOT_VERIFIED, TrustSource.DEVELOPMENT_FILE
+    return TrustState.VERIFIED, TrustSource.DEVELOPMENT_FILE
 
 
 def _status(args: argparse.Namespace) -> tuple[ExitCode, dict[str, Any]]:
     runner = _existing_runner(args.root)
     record = runner.status(args.job_id)
-    verified = record.state == JobState.COMPLETE and _record_is_verified(
-        args.root, runner, record.job_id
-    )
+    if record.state == JobState.COMPLETE:
+        trust_state, trust_source = _record_trust(args, runner, record.job_id)
+    else:
+        trust_state, trust_source = TrustState.NOT_VERIFIED, TrustSource.NO_RECORD
     view = build_job_view(
         job_id=record.job_id,
         state=record.state,
         observed_at=datetime.now(UTC),
-        signature_verified=verified,
+        signature_verified=trust_state == TrustState.VERIFIED,
         local_unqualified=_is_local_request(runner.store.request(record.job_id)),
     )
     return ExitCode.OK, _result(
         "status",
         "ok",
         view.headline,
-        data={"operator_state": view.model_dump(mode="json")},
+        data={
+            "operator_state": view.model_dump(mode="json"),
+            "trust_state": trust_state.value,
+            "trust_source": trust_source.value,
+            "trust_hint": _STATUS_TRUST_HINTS[trust_source],
+        },
     )
 
 
@@ -2402,7 +2525,7 @@ def _dispatch(
 def _require_trust_registry_identity(
     parser: argparse.ArgumentParser, args: argparse.Namespace
 ) -> None:
-    if args.command != "verify":
+    if args.command not in {"verify", "status"}:
         return
     identity = (
         args.trust_registry_id,

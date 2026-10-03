@@ -38,6 +38,9 @@ traceback demo [--root ROOT] [--json]
 traceback preflight INPUT [--root ROOT] [--json]
 traceback run INPUT [--json]
 traceback status JOB_ID [--root ROOT] [--json]
+traceback status JOB_ID [--root ROOT] --trust-registry REGISTRY_ROOT \
+  --trust-registry-id ID --trust-registry-epoch EPOCH \
+  --trust-registry-head HEAD [--json]
 traceback logs JOB_ID [--root ROOT] [--json]
 traceback pause JOB_ID [--root ROOT] [--json]
 traceback resume JOB_ID [--root ROOT] [--json]
@@ -64,6 +67,18 @@ independently retained registry ID, epoch, and current head, refuses an older
 head, and never creates a registry. A key revoked in the registry fails
 verification. `assets` commands verify release signatures and take
 `--trust-store` only; the result-trust registry holds result keys only.
+
+`status` reports `trust_state` (`verified`, `not_verified` or `unknown`) and
+the `trust_source` it used, and always exits 0 for a known job:
+
+| `trust_source` | Meaning |
+|---|---|
+| `trust_registry` | Checked against the registry's current trust (with the same pins as `verify`). A registry revocation reaches it. |
+| `trust_registry_error` | The registry did not open at the given ID, epoch and head (an older head is refused). State is `not_verified`. |
+| `development_file` | Checked against the fixed `ROOT/trust/development-result-trust.json`. Registry revocations do not reach this file. |
+| `development_file_error` | That file exists but could not be read. State is `not_verified`. |
+| `none` | No trust is available under ROOT and no registry was given. State is `unknown`. |
+| `no_record` | The job has no complete signed record yet. State is `not_verified`. |
 
 `preflight` is technical inspection only. A passing report does not approve
 real-data execution. `run` rejects real-data execution in this wave rather than
