@@ -26,11 +26,20 @@ def _plenty_of_disk_and_samtools(monkeypatch: pytest.MonkeyPatch) -> None:
         shutil, "disk_usage", lambda path: _Usage(10**13, 0, 500 * 1024**3)
     )
     monkeypatch.setattr(shutil, "which", lambda name: f"/opt/bin/{name}")
-    monkeypatch.setattr(
-        subprocess,
-        "run",
-        lambda *a, **k: subprocess.CompletedProcess(a[0], 0, "samtools 1.21\nUsing htslib 1.21\n", ""),
-    )
+    monkeypatch.setattr(subprocess, "run", _fake_samtools_only)
+
+
+def _fake_samtools_only(*args, **kwargs):
+    """Answer `samtools --version` only; every other command really runs.
+
+    A blanket fake also swallowed the preflight index rebuild, which runs in a
+    child interpreter, so `demo` saw no rebuilt index and blocked.
+    """
+
+    command = args[0] if args else kwargs["args"]
+    if os.path.basename(str(command[0])) == "samtools":
+        return subprocess.CompletedProcess(command, 0, "samtools 1.21\nUsing htslib 1.21\n", "")
+    return _REAL_RUN(*args, **kwargs)
 
 
 def _doctor(capsys, root: Path, *extra: str) -> tuple[int, dict]:
