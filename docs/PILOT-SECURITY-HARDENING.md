@@ -3,6 +3,8 @@
 
 Status: spec, 2026-10-02. Source: a structural security, privacy and trust review of `main` at `eaac96a`, verified against the code on `d3739ca`.
 
+Update 2026-10-03: two audit facts below are now out of date. CI exists (`.github/workflows/ci.yml`, #91). The browser branch `epic-e/e12-browser-integration` was committed and merged as #93 (`bc237e0`). Still true: no production composition root wires an explorer; `traceback reader launch` starts the service with `explorer=None`. The audit text is kept as written on 2026-10-02.
+
 ## Context
 
 Traceback's current threat model has three premises. In-process code mutation is out of scope. Races by the same OS user on the filesystem are out of scope. The process/user boundary is the trust boundary. That is correct for a developer's own machine with synthetic data.
@@ -356,10 +358,10 @@ So this spec hardens a deployment that doesn't exist yet, on code that the archi
 
 ### Pre-review system audit
 
-- **Repo age and pace.** First commit 2026-09-26; 477 commits in 7 days (153 on 2026-09-29). No `.github/workflows`, so no CI.
+- **Repo age and pace.** First commit 2026-09-26; 477 commits in 7 days (153 on 2026-09-29). No `.github/workflows`, so no CI (as of 2026-10-02; CI landed in #91).
 - **The branch diff vs. local `main`** shows D10 files as well, because local `main` is behind `origin`. This branch's only own change is this spec.
 - **TODOS.md (16 lines)** already defers "additional operating systems … after the paid provider pilot", which is consistent with P3. It has no security items.
-- **The in-flight browser work** is uncommitted in worktree `agent-a2f921bc99d6aee7a` (branch `epic-e/e12-browser-integration`, still at `eaac96a`). Diff: +323 lines across `server.py`, `reader_session.py`, `explorer.py`, `app.js` and `index.html`, plus new files `web/longitudinal.py` (2185 lines) and `static/longitudinal.js`.
+- **The in-flight browser work** was uncommitted at review time in worktree `agent-a2f921bc99d6aee7a` (branch `epic-e/e12-browser-integration`, then at `eaac96a`; merged since as #93). Diff: +323 lines across `server.py`, `reader_session.py`, `explorer.py`, `app.js` and `index.html`, plus new files `web/longitudinal.py` (2185 lines) and `static/longitudinal.js`.
   - It adds 3 GET and 4 POST longitudinal routes.
   - It adds `ReaderSessionBinder.session_credential`, which builds the D08 `ReaderGrantBinding` from **server-side session state**. That already covers the realistic part of H7.
 - **Design doc:** none for this branch. The office-hours prerequisite was skipped (P6).
@@ -753,6 +755,7 @@ There are 2 critical gaps, and both exist **today**. Both are fixed by H6-min, w
   +====================================================================+
   | Mode selected        | SELECTIVE EXPANSION (autoplan override)     |
   | System Audit         | 7-day repo, no CI, browser work uncommitted;|
+  |                      | (both as of 2026-10-02; #91, #93 since)     |
   |                      | headline gap unreachable in production      |
   | Step 0               | Approach B recommended (needs UC1-UC4)      |
   | Section 1  (Arch)    | 4 issues found                              |

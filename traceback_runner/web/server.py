@@ -14,6 +14,7 @@ import secrets
 import socket
 import stat
 import threading
+import time
 from collections.abc import Callable
 from contextlib import ExitStack
 from dataclasses import dataclass
@@ -67,6 +68,10 @@ REQUEST_TIMEOUT_SECONDS = 2
 STATE_DIRECTORY_MODE = 0o700
 STATE_FILE_MODE = 0o600
 _STABLE_LOCK_ROOT = Path("/tmp").resolve(strict=True)
+# The stable lock root's own flock only serializes anchor create/validate
+# against anchor unlink; it is never held for a server's lifetime.
+_STARTUP_PARENT_LOCK_TIMEOUT_SECONDS = 5.0
+_STARTUP_PARENT_LOCK_RETRY_SECONDS = 0.05
 _JOB_ROUTE = re.compile(r"^/api/v1/jobs/(job_[0-9a-f]{32})$")
 _EXPLORER_RESULT_ROUTE = re.compile(r"^/api/v1/explorer/results/(result_[0-9a-f]{40})$")
 _EXPLORER_COMPARE_ROUTE = "/api/v1/explorer/compare"
@@ -185,7 +190,43 @@ def _require_startup_anchor(anchor: _StartupAnchor) -> None:
         raise LocalWebServerError("local web state parent identity changed")
 
 
+def _lock_startup_parent(parent_fd: int) -> bool:
+    """Briefly take the stable lock root's flock; ``False`` on timeout.
+
+    The flock on the shared root only orders one start's anchor
+    create/lock/validate against another's anchor unlink.  It is released as
+    soon as that step ends, so services on different state directories never
+    wait on each other for longer than one such step.  Single-instance
+    ownership is the per-anchor flock plus the state-directory lease, both held
+    for the server's lifetime.
+    """
+
+    deadline = time.monotonic() + _STARTUP_PARENT_LOCK_TIMEOUT_SECONDS
+    while True:
+        try:
+            fcntl.flock(parent_fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            return True
+        except OSError as exc:
+            if exc.errno not in {errno.EACCES, errno.EAGAIN}:
+                raise
+        if time.monotonic() >= deadline:
+            return False
+        time.sleep(_STARTUP_PARENT_LOCK_RETRY_SECONDS)
+
+
 def _open_startup_anchor(state_directory: Path) -> _StartupAnchor:
+    """Create, lock and validate the per-state-directory startup anchor.
+
+    The anchor name is keyed to the absolute state path and the effective
+    user, so exactly one service may hold a given state path at a time even if
+    its parent or the state directory itself is renamed and recreated.  The
+    anchor's own flock is held for the server's lifetime; the stable lock
+    root's flock is held only while the anchor is created, locked and
+    re-checked against its name, so unrelated state directories start
+    concurrently.  Only a failure on the anchor's own flock means another
+    service owns this state directory.
+    """
+
     parent_path = _STABLE_LOCK_ROOT
     parent_fd: int | None = None
     state_parent_fd: int | None = None
@@ -212,7 +253,8 @@ def _open_startup_anchor(state_directory: Path) -> _StartupAnchor:
             parent_metadata.st_ino,
         ):
             raise LocalWebServerError("local web startup parent changed during open")
-        fcntl.flock(parent_fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        if not _lock_startup_parent(parent_fd):
+            raise LocalWebServerError("local web startup lock is busy")
         parent_locked = True
         name_digest = hashlib.sha256(os.fsencode(state_directory)).hexdigest()
         anchor_name = f".traceback-web-{os.geteuid()}-{name_digest[:32]}.lock"
@@ -230,8 +272,25 @@ def _open_startup_anchor(state_directory: Path) -> _StartupAnchor:
         ):
             raise LocalWebServerError("local web startup anchor is not private")
         os.fchmod(descriptor, STATE_FILE_MODE)
-        fcntl.flock(descriptor, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        try:
+            fcntl.flock(descriptor, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except OSError as exc:
+            if exc.errno in {errno.EACCES, errno.EAGAIN}:
+                raise LocalWebServerError(
+                    "local web service is already running"
+                ) from exc
+            raise
         anchor_locked = True
+        # Under the root's flock no close can unlink this name, so the locked
+        # descriptor must still be the named anchor before the root is released.
+        named_anchor = os.stat(anchor_name, dir_fd=parent_fd, follow_symlinks=False)
+        if (named_anchor.st_dev, named_anchor.st_ino) != (
+            anchor_metadata.st_dev,
+            anchor_metadata.st_ino,
+        ):
+            raise LocalWebServerError("local web startup anchor identity changed")
+        fcntl.flock(parent_fd, fcntl.LOCK_UN)
+        parent_locked = False
         state_parent_path = state_directory.parent
         state_parent_path.mkdir(mode=STATE_DIRECTORY_MODE, parents=True, exist_ok=True)
         state_parent_metadata = state_parent_path.lstat()
@@ -278,26 +337,36 @@ def _open_startup_anchor(state_directory: Path) -> _StartupAnchor:
             os.close(parent_fd)
         if isinstance(exc, LocalWebServerError):
             raise
-        if isinstance(exc, OSError) and exc.errno in {errno.EACCES, errno.EAGAIN}:
-            raise LocalWebServerError("local web service is already running") from exc
         raise LocalWebServerError("local web startup anchor is unavailable") from exc
 
 
 def _close_startup_anchor(anchor: _StartupAnchor) -> None:
+    """Unlink the anchor if it is still ours, then release and close it.
+
+    The unlink happens under the stable lock root's flock and before the
+    anchor's own flock is released, so no concurrent start can lock and
+    validate this inode and then lose its name.  If the root's flock stays
+    busy, the unlink is skipped: a stale anchor file is harmless because the
+    next start re-opens it and its own flock decides.
+    """
+
     try:
         try:
-            try:
-                named = os.stat(
-                    anchor.name,
-                    dir_fd=anchor.parent_fd,
-                    follow_symlinks=False,
-                )
-                pinned = os.fstat(anchor.descriptor)
-                if (named.st_dev, named.st_ino) == (pinned.st_dev, pinned.st_ino):
-                    os.unlink(anchor.name, dir_fd=anchor.parent_fd)
-                    os.fsync(anchor.parent_fd)
-            except FileNotFoundError:
-                pass
+            if _lock_startup_parent(anchor.parent_fd):
+                try:
+                    named = os.stat(
+                        anchor.name,
+                        dir_fd=anchor.parent_fd,
+                        follow_symlinks=False,
+                    )
+                    pinned = os.fstat(anchor.descriptor)
+                    if (named.st_dev, named.st_ino) == (pinned.st_dev, pinned.st_ino):
+                        os.unlink(anchor.name, dir_fd=anchor.parent_fd)
+                        os.fsync(anchor.parent_fd)
+                except FileNotFoundError:
+                    pass
+                finally:
+                    fcntl.flock(anchor.parent_fd, fcntl.LOCK_UN)
         finally:
             os.close(anchor.state_parent_fd)
     finally:
@@ -307,10 +376,7 @@ def _close_startup_anchor(anchor: _StartupAnchor) -> None:
             finally:
                 os.close(anchor.descriptor)
         finally:
-            try:
-                fcntl.flock(anchor.parent_fd, fcntl.LOCK_UN)
-            finally:
-                os.close(anchor.parent_fd)
+            os.close(anchor.parent_fd)
 
 
 def _open_state_directory(path: Path) -> int:

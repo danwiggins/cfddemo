@@ -6,9 +6,10 @@ One coherent synthetic world over every merged E12 store
 packaged loopback server with the longitudinal adapter, and one bound reader
 session.  The packaged view is driven by an offline DOM harness under node.
 
-Only one loopback service may run per process (the B01 startup anchor), so a
-test module uses either the shared read-only ``env`` or a per-test ``fresh``
-environment, never both.
+Each environment starts its own loopback service on its own state directory
+(the B01 startup anchor admits one service per state directory).  A test
+module uses either the shared read-only ``env`` or a per-test ``fresh``
+environment.
 """
 
 from __future__ import annotations

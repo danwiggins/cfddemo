@@ -191,8 +191,8 @@ from durable family-source discovery against its exact E04/E06 source, replays
 the registered D03 series decision and each D07 comparison against current
 authority, and obtains D10 derived from that exact D09 population and replayed
 D03 decision set. Construction and return require the composable authority-
-fence prerequisite below; the builder is prohibited until that prerequisite
-merges. Under that protocol it acquires the live D01 linkage, D04 history, D05
+fence prerequisite below; the builder was prohibited until that prerequisite
+merged (it merged in #80 and #81; the D08 builder followed in #83). Under that protocol it acquires the live D01 linkage, D04 history, D05
 cohort, reader-authorization, D06 record/catalog, E04 catalog, the protected E06 result-view-source
 registry, D03 decision, D07
 comparison, D09 summary, D10 context, family-source, anchor-policy and
@@ -290,6 +290,9 @@ authority.
 
 ### Composable authority-fence prerequisite
 
+Built since this was written (#80, #81); see the note at the end of this
+section. The text below is the plan as specified.
+
 The existing D04 and D06 public reads internally acquire the D01 linkage fence,
 whose non-reentrant cross-operation guard rejects nested entry, and E04 exposes
 no composable read fence. D08 must not simulate an atomic snapshot by nesting
@@ -319,6 +322,12 @@ digests are rechecked while held. Opposing mutation/read/save tests prove
 termination without deadlock and prove no authority change can land between
 final revalidation and the returned object. Until these APIs exist and their
 lock order is independently reviewed, D08 and Save remain unavailable.
+
+Built: the coordinator and store fences in
+`evidence_inspector/composite_authority_fence.py` (#80,
+`docs/COMPOSITE-AUTHORITY-FENCE.md`) and the E04 cross-process catalog-content
+fence and content head (#81). The D08 read model (#83) and browser Save and
+Reopen (#93) run under them.
 
 ### Durable saved-comparison registry prerequisite
 
@@ -703,8 +712,13 @@ source checkout, or a successful synthetic quickstart cannot claim those gates.
 
 ## Remaining blockers
 
-At current main, implementing the builder would still require accepting weaker
-caller assertions and is therefore prohibited:
+Historical list, written before #80. Since then the composite authority fence
+(#80), the E04 content fence (#81), registry storage hardening (#82), the D08
+read model (#83) and the browser routes, view, Save and Reopen (#93) have
+merged. Resolved bullets below say so.
+
+Before #80, implementing the builder would still have required accepting weaker
+caller assertions and was therefore prohibited:
 
 - Merged prerequisites: corrected D09 (#52), D10 (#54), the D03 decision
   registry (#56, #61), D10 resolving D03 from it (#57), the D05 stale-history
@@ -785,13 +799,15 @@ caller assertions and is therefore prohibited:
   `require_projection_policy_binding` with its live D05 anchor and E04/E06
   source. E08 and E09 policies bind the registrant's exact D02 tuple, because
   those contracts pin no quantity or unit.
-- The current D01/D04/D06/E04 and downstream APIs do not expose the composable
-  cross-store fence required above. See the lock-order findings. The
-  authority-fence adapter prerequisites must merge before builder work.
-- The saved-comparison registry (#77) publishes through a caller-supplied
-  dependency fence. Its built-in `LiveRegistryDependencyFence` re-reads heads
-  without a cross-store lock (`direct_head_reread`), so D08 keeps Save disabled
-  until publications carry `composite_authority_fence`.
+- Resolved (#80, #81): the composable cross-store fence required above exists
+  as `evidence_inspector/composite_authority_fence.py`, and E04 has its
+  cross-process catalog-content fence. Before those PRs, the D01/D04/D06/E04
+  APIs did not expose it and builder work was blocked on it.
+- Resolved: the saved-comparison registry (#77) publishes through a
+  caller-supplied dependency fence. The former `LiveRegistryDependencyFence`
+  (`direct_head_reread`) is retired and refused; `composite_authority_fence` is
+  the only production fence kind, and browser Save (#93) publishes through it
+  (`docs/LONGITUDINAL-COMPARISON-REGISTRY.md`, "Dependency-fence seam").
 - The family-source registry (#75) derives E07 fragment artifacts only. E08 needs
   cell-origin bundle import and verification, and E09 needs a binding to E04/E06
   results plus authority from E04/E01. Per the one-measurement first
@@ -800,16 +816,19 @@ caller assertions and is therefore prohibited:
   families once artifacts exist; the E12 builder must resolve every projection
   policy from the registry, because the adapter cannot tell a valid unregistered
   policy from a registered one.
-- Shared storage follow-up across the D03, D05, D07, D09, D10, E06, anchor,
-  projection, reader, and result-trust registries: crash recovery for interrupted
-  root creation, torn-journal tails found on reopen, and staged restore (every
-  registry fails closed today), plus porting the result-trust store's
-  lock-descriptor ordering and truncate-on-any-exception to the others. Every read
-  also parses every committed object, which is fine at synthetic scale only.
+- Resolved (#82, `docs/REGISTRY-STORAGE.md`): across the D03, D05, D07, D09,
+  D10, E06, family-source, anchor, projection, reader and result-trust
+  registries, root creation and restore are staged and published by one
+  `rename(2)`, owned temporary names are swept, a failed append truncates on any
+  exception, and the result-trust lock-descriptor ordering is ported. A torn
+  journal tail found on reopen still fails closed by design; the explicit
+  `recover_torn_journal_tail` maintenance call repairs it. Still open: every read
+  parses every committed object, which is fine at synthetic scale only.
 
-The remaining merge order is the composable authority-fence
-adapters/coordinator, D08 read model, browser integration, then installed
-quickstart and
-rollback rehearsal evidence. E14 may automate renderer checks afterward;
+The composable authority-fence adapters/coordinator (#80, #81), D08 read model
+(#83) and browser integration (#93) have merged. What remains is installed
+quickstart and rollback rehearsal evidence, and a production composition root:
+no CLI command constructs a `LongitudinalExplorerSource` today, so
+`traceback reader launch` serves no E12 route. E14 may automate renderer checks afterward;
 observed keyboard, screen-reader, 200% zoom, approved-host performance, and
 five-provider evidence remain separate gates.
