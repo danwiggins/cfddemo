@@ -1516,10 +1516,26 @@ def _run_sealed(
     progress: Callable[[str], None],
 ) -> tuple[ExitCode, dict[str, Any]]:
     from .runner import Runner
+
+    runner = Runner(root / "runner", local_unqualified_enabled=True)
+    # Keep the runner store's WAL/SHM identities stable while another process
+    # (traceback pause/status) opens the same store during a long run.
+    with runner.store.journal_anchor():
+        return _run_with_runner(root, runner, request, source, relative_files, loaded, progress)
+
+
+def _run_with_runner(
+    root: Path,
+    runner: Any,
+    request: Any,
+    source: Path,
+    relative_files: tuple[str, str],
+    loaded: Any,
+    progress: Callable[[str], None],
+) -> tuple[ExitCode, dict[str, Any]]:
     from .signing import TrustNamespace
 
     bam_name, index_name = relative_files
-    runner = Runner(root / "runner", local_unqualified_enabled=True)
     try:
         record = _execute_signed_run(
             root,
@@ -1806,7 +1822,8 @@ def _resume(
     _append_development_trust(args.root / _TRUST_RELATIVE, development_trust_bytes(signing_key))
     stages = make_stages(signing_key)
     worker_id = "local-cli" if local else "synthetic-cli"
-    return _resume_execute(args, runner, record, stages, worker_id, local=local)
+    with runner.store.journal_anchor():
+        return _resume_execute(args, runner, record, stages, worker_id, local=local)
 
 
 def _resume_execute(

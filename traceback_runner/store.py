@@ -149,6 +149,25 @@ class JobStore:
         return connection
 
     @contextmanager
+    def journal_anchor(self) -> Iterator[None]:
+        """Hold one read connection so the WAL and SHM sidecars stay in place.
+
+        SQLite deletes ``-wal``/``-shm`` when the last connection closes.  If
+        another store instance (for example ``traceback pause`` in a second
+        process) opens and closes the database between two of this instance's
+        calls, the sidecars come back with new inodes and the pinned-identity
+        check above refuses them.  While this anchor is open, no other close is
+        the last one, so the sidecars and their identities persist.
+        """
+
+        connection = self._connect()
+        try:
+            connection.execute("SELECT count(*) FROM jobs").fetchone()
+            yield
+        finally:
+            connection.close()
+
+    @contextmanager
     def _transaction(self) -> Iterator[sqlite3.Connection]:
         connection = self._connect()
         try:
