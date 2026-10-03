@@ -569,6 +569,10 @@ def _write_pin(root: Path, registry: ResultTrustRegistry) -> None:
         temporary.unlink(missing_ok=True)
 
 
+# E04 bounds a trust journal at 256 KiB; recovery never reads more than that.
+_MAX_FORWARD_JOURNAL_BYTES = 256 * 1024
+
+
 def _forward_head(directory: Path, pinned_head: str) -> str | None:
     """Return the journal tail when the pinned head is an earlier point of it.
 
@@ -581,7 +585,10 @@ def _forward_head(directory: Path, pinned_head: str) -> str | None:
     from evidence_inspector.result_trust_registry import ResultTrustJournalEntryV2
 
     try:
-        lines = (directory / "registry-journal.jsonl").read_bytes().splitlines()
+        journal = directory / "registry-journal.jsonl"
+        if journal.is_symlink() or journal.stat().st_size > _MAX_FORWARD_JOURNAL_BYTES:
+            return None
+        lines = journal.read_bytes().splitlines()
         entries = [ResultTrustJournalEntryV2.model_validate_json(line) for line in lines]
     except (OSError, ValueError, ValidationError):
         return None
@@ -631,7 +638,7 @@ def open_local_result_trust_registry(
         directory.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
         try:
             registry = ResultTrustRegistry(directory, create_version=2)
-        except ResultTrustRegistryError:
+        except (ResultTrustRegistryError, OSError):
             raise _trust_problem("the result-trust registry could not be created") from None
         try:
             _write_pin(root, registry)
@@ -661,7 +668,7 @@ def open_local_result_trust_registry(
             expected_registry_epoch_sha256=pin.registry_epoch_sha256,
             expected_state_head_sha256=pin.state_head_sha256,
         )
-    except ResultTrustRegistryError:
+    except (ResultTrustRegistryError, OSError):
         candidate = _forward_head(directory, pin.state_head_sha256)
         if candidate is None or not create:
             raise _trust_problem(
@@ -674,7 +681,7 @@ def open_local_result_trust_registry(
             expected_registry_epoch_sha256=pin.registry_epoch_sha256,
             expected_state_head_sha256=candidate,
         )
-    except ResultTrustRegistryError:
+    except (ResultTrustRegistryError, OSError):
         raise _trust_problem(
             "the registry does not open at its pinned identity and head"
         ) from None
@@ -686,13 +693,18 @@ def open_local_result_trust_registry(
     return registry
 
 
-def sync_local_result_trust(root: Path) -> ResultTrustRegistry:
+def sync_local_result_trust(
+    root: Path, *, key_ids: frozenset[str] | None = None
+) -> ResultTrustRegistry:
     """Open (or create) the pinned registry and mirror ROOT's local result keys.
 
     Every ``development-local`` result key in
     ``ROOT/trust/development-result-trust.json`` (the keys ``run`` signed with)
-    is added; a key revoked there is revoked here.  Keys are never removed.  The
-    caller holds the operator lock and closes the returned registry.
+    is added; a key revoked there is revoked here.  Keys are never removed.
+    ``key_ids`` limits mirroring to those keys (``catalog import`` passes the
+    one key that signed the bundle, so the registry holds only keys of
+    imported records).  The caller holds the operator lock and closes the
+    returned registry.
     """
 
     from evidence_inspector.result_trust_registry import ResultTrustRegistryError
@@ -721,6 +733,7 @@ def sync_local_result_trust(root: Path) -> ResultTrustRegistry:
                 if (
                     getattr(key, "namespace", None) != TrustNamespace.DEVELOPMENT_LOCAL
                     or key.purpose != KeyPurpose.RESULT
+                    or (key_ids is not None and key.key_id not in key_ids)
                 ):
                     continue
                 known = current.get(key.key_id)
@@ -736,7 +749,7 @@ def sync_local_result_trust(root: Path) -> ResultTrustRegistry:
                         )
                     if key.revoked and not (known is not None and known.revoked):
                         registry.revoke_key(key.key_id)
-                except ResultTrustRegistryError:
+                except (ResultTrustRegistryError, OSError):
                     raise _trust_problem(
                         "a development-local key conflicts with the registry"
                     ) from None

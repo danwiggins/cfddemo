@@ -184,6 +184,9 @@ if grep -qi "synthetic" "$REPORT"; then fail "report.html mentions synthetic"; f
 "${TRACEBACK_CMD[@]}" logs "$JOB_ID" --root "$R" --json >"$OUT/logs.json"
 "${TRACEBACK_CMD[@]}" status "$JOB_ID" --root "$R" --json >"$OUT/status.json"
 for locator in "$FASTA_ABS" "$BAM_ABS" "$(dirname "$BAM_ABS")"; do
+  # An input directory that also contains this run's work root (TMPDIR=/tmp
+  # with a BAM in /tmp) legitimately prefixes ROOT paths; skip only that one.
+  case "$WORK/" in "$locator"/*) continue ;; esac
   if grep -rqF "$locator" "$R/records" "$R/catalog" "$R/explorer" "$R/authority" "$OUT"; then
     fail "an input path appears in the record, catalog, explorer files or command output"
   fi

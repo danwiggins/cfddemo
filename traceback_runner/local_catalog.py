@@ -123,8 +123,11 @@ def _read_peek(path: Path) -> bytes:
         os.close(descriptor)
 
 
-def _peek_local_record(bundle: Path) -> tuple[str, str]:
-    """Return (record_id, reference_id) of a v3 local bundle; nothing is trusted yet."""
+def _peek_local_record(bundle: Path) -> tuple[str, str, str]:
+    """Return (record_id, reference_id, signing key ID) of a v3 local bundle.
+
+    Nothing is trusted yet; the catalog verifies the bundle afterwards.
+    """
 
     from .bundles import MANIFEST_PATH, MEASUREMENT_PATH
     from .contracts import FragmentMeasurementV2, ResultBundleManifestV3, parse_fragment_measurement
@@ -144,7 +147,7 @@ def _peek_local_record(bundle: Path) -> tuple[str, str]:
         raise _not_a_record("the bundle manifest or measurement is missing or invalid") from None
     if type(measurement) is not FragmentMeasurementV2:
         raise _not_a_record("the bundle does not carry a local measurement")
-    return manifest.record_id, measurement.reference_id
+    return manifest.record_id, measurement.reference_id, manifest.signing_key_id
 
 
 # ---------------------------------------------------------------------------
@@ -310,7 +313,8 @@ def build_local_explorer_artifact(
     hex40 = reference.result_id.removeprefix("result_")
     record = VerifiedMeasurementRecord(
         result_id=reference.result_id,
-        result_sha256=reference.bundle_manifest_sha256,
+        # E07 binds the E06 result digest to the canonical E04 measurement.
+        result_sha256=hashlib.sha256(canonical_json_bytes(verified.measurement)).hexdigest(),
         bundle_id=f"bundle_{hex40}",
         bundle_sha256=reference.bundle_sha256,
         method=definition,
@@ -645,6 +649,28 @@ def open_local_explorer(root: Path) -> Iterator[LocalExplorer | None]:
 # ---------------------------------------------------------------------------
 
 
+def _require_public_reference_id(reference_id: str) -> None:
+    """The method version names the reference and is shown by the explorer.
+
+    Refuse before any catalog write when the ID fails the public-text boundary
+    (for example ``patient-id``), so no row is left without its explorer view.
+    """
+
+    from traceback_runner.web.contracts import validate_public_projection
+
+    from .local_authority import local_method_version
+
+    try:
+        validate_public_projection({"version": local_method_version(reference_id)})
+    except ValueError:
+        raise CatalogImportProblem(
+            "TBX-CAT-002",
+            "Reference ID cannot be shown in the explorer; no catalog row was written",
+            cause="the registered reference ID fails the explorer's public-text rules",
+            fix="Register the FASTA again under a neutral ID (for example hg38) and re-run",
+        ) from None
+
+
 def import_local_record(root: Path, bundle: Path) -> CatalogImportOutcome:
     """Catalog one local record and persist its explorer artifact (idempotent)."""
 
@@ -654,10 +680,11 @@ def import_local_record(root: Path, bundle: Path) -> CatalogImportOutcome:
     from .signing import SigningError
 
     bundle = bundle.absolute()
-    record_id, reference_id = _peek_local_record(bundle)
+    record_id, reference_id, key_id = _peek_local_record(bundle)
     registered = load_reference(root, reference_id).registered
+    _require_public_reference_id(registered.reference_id)
     authority = ensure_local_method_authority(root, registered)
-    trust = sync_local_result_trust(root)
+    trust = sync_local_result_trust(root, key_ids=frozenset({key_id}))
     try:
         catalog = open_local_catalog(root, trust, import_root=bundle.parent)
         try:

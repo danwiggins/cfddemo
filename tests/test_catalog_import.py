@@ -584,3 +584,54 @@ def test_oversized_manifest_is_refused_without_reading_it_whole(world, tmp_path:
     code, payload = _main("catalog", "import", bundle, "--root", root)
     assert code == cli.ExitCode.BLOCKED, payload
     assert payload["data"]["code"] == "TBX-CAT-001"
+
+
+def test_e06_result_digest_binds_the_canonical_measurement(world) -> None:
+    import hashlib
+
+    from traceback_runner.bundles import verify_bundle
+    from traceback_runner.signing import load_development_trust
+
+    root, (record_id, _), _ = world
+    result_id = _import(root, record_id)[1]["data"]["result_id"]
+    artifact = ExplorerArtifactRecord.model_validate_json(
+        explorer_paths(root, result_id)[0].read_bytes()
+    )
+    verified = verify_bundle(
+        root / "records" / record_id,
+        load_development_trust((root / "trust" / "development-result-trust.json").read_bytes()),
+    )
+    expected = hashlib.sha256(canonical_json_bytes(verified.measurement)).hexdigest()
+    assert artifact.result_view_request.sources[0].record.result_sha256 == expected
+
+
+def test_registry_mirrors_only_keys_of_imported_records(world) -> None:
+    root, record_ids, _ = world
+    assert _import(root, record_ids[0])[0] == cli.ExitCode.OK
+    with open_local_result_trust_registry(root) as trust:
+        assert len(trust.current_trust().document.keys) == 1
+    assert _import(root, record_ids[1])[0] == cli.ExitCode.OK
+    with open_local_result_trust_registry(root) as trust:
+        assert len(trust.current_trust().document.keys) == 2
+
+
+def test_reference_id_that_fails_the_public_boundary_is_refused_before_any_row(
+    world, tmp_path: Path
+) -> None:
+    root, _, (first, _) = world
+    assert _main("reference", "register", "--fasta", first.fasta_path, "--id", "patient-id", "--root", root)[0] == 0
+    code, payload = _main("run", first.bam_path, "--reference", "patient-id", "--root", root)
+    assert code == 0, payload
+    code, payload = _import(root, payload["data"]["record_id"])
+    assert code == cli.ExitCode.BLOCKED, payload
+    assert payload["data"]["code"] == "TBX-CAT-002"
+    assert _rows(root) == []
+
+
+def test_missing_registry_internals_map_to_tbx_auth_local_002(world) -> None:
+    root, (record_id, _), _ = world
+    assert _import(root, record_id)[0] == cli.ExitCode.OK
+    os.unlink(root / "trust" / "result-trust-registry" / ".registry.lock")
+    code, payload = _import(root, record_id)
+    assert code == cli.ExitCode.BLOCKED, payload
+    assert payload["data"]["code"] == "TBX-AUTH-LOCAL-002"
