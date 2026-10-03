@@ -1422,6 +1422,14 @@ def test_storage_lock_descriptor_is_read_under_the_process_lock(
     )
 
 
+def test_storage_integrity_check_waits_for_an_in_flight_head_seal(
+    registry: ProjectionPolicyRegistry
+) -> None:
+    storage_checks.check_integrity_reads_head_and_seal_under_process_lock(
+        registry, lambda: registry.register_policy(_fragment())
+    )
+
+
 def test_storage_owned_temporaries_are_swept_and_directories_fail_closed(
     registry: ProjectionPolicyRegistry,
 ) -> None:
