@@ -24,6 +24,7 @@ from .contracts import JobState
 from .filesystem import rename_directory_exclusive_at
 from .operator import build_job_view, support_payload
 from .protocol import render_protocol, synthetic_protocol_manifest
+from .references import DOCS_ANCHOR, ReferenceProblem, validate_reference_id
 from .serialization import canonical_json_bytes
 
 _TRUST_RELATIVE = Path("trust/development-result-trust.json")
@@ -58,12 +59,54 @@ def _root_argument(parser: argparse.ArgumentParser) -> None:
     )
 
 
+def _reference_id_argument(value: str) -> str:
+    try:
+        return validate_reference_id(value)
+    except ValueError as exc:
+        raise argparse.ArgumentTypeError(str(exc)) from exc
+
+
+def _assembly_argument(value: str) -> str:
+    import re
+
+    if not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9_.:-]{0,127}", value):
+        raise argparse.ArgumentTypeError(
+            "assembly name must match ^[A-Za-z0-9][A-Za-z0-9_.:-]{0,127}$"
+        )
+    return value
+
+
 def _parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(prog="traceback")
     commands = parser.add_subparsers(dest="command", required=True)
 
-    doctor = commands.add_parser("doctor", help="check the local synthetic runtime")
+    doctor = commands.add_parser("doctor", help="check the local runtime and ROOT")
+    _root_argument(doctor)
+    doctor.add_argument(
+        "--deep",
+        action="store_true",
+        help="also re-hash each registered FASTA (slow: reads every byte)",
+    )
     doctor.add_argument("--json", action="store_true", dest="as_json")
+
+    reference = commands.add_parser(
+        "reference", help="register a local reference FASTA (unqualified)"
+    )
+    reference_commands = reference.add_subparsers(dest="reference_command", required=True)
+    register = reference_commands.add_parser(
+        "register", help="record contig names, lengths and M5 digests of a FASTA"
+    )
+    register.add_argument("--fasta", required=True, type=Path)
+    register.add_argument(
+        "--id", required=True, dest="reference_id", type=_reference_id_argument
+    )
+    register.add_argument(
+        "--assembly",
+        type=_assembly_argument,
+        help="assembly name a BAM's @SQ AS must equal; without it AS is not compared",
+    )
+    _root_argument(register)
+    register.add_argument("--json", action="store_true", dest="as_json")
 
     protocol = commands.add_parser("protocol", help="show fail-closed setup content")
     protocol_commands = protocol.add_subparsers(dest="protocol_command", required=True)
@@ -79,6 +122,12 @@ def _parser() -> argparse.ArgumentParser:
     )
     preflight.add_argument("input", type=Path)
     preflight.add_argument("--index", type=Path)
+    preflight.add_argument(
+        "--reference",
+        dest="reference_id",
+        type=_reference_id_argument,
+        help="registered reference ID under ROOT (default: the synthetic reference)",
+    )
     _root_argument(preflight)
     preflight.add_argument("--json", action="store_true", dest="as_json")
 
@@ -156,6 +205,26 @@ def _result(
     }
 
 
+def _problem(
+    command: str,
+    problem: ReferenceProblem,
+) -> dict[str, Any]:
+    """Uniform operator problem: code, summary, cause, fix, retryable, docs."""
+
+    return _result(
+        command,
+        "not_found" if problem.exit_code == ExitCode.NOT_FOUND else "blocked",
+        problem.summary,
+        data={
+            "code": problem.code,
+            "cause": problem.cause,
+            "fix": problem.fix,
+            "retryable": problem.retryable,
+            "docs": DOCS_ANCHOR,
+        },
+    )
+
+
 def _emit(payload: dict[str, Any], *, as_json: bool) -> None:
     if as_json:
         print(canonical_json_bytes(payload).decode("utf-8"))
@@ -171,41 +240,208 @@ def _emit(payload: dict[str, Any], *, as_json: bool) -> None:
         print(f"{key.upper()}  {rendered}")
 
 
-def _doctor() -> tuple[ExitCode, dict[str, Any]]:
+_DOCTOR_MIN_FREE_BYTES = 10 * 1024**3
+
+
+def _doctor_check(name: str, status: str, detail: str, **extra: Any) -> dict[str, Any]:
+    return {"name": name, "status": status, "detail": detail, **extra}
+
+
+def _doctor_samtools() -> dict[str, Any]:
+    import re
+    import subprocess
+
+    executable = shutil.which("samtools")
+    if executable is None:
+        return _doctor_check(
+            "samtools",
+            "warn",
+            "samtools not on PATH; only needed to index BAM/FASTA (brew install samtools)",
+        )
+    try:
+        completed = subprocess.run(
+            [executable, "--version"],
+            capture_output=True,
+            text=True,
+            timeout=10,
+            check=False,
+        )
+    except (OSError, subprocess.SubprocessError):
+        return _doctor_check("samtools", "warn", "samtools --version could not be run")
+    match = re.match(r"samtools (\d+\.\d+(?:\.\d+)?)", completed.stdout)
+    if completed.returncode != 0 or match is None:
+        return _doctor_check("samtools", "warn", "samtools --version output did not parse")
+    return _doctor_check("samtools", "pass", f"samtools {match.group(1)}")
+
+
+def _existing_ancestor(path: Path) -> Path:
+    candidate = path
+    while not candidate.exists() and candidate != candidate.parent:
+        candidate = candidate.parent
+    return candidate
+
+
+def _doctor_root(root: Path) -> dict[str, Any]:
+    if root.is_symlink() or (root.exists() and not root.is_dir()):
+        return _doctor_check("root", "warn", "ROOT exists but is not a directory")
+    if not root.exists():
+        ancestor = _existing_ancestor(root)
+        if ancestor.is_dir() and os.access(ancestor, os.W_OK | os.X_OK):
+            return _doctor_check("root", "pass", "ROOT does not exist yet and can be created")
+        return _doctor_check("root", "warn", "ROOT does not exist and cannot be created here")
+    metadata = root.stat()
+    if metadata.st_uid != os.geteuid():
+        return _doctor_check("root", "warn", "ROOT is owned by another user")
+    if stat.S_IMODE(metadata.st_mode) & 0o022:
+        return _doctor_check(
+            "root", "warn", "ROOT is group- or other-writable; run chmod go-w ROOT"
+        )
+    return _doctor_check("root", "pass", "ROOT exists, is owned by you and is not shared-writable")
+
+
+def _doctor_disk(root: Path) -> dict[str, Any]:
+    try:
+        free = shutil.disk_usage(_existing_ancestor(root)).free
+    except OSError:
+        return _doctor_check("disk", "warn", "free space on ROOT's volume could not be read")
+    gib = free / 1024**3
+    if free < _DOCTOR_MIN_FREE_BYTES:
+        return _doctor_check(
+            "disk",
+            "warn",
+            f"{gib:.1f} GiB free on ROOT's volume; under 10 GiB",
+            free_bytes=free,
+        )
+    return _doctor_check("disk", "pass", f"{gib:.1f} GiB free on ROOT's volume", free_bytes=free)
+
+
+def _file_sha256(path: Path) -> str:
+    digest = hashlib.sha256()
+    with path.open("rb") as handle:
+        while chunk := handle.read(16 * 1024 * 1024):
+            digest.update(chunk)
+    return digest.hexdigest()
+
+
+def _doctor_references(root: Path, *, deep: bool) -> list[dict[str, Any]]:
+    from .references import list_reference_ids, load_reference
+
+    identifiers = list_reference_ids(root)
+    if not identifiers:
+        return [
+            _doctor_check(
+                "reference",
+                "warn",
+                "no reference registered under ROOT; run traceback reference register",
+            )
+        ]
+    checks = []
+    for identifier in identifiers:
+        try:
+            loaded = load_reference(root, identifier)
+        except ReferenceProblem as problem:
+            checks.append(
+                _doctor_check("reference", "warn", problem.summary, reference_id=identifier)
+            )
+            continue
+        fasta = Path(loaded.source.fasta_path)
+        try:
+            metadata = fasta.stat()
+        except OSError:
+            metadata = None
+        if metadata is None or not stat.S_ISREG(metadata.st_mode):
+            status, detail = "warn", "registered FASTA is missing; existing records stay valid"
+        elif metadata.st_size != loaded.source.fasta_size_bytes:
+            status, detail = "warn", "registered FASTA size changed since registration"
+        elif deep and _file_sha256(fasta) != loaded.registered.asset_sha256:
+            status, detail = "warn", "registered FASTA bytes changed since registration"
+        else:
+            status = "pass"
+            detail = (
+                "FASTA present; SHA-256 matches the registration"
+                if deep
+                else "FASTA present with the registered size (--deep re-hashes it)"
+            )
+        checks.append(_doctor_check("reference", status, detail, reference_id=identifier))
+    return checks
+
+
+def _doctor_trust(root: Path) -> dict[str, Any]:
+    from .signing import load_development_trust
+
+    records = root / "records"
+    has_records = records.is_dir() and any(
+        not entry.name.startswith(".") for entry in records.iterdir()
+    )
+    if not has_records:
+        return _doctor_check(
+            "trust", "pass", "no records under ROOT; trust is created by the first signed run"
+        )
+    try:
+        load_development_trust((root / _TRUST_RELATIVE).read_bytes())
+    except Exception:
+        return _doctor_check(
+            "trust",
+            "blocked",
+            "records exist but trust/development-result-trust.json is missing or invalid; "
+            "every later verify would fail",
+        )
+    registry = root / "trust" / "result-trust-registry"
+    if not (registry.exists() or registry.is_symlink()):
+        return _doctor_check(
+            "trust",
+            "pass",
+            "development trust parses; no result-trust registry under ROOT yet",
+        )
+    from evidence_inspector.result_trust_registry import ResultTrustRegistry
+
+    try:
+        with ResultTrustRegistry(registry) as opened:
+            opened.current_trust()
+    except Exception:
+        return _doctor_check(
+            "trust", "blocked", "result-trust registry under ROOT/trust does not open"
+        )
+    return _doctor_check("trust", "pass", "development trust and result-trust registry parse")
+
+
+def _doctor(args: argparse.Namespace) -> tuple[ExitCode, dict[str, Any]]:
+    root = Path(os.path.abspath(args.root))
     checks = [
-        {
-            "name": "python",
-            "status": "pass" if sys.version_info[:2] == (3, 11) else "blocked",
-            "detail": "Python 3.11 runtime",
-        },
-        {
-            "name": "platform",
-            "status": "pass",
-            "detail": f"{platform.system()} {platform.machine()}",
-        },
-        {
-            "name": "data_boundary",
-            "status": "pass",
-            "detail": "synthetic local execution; network not required",
-        },
-        {
-            "name": "real_data",
-            "status": "blocked",
-            "detail": "real-data execution is not enabled in this development wave",
-        },
+        _doctor_check(
+            "python",
+            "pass" if sys.version_info[:2] == (3, 11) else "blocked",
+            "Python 3.11 runtime",
+        ),
+        _doctor_check("platform", "pass", f"{platform.system()} {platform.machine()}"),
+        _doctor_check("data_boundary", "pass", "local execution; network not required"),
+        _doctor_samtools(),
+        _doctor_root(root),
+        _doctor_disk(root),
+        *_doctor_references(root, deep=args.deep),
+        _doctor_trust(root),
     ]
     runtime_blocked = checks[0]["status"] == "blocked"
+    trust_blocked = any(
+        check["name"] == "trust" and check["status"] == "blocked" for check in checks
+    )
+    warnings = sum(check["status"] == "warn" for check in checks)
+    if runtime_blocked:
+        summary = "Synthetic runtime is blocked"
+    elif trust_blocked:
+        summary = "Records exist under ROOT but their trust material is missing or invalid"
+    else:
+        summary = "Real-data execution is not enabled; synthetic local runtime is available"
+        if warnings:
+            summary += f" ({warnings} warning{'s' if warnings != 1 else ''})"
+    blocked = runtime_blocked or trust_blocked
     return (
-        ExitCode.BLOCKED if runtime_blocked else ExitCode.OK,
+        ExitCode.BLOCKED if blocked else ExitCode.OK,
         _result(
             "doctor",
-            "blocked" if runtime_blocked else "ok",
-            (
-                "Synthetic runtime is blocked"
-                if runtime_blocked
-                else "Real-data execution is not enabled; synthetic local runtime is available"
-            ),
-            data={"checks": checks},
+            "blocked" if blocked else "ok",
+            summary,
+            data={"root": str(root), "checks": checks},
         ),
     )
 
@@ -595,6 +831,8 @@ def _preflight(args: argparse.Namespace) -> tuple[ExitCode, dict[str, Any]]:
     from .preflight import BamPreflightPolicy, validate_bam_snapshot
 
     index = args.index or Path(f"{args.input}.bai")
+    if args.reference_id is not None:
+        return _preflight_registered(args, index)
     report = validate_bam_snapshot(
         args.input,
         index,
@@ -617,6 +855,73 @@ def _preflight(args: argparse.Namespace) -> tuple[ExitCode, dict[str, Any]]:
             ),
             data={"report": report.model_dump(mode="json"), "qualified": False},
         ),
+    )
+
+
+def _preflight_registered(
+    args: argparse.Namespace, index: Path
+) -> tuple[ExitCode, dict[str, Any]]:
+    from .contracts import PreflightOutcome
+    from .preflight import BamPreflightPolicy, validate_bam_snapshot
+    from .references import load_reference
+
+    loaded = load_reference(args.root, args.reference_id)
+    report = validate_bam_snapshot(
+        args.input,
+        index,
+        loaded.registered,
+        BamPreflightPolicy(policy_id="local-unqualified-preflight-v1"),
+        compare_assembly=loaded.source.assembly_declared,
+    )
+    blocked = report.outcome == PreflightOutcome.BLOCKED
+    return (
+        ExitCode.BLOCKED if blocked else ExitCode.OK,
+        _result(
+            "preflight",
+            "blocked" if blocked else "ok",
+            (
+                "Technical inspection blocked this input; "
+                "unqualified, local, not for clinical use"
+                if blocked
+                else f"Technical inspection {report.outcome.value} against registered "
+                f"reference {args.reference_id}; unqualified, local, not for clinical use"
+            ),
+            data={
+                "report": report.model_dump(mode="json"),
+                "qualified": False,
+                "reference_id": args.reference_id,
+            },
+        ),
+    )
+
+
+def _reference_register(args: argparse.Namespace) -> tuple[ExitCode, dict[str, Any]]:
+    from .references import REGISTRATION_FILE, references_root, register_reference
+
+    result = register_reference(
+        args.root, args.fasta, args.reference_id, assembly=args.assembly
+    )
+    registered = result.registered
+    return ExitCode.OK, _result(
+        "reference register",
+        "ok",
+        (
+            f"Reference {registered.reference_id} registered "
+            f"({len(registered.contigs)} contigs); unqualified, local"
+            if result.created
+            else f"Reference {registered.reference_id} already registered with identical bytes"
+        ),
+        data={
+            "reference_id": registered.reference_id,
+            "created": result.created,
+            "contigs": len(registered.contigs),
+            "asset_sha256": registered.asset_sha256,
+            "assembly_compared": args.assembly is not None,
+            "registration": (
+                references_root(args.root) / registered.reference_id / REGISTRATION_FILE
+            ).relative_to(args.root).as_posix(),
+            "qualified": False,
+        },
     )
 
 
@@ -1213,13 +1518,15 @@ def _support_bundle(args: argparse.Namespace) -> tuple[ExitCode, dict[str, Any]]
 
 def _dispatch(args: argparse.Namespace) -> tuple[ExitCode, dict[str, Any]]:
     if args.command == "doctor":
-        return _doctor()
+        return _doctor(args)
     if args.command == "protocol":
         return _protocol_show()
     if args.command == "demo":
         return _demo(args)
     if args.command == "preflight":
         return _preflight(args)
+    if args.command == "reference":
+        return _reference_register(args)
     if args.command == "run":
         return _real_run_blocked()
     if args.command == "status":
@@ -1276,10 +1583,18 @@ def main(argv: Sequence[str] | None = None) -> int:
             _operator_lock(args.root)
             if args.command in {"demo", "resume", "retry"}
             or (args.command == "assets" and args.asset_command == "install")
+            or (args.command == "reference" and args.reference_command == "register")
             else nullcontext()
         )
         with mutation:
             code, payload = _dispatch(args)
+    except ReferenceProblem as problem:
+        command = (
+            f"{args.command} {args.reference_command}"
+            if args.command == "reference"
+            else args.command
+        )
+        code, payload = ExitCode(problem.exit_code), _problem(command, problem)
     except OperatorBusy:
         code, payload = ExitCode.BLOCKED, _result(
             args.command, "blocked",

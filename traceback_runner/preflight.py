@@ -1,4 +1,4 @@
-"""Privacy-safe preflight for runner-owned synthetic BAM snapshots."""
+"""Privacy-safe, unqualified preflight for runner-owned BAM snapshots."""
 
 from __future__ import annotations
 
@@ -43,19 +43,41 @@ def _check(code: str, outcome: PreflightOutcome, problem: str, fix: str) -> Pref
     )
 
 
-def _reference_matches(header: dict[str, Any], registered: RegisteredReference) -> bool:
+def _reference_matches(
+    header: dict[str, Any],
+    registered: RegisteredReference,
+    *,
+    compare_assembly: bool = True,
+) -> PreflightOutcome:
+    """Compare ``@SQ`` provenance with a registration.
+
+    Count, order, ``SN`` and ``LN`` must match exactly. Any present ``M5`` or
+    compared ``AS`` that differs blocks. When every line carries matching
+    ``M5`` and ``AS`` (and ``AS`` is compared) the header passes; otherwise the
+    names and lengths match but sequence identity is not bound by the header,
+    which is a warning.
+    """
+
     sequences = header.get("SQ")
     if not isinstance(sequences, list) or len(sequences) != len(registered.contigs):
-        return False
+        return PreflightOutcome.BLOCKED
+    complete = compare_assembly
     for observed, expected in zip(sequences, registered.contigs, strict=True):
         if not isinstance(observed, dict) or (
-            observed.get("SN") != expected.name
-            or observed.get("LN") != expected.length
-            or observed.get("AS") != registered.assembly
-            or str(observed.get("M5", "")).lower() != expected.md5
+            observed.get("SN") != expected.name or observed.get("LN") != expected.length
         ):
-            return False
-    return True
+            return PreflightOutcome.BLOCKED
+        md5 = observed.get("M5")
+        if md5 is None:
+            complete = False
+        elif str(md5).lower() != expected.md5:
+            return PreflightOutcome.BLOCKED
+        assembly = observed.get("AS")
+        if assembly is None:
+            complete = False
+        elif compare_assembly and assembly != registered.assembly:
+            return PreflightOutcome.BLOCKED
+    return PreflightOutcome.PASS if complete else PreflightOutcome.WARN
 
 
 def _header_has_model(header: dict[str, Any], model_id: str | None) -> bool:
@@ -157,8 +179,14 @@ def validate_bam_snapshot(
     index_path: str | Path | None,
     registered_reference: RegisteredReference,
     policy: BamPreflightPolicy,
+    *,
+    compare_assembly: bool = True,
 ) -> PreflightReport:
-    """Validate a sealed BAM and matching index without exposing locators."""
+    """Validate a sealed BAM and matching index without exposing locators.
+
+    ``compare_assembly=False`` is for registrations made without an assembly
+    name: ``AS`` is then never compared, so the header can at best WARN.
+    """
 
     import pysam
 
@@ -205,13 +233,26 @@ def validate_bam_snapshot(
                     )
                 )
 
-            if _reference_matches(header, registered_reference):
+            reference_outcome = _reference_matches(
+                header, registered_reference, compare_assembly=compare_assembly
+            )
+            if reference_outcome == PreflightOutcome.PASS:
                 checks.append(
                     _check(
                         "TBX-BAM-002",
                         PreflightOutcome.PASS,
                         "BAM header matches the registered reference.",
                         "No action required.",
+                    )
+                )
+            elif reference_outcome == PreflightOutcome.WARN:
+                checks.append(
+                    _check(
+                        "TBX-BAM-002",
+                        PreflightOutcome.WARN,
+                        "BAM header lacks M5/AS; contig names and lengths match "
+                        "the registered reference.",
+                        "Optional: `samtools reheader` with M5/AS for full provenance.",
                     )
                 )
             else:
