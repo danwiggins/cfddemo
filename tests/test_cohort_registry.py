@@ -267,7 +267,8 @@ def test_resolve_holds_authority_fence_through_exact_return(
     monkeypatch.setattr(cohort_registry_module, "RegisteredCohortManifest", construct)
     resolved = registry.resolve(selector.selector_id, selector.cohort_version)
     assert resolved.manifest == manifest
-    workers[0].join(timeout=2)
+    workers[0].join(timeout=30)
+    assert not workers[0].is_alive()
     assert writer_finished.is_set()
     with pytest.raises(CohortRegistryConflict, match="stale"):
         registry.resolve(selector.selector_id, selector.cohort_version)
@@ -901,7 +902,8 @@ def test_history_view_holds_authority_fence_through_exact_return(
     monkeypatch.setattr(cohort_registry_module, "CohortHistoryView", construct)
     view = registry.resolve_history_view(selector.selector_id, 1)
     assert view.authority_state is CohortAuthorityState.CURRENT
-    workers[0].join(timeout=2)
+    workers[0].join(timeout=30)
+    assert not workers[0].is_alive()
     assert writer_finished.is_set()
     monkeypatch.undo()
     stale = registry.resolve_history_view(selector.selector_id, 1)
