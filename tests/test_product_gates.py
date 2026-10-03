@@ -72,6 +72,44 @@ def report() -> ProductGateReport:
     )
 
 
+def test_fixture_projection_masks_only_volatile_values(
+    report: ProductGateReport,
+) -> None:
+    baseline = structural_projection(report)
+    volatile = report.model_copy(
+        update={
+            "host_run": report.host_run.model_copy(
+                update={"operating_system": "Linux", "machine": "x86_64"}
+            ),
+            "filter_performance": report.filter_performance.model_copy(
+                update={"p95_us": report.filter_performance.p95_us + 1}
+            ),
+            "stress_memory": report.stress_memory.model_copy(
+                update={"peak_bytes": report.stress_memory.peak_bytes + 1}
+            ),
+            "privacy_sentinel_evidence": report.privacy_sentinel_evidence.model_copy(
+                update={"output_payload_sha256": "0" * 64}
+            ),
+        }
+    )
+    assert structural_projection(volatile) == baseline
+    stable_drifts = (
+        {"screenshot_manifest_sha256": "0" * 64},
+        {
+            "local_service_evidence": report.local_service_evidence.model_copy(
+                update={"packaged_assets_sha256": "0" * 64}
+            )
+        },
+        {
+            "stress_memory": report.stress_memory.model_copy(
+                update={"record_count": report.stress_memory.record_count + 1}
+            )
+        },
+    )
+    for update in stable_drifts:
+        assert structural_projection(report.model_copy(update=update)) != baseline
+
+
 @pytest.mark.slow
 def test_live_harness_structure_matches_frozen_fixture(
     report: ProductGateReport,

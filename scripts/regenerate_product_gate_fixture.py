@@ -67,7 +67,8 @@ def structural_projection(report: ProductGateReport) -> dict[str, Any]:
     """Project a report onto what must not drift between runs and hosts.
 
     Masks only the volatile values listed above; timing sample lists keep their
-    length. A renamed or removed field raises KeyError, which also means the
+    length. `target_met` stays exact on purpose: the targets (2 s, 256 MB) sit
+    orders of magnitude above observed values, so a flip is a real gate change. A renamed or removed field raises KeyError, which also means the
     fixture must be regenerated.
     """
 
