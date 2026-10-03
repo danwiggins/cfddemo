@@ -111,13 +111,21 @@ def test_launch_link_is_fragment_only_and_binds_through_post(service) -> None:
     assert link.index("reader_launch=") > link.index("#")
     cookie, credential = _follow(service, link)
     assert _authorize(service, cookie).cohort_registry_id == COHORT
-    # One use: a replay on a fresh session is denied.
-    other_cookie, other_csrf = _exchange(service, service.issue_bootstrap())
+    # One use: a replay on another link's reader session is denied.
+    other = _fragment(service.issue_reader_launch_url(SELECTOR))
+    other_cookie, other_csrf = _exchange(service, other["bootstrap"])
     status, headers, content = _launch(service, other_cookie, other_csrf, credential)
     assert status == 403
     assert json.loads(content) == {"error": {"code": "permission_denied"}}
     assert headers["referrer-policy"] == "no-referrer"
     assert headers["cache-control"] == "no-store"
+    # H1: an operator session never reaches the reader launch route.
+    operator_cookie, operator_csrf = _exchange(service, service.issue_bootstrap())
+    status, _, content = _launch(service, operator_cookie, operator_csrf, credential)
+    assert (status, json.loads(content)) == (
+        403,
+        {"error": {"code": "TBX-AUTH-007"}},
+    )
 
 
 def test_exchange_route_keeps_full_b01_checks(service) -> None:
@@ -173,9 +181,11 @@ def test_route_is_absent_without_a_reader_registry(tmp_path: Path) -> None:
     ) as running:
         with pytest.raises(LocalWebServerError, match="not configured"):
             running.issue_reader_launch_url(SELECTOR)
+        # No reader session can exist without a registry, and an operator
+        # session never reaches the reader launch route (H1).
         cookie, csrf = _exchange(running)
-        status, _, _ = _launch(running, cookie, csrf, "A" * 43)
-        assert status == 404
+        status, _, content = _launch(running, cookie, csrf, "A" * 43)
+        assert (status, json.loads(content)["error"]["code"]) == (403, "TBX-AUTH-007")
 
 
 def test_credential_never_reaches_server_output(

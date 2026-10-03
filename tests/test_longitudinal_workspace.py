@@ -630,6 +630,15 @@ def _register_writer(world: World) -> None:
         (ResultViewSourceRegistryUnsafe, LongitudinalErrorCode.INTEGRITY_FAILURE),
         (OSError, LongitudinalErrorCode.STORAGE_FAILURE),
         (ValueError, LongitudinalErrorCode.INTEGRITY_FAILURE),
+        (RuntimeError, LongitudinalErrorCode.INTEGRITY_FAILURE),
+        # H6: programming errors are internal errors, never tampering.
+        (AttributeError, LongitudinalErrorCode.INTERNAL_ERROR),
+        (TypeError, LongitudinalErrorCode.INTERNAL_ERROR),
+        (KeyError, LongitudinalErrorCode.INTERNAL_ERROR),
+        (IndexError, LongitudinalErrorCode.INTERNAL_ERROR),
+        (AssertionError, LongitudinalErrorCode.INTERNAL_ERROR),
+        (NameError, LongitudinalErrorCode.INTERNAL_ERROR),
+        (RecursionError, LongitudinalErrorCode.INTERNAL_ERROR),
     ],
 )
 def test_source_registry_failure_is_a_typed_boundary_error(
@@ -646,6 +655,33 @@ def test_source_registry_failure_is_a_typed_boundary_error(
     error = _boundary(world.build)
     assert error.code is code
     assert "result_" not in str(error)
+
+
+@pytest.mark.parametrize(
+    ("failure", "code"),
+    [
+        (TypeError, LongitudinalErrorCode.INTERNAL_ERROR),
+        (AttributeError, LongitudinalErrorCode.INTERNAL_ERROR),
+        (RuntimeError, LongitudinalErrorCode.PERMISSION_DENIED),
+        (OSError, LongitudinalErrorCode.PERMISSION_DENIED),
+    ],
+)
+def test_authorization_step_separates_bugs_from_denials(
+    world: World, monkeypatch: pytest.MonkeyPatch, failure, code
+) -> None:
+    """H6: in the first (authorization) step a programming error is
+    ``internal_error``; every other failure still denies without detail."""
+
+    original = workspace_module._call
+
+    def broken(store, cls, name, *args, **kwargs):
+        if (cls, name) == (ResultViewSourceRegistry, "registry_identity"):
+            raise failure("protected detail")
+        return original(store, cls, name, *args, **kwargs)
+
+    monkeypatch.setattr(workspace_module, "_call", broken)
+    error = _boundary(world.build)
+    assert error.code is code
 
 
 def test_stable_key_revocation_is_a_withheld_row_not_an_error(world: World) -> None:

@@ -49,6 +49,8 @@
     integrity_failure: ["A local store failed an integrity check.", "Verify local store integrity with the operator."],
     storage_failure: ["Local storage is unavailable.", "Check local storage, then retry."],
     save_unavailable: ["Save is unavailable.", "The saved-comparison registry is absent, unhealthy or full."],
+    "TBX-INTERNAL": ["An internal error occurred; nothing was changed.", "Retry; if it repeats, report it to the operator."],
+    "TBX-AUTH-001": ["The reader session ended (idle for 20 minutes, logged out, or its grant changed).", "Ask the operator for a new reader launch link."],
   };
   const REMEDIATIONS = {
     correct_request: "Correct the selection.",
@@ -553,7 +555,7 @@
       ui.problem.hidden = false;
       ui.problemText.textContent = `${problem.code}: ${problem.problem}`;
       ui.problemFix.textContent = problem.remediation;
-      ui.retry.hidden = code === "permission_denied";
+      ui.retry.hidden = code === "permission_denied" || code === "TBX-AUTH-001";
     };
     const clearProblem = () => { ui.problem.hidden = true; };
     // Clears every result surface, closes the drawer and drops the receipt, so

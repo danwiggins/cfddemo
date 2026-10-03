@@ -35,10 +35,12 @@ from tests.web.longitudinal_env import (
     _assert_denied,
     _assert_no_protected,
     _bind,
+    _call_route,
     _cohort_query,
     _contrast,
     _controller_layout,
     _deny_everywhere,
+    _every_route,
     _http,
     _journey_responses,
     _journey_steps,
@@ -75,6 +77,30 @@ def fresh(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
     yield from fresh_env(tmp_path, monkeypatch)
 
 
+def _denied_then_session_ended(env: Env) -> None:
+    """Criterion 5 (H1): the first read after the session's own grant is
+    revoked or stops being current gets the bounded denial and ends the
+    session; every later request on that cookie gets 401 ``TBX-AUTH-001``."""
+
+    routes = _every_route(env)
+    method, route, value = routes[0]
+    _assert_denied(*_call_route(env, method, route, value))
+    for method, route, value in routes:
+        status, content = _call_route(env, method, route, value)
+        assert (status, _json(content)) == (401, {"error": {"code": "TBX-AUTH-001"}})
+    status, content = _http(
+        env.service,
+        "POST",
+        "/api/v1/session/validate",
+        {
+            "Cookie": env.cookie,
+            "Origin": env.service.base_url,
+            "X-Traceback-CSRF": env.csrf,
+        },
+    )
+    assert (status, _json(content)) == (401, {"error": {"code": "TBX-AUTH-001"}})
+
+
 def test_revoked_grant_is_denied_on_every_route(fresh: Env) -> None:
     status, _ = fresh.get("selectors")
     assert status == 200
@@ -82,13 +108,13 @@ def test_revoked_grant_is_denied_on_every_route(fresh: Env) -> None:
         fresh.world.grant.payload.grant_selector,
         reason=ReaderRevocationReason.OPERATOR_REQUEST,
     )
-    _deny_everywhere(fresh)
+    _denied_then_session_ended(fresh)
 
 
 def test_expired_grant_is_denied_on_every_route(fresh: Env) -> None:
     clock = object.__getattribute__(fresh.world.reader, "_time_source")
     clock.advance_to(NOW + timedelta(days=2))
-    _deny_everywhere(fresh)
+    _denied_then_session_ended(fresh)
 
 
 def test_stale_bound_head_is_denied(fresh: Env) -> None:
@@ -179,13 +205,19 @@ def test_routes_need_their_own_reader_registry(tmp_path: Path, monkeypatch) -> N
                 stores={**world.stores(), "cohort_registry": object()},
                 measurement_scopes=(world.extra["scope"],),
             )
-        # Without the adapter the routes do not exist.
+        # Without a reader registry no reader session can exist, and the
+        # longitudinal routes admit reader sessions only (H1).
         with RunningLocalWebService.start(
             store=store, state_directory=tmp_path / "state2"
         ) as service:
             cookie, _ = _exchange(service)
-            status, _ = _http(service, "GET", PREFIX + "selectors", {"Cookie": cookie})
-            assert status == 404
+            status, content = _http(
+                service, "GET", PREFIX + "selectors", {"Cookie": cookie}
+            )
+            assert (status, _json(content)) == (
+                403,
+                {"error": {"code": "TBX-AUTH-007"}},
+            )
     finally:
         world.close()
 

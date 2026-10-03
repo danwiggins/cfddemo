@@ -84,6 +84,10 @@ class _LocalMaterialNotFound(RuntimeError):
     """Local runner material the command needs is absent (exit 4)."""
 
 
+class _LaunchServerStopped(RuntimeError):
+    """``launch``: the local web service stopped; its links would be dead."""
+
+
 class OperatorAuthorityError(RuntimeError):
     """Sanitized operator-authority failure; never carries key material."""
 
@@ -798,7 +802,11 @@ def _launch(
     stdin: TextIO,
 ) -> int:
     from traceback_runner.store import JobStore
-    from traceback_runner.web.server import RunningLocalWebService
+    from traceback_runner.web.reader_session import ReaderLaunchRateLimited
+    from traceback_runner.web.server import (
+        LocalWebServerStopped,
+        RunningLocalWebService,
+    )
 
     directory = _AuthorityDirectory(Path(args.authority_dir), create=False)
     try:
@@ -837,8 +845,14 @@ def _launch(
             while True:
                 try:
                     link = service.issue_reader_launch_url(args.grant)
-                except RuntimeError:
+                except ReaderLaunchRateLimited:
                     link = "Too many unused links; wait 60 seconds, then press Enter."
+                except LocalWebServerStopped:
+                    # H6: the watchdog stopped the server; never print a dead
+                    # link.  Every other error propagates.
+                    raise _LaunchServerStopped(
+                        "server stopped; relaunch with `traceback reader launch`"
+                    ) from None
                 print(link, file=out, flush=True)
                 try:
                     line = stdin.readline()
@@ -962,6 +976,9 @@ def run(
     except _LocalMaterialNotFound as exc:
         print(f"error: {exc}", file=err)
         return 4
+    except _LaunchServerStopped as exc:
+        print(f"error: {exc}", file=err)
+        return 3
     except OperatorAuthorityError as exc:
         print(f"error: {exc}", file=err)
         return 3
