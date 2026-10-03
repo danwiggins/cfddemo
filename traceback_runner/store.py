@@ -537,6 +537,23 @@ class JobStore:
             and row["lease_expires_at"] >= now
         )
 
+    def publish_attempt(self, lease: AttemptLease, publish: Callable[[], None]) -> None:
+        """Run ``publish`` only while ``lease`` is current, fenced against takeover.
+
+        The check and ``publish`` run inside one ``BEGIN IMMEDIATE`` write
+        transaction; ``acquire_lease`` needs the same write lock, so no other
+        worker can take the job over between the fence check and the rename.
+        Keep ``publish`` short (a rename, chmod and fsync).
+        """
+
+        with self._transaction() as connection:
+            row = connection.execute(
+                "SELECT * FROM jobs WHERE job_id=?", (lease.job_id,)
+            ).fetchone()
+            if row is None or not self._lease_matches(row, lease, self.clock()):
+                raise StaleLease("stale worker cannot publish a stage")
+            publish()
+
     def commit_attempt(
         self, lease: AttemptLease, receipt_path: str, receipt_sha256: str
     ) -> None:
@@ -695,7 +712,9 @@ class JobStore:
                 "SELECT * FROM jobs WHERE job_id=?", (lease.job_id,)
             ).fetchone()
             now = self.clock()
-            if row is None or row["lease_token"] != lease.token:
+            # Same fence as heartbeat and commit: an expired or superseded
+            # worker has no authority to decide the job's failure state.
+            if row is None or not self._lease_matches(row, lease, now):
                 raise StaleLease("stale worker cannot record failure")
             previous = JobState(row["state"])
             validate_transition(previous, target)

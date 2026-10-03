@@ -23,6 +23,7 @@ from traceback_runner.runner import (
     StageResult,
     StageSpec,
     SyntheticExecutionDisabled,
+    TerminalStageError,
 )
 from traceback_runner.snapshots import (
     SnapshotViolation,
@@ -946,9 +947,9 @@ def test_superseded_lease_still_stops_the_worker_before_publication(
     # verification, no publication, and the second runner keeps the lease.
     assert len(verified_under_lease) == 1
     assert not (runner.artifacts_dir / job.job_id).exists()
-    current = takeover.get(job.job_id)
-    assert current.lease_owner == "worker-b"
-    assert current.lease_token == second[0].token
+    owner, token, _ = _job_row(runner, job.job_id)
+    assert owner == "worker-b"
+    assert token == second[0].token
     assert not _keeper_threads()
 
 
@@ -1017,6 +1018,118 @@ def test_failed_worker_stops_renewing_before_it_records_the_failure(
     with pytest.raises(error):
         runner.execute(job.job_id, [StageSpec("measure", "v1", broken)], worker_id="w")
     assert keepers_at_failure == [0]
+
+
+def _job_row(runner: Runner, job_id: str) -> tuple[str | None, int, str]:
+    # Raw read: a second JobStore instance outside a journal anchor can trip the
+    # pinned WAL/SHM identity check (a pre-existing multi-instance hazard).
+    with sqlite3.connect(runner.store.path) as connection:
+        return connection.execute(
+            "SELECT lease_owner, lease_token, state FROM jobs WHERE job_id=?", (job_id,)
+        ).fetchone()
+
+
+def _attempt_statuses(runner: Runner, job_id: str) -> list[str]:
+    with sqlite3.connect(runner.store.path) as connection:
+        rows = connection.execute(
+            "SELECT status FROM attempts WHERE job_id=? ORDER BY attempt", (job_id,)
+        ).fetchall()
+    return [row[0] for row in rows]
+
+
+def test_takeover_after_keeper_shutdown_cannot_publish_stale_bytes(
+    tmp_path: Path,
+) -> None:
+    # The worker's last fenced heartbeat succeeds and its keeper stops; it then
+    # stalls past the lease and a second runner takes over before the rename.
+    clock = FakeClock()
+    lease = 5.0
+    runner = Runner(
+        tmp_path / "state",
+        clock=clock,
+        lease_seconds=lease,
+        heartbeat_seconds=0.01,
+        synthetic_enabled=True,
+    )
+    source, files = _source(tmp_path)
+    job = runner.submit(_request(source, files), source, files)
+    takeover = JobStore(runner.store.path, clock=clock)
+    real_publish = runner.store.publish_attempt
+    keepers_at_publish = []
+
+    def stalled_publish(lease_arg, publish):
+        keepers_at_publish.append(len(_keeper_threads()))
+        clock.now += lease + 1
+        takeover.acquire_lease(job.job_id, "measure", "a" * 64, "worker-b", lease)
+        return real_publish(lease_arg, publish)
+
+    runner.store.publish_attempt = stalled_publish  # type: ignore[method-assign]
+
+    with pytest.raises(StaleLease):
+        runner.execute(job.job_id, [_stage()], worker_id="worker-a")
+
+    assert keepers_at_publish == [0]
+    assert list((runner.artifacts_dir / job.job_id).glob("measure/*")) == []
+    owner, _, state = _job_row(runner, job.job_id)
+    assert owner == "worker-b"
+    assert state == JobState.RUNNING.value
+
+
+def test_lost_lease_and_stage_error_record_no_failure(tmp_path: Path) -> None:
+    # Conjunction: the keeper has recorded an expired lease AND the stage then
+    # raises its own error.  The worker surfaces the lost lease and records
+    # nothing; the job's failure state is left to whoever holds the fence.
+    clock = FakeClock()
+    lease = 5.0
+    runner = Runner(
+        tmp_path / "state",
+        clock=clock,
+        lease_seconds=lease,
+        heartbeat_seconds=0.01,
+        synthetic_enabled=True,
+    )
+    source, files = _source(tmp_path)
+    job = runner.submit(_request(source, files), source, files)
+    counter = _RenewalCounter(runner.store)
+
+    def expired_then_broken(context: object) -> StageResult:
+        clock.now += lease + 1
+        assert counter.wait_for(lambda: counter.failed >= 1)
+        raise TerminalStageError("refused after the lease expired")
+
+    with pytest.raises(StaleLease, match="lease expired or was superseded"):
+        runner.execute(
+            job.job_id, [StageSpec("measure", "v1", expired_then_broken)], worker_id="w"
+        )
+    assert runner.status(job.job_id).state == JobState.RUNNING
+    assert _attempt_statuses(runner, job.job_id) == ["running"]
+
+
+def test_fail_attempt_refuses_an_expired_lease(tmp_path: Path) -> None:
+    # The keeper has not noticed (long interval), so only the store's fence
+    # on token AND expiry stops an expired worker from recording a failure.
+    clock = FakeClock()
+    lease = 5.0
+    runner = Runner(
+        tmp_path / "state",
+        clock=clock,
+        lease_seconds=lease,
+        heartbeat_seconds=lease * 0.99,
+        synthetic_enabled=True,
+    )
+    source, files = _source(tmp_path)
+    job = runner.submit(_request(source, files), source, files)
+
+    def expired_then_broken(context: object) -> StageResult:
+        clock.now += lease + 1
+        raise RuntimeError("stage failed after the lease expired")
+
+    with pytest.raises(StaleLease, match="cannot record failure"):
+        runner.execute(
+            job.job_id, [StageSpec("measure", "v1", expired_then_broken)], worker_id="w"
+        )
+    assert runner.status(job.job_id).state == JobState.RUNNING
+    assert _attempt_statuses(runner, job.job_id) == ["running"]
 
 
 def test_heartbeat_interval_must_be_shorter_than_the_lease(tmp_path: Path) -> None:

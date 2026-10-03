@@ -163,6 +163,10 @@ class _LeaseKeeper:
                 self._lost = exc
                 return
 
+    @property
+    def lost(self) -> bool:
+        return self._lost is not None
+
     def raise_if_lost(self) -> None:
         lost = self._lost
         if lost is None:
@@ -459,17 +463,22 @@ class Runner:
                 # steps remain, so stop the keeper here: joined, its record is
                 # final, and any renewal failure since the last check (even one
                 # this heartbeat outlived) stops the worker before it publishes.
-                # As before this keeper existed, a stall past the lease from
-                # here on is left to the fenced commit.
                 keeper.stop()
                 keeper.raise_if_lost()
                 publication = self._publication_path(receipt)
                 publication.parent.mkdir(parents=True, exist_ok=True)
-                if publication.exists():
-                    raise StoreError("publication identity already exists")
-                os.replace(attempt_dir, publication)
-                publication.chmod(0o555)
-                self._fsync_directory(publication.parent)
+
+                def publish() -> None:
+                    if publication.exists():
+                        raise StoreError("publication identity already exists")
+                    os.replace(attempt_dir, publication)
+                    publication.chmod(0o555)
+                    self._fsync_directory(publication.parent)
+
+                # The rename runs under the store's write lock after a fresh
+                # token-and-expiry check, so a worker that stalled past its
+                # lease (or was taken over) cannot place bytes in artifacts/.
+                self.store.publish_attempt(current_lease, publish)
                 self._fault("after_publication")
                 self.store.commit_attempt(
                     current_lease,
@@ -490,6 +499,8 @@ class Runner:
                 raise
             except (SnapshotViolation, TerminalStageError) as exc:
                 keeper.stop()  # a failed worker stops renewing before it records
+                if keeper.lost:
+                    self._fail_after_lost_renewal(keeper, current_lease, exc)
                 # A pending pause can only end retryably (state table); the
                 # refusal repeats on the next attempt and then ends terminally.
                 pending_pause = self.store.get(job_id).state == JobState.PAUSE_REQUESTED
@@ -497,6 +508,8 @@ class Runner:
                 raise
             except Exception as exc:
                 keeper.stop()  # a failed worker stops renewing before it records
+                if keeper.lost:
+                    self._fail_after_lost_renewal(keeper, current_lease, exc)
                 self.store.fail_attempt(current_lease, str(exc), retryable=True)
                 raise
             finally:
@@ -512,6 +525,23 @@ class Runner:
         )
         self.store.transition(job_id, JobState.COMPLETE, f"{self._origin_label} workflow complete")
         return self.status(job_id)
+
+    def _fail_after_lost_renewal(
+        self, keeper: _LeaseKeeper, lease: AttemptLease, exc: BaseException
+    ) -> None:
+        """Surface a recorded renewal failure instead of the stage's own error.
+
+        ``fail_attempt`` is fenced on token and expiry, so it records only if
+        the lease is in fact still this worker's (a transient renewal error),
+        and then only a retryable failure: a worker whose renewal failed never
+        decides a terminal outcome.  An expired or superseded lease records
+        nothing.  Either way the keeper's ``StaleLease`` is raised.
+        """
+
+        try:
+            self.store.fail_attempt(lease, str(exc), retryable=True)
+        finally:
+            keeper.raise_if_lost()
 
     def recover(self, job_id: str) -> RecoveryReport:
         """Adopt exactly-current publications and quarantine every other orphan."""
