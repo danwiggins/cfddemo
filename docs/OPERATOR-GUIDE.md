@@ -156,6 +156,10 @@ and length only (TBX-BAM-002 WARN); the report says so.
 Cleanup: sealed records are read-only, so remove a root with
 `chmod -R u+w R && rm -rf R`.
 
+To rerun this path daily against the same FASTA and BAM and compare the counts
+with a local baseline, use the golden-path canary (`docs/CANARIES.md`). Its
+baseline and logs stay on the workstation.
+
 ## Stable exit codes
 
 | Code | Meaning |

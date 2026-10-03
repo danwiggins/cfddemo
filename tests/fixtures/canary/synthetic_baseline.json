@@ -1,0 +1,87 @@
+{
+  "inputs": null,
+  "metrics": {
+    "exit_codes": {
+      "logs": 0,
+      "preflight": 0,
+      "register": 0,
+      "run": 0,
+      "status": 0,
+      "verify": 0
+    },
+    "locator_clean": true,
+    "measurement": {
+      "completion": "complete",
+      "eligible_alignments": 866,
+      "exclusions": {
+        "duplicate": 15,
+        "low_mapping_quality": 40,
+        "no_reference_span": 0,
+        "qc_failure": 16,
+        "secondary": 15,
+        "supplementary": 25,
+        "unmapped": 23,
+        "unregistered_contig": 0
+      },
+      "histogram": {
+        "0-100": 277,
+        "100-150": 138,
+        "1000-inf": 0,
+        "150-200": 117,
+        "200-300": 84,
+        "300-500": 137,
+        "500-1000": 113
+      },
+      "records_scanned": 1000,
+      "schema_version": "traceback.fragment-measurement.v2"
+    },
+    "measurement_sha256": "9b2681ef232dc322e7e04b0d40e262a6d081131efd3db21058b074452215b04f",
+    "preflight": {
+      "checks": [
+        {
+          "code": "TBX-BAM-001",
+          "outcome": "pass",
+          "role": "analysis_bam"
+        },
+        {
+          "code": "TBX-BAM-002",
+          "outcome": "warn",
+          "role": "analysis_bam"
+        },
+        {
+          "code": "TBX-BAM-001",
+          "outcome": "pass",
+          "role": "analysis_bam"
+        },
+        {
+          "code": "TBX-BAM-001",
+          "outcome": "pass",
+          "role": "analysis_bam"
+        },
+        {
+          "code": "TBX-MOD-001",
+          "outcome": "partial",
+          "role": "analysis_bam"
+        }
+      ],
+      "fragment_measurement_eligible": true,
+      "outcome": "partial"
+    },
+    "report": {
+      "local_banner": true,
+      "mentions_synthetic": false
+    },
+    "run": {
+      "data_origin": "local_unqualified",
+      "preflight_outcome": "partial",
+      "qualified": false,
+      "reference_match": "name_and_length_only",
+      "state": "complete"
+    },
+    "verified": true
+  },
+  "note": "Committed SYNTHETIC canary baseline for the generated golden-path fixture (traceback_runner.fixtures.create_local_golden_path_inputs, default seed). Synthetic numbers only; real-data baselines stay local. inputs and wall_seconds are null so it compares across platforms.",
+  "recorded_at": "2026-10-03T00:00:00+00:00",
+  "schema_version": "traceback.canary-baseline.v1",
+  "wall_seconds": null
+}

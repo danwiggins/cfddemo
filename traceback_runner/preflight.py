@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import struct
+import subprocess
+import sys
 import tempfile
 from pathlib import Path
 from typing import Any
@@ -148,8 +150,25 @@ def _index_matches_bam(bam_path: str, index_path: str, pysam: Any) -> bool:
         return False
     with tempfile.TemporaryDirectory(prefix="traceback-index-check-") as directory:
         rebuilt = Path(directory) / f"rebuilt{suffix}"
-        pysam.index(*arguments, "-o", str(rebuilt), bam_path)
+        _rebuild_index(*arguments, "-o", str(rebuilt), bam_path)
         return _same_bytes(supplied, rebuilt)
+
+
+def _rebuild_index(*arguments: str) -> None:
+    """Run ``samtools index`` in a child interpreter.
+
+    ``pysam.index`` runs samtools in-process and holds the GIL for the whole
+    rebuild (about 65 s for a 2 GB BAM), which starves the stage heartbeat
+    thread so the runner's 30 s worker lease expires mid-validate. A child
+    process leaves the GIL free. Any failure raises, which callers treat as a
+    contradictory index.
+    """
+
+    subprocess.run(
+        [sys.executable, "-c", "import sys, pysam; pysam.index(*sys.argv[1:])", *arguments],
+        check=True,
+        capture_output=True,
+    )
 
 
 def _report(checks: list[PreflightCheck]) -> PreflightReport:
