@@ -458,6 +458,12 @@ class Runner:
                 publication.parent.mkdir(parents=True, exist_ok=True)
                 if publication.exists():
                     raise StoreError("publication identity already exists")
+                # Any renewal failure since the last check (even one a later
+                # foreground heartbeat outlived) stops the worker before it
+                # publishes.  A stall after this check can still publish a
+                # token-named directory; the fenced commit rejects it and
+                # recovery quarantines it (as before this keeper existed).
+                keeper.raise_if_lost()
                 os.replace(attempt_dir, publication)
                 publication.chmod(0o555)
                 self._fsync_directory(publication.parent)

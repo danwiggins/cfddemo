@@ -952,6 +952,48 @@ def test_superseded_lease_still_stops_the_worker_before_publication(
     assert not _keeper_threads()
 
 
+def test_late_keeper_failure_blocks_publication_after_a_good_heartbeat(
+    tmp_path: Path,
+) -> None:
+    # A keeper renewal fails after the callback-boundary checks; the worker's
+    # own fenced heartbeat then succeeds.  The recorded failure still stops the
+    # worker before it publishes.
+    armed = Event()
+    failed = Event()
+
+    def fault(point: str) -> None:
+        if point == "after_receipt":
+            armed.set()
+            assert failed.wait(10)
+
+    runner = Runner(
+        tmp_path / "state",
+        lease_seconds=30,
+        heartbeat_seconds=0.01,
+        synthetic_enabled=True,
+        fault_injector=fault,
+    )
+    source, files = _source(tmp_path)
+    job = runner.submit(_request(source, files), source, files)
+    real = runner.store.heartbeat
+
+    def heartbeat(lease, seconds):
+        on_keeper = threading.current_thread().name == "traceback-lease-keeper"
+        if on_keeper and armed.is_set() and not failed.is_set():
+            failed.set()
+            raise sqlite3.OperationalError("database is locked")
+        return real(lease, seconds)
+
+    runner.store.heartbeat = heartbeat  # type: ignore[method-assign]
+
+    with pytest.raises(StaleLease, match="lease renewal failed"):
+        runner.execute(job.job_id, [_stage()], worker_id="worker")
+
+    assert list((runner.artifacts_dir / job.job_id).glob("measure/*")) == []
+    assert runner.status(job.job_id).state == JobState.RETRYABLE_FAILURE
+    assert not _keeper_threads()
+
+
 def test_heartbeat_interval_must_be_shorter_than_the_lease(tmp_path: Path) -> None:
     for name, interval in (("equal", 1), ("zero", 0)):
         with pytest.raises(ValueError, match="heartbeat_seconds"):
