@@ -1,4 +1,10 @@
-"""Ed25519 signing with explicit purpose and synthetic-only development trust."""
+"""Ed25519 signing with explicit purpose and namespace-bound development trust.
+
+Two development namespaces exist.  ``development-synthetic`` signs synthetic
+records (result-bundle v1/v2).  ``development-local`` signs records built from
+a real local input by an unqualified method (result-bundle v3).  A key ID is
+derived from its namespace, so one key is valid for exactly one namespace.
+"""
 
 from __future__ import annotations
 
@@ -50,7 +56,20 @@ class KeyPurpose(StrEnum):
 
 class TrustNamespace(StrEnum):
     DEVELOPMENT_SYNTHETIC = "development-synthetic"
+    DEVELOPMENT_LOCAL = "development-local"
     EXTERNAL_RELEASE = "external-release"
+
+
+# Namespaces a development (ephemeral, locally generated) key may belong to.
+DEVELOPMENT_NAMESPACES = frozenset(
+    {TrustNamespace.DEVELOPMENT_SYNTHETIC, TrustNamespace.DEVELOPMENT_LOCAL}
+)
+# Key-ID prefix per namespace; the prefix makes a key ID name its namespace.
+_KEY_ID_PREFIXES = {
+    TrustNamespace.DEVELOPMENT_SYNTHETIC: "dev",
+    TrustNamespace.DEVELOPMENT_LOCAL: "devlocal",
+    TrustNamespace.EXTERNAL_RELEASE: "external",
+}
 
 
 KeyId = Annotated[
@@ -106,6 +125,48 @@ class DevelopmentTrustDocument(BaseModel):
     keys: tuple[PublicTrustedKey, ...]
 
 
+class PublicTrustedKeyV2(BaseModel):
+    """Public key in either development namespace; the namespace is explicit."""
+
+    model_config = ConfigDict(extra="forbid", frozen=True, str_strip_whitespace=True)
+
+    key_id: KeyId
+    namespace: Literal[
+        TrustNamespace.DEVELOPMENT_SYNTHETIC, TrustNamespace.DEVELOPMENT_LOCAL
+    ]
+    purpose: KeyPurpose
+    public_key_base64: Annotated[str, StringConstraints(min_length=44, max_length=44)]
+    revoked: bool = False
+
+
+class DevelopmentTrustDocumentV2(BaseModel):
+    """Public development trust roots across both development namespaces.
+
+    A separate class, never a widened v1.  v1 documents stay
+    ``development-synthetic`` only; a document holding any
+    ``development-local`` key is written as v2.
+    """
+
+    model_config = ConfigDict(extra="forbid", frozen=True, str_strip_whitespace=True)
+
+    schema_version: Literal["traceback.development-trust.v2"] = (
+        "traceback.development-trust.v2"
+    )
+    keys: tuple[PublicTrustedKeyV2, ...]
+
+
+AnyDevelopmentTrustDocument = DevelopmentTrustDocument | DevelopmentTrustDocumentV2
+DEVELOPMENT_TRUST_V1 = "traceback.development-trust.v1"
+DEVELOPMENT_TRUST_V2 = "traceback.development-trust.v2"
+# The one dispatch table from a trust-document schema literal to its class.
+DEVELOPMENT_TRUST_DOCUMENT_MODELS: dict[
+    str, type[DevelopmentTrustDocument] | type[DevelopmentTrustDocumentV2]
+] = {
+    DEVELOPMENT_TRUST_V1: DevelopmentTrustDocument,
+    DEVELOPMENT_TRUST_V2: DevelopmentTrustDocumentV2,
+}
+
+
 @dataclass(frozen=True)
 class DevelopmentSigningKey:
     """Ephemeral private key for synthetic development records only."""
@@ -116,7 +177,11 @@ class DevelopmentSigningKey:
     namespace: TrustNamespace = TrustNamespace.DEVELOPMENT_SYNTHETIC
 
     def __post_init__(self) -> None:
-        expected = _development_key_id(self.public_key_bytes(), self.purpose)
+        if self.namespace not in DEVELOPMENT_NAMESPACES:
+            raise SigningError("development keys belong to a development namespace")
+        expected = _development_key_id(
+            self.public_key_bytes(), self.purpose, namespace=self.namespace
+        )
         if self.key_id != expected:
             raise SigningError(
                 "development key identifier does not match its public key"
@@ -194,12 +259,13 @@ class TrustStore:
                 raise UnknownKeyError(f"unknown signing key {key_id!r}") from exc
 
 
-def _development_key_id(public_key_bytes: bytes, purpose: KeyPurpose) -> str:
-    return trusted_key_id(
-        public_key_bytes,
-        purpose,
-        namespace=TrustNamespace.DEVELOPMENT_SYNTHETIC,
-    )
+def _development_key_id(
+    public_key_bytes: bytes,
+    purpose: KeyPurpose,
+    *,
+    namespace: TrustNamespace = TrustNamespace.DEVELOPMENT_SYNTHETIC,
+) -> str:
+    return trusted_key_id(public_key_bytes, purpose, namespace=namespace)
 
 
 def trusted_key_id(
@@ -211,22 +277,28 @@ def trusted_key_id(
     """Derive a namespace-bound public key identifier."""
 
     fingerprint = hashlib.sha256(public_key_bytes).hexdigest()[:24]
-    prefix = "dev" if namespace == TrustNamespace.DEVELOPMENT_SYNTHETIC else "external"
-    return f"{prefix}-{purpose.value}-{fingerprint}"
+    return f"{_KEY_ID_PREFIXES[TrustNamespace(namespace)]}-{purpose.value}-{fingerprint}"
 
 
-def generate_development_keypair(purpose: KeyPurpose) -> DevelopmentSigningKey:
-    """Create an ephemeral synthetic-only Ed25519 signing key."""
+def generate_development_keypair(
+    purpose: KeyPurpose,
+    *,
+    namespace: TrustNamespace = TrustNamespace.DEVELOPMENT_SYNTHETIC,
+) -> DevelopmentSigningKey:
+    """Create an ephemeral Ed25519 development key bound to one namespace."""
 
+    if namespace not in DEVELOPMENT_NAMESPACES:
+        raise SigningError("development keys belong to a development namespace")
     private_key = Ed25519PrivateKey.generate()
     public_bytes = private_key.public_key().public_bytes(
         encoding=serialization.Encoding.Raw,
         format=serialization.PublicFormat.Raw,
     )
     return DevelopmentSigningKey(
-        key_id=_development_key_id(public_bytes, purpose),
+        key_id=_development_key_id(public_bytes, purpose, namespace=namespace),
         purpose=purpose,
         private_key=private_key,
+        namespace=namespace,
     )
 
 
@@ -289,40 +361,132 @@ def verify_signature(
         raise InvalidSignatureError("Ed25519 signature verification failed") from exc
 
 
-def development_trust_bytes(*keys: DevelopmentSigningKey) -> bytes:
-    """Serialize only public development keys for a later offline invocation."""
+def _trust_document(
+    keys: tuple[tuple[str, TrustNamespace, KeyPurpose, str, bool], ...],
+) -> AnyDevelopmentTrustDocument:
+    """Build v1 when every key is synthetic (unchanged bytes), else v2."""
 
-    public_keys = tuple(
-        PublicTrustedKey(
-            key_id=key.key_id,
-            purpose=key.purpose,
-            public_key_base64=base64.b64encode(key.public_key_bytes()).decode("ascii"),
-        )
-        for key in sorted(keys, key=lambda item: item.key_id)
-    )
-    if len({key.key_id for key in public_keys}) != len(public_keys):
+    ordered = tuple(sorted(keys, key=lambda item: item[0]))
+    if len({item[0] for item in ordered}) != len(ordered):
         raise SigningError("development trust keys must have unique key identifiers")
-    document = DevelopmentTrustDocument(keys=public_keys)
-    return (
-        json.dumps(
-            document.model_dump(mode="json"),
-            allow_nan=False,
-            ensure_ascii=False,
-            separators=(",", ":"),
-            sort_keys=True,
-        ).encode("utf-8")
-        + b"\n"
+    if all(item[1] == TrustNamespace.DEVELOPMENT_SYNTHETIC for item in ordered):
+        return DevelopmentTrustDocument(
+            keys=tuple(
+                PublicTrustedKey(
+                    key_id=key_id,
+                    purpose=purpose,
+                    public_key_base64=public_key,
+                    revoked=revoked,
+                )
+                for key_id, _, purpose, public_key, revoked in ordered
+            )
+        )
+    return DevelopmentTrustDocumentV2(
+        keys=tuple(
+            PublicTrustedKeyV2(
+                key_id=key_id,
+                namespace=namespace,
+                purpose=purpose,
+                public_key_base64=public_key,
+                revoked=revoked,
+            )
+            for key_id, namespace, purpose, public_key, revoked in ordered
+        )
     )
+
+
+def development_trust_bytes(*keys: DevelopmentSigningKey) -> bytes:
+    """Serialize only public development keys for a later offline invocation.
+
+    All-synthetic keys produce the unchanged v1 document; any
+    ``development-local`` key produces a v2 document.
+    """
+
+    document = _trust_document(
+        tuple(
+            (
+                key.key_id,
+                key.namespace,
+                key.purpose,
+                base64.b64encode(key.public_key_bytes()).decode("ascii"),
+                False,
+            )
+            for key in keys
+        )
+    )
+    return development_trust_document_bytes(document)
+
+
+def _parse_trust_document(content: bytes) -> AnyDevelopmentTrustDocument:
+    try:
+        raw = json.loads(content)
+        if not isinstance(raw, dict):
+            raise ValueError("trust document must be a JSON object")
+        model = DEVELOPMENT_TRUST_DOCUMENT_MODELS[raw.get("schema_version")]
+        return model.model_validate(raw)
+    except Exception as exc:
+        raise SigningError("invalid development trust document") from exc
+
+
+def parse_development_trust_document(content: bytes) -> AnyDevelopmentTrustDocument:
+    """Parse exact canonical trust-document bytes, dispatching on schema version."""
+
+    document = _parse_trust_document(content)
+    if content != development_trust_document_bytes(document):
+        raise SigningError("development trust document is not canonical JSON")
+    return document
+
+
+def revalidated_development_trust_document(
+    document: object,
+) -> AnyDevelopmentTrustDocument:
+    """Re-parse a caller-supplied document through its schema literal.
+
+    ``model_copy``/``model_construct`` skip validators, so the Python class of
+    a supplied document never decides its version.
+    """
+
+    if type(document) not in (DevelopmentTrustDocument, DevelopmentTrustDocumentV2):
+        raise SigningError("invalid development trust document")
+    try:
+        content = development_trust_document_bytes(document)  # type: ignore[arg-type]
+    except Exception as exc:
+        raise SigningError("invalid development trust document") from exc
+    return parse_development_trust_document(content)
+
+
+def merge_development_trust_documents(
+    *documents: AnyDevelopmentTrustDocument,
+) -> AnyDevelopmentTrustDocument:
+    """Union public keys; an existing key ID can never change.
+
+    The result is v1 when every key is synthetic, else v2.
+    """
+
+    merged: dict[str, tuple[str, TrustNamespace, KeyPurpose, str, bool]] = {}
+    for supplied in documents:
+        document = revalidated_development_trust_document(supplied)
+        for key in document.keys:
+            entry = (
+                key.key_id,
+                TrustNamespace(key.namespace),
+                key.purpose,
+                key.public_key_base64,
+                key.revoked,
+            )
+            if merged.get(key.key_id, entry) != entry:
+                raise SigningError("existing development trust entry cannot be changed")
+            merged[key.key_id] = entry
+    return _trust_document(tuple(merged.values()))
 
 
 def load_development_trust(content: bytes) -> TrustStore:
-    """Load a strict public-only development trust document from exact bytes."""
+    """Load a strict public-only development trust document from exact bytes.
 
-    try:
-        raw = json.loads(content)
-        document = DevelopmentTrustDocument.model_validate(raw)
-    except Exception as exc:
-        raise SigningError("invalid development trust document") from exc
+    Accepts v1 (synthetic keys only) and v2 (either development namespace).
+    """
+
+    document = _parse_trust_document(content)
     expected = development_trust_document_bytes(document)
     if content != expected:
         raise SigningError("development trust document is not canonical JSON")
@@ -344,7 +508,7 @@ def load_development_trust(content: bytes) -> TrustStore:
     return store
 
 
-def development_trust_document_bytes(document: DevelopmentTrustDocument) -> bytes:
+def development_trust_document_bytes(document: AnyDevelopmentTrustDocument) -> bytes:
     """Return canonical public trust-document bytes."""
 
     return (
@@ -360,8 +524,16 @@ def development_trust_document_bytes(document: DevelopmentTrustDocument) -> byte
 
 
 __all__ = [
+    "AnyDevelopmentTrustDocument",
+    "DEVELOPMENT_NAMESPACES",
+    "DEVELOPMENT_TRUST_DOCUMENT_MODELS",
     "DevelopmentSigningKey",
     "DevelopmentTrustDocument",
+    "DevelopmentTrustDocumentV2",
+    "PublicTrustedKeyV2",
+    "merge_development_trust_documents",
+    "parse_development_trust_document",
+    "revalidated_development_trust_document",
     "InvalidSignatureError",
     "KeyPurpose",
     "RevokedKeyError",

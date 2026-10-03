@@ -1,6 +1,34 @@
-# Synthetic record signing and export boundary
+# Development record signing and export boundary
 
-Status: first-wave development implementation; synthetic data only.
+Status: development implementation. Synthetic records, plus local records
+(`unapproved_local`: a real local input, an unqualified method, development
+trust only, not for clinical use).
+
+## Namespaces and bundle versions
+
+| Bundle | Measurement | Limitations | Report | Signing namespace | Key ID prefix |
+|---|---|---|---|---|---|
+| `traceback.result-bundle.v1`, `v2` | `fragment-measurement.v1` (`unapproved_synthetic`) | `limitations.v1` | synthetic report | `development-synthetic` | `dev-result-` |
+| `traceback.result-bundle.v3` | `fragment-measurement.v2` (`unapproved_local`) | `limitations.v2`, local template | `report-local.html` template | `development-local` | `devlocal-result-` |
+
+`verify_bundle` fixes the namespace from the bundle version: a v3 bundle signed
+by a `development-synthetic` key, or a v2 bundle signed by a
+`development-local` key, fails with `TrustNamespaceError`.
+`build_result_bundle` writes v2 for a v1 measurement (unchanged bytes) and v3
+for a v2 `unapproved_local` measurement, which also requires
+`reference_match` (`registered_digests` or `name_and_length_only`).
+`generate_development_keypair(purpose, namespace=...)` creates a key in either
+development namespace. Public trust documents stay
+`traceback.development-trust.v1` while every key is synthetic and become
+`traceback.development-trust.v2` (namespace per key) once any local key is
+present; `load_development_trust` reads both, and
+`merge_development_trust_documents` unions them without changing a key.
+
+The local report opens with the fixed banner "Unqualified. Local development
+record. Not for clinical use. Development signing key only." and lists: the
+method is unqualified, trust is development-only, no E0 protocol approval
+exists, and (when `reference_match` is `name_and_length_only`) the reference
+was matched by contig name and length only.
 
 This module proves the local bundle and offline-verification contracts. It does
 not qualify production key custody, real genomic inputs, MinION hardware,
@@ -11,8 +39,9 @@ upload exists in this path.
 
 `traceback_runner.signing` provides:
 
-- `generate_development_keypair(purpose)` for ephemeral Ed25519 keys in the
-  `development-synthetic` namespace;
+- `generate_development_keypair(purpose, namespace=...)` for ephemeral Ed25519
+  keys in the `development-synthetic` (default) or `development-local`
+  namespace;
 - `sign_bytes` and `verify_signature`, which require an explicit `release` or
   `result` purpose;
 - `TrustStore`, with independently supplied public keys and local revocation.
@@ -99,8 +128,9 @@ or zero-eligible scans cannot be serialized as publishable measurements.
 
 Release and result keys are distinct Ed25519 purposes. A key registered for one
 purpose cannot sign or verify the other. Development keys are generated at
-runtime and are accepted only in the `development-synthetic` namespace. A
-development signature can never establish trust for future non-synthetic data.
+runtime and are accepted only in a development namespace
+(`development-synthetic` or `development-local`). A development signature,
+including a `development-local` one, never establishes production trust.
 The bundle contains a key identifier, not a self-authorizing public key or trust
 root. Verification therefore requires a public key supplied by the operator's
 separate trust configuration.

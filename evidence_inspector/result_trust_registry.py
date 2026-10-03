@@ -12,6 +12,18 @@ Readers take ``read_fence``, which holds the registry's shared lock while the
 caller derives and returns its result, and receive one
 ``ResultTrustSnapshot`` binding registry identity, state version, head, and the
 current public ``DevelopmentTrustDocument``.
+
+Schema versions.  A ``v1`` registry (metadata, journal entries, snapshot,
+receipt and backup all ``v1``) holds ``development-synthetic`` result keys
+only; every registry created before the ``development-local`` namespace is
+``v1`` and reopens unchanged.  A ``v2`` registry, created only on request
+(``create_version=2``), records each key's namespace in its journal and
+accepts ``development-synthetic`` and ``development-local`` result keys.  A key
+ID is derived from its namespace, so a key is valid for exactly one
+namespace.  Its ``ResultTrustSnapshotV2`` carries a ``DevelopmentTrustDocumentV2``
+and ``data_origin`` in place of ``synthetic_only``.  The two versions never mix:
+a ``v1`` registry refuses ``development-local`` keys, and a journal line of the
+other version fails closed on load.
 """
 
 from __future__ import annotations
@@ -56,15 +68,19 @@ from evidence_inspector.safe_ingress import (
     exact_model_bytes,
 )
 from traceback_runner.signing import (
+    AnyDevelopmentTrustDocument,
     DevelopmentTrustDocument,
+    DevelopmentTrustDocumentV2,
     KeyPurpose,
     PublicTrustedKey,
+    PublicTrustedKeyV2,
     SigningError,
     TrustedKey,
     TrustNamespace,
     TrustStore,
     development_trust_document_bytes,
     load_development_trust,
+    revalidated_development_trust_document,
     trusted_key_id,
 )
 
@@ -96,6 +112,10 @@ RegistryId = Annotated[
     str, StringConstraints(pattern=r"^result_trust_registry_[0-9a-f]{32}$")
 ]
 ResultKeyId = Annotated[str, StringConstraints(pattern=r"^dev-result-[0-9a-f]{24}$")]
+# v2 registries: a synthetic (``dev-``) or local (``devlocal-``) result key ID.
+ResultKeyIdV2 = Annotated[
+    str, StringConstraints(pattern=r"^(?:dev|devlocal)-result-[0-9a-f]{24}$")
+]
 Sha256 = Annotated[str, StringConstraints(pattern=r"^[0-9a-f]{64}$")]
 PublicKeyBase64 = Annotated[str, StringConstraints(min_length=44, max_length=44)]
 _REGISTRY_ID_PREFIX = "result_trust_registry_"
@@ -130,9 +150,42 @@ class ResultTrustRegistryMetadata(RegistryContract):
     purpose: Literal[KeyPurpose.RESULT] = KeyPurpose.RESULT
 
 
+class ResultTrustRegistryMetadataV2(RegistryContract):
+    """A registry whose journal records each result key's namespace."""
+
+    schema_version: Literal["traceback.result-trust-registry-metadata.v2"] = (
+        "traceback.result-trust-registry-metadata.v2"
+    )
+    registry_id: RegistryId
+    registry_epoch_sha256: Sha256
+    purpose: Literal[KeyPurpose.RESULT] = KeyPurpose.RESULT
+
+
+AnyResultTrustRegistryMetadata = ResultTrustRegistryMetadata | ResultTrustRegistryMetadataV2
+
 _METADATA_MODEL_TYPES, _METADATA_ENUM_TYPES = contract_type_graph(
     ResultTrustRegistryMetadata
 )
+_METADATA_V2_MODEL_TYPES, _METADATA_V2_ENUM_TYPES = contract_type_graph(
+    ResultTrustRegistryMetadataV2
+)
+# Namespace a result key ID names through its derived prefix.
+_KEY_ID_NAMESPACES = (
+    ("dev-result-", TrustNamespace.DEVELOPMENT_SYNTHETIC),
+    ("devlocal-result-", TrustNamespace.DEVELOPMENT_LOCAL),
+)
+# ``data_origin`` label for the records each development namespace signs.
+_NAMESPACE_DATA_ORIGINS = {
+    TrustNamespace.DEVELOPMENT_SYNTHETIC: "synthetic",
+    TrustNamespace.DEVELOPMENT_LOCAL: "local_unqualified",
+}
+
+
+def _key_id_namespace(key_id: str) -> TrustNamespace:
+    for prefix, namespace in _KEY_ID_NAMESPACES:
+        if key_id.startswith(prefix):
+            return namespace
+    raise ValueError("result trust key identifier names no development namespace")
 
 
 def _decoded_public_key(value: str) -> bytes:
@@ -178,6 +231,44 @@ class ResultTrustJournalEntry(RegistryContract):
         return self
 
 
+class ResultTrustJournalEntryV2(RegistryContract):
+    """One committed v2 trust event, naming the key's namespace explicitly."""
+
+    schema_version: Literal["traceback.result-trust-journal-entry.v2"] = (
+        "traceback.result-trust-journal-entry.v2"
+    )
+    sequence: int = Field(ge=1, le=MAX_TRUST_EVENTS, strict=True)
+    previous_entry_sha256: Sha256
+    event: ResultTrustEventKind
+    namespace: Literal[
+        TrustNamespace.DEVELOPMENT_SYNTHETIC, TrustNamespace.DEVELOPMENT_LOCAL
+    ]
+    purpose: Literal[KeyPurpose.RESULT] = KeyPurpose.RESULT
+    key_id: ResultKeyIdV2
+    public_key_base64: PublicKeyBase64 | None
+    entry_sha256: Sha256
+
+    @model_validator(mode="after")
+    def exact_event(self) -> ResultTrustJournalEntryV2:
+        if _key_id_namespace(self.key_id) != self.namespace:
+            raise ValueError("result trust key identifier names another namespace")
+        if self.event is ResultTrustEventKind.REVOKE_KEY:
+            if self.public_key_base64 is not None:
+                raise ValueError("a revocation carries no public key")
+            return self
+        if self.public_key_base64 is None:
+            raise ValueError("a key addition requires its public key")
+        public_key = _decoded_public_key(self.public_key_base64)
+        if self.key_id != trusted_key_id(
+            public_key, KeyPurpose.RESULT, namespace=self.namespace
+        ):
+            raise ValueError("result trust key identifier does not match its key")
+        return self
+
+
+AnyResultTrustJournalEntry = ResultTrustJournalEntry | ResultTrustJournalEntryV2
+
+
 class ResultTrustEventReceipt(RegistryContract):
     schema_version: Literal["traceback.result-trust-event-receipt.v1"] = (
         "traceback.result-trust-event-receipt.v1"
@@ -188,6 +279,23 @@ class ResultTrustEventReceipt(RegistryContract):
     state_head_sha256: Sha256
     event: ResultTrustEventKind
     key_id: ResultKeyId
+    applied: bool
+    document_sha256: Sha256
+
+
+class ResultTrustEventReceiptV2(RegistryContract):
+    schema_version: Literal["traceback.result-trust-event-receipt.v2"] = (
+        "traceback.result-trust-event-receipt.v2"
+    )
+    registry_id: RegistryId
+    registry_epoch_sha256: Sha256
+    state_version: int = Field(ge=0, le=MAX_TRUST_EVENTS)
+    state_head_sha256: Sha256
+    event: ResultTrustEventKind
+    namespace: Literal[
+        TrustNamespace.DEVELOPMENT_SYNTHETIC, TrustNamespace.DEVELOPMENT_LOCAL
+    ]
+    key_id: ResultKeyIdV2
     applied: bool
     document_sha256: Sha256
 
@@ -225,6 +333,53 @@ class ResultTrustSnapshot(RegistryContract):
         return self
 
 
+DataOrigin = Literal["local_unqualified", "synthetic"]
+
+
+class ResultTrustSnapshotV2(RegistryContract):
+    """Current public result trust of a v2 registry at one exact head.
+
+    ``data_origin`` lists, sorted, the record origins the document's keys sign:
+    ``synthetic`` for ``development-synthetic`` keys and ``local_unqualified``
+    for ``development-local`` keys (revoked keys included).  It replaces v1's
+    ``synthetic_only``.
+    """
+
+    schema_version: Literal["traceback.result-trust-snapshot.v2"] = (
+        "traceback.result-trust-snapshot.v2"
+    )
+    registry_id: RegistryId
+    registry_epoch_sha256: Sha256
+    state_version: int = Field(ge=0, le=MAX_TRUST_EVENTS)
+    state_head_sha256: Sha256
+    document: DevelopmentTrustDocumentV2
+    document_sha256: Sha256
+    data_origin: tuple[DataOrigin, ...] = Field(max_length=2)
+
+    @model_validator(mode="after")
+    def exact_document(self) -> ResultTrustSnapshotV2:
+        key_ids = tuple(key.key_id for key in self.document.keys)
+        if (
+            len(key_ids) > MAX_TRUST_KEYS
+            or key_ids != tuple(sorted(set(key_ids)))
+            or any(key.purpose is not KeyPurpose.RESULT for key in self.document.keys)
+            or any(
+                _key_id_namespace(key.key_id) != key.namespace
+                for key in self.document.keys
+            )
+        ):
+            raise ValueError("result trust snapshot keys are invalid")
+        if self.data_origin != _data_origin(self.document):
+            raise ValueError("result trust snapshot data origin is invalid")
+        if self.document_sha256 != _document_sha256(self.document):
+            raise ValueError("result trust snapshot digest is invalid")
+        return self
+
+
+AnyResultTrustSnapshot = ResultTrustSnapshot | ResultTrustSnapshotV2
+AnyResultTrustEventReceipt = ResultTrustEventReceipt | ResultTrustEventReceiptV2
+
+
 class ResultTrustBackup(RegistryContract):
     schema_version: Literal["traceback.result-trust-backup.v1"] = (
         "traceback.result-trust-backup.v1"
@@ -235,16 +390,88 @@ class ResultTrustBackup(RegistryContract):
     journal: tuple[ResultTrustJournalEntry, ...] = Field(max_length=MAX_TRUST_EVENTS)
 
 
+class ResultTrustBackupV2(RegistryContract):
+    schema_version: Literal["traceback.result-trust-backup.v2"] = (
+        "traceback.result-trust-backup.v2"
+    )
+    metadata: ResultTrustRegistryMetadataV2
+    state_version: int = Field(ge=0, le=MAX_TRUST_EVENTS)
+    state_head_sha256: Sha256
+    journal: tuple[ResultTrustJournalEntryV2, ...] = Field(max_length=MAX_TRUST_EVENTS)
+
+
+AnyResultTrustBackup = ResultTrustBackup | ResultTrustBackupV2
+
 _BACKUP_MODEL_TYPES, _BACKUP_ENUM_TYPES = contract_type_graph(ResultTrustBackup)
+_BACKUP_V2_MODEL_TYPES, _BACKUP_V2_ENUM_TYPES = contract_type_graph(ResultTrustBackupV2)
+
+RESULT_TRUST_REGISTRY_METADATA_V1 = "traceback.result-trust-registry-metadata.v1"
+RESULT_TRUST_REGISTRY_METADATA_V2 = "traceback.result-trust-registry-metadata.v2"
+# One dispatch table per digested registry contract, keyed by registry version:
+# metadata, journal entry, backup, and the backup type graph.
+_METADATA_MODELS: dict[str, type[AnyResultTrustRegistryMetadata]] = {
+    RESULT_TRUST_REGISTRY_METADATA_V1: ResultTrustRegistryMetadata,
+    RESULT_TRUST_REGISTRY_METADATA_V2: ResultTrustRegistryMetadataV2,
+}
+_JOURNAL_ENTRY_MODELS: dict[str, type[AnyResultTrustJournalEntry]] = {
+    "traceback.result-trust-journal-entry.v1": ResultTrustJournalEntry,
+    "traceback.result-trust-journal-entry.v2": ResultTrustJournalEntryV2,
+}
+_BACKUP_MODELS: dict[str, type[AnyResultTrustBackup]] = {
+    "traceback.result-trust-backup.v1": ResultTrustBackup,
+    "traceback.result-trust-backup.v2": ResultTrustBackupV2,
+}
+# Registry version -> (metadata, entry, backup, snapshot) classes.
+_REGISTRY_VERSION_MODELS: dict[type, tuple[type, type, type, type]] = {
+    ResultTrustRegistryMetadata: (
+        ResultTrustRegistryMetadata,
+        ResultTrustJournalEntry,
+        ResultTrustBackup,
+        ResultTrustSnapshot,
+    ),
+    ResultTrustRegistryMetadataV2: (
+        ResultTrustRegistryMetadataV2,
+        ResultTrustJournalEntryV2,
+        ResultTrustBackupV2,
+        ResultTrustSnapshotV2,
+    ),
+}
 
 
-def _document_sha256(document: DevelopmentTrustDocument) -> str:
+def _schema_dispatch(content: bytes, models: dict[str, type]) -> type:
+    """Pick the exact model a canonical JSON object's ``schema_version`` names."""
+
+    raw = bounded_json_loads(
+        content,
+        max_bytes=MAX_BACKUP_BYTES,
+        max_depth=8,
+        max_nodes=MAX_TRUST_EVENTS * 16 + 64,
+        max_collection_items=MAX_TRUST_EVENTS,
+        max_string_bytes=256,
+    )
+    if type(raw) is not dict or raw.get("schema_version") not in models:
+        raise ValueError("result trust registry schema is unsupported")
+    return models[raw["schema_version"]]
+
+
+def _data_origin(document: DevelopmentTrustDocumentV2) -> tuple[str, ...]:
+    return tuple(
+        sorted(
+            {
+                _NAMESPACE_DATA_ORIGINS[TrustNamespace(key.namespace)]
+                for key in document.keys
+            }
+        )
+    )
+
+
+def _document_sha256(document: AnyDevelopmentTrustDocument) -> str:
     return hashlib.sha256(_PINNED_TRUST_DOCUMENT_BYTES(document)).hexdigest()
 
 
 def project_result_trust_document(
-    document: DevelopmentTrustDocument, key_ids: tuple[str, ...]
-) -> DevelopmentTrustDocument:
+    document: AnyDevelopmentTrustDocument, key_ids: tuple[str, ...]
+) -> AnyDevelopmentTrustDocument:
     """Return ``document`` restricted to ``key_ids``.
 
     Signature verification resolves only the key a signature names, so a
@@ -254,6 +481,14 @@ def project_result_trust_document(
     """
 
     wanted = set(key_ids)
+    try:
+        document = revalidated_development_trust_document(document)
+    except SigningError:
+        raise ResultTrustRegistryConflict("result trust document is invalid") from None
+    if type(document) is DevelopmentTrustDocumentV2:
+        return DevelopmentTrustDocumentV2(
+            keys=tuple(key for key in document.keys if key.key_id in wanted)
+        )
     return DevelopmentTrustDocument(
         keys=tuple(key for key in document.keys if key.key_id in wanted)
     )
@@ -306,13 +541,19 @@ def _is_registry_id(value: object) -> bool:
     )
 
 
-def _is_result_key_id(value: object) -> bool:
-    return (
-        type(value) is str
-        and len(value) == len("dev-result-") + 24
-        and value.startswith("dev-result-")
-        and all(character in "0123456789abcdef" for character in value[11:])
-    )
+def _is_result_key_id(value: object, *, local_allowed: bool = False) -> bool:
+    if type(value) is not str:
+        return False
+    for prefix, namespace in _KEY_ID_NAMESPACES:
+        if namespace is TrustNamespace.DEVELOPMENT_LOCAL and not local_allowed:
+            continue
+        if (
+            len(value) == len(prefix) + 24
+            and value.startswith(prefix)
+            and all(character in "0123456789abcdef" for character in value[len(prefix) :])
+        ):
+            return True
+    return False
 
 
 def _write_all(descriptor: int, content: bytes) -> None:
@@ -371,46 +612,54 @@ def _publish_file(directory_fd: int, name: str, content: bytes) -> None:
         os.fsync(directory_fd)
 
 
-def _journal_entry_sha256(entry: ResultTrustJournalEntry) -> str:
+def _journal_entry_sha256(entry: AnyResultTrustJournalEntry) -> str:
     placeholder = entry.model_copy(update={"entry_sha256": "0" * 64})
-    return hashlib.sha256(
-        b"traceback-result-trust-journal-v1\0" + canonical_contract_bytes(placeholder)
-    ).hexdigest()
+    domain = (
+        b"traceback-result-trust-journal-v2\0"
+        if type(entry) is ResultTrustJournalEntryV2
+        else b"traceback-result-trust-journal-v1\0"
+    )
+    return hashlib.sha256(domain + canonical_contract_bytes(placeholder)).hexdigest()
 
 
-def _metadata_genesis_sha256(metadata: ResultTrustRegistryMetadata) -> str:
-    return hashlib.sha256(
-        b"traceback-result-trust-registry-genesis-v1\0"
-        + canonical_contract_bytes(metadata)
-    ).hexdigest()
+def _metadata_genesis_sha256(metadata: AnyResultTrustRegistryMetadata) -> str:
+    domain = (
+        b"traceback-result-trust-registry-genesis-v2\0"
+        if type(metadata) is ResultTrustRegistryMetadataV2
+        else b"traceback-result-trust-registry-genesis-v1\0"
+    )
+    return hashlib.sha256(domain + canonical_contract_bytes(metadata)).hexdigest()
 
 
 def _build_journal_entry(
     *,
+    entry_model: type[AnyResultTrustJournalEntry] = ResultTrustJournalEntry,
     sequence: int,
     previous_entry_sha256: str,
     event: ResultTrustEventKind,
     key_id: str,
     public_key_base64: str | None,
-) -> ResultTrustJournalEntry:
-    placeholder = ResultTrustJournalEntry.model_construct(
+) -> AnyResultTrustJournalEntry:
+    if entry_model not in (ResultTrustJournalEntry, ResultTrustJournalEntryV2):
+        raise ResultTrustRegistryUnsafe("result trust journal entry schema is invalid")
+    placeholder = entry_model.model_construct(
         sequence=sequence,
         previous_entry_sha256=previous_entry_sha256,
         event=event,
-        namespace=TrustNamespace.DEVELOPMENT_SYNTHETIC,
+        namespace=_key_id_namespace(key_id),
         purpose=KeyPurpose.RESULT,
         key_id=key_id,
         public_key_base64=public_key_base64,
         entry_sha256="0" * 64,
     )
-    return ResultTrustJournalEntry(
+    return entry_model(
         **placeholder.model_dump(mode="python", exclude={"entry_sha256"}),
         entry_sha256=_journal_entry_sha256(placeholder),
     )
 
 
 def _fold_events(
-    journal: tuple[ResultTrustJournalEntry, ...], genesis: str
+    journal: tuple[AnyResultTrustJournalEntry, ...], genesis: str
 ) -> tuple[dict[str, tuple[str, bool]], frozenset[str], str]:
     """Replay the chain and the forward-only rules; any violation fails closed.
 
@@ -451,7 +700,22 @@ def _fold_events(
     return keys, frozenset(revoked), previous
 
 
-def _document_from_keys(keys: dict[str, tuple[str, bool]]) -> DevelopmentTrustDocument:
+def _document_from_keys(
+    keys: dict[str, tuple[str, bool]], *, version_two: bool
+) -> AnyDevelopmentTrustDocument:
+    if version_two:
+        return DevelopmentTrustDocumentV2(
+            keys=tuple(
+                PublicTrustedKeyV2(
+                    key_id=key_id,
+                    namespace=_key_id_namespace(key_id),
+                    purpose=KeyPurpose.RESULT,
+                    public_key_base64=public_key,
+                    revoked=revoked,
+                )
+                for key_id, (public_key, revoked) in sorted(keys.items())
+            )
+        )
     return DevelopmentTrustDocument(
         keys=tuple(
             PublicTrustedKey(
@@ -465,12 +729,18 @@ def _document_from_keys(keys: dict[str, tuple[str, bool]]) -> DevelopmentTrustDo
     )
 
 
-def _canonical_backup_bytes(backup: ResultTrustBackup) -> bytes:
+def _canonical_backup_bytes(backup: AnyResultTrustBackup) -> bytes:
+    if type(backup) is ResultTrustBackupV2:
+        model: type = ResultTrustBackupV2
+        model_types, enum_types = _BACKUP_V2_MODEL_TYPES, _BACKUP_V2_ENUM_TYPES
+    else:
+        model = ResultTrustBackup
+        model_types, enum_types = _BACKUP_MODEL_TYPES, _BACKUP_ENUM_TYPES
     return exact_model_bytes(
         backup,
-        ResultTrustBackup,
-        model_types=_BACKUP_MODEL_TYPES,
-        enum_types=_BACKUP_ENUM_TYPES,
+        model,
+        model_types=model_types,
+        enum_types=enum_types,
         max_bytes=MAX_BACKUP_BYTES,
         max_nodes=MAX_TRUST_EVENTS * 16 + 64,
         max_depth=8,
@@ -479,7 +749,7 @@ def _canonical_backup_bytes(backup: ResultTrustBackup) -> bytes:
     )
 
 
-def result_trust_backup_from_bytes(content: bytes) -> ResultTrustBackup:
+def result_trust_backup_from_bytes(content: bytes) -> AnyResultTrustBackup:
     if type(content) is not bytes or len(content) > MAX_BACKUP_BYTES:
         raise ResultTrustRegistryConflict("result trust registry backup exceeds its bound")
     try:
@@ -491,7 +761,7 @@ def result_trust_backup_from_bytes(content: bytes) -> ResultTrustBackup:
             max_collection_items=MAX_TRUST_EVENTS,
             max_string_bytes=256,
         )
-        backup = ResultTrustBackup.model_validate_json(content)
+        backup = _schema_dispatch(content, _BACKUP_MODELS).model_validate_json(content)
         if _canonical_backup_bytes(backup) != content:
             raise ValueError("result trust registry backup is not canonical")
         if backup.state_version != len(backup.journal):
@@ -508,19 +778,31 @@ def result_trust_backup_from_bytes(content: bytes) -> ResultTrustBackup:
     return backup
 
 
-def _validated_public_key(key: object) -> PublicTrustedKey:
-    """Return an exact, re-validated public result key or raise a conflict."""
+def _validated_public_key(
+    key: object, *, local_allowed: bool = False
+) -> PublicTrustedKey | PublicTrustedKeyV2:
+    """Return an exact, re-validated public result key or raise a conflict.
 
-    if type(key) is not PublicTrustedKey:
+    A v1 registry accepts only ``development-synthetic`` keys; a v2 registry
+    (``local_allowed``) also accepts ``development-local`` keys.
+    """
+
+    key_type = type(key)
+    if key_type not in (PublicTrustedKey, PublicTrustedKeyV2):
         raise ResultTrustRegistryConflict("result trust key must be a PublicTrustedKey")
     try:
-        encoded = key.model_dump_json()
-        replayed = PublicTrustedKey.model_validate_json(encoded)
+        encoded = key.model_dump_json()  # type: ignore[union-attr]
+        replayed = key_type.model_validate_json(encoded)
         if replayed != key or replayed.model_dump_json() != encoded:
             raise ValueError("result trust key does not replay")
     except (TypeError, ValueError):
         raise ResultTrustRegistryConflict("result trust key is invalid") from None
-    if replayed.namespace is not TrustNamespace.DEVELOPMENT_SYNTHETIC:
+    allowed = (
+        (TrustNamespace.DEVELOPMENT_SYNTHETIC, TrustNamespace.DEVELOPMENT_LOCAL)
+        if local_allowed
+        else (TrustNamespace.DEVELOPMENT_SYNTHETIC,)
+    )
+    if replayed.namespace not in allowed:
         raise ResultTrustRegistryConflict("result trust key namespace is invalid")
     if replayed.purpose is not KeyPurpose.RESULT:
         raise ResultTrustRegistryConflict("result trust key purpose must be result")
@@ -536,7 +818,7 @@ def _validated_public_key(key: object) -> PublicTrustedKey:
             namespace=replayed.namespace,
         )
         if replayed.key_id != _PINNED_TRUSTED_KEY_ID(
-            public_key, KeyPurpose.RESULT, namespace=TrustNamespace.DEVELOPMENT_SYNTHETIC
+            public_key, KeyPurpose.RESULT, namespace=replayed.namespace
         ):
             raise ValueError("result trust key identifier is invalid")
     except (TypeError, ValueError, SigningError):
@@ -566,12 +848,18 @@ def _registry_instance_snapshot(registry: ResultTrustRegistry) -> tuple[object, 
     if type(instance) is not dict or any(name not in instance for name in required):
         raise unsafe
     metadata = instance["_metadata"]
+    if type(metadata) is ResultTrustRegistryMetadataV2:
+        metadata_model: type = ResultTrustRegistryMetadataV2
+        metadata_types = (_METADATA_V2_MODEL_TYPES, _METADATA_V2_ENUM_TYPES)
+    else:
+        metadata_model = ResultTrustRegistryMetadata
+        metadata_types = (_METADATA_MODEL_TYPES, _METADATA_ENUM_TYPES)
     try:
         metadata_bytes = exact_model_bytes(
             metadata,
-            ResultTrustRegistryMetadata,
-            model_types=_METADATA_MODEL_TYPES,
-            enum_types=_METADATA_ENUM_TYPES,
+            metadata_model,
+            model_types=metadata_types[0],
+            enum_types=metadata_types[1],
             max_bytes=4096,
             max_nodes=64,
             max_depth=8,
@@ -653,8 +941,21 @@ class ResultTrustRegistry:
         expected_registry_id: str | None = None,
         expected_registry_epoch_sha256: str | None = None,
         expected_state_head_sha256: str | None = None,
+        create_version: int = 1,
     ) -> None:
+        """Open, or create, one registry root.
+
+        ``create_version`` applies only when this call creates the root: ``1``
+        (the default) creates a synthetic-only ``v1`` registry, ``2`` a ``v2``
+        registry that also accepts ``development-local`` keys.  An existing
+        root always keeps the version it was created with.
+        """
+
         _require_registry_integrity(self)
+        if type(create_version) is not int or create_version not in (1, 2):
+            raise ResultTrustRegistryUnsafe(
+                "result trust registry create version is invalid"
+            )
         expected_values = (
             expected_registry_id,
             expected_registry_epoch_sha256,
@@ -744,7 +1045,7 @@ class ResultTrustRegistry:
             self._journal_identity = (journal_metadata.st_dev, journal_metadata.st_ino)
             with _RT_LOCK(self, exclusive=True):
                 self._metadata = _RT_LOAD_OR_CREATE_METADATA(
-                    self, allow_create=root_created
+                    self, allow_create=root_created, create_version=create_version
                 )
                 self._genesis_head_sha256 = _metadata_genesis_sha256(self._metadata)
                 self._head_key = (
@@ -910,8 +1211,8 @@ class ResultTrustRegistry:
             ) from None
 
     def _load_or_create_metadata(
-        self, *, allow_create: bool
-    ) -> ResultTrustRegistryMetadata:
+        self, *, allow_create: bool, create_version: int = 1
+    ) -> AnyResultTrustRegistryMetadata:
         assert self._root_fd is not None
         try:
             descriptor = os.open(
@@ -924,7 +1225,12 @@ class ResultTrustRegistry:
                 raise ResultTrustRegistryUnsafe(
                     "result trust registry metadata is missing"
                 ) from None
-            metadata = ResultTrustRegistryMetadata(
+            metadata_model = (
+                ResultTrustRegistryMetadataV2
+                if create_version == 2
+                else ResultTrustRegistryMetadata
+            )
+            metadata = metadata_model(
                 registry_id=f"{_REGISTRY_ID_PREFIX}{secrets.token_hex(16)}",
                 registry_epoch_sha256=secrets.token_hex(32),
             )
@@ -949,7 +1255,7 @@ class ResultTrustRegistry:
                 )
             content = _read_bounded(descriptor, 4096)
             metadata = contract_from_canonical_bytes(
-                ResultTrustRegistryMetadata, content
+                _schema_dispatch(content, _METADATA_MODELS), content
             )
         except ResultTrustRegistryUnsafe:
             os.close(descriptor)
@@ -963,7 +1269,7 @@ class ResultTrustRegistry:
         self._metadata_identity = (observed.st_dev, observed.st_ino)
         return metadata
 
-    def _load_journal(self) -> tuple[ResultTrustJournalEntry, ...]:
+    def _load_journal(self) -> tuple[AnyResultTrustJournalEntry, ...]:
         descriptor = self._journal_fd
         if descriptor is None:
             raise ResultTrustRegistryUnsafe("result trust registry is closed")
@@ -982,9 +1288,10 @@ class ResultTrustRegistry:
                 "result trust registry journal bound exceeded"
             )
         try:
+            # A registry's journal holds only its own version's entries.
+            entry_model = _REGISTRY_VERSION_MODELS[type(self._metadata)][1]
             journal = tuple(
-                contract_from_canonical_bytes(ResultTrustJournalEntry, line)
-                for line in lines
+                contract_from_canonical_bytes(entry_model, line) for line in lines
             )
             _fold_events(journal, self._genesis_head_sha256)
         except Exception:
@@ -993,7 +1300,7 @@ class ResultTrustRegistry:
             ) from None
         return journal
 
-    def _append_journal(self, entry: ResultTrustJournalEntry) -> None:
+    def _append_journal(self, entry: AnyResultTrustJournalEntry) -> None:
         descriptor = self._journal_fd
         if descriptor is None:
             raise ResultTrustRegistryUnsafe("result trust registry is closed")
@@ -1023,7 +1330,7 @@ class ResultTrustRegistry:
 
     def _accept_observed_head(
         self,
-        journal: tuple[ResultTrustJournalEntry, ...],
+        journal: tuple[AnyResultTrustJournalEntry, ...],
         head: str,
         *,
         check_instance: bool,
@@ -1046,7 +1353,7 @@ class ResultTrustRegistry:
     def _load_state(
         self,
     ) -> tuple[
-        tuple[ResultTrustJournalEntry, ...],
+        tuple[AnyResultTrustJournalEntry, ...],
         dict[str, tuple[str, bool]],
         frozenset[str],
         str,
@@ -1056,9 +1363,21 @@ class ResultTrustRegistry:
         _RT_ACCEPT_OBSERVED_HEAD(self, journal, head, check_instance=True)
         return journal, keys, revoked, head
 
-    def _snapshot_locked(self) -> ResultTrustSnapshot:
+    def _snapshot_locked(self) -> AnyResultTrustSnapshot:
         journal, keys, _, head = _RT_LOAD_STATE(self)
-        document = _document_from_keys(keys)
+        if type(self._metadata) is ResultTrustRegistryMetadataV2:
+            document_v2 = _document_from_keys(keys, version_two=True)
+            assert type(document_v2) is DevelopmentTrustDocumentV2
+            return _RT_SNAPSHOT_V2(
+                registry_id=self._metadata.registry_id,
+                registry_epoch_sha256=self._metadata.registry_epoch_sha256,
+                state_version=len(journal),
+                state_head_sha256=head,
+                document=document_v2,
+                document_sha256=_document_sha256(document_v2),
+                data_origin=_data_origin(document_v2),
+            )
+        document = _document_from_keys(keys, version_two=False)
         return _RT_SNAPSHOT(
             registry_id=self._metadata.registry_id,
             registry_epoch_sha256=self._metadata.registry_epoch_sha256,
@@ -1073,7 +1392,7 @@ class ResultTrustRegistry:
         event: ResultTrustEventKind,
         key_id: str,
         public_key_base64: str | None,
-    ) -> ResultTrustEventReceipt:
+    ) -> AnyResultTrustEventReceipt:
         with _RT_LOCK(self, exclusive=True):
             _RT_RECOVER_TEMPORARY_FILES(self)
             journal, keys, revoked, head = _RT_LOAD_STATE(self)
@@ -1110,6 +1429,7 @@ class ResultTrustRegistry:
                 _RT_APPEND_JOURNAL(
                     self,
                     _build_journal_entry(
+                        entry_model=_REGISTRY_VERSION_MODELS[type(self._metadata)][1],
                         sequence=len(journal) + 1,
                         previous_entry_sha256=head,
                         event=event,
@@ -1118,6 +1438,18 @@ class ResultTrustRegistry:
                     ),
                 )
             snapshot = _RT_SNAPSHOT_LOCKED(self)
+            if type(snapshot) is ResultTrustSnapshotV2:
+                return _RT_RECEIPT_V2(
+                    registry_id=snapshot.registry_id,
+                    registry_epoch_sha256=snapshot.registry_epoch_sha256,
+                    state_version=snapshot.state_version,
+                    state_head_sha256=snapshot.state_head_sha256,
+                    event=event,
+                    namespace=_key_id_namespace(key_id),
+                    key_id=key_id,
+                    applied=applied,
+                    document_sha256=snapshot.document_sha256,
+                )
             return _RT_RECEIPT(
                 registry_id=snapshot.registry_id,
                 registry_epoch_sha256=snapshot.registry_epoch_sha256,
@@ -1129,16 +1461,21 @@ class ResultTrustRegistry:
                 document_sha256=snapshot.document_sha256,
             )
 
-    def add_key(self, key: PublicTrustedKey) -> ResultTrustEventReceipt:
+    def add_key(
+        self, key: PublicTrustedKey | PublicTrustedKeyV2
+    ) -> AnyResultTrustEventReceipt:
         """Append one active public result key; identical re-adds are no-ops.
 
         A revoked key ID can never be re-added, and any other entry for an
-        existing key ID is rejected.  Only ``development-synthetic`` result
-        keys are accepted.
+        existing key ID is rejected.  A v1 registry accepts only
+        ``development-synthetic`` result keys; a v2 registry also accepts
+        ``development-local`` result keys.
         """
 
         _require_registry_integrity(self)
-        validated = _validated_public_key(key)
+        validated = _validated_public_key(
+            key, local_allowed=type(self._metadata) is ResultTrustRegistryMetadataV2
+        )
         return _RT_APPEND_EVENT(
             self,
             ResultTrustEventKind.ADD_KEY,
@@ -1146,7 +1483,7 @@ class ResultTrustRegistry:
             validated.public_key_base64,
         )
 
-    def revoke_key(self, key_id: str) -> ResultTrustEventReceipt:
+    def revoke_key(self, key_id: str) -> AnyResultTrustEventReceipt:
         """Permanently revoke one result key ID; needs no further authority.
 
         Revoking an already revoked ID is a no-op.  Revoking an ID that was
@@ -1154,12 +1491,14 @@ class ResultTrustRegistry:
         """
 
         _require_registry_integrity(self)
-        if not _is_result_key_id(key_id):
+        if not _is_result_key_id(
+            key_id, local_allowed=type(self._metadata) is ResultTrustRegistryMetadataV2
+        ):
             raise ResultTrustRegistryConflict("result trust key identifier is invalid")
         return _RT_APPEND_EVENT(self, ResultTrustEventKind.REVOKE_KEY, key_id, None)
 
     @contextmanager
-    def read_fence(self) -> Iterator[ResultTrustSnapshot]:
+    def read_fence(self) -> Iterator[AnyResultTrustSnapshot]:
         """Hold the shared registry lock while the caller uses current trust.
 
         No trust event can commit until the ``with`` body exits, so a caller
@@ -1172,14 +1511,14 @@ class ResultTrustRegistry:
             yield _RT_SNAPSHOT_LOCKED(self)
             _require_registry_integrity(self)
 
-    def current_trust(self) -> ResultTrustSnapshot:
+    def current_trust(self) -> AnyResultTrustSnapshot:
         """Return the current trust snapshot, built under the registry lock."""
 
         _require_registry_integrity(self)
         with _RT_LOCK(self, exclusive=False):
             return _RT_SNAPSHOT_LOCKED(self)
 
-    def current_trust_store(self) -> tuple[ResultTrustSnapshot, TrustStore]:
+    def current_trust_store(self) -> tuple[AnyResultTrustSnapshot, TrustStore]:
         """Return a fresh ``TrustStore`` and the snapshot it was built from."""
 
         _require_registry_integrity(self)
@@ -1194,7 +1533,8 @@ class ResultTrustRegistry:
         _require_registry_integrity(self)
         with _RT_LOCK(self, exclusive=False):
             journal, _, _, head = _RT_LOAD_STATE(self)
-            backup = ResultTrustBackup(
+            backup_model = _REGISTRY_VERSION_MODELS[type(self._metadata)][2]
+            backup = backup_model(
                 metadata=self._metadata,
                 state_version=len(journal),
                 state_head_sha256=head,
@@ -1374,11 +1714,13 @@ class ResultTrustRegistry:
             expected_registry_epoch_sha256=expected_registry_epoch_sha256,
             expected_state_head_sha256=expected_state_head_sha256,
             parse_metadata=lambda content: contract_from_canonical_bytes(
-                ResultTrustRegistryMetadata, content
+                _schema_dispatch(content, _METADATA_MODELS), content
             ),
             genesis_sha256=_metadata_genesis_sha256,
+            # Both versions parse here; the reopen that follows rejects a line
+            # whose version differs from the registry's metadata.
             parse_entry=lambda line: contract_from_canonical_bytes(
-                ResultTrustJournalEntry, line
+                _schema_dispatch(line, _JOURNAL_ENTRY_MODELS), line
             ),
             entry_sha256=_journal_entry_sha256,
             max_journal_bytes=MAX_JOURNAL_BYTES,
@@ -1489,6 +1831,8 @@ _RT_APPEND_EVENT = ResultTrustRegistry._append_event
 # head with another document.
 _RT_SNAPSHOT = ResultTrustSnapshot
 _RT_RECEIPT = ResultTrustEventReceipt
+_RT_SNAPSHOT_V2 = ResultTrustSnapshotV2
+_RT_RECEIPT_V2 = ResultTrustEventReceiptV2
 _REGISTRY_AUTHORITY_SEAL = MappingProxyType(
     {
         "_PINNED_TRUSTED_KEY_ID": _PINNED_TRUSTED_KEY_ID,
@@ -1514,25 +1858,33 @@ _REGISTRY_ALIAS_SEAL = MappingProxyType(
             "_RT_APPEND_EVENT",
             "_RT_SNAPSHOT",
             "_RT_RECEIPT",
+            "_RT_SNAPSHOT_V2",
+            "_RT_RECEIPT_V2",
         )
     }
 )
 
 
 __all__ = [
+    "AnyResultTrustSnapshot",
     "MAX_TRUST_EVENTS",
     "MAX_TRUST_KEYS",
     "MAX_TRUST_TOMBSTONES",
     "ResultTrustBackup",
+    "ResultTrustBackupV2",
     "ResultTrustEventKind",
     "ResultTrustEventReceipt",
+    "ResultTrustEventReceiptV2",
     "ResultTrustJournalEntry",
+    "ResultTrustJournalEntryV2",
     "ResultTrustRegistry",
     "ResultTrustRegistryConflict",
     "ResultTrustRegistryError",
     "ResultTrustRegistryMetadata",
+    "ResultTrustRegistryMetadataV2",
     "ResultTrustRegistryUnsafe",
     "ResultTrustSnapshot",
+    "ResultTrustSnapshotV2",
     "project_result_trust_document",
     "result_trust_backup_from_bytes",
 ]

@@ -1,8 +1,19 @@
-"""Canonical synthetic result-bundle construction and offline verification."""
+"""Canonical development result-bundle construction and offline verification.
+
+Bundle versions and what each carries:
+
+- ``traceback.result-bundle.v1`` / ``v2``: ``fragment-measurement.v1``
+  (synthetic), ``limitations.v1``, the synthetic report, signed under
+  ``development-synthetic``.  ``build_result_bundle`` writes v2.
+- ``traceback.result-bundle.v3``: ``fragment-measurement.v2`` labelled
+  ``unapproved_local``, ``limitations.v2`` (local template), the local report,
+  signed under ``development-local``.
+"""
 
 from __future__ import annotations
 
 import hashlib
+import json
 import os
 import re
 import stat
@@ -13,20 +24,29 @@ from typing import Annotated, Literal, Mapping
 from pydantic import BaseModel, ConfigDict, StringConstraints
 
 from traceback_runner.contracts import (
+    AnyFragmentMeasurement,
+    ApprovalState,
     BundleContent,
     BundleMethodIdentity,
     ExportRunProvenance,
     FragmentMeasurement,
+    FragmentMeasurementV2,
     ResultBundleManifest,
     ResultBundleManifestV2,
+    ResultBundleManifestV3,
     canonical_json_bytes,
     canonical_model_from_bytes,
+    parse_fragment_measurement,
 )
 from traceback_runner.export import (
+    AnyExportLimitations,
     ExportLimitations,
+    ExportLimitationsV2,
     FragmentLengthChart,
+    ReferenceMatch,
     chart_for_measurement,
-    render_report,
+    limitations_for_measurement,
+    render_bundle_report,
     validate_measurement,
     validate_provenance,
 )
@@ -105,7 +125,43 @@ _MAX_FILE_BYTES: dict[str, int] = {
 _MAX_TOTAL_BYTES = 36 * 1024 * 1024
 
 
-BundleManifest = ResultBundleManifest | ResultBundleManifestV2
+BundleManifest = ResultBundleManifest | ResultBundleManifestV2 | ResultBundleManifestV3
+
+RESULT_BUNDLE_V1 = "traceback.result-bundle.v1"
+RESULT_BUNDLE_V2 = "traceback.result-bundle.v2"
+RESULT_BUNDLE_V3 = "traceback.result-bundle.v3"
+
+
+class _BundleVersionRules(BaseModel):
+    """What one bundle schema version must carry; the single dispatch table."""
+
+    model_config = ConfigDict(frozen=True, arbitrary_types_allowed=True)
+
+    measurement_model: type
+    limitations_model: type
+    trust_namespace: TrustNamespace
+
+
+# Every result-bundle schema this module reads, and the exact measurement,
+# limitations, and signing namespace each requires.
+_BUNDLE_VERSION_RULES: Mapping[str, _BundleVersionRules] = {
+    RESULT_BUNDLE_V1: _BundleVersionRules(
+        measurement_model=FragmentMeasurement,
+        limitations_model=ExportLimitations,
+        trust_namespace=TrustNamespace.DEVELOPMENT_SYNTHETIC,
+    ),
+    RESULT_BUNDLE_V2: _BundleVersionRules(
+        measurement_model=FragmentMeasurement,
+        limitations_model=ExportLimitations,
+        trust_namespace=TrustNamespace.DEVELOPMENT_SYNTHETIC,
+    ),
+    RESULT_BUNDLE_V3: _BundleVersionRules(
+        measurement_model=FragmentMeasurementV2,
+        limitations_model=ExportLimitationsV2,
+        trust_namespace=TrustNamespace.DEVELOPMENT_LOCAL,
+    ),
+}
+RESULT_BUNDLE_SCHEMA_VERSIONS = tuple(_BUNDLE_VERSION_RULES)
 
 
 class BundleSigningPayload(_ClosedModel):
@@ -138,13 +194,28 @@ class BundleSigningPayloadV2(_ClosedModel):
     checksums_sha256: Sha256
 
 
+class BundleSigningPayloadV3(_ClosedModel):
+    schema_version: Literal["traceback.bundle-signing-payload.v3"] = (
+        "traceback.bundle-signing-payload.v3"
+    )
+    bundle_schema_version: Literal["traceback.result-bundle.v3"] = (
+        "traceback.result-bundle.v3"
+    )
+    trust_namespace: Literal[TrustNamespace.DEVELOPMENT_LOCAL] = (
+        TrustNamespace.DEVELOPMENT_LOCAL
+    )
+    signing_purpose: Literal[KeyPurpose.RESULT] = KeyPurpose.RESULT
+    bundle_files: tuple[BundlePath, ...]
+    checksums_sha256: Sha256
+
+
 class VerifiedBundle(_ClosedModel):
     path: str
     manifest: BundleManifest
-    measurement: FragmentMeasurement
+    measurement: AnyFragmentMeasurement
     chart: FragmentLengthChart
     provenance: ExportRunProvenance
-    limitations: ExportLimitations
+    limitations: AnyExportLimitations
     signature: SignatureEnvelope
 
 
@@ -165,16 +236,44 @@ def _checksums_bytes(files: Mapping[str, bytes]) -> bytes:
 def _signing_payload(
     checksums: bytes,
     bundle_schema_version: str,
-) -> BundleSigningPayload | BundleSigningPayloadV2:
+) -> BundleSigningPayload | BundleSigningPayloadV2 | BundleSigningPayloadV3:
     values = {
         "bundle_files": tuple(sorted(_ALL_PATHS)),
         "checksums_sha256": _digest(checksums),
     }
-    if bundle_schema_version == "traceback.result-bundle.v1":
+    if bundle_schema_version == RESULT_BUNDLE_V1:
         return BundleSigningPayload(**values)
-    if bundle_schema_version == "traceback.result-bundle.v2":
+    if bundle_schema_version == RESULT_BUNDLE_V2:
         return BundleSigningPayloadV2(**values)
+    if bundle_schema_version == RESULT_BUNDLE_V3:
+        return BundleSigningPayloadV3(**values)
     raise BundleFormatError("unsupported result bundle schema")
+
+
+def _bundle_rules(bundle_schema_version: str) -> _BundleVersionRules:
+    try:
+        return _BUNDLE_VERSION_RULES[bundle_schema_version]
+    except KeyError:
+        raise BundleFormatError("unsupported result bundle schema") from None
+
+
+def _check_record_label(
+    measurement: AnyFragmentMeasurement, limitations: AnyExportLimitations
+) -> None:
+    """A v3 record is local-labelled throughout; v1/v2 are synthetic throughout."""
+
+    if type(measurement) is FragmentMeasurementV2:
+        if (
+            measurement.approval_state != ApprovalState.UNAPPROVED_LOCAL
+            or not isinstance(limitations, ExportLimitationsV2)
+            or limitations
+            != limitations_for_measurement(measurement, limitations.reference_match)
+        ):
+            raise BundleFormatError(
+                "a v3 bundle carries only unapproved_local records with local limitations"
+            )
+    elif type(limitations) is not ExportLimitations:
+        raise BundleFormatError("a synthetic bundle carries v1 limitations")
 
 
 def build_result_bundle(
@@ -184,23 +283,48 @@ def build_result_bundle(
     provenance: ExportRunProvenance | Mapping[str, object],
     method: BundleMethodIdentity | Mapping[str, object],
     signing_key: DevelopmentSigningKey,
+    reference_match: ReferenceMatch | None = None,
 ) -> Path:
-    """Build one atomic, synthetic-only bundle from strict aggregate inputs."""
+    """Build one atomic bundle from strict aggregate inputs.
+
+    A ``fragment-measurement.v1`` (synthetic) measurement builds a v2 bundle
+    signed by a ``development-synthetic`` key, exactly as before.  A
+    ``fragment-measurement.v2`` measurement labelled ``unapproved_local`` builds
+    a v3 bundle signed by a ``development-local`` key; it requires
+    ``reference_match`` (how preflight matched the reference), which the local
+    limitations and report state.
+    """
 
     if signing_key.purpose != KeyPurpose.RESULT:
         raise BundleFormatError("result bundles require a result-purpose signing key")
     parsed_measurement = validate_measurement(measurement)
     parsed_provenance = validate_provenance(provenance)
     parsed_method = BundleMethodIdentity.model_validate(method)
+    limitations: AnyExportLimitations
+    if type(parsed_measurement) is FragmentMeasurementV2:
+        bundle_schema = RESULT_BUNDLE_V3
+        if reference_match is None:
+            raise BundleFormatError("a v3 bundle requires the reference match outcome")
+        limitations = limitations_for_measurement(parsed_measurement, reference_match)
+    else:
+        bundle_schema = RESULT_BUNDLE_V2
+        if reference_match is not None:
+            raise BundleFormatError("a synthetic bundle takes no reference match outcome")
+        limitations = ExportLimitations()
+    rules = _bundle_rules(bundle_schema)
+    if signing_key.namespace != rules.trust_namespace:
+        raise BundleFormatError(
+            f"{bundle_schema} requires a {rules.trust_namespace.value} signing key"
+        )
+    _check_record_label(parsed_measurement, limitations)
     measurement_content = _canonical_line_json(parsed_measurement)
     chart = chart_for_measurement(parsed_measurement, _digest(measurement_content))
-    limitations = ExportLimitations()
     content: dict[str, bytes] = {
         MEASUREMENT_PATH: measurement_content,
         CHART_PATH: _canonical_line_json(chart),
         PROVENANCE_PATH: _canonical_line_json(parsed_provenance),
         LIMITATIONS_PATH: _canonical_line_json(limitations),
-        REPORT_PATH: render_report(parsed_measurement),
+        REPORT_PATH: render_bundle_report(parsed_measurement, limitations),
     }
     record_identity = canonical_json_bytes(
         {
@@ -210,7 +334,10 @@ def build_result_bundle(
         }
     )
     record_id = f"record-{_digest(record_identity)[:24]}"
-    manifest = ResultBundleManifestV2(
+    manifest_model = (
+        ResultBundleManifestV3 if bundle_schema == RESULT_BUNDLE_V3 else ResultBundleManifestV2
+    )
+    manifest = manifest_model(
         record_id=record_id,
         workflow_release_id=parsed_provenance.workflow_release_id,
         measurement_schema_versions=(parsed_measurement.schema_version,),
@@ -318,14 +445,24 @@ def _parse_json(content: bytes, model: type[BaseModel], label: str) -> BaseModel
     return parsed
 
 
+_MANIFEST_MODELS: Mapping[str, type[BaseModel]] = {
+    RESULT_BUNDLE_V1: ResultBundleManifest,
+    RESULT_BUNDLE_V2: ResultBundleManifestV2,
+    RESULT_BUNDLE_V3: ResultBundleManifestV3,
+}
+
+
 def _parse_manifest(content: bytes) -> BundleManifest:
-    for model in (ResultBundleManifestV2, ResultBundleManifest):
-        try:
-            parsed = canonical_model_from_bytes(model, content)
-        except Exception:
-            continue
-        return parsed
-    raise BundleFormatError("invalid bundle manifest")
+    try:
+        raw = json.loads(content)
+        model = _MANIFEST_MODELS[raw["schema_version"]]
+        parsed = canonical_model_from_bytes(model, content)
+    except Exception:
+        raise BundleFormatError("invalid bundle manifest") from None
+    assert isinstance(
+        parsed, (ResultBundleManifest, ResultBundleManifestV2, ResultBundleManifestV3)
+    )
+    return parsed
 
 
 def _parse_checksums(content: bytes) -> dict[str, str]:
@@ -370,6 +507,10 @@ def verify_bundle(bundle_dir: str | Path, trust_store: TrustStore) -> VerifiedBu
         if len(actual) != item.size_bytes or _digest(actual) != item.sha256:
             raise BundleIntegrityError(f"manifest mismatch for {item.relative_path}")
 
+    rules = _bundle_rules(manifest.schema_version)
+    # The namespace is fixed by the bundle version: a v3 (local) bundle signed by
+    # a development-synthetic key, or a v1/v2 bundle signed by a
+    # development-local key, fails here.
     verify_signature(
         canonical_json_bytes(
             _signing_payload(content[CHECKSUMS_PATH], manifest.schema_version)
@@ -377,29 +518,33 @@ def verify_bundle(bundle_dir: str | Path, trust_store: TrustStore) -> VerifiedBu
         signature,
         trust_store,
         purpose=KeyPurpose.RESULT,
+        namespace=rules.trust_namespace,
     )
 
-    parsed_measurement = _parse_json(
-        content[MEASUREMENT_PATH], FragmentMeasurement, "measurement"
-    )
+    try:
+        parsed_measurement = parse_fragment_measurement(content[MEASUREMENT_PATH])
+    except Exception:
+        raise BundleFormatError("invalid measurement") from None
+    if type(parsed_measurement) is not rules.measurement_model:
+        raise BundleFormatError("bundle version does not carry this measurement schema")
     chart = _parse_json(content[CHART_PATH], FragmentLengthChart, "chart")
     parsed_provenance = _parse_json(
         content[PROVENANCE_PATH], ExportRunProvenance, "provenance"
     )
     limitations = _parse_json(
-        content[LIMITATIONS_PATH], ExportLimitations, "limitations"
+        content[LIMITATIONS_PATH], rules.limitations_model, "limitations"
     )
-    assert isinstance(parsed_measurement, FragmentMeasurement)
     assert isinstance(chart, FragmentLengthChart)
     assert isinstance(parsed_provenance, ExportRunProvenance)
-    assert isinstance(limitations, ExportLimitations)
+    assert isinstance(limitations, (ExportLimitations, ExportLimitationsV2))
     measurement = validate_measurement(parsed_measurement)
     provenance = validate_provenance(parsed_provenance)
+    _check_record_label(measurement, limitations)
 
     expected_chart = chart_for_measurement(measurement, _digest(content[MEASUREMENT_PATH]))
     if chart != expected_chart:
         raise BundleIntegrityError("chart does not derive from the canonical measurement")
-    if content[REPORT_PATH] != render_report(measurement):
+    if content[REPORT_PATH] != render_bundle_report(measurement, limitations):
         raise BundleIntegrityError("report is not the approved rendering of measurement")
     if provenance.workflow_release_id != manifest.workflow_release_id:
         raise BundleIntegrityError("provenance does not identify the workflow release")
@@ -424,6 +569,7 @@ def inspect_bundle(bundle_dir: str | Path) -> BundleManifest:
 
 
 __all__ = [
+    "RESULT_BUNDLE_SCHEMA_VERSIONS",
     "BundleError",
     "BundleFilesystemError",
     "BundleFormatError",
