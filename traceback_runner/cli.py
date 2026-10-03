@@ -32,7 +32,9 @@ from .filesystem import rename_directory_exclusive_at
 from .operator import build_job_view, support_payload
 from .protocol import render_protocol, synthetic_protocol_manifest
 from .references import DOCS_ANCHOR, ReferenceProblem, validate_reference_id
+from .awake import stay_awake
 from .runner import TerminalStageError
+from .store import StaleLease
 from .serialization import canonical_json_bytes
 
 _TRUST_RELATIVE = Path("trust/development-result-trust.json")
@@ -2743,7 +2745,15 @@ def main(argv: Sequence[str] | None = None) -> int:
             if args.command in {"run", "resume"} and _concerns_local_data(args)
             else nullcontext()
         )
-        with mutation, no_space:
+        # A wall-clock worker lease cannot survive the host sleeping through
+        # it, so commands that execute stages keep the host awake.
+        awake = (
+            stay_awake()
+            if args.command in {"resume", "retry"}
+            or (args.command == "run" and args.reference_id is not None)
+            else nullcontext()
+        )
+        with mutation, no_space, awake:
             code, payload = _dispatch(args, progress)
     except ReferenceProblem as problem:
         command = (
@@ -2815,6 +2825,14 @@ def main(argv: Sequence[str] | None = None) -> int:
                 "retryable_failure",
                 "Local asset storage operation failed; retry after checking the filesystem",
                 data={"retryable": True},
+            )
+        elif args.command == "run" and isinstance(exc, StaleLease):
+            code, payload = ExitCode.RETRYABLE_FAILURE, _result(
+                args.command,
+                "retryable_failure",
+                "Local run lost its worker lease (for example the host slept or "
+                "stalled past it); no record was made; run traceback resume for the job",
+                data={"code": "TBX-JOB-001", "retryable": True},
             )
         elif args.command == "run":
             code, payload = ExitCode.RETRYABLE_FAILURE, _result(
