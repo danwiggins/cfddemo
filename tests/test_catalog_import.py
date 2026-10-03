@@ -552,9 +552,35 @@ def test_explorer_file_modes_are_enforced_and_repaired(world) -> None:
     assert load_explorer_artifacts(root).skipped == 0
 
 
-def test_orphan_binding_is_counted_as_skipped(world) -> None:
+@pytest.mark.parametrize("artifacts_directory", ("kept", "absent"))
+def test_orphan_binding_is_counted_as_skipped(world, artifacts_directory: str) -> None:
     root, (record_id, _), _ = world
     result_id = _import(root, record_id)[1]["data"]["result_id"]
-    explorer_paths(root, result_id)[0].unlink()
+    artifact_path = explorer_paths(root, result_id)[0]
+    artifact_path.unlink()
+    if artifacts_directory == "absent":  # crash during the very first import
+        artifact_path.parent.rmdir()
     loaded = load_explorer_artifacts(root)
     assert loaded.records == () and loaded.skipped == 1
+
+
+def test_unreadable_explorer_file_is_repaired_by_reimport(world) -> None:
+    root, (record_id, _), _ = world
+    result_id = _import(root, record_id)[1]["data"]["result_id"]
+    artifact_path = explorer_paths(root, result_id)[0]
+    artifact_path.chmod(0o000)
+    code, payload = _import(root, record_id)
+    assert code == cli.ExitCode.OK, payload
+    assert payload["data"]["explorer_artifact"] == "repaired"
+    assert artifact_path.stat().st_mode & 0o777 == 0o600
+
+
+def test_oversized_manifest_is_refused_without_reading_it_whole(world, tmp_path: Path) -> None:
+    root, _, _ = world
+    bundle = tmp_path / "huge"
+    bundle.mkdir()
+    with (bundle / "bundle-manifest.json").open("wb") as stream:
+        stream.truncate(64 * 1024 * 1024)  # sparse
+    code, payload = _main("catalog", "import", bundle, "--root", root)
+    assert code == cli.ExitCode.BLOCKED, payload
+    assert payload["data"]["code"] == "TBX-CAT-001"

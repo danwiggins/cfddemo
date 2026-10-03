@@ -98,6 +98,31 @@ class CatalogImportOutcome:
 # ---------------------------------------------------------------------------
 
 
+_MAX_PEEK_BYTES = 4 * 1024 * 1024
+
+
+def _read_peek(path: Path) -> bytes:
+    """Read one small bundle file, bounded, before any verification."""
+
+    descriptor = os.open(path, os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0))
+    try:
+        if not stat.S_ISREG(os.fstat(descriptor).st_mode):
+            raise ValueError("bundle file is not a regular file")
+        content = os.read(descriptor, _MAX_PEEK_BYTES + 1)
+        if len(content) > _MAX_PEEK_BYTES:
+            raise ValueError("bundle file exceeds its byte bound")
+        while len(content) <= _MAX_PEEK_BYTES:
+            chunk = os.read(descriptor, _MAX_PEEK_BYTES + 1 - len(content))
+            if not chunk:
+                break
+            content += chunk
+        if len(content) > _MAX_PEEK_BYTES:
+            raise ValueError("bundle file exceeds its byte bound")
+        return content
+    finally:
+        os.close(descriptor)
+
+
 def _peek_local_record(bundle: Path) -> tuple[str, str]:
     """Return (record_id, reference_id) of a v3 local bundle; nothing is trusted yet."""
 
@@ -108,11 +133,11 @@ def _peek_local_record(bundle: Path) -> tuple[str, str]:
     if bundle.is_symlink() or not bundle.is_dir():
         raise _not_a_record("the path is not a record directory")
     try:
-        manifest_bytes = (bundle / MANIFEST_PATH).read_bytes()
+        manifest_bytes = _read_peek(bundle / MANIFEST_PATH)
         if json.loads(manifest_bytes).get("schema_version") != "traceback.result-bundle.v3":
             raise _not_a_record("the bundle is not a local (result-bundle v3) record")
         manifest = canonical_model_from_bytes(ResultBundleManifestV3, manifest_bytes)
-        measurement = parse_fragment_measurement((bundle / MEASUREMENT_PATH).read_bytes())
+        measurement = parse_fragment_measurement(_read_peek(bundle / MEASUREMENT_PATH))
     except CatalogImportProblem:
         raise
     except (OSError, ValueError, ValidationError, AttributeError):
@@ -420,15 +445,16 @@ def _persist_once(path: Path, content: bytes) -> str:
     elif path.exists():
         if not path.is_file():
             raise OSError("explorer file path is not a regular file")
+        metadata = os.stat(path, follow_symlinks=False)
+        if metadata.st_uid != os.geteuid():
+            raise OSError("explorer file is owned by another user")
+        # Restore the private mode first, so even an unreadable file is repaired.
+        mode_repaired = stat.S_IMODE(metadata.st_mode) != 0o600
+        if mode_repaired:
+            os.chmod(path, 0o600)
         existing = path.read_bytes()
         if existing == content:
-            metadata = os.stat(path, follow_symlinks=False)
-            if metadata.st_uid != os.geteuid():
-                raise OSError("explorer file is owned by another user")
-            if stat.S_IMODE(metadata.st_mode) != 0o600:
-                os.chmod(path, 0o600)
-                return "repaired"
-            return "unchanged"
+            return "repaired" if mode_repaired else "unchanged"
     temporary = directory / f".{path.name}.{os.getpid()}.tmp"
     temporary.unlink(missing_ok=True)
     descriptor = os.open(
@@ -529,12 +555,12 @@ def load_explorer_artifacts(root: Path) -> LoadedExplorerArtifacts:
     base = root / EXPLORER_DIRECTORY
     artifacts_dir = base / ARTIFACTS_DIRECTORY
     bindings_dir = base / BINDINGS_DIRECTORY
-    if not artifacts_dir.is_dir() or artifacts_dir.is_symlink():
-        return LoadedExplorerArtifacts(records=(), bindings=(), skipped=0)
+    artifacts_present = artifacts_dir.is_dir() and not artifacts_dir.is_symlink()
+    artifact_paths = sorted(artifacts_dir.glob("*.json")) if artifacts_present else []
     records = []
     bindings = []
     skipped = 0
-    for path in sorted(artifacts_dir.glob("*.json")):
+    for path in artifact_paths:
         result_id = path.name.removesuffix(".json")
         try:
             content = _read_bounded_regular(path, MAX_EXPLORER_ARTIFACT_BYTES)
@@ -560,7 +586,7 @@ def load_explorer_artifacts(root: Path) -> LoadedExplorerArtifacts:
     if bindings_dir.is_dir() and not bindings_dir.is_symlink():
         # A binding without its artifact (a crash between the two writes) is
         # unpaired: counted, never served.
-        artifact_names = {path.name for path in artifacts_dir.glob("*.json")}
+        artifact_names = {path.name for path in artifact_paths}
         skipped += sum(
             1 for path in bindings_dir.glob("*.json") if path.name not in artifact_names
         )
