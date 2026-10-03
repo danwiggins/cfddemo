@@ -82,8 +82,10 @@ def web(registry):
     return boundary, broker, binder, clock
 
 
-def _session(boundary: LocalWebBoundary):
-    code = boundary.issue_bootstrap()
+def _session(boundary: LocalWebBoundary, code: str | None = None):
+    """An operator session, or the session a given bootstrap code creates."""
+
+    code = boundary.issue_bootstrap() if code is None else code
     return boundary.exchange_bootstrap(
         BrowserRequest(
             method="POST",
@@ -115,11 +117,16 @@ def _get(grant) -> BrowserRequest:
     )
 
 
+def _reader_session(boundary, binder, selector: str = SELECTOR):
+    """What a reader launch link does: a reader bootstrap plus its credential."""
+
+    bootstrap, credential = binder.issue_launch(selector)
+    return _session(boundary, bootstrap), credential
+
+
 def _bound_session(boundary, binder, selector: str = SELECTOR):
-    grant = _session(boundary)
-    binder.exchange_launch_credential(
-        _post(grant), binder.issue_launch_credential(selector)
-    )
+    grant, credential = _reader_session(boundary, binder, selector)
+    binder.exchange_launch_credential(_post(grant), credential)
     return grant
 
 
@@ -175,20 +182,19 @@ def test_launch_exchange_stores_only_commitment_and_head(web, registry) -> None:
 
 def test_launch_credential_is_one_use_expiring_and_selector_only(web) -> None:
     boundary, _, binder, clock = web
-    grant = _session(boundary)
-    credential = binder.issue_launch_credential(SELECTOR)
+    grant, credential = _reader_session(boundary, binder)
     with _denied(ReaderDenialReason.LAUNCH_CREDENTIAL_INVALID):
         binder.exchange_launch_credential(_post(grant), credential + "x")
     # A failed guess does not consume the real credential, but a used one
     # cannot be replayed.
     binder.exchange_launch_credential(_post(grant), credential)
-    other = _session(boundary)
+    other, _ = _reader_session(boundary, binder)
     with _denied(ReaderDenialReason.LAUNCH_CREDENTIAL_INVALID):
         binder.exchange_launch_credential(_post(other), credential)
-    expiring = binder.issue_launch_credential(SELECTOR)
+    expiring_session, expiring = _reader_session(boundary, binder)
     clock.value += 60
     with _denied(ReaderDenialReason.LAUNCH_CREDENTIAL_INVALID):
-        binder.exchange_launch_credential(_post(other), expiring)
+        binder.exchange_launch_credential(_post(expiring_session), expiring)
     for role in ("longitudinal_reader", "*", "reader_grant_*"):
         with pytest.raises(ValueError, match="selector"):
             binder.issue_launch_credential(role)
@@ -198,8 +204,7 @@ def test_launch_credential_is_one_use_expiring_and_selector_only(web) -> None:
 
 def test_exchange_requires_full_b01_mutation_checks(web) -> None:
     boundary, _, binder, _ = web
-    grant = _session(boundary)
-    credential = binder.issue_launch_credential(SELECTOR)
+    grant, credential = _reader_session(boundary, binder)
     no_csrf = BrowserRequest(
         method="POST",
         path="/api/v1/longitudinal/session",
@@ -223,24 +228,41 @@ def test_exchange_requires_full_b01_mutation_checks(web) -> None:
 
 
 def test_a_session_binds_once(web) -> None:
-    boundary, _, binder, _ = web
+    boundary, broker, binder, _ = web
     grant = _bound_session(boundary, binder)
-    with _denied(ReaderDenialReason.SESSION_ALREADY_BOUND):
-        binder.exchange_launch_credential(
-            _post(grant), binder.issue_launch_credential(OTHER_SELECTOR)
+    # H1: another link's credential belongs to another session, so a bound
+    # session cannot even present it.
+    _, other = _reader_session(boundary, binder, OTHER_SELECTOR)
+    with _denied(ReaderDenialReason.LAUNCH_CREDENTIAL_INVALID):
+        binder.exchange_launch_credential(_post(grant), other)
+    with pytest.raises(BoundaryDenied) as info:
+        broker.bind_reader_session(
+            grant.session_token,
+            authority=AUTHORITY,
+            binding=ReaderSessionBinding(
+                grant_sha256="0" * 64, registry_head_sha256="1" * 64
+            ),
         )
+    assert info.value.code == "TBX-AUTH-006"
     assert _read(binder, grant).cohort_registry_id == COHORT
 
 
-def test_exchange_attempts_are_throttled(web) -> None:
+def test_failed_presentations_never_consume_another_links_credential(web) -> None:
+    """H1 (replaces the old throttle test, whose trip cleared every pending
+    credential): wrong guesses and wrong-session presentations, however
+    many, leave each link's own credential redeemable by its own session."""
+
     boundary, _, binder, _ = web
-    grant = _session(boundary)
-    credential = binder.issue_launch_credential(SELECTOR)
-    for _ in range(8):
+    grant, credential = _reader_session(boundary, binder)
+    spammer, spammer_credential = _reader_session(boundary, binder, OTHER_SELECTOR)
+    for _ in range(32):
         with _denied(ReaderDenialReason.LAUNCH_CREDENTIAL_INVALID):
             binder.exchange_launch_credential(_post(grant), "A" * 43)
-    with _denied(ReaderDenialReason.LAUNCH_CREDENTIAL_INVALID):
-        binder.exchange_launch_credential(_post(grant), credential)
+        with _denied(ReaderDenialReason.LAUNCH_CREDENTIAL_INVALID):
+            binder.exchange_launch_credential(_post(spammer), credential)
+    binder.exchange_launch_credential(_post(grant), credential)
+    binder.exchange_launch_credential(_post(spammer), spammer_credential)
+    assert _read(binder, grant).cohort_registry_id == COHORT
 
 
 def test_wrong_scope_is_permission_denied(web) -> None:
@@ -274,11 +296,9 @@ def test_missing_registry_disables_e12(web) -> None:
     boundary, broker, _, clock = web
     disabled = ReaderSessionBinder(boundary=boundary, registry=None, now=clock)
     assert disabled.enabled is False
-    grant = _session(boundary)
+    grant, credential = _reader_session(boundary, disabled)
     with _denied(ReaderDenialReason.AUTHORITY_ABSENT):
-        disabled.exchange_launch_credential(
-            _post(grant), disabled.issue_launch_credential(SELECTOR)
-        )
+        disabled.exchange_launch_credential(_post(grant), credential)
     broker.bind_reader_session(
         grant.session_token,
         authority=AUTHORITY,
@@ -396,3 +416,93 @@ def test_denials_carry_no_identifier(web, registry) -> None:
     ):
         assert value not in text
     assert info.value.__cause__ is None
+
+
+# --- H1: session kinds and launch-digest binding ---------------------------------------
+
+
+def test_operator_session_cannot_redeem_a_reader_link_credential(web) -> None:
+    """Criterion 2: a session from operator bootstrap A cannot redeem link B's
+    credential, and the attempt does not consume it; B's own reader session
+    then redeems it."""
+
+    boundary, _, binder, _ = web
+    reader, credential = _reader_session(boundary, binder)
+    operator = _session(boundary)
+    with _denied(ReaderDenialReason.LAUNCH_CREDENTIAL_INVALID):
+        binder.exchange_launch_credential(_post(operator), credential)
+    binder.exchange_launch_credential(_post(reader), credential)
+    assert _read(binder, reader).cohort_registry_id == COHORT
+
+
+def test_reader_session_redeems_only_its_own_links_credential(web) -> None:
+    boundary, _, binder, _ = web
+    first, first_credential = _reader_session(boundary, binder)
+    second, second_credential = _reader_session(boundary, binder, OTHER_SELECTOR)
+    with _denied(ReaderDenialReason.LAUNCH_CREDENTIAL_INVALID):
+        binder.exchange_launch_credential(_post(first), second_credential)
+    with _denied(ReaderDenialReason.LAUNCH_CREDENTIAL_INVALID):
+        binder.exchange_launch_credential(_post(second), first_credential)
+    binder.exchange_launch_credential(_post(first), first_credential)
+    binder.exchange_launch_credential(_post(second), second_credential)
+    assert _read(binder, first).cohort_registry_id == COHORT
+    assert (
+        _read(binder, second, cohort=OTHER_COHORT).cohort_registry_id == OTHER_COHORT
+    )
+
+
+def test_an_operator_session_can_never_carry_a_reader_binding(web) -> None:
+    boundary, broker, _, _ = web
+    operator = _session(boundary)
+    with pytest.raises(BoundaryDenied) as info:
+        broker.bind_reader_session(
+            operator.session_token,
+            authority=AUTHORITY,
+            binding=ReaderSessionBinding(
+                grant_sha256="0" * 64, registry_head_sha256="1" * 64
+            ),
+        )
+    assert info.value.code == "TBX-AUTH-007"
+    assert broker.reader_binding(operator.session_token, authority=AUTHORITY) is None
+
+
+def test_own_grant_revocation_ends_the_session_other_denials_do_not(
+    web, registry
+) -> None:
+    boundary, broker, binder, _ = web
+    grant = _bound_session(boundary, binder)
+    with _denied(ReaderDenialReason.SCOPE_MISMATCH):
+        _read(binder, grant, cohort=OTHER_COHORT)
+    broker.require_session(grant.session_token, authority=AUTHORITY)
+    registry.revoke_grant(SELECTOR, reason=ReaderRevocationReason.OPERATOR_REQUEST)
+    with _denied(ReaderDenialReason.GRANT_REVOKED):
+        _read(binder, grant)
+    with pytest.raises(BoundaryDenied) as info:
+        broker.require_session(grant.session_token, authority=AUTHORITY)
+    assert (info.value.status_code, info.value.code) == (401, "TBX-AUTH-001")
+
+
+def test_grant_no_longer_current_ends_the_session(
+    web, authority_clock: AuthorityTimeSource
+) -> None:
+    boundary, broker, binder, _ = web
+    grant = _bound_session(boundary, binder)
+    authority_clock.advance_to(NOW + timedelta(days=1))
+    with _denied(ReaderDenialReason.GRANT_NOT_CURRENT):
+        _read(binder, grant)
+    with pytest.raises(BoundaryDenied):
+        broker.require_session(grant.session_token, authority=AUTHORITY)
+
+
+def test_a_failed_bootstrap_issue_drops_the_launch_credential(
+    web, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    boundary, _, binder, _ = web
+
+    def refuse(**kwargs):
+        raise RuntimeError("strong unique credential issuance failed")
+
+    monkeypatch.setattr(boundary, "issue_bootstrap", refuse)
+    with pytest.raises(RuntimeError):
+        binder.issue_launch(SELECTOR)
+    assert binder._pending == {}

@@ -115,16 +115,19 @@ it.
 `BootstrapBroker` session records gain one optional field,
 `reader_binding: ReaderSessionBinding | None`, which holds only the grant
 commitment (the grant's canonical SHA-256) and the registry head at binding
-time. Existing routes never read it, so a bare B01 session behaves exactly as
-before for every non-E12 route.
+time. Only a `reader` session can carry it (security spec H1; see
+`docs/LOCAL-WEB-BOUNDARY.md` § Session kinds).
 
-1. The server-side launcher calls
-   `ReaderSessionBinder.issue_launch_credential(grant_selector)`. This mints a
-   separate opaque one-use credential (at least 256 bits, kept in memory as a
-   hash, 60 s TTL, at most 16 pending, bound to the B01 authority). The
-   browser never sees or supplies the selector.
-2. The browser, already holding a B01 session, presents the credential in a
-   POST that passes B01 Host, Origin, session and CSRF checks.
+1. The server-side launcher calls `ReaderSessionBinder.issue_launch(grant_selector)`.
+   This mints a separate opaque one-use credential (at least 256 bits, kept in
+   memory as a hash, 60 s TTL, at most 16 pending, bound to the B01 authority)
+   and a `reader` bootstrap carrying that credential's digest. The browser
+   never sees or supplies the selector.
+2. The browser exchanges the reader bootstrap, which creates a reader
+   session, then presents the credential in a POST that passes B01 Host,
+   Origin, session and CSRF checks. The credential must be the one issued in
+   the same link as the session's bootstrap; any other session, including
+   every operator session, is refused before the credential is looked up.
    `exchange_launch_credential` consumes the credential before verifying it,
    then, under the registry fence, resolves the selector to a current grant
    (present, unrevoked, signed by an active trusted key, inside its validity
@@ -140,7 +143,9 @@ before for every non-E12 route.
    chain, so a replaced, restored or rolled-back registry denies. Only changes
    to the session's own grant or signing key end it: its revocation, its
    expiry, a request outside its scope, its key being revoked or rotated out,
-   or a trust that no longer names its authority and key. Other grants,
+   or a trust that no longer names its authority and key. When the grant is
+   revoked or no longer current, the B01 session itself also ends, so the next
+   request on that cookie gets 401. Other grants,
    revocations and trust revisions that leave its key active do not. The
    caller builds its result inside the block. On exit the session and the
    grant are re-resolved before the fence is released; any difference denies

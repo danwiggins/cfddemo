@@ -69,6 +69,16 @@ def test_bare_b01_session_gets_the_same_bounded_denial_before_any_read(
     # Only the lock-free identity binding the gate needs was read; no selector,
     # registry, saved object or workspace read happened.
     assert set(calls) <= {"ResultViewSourceRegistry.registry_identity"}
+    # H1: an operator session is refused by the route table before the
+    # reader gate, so it reads nothing at all.
+    calls.clear()
+    cookie, csrf = env.operator()
+    for method, route, value in _every_route(env):
+        status, content = _call_route(
+            env, method, route, value, cookie=cookie, csrf=csrf
+        )
+        assert (status, _json(content)) == (403, {"error": {"code": "TBX-AUTH-007"}})
+    assert calls == []
 
 
 def test_b01_transport_checks_still_run_first(env: Env) -> None:

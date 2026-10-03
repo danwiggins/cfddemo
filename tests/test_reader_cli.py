@@ -264,6 +264,30 @@ def test_main_cli_dispatches_reader_with_a_minimal_hook(
     assert "profile provider" in capsys.readouterr().out
 
 
+def test_profile_flag_before_reader_exits_2_with_a_usage_message(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """Security spec R4: no ``--profile`` flag exists yet (T4 is deferred), so
+    the flag-first form must fail as a usage error, never dispatch oddly."""
+
+    argv = [
+        "--profile",
+        "provider",
+        "reader",
+        "authority",
+        "init",
+        "--authority-dir",
+        str(tmp_path / "authority"),
+    ]
+    try:
+        code = cli.main(argv)
+    except SystemExit as exc:
+        code = exc.code
+    assert code == 2
+    assert "usage: traceback" in capsys.readouterr().err
+    assert not (tmp_path / "authority").exists()
+
+
 # -- launch ------------------------------------------------------------------
 
 

@@ -177,7 +177,6 @@
   // The reader launch credential stays in page memory only; it is sent once,
   // in a same-origin POST body carrying the session cookie, Origin and CSRF.
   const exchangeReaderLaunch = async (csrfToken) => {
-    if (!readerLaunch) return true;
     const response = await fetch("/api/v1/session/reader-launch", {
       method: "POST",
       credentials: "same-origin",
@@ -194,6 +193,17 @@
     }
     return response.ok;
   };
+  // Explorer and jobs routes are operator-only (H1): a reader session never
+  // requests them, and their sections are hidden so the longitudinal view is
+  // what a reader sees.
+  const OPERATOR_SECTIONS = ["explorer-filters", "results", "explorer-provenance", "operator-jobs"];
+  const enterReaderView = () => {
+    document.documentElement.dataset.sessionKind = "reader";
+    OPERATOR_SECTIONS.forEach((id) => {
+      const section = byId(id);
+      if (section) section.hidden = true;
+    });
+  };
   if (!bootstrap) {
     status.textContent = "Relaunch from the local Traceback command";
     return;
@@ -204,10 +214,34 @@
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify({ bootstrap }),
   }).then(async (response) => {
-    if (!response.ok) throw new Error("Local session unavailable");
+    if (!response.ok) {
+      if (readerLaunch) {
+        // A newer link replaces an unused one, and links expire after 60 s.
+        status.textContent = response.status === 429
+          ? "Too many attempts; wait a minute, then open a new link from the operator"
+          : "This link expired or was replaced by a newer one; ask the operator for a new link";
+        document.documentElement.dataset.readerSession = "link-unavailable";
+        return;
+      }
+      throw new Error("Local session unavailable");
+    }
     const session = await response.json();
-    // A denied reader launch stops here so its message stays visible.
-    if (!(await exchangeReaderLaunch(session.csrf_token))) return;
+    // Branch on the kind the server assigned at exchange, never on the
+    // fragment: a reader bootstrap is a reader session from birth.
+    if (session.session_kind === "reader") {
+      // Bind, then show only the longitudinal view.  A denied launch keeps
+      // its message.
+      enterReaderView();
+      if (!readerLaunch) {
+        document.documentElement.dataset.readerSession = "denied";
+        status.textContent = "This reader link is incomplete; ask the operator for a new link";
+        return;
+      }
+      await exchangeReaderLaunch(session.csrf_token);
+      return;
+    }
+    if (session.session_kind !== "operator") throw new Error("Local session unavailable");
+    document.documentElement.dataset.sessionKind = "operator";
     await renderJobs();
     try {
       await loadCatalog();

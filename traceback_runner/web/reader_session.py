@@ -9,9 +9,11 @@ under its cross-process fence and raises
 (``permission_denied``) before any other protected read.
 
 The binding is created only by exchanging a separate one-use launch credential
-that the server-side launcher minted for one grant selector.  The browser never
-supplies a role, principal, grant, scope list or signature.  Existing B01 routes
-are unchanged: they never consult the reader binding.
+that the server-side launcher minted for one grant selector.  The launcher
+issues that credential together with a ``reader`` bootstrap carrying the
+credential's digest, so the session the link creates is a reader session from
+birth and can redeem only its own link's credential (H1).  The browser never
+supplies a role, principal, grant, scope list or signature.
 
 Threat model: the process/OS-user boundary is the trust boundary.  In-process
 code mutation and same-user filesystem races are out of scope.
@@ -24,7 +26,6 @@ import hmac
 import secrets
 import threading
 import time
-from collections import deque
 from collections.abc import Callable, Iterator
 from contextlib import contextmanager
 from dataclasses import dataclass
@@ -40,6 +41,7 @@ from evidence_inspector.reader_authorization_registry import (
 )
 
 from .auth import (
+    READER_SESSION,
     BootstrapBroker,
     BoundaryDenied,
     BrowserRequest,
@@ -48,6 +50,15 @@ from .auth import (
 )
 
 _GRANT_SELECTOR_PREFIX = "reader_grant_"
+# A denial for one of these reasons means the session's own grant is gone for
+# good, so the session ends with it (H1); other reasons leave it alone.
+_SESSION_ENDING_REASONS = frozenset(
+    {ReaderDenialReason.GRANT_REVOKED, ReaderDenialReason.GRANT_NOT_CURRENT}
+)
+
+
+class ReaderLaunchRateLimited(RuntimeError):
+    """Too many launch credentials are pending; the caller should wait."""
 
 
 def _is_grant_selector(value: object) -> bool:
@@ -84,8 +95,6 @@ class ReaderSessionBinder:
         now: Callable[[], float] = time.monotonic,
         launch_ttl_seconds: int = 60,
         max_pending_launches: int = 16,
-        exchange_window_seconds: int = 60,
-        max_exchange_attempts: int = 8,
     ) -> None:
         if type(boundary) is not LocalWebBoundary:
             raise TypeError("reader binder requires the exact B01 boundary")
@@ -95,18 +104,11 @@ class ReaderSessionBinder:
             raise ValueError("launch TTL must be between 1 and 300 seconds")
         if not 1 <= max_pending_launches <= 64:
             raise ValueError("pending launch limit must be between 1 and 64")
-        if not 1 <= exchange_window_seconds <= 300:
-            raise ValueError("exchange window must be between 1 and 300 seconds")
-        if not 1 <= max_exchange_attempts <= 64:
-            raise ValueError("exchange attempt limit must be between 1 and 64")
         self._boundary = boundary
         self._registry = registry
         self._now = now
         self._launch_ttl = launch_ttl_seconds
         self._max_pending = max_pending_launches
-        self._exchange_window = exchange_window_seconds
-        self._exchange_attempts: deque[float] = deque(maxlen=max_exchange_attempts)
-        self._max_exchange_attempts = max_exchange_attempts
         self._pending: dict[bytes, _PendingLaunch] = {}
         self._lock = threading.RLock()
 
@@ -137,7 +139,7 @@ class ReaderSessionBinder:
             ]:
                 self._pending.pop(digest, None)
             if len(self._pending) >= self._max_pending:
-                raise RuntimeError("pending reader launch limit reached")
+                raise ReaderLaunchRateLimited("pending reader launch limit reached")
             for _ in range(4):
                 token = secrets.token_urlsafe(32)
                 digest = self._digest(token)
@@ -152,22 +154,42 @@ class ReaderSessionBinder:
             )
             return token
 
-    def _consume_launch(self, launch_credential: object) -> str:
-        """Remove the credential before verification; any outcome consumes it."""
+    def issue_launch(self, grant_selector: str) -> tuple[str, str]:
+        """Server-side launcher only: one ``(bootstrap, launch credential)`` pair.
+
+        The bootstrap is a ``reader`` bootstrap bound to this credential's
+        digest (H1, T5).  It replaces any pending, unexchanged bootstrap, as
+        every bootstrap does.
+        """
+
+        credential = self.issue_launch_credential(grant_selector)
+        digest = self._digest(credential)
+        try:
+            bootstrap = self._boundary.issue_bootstrap(
+                kind=READER_SESSION, launch_credential_sha256=digest
+            )
+        except BaseException:
+            with self._lock:
+                self._pending.pop(digest, None)
+            raise
+        return bootstrap, credential
+
+    def _consume_launch(
+        self, launch_credential: object, *, session_token: str | None
+    ) -> str:
+        """Remove the credential before verification; any outcome consumes it.
+
+        The session must be the reader session born from the same link
+        (checked before the credential is looked up), so a mismatched session
+        neither redeems nor consumes any credential.  There is no attempt
+        throttle: only a presentation whose digest the session itself carries
+        can reach a pending credential, so guessing is pointless, and a
+        throttle that cleared the store would let one session burn every
+        other session's link (H1).
+        """
 
         with self._lock:
             now = self._now()
-            while (
-                self._exchange_attempts
-                and now - self._exchange_attempts[0] >= self._exchange_window
-            ):
-                self._exchange_attempts.popleft()
-            if len(self._exchange_attempts) >= self._max_exchange_attempts:
-                self._pending.clear()
-                raise ReaderAuthorizationDenied(
-                    ReaderDenialReason.LAUNCH_CREDENTIAL_INVALID
-                )
-            self._exchange_attempts.append(now)
             if type(launch_credential) is not str or not BootstrapBroker._strong_token(
                 launch_credential
             ):
@@ -175,6 +197,16 @@ class ReaderSessionBinder:
                     ReaderDenialReason.LAUNCH_CREDENTIAL_INVALID
                 )
             supplied = self._digest(launch_credential)
+            try:
+                self._broker().require_reader_launch(
+                    session_token,
+                    authority=self._boundary.config.authority,
+                    launch_credential_sha256=supplied,
+                )
+            except BoundaryDenied:
+                raise ReaderAuthorizationDenied(
+                    ReaderDenialReason.LAUNCH_CREDENTIAL_INVALID
+                ) from None
             matched: _PendingLaunch | None = None
             for digest in list(self._pending):
                 if hmac.compare_digest(digest, supplied):
@@ -201,7 +233,9 @@ class ReaderSessionBinder:
         self._boundary.authorize(request)
         if request.method.upper() != "POST":
             raise BoundaryDenied(403, "TBX-AUTH-003")
-        selector = self._consume_launch(launch_credential)
+        selector = self._consume_launch(
+            launch_credential, session_token=request.session_token
+        )
         registry = self._registry
         if registry is None:
             raise ReaderAuthorizationDenied(ReaderDenialReason.AUTHORITY_ABSENT)
@@ -386,6 +420,12 @@ class ReaderSessionBinder:
             raise ReaderAuthorizationDenied(
                 ReaderDenialReason.REGISTRY_UNAVAILABLE
             ) from None
+        except ReaderAuthorizationDenied as exc:
+            if exc.reason in _SESSION_ENDING_REASONS:
+                # The bound grant is revoked or no longer current: the next
+                # request on this cookie gets 401 instead of a live session.
+                self._broker().end_session(request.session_token)
+            raise
 
 
-__all__ = ["ReaderSessionBinder"]
+__all__ = ["ReaderLaunchRateLimited", "ReaderSessionBinder"]

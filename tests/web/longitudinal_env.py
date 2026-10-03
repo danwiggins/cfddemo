@@ -113,6 +113,18 @@ class Env:
         return _http(self.service, "POST", PREFIX + route, headers, payload)
 
     def unbound(self) -> tuple[str, str]:
+        """A reader session from a fresh link whose credential was never
+        presented: a live session with no grant binding."""
+
+        link = self.service.issue_reader_launch_url(
+            self.world.grant.payload.grant_selector
+        )
+        values = dict(item.split("=", 1) for item in link.split("#", 1)[1].split("&"))
+        return _exchange(self.service, values["bootstrap"])
+
+    def operator(self) -> tuple[str, str]:
+        """An operator session (plain bootstrap)."""
+
         return _exchange(self.service, self.service.issue_bootstrap())
 
     def binder(self):
