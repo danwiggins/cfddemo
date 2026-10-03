@@ -994,6 +994,31 @@ def test_late_keeper_failure_blocks_publication_after_a_good_heartbeat(
     assert not _keeper_threads()
 
 
+@pytest.mark.parametrize("error", [RuntimeError, SnapshotViolation])
+def test_failed_worker_stops_renewing_before_it_records_the_failure(
+    tmp_path: Path, error: type[Exception]
+) -> None:
+    runner = Runner(
+        tmp_path / "state", lease_seconds=30, heartbeat_seconds=0.01, synthetic_enabled=True
+    )
+    source, files = _source(tmp_path)
+    job = runner.submit(_request(source, files), source, files)
+    real_fail = runner.store.fail_attempt
+    keepers_at_failure = []
+
+    def fail_attempt(*args, **kwargs):
+        keepers_at_failure.append(len(_keeper_threads()))
+        return real_fail(*args, **kwargs)
+
+    def broken(context: object) -> StageResult:
+        raise error("stage failed")
+
+    runner.store.fail_attempt = fail_attempt  # type: ignore[method-assign]
+    with pytest.raises(error):
+        runner.execute(job.job_id, [StageSpec("measure", "v1", broken)], worker_id="w")
+    assert keepers_at_failure == [0]
+
+
 def test_heartbeat_interval_must_be_shorter_than_the_lease(tmp_path: Path) -> None:
     for name, interval in (("equal", 1), ("zero", 0)):
         with pytest.raises(ValueError, match="heartbeat_seconds"):

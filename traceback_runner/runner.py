@@ -489,12 +489,14 @@ class Runner:
             except InjectedCrash:
                 raise
             except (SnapshotViolation, TerminalStageError) as exc:
+                keeper.stop()  # a failed worker stops renewing before it records
                 # A pending pause can only end retryably (state table); the
                 # refusal repeats on the next attempt and then ends terminally.
                 pending_pause = self.store.get(job_id).state == JobState.PAUSE_REQUESTED
                 self.store.fail_attempt(current_lease, str(exc), retryable=pending_pause)
                 raise
             except Exception as exc:
+                keeper.stop()  # a failed worker stops renewing before it records
                 self.store.fail_attempt(current_lease, str(exc), retryable=True)
                 raise
             finally:
