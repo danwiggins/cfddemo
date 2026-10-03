@@ -96,7 +96,11 @@ or self-declared approval as a completed release gate.
 ## CI
 
 `.github/workflows/ci.yml` runs on every pull request and on pushes to `main`,
-on `ubuntu-latest` and `macos-latest` with Python 3.11. Each job runs
+on `macos-latest` and `ubuntu-latest` with Python 3.11. macOS team workstations
+are the product host (security spec X1, #86), so only `ci (macos-latest)` is a
+required check. The ubuntu job runs with `continue-on-error` and is
+informational until a Linux-compat follow-up fixes the `/proc/self/fd` bundle
+path and the fork-based tests. Each job runs
 `uv sync --frozen`, `uvx ruff@0.7.4 check .`, and
 `pytest -m "not slow" --timeout 600` in two steps: everything except the
 local web service tests under `pytest -n auto`, then `tests/web` and
@@ -113,13 +117,12 @@ regenerate the fixture with
 `uv run python scripts/regenerate_product_gate_fixture.py`; never hand-edit it.
 
 Branch protection is a manual repository-admin action (golden-path decision
-D8). The operator runs, once both CI checks have reported on a pull request:
+D8). The operator runs, once `ci (macos-latest)` has reported on a pull request:
 
 ```
 gh api -X PUT repos/danwiggins/cfddemo/branches/main/protection \
   -H "Accept: application/vnd.github+json" \
   -F 'required_status_checks[strict]=true' \
-  -f 'required_status_checks[contexts][]=ci (ubuntu-latest)' \
   -f 'required_status_checks[contexts][]=ci (macos-latest)' \
   -F 'enforce_admins=false' -F 'required_pull_request_reviews=null' -F 'restrictions=null'
 ```
