@@ -258,6 +258,8 @@ class LongitudinalErrorCode(StrEnum):
     INTEGRITY_FAILURE = "integrity_failure"
     STORAGE_FAILURE = "storage_failure"
     READ_CONFLICT = "read_conflict"
+    #: A programming error inside the build, never a store or grant state (H6).
+    INTERNAL_ERROR = "internal_error"
 
 
 class LongitudinalRemediation(StrEnum):
@@ -273,6 +275,7 @@ class LongitudinalRemediation(StrEnum):
     VERIFY_STORE_INTEGRITY = "verify_store_integrity"
     CHECK_LOCAL_STORAGE = "check_local_storage"
     REVIEW_TRUST_AUTHORITY = "review_trust_authority"
+    REPORT_INTERNAL_ERROR = "report_internal_error"
 
 
 class LongitudinalWorkspaceBoundaryError(Exception):
@@ -354,6 +357,18 @@ _TRUST_ERRORS: tuple[type[BaseException], ...] = (
     trust_module.ResultTrustRegistryError,
     SigningError,
 )
+#: Built-in exceptions that mean a bug in this code, not tampering, a stale
+#: authority or a denied grant (H6).  Matched only after every named store,
+#: grant and trust error, so a store error keeps its own mapping.
+PROGRAMMING_ERRORS: tuple[type[BaseException], ...] = (
+    AttributeError,
+    TypeError,
+    NameError,
+    AssertionError,
+    KeyError,
+    IndexError,
+    RecursionError,
+)
 
 T = TypeVar("T")
 
@@ -408,6 +423,11 @@ def _guarded(
         failure = (
             LongitudinalErrorCode.STORAGE_FAILURE,
             LongitudinalRemediation.CHECK_LOCAL_STORAGE,
+        )
+    except PROGRAMMING_ERRORS:
+        failure = (
+            LongitudinalErrorCode.INTERNAL_ERROR,
+            LongitudinalRemediation.REPORT_INTERNAL_ERROR,
         )
     except Exception:
         failure = (
@@ -2059,10 +2079,15 @@ def _authorize(
         return operation()
     except ReaderAuthorizationDenied:
         failure = LongitudinalErrorCode.PERMISSION_DENIED
+    except PROGRAMMING_ERRORS:
+        # A bug here is reported as one, never as a denied grant (H6).
+        failure = LongitudinalErrorCode.INTERNAL_ERROR
     except Exception:
         # A missing, unhealthy or replaced registry denies like any other grant
         # failure: no partial response, no detail.
         failure = LongitudinalErrorCode.PERMISSION_DENIED
+    if failure is LongitudinalErrorCode.INTERNAL_ERROR:
+        _fail(failure, LongitudinalRemediation.REPORT_INTERNAL_ERROR)
     _fail(failure, LongitudinalRemediation.OBTAIN_CURRENT_READER_GRANT)
 
 
@@ -3369,6 +3394,7 @@ __all__ = [
     "LimitationCode",
     "LongitudinalAuthorityCommitments",
     "LongitudinalErrorCode",
+    "PROGRAMMING_ERRORS",
     "LongitudinalMeasurementSelection",
     "LongitudinalRemediation",
     "LongitudinalSegment",

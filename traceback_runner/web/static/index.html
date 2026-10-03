@@ -14,7 +14,7 @@
       <p id="status" role="status" aria-live="polite">Establishing local session</p>
     </header>
     <main>
-      <section aria-labelledby="filters-title">
+      <section id="explorer-filters" aria-labelledby="filters-title" data-operator-only>
         <h2 id="filters-title">Shared filters and views</h2>
         <form id="filters">
           <label>Method ID <input id="method-id" name="method_id" autocomplete="off"></label>
@@ -27,7 +27,7 @@
         </div>
         <p id="comparison-help" class="help">Comparisons show registered method and pipeline outputs only. Incompatible views do not show deltas.</p>
       </section>
-      <section id="results" aria-labelledby="results-title" tabindex="-1">
+      <section id="results" aria-labelledby="results-title" tabindex="-1" data-operator-only>
         <div class="section-heading">
           <h2 id="results-title">Exact result values</h2>
           <p id="compatibility" class="badge">Select two registered views</p>
@@ -41,11 +41,11 @@
           </table>
         </div>
       </section>
-      <section aria-labelledby="provenance-title">
+      <section id="explorer-provenance" aria-labelledby="provenance-title" data-operator-only>
         <h2 id="provenance-title">Method compatibility and provenance</h2>
         <div id="provenance"></div>
       </section>
-      <section aria-labelledby="jobs-title">
+      <section id="operator-jobs" aria-labelledby="jobs-title" data-operator-only>
         <h2 id="jobs-title">Local jobs</h2>
         <ul id="jobs" aria-label="Local jobs"></ul>
       </section>

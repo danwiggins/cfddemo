@@ -8,6 +8,7 @@ import json
 import os
 import re
 import stat
+import time
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
@@ -262,6 +263,30 @@ def test_main_cli_dispatches_reader_with_a_minimal_hook(
     )
     assert code == 0
     assert "profile provider" in capsys.readouterr().out
+
+
+def test_profile_flag_before_reader_exits_2_with_a_usage_message(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """Security spec R4: no ``--profile`` flag exists yet (T4 is deferred), so
+    the flag-first form must fail as a usage error, never dispatch oddly."""
+
+    argv = [
+        "--profile",
+        "provider",
+        "reader",
+        "authority",
+        "init",
+        "--authority-dir",
+        str(tmp_path / "authority"),
+    ]
+    try:
+        code = cli.main(argv)
+    except SystemExit as exc:
+        code = exc.code
+    assert code == 2
+    assert "usage: traceback" in capsys.readouterr().err
+    assert not (tmp_path / "authority").exists()
 
 
 # -- launch ------------------------------------------------------------------
@@ -521,6 +546,62 @@ def test_launch_survives_too_many_unused_links(operator, tmp_path: Path) -> None
     lines = out.splitlines()
     assert sum(line.startswith("http://") for line in lines) == 16
     assert "Too many unused links" in out
+
+
+def test_launch_after_a_watchdog_shutdown_exits_and_prints_no_dead_link(
+    operator, tmp_path: Path
+) -> None:
+    """Criterion 24 (H6): trip the server's security watchdog (test hook),
+    press Enter: no further link, a stopped message, a non-zero exit."""
+
+    from traceback_runner.web import server as server_module
+
+    selector = operator.issue()
+
+    class _TripThenEnter:
+        def readline(self) -> str:
+            port = int(
+                re.search(
+                    r"http://127\.0\.0\.1:(\d+)/", operator.out.getvalue()
+                ).group(1)
+            )
+            runtime = next(
+                item
+                for item in server_module._RUNTIMES.values()
+                if item.server.server_address[1] == port
+            )
+            runtime.server.security_failed.set()
+            deadline = time.monotonic() + 5
+            while runtime in server_module._RUNTIMES.values():
+                assert time.monotonic() < deadline
+                time.sleep(0.01)
+            return "\n"
+
+    code, out, err = operator(
+        "launch", "--grant", selector, "--root", _runner_root(tmp_path),
+        stdin=_TripThenEnter(),
+    )
+    assert code == 3
+    assert "server stopped; relaunch with `traceback reader launch`" in err
+    assert sum(line.startswith("http://") for line in out.splitlines()) == 1
+    assert "Too many unused links" not in out
+
+
+def test_launch_reports_only_the_rate_limit_as_too_many_links(
+    operator, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from traceback_runner.web.server import RunningLocalWebService
+
+    def fail(self, grant: str) -> str:
+        raise RuntimeError("unrelated failure")
+
+    monkeypatch.setattr(RunningLocalWebService, "issue_reader_launch_url", fail)
+    with pytest.raises(RuntimeError, match="unrelated failure"):
+        operator(
+            "launch", "--grant", operator.issue(), "--root", _runner_root(tmp_path),
+            stdin=io.StringIO(""),
+        )
+    assert "Too many unused links" not in operator.out.getvalue()
 
 
 def test_interrupted_writes_leave_no_partial_key(operator, monkeypatch) -> None:

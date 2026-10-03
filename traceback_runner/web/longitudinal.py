@@ -89,6 +89,7 @@ from evidence_inspector.longitudinal_decision_registry import (
     LongitudinalDecisionRegistry,
 )
 from evidence_inspector.longitudinal_workspace import (
+    PROGRAMMING_ERRORS,
     LongitudinalErrorCode,
     LongitudinalMeasurementSelection,
     LongitudinalRemediation,
@@ -628,7 +629,11 @@ _STATUS = {
     LongitudinalErrorCode.READ_CONFLICT: 409,
     LongitudinalErrorCode.INTEGRITY_FAILURE: 500,
     LongitudinalErrorCode.STORAGE_FAILURE: 503,
+    LongitudinalErrorCode.INTERNAL_ERROR: 500,
 }
+#: The server-wide code for an internal error (H6); D08's ``internal_error``
+#: is rendered as this, with no remediation or detail.
+_INTERNAL_CODE = "TBX-INTERNAL"
 
 
 def _fail(
@@ -2017,6 +2022,8 @@ def reopen(
             )
             if page.cohort_manifest_sha256 == saved.commitments.cohort_manifest_sha256:
                 page_sha256 = page.candidate_page_sha256
+        except PROGRAMMING_ERRORS:
+            raise  # a bug is never shown as a stale reopen (H6)
         except Exception:  # noqa: BLE001 - a stale page is a stale reopen
             page_sha256 = None
         cohort_diff: LongitudinalVersionDiff | None
@@ -2024,7 +2031,9 @@ def reopen(
             cohort_diff = _version_diff(
                 source, first, selection.cohort_selector_id, selection.cohort_version
             )
-        except _RouteFailure:
+        except _RouteFailure as exc:
+            if exc.code == LongitudinalErrorCode.INTERNAL_ERROR.value:
+                raise
             cohort_diff = None
         versions = [
             item.cohort_version
@@ -2040,6 +2049,8 @@ def reopen(
         try:
             rebuilt, _ = _build(view, source, _reopen_request(saved, page_sha256))
         except _RouteFailure as exc:
+            if exc.code == LongitudinalErrorCode.INTERNAL_ERROR.value:
+                raise  # a bug is never shown as a reopen diff state
             rebuild_error = LongitudinalErrorCode(exc.code)
     changes: list[CommitmentChange] = []
     if (
@@ -2203,10 +2214,15 @@ def handle_longitudinal_route(
     except (_Denied, ReaderAuthorizationDenied):
         return 403, dict(_PERMISSION_DENIED)
     except _RouteFailure as exc:
+        if exc.code == LongitudinalErrorCode.INTERNAL_ERROR.value:
+            return 500, {"error": {"code": _INTERNAL_CODE}}
         error: dict[str, object] = {"code": exc.code}
         if exc.remediation is not None:
             error["remediation"] = exc.remediation
         return exc.status, {"error": error}
+    except PROGRAMMING_ERRORS:
+        # A bug in a route is reported as one (H6), not as tampering.
+        return 500, {"error": {"code": _INTERNAL_CODE}}
     except Exception:  # noqa: BLE001 - never a partial payload or detail
         return 500, {
             "error": {
