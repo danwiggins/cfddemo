@@ -89,6 +89,7 @@ from evidence_inspector.longitudinal_decision_registry import (
     LongitudinalDecisionRegistry,
 )
 from evidence_inspector.longitudinal_workspace import (
+    PROGRAMMING_ERRORS,
     LongitudinalErrorCode,
     LongitudinalMeasurementSelection,
     LongitudinalRemediation,
@@ -139,7 +140,11 @@ from evidence_inspector.result_trust_registry import ResultTrustRegistry
 from evidence_inspector.result_view_source_registry import ResultViewSourceRegistry
 
 from .auth import BoundaryDenied, BrowserRequest
-from .contracts import validate_public_text
+from .contracts import (
+    PROTECTED_PUBLIC_KEYS,
+    validate_public_key,
+    validate_public_text,
+)
 from .reader_session import ReaderSessionBinder
 
 ROUTE_PREFIX = "/api/v1/longitudinal/"
@@ -150,41 +155,22 @@ SELECTOR_PAGE_LIMIT = 50
 SAVED_PAGE_LIMIT = 20
 _PERMISSION_DENIED = {"error": {"code": "permission_denied"}}
 _HEX64 = re.compile(r"^[0-9a-f]{64}$")
-_KEY = re.compile(r"^[a-z0-9_]{1,64}$")
 _COHORT_SELECTOR = re.compile(r"^cohort_selector_[0-9a-f]{40}$")
 _ANCHOR_POLICY_SELECTOR = re.compile(r"^anchor_policy_[0-9a-f]{40}$")
 _SAVED_SELECTOR = re.compile(r"^saved_comparison_[0-9a-f]{40}$")
 _IDENTIFIER = re.compile(r"^[a-z0-9_]{1,96}$")
 # Field names of protected D08/registry models.  None may appear in a public
-# response at any depth: defence in depth beside the closed public schemas.
-_PROTECTED_KEYS = frozenset(
+# response at any depth: defence in depth beside the closed public schemas.  The
+# shared identifier/session names and the key grammar live in web/contracts.py;
+# these are the E12-only additions (E04 ``result_id``/``bundle_id`` are public in
+# the explorer, so they are protected here only).
+_PROTECTED_KEYS = PROTECTED_PUBLIC_KEYS | frozenset(
     {
-        "protected_rows",
-        "protected_only",
-        "reader_authorization",
         "dependency_heads",
         "live_dependency_heads",
-        "member",
-        "member_sha256",
-        "member_result_id",
-        "linkage_id",
-        "subject_token",
-        "collection_token",
-        "specimen_token",
-        "analysis_record_id",
-        "run_token",
-        "provider_namespace",
-        "time_coordinate",
-        "time_coordinate_sha256",
-        "biological_timepoint_id",
         "committed_receipt_sha256",
-        "grant_sha256",
-        "reader_grant_sha256",
         "state_head_sha256_binding",
         "saved_object_json",
-        "credential",
-        "session_token",
-        "csrf_token",
         "result_id",
         "bundle_id",
     }
@@ -643,7 +629,11 @@ _STATUS = {
     LongitudinalErrorCode.READ_CONFLICT: 409,
     LongitudinalErrorCode.INTEGRITY_FAILURE: 500,
     LongitudinalErrorCode.STORAGE_FAILURE: 503,
+    LongitudinalErrorCode.INTERNAL_ERROR: 500,
 }
+#: The server-wide code for an internal error (H6); D08's ``internal_error``
+#: is rendered as this, with no remediation or detail.
+_INTERNAL_CODE = "TBX-INTERNAL"
 
 
 def _fail(
@@ -750,11 +740,9 @@ def validate_longitudinal_public(value: object, *, key: str = "") -> None:
 
     if isinstance(value, Mapping):
         for name, nested in value.items():
-            if type(name) is not str or not _KEY.fullmatch(name):
-                raise ValueError("public key is not a controlled name")
-            if name in _PROTECTED_KEYS:
-                raise ValueError("protected field reached the public boundary")
-            validate_longitudinal_public(nested, key=name)
+            validate_longitudinal_public(
+                nested, key=validate_public_key(name, protected=_PROTECTED_KEYS)
+            )
     elif isinstance(value, (list, tuple)):
         for nested in value:
             validate_longitudinal_public(nested, key=key)
@@ -2034,6 +2022,8 @@ def reopen(
             )
             if page.cohort_manifest_sha256 == saved.commitments.cohort_manifest_sha256:
                 page_sha256 = page.candidate_page_sha256
+        except PROGRAMMING_ERRORS:
+            raise  # a bug is never shown as a stale reopen (H6)
         except Exception:  # noqa: BLE001 - a stale page is a stale reopen
             page_sha256 = None
         cohort_diff: LongitudinalVersionDiff | None
@@ -2041,7 +2031,9 @@ def reopen(
             cohort_diff = _version_diff(
                 source, first, selection.cohort_selector_id, selection.cohort_version
             )
-        except _RouteFailure:
+        except _RouteFailure as exc:
+            if exc.code == LongitudinalErrorCode.INTERNAL_ERROR.value:
+                raise
             cohort_diff = None
         versions = [
             item.cohort_version
@@ -2057,6 +2049,8 @@ def reopen(
         try:
             rebuilt, _ = _build(view, source, _reopen_request(saved, page_sha256))
         except _RouteFailure as exc:
+            if exc.code == LongitudinalErrorCode.INTERNAL_ERROR.value:
+                raise  # a bug is never shown as a reopen diff state
             rebuild_error = LongitudinalErrorCode(exc.code)
     changes: list[CommitmentChange] = []
     if (
@@ -2220,10 +2214,15 @@ def handle_longitudinal_route(
     except (_Denied, ReaderAuthorizationDenied):
         return 403, dict(_PERMISSION_DENIED)
     except _RouteFailure as exc:
+        if exc.code == LongitudinalErrorCode.INTERNAL_ERROR.value:
+            return 500, {"error": {"code": _INTERNAL_CODE}}
         error: dict[str, object] = {"code": exc.code}
         if exc.remediation is not None:
             error["remediation"] = exc.remediation
         return exc.status, {"error": error}
+    except PROGRAMMING_ERRORS:
+        # A bug in a route is reported as one (H6), not as tampering.
+        return 500, {"error": {"code": _INTERNAL_CODE}}
     except Exception:  # noqa: BLE001 - never a partial payload or detail
         return 500, {
             "error": {

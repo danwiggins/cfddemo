@@ -1,0 +1,59 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!--
+  launchd agent for the golden-path real-BAM canary (docs/CANARIES.md).
+  Rendered by scripts/canary/install_canary.sh; the placeholders (names between double
+  at-signs) are filled with XML-escaped absolute paths. The rendered copy lives only in
+  ~/Library/LaunchAgents and is never committed.
+-->
+<plist version="1.0">
+<dict>
+  <key>Label</key>
+  <string>com.traceback.real-bam-canary</string>
+  <key>ProgramArguments</key>
+  <array>
+    <string>@@UV@@</string>
+    <string>run</string>
+    <string>--project</string>
+    <string>@@REPO@@</string>
+    <string>python</string>
+    <string>@@REPO@@/scripts/canary/real_bam_canary.py</string>
+    <string>--fasta</string>
+    <string>@@FASTA@@</string>
+    <string>--bam</string>
+    <string>@@BAM@@</string>
+    <string>--baseline</string>
+    <string>@@BASELINE@@</string>
+    <string>--log-dir</string>
+    <string>@@LOG_DIR@@</string>
+    <string>--repeat</string>
+    <string>@@REPEAT@@</string>
+  </array>
+  <key>WorkingDirectory</key>
+  <string>@@REPO@@</string>
+  <key>EnvironmentVariables</key>
+  <dict>
+    <key>PATH</key>
+    <string>@@PATH@@</string>
+  </dict>
+  <key>StartCalendarInterval</key>
+  <dict>
+    <key>Hour</key>
+    <integer>3</integer>
+    <key>Minute</key>
+    <integer>30</integer>
+  </dict>
+  <key>RunAtLoad</key>
+  <false/>
+  <key>Umask</key>
+  <integer>63</integer>
+  <key>LowPriorityIO</key>
+  <true/>
+  <key>Nice</key>
+  <integer>10</integer>
+  <key>StandardOutPath</key>
+  <string>@@LOG_DIR@@/launchd.out.log</string>
+  <key>StandardErrorPath</key>
+  <string>@@LOG_DIR@@/launchd.err.log</string>
+</dict>
+</plist>

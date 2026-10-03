@@ -6,9 +6,10 @@ One coherent synthetic world over every merged E12 store
 packaged loopback server with the longitudinal adapter, and one bound reader
 session.  The packaged view is driven by an offline DOM harness under node.
 
-Only one loopback service may run per process (the B01 startup anchor), so a
-test module uses either the shared read-only ``env`` or a per-test ``fresh``
-environment, never both.
+Each environment starts its own loopback service on its own state directory
+(the B01 startup anchor admits one service per state directory).  A test
+module uses either the shared read-only ``env`` or a per-test ``fresh``
+environment.
 """
 
 from __future__ import annotations
@@ -112,6 +113,18 @@ class Env:
         return _http(self.service, "POST", PREFIX + route, headers, payload)
 
     def unbound(self) -> tuple[str, str]:
+        """A reader session from a fresh link whose credential was never
+        presented: a live session with no grant binding."""
+
+        link = self.service.issue_reader_launch_url(
+            self.world.grant.payload.grant_selector
+        )
+        values = dict(item.split("=", 1) for item in link.split("#", 1)[1].split("&"))
+        return _exchange(self.service, values["bootstrap"])
+
+    def operator(self) -> tuple[str, str]:
+        """An operator session (plain bootstrap)."""
+
         return _exchange(self.service, self.service.issue_bootstrap())
 
     def binder(self):

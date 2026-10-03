@@ -110,6 +110,7 @@ records and is not an export artifact.
 ## Not in scope
 
 D07 comparison discovery, D10 live integration, and the composable E12
-authority-fence adapter are separate prerequisites in the E12 merge order.
+authority-fence adapter were separate prerequisites in the E12 merge order
+(since merged: #60, #64, #80).
 All fixtures are synthetic/local, and outcomes describe technical
 comparability only.

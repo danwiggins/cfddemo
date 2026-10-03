@@ -19,10 +19,19 @@ job database. The preserved Streamlit demo is not this service.
 - HTML, JavaScript, and CSS are package resources. They contain no CDN, remote
   font, analytics, model, map, or other runtime network reference. CSP permits
   connections and assets only from the same local origin.
-- Before touching the replaceable state parent, startup pins and exclusively
-  locks the root-owned sticky system temporary directory plus a deterministic,
-  user-owned mode-`0600` anchor keyed to the absolute state path. It then pins
-  the user-owned, non-group/world-writable immediate parent. The state directory
+- Before touching the replaceable state parent, startup pins the root-owned
+  sticky system temporary directory and exclusively locks a deterministic,
+  user-owned mode-`0600` anchor there, keyed to the effective user and the
+  absolute state path. The anchor's lock is held for the service's lifetime,
+  so exactly one service runs per state path; services on different state
+  paths run concurrently. A flock on the temporary directory itself is held
+  only while an anchor is created, locked and re-checked against its name, and
+  while a closing service checks and unlinks its own anchor; that ordering
+  stops a start from locking an anchor inode that a concurrent close then
+  unlinks. Only a held anchor reports "already running"; a temporary-directory
+  lock still busy after 5 s reports "startup lock is busy", and a close that
+  cannot take it leaves the anchor file in place for the next start to reuse.
+  Startup then pins the user-owned, non-group/world-writable immediate parent. The state directory
   must be owned by the current OS user at mode `0700`. Stable root, anchor,
   immediate parent, state-directory, and instance-lock identities are
   revalidated before and after publication and while the listener is live.
@@ -37,6 +46,19 @@ job database. The preserved Streamlit demo is not this service.
   under the broker's single lock.
 - The adapter emits no access log, rejects forwarded headers, and performs
   authorization before durable-store lookup.
+- An exception no route maps is caught at the request dispatcher (security
+  spec H6-min): it answers the bounded `500 {"error":{"code":"TBX-INTERNAL"}}`
+  (or, if a response had started, closes the connection) and increments an
+  in-memory per-code counter (`RunningLocalWebService.internal_errors`) that
+  stores no body, path, query or exception text. A D08 programming error
+  (`AttributeError`, `TypeError`, `NameError`, `AssertionError`, `KeyError`,
+  `IndexError`, `RecursionError`) reaches the longitudinal routes as the same
+  `TBX-INTERNAL`; store errors keep their own codes.
+- When the security watchdog shuts the listener down, the runtime stops being
+  a running runtime: it issues no more bootstrap codes or reader links
+  (`LocalWebServerStopped`), and `traceback reader launch` prints a stopped
+  message and exits 3 instead of a dead link. The startup anchor and lease
+  stay held until `close()`.
 
 ## Threat boundary
 
@@ -48,8 +70,12 @@ job database. The preserved Streamlit demo is not this service.
   not valid on IPv6, or vice versa. CORS and outbound network are disabled by
   contract.
 - The launcher creates a short-lived one-use bootstrap code. It belongs only
-  in the URL fragment, is exchanged by an exact same-origin POST, and is
-  invalidated after the first exchange attempt.
+  in the URL fragment and is exchanged by an exact same-origin POST. Only the
+  correct code consumes it (security spec H1): a wrong or malformed code gets
+  401 and counts against the per-window attempt limit, and once the limit is
+  reached further wrong codes get 429 `TBX-AUTH-005`. Neither clears the
+  pending code, so a local process cannot burn the operator's link. Issuing
+  any new bootstrap or reader link replaces an unexchanged one.
 - The exchange returns an opaque session for an `HttpOnly`,
   `SameSite=Strict` cookie plus a separate CSRF token. Every read requires the
   session. Every mutation additionally requires exact Host, Origin, and CSRF
@@ -66,6 +92,43 @@ job database. The preserved Streamlit demo is not this service.
   guessed ID receives the same safe denial as any other missing session and
   reveals no object state.
 
+## Session kinds and the route table (security spec H1)
+
+- A session is `operator` or `reader`, fixed when its bootstrap is exchanged.
+  A plain bootstrap creates an operator session. A reader launch link carries
+  a `reader` bootstrap bound to the digest of the launch credential in the
+  same link, so its session is a reader session from birth and can redeem
+  only that link's credential.
+- `_ROUTE_KINDS` in `traceback_runner/web/server.py` is generated from one
+  exact route table (`_ROUTES` plus the two named full-match patterns
+  `job_detail` and `explorer_result`); the longitudinal entries are copied
+  from that module's own route constants. There is no prefix matching. A path
+  not in the table and not a packaged asset answers 404 and reaches no
+  handler. HEAD follows the GET policy.
+
+  | Routes | Kinds |
+  |---|---|
+  | `POST /api/v1/session/bootstrap` | none (it creates the session) |
+  | `POST /api/v1/session/validate`, `POST /api/v1/session/logout` | operator, reader |
+  | `POST /api/v1/session/reader-launch` | reader |
+  | `GET /api/v1/jobs`, `GET /api/v1/jobs/job_<32hex>` | operator |
+  | `GET /api/v1/explorer/catalog`, `compare`, `results/result_<40hex>` | operator |
+  | `GET /api/v1/longitudinal/` `selectors`, `diff`, `saved`; `POST` `workspace`, `source`, `save`, `reopen` | reader |
+
+- One locked broker check per request: expiry (8 h) and idle timeout (20 min)
+  and authority give 401 `TBX-AUTH-001`; for a mutation, Origin and CSRF give
+  403; a kind the route does not admit gives 403 `TBX-AUTH-007`. Only a
+  request that passes every check refreshes the idle clock, under the same
+  lock, so a denied request never extends a session and a logout is never
+  undone by a concurrent request.
+- `POST /api/v1/session/logout` (Origin and CSRF) deletes the session and its
+  reader binding and answers 204; a repeat answers 401.
+- When a reader read is denied because the session's own grant is revoked or
+  no longer current, the session ends: that response is the bounded
+  `permission_denied`, and the next request on the cookie gets 401.
+- The packaged page never requests jobs or explorer routes from a reader
+  session; it hides those sections and shows the longitudinal view.
+
 The current contract uses plain HTTP on a literal loopback origin, so the
 cookie is intentionally not marked `Secure`; browsers do not treat arbitrary
 loopback HTTP as a secure transport. The service must never bind beyond
@@ -81,18 +144,21 @@ commitment and registry head. Non-E12 routes never consult it. See
 `docs/READER-AUTHORIZATION-REGISTRY.md`.
 
 `traceback reader launch` starts the service with a reader registry and prints
-a one-use link whose fragment carries a bootstrap code and a reader launch
-credential. The page exchanges the bootstrap, then POSTs the credential to
-`/api/v1/session/reader-launch` with the session cookie, exact Origin and
-CSRF token. Without a reader registry that route answers not found.
+a one-use link whose fragment carries a reader bootstrap code and a reader
+launch credential. The page exchanges the bootstrap, then POSTs the credential
+to `/api/v1/session/reader-launch` with the session cookie, exact Origin and
+CSRF token. The binder refuses the credential unless the session is the reader
+session born from the same link. Without a reader registry no reader session
+can exist.
 
 The E12 routes (`/api/v1/longitudinal/selectors|diff|saved` GET and
 `workspace|source|save|reopen` POST) exist only when the explorer carries a
 `LongitudinalExplorerSource`, and startup refuses one whose reader registry is
 not the service's. They run the B01 checks first, then re-resolve the bound
 grant through `ReaderSessionBinder.reader_authorization` before any protected
-read and again before returning. A bare B01 session, and every grant failure,
-gets the same `403 {"error":{"code":"permission_denied"}}` with no counts,
+read and again before returning. An operator session gets 403 `TBX-AUTH-007`
+from the route table. An unbound reader session, and every grant failure, gets
+the same `403 {"error":{"code":"permission_denied"}}` with no counts,
 selectors or timing detail. See `docs/LONGITUDINAL-BROWSER.md`.
 
 ## Frozen response contracts

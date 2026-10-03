@@ -192,16 +192,20 @@ def test_credential_strength_ttl_attempts_and_session_count_are_bounded(
 
     limited = BootstrapBroker(now=lambda: 100.0, max_exchange_attempts=1)
     limited_boundary = LocalWebBoundary(build_loopback_config(port=8765), limited)
-    invalid = limited_boundary.issue_bootstrap()
-    with pytest.raises(BoundaryDenied):
-        limited_boundary.exchange_bootstrap(_exchange_request(), invalid + "x")
     valid = limited_boundary.issue_bootstrap()
+    with pytest.raises(BoundaryDenied) as wrong:
+        limited_boundary.exchange_bootstrap(_exchange_request(), valid + "x")
+    assert wrong.value.status_code == 401
     with pytest.raises(BoundaryDenied) as throttled:
-        limited_boundary.exchange_bootstrap(_exchange_request(), valid)
+        limited_boundary.exchange_bootstrap(_exchange_request(), "y" * 43)
     assert (throttled.value.status_code, throttled.value.code) == (
         429,
         "TBX-AUTH-005",
     )
+    # H1 (updated from the burn-on-any-attempt behaviour): neither the wrong
+    # code nor the tripped limit cleared the slot, so the operator's own code
+    # still exchanges.
+    limited_boundary.exchange_bootstrap(_exchange_request(), valid)
 
 
 def test_missing_session_cross_origin_host_and_csrf_fail_closed() -> None:

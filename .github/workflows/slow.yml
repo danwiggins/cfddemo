@@ -43,7 +43,5 @@ jobs:
       - name: Sync locked environment
         run: uv sync --frozen
 
-      # Serial on purpose: the live harness starts the local web service,
-      # which holds a host-wide /tmp lock until spec item A3 lands.
       - name: Slow tests
         run: uv run pytest -p no:cacheprovider --timeout 600 -m slow --durations=10

@@ -1,0 +1,97 @@
+name: canary
+
+# Synthetic golden-path canary (docs/CANARIES.md). Nightly on both product
+# hosts: the Milestone 1 acceptance script, the synthetic demo + verify, and
+# scripts/canary/real_bam_canary.py on the generated fixture with --repeat 2,
+# first against a baseline recorded in this job (self-consistency), then
+# against the committed SYNTHETIC baseline (drift across commits). The
+# real-data canary runs only on the operator's workstation; its baseline and
+# logs never reach CI or the repository.
+
+on:
+  schedule:
+    - cron: "43 5 * * *"
+  workflow_dispatch:
+  pull_request:
+    paths:
+      - "scripts/canary/**"
+      - "scripts/golden_path_acceptance.sh"
+      - "tests/fixtures/canary/**"
+      - ".github/workflows/canary.yml"
+
+permissions:
+  contents: read
+
+concurrency:
+  group: canary-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+jobs:
+  canary:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [macos-latest, ubuntu-latest]
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 15
+    env:
+      TRACEBACK_CANARY_NO_NOTIFY: "1"
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - uses: astral-sh/setup-uv@c18668ad3cf93ea998bef934396af7bb5c839dc7 # v10.2.0
+        with:
+          version: "0.11.10"
+          python-version: "3.11"
+          enable-cache: true
+
+      - name: Sync locked environment
+        run: uv sync --frozen
+
+      - name: Golden-path acceptance (Milestone 1)
+        run: bash scripts/golden_path_acceptance.sh
+
+      - name: Synthetic demo, then verify
+        run: |
+          root="$RUNNER_TEMP/demo"
+          uv run traceback demo --root "$root" --json > "$RUNNER_TEMP/demo.json"
+          bundle="$(jq -r .data.bundle "$RUNNER_TEMP/demo.json")"
+          trust="$(jq -r .data.trust_store "$RUNNER_TEMP/demo.json")"
+          uv run traceback verify "$root/$bundle" --trust-store "$root/$trust"
+
+      - name: Generate the golden-path fixture
+        run: >-
+          uv run python -c "import sys; from pathlib import Path;
+          from traceback_runner.fixtures import create_local_golden_path_inputs as c;
+          c(Path(sys.argv[1]))" "$RUNNER_TEMP/canary-inputs"
+
+      - name: Canary, record a baseline (--repeat 2)
+        run: >-
+          uv run python scripts/canary/real_bam_canary.py
+          --fasta "$RUNNER_TEMP/canary-inputs/golden-reference.fa"
+          --bam "$RUNNER_TEMP/canary-inputs/golden-aligned.bam"
+          --baseline "$RUNNER_TEMP/canary-state/baseline.json"
+          --log-dir "$RUNNER_TEMP/canary-logs" --no-notify
+          --record-baseline --repeat 2
+
+      - name: Canary, compare with the baseline from this job (--repeat 2)
+        run: >-
+          uv run python scripts/canary/real_bam_canary.py
+          --fasta "$RUNNER_TEMP/canary-inputs/golden-reference.fa"
+          --bam "$RUNNER_TEMP/canary-inputs/golden-aligned.bam"
+          --baseline "$RUNNER_TEMP/canary-state/baseline.json"
+          --log-dir "$RUNNER_TEMP/canary-logs" --no-notify --repeat 2
+
+      - name: Canary, compare with the committed synthetic baseline
+        run: >-
+          uv run python scripts/canary/real_bam_canary.py
+          --fasta "$RUNNER_TEMP/canary-inputs/golden-reference.fa"
+          --bam "$RUNNER_TEMP/canary-inputs/golden-aligned.bam"
+          --baseline tests/fixtures/canary/synthetic_baseline.json
+          --log-dir "$RUNNER_TEMP/canary-logs" --no-notify
+
+      - name: Show the last canary result
+        if: failure()
+        run: cat "$RUNNER_TEMP/canary-logs/latest.json" || true

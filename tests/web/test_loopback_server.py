@@ -6,9 +6,15 @@ import http.client
 import ipaddress
 import json
 import os
+import fcntl
 import socket
 import stat
+import subprocess
+import sys
+import threading
 import time
+from collections.abc import Iterator
+from contextlib import contextmanager
 from dataclasses import replace
 from pathlib import Path
 
@@ -607,8 +613,8 @@ def test_failed_start_releases_the_journal_anchor_even_if_cleanup_fails(
     real_close_startup_anchor = server_module._close_startup_anchor
 
     def fail_cleanup(*args: object, **kwargs: object) -> None:
-        # Release the real host-wide startup lock first, so later tests can
-        # start a service, then fail as a broken cleanup step would.
+        # Release the real per-state-directory startup anchor first, then fail
+        # as a broken cleanup step would.
         real_close_startup_anchor(*args, **kwargs)
         raise OSError("injected cleanup failure")
 
@@ -625,3 +631,390 @@ def test_failed_start_releases_the_journal_anchor_even_if_cleanup_fails(
     assert wal.exists()
     store.close()
     assert not wal.exists()
+
+
+# --- A3: per-state-directory single-instance anchor -------------------------
+
+_HOLDER_SCRIPT = """
+import sys
+from pathlib import Path
+from traceback_runner.store import JobStore
+from traceback_runner.web.server import LocalWebServerError, RunningLocalWebService
+
+root = Path(sys.argv[1])
+store = JobStore(root / "runner" / "jobs.sqlite3")
+print("imported", flush=True)
+if sys.stdin.readline().strip() != "go":
+    sys.exit(0)
+try:
+    service = RunningLocalWebService.start(store=store, state_directory=root / "state")
+except LocalWebServerError as exc:
+    print(f"refused: {exc}", flush=True)
+    sys.exit(3)
+print("ready", flush=True)
+sys.stdin.readline()
+service.close()
+"""
+
+
+def _spawn_holder(root: Path) -> subprocess.Popen[str]:
+    """Spawn a process that imports the server, then starts on ``go``."""
+
+    return subprocess.Popen(
+        [sys.executable, "-c", _HOLDER_SCRIPT, str(root)],
+        stdin=subprocess.PIPE,
+        stdout=subprocess.PIPE,
+        text=True,
+        cwd=Path(__file__).resolve().parents[2],
+    )
+
+
+def _go(process: subprocess.Popen[str]) -> str:
+    assert _await_line(process) == "imported"
+    assert process.stdin is not None
+    process.stdin.write("go\n")
+    process.stdin.flush()
+    return _await_line(process)
+
+
+def _await_line(process: subprocess.Popen[str]) -> str:
+    stdout = process.stdout
+    assert stdout is not None
+    result: list[str] = []
+    reader = threading.Thread(target=lambda: result.append(stdout.readline()))
+    reader.daemon = True
+    reader.start()
+    reader.join(timeout=60)
+    if not result:
+        process.kill()
+        pytest.fail("holder process did not report within 60 s")
+    return result[0].strip()
+
+
+def _stop_holder(process: subprocess.Popen[str]) -> None:
+    if process.stdin is not None:
+        try:
+            process.stdin.close()
+        except BrokenPipeError:
+            pass
+    try:
+        process.wait(timeout=15)
+    except subprocess.TimeoutExpired:
+        process.kill()
+        process.wait(timeout=5)
+
+
+@contextmanager
+def _concurrent_starts(
+    roots: list[Path], stores_root: Path
+) -> Iterator[tuple[list[RunningLocalWebService], list[BaseException]]]:
+    """Start one service per root at once; each thread later closes its own.
+
+    The store's journal anchor is a SQLite connection bound to the starting
+    thread, so a service must be closed on the thread that started it.  Each
+    start gets its own job store: concurrent first opens of one SQLite file
+    race on its WAL sidecars, which is a job-store concern, not the web lock's.
+    """
+
+    stores = [
+        _store(stores_root / f"store-{index:02d}")[0] for index in range(len(roots))
+    ]
+
+    barrier = threading.Barrier(len(roots))
+    release = threading.Event()
+    settled = threading.Semaphore(0)
+    started: list[RunningLocalWebService] = []
+    failures: list[BaseException] = []
+    guard = threading.Lock()
+
+    def start(root: Path, store: JobStore) -> None:
+        try:
+            barrier.wait(timeout=10)
+            service = RunningLocalWebService.start(store=store, state_directory=root)
+        except BaseException as exc:  # collected for assertion
+            with guard:
+                failures.append(exc)
+            settled.release()
+            return
+        with guard:
+            started.append(service)
+        settled.release()
+        release.wait(timeout=120)
+        service.close()
+
+    threads = [
+        threading.Thread(target=start, args=(root, store))
+        for root, store in zip(roots, stores, strict=True)
+    ]
+    for thread in threads:
+        thread.start()
+    try:
+        for _ in threads:
+            assert settled.acquire(timeout=60)
+        yield started, failures
+    finally:
+        release.set()
+        for thread in threads:
+            thread.join(timeout=60)
+    assert not any(thread.is_alive() for thread in threads)
+    assert not any(service.is_running for service in started)
+
+
+def test_distinct_state_directories_run_concurrently_in_one_process(
+    tmp_path: Path,
+) -> None:
+    with _concurrent_starts(
+        [tmp_path / "root-a" / "state", tmp_path / "root-b" / "state"], tmp_path
+    ) as (started, failures):
+        assert failures == []
+        assert len(started) == 2
+        assert started[0].anchor_path != started[1].anchor_path
+        for service in started:
+            assert service.is_running
+            assert _request(service, "GET", "/")[0] == 200
+
+
+def test_sixteen_concurrent_starts_on_distinct_roots_all_succeed(
+    tmp_path: Path,
+) -> None:
+    roots = [tmp_path / f"root-{index:02d}" / "state" for index in range(16)]
+    with _concurrent_starts(roots, tmp_path) as (started, failures):
+        assert failures == []
+        assert len(started) == 16
+        assert len({service.anchor_path for service in started}) == 16
+
+
+def test_concurrent_starts_on_one_root_admit_exactly_one(tmp_path: Path) -> None:
+    with _concurrent_starts([tmp_path / "state"] * 8, tmp_path) as (started, failures):
+        assert len(started) == 1
+        assert len(failures) == 7
+        assert all(
+            isinstance(exc, LocalWebServerError) and "already running" in str(exc)
+            for exc in failures
+        )
+
+
+def test_distinct_roots_run_in_two_processes_and_one_root_is_refused(
+    tmp_path: Path,
+) -> None:
+    store, _ = _store(tmp_path)
+    holder_root = tmp_path / "holder"
+    # Both processes import in parallel; each starts only on "go".
+    holder = _spawn_holder(holder_root)
+    rival = _spawn_holder(tmp_path / "local")
+    try:
+        assert _go(holder) == "ready"
+        # A different root starts while the other process holds its own root.
+        with RunningLocalWebService.start(
+            store=store, state_directory=tmp_path / "local" / "state"
+        ) as service:
+            assert _request(service, "GET", "/")[0] == 200
+            # The other process's root is refused here...
+            with pytest.raises(LocalWebServerError, match="already running"):
+                RunningLocalWebService.start(
+                    store=store, state_directory=holder_root / "state"
+                )
+            # ...and this process's root is refused in a second process.
+            assert _go(rival) == "refused: local web service is already running"
+            _stop_holder(rival)
+            assert rival.returncode == 3
+    finally:
+        _stop_holder(rival)
+        _stop_holder(holder)
+    assert holder.returncode == 0
+    with RunningLocalWebService.start(
+        store=store, state_directory=holder_root / "state"
+    ) as restarted:
+        assert _request(restarted, "GET", "/")[0] == 200
+
+
+def test_stale_anchor_file_with_racing_starts_admits_exactly_one(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    store, _ = _store(tmp_path)
+    state = tmp_path / "state"
+    # A close that cannot take the stable lock root skips the unlink and
+    # leaves a stale, unlocked anchor; that must not weaken single-instance.
+    first = RunningLocalWebService.start(store=store, state_directory=state)
+    anchor_path = first.anchor_path
+    monkeypatch.setattr(server_module, "_STARTUP_PARENT_LOCK_TIMEOUT_SECONDS", 0.2)
+    root_fd = os.open(server_module._STABLE_LOCK_ROOT, os.O_RDONLY)
+    try:
+        fcntl.flock(root_fd, fcntl.LOCK_EX)
+        try:
+            first.close()
+            assert anchor_path.exists()
+            # While the root's flock stays busy a start reports busy, never
+            # "already running".
+            with pytest.raises(LocalWebServerError, match="startup lock is busy"):
+                RunningLocalWebService.start(
+                    store=store, state_directory=tmp_path / "other" / "state"
+                )
+        finally:
+            fcntl.flock(root_fd, fcntl.LOCK_UN)
+    finally:
+        os.close(root_fd)
+    monkeypatch.undo()
+    stale_inode = anchor_path.stat().st_ino
+    with _concurrent_starts([state] * 8, tmp_path / "racers") as (started, failures):
+        assert len(started) == 1
+        assert len(failures) == 7
+        assert all("already running" in str(exc) for exc in failures)
+        assert started[0].anchor_path.stat().st_ino == stale_inode
+    assert not anchor_path.exists()
+
+
+def test_anchor_replaced_during_open_or_unlinked_at_runtime_never_admits_two(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    store, _ = _store(tmp_path)
+    state = tmp_path / "state"
+    lock_root = server_module._STABLE_LOCK_ROOT
+    real_flock = fcntl.flock
+    swapped: list[str] = []
+
+    # Open: the named anchor is swapped right after its flock is taken and
+    # before the stable root is released; the start fails closed.
+    def swap_after_anchor_lock(descriptor: int, operation: int) -> None:
+        real_flock(descriptor, operation)
+        if swapped or operation != fcntl.LOCK_EX | fcntl.LOCK_NB:
+            return
+        metadata = os.fstat(descriptor)
+        if not stat.S_ISREG(metadata.st_mode):
+            return
+        name = next(
+            entry.name
+            for entry in os.scandir(lock_root)
+            if entry.name.startswith(".traceback-web-")
+            and entry.inode() == metadata.st_ino
+        )
+        replacement = lock_root / f"{name}.swap"
+        replacement.write_bytes(b"")
+        os.chmod(replacement, 0o600)
+        os.replace(replacement, lock_root / name)
+        swapped.append(name)
+
+    monkeypatch.setattr(server_module.fcntl, "flock", swap_after_anchor_lock)
+    try:
+        with pytest.raises(LocalWebServerError, match="anchor identity changed"):
+            RunningLocalWebService.start(store=store, state_directory=state)
+    finally:
+        monkeypatch.undo()
+    assert swapped
+    assert not (state / "instance.json").exists()
+    (lock_root / swapped[0]).unlink(missing_ok=True)
+
+    # Runtime: unlinking the live anchor fails the service closed, and a
+    # racing start that creates a fresh anchor is still refused by the lease.
+    first = RunningLocalWebService.start(store=store, state_directory=state)
+    anchor_path = first.anchor_path
+    try:
+        anchor_path.unlink()
+        with pytest.raises(LocalWebServerError, match="already running"):
+            RunningLocalWebService.start(store=store, state_directory=state)
+        deadline = time.monotonic() + 2
+        while first.is_running and time.monotonic() < deadline:
+            time.sleep(0.01)
+        assert first.server.security_failed.is_set()
+        assert not first.is_running
+        # The refused start unlinked the fresh anchor it created.
+        assert not anchor_path.exists()
+        # A same-name file created by someone else is not first's anchor.
+        anchor_path.write_bytes(b"")
+        os.chmod(anchor_path, 0o600)
+        foreign_inode = anchor_path.stat().st_ino
+    finally:
+        # Close: first's anchor is gone, so close must not unlink the
+        # replacement that another start may own.
+        first.close()
+    assert anchor_path.stat().st_ino == foreign_inode
+    with RunningLocalWebService.start(store=store, state_directory=state) as again:
+        assert _request(again, "GET", "/")[0] == 200
+    assert not anchor_path.exists()
+
+
+def test_start_racing_a_close_on_one_root_never_overlaps_or_loses_its_anchor(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Close of A interleaved with start of B on the same state directory.
+
+    B is launched while A holds the stable root's flock around its unlink: B
+    must wait.  B then completes while A still holds its old, unlinked anchor
+    inode, and A's final release must not disturb B's anchor.
+    """
+
+    store, _ = _store(tmp_path)
+    state = tmp_path / "state"
+    first = RunningLocalWebService.start(store=store, state_directory=state)
+    anchor = server_module._RUNTIMES[first._runtime_id].startup_anchor
+    real_flock = fcntl.flock
+    started = threading.Event()
+    release = threading.Event()
+    outcome: dict[str, object] = {}
+
+    def start_second() -> None:
+        try:
+            outcome["service"] = RunningLocalWebService.start(
+                store=store, state_directory=state
+            )
+        except BaseException as exc:  # collected for assertion
+            outcome["error"] = exc
+        started.set()
+        release.wait(timeout=60)
+        service = outcome.get("service")
+        if isinstance(service, RunningLocalWebService):
+            service.close()
+
+    second = threading.Thread(target=start_second)
+    observed: list[str] = []
+
+    root_metadata = os.fstat(anchor.parent_fd)
+    root_identity = (root_metadata.st_dev, root_metadata.st_ino)
+    contended = threading.Event()
+
+    def interleave(descriptor: int, operation: int) -> None:
+        if threading.current_thread() is second:
+            try:
+                real_flock(descriptor, operation)
+            except BlockingIOError:
+                metadata = os.fstat(descriptor)
+                if (metadata.st_dev, metadata.st_ino) == root_identity:
+                    contended.set()
+                raise
+            return
+        if descriptor == anchor.parent_fd and operation == fcntl.LOCK_UN:
+            # A has unlinked its anchor and still holds the stable root.
+            assert not (anchor.parent_path / anchor.name).exists()
+            second.start()
+            # B has actually been refused the stable root at least once.
+            assert contended.wait(timeout=30)
+            assert not started.is_set()
+            observed.append("root-held")
+        elif descriptor == anchor.descriptor and operation == fcntl.LOCK_UN:
+            # A has released the root but still holds its old anchor inode.
+            assert started.wait(timeout=30)
+            observed.append("old-anchor-held")
+        real_flock(descriptor, operation)
+
+    monkeypatch.setattr(server_module.fcntl, "flock", interleave)
+    try:
+        first.close()
+    finally:
+        monkeypatch.undo()
+    try:
+        assert observed == ["root-held", "old-anchor-held"]
+        assert "error" not in outcome, outcome.get("error")
+        service = outcome["service"]
+        assert isinstance(service, RunningLocalWebService)
+        assert service.is_running
+        runtime = server_module._RUNTIMES[service._runtime_id]
+        named = os.stat(service.anchor_path, follow_symlinks=False)
+        pinned = os.fstat(runtime.startup_anchor.descriptor)
+        assert (named.st_dev, named.st_ino) == (pinned.st_dev, pinned.st_ino)
+        assert _request(service, "GET", "/")[0] == 200
+        with pytest.raises(LocalWebServerError, match="already running"):
+            RunningLocalWebService.start(store=store, state_directory=state)
+    finally:
+        release.set()
+        second.join(timeout=60)
+    assert not second.is_alive()

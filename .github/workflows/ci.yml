@@ -49,21 +49,10 @@ jobs:
       - name: Lint
         run: uvx ruff@0.7.4 check .
 
-      # Every test that starts the local web service takes one host-wide
-      # /tmp flock for the server's lifetime (traceback_runner/web/server.py
-      # _open_startup_anchor), so two xdist workers starting servers collide
-      # with "already running". Those files run serially in the next step.
-      # Fold them back into this step once spec item A3 (per-state-root web
-      # lock) lands.
-      - name: Test (parallel)
+      # The local web service's single-instance lock is per state directory
+      # (golden-path A3), so web tests run under xdist with everything else.
+      - name: Test
         timeout-minutes: 40
         run: >-
           uv run pytest -p no:cacheprovider -n auto --timeout 600 -m "not slow"
           --durations=10
-          --ignore=tests/web --ignore=tests/test_reader_cli.py
-
-      - name: Test (web service, serial)
-        run: >-
-          uv run pytest -p no:cacheprovider --timeout 600 -m "not slow"
-          --durations=10
-          tests/web tests/test_reader_cli.py

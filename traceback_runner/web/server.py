@@ -14,6 +14,7 @@ import secrets
 import socket
 import stat
 import threading
+import time
 from collections.abc import Callable
 from contextlib import ExitStack
 from dataclasses import dataclass
@@ -21,7 +22,7 @@ from datetime import UTC, datetime
 from importlib.resources import files
 from pathlib import Path
 from types import TracebackType
-from typing import Any, Self
+from typing import Any, Literal, Self
 from urllib.parse import parse_qs, urlsplit
 
 from evidence_inspector.reader_authorization_registry import (
@@ -34,6 +35,9 @@ from traceback_runner.store import JobStore
 
 from .api import ApiProblem, LocalApiKernel
 from .auth import (
+    ANY_SESSION,
+    OPERATOR_ONLY,
+    READER_ONLY,
     BootstrapBroker,
     BoundaryDenied,
     BrowserRequest,
@@ -67,10 +71,16 @@ REQUEST_TIMEOUT_SECONDS = 2
 STATE_DIRECTORY_MODE = 0o700
 STATE_FILE_MODE = 0o600
 _STABLE_LOCK_ROOT = Path("/tmp").resolve(strict=True)
+# The stable lock root's own flock only serializes anchor create/validate
+# against anchor unlink; it is never held for a server's lifetime.
+_STARTUP_PARENT_LOCK_TIMEOUT_SECONDS = 5.0
+_STARTUP_PARENT_LOCK_RETRY_SECONDS = 0.05
 _JOB_ROUTE = re.compile(r"^/api/v1/jobs/(job_[0-9a-f]{32})$")
 _EXPLORER_RESULT_ROUTE = re.compile(r"^/api/v1/explorer/results/(result_[0-9a-f]{40})$")
+_EXPLORER_CATALOG_ROUTE = "/api/v1/explorer/catalog"
 _EXPLORER_COMPARE_ROUTE = "/api/v1/explorer/compare"
 _READER_LAUNCH_ROUTE = "/api/v1/session/reader-launch"
+_LOGOUT_ROUTE = "/api/v1/session/logout"
 _COOKIE_NAME = re.compile(r"^[!#$%&'*+\-.^_`|~0-9A-Za-z]+$")
 _COOKIE_VALUE = re.compile(r"^[A-Za-z0-9_-]{0,256}$")
 _SECURITY_HEADERS = {
@@ -134,6 +144,35 @@ class LocalWebServerError(RuntimeError):
     """The packaged local server could not establish its security boundary."""
 
 
+class LocalWebServerStopped(LocalWebServerError):
+    """The service was closed, or its security watchdog shut it down (H6)."""
+
+
+#: The one code an unexpected handler exception produces (H6).
+INTERNAL_ERROR_CODE = "TBX-INTERNAL"
+
+
+class _ErrorCounter:
+    """Per-code counts of internal errors since start (H6-min).
+
+    Records only a closed code: never a body, path, query or exception text.
+    """
+
+    def __init__(self) -> None:
+        self._lock = threading.Lock()
+        self._counts: dict[str, int] = {}
+
+    def record(self, code: str) -> None:
+        if code != INTERNAL_ERROR_CODE:
+            raise ValueError("only closed internal error codes are counted")
+        with self._lock:
+            self._counts[code] = self._counts.get(code, 0) + 1
+
+    def snapshot(self) -> dict[str, int]:
+        with self._lock:
+            return dict(self._counts)
+
+
 @dataclass(frozen=True, slots=True)
 class _StartupAnchor:
     parent_path: Path
@@ -185,7 +224,43 @@ def _require_startup_anchor(anchor: _StartupAnchor) -> None:
         raise LocalWebServerError("local web state parent identity changed")
 
 
+def _lock_startup_parent(parent_fd: int) -> bool:
+    """Briefly take the stable lock root's flock; ``False`` on timeout.
+
+    The flock on the shared root only orders one start's anchor
+    create/lock/validate against another's anchor unlink.  It is released as
+    soon as that step ends, so services on different state directories never
+    wait on each other for longer than one such step.  Single-instance
+    ownership is the per-anchor flock plus the state-directory lease, both held
+    for the server's lifetime.
+    """
+
+    deadline = time.monotonic() + _STARTUP_PARENT_LOCK_TIMEOUT_SECONDS
+    while True:
+        try:
+            fcntl.flock(parent_fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            return True
+        except OSError as exc:
+            if exc.errno not in {errno.EACCES, errno.EAGAIN}:
+                raise
+        if time.monotonic() >= deadline:
+            return False
+        time.sleep(_STARTUP_PARENT_LOCK_RETRY_SECONDS)
+
+
 def _open_startup_anchor(state_directory: Path) -> _StartupAnchor:
+    """Create, lock and validate the per-state-directory startup anchor.
+
+    The anchor name is keyed to the absolute state path and the effective
+    user, so exactly one service may hold a given state path at a time even if
+    its parent or the state directory itself is renamed and recreated.  The
+    anchor's own flock is held for the server's lifetime; the stable lock
+    root's flock is held only while the anchor is created, locked and
+    re-checked against its name, so unrelated state directories start
+    concurrently.  Only a failure on the anchor's own flock means another
+    service owns this state directory.
+    """
+
     parent_path = _STABLE_LOCK_ROOT
     parent_fd: int | None = None
     state_parent_fd: int | None = None
@@ -212,7 +287,8 @@ def _open_startup_anchor(state_directory: Path) -> _StartupAnchor:
             parent_metadata.st_ino,
         ):
             raise LocalWebServerError("local web startup parent changed during open")
-        fcntl.flock(parent_fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        if not _lock_startup_parent(parent_fd):
+            raise LocalWebServerError("local web startup lock is busy")
         parent_locked = True
         name_digest = hashlib.sha256(os.fsencode(state_directory)).hexdigest()
         anchor_name = f".traceback-web-{os.geteuid()}-{name_digest[:32]}.lock"
@@ -230,8 +306,25 @@ def _open_startup_anchor(state_directory: Path) -> _StartupAnchor:
         ):
             raise LocalWebServerError("local web startup anchor is not private")
         os.fchmod(descriptor, STATE_FILE_MODE)
-        fcntl.flock(descriptor, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        try:
+            fcntl.flock(descriptor, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except OSError as exc:
+            if exc.errno in {errno.EACCES, errno.EAGAIN}:
+                raise LocalWebServerError(
+                    "local web service is already running"
+                ) from exc
+            raise
         anchor_locked = True
+        # Under the root's flock no close can unlink this name, so the locked
+        # descriptor must still be the named anchor before the root is released.
+        named_anchor = os.stat(anchor_name, dir_fd=parent_fd, follow_symlinks=False)
+        if (named_anchor.st_dev, named_anchor.st_ino) != (
+            anchor_metadata.st_dev,
+            anchor_metadata.st_ino,
+        ):
+            raise LocalWebServerError("local web startup anchor identity changed")
+        fcntl.flock(parent_fd, fcntl.LOCK_UN)
+        parent_locked = False
         state_parent_path = state_directory.parent
         state_parent_path.mkdir(mode=STATE_DIRECTORY_MODE, parents=True, exist_ok=True)
         state_parent_metadata = state_parent_path.lstat()
@@ -278,26 +371,36 @@ def _open_startup_anchor(state_directory: Path) -> _StartupAnchor:
             os.close(parent_fd)
         if isinstance(exc, LocalWebServerError):
             raise
-        if isinstance(exc, OSError) and exc.errno in {errno.EACCES, errno.EAGAIN}:
-            raise LocalWebServerError("local web service is already running") from exc
         raise LocalWebServerError("local web startup anchor is unavailable") from exc
 
 
 def _close_startup_anchor(anchor: _StartupAnchor) -> None:
+    """Unlink the anchor if it is still ours, then release and close it.
+
+    The unlink happens under the stable lock root's flock and before the
+    anchor's own flock is released, so no concurrent start can lock and
+    validate this inode and then lose its name.  If the root's flock stays
+    busy, the unlink is skipped: a stale anchor file is harmless because the
+    next start re-opens it and its own flock decides.
+    """
+
     try:
         try:
-            try:
-                named = os.stat(
-                    anchor.name,
-                    dir_fd=anchor.parent_fd,
-                    follow_symlinks=False,
-                )
-                pinned = os.fstat(anchor.descriptor)
-                if (named.st_dev, named.st_ino) == (pinned.st_dev, pinned.st_ino):
-                    os.unlink(anchor.name, dir_fd=anchor.parent_fd)
-                    os.fsync(anchor.parent_fd)
-            except FileNotFoundError:
-                pass
+            if _lock_startup_parent(anchor.parent_fd):
+                try:
+                    named = os.stat(
+                        anchor.name,
+                        dir_fd=anchor.parent_fd,
+                        follow_symlinks=False,
+                    )
+                    pinned = os.fstat(anchor.descriptor)
+                    if (named.st_dev, named.st_ino) == (pinned.st_dev, pinned.st_ino):
+                        os.unlink(anchor.name, dir_fd=anchor.parent_fd)
+                        os.fsync(anchor.parent_fd)
+                except FileNotFoundError:
+                    pass
+                finally:
+                    fcntl.flock(anchor.parent_fd, fcntl.LOCK_UN)
         finally:
             os.close(anchor.state_parent_fd)
     finally:
@@ -307,10 +410,7 @@ def _close_startup_anchor(anchor: _StartupAnchor) -> None:
             finally:
                 os.close(anchor.descriptor)
         finally:
-            try:
-                fcntl.flock(anchor.parent_fd, fcntl.LOCK_UN)
-            finally:
-                os.close(anchor.parent_fd)
+            os.close(anchor.parent_fd)
 
 
 def _open_state_directory(path: Path) -> int:
@@ -489,22 +589,21 @@ def _write_instance_state(directory_fd: int, payload: dict[str, object]) -> None
             pass
 
 
+# Public packaged assets: exact path -> (packaged file, content type).  Each
+# path is a public entry of the route table.
+_PACKAGED_ASSET_FILES: dict[str, tuple[str, str]] = {
+    "/": ("index.html", "text/html; charset=utf-8"),
+    "/assets/app.js": ("app.js", "text/javascript; charset=utf-8"),
+    "/assets/styles.css": ("styles.css", "text/css; charset=utf-8"),
+    "/assets/longitudinal.js": ("longitudinal.js", "text/javascript; charset=utf-8"),
+}
+
+
 def _packaged_assets() -> dict[str, tuple[str, bytes]]:
     root = files("traceback_runner.web").joinpath("static")
     assets = {
-        "/": ("text/html; charset=utf-8", root.joinpath("index.html").read_bytes()),
-        "/assets/app.js": (
-            "text/javascript; charset=utf-8",
-            root.joinpath("app.js").read_bytes(),
-        ),
-        "/assets/styles.css": (
-            "text/css; charset=utf-8",
-            root.joinpath("styles.css").read_bytes(),
-        ),
-        "/assets/longitudinal.js": (
-            "text/javascript; charset=utf-8",
-            root.joinpath("longitudinal.js").read_bytes(),
-        ),
+        path: (content_type, root.joinpath(name).read_bytes())
+        for path, (name, content_type) in _PACKAGED_ASSET_FILES.items()
     }
     for _, content in assets.values():
         lowered = content.lower()
@@ -600,6 +699,7 @@ class _LoopbackHttpServer(http.server.ThreadingHTTPServer):
     application: _Application
     security_validator: Callable[[], None]
     security_failed: threading.Event
+    internal_errors: _ErrorCounter
 
     def __setattr__(self, name: str, value: object) -> None:
         if name == "RequestHandlerClass" and hasattr(self, "RequestHandlerClass"):
@@ -611,6 +711,7 @@ class _LoopbackHttpServer(http.server.ThreadingHTTPServer):
         self._worker_count = 0
         self._worker_count_lock = threading.Lock()
         self.security_failed = threading.Event()
+        self.internal_errors = _ErrorCounter()
         super().__init__(*args, **kwargs)
 
     @property
@@ -685,6 +786,11 @@ class _Handler(http.server.BaseHTTPRequestHandler, metaclass=_SealedHandlerType)
     def setup(self) -> None:
         super().setup()
         self.connection.settimeout(REQUEST_TIMEOUT_SECONDS)
+        self._response_started = False
+
+    def send_response(self, code: int, message: str | None = None) -> None:
+        self._response_started = True
+        super().send_response(code, message)
 
     def _headers_within_bounds(self) -> bool:
         items = list(self.headers.items())
@@ -858,12 +964,272 @@ class _Handler(http.server.BaseHTTPRequestHandler, metaclass=_SealedHandlerType)
         except (TypeError, ValueError, json.JSONDecodeError):
             self._json(400, {"error": {"code": "TBX-WEB-400"}})
             return
+        error = payload.get("error") if isinstance(payload, dict) else None
+        if isinstance(error, dict) and error.get("code") == INTERNAL_ERROR_CODE:
+            self.server.internal_errors.record(INTERNAL_ERROR_CODE)  # type: ignore[attr-defined]
         self._json(status, payload)
 
-    def do_HEAD(self) -> None:
-        self.do_GET()
+    # --- route handlers (reached only through the route table) -----------------
 
-    def do_GET(self) -> None:
+    def _route_longitudinal_get(
+        self, path: str, query: str, request: BrowserRequest, match: object
+    ) -> None:
+        del match
+        self._longitudinal(path, query, request, post=False)
+
+    def _route_longitudinal_post(
+        self, path: str, query: str, request: BrowserRequest, match: object
+    ) -> None:
+        del query, match
+        self._longitudinal(path, "", request, post=True)
+
+    def _route_jobs(
+        self, path: str, query: str, request: BrowserRequest, match: object
+    ) -> None:
+        del path, query, match
+        jobs = self.application.kernel.list_jobs(request)
+        self._json(200, {"jobs": [item.model_dump(mode="json") for item in jobs]})
+
+    def _route_job_detail(
+        self, path: str, query: str, request: BrowserRequest, match: re.Match[str]
+    ) -> None:
+        del path, query
+        job = self.application.kernel.get_job(request, match.group(1))
+        self._json(200, job.model_dump(mode="json"))
+
+    def _route_explorer_catalog(
+        self, path: str, query: str, request: BrowserRequest, match: object
+    ) -> None:
+        del path, match
+        self.application.boundary.authorize(request)
+        if self.application.explorer is None:
+            raise ApiProblem(404, self.application.kernel.not_found_problem)
+        parameters = parse_qs(
+            query,
+            keep_blank_values=False,
+            strict_parsing=True,
+            max_num_fields=8,
+        )
+        if set(parameters) - {"method_id", "method_version", "cursor", "limit"}:
+            raise ValueError("unsupported explorer query")
+        if any(len(values) != 1 for values in parameters.values()):
+            raise ValueError("explorer query values must be singular")
+        method_ids = parameters.get("method_id", [])
+        method_versions = parameters.get("method_version", [])
+        if (
+            bool(method_ids) != bool(method_versions)
+            or len(method_ids) > 1
+            or len(method_versions) > 1
+        ):
+            raise ValueError("method filters must be paired")
+        query_payload: dict[str, object] = {
+            "limit": int(parameters.get("limit", ["50"])[0]),
+        }
+        if method_ids:
+            query_payload["method_refs"] = (
+                {"method_id": method_ids[0], "version": method_versions[0]},
+            )
+        if "cursor" in parameters:
+            query_payload["cursor"] = parameters["cursor"][0]
+        explorer_http = self.application.explorer_http
+        if explorer_http is None:
+            raise TypeError("explorer HTTP boundary is unavailable")
+        explorer_http.assert_intact()
+        explorer_query = explorer_http.dispatch[0]
+        catalog_query = CatalogQuery(**query_payload)
+        page = explorer_query(self.application.explorer, catalog_query)
+        if page.query != catalog_query:
+            raise ValueError("catalog response query identity changed")
+        payload = page.model_dump(mode="json")
+        if payload.get("query") != catalog_query.model_dump(mode="json"):
+            raise ValueError("catalog response query encoding changed")
+        self._public_json(200, payload)
+
+    def _route_explorer_compare(
+        self, path: str, query: str, request: BrowserRequest, match: object
+    ) -> None:
+        del path, match
+        self.application.boundary.authorize(request)
+        if self.application.explorer is None:
+            raise ApiProblem(404, self.application.kernel.not_found_problem)
+        parameters = parse_qs(
+            query,
+            keep_blank_values=False,
+            strict_parsing=True,
+            max_num_fields=2,
+        )
+        if set(parameters) != {"left", "right"} or any(
+            len(values) != 1 for values in parameters.values()
+        ):
+            raise ValueError("comparison requires singular left and right")
+        result_pattern = re.compile(r"^result_[0-9a-f]{40}$")
+        left = parameters["left"][0]
+        right = parameters["right"][0]
+        if not result_pattern.fullmatch(left) or not result_pattern.fullmatch(right):
+            raise ValueError("comparison result identity is invalid")
+        explorer_http = self.application.explorer_http
+        if explorer_http is None:
+            raise TypeError("explorer HTTP boundary is unavailable")
+        explorer_http.assert_intact()
+        explorer_compare = explorer_http.dispatch[2]
+        comparison = explorer_compare(self.application.explorer, left, right)
+        if comparison.left_result_id != left or comparison.right_result_id != right:
+            raise ValueError("comparison response identity changed")
+        payload = explorer_http.prepare_comparison(self.application.explorer, comparison)
+        if (
+            payload.get("left_result_id") != left
+            or payload.get("right_result_id") != right
+        ):
+            raise ValueError("comparison response encoding changed")
+        self._public_json(200, payload)
+
+    def _route_explorer_result(
+        self, path: str, query: str, request: BrowserRequest, match: re.Match[str]
+    ) -> None:
+        del path, query
+        self.application.boundary.authorize(request)
+        if self.application.explorer is None:
+            raise ApiProblem(404, self.application.kernel.not_found_problem)
+        requested_result_id = match.group(1)
+        explorer_http = self.application.explorer_http
+        if explorer_http is None:
+            raise TypeError("explorer HTTP boundary is unavailable")
+        explorer_http.assert_intact()
+        explorer_get = explorer_http.dispatch[1]
+        try:
+            document = explorer_get(self.application.explorer, requested_result_id)
+        except KeyError as exc:
+            raise ApiProblem(404, self.application.kernel.not_found_problem) from exc
+        if document.models.catalog_ref.result_id != requested_result_id:
+            raise ValueError("detail response identity changed")
+        payload = explorer_http.prepare_document(self.application.explorer, document)
+        models = payload.get("models")
+        catalog_ref = models.get("catalog_ref") if isinstance(models, dict) else None
+        if (
+            not isinstance(catalog_ref, dict)
+            or catalog_ref.get("result_id") != requested_result_id
+        ):
+            raise ValueError("detail response encoding changed")
+        self._public_json(200, payload)
+
+    def _route_asset(
+        self, path: str, query: str, request: BrowserRequest, match: object
+    ) -> None:
+        # Public: only the Host (DNS-rebinding) check applies.
+        del query, match
+        self.application.boundary.authorize_public_asset(request)
+        asset = self.application.assets.get(path)
+        if asset is None:
+            self._json(404, {"error": {"code": "TBX-WEB-404"}})
+            return
+        self._send(200, asset[0], asset[1])
+
+    def _route_session_bootstrap(
+        self, path: str, query: str, request: BrowserRequest, match: object
+    ) -> None:
+        del path, query, match
+        self.application.boundary.authorize_bootstrap_request(request)
+        payload = self._body_json()
+        if set(payload) != {"bootstrap"} or not isinstance(payload["bootstrap"], str):
+            raise ValueError("bootstrap request shape is invalid")
+        grant = self.application.boundary.broker.exchange(
+            payload["bootstrap"],
+            authority=self.application.boundary.config.authority,
+        )
+        explorer_http = self.application.explorer_http
+        if explorer_http is None:
+            raise TypeError("explorer HTTP boundary is unavailable")
+        # The page branches on the server-assigned kind, never on the fragment.
+        content = explorer_http.encode(
+            {"csrf_token": grant.csrf_token, "session_kind": grant.kind}
+        )
+        try:
+            self.send_response(200)
+            for name, value in _SECURITY_HEADERS.items():
+                self.send_header(name, value)
+            self.send_header("Content-Type", "application/json; charset=utf-8")
+            self.send_header("Content-Length", str(len(content)))
+            self.send_header(
+                "Set-Cookie",
+                f"{grant.cookie_name}={grant.session_token}; Path=/; HttpOnly; SameSite=Strict",
+            )
+            self.end_headers()
+            self.wfile.write(content)
+        except (BrokenPipeError, ConnectionResetError, OSError):
+            self.close_connection = True
+
+    def _route_session_validate(
+        self, path: str, query: str, request: BrowserRequest, match: object
+    ) -> None:
+        del path, query, match, request
+        self._json(200, {"authorized": True})
+
+    def _route_session_logout(
+        self, path: str, query: str, request: BrowserRequest, match: object
+    ) -> None:
+        """Delete this session (and its reader binding); 204.  A repeat is 401."""
+
+        del path, query, match
+        if not self.application.boundary.broker.end_session(request.session_token):
+            raise BoundaryDenied(401, "TBX-AUTH-001")
+        if not self._security_boundary_intact():
+            self.close_connection = True
+            self._json(503, {"error": {"code": "TBX-WEB-503"}})
+            return
+        self._send(204, "application/json; charset=utf-8", b"")
+
+    def _route_session_reader_launch(
+        self, path: str, query: str, request: BrowserRequest, match: object
+    ) -> None:
+        # Full B01 mutation checks (Host, session, Origin, CSRF, reader kind)
+        # ran in the dispatcher before the body is read; the binder repeats
+        # them, requires POST and requires this session's own link.  The
+        # credential arrives only in this JSON body.
+        del path, query, match
+        reader = self.application.reader
+        if reader is None:
+            raise ApiProblem(404, self.application.kernel.not_found_problem)
+        payload = self._body_json()
+        if set(payload) != {"launch"} or not isinstance(payload["launch"], str):
+            raise ValueError("reader launch request shape is invalid")
+        reader.exchange_launch_credential(request, payload["launch"])
+        self._json(200, {"reader_bound": True})
+
+    # --- dispatch -------------------------------------------------------------
+
+    def _dispatch(self, method: Literal["GET", "POST"]) -> None:
+        """The request dispatcher's last-resort catch (H6-min).
+
+        An exception no route maps becomes one counted ``TBX-INTERNAL`` and,
+        if no response has started, the bounded 500 problem; the connection
+        then closes.  Nothing about the request or the exception is kept.
+        """
+
+        self._response_started = False
+        try:
+            self._serve_request(method)
+        except Exception:  # noqa: BLE001 - one closed code, no detail
+            self.close_connection = True
+            self.server.internal_errors.record(INTERNAL_ERROR_CODE)  # type: ignore[attr-defined]
+            if self._response_started:
+                return
+            try:
+                self._json(500, {"error": {"code": INTERNAL_ERROR_CODE}})
+            except Exception:  # noqa: BLE001 - the connection just closes
+                return
+
+    def _serve_request(self, method: Literal["GET", "POST"]) -> None:
+        """Route one request through the exact route table (H1).
+
+        A path is served only if it is an exact entry of ``_ROUTES`` (which
+        includes the public packaged assets) or a full match of a named
+        ``_PATTERN_ROUTES`` entry; there is no prefix match
+        and no handler is reachable any other way.  For a session route the
+        one locked session check runs with that route's kinds before the
+        handler: 401 first, then Origin/CSRF, then 403 ``TBX-AUTH-007`` for a
+        kind the route does not admit.
+        """
+
         if not self._security_boundary_intact():
             self.close_connection = True
             self._json(503, {"error": {"code": "TBX-WEB-503"}})
@@ -876,254 +1242,154 @@ class _Handler(http.server.BaseHTTPRequestHandler, metaclass=_SealedHandlerType)
         if parsed.fragment:
             self._json(404, {"error": {"code": "TBX-WEB-404"}})
             return
-        if parsed.query and parsed.path not in {
-            "/api/v1/explorer/catalog",
-            _EXPLORER_COMPARE_ROUTE,
-            *_LONGITUDINAL_GET_ROUTES,
-        }:
+        resolved = _resolve_route(method, parsed.path)
+        if resolved is None:
             self._json(404, {"error": {"code": "TBX-WEB-404"}})
             return
-        asset = self.application.assets.get(parsed.path)
-        if asset is not None:
-            try:
-                self.application.boundary.authorize_public_asset(
-                    self._request(parsed.path)
-                )
-            except BoundaryDenied as exc:
-                self._deny(exc)
-                return
-            self._send(200, asset[0], asset[1])
-            return
-        request = self._request(parsed.path)
-        if parsed.path in _LONGITUDINAL_GET_ROUTES:
-            self._longitudinal(parsed.path, parsed.query, request, post=False)
-            return
-        try:
-            if parsed.path == "/api/v1/jobs":
-                jobs = self.application.kernel.list_jobs(request)
-                self._json(
-                    200, {"jobs": [item.model_dump(mode="json") for item in jobs]}
-                )
-                return
-            if parsed.path == "/api/v1/explorer/catalog":
-                self.application.boundary.authorize(request)
-                if self.application.explorer is None:
-                    raise ApiProblem(404, self.application.kernel.not_found_problem)
-                parameters = parse_qs(
-                    parsed.query,
-                    keep_blank_values=False,
-                    strict_parsing=True,
-                    max_num_fields=8,
-                )
-                if set(parameters) - {"method_id", "method_version", "cursor", "limit"}:
-                    raise ValueError("unsupported explorer query")
-                if any(len(values) != 1 for values in parameters.values()):
-                    raise ValueError("explorer query values must be singular")
-                method_ids = parameters.get("method_id", [])
-                method_versions = parameters.get("method_version", [])
-                if (
-                    bool(method_ids) != bool(method_versions)
-                    or len(method_ids) > 1
-                    or len(method_versions) > 1
-                ):
-                    raise ValueError("method filters must be paired")
-                query_payload: dict[str, object] = {
-                    "limit": int(parameters.get("limit", ["50"])[0]),
-                }
-                if method_ids:
-                    query_payload["method_refs"] = (
-                        {"method_id": method_ids[0], "version": method_versions[0]},
-                    )
-                if "cursor" in parameters:
-                    query_payload["cursor"] = parameters["cursor"][0]
-                explorer_http = self.application.explorer_http
-                if explorer_http is None:
-                    raise TypeError("explorer HTTP boundary is unavailable")
-                explorer_http.assert_intact()
-                explorer_query = explorer_http.dispatch[0]
-                query = CatalogQuery(**query_payload)
-                page = explorer_query(self.application.explorer, query)
-                if page.query != query:
-                    raise ValueError("catalog response query identity changed")
-                payload = page.model_dump(mode="json")
-                if payload.get("query") != query.model_dump(mode="json"):
-                    raise ValueError("catalog response query encoding changed")
-                self._public_json(200, payload)
-                return
-            if parsed.path == _EXPLORER_COMPARE_ROUTE:
-                self.application.boundary.authorize(request)
-                if self.application.explorer is None:
-                    raise ApiProblem(404, self.application.kernel.not_found_problem)
-                parameters = parse_qs(
-                    parsed.query,
-                    keep_blank_values=False,
-                    strict_parsing=True,
-                    max_num_fields=2,
-                )
-                if set(parameters) != {"left", "right"} or any(
-                    len(values) != 1 for values in parameters.values()
-                ):
-                    raise ValueError("comparison requires singular left and right")
-                result_pattern = re.compile(r"^result_[0-9a-f]{40}$")
-                left = parameters["left"][0]
-                right = parameters["right"][0]
-                if not result_pattern.fullmatch(left) or not result_pattern.fullmatch(
-                    right
-                ):
-                    raise ValueError("comparison result identity is invalid")
-                explorer_http = self.application.explorer_http
-                if explorer_http is None:
-                    raise TypeError("explorer HTTP boundary is unavailable")
-                explorer_http.assert_intact()
-                explorer_compare = explorer_http.dispatch[2]
-                comparison = explorer_compare(self.application.explorer, left, right)
-                if (
-                    comparison.left_result_id != left
-                    or comparison.right_result_id != right
-                ):
-                    raise ValueError("comparison response identity changed")
-                payload = explorer_http.prepare_comparison(
-                    self.application.explorer, comparison
-                )
-                if (
-                    payload.get("left_result_id") != left
-                    or payload.get("right_result_id") != right
-                ):
-                    raise ValueError("comparison response encoding changed")
-                self._public_json(200, payload)
-                return
-            explorer_match = _EXPLORER_RESULT_ROUTE.fullmatch(parsed.path)
-            if explorer_match is not None:
-                self.application.boundary.authorize(request)
-                if self.application.explorer is None:
-                    raise ApiProblem(404, self.application.kernel.not_found_problem)
-                requested_result_id = explorer_match.group(1)
-                explorer_http = self.application.explorer_http
-                if explorer_http is None:
-                    raise TypeError("explorer HTTP boundary is unavailable")
-                explorer_http.assert_intact()
-                explorer_get = explorer_http.dispatch[1]
-                try:
-                    document = explorer_get(
-                        self.application.explorer, requested_result_id
-                    )
-                except KeyError as exc:
-                    raise ApiProblem(
-                        404, self.application.kernel.not_found_problem
-                    ) from exc
-                if document.models.catalog_ref.result_id != requested_result_id:
-                    raise ValueError("detail response identity changed")
-                payload = explorer_http.prepare_document(
-                    self.application.explorer, document
-                )
-                models = payload.get("models")
-                catalog_ref = (
-                    models.get("catalog_ref") if isinstance(models, dict) else None
-                )
-                if (
-                    not isinstance(catalog_ref, dict)
-                    or catalog_ref.get("result_id") != requested_result_id
-                ):
-                    raise ValueError("detail response encoding changed")
-                self._public_json(200, payload)
-                return
-            match = _JOB_ROUTE.fullmatch(parsed.path)
-            if match is not None:
-                job = self.application.kernel.get_job(request, match.group(1))
-                self._json(200, job.model_dump(mode="json"))
-                return
-        except BoundaryDenied as exc:
-            self._deny(exc)
-            return
-        except ApiProblem as exc:
-            self._json(exc.status_code, exc.problem.model_dump(mode="json"))
-            return
-        except (TypeError, ValueError):
-            self._json(400, {"error": {"code": "TBX-WEB-400"}})
-            return
-        self._json(404, {"error": {"code": "TBX-WEB-404"}})
-
-    def do_POST(self) -> None:
-        if not self._security_boundary_intact():
-            self.close_connection = True
-            self._json(503, {"error": {"code": "TBX-WEB-503"}})
-            return
-        if not self._headers_within_bounds():
-            self.close_connection = True
-            self._json(431, {"error": {"code": "TBX-WEB-431"}})
-            return
-        parsed = urlsplit(self.path)
-        if parsed.query or parsed.fragment:
+        route, match = resolved
+        if parsed.query and not route.accepts_query:
             self._json(404, {"error": {"code": "TBX-WEB-404"}})
             return
         request = self._request(parsed.path)
-        if parsed.path in _LONGITUDINAL_POST_ROUTES:
-            self._longitudinal(parsed.path, "", request, post=True)
-            return
         try:
-            if parsed.path == "/api/v1/session/bootstrap":
-                self.application.boundary.authorize_bootstrap_request(request)
-                payload = self._body_json()
-                if set(payload) != {"bootstrap"} or not isinstance(
-                    payload["bootstrap"], str
-                ):
-                    raise ValueError("bootstrap request shape is invalid")
-                grant = self.application.boundary.broker.exchange(
-                    payload["bootstrap"],
-                    authority=self.application.boundary.config.authority,
-                )
-                explorer_http = self.application.explorer_http
-                if explorer_http is None:
-                    raise TypeError("explorer HTTP boundary is unavailable")
-                content = explorer_http.encode({"csrf_token": grant.csrf_token})
-                try:
-                    self.send_response(200)
-                    for name, value in _SECURITY_HEADERS.items():
-                        self.send_header(name, value)
-                    self.send_header("Content-Type", "application/json; charset=utf-8")
-                    self.send_header("Content-Length", str(len(content)))
-                    self.send_header(
-                        "Set-Cookie",
-                        f"{grant.cookie_name}={grant.session_token}; Path=/; HttpOnly; SameSite=Strict",
-                    )
-                    self.end_headers()
-                    self.wfile.write(content)
-                except (BrokenPipeError, ConnectionResetError, OSError):
-                    self.close_connection = True
-                return
-            if parsed.path == "/api/v1/session/validate":
-                self.application.boundary.authorize(request)
-                self._json(200, {"authorized": True})
-                return
-            if parsed.path == _READER_LAUNCH_ROUTE:
-                # Full B01 mutation checks (Host, session, Origin, CSRF) run
-                # before the body is read; the binder repeats them and requires
-                # POST.  The credential arrives only in this JSON body.
-                self.application.boundary.authorize(request)
-                reader = self.application.reader
-                if reader is None:
-                    raise ApiProblem(404, self.application.kernel.not_found_problem)
-                payload = self._body_json()
-                if set(payload) != {"launch"} or not isinstance(
-                    payload["launch"], str
-                ):
-                    raise ValueError("reader launch request shape is invalid")
-                reader.exchange_launch_credential(request, payload["launch"])
-                self._json(200, {"reader_bound": True})
-                return
+            if route.kinds:
+                self.application.boundary.authorize(request, kinds=route.kinds)
+            route.handler(self, parsed.path, parsed.query, request, match)
         except BoundaryDenied as exc:
             self._deny(exc)
-            return
         except ReaderAuthorizationDenied:
             self._json(403, {"error": {"code": "permission_denied"}})
-            return
         except ApiProblem as exc:
             self._json(exc.status_code, exc.problem.model_dump(mode="json"))
-            return
         except (TypeError, ValueError, json.JSONDecodeError):
             self._json(400, {"error": {"code": "TBX-WEB-400"}})
-            return
-        self._json(404, {"error": {"code": "TBX-WEB-404"}})
+
+    def do_HEAD(self) -> None:
+        # HEAD follows the GET policy exactly; ``_send`` omits the body.
+        self._dispatch("GET")
+
+    def do_GET(self) -> None:
+        self._dispatch("GET")
+
+    def do_POST(self) -> None:
+        self._dispatch("POST")
+
+
+@dataclass(frozen=True, slots=True)
+class _Route:
+    """One exact route: its policy key, session kinds and handler.
+
+    ``kinds`` empty means the route needs no session: the handler makes its
+    own Host/Origin check (packaged assets, the bootstrap exchange).
+    """
+
+    method: Literal["GET", "POST"]
+    key: str
+    kinds: frozenset[str]
+    handler: Callable[..., None]
+    accepts_query: bool = False
+
+
+_NO_SESSION: frozenset[str] = frozenset()
+
+
+def _build_routes() -> tuple[dict[tuple[str, str], _Route], tuple[tuple[re.Pattern[str], _Route], ...]]:
+    exact = [
+        *(
+            _Route("GET", path, _NO_SESSION, _Handler._route_asset)
+            for path in _PACKAGED_ASSET_FILES
+        ),
+        _Route("POST", "/api/v1/session/bootstrap", _NO_SESSION, _Handler._route_session_bootstrap),
+        _Route("POST", "/api/v1/session/validate", ANY_SESSION, _Handler._route_session_validate),
+        _Route("POST", _READER_LAUNCH_ROUTE, READER_ONLY, _Handler._route_session_reader_launch),
+        _Route("POST", _LOGOUT_ROUTE, ANY_SESSION, _Handler._route_session_logout),
+        _Route("GET", "/api/v1/jobs", OPERATOR_ONLY, _Handler._route_jobs),
+        _Route(
+            "GET",
+            _EXPLORER_CATALOG_ROUTE,
+            OPERATOR_ONLY,
+            _Handler._route_explorer_catalog,
+            accepts_query=True,
+        ),
+        _Route(
+            "GET",
+            _EXPLORER_COMPARE_ROUTE,
+            OPERATOR_ONLY,
+            _Handler._route_explorer_compare,
+            accepts_query=True,
+        ),
+        # The merged E12 browser routes, copied from their own constants.
+        *(
+            _Route(
+                "GET",
+                path,
+                READER_ONLY,
+                _Handler._route_longitudinal_get,
+                accepts_query=True,
+            )
+            for path in sorted(_LONGITUDINAL_GET_ROUTES)
+        ),
+        *(
+            _Route("POST", path, READER_ONLY, _Handler._route_longitudinal_post)
+            for path in sorted(_LONGITUDINAL_POST_ROUTES)
+        ),
+    ]
+    table: dict[tuple[str, str], _Route] = {}
+    for route in exact:
+        if (route.method, route.key) in table:
+            raise LocalWebServerError("duplicate local web route")
+        table[(route.method, route.key)] = route
+    patterns = (
+        (
+            _JOB_ROUTE,
+            _Route("GET", "job_detail", OPERATOR_ONLY, _Handler._route_job_detail),
+        ),
+        (
+            _EXPLORER_RESULT_ROUTE,
+            _Route(
+                "GET", "explorer_result", OPERATOR_ONLY, _Handler._route_explorer_result
+            ),
+        ),
+    )
+    return table, patterns
+
+
+_ROUTES, _PATTERN_ROUTES = _build_routes()
+
+
+def _route_kinds() -> dict[tuple[str, str], frozenset[str]]:
+    """The policy view of the table: (method, route key) -> session kinds.
+
+    HEAD is listed with the same kinds as GET because ``do_HEAD`` dispatches
+    through the GET table.  An empty set means the route needs no session:
+    the packaged assets (public, Host check only) and the bootstrap exchange.
+    """
+
+    kinds: dict[tuple[str, str], frozenset[str]] = {}
+    routes = [*_ROUTES.values(), *(route for _, route in _PATTERN_ROUTES)]
+    for route in routes:
+        kinds[(route.method, route.key)] = route.kinds
+        if route.method == "GET":
+            kinds[("HEAD", route.key)] = route.kinds
+    return kinds
+
+
+_ROUTE_KINDS = _route_kinds()
+
+
+def _resolve_route(
+    method: str, path: str
+) -> tuple[_Route, re.Match[str] | None] | None:
+    route = _ROUTES.get((method, path))
+    if route is not None:
+        return route, None
+    for pattern, candidate in _PATTERN_ROUTES:
+        if candidate.method != method:
+            continue
+        match = pattern.fullmatch(path)
+        if match is not None:
+            return candidate, match
+    return None
 
 
 @dataclass(frozen=True, slots=True)
@@ -1164,6 +1430,17 @@ class _RunningLocalWebRuntime:
 
 _RUNTIME_LOCK = threading.Lock()
 _RUNTIMES: dict[str, _RunningLocalWebRuntime] = {}
+# Runtimes the security watchdog shut down (H6).  They are no longer running,
+# so nothing issues links for them, but they still hold their startup anchor,
+# lease and journal until ``close()`` releases them.
+_STOPPED_RUNTIMES: dict[str, _RunningLocalWebRuntime] = {}
+
+
+def _retire_runtime(runtime_id: str) -> None:
+    with _RUNTIME_LOCK:
+        runtime = _RUNTIMES.pop(runtime_id, None)
+        if runtime is not None:
+            _STOPPED_RUNTIMES[runtime_id] = runtime
 
 
 @dataclass(frozen=True, slots=True)
@@ -1196,6 +1473,18 @@ class RunningLocalWebService:
             runtime = _RUNTIMES.get(self._runtime_id)
             return runtime is not None and runtime.thread.is_alive()
 
+    @property
+    def internal_errors(self) -> dict[str, int]:
+        """Internal-error counts by closed code since start (H6-min)."""
+
+        with _RUNTIME_LOCK:
+            runtime = _RUNTIMES.get(self._runtime_id) or _STOPPED_RUNTIMES.get(
+                self._runtime_id
+            )
+            if runtime is None:
+                return {}
+            return runtime.server.internal_errors.snapshot()
+
     @classmethod
     def start(
         cls,
@@ -1221,6 +1510,7 @@ class RunningLocalWebService:
         thread: threading.Thread | None = None
         watchdog_stop: threading.Event | None = None
         watchdog_thread: threading.Thread | None = None
+        runtime_id: str | None = None
         journal = ExitStack()
         try:
             startup_anchor = _open_startup_anchor(state_directory)
@@ -1281,6 +1571,8 @@ class RunningLocalWebService:
                 longitudinal_dispatch,
                 _Handler.do_GET,
                 _Handler.do_POST,
+                _Handler._dispatch,
+                _Handler._serve_request,
                 _Handler._longitudinal,
                 _Handler._json,
                 _Handler._public_json,
@@ -1370,6 +1662,7 @@ class RunningLocalWebService:
             )
             thread.start()
             watchdog_stop = threading.Event()
+            new_runtime_id = secrets.token_hex(32)
 
             def watch_security_boundary() -> None:
                 while not watchdog_stop.wait(0.05):
@@ -1378,6 +1671,9 @@ class RunningLocalWebService:
                     except LocalWebServerError:
                         server.security_failed.set()
                     if server.security_failed.is_set():
+                        # H6: retire first, so no link is issued for a
+                        # listener that is shutting down.
+                        _retire_runtime(new_runtime_id)
                         server.shutdown()
                         server.server_close()
                         return
@@ -1387,8 +1683,6 @@ class RunningLocalWebService:
                 name="traceback-local-web-security",
                 daemon=True,
             )
-            watchdog_thread.start()
-            runtime_id = secrets.token_hex(32)
             runtime = _RunningLocalWebRuntime(
                 server=server,
                 thread=thread,
@@ -1404,7 +1698,10 @@ class RunningLocalWebService:
                 journal=journal,
             )
             with _RUNTIME_LOCK:
-                _RUNTIMES[runtime_id] = runtime
+                _RUNTIMES[new_runtime_id] = runtime
+            runtime_id = new_runtime_id
+            # Started only once registered, so a trip always finds the runtime.
+            watchdog_thread.start()
             launch_url = (
                 f"{config.allowed_origins[0]}/"
                 f"{boundary.broker.launch_fragment(bootstrap_code)}"
@@ -1418,6 +1715,10 @@ class RunningLocalWebService:
                 _launch_url=launch_url,
             )
         except BaseException:
+            if runtime_id is not None:
+                with _RUNTIME_LOCK:
+                    _RUNTIMES.pop(runtime_id, None)
+                    _STOPPED_RUNTIMES.pop(runtime_id, None)
             try:
                 if watchdog_stop is not None:
                     watchdog_stop.set()
@@ -1460,8 +1761,8 @@ class RunningLocalWebService:
     def issue_bootstrap(self) -> str:
         with _RUNTIME_LOCK:
             runtime = _RUNTIMES.get(self._runtime_id)
-            if runtime is None:
-                raise LocalWebServerError("local web service is closed")
+            if runtime is None or runtime.server.security_failed.is_set():
+                raise LocalWebServerStopped("local web service is stopped")
             return runtime.boundary.issue_bootstrap()
 
     def issue_reader_launch_url(self, grant_selector: str) -> str:
@@ -1473,16 +1774,22 @@ class RunningLocalWebService:
         exchanges the bootstrap, then POSTs the credential with Origin and
         CSRF to the reader launch route.  The link is for the operator's
         terminal only; it is never logged or written to disk here.
+
+        The bootstrap is a ``reader`` bootstrap: its session can use only the
+        session routes and the reader-gated longitudinal routes, and can
+        redeem only this link's credential.
         """
 
         with _RUNTIME_LOCK:
             runtime = _RUNTIMES.get(self._runtime_id)
-            if runtime is None:
-                raise LocalWebServerError("local web service is closed")
+            # A tripped watchdog may not have retired the runtime yet.
+            if runtime is None or runtime.server.security_failed.is_set():
+                raise LocalWebServerStopped("local web service is stopped")
             if runtime.reader is None:
                 raise LocalWebServerError("reader authorization is not configured")
-            credential = runtime.reader.issue_launch_credential(grant_selector)
-            bootstrap = runtime.boundary.issue_bootstrap()
+            # A reader bootstrap bound to this link's credential digest: the
+            # session it creates is a reader session from birth (H1).
+            bootstrap, credential = runtime.reader.issue_launch(grant_selector)
         fragment = runtime.boundary.broker.launch_fragment(bootstrap)
         if not BootstrapBroker._strong_token(credential):
             raise LocalWebServerError("reader launch credential is invalid")
@@ -1491,6 +1798,8 @@ class RunningLocalWebService:
     def close(self) -> None:
         with _RUNTIME_LOCK:
             runtime = _RUNTIMES.pop(self._runtime_id, None)
+            stopped = _STOPPED_RUNTIMES.pop(self._runtime_id, None)
+            runtime = runtime or stopped
         if runtime is None:
             return
         runtime.watchdog_stop.set()
@@ -1535,4 +1844,9 @@ class RunningLocalWebService:
         self.close()
 
 
-__all__ = ["LocalWebServerError", "RunningLocalWebService"]
+__all__ = [
+    "INTERNAL_ERROR_CODE",
+    "LocalWebServerError",
+    "LocalWebServerStopped",
+    "RunningLocalWebService",
+]

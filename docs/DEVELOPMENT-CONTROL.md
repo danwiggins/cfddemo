@@ -1,6 +1,11 @@
 # L0 development control plane
 
-Status: first implementation wave; synthetic data only.
+> **Historical.** Everything above the CI section describes the first
+> implementation wave: its sessions, branches, file ownership, acceptance and
+> handoff rules. Current process is in `docs/EPICS.md` and this repo's PR history.
+> The CI section at the end is current.
+
+Status: first implementation wave (historical); synthetic data only.
 
 L0 is the higher-model coordinator and reviewer. L0 owns sprint planning,
 feature scope, roadmap, staffing and implementation lanes, dependency
@@ -101,11 +106,10 @@ and `ci (ubuntu-latest)` are required checks. macOS team workstations remain the
 product host (security spec X1, #86); the ubuntu job catches Linux-only
 regressions. Each job runs
 `uv sync --frozen`, `uvx ruff@0.7.4 check .`, and
-`pytest -m "not slow" --timeout 600` in two steps: everything except the
-local web service tests under `pytest -n auto`, then `tests/web` and
-`tests/test_reader_cli.py` serially. The serial step exists because every
-running local web service holds one host-wide `/tmp` lock; it folds back into
-the parallel step once golden-path item A3 (per-state-root web lock) lands.
+`pytest -n auto -m "not slow" --timeout 600` as one step, web service tests
+included. The local web service's single-instance lock is per state directory
+(golden-path item A3), so parallel workers on distinct temporary roots do not
+collide.
 
 `.github/workflows/slow.yml` runs `pytest -m slow` nightly, on demand, and on
 pull requests that touch `traceback_runner/product_gates.py`,

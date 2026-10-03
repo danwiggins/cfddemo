@@ -200,9 +200,12 @@ is a conflict. Saved bytes are never rewritten.
 ## Crash recovery
 
 The plan requires a durable candidate/recovery record written before object
-publication. This differs from the sibling registries, which fail closed on
-interrupted writes (listed as a shared follow-up in the plan); this registry
-follows its own spec.
+publication. The sibling registries use the shared storage behaviour instead
+(#82, `docs/REGISTRY-STORAGE.md`): staged root creation and restore, owned
+temporary-name sweeps and truncate-on-any-exception for a failed append, with a
+torn journal tail on reopen still failing closed until the operator runs
+`recover_torn_journal_tail`. This registry recovers an interrupted publication
+itself from its candidate record, as its own spec requires.
 
 `publication-candidate.json` (≤ 64 KiB, owner-only, single link) holds the
 base state version, head and journal byte length, and the exact intended

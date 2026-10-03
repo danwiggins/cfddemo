@@ -24,7 +24,8 @@ port so the service path is part of the local evidence.
   stress fixture;
 - process-level socket denial during the complete run;
 - byte-identical repeated responses from the authenticated packaged catalog
-  route, with release explorer/export disabled and E12 explicitly unavailable;
+  route, with release explorer/export disabled and each catalog row's E12
+  (longitudinal) state explicitly unavailable;
 - rejection of seeded private identifier, local path, and sequence sentinels at
   model boundaries and the authenticated HTTP query boundary without echoing
   them in the response;
@@ -59,9 +60,16 @@ The provider-study artifact requires exactly five participants and the frozen
 four-of-five uncoached recovery, five-of-five no-upload-belief, and five-minute
 doctor/demo/verify thresholds. This schema does not create study evidence.
 
-E12 remains `unavailable_not_implemented`. The report binds that missing
-dependency and all six unmet external requirements into a release-control
-record whose explorer, export and capability fields are fixed false.
+The report's E12 field still reads `unavailable_not_implemented`. That literal
+is part of the digested report contract and is not changed here. E12 code does
+exist: the D08 read model (#83) and the reader-authorized browser routes, view,
+Save and Reopen (#93, `docs/LONGITUDINAL-BROWSER.md`), tested in-process on
+synthetic stores. This harness does not exercise them, the E14 evidence does
+not cover them, and no production composition root wires them (`traceback
+reader launch` starts the service without an explorer). The report binds that
+missing E12 evidence and all six unmet external requirements into a
+release-control record whose explorer, export and capability fields are fixed
+false.
 
 An external gate cannot be marked `observed_pass` without an evidence
 reference. `capability_enabled` is derived from all gate statuses and is false

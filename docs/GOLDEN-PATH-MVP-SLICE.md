@@ -2,6 +2,12 @@
 # Golden-path MVP slice and engineering hygiene
 
 Status: draft spec, 2026-10-02. Verified against `main` at `d3739ca`.
+Update 2026-10-03: the Context and the item tables describe `main` at
+`d3739ca`. Since then CI (#91), `traceback run` on a real BAM (Milestone 1,
+#92) and the E12 browser routes, view, Save and Reopen (#93, `bc237e0`) have
+merged; the browser branch this spec calls uncommitted is #93, so the "after
+the browser PR" gates on A3, A5 and B6 are met. Still true: no production
+composition root supplies an explorer to the web service.
 Scope: one epic, two tracks. Track A makes the test suite trustworthy in CI.
 Track B makes one real BAM travel from the CLI to the browser, with every
 "unqualified, local, not for clinical use" label intact.
@@ -170,7 +176,7 @@ Acceptance:
 
 Tests: +6 in `tests/web/test_loopback_server.py`.
 Rollback: revert the commit; the lock file format is unchanged.
-Conflict: `server.py` is also edited by the uncommitted E12 browser branch and by security items H1/H6. Land after the browser PR.
+Conflict: `server.py` is also edited by the E12 browser branch (uncommitted when written; merged as #93) and by security items H1/H6. Land after the browser PR.
 
 ### A4. Split the product-gates fixture
 
@@ -185,7 +191,7 @@ Rollback: revert. Watch item: the fixture is a frozen artifact; a later contract
 
 ### A5. Stale docs
 
-Do this after the E12 browser PR merges, because that branch edits `docs/RESULT-EXPLORER.md` and `docs/LONGITUDINAL-COMPARISON-REGISTRY.md` (uncommitted on `epic-e/e12-browser-integration`).
+Do this after the E12 browser PR merges, because that branch edits `docs/RESULT-EXPLORER.md` and `docs/LONGITUDINAL-COMPARISON-REGISTRY.md` (uncommitted on `epic-e/e12-browser-integration` when written; merged as #93).
 
 | File | Claim | Fact on `main` | Change |
 |---|---|---|---|
@@ -425,7 +431,7 @@ Sequencing: A1-A3 first because every later PR needs green CI and parallel suite
 
 | In-flight work | Overlap | Resolution |
 |---|---|---|
-| E12 browser branch `epic-e/e12-browser-integration` (uncommitted edits to `traceback_runner/web/server.py`, `web/explorer.py`, `web/reader_session.py`, `docs/RESULT-EXPLORER.md`, `docs/LONGITUDINAL-COMPARISON-REGISTRY.md`) | A3 (server.py), A5 (both docs), B6 (explorer wiring) | Browser PR merges first; A3, A5 and B6 rebase onto it |
+| E12 browser branch `epic-e/e12-browser-integration` (merged as #93; uncommitted edits when written, to `traceback_runner/web/server.py`, `web/explorer.py`, `web/reader_session.py`, `docs/RESULT-EXPLORER.md`, `docs/LONGITUDINAL-COMPARISON-REGISTRY.md`) | A3 (server.py), A5 (both docs), B6 (explorer wiring) | Browser PR merges first; A3, A5 and B6 rebase onto it |
 | Security spec `docs/PILOT-SECURITY-HARDENING.md` H1 (reader sessions get 403 on explorer routes) | B6 adds a second operator-bootstrap launch path | D6: the DoD uses `traceback serve` with an operator session; `reader launch` keeps `explorer=None` until H1 lands. Taste T2: get the security spec's sign-off on `serve` before coding B6 |
 | Security H6 (`server.py`, `auth.py`), watchdog/launch fix (`reader_cli.py:827-830`) | A3, B1 | Order: browser PR, then A3, then H1/H6; B1 touches only `reader_cli.py:811` and rebases trivially |
 | Security `--profile` top-level option and `status --trust-registry` (`traceback_runner/cli.py`) | B2, B4, B5, B6, B7 all add subcommands to `cli.py` | Mechanical parser conflicts; whichever lands second rebases. B5's trust-registry binding should reuse the security spec's `_require_trust_registry_identity` path if it lands first |
@@ -517,7 +523,7 @@ Run autonomously. Intermediate questions were auto-decided with the six autoplan
 | P2 | Fragment-length output alone is worth a full CLI path | Assumed | EPICS.md defines the MVP around modBAM and later POD5; this slice proves one of the three signals |
 | P3 | Plumbing (real BAM to browser) is the right next build, ahead of demand evidence and E0 | Stated (plan-vs-reality order) | Both outside voices challenge it; see User Challenge UC2 |
 | P4 | Catalog + explorer is the right viewing surface for the first real record | Assumed | A static `report-local.html` or the existing E13 portable view (`evidence_inspector/portable_view.py`) would show the same record with fewer new surfaces |
-| P5 | The E12 browser PR merges soon | Assumed | A3, A5 and B6 are gated on it; it is uncommitted work in a worktree today |
+| P5 | The E12 browser PR merges soon | Met: merged as #93 | A3, A5 and B6 were gated on it; it was uncommitted work in a worktree when written |
 | P6 | Security H1/H6 ordering holds and no donor data enters this path | Assumed | The plan never says the golden path is forbidden on donor data until H1/H6 land |
 | P7 | Name + length + order with WARN is acceptable reference provenance for an unqualified record | Decided as D1 (least-blocking default) | Codex says it leaves sequence identity unbound; Claude suggests `samtools reheader` on a copy. See UC3 |
 
