@@ -605,14 +605,79 @@ def test_e06_result_digest_binds_the_canonical_measurement(world) -> None:
     assert artifact.result_view_request.sources[0].record.result_sha256 == expected
 
 
-def test_registry_mirrors_only_keys_of_imported_records(world) -> None:
+def test_one_local_signing_key_per_root(world) -> None:
     root, record_ids, _ = world
-    assert _import(root, record_ids[0])[0] == cli.ExitCode.OK
-    with open_local_result_trust_registry(root) as trust:
-        assert len(trust.current_trust().document.keys) == 1
-    assert _import(root, record_ids[1])[0] == cli.ExitCode.OK
-    with open_local_result_trust_registry(root) as trust:
-        assert len(trust.current_trust().document.keys) == 2
+    for record_id in record_ids:
+        assert _import(root, record_id)[0] == cli.ExitCode.OK
+    trust = json.loads((root / "trust" / "development-result-trust.json").read_bytes())
+    assert len(trust["keys"]) == 1
+    with open_local_result_trust_registry(root) as registry:
+        assert len(registry.current_trust().document.keys) == 1
+    key_file = root / "trust" / "development-local-signing.key"
+    assert key_file.stat().st_mode & 0o777 == 0o600
+
+
+@pytest.mark.parametrize("damage", ("mode", "owner", "truncated"))
+def test_local_signing_key_must_be_private(world, damage: str, monkeypatch) -> None:
+    root, _, _ = world
+    key_file = root / "trust" / "development-local-signing.key"
+    if damage == "mode":
+        key_file.chmod(0o644)
+    elif damage == "owner":
+        real = os.geteuid()
+        monkeypatch.setattr(cli.os, "geteuid", lambda: real + 1)
+    else:
+        key_file.write_bytes(key_file.read_bytes()[:16])
+    with pytest.raises(cli.RunProblem) as raised:
+        cli._local_signing_key(root)
+    assert raised.value.code == "TBX-RUN-007"
+
+
+def _many_records(tmp_path: Path, count: int) -> tuple[Path, list[str]]:
+    root = tmp_path / "many"
+    first = create_local_golden_path_inputs(tmp_path / "in-0", reads=200)
+    assert _main("reference", "register", "--fasta", first.fasta_path, "--id", "ref", "--root", root)[0] == 0
+    record_ids = []
+    for index in range(count):
+        inputs = first if index == 0 else create_local_golden_path_inputs(
+            tmp_path / f"in-{index}", reads=200 + index
+        )
+        code, payload = _main("run", inputs.bam_path, "--reference", "ref", "--root", root)
+        assert code == 0, payload
+        record_ids.append(payload["data"]["record_id"])
+    assert len(set(record_ids)) == count
+    return root, record_ids
+
+
+def test_forty_records_on_one_root_are_all_cataloged(tmp_path: Path) -> None:
+    root, record_ids = _many_records(tmp_path, 40)
+    for record_id in record_ids:
+        code, payload = _import(root, record_id)
+        assert code == cli.ExitCode.OK, payload
+    assert len(_rows(root)) == 40
+    with open_local_explorer(root) as explorer:
+        assert explorer is not None and explorer.skipped == 0
+        page = explorer.source.query(CatalogQuery(limit=50))
+        assert len(page.results) == 40 and all(item.has_registered_view for item in page.results)
+
+
+def test_a_key_per_record_would_exhaust_the_trust_registry(tmp_path: Path, monkeypatch) -> None:
+    """Mutation guard: minting a fresh key per record hits MAX_TRUST_KEYS."""
+
+    from evidence_inspector.result_trust_registry import MAX_TRUST_KEYS
+    from traceback_runner.signing import generate_development_keypair
+
+    monkeypatch.setattr(
+        cli,
+        "_local_signing_key",
+        lambda root: generate_development_keypair(
+            KeyPurpose.RESULT, namespace=TrustNamespace.DEVELOPMENT_LOCAL
+        ),
+    )
+    root, record_ids = _many_records(tmp_path, MAX_TRUST_KEYS + 1)
+    codes = [_import(root, record_id)[0] for record_id in record_ids]
+    assert codes[:MAX_TRUST_KEYS] == [cli.ExitCode.OK] * MAX_TRUST_KEYS
+    assert codes[MAX_TRUST_KEYS] == cli.ExitCode.BLOCKED
 
 
 def test_reference_id_that_fails_the_public_boundary_is_refused_before_any_row(

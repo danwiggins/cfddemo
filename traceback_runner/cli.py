@@ -925,18 +925,19 @@ def _execute_signed_run(
 ) -> Any:
     """Seal the input, then run the signed stages unless the job is complete.
 
-    Shared by ``demo`` (synthetic) and ``run`` (local).  A fresh ephemeral
-    signing key in ``namespace`` is generated only when stages must run, and
-    its public half is appended to ``ROOT``'s development trust first.
+    Shared by ``demo`` (synthetic) and ``run`` (local).  A signing key in
+    ``namespace`` is taken only when stages must run (a fresh ephemeral key for
+    ``demo``; ROOT's one persistent development-local key for ``run``), and its
+    public half is appended to ``ROOT``'s development trust first.
     """
-    from .signing import KeyPurpose, development_trust_bytes, generate_development_keypair
+    from .signing import development_trust_bytes
 
     record = runner.submit(request, source, relative_files)
     if on_submitted is not None:
         on_submitted(record)
     if record.state != JobState.COMPLETE:
         _reject_live_worker(runner, record.job_id)
-        signing_key = generate_development_keypair(KeyPurpose.RESULT, namespace=namespace)
+        signing_key = _signing_key_for(root, namespace)
         _append_development_trust(root / _TRUST_RELATIVE, development_trust_bytes(signing_key))
         job_stages = stages(signing_key)
         if record.state in {JobState.PAUSED, JobState.RETRYABLE_FAILURE}:
@@ -1089,6 +1090,81 @@ def _provenance_hmac_key(root: Path) -> bytes:
             fix="Use a fresh --root; never edit files under ROOT/trust",
         )
     return key
+
+
+_LOCAL_SIGNING_KEY_RELATIVE = Path("trust/development-local-signing.key")
+
+
+def _local_signing_key(root: Path) -> Any:
+    """Return ROOT's one development-local result signing key, creating it once (0600).
+
+    Every local record under ROOT is signed by this key, so ROOT's trust
+    document and result-trust registry carry one local key, not one per record
+    (the registry holds at most ``MAX_TRUST_KEYS``).  Same pattern as the
+    provenance HMAC key: the 32-byte Ed25519 seed must be a regular file owned
+    by the user with no group or other access, or ``run`` refuses (TBX-RUN-007).
+    """
+    from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
+
+    from .signing import DevelopmentSigningKey, KeyPurpose, TrustNamespace, trusted_key_id
+
+    path = root / _LOCAL_SIGNING_KEY_RELATIVE
+    path.parent.mkdir(parents=True, exist_ok=True)
+    nofollow = getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_CLOEXEC", 0)
+    try:
+        descriptor = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL | nofollow, 0o600)
+    except FileExistsError:
+        pass
+    else:
+        with os.fdopen(descriptor, "wb") as stream:
+            stream.write(os.urandom(32))
+            stream.flush()
+            os.fsync(stream.fileno())
+        _fsync_directory(path.parent)
+    try:
+        descriptor = os.open(path, os.O_RDONLY | nofollow)
+    except OSError:
+        descriptor = -1
+    seed = b""
+    private = False
+    if descriptor >= 0:
+        with os.fdopen(descriptor, "rb") as stream:
+            metadata = os.fstat(stream.fileno())
+            private = (
+                stat.S_ISREG(metadata.st_mode)
+                and metadata.st_uid == os.geteuid()
+                and not stat.S_IMODE(metadata.st_mode) & 0o077
+            )
+            seed = stream.read(33)
+    if not private or len(seed) != 32:
+        raise RunProblem(
+            "TBX-RUN-007",
+            "The local signing key under ROOT/trust is not a private 32-byte file",
+            cause=(
+                "ROOT/trust/development-local-signing.key was edited, truncated, "
+                "replaced, or is readable by other users (it must be 0600 and yours)"
+            ),
+            fix="Use a fresh --root; never edit files under ROOT/trust",
+        )
+    private_key = Ed25519PrivateKey.from_private_bytes(seed)
+    public = private_key.public_key().public_bytes_raw()
+    return DevelopmentSigningKey(
+        key_id=trusted_key_id(
+            public, KeyPurpose.RESULT, namespace=TrustNamespace.DEVELOPMENT_LOCAL
+        ),
+        purpose=KeyPurpose.RESULT,
+        private_key=private_key,
+        namespace=TrustNamespace.DEVELOPMENT_LOCAL,
+    )
+
+
+def _signing_key_for(root: Path, namespace: Any) -> Any:
+    """ROOT's persistent key for local records; a fresh ephemeral key for synthetic ones."""
+    from .signing import KeyPurpose, TrustNamespace, generate_development_keypair
+
+    if namespace == TrustNamespace.DEVELOPMENT_LOCAL:
+        return _local_signing_key(root)
+    return generate_development_keypair(KeyPurpose.RESULT, namespace=namespace)
 
 
 @contextmanager
@@ -1949,10 +2025,8 @@ def _resume(
 ) -> tuple[ExitCode, dict[str, Any]]:
     from .references import load_reference
     from .signing import (
-        KeyPurpose,
         TrustNamespace,
         development_trust_bytes,
-        generate_development_keypair,
     )
 
     probe = _existing_runner(args.root)
@@ -1996,7 +2070,7 @@ def _resume(
         runner = _existing_runner(args.root, synthetic_enabled=True)
         namespace = TrustNamespace.DEVELOPMENT_SYNTHETIC
         make_stages = _demo_stages
-    signing_key = generate_development_keypair(KeyPurpose.RESULT, namespace=namespace)
+    signing_key = _signing_key_for(args.root, namespace)
     _append_development_trust(args.root / _TRUST_RELATIVE, development_trust_bytes(signing_key))
     stages = make_stages(signing_key)
     worker_id = "local-cli" if local else "synthetic-cli"
