@@ -855,6 +855,15 @@ def _all_scopes(
             pass
 
 
+def _require_configured(
+    source: LongitudinalExplorerSource, scope: MeasurementScope
+) -> None:
+    """Only operator-configured measurements are served, whatever the grant."""
+
+    if scope not in source.measurement_scopes:
+        raise _Denied
+
+
 def _scope_of(measurement: LongitudinalMeasurementSelection) -> MeasurementScope:
     return MeasurementScope(
         family=measurement.family,
@@ -1229,6 +1238,8 @@ def selector_catalog(
         _invalid()
     if anchor_id is not None and cohort_id is None:
         _invalid()
+    if scope is not None:
+        _require_configured(source, scope)
     gate_scope = scope if scope is not None else scopes[0]
     cohort = source.store("cohort_registry")
     with _Gate(binder, request, source, gate_scope) as authorization:
@@ -1348,6 +1359,7 @@ def version_diff(
     ):
         _authorized_scopes(binder, request, source)
         _invalid()
+    _require_configured(source, scope)
     with _Gate(binder, request, source, scope) as authorization:
         diff = _version_diff(source, authorization, selector_id, version)
         payload = _public(
@@ -1368,6 +1380,7 @@ def _build(
     """Authorize first, then build from live authority with the session binding."""
 
     scope = _scope_of(workspace_request.measurement)
+    _require_configured(source, scope)
     with _Gate(binder, request, source, scope) as first:
         pass
     credential = binder.session_credential(request)

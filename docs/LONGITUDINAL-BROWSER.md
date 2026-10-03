@@ -67,7 +67,9 @@ credentials, sequences).
    untrusted key, stale bound head, or an unavailable/replaced registry all
    answer exactly `403 {"error":{"code":"permission_denied"}}`: no counts,
    selectors or detail. Only the lock-free E06 identity binding (the cohort
-   registry the grant must cover) is read before the gate.
+   registry the grant must cover) is read before the gate. A requested
+   measurement that is not one of the operator-configured scopes gets the
+   same denial even when the grant covers it.
 3. Selector and diff reads run while the gate's reader fence is held (the
    reader registry is first in the global lock order).
 4. Workspace, source detail, save and reopen release the gate and call

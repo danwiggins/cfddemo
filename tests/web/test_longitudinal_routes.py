@@ -669,3 +669,79 @@ def test_saved_routes_need_every_configured_scope(
         )
     finally:
         env.close()
+
+
+def test_unconfigured_measurement_is_refused_even_with_a_grant(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from evidence_inspector.reader_authorization_registry import MeasurementScope
+
+    monkeypatch.setattr(reader_module, "_PROCESS_PROFILE", {})
+    other = MeasurementScope(
+        family="fragment_measurement",
+        quantity_id="qty_fragment_other",
+        unit="unit_bp",
+    )
+    # The grant covers the world's scope; the installation offers only another.
+    env = _make_env(tmp_path, scopes=(other,))
+    try:
+        request = env.request_json
+        for route, payload in (
+            ("workspace", {"request": request}),
+            ("source", {"request": request, "row_ordinal": 1}),
+            ("save", {"request": request}),
+        ):
+            _assert_denied(*env.post(route, payload))
+        _assert_denied(*env.get("diff", _cohort_query(env)))
+        _assert_denied(*env.get("selectors", _cohort_query(env)))
+        assert list((env.saved.root / "objects").iterdir()) == []  # type: ignore[union-attr]
+    finally:
+        env.close()
+
+
+@needs_node
+def test_controller_current_reopen_details_reresolve_source(
+    fresh: Env, tmp_path: Path
+) -> None:
+    receipt = _json(_save(fresh)[1])
+    saved_page = _json(fresh.get("saved")[1])
+    diff = _json(_reopen(fresh, receipt, "diff")[1])
+    results = _json(_reopen(fresh, receipt, "results")[1])
+    assert results["current_workspace"] is not None
+    detail = _json(
+        fresh.post(
+            "source",
+            {"request": results["current_workspace"]["request"], "row_ordinal": 1},
+        )[1]
+    )
+    report = _run_harness(
+        tmp_path,
+        {
+            "controller": {
+                "layout": _controller_layout(),
+                "responses": {
+                    "/api/v1/longitudinal/selectors": [
+                        {"status": 200, "payload": _json(fresh.get("selectors")[1])}
+                    ],
+                    "/api/v1/longitudinal/saved": [
+                        {"status": 200, "payload": saved_page}
+                    ],
+                    "/api/v1/longitudinal/reopen": [
+                        {"status": 200, "payload": diff},
+                        {"status": 200, "payload": results},
+                    ],
+                    "/api/v1/longitudinal/source": [{"status": 200, "payload": detail}],
+                },
+                "steps": [
+                    {"do": "bind"},
+                    {"do": "clickText", "text": "Reopen version 1"},
+                    {"do": "clickText", "text": "Show reopened results"},
+                    {"do": "details", "index": 0, "snapshot": "drawer"},
+                ],
+            }
+        },
+    )
+    [source_fetch] = [f for f in report["fetches"] if f["url"].endswith("/source")]
+    assert source_fetch["body"]["request"] == results["current_workspace"]["request"]
+    drawer = report["snapshots"][-1]
+    assert drawer["drawerHidden"] is False and drawer["state"] == "partial"

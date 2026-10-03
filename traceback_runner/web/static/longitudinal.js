@@ -896,6 +896,8 @@
       currentRequest = null;
       renderReopenDiff(doc, ui.diffBody, results.diff);
       if (results.current_workspace) {
+        // The exact rebuilt request, so Details re-resolves source detail.
+        currentRequest = results.current_workspace.request;
         presentWorkspace({ workspace: results.current_workspace, save: { state: "registry_absent" } }, "current: saved comparison replays exactly");
         return;
       }

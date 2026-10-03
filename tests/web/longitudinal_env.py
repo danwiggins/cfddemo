@@ -162,7 +162,7 @@ def _bind(service, grant_selector: str) -> tuple[str, str]:
 
 
 def _make_env(
-    root: Path, *, with_registry: bool = True, now=None, extra_scopes=()
+    root: Path, *, with_registry: bool = True, now=None, extra_scopes=(), scopes=None
 ) -> Env:
     world = make_world(root / "world")
     closers: list[object] = [world]
@@ -175,7 +175,7 @@ def _make_env(
         closers.append(saved)
     source = LongitudinalExplorerSource(
         stores=world.stores(),
-        measurement_scopes=(world.extra["scope"], *extra_scopes),
+        measurement_scopes=scopes or (world.extra["scope"], *extra_scopes),
         comparison_registry=saved,
         now=now,
     )
