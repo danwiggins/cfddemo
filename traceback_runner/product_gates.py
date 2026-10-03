@@ -1304,7 +1304,9 @@ def _run_local_service_journey(
     if bootstrap_status != 200:
         raise ValueError("local service bootstrap failed")
     bootstrap_payload = json.loads(bootstrap_body)
-    if set(bootstrap_payload) != {"csrf_token"}:
+    if set(bootstrap_payload) != {"csrf_token", "session_kind"} or (
+        bootstrap_payload["session_kind"] != "operator"
+    ):
         raise ValueError("local service bootstrap response changed")
     try:
         cookie = bootstrap_headers["set-cookie"].split(";", 1)[0]
