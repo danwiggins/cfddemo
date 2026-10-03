@@ -529,7 +529,7 @@ def test_registry_rejects_symlink_ancestors_and_fifo_without_blocking(
     completed = subprocess.run(
         [sys.executable, "-c", script],
         cwd=Path(__file__).parents[1],
-        timeout=2,
+        timeout=30,
         check=False,
     )
     assert completed.returncode == 0

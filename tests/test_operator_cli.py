@@ -103,17 +103,20 @@ def test_verify_trust_registry_options_are_exact(tmp_path: Path, capsys) -> None
     trust.close()
 
 
-def test_doctor_human_and_json_share_success_semantics(capsys) -> None:
-    assert main(["doctor"]) == ExitCode.OK
+def test_doctor_human_and_json_share_success_semantics(capsys, tmp_path: Path) -> None:
+    root = str(tmp_path / "root")
+    assert main(["doctor", "--root", root]) == ExitCode.OK
     human = capsys.readouterr().out
     assert "synthetic local runtime is available" in human
     assert "Real-data execution is not enabled" in human
 
-    assert main(["doctor", "--json"]) == ExitCode.OK
+    assert main(["doctor", "--root", root, "--json"]) == ExitCode.OK
     payload = json.loads(capsys.readouterr().out)
     assert payload["status"] == "ok"
     assert payload["synthetic_only"] is True
-    assert any(item["name"] == "real_data" for item in payload["data"]["checks"])
+    names = {item["name"] for item in payload["data"]["checks"]}
+    assert {"samtools", "root", "disk", "reference", "trust"} <= names
+    assert "real_data" not in names
 
 
 def test_protocol_cli_withholds_unapproved_instructions(capsys) -> None:

@@ -97,8 +97,10 @@ def test_state_machine_rejects_skipping_validation_or_reopening_history() -> Non
         validate_transition(JobState.COMPLETE, JobState.RUNNING)
 
 
-def test_cli_doctor_and_demo_are_explicitly_synthetic(capsys: pytest.CaptureFixture[str]) -> None:
-    assert main(["doctor"]) == 0
+def test_cli_doctor_and_demo_are_explicitly_synthetic(
+    capsys: pytest.CaptureFixture[str], tmp_path: Path
+) -> None:
+    assert main(["doctor", "--root", str(tmp_path / "root")]) == 0
     assert "Real-data execution is not enabled" in capsys.readouterr().out
 
 
