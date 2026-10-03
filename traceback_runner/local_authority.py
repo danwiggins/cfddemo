@@ -549,6 +549,14 @@ class LocalTrustRegistryPin(RunnerContract):
 
 
 def _write_pin(root: Path, registry: ResultTrustRegistry) -> None:
+    try:
+        _write_pin_unchecked(root, registry)
+    except OSError:
+        # The next import advances a pin left behind along the journal.
+        raise _trust_problem("the registry's identity pin could not be written") from None
+
+
+def _write_pin_unchecked(root: Path, registry: ResultTrustRegistry) -> None:
     snapshot = registry.current_trust()
     pin = LocalTrustRegistryPin(
         registry_id=snapshot.registry_id,

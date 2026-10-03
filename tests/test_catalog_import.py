@@ -617,12 +617,14 @@ def test_one_local_signing_key_per_root(world) -> None:
     assert key_file.stat().st_mode & 0o777 == 0o600
 
 
-@pytest.mark.parametrize("damage", ("mode", "owner", "truncated"))
+@pytest.mark.parametrize("damage", ("mode", "mode-0400", "owner", "truncated"))
 def test_local_signing_key_must_be_private(world, damage: str, monkeypatch) -> None:
     root, _, _ = world
     key_file = root / "trust" / "development-local-signing.key"
     if damage == "mode":
         key_file.chmod(0o644)
+    elif damage == "mode-0400":
+        key_file.chmod(0o400)
     elif damage == "owner":
         real = os.geteuid()
         monkeypatch.setattr(cli.os, "geteuid", lambda: real + 1)
@@ -700,3 +702,20 @@ def test_missing_registry_internals_map_to_tbx_auth_local_002(world) -> None:
     code, payload = _import(root, record_id)
     assert code == cli.ExitCode.BLOCKED, payload
     assert payload["data"]["code"] == "TBX-AUTH-LOCAL-002"
+
+
+def test_local_signing_key_creation_leaves_no_partial_file(tmp_path: Path, monkeypatch) -> None:
+    root = tmp_path / "root"
+    real_link = os.link
+
+    def crash(*args, **kwargs):
+        raise OSError("simulated crash before publication")
+
+    monkeypatch.setattr(cli.os, "link", crash)
+    with pytest.raises(OSError):
+        cli._local_signing_key(root)
+    assert not (root / "trust" / "development-local-signing.key").exists()
+    assert list((root / "trust").iterdir()) == []
+    monkeypatch.setattr(cli.os, "link", real_link)
+    first = cli._local_signing_key(root)
+    assert cli._local_signing_key(root).key_id == first.key_id

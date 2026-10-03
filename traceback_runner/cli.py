@@ -1111,16 +1111,26 @@ def _local_signing_key(root: Path) -> Any:
     path = root / _LOCAL_SIGNING_KEY_RELATIVE
     path.parent.mkdir(parents=True, exist_ok=True)
     nofollow = getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_CLOEXEC", 0)
-    try:
-        descriptor = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL | nofollow, 0o600)
-    except FileExistsError:
-        pass
-    else:
-        with os.fdopen(descriptor, "wb") as stream:
-            stream.write(os.urandom(32))
-            stream.flush()
-            os.fsync(stream.fileno())
-        _fsync_directory(path.parent)
+    if not (path.exists() or path.is_symlink()):
+        # Write and fsync a private temporary, then publish it with a
+        # no-replace link: a crash never leaves a short key at the final path.
+        temporary = path.with_name(f".{path.name}.{os.getpid()}.tmp")
+        temporary.unlink(missing_ok=True)
+        descriptor = os.open(
+            temporary, os.O_WRONLY | os.O_CREAT | os.O_EXCL | nofollow, 0o600
+        )
+        try:
+            with os.fdopen(descriptor, "wb") as stream:
+                stream.write(os.urandom(32))
+                stream.flush()
+                os.fsync(stream.fileno())
+            try:
+                os.link(temporary, path)
+            except FileExistsError:
+                pass
+            _fsync_directory(path.parent)
+        finally:
+            temporary.unlink(missing_ok=True)
     try:
         descriptor = os.open(path, os.O_RDONLY | nofollow)
     except OSError:
@@ -1133,7 +1143,7 @@ def _local_signing_key(root: Path) -> Any:
             private = (
                 stat.S_ISREG(metadata.st_mode)
                 and metadata.st_uid == os.geteuid()
-                and not stat.S_IMODE(metadata.st_mode) & 0o077
+                and stat.S_IMODE(metadata.st_mode) == 0o600
             )
             seed = stream.read(33)
     if not private or len(seed) != 32:
