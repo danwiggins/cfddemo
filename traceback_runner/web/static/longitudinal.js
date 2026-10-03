@@ -506,6 +506,7 @@
       retry: byId("lg-retry"),
       cohort: byId("lg-cohort"),
       scope: byId("lg-scope"),
+      timepoints: byId("lg-timepoints"),
       measurement: byId("lg-measurement"),
       anchorPolicy: byId("lg-anchor-policy"),
       anchor: byId("lg-anchor"),
@@ -555,7 +556,25 @@
       ui.retry.hidden = code === "permission_denied";
     };
     const clearProblem = () => { ui.problem.hidden = true; };
-    const hideResults = () => { ui.results.hidden = true; ui.rows.replaceChildren(); ui.chart.replaceChildren(); };
+    // Clears every result surface, closes the drawer and drops the receipt, so
+    // no earlier value, count or comparison survives into a denial, an error
+    // or a stale reopen.
+    const hideResults = () => {
+      ui.results.hidden = true;
+      [ui.identity, ui.outcome, ui.strip, ui.rows, ui.chart, ui.covariates, ui.drawerBody, ui.receipt, ui.saveState]
+        .forEach((node) => node.replaceChildren());
+      ui.drawer.hidden = true;
+      ui.drawer.setAttribute("aria-modal", "false");
+      delete ui.results.dataset.drawer;
+      ui.save.disabled = true;
+    };
+    const deny = () => {
+      hideResults();
+      lastView = null;
+      setState("permission-denied");
+      ui.status.textContent = "Permission denied.";
+      showProblem("permission_denied");
+    };
 
     const call = async (method, path, body) => {
       if (inflight) inflight.abort();
@@ -594,10 +613,7 @@
         const result = await action();
         stopTicker();
         if (result && result.status === 403) {
-          hideResults();
-          setState("permission-denied");
-          ui.status.textContent = "Permission denied.";
-          showProblem("permission_denied");
+          deny();
           return null;
         }
         if (!result || result.status !== 200 || !result.payload) {
@@ -655,13 +671,20 @@
         d09_policy_version: Number(d09Version),
         measurement: measurement.measurement,
         filters: {
-          timepoint_ordinals: [],
+          timepoint_ordinals: timepoints(),
           lineage_roles: checked("lineage_roles"),
           record_availability: checked("record_availability"),
-          compatibility_states: [],
+          compatibility_states: checked("compatibility_states"),
         },
       };
     };
+    // Public timepoint ordinals typed as "1, 3"; anything else is dropped and
+    // the server validates the bound.
+    function timepoints() {
+      const raw = String(ui.timepoints.value || "");
+      return [...new Set(raw.split(",").map((item) => item.trim()).filter((item) => /^[1-9][0-9]{0,3}$/.test(item)).map(Number))]
+        .sort((a, b) => a - b);
+    }
     const requestKey = (request) => (request ? JSON.stringify(request) : null);
     const refreshResultsButton = () => {
       const request = buildRequest();
@@ -760,7 +783,8 @@
       if (!currentRequest) return;
       const result = await call("POST", "/api/v1/longitudinal/source", { request: currentRequest, row_ordinal: row.row_ordinal });
       if (result.status === 200 && result.payload) renderDrawer(doc, ui, result.payload.row, result.payload);
-      else if (result.status === 403) { setState("permission-denied"); showProblem("permission_denied"); }
+      else if (result.status === 403) deny();
+      else { hideResults(); setState("error"); showProblem(result.payload && result.payload.error ? result.payload.error.code : "storage_failure"); }
     };
     const closeDrawer = () => {
       ui.drawer.hidden = true;
@@ -839,30 +863,33 @@
       ui.diff.hidden = false;
       renderReopenDiff(doc, ui.diffBody, payload.diff);
       const confirm = el(doc, "button", "Show reopened results", { type: "button" });
-      confirm.addEventListener("click", async () => {
-        const results = await runStage("reopen results", () => call("POST", "/api/v1/longitudinal/reopen", Object.assign({}, body, { stage: "results" })));
-        if (!results) return;
-        lastView = { kind: "reopen", record };
-        renderReopenDiff(doc, ui.diffBody, results.diff);
-        if (results.current_workspace) {
-          currentRequest = null;
-          presentWorkspace({ workspace: results.current_workspace, save: { state: "registry_absent" } }, "current: saved comparison replays exactly");
-          return;
-        }
-        ui.results.hidden = false;
-        ui.rows.replaceChildren();
-        renderHistorical(doc, ui.covariates, results.historical_commitments);
-        ui.chart.replaceChildren(el(doc, "p", "Stale: no current segments are drawn for a stale saved comparison.", { class: "help" }));
-        setState("stale");
-        ui.status.textContent = "Stale: authority differs from the saved comparison. Comparisons and segments are suppressed. Required action: start a new comparison at current authority.";
-        ui.save.disabled = true;
-      });
+      confirm.addEventListener("click", () => showReopenResults(record, body));
       ui.diffBody.append(confirm);
       setState("stale");
       ui.status.textContent = payload.diff.comparison_state === "current"
         ? "Diff shown: the saved comparison replays at current authority. Confirm to show results."
         : "Diff shown: the saved comparison is stale. Confirm to inspect it without current comparisons.";
       if (payload.diff.comparison_state === "current") setState("success");
+    };
+
+    const showReopenResults = async (record, body) => {
+      retryStep = () => showReopenResults(record, body);
+      hideResults();
+      const results = await runStage("reopen results", () => call("POST", "/api/v1/longitudinal/reopen", Object.assign({}, body, { stage: "results" })));
+      if (!results) return;
+      lastView = { kind: "reopen", record, body };
+      currentRequest = null;
+      renderReopenDiff(doc, ui.diffBody, results.diff);
+      if (results.current_workspace) {
+        presentWorkspace({ workspace: results.current_workspace, save: { state: "registry_absent" } }, "current: saved comparison replays exactly");
+        return;
+      }
+      ui.results.hidden = false;
+      renderHistorical(doc, ui.covariates, results.historical_commitments);
+      ui.chart.replaceChildren(el(doc, "p", "Stale: no current segments are drawn for a stale saved comparison.", { class: "help" }));
+      setState("stale");
+      ui.status.textContent = "Stale: authority differs from the saved comparison. Comparisons and segments are suppressed. Required action: start a new comparison at current authority.";
+      ui.save.disabled = true;
     };
 
     ui.cohort.addEventListener("change", () => { diffShownFor = null; loadCohortOptions(); });
@@ -899,7 +926,10 @@
         if (inflight) inflight.abort();
         stopTicker();
       } else if (lastView && lastView.kind === "workspace" && currentRequest) {
+        hideResults();
         showResults();
+      } else if (lastView && lastView.kind === "reopen") {
+        showReopenResults(lastView.record, lastView.body);
       }
     });
     win.addEventListener("traceback:longitudinal", (event) => {

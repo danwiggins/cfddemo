@@ -535,3 +535,41 @@ def test_controller_loading_slow_error_denied_and_stale_states(
     assert snaps["retried"]["options"]["lg-cohort"][1].startswith(
         env.world.request.cohort_selector_id
     )
+
+
+@needs_node
+def test_controller_denial_clears_every_result_and_filters_reach_the_request(
+    env: Env, tmp_path: Path
+) -> None:
+    responses = _journey_responses(env)
+    responses["/api/v1/longitudinal/source"] = [{"status": 403, "payload": DENIED}]
+    steps = _journey_steps(env, 1440)
+    diff_index = next(i for i, s in enumerate(steps) if s.get("id") == "lg-show-diff")
+    steps[diff_index:diff_index] = [
+        {"do": "check", "name": "compatibility_states", "value": "equivalent"},
+        {"do": "check", "name": "compatibility_states", "value": "anchor"},
+    ]
+    steps = steps[: next(i for i, s in enumerate(steps) if s["do"] == "details")]
+    steps.append({"do": "details", "index": 0, "snapshot": "denied"})
+    report = _run_harness(
+        tmp_path,
+        {
+            "controller": {
+                "layout": _controller_layout(),
+                "responses": responses,
+                "steps": steps,
+            }
+        },
+    )
+    workspace_fetch = next(
+        f for f in report["fetches"] if f["url"].endswith("/workspace")
+    )
+    filters = workspace_fetch["body"]["request"]["filters"]
+    assert filters["compatibility_states"] == ["equivalent", "anchor"]
+    assert filters["timepoint_ordinals"] == []
+    denied = {s["label"]: s for s in report["snapshots"]}["denied"]
+    assert denied["state"] == "permission-denied"
+    assert denied["resultsHidden"] is True and denied["drawerHidden"] is True
+    assert denied["rows"] == 0 and denied["paths"] == 0
+    assert denied["resultsText"].strip() == ""
+    assert denied["saveDisabled"] is True

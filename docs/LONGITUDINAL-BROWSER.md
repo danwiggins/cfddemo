@@ -167,6 +167,16 @@ configured scopes the grant covers) → measurement → anchor-policy approval
 version diff" → "Show results" (enabled only for the exact selection whose
 diff was shown).
 
+Filters are the D08 `LongitudinalWorkspaceFilters` axes: lineage role,
+record availability, compatibility outcome (including `anchor` and
+`not_evaluated`, which cannot be saved) and public timepoint ordinals. The
+D08 filter contract carries no E06 state axes, so the view offers none.
+
+Any denial, error or new reopen first clears every result surface (identity,
+outcomes, counts, table, chart, covariates, drawer, receipt) so nothing from an
+earlier result survives beside it. Returning to the tab refetches the last
+workspace or reopened result as a fresh revision.
+
 Result order (HTML and DOM): identity/version/authority; outcome, reasons and
 permitted next action; denominator strip (D09 counts, "not a comparison gate");
 the native source table (caption, `scope="col"` headers, `scope="row"` row
