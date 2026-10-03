@@ -28,18 +28,29 @@ REPORT_FIXTURE = Path("tests/fixtures/product_gates/foundation_report.json")
 RUN_ID = "gate_run_20260929"
 CAPTURED_AT = datetime(2026, 9, 29, tzinfo=UTC)
 
-# Fields that vary run to run or host to host. The structural comparison keeps
-# their presence and shape but not their values.
-_VOLATILE_VALUE_KEYS = frozenset(
+# Values that vary run to run (timings, tracemalloc peak) or host to host
+# (platform strings), and the digests that bind them. Every other field,
+# including all other digests, is compared exactly.
+_HOST_FIELDS = ("python_version", "operating_system", "machine", "processor")
+_TIMED_MEASUREMENTS = ("filter_performance", "initial_render")
+_VOLATILE_DIGESTS = (
+    # host_run digest
+    ("network_denial_evidence", "host_run_sha256"),
+    ("privacy_sentinel_evidence", "host_run_sha256"),
+    # digest of host_run + timings + memory
+    ("privacy_sentinel_evidence", "output_payload_sha256"),
+)
+# Gates whose evidence_sha256 digests one of the volatile objects above.
+_VOLATILE_GATE_EVIDENCE = frozenset(
     {
-        "p95_us",
-        "peak_bytes",
-        "python_version",
-        "operating_system",
-        "machine",
-        "processor",
+        "filter_performance",
+        "initial_render",
+        "stress_memory",
+        "no_external_network",
+        "privacy_sentinels",
     }
 )
+_MASK = "<volatile>"
 
 
 def run_live_report() -> ProductGateReport:
@@ -52,26 +63,28 @@ def run_live_report() -> ProductGateReport:
     )
 
 
-def structural_projection(value: Any, key: str | None = None) -> Any:
-    """Project a report dump onto what must not drift.
+def structural_projection(report: ProductGateReport) -> dict[str, Any]:
+    """Project a report onto what must not drift between runs and hosts.
 
-    Timing samples, memory peaks, host platform fields, and every digest
-    (digests bind those volatile values) are reduced to their type or
-    presence. Record counts, gate ids, statuses, details, targets and all
-    other fields are compared exactly.
+    Masks only the volatile values listed above; timing sample lists keep their
+    length. A renamed or removed field raises KeyError, which also means the
+    fixture must be regenerated.
     """
 
-    if key is not None and (key in _VOLATILE_VALUE_KEYS or key.endswith("sha256")):
-        if isinstance(value, list):
-            return ["<digest>" if item is not None else None for item in value]
-        return None if value is None else f"<{type(value).__name__}>"
-    if key == "samples_us":
-        return {"sample_count": len(value)}
-    if isinstance(value, dict):
-        return {name: structural_projection(item, name) for name, item in value.items()}
-    if isinstance(value, list):
-        return [structural_projection(item) for item in value]
-    return value
+    payload = report.model_dump(mode="json")
+    for field in _HOST_FIELDS:
+        payload["host_run"][field] = _MASK
+    for name in _TIMED_MEASUREMENTS:
+        measurement = payload[name]
+        measurement["samples_us"] = {"sample_count": len(measurement["samples_us"])}
+        measurement["p95_us"] = _MASK
+    payload["stress_memory"]["peak_bytes"] = _MASK
+    for section, field in _VOLATILE_DIGESTS:
+        payload[section][field] = _MASK
+    for item in payload["gate_evidence"]:
+        if item["gate_id"] in _VOLATILE_GATE_EVIDENCE:
+            item["evidence_sha256"] = _MASK
+    return payload
 
 
 def main() -> int:

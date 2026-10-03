@@ -79,9 +79,7 @@ def test_live_harness_structure_matches_frozen_fixture(
     live = run_live_report()
     assert live.host_run.run_id == RUN_ID
     assert live.host_run.captured_at == CAPTURED_AT
-    assert structural_projection(live.model_dump(mode="json")) == (
-        structural_projection(report.model_dump(mode="json"))
-    )
+    assert structural_projection(live) == structural_projection(report)
 
 
 def test_harness_records_10k_stress_memory_and_exact_host_run(
