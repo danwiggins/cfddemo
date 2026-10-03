@@ -676,20 +676,34 @@ def test_failed_publisher_never_unlinks_an_object_adopted_concurrently(
         if not entry.name.startswith(".")
     }
     assert len(published) == 1
-    adopter_at_gate = threading.Event()
-    original_gate = catalog_module._acquire_content_gate
+    gate = catalog_module._CONTENT_GATE
+    adopter_waiting = threading.Event()
 
-    def observed_gate(inode, current, catalog, exclusive) -> None:
-        if catalog is second:
-            adopter_at_gate.set()
-        original_gate(inode, current, catalog, exclusive)
+    class _ObservedGate:
+        # Delegates to the real gate condition and records when the adopter
+        # thread waits on it (it sets the event while holding the gate lock).
+        def __enter__(self):
+            return gate.__enter__()
 
-    monkeypatch.setattr(catalog_module, "_acquire_content_gate", observed_gate)
+        def __exit__(self, *exc_info):
+            return gate.__exit__(*exc_info)
+
+        def wait(self, timeout=None):
+            if threading.current_thread() is adopter:
+                adopter_waiting.set()
+            return gate.wait(timeout)
+
+        def notify_all(self) -> None:
+            gate.notify_all()
+
+    monkeypatch.setattr(catalog_module, "_CONTENT_GATE", _ObservedGate())
     adopter = threading.Thread(target=adopting_import)
     adopter.start()
-    assert adopter_at_gate.wait(timeout=30)
-    adopter.join(timeout=0.2)
-    assert adopter.is_alive() and not adopted
+    assert adopter_waiting.wait(timeout=30)
+    # Taking the gate lock succeeds only once the adopter's wait() released
+    # it: the adopter is parked behind the paused publisher's content lock.
+    with gate:
+        assert adopter.is_alive() and not adopted
     controller.release()
     worker.join(timeout=30)
     assert not worker.is_alive()
