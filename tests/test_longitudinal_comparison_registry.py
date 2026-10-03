@@ -57,6 +57,7 @@ from evidence_inspector.projection_policy_registry import (
     StatisticUnit,
 )
 from evidence_inspector.reader_authorization_registry import MeasurementScope
+from tests import registry_storage_checks as storage_checks
 
 CREATED_AT = datetime(2026, 10, 1, 12, tzinfo=UTC)
 COHORT = "cohort_selector_" + "1" * 40
@@ -1580,3 +1581,12 @@ def test_a_refused_fence_leaves_pending_recovery_untouched(
     with pytest.raises(LongitudinalComparisonRegistryUnsafe, match="composite"):
         calls[operation]()
     assert _storage_bytes(registry.root) == before
+
+
+def test_storage_integrity_check_waits_for_an_in_flight_head_seal(
+    registry, fence
+) -> None:
+    storage_checks.check_integrity_reads_head_and_seal_under_process_lock(
+        registry,
+        lambda: registry.register(make_saved(fence.heads), dependency_fence=fence),
+    )
