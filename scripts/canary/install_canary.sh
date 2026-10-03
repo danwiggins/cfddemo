@@ -72,14 +72,13 @@ parse_inputs() {
 }
 
 in_work_tree() {
-  # in_work_tree PATH -> 0 when PATH (resolved through its nearest existing
-  # ancestor, so symlinks and .. count) lies in any Git work tree.
-  local path="$1"
-  while [ ! -d "$path" ]; do
-    path="$(dirname "$path")"
-  done
+  # in_work_tree PATH -> 0 when PATH, fully resolved (every symlink including
+  # the last component, and ..), lies in any Git work tree.
+  local -a python
+  read -r -a python <<<"$(python_command)"
   local directory
-  directory="$(cd "$path" && pwd -P)"
+  directory="$("${python[@]}" -c 'import os, sys; print(os.path.realpath(sys.argv[1]))' "$1")" \
+    || die "cannot resolve a path"
   while :; do
     [ -e "$directory/.git" ] && return 0
     [ "$directory" = "/" ] && return 1
@@ -92,15 +91,18 @@ uv_path() {
   command -v uv || die "uv is not on PATH; set UV=/path/to/uv"
 }
 
+python_command() {
+  # One interpreter for render, path checks and status: $PYTHON, else the
+  # project's uv-managed Python.
+  if [ -n "${PYTHON:-}" ]; then echo "$PYTHON"; return; fi
+  echo "$(uv_path) run --quiet --project $REPO python"
+}
+
 render() {
   local uv
   uv="$(uv_path)"
   local -a python
-  if [ -n "${PYTHON:-}" ]; then
-    read -r -a python <<<"$PYTHON"
-  else
-    python=("$uv" run --quiet --project "$REPO" python)
-  fi
+  read -r -a python <<<"$(python_command)"
   "${python[@]}" - "$TEMPLATE" "$uv" "$REPO" "$FASTA" "$BAM" "$BASELINE" "$LOG_DIR" \
     "$REPEAT" "$(dirname "$uv"):/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin" <<'PY'
 import re
@@ -134,11 +136,28 @@ command_install() {
   rendered="$(mktemp "${TMPDIR:-/tmp}/traceback-canary-plist.XXXXXX")"
   render >"$rendered"
   plutil -lint "$rendered" >/dev/null || { rm -f "$rendered"; die "rendered plist is invalid"; }
+  # Keep the previous agent so a failed reinstall can put it back.
+  local previous=""
+  if [ -f "$PLIST" ]; then
+    previous="$(mktemp "${TMPDIR:-/tmp}/traceback-canary-previous.XXXXXX")"
+    cp "$PLIST" "$previous"
+  fi
   launchctl bootout "gui/$(id -u)/$LABEL" 2>/dev/null || true
-  install -m 0644 "$rendered" "$PLIST"
+  if install -m 0644 "$rendered" "$PLIST" && launchctl bootstrap "gui/$(id -u)" "$PLIST"; then
+    rm -f "$rendered" "$previous"
+    echo "installed $LABEL: daily at 03:30 local; results in $LOG_DIR"
+    return
+  fi
   rm -f "$rendered"
-  launchctl bootstrap "gui/$(id -u)" "$PLIST"
-  echo "installed $LABEL: daily at 03:30 local; results in $LOG_DIR"
+  if [ -n "$previous" ]; then
+    install -m 0644 "$previous" "$PLIST" && rm -f "$previous"
+    if launchctl bootstrap "gui/$(id -u)" "$PLIST" 2>/dev/null; then
+      die "install failed; the previous agent was restored"
+    fi
+    die "install failed and the previous agent could not be reloaded; run install again"
+  fi
+  rm -f "$PLIST"
+  die "install failed; no agent is installed"
 }
 
 command_uninstall() {
@@ -154,7 +173,7 @@ command_status() {
       | grep -E '^\s*(state|last exit code|runs) =' || echo "launchd: not loaded"
   fi
   local -a python
-  if [ -n "${PYTHON:-}" ]; then read -r -a python <<<"$PYTHON"; else python=(python3); fi
+  read -r -a python <<<"$(python_command)"
   local log_dir="$LOG_DIR" installed=""
   if [ -f "$PLIST" ]; then
     # Use the log directory the installed agent actually writes to.

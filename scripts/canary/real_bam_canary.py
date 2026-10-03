@@ -409,7 +409,12 @@ def write_result(log_dir: Path, result: dict[str, Any], stamp: str) -> Path:
             continue
     else:  # pragma: no cover
         raise RuntimeError("could not pick a unique result file name")
-    _write_private(log_dir / "latest.json", result, exclusive=False)
+    try:
+        _write_private(log_dir / "latest.json", result, exclusive=False)
+    except OSError:
+        # Never leave a timestamped "pass" behind a run that then fails.
+        target.unlink(missing_ok=True)
+        raise
     return target
 
 

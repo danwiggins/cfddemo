@@ -464,7 +464,9 @@ def test_installer_refuses_git_work_trees_including_symlinks(tmp_path: Path) -> 
     (other / ".git").mkdir(parents=True)
     (tmp_path / "link").symlink_to(other)
     (tmp_path / "out").mkdir()
-    base = {**_environment(tmp_path), "PYTHON": sys.executable, "UV": "/opt/example/bin/uv"}
+    (other / "real.json").write_text("{}", encoding="utf-8")
+    (tmp_path / "out" / "leaf.json").symlink_to(other / "real.json")
+    base ={**_environment(tmp_path), "PYTHON": sys.executable, "UV": "/opt/example/bin/uv"}
     cases = {
         "launchd plist": {"TRACEBACK_CANARY_LAUNCH_AGENTS": str(other / "agents")},
         "log directory": {"TRACEBACK_CANARY_LOG_DIR": str(tmp_path / "link" / "x" / "logs")},
@@ -472,7 +474,8 @@ def test_installer_refuses_git_work_trees_including_symlinks(tmp_path: Path) -> 
             "TRACEBACK_CANARY_BASELINE": str(tmp_path / "out" / ".." / "clone" / "b.json")
         },
     }
-    for label, extra in cases.items():
+    leaf = {"TRACEBACK_CANARY_BASELINE": str(tmp_path / "out" / "leaf.json")}
+    for label, extra in [*cases.items(), ("baseline", leaf)]:
         environment = {
             **base, "TRACEBACK_CANARY_LAUNCH_AGENTS": str(tmp_path / "agents"), **extra,
         }
