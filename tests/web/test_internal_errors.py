@@ -86,6 +86,13 @@ def test_error_after_the_response_started_only_closes_and_counts(
     cookie, _ = _exchange(service)
     status, _, content = _request(service, "GET", "/api/v1/jobs", headers={"Cookie": cookie})
     assert (status, content) == (200, b'{"jobs":[]}\n')
+    # The handler raises only after the full response went out, so the client
+    # can read it before the server thread counts the error. Wait (bounded) for
+    # the count rather than racing it.
+    deadline = time.monotonic() + 10
+    while service.internal_errors != {"TBX-INTERNAL": 1}:
+        assert time.monotonic() < deadline, service.internal_errors
+        time.sleep(0.01)
     assert service.internal_errors == {"TBX-INTERNAL": 1}
 
 
