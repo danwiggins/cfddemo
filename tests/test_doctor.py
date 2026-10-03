@@ -210,3 +210,23 @@ def test_reference_deep_warns_when_fasta_is_unreadable(tmp_path: Path, capsys) -
         "detail": "registered FASTA could not be read",
         "reference_id": "tiny",
     }
+
+
+@pytest.mark.parametrize("damage", ["metadata", "journal"])
+def test_trust_blocked_when_registry_structure_is_damaged(
+    tmp_path: Path, capsys, damage: str
+) -> None:
+    from evidence_inspector.result_trust_registry import ResultTrustRegistry
+
+    root = tmp_path / "root"
+    assert main(["demo", "--root", str(root), "--json"]) == ExitCode.OK
+    capsys.readouterr()
+    registry = root / "trust" / "result-trust-registry"
+    ResultTrustRegistry(registry).close()
+    if damage == "metadata":
+        (registry / "registry-metadata.json").write_text("garbage")
+    else:
+        (registry / "registry-journal.jsonl").unlink()
+    code, payload = _doctor(capsys, root)
+    assert code == ExitCode.BLOCKED
+    assert _one(payload, "trust")["status"] == "blocked"

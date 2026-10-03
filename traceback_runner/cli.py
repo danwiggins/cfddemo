@@ -402,33 +402,40 @@ def _doctor_trust(root: Path) -> dict[str, Any]:
             "pass",
             "development trust parses; no result-trust registry under ROOT yet",
         )
-    # Opening a registry needs its independently retained ID, epoch and head,
-    # which doctor does not have; check the structure only. `verify
-    # --trust-registry` performs the full identity-bound check.
-    try:
-        metadata = registry.lstat()
-        registry_metadata = (registry / "registry-metadata.json").lstat()
-    except OSError:
-        metadata = registry_metadata = None
-    if (
-        metadata is None
-        or registry_metadata is None
-        or not stat.S_ISDIR(metadata.st_mode)
-        or stat.S_IMODE(metadata.st_mode) != 0o700
-        or metadata.st_uid != os.geteuid()
-        or not stat.S_ISREG(registry_metadata.st_mode)
-    ):
+    if registry.is_symlink() or not registry.is_dir():
         return _doctor_check(
-            "trust",
-            "blocked",
-            "result-trust registry under ROOT/trust is not a private registry directory",
+            "trust", "blocked", "result-trust registry under ROOT/trust is not a directory"
         )
-    return _doctor_check(
-        "trust",
-        "pass",
-        "development trust parses; result-trust registry present "
-        "(identity is checked by verify --trust-registry)",
+    from evidence_inspector.result_trust_registry import (
+        ResultTrustRegistry,
+        ResultTrustRegistryUnsafe,
     )
+
+    # Doctor does not hold the independently retained ID, epoch and head, so a
+    # full open is impossible. The registry's own constructor validates lock,
+    # journal and metadata first and only then compares the expected identity;
+    # reaching that identity refusal therefore proves the structure is sound.
+    # `verify --trust-registry` performs the identity-bound check.
+    try:
+        ResultTrustRegistry(registry).close()
+    except ResultTrustRegistryUnsafe as exc:
+        if str(exc) == _REGISTRY_IDENTITY_REQUIRED:
+            return _doctor_check(
+                "trust",
+                "pass",
+                "development trust parses; result-trust registry structure opens "
+                "(identity is checked by verify --trust-registry)",
+            )
+    except Exception:
+        pass
+    return _doctor_check(
+        "trust", "blocked", "result-trust registry under ROOT/trust does not open"
+    )
+
+
+_REGISTRY_IDENTITY_REQUIRED = (
+    "result trust registry expected identity and head are required and must match"
+)
 
 
 def _doctor(args: argparse.Namespace) -> tuple[ExitCode, dict[str, Any]]:
