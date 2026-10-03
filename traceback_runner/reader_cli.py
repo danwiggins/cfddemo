@@ -36,7 +36,7 @@ import stat
 import sys
 from collections.abc import Iterator, Sequence
 from contextlib import contextmanager
-from datetime import UTC, datetime, timedelta
+from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Any, Literal, TextIO
 

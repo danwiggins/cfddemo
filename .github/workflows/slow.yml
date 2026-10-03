@@ -1,0 +1,49 @@
+name: slow
+
+# Tests marked `slow` (today: the live product-gates harness compared against
+# the frozen fixture tests/fixtures/product_gates/foundation_report.json).
+# Runs nightly and on PRs that touch the harness or its fixture, so fixture
+# drift cannot hide behind the fast CI lane.
+
+on:
+  schedule:
+    - cron: "17 6 * * *"
+  workflow_dispatch:
+  pull_request:
+    paths:
+      - "traceback_runner/product_gates.py"
+      - "traceback_runner/web/**"
+      - "tests/test_product_gates.py"
+      - "tests/fixtures/product_gates/**"
+      - "scripts/regenerate_product_gate_fixture.py"
+      - ".github/workflows/slow.yml"
+
+permissions:
+  contents: read
+
+concurrency:
+  group: slow-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+jobs:
+  slow:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - uses: astral-sh/setup-uv@c18668ad3cf93ea998bef934396af7bb5c839dc7 # v10.2.0
+        with:
+          version: "0.11.10"
+          python-version: "3.11"
+          enable-cache: true
+
+      - name: Sync locked environment
+        run: uv sync --frozen
+
+      # Serial on purpose: the live harness starts the local web service,
+      # which holds a host-wide /tmp lock until spec item A3 lands.
+      - name: Slow tests
+        run: uv run pytest -p no:cacheprovider --timeout 600 -m slow --durations=10

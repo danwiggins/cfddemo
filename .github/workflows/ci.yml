@@ -1,0 +1,75 @@
+name: ci
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+jobs:
+  # Check names are "ci (macos-latest)" and "ci (ubuntu-latest)". macOS team
+  # workstations are the product host (security spec X1, #86), so branch
+  # protection in docs/DEVELOPMENT-CONTROL.md requires only "ci (macos-latest)".
+  #
+  # The ubuntu job is informational until the Linux-compat follow-up lands:
+  # result_catalog._descriptor_path returns /proc/self/fd/N, which
+  # bundles._read_exact_files rejects as a symlink, and fork-based tests whose
+  # children raise keep running the pytest session and can hang xdist.
+  ci:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [macos-latest, ubuntu-latest]
+    runs-on: ${{ matrix.os }}
+    continue-on-error: ${{ matrix.os == 'ubuntu-latest' }}
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - uses: astral-sh/setup-uv@c18668ad3cf93ea998bef934396af7bb5c839dc7 # v10.2.0
+        with:
+          version: "0.11.10"
+          python-version: "3.11"
+          enable-cache: true
+
+      - name: Install samtools (Linux)
+        if: runner.os == 'Linux'
+        run: sudo apt-get update && sudo apt-get install -y samtools
+
+      - name: Install samtools (macOS)
+        if: runner.os == 'macOS'
+        run: brew install samtools
+
+      - name: Sync locked environment
+        run: uv sync --frozen
+
+      - name: Lint
+        run: uvx ruff@0.7.4 check .
+
+      # Every test that starts the local web service takes one host-wide
+      # /tmp flock for the server's lifetime (traceback_runner/web/server.py
+      # _open_startup_anchor), so two xdist workers starting servers collide
+      # with "already running". Those files run serially in the next step.
+      # Fold them back into this step once spec item A3 (per-state-root web
+      # lock) lands.
+      - name: Test (parallel)
+        # Short cap on ubuntu so the Linux fork hang cannot use the whole job.
+        timeout-minutes: ${{ matrix.os == 'ubuntu-latest' && 25 || 40 }}
+        run: >-
+          uv run pytest -p no:cacheprovider -n auto --timeout 600 -m "not slow"
+          --durations=10
+          --ignore=tests/web --ignore=tests/test_reader_cli.py
+
+      - name: Test (web service, serial)
+        run: >-
+          uv run pytest -p no:cacheprovider --timeout 600 -m "not slow"
+          --durations=10
+          tests/web tests/test_reader_cli.py
