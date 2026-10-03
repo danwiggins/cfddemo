@@ -144,6 +144,35 @@ class LocalWebServerError(RuntimeError):
     """The packaged local server could not establish its security boundary."""
 
 
+class LocalWebServerStopped(LocalWebServerError):
+    """The service was closed, or its security watchdog shut it down (H6)."""
+
+
+#: The one code an unexpected handler exception produces (H6).
+INTERNAL_ERROR_CODE = "TBX-INTERNAL"
+
+
+class _ErrorCounter:
+    """Per-code counts of internal errors since start (H6-min).
+
+    Records only a closed code: never a body, path, query or exception text.
+    """
+
+    def __init__(self) -> None:
+        self._lock = threading.Lock()
+        self._counts: dict[str, int] = {}
+
+    def record(self, code: str) -> None:
+        if code != INTERNAL_ERROR_CODE:
+            raise ValueError("only closed internal error codes are counted")
+        with self._lock:
+            self._counts[code] = self._counts.get(code, 0) + 1
+
+    def snapshot(self) -> dict[str, int]:
+        with self._lock:
+            return dict(self._counts)
+
+
 @dataclass(frozen=True, slots=True)
 class _StartupAnchor:
     parent_path: Path
@@ -670,6 +699,7 @@ class _LoopbackHttpServer(http.server.ThreadingHTTPServer):
     application: _Application
     security_validator: Callable[[], None]
     security_failed: threading.Event
+    internal_errors: _ErrorCounter
 
     def __setattr__(self, name: str, value: object) -> None:
         if name == "RequestHandlerClass" and hasattr(self, "RequestHandlerClass"):
@@ -681,6 +711,7 @@ class _LoopbackHttpServer(http.server.ThreadingHTTPServer):
         self._worker_count = 0
         self._worker_count_lock = threading.Lock()
         self.security_failed = threading.Event()
+        self.internal_errors = _ErrorCounter()
         super().__init__(*args, **kwargs)
 
     @property
@@ -755,6 +786,11 @@ class _Handler(http.server.BaseHTTPRequestHandler, metaclass=_SealedHandlerType)
     def setup(self) -> None:
         super().setup()
         self.connection.settimeout(REQUEST_TIMEOUT_SECONDS)
+        self._response_started = False
+
+    def send_response(self, code: int, message: str | None = None) -> None:
+        self._response_started = True
+        super().send_response(code, message)
 
     def _headers_within_bounds(self) -> bool:
         items = list(self.headers.items())
@@ -928,6 +964,9 @@ class _Handler(http.server.BaseHTTPRequestHandler, metaclass=_SealedHandlerType)
         except (TypeError, ValueError, json.JSONDecodeError):
             self._json(400, {"error": {"code": "TBX-WEB-400"}})
             return
+        error = payload.get("error") if isinstance(payload, dict) else None
+        if isinstance(error, dict) and error.get("code") == INTERNAL_ERROR_CODE:
+            self.server.internal_errors.record(INTERNAL_ERROR_CODE)  # type: ignore[attr-defined]
         self._json(status, payload)
 
     # --- route handlers (reached only through the route table) -----------------
@@ -1159,6 +1198,27 @@ class _Handler(http.server.BaseHTTPRequestHandler, metaclass=_SealedHandlerType)
     # --- dispatch -------------------------------------------------------------
 
     def _dispatch(self, method: Literal["GET", "POST"]) -> None:
+        """The request dispatcher's last-resort catch (H6-min).
+
+        An exception no route maps becomes one counted ``TBX-INTERNAL`` and,
+        if no response has started, the bounded 500 problem; the connection
+        then closes.  Nothing about the request or the exception is kept.
+        """
+
+        self._response_started = False
+        try:
+            self._serve_request(method)
+        except Exception:  # noqa: BLE001 - one closed code, no detail
+            self.close_connection = True
+            self.server.internal_errors.record(INTERNAL_ERROR_CODE)  # type: ignore[attr-defined]
+            if self._response_started:
+                return
+            try:
+                self._json(500, {"error": {"code": INTERNAL_ERROR_CODE}})
+            except Exception:  # noqa: BLE001 - the connection just closes
+                return
+
+    def _serve_request(self, method: Literal["GET", "POST"]) -> None:
         """Route one request through the exact route table (H1).
 
         A path is served only if it is an exact entry of ``_ROUTES`` (which
@@ -1370,6 +1430,17 @@ class _RunningLocalWebRuntime:
 
 _RUNTIME_LOCK = threading.Lock()
 _RUNTIMES: dict[str, _RunningLocalWebRuntime] = {}
+# Runtimes the security watchdog shut down (H6).  They are no longer running,
+# so nothing issues links for them, but they still hold their startup anchor,
+# lease and journal until ``close()`` releases them.
+_STOPPED_RUNTIMES: dict[str, _RunningLocalWebRuntime] = {}
+
+
+def _retire_runtime(runtime_id: str) -> None:
+    with _RUNTIME_LOCK:
+        runtime = _RUNTIMES.pop(runtime_id, None)
+        if runtime is not None:
+            _STOPPED_RUNTIMES[runtime_id] = runtime
 
 
 @dataclass(frozen=True, slots=True)
@@ -1402,6 +1473,18 @@ class RunningLocalWebService:
             runtime = _RUNTIMES.get(self._runtime_id)
             return runtime is not None and runtime.thread.is_alive()
 
+    @property
+    def internal_errors(self) -> dict[str, int]:
+        """Internal-error counts by closed code since start (H6-min)."""
+
+        with _RUNTIME_LOCK:
+            runtime = _RUNTIMES.get(self._runtime_id) or _STOPPED_RUNTIMES.get(
+                self._runtime_id
+            )
+            if runtime is None:
+                return {}
+            return runtime.server.internal_errors.snapshot()
+
     @classmethod
     def start(
         cls,
@@ -1427,6 +1510,7 @@ class RunningLocalWebService:
         thread: threading.Thread | None = None
         watchdog_stop: threading.Event | None = None
         watchdog_thread: threading.Thread | None = None
+        runtime_id: str | None = None
         journal = ExitStack()
         try:
             journal.enter_context(store.journal_anchor())
@@ -1489,6 +1573,7 @@ class RunningLocalWebService:
                 _Handler.do_GET,
                 _Handler.do_POST,
                 _Handler._dispatch,
+                _Handler._serve_request,
                 _Handler._longitudinal,
                 _Handler._json,
                 _Handler._public_json,
@@ -1578,6 +1663,7 @@ class RunningLocalWebService:
             )
             thread.start()
             watchdog_stop = threading.Event()
+            new_runtime_id = secrets.token_hex(32)
 
             def watch_security_boundary() -> None:
                 while not watchdog_stop.wait(0.05):
@@ -1586,6 +1672,9 @@ class RunningLocalWebService:
                     except LocalWebServerError:
                         server.security_failed.set()
                     if server.security_failed.is_set():
+                        # H6: retire first, so no link is issued for a
+                        # listener that is shutting down.
+                        _retire_runtime(new_runtime_id)
                         server.shutdown()
                         server.server_close()
                         return
@@ -1595,8 +1684,6 @@ class RunningLocalWebService:
                 name="traceback-local-web-security",
                 daemon=True,
             )
-            watchdog_thread.start()
-            runtime_id = secrets.token_hex(32)
             runtime = _RunningLocalWebRuntime(
                 server=server,
                 thread=thread,
@@ -1612,7 +1699,10 @@ class RunningLocalWebService:
                 journal=journal,
             )
             with _RUNTIME_LOCK:
-                _RUNTIMES[runtime_id] = runtime
+                _RUNTIMES[new_runtime_id] = runtime
+            runtime_id = new_runtime_id
+            # Started only once registered, so a trip always finds the runtime.
+            watchdog_thread.start()
             launch_url = (
                 f"{config.allowed_origins[0]}/"
                 f"{boundary.broker.launch_fragment(bootstrap_code)}"
@@ -1626,6 +1716,10 @@ class RunningLocalWebService:
                 _launch_url=launch_url,
             )
         except BaseException:
+            if runtime_id is not None:
+                with _RUNTIME_LOCK:
+                    _RUNTIMES.pop(runtime_id, None)
+                    _STOPPED_RUNTIMES.pop(runtime_id, None)
             try:
                 if watchdog_stop is not None:
                     watchdog_stop.set()
@@ -1668,8 +1762,8 @@ class RunningLocalWebService:
     def issue_bootstrap(self) -> str:
         with _RUNTIME_LOCK:
             runtime = _RUNTIMES.get(self._runtime_id)
-            if runtime is None:
-                raise LocalWebServerError("local web service is closed")
+            if runtime is None or runtime.server.security_failed.is_set():
+                raise LocalWebServerStopped("local web service is stopped")
             return runtime.boundary.issue_bootstrap()
 
     def issue_reader_launch_url(self, grant_selector: str) -> str:
@@ -1689,8 +1783,9 @@ class RunningLocalWebService:
 
         with _RUNTIME_LOCK:
             runtime = _RUNTIMES.get(self._runtime_id)
-            if runtime is None:
-                raise LocalWebServerError("local web service is closed")
+            # A tripped watchdog may not have retired the runtime yet.
+            if runtime is None or runtime.server.security_failed.is_set():
+                raise LocalWebServerStopped("local web service is stopped")
             if runtime.reader is None:
                 raise LocalWebServerError("reader authorization is not configured")
             # A reader bootstrap bound to this link's credential digest: the
@@ -1704,6 +1799,8 @@ class RunningLocalWebService:
     def close(self) -> None:
         with _RUNTIME_LOCK:
             runtime = _RUNTIMES.pop(self._runtime_id, None)
+            stopped = _STOPPED_RUNTIMES.pop(self._runtime_id, None)
+            runtime = runtime or stopped
         if runtime is None:
             return
         runtime.watchdog_stop.set()
@@ -1748,4 +1845,9 @@ class RunningLocalWebService:
         self.close()
 
 
-__all__ = ["LocalWebServerError", "RunningLocalWebService"]
+__all__ = [
+    "INTERNAL_ERROR_CODE",
+    "LocalWebServerError",
+    "LocalWebServerStopped",
+    "RunningLocalWebService",
+]

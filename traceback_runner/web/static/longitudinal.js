@@ -49,6 +49,7 @@
     integrity_failure: ["A local store failed an integrity check.", "Verify local store integrity with the operator."],
     storage_failure: ["Local storage is unavailable.", "Check local storage, then retry."],
     save_unavailable: ["Save is unavailable.", "The saved-comparison registry is absent, unhealthy or full."],
+    "TBX-INTERNAL": ["An internal error occurred; nothing was changed.", "Retry; if it repeats, report it to the operator."],
     "TBX-AUTH-001": ["The reader session ended (idle for 20 minutes, logged out, or its grant changed).", "Ask the operator for a new reader launch link."],
   };
   const REMEDIATIONS = {

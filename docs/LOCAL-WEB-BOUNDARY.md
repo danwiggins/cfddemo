@@ -46,6 +46,19 @@ job database. The preserved Streamlit demo is not this service.
   under the broker's single lock.
 - The adapter emits no access log, rejects forwarded headers, and performs
   authorization before durable-store lookup.
+- An exception no route maps is caught at the request dispatcher (security
+  spec H6-min): it answers the bounded `500 {"error":{"code":"TBX-INTERNAL"}}`
+  (or, if a response had started, closes the connection) and increments an
+  in-memory per-code counter (`RunningLocalWebService.internal_errors`) that
+  stores no body, path, query or exception text. A D08 programming error
+  (`AttributeError`, `TypeError`, `NameError`, `AssertionError`, `KeyError`,
+  `IndexError`, `RecursionError`) reaches the longitudinal routes as the same
+  `TBX-INTERNAL`; store errors keep their own codes.
+- When the security watchdog shuts the listener down, the runtime stops being
+  a running runtime: it issues no more bootstrap codes or reader links
+  (`LocalWebServerStopped`), and `traceback reader launch` prints a stopped
+  message and exits 3 instead of a dead link. The startup anchor and lease
+  stay held until `close()`.
 
 ## Threat boundary
 
