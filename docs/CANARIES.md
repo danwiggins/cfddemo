@@ -50,7 +50,9 @@ Then it compares against the baseline:
 - **Fail** when no baseline exists (unless recording one).
 
 Exit codes: `0` pass (warnings allowed), `1` fail, `2` refused (bad usage, an
-existing baseline without `--force`, a `--work-dir` under an input's directory).
+existing baseline without `--force`, a `--work-dir` under an input's directory,
+or a baseline being recorded, a log directory or a `--work-dir` inside any Git
+work tree).
 
 ## Record a baseline
 
@@ -150,3 +152,10 @@ committed or uploaded. Results identify inputs by size and SHA-256 only, and
 console output replaces input paths with `<FASTA>` / `<BAM>`. The rendered
 launchd plist does hold the absolute input paths; it stays in
 `~/Library/LaunchAgents`. Only synthetic numbers are committed.
+
+The canary and the installer refuse to write a baseline, logs, temporary roots
+or the plist inside any Git work tree (paths are fully resolved, so symlinks and
+`..` do not get around it).
+
+On the 2.1 GB development BAM one pass takes about 3-5 minutes (input hashing,
+register, preflight, run); the scheduled `--repeat 2` run about twice that.
