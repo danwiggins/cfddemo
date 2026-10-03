@@ -1,0 +1,43 @@
+"""Run scripts/golden_path_acceptance.sh (Milestone 1, DoD steps 1-4) on generated inputs."""
+
+from __future__ import annotations
+
+import os
+import shlex
+import shutil
+import subprocess
+import sys
+from pathlib import Path
+
+import pytest
+
+SCRIPT = Path(__file__).resolve().parents[1] / "scripts" / "golden_path_acceptance.sh"
+
+
+@pytest.mark.skipif(shutil.which("bash") is None or shutil.which("perl") is None,
+                    reason="the acceptance script needs bash and perl")
+def test_golden_path_milestone_1_acceptance(tmp_path: Path) -> None:
+    python = shlex.quote(sys.executable)
+    environment = {
+        **os.environ,
+        "TRACEBACK": f"{python} -m traceback_runner",
+        "PYTHON": python,
+        "TMPDIR": str(tmp_path),
+    }
+    environment.pop("FASTA", None)
+    environment.pop("BAM", None)
+    environment.pop("KEEP_ROOT", None)
+    completed = subprocess.run(
+        ["bash", str(SCRIPT)],
+        cwd=SCRIPT.parents[1],
+        env=environment,
+        capture_output=True,
+        text=True,
+        timeout=300,
+        check=False,
+    )
+    assert completed.returncode == 0, completed.stdout + completed.stderr
+    assert "M1 ACCEPTANCE PASSED" in completed.stdout
+    assert "preflight outcome: partial" in completed.stdout
+    # The script removes its temporary root.
+    assert not any(tmp_path.glob("traceback-golden.*"))

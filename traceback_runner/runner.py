@@ -1,7 +1,10 @@
-"""Synthetic-only durable local stage runner.
+"""Durable local stage runner for synthetic and unqualified local workflows.
 
-The in-process callback boundary is a development harness, not a container,
-zero-egress, hardware, genomic-data, or scientific qualification boundary.
+Execution is off unless the caller enables exactly one origin: synthetic
+callbacks (``synthetic_enabled``) or unqualified local callbacks
+(``local_unqualified_enabled``).  The in-process callback boundary is a
+development harness, not a container, zero-egress, hardware, genomic-data, or
+scientific qualification boundary.
 """
 
 from __future__ import annotations
@@ -36,7 +39,14 @@ class RunnerError(RuntimeError):
 
 
 class SyntheticExecutionDisabled(RunnerError):
-    """In-process synthetic callbacks were not explicitly enabled."""
+    """In-process callbacks were not explicitly enabled for any origin."""
+
+
+class TerminalStageError(RunnerError):
+    """A stage refused its input for a reason a retry cannot change.
+
+    The attempt fails terminally (``terminal_failure``), not retryably.
+    """
 
 
 class StageDefinitionError(RunnerError):
@@ -125,14 +135,20 @@ class Runner:
         clock: Callable[[], float] = time.time,
         lease_seconds: float = 30.0,
         synthetic_enabled: bool = False,
+        local_unqualified_enabled: bool = False,
         fault_injector: Callable[[str], None] | None = None,
     ) -> None:
         if lease_seconds <= 0:
             raise ValueError("lease_seconds must be positive")
+        if synthetic_enabled and local_unqualified_enabled:
+            raise ValueError("a runner executes one data origin, never both")
         self.root = root
         self.clock = clock
         self.lease_seconds = lease_seconds
         self.synthetic_enabled = synthetic_enabled
+        self.local_unqualified_enabled = local_unqualified_enabled
+        # Audit transition text names the enabled origin; synthetic text is unchanged.
+        self._origin_label = "local unqualified" if local_unqualified_enabled else "synthetic"
         self.fault_injector = fault_injector
         self.snapshots_dir = root / "snapshots"
         self.attempts_dir = root / "attempts"
@@ -268,10 +284,10 @@ class Runner:
     def execute(
         self, job_id: str, stages: Sequence[StageSpec], *, worker_id: str
     ) -> JobRecord:
-        if not self.synthetic_enabled:
+        if not (self.synthetic_enabled or self.local_unqualified_enabled):
             raise SyntheticExecutionDisabled(
-                "synthetic in-process stages require synthetic_enabled=True; "
-                "real-data execution is not enabled"
+                "in-process stages require synthetic_enabled=True or "
+                "local_unqualified_enabled=True; real-data execution is not enabled"
             )
         if not stages:
             raise StageDefinitionError("at least one stage is required")
@@ -281,7 +297,9 @@ class Runner:
         self.recover(job_id)
         record = self.status(job_id)
         if record.state in {JobState.READY, JobState.QUEUED}:
-            record = self.store.transition(job_id, JobState.RUNNING, "synthetic execution started")
+            record = self.store.transition(
+                job_id, JobState.RUNNING, f"{self._origin_label} execution started"
+            )
         if record.state != JobState.RUNNING:
             raise RunnerError(f"job cannot execute from state {record.state.value}")
         try:
@@ -387,7 +405,7 @@ class Runner:
                 )
             except InjectedCrash:
                 raise
-            except SnapshotViolation as exc:
+            except (SnapshotViolation, TerminalStageError) as exc:
                 self.store.fail_attempt(current_lease, str(exc), retryable=False)
                 raise
             except Exception as exc:
@@ -399,8 +417,10 @@ class Runner:
                 return self.status(job_id)
 
         self.store.transition(job_id, JobState.VALIDATING_OUTPUT, "all stage receipts verified")
-        self.store.transition(job_id, JobState.SIGNING, "synthetic completion receipt stage passed")
-        self.store.transition(job_id, JobState.COMPLETE, "synthetic workflow complete")
+        self.store.transition(
+            job_id, JobState.SIGNING, f"{self._origin_label} completion receipt stage passed"
+        )
+        self.store.transition(job_id, JobState.COMPLETE, f"{self._origin_label} workflow complete")
         return self.status(job_id)
 
     def recover(self, job_id: str) -> RecoveryReport:
