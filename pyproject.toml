@@ -24,11 +24,16 @@ traceback = "traceback_runner.cli:main"
 [dependency-groups]
 dev = [
     "pytest==8.4.1",
+    "pytest-timeout==2.4.0",
+    "pytest-xdist==3.8.0",
 ]
 
 [tool.pytest.ini_options]
 pythonpath = ["."]
 testpaths = ["tests"]
+markers = [
+    "slow: long-running live harness tests; excluded from the default CI lane (run with -m slow)",
+]
 
 [tool.hatch.build.targets.wheel]
 packages = ["bedrock_chat", "evidence_inspector", "evals", "traceback_runner"]

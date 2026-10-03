@@ -34,7 +34,6 @@ from evidence_inspector.method_registry import MethodReference, Sha256
 from traceback_runner.bundles import BundleManifest, VerifiedBundle
 from traceback_runner.contracts import (
     FragmentMeasurement,
-    ResultBundleManifest,
     ResultBundleManifestV2,
     canonical_json_bytes,
 )
