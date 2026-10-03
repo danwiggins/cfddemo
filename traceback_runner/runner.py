@@ -132,12 +132,13 @@ class _LeaseKeeper:
 
     The worker thread does long synchronous work under the lease that no stage
     callback covers: re-hashing the sealed snapshot before and after the
-    callback, hashing outputs, sealing and publishing.  The keeper renews the
-    lease throughout.  It stays fail-closed: the first failed renewal (expired
-    or superseded fence, or any store error) stops it for good and is recorded;
-    it never re-acquires.  The worker checks :meth:`raise_if_lost` at its own
-    boundaries, and the explicit fenced heartbeat before publication and the
-    fenced commit remain the authority either way.
+    callback, hashing outputs and sealing the receipt.  The keeper renews the
+    lease until the worker's fenced heartbeat just before publication.  It
+    stays fail-closed: the first failed renewal (expired or superseded fence,
+    or any store error) stops it for good and is recorded; it never
+    re-acquires.  The worker checks :meth:`raise_if_lost` at its own
+    boundaries and, after joining the keeper, before publishing; the fenced
+    heartbeat and fenced commit remain the authority either way.
     """
 
     def __init__(self, renew: Callable[[], None], interval: float) -> None:
@@ -454,22 +455,22 @@ class Runner:
                 self._seal_attempt(attempt_dir)
                 self._fault("after_receipt")
                 heartbeat()
+                # The fenced heartbeat just renewed a full lease and only short
+                # steps remain, so stop the keeper here: joined, its record is
+                # final, and any renewal failure since the last check (even one
+                # this heartbeat outlived) stops the worker before it publishes.
+                # As before this keeper existed, a stall past the lease from
+                # here on is left to the fenced commit.
+                keeper.stop()
+                keeper.raise_if_lost()
                 publication = self._publication_path(receipt)
                 publication.parent.mkdir(parents=True, exist_ok=True)
                 if publication.exists():
                     raise StoreError("publication identity already exists")
-                # Any renewal failure since the last check (even one a later
-                # foreground heartbeat outlived) stops the worker before it
-                # publishes.  A stall after this check can still publish a
-                # token-named directory; the fenced commit rejects it and
-                # recovery quarantines it (as before this keeper existed).
-                keeper.raise_if_lost()
                 os.replace(attempt_dir, publication)
                 publication.chmod(0o555)
                 self._fsync_directory(publication.parent)
                 self._fault("after_publication")
-                # The fenced commit ends the lease; renewing past it only fails.
-                keeper.stop()
                 self.store.commit_attempt(
                     current_lease,
                     str(publication.relative_to(self.root)),
