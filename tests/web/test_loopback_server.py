@@ -460,8 +460,11 @@ def test_partial_request_flood_has_bounded_workers_and_no_tracebacks(
     ) as service:
         config = service.config
         for _ in range(server_module.MAX_HTTP_WORKERS * 3):
+            # Linux drops a SYN while the listen backlog is full and resends it
+            # after a 1 s initial RTO, so a 1 s connect timeout races the server
+            # draining its backlog; 5 s allows one retransmit.
             client = socket.create_connection(
-                (config.bind_host, config.port), timeout=1
+                (config.bind_host, config.port), timeout=5
             )
             client.sendall(b"GET / HTTP/1.1\r\nHost: ")
             clients.append(client)
