@@ -12,6 +12,7 @@ from __future__ import annotations
 import hashlib
 import fcntl
 import os
+import threading
 import time
 from dataclasses import dataclass, field
 from contextlib import contextmanager
@@ -31,7 +32,14 @@ from .receipts import (
 )
 from .snapshots import InputSnapshot, SnapshotViolation, capture_snapshot, verify_snapshot
 from .serialization import canonical_json_bytes
-from .store import AttemptLease, JobStore, StoredJobRecord, StoreError, LeaseBusy
+from .store import (
+    AttemptLease,
+    JobStore,
+    LeaseBusy,
+    StaleLease,
+    StoredJobRecord,
+    StoreError,
+)
 
 
 class RunnerError(RuntimeError):
@@ -119,6 +127,50 @@ class StageSpec:
         ).hexdigest()
 
 
+class _LeaseKeeper:
+    """Renew one attempt's lease from a background thread while it is held.
+
+    The worker thread does long synchronous work under the lease that no stage
+    callback covers: re-hashing the sealed snapshot before and after the
+    callback, hashing outputs, sealing and publishing.  The keeper renews the
+    lease throughout.  It stays fail-closed: the first failed renewal (expired
+    or superseded fence, or any store error) stops it for good and is recorded;
+    it never re-acquires.  The worker checks :meth:`raise_if_lost` at its own
+    boundaries, and the explicit fenced heartbeat before publication and the
+    fenced commit remain the authority either way.
+    """
+
+    def __init__(self, renew: Callable[[], None], interval: float) -> None:
+        self._renew = renew
+        self._interval = interval
+        self._stop = threading.Event()
+        self._lost: BaseException | None = None
+        self._thread = threading.Thread(
+            target=self._run, name="traceback-lease-keeper", daemon=True
+        )
+        self._thread.start()
+
+    def stop(self) -> None:
+        self._stop.set()
+        self._thread.join()
+
+    def _run(self) -> None:
+        while not self._stop.wait(self._interval):
+            try:
+                self._renew()
+            except BaseException as exc:  # recorded; the worker raises it
+                self._lost = exc
+                return
+
+    def raise_if_lost(self) -> None:
+        lost = self._lost
+        if lost is None:
+            return
+        if isinstance(lost, StaleLease):
+            raise StaleLease(str(lost)) from lost
+        raise StaleLease(f"lease renewal failed: {lost}") from lost
+
+
 @dataclass(frozen=True)
 class RecoveryReport:
     adopted: tuple[str, ...]
@@ -134,17 +186,23 @@ class Runner:
         *,
         clock: Callable[[], float] = time.time,
         lease_seconds: float = 30.0,
+        heartbeat_seconds: float | None = None,
         synthetic_enabled: bool = False,
         local_unqualified_enabled: bool = False,
         fault_injector: Callable[[str], None] | None = None,
     ) -> None:
         if lease_seconds <= 0:
             raise ValueError("lease_seconds must be positive")
+        if heartbeat_seconds is None:
+            heartbeat_seconds = lease_seconds / 3
+        if not 0 < heartbeat_seconds < lease_seconds:
+            raise ValueError("heartbeat_seconds must be positive and below lease_seconds")
         if synthetic_enabled and local_unqualified_enabled:
             raise ValueError("a runner executes one data origin, never both")
         self.root = root
         self.clock = clock
         self.lease_seconds = lease_seconds
+        self.heartbeat_seconds = heartbeat_seconds
         self.synthetic_enabled = synthetic_enabled
         self.local_unqualified_enabled = local_unqualified_enabled
         # Audit transition text names the enabled origin; synthetic text is unchanged.
@@ -345,10 +403,12 @@ class Runner:
             attempt_dir = self.attempts_dir / job_id / f"{stage.name.value}-{lease.token}"
             attempt_dir.mkdir(parents=True, mode=0o700)
             current_lease = lease
+            lease_lock = threading.Lock()
 
             def heartbeat() -> None:
                 nonlocal current_lease
-                current_lease = self.store.heartbeat(current_lease, self.lease_seconds)
+                with lease_lock:
+                    current_lease = self.store.heartbeat(current_lease, self.lease_seconds)
 
             context = StageContext(
                 job_id=job_id,
@@ -360,10 +420,18 @@ class Runner:
                 attempt_dir=attempt_dir,
                 heartbeat=heartbeat,
             )
+            # Renew the lease through every long step the worker owns, not only
+            # inside stage callbacks: re-hashing a 2 GB sealed snapshot alone can
+            # outlast the lease.  Stopped in ``finally``, before any crash or
+            # failure leaves this frame, so a dead worker never keeps a lease.
+            keeper = _LeaseKeeper(heartbeat, self.heartbeat_seconds)
             try:
                 self._verify_job_snapshot(job_id)
+                keeper.raise_if_lost()
                 result = stage.callback(context)
+                keeper.raise_if_lost()
                 self._verify_job_snapshot(job_id)
+                keeper.raise_if_lost()
                 if not result.postconditions or not all(result.postconditions.values()):
                     raise OutputCorrupt("stage postconditions did not all pass")
                 outputs = hash_outputs(attempt_dir, result.outputs)
@@ -385,9 +453,7 @@ class Runner:
                 write_receipt(attempt_dir, receipt)
                 self._seal_attempt(attempt_dir)
                 self._fault("after_receipt")
-                current_lease = self.store.heartbeat(
-                    current_lease, self.lease_seconds
-                )
+                heartbeat()
                 publication = self._publication_path(receipt)
                 publication.parent.mkdir(parents=True, exist_ok=True)
                 if publication.exists():
@@ -396,6 +462,8 @@ class Runner:
                 publication.chmod(0o555)
                 self._fsync_directory(publication.parent)
                 self._fault("after_publication")
+                # The fenced commit ends the lease; renewing past it only fails.
+                keeper.stop()
                 self.store.commit_attempt(
                     current_lease,
                     str(publication.relative_to(self.root)),
@@ -422,6 +490,8 @@ class Runner:
             except Exception as exc:
                 self.store.fail_attempt(current_lease, str(exc), retryable=True)
                 raise
+            finally:
+                keeper.stop()
 
             if self.status(job_id).state == JobState.PAUSE_REQUESTED:
                 self.store.transition(job_id, JobState.PAUSED, "paused at stage boundary")

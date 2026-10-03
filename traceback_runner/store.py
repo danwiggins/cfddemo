@@ -6,6 +6,7 @@ import json
 import os
 import sqlite3
 import stat
+import threading
 import time
 import uuid
 from collections.abc import Callable, Iterator
@@ -85,6 +86,9 @@ class JobStore:
         self._directory_identity = (parent.st_dev, parent.st_ino)
         self._database_identity: tuple[int, int] | None = None
         self._sidecar_identities: dict[Path, tuple[int, int]] = {}
+        # The runner's lease keeper thread uses this store concurrently with
+        # the worker thread; the pinned-identity bookkeeping is not atomic.
+        self._storage_lock = threading.RLock()
         self._secure_storage()
         self._initialize()
         self._secure_storage()
@@ -92,6 +96,10 @@ class JobStore:
         self._database_identity = (database.st_dev, database.st_ino)
 
     def _secure_storage(self) -> None:
+        with self._storage_lock:
+            self._secure_storage_locked()
+
+    def _secure_storage_locked(self) -> None:
         parent = self.path.parent.lstat()
         if (
             not stat.S_ISDIR(parent.st_mode)

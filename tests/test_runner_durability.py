@@ -6,9 +6,10 @@ import json
 import os
 import sqlite3
 import stat
+import threading
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
-from threading import Event
+from threading import Condition, Event
 
 import pytest
 
@@ -819,3 +820,145 @@ def test_callback_snapshot_mutation_cannot_publish(tmp_path: Path) -> None:
         )
     assert runner.status(job.job_id).state == JobState.TERMINAL_FAILURE
     assert not (runner.artifacts_dir / job.job_id).exists()
+
+
+class _RenewalCounter:
+    """Wrap ``JobStore.heartbeat`` to count renewals and failed renewals."""
+
+    def __init__(self, store: JobStore) -> None:
+        self.condition = Condition()
+        self.renewed = 0
+        self.failed = 0
+        real = store.heartbeat
+
+        def heartbeat(lease, seconds):
+            try:
+                result = real(lease, seconds)
+            except BaseException:
+                with self.condition:
+                    self.failed += 1
+                    self.condition.notify_all()
+                raise
+            with self.condition:
+                self.renewed += 1
+                self.condition.notify_all()
+            return result
+
+        store.heartbeat = heartbeat  # type: ignore[method-assign]
+
+    def wait_for(self, predicate, timeout: float = 10.0) -> bool:
+        with self.condition:
+            return self.condition.wait_for(predicate, timeout)
+
+
+def _keeper_threads() -> list[threading.Thread]:
+    return [t for t in threading.enumerate() if t.name == "traceback-lease-keeper"]
+
+
+def test_slow_snapshot_verification_keeps_the_lease_alive(tmp_path: Path) -> None:
+    # The real-data failure: re-hashing a 2 GB sealed snapshot before and
+    # after a stage outlasted the 30 s lease, because only stage callbacks
+    # renewed it.  Here each verification spans three lease lengths on the
+    # store clock and the callback never heartbeats.
+    clock = FakeClock()
+    lease = 5.0
+    runner = Runner(
+        tmp_path / "state",
+        clock=clock,
+        lease_seconds=lease,
+        heartbeat_seconds=0.01,
+        synthetic_enabled=True,
+    )
+    source, files = _source(tmp_path)
+    job = runner.submit(_request(source, files), source, files)
+    counter = _RenewalCounter(runner.store)
+    real_verify = runner._verify_job_snapshot
+    slow_verifications = []
+
+    def slow_verify(job_id: str) -> None:
+        real_verify(job_id)
+        if runner.store.get(job_id).lease_owner is None:
+            return  # execute()'s check before any lease; nothing to keep alive
+        slow_verifications.append(job_id)
+        for _ in range(6):
+            seen = counter.renewed
+            clock.now += lease / 2
+            # Two renewals after the advance: the second started after it.
+            assert counter.wait_for(lambda: counter.renewed >= seen + 2 or counter.failed)
+            assert counter.failed == 0
+
+    runner._verify_job_snapshot = slow_verify  # type: ignore[method-assign]
+
+    record = runner.execute(job.job_id, [_stage()], worker_id="worker")
+
+    assert record.state == JobState.COMPLETE
+    assert len(slow_verifications) == 2  # before and after the callback
+    assert counter.failed == 0
+    assert not _keeper_threads()
+
+
+def test_superseded_lease_still_stops_the_worker_before_publication(
+    tmp_path: Path,
+) -> None:
+    clock = FakeClock()
+    lease = 5.0
+    runner = Runner(
+        tmp_path / "state",
+        clock=clock,
+        lease_seconds=lease,
+        heartbeat_seconds=0.01,
+        synthetic_enabled=True,
+    )
+    source, files = _source(tmp_path)
+    job = runner.submit(_request(source, files), source, files)
+    counter = _RenewalCounter(runner.store)
+    takeover = JobStore(runner.store.path, clock=clock)
+    real_verify = runner._verify_job_snapshot
+    verified_under_lease = []
+    second = []
+
+    def verify(job_id: str) -> None:
+        if runner.store.get(job_id).lease_owner is not None:
+            verified_under_lease.append(job_id)
+        real_verify(job_id)
+
+    def stalled_then_superseded(context: object) -> StageResult:
+        # The worker stalls past its lease; a second runner takes the job over.
+        clock.now += lease + 1
+        second.append(
+            takeover.acquire_lease(job.job_id, "measure", "a" * 64, "worker-b", lease)
+        )
+        # The keeper's next renewal meets the superseded fence and stops.
+        assert counter.wait_for(lambda: counter.failed >= 1)
+        (context.attempt_dir / "result.json").write_text("{}")  # type: ignore[attr-defined]
+        return StageResult({"result": "result.json"})
+
+    runner._verify_job_snapshot = verify  # type: ignore[method-assign]
+
+    with pytest.raises(StaleLease):
+        runner.execute(
+            job.job_id,
+            [StageSpec("measure", "v1", stalled_then_superseded)],
+            worker_id="worker-a",
+        )
+
+    # The first worker stopped at the callback boundary: no post-callback
+    # verification, no publication, and the second runner keeps the lease.
+    assert len(verified_under_lease) == 1
+    assert not (runner.artifacts_dir / job.job_id).exists()
+    current = takeover.get(job.job_id)
+    assert current.lease_owner == "worker-b"
+    assert current.lease_token == second[0].token
+    assert not _keeper_threads()
+
+
+def test_heartbeat_interval_must_be_shorter_than_the_lease(tmp_path: Path) -> None:
+    for name, interval in (("equal", 1), ("zero", 0)):
+        with pytest.raises(ValueError, match="heartbeat_seconds"):
+            Runner(
+                tmp_path / name,
+                lease_seconds=1,
+                heartbeat_seconds=interval,
+                synthetic_enabled=True,
+            )
+    assert Runner(tmp_path / "default", synthetic_enabled=True).heartbeat_seconds == 10.0
