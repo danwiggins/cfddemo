@@ -608,7 +608,15 @@ def main(argv: list[str] | None = None) -> int:
             failures.extend(f"inputs changed since the baseline: {line}" for line in input_diff)
         drift = diff_metrics(baseline.get("metrics"), metrics)
         baseline_report["diff"] = drift
-        failures.extend(f"drift from baseline: {line}" for line in drift)
+        shown = drift
+        if runs[0]["failures"]:
+            # A failed step leaves later metrics unset; one line says so instead
+            # of one "<missing>" line per baseline field.
+            shown = [line for line in drift if not line.endswith(f"got {json.dumps(_MISSING)}")]
+            if len(shown) < len(drift):
+                shown.append(f"{len(drift) - len(shown)} baseline fields not measured "
+                             "(the run failed first)")
+        failures.extend(f"drift from baseline: {line}" for line in shown)
         for run_index, run in enumerate(runs, start=1):
             warnings.extend(
                 f"run {run_index}: {line}"

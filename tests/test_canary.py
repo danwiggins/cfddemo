@@ -515,3 +515,37 @@ def test_status_reads_the_installed_log_directory(tmp_path: Path) -> None:
     )
     assert status.returncode == 0, status.stderr
     assert "last result: PASS" in status.stdout
+
+
+def test_failed_run_collapses_missing_baseline_fields(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    module = _load_canary_module()
+    fasta = tmp_path / "in" / "r.fa"
+    bam = tmp_path / "in" / "s.bam"
+    fasta.parent.mkdir()
+    fasta.write_text(">c\nACGT\n", encoding="ascii")
+    bam.write_bytes(b"BAM")
+    baseline = tmp_path / "b.json"
+    baseline.write_text(json.dumps({
+        "schema_version": module.BASELINE_SCHEMA, "inputs": None, "wall_seconds": None,
+        "metrics": {"exit_codes": {"run": 0, "verify": 0},
+                    "measurement": {"records_scanned": 10, "eligible_alignments": 8}},
+    }), encoding="utf-8")
+    monkeypatch.setattr(module, "run_once", lambda *_: {
+        "metrics": {"exit_codes": {"run": 6}}, "wall_seconds": {},
+        "failures": ["step run exited 6"],
+    })
+    work = tmp_path / "work"
+    work.mkdir()
+    code = module.main([
+        "--fasta", str(fasta), "--bam", str(bam), "--baseline", str(baseline),
+        "--log-dir", str(tmp_path / "logs"), "--work-dir", str(work), "--no-notify",
+    ])
+    assert code == 1
+    failures = _latest(tmp_path / "logs")["failures"]
+    assert failures == [
+        "run 1: step run exited 6",
+        "drift from baseline: exit_codes.run: expected 0, got 6",
+        "drift from baseline: 3 baseline fields not measured (the run failed first)",
+    ]
