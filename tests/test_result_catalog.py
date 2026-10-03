@@ -630,7 +630,7 @@ def _inode_and_ctime(metadata: os.stat_result) -> tuple[int, int, int]:
 
 
 def test_failed_publisher_never_unlinks_an_object_adopted_concurrently(
-    tmp_path: Path,
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     import_root = tmp_path / "imports"
     import_root.mkdir()
@@ -676,8 +676,18 @@ def test_failed_publisher_never_unlinks_an_object_adopted_concurrently(
         if not entry.name.startswith(".")
     }
     assert len(published) == 1
+    adopter_at_gate = threading.Event()
+    original_gate = catalog_module._acquire_content_gate
+
+    def observed_gate(inode, current, catalog, exclusive) -> None:
+        if catalog is second:
+            adopter_at_gate.set()
+        original_gate(inode, current, catalog, exclusive)
+
+    monkeypatch.setattr(catalog_module, "_acquire_content_gate", observed_gate)
     adopter = threading.Thread(target=adopting_import)
     adopter.start()
+    assert adopter_at_gate.wait(timeout=30)
     adopter.join(timeout=0.2)
     assert adopter.is_alive() and not adopted
     controller.release()

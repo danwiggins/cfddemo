@@ -395,11 +395,23 @@ def test_launch_opens_the_runner_database_demo_writes(
     job_id = json.loads(capsys.readouterr().out)["data"]["job_id"]
     selector = operator.issue()
     opened: list[JobStore] = []
-    original_start = RunningLocalWebService.start
+
+    class _Service:
+        # Stands in for the loopback server: this test is about the store
+        # launch opens, not HTTP (and must not contend for the web lock).
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *exc_info) -> None:
+            return None
+
+        def issue_reader_launch_url(self, grant: str) -> str:
+            return "http://127.0.0.1:1/#stub"
 
     def recording_start(*, store, **kwargs):
         opened.append(store)
-        return original_start(store=store, **kwargs)
+        assert kwargs.get("explorer") is None
+        return _Service()
 
     monkeypatch.setattr(RunningLocalWebService, "start", recording_start)
     args = reader_cli._parser().parse_args(
