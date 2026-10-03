@@ -1,16 +1,20 @@
 #!/usr/bin/env bash
-# Golden-path acceptance run, Milestone 1 (docs/GOLDEN-PATH-MVP-SLICE.md,
-# "Definition of done", steps 1-4), from a fresh mktemp root:
+# Golden-path acceptance run (docs/GOLDEN-PATH-MVP-SLICE.md, "Definition of
+# done", steps 1-5), from a fresh mktemp root:
 #
 #   1. traceback reference register --fasta F --id ref --root R
 #   2. traceback preflight BAM --reference ref --root R   (exit 0, not blocked)
 #   3. traceback run BAM --reference ref --root R         (exit 0)
 #   4. traceback verify R/records/<record> --trust-store R/trust/development-result-trust.json
 #      (exit 0), and R/records/<record>/report.html is the local report.
+#   5. traceback catalog import R/records/<record> --root R    (exit 0), then a
+#      library-level check: IntegratedExplorerSource over R's catalog and the
+#      persisted explorer artifacts lists the record as development_unqualified
+#      and serves its detail.
 #
-# TODO(Milestone 2): steps 5-7 (traceback catalog import, traceback serve, and an
-# operator-session GET of /api/v1/explorer/catalog?limit=10 that lists the record
-# with qualification_state="development_unqualified") land with B5a/B5b/B6.
+# TODO(Milestone 2, B6): steps 6-7 (traceback serve --root R in the background,
+# and an operator-session GET of /api/v1/explorer/catalog?limit=10 that lists the
+# record with qualification_state="development_unqualified").
 #
 # Inputs:
 #   FASTA, BAM   optional; a FASTA with .fai and a coordinate-sorted BAM with .bai.
@@ -132,6 +136,44 @@ VERIFIED="$(json_get "$OUT/4.json" data.verified)"
 step 4b "verify --root RECORD_ID" "$OUT/4b.json" -- \
   "${TRACEBACK_CMD[@]}" verify "$RECORD_ID" --root "$R" --json
 
+step 5 "catalog import" "$OUT/5.json" -- \
+  "${TRACEBACK_CMD[@]}" catalog import "$RECORD" --root "$R" --json
+QUALIFICATION="$(json_get "$OUT/5.json" data.qualification_state)"
+[ "$QUALIFICATION" = "development_unqualified" ] \
+  || fail "catalog import did not record development_unqualified"
+[ "$(json_get "$OUT/5.json" data.current_provider_eligible)" = "false" ] \
+  || fail "catalog import made the record provider-eligible"
+RESULT_ID="$(json_get "$OUT/5.json" data.result_id)"
+step 5b "catalog import (again)" "$OUT/5b.json" -- \
+  "${TRACEBACK_CMD[@]}" catalog import "$RECORD" --root "$R" --json
+[ "$(json_get "$OUT/5b.json" data.result_id)" = "$RESULT_ID" ] \
+  || fail "re-import changed the result ID"
+
+# Library-level explorer check (step 7's assertion without the HTTP server, B6).
+"${PYTHON_CMD[@]}" - "$R" "$RESULT_ID" >"$OUT/explorer.json" <<'PY' \
+  || fail "the explorer over ROOT's catalog does not list the record"
+import json, sys
+from pathlib import Path
+from evidence_inspector.result_catalog import CatalogQuery
+from traceback_runner.local_catalog import open_local_explorer
+
+root, result_id = Path(sys.argv[1]), sys.argv[2]
+with open_local_explorer(root) as explorer:
+    assert explorer is not None and explorer.skipped == 0
+    page = explorer.source.query(CatalogQuery(limit=10))
+    rows = {item.ref.result_id: item for item in page.results}
+    item = rows[result_id]
+    assert item.ref.qualification_state.value == "development_unqualified"
+    assert item.has_registered_view
+    document = explorer.source.get(result_id)
+    print(json.dumps({
+        "listed": len(rows),
+        "qualification_state": item.ref.qualification_state.value,
+        "detail_rows": document.models.result_view.visible_count,
+    }, sort_keys=True))
+PY
+EXPLORER_LISTED="$(json_get "$OUT/explorer.json" listed)"
+
 REPORT="$RECORD/report.html"
 [ -f "$REPORT" ] || fail "record has no report.html"
 grep -qF "Unqualified. Local development record. Not for clinical use. Development signing key only." \
@@ -142,16 +184,18 @@ if grep -qi "synthetic" "$REPORT"; then fail "report.html mentions synthetic"; f
 "${TRACEBACK_CMD[@]}" logs "$JOB_ID" --root "$R" --json >"$OUT/logs.json"
 "${TRACEBACK_CMD[@]}" status "$JOB_ID" --root "$R" --json >"$OUT/status.json"
 for locator in "$FASTA_ABS" "$BAM_ABS" "$(dirname "$BAM_ABS")"; do
-  if grep -rqF "$locator" "$R/records" "$OUT"; then
-    fail "an input path appears in the record or command output"
+  if grep -rqF "$locator" "$R/records" "$R/catalog" "$R/explorer" "$R/authority" "$OUT"; then
+    fail "an input path appears in the record, catalog, explorer files or command output"
   fi
 done
 
 echo
-echo "M1 golden-path summary (unqualified, local, not for clinical use)"
+echo "Golden-path summary, DoD steps 1-5 (unqualified, local, not for clinical use)"
 for line in "${STEP_LINES[@]}"; do echo "  $line"; done
 echo "  preflight outcome: $PREFLIGHT_OUTCOME"
 echo "  records scanned: $SCANNED"
 echo "  eligible alignments: $ELIGIBLE"
 echo "  verify: $VERIFIED"
-echo "M1 ACCEPTANCE PASSED"
+echo "  catalog qualification_state: $QUALIFICATION"
+echo "  explorer rows listed: $EXPLORER_LISTED"
+echo "ACCEPTANCE PASSED (DoD steps 1-5; steps 6-7 wait for B6 serve)"

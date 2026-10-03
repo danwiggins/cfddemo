@@ -175,6 +175,18 @@ def _parser() -> argparse.ArgumentParser:
             )
             _trust_registry_identity_arguments(command)
 
+    catalog = commands.add_parser(
+        "catalog", help="catalog local records for the explorer (unqualified)"
+    )
+    catalog_commands = catalog.add_subparsers(dest="catalog_command", required=True)
+    catalog_import = catalog_commands.add_parser(
+        "import",
+        help="import one local record under ROOT as development_unqualified",
+    )
+    catalog_import.add_argument("bundle", type=Path, help="record directory (ROOT/records/ID)")
+    _root_argument(catalog_import)
+    catalog_import.add_argument("--json", action="store_true", dest="as_json")
+
     inspect = commands.add_parser("inspect", help="inspect an unverified local bundle")
     inspect.add_argument("bundle", type=Path)
     inspect.add_argument("--json", action="store_true", dest="as_json")
@@ -1269,7 +1281,7 @@ def _local_stages(
             context.attempt_dir / "bundle",
             measurement=measurement,
             provenance=provenance,
-            method=local_method_identity(policy),
+            method=local_method_identity(registered),
             signing_key=signing_key,
             reference_match=reference_match(report),
         )
@@ -1485,6 +1497,8 @@ def _local_run_result(
             "next_commands": [
                 f"traceback verify {shlex.quote(str(bundle_path))} "
                 f"--trust-store {shlex.quote(str(trust_path))}",
+                f"traceback catalog import {shlex.quote(str(bundle_path))} "
+                f"--root {shlex.quote(str(root.absolute()))}",
             ],
             "verification": "verified",
             "development_trust_only": True,
@@ -1497,7 +1511,7 @@ def _run(
     args: argparse.Namespace, progress: Callable[[str], None]
 ) -> tuple[ExitCode, dict[str, Any]]:
     from .contracts import InputKind, JobRequest
-    from .local_authority import local_fragment_policy
+    from .local_authority import ensure_local_method_authority, local_fragment_policy
     from .references import load_reference
     from .snapshots import input_tree_sha256
 
@@ -1505,6 +1519,9 @@ def _run(
         return _real_run_blocked()
     root = args.root
     loaded = load_reference(root, args.reference_id)
+    # Create (once) or validate the local method authority before any copy:
+    # a damaged ROOT/authority refuses the run with TBX-AUTH-LOCAL-001.
+    ensure_local_method_authority(root, loaded.registered)
     source, relative_files = _local_input_files(
         args.input, args.index or Path(f"{args.input}.bai")
     )
@@ -1578,6 +1595,36 @@ def _run_with_runner(
             },
         )
     return _local_run_result(root, runner, record, loaded.registered.reference_id)
+
+
+def _catalog_import(args: argparse.Namespace) -> tuple[ExitCode, dict[str, Any]]:
+    """Catalog one local record and persist its explorer view (B5a/B5b)."""
+
+    from .local_catalog import import_local_record
+
+    root = args.root
+    outcome = import_local_record(root, args.bundle)
+    ref = outcome.reference
+    return ExitCode.OK, _result(
+        "catalog import",
+        "ok",
+        "Record cataloged as development_unqualified (unqualified, local, not for "
+        "clinical use); its explorer view is saved under ROOT/explorer",
+        data={
+            "result_id": ref.result_id,
+            "record_id": outcome.record_id,
+            "method_id": ref.method_ref.method_id,
+            "method_version": ref.method_ref.version,
+            "qualification_state": ref.qualification_state.value,
+            "display_role": ref.display_role.value if ref.display_role else None,
+            "trust_state": ref.trust_state.value,
+            "current_provider_eligible": ref.current_provider_eligible,
+            "explorer_artifact": outcome.explorer_artifact,
+            "authority_binding": outcome.authority_binding,
+            "catalog": "catalog",
+            "qualified": False,
+        },
+    )
 
 
 def _preflight(args: argparse.Namespace) -> tuple[ExitCode, dict[str, Any]]:
@@ -2511,6 +2558,8 @@ def _dispatch(
         return _resume(args, progress)
     if args.command == "retry":
         return _retry(args)
+    if args.command == "catalog":
+        return _catalog_import(args)
     if args.command == "inspect":
         return _inspect(args)
     if args.command == "verify":
@@ -2552,7 +2601,7 @@ def _concerns_local_data(args: argparse.Namespace) -> bool:
     """
 
     command = args.command
-    if command in {"run", "reference"}:
+    if command in {"run", "reference", "catalog"}:
         return True
     if command == "preflight":
         return args.reference_id is not None
@@ -2604,6 +2653,7 @@ def main(argv: Sequence[str] | None = None) -> int:
             or (args.command == "run" and args.reference_id is not None)
             or (args.command == "assets" and args.asset_command == "install")
             or (args.command == "reference" and args.reference_command == "register")
+            or (args.command == "catalog" and args.catalog_command == "import")
             else nullcontext()
         )
         # Local work maps a full ROOT volume (OS or SQLite) to TBX-RUN-004.
@@ -2618,6 +2668,8 @@ def main(argv: Sequence[str] | None = None) -> int:
         command = (
             f"{args.command} {args.reference_command}"
             if args.command == "reference"
+            else f"{args.command} {args.catalog_command}"
+            if args.command == "catalog"
             else args.command
         )
         code, payload = ExitCode(problem.exit_code), _problem(command, problem)

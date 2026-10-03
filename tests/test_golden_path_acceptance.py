@@ -1,4 +1,4 @@
-"""Run scripts/golden_path_acceptance.sh (Milestone 1, DoD steps 1-4) on generated inputs."""
+"""Run scripts/golden_path_acceptance.sh (DoD steps 1-5) on generated inputs."""
 
 from __future__ import annotations
 
@@ -37,7 +37,9 @@ def test_golden_path_milestone_1_acceptance(tmp_path: Path) -> None:
         check=False,
     )
     assert completed.returncode == 0, completed.stdout + completed.stderr
-    assert "M1 ACCEPTANCE PASSED" in completed.stdout
+    assert "ACCEPTANCE PASSED (DoD steps 1-5" in completed.stdout
     assert "preflight outcome: partial" in completed.stdout
+    assert "catalog qualification_state: development_unqualified" in completed.stdout
+    assert "explorer rows listed: 1" in completed.stdout
     # The script removes its temporary root.
     assert not any(tmp_path.glob("traceback-golden.*"))
