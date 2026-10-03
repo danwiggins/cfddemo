@@ -23,8 +23,10 @@ from traceback_runner.fixtures import (
     create_local_golden_path_inputs,
     synthetic_registered_reference,
 )
+from evidence_inspector.method_registry import method_definition_sha256
 from traceback_runner.local_authority import (
     local_fragment_policy,
+    local_method_definition,
     local_method_identity,
 )
 from traceback_runner.contracts import ReferenceContig, RegisteredReference
@@ -94,9 +96,7 @@ def test_run_signs_verifies_and_labels_a_local_record(tmp_path: Path, inputs, ca
     assert verified.manifest.schema_version == "traceback.result-bundle.v3"
     assert verified.measurement.approval_state == ApprovalState.UNAPPROVED_LOCAL
     assert verified.signature.namespace == TrustNamespace.DEVELOPMENT_LOCAL
-    assert verified.manifest.method == local_method_identity(
-        local_fragment_policy(_registered(root))
-    )
+    assert verified.manifest.method == local_method_identity(_registered(root))
     report = (bundle / "report.html").read_text()
     assert LOCAL_REPORT_BANNER in report
     assert "synthetic" not in report.lower()
@@ -343,6 +343,16 @@ def test_pause_between_stages_then_resume_completes(
     assert _records(root) == []
     monkeypatch.setattr(cli, "_local_stages", original)
 
+    # A damaged local method authority refuses the resume before any signing.
+    registry_file = root / "authority" / "ref" / "method-registry.json"
+    good = registry_file.read_bytes()
+    registry_file.write_bytes(good.replace(b"registry_traceback_local", b"registry_traceback_locax"))
+    code, refused = _json(capsys, "resume", paused["data"]["job_id"], "--root", root)
+    assert code == cli.ExitCode.BLOCKED, refused
+    assert refused["data"]["code"] == "TBX-AUTH-LOCAL-001"
+    assert _records(root) == []
+    registry_file.write_bytes(good)
+
     code, resumed = _json(capsys, "resume", paused["data"]["job_id"], "--root", root)
     assert code == cli.ExitCode.OK, resumed
     assert resumed["data_origin"] == "local_unqualified"
@@ -416,12 +426,16 @@ def test_local_policy_selects_primary_contigs_or_all() -> None:
         (0, 100), (100, 150), (150, 200), (200, 300), (300, 500), (500, 1000), (1000, None)
     ]
     assert local_fragment_policy(reference("tiny_a", "tiny_b")).contigs == ("tiny_a", "tiny_b")
-    with pytest.raises(ValueError):
-        local_method_identity(
-            local_fragment_policy(synthetic_registered_reference()).model_copy(
-                update={"approval_state": ApprovalState.UNAPPROVED_SYNTHETIC}
-            )
-        )
+    identity = local_method_identity(hg)
+    assert identity.version == "1.0.0-local-hg-local"
+    # The bundle carries exactly the E01 definition digest the local authority
+    # registers, so catalog import can bind the record to it.
+    assert identity.method_definition_sha256 == method_definition_sha256(
+        local_method_definition(hg)
+    )
+    other = local_method_identity(synthetic_registered_reference())
+    assert other.version != identity.version
+    assert other.method_definition_sha256 != identity.method_definition_sha256
 
 
 def test_runner_executes_one_origin_and_labels_transitions(tmp_path: Path, inputs, capsys) -> None:

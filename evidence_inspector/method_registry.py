@@ -76,6 +76,31 @@ Version = Annotated[
 ]
 Sha256 = Annotated[str, StringConstraints(pattern=r"^[0-9a-f]{64}$")]
 
+# A method version is ``MAJOR.MINOR.PATCH`` (at most 32 characters), optionally
+# followed by ``-local-<reference_id>``: the unqualified local method that
+# ``traceback run`` signs names the registered reference it measured against
+# (``traceback_runner.local_authority``).  Only method references and
+# definitions take this form; tool, asset and policy versions stay plain.
+_METHOD_VERSION = re.compile(
+    r"([0-9]+\.[0-9]+\.[0-9]+)(?:-local-([a-z0-9][a-z0-9._-]{0,63}))?"
+)
+
+
+def _method_version(value: str) -> str:
+    match = _METHOD_VERSION.fullmatch(value)
+    if match is not None and len(match.group(1)) > 32:
+        raise ValueError("MAJOR.MINOR.PATCH must have at most 32 characters")
+    if match is None or ".." in (match.group(2) or ""):
+        raise ValueError("method version must be MAJOR.MINOR.PATCH[-local-REFERENCE]")
+    return value
+
+
+MethodVersion = Annotated[
+    str,
+    StringConstraints(max_length=108),
+    AfterValidator(_method_version),
+]
+
 
 class RegistryContract(BaseModel):
     """Immutable, closed contract base with finite-number enforcement."""
@@ -116,7 +141,7 @@ class RevocationTarget(StrEnum):
 
 class MethodReference(RegistryContract):
     method_id: MethodId
-    version: Version
+    version: MethodVersion
 
 
 class ToolRegistration(RegistryContract):
@@ -157,7 +182,7 @@ class MethodDefinition(RegistryContract):
         "traceback.method-definition.v1"
     )
     method_id: MethodId
-    version: Version
+    version: MethodVersion
     family: MethodFamily
     quantity_id: QuantityId
     unit: UnitId

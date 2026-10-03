@@ -852,3 +852,35 @@ def test_canonical_contract_contains_no_sensitive_or_unscoped_fields() -> None:
         "extensions",
     )
     assert all(token not in rendered for token in forbidden)
+
+
+@pytest.mark.parametrize(
+    ("version", "accepted"),
+    (
+        ("1.0.0", True),
+        ("1.0.0-local-ref", True),
+        ("1.0.0-local-ref.b_2-x", True),
+        ("1.0.0-local-", False),
+        ("1.0.0-beta", False),
+        ("1.0.0-local-a..b", False),
+        ("1.0.0-local-Ref", False),
+        ("1.0.0-local-" + "a" * 65, False),
+        ("1.0-local-ref", False),
+    ),
+)
+def test_method_versions_accept_only_the_local_reference_suffix(
+    version: str, accepted: bool
+) -> None:
+    if accepted:
+        assert MethodReference(method_id="mth_fragment_span", version=version).version == version
+        assert _definition(version=version).version == version
+    else:
+        with pytest.raises(ValidationError):
+            MethodReference(method_id="mth_fragment_span", version=version)
+
+
+def test_tool_and_asset_versions_stay_plain_semver() -> None:
+    with pytest.raises(ValidationError):
+        ToolReference(tool_id="tool_fragment_counter", version="1.0.0-local-ref", artifact_sha256="a" * 64)
+    with pytest.raises(ValidationError):
+        AssetReference(asset_id="asset_fragment_policy", version="1.0.0-local-ref", content_sha256="b" * 64)
