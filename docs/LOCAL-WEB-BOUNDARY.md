@@ -19,10 +19,19 @@ job database. The preserved Streamlit demo is not this service.
 - HTML, JavaScript, and CSS are package resources. They contain no CDN, remote
   font, analytics, model, map, or other runtime network reference. CSP permits
   connections and assets only from the same local origin.
-- Before touching the replaceable state parent, startup pins and exclusively
-  locks the root-owned sticky system temporary directory plus a deterministic,
-  user-owned mode-`0600` anchor keyed to the absolute state path. It then pins
-  the user-owned, non-group/world-writable immediate parent. The state directory
+- Before touching the replaceable state parent, startup pins the root-owned
+  sticky system temporary directory and exclusively locks a deterministic,
+  user-owned mode-`0600` anchor there, keyed to the effective user and the
+  absolute state path. The anchor's lock is held for the service's lifetime,
+  so exactly one service runs per state path; services on different state
+  paths run concurrently. A flock on the temporary directory itself is held
+  only while an anchor is created, locked and re-checked against its name, and
+  while a closing service checks and unlinks its own anchor; that ordering
+  stops a start from locking an anchor inode that a concurrent close then
+  unlinks. Only a held anchor reports "already running"; a temporary-directory
+  lock still busy after 5 s reports "startup lock is busy", and a close that
+  cannot take it leaves the anchor file in place for the next start to reuse.
+  Startup then pins the user-owned, non-group/world-writable immediate parent. The state directory
   must be owned by the current OS user at mode `0700`. Stable root, anchor,
   immediate parent, state-directory, and instance-lock identities are
   revalidated before and after publication and while the listener is live.
