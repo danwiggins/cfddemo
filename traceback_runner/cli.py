@@ -1045,7 +1045,6 @@ _LOCAL_SAMPLE_PREFIX = "local-"
 _LOCAL_PREFLIGHT_POLICY = "local-unqualified-preflight-v1"
 _PROVENANCE_KEY_RELATIVE = Path("trust/provenance-hmac.key")
 _INDEX_SUFFIXES = (".bai", ".csi")
-_STAGE_HEARTBEAT_SECONDS = 5.0
 _PROBLEM_CODE = re.compile(r"^(TBX-[A-Z]+-[0-9]{3})\b")
 
 
@@ -1064,62 +1063,143 @@ class LocalStageRefusal(TerminalStageError):
         self.fix = fix
 
 
-def _local_workflow_sha256() -> str:
-    return hashlib.sha256(_LOCAL_WORKFLOW_ID.encode("ascii")).hexdigest()
+def _local_workflow_sha256(method_definition_sha256: str) -> str:
+    """The local job key's workflow hash: it names the exact method definition.
+
+    The runner deduplicates on the canonical request, so a run under a changed
+    method (another policy, reference bytes or tool) is a new job and never
+    returns an earlier method's record.
+    """
+
+    if not re.fullmatch(r"[0-9a-f]{64}", method_definition_sha256):
+        raise ValueError("method definition digest must be 64 lowercase hex characters")
+    return hashlib.sha256(
+        f"{_LOCAL_WORKFLOW_ID}:{method_definition_sha256}".encode("ascii")
+    ).hexdigest()
+
+
+def _synthetic_workflow_sha256() -> str:
+    return hashlib.sha256(_WORKFLOW_ID.encode("ascii")).hexdigest()
 
 
 def _is_local_request(request: Any) -> bool:
-    return request.workflow_release_sha256 == _local_workflow_sha256() and (
-        request.sample_token.startswith(_LOCAL_SAMPLE_PREFIX)
+    """A local job: ``local-`` sample token and not the synthetic workflow.
+
+    Deliberately independent of the current method: rows written under the
+    legacy constant key, under today's method and under any later method all
+    stay recognisable without loading a reference.
+    """
+
+    return request.sample_token.startswith(_LOCAL_SAMPLE_PREFIX) and (
+        request.workflow_release_sha256 != _synthetic_workflow_sha256()
     )
 
 
-def _provenance_hmac_key(root: Path) -> bytes:
-    """Return ROOT's 32-byte provenance HMAC key, creating it once (0600).
+def _local_method_sha256(registered: Any) -> str:
+    """SHA-256 of the local method definition ``run`` measures this reference with."""
 
-    A per-root random key means the same BAM run under two roots yields
-    unlinkable ``provider_hmac_sha256`` commitments.
+    from evidence_inspector.method_registry import method_definition_sha256
+
+    from . import local_authority
+
+    return method_definition_sha256(local_authority.local_method_definition(registered))
+
+
+def _publish_private_key_bytes(path: Path, *, replace: bool) -> None:
+    """Write 32 random bytes to ``path`` so a crash never leaves a short key.
+
+    The bytes go to a fsynced private temporary first.  A new key is published
+    with a no-replace ``link`` (a concurrent creator wins and its key is kept);
+    ``replace=True`` atomically swaps out a short key left by an older crash.
     """
 
-    path = root / _PROVENANCE_KEY_RELATIVE
-    path.parent.mkdir(parents=True, exist_ok=True)
     nofollow = getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_CLOEXEC", 0)
+    temporary = path.with_name(f".{path.name}.{os.getpid()}.tmp")
+    temporary.unlink(missing_ok=True)
+    descriptor = os.open(temporary, os.O_WRONLY | os.O_CREAT | os.O_EXCL | nofollow, 0o600)
     try:
-        descriptor = os.open(
-            path, os.O_WRONLY | os.O_CREAT | os.O_EXCL | nofollow, 0o600
-        )
-    except FileExistsError:
-        pass
-    else:
         with os.fdopen(descriptor, "wb") as stream:
             stream.write(os.urandom(32))
             stream.flush()
             os.fsync(stream.fileno())
+        if replace:
+            os.replace(temporary, path)
+        else:
+            try:
+                os.link(temporary, path)
+            except FileExistsError:
+                pass
         _fsync_directory(path.parent)
+    finally:
+        temporary.unlink(missing_ok=True)
+
+
+def _read_private_key(path: Path) -> tuple[bool, bytes]:
+    """Read at most 33 bytes of a key; ``private`` means a regular file of
+    yours with no group or other access (0600 or 0400)."""
+
+    nofollow = getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_CLOEXEC", 0)
     try:
         descriptor = os.open(path, os.O_RDONLY | nofollow)
     except OSError:
-        descriptor = -1
-    key = b""
-    regular = False
-    if descriptor >= 0:
-        with os.fdopen(descriptor, "rb") as stream:
-            metadata = os.fstat(stream.fileno())
-            regular = (
-                stat.S_ISREG(metadata.st_mode)
-                and metadata.st_uid == os.geteuid()
-                and not stat.S_IMODE(metadata.st_mode) & 0o077
-            )
-            key = stream.read(33)
-    if not regular or len(key) != 32:
+        return False, b""
+    with os.fdopen(descriptor, "rb") as stream:
+        metadata = os.fstat(stream.fileno())
+        private = (
+            stat.S_ISREG(metadata.st_mode)
+            and metadata.st_uid == os.geteuid()
+            and not stat.S_IMODE(metadata.st_mode) & 0o077
+        )
+        return private, stream.read(33)
+
+
+def _root_has_records(root: Path) -> bool:
+    records = root / "records"
+    if records.is_symlink():
+        return True
+    if not records.exists():
+        return False
+    if not records.is_dir():
+        return True
+    return any(not entry.name.startswith(".") for entry in records.iterdir())
+
+
+def _provenance_hmac_key(root: Path) -> bytes:
+    """Return ROOT's 32-byte provenance HMAC key, creating it once (private).
+
+    A per-root random key means the same BAM run under two roots yields
+    unlinkable ``provider_hmac_sha256`` commitments.  Created like the local
+    signing key (fsynced temporary, no-replace link), so a crash never
+    leaves a short key.  A short key left by an older version's crash is
+    replaced only while ROOT/records holds no record: no published record
+    carries a commitment under it yet.  Otherwise ``run`` refuses (TBX-RUN-006).
+    """
+
+    path = root / _PROVENANCE_KEY_RELATIVE
+    path.parent.mkdir(parents=True, exist_ok=True)
+    if not (path.exists() or path.is_symlink()):
+        _publish_private_key_bytes(path, replace=False)
+    private, key = _read_private_key(path)
+    if private and len(key) < 32 and not _root_has_records(root):
+        _publish_private_key_bytes(path, replace=True)
+        private, key = _read_private_key(path)
+    if not private or len(key) != 32:
         raise RunProblem(
             "TBX-RUN-006",
-            "The provenance key under ROOT/trust is not a private 32-byte file",
+            "The provenance key ROOT/trust/provenance-hmac.key is not a private 32-byte file",
             cause=(
                 "ROOT/trust/provenance-hmac.key was edited, truncated, replaced, "
-                "or is readable by other users (it must be 0600 and yours)"
+                "or is readable by other users (it must be yours, 0600 or 0400)"
+                + (
+                    "; ROOT/records already holds records, so it is not replaced"
+                    if private and len(key) < 32
+                    else ""
+                )
             ),
-            fix="Use a fresh --root; never edit files under ROOT/trust",
+            fix=(
+                "Use a fresh --root; never edit ROOT/trust/provenance-hmac.key "
+                "or other files under ROOT/trust"
+            ),
         )
     return key
 
@@ -1146,23 +1226,7 @@ def _local_signing_key(root: Path) -> Any:
     if not (path.exists() or path.is_symlink()):
         # Write and fsync a private temporary, then publish it with a
         # no-replace link: a crash never leaves a short key at the final path.
-        temporary = path.with_name(f".{path.name}.{os.getpid()}.tmp")
-        temporary.unlink(missing_ok=True)
-        descriptor = os.open(
-            temporary, os.O_WRONLY | os.O_CREAT | os.O_EXCL | nofollow, 0o600
-        )
-        try:
-            with os.fdopen(descriptor, "wb") as stream:
-                stream.write(os.urandom(32))
-                stream.flush()
-                os.fsync(stream.fileno())
-            try:
-                os.link(temporary, path)
-            except FileExistsError:
-                pass
-            _fsync_directory(path.parent)
-        finally:
-            temporary.unlink(missing_ok=True)
+        _publish_private_key_bytes(path, replace=False)
     try:
         descriptor = os.open(path, os.O_RDONLY | nofollow)
     except OSError:
@@ -1207,29 +1271,6 @@ def _signing_key_for(root: Path, namespace: Any) -> Any:
     if namespace == TrustNamespace.DEVELOPMENT_LOCAL:
         return _local_signing_key(root)
     return generate_development_keypair(KeyPurpose.RESULT, namespace=namespace)
-
-
-@contextmanager
-def _stage_heartbeat(context: Any) -> Iterator[None]:
-    """Keep a long stage's worker lease alive while it reads a large BAM."""
-    import threading
-
-    stop = threading.Event()
-
-    def beat() -> None:
-        while not stop.wait(_STAGE_HEARTBEAT_SECONDS):
-            try:
-                context.heartbeat()
-            except Exception:
-                return  # the runner's own post-stage heartbeat reports a lost lease
-
-    thread = threading.Thread(target=beat, name="traceback-stage-heartbeat", daemon=True)
-    thread.start()
-    try:
-        yield
-    finally:
-        stop.set()
-        thread.join()
 
 
 def _policy_lines(policy: Any) -> list[str]:
@@ -1290,14 +1331,13 @@ def _local_stages(
     def preflight_stage(context: Any) -> Any:
         progress("STAGE  preflight: inspecting the sealed BAM copy")
         try:
-            with _stage_heartbeat(context):
-                report = validate_bam_snapshot(
-                    context.sealed_input_dir / bam_name,
-                    context.sealed_input_dir / index_name,
-                    registered,
-                    preflight_policy,
-                    compare_assembly=loaded.source.assembly_declared,
-                )
+            report = validate_bam_snapshot(
+                context.sealed_input_dir / bam_name,
+                context.sealed_input_dir / index_name,
+                registered,
+                preflight_policy,
+                compare_assembly=loaded.source.assembly_declared,
+            )
         except (StaleLease, TerminalStageError):
             raise
         except Exception as exc:
@@ -1341,8 +1381,7 @@ def _local_stages(
 
     def measurement_stage(context: Any) -> Any:
         progress("STAGE  measure: scanning every record of the sealed BAM copy")
-        with _stage_heartbeat(context):
-            scan = scan_aligned_reference_spans(context.sealed_input_dir / bam_name, policy)
+        scan = scan_aligned_reference_spans(context.sealed_input_dir / bam_name, policy)
         try:
             measurement = finalize_measurement(scan)
         except MeasurementUnavailableError as exc:
@@ -1611,6 +1650,101 @@ def _refuse_failed_job(runner: Any) -> Callable[[Any], None]:
     return check
 
 
+_LOCAL_RECORD_NAME = re.compile(r"record-[0-9a-f]{24}")
+_LOCAL_RUN_TOKEN = re.compile(r"local-run-([0-9a-f]{16})")
+
+
+def _peek_measurement_sha256(bundle: Path) -> str | None:
+    """Unverified peek at a record's measurement digest; only a pre-filter."""
+
+    from .bundles import MANIFEST_PATH, MEASUREMENT_PATH
+    from .local_catalog import _read_peek
+
+    try:
+        manifest = json.loads(_read_peek(bundle / MANIFEST_PATH))
+        contents = manifest["contents"]
+        return next(
+            str(item["sha256"]) for item in contents if item["relative_path"] == MEASUREMENT_PATH
+        )
+    except Exception:
+        return None
+
+
+def _measurement_twins(root: Path, store: Any | None) -> dict[str, str]:
+    """Map each local record to the earliest record with the same measurement.
+
+    A re-run under a different job (for example after the job key gained the
+    method, B1) signs a new record whose measurement bytes equal an earlier
+    record's.  Records are grouped by the signed measurement digest of their
+    verified manifest; within a group the record whose job was created first
+    is the original, and every other record maps to it ("same measurement as").
+    Records that do not verify, or are not local, are left out.  Without a job
+    store (or a job it cannot find) a record sorts last, then by record ID.
+    """
+
+    from .bundles import MEASUREMENT_PATH, verify_bundle
+    from .signing import load_development_trust
+
+    records = root / "records"
+    if not records.is_dir():
+        return {}
+    candidates: dict[str, list[Path]] = {}
+    for path in sorted(records.iterdir()):
+        if not _LOCAL_RECORD_NAME.fullmatch(path.name) or path.is_symlink():
+            continue
+        digest = _peek_measurement_sha256(path)
+        if digest is not None:
+            candidates.setdefault(digest, []).append(path)
+    groups = [paths for paths in candidates.values() if len(paths) > 1]
+    if not groups:
+        return {}
+    trust = load_development_trust((root / _TRUST_RELATIVE).read_bytes())
+    twins: dict[str, str] = {}
+    for paths in groups:
+        members: list[tuple[str, float, str]] = []
+        for path in paths:
+            try:
+                verified = verify_bundle(path, trust)
+            except Exception:
+                continue
+            manifest = verified.manifest
+            if manifest.schema_version != "traceback.result-bundle.v3" or (
+                manifest.record_id != path.name
+            ):
+                continue
+            digest = next(
+                item.sha256 for item in manifest.contents if item.relative_path == MEASUREMENT_PATH
+            )
+            token = _LOCAL_RUN_TOKEN.fullmatch(verified.provenance.run_token)
+            when = (
+                store.created_at_by_prefix(token.group(1))
+                if token is not None and store is not None
+                else None
+            )
+            members.append((digest, float("inf") if when is None else when, path.name))
+        by_digest: dict[str, list[tuple[float, str]]] = {}
+        for digest, when, name in members:
+            by_digest.setdefault(digest, []).append((when, name))
+        for ordered in by_digest.values():
+            ordered.sort()
+            original = ordered[0][1]
+            for _, name in ordered[1:]:
+                twins[name] = original
+    return twins
+
+
+def _same_measurement_as(root: Path, store: Any, record_id: str) -> str | None:
+    """The earlier record whose measurement equals ``record_id``'s, if any.
+
+    A display marker only: an unreadable sibling never fails the run.
+    """
+
+    try:
+        return _measurement_twins(root, store).get(record_id)
+    except Exception:
+        return None
+
+
 def _local_run_result(
     root: Path, runner: Any, record: Any, reference_id: str
 ) -> tuple[ExitCode, dict[str, Any]]:
@@ -1623,6 +1757,7 @@ def _local_run_result(
         runner.outputs(record.job_id, "validate")["preflight_report"].read_bytes()
     )
     measurement = verified.measurement
+    twin = _same_measurement_as(root, runner.store, verified.manifest.record_id)
     absolute_root = Path(os.path.abspath(root))
     bundle_path = absolute_root / published.relative_to(root)
     trust_path = absolute_root / _TRUST_RELATIVE
@@ -1654,6 +1789,7 @@ def _local_run_result(
             "verification": "verified",
             "development_trust_only": True,
             "qualified": False,
+            **({"same_measurement_as": twin} if twin is not None else {}),
         },
     )
 
@@ -1691,7 +1827,9 @@ def _run(
         sample_token=f"{_LOCAL_SAMPLE_PREFIX}{args.reference_id}",
         input_kind=InputKind.MODBAM,
         input_tree_sha256_local=input_tree_sha256(source, relative_files),
-        workflow_release_sha256=_local_workflow_sha256(),
+        workflow_release_sha256=_local_workflow_sha256(
+            _local_method_sha256(loaded.registered)
+        ),
     )
     return _run_sealed(root, request, source, relative_files, loaded, progress)
 
@@ -2408,7 +2546,7 @@ def _resume(
     request = probe.store.request(record.job_id)
     local = _is_local_request(request)
     if not local and (
-        request.workflow_release_sha256 != hashlib.sha256(_WORKFLOW_ID.encode("ascii")).hexdigest()
+        request.workflow_release_sha256 != _synthetic_workflow_sha256()
         or request.sample_token != "synthetic-sample-token"
     ):
         return ExitCode.BLOCKED, _result(
