@@ -1465,18 +1465,25 @@ def _local_stages(
     )
 
 
-def _refuse_unaligned_or_empty(bam: Path) -> None:
+def _refuse_unaligned_or_empty(bam: Path, *, fasta: str | None) -> None:
     """A1: refuse an unaligned (TBX-BAM-003) or record-less (TBX-BAM-004) BAM
-    before any job, authority or copy exists. The FIX never names a path."""
+    before any job, authority or copy exists. ``fasta`` (human output only)
+    replaces the ``REF.fa`` placeholder in the alignment command."""
 
-    from .preflight import intake_refusal
+    import shlex
+
+    from .preflight import intake_refusal, unaligned_remediation
 
     path = Path(os.path.abspath(bam))
     if path.is_symlink() or not path.is_file():
         return  # the input-file check below reports it
     check = intake_refusal(path)
-    if check is not None:
-        raise RunProblem(check.code, check.problem, cause=check.problem, fix=check.remediation)
+    if check is None:
+        return
+    fix = check.remediation
+    if fasta is not None and check.code == "TBX-BAM-003":
+        fix = unaligned_remediation(shlex.quote(fasta))
+    raise RunProblem(check.code, check.problem, cause=check.problem, fix=fix)
 
 
 def _local_input_files(bam: Path, index: Path) -> tuple[Path, tuple[str, str]]:
@@ -1663,7 +1670,11 @@ def _run(
         return _real_run_blocked()
     root = args.root
     loaded = load_reference(root, args.reference_id)
-    _refuse_unaligned_or_empty(args.input)
+    _refuse_unaligned_or_empty(
+        args.input,
+        # Human output names the registered FASTA; --json never does.
+        fasta=None if getattr(args, "as_json", False) else loaded.source.fasta_path,
+    )
     # Create (once) or validate the local method authority before any copy:
     # a damaged ROOT/authority refuses the run with TBX-AUTH-LOCAL-001.
     ensure_local_method_authority(root, loaded.registered)

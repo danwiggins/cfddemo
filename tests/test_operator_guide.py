@@ -268,3 +268,4 @@ def test_guide_minknow_batch_runs_verbatim_per_barcode(tmp_path: Path, aligner: 
     assert "preflight warn" in out  # valid tags, no @RG after alignment: WARN
     assert "re-basecall" not in out.lower()
     assert len(list((root / "records").iterdir())) == 2
+    assert out.count("QUALIFICATION_STATE  development_unqualified") == 2  # imported

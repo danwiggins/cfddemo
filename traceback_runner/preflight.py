@@ -198,16 +198,29 @@ def alignment_command(fasta: str = ALIGNMENT_FASTA_PLACEHOLDER) -> str:
     )
 
 
+def unaligned_remediation(fasta: str | None = None) -> str:
+    """TBX-BAM-003's FIX; ``fasta`` (a shell-quoted path, human output only)
+    replaces the ``REF.fa`` placeholder."""
+
+    target = (
+        "OUT.sorted.bam:"
+        if fasta is not None
+        else f"OUT.sorted.bam, with {ALIGNMENT_FASTA_PLACEHOLDER} the registered FASTA:"
+    )
+    return (
+        "Align it first (an assisted prerequisite, outside traceback; see "
+        "'Aligning MinKNOW output' in docs/OPERATOR-GUIDE.md), then rerun on "
+        f"{target}\n" + alignment_command(fasta or ALIGNMENT_FASTA_PLACEHOLDER)
+    )
+
+
 def _unaligned_check() -> PreflightCheck:
     return _check(
         "TBX-BAM-003",
         PreflightOutcome.BLOCKED,
         "This BAM is unaligned (no @SQ reference lines). MinKNOW and Dorado "
         "write unaligned BAMs by default.",
-        "Align it first (an assisted prerequisite, outside traceback; see "
-        "'Aligning MinKNOW output' in docs/OPERATOR-GUIDE.md), then rerun "
-        f"preflight on OUT.sorted.bam, with {ALIGNMENT_FASTA_PLACEHOLDER} the "
-        "registered FASTA:\n" + alignment_command(),
+        unaligned_remediation(),
     )
 
 

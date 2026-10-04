@@ -215,11 +215,14 @@ done
 for f in "$ALIGNED"/*.sorted.bam; do
   uv run traceback run "$f" --reference ref --root "$R" || echo "FAILED $f"
 done
+for record in "$R"/records/*/; do
+  uv run traceback catalog import "$record" --root "$R"
+done
 ```
 <!-- minknow-batch:end -->
 
-Each `run` prints its `RECORD_ID`; import each record with
-`traceback catalog import "$R/records/RECORD_ID" --root "$R"`.
+Each `run` prints its `RECORD_ID`; note which barcode each one came from
+(records carry no sample label yet). Importing a record twice is a no-op.
 
 Set three variables. ROOT (`R`) holds everything this path writes; use a fresh
 directory per experiment.

@@ -141,7 +141,7 @@ def test_unaligned_bam_is_tbx_bam_003_with_the_alignment_command(
 
 
 def test_run_refuses_unaligned_and_header_only_bams_before_any_job(
-    tmp_path: Path, root: Path, capsys
+    tmp_path: Path, golden, root: Path, capsys
 ) -> None:
     unaligned = create_unaligned_ont_bam(tmp_path / "minknow" / "chunk.bam", reads=5)
     header_only, _ = _aligned_bam(tmp_path / "empty", [("tiny_a", 20_000)], reads=0)
@@ -153,6 +153,12 @@ def test_run_refuses_unaligned_and_header_only_bams_before_any_job(
         assert str(tmp_path) not in json.dumps(payload)
     assert _job_rows(root) == []
     assert not (root / "authority").exists()  # refused before any authority work
+
+    code, out = _human(capsys, "run", unaligned, "--reference", "ref", "--root", root)
+    assert code == cli.ExitCode.BLOCKED
+    assert f"minimap2 -ax map-ont -y {golden.fasta_path} -" in out  # human only
+    assert "REF.fa" not in out
+    assert _job_rows(root) == []
 
 
 def test_header_only_bam_is_tbx_bam_004(tmp_path: Path, root: Path, capsys) -> None:
