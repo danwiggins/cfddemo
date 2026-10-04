@@ -53,6 +53,12 @@ stop_serve() {
 
 cleanup() {
   stop_serve
+  # serve's first stdout line is a bearer launch link: never leave it on disk,
+  # even when a failure keeps the root for inspection.
+  if [ -n "${OUT:-}" ] && [ -f "$OUT/serve.out" ]; then
+    grep -v "bootstrap=" "$OUT/serve.out" >"$OUT/serve.out.scrubbed" 2>/dev/null || true
+    mv -f "$OUT/serve.out.scrubbed" "$OUT/serve.out" 2>/dev/null || : >"$OUT/serve.out"
+  fi
   if [ -n "${KEEP_ROOT:-}" ]; then
     echo "kept root: $R"
     return

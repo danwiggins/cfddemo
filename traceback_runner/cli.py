@@ -1754,7 +1754,12 @@ def _serve_material(root: Path) -> Path:
             fix="Run `traceback run BAM --reference ID --root ROOT` first, or pass the right --root",
             exit_code=ExitCode.NOT_FOUND,
         )
-    if not (root / "catalog").is_dir():
+    catalog_database = root / "catalog" / "catalog.sqlite3"
+    if not (root / "catalog").is_dir() or not (
+        catalog_database.is_file() and not catalog_database.is_symlink()
+    ):
+        # ResultCatalog() would create an empty catalog here; a directory left
+        # by a failed import, or a deleted database, is refused instead.
         raise _no_catalog()
     # A catalog without a valid authority is partial state: refuse, exit 3.
     validate_local_method_authorities(root)

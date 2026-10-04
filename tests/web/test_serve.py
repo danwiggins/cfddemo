@@ -205,6 +205,18 @@ def test_missing_runner_database_or_catalog_is_refused_without_a_listener(world)
     assert not (root / "web").exists()
 
 
+@pytest.mark.timeout(60)  # a regression starts serving instead of refusing
+def test_catalog_directory_without_database_is_refused_not_recreated(world) -> None:
+    root, _, _ = world
+    database = root / "catalog" / "catalog.sqlite3"
+    subprocess.run(["chmod", "-R", "u+w", str(root / "catalog")], check=True)
+    for path in root.joinpath("catalog").glob("catalog.sqlite3*"):
+        path.unlink()
+    code, text = _main_text("serve", "--root", root)
+    assert code == cli.ExitCode.NOT_FOUND and "TBX-SERVE-002" in text
+    assert not database.exists()
+
+
 def test_empty_root_is_refused_and_left_untouched(tmp_path: Path) -> None:
     root = tmp_path / "nothing"
     code, text = _main_text("serve", "--root", root)

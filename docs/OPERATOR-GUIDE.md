@@ -224,7 +224,8 @@ uv run traceback serve --root "$R"
    within 60 seconds; do not share it (it is a bearer secret until used). The
    next lines say how many cataloged record views were loaded and how many
    invalid explorer files were skipped. In a terminal, Enter prints a fresh
-   link; Ctrl-C stops the server. With stdin closed or redirected (for example
+   one-use link (also a bearer secret: do not paste terminal output into
+   chats, tickets or logs); Ctrl-C stops the server. With stdin closed or redirected (for example
    in the background), only Ctrl-C or SIGTERM stops it. On stop it prints
    `Stopped; the web lock for ROOT is released.` The page shows the jobs and
    the catalog; records stay unqualified and local. Explorer views are loaded
