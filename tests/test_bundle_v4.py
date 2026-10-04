@@ -923,6 +923,26 @@ def _query() -> Any:
     return CatalogQuery()
 
 
+@pytest.mark.parametrize("version", [["traceback.result-bundle.v4"], {"v": 4}, 4, None])
+def test_unhashable_or_odd_manifest_versions_never_raise_in_peeks(
+    version: object, tmp_path: Path
+) -> None:
+    """Untrusted manifest JSON: peeks answer "not local" instead of raising."""
+
+    from traceback_runner.local_catalog import CatalogImportProblem
+
+    bundle = tmp_path / "record"
+    shutil.copytree(FIXTURES / "v3-local", bundle)
+    manifest = json.loads((bundle / MANIFEST_PATH).read_bytes())
+    manifest["schema_version"] = version
+    (bundle / MANIFEST_PATH).write_bytes(json.dumps(manifest).encode())
+    assert cli._manifest_is_local(bundle) is False
+    assert peek_measurement_path(manifest) is None
+    assert cli._peek_measurement_sha256(bundle) is None
+    with pytest.raises(CatalogImportProblem):
+        _peek_local_record(bundle)
+
+
 class LooseProbeMeasurement(RunnerContract):
     """A careless contract that admits the synthetic label (test-only)."""
 

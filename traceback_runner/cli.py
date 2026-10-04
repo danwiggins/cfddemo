@@ -3588,9 +3588,9 @@ def _manifest_is_local(bundle: Path) -> bool:
         return False
     from .bundles import LOCAL_RESULT_BUNDLE_VERSIONS
 
-    return isinstance(manifest, dict) and (
-        manifest.get("schema_version") in LOCAL_RESULT_BUNDLE_VERSIONS
-    )
+    version = manifest.get("schema_version") if isinstance(manifest, dict) else None
+    # Untrusted JSON: a list or object here is unhashable, so test the type first.
+    return type(version) is str and version in LOCAL_RESULT_BUNDLE_VERSIONS
 
 
 def _verify(args: argparse.Namespace) -> tuple[ExitCode, dict[str, Any]]:

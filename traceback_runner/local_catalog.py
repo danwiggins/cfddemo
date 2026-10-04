@@ -226,7 +226,7 @@ def _peek_local_record(bundle: Path) -> tuple[str, str, str]:
     try:
         manifest_bytes = _read_peek(bundle / MANIFEST_PATH)
         version = json.loads(manifest_bytes).get("schema_version")
-        if version not in LOCAL_RESULT_BUNDLE_VERSIONS:
+        if type(version) is not str or version not in LOCAL_RESULT_BUNDLE_VERSIONS:
             raise _not_a_record(
                 "the bundle is not a local (result-bundle v3 or v4) record"
             )

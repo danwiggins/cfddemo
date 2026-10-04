@@ -850,6 +850,8 @@ def peek_measurement_path(manifest: object) -> str | None:
     if not isinstance(manifest, Mapping):
         return None
     version = manifest.get("schema_version")
+    if type(version) is not str:
+        return None
     if version in _BUNDLE_VERSION_RULES:
         return MEASUREMENT_PATH
     schemas = manifest.get("measurement_schema_versions")
