@@ -613,6 +613,33 @@ class ResultBundleManifestV3(RunnerContract):
         return self
 
 
+class ResultBundleManifestV4(RunnerContract):
+    """v3 manifest shape for bundles whose paths are chosen by measurement schema.
+
+    Signed under the ``development-local`` trust namespace.  The bundle verifier
+    (not this model) enforces exactly one measurement schema, because it picks
+    the bundle's file layout from that schema.
+    """
+
+    schema_version: Literal["traceback.result-bundle.v4"] = (
+        "traceback.result-bundle.v4"
+    )
+    record_id: Identifier
+    workflow_release_id: Identifier
+    measurement_schema_versions: tuple[Identifier, ...] = Field(min_length=1)
+    method: BundleMethodIdentity
+    contents: tuple[BundleContent, ...] = Field(min_length=1)
+    signing_key_id: Identifier
+    development_trust_only: Literal[True] = True
+
+    @model_validator(mode="after")
+    def ordered_contents(self) -> ResultBundleManifestV4:
+        paths = [item.relative_path for item in self.contents]
+        if paths != sorted(paths) or len(paths) != len(set(paths)):
+            raise ValueError("bundle contents must have unique sorted paths")
+        return self
+
+
 class CompatibilityItem(RunnerContract):
     category: Identifier
     item_id: Identifier

@@ -650,6 +650,7 @@ def test_every_schema_dispatch_table_accepts_the_new_versions(tmp_path: Path) ->
         "traceback.result-bundle.v1",
         "traceback.result-bundle.v2",
         "traceback.result-bundle.v3",
+        "traceback.result-bundle.v4",
     )
     assert tuple(bundles_module._MANIFEST_MODELS) == bundles_module.RESULT_BUNDLE_SCHEMA_VERSIONS
     assert tuple(signing_module.DEVELOPMENT_TRUST_DOCUMENT_MODELS) == (
@@ -657,9 +658,10 @@ def test_every_schema_dispatch_table_accepts_the_new_versions(tmp_path: Path) ->
         "traceback.development-trust.v2",
     )
     # Signing payload per bundle version, each with its namespace.
+    # (v4 is signed over a per-schema layout; tests/test_bundle_v4.py covers it.)
     payloads = {
         version: bundles_module._signing_payload(b"x", version)
-        for version in bundles_module.RESULT_BUNDLE_SCHEMA_VERSIONS
+        for version in bundles_module.RESULT_BUNDLE_SCHEMA_VERSIONS[:3]
     }
     assert {
         version: (payload.schema_version, payload.trust_namespace)
