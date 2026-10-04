@@ -1908,19 +1908,43 @@ def test_store_finalized_on_open_worker_does_not_stall_the_open(
     _assert_victim_descriptors_closed(identities)
 
 
-def test_store_finalized_inside_proof_window_defers_its_descriptors(
-    durable, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+def test_descriptor_queued_while_lock_is_held_is_closed_on_release(
+    durable, tmp_path: Path
 ) -> None:
-    # The lock is reentrant, so a finalizer on the thread that owns it
-    # acquires it. Inside the descriptor proof window it must still not
-    # close anything: the close would perturb the descriptor-table diff.
+    # A finalizer on another thread finds the lock busy and queues; the
+    # holder (here a plain lock holder, not _connect) must reap on release
+    # so nothing waits for some later store operation.
+    linkage, _, _, _, _ = durable
+    victims, identities = _victim_store(tmp_path / "victim", linkage)
+    finalizer = supersession_module.threading.Thread(target=victims.clear, daemon=True)
+    with supersession_module._holding_open_lock():
+        finalizer.start()
+        finalizer.join(timeout=10)
+        # A finalizer blocked on the lock would still be alive here.
+        finalized_without_blocking = not finalizer.is_alive()
+        queued = set(identities) <= set(supersession_module._DEFERRED_DESCRIPTOR_CLOSES)
+    finalizer.join(timeout=10)
+    assert finalized_without_blocking
+    assert queued
+    _assert_victim_descriptors_closed(identities)
+
+
+@pytest.mark.parametrize("release", ["finalize", "close"])
+def test_store_released_inside_proof_window_defers_its_descriptors(
+    durable, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, release: str
+) -> None:
+    # The lock is reentrant, so a finalizer or close() on the thread that
+    # owns it acquires it. Inside the descriptor proof window it must still
+    # not close anything: the close would perturb the descriptor-table diff.
     linkage, ledger, _, _, _ = durable
     victims, identities = _victim_store(tmp_path / "victim", linkage)
     original_open = supersession_module._open_anchored_sqlite_connection
     deferred_during_window: list[bool] = []
 
-    def open_after_finalizing_victim(descriptor, expected_identity):
-        victims.clear()  # __del__ runs here, on the lock-owning thread
+    def open_after_releasing_victim(descriptor, expected_identity):
+        if release == "close":
+            victims[0].close()
+        victims.clear()  # finalize: __del__ runs here, on the lock owner
         deferred_during_window.append(
             set(identities) <= set(supersession_module._DEFERRED_DESCRIPTOR_CLOSES)
         )
@@ -1929,11 +1953,12 @@ def test_store_finalized_inside_proof_window_defers_its_descriptors(
     monkeypatch.setattr(
         supersession_module,
         "_open_anchored_sqlite_connection",
-        open_after_finalizing_victim,
+        open_after_releasing_victim,
     )
     with ledger._connect() as connection:
         assert connection.execute("SELECT 1").fetchone() == (1,)
     assert deferred_during_window == [True]
+    assert supersession_module._PROOF_WINDOW_DEPTH == 0
     _assert_victim_descriptors_closed(identities)
 
 
