@@ -155,6 +155,13 @@ PROBLEM_TABLE: dict[str, ProblemText] = {
         "ROOT/trust/result-trust-registry or its pin is missing or does not open",
         "Remove the registry and its .pin.json, then import again",
     ),
+    "TBX-AUTH-LOCAL-003": ProblemText(
+        "A store under ROOT/method-authority fails its pinned SHA-256, location or replay "
+        "check, or ROOT/method-authority is not a private directory; only the records "
+        "bound to a damaged store are hidden",
+        "Restore the named store directory (or ROOT/method-authority) from a backup; "
+        "never remove ROOT/authority for this code",
+    ),
     # traceback serve
     "TBX-SERVE-001": ProblemText(
         "No runner database under ROOT (wrong --root, or no run yet)",

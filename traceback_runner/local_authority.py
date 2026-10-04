@@ -367,7 +367,11 @@ def _write_new_private(path: Path, content: bytes) -> None:
 
 
 def _read_private(path: Path) -> bytes:
-    descriptor = os.open(path, os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0))
+    # O_NONBLOCK: a FIFO at a store file name is rejected by the fstat check
+    # below instead of blocking the open (and serve or run with it).
+    descriptor = os.open(
+        path, os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_NONBLOCK", 0)
+    )
     try:
         metadata = os.fstat(descriptor)
         if (
@@ -802,17 +806,509 @@ def sync_local_result_trust(
     return registry
 
 
+# ---------------------------------------------------------------------------
+# Method-parameterised authority stores (ROOT/method-authority, signal SH1)
+# ---------------------------------------------------------------------------
+#
+# Layout, one append-only directory per method definition::
+#
+#     ROOT/<tree>/<reference_id>/<method_slug>/<method_definition_sha256>/
+#         method-registry.json   canonical MethodRegistry (one definition)
+#         authority-head.json    canonical AuthorityHead
+#         pins.json              MethodAuthorityPins (location + both digests)
+#
+# ``<tree>`` is ``method-authority`` for the signal methods; the research
+# authority (usability B2b) reuses the same code with its own tree name.  A
+# store is validated only against the definition and publication time stored
+# in it, never against current machine state: a tool reinstall or an asset
+# re-registration yields a new definition hash and so a new directory, and the
+# older stores (and the records bound to them) stay valid.  ``ROOT/authority``
+# is never read or written by this section.
+
+METHOD_AUTHORITY_DIRECTORY = "method-authority"
+METHOD_SLUG_PATTERN = re.compile(r"^[a-z0-9]+(?:-[a-z0-9]+)*$")
+_MAX_METHOD_SLUG_LENGTH = 64
+_SHA256_NAME = re.compile(r"^[0-9a-f]{64}$")
+_TREE_NAME = re.compile(r"^[a-z0-9]+(?:-[a-z0-9]+)*$")
+METHOD_AUTHORITY_DAMAGED_CODE = "TBX-AUTH-LOCAL-003"
+
+
+def _method_store_problem(cause: str) -> LocalAuthorityProblem:
+    return LocalAuthorityProblem(
+        METHOD_AUTHORITY_DAMAGED_CODE,
+        "A method authority store under ROOT failed validation; nothing was changed",
+        cause=cause,
+        fix=(
+            "Records bound to this store stay hidden; other records are unaffected. "
+            "Restore the named ROOT/method-authority directory from a backup"
+        ),
+    )
+
+
+def validate_method_slug(value: str) -> str:
+    """Return ``value`` when it is a lowercase, hyphen-separated method slug."""
+
+    if len(value) > _MAX_METHOD_SLUG_LENGTH or not METHOD_SLUG_PATTERN.fullmatch(value):
+        raise ValueError(
+            "method slug must match ^[a-z0-9]+(-[a-z0-9]+)*$ and be at most 64 characters"
+        )
+    return value
+
+
+def _validate_tree(tree: str) -> str:
+    if tree == AUTHORITY_DIRECTORY or not _TREE_NAME.fullmatch(tree):
+        raise ValueError("authority tree must be a single lowercase name other than 'authority'")
+    return tree
+
+
+class MethodAuthorityPins(RunnerContract):
+    """Where one method store lives and the digests of its two authority files."""
+
+    schema_version: Literal["traceback.method-authority-pins.v1"] = (
+        "traceback.method-authority-pins.v1"
+    )
+    reference_id: str
+    method_slug: str
+    method_definition_sha256: Sha256
+    registry_sha256: Sha256
+    authority_head_sha256: Sha256
+
+
+@dataclass(frozen=True)
+class MethodAuthority:
+    """One validated method store: its location, registry, head and capability."""
+
+    tree: str
+    reference_id: str
+    method_slug: str
+    method_definition_sha256: str
+    definition: MethodDefinition
+    registry: MethodRegistry
+    authority_head: AuthorityHead
+    authority_head_sha256: str
+    capability: CurrentMethodCapability
+
+    def verification_context(self) -> CatalogVerificationContext:
+        from evidence_inspector.result_catalog import CatalogVerificationContext
+
+        return CatalogVerificationContext(
+            registry=self.registry,
+            authority_head=self.authority_head,
+            expected_authority_head_sha256=self.authority_head_sha256,
+            capability=self.capability,
+        )
+
+
+@dataclass(frozen=True)
+class DamagedMethodAuthority:
+    """One entry under the tree that failed validation; its records stay hidden.
+
+    ``location`` holds the path parts below the tree (reference ID, slug,
+    definition hash) as far as they were read; it never holds a local path.
+    """
+
+    location: tuple[str, ...]
+    problem: LocalAuthorityProblem
+
+
+@dataclass(frozen=True)
+class MethodAuthorityTree:
+    """The result of validating one tree: valid stores and damaged entries."""
+
+    tree: str
+    stores: tuple[MethodAuthority, ...]
+    damaged: tuple[DamagedMethodAuthority, ...]
+
+    def find(
+        self, reference_id: str, method_slug: str, method_definition_sha256: str
+    ) -> MethodAuthority | None:
+        """The valid store for one record's binding, or ``None`` (the record is hidden)."""
+
+        for store in self.stores:
+            if (
+                store.reference_id == reference_id
+                and store.method_slug == method_slug
+                and store.method_definition_sha256 == method_definition_sha256
+            ):
+                return store
+        return None
+
+
+def method_authority_registry(
+    definition: MethodDefinition, published_at: datetime
+) -> MethodRegistry:
+    """The unqualified local registry for one method definition.
+
+    Tools and assets are registered exactly as the definition references them;
+    the one qualification record is ``development_unqualified`` and the one
+    display role is ``research_baseline``, as for the built-in store.
+    """
+
+    return MethodRegistry(
+        registry_id=LOCAL_REGISTRY_ID,
+        registry_version=1,
+        authority_revision=2,
+        published_at=published_at,
+        previous_registry_sha256=None,
+        tools=tuple(
+            ToolRegistration(
+                tool_id=tool.tool_id, version=tool.version, artifact_sha256=tool.artifact_sha256
+            )
+            for tool in definition.tools
+        ),
+        assets=tuple(
+            AssetRegistration(
+                asset_id=asset.asset_id,
+                version=asset.version,
+                content_sha256=asset.content_sha256,
+            )
+            for asset in definition.assets
+        ),
+        method_definitions=(definition,),
+        qualification_records=(
+            QualificationRecord(
+                record_ref=LOCAL_QUALIFICATION_REF,
+                method_ref=definition.method_ref,
+                state=QualificationState.DEVELOPMENT_UNQUALIFIED,
+                effective_at=published_at,
+                approval_ref=LOCAL_QUALIFICATION_APPROVAL_REF,
+            ),
+        ),
+        display_role_assignments=(
+            DisplayRoleAssignment(
+                assignment_ref=LOCAL_ROLE_REF,
+                method_ref=definition.method_ref,
+                display_role=DisplayRole.RESEARCH_BASELINE,
+                authority_scope=LOCAL_AUTHORITY_SCOPE,
+                effective_at=published_at,
+            ),
+        ),
+    )
+
+
+def _require_local_version(definition: MethodDefinition, reference_id: str) -> None:
+    # The base is MAJOR.MINOR.PATCH, so the first "-local-" is the delimiter
+    # and everything after it is the whole reference ID (never a suffix match).
+    if definition.version.partition("-local-")[2] != reference_id:
+        raise ValueError("the method version must name the registered reference")
+
+
+def _private_directory(path: Path, label: str) -> Path:
+    """Create (0700) or check one directory of the tree; never follows a symlink."""
+
+    try:
+        metadata = os.stat(path, follow_symlinks=False)
+    except FileNotFoundError:
+        os.mkdir(path, 0o700)
+        metadata = os.stat(path, follow_symlinks=False)
+    if not stat.S_ISDIR(metadata.st_mode):
+        raise _method_store_problem(f"{label} is not a private directory")
+    if metadata.st_uid != os.geteuid():
+        raise _method_store_problem(f"{label} is owned by another user")
+    if stat.S_IMODE(metadata.st_mode) != 0o700:
+        os.chmod(path, 0o700)
+    return path
+
+
+def _is_private_directory(path: Path) -> bool:
+    try:
+        metadata = os.stat(path, follow_symlinks=False)
+    except OSError:
+        return False
+    return (
+        stat.S_ISDIR(metadata.st_mode)
+        and stat.S_IMODE(metadata.st_mode) == 0o700
+        and metadata.st_uid == os.geteuid()
+    )
+
+
+def _create_method_store(
+    directory: Path,
+    reference_id: str,
+    method_slug: str,
+    definition: MethodDefinition,
+    now: datetime,
+) -> None:
+    published_at = now.astimezone(UTC).replace(microsecond=0)
+    registry = method_authority_registry(definition, published_at)
+    head = authority_head_for_registry(registry, issued_at=published_at)
+    definition_sha256 = method_definition_sha256(definition)
+    pins = MethodAuthorityPins(
+        reference_id=reference_id,
+        method_slug=method_slug,
+        method_definition_sha256=definition_sha256,
+        registry_sha256=registry_sha256(registry),
+        authority_head_sha256=authority_head_sha256(head),
+    )
+    staging = directory / f"{_STAGING_PREFIX}{definition_sha256[:12]}-{os.getpid()}"
+    os.mkdir(staging, 0o700)
+    try:
+        _write_new_private(staging / REGISTRY_FILE, canonical_contract_bytes(registry))
+        _write_new_private(staging / HEAD_FILE, canonical_contract_bytes(head))
+        _write_new_private(staging / PINS_FILE, canonical_json_bytes(pins))
+        _fsync_directory(staging)
+        parent_fd = os.open(directory, os.O_RDONLY | getattr(os, "O_DIRECTORY", 0))
+        try:
+            rename_directory_exclusive_at(parent_fd, staging.name, definition_sha256)
+            os.fsync(parent_fd)
+        finally:
+            os.close(parent_fd)
+    except BaseException:
+        if staging.exists():
+            shutil.rmtree(staging, ignore_errors=True)
+        raise
+
+
+def open_method_authority(
+    root: Path,
+    reference_id: str,
+    method_slug: str,
+    method_definition_sha256_hex: str,
+    *,
+    tree: str = METHOD_AUTHORITY_DIRECTORY,
+) -> MethodAuthority:
+    """Reopen and validate one method store; never writes.
+
+    The store is checked against what it holds: the exact file set and modes,
+    both pinned SHA-256 digests, the pinned location against the directory
+    path, the stored definition against the directory name, and the registry
+    and head against the ones rebuilt from the stored definition at the stored
+    second.  The current capability must replay as development_unqualified.
+    Any mismatch raises TBX-AUTH-LOCAL-003.
+    """
+
+    _validate_tree(tree)
+    validate_reference_id(reference_id)
+    validate_method_slug(method_slug)
+    if not _SHA256_NAME.fullmatch(method_definition_sha256_hex):
+        raise ValueError("method definition SHA-256 must be 64 lowercase hex characters")
+    directory = root / tree / reference_id / method_slug / method_definition_sha256_hex
+    for parent in (root / tree, root / tree / reference_id, root / tree / reference_id / method_slug):
+        if not _is_private_directory(parent):
+            raise _method_store_problem("a method authority directory is not private")
+    if not _is_private_directory(directory):
+        if not (directory.exists() or directory.is_symlink()):
+            raise _method_store_problem("no method authority store for this definition")
+        raise _method_store_problem("the method authority store is not a private directory")
+    names = {entry.name for entry in directory.iterdir()}
+    if names != _STORE_FILES:
+        raise _method_store_problem("the method authority store holds unexpected files")
+    try:
+        registry = contract_from_canonical_bytes(
+            MethodRegistry, _read_private(directory / REGISTRY_FILE)
+        )
+        head = contract_from_canonical_bytes(AuthorityHead, _read_private(directory / HEAD_FILE))
+        pins = canonical_model_from_bytes(MethodAuthorityPins, _read_private(directory / PINS_FILE))
+    except (OSError, ValueError, ValidationError, RecursionError):
+        # RecursionError: deeply nested JSON fails in the parser itself.
+        raise _method_store_problem("an authority file is unreadable or not canonical") from None
+    if (pins.reference_id, pins.method_slug, pins.method_definition_sha256) != (
+        reference_id,
+        method_slug,
+        method_definition_sha256_hex,
+    ):
+        raise _method_store_problem("pins.json names a different store location")
+    if registry_sha256(registry) != pins.registry_sha256:
+        raise _method_store_problem("method-registry.json does not match its pinned SHA-256")
+    head_sha256 = authority_head_sha256(head)
+    if head_sha256 != pins.authority_head_sha256:
+        raise _method_store_problem("authority-head.json does not match its pinned SHA-256")
+    if len(registry.method_definitions) != 1:
+        raise _method_store_problem("the store must hold exactly one method definition")
+    definition = registry.method_definitions[0]
+    if method_definition_sha256(definition) != method_definition_sha256_hex:
+        raise _method_store_problem("the stored definition does not match the directory name")
+    try:
+        _require_local_version(definition, reference_id)
+        expected_registry = method_authority_registry(definition, registry.published_at)
+        expected_head = authority_head_for_registry(
+            expected_registry, issued_at=registry.published_at
+        )
+    except (ValueError, ValidationError):
+        raise _method_store_problem(
+            "the stored definition or publication time is invalid for this store"
+        ) from None
+    if registry != expected_registry or head != expected_head:
+        raise _method_store_problem(
+            "the stored authority is not the local unqualified authority for its definition"
+        )
+    try:
+        capability = resolve_current_capability(
+            registry,
+            head,
+            head_sha256,
+            definition.method_ref,
+            authority_scope=LOCAL_AUTHORITY_SCOPE,
+            as_of=head.issued_at,
+        )
+    except (ValueError, ValidationError):
+        raise _method_store_problem("the current capability does not replay") from None
+    if (
+        capability.qualification_state != QualificationState.DEVELOPMENT_UNQUALIFIED
+        or capability.display_role != DisplayRole.RESEARCH_BASELINE
+        or capability.current_provider_eligible
+    ):
+        raise _method_store_problem("the method capability is not development_unqualified")
+    return MethodAuthority(
+        tree=tree,
+        reference_id=reference_id,
+        method_slug=method_slug,
+        method_definition_sha256=method_definition_sha256_hex,
+        definition=definition,
+        registry=registry,
+        authority_head=head,
+        authority_head_sha256=head_sha256,
+        capability=capability,
+    )
+
+
+def ensure_method_authority(
+    root: Path,
+    reference_id: str,
+    method_slug: str,
+    definition: MethodDefinition,
+    *,
+    tree: str = METHOD_AUTHORITY_DIRECTORY,
+    now: datetime | None = None,
+) -> MethodAuthority:
+    """Create (once) or reopen and validate the store for one method definition.
+
+    The caller holds the operator lock.  The store is append-only: a new
+    definition hash adds a sibling directory and never touches an existing
+    one.  An existing store is reopened and validated; any mismatch raises
+    TBX-AUTH-LOCAL-003 with nothing changed.  ``ROOT/authority`` is untouched.
+    """
+
+    _validate_tree(tree)
+    validate_reference_id(reference_id)
+    validate_method_slug(method_slug)
+    _require_local_version(definition, reference_id)
+    tree_directory = _private_directory(root / tree, f"ROOT/{tree}")
+    reference_directory = _private_directory(tree_directory / reference_id, "a reference directory")
+    directory = _private_directory(reference_directory / method_slug, "a method directory")
+    _remove_leftover_staging(directory)
+    definition_sha256 = method_definition_sha256(definition)
+    target = directory / definition_sha256
+    if not (target.exists() or target.is_symlink()):
+        _create_method_store(
+            directory, reference_id, method_slug, definition, now or datetime.now(UTC)
+        )
+    return open_method_authority(root, reference_id, method_slug, definition_sha256, tree=tree)
+
+
+def _visible_entries(directory: Path) -> list[Path]:
+    return sorted(
+        (entry for entry in directory.iterdir() if not entry.name.startswith(_STAGING_PREFIX)),
+        key=lambda entry: entry.name,
+    )
+
+
+def validate_method_authority_tree(
+    root: Path, *, tree: str = METHOD_AUTHORITY_DIRECTORY
+) -> MethodAuthorityTree:
+    """Reopen and validate every store under ``ROOT/<tree>``; never writes.
+
+    The sibling of :func:`validate_local_method_authorities`.  A missing tree is
+    valid and empty (nothing is created).  A tree root that is not a private
+    directory raises TBX-AUTH-LOCAL-003.  Every other failure is local: the
+    damaged entry is listed in ``damaged`` and only the records bound to it are
+    hidden; every other store stays valid.  Leftover staging directories are
+    ignored, not removed.
+    """
+
+    _validate_tree(tree)
+    directory = root / tree
+    if not (directory.exists() or directory.is_symlink()):
+        return MethodAuthorityTree(tree=tree, stores=(), damaged=())
+    if not _is_private_directory(directory):
+        raise _method_store_problem(f"ROOT/{tree} is not a private directory")
+    stores: list[MethodAuthority] = []
+    damaged: list[DamagedMethodAuthority] = []
+
+    def fail(location: tuple[str, ...], cause: str) -> None:
+        damaged.append(DamagedMethodAuthority(location, _method_store_problem(cause)))
+
+    for reference_entry in _visible_entries(directory):
+        reference_id = reference_entry.name
+        try:
+            validate_reference_id(reference_id)
+        except ValueError:
+            fail((), "the tree holds an entry that is not a reference ID")
+            continue
+        if not _is_private_directory(reference_entry):
+            fail((reference_id,), "a reference directory is not private")
+            continue
+        for slug_entry in _visible_entries(reference_entry):
+            method_slug = slug_entry.name
+            try:
+                validate_method_slug(method_slug)
+            except ValueError:
+                fail((reference_id,), "a reference directory holds an entry that is not a slug")
+                continue
+            if not _is_private_directory(slug_entry):
+                fail((reference_id, method_slug), "a method directory is not private")
+                continue
+            for store_entry in _visible_entries(slug_entry):
+                name = store_entry.name
+                if not _SHA256_NAME.fullmatch(name):
+                    fail(
+                        (reference_id, method_slug),
+                        "a method directory holds an entry that is not a definition hash",
+                    )
+                    continue
+                try:
+                    stores.append(
+                        open_method_authority(root, reference_id, method_slug, name, tree=tree)
+                    )
+                except LocalAuthorityProblem as problem:
+                    damaged.append(
+                        DamagedMethodAuthority((reference_id, method_slug, name), problem)
+                    )
+    return MethodAuthorityTree(tree=tree, stores=tuple(stores), damaged=tuple(damaged))
+
+
+def validate_all_method_authorities(
+    root: Path,
+) -> tuple[tuple[str, ...], MethodAuthorityTree]:
+    """Validate ``ROOT/authority`` and ``ROOT/method-authority``; never writes.
+
+    ``serve`` calls this before it starts a listener.  The built-in store is
+    validated exactly as :func:`validate_local_method_authorities` does, except
+    that a missing ``ROOT/authority`` is not an error when the method tree
+    holds at least one valid store (a ROOT with only new-method records).
+    Returns the validated reference IDs of the built-in store (empty when it
+    is absent) and the validated method tree.
+    """
+
+    methods = validate_method_authority_tree(root)
+    builtin = root / AUTHORITY_DIRECTORY
+    if not (builtin.exists() or builtin.is_symlink()) and methods.stores:
+        return (), methods
+    return validate_local_method_authorities(root), methods
+
+
 __all__ = [
     "AUTHORITY_DIRECTORY",
     "LOCAL_AUTHORITY_SCOPE",
     "LOCAL_METHOD_ID",
     "LOCAL_MIN_MAPPING_QUALITY",
     "LOCAL_POLICY_ID",
+    "METHOD_AUTHORITY_DIRECTORY",
+    "DamagedMethodAuthority",
     "LocalAuthorityPins",
     "LocalAuthorityProblem",
     "LocalMethodAuthority",
     "LocalTrustRegistryPin",
+    "MethodAuthority",
+    "MethodAuthorityPins",
+    "MethodAuthorityTree",
     "ensure_local_method_authority",
+    "ensure_method_authority",
+    "method_authority_registry",
+    "open_method_authority",
+    "validate_all_method_authorities",
+    "validate_method_authority_tree",
+    "validate_method_slug",
     "local_catalog_aliases",
     "local_fragment_policy",
     "local_method_definition",
