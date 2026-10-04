@@ -1860,6 +1860,22 @@ def test_timed_out_sqlite_worker_closes_late_connection_and_exits(
     )
 
 
+def _victim_store(root: Path, linkage) -> tuple[list, dict[int, tuple[int, int]]]:
+    victim = RecordSupersessionStore(root, linkage_store=linkage)
+    identities = {
+        descriptor: (os.fstat(descriptor).st_dev, os.fstat(descriptor).st_ino)
+        for descriptor in (victim._database_fd, victim._root_fd)
+    }
+    return [victim], identities
+
+
+def _assert_victim_descriptors_closed(identities: dict[int, tuple[int, int]]):
+    assert supersession_module._DEFERRED_DESCRIPTOR_CLOSES == []
+    for descriptor, identity in identities.items():
+        metadata = supersession_module._safe_fstat(descriptor)
+        assert metadata is None or (metadata.st_dev, metadata.st_ino) != identity
+
+
 @pytest.mark.skipif(sys.platform != "darwin", reason="Darwin worker contract")
 def test_store_finalized_on_open_worker_does_not_stall_the_open(
     durable, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
@@ -1867,14 +1883,11 @@ def test_store_finalized_on_open_worker_does_not_stall_the_open(
     # Regression for the macOS CI flake "connection initialization timed
     # out": the garbage collector ran a dropped store's __del__ on the open
     # worker thread while the caller held _SQLITE_OPEN_LOCK and waited for
-    # that worker, so the open stalled until the timeout failed it.
+    # that worker, so the open stalled until the timeout failed it. The
+    # production budget is left in place: a regression fails here with
+    # "timed out" rather than on a test-chosen deadline.
     linkage, ledger, _, _, _ = durable
-    victims = [RecordSupersessionStore(tmp_path / "victim", linkage_store=linkage)]
-    victim_descriptors = (victims[0]._database_fd, victims[0]._root_fd)
-    victim_identities = {
-        descriptor: (os.fstat(descriptor).st_dev, os.fstat(descriptor).st_ino)
-        for descriptor in victim_descriptors
-    }
+    victims, identities = _victim_store(tmp_path / "victim", linkage)
     finalized_on: list[str] = []
     original_connect = sqlite3.connect
 
@@ -1886,22 +1899,42 @@ def test_store_finalized_on_open_worker_does_not_stall_the_open(
     monkeypatch.setattr(
         supersession_module.sqlite3, "connect", connect_after_finalizing_victim
     )
-    # Short budget so the pre-fix deadlock fails fast instead of after 10 s.
-    monkeypatch.setattr(supersession_module, "_SQLITE_WORKER_TIMEOUT_SECONDS", 2.0)
-    started = time.monotonic()
     with ledger._connect() as connection:
         assert connection.execute("SELECT 1").fetchone() == (1,)
-        assert set(victim_descriptors) <= set(
-            supersession_module._DEFERRED_DESCRIPTOR_CLOSES
-        )
-    assert time.monotonic() - started < 2.0
+        assert set(identities) <= set(supersession_module._DEFERRED_DESCRIPTOR_CLOSES)
     assert finalized_on == ["record-ledger-sqlite-open"]
-    # The next holder of the lock closes the handed-over descriptors.
-    ledger.close()
-    assert supersession_module._DEFERRED_DESCRIPTOR_CLOSES == []
-    for descriptor, identity in victim_identities.items():
-        metadata = supersession_module._safe_fstat(descriptor)
-        assert metadata is None or (metadata.st_dev, metadata.st_ino) != identity
+    # The open that was holding the lock closes the handed-over descriptors
+    # on its way out; no later store operation is needed.
+    _assert_victim_descriptors_closed(identities)
+
+
+def test_store_finalized_inside_proof_window_defers_its_descriptors(
+    durable, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # The lock is reentrant, so a finalizer on the thread that owns it
+    # acquires it. Inside the descriptor proof window it must still not
+    # close anything: the close would perturb the descriptor-table diff.
+    linkage, ledger, _, _, _ = durable
+    victims, identities = _victim_store(tmp_path / "victim", linkage)
+    original_open = supersession_module._open_anchored_sqlite_connection
+    deferred_during_window: list[bool] = []
+
+    def open_after_finalizing_victim(descriptor, expected_identity):
+        victims.clear()  # __del__ runs here, on the lock-owning thread
+        deferred_during_window.append(
+            set(identities) <= set(supersession_module._DEFERRED_DESCRIPTOR_CLOSES)
+        )
+        return original_open(descriptor, expected_identity)
+
+    monkeypatch.setattr(
+        supersession_module,
+        "_open_anchored_sqlite_connection",
+        open_after_finalizing_victim,
+    )
+    with ledger._connect() as connection:
+        assert connection.execute("SELECT 1").fetchone() == (1,)
+    assert deferred_during_window == [True]
+    _assert_victim_descriptors_closed(identities)
 
 
 @pytest.mark.skipif(sys.platform != "darwin", reason="Darwin worker contract")

@@ -108,10 +108,13 @@ _PINNED_STORE_CALLABLES = {
     if callable(getattr(ProviderLinkageStore, name))
 }
 _SQLITE_OPEN_LOCK = threading.RLock()
-# Descriptors whose owning store was finalized while another thread held
-# _SQLITE_OPEN_LOCK. They are closed by the next holder of the lock, before it
-# snapshots the descriptor table, so the close never lands inside a proof
-# window. See RecordSupersessionStore.__del__.
+# Set, under _SQLITE_OPEN_LOCK, while _connect proves which descriptor SQLite
+# opened by diffing the process descriptor table. Nothing may close a
+# descriptor while it is set.
+_DESCRIPTOR_PROOF_WINDOW = threading.Event()
+# Descriptors of stores finalized when closing them was unsafe: another thread
+# held _SQLITE_OPEN_LOCK, or a proof window was open. They are closed by
+# _drain_deferred_descriptor_closes. See RecordSupersessionStore.__del__.
 _DEFERRED_DESCRIPTOR_CLOSES: list[int] = []
 _PYDANTIC_UTC = TzInfo(0)
 _PLATFORM_PATH_TYPE = type(Path())
@@ -182,12 +185,42 @@ def _captured_storage_root(root: str | Path) -> Path:
 
 def _drain_deferred_descriptor_closes() -> None:
     """Close descriptors handed over by finalizers. Caller holds the lock."""
+    if _DESCRIPTOR_PROOF_WINDOW.is_set():
+        return
     while _DEFERRED_DESCRIPTOR_CLOSES:
         descriptor = _DEFERRED_DESCRIPTOR_CLOSES.pop()
         try:
             os.close(descriptor)
         except OSError:
             pass
+
+
+def _reap_deferred_descriptor_closes() -> None:
+    """Drain the hand-over list if the lock is free right now; never blocks.
+
+    Every party that can leave descriptors queued (a deferring finalizer, a
+    releasing _connect) calls this after it is done with the lock, so a
+    descriptor queued while the lock was held is closed by whichever of them
+    acts last."""
+    if not _DEFERRED_DESCRIPTOR_CLOSES:
+        return
+    if not _SQLITE_OPEN_LOCK.acquire(blocking=False):
+        return
+    try:
+        _drain_deferred_descriptor_closes()
+    finally:
+        _SQLITE_OPEN_LOCK.release()
+
+
+def _defer_store_descriptor_closes(store: RecordSupersessionStore) -> None:
+    if getattr(store, "_closed", True):
+        return
+    store._closed = True
+    for attribute in ("_database_fd", "_root_fd"):
+        descriptor = getattr(store, attribute, None)
+        if type(descriptor) is int:
+            _DEFERRED_DESCRIPTOR_CLOSES.append(descriptor)
+        setattr(store, attribute, None)
 
 
 def _root_descriptor_is_valid(
@@ -1608,21 +1641,21 @@ class RecordSupersessionStore:
         # holds _SQLITE_OPEN_LOCK while it waits for the worker. Blocking on
         # the lock here would stall that open until its timeout fails it
         # ("connection initialization timed out"). So never block: if the
-        # lock is busy, hand the descriptors to the next lock holder.
-        if not _SQLITE_OPEN_LOCK.acquire(blocking=False):
-            if getattr(self, "_closed", True):
-                return
-            self._closed = True
-            for attribute in ("_database_fd", "_root_fd"):
-                descriptor = getattr(self, attribute, None)
-                if type(descriptor) is int:
-                    _DEFERRED_DESCRIPTOR_CLOSES.append(descriptor)
-                setattr(self, attribute, None)
-            return
-        try:
-            self.close()
-        finally:
-            _SQLITE_OPEN_LOCK.release()
+        # lock is busy, hand the descriptors over instead. The same applies
+        # when the collector runs on the thread that owns the (reentrant)
+        # lock during a proof window: a close there would perturb the
+        # descriptor-table diff.
+        if _SQLITE_OPEN_LOCK.acquire(blocking=False):
+            try:
+                if not _DESCRIPTOR_PROOF_WINDOW.is_set():
+                    self.close()
+                    return
+                _defer_store_descriptor_closes(self)
+            finally:
+                _SQLITE_OPEN_LOCK.release()
+        else:
+            _defer_store_descriptor_closes(self)
+        _reap_deferred_descriptor_closes()
 
     def _bind_database_descriptor(self) -> None:
         if self._database_fd is not None:
@@ -1783,6 +1816,7 @@ class RecordSupersessionStore:
             if self._closed or self._root_fd is None:
                 raise RecordSupersessionUnsafe("record ledger is closed")
             _RS_VALIDATE_STORAGE(self)
+            _DESCRIPTOR_PROOF_WINDOW.set()
             before = _open_descriptor_identities()
             try:
                 operation_root_fd = fcntl.fcntl(self._root_fd, fcntl.F_DUPFD_CLOEXEC, 0)
@@ -1815,6 +1849,7 @@ class RecordSupersessionStore:
             sqlite_fd = matches[0]
             os.fchmod(sqlite_fd, 0o600)
             sidecar_bindings = _RS_BIND_SIDECARS(self, before)
+            _DESCRIPTOR_PROOF_WINDOW.clear()
             _RS_VALIDATE_STORAGE(self, sidecar_bindings)
             yield connection
         finally:
@@ -1842,7 +1877,12 @@ class RecordSupersessionStore:
                 if not self._closed:
                     _RS_VALIDATE_STORAGE(self)
             finally:
-                _SQLITE_OPEN_LOCK.release()
+                _DESCRIPTOR_PROOF_WINDOW.clear()
+                try:
+                    _drain_deferred_descriptor_closes()
+                finally:
+                    _SQLITE_OPEN_LOCK.release()
+                _reap_deferred_descriptor_closes()
 
     def _initialize(self) -> None:
         with _RS_LINKAGE_FENCE(self) as authority, _RS_CONNECT(self) as connection:
