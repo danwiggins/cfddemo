@@ -236,6 +236,18 @@ uv run traceback serve --root "$R"
 exit code is the same as in human output. Command output and the record never
 contain the FASTA or BAM path.
 
+### Upgrading
+
+A local job's key names the exact method definition (policy, reference
+bytes and tool), so a run under a changed method is a new job and never
+returns an earlier method's record. Jobs written before this change used a
+fixed key: they still show as local jobs and still resume, but re-running the
+same BAM after upgrading makes a new job and a second record. Its
+measurement equals the first record's, and `run` says so with
+`SAME_MEASUREMENT_AS <record ID>` (`data.same_measurement_as` in `--json`).
+Both records stay valid; the second is the same input measured again under the
+same method.
+
 ### Daily canary
 
 To rerun this path daily against the same FASTA and BAM and compare the counts
@@ -273,7 +285,7 @@ says otherwise. Exit codes are listed under "Stable exit codes".
 | <a id="tbx-run-003"></a>TBX-RUN-003 | 3 | `run` without `--reference` | Register the FASTA, then pass `--reference ID`; `traceback demo` is the synthetic workflow |
 | <a id="tbx-run-004"></a>TBX-RUN-004 | 3 | Free space under 2x the input (retryable; reports required and available bytes), or ROOT's volume filled during the run; no record | Free space or use a `--root` on a larger volume, then run again under a fresh ROOT |
 | <a id="tbx-run-005"></a>TBX-RUN-005 | 3 | No complete eligible denominator: no alignment passed the locked policy; the job fails, no record | Check contig names against the policy (chr1-chr22, chrX, chrY), MAPQ 20, and duplicate/secondary/supplementary/QC-fail flags |
-| <a id="tbx-run-006"></a>TBX-RUN-006 | 3 | `R/trust/provenance-hmac.key` is not a private 32-byte file (edited, truncated, replaced, or readable by others) | Restore it from a backup with mode 0600, or start a fresh ROOT |
+| <a id="tbx-run-006"></a>TBX-RUN-006 | 3 | `R/trust/provenance-hmac.key` is not a private 32-byte file (edited, truncated, replaced, or readable by others; 0600 and 0400 are both accepted). A short key left by an older version's crash is replaced automatically while `R/records` is empty, so this refusal means records already exist | Restore it from a backup with mode 0600, or start a fresh ROOT |
 | <a id="tbx-run-007"></a>TBX-RUN-007 | 3 | `R/trust/development-local-signing.key` is not a private 32-byte file | Restore it from a backup with mode 0600, or start a fresh ROOT |
 | <a id="tbx-cat-001"></a>TBX-CAT-001 | 3 | The path is not a verifiable local record (not a `run` record, not signed by this ROOT's key, or damaged); no catalog row | Pass `R/records/RECORD_ID` from `run`, and check it with `traceback verify RECORD_ID --root R` |
 | <a id="tbx-cat-002"></a>TBX-CAT-002 | 3 | The registered reference ID fails the explorer's public-text rules (for example `patient-id`); no catalog row | Register the FASTA again under a neutral ID (for example `hg38`) and rerun |
