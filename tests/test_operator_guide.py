@@ -32,6 +32,7 @@ PROBLEM_MODULES = (
     "traceback_runner/local_authority.py",
     "traceback_runner/local_catalog.py",
     "traceback_runner/preflight.py",
+    "traceback_runner/toolchain.py",
 )
 _CODE = re.compile(r'"(TBX-[A-Z]+(?:-[A-Z]+)?-\d{3})"')
 

@@ -68,7 +68,18 @@ traceback assets verify --release-evidence ENVELOPE \
   --authority-head HEAD --asset ASSET_ID --version VERSION \
   [--root ROOT] [--json]
 traceback support-bundle JOB_ID --output OUTPUT [--root ROOT] [--json]
+traceback toolchain install modkit [--yes] [--micromamba ABS_PATH] [--json]
 ```
+
+`toolchain install modkit` installs the pinned modkit 0.6.4 that cell origin
+uses into the per-user cache `~/.cache/traceback/toolchains/<lock sha256>/`,
+shared by every ROOT, from a committed `@EXPLICIT` lock whose lines each carry
+a `#sha256:`. Without `--yes` it prints the micromamba command and the target
+directory, changes nothing and exits 0; with `--yes` it needs the network.
+micromamba is found by absolute path only (`--micromamba`, `$MAMBA_EXE`,
+`/opt/homebrew/bin`, `/usr/local/bin`, `/usr/bin` or `~/.local/bin`), never on
+`PATH`. modkit is run by its absolute path, and its binary is re-hashed against
+the install receipt right before each run.
 
 `verify --trust-registry` checks a result bundle against the current trust of a
 protected result-trust registry (`docs/RESULT-TRUST-REGISTRY.md`). It needs the
@@ -449,6 +460,7 @@ says otherwise. Exit codes are listed under "Stable exit codes".
 | <a id="tbx-web-503"></a>TBX-WEB-503 | browser 503 | The service is busy or a store is temporarily unavailable | Retry in a few seconds |
 | <a id="tbx-internal"></a>TBX-INTERNAL | browser 500 | An internal error occurred; nothing was changed | Retry; if it repeats, write a support bundle and report it |
 | <a id="tbx-out-001"></a>TBX-OUT-001 | none | Release gate only: an output contained a value the privacy rules forbid | Remove the forbidden value |
+| <a id="tbx-tool-001"></a>TBX-TOOL-001 | 3 | Missing (retryable): the pinned tool is not installed in the per-user cache, micromamba was not found, the install failed (no network, or a package digest did not match the lock), or this platform has no lock (macOS arm64 and Linux x86-64 only). Wrong version or digest: the installed binary's sha256 differs from its install receipt, the receipt or package record names another version or package, the binary does not report the pinned version, or the committed lock file was edited | Missing: run `traceback toolchain install modkit` to see the plan, then add `--yes`. Wrong version or digest: run `traceback toolchain install modkit --yes`, which replaces a damaged install; for an edited lock file, reinstall traceback from a clean checkout |
 | <a id="operator-busy"></a>Operator busy | 3 | `A local action or unexpired worker lease is active`: another CLI mutation holds `R/.operator.lock` | Wait for it to finish, then rerun |
 
 ## Stable exit codes

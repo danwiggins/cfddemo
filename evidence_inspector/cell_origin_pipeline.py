@@ -24,6 +24,7 @@ import shutil
 import subprocess
 import sys
 import tempfile
+import threading
 from bisect import bisect_right
 from collections import defaultdict
 from collections.abc import Callable, Iterable, Mapping, Sequence
@@ -61,6 +62,13 @@ from evidence_inspector.cell_origin_models import (
     ValidationReport,
     VerificationLevel,
 )
+from evidence_inspector.cell_origin_prefilter import (
+    DEFAULT_MIN_MAPQ,
+    PrefilterCounts,
+    prefilter_summary,
+    read_bed_regions,
+    write_prefiltered_bam,
+)
 from evidence_inspector.deconvolution import (
     bootstrap_uxm_v2,
     deconvolve_uxm_v2,
@@ -72,6 +80,13 @@ from evidence_inspector.uxm import (
     aggregate_marker_counts,
     classify_uxm_calls,
 )
+from traceback_runner.toolchain import (
+    PinnedTool,
+    ToolProblem,
+    exec_pinned,
+    kill_process_group,
+    resolve_modkit,
+)
 
 PIPELINE_VERSION = "1.0.0"
 SCHEMA_VERSION = "cell-origin-pipeline.v1"
@@ -81,6 +96,14 @@ DEFAULT_MAXIMUM_CPGS_PER_GROUP = 10_000
 DEFAULT_BOOTSTRAP_REPLICATES = 200
 DEFAULT_RANDOM_SEED = 7
 DEFAULT_TOP_COMPOSITION_ROWS = 12
+# modkit's global ``--filter-threshold``, locked: never modkit's per-run
+# estimate.  It is the C threshold modkit 0.6.4 estimated for the reproduced
+# 2026-10-01 run (qual 233, i.e. (233 + 0.5) / 256), written exactly.  With it,
+# the C calls modkit emits are the same as with the estimate; only non-C rows,
+# which the call loader drops, can change.  A method parameter, not a result.
+DEFAULT_MODKIT_FILTER_THRESHOLD = 0.912109375
+MODKIT_TIMEOUT_SECONDS = 1800
+MODKIT_WORK_DIRECTORY = "modkit-work"
 PALETTE = (
     "#0F766E",
     "#2563EB",
@@ -326,6 +349,13 @@ class PipelineConfig:
     maximum_cpgs_per_group: int = DEFAULT_MAXIMUM_CPGS_PER_GROUP
     bootstrap_replicates: int = DEFAULT_BOOTSTRAP_REPLICATES
     random_seed: int = DEFAULT_RANDOM_SEED
+    # Required with ``aligned_modbam``: the FASTA the BAM was aligned to, and
+    # the caller's job directory, which alone holds modkit's work files (they
+    # carry read names; never the system temp directory).
+    reference_fasta: Path | None = None
+    job_directory: Path | None = None
+    modkit_filter_threshold: float = DEFAULT_MODKIT_FILTER_THRESHOLD
+    min_mapq: int = DEFAULT_MIN_MAPQ
 
 
 @dataclass(frozen=True, slots=True)
@@ -417,25 +447,24 @@ def preflight(
     require_modkit: bool = True,
     executable_finder: Callable[[str], str | None] = shutil.which,
     version_probe: Callable[[str], tuple[bool, str | None]] = _tool_version,
+    modkit_resolver: Callable[[], PinnedTool] = resolve_modkit,
 ) -> PreflightReport:
-    """Check tools and required local artifacts without exposing their paths."""
+    """Check tools and required local artifacts without exposing their paths.
+
+    modkit is resolved only as the pinned, digest-checked toolchain, never
+    from ``PATH``.
+    """
 
     items: list[PreflightItem] = []
-    for tool in ("minimap2", "samtools", "modkit"):
+    for tool in ("minimap2", "samtools"):
         executable = executable_finder(tool)
-        blocking = tool != "modkit" or require_modkit
         if executable is None:
-            detail = (
-                "modkit is not installed; install a pinned release before "
-                "extracting methylation calls"
-                if tool == "modkit"
-                else f"{tool} is not installed or is not on PATH"
-            )
+            detail = f"{tool} is not installed or is not on PATH"
             items.append(
                 PreflightItem(
                     item_id=f"software.{tool}",
                     ready=False,
-                    blocking=blocking,
+                    blocking=True,
                     detail=detail,
                 )
             )
@@ -445,7 +474,7 @@ def preflight(
             PreflightItem(
                 item_id=f"software.{tool}",
                 ready=ready,
-                blocking=blocking,
+                blocking=True,
                 version=version,
                 detail=(
                     f"{tool} version detected"
@@ -455,15 +484,37 @@ def preflight(
             )
         )
 
-    artifact_checks = (
-        ("reference.hg38-fasta", Path("data/local/reference/hg38.primary.fa")),
-        ("reference.hg38-index", Path("data/local/reference/hg38.primary.fa.mmi")),
+    try:
+        modkit = modkit_resolver()
+    except ToolProblem as problem:
+        items.append(
+            PreflightItem(
+                item_id="software.modkit",
+                ready=False,
+                blocking=require_modkit,
+                detail=f"{problem.code} ({problem.reason}): {problem.fix}",
+            )
+        )
+    else:
+        items.append(
+            PreflightItem(
+                item_id="software.modkit",
+                ready=True,
+                blocking=require_modkit,
+                version=modkit.identity.version,
+                detail="pinned modkit verified by version and binary digest",
+            )
+        )
+
+    artifact_checks: list[tuple[str, Path | None]] = [
         ("atlas.marker-bed", config.marker_bed),
         ("atlas.marker-metadata", config.marker_metadata),
         ("atlas.u-matrix", config.atlas_u_matrix),
-    )
+    ]
+    if config.aligned_modbam is not None:
+        artifact_checks.insert(0, ("reference.fasta", config.reference_fasta))
     for item_id, path in artifact_checks:
-        ready = path.is_file() and path.stat().st_size > 0
+        ready = path is not None and path.is_file() and path.stat().st_size > 0
         items.append(
             PreflightItem(
                 item_id=item_id,
@@ -1395,113 +1446,255 @@ def _native_probability(raw: str, call_code: str) -> str:
     )
 
 
-def _normalize_native_modkit(source: Path, destination: Path) -> None:
+def _normalize_native_modkit(
+    source: Path,
+    destination: Path,
+    *,
+    maximum_calls: int = DEFAULT_MAXIMUM_CALLS,
+) -> int:
     try:
         with source.open("r", encoding="utf-8", newline="") as input_handle:
-            reader = csv.DictReader(input_handle, delimiter="\t")
-            header = frozenset(reader.fieldnames or ())
-            if not NATIVE_MODKIT_REQUIRED_COLUMNS.issubset(header):
-                raise CellOriginPipelineError(
-                    "installed modkit emitted an unsupported extract schema"
-                )
-            probability_column = next(
-                (
-                    name
-                    for name in ("modified_probability", "call_prob")
-                    if name in header
-                ),
-                None,
+            return _normalize_native_stream(
+                input_handle, destination, maximum_calls=maximum_calls
             )
-            if probability_column is None and "base_probs" not in header:
-                raise CellOriginPipelineError(
-                    "modkit extract lacks call_prob, modified_probability, or base_probs"
-                )
-            with destination.open(
-                "w", encoding="utf-8", newline=""
-            ) as output_handle:
-                writer = csv.DictWriter(
-                    output_handle,
-                    fieldnames=NORMALIZED_MODKIT_COLUMNS.declared(),
-                    delimiter="\t",
-                    lineterminator="\n",
-                )
-                writer.writeheader()
-                for row_number, row in enumerate(reader, start=1):
-                    if row_number > DEFAULT_MAXIMUM_CALLS:
-                        raise CellOriginPipelineError(
-                            "modkit extract exceeds the configured call cap"
-                        )
-                    native_call_code = row["call_code"]
-                    call_code = "C" if native_call_code == "-" else native_call_code
-                    writer.writerow(
-                        {
-                            "read_id": row["read_id"],
-                            "chrom": row["chrom"],
-                            "ref_position": row["ref_position"],
-                            "mod_strand": row["mod_strand"],
-                            "modified_primary_base": row[
-                                "modified_primary_base"
-                            ],
-                            "call_code": call_code,
-                            "modified_probability": (
-                                row[probability_column]
-                                if probability_column is not None
-                                else _native_probability(
-                                    row["base_probs"], native_call_code
-                                )
-                            ),
-                            "fail": row["fail"].lower(),
-                        }
-                    )
-    except (OSError, UnicodeError, csv.Error, KeyError) as exc:
+    except OSError as exc:
         raise CellOriginPipelineError(
             "unable to normalize modkit extract output"
         ) from exc
 
 
-def _extract_modbam(
-    config: PipelineConfig,
+def _normalize_native_stream(
+    input_handle: Iterable[str],
+    destination: Path,
     *,
-    executable: str,
-) -> tuple[Path, tempfile.TemporaryDirectory[str]]:
-    if config.aligned_modbam is None:
-        raise CellOriginPipelineError("aligned modBAM input is not configured")
-    temporary = tempfile.TemporaryDirectory(prefix="traceback-modkit-")
-    native = Path(temporary.name) / "modkit.native.tsv"
-    normalized = Path(temporary.name) / "modkit.normalized.tsv"
-    argv = [
-        executable,
+    maximum_calls: int,
+) -> int:
+    """Normalize native ``extract calls`` rows; refuse past ``maximum_calls``.
+
+    The cap is checked row by row while streaming, so a caller reading modkit's
+    stdout stops it as soon as the cap is passed.  Returns the row count.
+    """
+
+    if isinstance(maximum_calls, bool) or maximum_calls < 1:
+        raise CellOriginPipelineError("the call cap must be a positive integer")
+    rows = 0
+    try:
+        reader = csv.DictReader(input_handle, delimiter="\t")
+        header = frozenset(reader.fieldnames or ())
+        if not NATIVE_MODKIT_REQUIRED_COLUMNS.issubset(header):
+            raise CellOriginPipelineError(
+                "installed modkit emitted an unsupported extract schema"
+            )
+        probability_column = next(
+            (
+                name
+                for name in ("modified_probability", "call_prob")
+                if name in header
+            ),
+            None,
+        )
+        if probability_column is None and "base_probs" not in header:
+            raise CellOriginPipelineError(
+                "modkit extract lacks call_prob, modified_probability, or base_probs"
+            )
+        with destination.open("w", encoding="utf-8", newline="") as output_handle:
+            writer = csv.DictWriter(
+                output_handle,
+                fieldnames=NORMALIZED_MODKIT_COLUMNS.declared(),
+                delimiter="\t",
+                lineterminator="\n",
+            )
+            writer.writeheader()
+            for row_number, row in enumerate(reader, start=1):
+                if row_number > maximum_calls:
+                    raise CellOriginPipelineError(
+                        "modkit extract exceeds the configured call cap"
+                    )
+                native_call_code = row["call_code"]
+                call_code = "C" if native_call_code == "-" else native_call_code
+                writer.writerow(
+                    {
+                        "read_id": row["read_id"],
+                        "chrom": row["chrom"],
+                        "ref_position": row["ref_position"],
+                        "mod_strand": row["mod_strand"],
+                        "modified_primary_base": row["modified_primary_base"],
+                        "call_code": call_code,
+                        "modified_probability": (
+                            row[probability_column]
+                            if probability_column is not None
+                            else _native_probability(
+                                row["base_probs"], native_call_code
+                            )
+                        ),
+                        "fail": row["fail"].lower(),
+                    }
+                )
+                rows = row_number
+    except (OSError, UnicodeError, csv.Error, KeyError) as exc:
+        raise CellOriginPipelineError(
+            "unable to normalize modkit extract output"
+        ) from exc
+    return rows
+
+
+def modkit_extract_arguments(
+    *,
+    reference_fasta: Path,
+    include_bed: Path,
+    filter_threshold: float,
+    modbam: Path,
+) -> tuple[str, ...]:
+    """The locked ``modkit extract calls`` argv after the executable.
+
+    Output goes to stdout (``-``) so the call cap is enforced while streaming;
+    the filter threshold is always explicit, never modkit's estimate.
+    """
+
+    if not 0.0 < filter_threshold < 1.0:
+        raise CellOriginPipelineError("the modkit filter threshold must be in (0, 1)")
+    return (
         "extract",
         "calls",
         "--reference",
-        str(Path("data/local/reference/hg38.primary.fa")),
+        str(reference_fasta),
         "--cpg",
         "--include-bed",
-        str(config.marker_bed),
+        str(include_bed),
         "--mapped-only",
+        "--filter-threshold",
+        repr(float(filter_threshold)),
         "--suppress-progress",
-        "--force",
-        str(config.aligned_modbam),
-        str(native),
-    ]
-    try:
-        completed = subprocess.run(
-            argv,
-            check=False,
-            capture_output=True,
-            text=True,
-            timeout=1800,
+        str(modbam),
+        "-",
+    )
+
+
+def _modkit_work_directory(config: PipelineConfig) -> Path:
+    if config.job_directory is None:
+        raise CellOriginPipelineError(
+            "a job directory is required to extract calls from an aligned modBAM"
         )
-    except (OSError, subprocess.SubprocessError) as exc:
-        temporary.cleanup()
-        raise CellOriginPipelineError("modkit extraction could not run") from exc
-    if completed.returncode != 0:
-        temporary.cleanup()
+    return config.job_directory.absolute() / MODKIT_WORK_DIRECTORY
+
+
+def _remove_work_directory(work: Path) -> None:
+    if work.is_symlink() or work.is_file():
+        work.unlink()
+    elif work.is_dir():
+        shutil.rmtree(work)
+
+
+def _extract_modbam(
+    config: PipelineConfig,
+    *,
+    modkit: PinnedTool,
+    timeout_seconds: float = MODKIT_TIMEOUT_SECONDS,
+) -> tuple[Path, PrefilterCounts]:
+    """Pre-filter, then stream ``modkit extract calls`` into a bounded TSV.
+
+    Every file it writes is under ``<job directory>/modkit-work``; the caller
+    removes that directory when the run ends.
+    """
+
+    if config.aligned_modbam is None:
+        raise CellOriginPipelineError("aligned modBAM input is not configured")
+    if config.reference_fasta is None:
+        raise CellOriginPipelineError(
+            "a reference FASTA is required to extract calls from an aligned modBAM"
+        )
+    # modkit runs with cwd=work, so every path it is given is absolute.
+    reference_fasta = config.reference_fasta.absolute()
+    marker_bed = config.marker_bed.absolute()
+    work = _modkit_work_directory(config)
+    _remove_work_directory(work)
+    work.parent.mkdir(parents=True, exist_ok=True)
+    # Private before anything holding read names is written into it.
+    work.mkdir(mode=0o700)
+    work.chmod(0o700)
+    temporary = work / "tmp"
+    temporary.mkdir(mode=0o700)
+    try:
+        regions = read_bed_regions(marker_bed)
+    except (OSError, UnicodeError, ValueError) as exc:
+        raise CellOriginPipelineError("the marker region BED could not be read") from exc
+    filtered = work / "prefiltered.bam"
+    try:
+        counts = write_prefiltered_bam(
+            config.aligned_modbam, filtered, regions, min_mapq=config.min_mapq
+        )
+    except (OSError, ValueError) as exc:
+        raise CellOriginPipelineError(
+            "the aligned modBAM could not be pre-filtered"
+        ) from exc
+    if counts.written == 0:
+        raise CellOriginPipelineError(
+            "no alignment passes the pre-filter and overlaps a marker region"
+        )
+    normalized = work / "modkit.normalized.tsv"
+    arguments = modkit_extract_arguments(
+        reference_fasta=reference_fasta,
+        include_bed=marker_bed,
+        filter_threshold=config.modkit_filter_threshold,
+        modbam=filtered,
+    )
+    environment = {**os.environ, "TMPDIR": str(temporary)}
+    with (work / "modkit.stderr.log").open("wb") as stderr_log:
+        try:
+            process = exec_pinned(
+                modkit,
+                arguments,
+                stdin=subprocess.DEVNULL,
+                stdout=subprocess.PIPE,
+                stderr=stderr_log,
+                cwd=work,
+                env=environment,
+            )
+        except OSError as exc:
+            raise CellOriginPipelineError("modkit extraction could not run") from exc
+        timed_out = threading.Event()
+
+        def _on_timeout() -> None:
+            timed_out.set()
+            kill_process_group(process)
+
+        watchdog = threading.Timer(timeout_seconds, _on_timeout)
+        watchdog.daemon = True
+        watchdog.start()
+        try:
+            assert process.stdout is not None
+            _normalize_native_stream(
+                io.TextIOWrapper(process.stdout, encoding="utf-8", newline=""),
+                normalized,
+                maximum_calls=config.maximum_calls,
+            )
+            returncode = process.wait()
+        except BaseException as exc:
+            kill_process_group(process)
+            if timed_out.is_set():  # a killed stream reads as a short or empty table
+                raise CellOriginPipelineError("modkit extraction timed out") from exc
+            raise
+        finally:
+            watchdog.cancel()
+            if process.stdout is not None:
+                process.stdout.close()
+    if timed_out.is_set():
+        raise CellOriginPipelineError("modkit extraction timed out")
+    if returncode != 0:
         raise CellOriginPipelineError(
             "modkit extraction failed; run modkit validate on the aligned modBAM"
         )
-    _normalize_native_modkit(native, normalized)
-    return normalized, temporary
+    return normalized, counts
+
+
+def _prefilter_notice(counts: PrefilterCounts) -> str:
+    excluded = ", ".join(f"{reason} {count}" for reason, count in prefilter_summary(counts))
+    return (
+        f"Before modkit, {counts.records_scanned} alignment records were scanned: "
+        f"{counts.written} passed and overlap a marker region, "
+        f"{counts.outside_regions} passed but overlap no marker region; "
+        f"excluded: {excluded}."
+    )
 
 
 def run_pipeline(
@@ -1509,8 +1702,13 @@ def run_pipeline(
     *,
     fragment_hash_salt: bytes,
     software_versions: Mapping[str, str] | None = None,
+    modkit: PinnedTool | None = None,
 ) -> CellOriginResultBundle:
-    """Execute the bounded cell-origin pipeline and atomically publish JSON."""
+    """Execute the bounded cell-origin pipeline and atomically publish JSON.
+
+    ``modkit`` defaults to the pinned per-user toolchain (TBX-TOOL-001 when it
+    is missing or not the pinned bytes).
+    """
 
     if (
         sum(item is not None for item in (config.extract_tsv, config.aligned_modbam))
@@ -1519,24 +1717,24 @@ def run_pipeline(
         raise CellOriginPipelineError(
             "provide exactly one aligned modBAM or validated modkit extract TSV"
         )
-    resources = _load_loyfer_resources(config)
-    temporary: tempfile.TemporaryDirectory[str] | None = None
     call_source = config.extract_tsv
     versions = dict(software_versions or {})
+    work: Path | None = None
+    prefilter: PrefilterCounts | None = None
     if config.aligned_modbam is not None:
-        modkit = shutil.which("modkit")
-        if modkit is None:
+        if config.reference_fasta is None:
             raise CellOriginPipelineError(
-                "modkit is required to extract calls from an aligned modBAM"
+                "a reference FASTA is required to extract calls from an aligned modBAM"
             )
-        ready, version = _tool_version(modkit)
-        if not ready or version is None:
-            raise CellOriginPipelineError("modkit version could not be verified")
-        versions["modkit"] = version
-        call_source, temporary = _extract_modbam(config, executable=modkit)
-    assert call_source is not None
+        work = _modkit_work_directory(config)
+        tool = modkit if modkit is not None else resolve_modkit()
+        versions["modkit"] = tool.identity.version
+    resources = _load_loyfer_resources(config)
 
     try:
+        if work is not None:
+            call_source, prefilter = _extract_modbam(config, modkit=tool)
+        assert call_source is not None
         calls = load_modkit_extract_calls(
             call_source,
             columns=NORMALIZED_MODKIT_COLUMNS,
@@ -1736,6 +1934,8 @@ def run_pipeline(
                 "linkage. Unusable uncertainty is reported as unavailable."
             ),
         ]
+        if prefilter is not None:
+            notices.append(_prefilter_notice(prefilter))
         if resources.collapsed_duplicate_count:
             notices.append(
                 f"{resources.collapsed_duplicate_count} duplicate Loyfer marker "
@@ -1777,8 +1977,8 @@ def run_pipeline(
             raise
         raise CellOriginPipelineError(str(exc)) from exc
     finally:
-        if temporary is not None:
-            temporary.cleanup()
+        if work is not None:
+            _remove_work_directory(work)
 
 
 def _config_from_args(arguments: argparse.Namespace) -> PipelineConfig:
@@ -1797,6 +1997,12 @@ def _config_from_args(arguments: argparse.Namespace) -> PipelineConfig:
         maximum_groups=arguments.maximum_groups,
         bootstrap_replicates=arguments.bootstrap_replicates,
         random_seed=arguments.random_seed,
+        reference_fasta=arguments.reference,
+        job_directory=(
+            arguments.job_dir
+            if arguments.job_dir is not None
+            else arguments.output.parent / "cell-origin-job"
+        ),
     )
 
 
@@ -1807,6 +2013,18 @@ def build_argument_parser() -> argparse.ArgumentParser:
     input_group = parser.add_mutually_exclusive_group(required=True)
     input_group.add_argument("--extract-tsv", type=Path)
     input_group.add_argument("--aligned-modbam", type=Path)
+    parser.add_argument(
+        "--reference",
+        type=Path,
+        default=Path("data/local/reference/hg38.primary.fa"),
+        help="FASTA the modBAM was aligned to (its .mmi is used by the alignment plan)",
+    )
+    parser.add_argument(
+        "--job-dir",
+        type=Path,
+        default=None,
+        help="private work directory for modkit files (default: next to --output)",
+    )
     parser.add_argument(
         "--marker-bed",
         type=Path,
@@ -1865,9 +2083,10 @@ def cli_main(argv: Sequence[str] | None = None) -> int:
     if arguments.print_alignment_plan:
         if config.aligned_modbam is None:
             parser.error("--print-alignment-plan requires --aligned-modbam")
+        assert config.reference_fasta is not None
         plan = build_alignment_command_plan(
             config.aligned_modbam,
-            Path("data/local/reference/hg38.primary.fa.mmi"),
+            config.reference_fasta.with_name(config.reference_fasta.name + ".mmi"),
             Path("data/local/alignment-work"),
         )
         print(plan.model_dump_json(indent=2))
@@ -1899,6 +2118,13 @@ def cli_main(argv: Sequence[str] | None = None) -> int:
     except CellOriginPipelineError as exc:
         print(f"Cell-origin regeneration failed: {exc}", file=sys.stderr)
         return 1
+    except ToolProblem as problem:
+        print(
+            f"Cell-origin regeneration is blocked:\n- {problem.code}: "
+            f"{problem.summary}. {problem.fix}",
+            file=sys.stderr,
+        )
+        return 2
     print(
         json.dumps(
             {

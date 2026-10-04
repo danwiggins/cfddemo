@@ -1,0 +1,5 @@
+# platform: osx-arm64
+@EXPLICIT
+https://conda.anaconda.org/conda-forge/osx-arm64/libcxx-23.1.2-h55c6f16_0.conda#sha256:087a610bacee7901d259ef72c6f060d795ab26831bd7541ba75ced786a5a63f9
+https://conda.anaconda.org/conda-forge/osx-arm64/libzlib-1.3.2-h8088a28_3.conda#sha256:a18fa5d5bac452401459f966cf0d872224e8080c4ff93c77e168d43ab42ef9d7
+https://conda.anaconda.org/bioconda/osx-arm64/ont-modkit-0.6.4-h2797cb0_0.conda#sha256:8de445bc5375d69582548d31ad6e1e39f3bb4ed57194feccb238859e71bffe68
