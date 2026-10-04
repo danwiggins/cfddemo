@@ -6,6 +6,7 @@ Every record here is generated test data labelled unqualified and local.
 from __future__ import annotations
 
 import errno
+import hashlib
 import gc
 import json
 import re
@@ -574,3 +575,328 @@ def test_a_lost_lease_names_the_lease_and_resume(
     assert (data["code"], data["retryable"], data["job_id"]) == ("TBX-JOB-001", True, job_id)
     assert data["next_action"] == f"traceback resume {job_id} --root <same-root>"
     assert _records(root) == []
+
+
+# --- B1: the job key names the method ----------------------------------------
+
+_LEGACY_LOCAL_WORKFLOW_SHA256 = hashlib.sha256(b"local-unqualified-v0").hexdigest()
+
+
+def _request(root: Path, job_id: str):
+    with JobStore(root / "runner" / "runner.sqlite3") as store:
+        return store.request(job_id)
+
+
+def test_local_workflow_hash_names_the_method_and_recognition_ignores_it() -> None:
+    from traceback_runner.contracts import InputKind, JobRequest
+
+    method = "a" * 64
+    assert cli._local_workflow_sha256(method) == hashlib.sha256(
+        b"local-unqualified-v0:" + method.encode("ascii")
+    ).hexdigest()
+    assert cli._local_workflow_sha256(method) != cli._local_workflow_sha256("b" * 64)
+    with pytest.raises(ValueError):
+        cli._local_workflow_sha256("A" * 64)
+
+    def request(token: str, workflow: str) -> JobRequest:
+        return JobRequest(
+            sample_token=token,
+            input_kind=InputKind.MODBAM,
+            input_tree_sha256_local="0" * 64,
+            workflow_release_sha256=workflow,
+        )
+
+    synthetic = cli._synthetic_workflow_sha256()
+    # Legacy constant rows, current rows and rows under any later method.
+    for workflow in (_LEGACY_LOCAL_WORKFLOW_SHA256, cli._local_workflow_sha256(method), "c" * 64):
+        assert cli._is_local_request(request("local-ref", workflow))
+    assert not cli._is_local_request(request("local-ref", synthetic))
+    assert not cli._is_local_request(request("synthetic-sample-token", synthetic))
+    assert not cli._is_local_request(request("synthetic-sample-token", "c" * 64))
+
+
+def test_a_changed_method_is_a_new_job_not_the_old_record(
+    tmp_path: Path, inputs, capsys, monkeypatch
+) -> None:
+    from traceback_runner import local_authority
+
+    root = tmp_path / "root"
+    _register(capsys, root, inputs.fasta_path)
+    code, first = _run(capsys, root, inputs.bam_path)
+    assert code == cli.ExitCode.OK, first
+    stored = _request(root, first["data"]["job_id"])
+    assert stored.schema_version == "traceback.job-request.v1"
+    assert stored.workflow_release_sha256 == cli._local_workflow_sha256(
+        method_definition_sha256(local_method_definition(_registered(root)))
+    )
+
+    original = local_authority.local_method_definition
+
+    def changed(reference):
+        return original(reference).model_copy(update={"parameter_schema_sha256": "e" * 64})
+
+    monkeypatch.setattr(local_authority, "local_method_definition", changed)
+    monkeypatch.setattr(local_authority, "ensure_local_method_authority", lambda *a, **k: None)
+    code, second = _run(capsys, root, inputs.bam_path)
+    assert code == cli.ExitCode.OK, second
+    assert second["data"]["job_id"] != first["data"]["job_id"]
+    assert second["data"]["record_id"] != first["data"]["record_id"]
+    assert len(_job_ids(root)) == 2 and len(_records(root)) == 2
+    verified = verify_bundle(
+        Path(second["data"]["bundle_path"]),
+        load_development_trust(Path(second["data"]["trust_store_path"]).read_bytes()),
+    )
+    assert verified.manifest.method.method_definition_sha256 == method_definition_sha256(
+        changed(_registered(root))
+    )
+
+
+def test_the_same_method_twice_is_one_job_with_no_twin(tmp_path: Path, inputs, capsys) -> None:
+    root = tmp_path / "root"
+    _register(capsys, root, inputs.fasta_path)
+    _, first = _run(capsys, root, inputs.bam_path)
+    code, second = _run(capsys, root, inputs.bam_path)
+    assert code == cli.ExitCode.OK
+    assert second["data"]["job_id"] == first["data"]["job_id"]
+    assert len(_job_ids(root)) == 1
+    assert "same_measurement_as" not in first["data"]
+    assert "same_measurement_as" not in second["data"]
+
+
+def _legacy_key(monkeypatch) -> None:
+    monkeypatch.setattr(cli, "_local_workflow_sha256", lambda method: _LEGACY_LOCAL_WORKFLOW_SHA256)
+
+
+def test_a_legacy_key_job_is_still_local_and_resumes(
+    tmp_path: Path, inputs, capsys, monkeypatch
+) -> None:
+    root = tmp_path / "root"
+    _register(capsys, root, inputs.fasta_path)
+    original = cli._local_stages
+
+    def pausing(*args, **kwargs):
+        stages = list(original(*args, **kwargs))
+        first = stages[0]
+
+        def callback(context):
+            result = first.callback(context)
+            cli._existing_runner(root).request_pause(context.job_id)
+            return result
+
+        stages[0] = type(first)(
+            name=first.name, version=first.version, callback=callback, parameters=first.parameters
+        )
+        return tuple(stages)
+
+    with monkeypatch.context() as patch:
+        _legacy_key(patch)
+        patch.setattr(cli, "_local_stages", pausing)
+        code, paused = _run(capsys, root, inputs.bam_path)
+    assert code == cli.ExitCode.OK and paused["data"]["state"] == "paused", paused
+    job_id = paused["data"]["job_id"]
+    assert _request(root, job_id).workflow_release_sha256 == _LEGACY_LOCAL_WORKFLOW_SHA256
+
+    # Upgraded code: the legacy row is still a local job and resumes.
+    code, status = _json(capsys, "status", job_id, "--root", root)
+    assert code == cli.ExitCode.OK
+    assert status["data_origin"] == "local_unqualified"
+    assert "synthetic" not in status["summary"].lower()
+    code, resumed = _json(capsys, "resume", job_id, "--root", root)
+    assert code == cli.ExitCode.OK, resumed
+    assert resumed["data"]["state"] == "complete"
+    assert len(_records(root)) == 1
+
+
+def test_a_legacy_key_rerun_makes_a_second_record_marked_same_measurement(
+    tmp_path: Path, inputs, capsys, monkeypatch
+) -> None:
+    root = tmp_path / "root"
+    _register(capsys, root, inputs.fasta_path)
+    with monkeypatch.context() as patch:
+        _legacy_key(patch)
+        code, legacy = _run(capsys, root, inputs.bam_path)
+    assert code == cli.ExitCode.OK, legacy
+    assert "same_measurement_as" not in legacy["data"]
+
+    code, upgraded = _run(capsys, root, inputs.bam_path)
+    assert code == cli.ExitCode.OK, upgraded
+    assert upgraded["data"]["job_id"] != legacy["data"]["job_id"]
+    assert upgraded["data"]["record_id"] != legacy["data"]["record_id"]
+    assert upgraded["data"]["same_measurement_as"] == legacy["data"]["record_id"]
+    assert len(_records(root)) == 2
+    with JobStore(root / "runner" / "runner.sqlite3") as store:
+        assert cli._measurement_twins(root, store) == {
+            upgraded["data"]["record_id"]: legacy["data"]["record_id"]
+        }
+    # Human output names it too.
+    code = cli.main(["run", str(inputs.bam_path), "--reference", "ref", "--root", str(root)])
+    assert code == cli.ExitCode.OK
+    assert f"SAME_MEASUREMENT_AS  {legacy['data']['record_id']}" in capsys.readouterr().out
+
+
+def test_a_tampered_twin_is_not_named(tmp_path: Path, inputs, capsys, monkeypatch) -> None:
+    root = tmp_path / "root"
+    _register(capsys, root, inputs.fasta_path)
+    with monkeypatch.context() as patch:
+        _legacy_key(patch)
+        _, legacy = _run(capsys, root, inputs.bam_path)
+    report = root / "records" / legacy["data"]["record_id"] / "report.html"
+    report.chmod(0o600)
+    report.write_text(report.read_text() + "<!-- edited -->")
+    code, upgraded = _run(capsys, root, inputs.bam_path)
+    assert code == cli.ExitCode.OK, upgraded
+    assert "same_measurement_as" not in upgraded["data"]
+
+
+# --- D1: crash-safe provenance HMAC key --------------------------------------
+
+
+def test_a_short_provenance_key_with_no_records_is_replaced(
+    tmp_path: Path, inputs, capsys
+) -> None:
+    root = tmp_path / "root"
+    _register(capsys, root, inputs.fasta_path)
+    key = root / "trust" / "provenance-hmac.key"
+    key.parent.mkdir(parents=True, exist_ok=True)
+    key.write_bytes(b"")  # an older version crashed between create and write
+    key.chmod(0o600)
+    code, payload = _run(capsys, root, inputs.bam_path)
+    assert code == cli.ExitCode.OK, payload
+    assert len(key.read_bytes()) == 32
+    assert stat.S_IMODE(key.stat().st_mode) == 0o600
+    assert not list(key.parent.glob(".provenance-hmac.key.*"))
+
+
+def test_a_short_provenance_key_with_a_record_is_refused(
+    tmp_path: Path, inputs, capsys
+) -> None:
+    root = tmp_path / "root"
+    _register(capsys, root, inputs.fasta_path)
+    code, first = _run(capsys, root, inputs.bam_path)
+    assert code == cli.ExitCode.OK, first
+    key = root / "trust" / "provenance-hmac.key"
+    key.write_bytes(b"k" * 7)
+    other = create_local_golden_path_inputs(tmp_path / "other", seed=7)
+    code, payload = _run(capsys, root, other.bam_path)
+    assert code == cli.ExitCode.BLOCKED, payload
+    assert payload["data"]["code"] == "TBX-RUN-006"
+    assert "ROOT/trust/provenance-hmac.key" in payload["data"]["fix"]
+    assert "already holds records" in payload["data"]["cause"]
+    assert key.read_bytes() == b"k" * 7
+    assert len(_records(root)) == 1
+
+
+def test_an_existing_read_only_provenance_key_is_accepted(
+    tmp_path: Path, inputs, capsys
+) -> None:
+    root = tmp_path / "root"
+    _register(capsys, root, inputs.fasta_path)
+    key = root / "trust" / "provenance-hmac.key"
+    key.parent.mkdir(parents=True, exist_ok=True)
+    key.write_bytes(b"r" * 32)
+    key.chmod(0o400)
+    code, payload = _run(capsys, root, inputs.bam_path)
+    assert code == cli.ExitCode.OK, payload
+    assert key.read_bytes() == b"r" * 32
+
+
+def test_provenance_key_creation_never_leaves_a_short_key(tmp_path: Path, monkeypatch) -> None:
+    import os
+
+    root = tmp_path / "root"
+
+    def crash(*args, **kwargs):
+        raise OSError("simulated crash before publication")
+
+    monkeypatch.setattr(os, "link", crash)
+    with pytest.raises(OSError):
+        cli._provenance_hmac_key(root)
+    key = root / "trust" / "provenance-hmac.key"
+    assert not key.exists()
+    assert not list(key.parent.glob(".provenance-hmac.key.*"))
+    monkeypatch.undo()
+    assert len(cli._provenance_hmac_key(root)) == 32
+
+
+# --- D2: the runner's lease keeper alone keeps a long local stage alive ------
+
+
+def test_a_local_stage_three_leases_long_completes_through_the_lease_keeper(
+    tmp_path: Path, inputs, capsys, monkeypatch
+) -> None:
+    import threading
+
+    from traceback_runner import runner as runner_module
+
+    class FakeClock:
+        def __init__(self) -> None:
+            self.now = 1_000.0
+
+        def __call__(self) -> float:
+            return self.now
+
+    clock = FakeClock()
+    lease = 5.0
+    renewals = threading.Condition()
+    counts = {"renewed": 0, "failed": 0}
+    real_runner = runner_module.Runner
+
+    def runner_factory(*args, **kwargs):
+        built = real_runner(
+            *args, clock=clock, lease_seconds=lease, heartbeat_seconds=0.01, **kwargs
+        )
+        real = built.store.heartbeat
+
+        def heartbeat(current, seconds):
+            try:
+                result = real(current, seconds)
+            except BaseException:
+                with renewals:
+                    counts["failed"] += 1
+                    renewals.notify_all()
+                raise
+            with renewals:
+                counts["renewed"] += 1
+                renewals.notify_all()
+            return result
+
+        built.store.heartbeat = heartbeat
+        return built
+
+    monkeypatch.setattr(runner_module, "Runner", runner_factory)
+    original = cli._local_stages
+    slow_stages: list[str] = []
+
+    def slow(*args, **kwargs):
+        stages = list(original(*args, **kwargs))
+        measure = stages[1]
+
+        def callback(context):
+            # The stage itself never heartbeats; three lease lengths pass.
+            for _ in range(6):
+                with renewals:
+                    seen = counts["renewed"]
+                clock.now += lease / 2
+                with renewals:
+                    assert renewals.wait_for(
+                        lambda: counts["renewed"] >= seen + 2 or counts["failed"], 10.0
+                    )
+                    assert counts["failed"] == 0
+            slow_stages.append(context.job_id)
+            return measure.callback(context)
+
+        stages[1] = type(measure)(
+            name=measure.name, version=measure.version, callback=callback,
+            parameters=measure.parameters,
+        )
+        return tuple(stages)
+
+    monkeypatch.setattr(cli, "_local_stages", slow)
+    root = tmp_path / "root"
+    _register(capsys, root, inputs.fasta_path)
+    code, payload = _run(capsys, root, inputs.bam_path)
+    assert code == cli.ExitCode.OK, payload
+    assert payload["data"]["state"] == "complete"
+    assert slow_stages == [payload["data"]["job_id"]]
+    assert counts["failed"] == 0
+    assert not hasattr(cli, "_stage_heartbeat")
