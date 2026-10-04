@@ -57,8 +57,12 @@ from evidence_inspector.result_trust_registry import (
     ResultTrustSnapshot,
     ResultTrustSnapshotV2,
 )
-from traceback_runner.bundles import VerifiedBundle, verify_bundle
-from traceback_runner.contracts import ResultBundleManifestV2, ResultBundleManifestV3
+from traceback_runner.bundles import VerifiedBundle, bundle_file_byte_limit, verify_bundle
+from traceback_runner.contracts import (
+    ResultBundleManifestV2,
+    ResultBundleManifestV3,
+    ResultBundleManifestV4,
+)
 from traceback_runner.filesystem import rename_directory_exclusive_at
 from traceback_runner.serialization import canonical_json_bytes
 from traceback_runner.signing import (
@@ -266,6 +270,16 @@ _FIXED_FILES = (
     "provenance.json",
     "report.html",
 )
+# Files every bundle holds at its top level; the one measurement and the one
+# chart (same file name) are chosen by the bundle's measurement schema.
+_TOP_LEVEL_FILES = (
+    "bundle-manifest.json",
+    "bundle.sig",
+    "checksums.sha256",
+    "limitations.json",
+    "provenance.json",
+    "report.html",
+)
 _TOP_LEVEL = frozenset(
     {
         "bundle-manifest.json",
@@ -278,10 +292,7 @@ _TOP_LEVEL = frozenset(
         "report.html",
     }
 )
-_NESTED = {
-    "charts": frozenset({"fragment-length.v1.json"}),
-    "measurements": frozenset({"fragment-length.v1.json"}),
-}
+_NESTED_DIRECTORIES = ("charts", "measurements")
 _MAX_FILE_BYTES = {
     "bundle-manifest.json": 256 * 1024,
     "bundle.sig": 16 * 1024,
@@ -334,7 +345,12 @@ class CatalogUnsupportedSchema(CatalogError):
 
 
 class ResultBundleReader(CatalogModel):
-    """One explicit, bounded reader range for independently verified bundles."""
+    """One explicit, bounded reader range for independently verified bundles.
+
+    A reader is selected by ``(bundle_version, measurement_schema_versions)``:
+    two readers may cover the same bundle version only when they read different
+    measurement schemas (result-bundle v4 carries one schema per bundle).
+    """
 
     reader_id: str = Field(pattern=r"^reader_[a-z0-9]+(?:_[a-z0-9]+)*$")
     bundle_family: Literal["traceback.result-bundle"] = "traceback.result-bundle"
@@ -362,7 +378,7 @@ class ResultBundleReaderRegistry(CatalogModel):
     readers: tuple[ResultBundleReader, ...] = Field(min_length=1, max_length=16)
 
     @model_validator(mode="after")
-    def ranges_are_non_overlapping(self) -> ResultBundleReaderRegistry:
+    def selections_are_unambiguous(self) -> ResultBundleReaderRegistry:
         order = [
             (
                 item.bundle_family,
@@ -376,15 +392,18 @@ class ResultBundleReaderRegistry(CatalogModel):
             {item.reader_id for item in self.readers}
         ) != len(self.readers):
             raise ValueError("reader registry must be uniquely sorted")
-        previous: ResultBundleReader | None = None
-        for reader in self.readers:
-            if (
-                previous is not None
-                and previous.bundle_family == reader.bundle_family
-                and reader.minimum_version <= previous.maximum_version
-            ):
-                raise ValueError("reader version ranges cannot overlap")
-            previous = reader
+        for index, reader in enumerate(self.readers):
+            for other in self.readers[index + 1 :]:
+                if (
+                    other.bundle_family == reader.bundle_family
+                    and other.minimum_version <= reader.maximum_version
+                    and reader.minimum_version <= other.maximum_version
+                    and other.measurement_schema_versions
+                    == reader.measurement_schema_versions
+                ):
+                    raise ValueError(
+                        "readers for one measurement schema cannot overlap in version"
+                    )
         return self
 
     def select(self, verified: VerifiedBundle) -> ResultBundleReader:
@@ -400,15 +419,17 @@ class ResultBundleReaderRegistry(CatalogModel):
             if reader.bundle_family == "traceback.result-bundle"
             and reader.minimum_version <= version <= reader.maximum_version
         )
-        if len(candidates) != 1:
+        if not candidates:
             raise CatalogUnsupportedSchema("bundle schema is unsupported")
-        reader = candidates[0]
-        if (
-            tuple(manifest.measurement_schema_versions)
-            != reader.measurement_schema_versions
-        ):
+        selected = tuple(
+            reader
+            for reader in candidates
+            if tuple(manifest.measurement_schema_versions)
+            == reader.measurement_schema_versions
+        )
+        if len(selected) != 1:
             raise CatalogUnsupportedSchema("measurement schema is unsupported")
-        return reader
+        return selected[0]
 
 
 _READER_RESULT_BUNDLE_V2 = ResultBundleReader(
@@ -437,7 +458,11 @@ LOCAL_RESULT_BUNDLE_READER_REGISTRY = ResultBundleReaderRegistry(
     readers=(_READER_RESULT_BUNDLE_V2, _READER_RESULT_BUNDLE_V3)
 )
 # Manifest classes that bind a method identity; v1 manifests carry none.
-_METHOD_BOUND_MANIFESTS = (ResultBundleManifestV2, ResultBundleManifestV3)
+_METHOD_BOUND_MANIFESTS = (
+    ResultBundleManifestV2,
+    ResultBundleManifestV3,
+    ResultBundleManifestV4,
+)
 
 _PINNED_READER_SELECT = ResultBundleReaderRegistry.select
 
@@ -1002,16 +1027,47 @@ def _open_directory_at(parent_fd: int, name: str) -> int:
     return descriptor
 
 
-def _inventory(bundle_fd: int) -> None:
+def _file_limit(relative: str) -> int:
+    limit = _MAX_FILE_BYTES.get(relative)
+    if limit is None:
+        limit = bundle_file_byte_limit(relative)
+    if limit is None:
+        raise CatalogFilesystemError("bundle inventory is not exact")
+    return limit
+
+
+def _inventory(bundle_fd: int) -> tuple[str, ...]:
+    """The exact, sorted file list of one bundle.
+
+    The fixed files plus one measurement and one chart that share a file name:
+    ``fragment-length.v1.json`` (v1-v3) or the path stem of a registered v4
+    measurement schema.  Verification then binds that name to the manifest's
+    schema; a v1-v3 bundle yields exactly ``_FIXED_FILES``.
+    """
+
     if frozenset(os.listdir(bundle_fd)) != _TOP_LEVEL:
         raise CatalogFilesystemError("bundle inventory is not exact")
-    for directory, expected in _NESTED.items():
+    names: list[str] = []
+    for directory in _NESTED_DIRECTORIES:
         nested_fd = _open_directory_at(bundle_fd, directory)
         try:
-            if frozenset(os.listdir(nested_fd)) != expected:
-                raise CatalogFilesystemError("bundle inventory is not exact")
+            listing = os.listdir(nested_fd)
         finally:
             os.close(nested_fd)
+        if len(listing) != 1:
+            raise CatalogFilesystemError("bundle inventory is not exact")
+        names.append(listing[0])
+    if len(set(names)) != 1:
+        raise CatalogFilesystemError("bundle inventory is not exact")
+    name = names[0]
+    files = tuple(
+        sorted(
+            (*_TOP_LEVEL_FILES, *(f"{directory}/{name}" for directory in _NESTED_DIRECTORIES))
+        )
+    )
+    for relative in files:
+        _file_limit(relative)
+    return files
 
 
 def _open_file_at(bundle_fd: int, relative: str) -> tuple[int, int | None]:
@@ -1039,17 +1095,17 @@ def _open_file_at(bundle_fd: int, relative: str) -> tuple[int, int | None]:
 def _copy_exact_bundle(
     bundle_fd: int, destination: Path | None
 ) -> tuple[str, str, dict[str, tuple[int, ...]]]:
-    _inventory(bundle_fd)
+    files = _inventory(bundle_fd)
     records: list[dict[str, object]] = []
     source_identities: dict[str, tuple[int, ...]] = {}
     total = 0
-    for relative in _FIXED_FILES:
+    for relative in files:
         descriptor, owned_parent = _open_file_at(bundle_fd, relative)
         try:
             before = os.fstat(descriptor)
             if not stat.S_ISREG(before.st_mode):
                 raise CatalogFilesystemError("bundle contains a non-regular entry")
-            limit = _MAX_FILE_BYTES[relative]
+            limit = _file_limit(relative)
             if before.st_size > limit or total + before.st_size > _MAX_TOTAL_BYTES:
                 raise CatalogFilesystemError("bundle exceeds its byte bound")
             digest = hashlib.sha256()
@@ -1107,8 +1163,10 @@ def _copy_exact_bundle(
 def _verify_source_identities(
     bundle_fd: int, expected: Mapping[str, tuple[int, ...]]
 ) -> None:
-    _inventory(bundle_fd)
-    for relative in _FIXED_FILES:
+    files = _inventory(bundle_fd)
+    if frozenset(files) != frozenset(expected):
+        raise CatalogFilesystemError("bundle changed during import")
+    for relative in files:
         descriptor, owned_parent = _open_file_at(bundle_fd, relative)
         try:
             if _stat_identity(os.fstat(descriptor)) != expected[relative]:

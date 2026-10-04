@@ -18,8 +18,15 @@ from traceback_runner.contracts import (
     AnyFragmentMeasurement,
     ApprovalState,
     ExportRunProvenance,
+    FragmentMeasurement,
+    FragmentMeasurementV2,
     canonical_json_bytes,
     validate_fragment_measurement,
+)
+from traceback_runner.measurement_schemas import (
+    BundleMeasurementSchema,
+    measurement_schema,
+    schema_version_of,
 )
 
 
@@ -135,13 +142,43 @@ def _check_export_strings(value: object, *, field_name: str = "") -> None:
             raise ExportBoundaryError(f"clinical claim language is forbidden in {field_name!r}")
 
 
-def validate_measurement(
-    value: AnyFragmentMeasurement | Mapping[str, object],
-) -> AnyFragmentMeasurement:
-    """Parse the exact measurement contract its schema names; enforce export-safe text."""
+def _v4_schema(measurement: object) -> BundleMeasurementSchema | None:
+    """The registered v4 schema a non-fragment measurement names, if any."""
 
+    if isinstance(measurement, (FragmentMeasurement, FragmentMeasurementV2)):
+        return None
+    return measurement_schema(schema_version_of(measurement))
+
+
+def _validate_v4_measurement(value: object, spec: BundleMeasurementSchema) -> BaseModel:
+    """Re-validate a registered v4 measurement through its exact contract class."""
+
+    if isinstance(value, BaseModel):
+        value = value.model_dump(mode="json")
+    parsed = spec.measurement_model.model_validate(value)
+    if type(parsed) is not spec.measurement_model or (
+        parsed.approval_state != ApprovalState.UNAPPROVED_LOCAL  # type: ignore[attr-defined]
+    ):
+        raise ExportBoundaryError("a v4 measurement is an unapproved_local record")
+    return parsed
+
+
+def validate_measurement(
+    value: AnyFragmentMeasurement | BaseModel | Mapping[str, object],
+) -> AnyFragmentMeasurement | BaseModel:
+    """Parse the exact measurement contract its schema names; enforce export-safe text.
+
+    Fragment-length schemas parse through their fixed contracts; a schema
+    registered for result-bundle v4 parses through its registered contract.
+    """
+
+    spec = _v4_schema(value)
     try:
-        parsed = validate_fragment_measurement(value)
+        parsed: AnyFragmentMeasurement | BaseModel = (
+            validate_fragment_measurement(value)
+            if spec is None
+            else _validate_v4_measurement(value, spec)
+        )
         _check_export_strings(parsed.model_dump(mode="json"))
         return parsed
     except ExportBoundaryError:
@@ -167,9 +204,23 @@ def measurement_bytes(measurement: AnyFragmentMeasurement) -> bytes:
     return canonical_json_bytes(measurement)
 
 
-def chart_for_measurement(measurement: AnyFragmentMeasurement, measurement_sha256: str) -> FragmentLengthChart:
-    """Derive chart rows losslessly from the validated shared measurement."""
+def chart_for_measurement(
+    measurement: AnyFragmentMeasurement | BaseModel, measurement_sha256: str
+) -> FragmentLengthChart | BaseModel:
+    """Derive the chart losslessly from the validated measurement, per schema.
 
+    Fragment-length measurements derive the fixed fragment-length chart; a v4
+    schema derives its own registered chart contract.
+    """
+
+    spec = _v4_schema(measurement)
+    if spec is not None:
+        chart = spec.build_chart(measurement, measurement_sha256)
+        if type(chart) is not spec.chart_model:
+            raise ExportBoundaryError("chart is not the registered chart contract")
+        return chart
+    if not isinstance(measurement, (FragmentMeasurement, FragmentMeasurementV2)):
+        raise ExportBoundaryError("no chart is registered for this measurement schema")
     return FragmentLengthChart(
         measurement_sha256=measurement_sha256,
         rows=tuple(
@@ -267,11 +318,40 @@ def render_local_report(
     return body.encode("utf-8")
 
 
-def render_bundle_report(
-    measurement: AnyFragmentMeasurement, limitations: AnyExportLimitations
+def _render_v4_report(
+    spec: BundleMeasurementSchema, measurement: BaseModel, limitations: BaseModel
 ) -> bytes:
-    """Select the one approved report template for a record's approval label."""
+    """Render a v4 record through its registered template, then check the claims."""
 
+    if type(limitations) is not spec.limitations_model:
+        raise ExportBoundaryError("v4 records carry their registered limitations")
+    body = spec.render_report(measurement, limitations)
+    if type(body) is not bytes:
+        raise ExportBoundaryError("a report renders to bytes")
+    text = body.decode("utf-8")
+    # Every local record states the banner; no template may make a claim.
+    if html.escape(LOCAL_REPORT_BANNER, quote=True) not in text:
+        raise ExportBoundaryError("a v4 report must carry the local record banner")
+    if _FORBIDDEN_CLAIM.search(text):
+        raise ExportBoundaryError("report template contains prohibited claim language")
+    return body
+
+
+def render_bundle_report(
+    measurement: AnyFragmentMeasurement | BaseModel,
+    limitations: AnyExportLimitations | BaseModel,
+) -> bytes:
+    """Select the one approved report template for a record's schema and label.
+
+    Fragment-length records select by approval label (synthetic or local); a
+    v4 record renders through the template its measurement schema registered.
+    """
+
+    spec = _v4_schema(measurement)
+    if spec is not None:
+        return _render_v4_report(spec, measurement, limitations)
+    if not isinstance(measurement, (FragmentMeasurement, FragmentMeasurementV2)):
+        raise ExportBoundaryError("no report is registered for this measurement schema")
     if measurement.approval_state == ApprovalState.UNAPPROVED_LOCAL:
         if type(limitations) is not ExportLimitationsV2:
             raise ExportBoundaryError("local records require v2 limitations")

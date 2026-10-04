@@ -16,6 +16,11 @@ Golden-path B5a/B5b.  The import:
 
 Every record here is unqualified, local and not for clinical use.  No input
 path is written to the catalog or the explorer files.
+
+Result-bundle v3 records are fragment-length records.  A result-bundle v4
+record carries one measurement whose registered schema
+(:mod:`traceback_runner.measurement_schemas`) chooses its authority, its
+catalog result schema, its reader and its explorer denominator.
 """
 
 from __future__ import annotations
@@ -25,7 +30,7 @@ import json
 import os
 import stat
 import threading
-from collections.abc import Iterator
+from collections.abc import Callable, Iterator
 from contextlib import contextmanager
 from dataclasses import dataclass
 from pathlib import Path
@@ -33,6 +38,11 @@ from typing import TYPE_CHECKING, Any
 
 from pydantic import ValidationError
 
+from .measurement_schemas import (
+    BundleMeasurementSchema,
+    measurement_schema,
+    registered_measurement_schemas,
+)
 from .local_authority import (
     LocalAuthorityProblem,
     LocalMethodAuthority,
@@ -46,7 +56,11 @@ from .references import ReferenceProblem, load_reference
 from .serialization import canonical_json_bytes
 
 if TYPE_CHECKING:
-    from evidence_inspector.result_catalog import CatalogResultRef, ResultCatalog
+    from evidence_inspector.result_catalog import (
+        CatalogResultRef,
+        ResultBundleReaderRegistry,
+        ResultCatalog,
+    )
     from evidence_inspector.result_trust_registry import ResultTrustRegistry
     from traceback_runner.bundles import VerifiedBundle
     from traceback_runner.web.explorer import (
@@ -68,6 +82,60 @@ _FILTER_ID = "filter_local_unqualified"
 _COMPATIBILITY_POLICY_ID = "policy_local_unqualified"
 _RESULT_SCHEMA_ID = "schema_fragment_measurement"
 _RESULT_SCHEMA_VERSION = "2.0.0"  # traceback.fragment-measurement.v2
+
+
+@dataclass(frozen=True)
+class _CatalogSchema:
+    """What the import binds for one measurement schema (fragment or v4)."""
+
+    result_schema_id: str
+    result_schema_version: str
+    accessible_label: str
+    normalization_semantics_id: str
+    coordinate_semantics_id: str
+    denominator_semantics_id: str
+    authority: Callable[[Path, Any], LocalMethodAuthority]
+    denominator: Callable[[VerifiedBundle], Any]
+
+
+def _catalog_schema(spec: BundleMeasurementSchema | None) -> _CatalogSchema:
+    """Choose the catalog binding by measurement schema (``None``: fragment, v3)."""
+
+    if spec is None:
+        return _CatalogSchema(
+            result_schema_id=_RESULT_SCHEMA_ID,
+            result_schema_version=_RESULT_SCHEMA_VERSION,
+            accessible_label=ACCESSIBLE_LABEL,
+            normalization_semantics_id="sem_fragment_length_histogram",
+            coordinate_semantics_id="sem_aligned_reference_span",
+            denominator_semantics_id="sem_eligible_alignments",
+            authority=ensure_local_method_authority,
+            denominator=_denominator,
+        )
+    binding = spec.catalog
+    return _CatalogSchema(
+        result_schema_id=binding.result_schema_id,
+        result_schema_version=binding.result_schema_version,
+        accessible_label=binding.accessible_label,
+        normalization_semantics_id=binding.normalization_semantics_id,
+        coordinate_semantics_id=binding.coordinate_semantics_id,
+        denominator_semantics_id=binding.denominator_semantics_id,
+        authority=binding.authority,
+        denominator=binding.denominator,
+    )
+
+
+def _schema_of(verified: VerifiedBundle) -> BundleMeasurementSchema | None:
+    """The registered v4 schema of a verified bundle; ``None`` for v1-v3."""
+
+    from .bundles import RESULT_BUNDLE_V4
+
+    if verified.manifest.schema_version != RESULT_BUNDLE_V4:
+        return None
+    spec = measurement_schema(verified.manifest.measurement_schema_versions[0])
+    if spec is None or type(verified.measurement) is not spec.measurement_model:
+        raise ValueError("verified v4 bundle names no registered measurement schema")
+    return spec
 
 
 class CatalogImportProblem(ReferenceProblem):
@@ -99,25 +167,32 @@ class CatalogImportOutcome:
 # ---------------------------------------------------------------------------
 
 
-_MAX_PEEK_BYTES = 4 * 1024 * 1024
-
-
 def _read_peek(path: Path) -> bytes:
-    """Read one small bundle file, bounded, before any verification."""
+    """Read one bundle file, bounded, before any verification.
 
+    The bound is the verifier's own bound for that bundle path
+    (``bundle_file_byte_limit``), so a peek never refuses a file verification
+    would accept and never reads more than verification would.
+    """
+
+    from .bundles import bundle_file_byte_limit
+
+    limit = bundle_file_byte_limit(f"{path.parent.name}/{path.name}")
+    if limit is None:
+        limit = bundle_file_byte_limit(path.name)
+    if limit is None:
+        raise ValueError("the path is not a bundle file")
     descriptor = os.open(path, os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0))
     try:
         if not stat.S_ISREG(os.fstat(descriptor).st_mode):
             raise ValueError("bundle file is not a regular file")
-        content = os.read(descriptor, _MAX_PEEK_BYTES + 1)
-        if len(content) > _MAX_PEEK_BYTES:
-            raise ValueError("bundle file exceeds its byte bound")
-        while len(content) <= _MAX_PEEK_BYTES:
-            chunk = os.read(descriptor, _MAX_PEEK_BYTES + 1 - len(content))
+        content = os.read(descriptor, limit + 1)
+        while len(content) <= limit:
+            chunk = os.read(descriptor, limit + 1 - len(content))
             if not chunk:
                 break
             content += chunk
-        if len(content) > _MAX_PEEK_BYTES:
+        if len(content) > limit:
             raise ValueError("bundle file exceeds its byte bound")
         return content
     finally:
@@ -125,35 +200,123 @@ def _read_peek(path: Path) -> bytes:
 
 
 def _peek_local_record(bundle: Path) -> tuple[str, str, str]:
-    """Return (record_id, reference_id, signing key ID) of a v3 local bundle.
+    """Return (record_id, reference_id, signing key ID) of a v3 or v4 local bundle.
 
-    Nothing is trusted yet; the catalog verifies the bundle afterwards.
+    The manifest's ``(bundle_version, measurement_schema)`` chooses the
+    measurement path and contract.  Nothing is trusted yet; the catalog
+    verifies the bundle afterwards.
     """
 
-    from .bundles import MANIFEST_PATH, MEASUREMENT_PATH
-    from .contracts import FragmentMeasurementV2, ResultBundleManifestV3, parse_fragment_measurement
+    from .bundles import (
+        LOCAL_RESULT_BUNDLE_VERSIONS,
+        MANIFEST_PATH,
+        RESULT_BUNDLE_V4,
+        bundle_measurement_path,
+    )
+    from .contracts import (
+        FragmentMeasurementV2,
+        ResultBundleManifestV3,
+        ResultBundleManifestV4,
+        parse_fragment_measurement,
+    )
     from .serialization import canonical_model_from_bytes
 
     if bundle.is_symlink() or not bundle.is_dir():
         raise _not_a_record("the path is not a record directory")
     try:
         manifest_bytes = _read_peek(bundle / MANIFEST_PATH)
-        if json.loads(manifest_bytes).get("schema_version") != "traceback.result-bundle.v3":
-            raise _not_a_record("the bundle is not a local (result-bundle v3) record")
-        manifest = canonical_model_from_bytes(ResultBundleManifestV3, manifest_bytes)
-        measurement = parse_fragment_measurement(_read_peek(bundle / MEASUREMENT_PATH))
+        version = json.loads(manifest_bytes).get("schema_version")
+        if type(version) is not str or version not in LOCAL_RESULT_BUNDLE_VERSIONS:
+            raise _not_a_record(
+                "the bundle is not a local (result-bundle v3 or v4) record"
+            )
+        manifest = canonical_model_from_bytes(
+            ResultBundleManifestV4 if version == RESULT_BUNDLE_V4 else ResultBundleManifestV3,
+            manifest_bytes,
+        )
+        spec = None
+        if version == RESULT_BUNDLE_V4:
+            schemas = manifest.measurement_schema_versions
+            spec = measurement_schema(schemas[0]) if len(schemas) == 1 else None
+            if spec is None:
+                raise _not_a_record(
+                    "the bundle's measurement schema is not one this build reads"
+                )
+        measurement_bytes = _read_peek(bundle / bundle_measurement_path(manifest))
+        measurement = (
+            parse_fragment_measurement(measurement_bytes)
+            if spec is None
+            else spec.parse_measurement(measurement_bytes)
+        )
     except CatalogImportProblem:
         raise
     except (OSError, ValueError, ValidationError, AttributeError):
         raise _not_a_record("the bundle manifest or measurement is missing or invalid") from None
-    if type(measurement) is not FragmentMeasurementV2:
+    expected = FragmentMeasurementV2 if spec is None else spec.measurement_model
+    if type(measurement) is not expected:
         raise _not_a_record("the bundle does not carry a local measurement")
-    return manifest.record_id, measurement.reference_id, manifest.signing_key_id
+    reference_id = getattr(measurement, "reference_id", None)
+    if type(reference_id) is not str:
+        raise _not_a_record("the bundle measurement names no reference")
+    return manifest.record_id, reference_id, manifest.signing_key_id
+
+
+def _peek_schema(bundle: Path) -> BundleMeasurementSchema | None:
+    """The registered v4 schema an already-peeked local bundle names, if any."""
+
+    from .bundles import MANIFEST_PATH, RESULT_BUNDLE_V4
+
+    raw = json.loads(_read_peek(bundle / MANIFEST_PATH))
+    if raw.get("schema_version") != RESULT_BUNDLE_V4:
+        return None
+    return measurement_schema(raw["measurement_schema_versions"][0])
 
 
 # ---------------------------------------------------------------------------
 # Catalog
 # ---------------------------------------------------------------------------
+
+
+def local_result_bundle_reader_registry() -> ResultBundleReaderRegistry:
+    """The local reader registry: v2 and v3, plus one v4 reader per registered schema.
+
+    With no v4 schema registered this is exactly
+    ``LOCAL_RESULT_BUNDLE_READER_REGISTRY``, so its digest (and every catalog
+    authority digest built on it) is unchanged.  Each v4 reader is selected by
+    ``(4, (measurement_schema,))``.
+    """
+
+    from evidence_inspector.result_catalog import (
+        LOCAL_RESULT_BUNDLE_READER_REGISTRY,
+        ResultBundleReader,
+        ResultBundleReaderRegistry,
+    )
+
+    specs = registered_measurement_schemas()
+    if not specs:
+        return LOCAL_RESULT_BUNDLE_READER_REGISTRY
+    readers = [
+        *LOCAL_RESULT_BUNDLE_READER_REGISTRY.readers,
+        *(
+            ResultBundleReader(
+                reader_id="reader_result_bundle_v4_"
+                + spec.catalog.result_schema_id.removeprefix("schema_"),
+                minimum_version=4,
+                maximum_version=4,
+                measurement_schema_versions=(spec.schema_version,),
+            )
+            for spec in specs.values()
+        ),
+    ]
+    readers.sort(
+        key=lambda item: (
+            item.bundle_family,
+            item.minimum_version,
+            item.maximum_version,
+            item.reader_id,
+        )
+    )
+    return ResultBundleReaderRegistry(readers=tuple(readers))
 
 
 def open_local_catalog(
@@ -164,10 +327,7 @@ def open_local_catalog(
 ) -> ResultCatalog:
     """Open ``ROOT/catalog`` bound to the trust registry and the local reader registry."""
 
-    from evidence_inspector.result_catalog import (
-        LOCAL_RESULT_BUNDLE_READER_REGISTRY,
-        ResultCatalog,
-    )
+    from evidence_inspector.result_catalog import ResultCatalog
 
     return ResultCatalog(
         root / CATALOG_DIRECTORY,
@@ -175,7 +335,7 @@ def open_local_catalog(
             _IMPORT_ROOT_ID: (import_root or (root / "records")).absolute(),
         },
         result_trust_registry=trust,
-        reader_registry=LOCAL_RESULT_BUNDLE_READER_REGISTRY,
+        reader_registry=local_result_bundle_reader_registry(),
     )
 
 
@@ -254,7 +414,8 @@ def build_local_explorer_artifact(
     placeholder (``result_nocomparator_*``, execution ``not_run``): a single
     local record has no registered comparison, so the decision is ``unknown``
     and never allows a delta or shared axis.  Grid, atlas and panel assets do not
-    apply to fragment length and stay unset.
+    apply to fragment length and stay unset.  The result schema, semantics,
+    label and denominator are chosen by the record's measurement schema.
     """
 
     from evidence_inspector.compatibility import (
@@ -283,6 +444,7 @@ def build_local_explorer_artifact(
         ExplorerArtifactRecord,
     )
 
+    chosen = _catalog_schema(_schema_of(verified))
     definition = authority.definition
     capability = authority.capability
     if (
@@ -292,7 +454,7 @@ def build_local_explorer_artifact(
     ):
         raise ValueError("catalog row is not bound to this local authority")
     schema = ResultSchemaReference(
-        schema_id=_RESULT_SCHEMA_ID, version=_RESULT_SCHEMA_VERSION
+        schema_id=chosen.result_schema_id, version=chosen.result_schema_version
     )
     policy_ref = CompatibilityPolicyReference(
         policy_id=_COMPATIBILITY_POLICY_ID, version="1.0.0"
@@ -306,9 +468,9 @@ def build_local_explorer_artifact(
         grid_asset=None,
         atlas_asset=None,
         panel_asset=None,
-        normalization_semantics_id="sem_fragment_length_histogram",
-        coordinate_semantics_id="sem_aligned_reference_span",
-        denominator_semantics_id="sem_eligible_alignments",
+        normalization_semantics_id=chosen.normalization_semantics_id,
+        coordinate_semantics_id=chosen.coordinate_semantics_id,
+        denominator_semantics_id=chosen.denominator_semantics_id,
         registered_policy=policy_ref,
     )
     hex40 = reference.result_id.removeprefix("result_")
@@ -380,8 +542,8 @@ def build_local_explorer_artifact(
     source = bind_result_view_source(
         record=record,
         compatibility_decision=decision,
-        denominator=_denominator(verified),
-        accessible_label=ACCESSIBLE_LABEL,
+        denominator=chosen.denominator(verified),
+        accessible_label=chosen.accessible_label,
         qc_label=QC_LABEL,
     )
     request = ResultViewRequest(
@@ -726,9 +888,13 @@ def import_local_record(root: Path, bundle: Path) -> CatalogImportOutcome:
 
     bundle = bundle.absolute()
     record_id, reference_id, key_id = _peek_local_record(bundle)
+    try:
+        chosen = _catalog_schema(_peek_schema(bundle))
+    except (OSError, ValueError, KeyError, IndexError, TypeError):
+        raise _not_a_record("the bundle manifest is missing or invalid") from None
     registered = load_reference(root, reference_id).registered
     _require_public_reference_id(registered.reference_id)
-    authority = ensure_local_method_authority(root, registered)
+    authority = chosen.authority(root, registered)
     trust = sync_local_result_trust(root, key_ids=frozenset({key_id}))
     try:
         catalog = open_local_catalog(root, trust, import_root=bundle.parent)
@@ -776,6 +942,7 @@ __all__ = [
     "build_local_explorer_artifact",
     "explorer_paths",
     "import_local_record",
+    "local_result_bundle_reader_registry",
     "load_explorer_artifacts",
     "open_local_catalog",
     "open_local_explorer",

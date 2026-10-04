@@ -1002,17 +1002,17 @@ def _rename_directory_exclusive(source: Path, destination: Path) -> None:
 
 
 def _publish_verified_record(root: Path, verified: Any, source: Path) -> Path:
-    from .bundles import BundleError, verify_bundle
+    from .bundles import LOCAL_RESULT_BUNDLE_VERSIONS, BundleError, verify_bundle
     from .signing import SigningError, load_development_trust
 
     trust = load_development_trust((root / _TRUST_RELATIVE).read_bytes())
     records = root / "records"
     records.mkdir(parents=True, exist_ok=True)
-    # Local (v3) records publish at ROOT/records/<record_id>, the path the
+    # Local (v3, v4) records publish at ROOT/records/<record_id>, the path the
     # golden path names; synthetic records keep their key-suffixed name.
     name = (
         verified.manifest.record_id
-        if verified.manifest.schema_version == "traceback.result-bundle.v3"
+        if verified.manifest.schema_version in LOCAL_RESULT_BUNDLE_VERSIONS
         else f"{verified.manifest.record_id}-{verified.manifest.signing_key_id}"
     )
     destination = records / name
@@ -1879,16 +1879,23 @@ _LOCAL_RUN_TOKEN = re.compile(r"local-run-([0-9a-f]{16})")
 
 
 def _peek_measurement_sha256(bundle: Path) -> str | None:
-    """Unverified peek at a record's measurement digest; only a pre-filter."""
+    """Unverified peek at a record's measurement digest; only a pre-filter.
 
-    from .bundles import MANIFEST_PATH, MEASUREMENT_PATH
+    The manifest's ``(bundle_version, measurement_schema)`` names the
+    measurement path, so a v4 record is grouped by its own measurement.
+    """
+
+    from .bundles import MANIFEST_PATH, peek_measurement_path
     from .local_catalog import _read_peek
 
     try:
         manifest = json.loads(_read_peek(bundle / MANIFEST_PATH))
+        path = peek_measurement_path(manifest)
+        if path is None:
+            return None
         contents = manifest["contents"]
         return next(
-            str(item["sha256"]) for item in contents if item["relative_path"] == MEASUREMENT_PATH
+            str(item["sha256"]) for item in contents if item["relative_path"] == path
         )
     except Exception:
         return None
@@ -1906,7 +1913,7 @@ def _measurement_twins(root: Path, store: Any | None) -> dict[str, str]:
     store (or a job it cannot find) a record sorts last, then by record ID.
     """
 
-    from .bundles import MEASUREMENT_PATH, verify_bundle
+    from .bundles import LOCAL_RESULT_BUNDLE_VERSIONS, bundle_measurement_path, verify_bundle
     from .signing import load_development_trust
 
     records = root / "records"
@@ -1932,12 +1939,13 @@ def _measurement_twins(root: Path, store: Any | None) -> dict[str, str]:
             except Exception:
                 continue
             manifest = verified.manifest
-            if manifest.schema_version != "traceback.result-bundle.v3" or (
+            if manifest.schema_version not in LOCAL_RESULT_BUNDLE_VERSIONS or (
                 manifest.record_id != path.name
             ):
                 continue
+            measurement_path = bundle_measurement_path(manifest)
             digest = next(
-                item.sha256 for item in manifest.contents if item.relative_path == MEASUREMENT_PATH
+                item.sha256 for item in manifest.contents if item.relative_path == measurement_path
             )
             token = _LOCAL_RUN_TOKEN.fullmatch(verified.provenance.run_token)
             when = (
@@ -3578,9 +3586,11 @@ def _manifest_is_local(bundle: Path) -> bool:
         manifest = json.loads((bundle / "bundle-manifest.json").read_bytes())
     except Exception:
         return False
-    return isinstance(manifest, dict) and (
-        manifest.get("schema_version") == "traceback.result-bundle.v3"
-    )
+    from .bundles import LOCAL_RESULT_BUNDLE_VERSIONS
+
+    version = manifest.get("schema_version") if isinstance(manifest, dict) else None
+    # Untrusted JSON: a list or object here is unhashable, so test the type first.
+    return type(version) is str and version in LOCAL_RESULT_BUNDLE_VERSIONS
 
 
 def _verify(args: argparse.Namespace) -> tuple[ExitCode, dict[str, Any]]:
