@@ -54,8 +54,9 @@ uv run pytest
 uv run streamlit run app.py
 ```
 
-To take one local BAM through the CLI (reference register, preflight, run,
-verify, catalog import, `serve`), follow
+To take your own Nanopore BAMs through the CLI (align, reference register,
+preflight, run, catalog import, `serve`), start with the short
+[scientist quick guide](docs/SCIENTIST-QUICK-GUIDE.md); the full reference is
 [Real local BAM (unqualified)](docs/OPERATOR-GUIDE.md#real-local-bam-unqualified)
 in the operator guide. It needs `samtools` (`brew install samtools`) to index
 the inputs. Every record it makes is unqualified, local and not for clinical
@@ -108,6 +109,9 @@ uv run python -m scripts.regenerate_copy_number \
 
 ## Documentation
 
+- [Scientist quick guide: your BAMs to a browsable record](docs/SCIENTIST-QUICK-GUIDE.md)
+- [Operator guide: every command, error code and recovery step](docs/OPERATOR-GUIDE.md)
+- [Canaries: the nightly real-data and CI checks](docs/CANARIES.md)
 - [Three-minute demo](docs/DEMO.md)
 - [75-second recording script](docs/RECORDING-SCRIPT.md)
 - [Algorithm and evidence design](docs/ALGORITHMS.md)
