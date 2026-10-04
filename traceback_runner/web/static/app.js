@@ -2,7 +2,7 @@
   "use strict";
   const byId = (id) => document.getElementById(id);
   const status = byId("status");
-  const jobs = byId("jobs");
+  const explorerStatus = byId("explorer-status") || status;
   const left = byId("left-result");
   const right = byId("right-result");
   const exactRows = byId("exact-rows");
@@ -147,7 +147,7 @@
     left.replaceChildren(...options.map((item) => item.cloneNode(true)));
     right.replaceChildren(...options.map((item) => item.cloneNode(true)));
     if (right.options.length > 1) right.selectedIndex = 1;
-    status.textContent = registered.length ? `${registered.length} local result views ready` : "No registered result views match the active filters";
+    explorerStatus.textContent = registered.length ? `${registered.length} local result views ready` : "No registered result views match the active filters";
     if (!registered.length) {
       document.documentElement.dataset.renderState = "empty";
       const readyAtMs = performance.now();
@@ -156,17 +156,19 @@
     }
     await renderSelection();
   };
+  // site.js renders the one-line jobs disclosure with the job-state words.
   const renderJobs = async () => {
-    const payload = await requestJson("/api/v1/jobs");
-    jobs.replaceChildren(...payload.jobs.map((job) => {
-      const item = document.createElement("li");
-      item.textContent = `${job.headline}: ${job.stage_label}`;
-      return item;
-    }));
+    let payload = null;
+    try {
+      payload = await requestJson("/api/v1/jobs");
+    } catch (_) {
+      payload = null;
+    }
+    window.dispatchEvent(new CustomEvent("traceback:jobs", { detail: payload }));
   };
   byId("filters").addEventListener("submit", (event) => {
     event.preventDefault();
-    loadCatalog().catch((error) => { status.textContent = error.message; });
+    loadCatalog().catch((error) => { explorerStatus.textContent = error.message; });
   });
   left.addEventListener("change", renderSelection);
   right.addEventListener("change", renderSelection);
@@ -196,7 +198,7 @@
   // Explorer and jobs routes are operator-only (H1): a reader session never
   // requests them, and their sections are hidden so the longitudinal view is
   // what a reader sees.
-  const OPERATOR_SECTIONS = ["explorer-filters", "results", "explorer-provenance", "operator-jobs"];
+  const OPERATOR_SECTIONS = ["site", "explorer-advanced", "explorer-filters", "results", "explorer-provenance", "operator-jobs"];
   const enterReaderView = () => {
     document.documentElement.dataset.sessionKind = "reader";
     OPERATOR_SECTIONS.forEach((id) => {
@@ -242,11 +244,15 @@
     }
     if (session.session_kind !== "operator") throw new Error("Local session unavailable");
     document.documentElement.dataset.sessionKind = "operator";
+    status.textContent = "Local operator session ready";
+    // The records site (site.js) starts as soon as the operator session is
+    // bound; the jobs and the advanced explorer load beside it.
+    window.dispatchEvent(new CustomEvent("traceback:operator"));
     await renderJobs();
     try {
       await loadCatalog();
     } catch (_) {
-      status.textContent = "Local session ready; result explorer unavailable";
+      explorerStatus.textContent = "Result explorer unavailable";
     }
   }).catch(() => {
     status.textContent = "Local session unavailable; relaunch Traceback";
