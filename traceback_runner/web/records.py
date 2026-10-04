@@ -311,7 +311,7 @@ def _imported_at(root: Path, result_id: str) -> datetime | None:
         metadata = os.stat(artifact, follow_symlinks=False)
     except OSError:
         return None
-    return datetime.fromtimestamp(int(metadata.st_mtime), UTC)
+    return datetime.fromtimestamp(metadata.st_mtime_ns / 1e9, UTC)
 
 
 # ---------------------------------------------------------------------------
@@ -680,10 +680,13 @@ def build_local_record_list(
                 status=status,
                 status_label=copy_for("record_status", status)[0],
                 label=read_record_label(source.root, record_id),
+                imported_at=_imported_at(source.root, ref.result_id),  # type: ignore[attr-defined]
             )
         )
     summaries.sort(
+        # Oldest import first; a row with no known import time goes last.
         key=lambda item: (
+            item.imported_at is None,
             item.imported_at or datetime.min.replace(tzinfo=UTC),
             item.record_id,
         )

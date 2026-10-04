@@ -245,14 +245,15 @@
     if (session.session_kind !== "operator") throw new Error("Local session unavailable");
     document.documentElement.dataset.sessionKind = "operator";
     status.textContent = "Local operator session ready";
+    // The records site (site.js) starts as soon as the operator session is
+    // bound; the jobs and the advanced explorer load beside it.
+    window.dispatchEvent(new CustomEvent("traceback:operator"));
     await renderJobs();
     try {
       await loadCatalog();
     } catch (_) {
       explorerStatus.textContent = "Result explorer unavailable";
     }
-    // The records site (site.js) starts once the operator session is bound.
-    window.dispatchEvent(new CustomEvent("traceback:operator"));
   }).catch(() => {
     status.textContent = "Local session unavailable; relaunch Traceback";
   });

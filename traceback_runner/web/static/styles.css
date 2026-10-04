@@ -89,7 +89,7 @@ dd { margin: 0; overflow-wrap: anywhere; font-family: ui-monospace, monospace; }
 .chart-svg .label-common { font-size: 12px; font-weight: 700; }
 .chart-caption { margin: .5rem 0 0; font-weight: 650; }
 .footnotes { margin: .25rem 0 .75rem; padding-left: 1.25rem; color: var(--muted); }
-.data-table td, .data-table th { overflow-wrap: anywhere; }
+.data-table td, .data-table th { overflow-wrap: break-word; }
 .data-table tfoot th, .data-table tfoot td { font-weight: 700; border-top: 2px solid var(--neutral); }
 .strip-values { grid-template-columns: minmax(10rem, auto) 1fr; }
 .strip-values dd { font-family: inherit; font-variant-numeric: tabular-nums; }

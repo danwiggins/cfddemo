@@ -224,8 +224,9 @@
       root.append(label);
     });
     if (geometry.open) {
-      const x = xScale(geometry.open.lower + OPEN_DRAW_BP / 2);
-      const label = svg(doc, "text", { x, y: baseline + 32, "text-anchor": "middle", class: "tick-label" });
+      // Right-aligned to the drawn end, so the label never leaves the drawing.
+      const x = xScale(geometry.xMax);
+      const label = svg(doc, "text", { x, y: baseline + 32, "text-anchor": "end", class: "tick-label" });
       label.textContent = `${count(geometry.open.lower)}+ (open)`;
       root.append(label);
     }

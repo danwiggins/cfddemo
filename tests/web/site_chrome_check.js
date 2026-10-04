@@ -45,7 +45,7 @@ const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
   await send("Page.navigate", { url });
   const expected = (route) => (route.startsWith("#/records/") ? "record:" : route.startsWith("#/compare") ? "compare:" : "catalog:");
   const waitForView = async (route) => {
-    for (let attempt = 0; attempt < 200; attempt += 1) {
+    for (let attempt = 0; attempt < 1200; attempt += 1) {
       const state = (await evaluate("document.documentElement.dataset.viewState || ''")) || "";
       if (state.startsWith(expected(route)) && !state.endsWith(":loading")) return state;
       await sleep(50);

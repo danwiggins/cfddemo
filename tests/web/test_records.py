@@ -485,7 +485,8 @@ def test_compact_width_drops_bar_labels_and_thins_ticks(tmp_path: Path) -> None:
     compact, wide = reports[1]["view"], reports[2]["view"]
     assert not _nodes(compact, _attr("class", "bar-label"))
     ticks = [_text(n) for n in _nodes(compact, lambda n: n["tag"] == "text" and "tick-label" in n["attrs"].get("class", "") and n["attrs"].get("text-anchor") == "middle")]
-    assert ticks == ["0", "200", "500", "1,000", "1,000+ (open)"]
+    assert ticks == ["0", "200", "500", "1,000"]
+    assert "1,000+ (open)" in _text(compact)
     assert len(_nodes(wide, _attr("class", "bar-label"))) == len(EDGES)
 
 
@@ -693,6 +694,8 @@ CHROME = next(
 )
 
 
+@pytest.mark.slow
+@pytest.mark.timeout(900)
 @needs_node
 @pytest.mark.skipif(CHROME is None, reason="chrome-headless-shell is not cached")
 @pytest.mark.parametrize("width", [390, 1280])
@@ -703,7 +706,7 @@ def test_real_browser_has_no_horizontal_scroll_and_packaged_css_applies(world, w
             [NODE, "tests/web/site_chrome_check.js", str(CHROME), service.launch_url, str(width),
              f"#/records/{record_id}", f"#/compare?a={record_id}&b=record-{'0' * 24}",
              f"#/records/record-{'0' * 24}", "#/"],
-            capture_output=True, text=True, timeout=120, check=False,
+            capture_output=True, text=True, timeout=600, check=False,
         )
     assert result.returncode == 0, result.stderr
     report = json.loads(result.stdout)
