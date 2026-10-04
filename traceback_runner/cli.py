@@ -22,6 +22,7 @@ import tempfile
 import uuid
 from collections.abc import Callable, Iterator, Sequence
 from contextlib import contextmanager, nullcontext
+from dataclasses import dataclass
 from datetime import UTC, datetime
 from enum import IntEnum, StrEnum
 from pathlib import Path
@@ -1983,7 +1984,31 @@ def _run(
         ),
     )
     code, payload = _run_sealed(root, request, source, relative_files, loaded, progress)
-    return _after_run(args, code, payload)
+    data = payload["data"]
+    try:
+        return _after_run(args, code, payload)
+    except ReferenceProblem as problem:
+        # The record exists and verified; only the label or catalog step failed.
+        problem.data = {  # type: ignore[attr-defined]
+            **getattr(problem, "data", {}),
+            "record_id": data["record_id"],
+            "next_action": f"traceback catalog import {data['record_id']} --root <same-root>",
+        }
+        _attach_job_id(problem, data["job_id"])
+        raise
+    except Exception as exc:
+        raise RunProblem(
+            "TBX-JOB-001",
+            "The signed record was made, but setting its label or importing it failed",
+            cause=f"{type(exc).__name__} after record {data['record_id']} was published",
+            fix=(
+                f"Check ROOT's volume, then traceback label {data['record_id']} TEXT or "
+                f"traceback catalog import {data['record_id']} --root <same-root>"
+            ),
+            exit_code=ExitCode.RETRYABLE_FAILURE,
+            retryable=True,
+            data={"record_id": data["record_id"], "job_id": data["job_id"]},
+        ) from exc
 
 
 def _after_run(
@@ -2006,19 +2031,8 @@ def _after_run(
         if previous is not None and previous != args.label:
             lines.append(f"Label changed from {previous} to {args.label}")
     if args.do_import:
-        try:
-            outcome = _import_record(root, root / "records" / record_id)
-        except ReferenceProblem as problem:
-            # The record exists and verified; only the catalog step failed.
-            problem.data = {  # type: ignore[attr-defined]
-                **getattr(problem, "data", {}),
-                "record_id": record_id,
-                "next_action": f"traceback catalog import {record_id} --root <same-root>",
-            }
-            _attach_job_id(problem, data["job_id"])
-            raise
+        _import_record(root, root / "records" / record_id)
         data["imported"] = True
-        data["result_id"] = outcome.reference.result_id
         data["next_commands"] = [
             command for command in data.get("next_commands", ())
             if not command.startswith("traceback catalog import ")
@@ -2065,8 +2079,17 @@ def _run_with_runner(
         )
     except BaseException as exc:
         # Every refusal after submit names its job (A3), whatever maps it.
-        if submitted:
-            _attach_job_id(exc, submitted[0])
+        # Runner.submit inserts the job row before it seals the input, so a
+        # sealing failure leaves a job that on_submitted never saw.
+        job_id = submitted[0] if submitted else None
+        if job_id is None:
+            try:
+                found = runner.store.job_for_request(request)
+            except Exception:
+                found = None
+            job_id = found.job_id if found is not None else None
+        if job_id is not None:
+            _attach_job_id(exc, job_id)
         raise
 
 
@@ -2257,12 +2280,77 @@ def _table(header: Sequence[str], rows: Sequence[Sequence[str]]) -> list[str]:
     ]
 
 
+@dataclass(frozen=True)
+class _JobRow:
+    job_id: str
+    state: JobState
+    created_at: float
+    last_error: str | None
+    sample_token: str
+
+
+def _read_jobs(database: Path, limit: int) -> list[_JobRow]:
+    """The newest ``limit`` jobs by creation time, read without changing the store.
+
+    SQLite opens the database read-only (``mode=ro``): no schema, mode or
+    journal change, unlike opening a ``JobStore``.
+    """
+
+    import sqlite3
+
+    uri = f"{database.absolute().as_uri()}?mode=ro"
+    connection = sqlite3.connect(uri, uri=True, timeout=30)
+    try:
+        rows = connection.execute(
+            "SELECT job_id, state, created_at, last_error, request_json FROM jobs "
+            "ORDER BY created_at DESC, job_id LIMIT ?",
+            (limit,),
+        ).fetchall()
+    finally:
+        connection.close()
+    return [
+        _JobRow(
+            job_id=str(job_id),
+            state=JobState(state),
+            created_at=float(created_at),
+            last_error=last_error,
+            sample_token=str(json.loads(request_json)["sample_token"]),
+        )
+        for job_id, state, created_at, last_error, request_json in rows
+    ]
+
+
+def _live_lease_job(root: Path) -> str | None:
+    """The one job holding an unexpired worker lease under ROOT, read-only."""
+
+    import sqlite3
+    import time
+
+    database = root / "runner" / "runner.sqlite3"
+    if not database.is_file() or database.is_symlink():
+        return None
+    try:
+        connection = sqlite3.connect(
+            f"{database.absolute().as_uri()}?mode=ro", uri=True, timeout=5
+        )
+        try:
+            rows = connection.execute(
+                "SELECT job_id FROM jobs WHERE lease_owner IS NOT NULL "
+                "AND lease_expires_at >= ? LIMIT 2",
+                (time.time(),),
+            ).fetchall()
+        finally:
+            connection.close()
+    except sqlite3.Error:
+        return None
+    return str(rows[0][0]) if len(rows) == 1 else None
+
+
 def _jobs(args: argparse.Namespace) -> tuple[ExitCode, dict[str, Any]]:
     """``traceback jobs``: every job under ROOT, newest first (read-only)."""
 
     from .labels import read_label
     from .problems import CODED_FAILURE
-    from .store import JobStore
 
     root = args.root
     database = root / "runner" / "runner.sqlite3"
@@ -2274,16 +2362,12 @@ def _jobs(args: argparse.Namespace) -> tuple[ExitCode, dict[str, Any]]:
             data={"jobs": []},
         )
         return ExitCode.OK, payload
-    with JobStore(database) as store:
-        records = sorted(
-            store.list_jobs(limit=1000), key=lambda item: (-item.created_at, item.job_id)
-        )[: args.limit]
-        requests = {record.job_id: store.request(record.job_id) for record in records}
+    records = _read_jobs(database, args.limit)
     by_prefix = _record_job_prefixes(root)
     rows: list[dict[str, Any]] = []
     table: list[list[str]] = []
     for record in records:
-        reference, policy = _token_reference_policy(requests[record.job_id].sample_token)
+        reference, policy = _token_reference_policy(record.sample_token)
         failure_code = None
         if record.state in _FAILED_STATES:
             match = CODED_FAILURE.match(record.last_error or "")
@@ -2428,7 +2512,6 @@ def _catalog_list(args: argparse.Namespace) -> tuple[ExitCode, dict[str, Any]]:
             ),
             "imported": catalog is not None,
             "imported_at": _iso_utc(when) if when is not None else None,
-            "result_id": catalog[0] if catalog is not None else None,
             "verification": "verified" if verified is not None else "not_verified",
             "same_measurement_as": twins.get(record_id),
         }
@@ -3978,11 +4061,28 @@ def main(argv: Sequence[str] | None = None) -> int:
         code, payload = ExitCode(problem.exit_code), _problem(command, problem)
     except OperatorBusy as exc:
         failed_job_id = getattr(exc, "job_id", None)
-        code, payload = ExitCode.BLOCKED, _result(
-            args.command, "blocked",
-            "A local action or unexpired worker lease is active; wait before resuming",
-            data={"retryable": True},
-        )
+        running = _live_lease_job(args.root) if args.command == "run" else None
+        if running is not None:
+            # A concurrent `run` waits on ROOT's lock; name the job the other
+            # process is running so the operator can follow it.
+            code, payload = ExitCode.BLOCKED, _problem(
+                "run",
+                RunProblem(
+                    "TBX-JOB-002",
+                    f"Another traceback process is running job {running} on this ROOT; "
+                    "nothing was changed",
+                    cause="ROOT's operator lock is held by a process with a live worker lease",
+                    fix=f"Wait for it, or check traceback status {running}",
+                    retryable=True,
+                    data={"job_id": running},
+                ),
+            )
+        else:
+            code, payload = ExitCode.BLOCKED, _result(
+                args.command, "blocked",
+                "A local action or unexpired worker lease is active; wait before resuming",
+                data={"retryable": True},
+            )
     except (FileNotFoundError, KeyError) as exc:
         failed_job_id = getattr(exc, "job_id", None)
         code, payload = ExitCode.NOT_FOUND, _result(
