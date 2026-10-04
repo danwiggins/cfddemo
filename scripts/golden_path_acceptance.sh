@@ -200,7 +200,8 @@ started="$(now)"
 "${TRACEBACK_CMD[@]}" serve --root "$R" </dev/null >"$OUT/serve.out" 2>"$OUT/serve.err" &
 SERVE_PID=$!
 LAUNCH_URL=""
-for _ in $(seq 1 100); do
+# Up to 60 s: a cold CI runner can be slow to start the service.
+for _ in $(seq 1 600); do
   if [ -s "$OUT/serve.out" ]; then
     LAUNCH_URL="$(head -n 1 "$OUT/serve.out")"
     case "$LAUNCH_URL" in *"#bootstrap="*) break ;; esac
@@ -211,6 +212,7 @@ done
 case "$LAUNCH_URL" in
   http://127.0.0.1:*/\#bootstrap=*) ;;
   *) grep -hv "bootstrap=" "$OUT/serve.out" "$OUT/serve.err" >&2 2>/dev/null || true
+     ps -o pid,etime,stat,command -p "$SERVE_PID" >&2 2>/dev/null || echo "serve exited" >&2
      fail "serve did not print an operator launch link on its first stdout line" ;;
 esac
 ended="$(now)"
