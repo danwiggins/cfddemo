@@ -42,6 +42,9 @@ def validate_label(text: str) -> str:
 
     if not isinstance(text, str) or not 1 <= len(text) <= MAX_LABEL_CHARACTERS:
         raise LabelError(f"a label must be 1-{MAX_LABEL_CHARACTERS} characters")
+    if text != text.strip():
+        # The site's reader (web/records.py valid_label) refuses these.
+        raise LabelError("a label cannot start or end with whitespace")
     if "/" in text or "\\" in text:
         raise LabelError("a label cannot contain / or \\")
     if any(unicodedata.category(character)[0] == "C" for character in text):

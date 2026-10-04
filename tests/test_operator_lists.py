@@ -119,17 +119,26 @@ def test_missing_bam_is_tbx_run_008_and_creates_no_job(tmp_path: Path) -> None:
     assert str(tmp_path) not in json.dumps(payload)
 
 
-def test_input_check_order_is_bam_then_index_then_bgzf(tmp_path: Path) -> None:
+def test_input_check_order_is_bam_bgzf_alignment_then_index(tmp_path: Path) -> None:
+    from traceback_runner.fixtures import create_unaligned_ont_bam
+
     inputs = create_local_golden_path_inputs(tmp_path / "inputs")
     root = tmp_path / "root"
     _json("reference", "register", "--fasta", inputs.fasta_path, "--id", "ref", "--root", root)
     code, payload = _json("run", inputs.bam_path, "--index", tmp_path / "missing.txt",
                           "--reference", "ref", "--root", root)
     assert (code, payload["data"]["code"]) == (cli.ExitCode.NOT_FOUND, "TBX-RUN-009")
+    # Not a BAM, and no index either: "not a BAM" comes first.
     fake = tmp_path / "reads.bam"
     fake.write_text("not a bam")
     code, payload = _json("run", fake, "--reference", "ref", "--root", root)
-    assert (code, payload["data"]["code"]) == (cli.ExitCode.NOT_FOUND, "TBX-RUN-009")
+    assert (code, payload["data"]["code"]) == (cli.ExitCode.BLOCKED, "TBX-RUN-010")
+    # An unaligned MinKNOW BAM without an index is told to align (A1) before
+    # it is told to index.
+    unaligned = create_unaligned_ont_bam(tmp_path / "unaligned.bam")
+    assert not Path(f"{unaligned}.bai").exists()
+    code, payload = _json("run", unaligned, "--reference", "ref", "--root", root)
+    assert (code, payload["data"]["code"]) == (cli.ExitCode.BLOCKED, "TBX-BAM-003")
     assert _job_rows(root) == []
 
 
@@ -505,6 +514,29 @@ def test_a_symlinked_or_damaged_label_file_shows_no_label(world, tmp_path: Path)
     path.unlink()
     path.write_text(json.dumps({"label": "x/y"}))
     assert read_label(root, record_id) is None
+
+
+@pytest.mark.parametrize(
+    "text",
+    ["batch two sample A", "x" * 80, "Ünïcode note 3", " leading", "trailing ", "a​b"],
+)
+def test_the_site_reads_back_every_label_the_cli_writes(world, text: str) -> None:
+    """The CLI writer and the site reader (web/records.py) share one file format."""
+
+    from traceback_runner.labels import LabelError, read_label, validate_label, write_label
+    from traceback_runner.web.records import read_record_label, valid_label
+
+    root, _, records = world
+    record_id = records[0]["record_id"]
+    try:
+        validate_label(text)
+    except LabelError:
+        # Anything the CLI refuses, the site would refuse or never sees.
+        assert valid_label(text) is None or text != text.strip() or "​" in text
+        return
+    write_label(root, record_id, text)
+    assert read_label(root, record_id) == text
+    assert read_record_label(root, record_id) == text
 
 
 def test_the_guide_warns_against_identifiers_in_labels() -> None:

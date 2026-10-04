@@ -54,6 +54,24 @@ PROBLEM_TABLE: dict[str, ProblemText] = {
         "A contig name, length, order, M5 or AS differs from the registered reference",
         "Realign against the registered FASTA, or register the FASTA the BAM was aligned to",
     ),
+    "TBX-BAM-003": ProblemText(
+        "The BAM is unaligned (no @SQ lines); MinKNOW and Dorado write unaligned BAMs "
+        "by default",
+        "Align it with the printed minimap2 command (see Aligning MinKNOW output), then "
+        "preflight the sorted output",
+    ),
+    "TBX-BAM-004": ProblemText(
+        "The BAM has a header but no alignment records",
+        "This is often a bam_fail or empty chunk; use the sample's bam_pass files",
+    ),
+    "TBX-REF-004": ProblemText(
+        "preflight ran without --reference on a ROOT that has registered references",
+        "Add --reference ID; the problem lists the registered IDs",
+    ),
+    "TBX-INTERNAL-001": ProblemText(
+        "Preflight stopped on an unexpected internal error, not a BAM read or format error",
+        "Retrying will not change it; write traceback support-bundle and report the code",
+    ),
     "TBX-MOD-001": ProblemText(
         "No modification provenance or MM/ML tags were found",
         "No action needed for fragment length",
