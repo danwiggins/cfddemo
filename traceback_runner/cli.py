@@ -2187,7 +2187,8 @@ def _record_argument_path(root: Path, value: Path) -> Path:
     """``catalog import`` takes a record ID (or unique prefix) or a record path."""
 
     text = str(value)
-    if "/" not in text and not value.exists():
+    # An ID resolves under ROOT first, whatever the current directory holds.
+    if "/" not in text:
         record_id = _resolve_record_id(root, text)
         if record_id is not None:
             return root / "records" / record_id

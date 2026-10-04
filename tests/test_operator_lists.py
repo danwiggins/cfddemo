@@ -406,12 +406,15 @@ def test_jobs_reads_without_changing_the_store_and_orders_by_creation(world) -> 
     assert [(path.stat().st_mode, path.stat().st_mtime_ns) for path in watched] == before
 
 
-def test_run_import_and_import_by_record_id(world) -> None:
+def test_run_import_and_import_by_record_id(world, monkeypatch) -> None:
     root, inputs, records = world
     first = records[0]
     assert first["imported"] is True and "result_id" not in first
     assert not any(command.startswith("traceback catalog import") for command in first["next_commands"])
     third = records[2]["record_id"]
+    # A same-named entry in the current directory never shadows the ROOT record.
+    monkeypatch.chdir(root.parent)
+    (root.parent / cli._short_record(third)).mkdir()
     code, payload = _json("catalog", "import", cli._short_record(third), "--root", root)
     assert code == cli.ExitCode.OK, payload
     assert payload["data"]["record_id"] == third
