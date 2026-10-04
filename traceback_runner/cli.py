@@ -2030,7 +2030,11 @@ def _run(
     args: argparse.Namespace, progress: Callable[[str], None]
 ) -> tuple[ExitCode, dict[str, Any]]:
     from .contracts import InputKind, JobRequest
-    from .local_authority import ensure_local_method_authority, local_fragment_policy
+    from .local_authority import (
+        ensure_local_method_authority,
+        local_fragment_policy,
+        validate_method_authority_tree,
+    )
     from .references import load_reference
     from .snapshots import input_tree_sha256
 
@@ -2053,6 +2057,9 @@ def _run(
         args.input, args.index or Path(f"{args.input}.bai")
     )
     loaded = load_reference(root, args.reference_id)
+    # The method-authority tree (signal SH1), read-only: absent is a no-op; a
+    # damaged store only hides its own records; a non-private tree refuses.
+    validate_method_authority_tree(root)
     # Create (once) or validate the local method authority before any copy:
     # a damaged ROOT/authority refuses the run with TBX-AUTH-LOCAL-001.
     ensure_local_method_authority(root, loaded.registered)
@@ -2792,7 +2799,7 @@ def _serve_material(root: Path) -> Path:
     or changed (the trust registry and authority stores are only reopened).
     """
 
-    from .local_authority import validate_local_method_authorities
+    from .local_authority import validate_all_method_authorities
 
     database = root / "runner" / "runner.sqlite3"
     if not database.is_file():
@@ -2811,7 +2818,9 @@ def _serve_material(root: Path) -> Path:
         # by a failed import, or a deleted database, is refused instead.
         raise _no_catalog()
     # A catalog without a valid authority is partial state: refuse, exit 3.
-    validate_local_method_authorities(root)
+    # ROOT/authority may be absent when ROOT/method-authority holds a valid
+    # store; a damaged method store hides only its own records.
+    validate_all_method_authorities(root)
     return database
 
 
