@@ -61,6 +61,13 @@ from .longitudinal import (
     handle_longitudinal_route,
 )
 from .reader_session import ReaderSessionBinder
+from .records import (
+    LocalRecordSource,
+    RecordNotFound,
+    RecordUnavailable,
+    build_local_record_list,
+    build_local_record_view,
+)
 from .source import JobStoreProjectionSource
 
 MAX_REQUEST_BYTES = 4096
@@ -79,6 +86,9 @@ _JOB_ROUTE = re.compile(r"^/api/v1/jobs/(job_[0-9a-f]{32})$")
 _EXPLORER_RESULT_ROUTE = re.compile(r"^/api/v1/explorer/results/(result_[0-9a-f]{40})$")
 _EXPLORER_CATALOG_ROUTE = "/api/v1/explorer/catalog"
 _EXPLORER_COMPARE_ROUTE = "/api/v1/explorer/compare"
+# Usability C1/C5: per-request views of verified local records (operator only).
+_RECORDS_ROUTE = "/api/v1/records"
+_RECORD_ROUTE = re.compile(r"^/api/v1/records/(record-[0-9a-f]{24})$")
 _READER_LAUNCH_ROUTE = "/api/v1/session/reader-launch"
 _LOGOUT_ROUTE = "/api/v1/session/logout"
 _COOKIE_NAME = re.compile(r"^[!#$%&'*+\-.^_`|~0-9A-Za-z]+$")
@@ -596,6 +606,8 @@ _PACKAGED_ASSET_FILES: dict[str, tuple[str, str]] = {
     "/assets/app.js": ("app.js", "text/javascript; charset=utf-8"),
     "/assets/styles.css": ("styles.css", "text/css; charset=utf-8"),
     "/assets/longitudinal.js": ("longitudinal.js", "text/javascript; charset=utf-8"),
+    "/assets/chart.js": ("chart.js", "text/javascript; charset=utf-8"),
+    "/assets/site.js": ("site.js", "text/javascript; charset=utf-8"),
 }
 
 
@@ -654,6 +666,8 @@ class _ExplorerHttpBoundary:
     validate_public: Callable[..., None]
     canonicalize: Callable[[object], bytes]
     longitudinal: Callable[..., tuple[int, dict[str, object]]]
+    record_view: Callable[..., Any]
+    record_list: Callable[..., Any]
     identities: tuple[_CallableIdentity, ...]
 
     def assert_intact(self) -> None:
@@ -679,6 +693,8 @@ _INSTALLED_EXPLORER_HTTP_DEPENDENCIES = (
     validate_public_projection,
     canonical_json_bytes,
     handle_longitudinal_route,
+    build_local_record_view,
+    build_local_record_list,
 )
 
 
@@ -690,6 +706,7 @@ class _Application:
     explorer: IntegratedExplorerSource | None = None
     explorer_http: _ExplorerHttpBoundary | None = None
     reader: ReaderSessionBinder | None = None
+    records: LocalRecordSource | None = None
 
 
 class _LoopbackHttpServer(http.server.ThreadingHTTPServer):
@@ -1112,6 +1129,53 @@ class _Handler(http.server.BaseHTTPRequestHandler, metaclass=_SealedHandlerType)
             raise ValueError("detail response encoding changed")
         self._public_json(200, payload)
 
+    def _record_inputs(
+        self, request: BrowserRequest
+    ) -> tuple[_ExplorerHttpBoundary, LocalRecordSource, dict[str, Callable[..., Any]]]:
+        """The installed record source plus the pinned explorer reads (C1)."""
+
+        self.application.boundary.authorize(request)
+        explorer = self.application.explorer
+        records = self.application.records
+        if explorer is None or records is None:
+            raise ApiProblem(404, self.application.kernel.not_found_problem)
+        explorer_http = self.application.explorer_http
+        if explorer_http is None:
+            raise TypeError("explorer HTTP boundary is unavailable")
+        explorer_http.assert_intact()
+        explorer_query, explorer_get, _ = explorer_http.dispatch
+        reads = {
+            "get_document": lambda result_id: explorer_get(explorer, result_id),
+            "query_catalog": lambda value: explorer_query(explorer, value),
+        }
+        return explorer_http, records, reads
+
+    def _route_records(
+        self, path: str, query: str, request: BrowserRequest, match: object
+    ) -> None:
+        del path, query, match
+        explorer_http, records, reads = self._record_inputs(request)
+        listing = explorer_http.record_list(records, **reads)
+        self._public_json(200, listing.model_dump(mode="json"))
+
+    def _route_record(
+        self, path: str, query: str, request: BrowserRequest, match: re.Match[str]
+    ) -> None:
+        del path, query
+        record_id = match.group(1)
+        explorer_http, records, reads = self._record_inputs(request)
+        try:
+            view = explorer_http.record_view(records, record_id=record_id, **reads)
+        except RecordNotFound:
+            raise ApiProblem(404, self.application.kernel.not_found_problem) from None
+        except RecordUnavailable:
+            # Failed verification or a stale authority: no counts at all.
+            self._json(503, {"error": {"code": "TBX-WEB-503"}})
+            return
+        if view.record_id != record_id:
+            raise ValueError("record response identity changed")
+        self._public_json(200, view.model_dump(mode="json"))
+
     def _route_asset(
         self, path: str, query: str, request: BrowserRequest, match: object
     ) -> None:
@@ -1318,6 +1382,7 @@ def _build_routes() -> tuple[dict[tuple[str, str], _Route], tuple[tuple[re.Patte
             _Handler._route_explorer_compare,
             accepts_query=True,
         ),
+        _Route("GET", _RECORDS_ROUTE, OPERATOR_ONLY, _Handler._route_records),
         # The merged E12 browser routes, copied from their own constants.
         *(
             _Route(
@@ -1349,6 +1414,10 @@ def _build_routes() -> tuple[dict[tuple[str, str], _Route], tuple[tuple[re.Patte
             _Route(
                 "GET", "explorer_result", OPERATOR_ONLY, _Handler._route_explorer_result
             ),
+        ),
+        (
+            _RECORD_ROUTE,
+            _Route("GET", "record_view", OPERATOR_ONLY, _Handler._route_record),
         ),
     )
     return table, patterns
@@ -1494,12 +1563,21 @@ class RunningLocalWebService:
         ipv6: bool = False,
         explorer: IntegratedExplorerSource | None = None,
         reader_registry: ReaderAuthorizationRegistry | None = None,
+        records: LocalRecordSource | None = None,
     ) -> Self:
         """Start the loopback service.
 
         ``reader_registry`` enables the E12 reader launch exchange route for
         that protected registry; without it the route answers not found.
+        ``records`` enables the local record routes (usability C1/C5); it must
+        read the same catalog as ``explorer``.  Without it they answer not
+        found.
         """
+
+        if records is not None and (
+            type(records) is not LocalRecordSource or explorer is None
+        ):
+            raise LocalWebServerError("record routes require a record source and explorer")
 
         state_directory = state_directory.absolute()
         startup_anchor: _StartupAnchor | None = None
@@ -1561,6 +1639,8 @@ class RunningLocalWebService:
                 validate_public,
                 canonicalize,
                 longitudinal_dispatch,
+                record_view,
+                record_list,
             ) = _INSTALLED_EXPLORER_HTTP_DEPENDENCIES
             tracked_callables = (
                 *explorer_dispatch,
@@ -1569,6 +1649,8 @@ class RunningLocalWebService:
                 validate_public,
                 canonicalize,
                 longitudinal_dispatch,
+                record_view,
+                record_list,
                 _Handler.do_GET,
                 _Handler.do_POST,
                 _Handler._dispatch,
@@ -1584,6 +1666,8 @@ class RunningLocalWebService:
                 validate_public=validate_public,
                 canonicalize=canonicalize,
                 longitudinal=longitudinal_dispatch,
+                record_view=record_view,
+                record_list=record_list,
                 identities=tuple(
                     _CallableIdentity.capture(item) for item in tracked_callables
                 ),
@@ -1616,6 +1700,7 @@ class RunningLocalWebService:
                 explorer,
                 explorer_http,
                 reader,
+                records,
             )
             server.application = application
 
@@ -1629,6 +1714,7 @@ class RunningLocalWebService:
                     or application.kernel is not kernel
                     or application.explorer_http is not explorer_http
                     or application.reader is not reader
+                    or application.records is not records
                 ):
                     raise LocalWebServerError("installed HTTP application changed")
                 if server.RequestHandlerClass is not _Handler:

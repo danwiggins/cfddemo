@@ -1843,6 +1843,7 @@ def _serve(
     from .local_catalog import open_local_explorer
     from .store import JobStore
     from .web.auth import BootstrapBroker
+    from .web.records import LocalRecordSource
     from .web.server import LocalWebServerError, LocalWebServerStopped, RunningLocalWebService
 
     root = args.root
@@ -1858,6 +1859,7 @@ def _serve(
                     state_directory=root / "web",
                     ipv6=args.ipv6,
                     explorer=explorer.source,
+                    records=LocalRecordSource(root=root, catalog=explorer.catalog, store=store),
                 )
             except LocalWebServerError as exc:
                 raise _serve_start_problem(exc) from None

@@ -3,17 +3,30 @@
   <head>
     <meta charset="utf-8">
     <meta name="viewport" content="width=device-width, initial-scale=1">
-    <title>Traceback local result explorer</title>
+    <title>Traceback local records</title>
     <link rel="stylesheet" href="/assets/styles.css">
   </head>
   <body>
-    <a class="skip-link" href="#results">Skip to results</a>
+    <a class="skip-link" href="#site-view">Skip to records</a>
     <header>
-      <p class="eyebrow">Local research inspection</p>
-      <h1>Result explorer</h1>
+      <p class="banner" id="banner">Development records · unqualified · not for clinical use</p>
+      <p class="site-title">Traceback local records</p>
       <p id="status" role="status" aria-live="polite">Establishing local session</p>
     </header>
     <main>
+      <section id="site" class="site" data-view="catalog" data-state="loading" aria-label="Local records" hidden data-operator-only>
+        <p id="site-live" class="visually-hidden" role="status" aria-live="polite"></p>
+        <div id="site-view" tabindex="-1"></div>
+      </section>
+      <section id="operator-jobs" class="jobs" aria-label="Local jobs" data-operator-only>
+        <details id="jobs-disclosure">
+          <summary id="jobs-summary">Jobs: loading</summary>
+          <ul id="jobs" aria-label="Local jobs"></ul>
+        </details>
+      </section>
+      <details id="explorer-advanced" class="advanced" data-operator-only>
+        <summary>Explorer projection (E06 and E07 exact values; advanced)</summary>
+        <p id="explorer-status" class="help">Not loaded</p>
       <section id="explorer-filters" aria-labelledby="filters-title" data-operator-only>
         <h2 id="filters-title">Shared filters and views</h2>
         <form id="filters">
@@ -45,10 +58,7 @@
         <h2 id="provenance-title">Method compatibility and provenance</h2>
         <div id="provenance"></div>
       </section>
-      <section id="operator-jobs" aria-labelledby="jobs-title" data-operator-only>
-        <h2 id="jobs-title">Local jobs</h2>
-        <ul id="jobs" aria-label="Local jobs"></ul>
-      </section>
+      </details>
       <section id="longitudinal" class="lg" aria-labelledby="lg-title" data-state="loading" hidden>
         <h2 id="lg-title">Longitudinal comparison</h2>
         <p class="help">Local research inspection only. Comparisons are descriptive technical differences with no causal or clinical interpretation. Release and export are not authorized.</p>
@@ -176,6 +186,8 @@
         </section>
       </section>
     </main>
+    <script src="/assets/chart.js" defer></script>
+    <script src="/assets/site.js" defer></script>
     <script src="/assets/app.js" defer></script>
     <script src="/assets/longitudinal.js" defer></script>
   </body>
