@@ -2603,9 +2603,21 @@ def _catalog_export(args: argparse.Namespace) -> tuple[ExitCode, dict[str, Any]]
     writer = csv.writer(buffer, lineterminator="\n")
     writer.writerow(_CSV_COLUMNS)
     exported = 0
-    for record_id, verified in _verified_local_records(root):
-        if record_id not in imported or verified is None:
-            continue
+    verified_records = dict(_verified_local_records(root))
+    unverifiable = sorted(
+        record_id for record_id in imported if verified_records.get(record_id) is None
+    )
+    if unverifiable:
+        # One row per imported record: a partial CSV would read as complete.
+        raise RunProblem(
+            "TBX-CAT-001",
+            "An imported record is missing or does not verify; nothing was written",
+            cause=f"{len(unverifiable)} imported record(s) under ROOT/records are missing or "
+            f"fail verification (first: {unverifiable[0]})",
+            fix=f"Check it with traceback verify {unverifiable[0]} --root ROOT",
+        )
+    for record_id in sorted(imported):
+        verified = verified_records[record_id]
         measurement = verified.measurement
         built_in = measurement.definition_id == f"{LOCAL_POLICY_ID}.{measurement.reference_id}"
         for item in measurement.histogram:

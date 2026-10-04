@@ -82,6 +82,13 @@ identifiers, sequence, secrets, tokens, and raw SHA-256 values. Bundle export
 and signature enforcement remain in the signing layer. No command uploads or
 deletes data implicitly.
 
+Operator record labels (`ROOT/labels`, unsigned notes) are the one exception
+to "no sample labels": they appear in human CLI output and may appear in the
+operator's own loopback browser session, but never in any CLI `--json`
+output, logs, bundles, exports or support bundles. Their grammar rejects
+paths, identifiers and control characters; operators are told not to put
+donor names in them.
+
 ## Explicit limitations
 
 - Synthetic in-process callbacks do not qualify rootless container isolation.

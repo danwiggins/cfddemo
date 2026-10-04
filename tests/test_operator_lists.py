@@ -542,6 +542,19 @@ def test_csv_export_matches_the_signed_counts_and_never_overwrites(world, tmp_pa
     assert out.read_bytes() == before
 
 
+def test_csv_export_refuses_when_an_imported_record_does_not_verify(world, tmp_path: Path) -> None:
+    root, _, records = world
+    report = root / "records" / records[1]["record_id"] / "report.html"
+    report.chmod(0o600)
+    report.write_text(report.read_text() + "<!-- edited -->")
+    out = tmp_path / "counts.csv"
+    code, payload = _json("catalog", "export", "--csv", out, "--root", root)
+    assert code == cli.ExitCode.BLOCKED, payload
+    assert payload["data"]["code"] == "TBX-CAT-001"
+    assert records[1]["record_id"] in payload["data"]["cause"]
+    assert not out.exists()
+
+
 def test_status_of_a_complete_job_has_no_failure_block(world) -> None:
     root, _, records = world
     code, status = _json("status", records[0]["job_id"], "--root", root)
