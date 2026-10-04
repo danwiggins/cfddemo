@@ -483,3 +483,89 @@ def test_store_lifetime_anchor_keeps_wal_identity_across_another_store_closing(
     first.close()
     gc.collect()
     assert not wal.exists()
+
+
+def _fake_caffeinate(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
+    """Stand in for /usr/bin/caffeinate: record argv and pid, then wait to be killed."""
+
+    from traceback_runner import awake
+
+    log = tmp_path / "caffeinate"
+    log.mkdir()
+    script = log / "caffeinate"
+    script.write_text(
+        "#!/bin/sh\n"
+        f'echo "$@" > "{log}/argv"\n'
+        f'echo $$ > "{log}/pid"\n'
+        "exec sleep 600\n"
+    )
+    script.chmod(0o755)
+    monkeypatch.setattr(awake, "CAFFEINATE", script)
+    monkeypatch.setattr(awake.sys, "platform", "darwin")
+    return log
+
+
+def _alive(pid: int) -> bool:
+    import os
+
+    try:
+        os.kill(pid, 0)
+    except ProcessLookupError:
+        return False
+    return True
+
+
+def test_run_keeps_the_host_awake_while_stages_hold_the_lease(
+    tmp_path: Path, inputs, capsys, monkeypatch
+) -> None:
+    # Regression (TBX-JOB-001 on the real 2 GB BAM): the worker lease is wall
+    # clock, so a host that idles to sleep mid-stage wakes with an expired
+    # lease and the run ends without a record.  The run must hold a sleep
+    # assertion, tied to its own pid, for as long as the runner executes.
+    import os
+    import time
+
+    log = _fake_caffeinate(tmp_path, monkeypatch)
+    root = tmp_path / "root"
+    _register(capsys, root, inputs.fasta_path)
+    seen: list[tuple[list[str], bool]] = []
+    original = Runner.execute
+
+    def execute(self, *args, **kwargs):
+        deadline = time.monotonic() + 10
+        while not (log / "pid").exists() and time.monotonic() < deadline:
+            time.sleep(0.01)
+        pid = int((log / "pid").read_text())
+        seen.append(((log / "argv").read_text().split(), _alive(pid)))
+        return original(self, *args, **kwargs)
+
+    monkeypatch.setattr(Runner, "execute", execute)
+    code, payload = _run(capsys, root, inputs.bam_path)
+    assert code == cli.ExitCode.OK, payload
+    assert seen == [(["-i", "-s", "-w", str(os.getpid())], True)]
+    # Released when the command ends, not left running after it.
+    pid = int((log / "pid").read_text())
+    deadline = time.monotonic() + 5
+    while _alive(pid) and time.monotonic() < deadline:
+        time.sleep(0.01)
+    assert not _alive(pid)
+
+
+def test_a_lost_lease_names_the_lease_and_resume(
+    tmp_path: Path, inputs, capsys, monkeypatch
+) -> None:
+    from traceback_runner.store import StaleLease
+
+    root = tmp_path / "root"
+    _register(capsys, root, inputs.fasta_path)
+
+    def lost(self, *args, **kwargs):
+        raise StaleLease("lease expired or was superseded")
+
+    monkeypatch.setattr(Runner, "execute", lost)
+    code, payload = _run(capsys, root, inputs.bam_path)
+    assert code == cli.ExitCode.RETRYABLE_FAILURE
+    assert payload["data"] == {"code": "TBX-JOB-001", "retryable": True}
+    assert "worker lease" in payload["summary"]
+    assert "traceback resume" in payload["summary"]
+    assert _records(root) == []
