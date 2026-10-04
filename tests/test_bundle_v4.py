@@ -901,3 +901,67 @@ def _query() -> Any:
     from evidence_inspector.result_catalog import CatalogQuery
 
     return CatalogQuery()
+
+
+class LooseProbeMeasurement(RunnerContract):
+    """A careless contract that admits the synthetic label (test-only)."""
+
+    schema_version: Literal["traceback.sh3-loose-measurement.v1"] = (
+        "traceback.sh3-loose-measurement.v1"
+    )
+    approval_state: Literal[ApprovalState.UNAPPROVED_SYNTHETIC, ApprovalState.UNAPPROVED_LOCAL]
+    reference_id: Id
+    reads_counted: int = Field(ge=1)
+    values: tuple[int, ...] = Field(min_length=1)
+
+
+def test_v4_measurement_must_be_labelled_local(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(schemas_module, "_REGISTRY", {})
+    register_measurement_schema(
+        _spec(
+            schema_version="traceback.sh3-loose-measurement.v1",
+            path_stem="sh3-loose.v1",
+            model=LooseProbeMeasurement,
+            result_schema_id="schema_sh3_loose_measurement",
+        )
+    )
+    loose = _probe_measurement(schema_version="traceback.sh3-loose-measurement.v1")
+    _v4_bundle(tmp_path / "local", measurement=loose)
+    with pytest.raises(ExportBoundaryError, match="unapproved_local record"):
+        _v4_bundle(
+            tmp_path / "synthetic",
+            measurement={**loose, "approval_state": "unapproved_synthetic"},
+        )
+
+
+def test_v3_manifest_with_two_measurement_schemas_is_refused(tmp_path: Path) -> None:
+    """A re-signed v3 manifest naming a second schema (the old bundles.py:551 guard)."""
+
+    path = tmp_path / "v3"
+    shutil.copytree(FIXTURES / "v3-local", path)
+    key = _local_key()
+    store = TrustStore()
+    store.add_signing_key(key)
+    manifest = json.loads((path / MANIFEST_PATH).read_bytes())
+    manifest["measurement_schema_versions"] = [
+        "traceback.fragment-measurement.v2",
+        "traceback.fragment-measurement.v1",
+    ]
+    manifest["signing_key_id"] = key.key_id
+    (path / MANIFEST_PATH).write_bytes(canonical_json_bytes(manifest))
+    content = {
+        relative: (path / relative).read_bytes()
+        for relative in _FRAGMENT_LAYOUT.checksum_paths
+    }
+    checksums = _checksums_bytes(content)
+    (path / CHECKSUMS_PATH).write_bytes(checksums)
+    signature = sign_bytes(
+        canonical_json_bytes(_signing_payload(checksums, "traceback.result-bundle.v3")),
+        key,
+        purpose=KeyPurpose.RESULT,
+    )
+    (path / SIGNATURE_PATH).write_bytes(canonical_json_bytes(signature))
+    with pytest.raises(BundleIntegrityError, match="measurement schema"):
+        verify_bundle(path, store)
