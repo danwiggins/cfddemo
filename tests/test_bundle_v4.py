@@ -675,6 +675,26 @@ def test_registration_refuses_fragment_reserved_and_duplicate_schemas(
         register_measurement_schema(_spec(max_chart_bytes=17 * 1024 * 1024))
 
 
+@pytest.mark.parametrize(
+    "field, value",
+    [
+        # Passes AccessibleLabel but fails the explorer's public-text boundary
+        # (".." reads as a path): refused before any import can commit a row.
+        ("accessible_label", "SH3 probe... local record"),
+        ("denominator_semantics_id", "sem_sh3_probe_reads"),
+        ("result_schema_id", "schema_fragment_measurement"),
+    ],
+)
+def test_registration_refuses_catalog_text_the_explorer_would_reject(
+    field: str, value: str, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(schemas_module, "_REGISTRY", {})
+    base = _spec().catalog
+    binding = LocalCatalogBinding(**{**base.__dict__, field: value})
+    with pytest.raises(MeasurementSchemaError):
+        register_measurement_schema(_spec(catalog=binding))
+
+
 # --------------------------------------------------------------------------
 # Reader selection by (bundle_version, measurement_schema)
 # --------------------------------------------------------------------------

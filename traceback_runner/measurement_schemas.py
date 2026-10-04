@@ -159,6 +159,20 @@ def _validate(spec: BundleMeasurementSchema) -> None:
         ):
             semantics.validate_python(value)
         TypeAdapter(AccessibleLabel).validate_python(binding.accessible_label)
+        # The explorer's public-text boundary, which persistence applies to the
+        # artifact these strings land in.
+        from .web.contracts import validate_public_projection
+
+        validate_public_projection(
+            {
+                "accessible_label": binding.accessible_label,
+                "result_schema_id": binding.result_schema_id,
+                "result_schema_version": binding.result_schema_version,
+                "normalization_semantics_id": binding.normalization_semantics_id,
+                "coordinate_semantics_id": binding.coordinate_semantics_id,
+                "denominator_semantics_id": binding.denominator_semantics_id,
+            }
+        )
     except ValueError as exc:
         raise MeasurementSchemaError("catalog binding identifiers are malformed") from exc
     if not callable(binding.authority) or not callable(binding.denominator):
