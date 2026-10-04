@@ -32,7 +32,9 @@ from .filesystem import rename_directory_exclusive_at
 from .operator import build_job_view, support_payload
 from .protocol import render_protocol, synthetic_protocol_manifest
 from .references import DOCS_ANCHOR, ReferenceProblem, validate_reference_id
+from .awake import stay_awake
 from .runner import TerminalStageError
+from .store import StaleLease
 from .serialization import canonical_json_bytes
 
 _TRUST_RELATIVE = Path("trust/development-result-trust.json")
@@ -308,7 +310,11 @@ def _problem(
 
     return _result(
         command,
-        "not_found" if problem.exit_code == ExitCode.NOT_FOUND else "blocked",
+        "not_found"
+        if problem.exit_code == ExitCode.NOT_FOUND
+        else "retryable_failure"
+        if problem.exit_code == ExitCode.RETRYABLE_FAILURE
+        else "blocked",
         problem.summary,
         data={
             **getattr(problem, "data", {}),
@@ -1649,6 +1655,13 @@ def _run_with_runner(
     from .signing import TrustNamespace
 
     bam_name, index_name = relative_files
+    refuse_failed = _refuse_failed_job(runner)
+    submitted: list[str] = []
+
+    def on_submitted(record: Any) -> None:
+        submitted.append(record.job_id)
+        refuse_failed(record)
+
     try:
         record = _execute_signed_run(
             root,
@@ -1659,10 +1672,27 @@ def _run_with_runner(
             lambda key: _local_stages(root, loaded, bam_name, index_name, key, progress),
             namespace=TrustNamespace.DEVELOPMENT_LOCAL,
             worker_id="local-cli",
-            on_submitted=_refuse_failed_job(runner),
+            on_submitted=on_submitted,
         )
     except LocalStageRefusal as refusal:
         raise _refusal_problem(refusal) from refusal
+    except StaleLease as lost:
+        if not submitted:
+            raise
+        # The fenced store recorded nothing; the job keeps its sealed input and
+        # committed stages, and resume adopts or re-runs from there.
+        job_id = submitted[0]
+        next_action = f"traceback resume {job_id} --root <same-root>"
+        raise RunProblem(
+            "TBX-JOB-001",
+            "Local run lost its worker lease (for example the host slept or stalled "
+            "past it); no record was made",
+            cause=f"job {job_id}: {lost}",
+            fix=f"Run {next_action}",
+            exit_code=ExitCode.RETRYABLE_FAILURE,
+            retryable=True,
+            data={"job_id": job_id, "next_action": next_action},
+        ) from lost
     if record.state == JobState.PAUSED:
         return ExitCode.OK, _result(
             "run",
@@ -2743,7 +2773,15 @@ def main(argv: Sequence[str] | None = None) -> int:
             if args.command in {"run", "resume"} and _concerns_local_data(args)
             else nullcontext()
         )
-        with mutation, no_space:
+        # A wall-clock worker lease cannot survive the host sleeping through
+        # it, so commands that execute stages keep the host awake.
+        awake = (
+            stay_awake()
+            if args.command in {"resume", "retry"}
+            or (args.command == "run" and args.reference_id is not None)
+            else nullcontext()
+        )
+        with mutation, no_space, awake:
             code, payload = _dispatch(args, progress)
     except ReferenceProblem as problem:
         command = (
