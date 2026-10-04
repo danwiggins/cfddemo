@@ -391,6 +391,19 @@ def _doctor_samtools() -> dict[str, Any]:
     return _doctor_check("samtools", "pass", f"samtools {match.group(1)}")
 
 
+def _doctor_minimap2() -> dict[str, Any]:
+    """WARN, never block: minimap2 is only for aligning MinKNOW output."""
+
+    if shutil.which("minimap2") is None:
+        return _doctor_check(
+            "minimap2",
+            "warn",
+            "minimap2 not on PATH; only needed to align unaligned MinKNOW/Dorado BAMs "
+            "(brew install minimap2)",
+        )
+    return _doctor_check("minimap2", "pass", "minimap2 on PATH")
+
+
 def _existing_ancestor(path: Path) -> Path:
     candidate = path
     while not candidate.exists() and candidate != candidate.parent:
@@ -573,6 +586,7 @@ def _doctor(args: argparse.Namespace) -> tuple[ExitCode, dict[str, Any]]:
         _doctor_check("platform", "pass", f"{platform.system()} {platform.machine()}"),
         _doctor_check("data_boundary", "pass", "local execution; network not required"),
         _doctor_samtools(),
+        _doctor_minimap2(),
         _doctor_root(root),
         _doctor_disk(root),
         *_doctor_references(root, deep=args.deep),
@@ -1275,14 +1289,26 @@ def _local_stages(
 
     def preflight_stage(context: Any) -> Any:
         progress("STAGE  preflight: inspecting the sealed BAM copy")
-        with _stage_heartbeat(context):
-            report = validate_bam_snapshot(
-                context.sealed_input_dir / bam_name,
-                context.sealed_input_dir / index_name,
-                registered,
-                preflight_policy,
-                compare_assembly=loaded.source.assembly_declared,
-            )
+        try:
+            with _stage_heartbeat(context):
+                report = validate_bam_snapshot(
+                    context.sealed_input_dir / bam_name,
+                    context.sealed_input_dir / index_name,
+                    registered,
+                    preflight_policy,
+                    compare_assembly=loaded.source.assembly_declared,
+                )
+        except (StaleLease, TerminalStageError):
+            raise
+        except Exception as exc:
+            # Not a BAM read/format error (those are TBX-BAM-001 checks): a
+            # sealed input cannot change, so retrying would only loop.
+            raise LocalStageRefusal(
+                "TBX-INTERNAL-001",
+                "Preflight stopped on an unexpected internal error; no record was made",
+                cause=f"{type(exc).__name__} while inspecting the sealed BAM copy",
+                fix="Retrying will not change it; write `traceback support-bundle` and report the code",
+            ) from exc
         if (
             report.outcome == PreflightOutcome.BLOCKED
             or not report.fragment_measurement_eligible
@@ -1437,6 +1463,20 @@ def _local_stages(
             },
         ),
     )
+
+
+def _refuse_unaligned_or_empty(bam: Path) -> None:
+    """A1: refuse an unaligned (TBX-BAM-003) or record-less (TBX-BAM-004) BAM
+    before any job, authority or copy exists. The FIX never names a path."""
+
+    from .preflight import intake_refusal
+
+    path = Path(os.path.abspath(bam))
+    if path.is_symlink() or not path.is_file():
+        return  # the input-file check below reports it
+    check = intake_refusal(path)
+    if check is not None:
+        raise RunProblem(check.code, check.problem, cause=check.problem, fix=check.remediation)
 
 
 def _local_input_files(bam: Path, index: Path) -> tuple[Path, tuple[str, str]]:
@@ -1623,6 +1663,7 @@ def _run(
         return _real_run_blocked()
     root = args.root
     loaded = load_reference(root, args.reference_id)
+    _refuse_unaligned_or_empty(args.input)
     # Create (once) or validate the local method authority before any copy:
     # a damaged ROOT/authority refuses the run with TBX-AUTH-LOCAL-001.
     ensure_local_method_authority(root, loaded.registered)
@@ -1979,6 +2020,7 @@ def _preflight(args: argparse.Namespace) -> tuple[ExitCode, dict[str, Any]]:
     index = args.index or Path(f"{args.input}.bai")
     if args.reference_id is not None:
         return _preflight_registered(args, index)
+    _refuse_implicit_synthetic_reference(args)
     report = validate_bam_snapshot(
         args.input,
         index,
@@ -2004,11 +2046,45 @@ def _preflight(args: argparse.Namespace) -> tuple[ExitCode, dict[str, Any]]:
     )
 
 
+def _refuse_implicit_synthetic_reference(args: argparse.Namespace) -> None:
+    """D12: no silent synthetic default once ROOT has registered references.
+
+    An unaligned BAM is told to align first (TBX-BAM-003 comes before
+    TBX-REF-004), so the header is read before refusing.
+    """
+
+    from .preflight import header_is_unaligned, read_bam_header
+    from .references import list_reference_ids
+
+    try:
+        identifiers = list_reference_ids(args.root)
+    except OSError:
+        return
+    if not identifiers:
+        return
+    try:
+        unaligned = header_is_unaligned(read_bam_header(args.input))
+    except (OSError, ValueError):
+        unaligned = False  # the registered preflight reports the unreadable BAM
+    if unaligned:
+        return
+    raise RunProblem(
+        "TBX-REF-004",
+        "preflight needs --reference: this ROOT has registered references",
+        cause="registered reference IDs: " + ", ".join(identifiers),
+        fix=f"Add --reference {identifiers[0]} (or another registered ID)",
+        exit_code=ExitCode.USAGE,
+        data={"reference_ids": list(identifiers)},
+    )
+
+
 def _preflight_registered(
     args: argparse.Namespace, index: Path
 ) -> tuple[ExitCode, dict[str, Any]]:
+    import shlex
+
     from .contracts import PreflightOutcome
-    from .preflight import BamPreflightPolicy, validate_bam_snapshot
+    from .preflight import BamPreflightPolicy, alignment_command, validate_bam_snapshot
     from .references import load_reference
 
     loaded = load_reference(args.root, args.reference_id)
@@ -2018,6 +2094,14 @@ def _preflight_registered(
         loaded.registered,
         BamPreflightPolicy(policy_id="local-unqualified-preflight-v1"),
         compare_assembly=loaded.source.assembly_declared,
+    )
+    # TBX-BAM-003's command names the registered FASTA in human output only;
+    # --json and the report carry the reference ID, never a path.
+    align = (
+        {"align_command": alignment_command(shlex.quote(loaded.source.fasta_path))}
+        if not getattr(args, "as_json", False)
+        and any(check.code == "TBX-BAM-003" for check in report.checks)
+        else {}
     )
     blocked = report.outcome == PreflightOutcome.BLOCKED
     return (
@@ -2036,6 +2120,7 @@ def _preflight_registered(
                 "report": report.model_dump(mode="json"),
                 "qualified": False,
                 "reference_id": args.reference_id,
+                **align,
             },
         ),
     )
@@ -3097,6 +3182,15 @@ def main(argv: Sequence[str] | None = None) -> int:
                 "Local run failed without a record; inspect traceback status and "
                 "logs before retrying",
                 data={"code": "TBX-JOB-001", "retryable": True},
+            )
+        elif args.command == "preflight":
+            # BAM read/format errors are TBX-BAM-001 checks; anything reaching
+            # here is a defect, not a property of the input.
+            code, payload = ExitCode.INTERNAL_ERROR, _result(
+                args.command,
+                "internal_error",
+                "Preflight stopped on an unexpected internal error; nothing was changed",
+                data={"code": "TBX-INTERNAL-001", "retryable": False},
             )
         elif args.command in {"demo", "resume", "retry", "pause"}:
             code, payload = ExitCode.RETRYABLE_FAILURE, _result(

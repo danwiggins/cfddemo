@@ -108,12 +108,9 @@ def _journey_block() -> str:
     return match.group(1)
 
 
-@pytest.mark.skipif(shutil.which("bash") is None, reason="needs bash")
-def test_guide_journey_runs_verbatim_on_generated_inputs(tmp_path: Path) -> None:
-    block = _journey_block()
-    assert "uv run traceback catalog import" in block
-    inputs = create_local_golden_path_inputs(tmp_path / "inputs")
-    # A stand-in `uv` so `uv run traceback ...` runs this checkout's CLI.
+def _fake_uv_bin(tmp_path: Path) -> Path:
+    """A stand-in `uv` so `uv run traceback ...` runs this checkout's CLI."""
+
     bin_dir = tmp_path / "bin"
     bin_dir.mkdir()
     fake_uv = bin_dir / "uv"
@@ -128,6 +125,15 @@ def test_guide_journey_runs_verbatim_on_generated_inputs(tmp_path: Path) -> None
         encoding="utf-8",
     )
     fake_uv.chmod(fake_uv.stat().st_mode | stat.S_IXUSR)
+    return bin_dir
+
+
+@pytest.mark.skipif(shutil.which("bash") is None, reason="needs bash")
+def test_guide_journey_runs_verbatim_on_generated_inputs(tmp_path: Path) -> None:
+    block = _journey_block()
+    assert "uv run traceback catalog import" in block
+    inputs = create_local_golden_path_inputs(tmp_path / "inputs")
+    bin_dir = _fake_uv_bin(tmp_path)
     root = tmp_path / "root"
     completed = subprocess.run(
         ["bash", "-euo", "pipefail", "-c", block],
@@ -152,3 +158,113 @@ def test_guide_journey_runs_verbatim_on_generated_inputs(tmp_path: Path) -> None
     assert "QUALIFICATION_STATE  development_unqualified" in out
     assert "CURRENT_PROVIDER_ELIGIBLE  False" in out
     assert len(list((root / "records").iterdir())) == 1
+
+
+# Stands in for minimap2 when it is not installed (CI): reads the FASTQ that
+# `samtools fastq -T MM,ML,MN` writes, places each generated read at the
+# position its name encodes (`synthetic-<contig>-<start>-<n>`), and carries
+# the FASTQ comment tags through as `-y` does.
+_MINIMAP2_STUB = r'''
+import sys
+
+args = sys.argv[1:]
+assert args[:3] == ["-ax", "map-ont", "-y"] and args[-1] == "-" and len(args) == 5, args
+reference = args[3]
+print("@HD\tVN:1.6\tSO:unsorted")
+with open(reference + ".fai", encoding="ascii") as fai:
+    for line in fai:
+        name, length = line.split("\t")[:2]
+        print(f"@SQ\tSN:{name}\tLN:{length}")
+print("@PG\tID:minimap2-stub\tPN:minimap2-stub\tVN:0")
+lines = sys.stdin.read().splitlines()
+for offset in range(0, len(lines), 4):
+    fields = lines[offset][1:].split("\t")
+    name, tags = fields[0], fields[1:]
+    sequence, quality = lines[offset + 1], lines[offset + 3]
+    contig, start = name.removeprefix("synthetic-").rsplit("-", 2)[:2]
+    print("\t".join([name, "0", contig, str(int(start) + 1), "60",
+                     f"{len(sequence)}M", "*", "0", "0", sequence, quality, *tags]))
+'''
+
+
+def _batch_block() -> str:
+    text = GUIDE.read_text(encoding="utf-8")
+    match = re.search(
+        r"<!-- minknow-batch:begin -->\n```bash\n(.*?)```\n<!-- minknow-batch:end -->",
+        text,
+        flags=re.DOTALL,
+    )
+    assert match, "MinKNOW batch block markers are missing"
+    return match.group(1)
+
+
+@pytest.mark.skipif(
+    shutil.which("bash") is None or shutil.which("samtools") is None,
+    reason="needs bash and samtools",
+)
+@pytest.mark.parametrize("aligner", ["stub", "minimap2"])
+def test_guide_minknow_batch_runs_verbatim_per_barcode(tmp_path: Path, aligner: str) -> None:
+    if aligner == "minimap2" and shutil.which("minimap2") is None:
+        pytest.skip("minimap2 not installed; the stub variant covers the block")
+    import pysam
+
+    from traceback_runner.fixtures import create_unaligned_ont_bam
+
+    block = _batch_block()
+    assert "minimap2 -ax map-ont -y" in block
+    inputs = create_local_golden_path_inputs(tmp_path / "inputs")
+    with pysam.FastaFile(str(inputs.fasta_path)) as fasta:
+        contigs = {name: fasta.fetch(name) for name in fasta.references}
+    run_dir = tmp_path / "minknow-run"
+    chunks = {"barcode01": 2, "barcode02": 1, "unclassified": 1}
+    for seed, (directory, count) in enumerate(chunks.items()):
+        for chunk in range(count):
+            create_unaligned_ont_bam(
+                run_dir / "bam_pass" / directory / f"chunk_{chunk}.bam",
+                reads=60,
+                contigs=contigs,
+                seed=seed * 10 + chunk,
+            )
+    bin_dir = _fake_uv_bin(tmp_path)
+    if aligner == "stub":
+        stub = bin_dir / "minimap2"
+        stub.write_text(f"#!{sys.executable}\n" + _MINIMAP2_STUB, encoding="utf-8")
+        stub.chmod(stub.stat().st_mode | stat.S_IXUSR)
+    root = tmp_path / "root"
+    env = {
+        **os.environ,
+        "PATH": f"{bin_dir}{os.pathsep}{os.environ['PATH']}",
+        "FASTA": str(inputs.fasta_path),
+        "R": str(root),
+        "MINKNOW_RUN": str(run_dir),
+        "ALIGNED": str(tmp_path / "aligned"),
+    }
+    registered = subprocess.run(
+        [sys.executable, "-m", "traceback_runner", "reference", "register",
+         "--fasta", str(inputs.fasta_path), "--id", "ref", "--root", str(root)],
+        cwd=REPO, env=env, capture_output=True, text=True, timeout=120, check=False,
+    )
+    assert registered.returncode == 0, registered.stdout + registered.stderr
+    completed = subprocess.run(
+        ["bash", "-euo", "pipefail", "-c", block],
+        cwd=REPO,
+        env=env,
+        capture_output=True,
+        text=True,
+        timeout=300,
+        check=False,
+    )
+    out = completed.stdout
+    assert completed.returncode == 0, out + completed.stderr
+    assert "FAILED" not in out, out
+    # One merged, aligned BAM per barcode; `unclassified` is never merged in.
+    assert sorted(p.name for p in (tmp_path / "aligned").glob("*.sorted.bam")) == [
+        "barcode01.sorted.bam",
+        "barcode02.sorted.bam",
+    ]
+    with pysam.AlignmentFile(str(tmp_path / "aligned" / "barcode01.sorted.bam")) as bam:
+        assert sum(1 for _ in bam.fetch(until_eof=True)) == 120  # both chunks
+    assert out.count("Signed local record ready") == 2
+    assert "preflight warn" in out  # valid tags, no @RG after alignment: WARN
+    assert "re-basecall" not in out.lower()
+    assert len(list((root / "records").iterdir())) == 2
