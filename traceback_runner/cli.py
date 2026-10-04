@@ -300,6 +300,7 @@ def _parser() -> argparse.ArgumentParser:
     )
 
     commands.add_parser("reader", help="local operator reader authority (E12)")
+    commands.add_parser("toolchain", help="install a pinned analysis tool (per user)")
     support = commands.add_parser(
         "support-bundle", help="write allowlisted redacted diagnostics"
     )
@@ -4103,6 +4104,10 @@ def main(argv: Sequence[str] | None = None) -> int:
         from .reader_cli import main as reader_main
 
         return reader_main(raw[1:])
+    if raw[:1] == ["toolchain"]:  # pinned per-user toolchains (signal methods CO1)
+        from .toolchain_cli import main as toolchain_main
+
+        return toolchain_main(raw[1:])
     parser = _parser()
     args = parser.parse_args(argv)
     _require_trust_registry_identity(parser, args)

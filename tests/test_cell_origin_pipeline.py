@@ -31,6 +31,7 @@ from evidence_inspector.cell_origin_models import (
     LOYFER_UXM_METHOD,
     MarkerCountRow,
 )
+from traceback_runner.toolchain import PinnedTool, ToolProblem
 from evidence_inspector.uxm import (
     UxmClassificationResult,
     UxmDiagnostics,
@@ -50,6 +51,12 @@ def _config(tmp_path: Path, *, extract_tsv: Path) -> PipelineConfig:
         atlas_u_matrix=atlas,
         extract_tsv=extract_tsv,
         output_path=tmp_path / "result.json",
+    )
+
+
+def _missing_modkit() -> PinnedTool:
+    raise ToolProblem(
+        "missing", "modkit 0.6.4 is not installed", tool="modkit", cause="c", fix="f"
     )
 
 
@@ -114,6 +121,7 @@ def test_preflight_does_not_require_modkit_for_existing_extract(
         config,
         require_modkit=False,
         executable_finder=lambda name: None,
+        modkit_resolver=_missing_modkit,
     )
 
     modkit = next(item for item in report.items if item.item_id == "software.modkit")
