@@ -2069,14 +2069,24 @@ def _refuse_implicit_synthetic_reference(args: argparse.Namespace) -> None:
 
     try:
         identifiers = list_reference_ids(args.root)
-    except OSError:
-        return
+    except OSError as exc:
+        # Fail closed: an unreadable registry must not fall back to synthetic.
+        raise RunProblem(
+            "TBX-REF-004",
+            "preflight needs --reference: ROOT's references could not be listed",
+            cause="ROOT/references exists but could not be read",
+            fix="Add --reference ID, and check ROOT/references with traceback doctor",
+            exit_code=ExitCode.USAGE,
+        ) from exc
     if not identifiers:
         return
-    try:
-        unaligned = header_is_unaligned(read_bam_header(args.input))
-    except (OSError, ValueError):
-        unaligned = False  # the registered preflight reports the unreadable BAM
+    path = Path(os.path.abspath(args.input))
+    unaligned = False
+    if not path.is_symlink() and path.is_file():  # htslib would log a missing path
+        try:
+            unaligned = header_is_unaligned(read_bam_header(path))
+        except (OSError, ValueError):
+            pass  # the registered preflight reports the unreadable BAM
     if unaligned:
         return
     raise RunProblem(
@@ -3045,7 +3055,16 @@ def _concerns_local_data(args: argparse.Namespace) -> bool:
     if command in {"run", "reference", "catalog"}:
         return True
     if command == "preflight":
-        return args.reference_id is not None
+        if args.reference_id is not None:
+            return True
+        # Without --reference on a ROOT with registrations (TBX-REF-004, or an
+        # operator's unaligned BAM) the result is about local data too.
+        from .references import list_reference_ids
+
+        try:
+            return bool(list_reference_ids(args.root))
+        except OSError:
+            return True
     if command == "verify":
         if args.trust_registry is not None:
             return _manifest_is_local(args.bundle)

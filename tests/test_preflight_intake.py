@@ -6,8 +6,12 @@ Synthetic-only: every BAM and FASTA here is generated test data.
 from __future__ import annotations
 
 import array
+import contextlib
+import io
 import json
 import sqlite3
+import subprocess
+import sys
 from pathlib import Path
 
 import pysam
@@ -47,13 +51,15 @@ def golden(tmp_path: Path):
 
 
 @pytest.fixture
-def root(tmp_path: Path, golden, capsys) -> Path:
+def root(tmp_path: Path, golden) -> Path:
     root = tmp_path / "root"
-    code, payload = _json(
-        capsys, "reference", "register", "--fasta", golden.fasta_path, "--id", "ref",
-        "--root", root,
-    )
-    assert code == cli.ExitCode.OK, payload
+    out = io.StringIO()
+    with contextlib.redirect_stdout(out):
+        code = cli.main(
+            ["reference", "register", "--fasta", str(golden.fasta_path), "--id", "ref",
+             "--root", str(root), "--json"]
+        )
+    assert code == cli.ExitCode.OK, out.getvalue()
     return root
 
 
@@ -354,3 +360,53 @@ def test_preflight_without_reference_on_a_registered_root_is_tbx_ref_004(
     code, payload = _json(capsys, "preflight", unaligned, "--root", root)
     assert code == cli.ExitCode.BLOCKED
     assert payload["data"]["report"]["checks"][0]["code"] == "TBX-BAM-003"
+
+
+def test_partial_chr_rename_gets_no_global_sed(tmp_path: Path) -> None:
+    mixed = [("chr1", 248_956_422), ("2", 242_193_529), ("3", 198_295_559)]
+    bam, index = _aligned_bam(tmp_path, mixed)
+    report = validate_bam_snapshot(bam, index, _reference(*_HG38_LIKE), LOCAL_POLICY)
+    (check,) = [c for c in report.checks if c.code == "TBX-BAM-002"]
+    assert "samtools reheader" in check.remediation
+    assert "sed" not in check.remediation  # a global sed would make chrchr1
+
+
+def test_ref_004_is_labelled_local_and_fails_closed(
+    tmp_path: Path, golden, root: Path, capfd
+) -> None:
+    capsys = capfd  # file-descriptor capture also sees htslib's stderr
+    code, payload = _json(capsys, "preflight", golden.bam_path, "--root", root)
+    assert code == cli.ExitCode.USAGE
+    assert payload["schema_version"] == "traceback.cli-result.v2"
+    assert payload["data_origin"] == "local_unqualified"
+
+    # htslib logs a path it fails to open straight to fd 2, which in-process
+    # capture does not see; a child process shows it.
+    missing = tmp_path / "private-dir" / "missing.bam"
+    child = subprocess.run(
+        [sys.executable, "-m", "traceback_runner", "preflight", str(missing),
+         "--root", str(root), "--json"],
+        capture_output=True, text=True, timeout=120, check=False,
+    )
+    assert child.returncode == cli.ExitCode.USAGE, child.stdout + child.stderr
+    assert json.loads(child.stdout)["data"]["code"] == "TBX-REF-004"
+    assert str(missing) not in child.stdout + child.stderr
+
+    references = root / "references"
+    references.chmod(0)
+    try:
+        if references.stat() and _readable(references):
+            pytest.skip("running with privileges that ignore directory modes")
+        code, payload = _json(capsys, "preflight", golden.bam_path, "--root", root)
+    finally:
+        references.chmod(0o700)
+    assert code == cli.ExitCode.USAGE
+    assert payload["data"]["code"] == "TBX-REF-004"
+
+
+def _readable(directory: Path) -> bool:
+    try:
+        list(directory.iterdir())
+    except OSError:
+        return False
+    return True

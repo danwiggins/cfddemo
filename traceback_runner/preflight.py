@@ -99,17 +99,24 @@ def _sq_pairs(header: dict[str, Any]) -> list[tuple[str, object]]:
 def _chr_rename_direction(
     observed: list[tuple[str, object]], expected: list[tuple[str, int]]
 ) -> str | None:
-    """``"strip"``/``"add"`` when the lists differ only by a ``chr`` name prefix."""
+    """How the lists differ when only a ``chr`` name prefix differs, else ``None``.
+
+    ``"strip"``/``"add"``: every contig needs that same rename, so one global
+    ``sed`` is safe. ``"mixed"``: some names already match (or both
+    directions occur), so a global ``sed`` would break them.
+    """
 
     if len(observed) != len(expected):
         return None
     directions = set()
+    some_equal = False
     for (name, length), (reference_name, reference_length) in zip(
         observed, expected, strict=True
     ):
         if length != reference_length:
             return None
         if name == reference_name:
+            some_equal = True
             continue
         if name == f"chr{reference_name}":
             directions.add("strip")
@@ -117,7 +124,9 @@ def _chr_rename_direction(
             directions.add("add")
         else:
             return None
-    return directions.pop() if len(directions) == 1 else None
+    if not directions:
+        return None
+    return directions.pop() if len(directions) == 1 and not some_equal else "mixed"
 
 
 def _reference_diff(header: dict[str, Any], registered: RegisteredReference) -> tuple[str, str]:
@@ -170,6 +179,13 @@ def _reference_diff(header: dict[str, Any], registered: RegisteredReference) -> 
             "Only the names differ (a chr prefix); rename with `samtools reheader`, "
             "for example: samtools view -H IN.bam | sed -E 's/SN:/SN:chr/' | "
             "samtools reheader - IN.bam > OUT.bam (then samtools index OUT.bam)."
+        )
+    elif direction == "mixed":
+        fix = (
+            "Only the names differ (a chr prefix on some contigs); rename the "
+            "differing SN: names with `samtools reheader` (edit the header from "
+            "samtools view -H IN.bam, then samtools reheader EDITED.sam IN.bam > "
+            "OUT.bam and samtools index OUT.bam)."
         )
     else:
         fix = (
