@@ -301,10 +301,12 @@ def test_cli_preflight_unknown_reference_is_tbx_ref_003(
 
 # SHA-256 of `preflight BAM --json` stdout (one canonical line) recorded on
 # main before B2; synthetic preflight without --reference must not change.
+# wrong_reference re-pinned once by usability A6: its BLOCKED TBX-BAM-002 now
+# says which header field differs (M5/AS) and what to do.
 _SYNTHETIC_PREFLIGHT_SHA256 = {
     "ordinary": "59a4249421b3135791e2f225103b3cc5d18a3c3d7cc8dc5e3e5596b2e89739fd",
     "valid_modbam": "0f045966765ce34e5f730cb8a7d8d0c6b65a7a61a7e90e0986567977434c3c14",
-    "wrong_reference": "a9a1f01429a4f80431b8117d0688a6eda47b19e2c150e55bd6ba13d57516e00b",
+    "wrong_reference": "d6732e684fbb66793c5a9b62e1974b5a241fd187ac89ddda24756f2217629283",
 }
 
 

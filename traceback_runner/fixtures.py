@@ -190,6 +190,75 @@ def create_synthetic_minknow_run(directory: Path, *, completed: bool = True) -> 
     return root
 
 
+SYNTHETIC_DORADO_MODBASE_MODEL = "synthetic_modbase_model.v1"
+
+
+def create_unaligned_ont_bam(
+    path: Path,
+    *,
+    reads: int = 50,
+    contigs: dict[str, str] | None = None,
+    read_group: str = "synthetic-run_synthetic-basecall",
+    seed: int = 20261003,
+) -> Path:
+    """Write an unaligned BAM shaped like MinKNOW/Dorado output (no ``@SQ``).
+
+    Every read is unmapped with valid ``MM``/``ML``/``MN`` tags and an ``RG``
+    tag; the ``@RG DS`` declares ``basecall_model=`` and ``modbase_models=``
+    the way Dorado does. With ``contigs`` (name to sequence), each read is an
+    exact forward substring named ``synthetic-<contig>-<start>-<n>`` so a
+    test aligner can place it; otherwise sequences are random. Synthetic
+    only: no real run, model, chemistry or sample.
+    """
+
+    if reads < 1:
+        raise ValueError("generate at least one read")
+    path.parent.mkdir(parents=True, exist_ok=True)
+    generator = random.Random(seed)
+    header = pysam.AlignmentHeader.from_dict(
+        {
+            "HD": {"VN": "1.6", "SO": "unknown"},
+            "RG": [
+                {
+                    "ID": read_group,
+                    "DS": "runid=synthetic-run basecall_model=synthetic_basecall_model.v1 "
+                    f"modbase_models={SYNTHETIC_DORADO_MODBASE_MODEL}",
+                }
+            ],
+            "PG": [{"ID": "synthetic-basecaller", "PN": "not-minknow", "VN": "0"}],
+        }
+    )
+    with pysam.AlignmentFile(str(path), "wb", header=header) as output:
+        written = 0
+        while written < reads:
+            length = generator.randint(300, 700)
+            if contigs:
+                name = generator.choice(sorted(contigs))
+                start = generator.randint(0, len(contigs[name]) - length - 1)
+                sequence = contigs[name][start : start + length]
+                query_name = f"synthetic-{name}-{start}-{written:05d}"
+            else:
+                sequence = "".join(generator.choice("ACGT") for _ in range(length))
+                query_name = f"synthetic-unaligned-{written:05d}"
+            if "C" not in sequence:
+                continue
+            segment = pysam.AlignedSegment(header)
+            segment.query_name = query_name
+            segment.flag = 4
+            segment.reference_id = -1
+            segment.reference_start = -1
+            segment.mapping_quality = 0
+            segment.query_sequence = sequence
+            segment.query_qualities = pysam.qualitystring_to_array("I" * length)
+            segment.set_tag("MM", "C+m?,0;")
+            segment.set_tag("ML", array.array("B", [200]))
+            segment.set_tag("MN", length)
+            segment.set_tag("RG", read_group)
+            output.write(segment)
+            written += 1
+    return path
+
+
 class LocalHeaderDigests(StrEnum):
     """How the generated BAM header carries ``M5``/``AS`` for each ``@SQ``."""
 

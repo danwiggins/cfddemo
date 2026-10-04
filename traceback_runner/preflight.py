@@ -82,12 +82,274 @@ def _reference_matches(
     return PreflightOutcome.PASS if complete else PreflightOutcome.WARN
 
 
-def _header_has_model(header: dict[str, Any], model_id: str | None) -> bool:
-    declaration = f"traceback.modified_base_model={model_id}"
-    return model_id is not None and any(
-        isinstance(program, dict) and program.get("DS") == declaration
-        for program in header.get("PG", [])
+_DIFF_SHOWN = 3
+_NAME_SHOWN = 64
+
+
+def _sq_pairs(header: dict[str, Any]) -> list[tuple[str, object]]:
+    sequences = header.get("SQ")
+    if not isinstance(sequences, list):
+        return []
+    return [
+        (str(item.get("SN", "")), item.get("LN")) if isinstance(item, dict) else ("", None)
+        for item in sequences
+    ]
+
+
+def _chr_rename_direction(
+    observed: list[tuple[str, object]], expected: list[tuple[str, int]]
+) -> str | None:
+    """How the lists differ when only a ``chr`` name prefix differs, else ``None``.
+
+    ``"strip"``/``"add"``: every contig needs that same rename, so one global
+    ``sed`` is safe. ``"mixed"``: some names already match (or both
+    directions occur), so a global ``sed`` would break them.
+    """
+
+    if len(observed) != len(expected):
+        return None
+    directions = set()
+    some_equal = False
+    for (name, length), (reference_name, reference_length) in zip(
+        observed, expected, strict=True
+    ):
+        if length != reference_length:
+            return None
+        if name == reference_name:
+            some_equal = True
+            continue
+        if name == f"chr{reference_name}":
+            directions.add("strip")
+        elif f"chr{name}" == reference_name:
+            directions.add("add")
+        else:
+            return None
+    if not directions:
+        return None
+    return directions.pop() if len(directions) == 1 and not some_equal else "mixed"
+
+
+def _reference_diff(header: dict[str, Any], registered: RegisteredReference) -> tuple[str, str]:
+    """Problem and fix for a BLOCKED TBX-BAM-002, comparing ``@SQ`` by position.
+
+    Lists the first three differing positions as
+    ``position name_in_BAM length_in_BAM | name_in_reference length_in_reference``
+    (``-`` on the absent side) and the total count. Contig names come from
+    the reference and the BAM header, never from reads or input locators.
+    """
+
+    observed = _sq_pairs(header)
+    expected = [(contig.name, contig.length) for contig in registered.contigs]
+    rows: list[str] = []
+    differing = 0
+    for position in range(max(len(observed), len(expected))):
+        left = observed[position] if position < len(observed) else None
+        right = expected[position] if position < len(expected) else None
+        if left == right:
+            continue
+        differing += 1
+        if len(rows) < _DIFF_SHOWN:
+            bam_side = "- -" if left is None else f"{left[0][:_NAME_SHOWN]} {left[1]}"
+            ref_side = "- -" if right is None else f"{right[0][:_NAME_SHOWN]} {right[1]}"
+            rows.append(f"{position + 1} {bam_side} | {ref_side}")
+    if not differing:
+        # Names and lengths agree, so a present M5 or AS differs.
+        return (
+            "BAM @SQ names and lengths match the registered reference, but a "
+            "recorded M5 (sequence digest) or AS (assembly) differs.",
+            "The BAM was likely aligned to a different build with the same contig "
+            "names; register that FASTA or realign against the registered one.",
+        )
+    shown = "; ".join(rows)
+    problem = (
+        f"BAM @SQ lines differ from the registered reference at {differing} of "
+        f"{max(len(observed), len(expected))} positions (BAM {len(observed)} contigs, "
+        f"reference {len(expected)}). First differences (position name_in_BAM "
+        f"length_in_BAM | name_in_reference length_in_reference): {shown}."
     )
+    direction = _chr_rename_direction(observed, expected)
+    if direction == "strip":
+        fix = (
+            "Only the names differ (a chr prefix); rename with `samtools reheader`, "
+            "for example: samtools view -H IN.bam | sed -E 's/SN:chr/SN:/' | "
+            "samtools reheader - IN.bam > OUT.bam (then samtools index OUT.bam)."
+        )
+    elif direction == "add":
+        fix = (
+            "Only the names differ (a chr prefix); rename with `samtools reheader`, "
+            "for example: samtools view -H IN.bam | sed -E 's/SN:/SN:chr/' | "
+            "samtools reheader - IN.bam > OUT.bam (then samtools index OUT.bam)."
+        )
+    elif direction == "mixed":
+        fix = (
+            "Only the names differ (a chr prefix on some contigs); rename the "
+            "differing SN: names with `samtools reheader` (edit the header from "
+            "samtools view -H IN.bam, then samtools reheader EDITED.sam IN.bam > "
+            "OUT.bam and samtools index OUT.bam)."
+        )
+    else:
+        fix = (
+            "This BAM was aligned to a different reference; register that FASTA "
+            "or realign against the registered one."
+        )
+    return problem, fix
+
+
+ALIGNMENT_FASTA_PLACEHOLDER = "REF.fa"
+
+
+def alignment_command(fasta: str = ALIGNMENT_FASTA_PLACEHOLDER) -> str:
+    """The minimap2 + samtools command that aligns an unaligned ONT BAM.
+
+    ``-T MM,ML,MN`` and ``-y`` carry the modification tags through
+    alignment. Traceback prints this command; it never aligns for the
+    operator (alignment choices are scientific decisions).
+    """
+
+    return (
+        "samtools fastq -T MM,ML,MN IN.bam \\\n"
+        f"  | minimap2 -ax map-ont -y {fasta} - \\\n"
+        "  | samtools sort -o OUT.sorted.bam\n"
+        "samtools index OUT.sorted.bam"
+    )
+
+
+def unaligned_remediation(fasta: str | None = None) -> str:
+    """TBX-BAM-003's FIX; ``fasta`` (a shell-quoted path, human output only)
+    replaces the ``REF.fa`` placeholder."""
+
+    target = (
+        "OUT.sorted.bam:"
+        if fasta is not None
+        else f"OUT.sorted.bam, with {ALIGNMENT_FASTA_PLACEHOLDER} the registered FASTA:"
+    )
+    return (
+        "Align it first (an assisted prerequisite, outside traceback; see "
+        "'Aligning MinKNOW output' in docs/OPERATOR-GUIDE.md), then rerun on "
+        f"{target}\n" + alignment_command(fasta or ALIGNMENT_FASTA_PLACEHOLDER)
+    )
+
+
+def _unaligned_check() -> PreflightCheck:
+    return _check(
+        "TBX-BAM-003",
+        PreflightOutcome.BLOCKED,
+        "This BAM is unaligned (no @SQ reference lines). MinKNOW and Dorado "
+        "write unaligned BAMs by default.",
+        unaligned_remediation(),
+    )
+
+
+def _empty_check() -> PreflightCheck:
+    return _check(
+        "TBX-BAM-004",
+        PreflightOutcome.BLOCKED,
+        "BAM has no alignment records.",
+        "This is often a `bam_fail` or empty chunk; use the sample's `bam_pass` files.",
+    )
+
+
+def read_bam_header(bam_path: str | Path) -> dict[str, Any]:
+    """The BAM header as a dict, opened without requiring ``@SQ`` lines."""
+
+    import pysam
+
+    with pysam.AlignmentFile(str(bam_path), "rb", check_sq=False) as bam:
+        return bam.header.to_dict()
+
+
+def header_is_unaligned(header: dict[str, Any]) -> bool:
+    """True when the header has no ``@SQ`` lines (MinKNOW/Dorado default)."""
+
+    sequences = header.get("SQ")
+    return not isinstance(sequences, list) or not sequences
+
+
+def unaligned_report() -> PreflightReport:
+    """The one-check BLOCKED report for an unaligned BAM (TBX-BAM-003)."""
+
+    return _report([_unaligned_check()])
+
+
+def intake_refusal(bam_path: str | Path) -> PreflightCheck | None:
+    """TBX-BAM-003 (unaligned) or TBX-BAM-004 (no records) from a cheap peek.
+
+    Reads the header and at most one record, so ``run`` can refuse before it
+    creates a job or copies anything. ``None`` when neither applies or the
+    file cannot be read here (the full preflight reports that as TBX-BAM-001).
+    """
+
+    import pysam
+
+    try:
+        with pysam.AlignmentFile(str(bam_path), "rb", check_sq=False) as bam:
+            if header_is_unaligned(bam.header.to_dict()):
+                return _unaligned_check()
+            if next(iter(bam.fetch(until_eof=True)), None) is None:
+                return _empty_check()
+    except (OSError, ValueError):
+        return None
+    return None
+
+
+_MODEL_ID_CHARACTERS = frozenset(
+    "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789_.@+-"
+)
+
+
+def _declared_modbase_models(description: object) -> tuple[str, ...]:
+    """``modbase_models=<id>[,<id>...]`` from one Dorado/MinKNOW ``@RG DS`` field."""
+
+    if not isinstance(description, str):
+        return ()
+    models: list[str] = []
+    for token in description.split():
+        key, separator, value = token.partition("=")
+        if separator and key == "modbase_models":
+            models.extend(item for item in value.split(",") if item)
+    return tuple(models)
+
+
+def _printable_model(model_id: str) -> str | None:
+    """The model ID when it is short and plain enough to echo in a report."""
+
+    if 0 < len(model_id) <= 96 and set(model_id) <= _MODEL_ID_CHARACTERS:
+        return model_id
+    return None
+
+
+_TRACEBACK_PG_DECLARATION = "traceback @PG DS"
+
+
+def _model_declaration(header: dict[str, Any], model_id: str | None) -> str | None:
+    """Where the header declares the modified-base model, or ``None``.
+
+    Accepted: the traceback ``@PG DS`` (``traceback.modified_base_model=<id>``,
+    synthetic fixtures) or any ``@RG DS`` carrying ``modbase_models=<id>``, the
+    form Dorado and MinKNOW write. When the policy names a model, only that
+    model counts.
+    """
+
+    if model_id is not None and any(
+        isinstance(program, dict)
+        and program.get("DS") == f"traceback.modified_base_model={model_id}"
+        for program in header.get("PG", [])
+    ):
+        return _TRACEBACK_PG_DECLARATION
+    for group in header.get("RG", []):
+        if not isinstance(group, dict):
+            continue
+        declared = _declared_modbase_models(group.get("DS"))
+        if model_id is not None:
+            declared = tuple(item for item in declared if item == model_id)
+        if declared:
+            shown = _printable_model(declared[0])
+            return (
+                f"model {shown} declared by @RG DS"
+                if shown is not None
+                else "model declared by @RG DS"
+            )
+    return None
 
 
 def _modification_tags_valid(record: Any) -> tuple[bool, bool]:
@@ -205,15 +467,22 @@ def validate_bam_snapshot(
 
     ``compare_assembly=False`` is for registrations made without an assembly
     name: ``AS`` is then never compared, so the header can at best WARN.
+
+    An unaligned BAM (no ``@SQ``) returns one BLOCKED TBX-BAM-003 check and a
+    BAM with no records one BLOCKED TBX-BAM-004 check. Only read and format
+    errors (``OSError``, ``ValueError``, a failed ``samtools quickcheck``) map
+    to TBX-BAM-001; anything else propagates to the caller.
     """
 
     import pysam
+    from pysam.utils import SamtoolsError
 
     bam_locator = str(bam_path)
     index_locator = str(index_path) if index_path is not None else None
     checks: list[PreflightCheck] = []
     try:
-        pysam.quickcheck(bam_locator)
+        # ``-u`` accepts a header without @SQ, so TBX-BAM-003 can say so.
+        pysam.quickcheck("-u", bam_locator)
         checks.append(
             _check(
                 "TBX-BAM-001",
@@ -222,8 +491,10 @@ def validate_bam_snapshot(
                 "No action required.",
             )
         )
-        with pysam.AlignmentFile(bam_locator, "rb", check_sq=True) as bam:
+        with pysam.AlignmentFile(bam_locator, "rb", check_sq=False) as bam:
             header = bam.header.to_dict()
+            if header_is_unaligned(header):
+                return unaligned_report()
             index_counts: tuple[int, int] | None = None
             try:
                 if index_locator is None:
@@ -275,13 +546,9 @@ def validate_bam_snapshot(
                     )
                 )
             else:
+                problem, fix = _reference_diff(header, registered_reference)
                 checks.append(
-                    _check(
-                        "TBX-BAM-002",
-                        PreflightOutcome.BLOCKED,
-                        "BAM reference provenance does not match the registered asset.",
-                        "Realign against the registered reference asset.",
-                    )
+                    _check("TBX-BAM-002", PreflightOutcome.BLOCKED, problem, fix)
                 )
 
             saw_tagged = saw_invalid = False
@@ -309,6 +576,9 @@ def validate_bam_snapshot(
                     tagged, valid = _modification_tags_valid(record)
                     saw_tagged |= tagged
                     saw_invalid |= tagged and not valid
+
+            if observed_mapped + observed_unmapped == 0:
+                return _report([_empty_check()])
 
             if index_counts == (observed_mapped, observed_unmapped):
                 checks.append(
@@ -349,37 +619,15 @@ def validate_bam_snapshot(
                     )
                 )
 
-            model_present = _header_has_model(header, policy.modified_base_model_id)
-            if saw_invalid:
-                checks.append(
-                    _check(
-                        "TBX-MOD-002",
-                        PreflightOutcome.PARTIAL,
-                        "Sampled modification tags are structurally contradictory.",
-                        "Re-basecall for future methylation work; "
-                        "fragment measurement may continue.",
-                    )
+            checks.append(
+                _modification_check(
+                    _model_declaration(header, policy.modified_base_model_id),
+                    sampled=sampled,
+                    saw_tagged=saw_tagged,
+                    saw_invalid=saw_invalid,
                 )
-            elif not model_present or sampled == 0 or not saw_tagged:
-                checks.append(
-                    _check(
-                        "TBX-MOD-001",
-                        PreflightOutcome.PARTIAL,
-                        "Modification provenance or sampled MM/ML/MN tags are absent.",
-                        "Re-basecall for future methylation work; "
-                        "fragment measurement may continue.",
-                    )
-                )
-            else:
-                checks.append(
-                    _check(
-                        "TBX-MOD-001",
-                        PreflightOutcome.PASS,
-                        "Modification provenance and sampled tags are compatible.",
-                        "No action required.",
-                    )
-                )
-    except Exception:
+            )
+    except (OSError, ValueError, SamtoolsError):
         checks = [
             _check(
                 "TBX-BAM-001",
@@ -395,3 +643,43 @@ def validate_bam_snapshot(
             ),
         ]
     return _report(checks)
+
+
+def _modification_check(
+    declaration: str | None, *, sampled: int, saw_tagged: bool, saw_invalid: bool
+) -> PreflightCheck:
+    """TBX-MOD-001/002 from sampled tags and the header's model declaration.
+
+    "Re-basecall" is advised only when tags are absent or contradictory:
+    valid MM/ML/MN without a declared model (every Dorado BAM after a
+    ``samtools fastq | minimap2`` alignment drops ``@RG``) is a WARN.
+    """
+
+    if saw_invalid:
+        return _check(
+            "TBX-MOD-002",
+            PreflightOutcome.PARTIAL,
+            "Sampled modification tags are structurally contradictory.",
+            "Re-basecall for future methylation work; fragment measurement may continue.",
+        )
+    if sampled == 0 or not saw_tagged:
+        return _check(
+            "TBX-MOD-001",
+            PreflightOutcome.PARTIAL,
+            # Wording kept byte-identical (pinned synthetic preflight digests).
+            "Modification provenance or sampled MM/ML/MN tags are absent.",
+            "Re-basecall for future methylation work; fragment measurement may continue.",
+        )
+    if declaration is None:
+        return _check(
+            "TBX-MOD-001",
+            PreflightOutcome.WARN,
+            "Modification tags present; basecall model not declared in the header.",
+            "No action needed for fragment length.",
+        )
+    if declaration == _TRACEBACK_PG_DECLARATION:
+        # Synthetic fixtures; wording kept byte-identical (pinned digests).
+        problem = "Modification provenance and sampled tags are compatible."
+    else:
+        problem = f"Modification tags present; {declaration}."
+    return _check("TBX-MOD-001", PreflightOutcome.PASS, problem, "No action required.")

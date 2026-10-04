@@ -139,10 +139,91 @@ Two rules apply before any real data enters this path:
 
 - `uv sync` in this repository (commands below run as `uv run traceback ...`).
 - `brew install samtools` (only to index your inputs; `doctor` warns if absent).
+- `brew install minimap2` (only to align MinKNOW output, below; `doctor` warns
+  if absent and never blocks).
 - An uncompressed FASTA with its `.fai` beside it (`samtools faidx REF.fa`).
 - A coordinate-sorted BAM with its `.bai` beside it (`samtools index SAMPLE.bam`).
+  MinKNOW and Dorado write unaligned BAMs; align them first (next section).
 - Free space on ROOT's volume of at least twice the BAM plus index: `run`
   seals a copy of the input under ROOT.
+
+### Aligning MinKNOW output
+
+Alignment is an assisted prerequisite, outside traceback: traceback prints the
+command but never aligns for you, because the preset and the reference are
+scientific choices. `preflight` and `run` refuse an unaligned BAM (no `@SQ`
+lines) with TBX-BAM-003 and print this command; `preflight --reference ID`
+fills in the registered FASTA in its human output.
+
+```bash
+samtools fastq -T MM,ML,MN IN.bam \
+  | minimap2 -ax map-ont -y REF.fa - \
+  | samtools sort -o OUT.sorted.bam
+samtools index OUT.sorted.bam
+```
+
+`-T MM,ML,MN` and `-y` carry the modification tags through alignment. The
+aligned BAM has no `@RG` header line, so `preflight` reports TBX-MOD-001 WARN
+("basecall model not declared"); that needs no action for fragment length.
+Add `-t N` to minimap2 to use N threads (default 3).
+
+Measured once (Apple M5 Pro, 18 cores, 48 GB, macOS 26.4.1; minimap2 2.31,
+samtools 1.24; hg38 primary FASTA) on one 3.3 GB unaligned BAM of 3.9 M
+reads, wall time including `samtools index`: about 18 minutes with the
+command as printed (about 5.5 min per GB), about 9 minutes with `-t 16`
+(about 2.8 min per GB). minimap2 rebuilds the hg38 index each time, which is
+several minutes of that; `minimap2 -d REF.mmi REF.fa` once, then `REF.mmi` in
+place of `REF.fa`, skips it. Peak memory was about 8.5 GB.
+
+**Merge per barcode only.** A MinKNOW run writes many small BAM chunks per
+sample under `bam_pass/barcodeNN/` (barcoded runs) or straight under
+`bam_pass/` (one sample). Merge one sample's `bam_pass` chunks into one BAM
+before aligning:
+
+```bash
+samtools cat -o SAMPLE.bam bam_pass/barcode01/*.bam
+```
+
+Never merge across barcode directories (`bam_pass/*/*.bam`): that mixes
+samples into one record. Leave out `bam_fail/` (failed reads; its chunks are
+often empty and give TBX-BAM-004) and `unclassified/`.
+
+The block below aligns and runs every barcode of one MinKNOW run, one after
+another. A barcode whose merge, alignment, index or run fails prints
+`FAILED barcodeNN` and the loop goes on with the next one. It uses
+`FASTA` and `R` from the variables below, the `ref` ID from the journey, and
+two more variables:
+
+```bash
+MINKNOW_RUN=/path/to/minknow-run   # holds bam_pass/barcodeNN/*.bam
+ALIGNED=/path/to/aligned           # merged and aligned BAMs go here
+```
+
+The test suite runs this block verbatim on generated chunks
+(`tests/test_operator_guide.py`).
+
+<!-- minknow-batch:begin -->
+```bash
+mkdir -p "$ALIGNED"
+for d in "$MINKNOW_RUN"/bam_pass/barcode*/; do
+  s="$(basename "$d")"
+  { samtools cat -o "$ALIGNED/$s.bam" "$d"*.bam \
+    && (set -o pipefail
+        samtools fastq -T MM,ML,MN "$ALIGNED/$s.bam" \
+          | minimap2 -ax map-ont -y "$FASTA" - \
+          | samtools sort -o "$ALIGNED/$s.sorted.bam") \
+    && samtools index "$ALIGNED/$s.sorted.bam" \
+    && uv run traceback run "$ALIGNED/$s.sorted.bam" --reference ref --root "$R"
+  } || echo "FAILED $s"
+done
+for record in "$R"/records/*/; do
+  uv run traceback catalog import "$record" --root "$R"
+done
+```
+<!-- minknow-batch:end -->
+
+Each `run` prints its `RECORD_ID`; note which barcode each one came from
+(records carry no sample label yet). Importing a record twice is a no-op.
 
 Set three variables. ROOT (`R`) holds everything this path writes; use a fresh
 directory per experiment.
@@ -192,14 +273,22 @@ uv run traceback serve --root "$R"
    processes nothing. Its overall outcome is the worst check outcome:
    - `pass`: every check passed.
    - `warn`: the BAM header has no `M5`/`AS`, so it matched the reference by
-     contig name and length only (TBX-BAM-002 WARN). The run continues and
-     the report says `name_and_length_only`.
-   - `partial`: modification tags (`MM`/`ML`) are absent or contradictory
-     (TBX-MOD-001/002). Fragment measurement continues; only future
-     methylation work is ineligible. Most aligned BAMs without
+     contig name and length only (TBX-BAM-002 WARN); or the reads carry valid
+     `MM`/`ML`/`MN` tags but the header declares no modified-base model
+     (TBX-MOD-001 WARN, normal after the alignment command above). The run
+     continues and the report says `name_and_length_only`.
+   - `partial`: modification tags (`MM`/`ML`/`MN`) are absent or
+     contradictory (TBX-MOD-001/002). Fragment measurement continues; only
+     future methylation work is ineligible. Most aligned BAMs without
      modification calls are `partial`.
-   - `blocked`: a BAM or reference check failed (TBX-BAM-001/002). `run` will
-     refuse; see the code in the table below.
+   - `blocked`: a BAM or reference check failed (TBX-BAM-001 to 004). `run`
+     will refuse; see the code in the table below. An unaligned BAM gives
+     TBX-BAM-003 and the alignment command; a contig mismatch lists the first
+     three differing `@SQ` positions.
+
+   Without `--reference`, `preflight` uses a built-in synthetic reference
+   only while ROOT has no registered reference; once one is registered it
+   refuses with TBX-REF-004 and lists the registered IDs.
 4. **`run`** prints the locked policy (`aligned-reference-span-local-v2`:
    chr1-chr22, chrX, chrY when registered, else every registered contig;
    MAPQ >= 20; primary, mapped, non-duplicate, non-QC-fail alignments; bins 0,
@@ -233,8 +322,10 @@ uv run traceback serve --root "$R"
 
 `--json` on every command except `serve` emits one canonical
 `traceback.cli-result.v2` object with `data_origin: "local_unqualified"`; the
-exit code is the same as in human output. Command output and the record never
-contain the FASTA or BAM path.
+exit code is the same as in human output. `--json` output and the record never
+contain the FASTA or BAM path; human output names the FASTA in one place only,
+the alignment command that `preflight --reference ID` (`ALIGN_COMMAND`) and
+`run --reference ID` (`FIX`) print for an unaligned BAM.
 
 ### Upgrading
 
@@ -279,9 +370,13 @@ says otherwise. Exit codes are listed under "Stable exit codes".
 | <a id="tbx-ref-002"></a>TBX-REF-002 | 3 | A different FASTA is already registered under this `--id` (registrations are write-once) | Keep the existing registration, or register under a new `--id` |
 | <a id="tbx-ref-003"></a>TBX-REF-003 | 3 | The reference ID is not registered under this ROOT, or its registration files are damaged | Run `reference register` first (check `--root`); remove a damaged `R/references/ID` and register again |
 | <a id="tbx-bam-001"></a>TBX-BAM-001 | 3 | BAM or index unreadable, truncated, not coordinate-sorted, or the index contradicts the BAM; or `--index` is not a `.bai`/`.csi` | `samtools sort`, then `samtools index`, and rerun |
-| <a id="tbx-bam-002"></a>TBX-BAM-002 | 0 (WARN) or 3 | WARN: header has no `M5`/`AS`, matched by name and length only. BLOCKED: a contig name, length, order, `M5` or `AS` differs from the registered reference | WARN needs no action (optionally `samtools reheader` with `M5`/`AS`). BLOCKED: realign against the registered FASTA, or register the FASTA the BAM was aligned to |
-| <a id="tbx-mod-001"></a>TBX-MOD-001 | 0 (PARTIAL) | No modification provenance or `MM`/`ML` tags | None for fragment length; re-basecall with modification calls for future methylation work |
+| <a id="tbx-bam-002"></a>TBX-BAM-002 | 0 (WARN) or 3 | WARN: header has no `M5`/`AS`, matched by name and length only. BLOCKED: a contig name, length, order, `M5` or `AS` differs from the registered reference; the problem lists the first 3 differing positions as `position name_in_BAM length_in_BAM \| name_in_reference length_in_reference` (`-` where a side has no contig) and the total | WARN needs no action (optionally `samtools reheader` with `M5`/`AS`). BLOCKED, names differ only by a `chr` prefix with every length matching: rename with `samtools reheader` (the FIX prints a `sed` example). Otherwise realign against the registered FASTA, or register the FASTA the BAM was aligned to |
+| <a id="tbx-bam-003"></a>TBX-BAM-003 | 3 | The BAM is unaligned (no `@SQ` lines); MinKNOW and Dorado write unaligned BAMs by default. `run` refuses before it creates a job | Align it with the printed command (see "Aligning MinKNOW output"), then preflight `OUT.sorted.bam` |
+| <a id="tbx-bam-004"></a>TBX-BAM-004 | 3 | The BAM has a header but no alignment records. `run` refuses before it creates a job | Often a `bam_fail` or empty chunk; use the sample's `bam_pass` files |
+| <a id="tbx-mod-001"></a>TBX-MOD-001 | 0 (WARN or PARTIAL) | WARN: valid `MM`/`ML`/`MN` tags, but no modified-base model declared in the header (no `@RG DS modbase_models=`; alignment drops `@RG`). PARTIAL: sampled reads carry no modification tags | WARN: no action needed for fragment length. PARTIAL: none for fragment length; re-basecall with modification calls for future methylation work |
 | <a id="tbx-mod-002"></a>TBX-MOD-002 | 0 (PARTIAL) | Sampled modification tags are structurally contradictory | As TBX-MOD-001 |
+| <a id="tbx-ref-004"></a>TBX-REF-004 | 2 | `preflight` without `--reference` on a ROOT that has registered references (the synthetic default would block a real BAM with a misleading contig error) | Add `--reference ID`; the problem lists the registered IDs |
+| <a id="tbx-internal-001"></a>TBX-INTERNAL-001 | 3 (`run`) or 7 (`preflight`) | Preflight stopped on an unexpected internal error, not a BAM read or format error. In `run` the job ends terminally (never retried in a loop); no record | Retrying will not change it; write `traceback support-bundle` and report the code |
 | <a id="tbx-run-003"></a>TBX-RUN-003 | 3 | `run` without `--reference` | Register the FASTA, then pass `--reference ID`; `traceback demo` is the synthetic workflow |
 | <a id="tbx-run-004"></a>TBX-RUN-004 | 3 | Free space under 2x the input (retryable; reports required and available bytes), or ROOT's volume filled during the run; no record | Free space or use a `--root` on a larger volume, then run again under a fresh ROOT |
 | <a id="tbx-run-005"></a>TBX-RUN-005 | 3 | No complete eligible denominator: no alignment passed the locked policy; the job fails, no record | Check contig names against the policy (chr1-chr22, chrX, chrY), MAPQ 20, and duplicate/secondary/supplementary/QC-fail flags |
