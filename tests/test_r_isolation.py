@@ -395,3 +395,37 @@ def test_real_r_refuses_an_undeclared_library_path(tmp_path: Path) -> None:
     )
     assert result.libpaths_mismatch
     assert b"should not run" not in result.process.stdout
+
+
+def test_interrupt_while_readers_start_still_kills_the_child(tmp_path: Path, monkeypatch) -> None:
+    import subprocess as real_subprocess
+
+    from traceback_runner import contained_process
+
+    started: list[real_subprocess.Popen] = []
+    real_popen = real_subprocess.Popen
+
+    def recording_popen(*args, **kwargs):
+        process = real_popen(*args, **kwargs)
+        started.append(process)
+        return process
+
+    class InterruptedThread:
+        def __init__(self, *args, **kwargs) -> None:
+            pass
+
+        def start(self) -> None:
+            raise KeyboardInterrupt
+
+    monkeypatch.setattr(contained_process.subprocess, "Popen", recording_popen)
+    monkeypatch.setattr(contained_process.threading, "Thread", InterruptedThread)
+    with pytest.raises(KeyboardInterrupt):
+        run_contained(
+            [sys.executable, "-c", "import time; time.sleep(60)"],
+            env={},
+            cwd=tmp_path,
+            timeout_seconds=30,
+        )
+    (process,) = started
+    assert process.returncode is not None, "the child was not reaped"
+    assert _wait_dead(process.pid)
