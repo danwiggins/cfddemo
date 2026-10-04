@@ -38,8 +38,12 @@ traceback protocol show [--json]
 traceback demo [--root ROOT] [--json]
 traceback reference register --fasta FASTA --id ID [--assembly NAME] [--root ROOT] [--json]
 traceback preflight INPUT [--reference ID] [--root ROOT] [--json]
-traceback run INPUT --reference ID [--index INDEX] [--root ROOT] [--json]
-traceback catalog import RECORD_DIR [--root ROOT] [--json]
+traceback run INPUT --reference ID [--index INDEX] [--import] [--label TEXT] [--root ROOT] [--json]
+traceback jobs [--limit N] [--root ROOT] [--json]
+traceback catalog import RECORD_ID|RECORD_DIR [--root ROOT] [--json]
+traceback catalog list [--root ROOT] [--json]
+traceback catalog export --csv OUT.csv [--root ROOT] [--json]
+traceback label RECORD_ID TEXT [--root ROOT] [--json]
 traceback serve [--root ROOT] [--ipv6]
 traceback status JOB_ID [--root ROOT] [--json]
 traceback status JOB_ID [--root ROOT] --trust-registry REGISTRY_ROOT \
@@ -317,8 +321,8 @@ uv run traceback serve --root "$R"
    chats, tickets or logs); Ctrl-C stops the server. With stdin closed or redirected (for example
    in the background), only Ctrl-C or SIGTERM stops it. On stop it prints
    `Stopped; the web lock for ROOT is released.` The page shows the jobs and
-   the catalog; records stay unqualified and local. Explorer views are loaded
-   at start, so restart `serve` after importing more records.
+   the catalog; records stay unqualified and local. A record imported while
+   `serve` runs appears on the next catalog request; no restart is needed.
 
 `--json` on every command except `serve` emits one canonical
 `traceback.cli-result.v2` object with `data_origin: "local_unqualified"`; the
@@ -326,6 +330,40 @@ exit code is the same as in human output. `--json` output and the record never
 contain the FASTA or BAM path; human output names the FASTA in one place only,
 the alignment command that `preflight --reference ID` (`ALIGN_COMMAND`) and
 `run --reference ID` (`FIX`) print for an unaligned BAM.
+
+### Many BAMs: jobs, records and labels
+
+`run` checks its inputs before it creates anything: a missing BAM
+(TBX-RUN-008), a missing index (TBX-RUN-009) or a file that is not a BAM
+(TBX-RUN-010) is refused with no job. Once a job exists, every refusal prints
+its `JOB_ID`, and `traceback status JOB_ID` shows `FAILED: CODE summary` with
+the cause and fix (`logs` shows the same, with ISO-8601 UTC times).
+
+```bash
+uv run traceback run "$BAM" --reference ref --label "batch 2 sample A" --import --root "$R"
+uv run traceback jobs --root "$R"          # every job, newest first, with its failure code
+uv run traceback catalog list --root "$R"  # every record: label, eligible count, imported or not
+uv run traceback label RECORD_ID "new note" --root "$R"
+uv run traceback catalog export --csv counts.csv --root "$R"
+```
+
+- `--import` catalogs the record right after `run` publishes it (the same as
+  `catalog import`). `catalog import` takes a record ID, or the first 8 or
+  more hex digits of one, as well as a record directory.
+- `catalog list` shows each record's 12-character short ID, label, reference,
+  policy (`built-in`), eligible alignments, import date, verification, and
+  "same measurement as" when its measurement equals an earlier record's. A
+  record that is not imported shows `not imported` and the import command.
+- A label is an operator note, not part of the signed record. It is stored
+  in `R/labels/RECORD_ID.json`, never changes a byte under `R/records`, and
+  never appears in `--json` output, logs, bundles or support bundles. It is
+  shown in human CLI output only. Do not put
+  donor names or identifiers in labels. Labels are 1-80 characters with no
+  `/`, `\`, control characters, paths or identifiers.
+- `catalog export --csv` writes one row per imported record and histogram bin
+  (`record_id, reference_id, policy_id, min_mapq, bin_lower, bin_upper, count,
+  eligible, scanned`; an empty `bin_upper` is the open last bin). Counts come
+  from the signed measurement; nothing is derived. It never overwrites a file.
 
 ### Upgrading
 
@@ -382,17 +420,33 @@ says otherwise. Exit codes are listed under "Stable exit codes".
 | <a id="tbx-run-005"></a>TBX-RUN-005 | 3 | No complete eligible denominator: no alignment passed the locked policy; the job fails, no record | Check contig names against the policy (chr1-chr22, chrX, chrY), MAPQ 20, and duplicate/secondary/supplementary/QC-fail flags |
 | <a id="tbx-run-006"></a>TBX-RUN-006 | 3 | `R/trust/provenance-hmac.key` is not a private 32-byte file (edited, truncated, replaced, or readable by others; 0600 and 0400 are both accepted). A short key left by an older version's crash is replaced automatically while `R/records` is empty, so this refusal means records already exist | Restore it from a backup with mode 0600, or start a fresh ROOT |
 | <a id="tbx-run-007"></a>TBX-RUN-007 | 3 | `R/trust/development-local-signing.key` is not a private 32-byte file | Restore it from a backup with mode 0600, or start a fresh ROOT |
+| <a id="tbx-run-008"></a>TBX-RUN-008 | 4 | `run`: the BAM is missing, a directory or a symbolic link; no job was created | Check the path; pass the BAM file itself |
+| <a id="tbx-run-009"></a>TBX-RUN-009 | 4 | `run`: no index at `--index` (default `BAM.bai`); no job was created | `samtools index BAM`, or pass `--index` |
+| <a id="tbx-run-010"></a>TBX-RUN-010 | 3 | `run`: the file does not start with the BGZF bytes every BAM starts with; no job was created | This is not a BAM; FASTQ and POD5 must be aligned first (see "Aligning MinKNOW output") |
 | <a id="tbx-cat-001"></a>TBX-CAT-001 | 3 | The path is not a verifiable local record (not a `run` record, not signed by this ROOT's key, or damaged); no catalog row | Pass `R/records/RECORD_ID` from `run`, and check it with `traceback verify RECORD_ID --root R` |
 | <a id="tbx-cat-002"></a>TBX-CAT-002 | 3 | The registered reference ID fails the explorer's public-text rules (for example `patient-id`); no catalog row | Register the FASTA again under a neutral ID (for example `hg38`) and rerun |
 | <a id="tbx-auth-local-001"></a>TBX-AUTH-LOCAL-001 | 3 | `R/authority` is missing, not private, or a store fails its pinned SHA-256 or replay check | Restore `R/authority` from a backup, or remove `R/authority` and `R/catalog` together and import the records again |
 | <a id="tbx-auth-local-002"></a>TBX-AUTH-LOCAL-002 | 3 | `R/trust/result-trust-registry` or its `.pin.json` is missing or does not open at its pin | Remove `R/trust/result-trust-registry` and its `.pin.json`, then import again (the registry mirrors `development-result-trust.json`) |
 | <a id="tbx-job-001"></a>TBX-JOB-001 | 6 | The local run failed without a record for an unexpected reason | `traceback status JOB_ID --root R` and `traceback logs JOB_ID --root R`, fix the stated cause, then `retry` and `resume` |
+| <a id="tbx-job-002"></a>TBX-JOB-002 | 3 | Another traceback process holds this job's worker lease (it is running, or stopped less than a lease length ago); prints the `JOB_ID` | Wait for it, or check `traceback status JOB_ID --root R` |
+| <a id="tbx-cat-003"></a>TBX-CAT-003 | 3 | `catalog export`: the `--csv` file already exists; nothing was written | Choose a new file name, or move the existing file |
 | <a id="tbx-serve-001"></a>TBX-SERVE-001 | 4 | `serve`: no `R/runner/runner.sqlite3` (wrong `--root`, or no run yet); nothing started | Run `traceback run ... --root R` first, or pass the right `--root` |
 | <a id="tbx-serve-002"></a>TBX-SERVE-002 | 4 | `serve`: no `R/catalog`: no record imported; nothing started | `traceback catalog import R/records/RECORD_ID --root R` first |
 | <a id="tbx-serve-003"></a>TBX-SERVE-003 | 3 | `serve` could not start its listener. `local web service is already running`: another `serve` holds this ROOT's web lock. `local web startup lock is busy` (retryable): another local web service was starting at the same moment. Other messages: `R/web` or the temporary directory is not private | Already running: use that service, or stop it (Ctrl-C in its terminal) and start again. Busy: wait a few seconds and retry. Otherwise make `R` and `R/web` owned by you, not group/other-writable |
 | <a id="tbx-serve-004"></a>TBX-SERVE-004 | 3 | `serve` stopped itself: a security check of the running service failed (its state directory or listener changed) | Restart `traceback serve --root R` |
 | <a id="tbx-auth-001"></a>TBX-AUTH-001 | browser 401 | The browser session expired (8 h), was idle for 20 min, or was logged out | Press Enter in `serve`'s terminal for a fresh link (or restart `serve`) |
+| <a id="tbx-auth-002"></a>TBX-AUTH-002 | browser 403 | A changing request carried no valid CSRF token | Reload the page from a fresh `serve` link |
+| <a id="tbx-auth-003"></a>TBX-AUTH-003 | browser 403 | The request's host, origin or path is not the local service's own (for example through a proxy) | Open the link `serve` printed, on this machine |
+| <a id="tbx-auth-004"></a>TBX-AUTH-004 | browser 403 | Too many browser sessions are active | Log out of an old tab, or restart `serve` |
+| <a id="tbx-auth-005"></a>TBX-AUTH-005 | browser 429 | Too many wrong launch links were tried | Wait a minute, then use a fresh link from `serve` |
+| <a id="tbx-auth-006"></a>TBX-AUTH-006 | browser 403 | This reader session is already bound to a reader grant | Ask the operator for a new reader launch link |
 | <a id="tbx-auth-007"></a>TBX-AUTH-007 | browser 403 | A reader session asked for an operator route (jobs or explorer) | Use the operator link that `serve` prints; reader links never reach the explorer |
+| <a id="tbx-web-400"></a>TBX-WEB-400 | browser 400 | The local web service refused a malformed request | Reload the page and select again |
+| <a id="tbx-web-404"></a>TBX-WEB-404 | browser 404 | The page, record or route does not exist | Return to the catalog and select again |
+| <a id="tbx-web-431"></a>TBX-WEB-431 | browser 431 | The request headers were too large | Reload; clear this site's cookies if it repeats |
+| <a id="tbx-web-503"></a>TBX-WEB-503 | browser 503 | The service is busy or a store is temporarily unavailable | Retry in a few seconds |
+| <a id="tbx-internal"></a>TBX-INTERNAL | browser 500 | An internal error occurred; nothing was changed | Retry; if it repeats, write a support bundle and report it |
+| <a id="tbx-out-001"></a>TBX-OUT-001 | none | Release gate only: an output contained a value the privacy rules forbid | Remove the forbidden value |
 | <a id="operator-busy"></a>Operator busy | 3 | `A local action or unexpired worker lease is active`: another CLI mutation holds `R/.operator.lock` | Wait for it to finish, then rerun |
 
 ## Stable exit codes

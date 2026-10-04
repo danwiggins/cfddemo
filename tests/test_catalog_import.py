@@ -161,8 +161,11 @@ def test_tampered_method_registry_refuses_with_nothing_changed(world) -> None:
     }
     assert after == before
     assert len(_rows(root)) == 1
-    # `run` validates the same store before any copy.
-    code, payload = _main("run", root / "unused.bam", "--reference", "ref", "--root", root)
+    # `run` validates the same store before any copy (after its input checks).
+    unused = root.parent / "unused.bam"
+    unused.write_bytes(b"\x1f\x8b\x08\x04")
+    Path(f"{unused}.bai").write_bytes(b"BAI\x01")
+    code, payload = _main("run", unused, "--reference", "ref", "--root", root)
     assert code == cli.ExitCode.BLOCKED
     assert payload["data"]["code"] == "TBX-AUTH-LOCAL-001"
 

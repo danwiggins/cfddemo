@@ -67,7 +67,9 @@ def test_resume_rejects_live_worker_then_recovers_expired_crash(tmp_path, capsys
     before = (tmp_path / cli._TRUST_RELATIVE).read_bytes()
     code, result = invoke(capsys, "resume", job.job_id, "--root", tmp_path)
     assert code == cli.ExitCode.BLOCKED
-    assert "unexpired" in result["summary"]
+    assert result["data"]["code"] == "TBX-JOB-002"
+    assert result["data"]["job_id"] == job.job_id
+    assert "unexpired" in result["data"]["cause"]
     assert (tmp_path / cli._TRUST_RELATIVE).read_bytes() == before
     with sqlite3.connect(runner.store.path) as db:
         db.execute("UPDATE jobs SET lease_expires_at=?", (time.time() - 1,))

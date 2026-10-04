@@ -24,6 +24,7 @@ import hashlib
 import json
 import os
 import stat
+import threading
 from collections.abc import Iterator
 from contextlib import contextmanager
 from dataclasses import dataclass
@@ -599,6 +600,27 @@ def load_explorer_artifacts(root: Path) -> LoadedExplorerArtifacts:
     )
 
 
+def _explorer_signature(root: Path) -> tuple[tuple[int, int] | None, ...]:
+    """What changes when a record is imported: the catalog database (and its
+    WAL, where SQLite writes first) and the explorer artifact directories."""
+
+    watched = (
+        root / CATALOG_DIRECTORY / "catalog.sqlite3",
+        root / CATALOG_DIRECTORY / "catalog.sqlite3-wal",
+        root / EXPLORER_DIRECTORY / ARTIFACTS_DIRECTORY,
+        root / EXPLORER_DIRECTORY / BINDINGS_DIRECTORY,
+    )
+    signature: list[tuple[int, int] | None] = []
+    for path in watched:
+        try:
+            metadata = os.stat(path, follow_symlinks=False)
+        except OSError:
+            signature.append(None)
+            continue
+        signature.append((metadata.st_mtime_ns, metadata.st_size))
+    return tuple(signature)
+
+
 @dataclass(frozen=True)
 class LocalExplorer:
     source: IntegratedExplorerSource
@@ -629,12 +651,33 @@ def open_local_explorer(root: Path) -> Iterator[LocalExplorer | None]:
     try:
         catalog = open_local_catalog(root, trust)
         try:
+            signature = _explorer_signature(root)
             loaded = load_explorer_artifacts(root)
+            lock = threading.Lock()
+
+            def refresh() -> (
+                tuple[CatalogAuthorityIndex, CanonicalExplorerArtifactRepository] | None
+            ):
+                # A4a: records imported while serve runs appear on the next
+                # catalog request.  One stat per watched path per request.
+                nonlocal signature
+                with lock:
+                    current = _explorer_signature(root)
+                    if current == signature:
+                        return None
+                    fresh = load_explorer_artifacts(root)
+                    signature = current
+                    return (
+                        CatalogAuthorityIndex(fresh.bindings),
+                        CanonicalExplorerArtifactRepository(fresh.records),
+                    )
+
             yield LocalExplorer(
                 source=IntegratedExplorerSource(
                     catalog=catalog,
                     authority=CatalogAuthorityIndex(loaded.bindings),
                     artifacts=CanonicalExplorerArtifactRepository(loaded.records),
+                    refresh=refresh,
                 ),
                 catalog=catalog,
                 skipped=loaded.skipped,
