@@ -924,3 +924,187 @@ note, or states "G1 not yet cleared".
 | Cross-record comparison of mixtures or profiles | C6 (pair compare) merged and the scientist asks |
 | Promoting or retiring the in-house dosage screen | E11 decision revisited |
 | `traceback align` | Unchanged from the wave-1 spec |
+
+## 11. Review amendments (/autoplan, 2026-10-04)
+
+**Direction.** Both strategy reviewers recommended a one-week feasibility check
+before the build. The user chose to **build as specced** (D1). These items stay
+in scope and are recorded only so the scientist can see them before G1:
+- marker coverage at about 0.2x is unverified;
+- the bootstrap resamples per marker, not per molecule, so intervals are likely
+  too narrow;
+- the 3% lower limit comes from Illumina data with a PoN.
+
+**Positive control (D2).** Copy-number DoD requires one **public nanopore cfDNA
+cancer dataset with a published tumour fraction**, run with no PoN on both that
+dataset and the local BAM. If the two cannot be told apart, the record view
+keeps the tumour-fraction line hidden behind "not established for this
+protocol" until G1. CN1 finds and registers the dataset by digest; nothing from
+it is committed.
+
+The amendments below override the sections they name. Each was flagged by at
+least two of the three review voices (engineering, Codex, design/operator).
+
+### Architecture (overrides §3.3, §4)
+
+1. **Authority stores are keyed by definition hash, append-only.** The store is
+   `ROOT/method-authority/<ref>/<slug>/<method_definition_sha256>/`, validated
+   against the inputs stored with it and never against current machine state.
+   - A modkit reinstall or atlas re-registration creates a new hash directory.
+   - Older records stay viewable. Test: reinstall the tool, then the old records
+     still render.
+   - The fragment store `ROOT/authority/` is unchanged.
+2. **One validator covers both store trees.** `validate_local_method_authorities`
+   gains a sibling for `ROOT/method-authority`.
+   - `serve` and `run` call both.
+   - A ROOT holding only new-method records is valid: a missing `ROOT/authority`
+     is no longer an error if `method-authority` exists.
+   - A damaged method store hides only its own records (B6).
+3. **An orchestrator runs `run --analysis`.**
+   - It runs inside one ROOT lock, with fragment first and each analysis
+     independent.
+   - Per-analysis errors are captured. Every job ID is printed as soon as the
+     job is admitted.
+   - The result is a per-analysis table in human output and an array in
+     `--json`.
+   - A terminal failure of one analysis never blocks another.
+   - `_refuse_failed_job` is scoped to `(input, analysis)`.
+   - Free space is checked once, for N × 2 × input size.
+4. **The resolved configuration is part of the job identity.**
+   - `--modbase-model` (cell origin) and every resolved per-analysis setting
+     enter the `JobRequest` through the method definition or the sample token.
+     A re-run with a new declaration is therefore a new job, never a dedupe onto
+     a failed one.
+   - `resume` parses the analysis with `partition(":")` against a closed enum.
+   - `resume` refuses with **TBX-JOB-003** when the stored
+     `workflow_release_sha256` differs from the current method hash.
+5. **A missing tool at stage time is RETRYABLE**, never terminal. A deleted
+   environment must not poison the input.
+6. **Bundle v4 reader selection** is versioned by `(bundle_version,
+   measurement_schema)`, not by version range alone. It covers:
+   - `chart_for_measurement` and `render_bundle_report` in `export.py`, one per
+     analysis;
+   - the `BundlePath` regex and the per-path size map;
+   - the twin-record peek (`cli.py:1657-1670`);
+   - catalog `_RESULT_SCHEMA_ID`, chosen per schema;
+   - the peek size limit, reconciled with verify.
+   The existing `ExplorerArtifactRecord` `cell_origin` and `cna` slots
+   (`web/explorer.py:103-104`) are reused. Golden test: every v1-v3 fixture
+   still verifies and imports; a mixed-analysis ROOT imports.
+
+### Execution safety (overrides §3.1, §3.2, §3.4)
+
+7. **Assets are copied into the sealed job directory and hashed there.** The
+   atlas, markers, regions, wigs and centromere files are all small. Only the
+   FASTA stays referenced. At stage start, check its size, mtime and inode; the
+   DoD runs `doctor --deep` for the full digest.
+8. **Tools run by absolute pinned path.** The binary is hashed right before
+   exec. There is no `shutil.which` and no bare `Rscript`.
+9. **R runs isolated:**
+   - `--vanilla` with a scrubbed environment: `R_LIBS_USER=`, `R_LIBS_SITE=`,
+     `R_PROFILE_USER` and `R_ENVIRON_USER=/dev/null`;
+   - an asserted `.libPaths()`;
+   - BLAS/OpenMP threads set to 1;
+   - an explicit RNG seed.
+   The environment's `conda-meta` `paths_data` digest enters `tools[]` and is
+   verified at run time.
+10. **The lock file is `@EXPLICIT` with `#sha256` lines and pinned channel
+    URLs.** micromamba runs by absolute path. `toolchain install` without
+    `--yes` prints a dry run and exits 0, and it states that it needs the
+    network.
+11. **The `local_r` binding gets a real path contract.**
+    - A private staging directory replaces `/input`, `/assets` and `/attempt`,
+      with no symlinks.
+    - The adapter's exact-argv test gains a local variant.
+    - Logs are bounded, and the process group is killed on timeout, interrupt
+      or lease loss. The same rule covers modkit.
+12. **modkit output is bounded.**
+    - Its temp files go under the job directory, never system `/tmp` (they hold
+      read IDs).
+    - The call cap becomes a locked parameter, checked while streaming or
+      bounded by modkit options.
+    - CO1 records the real BAM's row count against the cap.
+13. **ichorCNA determinism is shown, not assumed.**
+    - `.RData` stays out of signed provenance unless shown to be byte-stable.
+    - CI keeps a synthetic baseline per platform.
+    - If two local runs differ, CN6 does not merge.
+
+### Record views and catalog (overrides §5)
+
+14. **Evidence comes before estimates.**
+    - **Cell origin:** a one-line basis under the identity ("Based on N
+      fragments at M of R markers; model declared by operator"), then the bar.
+    - **Copy number:** the tumour-fraction line, its lower-limit sentence, the
+      reads and bins line and the PoN line come above the plot.
+    - The operator label stays the h1, with the analysis line under it.
+15. **"Other" never reads as a cell type.** The row is "28 other contributors
+    combined (11 at 0%)":
+    - always last, hatched and neutral;
+    - no whisker;
+    - non-zero values below 0.1% shown as "<0.1%";
+    - display names from the copy table, with raw IDs in the full table.
+    Whiskers are **off by default** (consistent with §10). The residual line
+    states its basis and says it has no threshold.
+16. **Copy-number states are neutral, not clinical.**
+    - The palette is neutral and colour-blind-safe, with a legend: "ichorCNA
+      model state (not a clinical call)".
+    - Clipped bins get edge markers and a "k bins outside range" line.
+    - At 390 px the plot draws a min/max band per pixel column, labels every
+      other chromosome, and has a chromosome selector.
+17. **New states:**
+    - "Made under an earlier method version", distinct from tamper and never a
+      503;
+    - `cell_origin.not_converged`, which refuses the record;
+    - `modbase.header`;
+    - interval states;
+    - refusals in jobs, with code and label per job, analysis on each job row,
+      and analysis-neutral stage copy.
+    All are added to `ENUM_SOURCES`.
+18. **The catalog columns are common to every analysis:** Analysis, Record,
+    Reference, Method version, Key n with its unit, Preflight and Imported, plus
+    an Analysis filter.
+    - Records from one input are grouped by a short sealed-input digest.
+    - Compare accepts only same-analysis pairs.
+    - **No mixture or tumour-fraction value appears in the table** (G1
+      screenshot risk).
+
+### Operator experience (overrides §3.3, §3.4, §4)
+
+19. **The command is `traceback method-asset`**, not `asset`, which collides
+    with the existing `traceback assets`.
+    - `method-asset register --from-dir LOYFER_DIR` registers all three Loyfer
+      files with IDs derived from the kind.
+    - `--from-toolchain copy-number` derives the bin size from the locked
+      method, with no `--bin-size` flag.
+    - New code **TBX-ASSET-004 "not registered"**; its fix prints the exact
+      command.
+20. **Toolchains are cached per user** at `~/.cache/traceback/toolchains/<lock
+    sha>/`, shared by every ROOT. A fresh ROOT per experiment then costs no
+    359 MB reinstall. `toolchain install modkit` exists for symmetry, and
+    `copy-number` is accepted as an alias of `ichor`.
+21. **`preflight --analysis`** reports METH, CNA and TOOL readiness before a
+    run. The TBX-MOD-001 row says "BLOCKED for cell origin: pass
+    `--modbase-model`".
+22. **Doctor reports readiness per analysis** (tool, assets, contigs) in one
+    format: "not set up (optional); next: <command>".
+23. **Each code has one guide row with a cause and one fix.** TOOL-001 and
+    TOOL-002 are split into missing and wrong version or digest. CNA-001,
+    CNA-003, METH-004 and ASSET-001 get full rows. The journey's
+    `RECORD_ID="$(ls ...)"` changes to read the IDs printed by `run --json`.
+24. **The token reservation** (`cell-origin` and `copy-number` are not usable as
+    D2 policy IDs) gets a grammar test in whichever of D2 or SH4 lands second.
+
+### Revised estimate (overrides §7)
+
+| Item | Was | Now | Why |
+|---|---|---|---|
+| SH1 | 2 d | 3 d | hash-keyed append-only stores, second validator, serve preflight |
+| SH3 | 3 d | 6 d | reader selection, export/report per analysis, twin peek, peek limit |
+| SH4 | 2 d | 4 d | orchestrator, identity-bound config, resume checks, `cli.py` rebase |
+| SH6 (new) | none | 2 d | execution sandbox: absolute paths, staged copies, process-group kill, scrubbed R env |
+| CN1 | 2 d | 3 d | explicit lock, user cache, positive-control dataset |
+| CO5 + CN5 | 4.5 d | 6 d | states, catalog columns, mobile band plot |
+
+The total is about **45 human days**: 7-9 calendar weeks with three lanes, at
+this repo's review rate. That is about 12 days more than §7. Most of the
+increase is integration work that §7 did not count.
