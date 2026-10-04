@@ -239,6 +239,24 @@ def _parser() -> argparse.ArgumentParser:
         "--package", required=True, type=Path
     )
 
+    toolchain = commands.add_parser(
+        "toolchain", help="install an optional analysis toolchain (per user)"
+    )
+    toolchain_commands = toolchain.add_subparsers(dest="toolchain_command", required=True)
+    toolchain_install = toolchain_commands.add_parser(
+        "install",
+        help="install a locked toolchain into ~/.cache/traceback/toolchains "
+        "(needs the network; dry run without --yes)",
+    )
+    toolchain_install.add_argument("name", choices=("ichor", "copy-number"))
+    toolchain_install.add_argument(
+        "--yes", action="store_true", help="install; without it only the plan is printed"
+    )
+    toolchain_install.add_argument(
+        "--micromamba", type=Path, help="absolute path of the micromamba binary"
+    )
+    toolchain_install.add_argument("--json", action="store_true", dest="as_json")
+
     commands.add_parser("reader", help="local operator reader authority (E12)")
     support = commands.add_parser(
         "support-bundle", help="write allowlisted redacted diagnostics"
@@ -570,6 +588,37 @@ def _doctor_trust(root: Path) -> dict[str, Any]:
     )
 
 
+def _doctor_toolchain(*, deep: bool) -> dict[str, Any]:
+    """Optional copy-number toolchain; never blocks doctor."""
+
+    from .toolchain import doctor_line
+
+    return doctor_line(deep=deep)
+
+
+def _toolchain_install(
+    args: argparse.Namespace, progress: Callable[[str], None]
+) -> tuple[ExitCode, dict[str, Any]]:
+    from .toolchain import install_toolchain, plan_install
+
+    plan = plan_install(args.name, micromamba=args.micromamba)
+    if not args.yes:
+        return ExitCode.OK, _result(
+            "toolchain install",
+            "ok",
+            "Dry run: nothing was installed. Installing needs the network; "
+            "rerun with --yes to install",
+            data={**plan.describe(), "next": f"traceback toolchain install {args.name} --yes"},
+        )
+    identity = install_toolchain(plan, progress=progress)
+    return ExitCode.OK, _result(
+        "toolchain install",
+        "ok",
+        f"{plan.toolchain} toolchain is installed (lock {plan.lock.sha256[:12]})",
+        data={"install_directory": str(plan.directory), "identity": identity},
+    )
+
+
 _REGISTRY_IDENTITY_REQUIRED = (
     "result trust registry expected identity and head are required and must match"
 )
@@ -591,6 +640,7 @@ def _doctor(args: argparse.Namespace) -> tuple[ExitCode, dict[str, Any]]:
         _doctor_disk(root),
         *_doctor_references(root, deep=args.deep),
         _doctor_trust(root),
+        _doctor_toolchain(deep=args.deep),
     ]
     runtime_blocked = checks[0]["status"] == "blocked"
     trust_blocked = any(
@@ -3159,6 +3209,8 @@ def _dispatch(
         return _assets(args)
     if args.command == "support-bundle":
         return _support_bundle(args)
+    if args.command == "toolchain":
+        return _toolchain_install(args, progress)
     raise AssertionError(f"unhandled command {args.command}")
 
 
@@ -3280,6 +3332,8 @@ def main(argv: Sequence[str] | None = None) -> int:
             if args.command == "reference"
             else f"{args.command} {args.catalog_command}"
             if args.command == "catalog"
+            else f"{args.command} {args.toolchain_command}"
+            if args.command == "toolchain"
             else args.command
         )
         code, payload = ExitCode(problem.exit_code), _problem(command, problem)

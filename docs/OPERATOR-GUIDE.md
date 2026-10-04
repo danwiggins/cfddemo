@@ -64,6 +64,7 @@ traceback assets verify --release-evidence ENVELOPE \
   --authority-head HEAD --asset ASSET_ID --version VERSION \
   [--root ROOT] [--json]
 traceback support-bundle JOB_ID --output OUTPUT [--root ROOT] [--json]
+traceback toolchain install {ichor|copy-number} [--yes] [--micromamba PATH] [--json]
 ```
 
 `verify --trust-registry` checks a result bundle against the current trust of a
@@ -350,6 +351,29 @@ uv run python scripts/canary/real_bam_canary.py --fasta "$FASTA" --bam "$BAM" \
   --record-baseline --repeat 2
 ```
 
+### Optional copy-number toolchain
+
+Copy number (ichorCNA) needs R and HMMcopy, which the base install does not
+include. `doctor` reports it as `not set up (optional); next: traceback
+toolchain install ichor` until it is installed; the fragment-length path never
+needs it.
+
+```bash
+uv run traceback toolchain install ichor        # dry run: prints the plan, installs nothing
+uv run traceback toolchain install ichor --yes  # needs the network
+```
+
+`copy-number` is accepted in place of `ichor`. The install uses micromamba by
+absolute path and the committed lock for this platform
+(`traceback_runner/toolchains/ichor-<platform>.lock`): every package URL is
+pinned with its SHA-256. It goes into `~/.cache/traceback/toolchains/<lock
+SHA-256>/`, one copy per user shared by every ROOT, and records the lock,
+`runIchorCNA.R`, `readCounter` and `Rscript` digests and a `conda-meta` digest
+in `identity.json`. Expect several minutes and about 3 GB on disk: bioconda
+installs the hg19 and hg38 BSgenome data packages, downloaded from
+Bioconductor with md5 checks during the install. `doctor --deep` re-checks the
+whole environment. A changed lock is a new directory; delete old ones by hand.
+
 ### Cleanup
 
 Sealed records are read-only. Stop `serve` first, then remove the root:
@@ -393,6 +417,8 @@ says otherwise. Exit codes are listed under "Stable exit codes".
 | <a id="tbx-serve-004"></a>TBX-SERVE-004 | 3 | `serve` stopped itself: a security check of the running service failed (its state directory or listener changed) | Restart `traceback serve --root R` |
 | <a id="tbx-auth-001"></a>TBX-AUTH-001 | browser 401 | The browser session expired (8 h), was idle for 20 min, or was logged out | Press Enter in `serve`'s terminal for a fresh link (or restart `serve`) |
 | <a id="tbx-auth-007"></a>TBX-AUTH-007 | browser 403 | A reader session asked for an operator route (jobs or explorer) | Use the operator link that `serve` prints; reader links never reach the explorer |
+| <a id="tbx-tool-002"></a>TBX-TOOL-002 | 0 (doctor WARN) or 3 | The optional copy-number (ichorCNA) toolchain is unusable. Missing: never installed, an install stopped part-way (no `identity.json`), or a recorded file (`readCounter`, `Rscript`, `runIchorCNA.R`, the lock copy) is gone. Wrong digest: a recorded file, the `conda-meta` digest (`doctor --deep`) or a Bioconductor data package changed since install | Missing: `traceback toolchain install ichor --yes` (needs the network; an incomplete install is removed first). Wrong digest: delete the directory `doctor` prints, then install again. Fragment length never needs it |
+| <a id="tbx-tool-003"></a>TBX-TOOL-003 | 3 or 6 | `toolchain install` could not finish: no micromamba at `--micromamba`, `$TRACEBACK_MICROMAMBA` or a standard location; no lock for this platform; another install holds the per-user lock (6); or a download failed, was refused by its SHA-256, timed out, or the environment could not load ichorCNA (6, see `install.log` or `smoke.log` in the toolchain directory) | Install micromamba (`brew install micromamba`) or pass its absolute path; for 6, check the network and run the install again |
 | <a id="operator-busy"></a>Operator busy | 3 | `A local action or unexpired worker lease is active`: another CLI mutation holds `R/.operator.lock` | Wait for it to finish, then rerun |
 
 ## Stable exit codes
