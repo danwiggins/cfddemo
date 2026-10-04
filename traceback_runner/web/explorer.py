@@ -457,6 +457,21 @@ def _reverify_document(
         raise ValueError("catalog result changed before explorer response")
 
 
+def _checked_indexes(
+    indexes: object,
+) -> tuple[CatalogAuthorityIndex, CanonicalExplorerArtifactRepository]:
+    """Accept only the exact (authority index, artifact repository) pair."""
+
+    if (
+        type(indexes) is not tuple
+        or len(indexes) != 2
+        or type(indexes[0]) is not CatalogAuthorityIndex
+        or type(indexes[1]) is not CanonicalExplorerArtifactRepository
+    ):
+        raise TypeError("explorer indexes must be an authority index and artifact repository")
+    return indexes  # type: ignore[return-value]
+
+
 class _SealedExplorerType(type):
     def __new__(
         cls, name: str, bases: tuple[type, ...], namespace: dict[str, object]
@@ -494,12 +509,12 @@ def _build_integrated_explorer_source_type(
 
     class IntegratedExplorerSource(metaclass=_SealedExplorerType):
         __slots__ = (
-            "_artifacts",
-            "_authority",
             "_get_verified",
+            "_indexes",
             "_longitudinal",
             "_query",
             "_reader",
+            "_refresh",
         )
 
         def __init__(
@@ -509,6 +524,10 @@ def _build_integrated_explorer_source_type(
             authority: CatalogAuthorityIndex,
             artifacts: CanonicalExplorerArtifactRepository,
             longitudinal: LongitudinalExplorerSource | None = None,
+            refresh: Callable[
+                [], tuple[CatalogAuthorityIndex, CanonicalExplorerArtifactRepository] | None
+            ]
+            | None = None,
         ) -> None:
             # The one optional E12 longitudinal adapter: exact type, bound to
             # this explorer's own E04 catalog.
@@ -531,9 +550,11 @@ def _build_integrated_explorer_source_type(
             object.__setattr__(self, "_reader", reader)
             object.__setattr__(self, "_get_verified", reader.get_verified)
             object.__setattr__(self, "_query", reader.query)
-            object.__setattr__(self, "_authority", authority)
-            object.__setattr__(self, "_artifacts", artifacts)
+            object.__setattr__(self, "_indexes", _checked_indexes((authority, artifacts)))
             object.__setattr__(self, "_longitudinal", longitudinal)
+            # Optional (A4a): returns fresh validated indexes when records were
+            # imported after the source was built, else None.
+            object.__setattr__(self, "_refresh", refresh)
             self._assert_installed_reader()
 
         def __getattribute__(self, name: str) -> object:
@@ -570,13 +591,39 @@ def _build_integrated_explorer_source_type(
             ):
                 raise TypeError("integrated explorer reader chain changed")
 
+        @property
+        def _authority(self) -> CatalogAuthorityIndex:
+            return object.__getattribute__(self, "_indexes")[0]
+
+        @property
+        def _artifacts(self) -> CanonicalExplorerArtifactRepository:
+            return object.__getattribute__(self, "_indexes")[1]
+
+        def _current_indexes(
+            self,
+        ) -> tuple[CatalogAuthorityIndex, CanonicalExplorerArtifactRepository]:
+            """The authority and artifact indexes, refreshed once per request.
+
+            One attribute holds both, so a request never pairs a new artifact
+            index with an old authority index.
+            """
+
+            refresh = object.__getattribute__(self, "_refresh")
+            if refresh is not None:
+                fresh = refresh()
+                if fresh is not None:
+                    object.__setattr__(self, "_indexes", _checked_indexes(fresh))
+            return object.__getattribute__(self, "_indexes")
+
         def _reverify(self, document: ExplorerDocument) -> None:
             self._assert_installed_reader()
-            reverify_document(self._get_verified, self._authority, document)
+            authority, _ = object.__getattribute__(self, "_indexes")
+            reverify_document(self._get_verified, authority, document)
             self._assert_installed_reader()
 
         def query(self, query: CatalogQuery) -> ExplorerCatalogProjection:
             self._assert_installed_reader()
+            authority, artifacts = self._current_indexes()
             page: CatalogPage = self._query(query)
             self._assert_installed_reader()
             return ExplorerCatalogProjection(
@@ -585,8 +632,8 @@ def _build_integrated_explorer_source_type(
                     ExplorerCatalogItem(
                         ref=ref,
                         has_registered_view=(
-                            self._artifacts.contains(ref.result_id)
-                            and self._authority.contains(ref.result_id)
+                            artifacts.contains(ref.result_id)
+                            and authority.contains(ref.result_id)
                         ),
                         eligibility=explorer_eligibility(ref),
                     )
@@ -599,9 +646,10 @@ def _build_integrated_explorer_source_type(
 
         def get(self, result_id: str) -> ExplorerDocument:
             self._assert_installed_reader()
-            context = self._authority.context_for(result_id)
+            authority, artifacts = self._current_indexes()
+            context = authority.context_for(result_id)
             ref = self._get_verified(result_id, context)
-            record = self._artifacts.load(result_id)
+            record = artifacts.load(result_id)
             models = _bind_record_to_catalog(ref, record)
             document = ExplorerDocument(
                 models=models,
@@ -635,6 +683,7 @@ def _build_integrated_explorer_source_type(
             for name in (
                 "__getattribute__",
                 "_assert_installed_reader",
+                "_current_indexes",
                 "_reverify",
                 "compare",
                 "get",

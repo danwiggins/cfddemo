@@ -517,6 +517,15 @@ class JobStore:
             ).fetchall()
         return float(rows[0]["created_at"]) if len(rows) == 1 else None
 
+    def job_for_request(self, request: JobRequest) -> StoredJobRecord | None:
+        """The job ``submit`` created for this canonical request, if any."""
+
+        with self._connect() as connection:
+            row = connection.execute(
+                "SELECT * FROM jobs WHERE request_key=?", (job_key(request),)
+            ).fetchone()
+        return None if row is None else self._record(row)
+
     def list_jobs(self, *, limit: int = 100) -> tuple[StoredJobRecord, ...]:
         """Return a bounded authoritative queue snapshot for local projections."""
 

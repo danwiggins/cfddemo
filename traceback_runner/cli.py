@@ -22,6 +22,7 @@ import tempfile
 import uuid
 from collections.abc import Callable, Iterator, Sequence
 from contextlib import contextmanager, nullcontext
+from dataclasses import dataclass
 from datetime import UTC, datetime
 from enum import IntEnum, StrEnum
 from pathlib import Path
@@ -84,6 +85,25 @@ def _assembly_argument(value: str) -> str:
             "assembly name must match ^[A-Za-z0-9][A-Za-z0-9_.:-]{0,127}$"
         )
     return value
+
+
+def _label_argument(value: str) -> str:
+    from .labels import LabelError, validate_label
+
+    try:
+        return validate_label(value)
+    except LabelError as exc:
+        raise argparse.ArgumentTypeError(str(exc)) from exc
+
+
+def _limit_argument(value: str) -> int:
+    try:
+        limit = int(value)
+    except ValueError:
+        limit = 0
+    if not 1 <= limit <= 1000:
+        raise argparse.ArgumentTypeError("--limit must be an integer from 1 to 1000")
+    return limit
 
 
 def _trust_registry_identity_arguments(parser: argparse.ArgumentParser) -> None:
@@ -160,8 +180,33 @@ def _parser() -> argparse.ArgumentParser:
         type=_reference_id_argument,
         help="registered reference ID under ROOT (required)",
     )
+    run.add_argument(
+        "--import",
+        dest="do_import",
+        action="store_true",
+        help="catalog the record after it is published (same as catalog import)",
+    )
+    run.add_argument(
+        "--label",
+        type=_label_argument,
+        help="operator note for the record (1-80 characters; not signed; never in --json; "
+        "no donor names or identifiers)",
+    )
     _root_argument(run)
     run.add_argument("--json", action="store_true", dest="as_json")
+
+    jobs = commands.add_parser("jobs", help="list local jobs, newest first")
+    jobs.add_argument("--limit", type=_limit_argument, default=20, help="rows (default 20)")
+    _root_argument(jobs)
+    jobs.add_argument("--json", action="store_true", dest="as_json")
+
+    label = commands.add_parser(
+        "label", help="set or replace a record's operator note (not part of the signed record)"
+    )
+    label.add_argument("record_id", help="record ID (or a unique prefix of it)")
+    label.add_argument("text", type=_label_argument)
+    _root_argument(label)
+    label.add_argument("--json", action="store_true", dest="as_json")
 
     for name in ("status", "logs", "pause", "resume", "retry"):
         command = commands.add_parser(name)
@@ -185,9 +230,24 @@ def _parser() -> argparse.ArgumentParser:
         "import",
         help="import one local record under ROOT as development_unqualified",
     )
-    catalog_import.add_argument("bundle", type=Path, help="record directory (ROOT/records/ID)")
+    catalog_import.add_argument(
+        "bundle",
+        type=Path,
+        help="record ID (or a unique prefix), or a record directory (ROOT/records/ID)",
+    )
     _root_argument(catalog_import)
     catalog_import.add_argument("--json", action="store_true", dest="as_json")
+    catalog_list = catalog_commands.add_parser(
+        "list", help="list the records under ROOT and whether each is imported"
+    )
+    _root_argument(catalog_list)
+    catalog_list.add_argument("--json", action="store_true", dest="as_json")
+    catalog_export = catalog_commands.add_parser(
+        "export", help="write one CSV row per (imported record, histogram bin)"
+    )
+    catalog_export.add_argument("--csv", required=True, type=Path, dest="csv_path")
+    _root_argument(catalog_export)
+    catalog_export.add_argument("--json", action="store_true", dest="as_json")
 
     serve = commands.add_parser(
         "serve",
@@ -309,6 +369,20 @@ class RunProblem(ReferenceProblem):
         )
         self.data = dict(data or {})
 
+    def __str__(self) -> str:
+        # A stage that raises a RunProblem stores this as the job's
+        # ``last_error``; the code lets status and logs explain it later.
+        return f"{self.code}: {self.summary}"
+
+
+def _attach_job_id(exc: BaseException, job_id: str) -> None:
+    """Name the job a failed command created, so status and logs can find it."""
+
+    try:
+        exc.job_id = job_id  # type: ignore[attr-defined]
+    except AttributeError:
+        pass
+
 
 def _problem(
     command: str,
@@ -326,6 +400,7 @@ def _problem(
         problem.summary,
         data={
             **getattr(problem, "data", {}),
+            **({"job_id": job_id} if (job_id := getattr(problem, "job_id", None)) else {}),
             "code": problem.code,
             "cause": problem.cause,
             "fix": problem.fix,
@@ -341,12 +416,24 @@ def _docs_anchor(code: str) -> str:
     return f"{DOCS_ANCHOR.split('#', 1)[0]}#{code.lower()}"
 
 
+_HUMAN = "_human"
+
+
 def _emit(payload: dict[str, Any], *, as_json: bool) -> None:
+    """Print one result.  ``_human`` lines (tables, operator labels) are for
+    human output only and never reach ``--json``."""
+
+    human = payload.get(_HUMAN)
     if as_json:
-        print(canonical_json_bytes(payload).decode("utf-8"))
+        public = {key: value for key, value in payload.items() if key != _HUMAN}
+        print(canonical_json_bytes(public).decode("utf-8"))
         return
     label = "PASS" if payload["status"] == "ok" else payload["status"].upper()
     print(f"{label}  {payload['summary']}")
+    if human is not None and human.get("replace_data"):
+        for line in human["lines"]:
+            print(line)
+        return
     for key, value in payload.get("data", {}).items():
         rendered = (
             json.dumps(value, sort_keys=True, separators=(",", ":"))
@@ -354,6 +441,16 @@ def _emit(payload: dict[str, Any], *, as_json: bool) -> None:
             else str(value)
         )
         print(f"{key.upper()}  {rendered}")
+    for line in (human or {}).get("lines", ()):
+        print(line)
+
+
+def _with_human(
+    payload: dict[str, Any], lines: Sequence[str], *, replace_data: bool = False
+) -> dict[str, Any]:
+    """Attach human-only lines (never printed by ``--json``)."""
+
+    return {**payload, _HUMAN: {"lines": list(lines), "replace_data": replace_data}}
 
 
 _DOCTOR_MIN_FREE_BYTES = 10 * 1024**3
@@ -727,7 +824,15 @@ def _reject_live_worker(runner: Any, job_id: str) -> None:
     record = runner.store.get(job_id)
     if (record.lease_owner is not None and record.lease_expires_at is not None
             and record.lease_expires_at >= runner.clock()):
-        raise OperatorBusy("job still has a live worker lease")
+        raise RunProblem(
+            "TBX-JOB-002",
+            "Another traceback process holds this job; nothing was changed",
+            cause=f"job {job_id} has an unexpired worker lease (a running or "
+            "just-stopped traceback process)",
+            fix=f"Wait for it, or check traceback status {job_id}",
+            retryable=True,
+            data={"job_id": job_id},
+        )
 
 
 def _ensure_synthetic_input(root: Path) -> tuple[Path, tuple[str, str]]:
@@ -1347,7 +1452,8 @@ def _local_stages(
                 "TBX-INTERNAL-001",
                 "Preflight stopped on an unexpected internal error; no record was made",
                 cause=f"{type(exc).__name__} while inspecting the sealed BAM copy",
-                fix="Retrying will not change it; write `traceback support-bundle` and report the code",
+                fix="Retrying will not change it; write `traceback support-bundle JOB_ID "
+                "--output DIR` for this job and report the code",
             ) from exc
         if (
             report.outcome == PreflightOutcome.BLOCKED
@@ -1504,10 +1610,13 @@ def _local_stages(
     )
 
 
-def _refuse_unaligned_or_empty(bam: Path, *, fasta: str | None) -> None:
+def _refuse_unaligned_or_empty(
+    bam: Path, *, fasta: Callable[[], str | None] = lambda: None
+) -> None:
     """A1: refuse an unaligned (TBX-BAM-003) or record-less (TBX-BAM-004) BAM
-    before any job, authority or copy exists. ``fasta`` (human output only)
-    replaces the ``REF.fa`` placeholder in the alignment command."""
+    before any reference, job, authority or copy work.  ``fasta`` is called
+    only when refusing; its path (human output only) replaces the ``REF.fa``
+    placeholder in the alignment command."""
 
     import shlex
 
@@ -1515,24 +1624,140 @@ def _refuse_unaligned_or_empty(bam: Path, *, fasta: str | None) -> None:
 
     path = Path(os.path.abspath(bam))
     if path.is_symlink() or not path.is_file():
-        return  # the input-file check below reports it
+        return  # the input-file check reports it
     check = intake_refusal(path)
     if check is None:
         return
     fix = check.remediation
-    if fasta is not None and check.code == "TBX-BAM-003":
-        fix = unaligned_remediation(shlex.quote(fasta))
+    fasta_path = fasta() if check.code == "TBX-BAM-003" else None
+    if fasta_path is not None:
+        fix = unaligned_remediation(shlex.quote(fasta_path))
     raise RunProblem(check.code, check.problem, cause=check.problem, fix=fix)
 
 
-def _local_input_files(bam: Path, index: Path) -> tuple[Path, tuple[str, str]]:
-    """Return the snapshot source root and the BAM and index names under it.
+def _registered_fasta(root: Path, reference_id: str) -> str | None:
+    """The registered FASTA path for human output, or ``None`` if unavailable."""
 
-    Paths are only resolved here; they are never echoed.
+    from .references import load_reference
+
+    try:
+        return load_reference(root, reference_id).source.fasta_path
+    except (ReferenceProblem, OSError, ValueError):
+        return None
+
+
+_BGZF_MAGIC = b"\x1f\x8b\x08\x04"
+
+
+def _regular_input(path: Path) -> bool:
+    return not path.is_symlink() and path.is_file()
+
+
+def _check_bam_input(bam: Path) -> None:
+    """A2: the BAM exists as a regular file (TBX-RUN-008) and starts with the
+    BGZF bytes (TBX-RUN-010).  Runs before any reference, job or copy work."""
+
+    bam_abs = Path(os.path.abspath(bam))
+    if not _regular_input(bam_abs):
+        raise RunProblem(
+            "TBX-RUN-008",
+            "The BAM is missing or is not a regular file; no job was created",
+            cause="the BAM path does not name a regular file (missing, a directory, "
+            "or a symbolic link)",
+            fix="Check the BAM path; pass the file itself, not a link or a directory",
+            exit_code=ExitCode.NOT_FOUND,
+        )
+    structure = _bgzf_structure(bam_abs)
+    if structure == "not_bgzf":
+        raise RunProblem(
+            "TBX-RUN-010",
+            "The input is not a BAM (no BGZF header); no job was created",
+            cause="the file's first four bytes are not the BGZF bytes every BAM starts with",
+            fix="This is not a BAM; for FASTQ or POD5 see Aligning MinKNOW output in "
+            "docs/OPERATOR-GUIDE.md",
+        )
+    if structure != "ok":
+        raise RunProblem(
+            "TBX-BAM-001",
+            "The BAM is truncated or damaged; no job was created",
+            cause=(
+                "the first BGZF block is incomplete"
+                if structure == "short_block"
+                else "the file does not end with the BGZF end-of-file block "
+                "(an interrupted copy or download)"
+            ),
+            fix="Copy or download the BAM again (or re-run samtools sort), then "
+            "samtools index it and run again",
+        )
+
+
+# The 28-byte empty BGZF block every complete BAM ends with (SAM spec 4.1.2).
+_BGZF_EOF = bytes.fromhex("1f8b08040000000000ff0600424302001b0003000000000000000000")
+
+
+def _bgzf_structure(path: Path) -> str:
+    """``ok``, ``not_bgzf``, ``short_block`` or ``no_eof`` for one file.
+
+    Reads the first block's gzip header and its ``BC`` extra field (BSIZE),
+    checks the file holds that whole block, and checks the end-of-file block:
+    the same truncation test ``samtools quickcheck`` applies, with no htslib.
+    """
+
+    try:
+        size = path.stat().st_size
+        with path.open("rb") as stream:
+            header = stream.read(12)
+            if header[:4] != _BGZF_MAGIC:
+                return "not_bgzf"
+            if len(header) < 12:
+                return "short_block"
+            extra_length = int.from_bytes(header[10:12], "little")
+            extra = stream.read(extra_length)
+            if len(extra) < extra_length:
+                return "short_block"
+            block_size = None
+            offset = 0
+            while offset + 4 <= len(extra):
+                tag, length = extra[offset : offset + 2], int.from_bytes(
+                    extra[offset + 2 : offset + 4], "little"
+                )
+                if tag == b"BC" and length == 2 and offset + 6 <= len(extra):
+                    block_size = int.from_bytes(extra[offset + 4 : offset + 6], "little") + 1
+                    break
+                offset += 4 + length
+            if block_size is None:
+                return "not_bgzf"
+            if size < block_size:
+                return "short_block"
+            if size < block_size + len(_BGZF_EOF):
+                # A BAM is at least its header block plus the end-of-file block.
+                return "no_eof"
+            stream.seek(size - len(_BGZF_EOF))
+            if stream.read(len(_BGZF_EOF)) != _BGZF_EOF:
+                return "no_eof"
+    except OSError:
+        return "not_bgzf"
+    return "ok"
+
+
+def _local_input_files(bam: Path, index: Path) -> tuple[Path, tuple[str, str]]:
+    """Check the index; return the snapshot source and the BAM and index names.
+
+    Runs after :func:`_check_bam_input` and the unaligned-BAM check (an
+    unaligned MinKNOW BAM is told to align before it is told to index), and
+    before any authority, job or copy work.  Paths are never echoed.
     """
 
     bam_abs = Path(os.path.abspath(bam))
     index_abs = Path(os.path.abspath(index))
+    if not _regular_input(index_abs):
+        raise RunProblem(
+            "TBX-RUN-009",
+            "The BAM index is missing; no job was created",
+            cause="no regular index file at the --index path (default: BAM.bai beside the BAM)",
+            fix="samtools index BAM, or pass --index",
+            exit_code=ExitCode.NOT_FOUND,
+        )
     if index_abs.suffix not in _INDEX_SUFFIXES or bam_abs.suffix in _INDEX_SUFFIXES:
         raise RunProblem(
             "TBX-BAM-001",
@@ -1540,9 +1765,6 @@ def _local_input_files(bam: Path, index: Path) -> tuple[Path, tuple[str, str]]:
             cause="the --index file name does not end in .bai or .csi",
             fix="Index the BAM with samtools index and pass that file with --index",
         )
-    for path in (bam_abs, index_abs):
-        if path.is_symlink() or not path.is_file():
-            raise FileNotFoundError("local input is missing or not a regular file")
     source = Path(os.path.commonpath([bam_abs.parent, index_abs.parent]))
     return source, (
         bam_abs.relative_to(source).as_posix(),
@@ -1598,6 +1820,8 @@ def _no_space_mapped() -> Iterator[None]:
         problem = _no_space_problem(exc)
         if problem is None:
             raise
+        if (job_id := getattr(exc, "job_id", None)) is not None:
+            _attach_job_id(problem, job_id)
         raise problem from exc
 
 
@@ -1805,18 +2029,25 @@ def _run(
     if args.reference_id is None:
         return _real_run_blocked()
     root = args.root
-    loaded = load_reference(root, args.reference_id)
+    # Every input check runs first (A2): a bad input is reported before the
+    # reference is loaded and creates no job, authority store or copy.
+    _check_bam_input(args.input)
     _refuse_unaligned_or_empty(
         args.input,
         # Human output names the registered FASTA; --json never does.
-        fasta=None if getattr(args, "as_json", False) else loaded.source.fasta_path,
+        fasta=(
+            (lambda: None)
+            if getattr(args, "as_json", False)
+            else (lambda: _registered_fasta(root, args.reference_id))
+        ),
     )
-    # Create (once) or validate the local method authority before any copy:
-    # a damaged ROOT/authority refuses the run with TBX-AUTH-LOCAL-001.
-    ensure_local_method_authority(root, loaded.registered)
     source, relative_files = _local_input_files(
         args.input, args.index or Path(f"{args.input}.bai")
     )
+    loaded = load_reference(root, args.reference_id)
+    # Create (once) or validate the local method authority before any copy:
+    # a damaged ROOT/authority refuses the run with TBX-AUTH-LOCAL-001.
+    ensure_local_method_authority(root, loaded.registered)
     _require_free_space(
         root, sum((source / name).stat().st_size for name in relative_files)
     )
@@ -1831,7 +2062,63 @@ def _run(
             _local_method_sha256(loaded.registered)
         ),
     )
-    return _run_sealed(root, request, source, relative_files, loaded, progress)
+    code, payload = _run_sealed(root, request, source, relative_files, loaded, progress)
+    data = payload["data"]
+    try:
+        return _after_run(args, code, payload)
+    except ReferenceProblem as problem:
+        # The record exists and verified; only the label or catalog step failed.
+        problem.data = {  # type: ignore[attr-defined]
+            **getattr(problem, "data", {}),
+            "record_id": data["record_id"],
+            "next_action": f"traceback catalog import {data['record_id']} --root <same-root>",
+        }
+        _attach_job_id(problem, data["job_id"])
+        raise
+    except Exception as exc:
+        raise RunProblem(
+            "TBX-JOB-001",
+            "The signed record was made, but setting its label or importing it failed",
+            cause=f"{type(exc).__name__} after record {data['record_id']} was published",
+            fix=(
+                f"Check ROOT's volume, then traceback label {data['record_id']} TEXT or "
+                f"traceback catalog import {data['record_id']} --root <same-root>"
+            ),
+            exit_code=ExitCode.RETRYABLE_FAILURE,
+            retryable=True,
+            data={"record_id": data["record_id"], "job_id": data["job_id"]},
+        ) from exc
+
+
+def _after_run(
+    args: argparse.Namespace, code: ExitCode, payload: dict[str, Any]
+) -> tuple[ExitCode, dict[str, Any]]:
+    """``run --label`` and ``run --import`` once the record is published (A4)."""
+
+    from .labels import LABEL_QUALIFIER, write_label
+
+    data = payload["data"]
+    record_id = data.get("record_id")
+    if code != ExitCode.OK or record_id is None:
+        return code, payload
+    root = args.root
+    lines: list[str] = []
+    if args.label is not None:
+        previous = write_label(root, record_id, args.label)
+        data["label_set"] = True
+        lines.append(f"LABEL  {args.label} ({LABEL_QUALIFIER})")
+        if previous is not None and previous != args.label:
+            lines.append(f"Label changed from {previous} to {args.label}")
+    if args.do_import:
+        _import_record(root, root / "records" / record_id)
+        data["imported"] = True
+        data["next_commands"] = [
+            command for command in data.get("next_commands", ())
+            if not command.startswith("traceback catalog import ")
+        ]
+        lines.append("View it: traceback serve --root <same-root> (a running serve shows it "
+                     "on its next catalog request)")
+    return code, _with_human(payload, lines) if lines else payload
 
 
 def _run_sealed(
@@ -1857,9 +2144,6 @@ def _run_with_runner(
     loaded: Any,
     progress: Callable[[str], None],
 ) -> tuple[ExitCode, dict[str, Any]]:
-    from .signing import TrustNamespace
-
-    bam_name, index_name = relative_files
     refuse_failed = _refuse_failed_job(runner)
     submitted: list[str] = []
 
@@ -1867,6 +2151,41 @@ def _run_with_runner(
         submitted.append(record.job_id)
         refuse_failed(record)
 
+    try:
+        return _run_submitted(
+            root, runner, request, source, relative_files, loaded, progress, submitted,
+            on_submitted,
+        )
+    except BaseException as exc:
+        # Every refusal after submit names its job (A3), whatever maps it.
+        # Runner.submit inserts the job row before it seals the input, so a
+        # sealing failure leaves a job that on_submitted never saw.
+        job_id = submitted[0] if submitted else None
+        if job_id is None:
+            try:
+                found = runner.store.job_for_request(request)
+            except Exception:
+                found = None
+            job_id = found.job_id if found is not None else None
+        if job_id is not None:
+            _attach_job_id(exc, job_id)
+        raise
+
+
+def _run_submitted(
+    root: Path,
+    runner: Any,
+    request: Any,
+    source: Path,
+    relative_files: tuple[str, str],
+    loaded: Any,
+    progress: Callable[[str], None],
+    submitted: list[str],
+    on_submitted: Callable[[Any], None],
+) -> tuple[ExitCode, dict[str, Any]]:
+    from .signing import TrustNamespace
+
+    bam_name, index_name = relative_files
     try:
         record = _execute_signed_run(
             root,
@@ -1912,13 +2231,60 @@ def _run_with_runner(
     return _local_run_result(root, runner, record, loaded.registered.reference_id)
 
 
+_RECORD_PREFIX = re.compile(r"(?:record-)?([0-9a-f]{8,24})")
+
+
+def _short_record(record_id: str) -> str:
+    """The 12-character table form of a record ID (its first 12 hex digits)."""
+
+    return record_id.removeprefix("record-")[:12]
+
+
+def _local_record_names(root: Path) -> list[str]:
+    records = root / "records"
+    if not records.is_dir() or records.is_symlink():
+        return []
+    return sorted(
+        path.name
+        for path in records.iterdir()
+        if _LOCAL_RECORD_NAME.fullmatch(path.name) and not path.is_symlink() and path.is_dir()
+    )
+
+
+def _resolve_record_id(root: Path, text: str) -> str | None:
+    """A full local record ID, or a unique prefix of at least 8 hex digits."""
+
+    match = _RECORD_PREFIX.fullmatch(text)
+    if match is None:
+        return None
+    prefix = f"record-{match.group(1)}"
+    names = [name for name in _local_record_names(root) if name.startswith(prefix)]
+    return names[0] if len(names) == 1 else None
+
+
+def _record_argument_path(root: Path, value: Path) -> Path:
+    """``catalog import`` takes a record ID (or unique prefix) or a record path."""
+
+    text = str(value)
+    # An ID resolves under ROOT first, whatever the current directory holds.
+    if "/" not in text:
+        record_id = _resolve_record_id(root, text)
+        if record_id is not None:
+            return root / "records" / record_id
+    return value
+
+
+def _import_record(root: Path, bundle: Path) -> Any:
+    from .local_catalog import import_local_record
+
+    return import_local_record(root, bundle)
+
+
 def _catalog_import(args: argparse.Namespace) -> tuple[ExitCode, dict[str, Any]]:
     """Catalog one local record and persist its explorer view (B5a/B5b)."""
 
-    from .local_catalog import import_local_record
-
     root = args.root
-    outcome = import_local_record(root, args.bundle)
+    outcome = _import_record(root, _record_argument_path(root, args.bundle))
     ref = outcome.reference
     return ExitCode.OK, _result(
         "catalog import",
@@ -1940,6 +2306,461 @@ def _catalog_import(args: argparse.Namespace) -> tuple[ExitCode, dict[str, Any]]
             "qualified": False,
         },
     )
+
+
+# --- A4: list jobs and records, labels, CSV export ----------------------------
+
+
+def _token_reference_policy(sample_token: str) -> tuple[str, str]:
+    """(reference, policy) named by a job's sample token.
+
+    ``local-<reference_id>`` is the built-in policy; ``local-<ref>:<policy>``
+    (research policies, a later item) names its policy.  Demo jobs are synthetic.
+    """
+
+    if not sample_token.startswith(_LOCAL_SAMPLE_PREFIX):
+        return "synthetic", "synthetic"
+    reference, _, policy = sample_token[len(_LOCAL_SAMPLE_PREFIX):].partition(":")
+    return reference, policy or "built-in"
+
+
+def _record_job_prefixes(root: Path) -> dict[str, str]:
+    """Map a job ID's first 16 hex digits to its published local record ID.
+
+    An unverified peek at each record's provenance run token, used only to show
+    a label next to a job in human output.
+    """
+
+    from .bundles import PROVENANCE_PATH
+    from .local_catalog import _read_peek
+
+    mapping: dict[str, str] = {}
+    for name in _local_record_names(root):
+        try:
+            token = json.loads(_read_peek(root / "records" / name / PROVENANCE_PATH))["run_token"]
+        except Exception:
+            continue
+        match = _LOCAL_RUN_TOKEN.fullmatch(str(token))
+        if match is not None:
+            mapping.setdefault(match.group(1), name)
+    return mapping
+
+
+def _local_minutes(epoch: float) -> str:
+    return datetime.fromtimestamp(epoch).astimezone().strftime("%Y-%m-%d %H:%M")
+
+
+def _table(header: Sequence[str], rows: Sequence[Sequence[str]]) -> list[str]:
+    widths = [
+        max(len(str(cell)) for cell in column) for column in zip(header, *rows, strict=True)
+    ]
+    return [
+        "  ".join(str(cell).ljust(width) for cell, width in zip(row, widths, strict=True)).rstrip()
+        for row in (header, *rows)
+    ]
+
+
+@dataclass(frozen=True)
+class _JobRow:
+    job_id: str
+    state: JobState
+    created_at: float
+    last_error: str | None
+    sample_token: str
+
+
+def _read_jobs(database: Path, limit: int) -> list[_JobRow]:
+    """The newest ``limit`` jobs by creation time, read without changing the store.
+
+    SQLite opens the database read-only (``mode=ro``): no schema, mode or
+    journal change, unlike opening a ``JobStore``.
+    """
+
+    import sqlite3
+
+    uri = f"{database.absolute().as_uri()}?mode=ro"
+    connection = sqlite3.connect(uri, uri=True, timeout=30)
+    try:
+        rows = connection.execute(
+            "SELECT job_id, state, created_at, last_error, request_json FROM jobs "
+            "ORDER BY created_at DESC, job_id LIMIT ?",
+            (limit,),
+        ).fetchall()
+    finally:
+        connection.close()
+    return [
+        _JobRow(
+            job_id=str(job_id),
+            state=JobState(state),
+            created_at=float(created_at),
+            last_error=last_error,
+            sample_token=str(json.loads(request_json)["sample_token"]),
+        )
+        for job_id, state, created_at, last_error, request_json in rows
+    ]
+
+
+def _live_lease_job(root: Path) -> str | None:
+    """The one job holding an unexpired worker lease under ROOT, read-only."""
+
+    import sqlite3
+    import time
+
+    database = root / "runner" / "runner.sqlite3"
+    if not database.is_file() or database.is_symlink():
+        return None
+    try:
+        connection = sqlite3.connect(
+            f"{database.absolute().as_uri()}?mode=ro", uri=True, timeout=5
+        )
+        try:
+            rows = connection.execute(
+                "SELECT job_id FROM jobs WHERE lease_owner IS NOT NULL "
+                "AND lease_expires_at >= ? LIMIT 2",
+                (time.time(),),
+            ).fetchall()
+        finally:
+            connection.close()
+    except sqlite3.Error:
+        return None
+    return str(rows[0][0]) if len(rows) == 1 else None
+
+
+def _jobs(args: argparse.Namespace) -> tuple[ExitCode, dict[str, Any]]:
+    """``traceback jobs``: every job under ROOT, newest first (read-only)."""
+
+    from .labels import read_label
+    from .problems import CODED_FAILURE
+
+    root = args.root
+    database = root / "runner" / "runner.sqlite3"
+    if not database.is_file() or database.is_symlink():
+        payload = _result(
+            "jobs",
+            "ok",
+            "No jobs yet. Run traceback run BAM --reference ID --root ROOT",
+            data={"jobs": []},
+        )
+        return ExitCode.OK, payload
+    records = _read_jobs(database, args.limit)
+    by_prefix = _record_job_prefixes(root)
+    rows: list[dict[str, Any]] = []
+    table: list[list[str]] = []
+    for record in records:
+        reference, policy = _token_reference_policy(record.sample_token)
+        failure_code = None
+        if record.state in _FAILED_STATES:
+            match = CODED_FAILURE.match(record.last_error or "")
+            failure_code = match.group(1) if match else None
+        record_id = by_prefix.get(record.job_id[:16]) if record.state == JobState.COMPLETE else None
+        rows.append(
+            {
+                "job_id": record.job_id,
+                "state": record.state.value,
+                "reference_id": reference,
+                "policy": policy,
+                "started_at": _iso_utc(record.created_at),
+                "failure_code": failure_code,
+                "record_id": record_id,
+            }
+        )
+        label = read_label(root, record_id) if record_id else None
+        table.append(
+            [
+                record.job_id[:12],
+                record.state.value,
+                reference,
+                policy,
+                label or "-",
+                _local_minutes(record.created_at),
+                failure_code or ("uncoded" if record.state in _FAILED_STATES else "-"),
+            ]
+        )
+    lines = _table(
+        ["JOB_ID", "STATE", "REFERENCE", "POLICY", "LABEL", "STARTED", "FAILURE"], table
+    )
+    lines.append("Labels are operator notes, not part of the signed record.")
+    summary = (
+        f"{len(rows)} job(s), newest first; unqualified, local, not for clinical use"
+        if rows
+        else "No jobs yet. Run traceback run BAM --reference ID --root ROOT"
+    )
+    payload = _result("jobs", "ok", summary, data={"jobs": rows})
+    return ExitCode.OK, _with_human(payload, lines if rows else [], replace_data=True)
+
+
+def _catalog_rows(root: Path) -> tuple[dict[str, Any], str | None]:
+    """Map each imported record ID to its catalog result ID and import time.
+
+    Returns ``({}, None)`` without a catalog; a catalog that does not open
+    returns the refusal code instead of failing the listing.
+    """
+
+    from evidence_inspector.result_catalog import CatalogQuery
+
+    from .local_catalog import explorer_paths, open_local_explorer
+
+    imported: dict[str, Any] = {}
+    try:
+        with open_local_explorer(root) as explorer:
+            if explorer is None:
+                return {}, None
+            cursor = None
+            while True:
+                page = explorer.catalog.query(CatalogQuery(limit=100, cursor=cursor))
+                for ref in page.results:
+                    artifact, _ = explorer_paths(root, ref.result_id)
+                    try:
+                        when = artifact.stat().st_mtime
+                    except OSError:
+                        when = None
+                    imported[ref.bundle_record_id] = (ref.result_id, when)
+                if page.next_cursor is None:
+                    break
+                cursor = page.next_cursor
+    except ReferenceProblem as problem:
+        return {}, problem.code
+    return imported, None
+
+
+def _verified_local_records(root: Path) -> list[tuple[str, Any | None]]:
+    """(record ID, verified bundle or None) for every local record under ROOT."""
+
+    from .bundles import verify_bundle
+    from .signing import load_development_trust
+
+    names = _local_record_names(root)
+    try:
+        trust = load_development_trust((root / _TRUST_RELATIVE).read_bytes())
+    except Exception:
+        trust = None
+    records: list[tuple[str, Any | None]] = []
+    for name in names:
+        verified = None
+        if trust is not None:
+            try:
+                verified = verify_bundle(root / "records" / name, trust)
+            except Exception:
+                verified = None
+            if verified is not None and verified.manifest.record_id != name:
+                verified = None
+        records.append((name, verified))
+    return records
+
+
+def _store_or_none(root: Path) -> Any:
+    from .store import JobStore
+
+    database = root / "runner" / "runner.sqlite3"
+    if not database.is_file() or database.is_symlink():
+        return None
+    return JobStore(database)
+
+
+def _catalog_list(args: argparse.Namespace) -> tuple[ExitCode, dict[str, Any]]:
+    """``traceback catalog list``: every record under ROOT and its catalog state."""
+
+    import shlex
+
+    from .labels import read_label
+
+    root = args.root
+    records = _verified_local_records(root)
+    imported, catalog_problem = _catalog_rows(root)
+    store = _store_or_none(root)
+    try:
+        twins = _measurement_twins(root, store) if records else {}
+    except Exception:
+        twins = {}
+    finally:
+        if store is not None:
+            store.close()
+    rows: list[dict[str, Any]] = []
+    table: list[list[str]] = []
+    hints: list[str] = []
+    for record_id, verified in records:
+        catalog = imported.get(record_id)
+        measurement = verified.measurement if verified is not None else None
+        reference = measurement.reference_id if measurement is not None else None
+        when = catalog[1] if catalog is not None else None
+        row = {
+            "record_id": record_id,
+            "reference_id": reference,
+            "policy": "built-in",
+            "eligible_alignments": (
+                measurement.eligible_alignments if measurement is not None else None
+            ),
+            "imported": catalog is not None,
+            "imported_at": _iso_utc(when) if when is not None else None,
+            "verification": "verified" if verified is not None else "not_verified",
+            "same_measurement_as": twins.get(record_id),
+        }
+        rows.append(row)
+        twin = twins.get(record_id)
+        table.append(
+            [
+                _short_record(record_id),
+                read_label(root, record_id) or "-",
+                reference or "-",
+                "built-in",
+                f"{measurement.eligible_alignments:,}" if measurement is not None else "-",
+                (
+                    datetime.fromtimestamp(when).astimezone().strftime("%Y-%m-%d")
+                    if when is not None
+                    else "imported" if catalog is not None else "not imported"
+                ),
+                row["verification"].replace("_", " "),
+                f"same measurement as {_short_record(twin)}" if twin else "-",
+            ]
+        )
+        if catalog is None and verified is not None:
+            hints.append(
+                f"Import {_short_record(record_id)}: traceback catalog import "
+                f"{_short_record(record_id)} --root {shlex.quote(str(root))}"
+            )
+    if not rows:
+        payload = _result(
+            "catalog list",
+            "ok",
+            "No records yet. Run traceback run BAM --reference ID --import --root ROOT",
+            data={"records": [], "catalog_problem": catalog_problem},
+        )
+        return ExitCode.OK, payload
+    lines = _table(
+        ["RECORD", "LABEL", "REFERENCE", "POLICY", "ELIGIBLE", "IMPORTED", "VERIFICATION",
+         "SAME MEASUREMENT"],
+        table,
+    )
+    lines.append("Labels are operator notes, not part of the signed record.")
+    if catalog_problem is not None:
+        lines.append(f"The catalog under ROOT did not open ({catalog_problem}); see traceback doctor")
+    lines.extend(hints)
+    payload = _result(
+        "catalog list",
+        "ok",
+        f"{len(rows)} record(s); unqualified, local, not for clinical use",
+        data={"records": rows, "catalog_problem": catalog_problem},
+    )
+    return ExitCode.OK, _with_human(payload, lines, replace_data=True)
+
+
+_CSV_COLUMNS = (
+    "record_id", "reference_id", "policy_id", "min_mapq", "bin_lower", "bin_upper",
+    "count", "eligible", "scanned",
+)
+
+
+def _catalog_export(args: argparse.Namespace) -> tuple[ExitCode, dict[str, Any]]:
+    """``traceback catalog export --csv``: one row per (imported record, bin).
+
+    Counts come from each record's verified signed measurement; nothing is
+    derived.  No labels, paths or identifiers beyond record and reference IDs.
+    """
+
+    import csv
+    import io
+
+    from .local_authority import LOCAL_MIN_MAPPING_QUALITY, LOCAL_POLICY_ID
+
+    root = args.root
+    destination = args.csv_path
+    if destination.exists() or destination.is_symlink():
+        raise RunProblem(
+            "TBX-CAT-003",
+            "The CSV file already exists; nothing was written",
+            cause="catalog export never overwrites a file",
+            fix="Choose a new --csv file name, or move the existing file",
+        )
+    imported, catalog_problem = _catalog_rows(root)
+    if catalog_problem is not None:
+        raise RunProblem(
+            catalog_problem,
+            "The catalog under ROOT did not open; nothing was written",
+            cause="the catalog or its trust and authority stores failed their checks",
+            fix="Run traceback doctor --root ROOT",
+        )
+    buffer = io.StringIO()
+    writer = csv.writer(buffer, lineterminator="\n")
+    writer.writerow(_CSV_COLUMNS)
+    exported = 0
+    verified_records = dict(_verified_local_records(root))
+    unverifiable = sorted(
+        record_id for record_id in imported if verified_records.get(record_id) is None
+    )
+    if unverifiable:
+        # One row per imported record: a partial CSV would read as complete.
+        raise RunProblem(
+            "TBX-CAT-001",
+            "An imported record is missing or does not verify; nothing was written",
+            cause=f"{len(unverifiable)} imported record(s) under ROOT/records are missing or "
+            f"fail verification (first: {unverifiable[0]})",
+            fix=f"Check it with traceback verify {unverifiable[0]} --root ROOT",
+        )
+    for record_id in sorted(imported):
+        verified = verified_records[record_id]
+        measurement = verified.measurement
+        built_in = measurement.definition_id == f"{LOCAL_POLICY_ID}.{measurement.reference_id}"
+        for item in measurement.histogram:
+            writer.writerow(
+                (
+                    record_id,
+                    measurement.reference_id,
+                    "built-in" if built_in else measurement.definition_id,
+                    LOCAL_MIN_MAPPING_QUALITY if built_in else "",
+                    item.bin.lower_inclusive,
+                    "" if item.bin.upper_exclusive is None else item.bin.upper_exclusive,
+                    item.count,
+                    measurement.eligible_alignments,
+                    measurement.records_scanned,
+                )
+            )
+        exported += 1
+    try:
+        with destination.open("x", encoding="utf-8", newline="") as stream:
+            stream.write(buffer.getvalue())
+    except FileExistsError:
+        raise RunProblem(
+            "TBX-CAT-003",
+            "The CSV file already exists; nothing was written",
+            cause="catalog export never overwrites a file",
+            fix="Choose a new --csv file name, or move the existing file",
+        ) from None
+    return ExitCode.OK, _result(
+        "catalog export",
+        "ok",
+        f"Wrote {exported} imported record(s) as CSV rows (unqualified, local, not for "
+        "clinical use)",
+        data={"records": exported, "columns": list(_CSV_COLUMNS)},
+    )
+
+
+def _label(args: argparse.Namespace) -> tuple[ExitCode, dict[str, Any]]:
+    """``traceback label RECORD_ID TEXT``: set or replace an operator note."""
+
+    from .labels import LABEL_QUALIFIER, write_label
+
+    root = args.root
+    record_id = _resolve_record_id(root, args.record_id)
+    if record_id is None:
+        raise RunProblem(
+            "TBX-CAT-001",
+            "No local record under ROOT has this ID; no label was set",
+            cause="the ID does not name exactly one record under ROOT/records",
+            fix="Use a record ID from traceback catalog list --root ROOT",
+            exit_code=ExitCode.NOT_FOUND,
+        )
+    previous = write_label(root, record_id, args.text)
+    changed = previous is not None and previous != args.text
+    lines = [f"LABEL  {args.text} ({LABEL_QUALIFIER})"]
+    if changed:
+        lines.append(f"Label changed from {previous} to {args.text}")
+    payload = _result(
+        "label",
+        "ok",
+        "Label set (an operator note, not part of the signed record)",
+        data={"record_id": record_id, "label_set": True, "label_replaced": changed},
+    )
+    return ExitCode.OK, _with_human(payload, lines)
 
 
 class ServeProblem(ReferenceProblem):
@@ -2466,26 +3287,60 @@ def _status(args: argparse.Namespace) -> tuple[ExitCode, dict[str, Any]]:
         signature_verified=trust_state == TrustState.VERIFIED,
         local_unqualified=_is_local_request(runner.store.request(record.job_id)),
     )
+    failure = _job_failure(runner, record)
+    headline = view.headline
+    if failure is not None:
+        word = "FAILED" if record.state == JobState.TERMINAL_FAILURE else "RETRYABLE"
+        headline = " ".join(
+            part for part in (f"{word}:", failure["code"], failure["summary"]) if part
+        )
     return ExitCode.OK, _result(
         "status",
         "ok",
-        view.headline,
+        headline,
         data={
             "operator_state": view.model_dump(mode="json"),
             "trust_state": trust_state.value,
             "trust_source": trust_source.value,
             "trust_hint": _STATUS_TRUST_HINTS[trust_source],
+            **({"failure": failure} if failure is not None else {}),
         },
     )
 
 
+_FAILED_STATES = frozenset({JobState.TERMINAL_FAILURE, JobState.RETRYABLE_FAILURE})
+
+
+def _job_failure(runner: Any, record: Any) -> dict[str, Any] | None:
+    """The failed job's ``{code, summary, cause, fix}`` from its stored reason.
+
+    Only a coded reason is shown; an uncoded one (it may name a file) never is.
+    """
+
+    from .problems import UNCODED_SUMMARY, failure_block
+
+    if record.state not in _FAILED_STATES:
+        return None
+    return failure_block(runner.store.get(record.job_id).last_error) or {
+        "code": None,
+        "summary": UNCODED_SUMMARY,
+        "cause": None,
+        "fix": None,
+    }
+
+
+def _iso_utc(epoch: Any) -> str:
+    return datetime.fromtimestamp(float(epoch), UTC).isoformat(timespec="seconds")
+
+
 def _logs(args: argparse.Namespace) -> tuple[ExitCode, dict[str, Any]]:
     runner = _existing_runner(args.root)
-    runner.status(args.job_id)
+    record = runner.status(args.job_id)
+    failure = _job_failure(runner, record)
     events = [
         {
             "sequence": event["sequence"],
-            "occurred_at": event["occurred_at"],
+            "occurred_at": _iso_utc(event["occurred_at"]),
             "previous_state": event["previous_state"],
             "next_state": event["next_state"],
             "lease_token": event["lease_token"],
@@ -2496,7 +3351,11 @@ def _logs(args: argparse.Namespace) -> tuple[ExitCode, dict[str, Any]]:
         "logs",
         "ok",
         "Redacted local transition log",
-        data={"job_id": args.job_id, "events": events},
+        data={
+            "job_id": args.job_id,
+            "events": events,
+            **({"failure": failure} if failure is not None else {}),
+        },
     )
 
 
@@ -3150,7 +4009,15 @@ def _dispatch(
     if args.command == "retry":
         return _retry(args)
     if args.command == "catalog":
+        if args.catalog_command == "list":
+            return _catalog_list(args)
+        if args.catalog_command == "export":
+            return _catalog_export(args)
         return _catalog_import(args)
+    if args.command == "jobs":
+        return _jobs(args)
+    if args.command == "label":
+        return _label(args)
     if args.command == "inspect":
         return _inspect(args)
     if args.command == "verify":
@@ -3192,7 +4059,7 @@ def _concerns_local_data(args: argparse.Namespace) -> bool:
     """
 
     command = args.command
-    if command in {"run", "reference", "catalog"}:
+    if command in {"run", "reference", "catalog", "jobs", "label"}:
         return True
     if command == "preflight":
         if args.reference_id is not None:
@@ -3247,6 +4114,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         if not as_json:
             print(line, flush=True)
 
+    failed_job_id: str | None = None
     try:
         mutation = (
             _operator_lock(args.root)
@@ -3283,19 +4151,39 @@ def main(argv: Sequence[str] | None = None) -> int:
             else args.command
         )
         code, payload = ExitCode(problem.exit_code), _problem(command, problem)
-    except OperatorBusy:
-        code, payload = ExitCode.BLOCKED, _result(
-            args.command, "blocked",
-            "A local action or unexpired worker lease is active; wait before resuming",
-            data={"retryable": True},
-        )
-    except (FileNotFoundError, KeyError):
+    except OperatorBusy as exc:
+        failed_job_id = getattr(exc, "job_id", None)
+        running = _live_lease_job(args.root) if args.command == "run" else None
+        if running is not None:
+            # A concurrent `run` waits on ROOT's lock; name the job the other
+            # process is running so the operator can follow it.
+            code, payload = ExitCode.BLOCKED, _problem(
+                "run",
+                RunProblem(
+                    "TBX-JOB-002",
+                    f"Another traceback process is running job {running} on this ROOT; "
+                    "nothing was changed",
+                    cause="ROOT's operator lock is held by a process with a live worker lease",
+                    fix=f"Wait for it, or check traceback status {running}",
+                    retryable=True,
+                    data={"job_id": running},
+                ),
+            )
+        else:
+            code, payload = ExitCode.BLOCKED, _result(
+                args.command, "blocked",
+                "A local action or unexpired worker lease is active; wait before resuming",
+                data={"retryable": True},
+            )
+    except (FileNotFoundError, KeyError) as exc:
+        failed_job_id = getattr(exc, "job_id", None)
         code, payload = ExitCode.NOT_FOUND, _result(
             args.command,
             "not_found",
             "Requested local job, bundle, or trust material was not found",
         )
     except Exception as exc:
+        failed_job_id = getattr(exc, "job_id", None)
         verification_error_names = {
             "AssetEvidenceInputError",
             "AssetIntegrityError",
@@ -3360,7 +4248,13 @@ def main(argv: Sequence[str] | None = None) -> int:
                 args.command,
                 "internal_error",
                 "Preflight stopped on an unexpected internal error; nothing was changed",
-                data={"code": "TBX-INTERNAL-001", "retryable": False},
+                data={
+                    "code": "TBX-INTERNAL-001",
+                    "retryable": False,
+                    # preflight creates no job, so there is no support bundle.
+                    "fix": "Retrying will not change it; report the code and the "
+                    "preflight command you ran",
+                },
             )
         elif args.command in {"demo", "resume", "retry", "pause"}:
             code, payload = ExitCode.RETRYABLE_FAILURE, _result(
@@ -3375,6 +4269,9 @@ def main(argv: Sequence[str] | None = None) -> int:
                 "blocked",
                 "Command was blocked without exposing local input details",
             )
+    if failed_job_id is not None and "job_id" not in payload["data"]:
+        # The job a failed `run` created is named, so status and logs find it.
+        payload["data"]["job_id"] = failed_job_id
     if _concerns_local_data(args):
         payload = _local_envelope(payload)
     _emit(payload, as_json=as_json)
