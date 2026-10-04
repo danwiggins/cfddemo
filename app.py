@@ -470,7 +470,7 @@ def _render_truth_strip(st: Any, *, replay_mode: bool) -> None:
     """State exactly what a judge is seeing."""
 
     review_detail = (
-        "Validated AI assessment replay; no provider call"
+        "Recorded AI assessment replay; no provider call"
         if replay_mode
         else "Live bounded review through Amazon Bedrock"
     )
@@ -1379,7 +1379,7 @@ def _render_tool_result(st: Any, result: ToolResult) -> None:
 def _render_numeric_assertions(st: Any, audit: AuditResult) -> None:
     if not audit.numeric_assertions:
         return
-    st.markdown("**Validated measurements**")
+    st.markdown("**Measurements**")
     for assertion in audit.numeric_assertions:
         denominator = (
             f"; denominator: {assertion.denominator}"

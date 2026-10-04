@@ -66,6 +66,8 @@ EXPECTED = {
             "/assets/app.js",
             "/assets/styles.css",
             "/assets/longitudinal.js",
+            "/assets/chart.js",
+            "/assets/site.js",
         )
     },
     ("POST", "/api/v1/session/bootstrap"): frozenset(),
@@ -77,6 +79,8 @@ EXPECTED = {
     ("GET", "/api/v1/explorer/catalog"): OPERATOR_ONLY,
     ("GET", "/api/v1/explorer/compare"): OPERATOR_ONLY,
     ("GET", "explorer_result"): OPERATOR_ONLY,
+    ("GET", "/api/v1/records"): OPERATOR_ONLY,
+    ("GET", "record_view"): OPERATOR_ONLY,
     **{("GET", path): READER_ONLY for path in GET_ROUTE_PATHS},
     **{("POST", path): READER_ONLY for path in POST_ROUTE_PATHS},
 }
