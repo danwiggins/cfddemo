@@ -142,6 +142,86 @@ def test_input_check_order_is_bam_bgzf_alignment_then_index(tmp_path: Path) -> N
     assert _job_rows(root) == []
 
 
+def _no_state(root: Path) -> None:
+    for name in ("authority", "runner", "catalog", "trust"):
+        assert not (root / name).exists(), name
+
+
+@pytest.mark.parametrize("damage", ["four_bytes", "bgzf_header_only", "truncated", "no_eof"])
+def test_a_damaged_bam_is_refused_before_any_state(tmp_path: Path, damage: str) -> None:
+    inputs = create_local_golden_path_inputs(tmp_path / "inputs")
+    root = tmp_path / "root"
+    assert _json("reference", "register", "--fasta", inputs.fasta_path, "--id", "ref",
+                 "--root", root)[0] == 0
+    good = Path(inputs.bam_path).read_bytes()
+    bam = tmp_path / "damaged.bam"
+    bam.write_bytes(
+        {
+            "four_bytes": good[:4],
+            "bgzf_header_only": good[:18],
+            "truncated": good[: len(good) // 2],
+            "no_eof": good[:-28],
+        }[damage]
+    )
+    Path(f"{bam}.bai").write_bytes(Path(f"{inputs.bam_path}.bai").read_bytes())  # a fake index
+    code, payload = _json("run", bam, "--reference", "ref", "--root", root)
+    assert code == cli.ExitCode.BLOCKED, payload
+    assert payload["data"]["code"] == "TBX-BAM-001"
+    assert "truncated or damaged" in payload["summary"]
+    _no_state(root)
+    assert _job_rows(root) == []
+
+
+def test_an_intact_bam_passes_the_bgzf_structure_check(tmp_path: Path) -> None:
+    from traceback_runner.fixtures import create_unaligned_ont_bam
+
+    inputs = create_local_golden_path_inputs(tmp_path / "inputs")
+    assert cli._bgzf_structure(Path(inputs.bam_path)) == "ok"
+    assert cli._bgzf_structure(create_unaligned_ont_bam(tmp_path / "u.bam")) == "ok"
+    text = tmp_path / "t.bam"
+    text.write_text("@read\nACGT\n")
+    assert cli._bgzf_structure(text) == "not_bgzf"
+
+
+def test_every_input_check_runs_before_the_reference_is_loaded(tmp_path: Path) -> None:
+    from traceback_runner.fixtures import create_unaligned_ont_bam
+
+    root = tmp_path / "root"  # no reference registered under it at all
+    unaligned = create_unaligned_ont_bam(tmp_path / "unaligned.bam")
+    code, payload = _json("run", unaligned, "--reference", "ref", "--root", root)
+    assert (code, payload["data"]["code"]) == (cli.ExitCode.BLOCKED, "TBX-BAM-003")
+    code, human = _text("run", unaligned, "--reference", "ref", "--root", root)
+    assert "minimap2 -ax map-ont" in human and "REF.fa" in human
+    inputs = create_local_golden_path_inputs(tmp_path / "inputs")
+    Path(f"{inputs.bam_path}.bai").unlink()
+    code, payload = _json("run", inputs.bam_path, "--reference", "ref", "--root", root)
+    assert (code, payload["data"]["code"]) == (cli.ExitCode.NOT_FOUND, "TBX-RUN-009")
+    _no_state(root)
+
+
+def test_internal_error_fix_text_fits_the_command(tmp_path: Path, monkeypatch) -> None:
+    from traceback_runner import preflight
+
+    inputs = create_local_golden_path_inputs(tmp_path / "inputs")
+    root = tmp_path / "root"
+    _json("reference", "register", "--fasta", inputs.fasta_path, "--id", "ref", "--root", root)
+
+    def boom(record: object) -> tuple[bool, bool]:
+        raise RuntimeError("defect")
+
+    monkeypatch.setattr(preflight, "_modification_tags_valid", boom)
+    code, payload = _json("preflight", inputs.bam_path, "--reference", "ref", "--root", root)
+    assert payload["data"]["code"] == "TBX-INTERNAL-001"
+    assert "support-bundle" not in payload["data"]["fix"]
+    code, payload = _json("run", inputs.bam_path, "--reference", "ref", "--root", root)
+    assert payload["data"]["code"] == "TBX-INTERNAL-001"
+    assert "support-bundle JOB_ID" in payload["data"]["fix"]
+    assert payload["data"]["job_id"] in _job_rows(root)
+    text = PROBLEM_TABLE["TBX-INTERNAL-001"].fix
+    assert "From run" in text and "no job exists" in text
+    assert "could not be read" in PROBLEM_TABLE["TBX-REF-004"].cause
+
+
 def test_missing_index_is_tbx_run_009_and_creates_no_job(tmp_path: Path) -> None:
     inputs = create_local_golden_path_inputs(tmp_path / "inputs")
     root = tmp_path / "root"
@@ -537,6 +617,35 @@ def test_the_site_reads_back_every_label_the_cli_writes(world, text: str) -> Non
     write_label(root, record_id, text)
     assert read_label(root, record_id) == text
     assert read_record_label(root, record_id) == text
+
+
+def test_a_symlinked_labels_directory_is_refused_like_the_site_refuses_it(
+    world, tmp_path: Path
+) -> None:
+    root, inputs, records = world
+    elsewhere = tmp_path / "elsewhere"
+    elsewhere.mkdir()
+    shutil.rmtree(root / "labels")
+    (root / "labels").symlink_to(elsewhere, target_is_directory=True)
+    code, payload = _json("label", records[0]["record_id"], "note", "--root", root)
+    assert code == cli.ExitCode.BLOCKED, payload
+    assert payload["data"]["code"] == "TBX-LABEL-001"
+    assert list(elsewhere.iterdir()) == []
+    code, payload = _json("run", inputs[0].bam_path, "--reference", "ref", "--label", "note",
+                          "--root", root)
+    assert payload["data"]["code"] == "TBX-LABEL-001"
+    assert payload["data"]["record_id"] == records[0]["record_id"]
+    assert list(elsewhere.iterdir()) == []
+
+
+@pytest.mark.parametrize(
+    "text", ["plain note", "a​b", "a\x85b", "a\x7fb", " lead", "x" * 81, "a..b", "ok 2"]
+)
+def test_writer_and_site_reader_share_one_grammar(text: str) -> None:
+    from traceback_runner.labels import label_violation
+    from traceback_runner.web.records import valid_label
+
+    assert (valid_label(text) is None) == (label_violation(text) is not None)
 
 
 def test_the_guide_warns_against_identifiers_in_labels() -> None:

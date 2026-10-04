@@ -19,6 +19,8 @@ import unicodedata
 from datetime import UTC, datetime
 from pathlib import Path
 
+from .references import ReferenceProblem
+
 LABELS_DIRECTORY = "labels"
 MAX_LABEL_CHARACTERS = 80
 _MAX_LABEL_FILE_BYTES = 4096
@@ -30,30 +32,57 @@ class LabelError(ValueError):
     """A label breaks the grammar; the message names the rule."""
 
 
-def validate_label(text: str) -> str:
-    """Return ``text`` if it is a valid label, else raise naming the rule.
+def label_violation(text: object) -> str | None:
+    """The one label grammar (A4b), shared by the CLI writer and the site reader
+    (``web/records.py``): the rule ``text`` breaks, or ``None`` when valid.
 
-    1-80 characters; no ``/``, ``\\``, NUL or control characters; and it must
-    pass the web service's own public-text check, so a label never fails a
-    route that shows it.
+    1-80 characters; no leading or trailing whitespace; no ``/`` or ``\\``; no
+    NUL, control or other Unicode ``C*`` (control, format, private-use,
+    unassigned) characters; and it must pass the web service's own public-text
+    check, so a label never fails a route that shows it.
     """
 
     from .web.contracts import validate_public_text
 
-    if not isinstance(text, str) or not 1 <= len(text) <= MAX_LABEL_CHARACTERS:
-        raise LabelError(f"a label must be 1-{MAX_LABEL_CHARACTERS} characters")
+    if type(text) is not str or not 1 <= len(text) <= MAX_LABEL_CHARACTERS:
+        return f"a label must be 1-{MAX_LABEL_CHARACTERS} characters"
     if text != text.strip():
-        # The site's reader (web/records.py valid_label) refuses these.
-        raise LabelError("a label cannot start or end with whitespace")
+        return "a label cannot start or end with whitespace"
     if "/" in text or "\\" in text:
-        raise LabelError("a label cannot contain / or \\")
+        return "a label cannot contain / or \\"
     if any(unicodedata.category(character)[0] == "C" for character in text):
-        raise LabelError("a label cannot contain NUL or control characters")
+        return "a label cannot contain NUL or control characters"
     try:
         validate_public_text(text)
     except ValueError as exc:
-        raise LabelError(f"a label must pass the public-text rules: {exc}") from None
+        return f"a label must pass the public-text rules: {exc}"
+    return None
+
+
+def validate_label(text: str) -> str:
+    """Return ``text`` if it is a valid label, else raise naming the rule."""
+
+    rule = label_violation(text)
+    if rule is not None:
+        raise LabelError(rule)
     return text
+
+
+class LabelStoreProblem(ReferenceProblem):
+    """``ROOT/labels`` is not a real directory; no label was written."""
+
+
+def _require_label_directory(directory: Path) -> None:
+    """Refuse a symlinked or non-directory ``ROOT/labels``, exactly as the
+    site's reader (``web/records.py``) refuses to read one."""
+
+    if directory.is_symlink() or (directory.exists() and not directory.is_dir()):
+        raise LabelStoreProblem(
+            "TBX-LABEL-001",
+            "ROOT/labels is not a real directory; no label was set",
+            cause="ROOT/labels is a symbolic link or a file",
+            fix="Remove ROOT/labels (labels are unsigned notes) and set the label again",
+        )
 
 
 def _label_path(root: Path, record_id: str) -> Path:
@@ -103,8 +132,10 @@ def write_label(root: Path, record_id: str, text: str) -> str | None:
 
     label = validate_label(text)
     path = _label_path(root, record_id)
+    _require_label_directory(path.parent)
     previous = read_label(root, record_id)
     path.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
+    _require_label_directory(path.parent)
     content = (
         json.dumps(
             {"label": label, "set_at": datetime.now(UTC).isoformat(timespec="seconds")},

@@ -65,12 +65,20 @@ PROBLEM_TABLE: dict[str, ProblemText] = {
         "This is often a bam_fail or empty chunk; use the sample's bam_pass files",
     ),
     "TBX-REF-004": ProblemText(
-        "preflight ran without --reference on a ROOT that has registered references",
-        "Add --reference ID; the problem lists the registered IDs",
+        "preflight ran without --reference on a ROOT that has registered references, "
+        "or whose ROOT/references could not be read",
+        "Add --reference ID (the problem lists the registered IDs); if ROOT/references "
+        "could not be read, check it with traceback doctor",
     ),
     "TBX-INTERNAL-001": ProblemText(
         "Preflight stopped on an unexpected internal error, not a BAM read or format error",
-        "Retrying will not change it; write traceback support-bundle and report the code",
+        "Retrying will not change it. From run: traceback support-bundle JOB_ID --output "
+        "DIR, then report the code. From preflight (no job exists): report the code and "
+        "the command you ran",
+    ),
+    "TBX-LABEL-001": ProblemText(
+        "ROOT/labels is a symbolic link or a file, so no label can be written or shown",
+        "Remove ROOT/labels (labels are unsigned notes) and set the label again",
     ),
     "TBX-MOD-001": ProblemText(
         "No modification provenance or MM/ML tags were found",

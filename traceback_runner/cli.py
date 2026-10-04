@@ -1452,7 +1452,8 @@ def _local_stages(
                 "TBX-INTERNAL-001",
                 "Preflight stopped on an unexpected internal error; no record was made",
                 cause=f"{type(exc).__name__} while inspecting the sealed BAM copy",
-                fix="Retrying will not change it; write `traceback support-bundle` and report the code",
+                fix="Retrying will not change it; write `traceback support-bundle JOB_ID "
+                "--output DIR` for this job and report the code",
             ) from exc
         if (
             report.outcome == PreflightOutcome.BLOCKED
@@ -1609,10 +1610,13 @@ def _local_stages(
     )
 
 
-def _refuse_unaligned_or_empty(bam: Path, *, fasta: str | None) -> None:
+def _refuse_unaligned_or_empty(
+    bam: Path, *, fasta: Callable[[], str | None] = lambda: None
+) -> None:
     """A1: refuse an unaligned (TBX-BAM-003) or record-less (TBX-BAM-004) BAM
-    before any job, authority or copy exists. ``fasta`` (human output only)
-    replaces the ``REF.fa`` placeholder in the alignment command."""
+    before any reference, job, authority or copy work.  ``fasta`` is called
+    only when refusing; its path (human output only) replaces the ``REF.fa``
+    placeholder in the alignment command."""
 
     import shlex
 
@@ -1620,14 +1624,26 @@ def _refuse_unaligned_or_empty(bam: Path, *, fasta: str | None) -> None:
 
     path = Path(os.path.abspath(bam))
     if path.is_symlink() or not path.is_file():
-        return  # the input-file check below reports it
+        return  # the input-file check reports it
     check = intake_refusal(path)
     if check is None:
         return
     fix = check.remediation
-    if fasta is not None and check.code == "TBX-BAM-003":
-        fix = unaligned_remediation(shlex.quote(fasta))
+    fasta_path = fasta() if check.code == "TBX-BAM-003" else None
+    if fasta_path is not None:
+        fix = unaligned_remediation(shlex.quote(fasta_path))
     raise RunProblem(check.code, check.problem, cause=check.problem, fix=fix)
+
+
+def _registered_fasta(root: Path, reference_id: str) -> str | None:
+    """The registered FASTA path for human output, or ``None`` if unavailable."""
+
+    from .references import load_reference
+
+    try:
+        return load_reference(root, reference_id).source.fasta_path
+    except (ReferenceProblem, OSError, ValueError):
+        return None
 
 
 _BGZF_MAGIC = b"\x1f\x8b\x08\x04"
@@ -1651,12 +1667,8 @@ def _check_bam_input(bam: Path) -> None:
             fix="Check the BAM path; pass the file itself, not a link or a directory",
             exit_code=ExitCode.NOT_FOUND,
         )
-    try:
-        with bam_abs.open("rb") as stream:
-            magic = stream.read(len(_BGZF_MAGIC))
-    except OSError:
-        magic = b""
-    if magic != _BGZF_MAGIC:
+    structure = _bgzf_structure(bam_abs)
+    if structure == "not_bgzf":
         raise RunProblem(
             "TBX-RUN-010",
             "The input is not a BAM (no BGZF header); no job was created",
@@ -1664,6 +1676,68 @@ def _check_bam_input(bam: Path) -> None:
             fix="This is not a BAM; for FASTQ or POD5 see Aligning MinKNOW output in "
             "docs/OPERATOR-GUIDE.md",
         )
+    if structure != "ok":
+        raise RunProblem(
+            "TBX-BAM-001",
+            "The BAM is truncated or damaged; no job was created",
+            cause=(
+                "the first BGZF block is incomplete"
+                if structure == "short_block"
+                else "the file does not end with the BGZF end-of-file block "
+                "(an interrupted copy or download)"
+            ),
+            fix="Copy or download the BAM again (or re-run samtools sort), then "
+            "samtools index it and run again",
+        )
+
+
+# The 28-byte empty BGZF block every complete BAM ends with (SAM spec 4.1.2).
+_BGZF_EOF = bytes.fromhex("1f8b08040000000000ff0600424302001b0003000000000000000000")
+
+
+def _bgzf_structure(path: Path) -> str:
+    """``ok``, ``not_bgzf``, ``short_block`` or ``no_eof`` for one file.
+
+    Reads the first block's gzip header and its ``BC`` extra field (BSIZE),
+    checks the file holds that whole block, and checks the end-of-file block:
+    the same truncation test ``samtools quickcheck`` applies, with no htslib.
+    """
+
+    try:
+        size = path.stat().st_size
+        with path.open("rb") as stream:
+            header = stream.read(12)
+            if header[:4] != _BGZF_MAGIC:
+                return "not_bgzf"
+            if len(header) < 12:
+                return "short_block"
+            extra_length = int.from_bytes(header[10:12], "little")
+            extra = stream.read(extra_length)
+            if len(extra) < extra_length:
+                return "short_block"
+            block_size = None
+            offset = 0
+            while offset + 4 <= len(extra):
+                tag, length = extra[offset : offset + 2], int.from_bytes(
+                    extra[offset + 2 : offset + 4], "little"
+                )
+                if tag == b"BC" and length == 2 and offset + 6 <= len(extra):
+                    block_size = int.from_bytes(extra[offset + 4 : offset + 6], "little") + 1
+                    break
+                offset += 4 + length
+            if block_size is None:
+                return "not_bgzf"
+            if size < block_size:
+                return "short_block"
+            if size < block_size + len(_BGZF_EOF):
+                # A BAM is at least its header block plus the end-of-file block.
+                return "no_eof"
+            stream.seek(size - len(_BGZF_EOF))
+            if stream.read(len(_BGZF_EOF)) != _BGZF_EOF:
+                return "no_eof"
+    except OSError:
+        return "not_bgzf"
+    return "ok"
 
 
 def _local_input_files(bam: Path, index: Path) -> tuple[Path, tuple[str, str]]:
@@ -1955,17 +2029,22 @@ def _run(
     if args.reference_id is None:
         return _real_run_blocked()
     root = args.root
-    # Inputs first (A2): a bad input creates no job, authority store or copy.
+    # Every input check runs first (A2): a bad input is reported before the
+    # reference is loaded and creates no job, authority store or copy.
     _check_bam_input(args.input)
-    loaded = load_reference(root, args.reference_id)
     _refuse_unaligned_or_empty(
         args.input,
         # Human output names the registered FASTA; --json never does.
-        fasta=None if getattr(args, "as_json", False) else loaded.source.fasta_path,
+        fasta=(
+            (lambda: None)
+            if getattr(args, "as_json", False)
+            else (lambda: _registered_fasta(root, args.reference_id))
+        ),
     )
     source, relative_files = _local_input_files(
         args.input, args.index or Path(f"{args.input}.bai")
     )
+    loaded = load_reference(root, args.reference_id)
     # Create (once) or validate the local method authority before any copy:
     # a damaged ROOT/authority refuses the run with TBX-AUTH-LOCAL-001.
     ensure_local_method_authority(root, loaded.registered)
@@ -4169,7 +4248,13 @@ def main(argv: Sequence[str] | None = None) -> int:
                 args.command,
                 "internal_error",
                 "Preflight stopped on an unexpected internal error; nothing was changed",
-                data={"code": "TBX-INTERNAL-001", "retryable": False},
+                data={
+                    "code": "TBX-INTERNAL-001",
+                    "retryable": False,
+                    # preflight creates no job, so there is no support bundle.
+                    "fix": "Retrying will not change it; report the code and the "
+                    "preflight command you ran",
+                },
             )
         elif args.command in {"demo", "resume", "retry", "pause"}:
             code, payload = ExitCode.RETRYABLE_FAILURE, _result(

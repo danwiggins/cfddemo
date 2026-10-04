@@ -71,7 +71,6 @@ MAX_LIST_RECORDS = 500
 LABEL_MAX_CHARS = 80
 _LABEL_MAX_BYTES = 4096
 _PREFLIGHT_MAX_BYTES = 1024 * 1024
-_CONTROL = re.compile(r"[\x00-\x1f\x7f-\x9f]")
 
 
 class RecordNotFound(KeyError):
@@ -264,21 +263,11 @@ def _read_private_bounded(path: Path, maximum: int) -> bytes | None:
 
 
 def valid_label(value: object) -> str | None:
-    """The read-side label grammar (A4b): 1-80 public-text characters."""
+    """The read side of the one label grammar (A4b, ``labels.label_violation``)."""
 
-    if type(value) is not str:
-        return None
-    if (
-        not 1 <= len(value) <= LABEL_MAX_CHARS
-        or value != value.strip()
-        or "/" in value
-        or "\\" in value
-        or _CONTROL.search(value)
-    ):
-        return None
-    try:
-        validate_public_text(value)
-    except ValueError:
+    from traceback_runner.labels import label_violation
+
+    if type(value) is not str or label_violation(value) is not None:
         return None
     return value
 
