@@ -303,15 +303,21 @@ def read_record_label(root: Path, record_id: str) -> str | None:
     return valid_label(payload.get("label"))
 
 
-def _imported_at(root: Path, result_id: str) -> datetime | None:
+def _imported_at_ns(root: Path, result_id: str) -> int | None:
+    """Exact import time (nanoseconds) of a record's persisted explorer artifact."""
+
     from traceback_runner.local_catalog import explorer_paths
 
     artifact, _ = explorer_paths(root, result_id)
     try:
-        metadata = os.stat(artifact, follow_symlinks=False)
+        return os.stat(artifact, follow_symlinks=False).st_mtime_ns
     except OSError:
         return None
-    return datetime.fromtimestamp(metadata.st_mtime_ns / 1e9, UTC)
+
+
+def _imported_at(root: Path, result_id: str) -> datetime | None:
+    stamp = _imported_at_ns(root, result_id)
+    return None if stamp is None else datetime.fromtimestamp(stamp / 1e9, UTC)
 
 
 # ---------------------------------------------------------------------------
@@ -659,7 +665,7 @@ def build_local_record_list(
         raise TypeError("record routes require the package-owned record source")
     rows = _catalog_rows(query_catalog)
     truncated = len(rows) > MAX_LIST_RECORDS
-    summaries: list[RecordSummary] = []
+    summaries: list = []
     for ref, has_view in rows[:MAX_LIST_RECORDS]:
         record_id = ref.bundle_record_id  # type: ignore[attr-defined]
         if not RECORD_ID_PATTERN.fullmatch(record_id):
@@ -667,30 +673,39 @@ def build_local_record_list(
         status: Literal["failed_verification", "view_unavailable"]
         if has_view:
             try:
-                summaries.append(_summary(_verified_view(source, get_document, ref.result_id, record_id)))  # type: ignore[attr-defined]
+                summaries.append(
+                    (
+                        _imported_at_ns(source.root, ref.result_id),  # type: ignore[attr-defined]
+                        _summary(_verified_view(source, get_document, ref.result_id, record_id)),  # type: ignore[attr-defined]
+                    )
+                )
                 continue
             except (RecordUnavailable, *_UNAVAILABLE):
                 status = "failed_verification"
         else:
             status = "view_unavailable"
+        stamp = _imported_at_ns(source.root, ref.result_id)  # type: ignore[attr-defined]
         summaries.append(
-            RecordSummary(
-                record_id=record_id,
-                short_id=short_record_id(record_id),
-                status=status,
-                status_label=copy_for("record_status", status)[0],
-                label=read_record_label(source.root, record_id),
-                imported_at=_imported_at(source.root, ref.result_id),  # type: ignore[attr-defined]
+            (
+                stamp,
+                RecordSummary(
+                    record_id=record_id,
+                    short_id=short_record_id(record_id),
+                    status=status,
+                    status_label=copy_for("record_status", status)[0],
+                    label=read_record_label(source.root, record_id),
+                    imported_at=(
+                        None if stamp is None else datetime.fromtimestamp(stamp / 1e9, UTC)
+                    ),
+                ),
             )
         )
+    # Oldest import first by exact nanosecond mtime (the displayed datetime is
+    # only microsecond-precise); a row with no known import time goes last.
     summaries.sort(
-        # Oldest import first; a row with no known import time goes last.
-        key=lambda item: (
-            item.imported_at is None,
-            item.imported_at or datetime.min.replace(tzinfo=UTC),
-            item.record_id,
-        )
+        key=lambda item: (item[0] is None, item[0] or 0, item[1].record_id)
     )
+    summaries = [summary for _, summary in summaries]
     result = LocalRecordList(
         records=tuple(summaries),
         truncated=truncated,
