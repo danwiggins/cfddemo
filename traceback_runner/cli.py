@@ -1623,7 +1623,7 @@ def _peek_measurement_sha256(bundle: Path) -> str | None:
         return None
 
 
-def _measurement_twins(root: Path, store: Any) -> dict[str, str]:
+def _measurement_twins(root: Path, store: Any | None) -> dict[str, str]:
     """Map each local record to the earliest record with the same measurement.
 
     A re-run under a different job (for example after the job key gained the
@@ -1631,7 +1631,8 @@ def _measurement_twins(root: Path, store: Any) -> dict[str, str]:
     record's.  Records are grouped by the signed measurement digest of their
     verified manifest; within a group the record whose job was created first
     is the original, and every other record maps to it ("same measurement as").
-    Records that do not verify, or are not local, are left out.
+    Records that do not verify, or are not local, are left out.  Without a job
+    store (or a job it cannot find) a record sorts last, then by record ID.
     """
 
     from .bundles import MEASUREMENT_PATH, verify_bundle
@@ -1651,7 +1652,6 @@ def _measurement_twins(root: Path, store: Any) -> dict[str, str]:
     if not groups:
         return {}
     trust = load_development_trust((root / _TRUST_RELATIVE).read_bytes())
-    created = {job.job_id[:16]: job.created_at for job in store.list_jobs(limit=1000)}
     twins: dict[str, str] = {}
     for paths in groups:
         members: list[tuple[str, float, str]] = []
@@ -1669,7 +1669,11 @@ def _measurement_twins(root: Path, store: Any) -> dict[str, str]:
                 item.sha256 for item in manifest.contents if item.relative_path == MEASUREMENT_PATH
             )
             token = _LOCAL_RUN_TOKEN.fullmatch(verified.provenance.run_token)
-            when = created.get(token.group(1)) if token else None
+            when = (
+                store.created_at_by_prefix(token.group(1))
+                if token is not None and store is not None
+                else None
+            )
             members.append((digest, float("inf") if when is None else when, path.name))
         by_digest: dict[str, list[tuple[float, str]]] = {}
         for digest, when, name in members:

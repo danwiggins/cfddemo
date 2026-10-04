@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import sqlite3
 import stat
 import threading
@@ -499,6 +500,22 @@ class JobStore:
         if row is None:
             raise KeyError(job_id)
         return self._record(row)
+
+    def created_at_by_prefix(self, job_id_prefix: str) -> float | None:
+        """Creation time of the one job whose ID starts with ``job_id_prefix``.
+
+        ``None`` when no job, or more than one, matches.  The prefix must be
+        8-32 lowercase hex characters (job IDs are 32).
+        """
+
+        if not re.fullmatch(r"[0-9a-f]{8,32}", job_id_prefix):
+            raise ValueError("job ID prefix must be 8-32 lowercase hex characters")
+        with self._connect() as connection:
+            rows = connection.execute(
+                "SELECT created_at FROM jobs WHERE substr(job_id, 1, ?)=? LIMIT 2",
+                (len(job_id_prefix), job_id_prefix),
+            ).fetchall()
+        return float(rows[0]["created_at"]) if len(rows) == 1 else None
 
     def list_jobs(self, *, limit: int = 100) -> tuple[StoredJobRecord, ...]:
         """Return a bounded authoritative queue snapshot for local projections."""

@@ -734,6 +734,33 @@ def test_a_legacy_key_rerun_makes_a_second_record_marked_same_measurement(
     assert f"SAME_MEASUREMENT_AS  {legacy['data']['record_id']}" in capsys.readouterr().out
 
 
+def test_the_original_is_found_past_a_thousand_later_jobs(
+    tmp_path: Path, inputs, capsys, monkeypatch
+) -> None:
+    from traceback_runner.contracts import InputKind, JobRequest
+
+    root = tmp_path / "root"
+    _register(capsys, root, inputs.fasta_path)
+    with monkeypatch.context() as patch:
+        _legacy_key(patch)
+        _, legacy = _run(capsys, root, inputs.bam_path)
+    with JobStore(root / "runner" / "runner.sqlite3") as store:
+        for index in range(1_001):
+            store.submit(
+                JobRequest(
+                    sample_token="local-ref",
+                    input_kind=InputKind.MODBAM,
+                    input_tree_sha256_local=f"{index:064x}",
+                    workflow_release_sha256="d" * 64,
+                )
+            )
+        assert store.created_at_by_prefix(legacy["data"]["job_id"][:16]) is not None
+        assert store.created_at_by_prefix("0" * 16) is None
+    code, upgraded = _run(capsys, root, inputs.bam_path)
+    assert code == cli.ExitCode.OK, upgraded
+    assert upgraded["data"]["same_measurement_as"] == legacy["data"]["record_id"]
+
+
 def test_a_tampered_twin_is_not_named(tmp_path: Path, inputs, capsys, monkeypatch) -> None:
     root = tmp_path / "root"
     _register(capsys, root, inputs.fasta_path)
