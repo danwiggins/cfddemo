@@ -322,7 +322,7 @@ def _imported_at(root: Path, result_id: str) -> datetime | None:
 def _preflight_report(source: LocalRecordSource, run_token: str) -> PreflightReport | None:
     """The run's preflight report, through its verified stage receipt."""
 
-    from traceback_runner.receipts import verify_receipt
+    from traceback_runner.receipts import ReceiptError, verify_receipt
 
     store = source.store
     prefix = run_token.removeprefix("local-run-")
@@ -362,7 +362,8 @@ def _preflight_report(source: LocalRecordSource, run_token: str) -> PreflightRep
         if content is None:
             return None
         return PreflightReport.model_validate_json(content)
-    except (OSError, ValueError, KeyError, TypeError):
+    except (OSError, ValueError, KeyError, TypeError, ReceiptError):
+        # Optional, unsigned metadata: any damage means "not available".
         return None
 
 

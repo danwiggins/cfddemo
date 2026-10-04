@@ -192,6 +192,20 @@ def test_stale_authority_returns_503(world) -> None:
         assert (status, json.loads(body)) == (503, WEB_503)
 
 
+def test_damaged_preflight_receipt_only_hides_preflight_details(world) -> None:
+    root, record_id, _ = world
+    (receipt,) = (root / "runner" / "artifacts").glob("*/validate/*/receipt.json")
+    _make_writable(receipt.parent)
+    receipt.write_text("{")
+    with _serving(root) as (service, _):
+        cookie, _ = _exchange(service)
+        status, view = _get(service, f"/api/v1/records/{record_id}", cookie)
+        assert status == 200, view
+        assert view["preflight"] == {"outcome": "not_available", "origin": "not_available", "checks": []}
+        status, listing = _get(service, "/api/v1/records", cookie)
+        assert status == 200 and listing["records"][0]["status"] == "verified"
+
+
 def test_reader_sessions_unknown_and_malformed_ids(world) -> None:
     root, record_id, _ = world
     with _serving(root) as (service, _):
@@ -561,6 +575,21 @@ def test_a_slow_earlier_route_never_overwrites_the_current_one(tmp_path: Path) -
     final = reports[1]
     assert _text(_nodes(final["view"], _tag("h1"))[0]) == "fast B"
     assert "slow A" not in _text(final["view"])
+
+
+@needs_node
+def test_previous_record_is_cleared_while_the_next_loads(tmp_path: Path) -> None:
+    reports = _run(tmp_path, {
+        "responses": {
+            "/api/v1/records": _ok(_listing(_summary(RID[0]), _summary(RID[1]))),
+            f"/api/v1/records/{RID[0]}": _ok(_view(RID[0], label="record A")),
+            f"/api/v1/records/{RID[1]}": [{"status": 200, "payload": _view(RID[1], label="record B"), "delayMs": 500}],
+        },
+        "steps": [{"hash": f"#/records/{RID[0]}"}, {"hash": f"#/records/{RID[1]}", "noWait": True}],
+    })
+    loading = reports[2]
+    assert loading["dataset"]["state"] == "loading"
+    assert "record A" not in _text(loading["view"]) and not _nodes(loading["view"], _tag("svg"))
 
 
 @needs_node

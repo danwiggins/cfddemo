@@ -295,8 +295,9 @@
   };
 
   const renderCatalog = async (focus) => {
-    setState("catalog", "loading");
-    live("Loading records…");
+    if (focus) showLoading("catalog", "Loading records…");
+    else setState("catalog", "loading");
+    currentRecord = null;
     const mine = generation;
     const { status, payload } = await getJson("/api/v1/records");
     if (mine !== generation) return;
@@ -572,9 +573,18 @@
     return nodes;
   };
 
+  // On a route change the previous view is cleared at once, so nothing from
+  // another record stays on screen while this one loads.
+  const showLoading = (name, text) => {
+    currentRecord = null;
+    view().replaceChildren(heading(text));
+    setState(name, "loading");
+    live(text);
+  };
+
   const renderRecord = async (recordId, focus) => {
-    setState("record", "loading");
-    live("Loading record…");
+    if (focus || !currentRecord || currentRecord.record_id !== recordId) showLoading("record", "Loading record…");
+    else setState("record", "loading");
     const mine = generation;
     const { status, payload } = await getJson(`/api/v1/records/${recordId}`);
     if (mine !== generation) return;
@@ -625,8 +635,7 @@
       if (focus) focusHeading();
       return;
     }
-    setState("compare", "loading");
-    live("Loading both records…");
+    showLoading("compare", "Loading both records…");
     if (!records) {
       const mine = generation;
       const { status, payload } = await getJson("/api/v1/records");
@@ -691,7 +700,8 @@
     });
     if (compactQuery && typeof compactQuery.addEventListener === "function") {
       compactQuery.addEventListener("change", () => {
-        if (currentRecord && RECORD_ROUTE.test(window.location.hash || "")) {
+        const match = RECORD_ROUTE.exec(window.location.hash || "");
+        if (currentRecord && match && currentRecord.record_id === match[1]) {
           view().replaceChildren(...renderRecordBody(currentRecord));
         }
       });

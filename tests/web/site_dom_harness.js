@@ -263,9 +263,11 @@ const snapshot = (label) => ({
       media.matches = step.compact;
       media.listeners.forEach((handler) => handler({ matches: step.compact }));
     }
-    await flush();
+    if (step.noWait) await new Promise((resolve) => setTimeout(resolve, 30));
+    else await flush();
     reports.push(snapshot(step.label || JSON.stringify(step)));
   }
+  await flush();
   process.stdout.write(JSON.stringify({ errors, reports }));
 })().catch((error) => {
   process.stderr.write(String(error && error.stack ? error.stack : error));
