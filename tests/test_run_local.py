@@ -565,7 +565,10 @@ def test_a_lost_lease_names_the_lease_and_resume(
     monkeypatch.setattr(Runner, "execute", lost)
     code, payload = _run(capsys, root, inputs.bam_path)
     assert code == cli.ExitCode.RETRYABLE_FAILURE
-    assert payload["data"] == {"code": "TBX-JOB-001", "retryable": True}
+    assert payload["status"] == "retryable_failure"
     assert "worker lease" in payload["summary"]
-    assert "traceback resume" in payload["summary"]
+    (job_id,) = _job_ids(root)
+    data = payload["data"]
+    assert (data["code"], data["retryable"], data["job_id"]) == ("TBX-JOB-001", True, job_id)
+    assert data["next_action"] == f"traceback resume {job_id} --root <same-root>"
     assert _records(root) == []
