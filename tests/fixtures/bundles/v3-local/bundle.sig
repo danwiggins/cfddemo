@@ -1,0 +1,1 @@
+{"algorithm":"Ed25519","key_id":"devlocal-result-8fabefd7a9b3c54a393bd868","namespace":"development-local","purpose":"result","schema_version":"traceback.signature.v1","signature_base64":"q9nXxPEflRTXIdCDCcYBsxnvIQ9jKv81jIJIscM5EDMmYDw9t4lPXxM5Y80Gdo2/mjvJiGiUlljMCNzDDGoGDQ=="}

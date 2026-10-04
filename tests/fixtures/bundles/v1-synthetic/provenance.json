@@ -1,0 +1,1 @@
+{"artifacts":[{"artifact_token":"synthetic-input.v1","provider_hmac_sha256":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","role":"analysis_input","size_bytes":100}],"input_kind":"modbam","protocol_run_token":"synthetic.protocol.v1","run_token":"synthetic.run.v1","schema_version":"traceback.run-provenance.v1","workflow_release_id":"synthetic-workflow.v1"}
