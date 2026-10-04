@@ -24,6 +24,12 @@ from pathlib import Path
 CAFFEINATE = Path("/usr/bin/caffeinate")
 
 
+def _assertion_available() -> bool:
+    """True where a caffeinate-style power assertion can be held (macOS)."""
+
+    return sys.platform == "darwin" and CAFFEINATE.is_file()
+
+
 @contextmanager
 def stay_awake() -> Iterator[subprocess.Popen[bytes] | None]:
     """Hold an idle- and system-sleep assertion until the block exits.
@@ -35,7 +41,7 @@ def stay_awake() -> Iterator[subprocess.Popen[bytes] | None]:
     """
 
     holder: subprocess.Popen[bytes] | None = None
-    if sys.platform == "darwin" and CAFFEINATE.is_file():
+    if _assertion_available():
         try:
             holder = subprocess.Popen(
                 [str(CAFFEINATE), "-i", "-s", "-w", str(os.getpid())],

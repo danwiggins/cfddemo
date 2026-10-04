@@ -501,7 +501,9 @@ def _fake_caffeinate(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
     )
     script.chmod(0o755)
     monkeypatch.setattr(awake, "CAFFEINATE", script)
-    monkeypatch.setattr(awake.sys, "platform", "darwin")
+    # Patch only the platform check, never the global sys module: faking
+    # sys.platform process-wide sends Linux down macOS-only code paths.
+    monkeypatch.setattr(awake, "_assertion_available", lambda: True)
     return log
 
 
