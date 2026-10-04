@@ -1434,7 +1434,20 @@ TTHW: today, unreachable unaided from an unaligned zip; about 4 min from an alig
 - **Labels and privacy.** CEO, Eng (both), DX (both): labels in JSON conflict with `DESIGN.md`. -> D8 and T6.
 - **The 03:30 canary runs from the checkout.** CEO (Claude), Eng (both), DX (Codex). -> A1/A5 re-baseline step, D10 unload/run/reload, follow-up to pin the canary.
 
-## Pending user gates
+## Gate decisions (operator, 2026-10-04)
+
+| Gate | Decision |
+|---|---|
+| UC1 scope | **Wave 1 first** (about 19 days). Then run the real zip through it unaided, logging every intervention, and re-plan wave 2 from that log. |
+| UC2 analysis changes | **1-bp counts plus admin-owned presets.** Measure once at 1-bp resolution. Re-binning and derived metrics happen at display. Presets are owned by the operator or scientist; there is no operator-authored policy CLI. Ask the scientist what "change the analysis" means (P2) before building B2. |
+| UC3 derived metrics | **Keep.** Short-fragment fraction and 10-bp periodicity are shown as display projections of the 1-bp counts, labelled descriptive and unqualified. |
+| UC4 hygiene | **Keep all** (D3, D4/D15, D5, D6, D9) in wave 2. |
+| Premises | **All accepted:** P1 inspect the zip first (A0), P3, P4, P5, P7, P8. P2 is resolved through UC2. P6: plan 5–6 weeks in total. |
+| Taste T1–T10 | Accepted as auto-decided. |
+
+The original gate text follows for the record.
+
+## Pending user gates (now resolved, see above)
 
 Nothing below is decided. The spec body reflects your stated direction plus mechanical fixes from the reviews (false claims corrected, missing states, privacy, FIX texts). Each gate says what changes if you answer it the other way.
 
