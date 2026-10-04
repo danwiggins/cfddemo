@@ -69,6 +69,7 @@ traceback assets verify --release-evidence ENVELOPE \
   [--root ROOT] [--json]
 traceback support-bundle JOB_ID --output OUTPUT [--root ROOT] [--json]
 traceback toolchain install modkit [--yes] [--micromamba ABS_PATH] [--json]
+traceback toolchain install {ichor|copy-number} [--yes] [--micromamba ABS_PATH] [--json]
 ```
 
 `toolchain install modkit` installs the pinned modkit 0.6.4 that cell origin
@@ -80,6 +81,18 @@ micromamba is found by absolute path only (`--micromamba`, `$MAMBA_EXE`,
 `/opt/homebrew/bin`, `/usr/local/bin`, `/usr/bin` or `~/.local/bin`), never on
 `PATH`. modkit is run by its absolute path, and its binary is re-hashed against
 the install receipt right before each run.
+
+`toolchain install ichor` (or `copy-number`) installs the optional
+copy-number toolchain the same way: R 4.4, HMMcopy, `readCounter` and
+ichorCNA 0.5.1 from `traceback_runner/toolchain_locks/ichor-<platform>.lock`,
+plus Traceback's `runIchorCNA.R` driver, whose SHA-256 the lock pins. `doctor`
+shows it as `not set up (optional); next: traceback toolchain install ichor`
+until then; the fragment-length path never needs it. Expect several minutes and
+about 3 GB on disk: bioconda installs the hg19 and hg38 BSgenome data packages,
+downloaded from Bioconductor with md5 checks during the install, and the
+install refuses an environment that cannot load ichorCNA. `doctor --deep`
+re-hashes every installed file. A changed lock is a new directory; delete old
+ones by hand.
 
 `verify --trust-registry` checks a result bundle against the current trust of a
 protected result-trust registry (`docs/RESULT-TRUST-REGISTRY.md`). It needs the
@@ -516,6 +529,7 @@ says otherwise. Exit codes are listed under "Stable exit codes".
 | <a id="tbx-internal"></a>TBX-INTERNAL | browser 500 | An internal error occurred; nothing was changed | Retry; if it repeats, write a support bundle and report it |
 | <a id="tbx-out-001"></a>TBX-OUT-001 | none | Release gate only: an output contained a value the privacy rules forbid | Remove the forbidden value |
 | <a id="tbx-tool-001"></a>TBX-TOOL-001 | 3, or 6 at stage time | Missing (retryable; a `run --analysis` job whose stage finds the tool missing or damaged ends retryable, exit 6, and resumes once the tool is installed): the pinned tool is not installed in the per-user cache, micromamba was not found, the install failed (no network, or a package digest did not match the lock), or this platform has no lock (macOS arm64 and Linux x86-64 only). Wrong version or digest: the installed binary's sha256 differs from its install receipt, the receipt or package record names another version or package, the binary does not report the pinned version, or the committed lock file was edited | Missing: run `traceback toolchain install modkit` to see the plan, then add `--yes`. Wrong version or digest: run `traceback toolchain install modkit --yes`, which replaces a damaged install; for an edited lock file, reinstall traceback from a clean checkout |
+| <a id="tbx-tool-002"></a>TBX-TOOL-002 | 3, or 0 (doctor WARN) | The optional copy-number (ichorCNA) toolchain. Missing (retryable): not installed, micromamba not found, an install that stopped part-way or failed (no network, a package digest did not match the lock, a Bioconductor data-package download failed so ichorCNA cannot load), or no lock for this platform. Wrong version or digest: `readCounter`, `Rscript` or the driver differs from the install receipt or its package record, the receipt names another lock, or (`doctor --deep`) an installed file, the package set or a Bioconductor data package changed | Missing: run `traceback toolchain install ichor` to see the plan, then add `--yes` (needs the network). Wrong version or digest: run `traceback toolchain install ichor --yes`, which replaces a damaged install; for an edited lock or driver, reinstall traceback from a clean checkout. Fragment length never needs it |
 | <a id="operator-busy"></a>Operator busy | 3 | `A local action or unexpired worker lease is active`: another CLI mutation holds `R/.operator.lock` | Wait for it to finish, then rerun |
 
 ## Stable exit codes
