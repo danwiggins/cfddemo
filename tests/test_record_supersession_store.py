@@ -1861,6 +1861,50 @@ def test_timed_out_sqlite_worker_closes_late_connection_and_exits(
 
 
 @pytest.mark.skipif(sys.platform != "darwin", reason="Darwin worker contract")
+def test_store_finalized_on_open_worker_does_not_stall_the_open(
+    durable, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # Regression for the macOS CI flake "connection initialization timed
+    # out": the garbage collector ran a dropped store's __del__ on the open
+    # worker thread while the caller held _SQLITE_OPEN_LOCK and waited for
+    # that worker, so the open stalled until the timeout failed it.
+    linkage, ledger, _, _, _ = durable
+    victims = [RecordSupersessionStore(tmp_path / "victim", linkage_store=linkage)]
+    victim_descriptors = (victims[0]._database_fd, victims[0]._root_fd)
+    victim_identities = {
+        descriptor: (os.fstat(descriptor).st_dev, os.fstat(descriptor).st_ino)
+        for descriptor in victim_descriptors
+    }
+    finalized_on: list[str] = []
+    original_connect = sqlite3.connect
+
+    def connect_after_finalizing_victim(database, *args, **kwargs):
+        finalized_on.append(supersession_module.threading.current_thread().name)
+        victims.clear()  # drops the last reference: __del__ runs on this thread
+        return original_connect(database, *args, **kwargs)
+
+    monkeypatch.setattr(
+        supersession_module.sqlite3, "connect", connect_after_finalizing_victim
+    )
+    # Short budget so the pre-fix deadlock fails fast instead of after 10 s.
+    monkeypatch.setattr(supersession_module, "_SQLITE_WORKER_TIMEOUT_SECONDS", 2.0)
+    started = time.monotonic()
+    with ledger._connect() as connection:
+        assert connection.execute("SELECT 1").fetchone() == (1,)
+        assert set(victim_descriptors) <= set(
+            supersession_module._DEFERRED_DESCRIPTOR_CLOSES
+        )
+    assert time.monotonic() - started < 2.0
+    assert finalized_on == ["record-ledger-sqlite-open"]
+    # The next holder of the lock closes the handed-over descriptors.
+    ledger.close()
+    assert supersession_module._DEFERRED_DESCRIPTOR_CLOSES == []
+    for descriptor, identity in victim_identities.items():
+        metadata = supersession_module._safe_fstat(descriptor)
+        assert metadata is None or (metadata.st_dev, metadata.st_ino) != identity
+
+
+@pytest.mark.skipif(sys.platform != "darwin", reason="Darwin worker contract")
 def test_sqlite_worker_cleans_up_after_unexpected_base_exception(
     durable, monkeypatch: pytest.MonkeyPatch
 ) -> None:
