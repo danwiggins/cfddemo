@@ -225,6 +225,10 @@ def test_guide_minknow_batch_runs_verbatim_per_barcode(tmp_path: Path, aligner: 
                 contigs=contigs,
                 seed=seed * 10 + chunk,
             )
+    # A damaged chunk fails only its own barcode; the loop goes on.
+    damaged = run_dir / "bam_pass" / "barcode03" / "chunk_0.bam"
+    damaged.parent.mkdir(parents=True)
+    damaged.write_bytes(b"not a BAM")
     bin_dir = _fake_uv_bin(tmp_path)
     if aligner == "stub":
         stub = bin_dir / "minimap2"
@@ -256,7 +260,8 @@ def test_guide_minknow_batch_runs_verbatim_per_barcode(tmp_path: Path, aligner: 
     )
     out = completed.stdout
     assert completed.returncode == 0, out + completed.stderr
-    assert "FAILED" not in out, out
+    assert "FAILED barcode03" in out, out
+    assert "FAILED barcode01" not in out and "FAILED barcode02" not in out, out
     # One merged, aligned BAM per barcode; `unclassified` is never merged in.
     assert sorted(p.name for p in (tmp_path / "aligned").glob("*.sorted.bam")) == [
         "barcode01.sorted.bam",

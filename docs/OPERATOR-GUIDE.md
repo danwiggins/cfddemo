@@ -189,7 +189,8 @@ samples into one record. Leave out `bam_fail/` (failed reads; its chunks are
 often empty and give TBX-BAM-004) and `unclassified/`.
 
 The block below aligns and runs every barcode of one MinKNOW run, one after
-another. A failed barcode prints `FAILED` and the loop goes on. It uses
+another. A barcode whose merge, alignment, index or run fails prints
+`FAILED barcodeNN` and the loop goes on with the next one. It uses
 `FASTA` and `R` from the variables below, the `ref` ID from the journey, and
 two more variables:
 
@@ -206,14 +207,14 @@ The test suite runs this block verbatim on generated chunks
 mkdir -p "$ALIGNED"
 for d in "$MINKNOW_RUN"/bam_pass/barcode*/; do
   s="$(basename "$d")"
-  samtools cat -o "$ALIGNED/$s.bam" "$d"*.bam
-  samtools fastq -T MM,ML,MN "$ALIGNED/$s.bam" \
-    | minimap2 -ax map-ont -y "$FASTA" - \
-    | samtools sort -o "$ALIGNED/$s.sorted.bam"
-  samtools index "$ALIGNED/$s.sorted.bam"
-done
-for f in "$ALIGNED"/*.sorted.bam; do
-  uv run traceback run "$f" --reference ref --root "$R" || echo "FAILED $f"
+  { samtools cat -o "$ALIGNED/$s.bam" "$d"*.bam \
+    && (set -o pipefail
+        samtools fastq -T MM,ML,MN "$ALIGNED/$s.bam" \
+          | minimap2 -ax map-ont -y "$FASTA" - \
+          | samtools sort -o "$ALIGNED/$s.sorted.bam") \
+    && samtools index "$ALIGNED/$s.sorted.bam" \
+    && uv run traceback run "$ALIGNED/$s.sorted.bam" --reference ref --root "$R"
+  } || echo "FAILED $s"
 done
 for record in "$R"/records/*/; do
   uv run traceback catalog import "$record" --root "$R"
@@ -323,8 +324,8 @@ uv run traceback serve --root "$R"
 `traceback.cli-result.v2` object with `data_origin: "local_unqualified"`; the
 exit code is the same as in human output. `--json` output and the record never
 contain the FASTA or BAM path; human output names the FASTA in one place only,
-the alignment command `preflight --reference ID` prints for an unaligned BAM
-(`ALIGN_COMMAND`).
+the alignment command that `preflight --reference ID` (`ALIGN_COMMAND`) and
+`run --reference ID` (`FIX`) print for an unaligned BAM.
 
 ### Daily canary
 
