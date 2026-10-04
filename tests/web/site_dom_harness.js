@@ -128,6 +128,7 @@ const fakeFetch = async (target) => {
   const route = target.split("?")[0];
   const queue = scripted[route] || [{ status: 404, payload: { error: { code: "TBX-WEB-404" } } }];
   const next = queue.length > 1 ? queue.shift() : queue[0];
+  if (next.delayMs) await new Promise((resolve) => setTimeout(resolve, next.delayMs));
   return { ok: next.status >= 200 && next.status < 300, status: next.status, json: async () => next.payload };
 };
 let pending = 0;
@@ -233,7 +234,13 @@ const snapshot = (label) => ({
   await flush();
   const reports = [snapshot("start")];
   for (const step of scenario.steps || []) {
-    if (step.hash !== undefined) {
+    if (step.hashes) {
+      // Several route changes without waiting for responses in between.
+      for (const hash of step.hashes) {
+        window.location.hash = hash;
+        await new Promise((resolve) => setTimeout(resolve, 10));
+      }
+    } else if (step.hash !== undefined) {
       window.location.hash = step.hash;
     } else if (step.click) {
       const node = bySelector(step.click);

@@ -183,6 +183,8 @@ class RecordSummary(RunnerContract):
     preflight: str | None = None
     preflight_label: str | None = None
     preflight_warnings: int | None = None
+    warning_texts: tuple[str, ...] = ()
+    method_version: str | None = None
     imported_at: datetime | None = None
 
 
@@ -477,12 +479,18 @@ def _exclusions(measurement: FragmentMeasurementV2, min_mapq: int | None) -> tup
 def resolve_result_id(query_catalog: QueryCatalog, record_id: str) -> str:
     """Map a public record ID to its catalog result ID (exact match only)."""
 
+    from traceback_runner.local_authority import local_catalog_aliases
+
     if not RECORD_ID_PATTERN.fullmatch(record_id):
         raise RecordNotFound(record_id)
-    for ref, _ in _catalog_rows(query_catalog):
-        if ref.bundle_record_id == record_id:
-            return ref.result_id
-    raise RecordNotFound(record_id)
+    # Import gives every local record a deterministic, unique display alias;
+    # query by it (an exact, unbounded lookup), then require the record ID.
+    alias = local_catalog_aliases(record_id).display_alias
+    page = query_catalog(CatalogQuery(limit=10, display_alias=alias))
+    matches = [item.ref for item in page.results if item.ref.bundle_record_id == record_id]
+    if len(matches) != 1:
+        raise RecordNotFound(record_id)
+    return matches[0].result_id
 
 
 def _catalog_rows(query_catalog: QueryCatalog) -> list[tuple[object, bool]]:
@@ -607,6 +615,16 @@ def build_local_record_view(
         raise RecordUnavailable("record failed verification") from exc
 
 
+def _warning_texts(view: LocalRecordView) -> tuple[str, ...]:
+    texts = [
+        f"{check.code}: {check.summary or 'see the operator guide for this code'}"
+        for check in view.preflight.checks
+    ]
+    if view.preflight.origin != "job_store" and view.warnings:
+        texts.append("Reference matched by contig name and length only (stated in the signed record)")
+    return tuple(texts)
+
+
 def _summary(view: LocalRecordView) -> RecordSummary:
     preflight = view.preflight
     return RecordSummary(
@@ -622,6 +640,8 @@ def _summary(view: LocalRecordView) -> RecordSummary:
         preflight=preflight.outcome,
         preflight_label=copy_for("preflight", preflight.outcome)[0],
         preflight_warnings=view.warnings,
+        warning_texts=_warning_texts(view),
+        method_version=view.method_version,
         imported_at=view.imported_at,
     )
 

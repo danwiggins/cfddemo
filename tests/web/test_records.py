@@ -279,6 +279,8 @@ def _summary(record_id: str, *, status="verified", label=None, minute=0) -> dict
         "preflight": "warn" if verified else None,
         "preflight_label": "Preflight passed with warnings" if verified else None,
         "preflight_warnings": 1 if verified else None,
+        "warning_texts": ["TBX-BAM-002: BAM header lacks M5, AS."] if verified else [],
+        "method_version": "1.0.0-local-ref" if verified else None,
         "imported_at": f"2026-10-04T02:{minute:02d}:00Z" if verified else None,
     }
 
@@ -421,7 +423,7 @@ def test_eighty_character_label_and_no_free_text_inputs(tmp_path: Path) -> None:
     inputs = _nodes(report["view"], _tag("input"))
     assert all(node["attrs"]["type"] == "checkbox" for node in inputs)
     selects = _nodes(report["view"], _tag("select"))
-    assert [node["attrs"]["id"] for node in selects] == ["filter-reference", "filter-policy"]
+    assert [node["attrs"]["id"] for node in selects] == ["filter-method", "filter-policy"]
 
 
 @needs_node
@@ -544,6 +546,39 @@ def test_denominator_strip_reconciles_and_tokens_stay_in_exact_values(tmp_path: 
     rows = _nodes(_nodes(record, _attr("id", "states"))[0], _attr("data-axis"))
     assert [row["attrs"]["data-axis"] for row in rows] == list(RECORD_AXES)
     assert "How to read it (descriptive, not diagnostic)" in _text(record)
+
+
+@needs_node
+def test_a_slow_earlier_route_never_overwrites_the_current_one(tmp_path: Path) -> None:
+    reports = _run(tmp_path, {
+        "responses": {
+            "/api/v1/records": _ok(_listing(_summary(RID[0]), _summary(RID[1]))),
+            f"/api/v1/records/{RID[0]}": [{"status": 200, "payload": _view(RID[0], label="slow A"), "delayMs": 300}],
+            f"/api/v1/records/{RID[1]}": _ok(_view(RID[1], label="fast B")),
+        },
+        "steps": [{"hashes": [f"#/records/{RID[0]}", f"#/records/{RID[1]}"]}],
+    })
+    final = reports[1]
+    assert _text(_nodes(final["view"], _tag("h1"))[0]) == "fast B"
+    assert "slow A" not in _text(final["view"])
+
+
+@needs_node
+def test_row_warnings_expand_and_compare_ignores_rows_that_failed_later(tmp_path: Path) -> None:
+    first = _listing(*(_summary(rid, minute=i) for i, rid in enumerate(RID[:3])))
+    later = _listing(_summary(RID[0], minute=0), _summary(RID[1], minute=1),
+                     _summary(RID[2], status="failed_verification"))
+    reports = _run(tmp_path, {
+        "responses": {"/api/v1/records": [{"status": 200, "payload": first}, {"status": 200, "payload": later}]},
+        "steps": [{"check": RID[0]}, {"check": RID[1]}, {"check": RID[2]},
+                  {"click": {"id": "refresh"}}, {"click": {"id": "compare"}}],
+    })
+    details = _nodes(reports[0]["view"], _attr("class", "row-warnings"))
+    assert len(details) == 3 and "TBX-BAM-002" in _text(details[0])
+    after_refresh = reports[4]
+    assert not _nodes(after_refresh["view"], _attr("id", "compare"))[0].get("disabled")
+    assert json.loads(after_refresh["storage"]["traceback.compare-selection"]) == RID[:2]
+    assert reports[5]["dataset"]["view"] == "compare"
 
 
 @needs_node

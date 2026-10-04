@@ -41,6 +41,9 @@
   let jobs = null; // last jobs payload, or "unavailable"
   let currentRecord = null; // last record view payload
   let lastRoute = null;
+  // Each render takes a generation; a response for an older one is dropped,
+  // so a slow earlier route can never overwrite the current one.
+  let generation = 0;
 
   const el = (tag, text, attrs) => {
     const node = doc.createElement(tag);
@@ -191,7 +194,7 @@
     });
     const reason = el("span", "", { id: "compare-reason", role: "status", "aria-live": "polite", class: "help" });
     compare.addEventListener("click", () => {
-      const verified = (records ? records.records : []).filter((item) => selection.has(item.record_id));
+      const verified = (records ? records.records : []).filter((item) => item.status === "verified" && selection.has(item.record_id));
       if (verified.length !== 2) return;
       const [a, b] = verified; // list order is import order, so A is the earlier import
       window.location.hash = `#/compare?a=${a.record_id}&b=${b.record_id}`;
@@ -215,7 +218,7 @@
   const filterSelect = (id, label, values) => {
     const wrapper = el("label", label, { class: "filter" });
     const select = el("select", null, { id });
-    const all = el("option", label === "Reference" ? "All references" : "All policies", { value: "" });
+    const all = el("option", label === "Method version" ? "All method versions" : "All policies", { value: "" });
     select.append(all, ...values.map((value) => el("option", value, { value })));
     wrapper.append(select);
     return { wrapper, select };
@@ -274,14 +277,29 @@
         : item.preflight_label, ""],
       ["Imported", when(item.imported_at), ""],
     ];
-    cells.forEach(([label, value, cls]) => tr.append(el("td", value, { "data-label": label, class: cls })));
+    cells.forEach(([label, value, cls]) => {
+      const cell = el("td", null, { "data-label": label, class: cls });
+      if (label === "Preflight" && item.warning_texts && item.warning_texts.length) {
+        const details = el("details", null, { class: "row-warnings" });
+        details.append(el("summary", value));
+        const list = el("ul");
+        item.warning_texts.forEach((text) => list.append(el("li", text)));
+        details.append(list);
+        cell.append(details);
+      } else {
+        cell.textContent = value;
+      }
+      tr.append(cell);
+    });
     return tr;
   };
 
   const renderCatalog = async (focus) => {
     setState("catalog", "loading");
     live("Loading records…");
+    const mine = generation;
     const { status, payload } = await getJson("/api/v1/records");
+    if (mine !== generation) return;
     if (status === 401) { sessionEnded("catalog"); return; }
     const body = view();
     if (status !== 200 || !payload || !Array.isArray(payload.records)) {
@@ -298,7 +316,7 @@
     records = payload;
     renderJobs();
     const items = payload.records;
-    const known = new Set(items.map((item) => item.record_id));
+    const known = new Set(items.filter((item) => item.status === "verified").map((item) => item.record_id));
     selection = new Set([...selection].filter((id) => known.has(id)));
     saveSelection();
     const nodes = [heading("Records")];
@@ -313,10 +331,10 @@
     }
     const verified = items.filter((item) => item.status === "verified");
     nodes.push(compareControls());
-    const references = [...new Set(verified.map((item) => item.reference_id))].sort();
+    const versions = [...new Set(verified.map((item) => item.method_version))].sort();
     const policies = [...new Set(verified.map((item) => item.policy_label))].sort();
     const filters = el("div", null, { class: "filters" });
-    const reference = filterSelect("filter-reference", "Reference", references);
+    const reference = filterSelect("filter-method", "Method version", versions);
     const policy = filterSelect("filter-policy", "Analysis policy", policies);
     filters.append(reference.wrapper, policy.wrapper);
     nodes.push(filters);
@@ -338,7 +356,7 @@
     const applyFilters = () => {
       rows.forEach(([item, row]) => {
         row.hidden = Boolean(
-          (reference.select.value && item.reference_id !== reference.select.value)
+          (reference.select.value && item.method_version !== reference.select.value)
           || (policy.select.value && item.policy_label !== policy.select.value),
         );
       });
@@ -557,7 +575,9 @@
   const renderRecord = async (recordId, focus) => {
     setState("record", "loading");
     live("Loading record…");
+    const mine = generation;
     const { status, payload } = await getJson(`/api/v1/records/${recordId}`);
+    if (mine !== generation) return;
     if (status === 401) { sessionEnded("record"); return; }
     const body = view();
     const back = el("p", null, { class: "back" });
@@ -608,7 +628,9 @@
     setState("compare", "loading");
     live("Loading both records…");
     if (!records) {
+      const mine = generation;
       const { status, payload } = await getJson("/api/v1/records");
+      if (mine !== generation) return;
       if (status === 401) { sessionEnded("compare"); return; }
       if (status === 200 && payload) records = payload;
     }
@@ -639,6 +661,7 @@
 
   // --- router -------------------------------------------------------------------
   const render = async ({ focus }) => {
+    generation += 1;
     const hash = window.location.hash || "#/";
     const record = RECORD_ROUTE.exec(hash);
     const compare = COMPARE_ROUTE.exec(hash);
