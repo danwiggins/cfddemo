@@ -604,6 +604,7 @@ class LocalExplorer:
     source: IntegratedExplorerSource
     catalog: ResultCatalog
     skipped: int
+    views: int = 0  # explorer artifacts loaded and paired with their binding
 
 
 @contextmanager
@@ -637,6 +638,7 @@ def open_local_explorer(root: Path) -> Iterator[LocalExplorer | None]:
                 ),
                 catalog=catalog,
                 skipped=loaded.skipped,
+                views=len(loaded.records),
             )
         finally:
             catalog.close()

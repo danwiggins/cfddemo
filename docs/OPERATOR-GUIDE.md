@@ -1,7 +1,8 @@
-# Traceback synthetic operator guide
+# Traceback operator guide
 
 Status: first development wave; synthetic data, plus one unqualified local-BAM
-path (see "Real local BAM (unqualified)").
+path (see "Real local BAM (unqualified)"). Nothing here is qualified or for
+clinical use.
 
 This guide covers the local CLI implemented for the synthetic vertical slice.
 It does not qualify hardware, MinKNOW, Dorado, a wet-lab protocol, a reference,
@@ -16,7 +17,7 @@ account, cloud credential, network connection, or genomic input.
 traceback doctor
 traceback demo --root ./traceback-synthetic
 traceback verify ./traceback-synthetic/records/<bundle> \
-  --trust-store ./traceback-synthetic/trust
+  --trust-store ./traceback-synthetic/trust/development-result-trust.json
 ```
 
 `demo` prints the exact bundle and trust-store locations to use. The command
@@ -32,11 +33,14 @@ the first-wave validation and offline signature checks. Nothing was uploaded.
 ## Commands
 
 ```text
-traceback doctor [--json]
+traceback doctor [--root ROOT] [--deep] [--json]
 traceback protocol show [--json]
 traceback demo [--root ROOT] [--json]
-traceback preflight INPUT [--root ROOT] [--json]
-traceback run INPUT [--json]
+traceback reference register --fasta FASTA --id ID [--assembly NAME] [--root ROOT] [--json]
+traceback preflight INPUT [--reference ID] [--root ROOT] [--json]
+traceback run INPUT --reference ID [--index INDEX] [--root ROOT] [--json]
+traceback catalog import RECORD_DIR [--root ROOT] [--json]
+traceback serve [--root ROOT] [--ipv6]
 traceback status JOB_ID [--root ROOT] [--json]
 traceback status JOB_ID [--root ROOT] --trust-registry REGISTRY_ROOT \
   --trust-registry-id ID --trust-registry-epoch EPOCH \
@@ -47,6 +51,7 @@ traceback resume JOB_ID [--root ROOT] [--json]
 traceback retry JOB_ID [--root ROOT] [--json]
 traceback inspect BUNDLE [--json]
 traceback verify BUNDLE --trust-store TRUST_STORE [--json]
+traceback verify RECORD_ID --root ROOT [--json]
 traceback verify BUNDLE --trust-registry REGISTRY_ROOT \
   --trust-registry-id ID --trust-registry-epoch EPOCH \
   --trust-registry-head HEAD [--json]
@@ -81,8 +86,9 @@ the `trust_source` it used, and always exits 0 for a known job:
 | `no_record` | The job has no complete signed record yet. State is `not_verified`. |
 
 `preflight` is technical inspection only. A passing report does not approve
-real-data execution. `run` rejects real-data execution in this wave rather than
-simulating success. File-selection arguments may be local paths; JSON output,
+real-data execution. `run` without `--reference` refuses (TBX-RUN-003);
+`run --reference` makes an unqualified local record (see "Real local BAM
+(unqualified)"). File-selection arguments may be local paths; JSON output,
 support bundles, and exported record content do not include them.
 
 ## Offline synthetic assets
@@ -116,49 +122,171 @@ installation never authorizes execution, real input, or a qualification probe.
 
 ## Real local BAM (unqualified)
 
-Milestone 1 of the golden path (`docs/GOLDEN-PATH-MVP-SLICE.md`). Every record
-made this way is unqualified, local, not for clinical use, and signed with a
-development key only. Nothing is uploaded. B8 (Milestone 2) extends this
-section with catalog import and `serve`.
+The golden path (`docs/GOLDEN-PATH-MVP-SLICE.md`) takes one local BAM through a
+locked fragment-length measurement to a signed record, a local catalog and a
+loopback browser view. Every record made this way is unqualified, local, not
+for clinical use, and signed with a development key only. Nothing is uploaded
+and nothing here is a qualified method, reference or workflow.
 
-Prerequisites: `uv sync`; a FASTA with its `.fai` (`samtools faidx`); a
-coordinate-sorted BAM with its `.bai` (`samtools index`); free space on ROOT's
-volume of at least twice the BAM plus index (the input is sealed by copy).
+Two rules apply before any real data enters this path:
+
+- Write down the source BAM's provenance and consent before any record from it
+  is shown to anyone outside the team.
+- No donor data until the pilot security items H1 and H6-min have landed
+  (`docs/PILOT-SECURITY-HARDENING.md`).
+
+### Prerequisites
+
+- `uv sync` in this repository (commands below run as `uv run traceback ...`).
+- `brew install samtools` (only to index your inputs; `doctor` warns if absent).
+- An uncompressed FASTA with its `.fai` beside it (`samtools faidx REF.fa`).
+- A coordinate-sorted BAM with its `.bai` beside it (`samtools index SAMPLE.bam`).
+- Free space on ROOT's volume of at least twice the BAM plus index: `run`
+  seals a copy of the input under ROOT.
+
+Set three variables. ROOT (`R`) holds everything this path writes; use a fresh
+directory per experiment.
 
 ```bash
-uv run traceback reference register --fasta REF.fa --id ref --root R
-uv run traceback preflight SAMPLE.bam --reference ref --root R
-uv run traceback run SAMPLE.bam --reference ref --root R
-uv run traceback verify RECORD_ID --root R
+FASTA=/path/to/REF.fa          # with REF.fa.fai beside it
+BAM=/path/to/SAMPLE.bam        # coordinate-sorted, with SAMPLE.bam.bai beside it
+R="$HOME/traceback-local"      # ROOT
 ```
 
-`run` prints the locked policy (`aligned-reference-span-local-v2`: chr1-chr22,
-chrX, chrY when registered, else every registered contig; MAPQ >= 20; primary,
-mapped, non-duplicate, non-QC-fail alignments; bins 0, 100, 150, 200, 300, 500,
-1000 bp), one line per stage, then the absolute record path, the absolute trust
-store path and the exact `verify` command. Open `R/records/<record>/report.html`
-for the local report. `--json` results use `traceback.cli-result.v2` with
-`data_origin: "local_unqualified"`. Re-running the same BAM on the same ROOT
-returns the existing record.
+### Copy-paste journey
 
-Without `--assembly`, a registration's assembly label is its ID; it is never
-shown as an assembly name. A BAM header without `M5`/`AS` matches by contig name
-and length only (TBX-BAM-002 WARN); the report says so.
+The test suite runs this block verbatim on a generated FASTA and BAM
+(`tests/test_operator_guide.py`), so it stays in step with the CLI.
 
-| Code | Meaning | Fix |
-|---|---|---|
-| TBX-RUN-003 | `run` without `--reference` | Register the FASTA, then pass `--reference ID` |
-| TBX-RUN-004 | Free space under 2x the input (retryable); reports required and available bytes | Free space or choose a `--root` on a larger volume |
-| TBX-RUN-005 | No complete eligible denominator; the job fails, no record | Check contig names against the policy, MAPQ 20, duplicate/secondary/supplementary/QC-fail flags |
-| TBX-BAM-002 | Preflight blocked the sealed copy (reference mismatch); the job fails, no record | Realign against the registered reference |
-| TBX-REF-001..003 | Reference registration or lookup problems | See the `fix` field |
+<!-- golden-path-journey:begin -->
+```bash
+uv run traceback doctor --root "$R"
+uv run traceback reference register --fasta "$FASTA" --id ref --root "$R"
+uv run traceback preflight "$BAM" --reference ref --root "$R"
+uv run traceback run "$BAM" --reference ref --root "$R"
+# A fresh ROOT holds exactly one record; otherwise copy the RECORD_ID run printed.
+RECORD_ID="$(ls "$R/records")"
+uv run traceback verify "$RECORD_ID" --root "$R"
+uv run traceback catalog import "$R/records/$RECORD_ID" --root "$R"
+```
+<!-- golden-path-journey:end -->
 
-Cleanup: sealed records are read-only, so remove a root with
-`chmod -R u+w R && rm -rf R`.
+Then serve the catalog to your own browser (it stays in the foreground):
+
+```bash
+uv run traceback serve --root "$R"
+```
+
+### What each step prints
+
+1. **`doctor`** prints the resolved absolute ROOT and checks Python, samtools,
+   registered references, free disk and trust. `PASS ... (1 warning)` is normal
+   on a fresh ROOT. It exits 3 only when the local runtime cannot run.
+2. **`reference register`** reads the FASTA once (SHA-256 and per-contig `M5`;
+   minutes for a full human reference) and prints
+   `PASS  Reference ref registered (N contigs); unqualified, local`. The
+   registration is write-once. Add `--assembly NAME` only if the BAM's `@SQ AS`
+   should be compared; without it the ID is used as a label and never shown as
+   an assembly name.
+3. **`preflight`** inspects the BAM against the registered reference and
+   processes nothing. Its overall outcome is the worst check outcome:
+   - `pass`: every check passed.
+   - `warn`: the BAM header has no `M5`/`AS`, so it matched the reference by
+     contig name and length only (TBX-BAM-002 WARN). The run continues and
+     the report says `name_and_length_only`.
+   - `partial`: modification tags (`MM`/`ML`) are absent or contradictory
+     (TBX-MOD-001/002). Fragment measurement continues; only future
+     methylation work is ineligible. Most aligned BAMs without
+     modification calls are `partial`.
+   - `blocked`: a BAM or reference check failed (TBX-BAM-001/002). `run` will
+     refuse; see the code in the table below.
+4. **`run`** prints the locked policy (`aligned-reference-span-local-v2`:
+   chr1-chr22, chrX, chrY when registered, else every registered contig;
+   MAPQ >= 20; primary, mapped, non-duplicate, non-QC-fail alignments; bins 0,
+   100, 150, 200, 300, 500, 1000 bp), one `STAGE` line per stage (seal,
+   preflight, measure, sign), then
+   `PASS  Signed local record ready (development trust, unqualified, not for clinical use)`
+   with `RECORD_ID`, `RECORDS_SCANNED`, `ELIGIBLE_ALIGNMENTS`, the absolute
+   `REPORT_PATH` and the next commands. Open `report.html` for the local
+   report. Re-running the same BAM on the same ROOT returns the existing
+   record.
+5. **`verify`** prints
+   `PASS  Signed local record verified with development trust` (exit 0).
+   `verify RECORD_ID --root R` uses `R/trust/development-result-trust.json`;
+   the explicit form is
+   `verify "$R/records/$RECORD_ID" --trust-store "$R/trust/development-result-trust.json"`.
+6. **`catalog import`** adds the record to `R/catalog` as
+   `QUALIFICATION_STATE  development_unqualified` with
+   `CURRENT_PROVIDER_ELIGIBLE  False`, and saves its explorer view under
+   `R/explorer`. Re-importing is a no-op with the same `RESULT_ID`.
+7. **`serve`** prints a one-use operator link on its first line, for example
+   `http://127.0.0.1:PORT/#bootstrap=...`. Open it in a browser on this machine
+   within 60 seconds; do not share it (it is a bearer secret until used). The
+   next lines say how many cataloged record views were loaded and how many
+   invalid explorer files were skipped. In a terminal, Enter prints a fresh
+   one-use link (also a bearer secret: do not paste terminal output into
+   chats, tickets or logs); Ctrl-C stops the server. With stdin closed or redirected (for example
+   in the background), only Ctrl-C or SIGTERM stops it. On stop it prints
+   `Stopped; the web lock for ROOT is released.` The page shows the jobs and
+   the catalog; records stay unqualified and local. Explorer views are loaded
+   at start, so restart `serve` after importing more records.
+
+`--json` on every command except `serve` emits one canonical
+`traceback.cli-result.v2` object with `data_origin: "local_unqualified"`; the
+exit code is the same as in human output. Command output and the record never
+contain the FASTA or BAM path.
+
+### Daily canary
 
 To rerun this path daily against the same FASTA and BAM and compare the counts
-with a local baseline, use the golden-path canary (`docs/CANARIES.md`). Its
-baseline and logs stay on the workstation.
+with a local baseline, record a baseline once and install the launchd job
+(`docs/CANARIES.md`). The baseline and logs stay on the workstation.
+
+```bash
+uv run python scripts/canary/real_bam_canary.py --fasta "$FASTA" --bam "$BAM" \
+  --record-baseline --repeat 2
+```
+
+### Cleanup
+
+Sealed records are read-only. Stop `serve` first, then remove the root:
+
+```bash
+chmod -R u+w "$R" && rm -rf "$R"
+```
+
+### Troubleshooting
+
+Every refusal prints `CODE`, `CAUSE`, `FIX`, `RETRYABLE` and `DOCS`; `DOCS`
+points at the row below. A refusal changes nothing under ROOT unless the row
+says otherwise. Exit codes are listed under "Stable exit codes".
+
+| Code | Exit | Cause | Fix |
+|---|---:|---|---|
+| <a id="tbx-ref-001"></a>TBX-REF-001 | 3 or 4 | FASTA missing (4), gzip-compressed, without a `.fai`, or the `.fai` contradicts the FASTA | Decompress, run `samtools faidx REF.fa`, then register again |
+| <a id="tbx-ref-002"></a>TBX-REF-002 | 3 | A different FASTA is already registered under this `--id` (registrations are write-once) | Keep the existing registration, or register under a new `--id` |
+| <a id="tbx-ref-003"></a>TBX-REF-003 | 3 | The reference ID is not registered under this ROOT, or its registration files are damaged | Run `reference register` first (check `--root`); remove a damaged `R/references/ID` and register again |
+| <a id="tbx-bam-001"></a>TBX-BAM-001 | 3 | BAM or index unreadable, truncated, not coordinate-sorted, or the index contradicts the BAM; or `--index` is not a `.bai`/`.csi` | `samtools sort`, then `samtools index`, and rerun |
+| <a id="tbx-bam-002"></a>TBX-BAM-002 | 0 (WARN) or 3 | WARN: header has no `M5`/`AS`, matched by name and length only. BLOCKED: a contig name, length, order, `M5` or `AS` differs from the registered reference | WARN needs no action (optionally `samtools reheader` with `M5`/`AS`). BLOCKED: realign against the registered FASTA, or register the FASTA the BAM was aligned to |
+| <a id="tbx-mod-001"></a>TBX-MOD-001 | 0 (PARTIAL) | No modification provenance or `MM`/`ML` tags | None for fragment length; re-basecall with modification calls for future methylation work |
+| <a id="tbx-mod-002"></a>TBX-MOD-002 | 0 (PARTIAL) | Sampled modification tags are structurally contradictory | As TBX-MOD-001 |
+| <a id="tbx-run-003"></a>TBX-RUN-003 | 3 | `run` without `--reference` | Register the FASTA, then pass `--reference ID`; `traceback demo` is the synthetic workflow |
+| <a id="tbx-run-004"></a>TBX-RUN-004 | 3 | Free space under 2x the input (retryable; reports required and available bytes), or ROOT's volume filled during the run; no record | Free space or use a `--root` on a larger volume, then run again under a fresh ROOT |
+| <a id="tbx-run-005"></a>TBX-RUN-005 | 3 | No complete eligible denominator: no alignment passed the locked policy; the job fails, no record | Check contig names against the policy (chr1-chr22, chrX, chrY), MAPQ 20, and duplicate/secondary/supplementary/QC-fail flags |
+| <a id="tbx-run-006"></a>TBX-RUN-006 | 3 | `R/trust/provenance-hmac.key` is not a private 32-byte file (edited, truncated, replaced, or readable by others) | Restore it from a backup with mode 0600, or start a fresh ROOT |
+| <a id="tbx-run-007"></a>TBX-RUN-007 | 3 | `R/trust/development-local-signing.key` is not a private 32-byte file | Restore it from a backup with mode 0600, or start a fresh ROOT |
+| <a id="tbx-cat-001"></a>TBX-CAT-001 | 3 | The path is not a verifiable local record (not a `run` record, not signed by this ROOT's key, or damaged); no catalog row | Pass `R/records/RECORD_ID` from `run`, and check it with `traceback verify RECORD_ID --root R` |
+| <a id="tbx-cat-002"></a>TBX-CAT-002 | 3 | The registered reference ID fails the explorer's public-text rules (for example `patient-id`); no catalog row | Register the FASTA again under a neutral ID (for example `hg38`) and rerun |
+| <a id="tbx-auth-local-001"></a>TBX-AUTH-LOCAL-001 | 3 | `R/authority` is missing, not private, or a store fails its pinned SHA-256 or replay check | Restore `R/authority` from a backup, or remove `R/authority` and `R/catalog` together and import the records again |
+| <a id="tbx-auth-local-002"></a>TBX-AUTH-LOCAL-002 | 3 | `R/trust/result-trust-registry` or its `.pin.json` is missing or does not open at its pin | Remove `R/trust/result-trust-registry` and its `.pin.json`, then import again (the registry mirrors `development-result-trust.json`) |
+| <a id="tbx-job-001"></a>TBX-JOB-001 | 6 | The local run failed without a record for an unexpected reason | `traceback status JOB_ID --root R` and `traceback logs JOB_ID --root R`, fix the stated cause, then `retry` and `resume` |
+| <a id="tbx-serve-001"></a>TBX-SERVE-001 | 4 | `serve`: no `R/runner/runner.sqlite3` (wrong `--root`, or no run yet); nothing started | Run `traceback run ... --root R` first, or pass the right `--root` |
+| <a id="tbx-serve-002"></a>TBX-SERVE-002 | 4 | `serve`: no `R/catalog`: no record imported; nothing started | `traceback catalog import R/records/RECORD_ID --root R` first |
+| <a id="tbx-serve-003"></a>TBX-SERVE-003 | 3 | `serve` could not start its listener. `local web service is already running`: another `serve` holds this ROOT's web lock. `local web startup lock is busy` (retryable): another local web service was starting at the same moment. Other messages: `R/web` or the temporary directory is not private | Already running: use that service, or stop it (Ctrl-C in its terminal) and start again. Busy: wait a few seconds and retry. Otherwise make `R` and `R/web` owned by you, not group/other-writable |
+| <a id="tbx-serve-004"></a>TBX-SERVE-004 | 3 | `serve` stopped itself: a security check of the running service failed (its state directory or listener changed) | Restart `traceback serve --root R` |
+| <a id="tbx-auth-001"></a>TBX-AUTH-001 | browser 401 | The browser session expired (8 h), was idle for 20 min, or was logged out | Press Enter in `serve`'s terminal for a fresh link (or restart `serve`) |
+| <a id="tbx-auth-007"></a>TBX-AUTH-007 | browser 403 | A reader session asked for an operator route (jobs or explorer) | Use the operator link that `serve` prints; reader links never reach the explorer |
+| <a id="operator-busy"></a>Operator busy | 3 | `A local action or unexpired worker lease is active`: another CLI mutation holds `R/.operator.lock` | Wait for it to finish, then rerun |
 
 ## Stable exit codes
 

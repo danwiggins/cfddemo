@@ -131,6 +131,16 @@ Acceptance:
 5. Revoking the bound grant, then a longitudinal GET, gives 403 `TBX-READER-DENIED`. A following `POST /api/v1/session/validate` on the same cookie gives 401 `TBX-AUTH-001`.
 6. Existing `tests/web/` pass unchanged, except tests that asserted the burn-on-any-attempt behaviour; those are updated with a comment citing H1.
 
+Note (2026-10-03, golden-path B6, taste T2): `traceback serve --root ROOT` adds a
+second launch path and no reader exposure. It is operator-only: it starts the
+same B01 loopback service (`RunningLocalWebService.start`) with the runner
+store and `open_local_explorer(ROOT)`, prints only plain (operator)
+bootstrap links, and passes no `reader_registry`, so it issues no reader link,
+the reader-launch route answers not found and no longitudinal source is wired.
+The H1 route table is unchanged: a reader session on that server still gets
+403 `TBX-AUTH-007` on the jobs and explorer routes (`tests/web/test_serve.py`).
+`traceback reader launch` keeps `explorer=None`.
+
 ### H2 Trust path retirement and a read-only trust handle (M)
 
 - `traceback status`: the JSON field `verified` becomes a tri-state string: `"verified"`, `"not_verified"` or `"unknown"`. The text output prints the same word. The exit code stays 0 for all three, because `status` reports state and doesn't gate it; nonzero stays reserved for an unknown job, as today.
