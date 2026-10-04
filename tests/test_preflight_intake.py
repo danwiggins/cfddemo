@@ -316,6 +316,14 @@ def test_other_build_lengths_print_diff_without_reheader_hint(tmp_path: Path) ->
     assert "different reference" in check.remediation
 
 
+def test_renamed_contigs_with_other_lengths_get_no_reheader_hint(tmp_path: Path) -> None:
+    grch37_no_chr = [("1", 249_250_621), ("2", 243_199_373), ("3", 198_022_430)]
+    bam, index = _aligned_bam(tmp_path, grch37_no_chr)
+    report = validate_bam_snapshot(bam, index, _reference(*_HG38_LIKE), LOCAL_POLICY)
+    (check,) = [c for c in report.checks if c.code == "TBX-BAM-002"]
+    assert "reheader" not in check.remediation
+
+
 def test_missing_contig_shows_dash_and_total_count(tmp_path: Path) -> None:
     extra = [*_HG38_LIKE, ("chr4", 190_214_555), ("chr5", 181_538_259), ("chrX", 1)]
     bam, index = _aligned_bam(tmp_path, _HG38_LIKE[:2])
