@@ -70,6 +70,32 @@ PROBLEM_TABLE: dict[str, ProblemText] = {
         "Add --reference ID (the problem lists the registered IDs); if ROOT/references "
         "could not be read, check it with traceback doctor",
     ),
+    # Method assets (traceback method-asset)
+    "TBX-ASSET-001": ProblemText(
+        "A different file (other bytes or another location) is already registered under "
+        "this asset ID, or the ID is registered as another kind",
+        "Keep the existing registration, or register the new file under a new --id",
+    ),
+    "TBX-ASSET-002": ProblemText(
+        "A registered asset file changed since registration (its SHA-256 or size differs), "
+        "or a job's own copy of it was changed",
+        "Restore the original file; to use the new file, register it under a new --id",
+    ),
+    "TBX-ASSET-003": ProblemText(
+        "The asset file is missing or unreadable, or a --from-dir directory lacks one of "
+        "the three Loyfer files",
+        "Restore the file at its registered location, or pass the right --file or --from-dir",
+    ),
+    "TBX-ASSET-004": ProblemText(
+        "The asset ID is not registered under this ROOT, or its registration is damaged",
+        "Run the traceback method-asset register command the problem prints (check --root)",
+    ),
+    "TBX-ASSET-005": ProblemText(
+        "The analysis's own parser for this kind rejects the file, or a line or the file "
+        "is implausibly large; nothing was registered. For ichor-pon only the envelope is "
+        "checked; readRDS validates the panel when the analysis runs",
+        "Pass the unmodified file of the stated --kind",
+    ),
     "TBX-INTERNAL-001": ProblemText(
         "Preflight stopped on an unexpected internal error, not a BAM read or format error",
         "Retrying will not change it. From run: traceback support-bundle JOB_ID --output "

@@ -254,6 +254,11 @@ _METHOD_VERSION: dict[str, Copy] = {
 # One row per problem code a job can stop on, shown on its row in the jobs
 # disclosure (code and label).  The cause and fix stay in traceback logs.
 _JOB_PROBLEM: dict[str, Copy] = {
+    "TBX-ASSET-001": ("Asset ID already used", "A different file, or another kind, is already registered under this asset ID."),
+    "TBX-ASSET-002": ("Asset file changed", "A registered asset file, or a job's copy of it, changed since registration."),
+    "TBX-ASSET-003": ("Asset file missing", "A registered asset file is missing or unreadable."),
+    "TBX-ASSET-004": ("Asset not registered", "The asset the analysis needs is not registered under this ROOT."),
+    "TBX-ASSET-005": ("Asset file rejected", "The analysis's own parser rejected the asset file; nothing was registered."),
     "TBX-REF-001": ("Reference FASTA unusable", "The registered FASTA is missing, compressed, or its index contradicts it."),
     "TBX-REF-003": ("Reference not registered", "The reference ID is not registered in this ROOT, or its registration is damaged."),
     "TBX-BAM-001": ("BAM or index unreadable", "The BAM or its index is unreadable, truncated, not coordinate-sorted, or contradicts the other."),

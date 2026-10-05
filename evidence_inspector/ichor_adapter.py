@@ -12,6 +12,7 @@ import csv
 import hashlib
 import json
 import math
+import re
 import stat
 from collections.abc import Iterable, Sequence
 from enum import StrEnum
@@ -234,8 +235,36 @@ class ReferenceFastaBinding(StrictModel):
     declared_license_or_terms: str = Field(min_length=1, max_length=512)
 
 
+WigRole = Literal["raw_counts_wig", "gc_wig", "map_wig"]
+
+
+def check_wig_grid(
+    role: WigRole,
+    *,
+    span_bp: int,
+    step_bp: int,
+    bin_size_bp: int,
+    canonical_values: Sequence[float] | None,
+) -> None:
+    """The v1 WIG rules shared by :class:`WigGridBinding` and the file parser.
+
+    Span, step and bin size agree.  The mappability WIG carries replayable
+    values within zero and one; the GC (and raw-count) WIG binds none.
+    """
+
+    if not span_bp == step_bp == bin_size_bp:
+        raise ValueError("v1 WIG binding requires span, step, and bin size to agree")
+    if role == "map_wig":
+        if canonical_values is None:
+            raise ValueError("mappability WIG requires replayable canonical values")
+        if any(not 0 <= value <= 1 for value in canonical_values):
+            raise ValueError("mappability values must be within zero and one")
+    elif canonical_values is not None:
+        raise ValueError("only the mappability WIG binds canonical values in v1")
+
+
 class WigGridBinding(StrictModel):
-    role: Literal["raw_counts_wig", "gc_wig", "map_wig"]
+    role: WigRole
     identity: ArtifactIdentity
     assembly: Identifier
     contig_dictionary_sha256: Sha256
@@ -255,22 +284,21 @@ class WigGridBinding(StrictModel):
 
     @model_validator(mode="after")
     def fixed_width(self) -> WigGridBinding:
-        if not self.span_bp == self.step_bp == self.bin_size_bp:
-            raise ValueError(
-                "v1 WIG binding requires span, step, and bin size to agree"
-            )
         has_values = self.canonical_values is not None
         if has_values != (self.canonical_values_sha256 is not None):
             raise ValueError("canonical WIG values require their exact digest")
-        if self.role == "map_wig":
-            if self.canonical_values is None:
-                raise ValueError("mappability WIG requires replayable canonical values")
-            if any(not 0 <= value <= 1 for value in self.canonical_values):
-                raise ValueError("mappability values must be within zero and one")
-            if _canonical_sha256(self.canonical_values) != self.canonical_values_sha256:
-                raise ValueError("canonical mappability value digest mismatch")
-        elif has_values:
-            raise ValueError("only the mappability WIG binds canonical values in v1")
+        check_wig_grid(
+            self.role,
+            span_bp=self.span_bp,
+            step_bp=self.step_bp,
+            bin_size_bp=self.bin_size_bp,
+            canonical_values=self.canonical_values,
+        )
+        if (
+            self.canonical_values is not None
+            and _canonical_sha256(self.canonical_values) != self.canonical_values_sha256
+        ):
+            raise ValueError("canonical mappability value digest mismatch")
         return self
 
 
@@ -1132,25 +1160,62 @@ def _integer(value: str, label: str) -> int:
     return int(parsed)
 
 
-def validate_centromere_table(
-    path: Path,
-    binding: CentromereTableBinding,
-) -> tuple[CentromereInterval, ...]:
-    """Validate the pinned headered table and replay its GRanges conversion."""
+# ichorCNA reads coordinates as R integers (``as.integer``): plain decimal
+# digits, at most .Machine$integer.max.
+R_INTEGER_MAX = 2**31 - 1
+_R_DECIMAL = re.compile(r"[0-9]{1,10}")
+
+
+# A plain decimal number: a strict subset of what R's ``as.numeric`` reads,
+# so a value accepted here is never NA in R (no "_", hex, "NA" or "Inf").
+_R_DECIMAL_NUMBER = re.compile(r"-?(?:[0-9]+(?:\.[0-9]*)?|\.[0-9]+)(?:[eE][-+]?[0-9]{1,3})?")
+# Values read.delim treats as missing (its default na.strings).
+_R_NA_STRINGS = frozenset({"NA"})
+
+
+def _r_number(value: str, label: str) -> float:
+    if not _R_DECIMAL_NUMBER.fullmatch(value):
+        raise IchorOutputError(f"{label} is not a plain decimal number")
+    return _finite(value, label)
+
+
+def _r_integer(value: str | None, label: str) -> int:
+    if value is None or not _R_DECIMAL.fullmatch(value) or int(value) > R_INTEGER_MAX:
+        raise IchorOutputError(f"{label} is not an R integer (plain digits, at most 2^31-1)")
+    return int(value)
+
+
+CENTROMERE_COLUMNS = ("Chr", "Start", "End", "GapType")
+CENTROMERE_GAP_TYPE = "centromere"
+
+
+def parse_centromere_table(path: Path) -> tuple[CentromereInterval, ...]:
+    """Parse the headered ichorCNA centromere table into zero-based intervals.
+
+    The one parser of this file: :func:`validate_centromere_table` and
+    method-asset registration (``traceback_runner.references``) both call it.
+    One-based closed ``Start``/``End`` become zero-based half-open intervals.
+    """
 
     _safe_output(path)
     try:
         with path.open("r", encoding="utf-8", newline="") as stream:
             reader = csv.DictReader(stream, delimiter="\t")
-            if tuple(reader.fieldnames or ()) != binding.required_columns:
+            if tuple(reader.fieldnames or ()) != CENTROMERE_COLUMNS:
                 raise IchorOutputError("centromere table columns are invalid")
             intervals: list[CentromereInterval] = []
-            for row in reader:
-                if row["GapType"] != binding.required_gap_type:
+            for row_number, row in enumerate(reader, start=1):
+                if row_number > MAX_ROWS:
+                    raise IchorOutputError("centromere table has too many rows")
+                if None in row or any(value is None for value in row.values()):
+                    raise IchorOutputError("centromere table contains a malformed row")
+                if row["GapType"] != CENTROMERE_GAP_TYPE:
                     raise IchorOutputError(
                         "centromere table contains an unsupported gap type"
                     )
-                start_one_based = _integer(row["Start"], "centromere start")
+                if row["Chr"] in _R_NA_STRINGS:
+                    raise IchorOutputError("centromere chromosome is missing (NA)")
+                start_one_based = _r_integer(row["Start"], "centromere start")
                 if start_one_based <= 0:
                     raise IchorOutputError(
                         "centromere start must be one-based positive"
@@ -1159,19 +1224,141 @@ def validate_centromere_table(
                     CentromereInterval(
                         contig=row["Chr"],
                         start=start_one_based - 1,
-                        end=_integer(row["End"], "centromere end"),
+                        end=_r_integer(row["End"], "centromere end"),
                     )
                 )
     except IchorOutputError:
         raise
-    except (UnicodeError, OSError, csv.Error, KeyError):
+    except (UnicodeError, OSError, csv.Error, KeyError, ValidationError):
         raise IchorOutputError("centromere table could not be parsed") from None
     parsed = tuple(intervals)
     if not parsed:
         raise IchorOutputError("centromere table is empty")
+    keys = [(row.contig, row.start, row.end) for row in parsed]
+    if len(keys) != len(set(keys)):
+        raise IchorOutputError("centromere table repeats an interval")
+    return parsed
+
+
+def validate_centromere_table(
+    path: Path,
+    binding: CentromereTableBinding,
+) -> tuple[CentromereInterval, ...]:
+    """Validate the pinned headered table and replay its GRanges conversion."""
+
+    if (
+        binding.required_columns != CENTROMERE_COLUMNS
+        or binding.required_gap_type != CENTROMERE_GAP_TYPE
+    ):
+        raise IchorOutputError("centromere binding names an unsupported table layout")
+    parsed = parse_centromere_table(path)
     if parsed != binding.canonical_intervals:
         raise IchorOutputError("centromere table does not match its canonical binding")
     return parsed
+
+
+_WIG_HEADER = re.compile(
+    r"fixedStep chrom=(\S+) start=([1-9][0-9]{0,17}) step=([1-9][0-9]{0,17}) "
+    r"span=([1-9][0-9]{0,17})"
+)
+
+
+class ParsedFixedStepWig(StrictModel):
+    """A fixed-step WIG as HMMcopy reads it, on the canonical zero-based grid."""
+
+    role: WigRole
+    bin_size_bp: int = Field(gt=0)
+    grid: CanonicalGrid
+    values: tuple[FiniteFloat, ...]
+
+
+def parse_fixed_step_wig(path: Path, role: WigRole) -> ParsedFixedStepWig:
+    """Parse one ``fixedStep`` WIG for ``role`` and apply the v1 WIG rules.
+
+    Every header is exactly ``fixedStep chrom=C start=N step=N span=N`` in that
+    order (HMMcopy reads the fields by position); every other line is one
+    finite value.  Bins follow ``start1_to_zero_based_half_open`` and must form
+    a :class:`CanonicalGrid`; :func:`check_wig_grid` applies the role's rules
+    (map values within zero and one; GC binds no values).
+    """
+
+    _safe_output(path)
+    bins: list[CanonicalBin] = []
+    values: list[float] = []
+    contigs: list[str] = []
+    step_size: int | None = None
+    span_size: int | None = None
+    position: int | None = None
+    contig: str | None = None
+    block_values = -1  # values in the current block; -1 before any header
+    try:
+        with path.open("r", encoding="utf-8", newline="") as stream:
+            for line_number, raw in enumerate(stream, start=1):
+                if line_number > MAX_ROWS:
+                    raise IchorOutputError("WIG has too many lines")
+                line = raw.rstrip("\n")
+                if line.startswith("fixedStep"):
+                    match = _WIG_HEADER.fullmatch(line)
+                    if match is None:
+                        raise IchorOutputError(
+                            "WIG header is not 'fixedStep chrom= start= step= span=' "
+                            "in that order"
+                        )
+                    contig = match.group(1)
+                    start, step, span = (
+                        _r_integer(match.group(index), "WIG header value")
+                        for index in (2, 3, 4)
+                    )
+                    if step_size is not None and (step, span) != (step_size, span_size):
+                        raise IchorOutputError("WIG blocks use different step or span")
+                    step_size, span_size = step, span
+                    position = start - 1
+                    if contig not in contigs:
+                        contigs.append(contig)
+                    if block_values == 0:
+                        raise IchorOutputError("WIG has a fixedStep block with no values")
+                    block_values = 0
+                    continue
+                if position is None or contig is None or step_size is None:
+                    raise IchorOutputError("WIG has a value before any fixedStep header")
+                values.append(_r_number(line, "WIG value"))
+                block_values += 1
+                if position + (span_size or 0) > R_INTEGER_MAX:
+                    raise IchorOutputError("WIG bin end exceeds the R integer range")
+                bins.append(
+                    CanonicalBin(
+                        contig=contig, start=position, end=position + (span_size or 0)
+                    )
+                )
+                position += step_size
+    except IchorOutputError:
+        raise
+    except (UnicodeError, OSError, ValueError):
+        raise IchorOutputError("WIG could not be parsed") from None
+    if step_size is None or span_size is None or not values or block_values == 0:
+        raise IchorOutputError("WIG has no fixedStep block with values")
+    try:
+        grid = CanonicalGrid(
+            contig_order=tuple(contigs),
+            bins=tuple(bins),
+            bin_definition_sha256=_canonical_sha256(bins),
+        )
+        check_wig_grid(
+            role,
+            span_bp=span_size,
+            step_bp=step_size,
+            bin_size_bp=step_size,
+            canonical_values=tuple(values) if role == "map_wig" else None,
+        )
+        return ParsedFixedStepWig(
+            role=role, bin_size_bp=step_size, grid=grid, values=tuple(values)
+        )
+    except ValidationError as exc:
+        raise IchorOutputError(
+            f"WIG grid is invalid: {exc.errors()[0]['msg']}"
+        ) from None
+    except ValueError as exc:
+        raise IchorOutputError(f"WIG is invalid for {role}: {exc}") from None
 
 
 def _optional_fraction(value: str, label: str) -> float | None:
@@ -1735,6 +1922,8 @@ def validate_ichor_outputs(
 __all__ = [
     "HMMCOPY_COMMIT",
     "HMMCOPY_UTILS_COMMIT",
+    "CENTROMERE_COLUMNS",
+    "CENTROMERE_GAP_TYPE",
     "ICHOR_COMMIT",
     "CanonicalBin",
     "CanonicalBinMask",
@@ -1752,12 +1941,16 @@ __all__ = [
     "IchorParameterSet",
     "IdentifiabilityEvidence",
     "PanelOfNormalsBinding",
+    "ParsedFixedStepWig",
     "PreparedIchorRun",
     "RawWigLineage",
     "ReferenceFastaBinding",
     "RuntimeBinding",
     "WigGridBinding",
+    "check_wig_grid",
     "contract_sha256",
+    "parse_centromere_table",
+    "parse_fixed_step_wig",
     "prepare_ichor_run",
     "validate_centromere_table",
     "validate_ichor_outputs",
