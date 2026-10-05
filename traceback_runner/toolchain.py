@@ -805,6 +805,7 @@ ICHOR_SMOKE_MARKER = "TRACEBACK_TOOLCHAIN_OK"
 _ICHOR_DRIVER_LINE = re.compile(
     rf"^# driver: {re.escape(ICHOR_DRIVER_NAME)} sha256:(?P<sha256>[0-9a-f]{{64}})$", re.M
 )
+_EMPTY_SHA256 = hashlib.sha256(b"").hexdigest()
 # conda-meta path types written at link time without a package digest.
 _GENERATED_PATH_TYPES = frozenset({"pyc_file", "unix_python_entry_point", "directory"})
 IchorCheck = Literal["shallow", "deep"]
@@ -893,6 +894,7 @@ class IchorInstalled(_Strict):
     rscript_sha256: str = Field(pattern=_SHA256.pattern)
     driver_sha256: str = Field(pattern=_SHA256.pattern)
     conda_meta_paths_data_sha256: str = Field(pattern=_SHA256.pattern)
+    installed_paths_sha256: str = Field(pattern=_SHA256.pattern)
     post_link_libraries: tuple[str, ...]
     post_link_libraries_sha256: str = Field(pattern=_SHA256.pattern)
 
@@ -1001,6 +1003,26 @@ def conda_meta_paths_digest(records: Mapping[str, Mapping[str, Any]]) -> str:
     return hashlib.sha256(encoded).hexdigest()
 
 
+def installed_paths_digest(records: Mapping[str, Mapping[str, Any]]) -> str:
+    """SHA-256 over every recorded path's installed digest (``sha256_in_prefix``).
+
+    Per install (it depends on the install path), so it lives in the receipt:
+    a file and its conda-meta record cannot change together unnoticed.
+    """
+
+    rows = sorted(
+        [
+            name,
+            str(entry.get("_path")),
+            str(entry.get("sha256_in_prefix", entry.get("sha256"))),
+        ]
+        for name, record in records.items()
+        for entry in record.get("paths_data", {}).get("paths", [])
+    )
+    encoded = json.dumps(rows, separators=(",", ":")).encode("utf-8")
+    return hashlib.sha256(encoded).hexdigest()
+
+
 def _untracked_r_libraries(prefix: Path, records: Mapping[str, Mapping[str, Any]]) -> list[str]:
     """R packages that no conda-meta record owns: the post-link installs."""
 
@@ -1072,10 +1094,16 @@ def _check_installed_files(prefix: Path, records: Mapping[str, Mapping[str, Any]
                 # (or, for a directory link, to a directory) inside the prefix.
                 if not path.is_symlink():
                     raise _ichor_wrong(f"{relative} is no longer a link")
-                target = path.resolve()
+                try:
+                    target = path.resolve(strict=True)
+                except (OSError, RuntimeError) as exc:  # dangling or cyclic
+                    raise _ichor_wrong(f"{relative} no longer resolves") from exc
                 if not target.is_relative_to(prefix.resolve()):
                     raise _ichor_wrong(f"{relative} now points outside the toolchain")
                 if target.is_dir():
+                    # conda records a directory link with the empty digest.
+                    if expected != _EMPTY_SHA256:
+                        raise _ichor_wrong(f"{relative} now points at a directory")
                     continue
             elif path.is_symlink() or not path.is_file():
                 raise _ichor_wrong(f"{relative} from {name} is no longer a regular file")
@@ -1127,7 +1155,10 @@ def resolve_ichor(
         locked_urls = {line.split("#sha256:", 1)[0] for line in packages}
         if {str(record.get("url")) for record in records.values()} != locked_urls:
             raise _ichor_wrong("the installed packages differ from the lock")
-        if conda_meta_paths_digest(records) != installed.conda_meta_paths_data_sha256:
+        if (
+            conda_meta_paths_digest(records) != installed.conda_meta_paths_data_sha256
+            or installed_paths_digest(records) != installed.installed_paths_sha256
+        ):
             raise _ichor_wrong("the conda-meta digest changed since install")
         _check_installed_files(prefix, records)
         try:
@@ -1282,6 +1313,7 @@ def install_ichor(
         rscript_sha256=sha256_file(prefix / pin.rscript.binary_relpath),
         driver_sha256=sha256_file(driver_target),
         conda_meta_paths_data_sha256=conda_meta_paths_digest(records),
+        installed_paths_sha256=installed_paths_digest(records),
         post_link_libraries=tuple(untracked),
         post_link_libraries_sha256=_tree_digest(prefix / ICHOR_R_LIBRARY_RELPATH, untracked),
     )

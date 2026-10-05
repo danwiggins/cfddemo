@@ -497,3 +497,34 @@ def test_micromamba_never_sees_the_operators_home_or_r_setup(installed, env) -> 
     assert ran["HOME"] == str(env["cache"] / ".home")
     assert ran["R_ENVIRON_USER"] == "/dev/null" and ran["R_PROFILE_USER"] == "/dev/null"
     assert ran["R_LIBS_USER"] == ""
+
+
+def test_a_file_and_its_record_changed_together_is_caught_by_deep(installed, env) -> None:
+    target = installed / "lib/R/library/r-ichorcna/DESCRIPTION"
+    target.write_text("tampered\n")
+    meta = next((installed / "conda-meta").glob("r-ichorcna-*.json"))
+    record = json.loads(meta.read_text())
+    record["paths_data"]["paths"][0]["sha256_in_prefix"] = hashlib.sha256(b"tampered\n").hexdigest()
+    meta.write_text(json.dumps(record))
+    assert _state(env, "deep") == TOOL_WRONG
+
+
+def _relink(installed: Path, target: Path) -> None:
+    link = installed / "lib/R/library/r-ichorcna/DESCRIPTION"
+    meta = next((installed / "conda-meta").glob("r-ichorcna-*.json"))
+    record = json.loads(meta.read_text())
+    record["paths_data"]["paths"][0]["path_type"] = "softlink"
+    meta.write_text(json.dumps(record))
+    link.unlink()
+    link.symlink_to(target)
+
+
+def test_a_file_link_redirected_to_a_directory_is_caught_by_deep(installed, env) -> None:
+    _relink(installed, installed / "lib")
+    assert _state(env, "deep") == TOOL_WRONG
+
+
+def test_a_cyclic_link_is_a_wrong_digest_not_a_crash(installed, env) -> None:
+    link = installed / "lib/R/library/r-ichorcna/DESCRIPTION"
+    _relink(installed, link)
+    assert _state(env, "deep") == TOOL_WRONG
