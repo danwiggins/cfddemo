@@ -307,8 +307,8 @@ uv run traceback serve --root "$R"
 4. **`run`** prints the locked policy (`aligned-reference-span-local-v2`:
    chr1-chr22, chrX, chrY when registered, else every registered contig;
    MAPQ >= 20; primary, mapped, non-duplicate, non-QC-fail alignments; bins 0,
-   100, 150, 200, 300, 500, 1000 bp), one `STAGE` line per stage (seal,
-   preflight, measure, sign), then
+   100, 150, 200, 300, 500, 1000 bp), `JOB  fragment JOB_ID` as soon as the
+   job exists, one `STAGE` line per stage (seal, preflight, measure, sign), then
    `PASS  Signed local record ready (development trust, unqualified, not for clinical use)`
    with `RECORD_ID`, `RECORDS_SCANNED`, `ELIGIBLE_ALIGNMENTS`, the absolute
    `REPORT_PATH` and the next commands. Open `report.html` for the local

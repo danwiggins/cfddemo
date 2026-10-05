@@ -2555,6 +2555,22 @@ def _run_one_analysis(
         )
     except Exception as exc:
         job_id = getattr(exc, "job_id", None)
+        job = {"job_id": job_id} if job_id else {}
+        # The same classes as the single-analysis run (``main``).
+        if any(base.__name__ in _RUN_VERIFICATION_ERRORS for base in type(exc).mro()):
+            return ExitCode.VERIFICATION_FAILED, _result(
+                "run",
+                "verification_failed",
+                "Bundle or development trust verification failed",
+                data=job,
+            )
+        if isinstance(exc, (FileNotFoundError, KeyError)):
+            return ExitCode.NOT_FOUND, _result(
+                "run",
+                "not_found",
+                "Requested local job, bundle, or trust material was not found",
+                data=job,
+            )
         return ExitCode.RETRYABLE_FAILURE, _result(
             "run",
             "retryable_failure",
@@ -2566,6 +2582,23 @@ def _run_one_analysis(
                 **({"job_id": job_id} if job_id else {}),
             },
         )
+
+
+_RUN_VERIFICATION_ERRORS = frozenset(
+    {
+        "BundleError",
+        "BundleFilesystemError",
+        "BundleFormatError",
+        "BundleIntegrityError",
+        "SigningError",
+        "UnknownKeyError",
+        "RevokedKeyError",
+        "WrongPurposeError",
+        "InvalidSignatureError",
+        "TrustNamespaceError",
+        "ResultTrustRegistryError",
+    }
+)
 
 
 def _run_analyses(
@@ -2597,12 +2630,13 @@ def _run_analyses(
         codes.append(code)
         rows.append(_analysis_row(analysis, code, payload))
     worst = _worst_exit(codes)
-    made = sum(1 for row in rows if row["status"] == "ok" and row.get("record_id"))
+    # A row that failed only at its label or import step still has its record.
+    made = sum(1 for row in rows if row.get("record_id"))
     status = "ok" if worst == ExitCode.OK else _problem_status(worst)
     payload = _result(
         "run",
         status,
-        f"{made} of {len(rows)} analyses made a signed local record (development trust, "
+        f"{made} of {len(rows)} analyses have a signed local record (development trust, "
         "unqualified, not for clinical use); nothing was uploaded",
         data={"reference_id": loaded.registered.reference_id, "analyses": rows},
     )
@@ -4188,11 +4222,11 @@ def _resume_local_stages(
     bam_name, index_name = names if names is not None else ("", "")
     stored = request.workflow_release_sha256
     if analysis == FRAGMENT:
-        # The same authority check as `run`: a damaged store refuses the resume.
-        ensure_local_method_authority(root, loaded.registered)
         current = _local_workflow_sha256(_local_method_sha256(loaded.registered))
         if stored not in {current, _LEGACY_LOCAL_WORKFLOW_SHA256}:
             raise _method_changed(job_id, analysis)
+        # The same authority check as `run`: a damaged store refuses the resume.
+        ensure_local_method_authority(root, loaded.registered)
 
         def fragment_stages(key: Any) -> tuple[Any, ...]:
             return _local_stages(root, loaded, bam_name, index_name, key, progress)

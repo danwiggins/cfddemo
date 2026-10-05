@@ -352,7 +352,7 @@ def test_fragment_record_is_published_when_another_analysis_refuses(
     assert _records(root) == [fragment["record_id"]]
     trust = load_development_trust((root / "trust/development-result-trust.json").read_bytes())
     assert verify_bundle(root / "records" / fragment["record_id"], trust)
-    assert payload["summary"].startswith("1 of 2 analyses made a signed local record")
+    assert payload["summary"].startswith("1 of 2 analyses have a signed local record")
 
 
 def test_fake_success_gives_two_jobs_two_records_and_dedupes(
@@ -590,7 +590,14 @@ def test_resume_refuses_tbx_job_003_for_a_changed_fragment_method(
         patch.setattr(cli, "_local_stages", pausing)
         code, paused = _run(capsys, root, inputs.bam_path)
     assert paused["data"]["state"] == "paused", paused
-    monkeypatch.setattr(cli, "_local_method_sha256", lambda registered: "e" * 64)
+    from traceback_runner import local_authority
+
+    real = local_authority.local_method_definition
+    monkeypatch.setattr(
+        local_authority,
+        "local_method_definition",
+        lambda reference: real(reference).model_copy(update={"parameter_schema_sha256": "e" * 64}),
+    )
     code, refused = _json(capsys, "resume", paused["data"]["job_id"], "--root", root)
     assert code == cli.ExitCode.BLOCKED, refused
     assert refused["data"]["code"] == "TBX-JOB-003"
@@ -675,3 +682,48 @@ def test_no_host_path_in_json_rows(root, inputs, capsys) -> None:
     code, payload = _run(capsys, root, inputs.bam_path, "--analysis", "fragment,copy-number")
     text = json.dumps(_rows(payload)[COPY_NUMBER])
     assert str(inputs.bam_path) not in text and os.fspath(root) not in text
+
+
+def test_a_verification_failure_keeps_its_exit_code_in_a_row(
+    root, inputs, capsys, monkeypatch
+) -> None:
+    from traceback_runner.bundles import BundleIntegrityError
+
+    def damaged(*_: Any, **__: Any):
+        raise BundleIntegrityError("damaged")
+
+    monkeypatch.setattr(cli, "_publish_signed_record", damaged)
+    code, payload = _run(capsys, root, inputs.bam_path, "--analysis", "fragment,copy-number")
+    assert code == cli.ExitCode.VERIFICATION_FAILED, payload
+    row = _rows(payload)[FRAGMENT]
+    assert row["exit_code"] == cli.ExitCode.VERIFICATION_FAILED and row["job_id"]
+    assert _rows(payload)[COPY_NUMBER]["code"] == "TBX-RUN-011"
+
+
+def test_label_applies_to_every_record_and_a_failed_import_still_counts_it(
+    root, inputs, capsys, monkeypatch, probe  # noqa: F811
+) -> None:
+    from traceback_runner.labels import read_label
+
+    FakeAnalysis(CELL_ORIGIN).register()
+    real = cli._import_record
+
+    def failing_for_probe(root_: Path, bundle: Path):
+        if bundle.name != fragment_record[0]:
+            raise OSError("import failed")
+        return real(root_, bundle)
+
+    fragment_record: list[str] = []
+    code, first = _run(capsys, root, inputs.bam_path, "--analysis", "fragment")
+    fragment_record.append(first["data"]["record_id"])
+    monkeypatch.setattr(cli, "_import_record", failing_for_probe)
+    code, payload = _run(capsys, root, inputs.bam_path, "--analysis", "fragment,cell-origin",
+                         "--label", "batch note", "--import")
+    assert code == cli.ExitCode.RETRYABLE_FAILURE, payload
+    rows = _rows(payload)
+    assert rows[FRAGMENT]["imported"] is True
+    assert rows[CELL_ORIGIN]["code"] == "TBX-JOB-001" and rows[CELL_ORIGIN]["record_id"]
+    assert payload["summary"].startswith("2 of 2 analyses have a signed local record")
+    for row in rows.values():
+        assert read_label(root, row["record_id"]) == "batch note"
+    assert "batch note" not in json.dumps(payload)
