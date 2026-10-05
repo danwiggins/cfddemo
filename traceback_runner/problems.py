@@ -82,8 +82,9 @@ PROBLEM_TABLE: dict[str, ProblemText] = {
         "Restore the original file; to use the new file, register it under a new --id",
     ),
     "TBX-ASSET-003": ProblemText(
-        "The asset file is missing or unreadable, or a --from-dir directory lacks one of "
-        "the three Loyfer files",
+        "The asset file is missing or unreadable, a --from-dir directory lacks one of "
+        "the three Loyfer files, or the installed ichorCNA package lacks a "
+        "--from-toolchain file",
         "Restore the file at its registered location, or pass the right --file or --from-dir",
     ),
     "TBX-ASSET-004": ProblemText(
@@ -92,7 +93,8 @@ PROBLEM_TABLE: dict[str, ProblemText] = {
     ),
     "TBX-ASSET-005": ProblemText(
         "The analysis's own parser for this kind rejects the file, or a line or the file "
-        "is implausibly large; nothing was registered. For ichor-pon only the envelope is "
+        "is implausibly large, or a --from-toolchain wig's bin size differs from the "
+        "locked method's; nothing was registered. For ichor-pon only the envelope is "
         "checked; readRDS validates the panel when the analysis runs",
         "Pass the unmodified file of the stated --kind",
     ),
