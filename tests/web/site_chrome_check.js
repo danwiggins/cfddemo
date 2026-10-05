@@ -2,9 +2,12 @@
 // Opens the one-use launch link in chrome-headless-shell over CDP, visits each
 // hash route, and prints JSON: per route the page's scrollWidth vs innerWidth,
 // the site's view state, the computed banner styling (proof the packaged CSS
-// applied under the server's CSP), and every console or CSP message.
+// applied under the server's CSP), and every console or CSP message.  With
+// SITE_SCREENSHOT_DIR set, it also saves one full-page PNG per route there.
 "use strict";
 const { spawn } = require("child_process");
+const fs = require("fs");
+const path = require("path");
 
 const [chromePath, url, width, ...routes] = process.argv.slice(2);
 const port = 9600 + Math.floor(Math.random() * 300);
@@ -59,11 +62,20 @@ const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
     innerWidth: await evaluate("window.innerWidth"),
     bannerBorder: await evaluate("getComputedStyle(document.getElementById('banner')).borderLeftStyle"),
   });
+  const shots = process.env.SITE_SCREENSHOT_DIR || "";
+  const capture = async (index) => {
+    if (!shots) return;
+    await sleep(150);
+    const shot = await send("Page.captureScreenshot", { format: "png", captureBeyondViewport: true });
+    fs.writeFileSync(path.join(shots, `site-${width}-${index}.png`), Buffer.from(shot.result.data, "base64"));
+  };
   const results = [await measure("#/")];
-  for (const route of routes) {
+  await capture(0);
+  for (const [index, route] of routes.entries()) {
     await evaluate(`window.location.hash = ${JSON.stringify(route)}; true`);
     await sleep(100);
     results.push(await measure(route));
+    await capture(index + 1);
   }
   process.stdout.write(JSON.stringify({ results, messages }));
   socket.close();

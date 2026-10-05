@@ -13,6 +13,7 @@ from __future__ import annotations
 import json
 import re
 import shutil
+import subprocess
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
@@ -30,9 +31,10 @@ from tests.test_bundle_v4 import (
 )
 from tests.test_method_authority import _definition
 from tests.test_result_catalog import _bundle_method
-from tests.web.longitudinal_env import needs_node
+from tests.web.longitudinal_env import NODE, needs_node
 from tests.web.test_loopback_server import _exchange, _request
 from tests.web.test_records import (
+    CHROME,
     RID,
     _attr,
     _listing,
@@ -557,3 +559,38 @@ def test_dom_job_rows_show_analysis_and_problem_code(tmp_path: Path) -> None:
     assert first.startswith("Copy number: Failed; stage measure")
     assert first.endswith("stopped on TBX-RUN-005: No eligible alignments")
     assert second.startswith("Fragment length: Finished") and "stopped on" not in second
+
+
+# --- real browser: a mixed ROOT has no horizontal scroll at 390 px ------------------
+
+
+@pytest.mark.slow
+@pytest.mark.timeout(900)
+@needs_node
+@pytest.mark.skipif(CHROME is None, reason="chrome-headless-shell is not cached")
+@pytest.mark.parametrize("width", [390, 1280])
+def test_real_browser_mixed_root_has_no_horizontal_scroll(probe, world, width: int) -> None:
+    root, fragment_record = world
+    old = _publish(root, fragment_record, "old", values=[4321])
+    _CURRENT.update(definition=_definition("ref", tool=b"tool-b"), now=T2)
+    new = _publish(root, fragment_record, "new", values=[12])
+    with _serving(root) as (service, _):
+        result = subprocess.run(
+            [NODE, "tests/web/site_chrome_check.js", str(CHROME), service.launch_url, str(width),
+             f"#/records/{old}", f"#/compare?a={fragment_record}&b={new}",
+             f"#/records/{fragment_record}"],
+            capture_output=True, text=True, timeout=600, check=False,
+        )
+    assert result.returncode == 0, result.stderr
+    report = json.loads(result.stdout)
+    states = [item["state"] for item in report["results"]]
+    assert states[0] == "catalog:success", states
+    assert states[1] in {"record:success", "record:partial"}, states
+    assert states[2] == "compare:error", states  # different analyses
+    assert states[3] in {"record:success", "record:partial"}, states
+    for item in report["results"]:
+        assert item["scrollWidth"] <= item["innerWidth"], item
+        assert item["bannerBorder"] == "solid", item
+    assert not [
+        m for m in report["messages"] if "Content Security Policy" in m or m == "exception"
+    ], report
