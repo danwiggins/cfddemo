@@ -265,6 +265,8 @@ _JOB_PROBLEM: dict[str, Copy] = {
     "TBX-MOD-002": ("Modification tags contradictory", "The sampled modification tags contradict each other."),
     "TBX-RUN-004": ("Not enough free space", "The ROOT volume had less free space than the run needs, or filled during the run."),
     "TBX-RUN-005": ("No eligible alignments", "No alignment passed the locked policy, so there is nothing to count."),
+    "TBX-JOB-003": ("Method changed since the job started", "The job was admitted under a method definition that differs from the one this ROOT resolves now; run the input again."),
+    "TBX-RUN-011": ("Analysis not available yet", "This version has no stages for the requested analysis; the other analyses still ran."),
     "TBX-RUN-006": ("Provenance key damaged", "The ROOT provenance key is not a private 32-byte file."),
     "TBX-RUN-007": ("Signing key damaged", "The ROOT development signing key is not a private 32-byte file."),
     "TBX-RUN-008": ("BAM missing or not a file", "The BAM is missing, is a symbolic link, or is not a regular file."),
