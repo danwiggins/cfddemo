@@ -3,6 +3,8 @@
 //
 //   #/                      catalog: one row per signed local record (home)
 //   #/records/{record_id}   one record: status, histogram, denominator, states
+//                           (fragment); a banner and an analysis envelope
+//                           (every other analysis, signal SH5)
 //   #/compare?a=..&b=..     hook for pair comparison (C6, not built yet)
 //
 // It starts only when app.js has bound an operator session (the
@@ -28,7 +30,9 @@
     reference_match: "Reference match",
     preflight: "Preflight",
     comparison: "Comparison",
+    method_version: "Method version",
   };
+  const FRAGMENT_VIEW = "traceback.local-record-view.v1";
   const RUNNING_STATES = new Set([
     "discovered", "waiting_for_finalization", "snapshotting", "validating", "ready", "queued",
     "running", "basecalling", "aligning", "sorting_indexing", "technical_qc", "measuring",
@@ -133,6 +137,13 @@
     const row = records && records.job_states ? records.job_states.find((item) => item.token === token) : null;
     return row ? row.label : "Unrecognised job state";
   };
+  // Analysis names come from the listing's copy table (state_copy.py).
+  const analysisName = (token) => {
+    if (!token) return "Analysis unknown";
+    if (!records || !Array.isArray(records.analyses)) return "Analysis loading";
+    const row = records.analyses.find((item) => item.token === token);
+    return row ? row.label : "Unrecognised analysis";
+  };
   const ago = (iso) => {
     const then = Date.parse(iso);
     if (Number.isNaN(then)) return "";
@@ -173,7 +184,14 @@
     }
     items.forEach((job) => {
       const stale = job.stale && RUNNING_STATES.has(job.state) ? "; status may be out of date" : "";
-      list.append(el("li", `${jobCopy(job.state)}; stage ${job.stage_label}; updated ${when(job.updated_at)}${stale}`));
+      // The projection carries its own analysis label, so a direct record
+      // link (no catalog loaded yet) still names it.
+      const li = el("li", `${job.analysis_label || analysisName(job.analysis || "fragment")}: ${jobCopy(job.state)}; stage ${job.stage_label}; updated ${when(job.updated_at)}${stale}`,
+        { "data-analysis": job.analysis || "fragment" });
+      if (job.problem && job.problem.code) {
+        li.append(el("span", "; stopped on "), el("code", job.problem.code, { class: "job-code" }), el("span", `: ${job.problem.problem}`));
+      }
+      list.append(li);
     });
   };
   const loadJobs = async () => {
@@ -195,7 +213,7 @@
     const reason = el("span", "", { id: "compare-reason", role: "status", "aria-live": "polite", class: "help" });
     compare.addEventListener("click", () => {
       const verified = (records ? records.records : []).filter((item) => item.status === "verified" && selection.has(item.record_id));
-      if (verified.length !== 2) return;
+      if (verified.length !== 2 || verified[0].analysis !== verified[1].analysis) return;
       const [a, b] = verified; // list order is import order, so A is the earlier import
       window.location.hash = `#/compare?a=${a.record_id}&b=${b.record_id}`;
     });
@@ -206,20 +224,22 @@
     const button = byId("compare");
     const reason = byId("compare-reason");
     if (!button || !reason) return;
-    const known = new Set((records ? records.records : []).filter((item) => item.status === "verified").map((item) => item.record_id));
-    const chosen = [...selection].filter((id) => known.has(id)).length;
-    button.disabled = chosen !== 2;
-    if (chosen === 2) button.removeAttribute("aria-disabled");
-    reason.textContent = chosen === 2
-      ? "2 records selected; ready to open them together"
-      : `Select exactly 2 records (${chosen} selected)`;
+    const known = new Map((records ? records.records : []).filter((item) => item.status === "verified").map((item) => [item.record_id, item]));
+    const chosen = [...selection].filter((id) => known.has(id)).map((id) => known.get(id));
+    const analyses = new Set(chosen.map((item) => item.analysis));
+    const ready = chosen.length === 2 && analyses.size === 1;
+    button.disabled = !ready;
+    if (ready) button.removeAttribute("aria-disabled");
+    if (ready) reason.textContent = "2 records selected; ready to open them together";
+    else if (chosen.length === 2) reason.textContent = `Only records of the same analysis can be compared (selected: ${chosen.map((item) => analysisName(item.analysis)).join(" and ")})`;
+    else reason.textContent = `Select exactly 2 records (${chosen.length} selected)`;
   };
 
-  const filterSelect = (id, label, values) => {
+  // values: [[value, text], ...]
+  const filterSelect = (id, label, allText, values) => {
     const wrapper = el("label", label, { class: "filter" });
     const select = el("select", null, { id });
-    const all = el("option", label === "Method version" ? "All method versions" : "All policies", { value: "" });
-    select.append(all, ...values.map((value) => el("option", value, { value })));
+    select.append(el("option", allText, { value: "" }), ...values.map(([value, text]) => el("option", text, { value })));
     wrapper.append(select);
     return { wrapper, select };
   };
@@ -247,6 +267,10 @@
     pickLabel.append(box);
     pick.append(pickLabel);
     tr.append(pick);
+    const analysisText = item.status === "verified" && item.analysis === "fragment" && item.policy_label && item.policy_label !== "built-in"
+      ? `${analysisName(item.analysis)}; policy ${item.policy_label}`
+      : analysisName(item.analysis);
+    tr.append(el("td", analysisText, { "data-label": "Analysis", class: "analysis" }));
     const name = el("th", null, { scope: "row", "data-label": "Record" });
     if (item.status === "verified") {
       name.append(link(`#/records/${item.record_id}`, recordName(item)));
@@ -256,7 +280,7 @@
     if (item.label) name.append(el("span", ` ${item.short_id}`, { class: "short-id" }));
     tr.append(name);
     if (item.status !== "verified") {
-      const cell = el("td", null, { colspan: "6", class: "row-problem", "data-label": "Status" });
+      const cell = el("td", null, { colspan: "5", class: "row-problem", "data-label": "Status" });
       cell.append(el("strong", item.status_label));
       cell.append(el("span", item.status === "failed_verification"
         ? ". Nothing from this record is shown. Check it with: "
@@ -267,11 +291,11 @@
       tr.append(cell);
       return tr;
     }
+    const earlier = item.method_version_state === "earlier_method_version" ? "; made under an earlier method version" : "";
     const cells = [
       ["Reference", item.reference_id, ""],
-      ["Policy", item.policy_label, ""],
-      ["Eligible alignments", count(item.eligible_alignments), "num"],
-      ["Records scanned", count(item.records_scanned), "num"],
+      ["Method version", `${item.method_version}${earlier}`, ""],
+      ["Key n", `${count(item.key_count)} ${item.key_count_unit}`, "num"],
       ["Preflight", item.preflight_warnings
         ? `${item.preflight_label}; ${item.preflight_warnings} warning${item.preflight_warnings === 1 ? "" : "s"}`
         : item.preflight_label, ""],
@@ -332,38 +356,62 @@
     }
     const verified = items.filter((item) => item.status === "verified");
     nodes.push(compareControls());
+    const analysisTokens = [...new Set(verified.map((item) => item.analysis))].sort();
     const versions = [...new Set(verified.map((item) => item.method_version))].sort();
-    const policies = [...new Set(verified.map((item) => item.policy_label))].sort();
     const filters = el("div", null, { class: "filters" });
-    const reference = filterSelect("filter-method", "Method version", versions);
-    const policy = filterSelect("filter-policy", "Analysis policy", policies);
-    filters.append(reference.wrapper, policy.wrapper);
+    const analysis = filterSelect("filter-analysis", "Analysis", "All analyses", analysisTokens.map((token) => [token, analysisName(token)]));
+    const method = filterSelect("filter-method", "Method version", "All method versions", versions.map((value) => [value, value]));
+    filters.append(analysis.wrapper, method.wrapper);
     nodes.push(filters);
     const wrap = el("div", null, { class: "table-wrap", role: "region", "aria-labelledby": "records-caption", tabindex: "0" });
     const table = el("table", null, { class: "records" });
-    table.append(el("caption", `${items.length} record${items.length === 1 ? "" : "s"}`, { id: "records-caption" }));
+    table.append(el("caption", `${items.length} record${items.length === 1 ? "" : "s"}; records made from one input are grouped by its short input digest`, { id: "records-caption" }));
     const head = el("thead");
     const headRow = el("tr");
-    ["Compare", "Record (operator note)", "Reference", "Policy", "Eligible alignments", "Records scanned", "Preflight", "Imported"]
+    ["Compare", "Analysis", "Record (operator note)", "Reference", "Method version", "Key n", "Preflight", "Imported"]
       .forEach((text) => headRow.append(el("th", text, { scope: "col" })));
     head.append(headRow);
-    const tbody = el("tbody");
-    const rows = items.map((item) => [item, recordRow(item)]);
-    rows.forEach(([, row]) => tbody.append(row));
-    table.append(head, tbody);
+    table.append(head);
+    // One tbody per sealed input, in order of each group's first import; a
+    // row with no input digest (failed verification) is its own group.
+    const groups = new Map();
+    items.forEach((item) => {
+      const key = item.input_digest ? `input:${item.input_digest}` : `record:${item.record_id}`;
+      if (!groups.has(key)) groups.set(key, []);
+      groups.get(key).push(item);
+    });
+    const rows = [];
+    groups.forEach((members, key) => {
+      const tbody = el("tbody", null, { "data-input": key.startsWith("input:") ? key.slice(6) : "" });
+      const header = el("tr", null, { class: "group" });
+      header.append(el("th", key.startsWith("input:")
+        ? `Input ${key.slice(6)}: ${members.length} record${members.length === 1 ? "" : "s"}`
+        : "Input not known (record not verified)", { scope: "rowgroup", colspan: "8" }));
+      tbody.append(header);
+      members.forEach((item) => {
+        const row = recordRow(item);
+        rows.push([item, row, tbody]);
+        tbody.append(row);
+      });
+      table.append(tbody);
+    });
     wrap.append(table);
     nodes.push(wrap);
     if (payload.truncated) nodes.push(el("p", "Only the first 500 records are listed.", { class: "help" }));
     const applyFilters = () => {
       rows.forEach(([item, row]) => {
         row.hidden = Boolean(
-          (reference.select.value && item.method_version !== reference.select.value)
-          || (policy.select.value && item.policy_label !== policy.select.value),
+          (analysis.select.value && item.analysis !== analysis.select.value)
+          || (method.select.value && item.method_version !== method.select.value),
         );
       });
+      // A group with every row filtered out hides its header too.
+      new Set(rows.map(([, , tbody]) => tbody)).forEach((tbody) => {
+        tbody.hidden = rows.every(([, row, owner]) => owner !== tbody || row.hidden);
+      });
     };
-    reference.select.addEventListener("change", applyFilters);
-    policy.select.addEventListener("change", applyFilters);
+    analysis.select.addEventListener("change", applyFilters);
+    method.select.addEventListener("change", applyFilters);
     body.replaceChildren(...nodes);
     updateCompare();
     const failed = items.length - verified.length;
@@ -573,6 +621,80 @@
     return nodes;
   };
 
+  // --- non-fragment records (signal SH5) ----------------------------------------
+  // A v4 record's view is an envelope (banner, identity, states) around an
+  // analysis body.  Each analysis registers its renderer by view schema in
+  // window.TracebackAnalysisViews; without one, no estimate is drawn and the
+  // signed report is named as the record of truth.
+  const isFragmentView = (record) => record.schema_version === FRAGMENT_VIEW;
+  const analysisExactValues = (record) => {
+    const details = el("details", null, { class: "exact", id: "exact-values" });
+    details.append(el("summary", "Exact values and identities"));
+    const list = el("dl");
+    const pair = (term, value) => list.append(el("dt", term), el("dd", value));
+    pair("Record ID", record.record_id);
+    pair("Result ID", record.result_id);
+    pair("View schema", record.schema_version);
+    pair("Measurement SHA-256", record.measurement_sha256);
+    pair("Method version", record.method_version);
+    pair("Input digest", record.input_digest || "not recorded");
+    pair("Imported", when(record.imported_at));
+    pair("Preflight source", record.preflight.origin === "job_store" ? "the run's preflight report in ROOT's job store (not signed)" : "not available");
+    record.states.forEach((row) => pair(`${AXIS_NAMES[row.axis] || row.axis} token`, row.token));
+    pair("Signed report", `ROOT/records/${record.record_id}/report.html is the record of truth`);
+    pair("Label", record.label ? `${record.label} (unsigned operator note in ROOT/labels)` : "none");
+    details.append(list);
+    return details;
+  };
+  const analysisBody = (record) => {
+    const renderers = window.TracebackAnalysisViews || {};
+    const renderer = Object.prototype.hasOwnProperty.call(renderers, record.schema_version) ? renderers[record.schema_version] : null;
+    if (typeof renderer === "function") {
+      return renderer(doc, record, { el, count, share, compact: isCompact() });
+    }
+    const section = el("section", null, { class: "panel", id: "analysis-body", "aria-labelledby": "analysis-body-title" });
+    section.append(
+      el("h2", "Result", { id: "analysis-body-title" }),
+      el("p", `This site does not draw ${record.analysis_label.toLowerCase()} results yet. The signed report ROOT/records/${record.record_id}/report.html is the record of truth.`, { class: "empty" }),
+    );
+    return [section];
+  };
+  const renderAnalysisBody = (record) => {
+    const nodes = [];
+    nodes.push(el("p", record.banner, { class: "banner record-banner", id: "analysis-banner", role: "note" }));
+    const back = el("p", null, { class: "back" });
+    back.append(link("#/", "Back to records"));
+    nodes.push(back);
+    nodes.push(heading(record.label || record.short_id));
+    const input = record.input_digest ? `; input ${record.input_digest}` : "";
+    nodes.push(el("p", `${record.analysis_label}; reference ${record.reference_id}; record ${record.short_id}${input}`, { class: "identity", id: "analysis-line" }));
+    if (record.label) nodes.push(el("p", "The title is an operator note, not part of the signed record.", { class: "help" }));
+    const warnings = warningItems(record);
+    const method = stateRow(record, "method_version");
+    const earlier = method && method.token === "earlier_method_version" ? `; ${method.label.toLowerCase()}` : "";
+    nodes.push(el("p", `${stateRow(record, "qualification").label}; ${stateRow(record, "trust").label}${earlier}; ${warnings.length
+      ? `${warnings.length} preflight warning${warnings.length === 1 ? "" : "s"}, listed below`
+      : "no preflight warnings"}`, { class: "status-line", id: "record-status" }));
+    if (warnings.length) {
+      const list = el("ul", null, { class: "warnings", id: "record-warnings", "aria-label": "Preflight warnings" });
+      warnings.forEach((text) => list.append(el("li", text)));
+      nodes.push(list);
+    }
+    nodes.push(el("p", `Based on ${count(record.key_count)} ${record.key_count_unit}.`, { class: "identity", id: "key-count" }));
+    nodes.push(...analysisBody(record), whatItIs(record), analysisExactValues(record));
+    const actions = el("p", null, { class: "toolbar" });
+    const refresh = el("button", "Refresh", { type: "button", id: "refresh", class: "control" });
+    refresh.addEventListener("click", () => render({ focus: false }));
+    actions.append(refresh);
+    nodes.push(actions);
+    return nodes;
+  };
+  const recordBody = (record) => (isFragmentView(record) ? renderRecordBody(record) : renderAnalysisBody(record));
+  const recordState = (record) => {
+    const empty = isFragmentView(record) ? !record.eligible_alignments : !record.key_count;
+    return empty ? "empty" : (warningItems(record).length ? "partial" : "success");
+  };
+
   // On a route change the previous view is cleared at once, so nothing from
   // another record stays on screen while this one loads.
   const showLoading = (name, text) => {
@@ -613,9 +735,8 @@
       live("Could not load this record");
     } else {
       currentRecord = payload;
-      body.replaceChildren(...renderRecordBody(payload));
-      const state = !payload.eligible_alignments ? "empty" : (warningItems(payload).length ? "partial" : "success");
-      setState("record", state);
+      body.replaceChildren(...recordBody(payload));
+      setState("record", recordState(payload));
       live(`Record ${recordName(payload)} loaded`);
     }
     if (focus) focusHeading();
@@ -644,6 +765,19 @@
       if (status === 200 && payload) records = payload;
     }
     const find = (id) => (records ? records.records.find((item) => item.record_id === id) : null);
+    const left = find(a);
+    const right = find(b);
+    if (left && right && left.status === "verified" && right.status === "verified" && left.analysis !== right.analysis) {
+      setState("compare", "error");
+      view().replaceChildren(back, heading("Compare two records"), problemBox(
+        "These records are from different analyses and cannot be compared.",
+        `Record A is ${analysisName(left.analysis)}; record B is ${analysisName(right.analysis)}. Select 2 records of the same analysis in the catalog.`,
+        null,
+      ));
+      live("Records from different analyses cannot be compared");
+      if (focus) focusHeading();
+      return;
+    }
     const list = el("ul", null, { class: "compare-list" });
     let missing = 0;
     [["A (earlier import)", a], ["B", b]].forEach(([role, id]) => {
@@ -702,7 +836,7 @@
       compactQuery.addEventListener("change", () => {
         const match = RECORD_ROUTE.exec(window.location.hash || "");
         if (currentRecord && match && currentRecord.record_id === match[1]) {
-          view().replaceChildren(...renderRecordBody(currentRecord));
+          view().replaceChildren(...recordBody(currentRecord));
         }
       });
     }

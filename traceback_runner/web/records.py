@@ -37,9 +37,9 @@ from collections.abc import Callable
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
-from typing import TYPE_CHECKING, Literal
+from typing import TYPE_CHECKING, Any, Literal
 
-from pydantic import Field, model_validator
+from pydantic import BaseModel, Field, model_validator
 
 from evidence_inspector.result_catalog import CatalogError, CatalogQuery
 from traceback_runner.contracts import (
@@ -47,11 +47,19 @@ from traceback_runner.contracts import (
     PreflightReport,
     RunnerContract,
 )
+from traceback_runner.measurement_schemas import (
+    FRAGMENT_VIEW_SCHEMA,
+    BundleMeasurementSchema,
+    measurement_schema,
+    schema_version_of,
+)
 from traceback_runner.references import ReferenceProblem
 from traceback_runner.serialization import canonical_json_bytes
 
 from .contracts import validate_public_projection, validate_public_text
 from .state_copy import (
+    CURRENT_METHOD_VERSION,
+    EARLIER_METHOD_VERSION,
     NOT_ASSIGNED,
     NOT_COMPARED,
     PREFLIGHT_NOT_AVAILABLE,
@@ -63,6 +71,9 @@ if TYPE_CHECKING:
     from evidence_inspector.result_catalog import ResultCatalog
     from traceback_runner.store import JobStore
 
+    from traceback_runner.bundles import VerifiedBundle
+    from traceback_runner.local_authority import MethodAuthority
+
     from .explorer import ExplorerCatalogProjection, ExplorerDocument
 
 RECORD_ID_PATTERN = re.compile(r"^record-[0-9a-f]{24}$")
@@ -71,6 +82,11 @@ MAX_LIST_RECORDS = 500
 LABEL_MAX_CHARS = 80
 _LABEL_MAX_BYTES = 4096
 _PREFLIGHT_MAX_BYTES = 1024 * 1024
+INPUT_DIGEST_LENGTH = 12
+_SHA256_NAME = re.compile(r"^[0-9a-f]{64}$")
+#: The fixed banner every non-fragment record view carries (signal SH5).
+ANALYSIS_BANNER = "Unqualified. Local development record. Not for clinical use. Descriptive only."
+AnalysisToken = Literal["fragment", "cell_origin", "copy_number"]
 
 
 class RecordNotFound(KeyError):
@@ -131,6 +147,8 @@ class StateRow(RunnerContract):
 
 
 class LocalRecordView(RunnerContract):
+    """The fragment-length record view; unchanged by the signal methods (SH5)."""
+
     schema_version: Literal["traceback.local-record-view.v1"] = (
         "traceback.local-record-view.v1"
     )
@@ -167,14 +185,67 @@ class LocalRecordView(RunnerContract):
         return self
 
 
+class LocalAnalysisRecordView(RunnerContract):
+    """A non-fragment record's view: a common envelope around its analysis body.
+
+    The view schema, the analysis and the body come from the measurement
+    schema's registered :class:`~traceback_runner.measurement_schemas.RecordViewBinding`.
+    The envelope always carries the fixed :data:`ANALYSIS_BANNER`.
+    """
+
+    schema_version: str = Field(
+        pattern=r"^traceback\.local-[a-z0-9]+(?:-[a-z0-9]+)*-view\.v[1-9][0-9]*$"
+    )
+    analysis: Literal["cell_origin", "copy_number"]
+    analysis_label: str
+    banner: Literal[
+        "Unqualified. Local development record. Not for clinical use. Descriptive only."
+    ] = "Unqualified. Local development record. Not for clinical use. Descriptive only."
+    record_id: str = Field(pattern=RECORD_ID_PATTERN.pattern)
+    short_id: str
+    result_id: str = Field(pattern=r"^result_[0-9a-f]{40}$")
+    label: str | None = None
+    reference_id: str
+    method_version: str
+    measurement_sha256: str = Field(pattern=r"^[0-9a-f]{64}$")
+    input_digest: str | None = Field(default=None, pattern=r"^[0-9a-f]{12}$")
+    key_count: int = Field(ge=0)
+    key_count_unit: str = Field(min_length=1, max_length=64)
+    preflight: PreflightView
+    warnings: int = Field(ge=0)
+    states: tuple[StateRow, ...]
+    imported_at: datetime | None = None
+    body: dict[str, Any]
+
+    @model_validator(mode="after")
+    def not_the_fragment_view(self) -> LocalAnalysisRecordView:
+        if self.schema_version == FRAGMENT_VIEW_SCHEMA:
+            raise ValueError("the fragment view schema is reserved for fragment records")
+        return self
+
+
+AnyRecordView = LocalRecordView | LocalAnalysisRecordView
+
+
 class RecordSummary(RunnerContract):
-    """One catalog row; counts only for verified records."""
+    """One catalog row; counts only for verified records.
+
+    The fields are closed and common to every analysis: no estimate (a mixture
+    or tumour fraction, a ploidy) is ever projected here
+    (``tests/web/test_record_dispatch.py`` pins the field set).
+    """
 
     record_id: str = Field(pattern=RECORD_ID_PATTERN.pattern)
     short_id: str
     status: Literal["verified", "failed_verification", "view_unavailable"]
     status_label: str
     label: str | None = None
+    analysis: AnalysisToken | None = None
+    analysis_label: str | None = None
+    input_digest: str | None = Field(default=None, pattern=r"^[0-9a-f]{12}$")
+    key_count: int | None = Field(default=None, ge=0)
+    key_count_unit: str | None = None
+    method_version_state: str | None = None
     reference_id: str | None = None
     policy_label: str | None = None
     eligible_alignments: int | None = None
@@ -200,6 +271,7 @@ class LocalRecordList(RunnerContract):
     records: tuple[RecordSummary, ...]
     truncated: bool
     job_states: tuple[StateCopyRow, ...]
+    analyses: tuple[StateCopyRow, ...] = ()
 
 
 # ---------------------------------------------------------------------------
@@ -504,62 +576,206 @@ def _catalog_rows(query_catalog: QueryCatalog) -> list[tuple[object, bool]]:
     return rows
 
 
-def _verified_view(
+def _input_digest(verified: VerifiedBundle) -> str | None:
+    """A short digest that groups records made from one sealed input.
+
+    It is a prefix of the signed provenance's keyed commitment to the sealed
+    analysis BAM (an HMAC under ROOT's provenance key), so records made from
+    the same input in one ROOT share it; it is never a raw content digest.
+    """
+
+    for artifact in verified.provenance.artifacts:
+        if artifact.role == "analysis_bam":
+            return artifact.provider_hmac_sha256[:INPUT_DIGEST_LENGTH]
+    return None
+
+
+def _capability_is_bound(capability: Any, ref: Any) -> bool:
+    return bool(
+        capability.method_ref == ref.method_ref
+        and capability.method_definition_sha256 == ref.method_definition_sha256
+        and capability.registry_sha256 == ref.registry_sha256
+        and capability.authority_head_sha256 == ref.authority_head_sha256
+        and capability.authority_revision == ref.authority_revision
+        and capability.as_of == ref.capability_as_of
+    )
+
+
+def _later_store_exists(root: Path, store: MethodAuthority) -> bool:
+    """Whether a valid sibling store (same reference and slug) was published later.
+
+    Read-only and never raises: the bound store is already validated, and a
+    damaged or unreadable sibling is ignored (it hides only its own records).
+    This is the "made under an earlier method version" state, never a failure.
+    """
+
+    from traceback_runner.local_authority import (
+        METHOD_AUTHORITY_DIRECTORY,
+        LocalAuthorityProblem,
+        open_method_authority,
+    )
+
+    directory = root / METHOD_AUTHORITY_DIRECTORY / store.reference_id / store.method_slug
+    try:
+        names = sorted(entry.name for entry in directory.iterdir())
+    except OSError:
+        return False
+    published = store.registry.published_at
+    for name in names:
+        if name == store.method_definition_sha256 or not _SHA256_NAME.fullmatch(name):
+            continue
+        try:
+            sibling = open_method_authority(root, store.reference_id, store.method_slug, name)
+        except (LocalAuthorityProblem, ValueError, OSError):
+            continue
+        if sibling.registry.published_at > published:
+            return True
+    return False
+
+
+def _bound_v4_authority(root: Path, reference_id: str, ref: Any) -> bool:
+    """Reopen the authority a v4 row is bound to; return whether it is earlier.
+
+    Every store under ``ROOT/method-authority/<reference>/<slug>/`` named by the
+    row's definition hash is reopened and validated (never written); the one
+    whose capability equals the row's is the record's authority.  Damaged or
+    differently bound stores are skipped, so they hide only their own records.
+    Without a bound method store, the built-in fragment store must be the
+    bound one.  Otherwise the record is unavailable (HTTP 503); a later sibling
+    store is a state, never a failure.
+    """
+
+    from traceback_runner.local_authority import (
+        METHOD_AUTHORITY_DIRECTORY,
+        LocalAuthorityProblem,
+        open_local_method_authority,
+        open_method_authority,
+        validate_method_slug,
+    )
+    from traceback_runner.references import load_reference
+
+    definition_sha256 = ref.method_definition_sha256
+    base = root / METHOD_AUTHORITY_DIRECTORY / reference_id
+    try:
+        entries = (
+            sorted(entry.name for entry in base.iterdir())
+            if base.is_dir() and not base.is_symlink()
+            else []
+        )
+    except OSError:
+        entries = []  # unreadable tree: only the built-in store can bind the row
+    for slug in entries:
+        try:
+            validate_method_slug(slug)
+        except ValueError:
+            continue  # a staging directory or a stray entry
+        try:
+            store = open_method_authority(root, reference_id, slug, definition_sha256)
+        except (LocalAuthorityProblem, ValueError, OSError):
+            # Absent, damaged or unreadable: only records bound to it are hidden.
+            continue
+        if _capability_is_bound(store.capability, ref):
+            return _later_store_exists(root, store)
+    registered = load_reference(root, reference_id).registered
+    capability = open_local_method_authority(root, registered).capability
+    if not _capability_is_bound(capability, ref):
+        raise RecordUnavailable("no method authority on disk is the bound one")
+    return False
+
+
+def _states(ref: Any, reference_match: str, preflight: PreflightView) -> tuple[StateRow, ...]:
+    display_role = ref.display_role.value if ref.display_role is not None else NOT_ASSIGNED
+    return (
+        _state("qualification", ref.qualification_state.value),
+        _state("trust", "development_signature_verified"),
+        _state("display_role", display_role),
+        _state("reference_match", reference_match),
+        _state("preflight", preflight.outcome),
+        _state("comparison", NOT_COMPARED),
+    )
+
+
+def _analysis_view(
     source: LocalRecordSource,
-    get_document: GetDocument,
+    spec: BundleMeasurementSchema,
+    verified: VerifiedBundle,
+    ref: Any,
+    *,
     result_id: str,
     record_id: str,
+    measurement_sha256: str,
+) -> LocalAnalysisRecordView:
+    """A v4 record's view, built by the view its measurement schema registered."""
+
+    binding = spec.record_view
+    if binding is None:
+        raise RecordUnavailable("no record view is registered for this measurement schema")
+    measurement: Any = verified.measurement
+    reference_id = measurement.reference_id
+    # (2) The on-disk authority must still be the one the row is bound to.
+    earlier = _bound_v4_authority(source.root, reference_id, ref)
+    body = binding.build_body(measurement)
+    if not isinstance(body, BaseModel):
+        raise RecordUnavailable("the registered view body is not a contract")
+    key_count = binding.key_count(measurement)
+    if type(key_count) is not int:
+        raise RecordUnavailable("the registered key count is not an integer")
+    reference_match = verified.limitations.reference_match  # type: ignore[union-attr]
+    preflight = _preflight_view(_preflight_report(source, verified.provenance.run_token))
+    method_state = EARLIER_METHOD_VERSION if earlier else CURRENT_METHOD_VERSION
+    return LocalAnalysisRecordView(
+        schema_version=binding.view_schema_version,
+        analysis=binding.analysis,  # type: ignore[arg-type]
+        analysis_label=copy_for("analysis", binding.analysis)[0],
+        record_id=record_id,
+        short_id=short_record_id(record_id),
+        result_id=result_id,
+        label=read_record_label(source.root, record_id),
+        reference_id=reference_id,
+        method_version=ref.method_ref.version,
+        measurement_sha256=measurement_sha256,
+        input_digest=_input_digest(verified),
+        key_count=key_count,
+        key_count_unit=binding.key_count_unit,
+        preflight=preflight,
+        warnings=_warning_count(preflight, reference_match),
+        states=(
+            *_states(ref, reference_match, preflight),
+            _state("method_version", method_state),
+        ),
+        imported_at=_imported_at(source.root, result_id),
+        body=body.model_dump(mode="json"),
+    )
+
+
+def _fragment_view(
+    source: LocalRecordSource,
+    verified: VerifiedBundle,
+    ref: Any,
+    record: Any,
+    *,
+    result_id: str,
+    record_id: str,
+    measurement_sha256: str,
 ) -> LocalRecordView:
+    """The fragment-length view (``traceback.local-record-view.v1``), unchanged."""
+
     from traceback_runner.local_authority import open_local_method_authority
     from traceback_runner.references import load_reference
 
-    # (1) The authority-bound live read: replays the bound capability and
-    # re-verifies the bundle; a stale or revoked authority raises here.
-    document = get_document(result_id)
-    ref = document.models.catalog_ref
-    if ref.result_id != result_id or ref.bundle_record_id != record_id:
-        raise RecordUnavailable("catalog row identity changed")
-    record = next(
-        item.record
-        for item in document.models.result_view_request.sources
-        if item.record.result_id == result_id
-    )
-    # (3) The signed measurement from the catalog's verified bundle copy.
-    verified, _ = source.catalog.verify_reference(ref)
     measurement = verified.measurement
     if type(measurement) is not FragmentMeasurementV2:
         raise RecordUnavailable("not a local measurement")
-    measurement_sha256 = hashlib.sha256(canonical_json_bytes(measurement)).hexdigest()
-    if measurement_sha256 != record.result_sha256:
-        raise RecordUnavailable("measurement differs from the bound result digest")
-    if verified.manifest.record_id != record_id:
-        raise RecordUnavailable("bundle record identity changed")
     # (2) The on-disk authority must still be the one the row is bound to.
     registered = load_reference(source.root, measurement.reference_id).registered
     authority = open_local_method_authority(source.root, registered)
-    capability = authority.capability
-    if (
-        capability.method_ref != ref.method_ref
-        or capability.method_definition_sha256 != ref.method_definition_sha256
-        or capability.registry_sha256 != ref.registry_sha256
-        or capability.authority_head_sha256 != ref.authority_head_sha256
-        or capability.authority_revision != ref.authority_revision
-        or capability.as_of != ref.capability_as_of
-    ):
+    if not _capability_is_bound(authority.capability, ref):
         raise RecordUnavailable("the method authority on disk is not the bound one")
     policy = _policy(source.root, measurement, record.method.parameter_schema_sha256)
     report = _preflight_report(source, verified.provenance.run_token)
     preflight = _preflight_view(report)
-    display_role = ref.display_role.value if ref.display_role is not None else NOT_ASSIGNED
-    states = (
-        _state("qualification", ref.qualification_state.value),
-        _state("trust", "development_signature_verified"),
-        _state("display_role", display_role),
-        _state("reference_match", verified.limitations.reference_match),
-        _state("preflight", preflight.outcome),
-        _state("comparison", NOT_COMPARED),
-    )
-    view = LocalRecordView(
+    reference_match = verified.limitations.reference_match  # type: ignore[union-attr]
+    return LocalRecordView(
         record_id=record_id,
         short_id=short_record_id(record_id),
         result_id=result_id,
@@ -580,12 +796,84 @@ def _verified_view(
         ),
         measurement_sha256=measurement_sha256,
         preflight=preflight,
-        warnings=_warning_count(preflight, verified.limitations.reference_match),
-        states=states,
+        warnings=_warning_count(preflight, reference_match),
+        states=_states(ref, reference_match, preflight),
         imported_at=_imported_at(source.root, result_id),
     )
+
+
+def _verified(
+    source: LocalRecordSource,
+    get_document: GetDocument,
+    result_id: str,
+    record_id: str,
+) -> tuple[AnyRecordView, str | None]:
+    """One record's verified view (dispatched by measurement type) and input digest."""
+
+    from traceback_runner.bundles import RESULT_BUNDLE_V4
+
+    # (1) The authority-bound live read: replays the bound capability and
+    # re-verifies the bundle; a stale or revoked authority raises here.
+    document = get_document(result_id)
+    ref = document.models.catalog_ref
+    if ref.result_id != result_id or ref.bundle_record_id != record_id:
+        raise RecordUnavailable("catalog row identity changed")
+    record = next(
+        item.record
+        for item in document.models.result_view_request.sources
+        if item.record.result_id == result_id
+    )
+    # (3) The signed measurement from the catalog's verified bundle copy.
+    verified, _ = source.catalog.verify_reference(ref)
+    measurement = verified.measurement
+    measurement_sha256 = hashlib.sha256(canonical_json_bytes(measurement)).hexdigest()
+    if measurement_sha256 != record.result_sha256:
+        raise RecordUnavailable("measurement differs from the bound result digest")
+    if verified.manifest.record_id != record_id:
+        raise RecordUnavailable("bundle record identity changed")
+    view: AnyRecordView
+    if type(measurement) is FragmentMeasurementV2:
+        if verified.manifest.schema_version == RESULT_BUNDLE_V4:
+            raise RecordUnavailable("a fragment measurement never travels in v4")
+        view = _fragment_view(
+            source,
+            verified,
+            ref,
+            record,
+            result_id=result_id,
+            record_id=record_id,
+            measurement_sha256=measurement_sha256,
+        )
+    else:
+        spec = measurement_schema(schema_version_of(measurement))
+        if (
+            verified.manifest.schema_version != RESULT_BUNDLE_V4
+            or spec is None
+            or type(measurement) is not spec.measurement_model
+        ):
+            raise RecordUnavailable("not a local measurement")
+        view = _analysis_view(
+            source,
+            spec,
+            verified,
+            ref,
+            result_id=result_id,
+            record_id=record_id,
+            measurement_sha256=measurement_sha256,
+        )
     validate_public_projection(view.model_dump(mode="json"))
-    return view
+    return view, _input_digest(verified)
+
+
+def _verified_view(
+    source: LocalRecordSource,
+    get_document: GetDocument,
+    result_id: str,
+    record_id: str,
+) -> AnyRecordView:
+    """Dispatch by measurement type: fragment keeps its v1 view; v4 its registered one."""
+
+    return _verified(source, get_document, result_id, record_id)[0]
 
 
 _UNAVAILABLE = (CatalogError, ReferenceProblem, ValueError, KeyError, OSError, StopIteration)
@@ -597,7 +885,7 @@ def build_local_record_view(
     get_document: GetDocument,
     query_catalog: QueryCatalog,
     record_id: str,
-) -> LocalRecordView:
+) -> AnyRecordView:
     """One verified record's view.  ``RecordNotFound`` or ``RecordUnavailable``."""
 
     if type(source) is not LocalRecordSource:
@@ -611,7 +899,7 @@ def build_local_record_view(
         raise RecordUnavailable("record failed verification") from exc
 
 
-def _warning_texts(view: LocalRecordView) -> tuple[str, ...]:
+def _warning_texts(view: AnyRecordView) -> tuple[str, ...]:
     texts = [
         f"{check.code}: {check.summary or 'see the operator guide for this code'}"
         for check in view.preflight.checks
@@ -621,24 +909,47 @@ def _warning_texts(view: LocalRecordView) -> tuple[str, ...]:
     return tuple(texts)
 
 
-def _summary(view: LocalRecordView) -> RecordSummary:
+FRAGMENT_KEY_COUNT_UNIT = "eligible alignments"
+
+
+def _summary(view: AnyRecordView, input_digest: str | None) -> RecordSummary:
+    """The catalog row: the common columns only, never an estimate."""
+
     preflight = view.preflight
+    common = {
+        "record_id": view.record_id,
+        "short_id": view.short_id,
+        "status": "verified",
+        "status_label": copy_for("record_status", "verified")[0],
+        "label": view.label,
+        "input_digest": input_digest,
+        "reference_id": view.reference_id,
+        "preflight": preflight.outcome,
+        "preflight_label": copy_for("preflight", preflight.outcome)[0],
+        "preflight_warnings": view.warnings,
+        "warning_texts": _warning_texts(view),
+        "method_version": view.method_version,
+        "imported_at": view.imported_at,
+    }
+    if isinstance(view, LocalRecordView):
+        return RecordSummary(
+            **common,
+            analysis="fragment",
+            analysis_label=copy_for("analysis", "fragment")[0],
+            key_count=view.eligible_alignments,
+            key_count_unit=FRAGMENT_KEY_COUNT_UNIT,
+            policy_label="built-in" if view.policy.builtin else view.policy.id,
+            eligible_alignments=view.eligible_alignments,
+            records_scanned=view.records_scanned,
+        )
+    method_state = next(row.token for row in view.states if row.axis == "method_version")
     return RecordSummary(
-        record_id=view.record_id,
-        short_id=view.short_id,
-        status="verified",
-        status_label=copy_for("record_status", "verified")[0],
-        label=view.label,
-        reference_id=view.reference_id,
-        policy_label="built-in" if view.policy.builtin else view.policy.id,
-        eligible_alignments=view.eligible_alignments,
-        records_scanned=view.records_scanned,
-        preflight=preflight.outcome,
-        preflight_label=copy_for("preflight", preflight.outcome)[0],
-        preflight_warnings=view.warnings,
-        warning_texts=_warning_texts(view),
-        method_version=view.method_version,
-        imported_at=view.imported_at,
+        **common,
+        analysis=view.analysis,
+        analysis_label=copy_for("analysis", view.analysis)[0],
+        key_count=view.key_count,
+        key_count_unit=view.key_count_unit,
+        method_version_state=method_state,
     )
 
 
@@ -665,7 +976,7 @@ def build_local_record_list(
                 summaries.append(
                     (
                         _imported_at_ns(source.root, ref.result_id),  # type: ignore[attr-defined]
-                        _summary(_verified_view(source, get_document, ref.result_id, record_id)),  # type: ignore[attr-defined]
+                        _summary(*_verified(source, get_document, ref.result_id, record_id)),  # type: ignore[attr-defined]
                     )
                 )
                 continue
@@ -702,12 +1013,19 @@ def build_local_record_list(
             StateCopyRow(token=token, label=label, meaning=meaning)
             for token, (label, meaning) in STATE_COPY["job"].items()
         ),
+        analyses=tuple(
+            StateCopyRow(token=token, label=label, meaning=meaning)
+            for token, (label, meaning) in STATE_COPY["analysis"].items()
+        ),
     )
     validate_public_projection(result.model_dump(mode="json"))
     return result
 
 
 __all__ = [
+    "ANALYSIS_BANNER",
+    "AnyRecordView",
+    "LocalAnalysisRecordView",
     "LocalRecordList",
     "LocalRecordSource",
     "LocalRecordView",

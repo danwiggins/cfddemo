@@ -3,7 +3,8 @@
 A v4 bundle carries exactly one measurement.  Its measurement and chart paths,
 its contracts, its chart and report derivation, its byte bounds and its catalog
 binding are all chosen by that measurement's schema, through the one
-:class:`BundleMeasurementSchema` registered for it here.
+:class:`BundleMeasurementSchema` registered for it here.  So is the local
+records site's view of it (:class:`RecordViewBinding`, signal SH5).
 
 The fragment-length schemas are not registered here and never travel in v4:
 they keep the fixed v1-v3 rules, paths and renderers, so every existing record
@@ -39,6 +40,14 @@ FRAGMENT_PATH_STEM = "fragment-length.v1"
 MAX_MEASUREMENT_FILE_BYTES = 16 * 1024 * 1024
 _REQUIRED_MEASUREMENT_FIELDS = frozenset({"schema_version", "approval_state", "reference_id"})
 
+#: Every analysis the local records site names (signal SH5).  Fragment length
+#: keeps its v1-v3 rules and its own view; each v4 view names one of the others.
+ANALYSES = ("fragment", "cell_origin", "copy_number")
+FRAGMENT_VIEW_SCHEMA = "traceback.local-record-view.v1"
+_VIEW_SCHEMA_VERSION = re.compile(
+    r"^traceback\.local-[a-z0-9]+(?:-[a-z0-9]+)*-view\.v[1-9][0-9]*$"
+)
+
 
 class MeasurementSchemaError(ValueError):
     """A schema registration is malformed or conflicts with an existing one."""
@@ -64,6 +73,25 @@ class LocalCatalogBinding:
 
 
 @dataclass(frozen=True)
+class RecordViewBinding:
+    """How the local records site shows one v4 measurement schema (signal SH5).
+
+    ``build_body(measurement)`` returns the analysis-specific part of the view
+    (a pydantic model); the site wraps it in the common envelope (banner,
+    identity, states, preflight).  ``key_count(measurement)`` is the one count
+    the catalog table shows, in ``key_count_unit``.  No estimate (a mixture
+    fraction, a tumour fraction) is ever taken from here into the catalog row.
+    Both callables must be pure functions of the verified measurement.
+    """
+
+    analysis: str
+    view_schema_version: str
+    key_count_unit: str
+    key_count: Callable[[Any], int]
+    build_body: Callable[[Any], BaseModel]
+
+
+@dataclass(frozen=True)
 class BundleMeasurementSchema:
     """Everything a v4 bundle needs to know about one measurement schema.
 
@@ -82,6 +110,7 @@ class BundleMeasurementSchema:
     build_limitations: Callable[[Any, str], BaseModel]
     render_report: Callable[[Any, Any], bytes]
     catalog: LocalCatalogBinding
+    record_view: RecordViewBinding | None = None
     max_measurement_bytes: int = MAX_MEASUREMENT_FILE_BYTES
     max_chart_bytes: int = MAX_MEASUREMENT_FILE_BYTES
 
@@ -177,6 +206,31 @@ def _validate(spec: BundleMeasurementSchema) -> None:
         raise MeasurementSchemaError("catalog binding identifiers are malformed") from exc
     if not callable(binding.authority) or not callable(binding.denominator):
         raise MeasurementSchemaError("catalog binding needs authority and denominator")
+    if spec.record_view is not None:
+        _validate_record_view(spec.record_view)
+
+
+def _validate_record_view(view: RecordViewBinding) -> None:
+    if not isinstance(view, RecordViewBinding):
+        raise MeasurementSchemaError("a record view is a RecordViewBinding")
+    if view.analysis not in ANALYSES or view.analysis == "fragment":
+        raise MeasurementSchemaError("a v4 record view names a non-fragment analysis")
+    if (
+        type(view.view_schema_version) is not str
+        or not _VIEW_SCHEMA_VERSION.fullmatch(view.view_schema_version)
+        or view.view_schema_version == FRAGMENT_VIEW_SCHEMA
+    ):
+        raise MeasurementSchemaError("record view schema version is malformed or reserved")
+    from .web.contracts import validate_public_text
+
+    try:
+        if type(view.key_count_unit) is not str or not 0 < len(view.key_count_unit) <= 64:
+            raise ValueError("key count unit length")
+        validate_public_text(view.key_count_unit)
+    except ValueError as exc:
+        raise MeasurementSchemaError("record view key count unit is not public text") from exc
+    if not callable(view.key_count) or not callable(view.build_body):
+        raise MeasurementSchemaError("a record view needs key_count and build_body")
 
 
 _REGISTRY: dict[str, BundleMeasurementSchema] = {}
@@ -196,6 +250,12 @@ def register_measurement_schema(spec: BundleMeasurementSchema) -> BundleMeasurem
             raise MeasurementSchemaError("measurement path stem is already registered")
         if other.catalog.result_schema_id == spec.catalog.result_schema_id:
             raise MeasurementSchemaError("catalog result schema ID is already registered")
+        if (
+            other.record_view is not None
+            and spec.record_view is not None
+            and other.record_view.view_schema_version == spec.record_view.view_schema_version
+        ):
+            raise MeasurementSchemaError("record view schema version is already registered")
     _REGISTRY[spec.schema_version] = spec
     return spec
 
@@ -234,12 +294,15 @@ def schema_version_of(value: object) -> object:
 
 
 __all__ = [
+    "ANALYSES",
     "FRAGMENT_PATH_STEM",
+    "FRAGMENT_VIEW_SCHEMA",
     "MAX_MEASUREMENT_FILE_BYTES",
     "PATH_STEM",
     "BundleMeasurementSchema",
     "LocalCatalogBinding",
     "MeasurementSchemaError",
+    "RecordViewBinding",
     "measurement_schema",
     "measurement_schema_for_path",
     "register_measurement_schema",

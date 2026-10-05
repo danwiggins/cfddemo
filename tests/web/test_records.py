@@ -286,6 +286,12 @@ def _summary(record_id: str, *, status="verified", label=None, minute=0) -> dict
         "status": status,
         "status_label": STATE_COPY["record_status"][status][0],
         "label": label,
+        "analysis": "fragment" if verified else None,
+        "analysis_label": "Fragment length" if verified else None,
+        "input_digest": "c" * 12 if verified else None,
+        "key_count": 100 if verified else None,
+        "key_count_unit": "eligible alignments" if verified else None,
+        "method_version_state": None,
         "reference_id": "ref" if verified else None,
         "policy_label": "built-in" if verified else None,
         "eligible_alignments": 100 if verified else None,
@@ -307,6 +313,10 @@ def _listing(*rows: dict) -> dict:
         "job_states": [
             {"token": token, "label": label, "meaning": meaning}
             for token, (label, meaning) in STATE_COPY["job"].items()
+        ],
+        "analyses": [
+            {"token": token, "label": label, "meaning": meaning}
+            for token, (label, meaning) in STATE_COPY["analysis"].items()
         ],
     }
 
@@ -437,7 +447,7 @@ def test_eighty_character_label_and_no_free_text_inputs(tmp_path: Path) -> None:
     inputs = _nodes(report["view"], _tag("input"))
     assert all(node["attrs"]["type"] == "checkbox" for node in inputs)
     selects = _nodes(report["view"], _tag("select"))
-    assert [node["attrs"]["id"] for node in selects] == ["filter-method", "filter-policy"]
+    assert [node["attrs"]["id"] for node in selects] == ["filter-analysis", "filter-method"]
 
 
 @needs_node
