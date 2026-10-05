@@ -96,6 +96,39 @@ def _label_argument(value: str) -> str:
         raise argparse.ArgumentTypeError(str(exc)) from exc
 
 
+def _analysis_argument(value: str) -> tuple[str, ...]:
+    from .analyses import parse_analysis_list
+
+    try:
+        return parse_analysis_list(value)
+    except ValueError as exc:
+        raise argparse.ArgumentTypeError(str(exc)) from exc
+
+
+def _modbase_model_argument(value: str) -> str:
+    from .analyses import validate_modbase_model
+
+    try:
+        return validate_modbase_model(value)
+    except ValueError as exc:
+        raise argparse.ArgumentTypeError(str(exc)) from exc
+
+
+def _analysis_arguments(parser: argparse.ArgumentParser, *, verb: str) -> None:
+    parser.add_argument(
+        "--analysis",
+        type=_analysis_argument,
+        help=f"comma-separated analyses to {verb}: fragment, cell-origin, copy-number "
+        "(default: fragment)",
+    )
+    parser.add_argument(
+        "--modbase-model",
+        type=_modbase_model_argument,
+        help="cell origin: the modified-base model the reads were called with, when "
+        "the BAM header does not declare one (part of the job identity)",
+    )
+
+
 def _limit_argument(value: str) -> int:
     try:
         limit = int(value)
@@ -164,6 +197,7 @@ def _parser() -> argparse.ArgumentParser:
         type=_reference_id_argument,
         help="registered reference ID under ROOT (default: the synthetic reference)",
     )
+    _analysis_arguments(preflight, verb="report readiness for")
     _root_argument(preflight)
     preflight.add_argument("--json", action="store_true", dest="as_json")
 
@@ -192,6 +226,7 @@ def _parser() -> argparse.ArgumentParser:
         help="operator note for the record (1-80 characters; not signed; never in --json; "
         "no donor names or identifiers)",
     )
+    _analysis_arguments(run, verb="run, one job and record each")
     _root_argument(run)
     run.add_argument("--json", action="store_true", dest="as_json")
 
@@ -1063,6 +1098,7 @@ def _execute_signed_run(
     namespace: Any,
     worker_id: str,
     on_submitted: Callable[[Any], None] | None = None,
+    on_admitted: Callable[[str], None] | None = None,
 ) -> Any:
     """Seal the input, then run the signed stages unless the job is complete.
 
@@ -1073,7 +1109,11 @@ def _execute_signed_run(
     """
     from .signing import development_trust_bytes
 
-    record = runner.submit(request, source, relative_files)
+    record = (
+        runner.submit(request, source, relative_files, on_admitted=on_admitted)
+        if on_admitted is not None
+        else runner.submit(request, source, relative_files)
+    )
     if on_submitted is not None:
         on_submitted(record)
     if record.state != JobState.COMPLETE:
@@ -1773,13 +1813,20 @@ def _local_input_files(bam: Path, index: Path) -> tuple[Path, tuple[str, str]]:
     )
 
 
-def _require_free_space(root: Path, input_bytes: int) -> None:
-    required = 2 * input_bytes
+def _require_free_space(root: Path, input_bytes: int, *, analyses: int = 1) -> None:
+    """Refuse unless ROOT's volume holds every job's sealed copy (2x the input each).
+
+    ``run --analysis`` seals one copy per analysis, so it is checked once for
+    all of them before the first job.
+    """
+
+    required = 2 * input_bytes * analyses
     available = shutil.disk_usage(_existing_ancestor(root)).free
     if available < required:
         raise RunProblem(
             "TBX-RUN-004",
-            "Not enough space under ROOT; need 2x the input size",
+            "Not enough space under ROOT; need 2x the input size"
+            + (f" for each of {analyses} analyses" if analyses > 1 else ""),
             cause=(
                 f"ROOT's volume has {available} bytes free; sealing the BAM and "
                 f"index needs {required} bytes"
@@ -1853,21 +1900,41 @@ def _refuse_unsealed_job(runner: Any, record: Any) -> None:
         )
 
 
-def _refuse_failed_job(runner: Any) -> Callable[[Any], None]:
+def _refuse_failed_job(runner: Any, *, analysis: str = "fragment") -> Callable[[Any], None]:
+    """Refuse a terminally failed job of this ``(input, analysis)`` only.
+
+    The job was found by its request, which names the input, the analysis
+    (sample token) and its method (workflow hash), so another analysis of the
+    same input is never refused by this job's failure.
+    """
+
+    from .analyses import FRAGMENT, parse_sample_token
+
     def check(record: Any) -> None:
         _refuse_unsealed_job(runner, record)
         stored = runner.store.get(record.job_id)
         if record.state != JobState.TERMINAL_FAILURE:
             return
+        parsed = parse_sample_token(runner.store.request(record.job_id).sample_token)
+        if parsed is None or parsed[1] != analysis:
+            raise ValueError("a submitted job does not belong to this analysis")
         last_error = stored.last_error or ""
         match = _PROBLEM_CODE.match(last_error)
         raise RunProblem(
             match.group(1) if match else "TBX-JOB-001",
-            "This input already failed terminally on this ROOT; no record was made",
+            "This input already failed terminally on this ROOT; no record was made"
+            if analysis == FRAGMENT
+            else f"This input's {analysis} analysis already failed terminally on this "
+            "ROOT; no record was made",
             cause=f"job {record.job_id} ended in terminal_failure",
             fix=(
                 f"Inspect traceback status {record.job_id}; fix the input and run "
                 "it again under a fresh --root"
+                + (
+                    ""
+                    if analysis == FRAGMENT
+                    else " (a changed setting such as --modbase-model is a new job)"
+                )
             ),
             data={"job_id": record.job_id, "state": record.state.value},
         )
@@ -2030,18 +2097,14 @@ def _local_run_result(
 def _run(
     args: argparse.Namespace, progress: Callable[[str], None]
 ) -> tuple[ExitCode, dict[str, Any]]:
-    from .contracts import InputKind, JobRequest
-    from .local_authority import (
-        ensure_local_method_authority,
-        local_fragment_policy,
-        validate_method_authority_tree,
-    )
+    from .analyses import FRAGMENT
+    from .local_authority import ensure_local_method_authority, validate_method_authority_tree
     from .references import load_reference
-    from .snapshots import input_tree_sha256
 
     if args.reference_id is None:
         return _real_run_blocked()
     root = args.root
+    analyses: tuple[str, ...] = getattr(args, "analysis", None) or (FRAGMENT,)
     # Every input check runs first (A2): a bad input is reported before the
     # reference is loaded and creates no job, authority store or copy.
     _check_bam_input(args.input)
@@ -2061,24 +2124,65 @@ def _run(
     # The method-authority tree (signal SH1), read-only: absent is a no-op; a
     # damaged store only hides its own records; a non-private tree refuses.
     validate_method_authority_tree(root)
-    # Create (once) or validate the local method authority before any copy:
-    # a damaged ROOT/authority refuses the run with TBX-AUTH-LOCAL-001.
-    ensure_local_method_authority(root, loaded.registered)
+    if analyses == (FRAGMENT,):
+        # Create (once) or validate the local method authority before any copy:
+        # a damaged ROOT/authority refuses the run with TBX-AUTH-LOCAL-001.
+        ensure_local_method_authority(root, loaded.registered)
+    # One check for every analysis's sealed copy, before the first job (SH4).
     _require_free_space(
-        root, sum((source / name).stat().st_size for name in relative_files)
+        root,
+        sum((source / name).stat().st_size for name in relative_files),
+        analyses=len(analyses),
     )
-    for line in _policy_lines(local_fragment_policy(loaded.registered)):
-        progress(line)
-    progress("STAGE  seal: copying the BAM and index under ROOT")
-    request = JobRequest(
-        sample_token=f"{_LOCAL_SAMPLE_PREFIX}{args.reference_id}",
+    if analyses == (FRAGMENT,):
+        # Without --analysis (or with only fragment) the run, its JobRequest
+        # and its output are exactly the fragment run's.
+        code, payload = _run_fragment(root, source, relative_files, loaded, progress)
+        return _after_run_mapped(args, code, payload)
+    return _run_analyses(args, analyses, source, relative_files, loaded, progress)
+
+
+def _fragment_request(source: Path, relative_files: tuple[str, str], loaded: Any) -> Any:
+    """The fragment job's request: ``local-<ref>`` and the fragment method's hash."""
+
+    from .analyses import FRAGMENT, sample_token
+    from .contracts import InputKind, JobRequest
+    from .snapshots import input_tree_sha256
+
+    return JobRequest(
+        sample_token=sample_token(loaded.registered.reference_id, FRAGMENT),
         input_kind=InputKind.MODBAM,
         input_tree_sha256_local=input_tree_sha256(source, relative_files),
         workflow_release_sha256=_local_workflow_sha256(
             _local_method_sha256(loaded.registered)
         ),
     )
-    code, payload = _run_sealed(root, request, source, relative_files, loaded, progress)
+
+
+def _run_fragment(
+    root: Path,
+    source: Path,
+    relative_files: tuple[str, str],
+    loaded: Any,
+    progress: Callable[[str], None],
+    runner: Any | None = None,
+) -> tuple[ExitCode, dict[str, Any]]:
+    from .local_authority import local_fragment_policy
+
+    for line in _policy_lines(local_fragment_policy(loaded.registered)):
+        progress(line)
+    progress("STAGE  seal: copying the BAM and index under ROOT")
+    request = _fragment_request(source, relative_files, loaded)
+    if runner is None:
+        return _run_sealed(root, request, source, relative_files, loaded, progress)
+    return _run_with_runner(root, runner, request, source, relative_files, loaded, progress)
+
+
+def _after_run_mapped(
+    args: argparse.Namespace, code: ExitCode, payload: dict[str, Any]
+) -> tuple[ExitCode, dict[str, Any]]:
+    """``_after_run``, with a label or import failure named against its record."""
+
     data = payload["data"]
     try:
         return _after_run(args, code, payload)
@@ -2137,6 +2241,469 @@ def _after_run(
     return code, _with_human(payload, lines) if lines else payload
 
 
+# --- SH4: run --analysis (one job and one record per analysis) ----------------
+
+# "Worst" result first: a terminal refusal outranks a retryable failure, which
+# a retry can still turn into a record.
+_EXIT_SEVERITY = (
+    ExitCode.INTERNAL_ERROR,
+    ExitCode.VERIFICATION_FAILED,
+    ExitCode.BLOCKED,
+    ExitCode.NOT_FOUND,
+    ExitCode.USAGE,
+    ExitCode.RETRYABLE_FAILURE,
+    ExitCode.OK,
+)
+
+
+def _worst_exit(codes: Sequence[ExitCode]) -> ExitCode:
+    return min(codes, key=_EXIT_SEVERITY.index) if codes else ExitCode.OK
+
+
+class ToolUnavailableAtStage(Exception):
+    """A pinned tool was missing or not its pinned bytes when a stage needed it.
+
+    Deliberately not a ``TerminalStageError``: the runner records the attempt
+    as ``retryable_failure``, so installing the tool and resuming finishes the
+    job; a deleted environment never poisons the input (spec §11 item 5).
+    """
+
+    def __init__(self, problem: ReferenceProblem) -> None:
+        super().__init__(f"{problem.code}: {problem.summary}")
+        self.problem = problem
+
+
+_TOOL_CODE_PREFIX = "TBX-" + "TOOL-"  # every pinned-tool code
+
+
+def _tool_retryable(callback: Callable[[Any], Any]) -> Callable[[Any], Any]:
+    """Wrap one analysis stage so a tool problem is retryable, never terminal."""
+
+    from .toolchain import ToolProblem
+
+    def run(context: Any) -> Any:
+        try:
+            return callback(context)
+        except ToolProblem as problem:
+            raise ToolUnavailableAtStage(problem) from problem
+        except LocalStageRefusal as refusal:
+            # A stage must not end a job terminally over a tool: once the tool
+            # is installed the same sealed input can finish.
+            if refusal.code.startswith(_TOOL_CODE_PREFIX):
+                raise ToolUnavailableAtStage(
+                    ReferenceProblem(
+                        refusal.code, refusal.summary, cause=refusal.cause, fix=refusal.fix
+                    )
+                ) from refusal
+            raise
+
+    return run
+
+
+def _tool_problem(exc: ToolUnavailableAtStage, job_id: str | None, command: str) -> RunProblem:
+    problem = exc.problem
+    next_action = (
+        f"traceback {command} {job_id} --root <same-root>" if job_id is not None else None
+    )
+    return RunProblem(
+        problem.code,
+        problem.summary + "; no record yet, the job can resume",
+        cause=problem.cause,
+        fix=problem.fix + (f"; then {next_action}" if next_action else ""),
+        exit_code=ExitCode.RETRYABLE_FAILURE,
+        retryable=True,
+        data={
+            **getattr(problem, "data", {}),
+            **({"next_action": next_action} if next_action else {}),
+        },
+    )
+
+
+def _analysis_stages(
+    spec: Any,
+    root: Path,
+    loaded: Any,
+    bam_name: str,
+    index_name: str,
+    config: dict[str, str],
+    signing_key: Any,
+    progress: Callable[[str], None],
+) -> tuple[Any, ...]:
+    from .analyses import AnalysisStageContext
+    from .runner import StageSpec
+
+    stages = spec.stages(
+        AnalysisStageContext(
+            root=root,
+            loaded=loaded,
+            bam_name=bam_name,
+            index_name=index_name,
+            config=dict(config),
+            signing_key=signing_key,
+            progress=progress,
+        )
+    )
+    return tuple(
+        StageSpec(
+            name=stage.name,
+            version=stage.version,
+            callback=_tool_retryable(stage.callback),
+            parameters=stage.parameters,
+        )
+        for stage in stages
+    )
+
+
+def _analysis_not_available(analysis: str) -> RunProblem:
+    return RunProblem(
+        "TBX-RUN-011",
+        f"The {analysis} analysis is not available in this build; no job was created",
+        cause=f"no {analysis} stages are installed in this version of traceback",
+        fix=(
+            "Run the other analyses without it (for example --analysis fragment); "
+            f"{analysis} arrives in a later version"
+        ),
+        data={"analysis": analysis},
+    )
+
+
+@dataclass(frozen=True)
+class _ResolvedAnalysis:
+    """One non-fragment analysis resolved for a reference: its method and request."""
+
+    spec: Any
+    config: dict[str, str]
+    definition: Any
+    workflow_sha256: str
+
+
+def _resolve_analysis(
+    root: Path, analysis: str, loaded: Any, settings: dict[str, str | None]
+) -> _ResolvedAnalysis:
+    """The registered stages, resolved settings and method of one analysis.
+
+    Every resolved setting goes to the definition hook, so it is bound into
+    the method hash and therefore into the job's workflow hash.
+    """
+
+    from evidence_inspector.method_registry import method_definition_sha256
+
+    from .analyses import registered_analysis_stages, resolved_config
+
+    spec = registered_analysis_stages(analysis)
+    if spec is None:
+        raise _analysis_not_available(analysis)
+    config = resolved_config(spec, settings)
+    definition = spec.definition(loaded, config)
+    return _ResolvedAnalysis(
+        spec=spec,
+        config=config,
+        definition=definition,
+        workflow_sha256=_local_workflow_sha256(method_definition_sha256(definition)),
+    )
+
+
+def _run_registered_analysis(
+    root: Path,
+    runner: Any,
+    analysis: str,
+    settings: dict[str, str | None],
+    source: Path,
+    relative_files: tuple[str, str],
+    loaded: Any,
+    progress: Callable[[str], None],
+) -> tuple[ExitCode, dict[str, Any]]:
+    from .analyses import AnalysisConfigConflict, record_job_config, sample_token
+    from .contracts import InputKind, JobRequest
+    from .local_authority import ensure_method_authority
+    from .snapshots import input_tree_sha256
+
+    reference_id = loaded.registered.reference_id
+    resolved = _resolve_analysis(root, analysis, loaded, settings)
+    ensure_method_authority(root, reference_id, resolved.spec.method_slug, resolved.definition)
+    try:
+        record_job_config(
+            root, resolved.workflow_sha256, reference_id, analysis, resolved.config
+        )
+    except AnalysisConfigConflict as exc:
+        raise RunProblem(
+            "TBX-INTERNAL-001",
+            f"The {analysis} method does not bind its settings; no job was created",
+            cause=str(exc),
+            fix="Retrying will not change it; report the code and the run command you ran",
+            data={"analysis": analysis},
+        ) from exc
+    progress(f"STAGE  {analysis} seal: copying the BAM and index under ROOT")
+    request = JobRequest(
+        sample_token=sample_token(reference_id, analysis),
+        input_kind=InputKind.MODBAM,
+        input_tree_sha256_local=input_tree_sha256(source, relative_files),
+        workflow_release_sha256=resolved.workflow_sha256,
+    )
+    bam_name, index_name = relative_files
+    return _run_with_runner(
+        root,
+        runner,
+        request,
+        source,
+        relative_files,
+        loaded,
+        progress,
+        analysis=analysis,
+        make_stages=lambda key: _analysis_stages(
+            resolved.spec, root, loaded, bam_name, index_name, resolved.config, key, progress
+        ),
+        finish=lambda record: _analysis_run_result(root, runner, record, reference_id),
+    )
+
+
+def _analysis_run_result(
+    root: Path, runner: Any, record: Any, reference_id: str
+) -> tuple[ExitCode, dict[str, Any]]:
+    """The published record of one non-fragment analysis job."""
+
+    import shlex
+
+    from .bundles import bundle_measurement_path
+
+    verified, published = _publish_signed_record(root, runner, record.job_id)
+    absolute_root = Path(os.path.abspath(root))
+    bundle_path = absolute_root / published.relative_to(root)
+    trust_path = absolute_root / _TRUST_RELATIVE
+    return ExitCode.OK, _result(
+        "run",
+        "ok",
+        "Signed local record ready (development trust, unqualified, not for clinical "
+        "use); nothing was uploaded",
+        data={
+            "job_id": record.job_id,
+            "state": record.state.value,
+            "record_id": verified.manifest.record_id,
+            "reference_id": reference_id,
+            "measurement_schema": bundle_measurement_path(verified.manifest),
+            "bundle": published.relative_to(root).as_posix(),
+            "trust_store": _TRUST_RELATIVE.as_posix(),
+            "bundle_path": str(bundle_path),
+            "trust_store_path": str(trust_path),
+            "report_path": str(bundle_path / "report.html"),
+            "next_commands": [
+                f"traceback verify {shlex.quote(str(bundle_path))} "
+                f"--trust-store {shlex.quote(str(trust_path))}",
+                f"traceback catalog import {shlex.quote(str(bundle_path))} "
+                f"--root {shlex.quote(str(root.absolute()))}",
+            ],
+            "verification": "verified",
+            "development_trust_only": True,
+            "qualified": False,
+        },
+    )
+
+
+def _analysis_row(analysis: str, code: ExitCode, payload: dict[str, Any]) -> dict[str, Any]:
+    return {
+        "analysis": analysis,
+        "status": payload["status"],
+        "exit_code": int(code),
+        "summary": payload["summary"],
+        **payload["data"],
+    }
+
+
+def _run_one_analysis(
+    args: argparse.Namespace,
+    runner: Any,
+    analysis: str,
+    source: Path,
+    relative_files: tuple[str, str],
+    loaded: Any,
+    progress: Callable[[str], None],
+) -> tuple[ExitCode, dict[str, Any]]:
+    """Run one analysis; every failure becomes that analysis's result, never another's."""
+
+    from .analyses import FRAGMENT
+    from .local_authority import ensure_local_method_authority
+
+    root = args.root
+    try:
+        with _no_space_mapped():
+            if analysis == FRAGMENT:
+                ensure_local_method_authority(root, loaded.registered)
+                code, payload = _run_fragment(
+                    root, source, relative_files, loaded, progress, runner
+                )
+            else:
+                code, payload = _run_registered_analysis(
+                    root,
+                    runner,
+                    analysis,
+                    {"modbase_model": getattr(args, "modbase_model", None)},
+                    source,
+                    relative_files,
+                    loaded,
+                    progress,
+                )
+            return _after_run_mapped(args, code, payload)
+    except ReferenceProblem as problem:
+        return ExitCode(problem.exit_code), _problem("run", problem)
+    except OperatorBusy as busy:
+        job_id = getattr(busy, "job_id", None)
+        return ExitCode.BLOCKED, _problem(
+            "run",
+            RunProblem(
+                "TBX-JOB-002",
+                "Another traceback process holds this analysis's job; nothing was changed",
+                cause="the job's worker lease is live",
+                fix=f"Wait for it, or check traceback status {job_id or 'JOB_ID'}",
+                retryable=True,
+                data={"job_id": job_id} if job_id else {},
+            ),
+        )
+    except Exception as exc:
+        job_id = getattr(exc, "job_id", None)
+        job = {"job_id": job_id} if job_id else {}
+        # The same classes as the single-analysis run (``main``).
+        if any(base.__name__ in _RUN_VERIFICATION_ERRORS for base in type(exc).mro()):
+            return ExitCode.VERIFICATION_FAILED, _result(
+                "run",
+                "verification_failed",
+                "Bundle or development trust verification failed",
+                data=job,
+            )
+        if any(base.__name__ in _RUN_BLOCKED_ERRORS for base in type(exc).mro()):
+            return ExitCode.BLOCKED, _result(
+                "run", "blocked", "Asset operation was blocked before use", data=job
+            )
+        if isinstance(exc, (FileNotFoundError, KeyError)):
+            return ExitCode.NOT_FOUND, _result(
+                "run",
+                "not_found",
+                "Requested local job, bundle, or trust material was not found",
+                data=job,
+            )
+        return ExitCode.RETRYABLE_FAILURE, _result(
+            "run",
+            "retryable_failure",
+            "Local run failed without a record; inspect traceback status and "
+            "logs before retrying",
+            data={
+                "code": "TBX-JOB-001",
+                "retryable": True,
+                **({"job_id": job_id} if job_id else {}),
+            },
+        )
+
+
+_RUN_VERIFICATION_ERRORS = frozenset(
+    {
+        "BundleError",
+        "BundleFilesystemError",
+        "BundleFormatError",
+        "BundleIntegrityError",
+        "SigningError",
+        "UnknownKeyError",
+        "RevokedKeyError",
+        "WrongPurposeError",
+        "InvalidSignatureError",
+        "TrustNamespaceError",
+        "ResultTrustRegistryError",
+        "AssetEvidenceInputError",
+        "AssetIntegrityError",
+        "AssetPackageError",
+    }
+)
+_RUN_BLOCKED_ERRORS = frozenset(
+    {"AssetAuthorityError", "AssetCapacityError", "AssetConflictError", "AssetFilesystemError"}
+)
+
+
+def _run_analyses(
+    args: argparse.Namespace,
+    analyses: tuple[str, ...],
+    source: Path,
+    relative_files: tuple[str, str],
+    loaded: Any,
+    progress: Callable[[str], None],
+) -> tuple[ExitCode, dict[str, Any]]:
+    """``run --analysis``: one job and one record per analysis, fragment first.
+
+    The caller holds ROOT's operator lock for the whole run.  Each analysis
+    runs independently: a refusal or failure of one is reported in its own
+    row and never stops another.  The exit code is the worst row's.
+    """
+
+    from .runner import Runner
+
+    root = args.root
+    runner = Runner(root / "runner", local_unqualified_enabled=True)
+    rows: list[dict[str, Any]] = []
+    codes: list[ExitCode] = []
+    for analysis in analyses:
+        progress(f"START  {analysis}")
+        code, payload = _run_one_analysis(
+            args, runner, analysis, source, relative_files, loaded, progress
+        )
+        codes.append(code)
+        rows.append(_analysis_row(analysis, code, payload))
+    worst = _worst_exit(codes)
+    # A row that failed only at its label or import step still has its record.
+    made = sum(1 for row in rows if row.get("record_id"))
+    status = "ok" if worst == ExitCode.OK else _problem_status(worst)
+    payload = _result(
+        "run",
+        status,
+        f"{made} of {len(rows)} analyses have a signed local record (development trust, "
+        "unqualified, not for clinical use); nothing was uploaded",
+        data={"reference_id": loaded.registered.reference_id, "analyses": rows},
+    )
+    return worst, _with_human(payload, _analysis_table(rows), replace_data=True)
+
+
+def _problem_status(code: ExitCode) -> str:
+    return {
+        ExitCode.NOT_FOUND: "not_found",
+        ExitCode.RETRYABLE_FAILURE: "retryable_failure",
+        ExitCode.INTERNAL_ERROR: "internal_error",
+        ExitCode.VERIFICATION_FAILED: "verification_failed",
+    }.get(code, "blocked")
+
+
+def _analysis_table(rows: Sequence[dict[str, Any]]) -> list[str]:
+    from .labels import LABEL_QUALIFIER
+
+    lines = _table(
+        ("ANALYSIS", "RESULT", "EXIT", "JOB", "RECORD", "CODE"),
+        [
+            (
+                row["analysis"],
+                row["status"],
+                str(row["exit_code"]),
+                row.get("job_id") or "-",
+                row.get("record_id") or "-",
+                row.get("code") or "-",
+            )
+            for row in rows
+        ],
+    )
+    for row in rows:
+        if row["status"] == "ok":
+            if row.get("report_path"):
+                lines.append(f"{row['analysis']}: REPORT_PATH  {row['report_path']}")
+            elif row.get("next_action"):
+                lines.append(f"{row['analysis']}: {row['summary']}; {row['next_action']}")
+            if row.get("same_measurement_as"):
+                lines.append(
+                    f"{row['analysis']}: SAME_MEASUREMENT_AS  {row['same_measurement_as']}"
+                )
+            continue
+        lines.append(f"{row['analysis']}: {row['summary']}")
+        for key in ("cause", "fix", "next_action", "docs"):
+            if row.get(key):
+                lines.append(f"  {key.upper()}  {row[key]}")
+    if any(row.get("label_set") for row in rows):
+        lines.append(f"Each new record carries the label ({LABEL_QUALIFIER})")
+    return lines
+
+
 def _run_sealed(
     root: Path,
     request: Any,
@@ -2159,18 +2726,36 @@ def _run_with_runner(
     relative_files: tuple[str, str],
     loaded: Any,
     progress: Callable[[str], None],
+    *,
+    analysis: str = "fragment",
+    make_stages: Callable[[Any], tuple[Any, ...]] | None = None,
+    finish: Callable[[Any], tuple[ExitCode, dict[str, Any]]] | None = None,
 ) -> tuple[ExitCode, dict[str, Any]]:
-    refuse_failed = _refuse_failed_job(runner)
+    from .analyses import parse_sample_token
+
+    # A failed job refuses only its own (input, analysis): the request names
+    # the analysis (sample token) and the method (workflow hash).
+    refuse_failed = _refuse_failed_job(runner, analysis=analysis)
     submitted: list[str] = []
+    parsed = parse_sample_token(request.sample_token)
+    if parsed is None or parsed[1] != analysis:
+        raise ValueError("the request's sample token does not name this analysis")
+
+    def on_admitted(job_id: str) -> None:
+        # Every job ID is printed as soon as the job row exists, before the
+        # input is copied (SH4).
+        submitted.append(job_id)
+        progress(f"JOB  {analysis} {job_id}")
 
     def on_submitted(record: Any) -> None:
-        submitted.append(record.job_id)
+        if not submitted:
+            submitted.append(record.job_id)
         refuse_failed(record)
 
     try:
         return _run_submitted(
             root, runner, request, source, relative_files, loaded, progress, submitted,
-            on_submitted,
+            on_submitted, make_stages=make_stages, finish=finish, on_admitted=on_admitted,
         )
     except BaseException as exc:
         # Every refusal after submit names its job (A3), whatever maps it.
@@ -2198,10 +2783,17 @@ def _run_submitted(
     progress: Callable[[str], None],
     submitted: list[str],
     on_submitted: Callable[[Any], None],
+    *,
+    make_stages: Callable[[Any], tuple[Any, ...]] | None = None,
+    finish: Callable[[Any], tuple[ExitCode, dict[str, Any]]] | None = None,
+    on_admitted: Callable[[str], None] | None = None,
 ) -> tuple[ExitCode, dict[str, Any]]:
     from .signing import TrustNamespace
 
     bam_name, index_name = relative_files
+    if make_stages is None:
+        def make_stages(key: Any) -> tuple[Any, ...]:
+            return _local_stages(root, loaded, bam_name, index_name, key, progress)
     try:
         record = _execute_signed_run(
             root,
@@ -2209,13 +2801,18 @@ def _run_submitted(
             request,
             source,
             relative_files,
-            lambda key: _local_stages(root, loaded, bam_name, index_name, key, progress),
+            make_stages,
             namespace=TrustNamespace.DEVELOPMENT_LOCAL,
             worker_id="local-cli",
             on_submitted=on_submitted,
+            on_admitted=on_admitted,
         )
     except LocalStageRefusal as refusal:
         raise _refusal_problem(refusal) from refusal
+    except ToolUnavailableAtStage as unavailable:
+        raise _tool_problem(
+            unavailable, submitted[0] if submitted else None, "resume"
+        ) from unavailable
     except StaleLease as lost:
         if not submitted:
             raise
@@ -2244,6 +2841,8 @@ def _run_submitted(
                 "next_action": f"traceback resume {record.job_id} --root <same-root>",
             },
         )
+    if finish is not None:
+        return finish(record)
     return _local_run_result(root, runner, record, loaded.registered.reference_id)
 
 
@@ -3104,26 +3703,151 @@ def _preflight_registered(
         else {}
     )
     blocked = report.outcome == PreflightOutcome.BLOCKED
-    return (
-        ExitCode.BLOCKED if blocked else ExitCode.OK,
-        _result(
-            "preflight",
-            "blocked" if blocked else "ok",
-            (
-                "Technical inspection blocked this input; "
-                "unqualified, local, not for clinical use"
-                if blocked
-                else f"Technical inspection {report.outcome.value} against registered "
-                f"reference {args.reference_id}; unqualified, local, not for clinical use"
-            ),
-            data={
-                "report": report.model_dump(mode="json"),
-                "qualified": False,
-                "reference_id": args.reference_id,
-                **align,
-            },
-        ),
+    analyses = getattr(args, "analysis", None)
+    readiness = (
+        {"analyses": _analysis_readiness(analyses, report, loaded, args)}
+        if analyses is not None
+        else {}
     )
+    payload = _result(
+        "preflight",
+        "blocked" if blocked else "ok",
+        (
+            "Technical inspection blocked this input; "
+            "unqualified, local, not for clinical use"
+            if blocked
+            else f"Technical inspection {report.outcome.value} against registered "
+            f"reference {args.reference_id}; unqualified, local, not for clinical use"
+        ),
+        data={
+            "report": report.model_dump(mode="json"),
+            "qualified": False,
+            "reference_id": args.reference_id,
+            **align,
+            **readiness,
+        },
+    )
+    if readiness:
+        payload = _with_human(payload, _readiness_lines(readiness["analyses"]))
+    return ExitCode.BLOCKED if blocked else ExitCode.OK, payload
+
+
+def _modbase_readiness(report: Any, modbase_model: str | None) -> Any:
+    """Cell origin's TBX-MOD-001 row: modification tags and a declared model."""
+
+    from .analyses import ReadinessRow
+    from .contracts import PreflightOutcome
+
+    checks = {check.code: check for check in report.checks}
+    contradictory = checks.get("TBX-MOD-002")
+    mod = checks.get("TBX-MOD-001")
+    if contradictory is not None and contradictory.outcome != PreflightOutcome.PASS:
+        return ReadinessRow(
+            "TBX-MOD-002", "blocked", "BLOCKED for cell origin: " + contradictory.problem
+        )
+    if mod is None or mod.outcome in {PreflightOutcome.PARTIAL, PreflightOutcome.BLOCKED}:
+        return ReadinessRow(
+            "TBX-MOD-001",
+            "blocked",
+            "BLOCKED for cell origin: the reads carry no usable MM/ML modification tags",
+        )
+    if mod.outcome == PreflightOutcome.PASS:
+        return ReadinessRow("TBX-MOD-001", "ready", "modified-base model declared in the header")
+    if modbase_model is None:
+        return ReadinessRow(
+            "TBX-MOD-001", "blocked", "BLOCKED for cell origin: pass `--modbase-model`"
+        )
+    return ReadinessRow(
+        "TBX-MOD-001", "ready", "modified-base model declared by the operator (--modbase-model)"
+    )
+
+
+def _modkit_readiness() -> Any:
+    from .analyses import ReadinessRow
+    from .toolchain import TOOL_MISSING, ToolProblem, resolve_modkit
+
+    try:
+        resolve_modkit()
+    except ToolProblem as problem:
+        return ReadinessRow(
+            problem.code,
+            "missing" if problem.reason == TOOL_MISSING else "blocked",
+            f"{problem.summary}; {problem.fix}",
+        )
+    except Exception as exc:  # an unsupported platform or unreadable lock
+        return ReadinessRow(
+            "TBX-TOOL-001", "missing", f"modkit could not be checked ({type(exc).__name__})"
+        )
+    return ReadinessRow("TBX-TOOL-001", "ready", "modkit installed and verified")
+
+
+def _analysis_readiness(
+    analyses: Sequence[str], report: Any, loaded: Any, args: argparse.Namespace
+) -> list[dict[str, Any]]:
+    """``preflight --analysis``: what each analysis would need before ``run``.
+
+    Read-only.  Rows come from the preflight report (BAM and modification
+    checks), the pinned tools and the analysis's registered readiness hook (METH, CNA).
+    """
+
+    from .analyses import (
+        CELL_ORIGIN,
+        FRAGMENT,
+        ReadinessRow,
+        registered_analysis_stages,
+        resolved_config,
+    )
+    from .contracts import PreflightOutcome
+
+    modbase_model = getattr(args, "modbase_model", None)
+    results: list[dict[str, Any]] = []
+    for analysis in analyses:
+        rows: list[ReadinessRow] = []
+        if analysis == FRAGMENT:
+            blocked = [
+                check for check in report.checks if check.outcome == PreflightOutcome.BLOCKED
+            ]
+            rows.append(
+                ReadinessRow("TBX-BAM-001", "ready", "fragment measurement eligible")
+                if report.fragment_measurement_eligible and not blocked
+                else ReadinessRow(
+                    blocked[0].code if blocked else "TBX-BAM-001",
+                    "blocked",
+                    blocked[0].problem if blocked else "not eligible for fragment measurement",
+                )
+            )
+        else:
+            if analysis == CELL_ORIGIN:
+                rows.append(_modbase_readiness(report, modbase_model))
+                rows.append(_modkit_readiness())
+            spec = registered_analysis_stages(analysis)
+            if spec is None:
+                rows.append(
+                    ReadinessRow(
+                        "TBX-RUN-011", "blocked", f"{analysis} is not available in this build"
+                    )
+                )
+            elif spec.readiness is not None:
+                config = resolved_config(spec, {"modbase_model": modbase_model})
+                rows.extend(spec.readiness(loaded, config))
+        ready = all(row.outcome == "ready" for row in rows)
+        results.append(
+            {
+                "analysis": analysis,
+                "readiness": "ready" if ready else "blocked",
+                "checks": [row.as_json() for row in rows],
+            }
+        )
+    return results
+
+
+def _readiness_lines(results: Sequence[dict[str, Any]]) -> list[str]:
+    lines = ["READINESS (before run --analysis; nothing was run)"]
+    for result in results:
+        lines.append(f"{result['analysis']}: {result['readiness'].upper()}")
+        for check in result["checks"]:
+            lines.append(f"  {check['code']}  {check['outcome'].upper()}  {check['detail']}")
+    return lines
 
 
 def _reference_register(args: argparse.Namespace) -> tuple[ExitCode, dict[str, Any]]:
@@ -3440,23 +4164,30 @@ def _resume(
         )
     _reject_live_worker(probe, record.job_id)
     if local:
+        from .analyses import parse_sample_token
+
         runner = _existing_runner(args.root, local_unqualified_enabled=True)
         _refuse_unsealed_job(runner, record)
-        reference_id = request.sample_token[len(_LOCAL_SAMPLE_PREFIX):]
+        # `partition(":")` against the closed analysis list (SH4).
+        parsed = parse_sample_token(request.sample_token)
+        if parsed is None:
+            return ExitCode.BLOCKED, _result(
+                "resume",
+                "blocked",
+                "This job's analysis is not one this version of traceback can resume",
+                data={"job_id": record.job_id},
+            )
+        reference_id, analysis = parsed
         loaded = load_reference(args.root, reference_id)
-        # The same authority check as `run`: a damaged store refuses the resume.
-        from .local_authority import ensure_local_method_authority
-
-        ensure_local_method_authority(args.root, loaded.registered)
         names = _sealed_local_names(runner, record.job_id)
+        make_stages = _resume_local_stages(
+            args.root, record.job_id, request, analysis, loaded, names, progress
+        )
         if names is None:
             return ExitCode.BLOCKED, _result(
                 "resume", "blocked", "The local job's sealed input is not one BAM and one index",
             )
         namespace = TrustNamespace.DEVELOPMENT_LOCAL
-
-        def make_stages(key: Any) -> tuple[Any, ...]:
-            return _local_stages(args.root, loaded, names[0], names[1], key, progress)
     else:
         runner = _existing_runner(args.root, synthetic_enabled=True)
         namespace = TrustNamespace.DEVELOPMENT_SYNTHETIC
@@ -3466,6 +4197,87 @@ def _resume(
     stages = make_stages(signing_key)
     worker_id = "local-cli" if local else "synthetic-cli"
     return _resume_execute(args, runner, record, stages, worker_id, local=local)
+
+
+# Jobs written before the key named the method (golden-path B1) carry this
+# constant; they predate method-bound keys and stay resumable as before.
+_LEGACY_LOCAL_WORKFLOW_SHA256 = hashlib.sha256(_LOCAL_WORKFLOW_ID.encode("ascii")).hexdigest()
+
+
+def _method_changed(job_id: str, analysis: str) -> RunProblem:
+    return RunProblem(
+        "TBX-JOB-003",
+        f"This {analysis} job was admitted under another method definition; "
+        "nothing was resumed",
+        cause=(
+            f"job {job_id}'s workflow hash differs from the {analysis} method this ROOT "
+            "and this version resolve now (the reference, a tool, an asset or a "
+            "setting changed)"
+        ),
+        fix=(
+            "Run the input again with traceback run: the current method is a new job; "
+            "the old job keeps its committed stages"
+        ),
+        data={"job_id": job_id, "analysis": analysis},
+    )
+
+
+def _resume_local_stages(
+    root: Path,
+    job_id: str,
+    request: Any,
+    analysis: str,
+    loaded: Any,
+    names: tuple[str, str] | None,
+    progress: Callable[[str], None],
+) -> Callable[[Any], tuple[Any, ...]]:
+    """The stages that finish one local job, after its method is re-checked.
+
+    The stored workflow hash must equal the one the analysis's method resolves
+    to now, or the resume refuses with TBX-JOB-003 before any store is
+    created: a job is never finished under a method it was not admitted under.
+    """
+
+    from .analyses import FRAGMENT, read_job_config
+    from .local_authority import ensure_local_method_authority, ensure_method_authority
+
+    bam_name, index_name = names if names is not None else ("", "")
+    stored = request.workflow_release_sha256
+    if analysis == FRAGMENT:
+        current = _local_workflow_sha256(_local_method_sha256(loaded.registered))
+        if stored not in {current, _LEGACY_LOCAL_WORKFLOW_SHA256}:
+            raise _method_changed(job_id, analysis)
+        # The same authority check as `run`: a damaged store refuses the resume.
+        ensure_local_method_authority(root, loaded.registered)
+
+        def fragment_stages(key: Any) -> tuple[Any, ...]:
+            return _local_stages(root, loaded, bam_name, index_name, key, progress)
+
+        return fragment_stages
+    kept = read_job_config(root, stored)
+    if kept is None or kept[:2] != (loaded.registered.reference_id, analysis):
+        # Without the kept settings nothing can rebuild this job's method;
+        # never fall back to defaults the job was not admitted under.
+        problem = _method_changed(job_id, analysis)
+        problem.cause = (
+            f"job {job_id}'s kept settings (ROOT/analysis-config) are missing or damaged, "
+            "so its method cannot be rebuilt"
+        )
+        raise problem
+    config = kept[2]
+    resolved = _resolve_analysis(root, analysis, loaded, dict(config))
+    if resolved.workflow_sha256 != stored or resolved.config != config:
+        raise _method_changed(job_id, analysis)
+    ensure_method_authority(
+        root, loaded.registered.reference_id, resolved.spec.method_slug, resolved.definition
+    )
+
+    def analysis_stages(key: Any) -> tuple[Any, ...]:
+        return _analysis_stages(
+            resolved.spec, root, loaded, bam_name, index_name, resolved.config, key, progress
+        )
+
+    return analysis_stages
 
 
 def _resume_execute(
@@ -3484,6 +4296,8 @@ def _resume_execute(
             record = runner.resume(record.job_id, stages, worker_id=worker_id)
     except LocalStageRefusal as refusal:
         raise _refusal_problem(refusal) from refusal
+    except ToolUnavailableAtStage as unavailable:
+        raise _tool_problem(unavailable, record.job_id, "resume") from unavailable
     if local and record.state == JobState.PAUSED:
         return ExitCode.OK, _result(
             "resume",
@@ -4049,6 +4863,23 @@ def _dispatch(
     raise AssertionError(f"unhandled command {args.command}")
 
 
+def _require_analysis_settings(parser: argparse.ArgumentParser, args: argparse.Namespace) -> None:
+    """A per-analysis setting needs its analysis; ``preflight --analysis`` needs --reference."""
+
+    from .analyses import FRAGMENT, SETTING_ANALYSIS
+
+    if args.command not in {"run", "preflight"}:
+        return
+    analyses = args.analysis or (FRAGMENT,)
+    for setting, analysis in sorted(SETTING_ANALYSIS.items()):
+        if getattr(args, setting, None) is not None and analysis not in analyses:
+            parser.error(
+                f"--{setting.replace('_', '-')} applies only with --analysis including {analysis}"
+            )
+    if args.command == "preflight" and args.analysis is not None and args.reference_id is None:
+        parser.error("preflight --analysis needs --reference")
+
+
 def _require_trust_registry_identity(
     parser: argparse.ArgumentParser, args: argparse.Namespace
 ) -> None:
@@ -4130,6 +4961,7 @@ def main(argv: Sequence[str] | None = None) -> int:
     parser = _parser()
     args = parser.parse_args(argv)
     _require_trust_registry_identity(parser, args)
+    _require_analysis_settings(parser, args)
     if args.command == "serve":  # long-running; its first stdout line is the link
         return _serve_main(args)
     as_json = getattr(args, "as_json", False)

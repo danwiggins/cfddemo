@@ -237,10 +237,17 @@ class Runner:
         relative_files: Iterable[str],
         *,
         idempotency_key: str | None = None,
+        on_admitted: Callable[[str], None] | None = None,
     ) -> JobRecord:
-        """Atomically deduplicate a request and bind it to copied sealed bytes."""
+        """Atomically deduplicate a request and bind it to copied sealed bytes.
+
+        ``on_admitted(job_id)`` is called once the job row exists, before any
+        input is copied, so a caller can name the job before a long seal.
+        """
 
         record = self.store.submit(request, idempotency_key)
+        if on_admitted is not None:
+            on_admitted(record.job_id)
         # Process-scoped flock is released by process death, unlike a durable
         # "capturing" flag. Separate opens also serialize concurrent threads.
         with self._submission_guard(record.job_id):
