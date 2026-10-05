@@ -197,6 +197,7 @@ class LocalAnalysisRecordView(RunnerContract):
         pattern=r"^traceback\.local-[a-z0-9]+(?:-[a-z0-9]+)*-view\.v[1-9][0-9]*$"
     )
     analysis: Literal["cell_origin", "copy_number"]
+    analysis_label: str
     banner: Literal[
         "Unqualified. Local development record. Not for clinical use. Descriptive only."
     ] = "Unqualified. Local development record. Not for clinical use. Descriptive only."
@@ -721,6 +722,7 @@ def _analysis_view(
     return LocalAnalysisRecordView(
         schema_version=binding.view_schema_version,
         analysis=binding.analysis,  # type: ignore[arg-type]
+        analysis_label=copy_for("analysis", binding.analysis)[0],
         record_id=record_id,
         short_id=short_record_id(record_id),
         result_id=result_id,
