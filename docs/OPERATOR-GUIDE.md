@@ -37,8 +37,8 @@ traceback doctor [--root ROOT] [--deep] [--json]
 traceback protocol show [--json]
 traceback demo [--root ROOT] [--json]
 traceback reference register --fasta FASTA --id ID [--assembly NAME] [--root ROOT] [--json]
-traceback preflight INPUT [--reference ID] [--root ROOT] [--json]
-traceback run INPUT --reference ID [--index INDEX] [--import] [--label TEXT] [--root ROOT] [--json]
+traceback preflight INPUT [--reference ID [--analysis LIST] [--modbase-model MODEL]] [--root ROOT] [--json]
+traceback run INPUT --reference ID [--index INDEX] [--analysis LIST] [--modbase-model MODEL] [--import] [--label TEXT] [--root ROOT] [--json]
 traceback jobs [--limit N] [--root ROOT] [--json]
 traceback catalog import RECORD_ID|RECORD_DIR [--root ROOT] [--json]
 traceback catalog list [--root ROOT] [--json]
@@ -259,9 +259,9 @@ The test suite runs this block verbatim on a generated FASTA and BAM
 uv run traceback doctor --root "$R"
 uv run traceback reference register --fasta "$FASTA" --id ref --root "$R"
 uv run traceback preflight "$BAM" --reference ref --root "$R"
-uv run traceback run "$BAM" --reference ref --root "$R"
-# A fresh ROOT holds exactly one record; otherwise copy the RECORD_ID run printed.
-RECORD_ID="$(ls "$R/records")"
+RUN_JSON="$(uv run traceback run "$BAM" --reference ref --root "$R" --json)"
+printf '%s\n' "$RUN_JSON"
+RECORD_ID="$(printf '%s' "$RUN_JSON" | uv run python -c 'import json, sys; print(json.load(sys.stdin)["data"]["record_id"])')"
 uv run traceback verify "$RECORD_ID" --root "$R"
 uv run traceback catalog import "$R/records/$RECORD_ID" --root "$R"
 ```
@@ -341,6 +341,54 @@ exit code is the same as in human output. `--json` output and the record never
 contain the FASTA or BAM path; human output names the FASTA in one place only,
 the alignment command that `preflight --reference ID` (`ALIGN_COMMAND`) and
 `run --reference ID` (`FIX`) print for an unaligned BAM.
+
+### Several analyses of one BAM
+
+`run --analysis fragment,cell-origin,copy-number` makes one job and one signed
+record per analysis from the same BAM. Without `--analysis` (or with
+`--analysis fragment`) `run` is exactly the fragment run above: the same job,
+the same record and the same output.
+
+- The analyses run in the order fragment, cell origin, copy number, under one
+  hold of ROOT's operator lock. `run` checks free space once, for 2x the input
+  per analysis, because each job seals its own copy.
+- Each analysis is independent. A refusal or failure of one is reported in its
+  own row and never stops another, so a fragment record is still published
+  and reported when cell origin refuses.
+- Each job's ID is printed as `JOB  ANALYSIS JOB_ID` as soon as the job
+  exists. The result is a table with one row per analysis (analysis, result,
+  exit, job, record, code), followed by each refusal's cause and fix. With
+  `--json`, `data.analyses` is an array with one object per analysis, and each
+  one carries its `record_id` or its `code`, `cause` and `fix`:
+
+  ```bash
+  uv run traceback run "$BAM" --reference ref --analysis fragment,cell-origin --root "$R" --json \
+    | uv run python -c 'import json, sys; [print(a["analysis"], a.get("record_id", a.get("code"))) for a in json.load(sys.stdin)["data"]["analyses"]]'
+  ```
+
+- The exit code is the worst row's. From worst to best: 7, 5, 3, 4, 2, 6
+  (retryable), 0. A terminal refusal outranks a retryable failure, because a
+  retry can still turn the latter into a record.
+- `--modbase-model MODEL` declares the modified-base model for cell origin
+  when the BAM header does not (alignment drops `@RG`). It is part of the job
+  identity: running again with another model is a new job, never the earlier
+  job or its failure. It is refused unless `--analysis` includes
+  `cell-origin`.
+- A pinned tool that is missing when a stage needs it ends the job as
+  retryable (exit 6), never terminally. Install the tool, then
+  `traceback resume JOB_ID`.
+- `preflight --analysis LIST` adds a readiness section, one block per
+  analysis: the BAM checks for fragment; for cell origin, modification tags
+  and the declared model (`TBX-MOD-001 BLOCKED for cell origin: pass
+  --modbase-model`) and modkit (TBX-TOOL-001); and TBX-RUN-011 for an
+  analysis this version cannot run yet. It runs nothing, and its exit code is
+  still the BAM inspection's.
+- `resume` reads the analysis from the job and refuses with TBX-JOB-003 when
+  the method it resolves now (reference, tool, asset or setting) is not the
+  one the job was admitted under.
+
+Cell origin and copy number have no stages in this version yet: asking for
+them refuses that analysis with TBX-RUN-011 and runs the rest.
 
 ### Many BAMs: jobs, records and labels
 
@@ -425,7 +473,7 @@ says otherwise. Exit codes are listed under "Stable exit codes".
 | <a id="tbx-mod-001"></a>TBX-MOD-001 | 0 (WARN or PARTIAL) | WARN: valid `MM`/`ML`/`MN` tags, but no modified-base model declared in the header (no `@RG DS modbase_models=`; alignment drops `@RG`). PARTIAL: sampled reads carry no modification tags | WARN: no action needed for fragment length. PARTIAL: none for fragment length; re-basecall with modification calls for future methylation work |
 | <a id="tbx-mod-002"></a>TBX-MOD-002 | 0 (PARTIAL) | Sampled modification tags are structurally contradictory | As TBX-MOD-001 |
 | <a id="tbx-ref-004"></a>TBX-REF-004 | 2 | `preflight` without `--reference` on a ROOT that has registered references (the synthetic default would block a real BAM with a misleading contig error), or whose `R/references` could not be read (it never falls back to the synthetic default) | Add `--reference ID`; the problem lists the registered IDs. If `R/references` could not be read, check it with `traceback doctor --root R` |
-| <a id="tbx-internal-001"></a>TBX-INTERNAL-001 | 3 (`run`) or 7 (`preflight`) | Preflight stopped on an unexpected internal error, not a BAM read or format error. In `run` the job ends terminally (never retried in a loop); no record | Retrying will not change it. From `run`: `traceback support-bundle JOB_ID --output DIR`, then report the code. From `preflight` (no job exists): report the code and the command you ran |
+| <a id="tbx-internal-001"></a>TBX-INTERNAL-001 | 3 (`run`) or 7 (`preflight`) | Preflight stopped on an unexpected internal error, not a BAM read or format error. In `run` the job ends terminally (never retried in a loop); no record. With `run --analysis`, also: an analysis's method does not bind one of its settings, so that analysis refuses before it creates a job | Retrying will not change it. From `run`: `traceback support-bundle JOB_ID --output DIR`, then report the code. From `preflight` (no job exists): report the code and the command you ran |
 | <a id="tbx-run-003"></a>TBX-RUN-003 | 3 | `run` without `--reference` | Register the FASTA, then pass `--reference ID`; `traceback demo` is the synthetic workflow |
 | <a id="tbx-run-004"></a>TBX-RUN-004 | 3 | Free space under 2x the input (retryable; reports required and available bytes), or ROOT's volume filled during the run; no record | Free space or use a `--root` on a larger volume, then run again under a fresh ROOT |
 | <a id="tbx-run-005"></a>TBX-RUN-005 | 3 | No complete eligible denominator: no alignment passed the locked policy; the job fails, no record | Check contig names against the policy (chr1-chr22, chrX, chrY), MAPQ 20, and duplicate/secondary/supplementary/QC-fail flags |
@@ -440,6 +488,8 @@ says otherwise. Exit codes are listed under "Stable exit codes".
 | <a id="tbx-auth-local-002"></a>TBX-AUTH-LOCAL-002 | 3 | `R/trust/result-trust-registry` or its `.pin.json` is missing or does not open at its pin | Remove `R/trust/result-trust-registry` and its `.pin.json`, then import again (the registry mirrors `development-result-trust.json`) |
 | <a id="tbx-auth-local-003"></a>TBX-AUTH-LOCAL-003 | 3 | A store under `R/method-authority/REF/METHOD/DEFINITION_SHA256` fails its pinned SHA-256, location or replay check, or `R/method-authority` itself is not a private directory. A damaged store hides only the records bound to it; `R/authority` and every other store are unaffected | Restore the named store directory (or `R/method-authority`) from a backup; never remove `R/authority` for this code |
 | <a id="tbx-job-001"></a>TBX-JOB-001 | 6 | The local run failed without a record for an unexpected reason | `traceback status JOB_ID --root R` and `traceback logs JOB_ID --root R`, fix the stated cause, then `retry` and `resume` |
+| <a id="tbx-job-003"></a>TBX-JOB-003 | 3 | `resume`: the job was admitted under another method definition than the one ROOT resolves now (the reference, a tool, an asset or a `--modbase-model` setting changed); nothing was resumed | Run the input again with `traceback run`; the current method is a new job, and the old job keeps its committed stages |
+| <a id="tbx-run-011"></a>TBX-RUN-011 | 3 | `run --analysis`: this version has no stages for that analysis (cell origin and copy number arrive in later versions); no job was created for it, and the other analyses still ran | Run the other analyses without it, for example `--analysis fragment` |
 | <a id="tbx-job-002"></a>TBX-JOB-002 | 3 | Another traceback process holds this job's worker lease (it is running, or stopped less than a lease length ago); prints the `JOB_ID` | Wait for it, or check `traceback status JOB_ID --root R` |
 | <a id="tbx-label-001"></a>TBX-LABEL-001 | 3 | `R/labels` is a symbolic link or a file, so no label can be written (the site would not show one either) | Remove `R/labels` (labels are unsigned notes) and set the label again |
 | <a id="tbx-cat-003"></a>TBX-CAT-003 | 3 | `catalog export`: the `--csv` file already exists; nothing was written | Choose a new file name, or move the existing file |

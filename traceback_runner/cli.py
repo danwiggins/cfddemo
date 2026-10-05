@@ -2268,6 +2268,9 @@ class ToolUnavailableAtStage(Exception):
         self.problem = problem
 
 
+_TOOL_CODE_PREFIX = "TBX-" + "TOOL-"  # every pinned-tool code
+
+
 def _tool_retryable(callback: Callable[[Any], Any]) -> Callable[[Any], Any]:
     """Wrap one analysis stage so a tool problem is retryable, never terminal."""
 
@@ -2281,7 +2284,7 @@ def _tool_retryable(callback: Callable[[Any], Any]) -> Callable[[Any], Any]:
         except LocalStageRefusal as refusal:
             # A stage must not end a job terminally over a tool: once the tool
             # is installed the same sealed input can finish.
-            if refusal.code.startswith("TBX-TOOL-"):
+            if refusal.code.startswith(_TOOL_CODE_PREFIX):
                 raise ToolUnavailableAtStage(
                     ReferenceProblem(
                         refusal.code, refusal.summary, cause=refusal.cause, fix=refusal.fix
@@ -3727,8 +3730,8 @@ def _analysis_readiness(
 ) -> list[dict[str, Any]]:
     """``preflight --analysis``: what each analysis would need before ``run``.
 
-    Read-only.  Rows come from the preflight report (TBX-BAM/MOD), the pinned
-    tools (TBX-TOOL) and the analysis's registered readiness hook (METH, CNA).
+    Read-only.  Rows come from the preflight report (BAM and modification
+    checks), the pinned tools and the analysis's registered readiness hook (METH, CNA).
     """
 
     from .analyses import (

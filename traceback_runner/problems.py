@@ -133,6 +133,16 @@ PROBLEM_TABLE: dict[str, ProblemText] = {
         "Another traceback process holds this job's worker lease",
         "Wait for it, or check traceback status JOB_ID",
     ),
+    "TBX-JOB-003": ProblemText(
+        "resume: the job was admitted under another method definition than the one "
+        "ROOT resolves now (the reference, a tool, an asset or a setting changed)",
+        "Run the input again with traceback run; the current method is a new job",
+    ),
+    "TBX-RUN-011": ProblemText(
+        "run --analysis: this version of traceback has no stages for that analysis; "
+        "no job was created for it, and the other analyses still ran",
+        "Run the other analyses without it (for example --analysis fragment)",
+    ),
     # Pinned analysis tools (reason: missing, or wrong version or digest)
     "TBX-TOOL-001": ProblemText(
         "Missing: the pinned tool or micromamba is not installed, or the install "
