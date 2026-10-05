@@ -28,7 +28,29 @@ from pydantic import (
     model_validator,
 )
 
-ICHOR_COMMIT = "5bfc03ed854f0e93fe5b624c97c1290fa0053837"
+# Pin reconciliation (signal-methods Q2, CN1).  The installed ichorCNA is the
+# bioconda package r-ichorcna 0.5.1, build r44hdfd78af_1, from the committed
+# toolchain lock.  Its recipe builds GitHub tag v0.5.1 (this commit; source
+# archive SHA-256 below) with two bioconda patches, so the component is
+# *modified*.  The earlier pin 5bfc03ed (ichorCNA 0.3.2, 2019) was 90 commits
+# behind v0.5.1 and is not what any toolchain installs.  v0.5.1 ships no
+# runIchorCNA.R script; the toolchain's driver calls ichorCNA::run_ichorCNA().
+ICHOR_COMMIT = "e5a6b30c061efc20d12c241eefb2dc7ed911cb6c"
+ICHOR_VERSION = "0.5.1"
+ICHOR_SOURCE_ARCHIVE_SHA256 = (
+    "9c28f86efaee172d80390091edcaf8414ec3ca23c4272300284a4c3fac3ac683"
+)
+ICHOR_BIOCONDA_BUILD = "r44hdfd78af_1"
+ICHOR_BIOCONDA_PATCH_SHA256 = (
+    (
+        "0001-Set-chrX-median-counts-to-NA-if-gender-is-unknown.patch",
+        "8d773bfa023fabaea04586581f79013095c121a816fe11bf62697462ca99356d",
+    ),
+    (
+        "0002-Adjust-uses-of-counts-so-that-they-can-take-account-.patch",
+        "87b85eb156faa4c1293a28ad2281b1e88bbabc5721c85c1ebffbac684dbc4560",
+    ),
+)
 HMMCOPY_COMMIT = "3b5efcebea919cafed5b85ac5922f67e8127ce71"
 HMMCOPY_UTILS_COMMIT = "29a8d1d18dfd301600d5d91832e5fe231935058c"
 MAX_OUTPUT_BYTES = 128 * 1024 * 1024
@@ -84,6 +106,13 @@ def contract_sha256(value: BaseModel | Sequence[CanonicalDigestValue]) -> str:
     """Return the canonical contract digest used by adapter bindings."""
 
     return _canonical_sha256(value)
+
+
+# The modification manifest an ichorCNA component binding carries for the
+# bioconda build (``modified=True``): the ordered patch names and digests.
+ICHOR_BIOCONDA_MODIFICATION_MANIFEST_SHA256 = _canonical_sha256(
+    [f"{name}:{digest}" for name, digest in ICHOR_BIOCONDA_PATCH_SHA256]
+)
 
 
 class ArtifactIdentity(StrictModel):
@@ -348,7 +377,10 @@ class PanelOfNormalsBinding(StrictModel):
     identity: ArtifactIdentity
     assembly: Identifier
     contig_dictionary_sha256: Sha256
-    native_format: Literal["rdata_granges"] = "rdata_granges"
+    # ichorCNA reads the panel with readRDS() (utils.R at v0.5.1), and
+    # createPanelOfNormals saves it with saveRDS(): an .rds GRanges, never
+    # an .RData workspace.  The argv passes it as /assets/pon.rds.
+    native_format: Literal["rds_granges"] = "rds_granges"
     native_coordinates: Literal["one_based_closed"] = "one_based_closed"
     bin_size_bp: int = Field(gt=0)
     canonical_bin_definition_sha256: Sha256
@@ -1924,7 +1956,12 @@ __all__ = [
     "HMMCOPY_UTILS_COMMIT",
     "CENTROMERE_COLUMNS",
     "CENTROMERE_GAP_TYPE",
+    "ICHOR_BIOCONDA_BUILD",
+    "ICHOR_BIOCONDA_MODIFICATION_MANIFEST_SHA256",
+    "ICHOR_BIOCONDA_PATCH_SHA256",
     "ICHOR_COMMIT",
+    "ICHOR_SOURCE_ARCHIVE_SHA256",
+    "ICHOR_VERSION",
     "CanonicalBin",
     "CanonicalBinMask",
     "CanonicalGrid",

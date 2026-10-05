@@ -737,6 +737,14 @@ def _doctor_trust(root: Path) -> dict[str, Any]:
     )
 
 
+def _doctor_copy_number_toolchain(*, deep: bool) -> dict[str, Any]:
+    """Optional ichorCNA toolchain (CN1); never blocks doctor."""
+
+    from .toolchain import ichor_doctor_check
+
+    return ichor_doctor_check(deep=deep)
+
+
 _REGISTRY_IDENTITY_REQUIRED = (
     "result trust registry expected identity and head are required and must match"
 )
@@ -758,6 +766,7 @@ def _doctor(args: argparse.Namespace) -> tuple[ExitCode, dict[str, Any]]:
         _doctor_disk(root),
         *_doctor_references(root, deep=args.deep),
         _doctor_trust(root),
+        _doctor_copy_number_toolchain(deep=args.deep),
     ]
     runtime_blocked = checks[0]["status"] == "blocked"
     trust_blocked = any(

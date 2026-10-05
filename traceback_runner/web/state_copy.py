@@ -259,6 +259,7 @@ _JOB_PROBLEM: dict[str, Copy] = {
     "TBX-ASSET-003": ("Asset file missing", "A registered asset file is missing or unreadable."),
     "TBX-ASSET-004": ("Asset not registered", "The asset the analysis needs is not registered under this ROOT."),
     "TBX-ASSET-005": ("Asset file rejected", "The analysis's own parser rejected the asset file; nothing was registered."),
+    "TBX-TOOL-002": ("Copy-number toolchain unavailable", "The ichorCNA toolchain is not installed, or it differs from its pinned lock."),
     "TBX-REF-001": ("Reference FASTA unusable", "The registered FASTA is missing, compressed, or its index contradicts it."),
     "TBX-REF-003": ("Reference not registered", "The reference ID is not registered in this ROOT, or its registration is damaged."),
     "TBX-BAM-001": ("BAM or index unreadable", "The BAM or its index is unreadable, truncated, not coordinate-sorted, or contradicts the other."),

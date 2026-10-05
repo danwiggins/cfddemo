@@ -177,6 +177,14 @@ PROBLEM_TABLE: dict[str, ProblemText] = {
         "Run traceback toolchain install modkit to see the plan, then add --yes; it "
         "replaces a damaged install",
     ),
+    "TBX-TOOL-002": ProblemText(
+        "Missing: the copy-number (ichorCNA) toolchain or micromamba is not installed, "
+        "an install stopped part-way, or a download failed. Wrong version or digest: "
+        "readCounter, Rscript, the driver, an installed file or a Bioconductor data "
+        "package no longer matches the lock and the install receipt",
+        "Run traceback toolchain install ichor to see the plan, then add --yes; it "
+        "replaces a damaged install. Fragment length never needs it",
+    ),
     # Catalog and local authority
     "TBX-CAT-001": ProblemText(
         "The path or ID is not a verifiable local record under this ROOT",
