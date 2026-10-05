@@ -2590,7 +2590,7 @@ def _run_analyses(
     rows: list[dict[str, Any]] = []
     codes: list[ExitCode] = []
     for analysis in analyses:
-        progress(f"ANALYSIS  {analysis}")
+        progress(f"START  {analysis}")
         code, payload = _run_one_analysis(
             args, runner, analysis, source, relative_files, loaded, progress
         )
