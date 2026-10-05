@@ -167,6 +167,13 @@ def _method_asset_parser(commands: Any) -> None:
         dest="from_dir",
         help="register the three Loyfer files of this directory under fixed IDs",
     )
+    source.add_argument(
+        "--from-toolchain",
+        choices=("copy-number", "ichor"),
+        dest="from_toolchain",
+        help="register the installed ichorCNA package's wigs and centromere table "
+        "(bin size from the locked method)",
+    )
     register.add_argument("--kind", choices=[kind.value for kind in AssetKind])
     register.add_argument("--id", dest="asset_id", type=_reference_id_argument)
     _root_argument(register)
@@ -3973,19 +3980,27 @@ def _method_asset(args: argparse.Namespace) -> tuple[ExitCode, dict[str, Any]]:
             f"Asset {args.asset_id} ({loaded.registered.kind.value}); unqualified, local",
             data=_asset_data(loaded.registered),
         )
-    if args.from_dir is not None:
+    if args.from_dir is not None or args.from_toolchain is not None:
+        flag = "--from-dir" if args.from_dir is not None else "--from-toolchain"
         if args.kind is not None or args.asset_id is not None:
             return ExitCode.USAGE, _result(
                 "method-asset register",
                 "blocked",
-                "--from-dir derives each kind and ID; do not pass --kind or --id",
+                f"{flag} derives each kind and ID; do not pass --kind or --id",
             )
         with _operator_lock(args.root):
-            results = register_loyfer_directory(args.root, args.from_dir)
+            if args.from_dir is not None:
+                results = register_loyfer_directory(args.root, args.from_dir)
+                label = "Loyfer"
+            else:
+                from .copy_number_method import register_toolchain_assets
+
+                results = register_toolchain_assets(args.root)
+                label = "ichorCNA"
         return ExitCode.OK, _result(
             "method-asset register",
             "ok",
-            f"{sum(item.created for item in results)} of {len(results)} Loyfer assets "
+            f"{sum(item.created for item in results)} of {len(results)} {label} assets "
             "newly registered; unqualified, local",
             data={
                 "assets": [_asset_data(item.registered, item.created) for item in results],
