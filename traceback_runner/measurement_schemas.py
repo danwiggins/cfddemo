@@ -60,6 +60,11 @@ class LocalCatalogBinding:
     ``authority`` opens (or creates) the local method authority for a
     registered reference: ``(root, registered_reference) -> LocalMethodAuthority``.
     ``denominator`` builds the E06 ``DenominatorLedger`` from a verified bundle.
+
+    With ``method_slug`` set, the record binds the hash-keyed method store
+    ``ROOT/method-authority/<reference>/<method_slug>/<definition sha256>``
+    named by its own manifest (signal SH1); ``authority`` is then not called.
+    The store is opened and validated, never created, by the import.
     """
 
     result_schema_id: str
@@ -70,6 +75,7 @@ class LocalCatalogBinding:
     denominator_semantics_id: str
     authority: Callable[[Any, Any], Any]
     denominator: Callable[[Any], Any]
+    method_slug: str | None = None
 
 
 @dataclass(frozen=True)
@@ -206,6 +212,13 @@ def _validate(spec: BundleMeasurementSchema) -> None:
         raise MeasurementSchemaError("catalog binding identifiers are malformed") from exc
     if not callable(binding.authority) or not callable(binding.denominator):
         raise MeasurementSchemaError("catalog binding needs authority and denominator")
+    if binding.method_slug is not None:
+        from .local_authority import validate_method_slug
+
+        try:
+            validate_method_slug(binding.method_slug)
+        except (TypeError, ValueError) as exc:
+            raise MeasurementSchemaError("catalog binding method slug is malformed") from exc
     if spec.record_view is not None:
         _validate_record_view(spec.record_view)
 

@@ -773,13 +773,17 @@ def exec_pinned(
 
 
 def kill_process_group(process: subprocess.Popen[Any]) -> None:
-    """Kill the child's whole process group and reap it."""
+    """Kill the child's whole process group and reap it.
 
-    if process.poll() is None:
-        try:
-            os.killpg(process.pid, signal.SIGKILL)
-        except ProcessLookupError:
-            pass
+    The group is signalled even when the leader has already exited: its
+    descendants keep the group alive, and the kernel does not reuse a PID that
+    is still a live process-group ID.
+    """
+
+    try:
+        os.killpg(process.pid, signal.SIGKILL)
+    except ProcessLookupError:
+        pass
     process.wait()
 
 

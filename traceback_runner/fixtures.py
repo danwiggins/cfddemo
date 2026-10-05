@@ -377,3 +377,203 @@ def create_local_golden_path_inputs(
         reads=reads,
         expected_eligible_alignments=expected,
     )
+
+
+
+# --- Cell origin (signal CO3): planted U/M fragments over a 3-marker mini-atlas ---
+
+CELL_ORIGIN_CONTRIBUTORS = ("TypeA", "TypeB")
+# Marker start, end and atlas U fractions (TypeA, TypeB) on chr1.
+CELL_ORIGIN_MARKERS = (
+    (2_000, 2_100, (0.9, 0.1)),
+    (5_000, 5_100, (0.1, 0.9)),
+    (8_000, 8_100, (0.5, 0.5)),
+)
+_CELL_ORIGIN_CONTIG = ("chr1", 12_000)
+
+
+@dataclass(frozen=True)
+class CellOriginFixture:
+    """Generated cell-origin inputs; synthetic, never real data or numbers."""
+
+    fasta_path: Path
+    bam_path: Path
+    index_path: Path
+    loyfer_dir: Path
+    mixture: tuple[float, float]
+    planted: tuple[tuple[int, int], ...]  # (U, M) reads per marker
+    other_reads: int
+    excluded_reads: int
+
+
+def _cpg_only_sequence(generator: random.Random, length: int, *, cpg_every: int | None) -> str:
+    """A/G/T sequence whose only C bases are CpG cytosines (every ``cpg_every`` bp)."""
+
+    bases = [generator.choice("AGT") for _ in range(length)]
+    if cpg_every is not None:
+        for start in range(3, length - 2, cpg_every):
+            bases[start], bases[start + 1] = "C", "G"
+    return "".join(bases)
+
+
+def create_cell_origin_inputs(
+    directory: Path,
+    *,
+    mixture: tuple[float, float] = (0.7, 0.3),
+    reads_per_marker: int = 100,
+    modification_tags: bool = True,
+    mn_tag: bool = True,
+    header_model: str | None = None,
+    seed: int = 20261005,
+) -> CellOriginFixture:
+    """Write a chr1 FASTA, a modBAM of planted U/M fragments and three Loyfer files.
+
+    Each marker region holds ten CpGs and no other C.  At marker ``k`` the
+    expected U fraction is the mixture's: ``round(reads * sum(w * u))`` reads
+    are fully unmethylated (ML 5) and the rest fully methylated (ML 250), so
+    NNLS on the mini-atlas recovers ``mixture``.  Ten reads elsewhere on chr1
+    overlap no marker, and four marker reads are excluded by the pre-filter
+    (duplicate, secondary, QC failure, MAPQ 5).
+    """
+
+    directory.mkdir(parents=True, exist_ok=True)
+    generator = random.Random(seed)
+    name, length = _CELL_ORIGIN_CONTIG
+    sequence = list(_cpg_only_sequence(generator, length, cpg_every=None))
+    for start, end, _ in CELL_ORIGIN_MARKERS:
+        sequence[start:end] = _cpg_only_sequence(generator, end - start, cpg_every=10)
+    reference = "".join(sequence)
+    fasta = directory / "cell-origin-reference.fa"
+    fasta.write_text(
+        f">{name} generated cell-origin contig\n"
+        + "\n".join(reference[i : i + 60] for i in range(0, length, 60))
+        + "\n",
+        encoding="ascii",
+    )
+    pysam.faidx(str(fasta))
+
+    header_dict: dict[str, Any] = {
+        "HD": {"VN": "1.6", "SO": "coordinate"},
+        "SQ": [{"SN": name, "LN": length}],
+    }
+    if header_model is not None:
+        header_dict["RG"] = [
+            {"ID": "rg1", "DS": f"basecall_model=x modbase_models={header_model}"}
+        ]
+    header = pysam.AlignmentHeader.from_dict(header_dict)
+
+    def segment(
+        read: str, start: int, span: int, *, methylated: bool, flag: int = 0, mapq: int = 60
+    ) -> pysam.AlignedSegment:
+        item = pysam.AlignedSegment(header)
+        item.query_name = read
+        item.flag = flag
+        item.reference_id = 0
+        item.reference_start = start
+        item.mapping_quality = mapq
+        item.cigartuples = [(0, span)]
+        query = reference[start : start + span]
+        item.query_sequence = query
+        item.query_qualities = pysam.qualitystring_to_array("I" * span)
+        if modification_tags:
+            cytosines = query.count("C")
+            item.set_tag("MM", "C+m?" + ",0" * cytosines + ";")
+            item.set_tag("ML", array.array("B", [250 if methylated else 5] * cytosines))
+            if mn_tag:
+                item.set_tag("MN", span)
+        if header_model is not None:
+            item.set_tag("RG", "rg1")
+        return item
+
+    placed: list[pysam.AlignedSegment] = []
+    planted: list[tuple[int, int]] = []
+    for index, (start, end, u_values) in enumerate(CELL_ORIGIN_MARKERS):
+        expected_u = sum(w * u for w, u in zip(mixture, u_values, strict=True))
+        unmethylated = round(reads_per_marker * expected_u)
+        planted.append((unmethylated, reads_per_marker - unmethylated))
+        for read in range(reads_per_marker):
+            placed.append(
+                segment(
+                    f"co-{index}-{read:04d}", start, end - start,
+                    methylated=read >= unmethylated,
+                )
+            )
+        if index == 0:
+            for flag, mapq, label in (
+                (1024, 60, "dup"), (256, 60, "sec"), (512, 60, "qc"), (0, 5, "lowq")
+            ):
+                placed.append(
+                    segment(f"co-x-{label}", start, end - start, methylated=False,
+                            flag=flag, mapq=mapq)
+                )
+    for read in range(10):
+        placed.append(segment(f"co-off-{read:02d}", 9_000 + 100 * read, 100, methylated=False))
+    bam = directory / "cell-origin.bam"
+    with pysam.AlignmentFile(str(bam), "wb", header=header) as output:
+        for item in sorted(placed, key=lambda value: (value.reference_start, value.query_name)):
+            output.write(item)
+    pysam.index(str(bam))
+
+    loyfer = directory / "loyfer"
+    loyfer.mkdir(exist_ok=True)
+    atlas_rows, marker_rows, region_rows = [], [], []
+    for start, end, u_values in CELL_ORIGIN_MARKERS:
+        region = f"{name}:{start}-{end}"
+        target = CELL_ORIGIN_CONTRIBUTORS[0 if u_values[0] >= u_values[1] else 1]
+        atlas_rows.append(
+            f"{name}\t{start}\t{end}\t1\t11\t{target}\t{region}\tU\t"
+            + "\t".join(str(value) for value in u_values)
+        )
+        marker_rows.append(
+            f"{name}\t{start}\t{end}\t1\t11\t{target}\t{region}\t10CpGs\t100bp\t0.9\t0.1"
+            "\t0.8\t0.5\t0.4\t1e-9\tU"
+        )
+        region_rows.append(f"{name}\t{start}\t{end}")
+    (loyfer / "Atlas.U250.l4.hg38.full.tsv").write_text(
+        "chr\tstart\tend\tstartCpG\tendCpG\ttarget\tname\tdirection\t"
+        + "\t".join(CELL_ORIGIN_CONTRIBUTORS) + "\n" + "\n".join(atlas_rows) + "\n",
+        encoding="utf-8",
+    )
+    (loyfer / "Markers.U250.hg38.tsv").write_text(
+        "#chr\tstart\tend\tstartCpG\tendCpG\ttarget\tregion\tlenCpG\tbp\ttg_mean\tbg_mean"
+        "\tdelta_means\tdelta_quants\tdelta_maxmin\tttest\tdirection\n"
+        + "\n".join(marker_rows) + "\n",
+        encoding="utf-8",
+    )
+    (loyfer / "Regions.U250.l4.hg38.bed").write_text(
+        "\n".join(region_rows) + "\n", encoding="utf-8"
+    )
+    return CellOriginFixture(
+        fasta_path=fasta,
+        bam_path=bam,
+        index_path=Path(f"{bam}.bai"),
+        loyfer_dir=loyfer,
+        mixture=mixture,
+        planted=tuple(planted),
+        other_reads=10,
+        excluded_reads=4,
+    )
+
+
+# A stand-in for ``modkit extract calls`` (tests only): it reads the
+# pre-filtered BAM it is given and emits one native row per CpG call from the
+# MM/ML tags.
+FAKE_MODKIT_SOURCE = r'''
+import sys
+import pysam
+
+args = sys.argv[1:]
+bam = args[-2]
+print("read_id\tref_position\tchrom\tmod_strand\tmodified_primary_base\tfail\tcall_code"
+      "\tcall_prob", flush=True)
+with pysam.AlignmentFile(bam, "rb", check_sq=False) as reader:
+    for record in reader.fetch(until_eof=True):
+        pairs = dict(record.get_aligned_pairs(matches_only=True))
+        for (base, strand, code), calls in sorted(record.modified_bases.items()):
+            for query_position, quality in calls:
+                probability = (quality + 0.5) / 256
+                call = code if probability >= 0.5 else "-"
+                print(f"{record.query_name}\t{pairs[query_position]}\t"
+                      f"{record.reference_name}\t+\tC\tfalse\t{call}\t"
+                      f"{max(probability, 1 - probability):.4f}")
+'''

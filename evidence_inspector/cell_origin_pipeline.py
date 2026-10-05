@@ -48,12 +48,15 @@ from evidence_inspector.cell_origin_inputs import (
 from evidence_inspector.cell_origin_models import (
     AtlasUMatrix,
     BootstrapInformationStatus,
+    BootstrapResultV2,
     CellOriginProvenance,
     CellOriginResult,
+    DeconvolutionOutputV2,
     DigestArtifact,
     GenomicMarker,
     Identifier,
     LOYFER_UXM_METHOD,
+    MarkerCountRow,
     NnlsRowScale,
     SoftwareVersion,
     StrictModel,
@@ -104,6 +107,8 @@ DEFAULT_TOP_COMPOSITION_ROWS = 12
 # which the call loader drops, can change.  A method parameter, not a result.
 DEFAULT_MODKIT_FILTER_THRESHOLD = 0.912109375
 MODKIT_TIMEOUT_SECONDS = 1800
+# How long a stream that ended early waits for modkit's own exit status.
+MODKIT_EXIT_GRACE_SECONDS = 5
 MODKIT_WORK_DIRECTORY = "modkit-work"
 PALETTE = (
     "#0F766E",
@@ -176,6 +181,22 @@ NATIVE_MODKIT_REQUIRED_COLUMNS = frozenset(
 
 class CellOriginPipelineError(RuntimeError):
     """Sanitized, actionable pipeline failure."""
+
+
+class CallCapExceeded(CellOriginPipelineError):
+    """The modkit extract passed the locked call cap; the run is refused."""
+
+
+class NoMarkerAlignments(CellOriginPipelineError):
+    """No alignment passed the pre-filter and overlapped a marker region."""
+
+
+class ModkitTimedOut(CellOriginPipelineError):
+    """modkit did not finish within its timeout; its process group was killed."""
+
+
+class ModkitKilled(CellOriginPipelineError):
+    """modkit was stopped by a signal (for example the OS under memory pressure)."""
 
 
 class CommandStep(StrictModel):
@@ -1653,7 +1674,7 @@ def _normalize_native_stream(
             writer.writeheader()
             for row_number, row in enumerate(reader, start=1):
                 if row_number > maximum_calls:
-                    raise CellOriginPipelineError(
+                    raise CallCapExceeded(
                         "modkit extract exceeds the configured call cap"
                     )
                 native_call_code = row["call_code"]
@@ -1774,7 +1795,7 @@ def _extract_modbam(
             "the aligned modBAM could not be pre-filtered"
         ) from exc
     if counts.written == 0:
-        raise CellOriginPipelineError(
+        raise NoMarkerAlignments(
             "no alignment passes the pre-filter and overlaps a marker region"
         )
     normalized = work / "modkit.normalized.tsv"
@@ -1815,22 +1836,140 @@ def _extract_modbam(
                 maximum_calls=config.maximum_calls,
             )
             returncode = process.wait()
+        except CellOriginPipelineError as exc:
+            # The stream ended early or did not parse.  If modkit exited on its
+            # own after a signal (killed by the OS, not by us), the input is not
+            # at fault: that is retryable.  A cap hit, or a parse failure while
+            # modkit is still running, is ours to stop and stays terminal.
+            exited = None
+            if not isinstance(exc, CallCapExceeded) and not timed_out.is_set():
+                try:
+                    exited = process.wait(timeout=MODKIT_EXIT_GRACE_SECONDS)
+                except subprocess.TimeoutExpired:
+                    exited = None
+                except BaseException:
+                    # Interrupted while waiting: never leave modkit running.
+                    kill_process_group(process)
+                    raise
+            kill_process_group(process)
+            if timed_out.is_set():  # a killed stream reads as a short or empty table
+                raise ModkitTimedOut("modkit extraction timed out") from exc
+            if exited is not None and exited < 0:
+                raise ModkitKilled(f"modkit was stopped by signal {-exited}") from exc
+            raise
         except BaseException as exc:
             kill_process_group(process)
             if timed_out.is_set():  # a killed stream reads as a short or empty table
-                raise CellOriginPipelineError("modkit extraction timed out") from exc
+                raise ModkitTimedOut("modkit extraction timed out") from exc
             raise
         finally:
             watchdog.cancel()
             if process.stdout is not None:
                 process.stdout.close()
     if timed_out.is_set():
-        raise CellOriginPipelineError("modkit extraction timed out")
+        raise ModkitTimedOut("modkit extraction timed out")
+    if returncode < 0:
+        raise ModkitKilled(f"modkit was stopped by signal {-returncode}")
     if returncode != 0:
         raise CellOriginPipelineError(
             "modkit extraction failed; run modkit validate on the aligned modBAM"
         )
     return normalized, counts
+
+
+def _round_trips(model: Any) -> bool:
+    """The model re-validates from its own JSON to an equal model (strict schema)."""
+
+    try:
+        return type(model).model_validate_json(model.model_dump_json()) == model
+    except ValidationError:
+        return False
+
+
+def _publication_safe(payload: Any) -> bool:
+    """No forbidden key (read IDs, paths, sequences) and no BAM name anywhere."""
+
+    def keys(value: Any) -> Iterable[str]:
+        if isinstance(value, dict):
+            for key, item in value.items():
+                yield key
+                yield from keys(item)
+        elif isinstance(value, list):
+            for item in value:
+                yield from keys(item)
+
+    return not _FORBIDDEN_OUTPUT_KEYS.intersection(
+        keys(payload)
+    ) and _FORBIDDEN_OUTPUT_SUBSTRING not in json.dumps(payload, sort_keys=True)
+
+
+def validation_report(
+    *,
+    marker_counts: Sequence[MarkerCountRow],
+    classified_fragment_marker_count: int,
+    atlas: AtlasUMatrix,
+    deconvolution: DeconvolutionOutputV2,
+    bootstrap: BootstrapResultV2 | None,
+    artifacts: Sequence[tuple[DigestArtifact, Path]],
+    publication: Sequence[Any] = (),
+) -> ValidationReport:
+    """Each publication check, computed from the result (never assumed).
+
+    - strict_schema: every result model re-validates from its own JSON;
+    - digests_verified: every input artifact still has the digest it was
+      used under (re-hashed now);
+    - markers_match_atlas: the fit's markers are the counted markers, each an
+      atlas row, and its contributors are the atlas columns in order;
+    - uxm_counts_reconciled: every marker row's U + X + M is its count, and
+      the rows sum to the classified fragment-marker count;
+    - fractions_normalized: fractions are in [0, 1] and sum to 1;
+    - model_safe: no read ID, path, sequence or BAM name in what is published.
+    """
+
+    counted = tuple(row.marker_id for row in marker_counts)
+    atlas_markers = {row.marker_id for row in atlas.rows}
+    models: list[Any] = [*marker_counts, deconvolution, *publication]
+    if bootstrap is not None:
+        models.append(bootstrap)
+    digests = True
+    for artifact, path in artifacts:
+        try:
+            digests = digests and _sha256(path) == artifact.sha256
+        except CellOriginPipelineError:
+            digests = False
+    fractions = [estimate.fraction for estimate in deconvolution.estimates]
+    checks = {
+        ValidationCheck.STRICT_SCHEMA: all(_round_trips(model) for model in models),
+        ValidationCheck.DIGESTS_VERIFIED: bool(artifacts) and digests,
+        ValidationCheck.MARKERS_MATCH_ATLAS: (
+            bool(counted)
+            and deconvolution.marker_ids == counted
+            and set(counted) <= atlas_markers
+            and deconvolution.atlas_id == atlas.atlas_id
+            and tuple(item.cell_type_id for item in deconvolution.estimates)
+            == atlas.cell_type_ids
+        ),
+        ValidationCheck.UXM_COUNTS_RECONCILED: (
+            all(
+                row.u_count + row.x_count + row.m_count == row.classified_fragment_count
+                for row in marker_counts
+            )
+            and sum(row.classified_fragment_count for row in marker_counts)
+            == classified_fragment_marker_count
+        ),
+        ValidationCheck.FRACTIONS_NORMALIZED: (
+            all(0.0 <= value <= 1.0 for value in fractions)
+            and abs(sum(fractions) - 1.0) <= 1e-9
+        ),
+        ValidationCheck.MODEL_SAFE: _publication_safe(
+            [model.model_dump(mode="json") for model in models]
+        ),
+    }
+    return ValidationReport(
+        records=tuple(
+            ValidationRecord(check=check, passed=checks[check]) for check in ValidationCheck
+        )
+    )
 
 
 def _prefilter_notice(counts: PrefilterCounts) -> str:
@@ -1973,12 +2112,36 @@ def run_pipeline(
                 else VerificationLevel.RECOMPUTED
             ),
         )
-        validation = ValidationReport(
-            records=tuple(
-                ValidationRecord(check=check, passed=True)
-                for check in ValidationCheck
-            )
+        validation = validation_report(
+            marker_counts=classified.marker_counts,
+            classified_fragment_marker_count=(
+                classified.diagnostics.classified_fragment_marker_count
+            ),
+            atlas=atlas,
+            deconvolution=deconvolution,
+            bootstrap=bootstrap,
+            artifacts=tuple(
+                zip(
+                    artifacts,
+                    (
+                        input_path,
+                        config.marker_bed,
+                        config.marker_metadata,
+                        config.atlas_u_matrix,
+                        *(() if config.healthy_table is None else (config.healthy_table,)),
+                    ),
+                    strict=True,
+                )
+            ),
+            publication=(provenance,),
         )
+        if not validation.passed:
+            raise CellOriginPipelineError(
+                "the result failed its validation checks: "
+                + ", ".join(
+                    record.check.value for record in validation.records if not record.passed
+                )
+            )
         result_digest = hashlib.sha256(
             json.dumps(
                 {

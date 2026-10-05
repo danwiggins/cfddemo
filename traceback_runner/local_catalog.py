@@ -28,6 +28,7 @@ from __future__ import annotations
 import hashlib
 import json
 import os
+import re
 import stat
 import threading
 from collections.abc import Callable, Iterator
@@ -96,6 +97,7 @@ class _CatalogSchema:
     denominator_semantics_id: str
     authority: Callable[[Path, Any], LocalMethodAuthority]
     denominator: Callable[[VerifiedBundle], Any]
+    method_slug: str | None = None
 
 
 def _catalog_schema(spec: BundleMeasurementSchema | None) -> _CatalogSchema:
@@ -122,6 +124,7 @@ def _catalog_schema(spec: BundleMeasurementSchema | None) -> _CatalogSchema:
         denominator_semantics_id=binding.denominator_semantics_id,
         authority=binding.authority,
         denominator=binding.denominator,
+        method_slug=binding.method_slug,
     )
 
 
@@ -270,6 +273,21 @@ def _peek_schema(bundle: Path) -> BundleMeasurementSchema | None:
     if raw.get("schema_version") != RESULT_BUNDLE_V4:
         return None
     return measurement_schema(raw["measurement_schema_versions"][0])
+
+
+def _peek_method_definition_sha256(bundle: Path) -> str:
+    """The method definition hash an already-peeked local bundle's manifest names.
+
+    Unverified: it only chooses which method store to open; the catalog then
+    verifies the signed manifest against that store's registry.
+    """
+
+    from .bundles import MANIFEST_PATH
+
+    value = json.loads(_read_peek(bundle / MANIFEST_PATH))["method"]["method_definition_sha256"]
+    if type(value) is not str or re.fullmatch(r"[0-9a-f]{64}", value) is None:
+        raise ValueError("manifest method definition hash is malformed")
+    return value
 
 
 # ---------------------------------------------------------------------------
@@ -894,7 +912,20 @@ def import_local_record(root: Path, bundle: Path) -> CatalogImportOutcome:
         raise _not_a_record("the bundle manifest is missing or invalid") from None
     registered = load_reference(root, reference_id).registered
     _require_public_reference_id(registered.reference_id)
-    authority = chosen.authority(root, registered)
+    if chosen.method_slug is None:
+        authority = chosen.authority(root, registered)
+    else:
+        from .local_authority import open_method_authority
+
+        try:
+            definition_sha256 = _peek_method_definition_sha256(bundle)
+        except (OSError, ValueError, KeyError, TypeError):
+            raise _not_a_record("the bundle manifest names no method definition") from None
+        # The store `run` created for this record's exact definition; a
+        # missing or damaged one refuses with TBX-AUTH-LOCAL-003.
+        authority = open_method_authority(
+            root, registered.reference_id, chosen.method_slug, definition_sha256
+        )
     trust = sync_local_result_trust(root, key_ids=frozenset({key_id}))
     try:
         catalog = open_local_catalog(root, trust, import_root=bundle.parent)

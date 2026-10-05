@@ -2437,7 +2437,7 @@ def _resolve_analysis(
     if spec is None:
         raise _analysis_not_available(analysis)
     config = resolved_config(spec, settings)
-    definition = spec.definition(loaded, config)
+    definition = spec.resolve_definition(root, loaded, config)
     return _ResolvedAnalysis(
         spec=spec,
         config=config,
@@ -3245,9 +3245,7 @@ def _catalog_list(args: argparse.Namespace) -> tuple[ExitCode, dict[str, Any]]:
             "record_id": record_id,
             "reference_id": reference,
             "policy": "built-in",
-            "eligible_alignments": (
-                measurement.eligible_alignments if measurement is not None else None
-            ),
+            "eligible_alignments": _eligible_alignments(measurement),
             "imported": catalog is not None,
             "imported_at": _iso_utc(when) if when is not None else None,
             "verification": "verified" if verified is not None else "not_verified",
@@ -3261,7 +3259,9 @@ def _catalog_list(args: argparse.Namespace) -> tuple[ExitCode, dict[str, Any]]:
                 read_label(root, record_id) or "-",
                 reference or "-",
                 "built-in",
-                f"{measurement.eligible_alignments:,}" if measurement is not None else "-",
+                f"{row['eligible_alignments']:,}"
+                if row["eligible_alignments"] is not None
+                else "-",
                 (
                     datetime.fromtimestamp(when).astimezone().strftime("%Y-%m-%d")
                     if when is not None
@@ -3302,6 +3302,17 @@ def _catalog_list(args: argparse.Namespace) -> tuple[ExitCode, dict[str, Any]]:
     return ExitCode.OK, _with_human(payload, lines, replace_data=True)
 
 
+def _eligible_alignments(measurement: Any) -> int | None:
+    """Eligible alignments of a fragment record, or of a v4 record's denominators."""
+
+    if measurement is None:
+        return None
+    denominators = getattr(measurement, "denominators", None)
+    source = measurement if denominators is None else denominators
+    value = getattr(source, "eligible_alignments", None)
+    return value if type(value) is int else None
+
+
 _CSV_COLUMNS = (
     "record_id", "reference_id", "policy_id", "min_mapq", "bin_lower", "bin_upper",
     "count", "eligible", "scanned",
@@ -3313,6 +3324,8 @@ def _catalog_export(args: argparse.Namespace) -> tuple[ExitCode, dict[str, Any]]
 
     Counts come from each record's verified signed measurement; nothing is
     derived.  No labels, paths or identifiers beyond record and reference IDs.
+    Only fragment-length records have bins; other analyses' records are not
+    exported here.
     """
 
     import csv
@@ -3357,6 +3370,8 @@ def _catalog_export(args: argparse.Namespace) -> tuple[ExitCode, dict[str, Any]]
     for record_id in sorted(imported):
         verified = verified_records[record_id]
         measurement = verified.measurement
+        if not hasattr(measurement, "histogram"):
+            continue  # a v4 record of another analysis: no fragment-length bins
         built_in = measurement.definition_id == f"{LOCAL_POLICY_ID}.{measurement.reference_id}"
         for item in measurement.histogram:
             writer.writerow(
@@ -3843,25 +3858,33 @@ def _analysis_readiness(
     from .contracts import PreflightOutcome
 
     modbase_model = getattr(args, "modbase_model", None)
+    blocked = [check for check in report.checks if check.outcome == PreflightOutcome.BLOCKED]
+    # The shared BAM checks every analysis's first stage refuses on.
+    bam_row = (
+        ReadinessRow("TBX-BAM-001", "ready", "fragment measurement eligible")
+        if report.fragment_measurement_eligible and not blocked
+        else ReadinessRow(
+            blocked[0].code if blocked else "TBX-BAM-001",
+            "blocked",
+            blocked[0].problem if blocked else "not eligible for fragment measurement",
+        )
+    )
     results: list[dict[str, Any]] = []
     for analysis in analyses:
         rows: list[ReadinessRow] = []
         if analysis == FRAGMENT:
-            blocked = [
-                check for check in report.checks if check.outcome == PreflightOutcome.BLOCKED
-            ]
-            rows.append(
-                ReadinessRow("TBX-BAM-001", "ready", "fragment measurement eligible")
-                if report.fragment_measurement_eligible and not blocked
-                else ReadinessRow(
-                    blocked[0].code if blocked else "TBX-BAM-001",
-                    "blocked",
-                    blocked[0].problem if blocked else "not eligible for fragment measurement",
-                )
-            )
+            rows.append(bam_row)
         else:
             if analysis == CELL_ORIGIN:
-                rows.append(_modbase_readiness(report, modbase_model))
+                # The cell-origin validate stage runs the same BAM preflight.
+                rows.append(bam_row)
+                try:
+                    # The cell-origin stage's own checks (MN optional, header vs flag).
+                    from .cell_origin import modbase_readiness
+
+                    rows.append(modbase_readiness(args.input, modbase_model))
+                except Exception:  # an unreadable BAM: the report's rows decide
+                    rows.append(_modbase_readiness(report, modbase_model))
                 rows.append(_modkit_readiness())
             spec = registered_analysis_stages(analysis)
             if spec is None:
@@ -3870,9 +3893,9 @@ def _analysis_readiness(
                         "TBX-RUN-011", "blocked", f"{analysis} is not available in this build"
                     )
                 )
-            elif spec.readiness is not None:
+            else:
                 config = resolved_config(spec, {"modbase_model": modbase_model})
-                rows.extend(spec.readiness(loaded, config))
+                rows.extend(spec.readiness_rows(args.root, loaded, config))
         ready = all(row.outcome == "ready" for row in rows)
         results.append(
             {
@@ -5244,3 +5267,7 @@ def main(argv: Sequence[str] | None = None) -> int:
 
 
 __all__ = ["ExitCode", "main"]
+
+# Registers the cell-origin measurement schema (v4) and its run --analysis
+# stages (signal CO3).  Imported last: its stages import this module lazily.
+from . import cell_origin as _cell_origin  # noqa: E402,F401

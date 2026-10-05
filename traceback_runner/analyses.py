@@ -159,14 +159,37 @@ class AnalysisStages:
     records that as retryable, never terminal.
 
     ``readiness(loaded, config)`` (optional) adds ``preflight --analysis`` rows.
+
+    With ``takes_root``, ``definition`` and ``readiness`` are also passed
+    ``root=ROOT`` as a keyword: a method whose definition binds assets
+    registered under ROOT reads their registrations there.
     """
 
     analysis: str
     method_slug: str
-    definition: Callable[[Any, Mapping[str, str]], Any]
+    definition: Callable[..., Any]
     stages: Callable[[AnalysisStageContext], tuple[Any, ...]]
     config_keys: frozenset[str] = field(default_factory=frozenset)
-    readiness: Callable[[Any, Mapping[str, str]], list[ReadinessRow]] | None = None
+    readiness: Callable[..., list[ReadinessRow]] | None = None
+    takes_root: bool = False
+
+    def resolve_definition(self, root: Path, loaded: Any, config: Mapping[str, str]) -> Any:
+        """The method definition for ``loaded`` with ``config`` bound into it."""
+
+        if self.takes_root:
+            return self.definition(loaded, config, root=root)
+        return self.definition(loaded, config)
+
+    def readiness_rows(
+        self, root: Path, loaded: Any, config: Mapping[str, str]
+    ) -> list[ReadinessRow]:
+        """The registered ``preflight --analysis`` rows (none without a hook)."""
+
+        if self.readiness is None:
+            return []
+        if self.takes_root:
+            return self.readiness(loaded, config, root=root)
+        return self.readiness(loaded, config)
 
 
 _REGISTRY: dict[str, AnalysisStages] = {}
