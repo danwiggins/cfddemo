@@ -463,3 +463,37 @@ def test_real_toolchain_verifies_deep_and_matches_the_adapter() -> None:
     resolved = resolve_ichor(pin, cache_root=toolchain.toolchain_cache_root(), check="deep")
     assert resolved.identity.version == ichor_adapter.ICHOR_VERSION
     assert resolved.installed.post_link_libraries == tuple(sorted(ICHOR_POST_LINK_LIBRARIES))
+
+
+def test_a_file_replaced_by_a_symlink_is_caught_by_deep(installed, env) -> None:
+    target = installed / "lib/R/library/r-ichorcna/DESCRIPTION"
+    target.unlink()
+    target.symlink_to(installed / "lib/R/library/hmmcopy/DESCRIPTION")
+    assert _state(env, "deep") == TOOL_WRONG
+
+
+def test_a_malformed_package_record_is_a_wrong_digest_not_a_crash(
+    installed, env, capsys, tmp_path
+) -> None:
+    meta = next((installed / "conda-meta").glob("hmmcopy-*.json"))
+    record = json.loads(meta.read_text())
+    record["paths_data"] = None
+    meta.write_text(json.dumps(record))
+    assert _state(env) == TOOL_WRONG
+    check = _doctor(capsys, tmp_path)
+    assert check["status"] == "warn" and check["code"] == "TBX-TOOL-002"
+
+
+def test_reinstall_repairs_damage_only_deep_sees(installed, env, capsys) -> None:
+    (installed / "lib/R/library/r-ichorcna/DESCRIPTION").write_text("tampered\n")
+    assert _state(env) == "ready" and _state(env, "deep") == TOOL_WRONG
+    code, payload = _run(capsys, "ichor", "--yes")
+    assert code == 0 and payload["summary"] == "ichorCNA 0.5.1 toolchain installed and verified"
+    assert _state(env, "deep") == "ready"
+
+
+def test_micromamba_never_sees_the_operators_home_or_r_setup(installed, env) -> None:
+    ran = json.loads((env["micromamba"].parent / "fake-ran.json").read_text())["env"]
+    assert ran["HOME"] == str(env["cache"] / ".home")
+    assert ran["R_ENVIRON_USER"] == "/dev/null" and ran["R_PROFILE_USER"] == "/dev/null"
+    assert ran["R_LIBS_USER"] == ""

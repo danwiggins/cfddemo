@@ -949,10 +949,24 @@ def _conda_meta(prefix: Path) -> dict[str, dict[str, Any]]:
     for entry in sorted((prefix / "conda-meta").glob("*.json")):
         record = json.loads(entry.read_text(encoding="utf-8"))
         name = record.get("name") if isinstance(record, dict) else None
-        if not isinstance(name, str) or name in records:
+        if not isinstance(name, str) or name in records or not _well_formed(record):
             raise ValueError("conda-meta has a malformed or duplicate record")
         records[name] = record
     return records
+
+
+def _well_formed(record: Mapping[str, Any]) -> bool:
+    """The record fields verification reads have the shapes conda writes."""
+
+    files = record.get("files", [])
+    paths_data = record.get("paths_data", {"paths": []})
+    paths = paths_data.get("paths") if isinstance(paths_data, dict) else None
+    return (
+        isinstance(files, list)
+        and all(isinstance(item, str) for item in files)
+        and isinstance(paths, list)
+        and all(isinstance(item, dict) and isinstance(item.get("_path"), str) for item in paths)
+    )
 
 
 def conda_meta_paths_digest(records: Mapping[str, Mapping[str, Any]]) -> str:
@@ -1052,15 +1066,24 @@ def _check_installed_files(prefix: Path, records: Mapping[str, Mapping[str, Any]
             path = prefix / relative
             if ".." in Path(relative).parts or not relative:
                 raise _ichor_wrong(f"{name} records an unsafe path")
-            if entry.get("path_type") == "softlink" or path.is_symlink():
+            expected = entry.get("sha256_in_prefix", entry.get("sha256"))
+            if entry.get("path_type") == "softlink":
+                # A recorded link must still be a link to the recorded bytes
+                # (or, for a directory link, to a directory) inside the prefix.
                 if not path.is_symlink():
                     raise _ichor_wrong(f"{relative} is no longer a link")
-                continue
+                target = path.resolve()
+                if not target.is_relative_to(prefix.resolve()):
+                    raise _ichor_wrong(f"{relative} now points outside the toolchain")
+                if target.is_dir():
+                    continue
+            elif path.is_symlink() or not path.is_file():
+                raise _ichor_wrong(f"{relative} from {name} is no longer a regular file")
             try:
                 actual = sha256_file(path)
             except OSError as exc:
                 raise _ichor_wrong(f"{relative} from {name} is gone") from exc
-            if actual != entry.get("sha256_in_prefix", entry.get("sha256")):
+            if actual != expected:
                 raise _ichor_wrong(f"{relative} from {name} changed since install")
 
 
@@ -1107,10 +1130,15 @@ def resolve_ichor(
         if conda_meta_paths_digest(records) != installed.conda_meta_paths_data_sha256:
             raise _ichor_wrong("the conda-meta digest changed since install")
         _check_installed_files(prefix, records)
-        untracked = _untracked_r_libraries(prefix, records)
-        if tuple(untracked) != installed.post_link_libraries or _tree_digest(
-            prefix / ICHOR_R_LIBRARY_RELPATH, untracked
-        ) != installed.post_link_libraries_sha256:
+        try:
+            untracked = _untracked_r_libraries(prefix, records)
+            libraries = _tree_digest(prefix / ICHOR_R_LIBRARY_RELPATH, untracked)
+        except OSError as exc:
+            raise _ichor_wrong("the R library is unreadable") from exc
+        if (
+            tuple(untracked) != installed.post_link_libraries
+            or libraries != installed.post_link_libraries_sha256
+        ):
             raise _ichor_wrong("a Bioconductor data package changed since install")
     return IchorToolchain(prefix=prefix, identity=receipt.identity, installed=installed)
 
@@ -1122,7 +1150,13 @@ def micromamba_environment(cache_root: Path) -> dict[str, str]:
         # bioconda's data-package post-link scripts need md5 (/sbin on macOS)
         # and curl; they fetch md5-pinned Bioconductor tarballs.
         "PATH": "/usr/bin:/bin:/usr/sbin:/sbin",
-        "HOME": str(Path.home()),
+        # Post-link scripts run R CMD INSTALL: a private HOME and no user R
+        # startup files keep the operator's R setup out of the environment.
+        "HOME": str(cache_root / ".home"),
+        "R_ENVIRON_USER": "/dev/null",
+        "R_PROFILE_USER": "/dev/null",
+        "R_LIBS_USER": "",
+        "R_LIBS_SITE": "",
         "MAMBA_ROOT_PREFIX": str(cache_root / ".mamba-root"),
         "LANG": "C",
         "LC_ALL": "C",
@@ -1196,7 +1230,8 @@ def install_ichor(
     plan = plan_install(pin, cache_root=cache_root, micromamba=micromamba)  # type: ignore[arg-type]
     _read_ichor_lock(pin)
     try:
-        return resolve_ichor(pin, cache_root=cache_root), False
+        # Deep: a damage only --deep sees must be repaired here, not reused.
+        return resolve_ichor(pin, cache_root=cache_root, check="deep"), False
     except ToolchainProblem:
         pass
     prefix = plan.prefix
@@ -1208,6 +1243,7 @@ def install_ichor(
         progress("removing an incomplete earlier install")
         shutil.rmtree(prefix)
     cache_root.mkdir(parents=True, exist_ok=True, mode=0o700)
+    (cache_root / ".home").mkdir(exist_ok=True, mode=0o700)
     progress("installing the locked ichorCNA toolchain (network required; several minutes)")
     try:
         result = run_contained(
