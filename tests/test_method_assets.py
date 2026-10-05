@@ -53,7 +53,7 @@ MAP_WIG = (
     "fixedStep chrom=chr2 start=1 step=1000 span=1000\n1\n"
 )
 CENTROMERE = "Chr\tStart\tEnd\tGapType\nchr1\t1000\t3000\tcentromere\n"
-PON = gzip.compress(b"X\n\x00\x00\x00\x03synthetic")
+PON = gzip.compress(mtime=0, data=b"X\n\x00\x00\x00\x03synthetic")
 
 VALID: dict[AssetKind, bytes] = {
     AssetKind.LOYFER_ATLAS: ATLAS.encode(),
@@ -260,17 +260,17 @@ def test_a_line_over_the_cap_is_refused_before_parsing(tmp_path: Path) -> None:
         (b"\x1f\x8b", "truncated"),
         (b"\x1f\x8b\x08\x00garbage-not-deflate", "corrupt"),
         (PON[:-6], "truncated"),
-        (gzip.compress(b"plain text, not R"), "R serialized"),
+        (gzip.compress(mtime=0, data=b"plain text, not R"), "R serialized"),
         (PON + b"trailing", "after its stream"),
         # EOF lands exactly on an output-slice boundary with trailing input
         # still in zlib's unconsumed tail: refused, never drained forever.
         (
-            gzip.compress(b"X\n\x00\x00\x00\x03" + b"\x00" * 1024 * 1024) + b"TRAILING" * 10,
+            gzip.compress(mtime=0, data=b"X\n\x00\x00\x00\x03" + b"\x00" * 1024 * 1024) + b"TRAILING" * 10,
             "after its stream",
         ),
         # A whole second gzip member after the first stream is trailing data too.
-        (PON + gzip.compress(b"\x00" * 4 * 1024 * 1024), "after its stream"),
-        (gzip.compress(b"X\n\x00\x00\x00\x09rest"), "version"),
+        (PON + gzip.compress(mtime=0, data=b"\x00" * 4 * 1024 * 1024), "after its stream"),
+        (gzip.compress(mtime=0, data=b"X\n\x00\x00\x00\x09rest"), "version"),
         (b"", "R serialized"),
     ],
 )
@@ -297,7 +297,7 @@ def test_pon_decompression_is_bounded(tmp_path: Path, monkeypatch) -> None:
 
     monkeypatch.setattr(references, "_MAX_PON_DECOMPRESSED_BYTES", 64 * 1024)
     body = b"X\n\x00\x00\x00\x03" + b"\x00" * (1024 * 1024)
-    path = _file(tmp_path, "pon", gzip.compress(body))
+    path = _file(tmp_path, "pon", gzip.compress(mtime=0, data=body))
     with pytest.raises(ReferenceProblem) as raised:
         register_asset(tmp_path / "root", AssetKind.ICHOR_PON, "asset_pon", path)
     assert "implausibly large" in raised.value.cause
