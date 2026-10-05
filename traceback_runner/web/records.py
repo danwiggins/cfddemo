@@ -656,21 +656,26 @@ def _bound_v4_authority(root: Path, reference_id: str, ref: Any) -> bool:
 
     definition_sha256 = ref.method_definition_sha256
     base = root / METHOD_AUTHORITY_DIRECTORY / reference_id
-    if base.is_dir() and not base.is_symlink():
-        for entry in sorted(base.iterdir(), key=lambda item: item.name):
-            try:
-                validate_method_slug(entry.name)
-            except ValueError:
-                continue  # a staging directory or a stray entry
-            candidate = entry / definition_sha256
-            if not (candidate.exists() or candidate.is_symlink()):
-                continue
-            try:
-                store = open_method_authority(root, reference_id, entry.name, definition_sha256)
-            except (LocalAuthorityProblem, ValueError, OSError):
-                continue  # damaged: only records bound to it are hidden
-            if _capability_is_bound(store.capability, ref):
-                return _later_store_exists(root, store)
+    try:
+        entries = (
+            sorted(entry.name for entry in base.iterdir())
+            if base.is_dir() and not base.is_symlink()
+            else []
+        )
+    except OSError:
+        entries = []  # unreadable tree: only the built-in store can bind the row
+    for slug in entries:
+        try:
+            validate_method_slug(slug)
+        except ValueError:
+            continue  # a staging directory or a stray entry
+        try:
+            store = open_method_authority(root, reference_id, slug, definition_sha256)
+        except (LocalAuthorityProblem, ValueError, OSError):
+            # Absent, damaged or unreadable: only records bound to it are hidden.
+            continue
+        if _capability_is_bound(store.capability, ref):
+            return _later_store_exists(root, store)
     registered = load_reference(root, reference_id).registered
     capability = open_local_method_authority(root, registered).capability
     if not _capability_is_bound(capability, ref):

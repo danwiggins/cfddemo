@@ -629,3 +629,19 @@ def test_dom_job_analysis_label_without_a_loaded_catalog(tmp_path: Path) -> None
         "jobs": jobs,
     })[0]
     assert report["jobs"][0].startswith("Cell origin: ")
+
+
+def test_an_unreadable_unrelated_slug_does_not_hide_the_record(probe, world) -> None:
+    root, fragment_record = world
+    record = _publish(root, fragment_record, "unreadable", values=[14])
+    # Sorts before the bound slug; unreadable to its owner.
+    ensure_method_authority(root, "ref", "aaa-slug", _definition("ref", tool=b"x"), now=T1)
+    stray = root / "method-authority" / "ref" / "aaa-slug"
+    stray.chmod(0o000)
+    try:
+        with _serving(root) as (service, _):
+            cookie, _ = _exchange(service)
+            status, view = _get(service, f"/api/v1/records/{record}", cookie)
+            assert status == 200, view
+    finally:
+        stray.chmod(0o700)
