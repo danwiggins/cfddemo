@@ -20,7 +20,7 @@ from traceback_runner.problems import CODED_FAILURE
 from traceback_runner.store import JobStore, StoredJobProjectionSnapshot
 
 from .contracts import JobProjection, OpaqueId, ProblemDetail, ProblemOwner
-from .state_copy import job_problem_copy
+from .state_copy import copy_for, job_problem_copy
 
 _PUBLIC_JOB_ID = re.compile(r"^job_([0-9a-f]{32})$")
 _PROBLEM_CODE = re.compile(r"^TBX-[A-Z]+(?:-[A-Z]+)?-[0-9]{3}$")
@@ -119,6 +119,7 @@ class JobStoreProjectionSource:
             job_id=self._public_id(snapshot),
             state=record.state,
             analysis=analysis,
+            analysis_label=copy_for("analysis", analysis)[0],
             stage_label=stage_label,
             updated_at=observed_at,
             revision=snapshot.revision,

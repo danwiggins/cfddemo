@@ -184,7 +184,9 @@
     }
     items.forEach((job) => {
       const stale = job.stale && RUNNING_STATES.has(job.state) ? "; status may be out of date" : "";
-      const li = el("li", `${analysisName(job.analysis || "fragment")}: ${jobCopy(job.state)}; stage ${job.stage_label}; updated ${when(job.updated_at)}${stale}`,
+      // The projection carries its own analysis label, so a direct record
+      // link (no catalog loaded yet) still names it.
+      const li = el("li", `${job.analysis_label || analysisName(job.analysis || "fragment")}: ${jobCopy(job.state)}; stage ${job.stage_label}; updated ${when(job.updated_at)}${stale}`,
         { "data-analysis": job.analysis || "fragment" });
       if (job.problem && job.problem.code) {
         li.append(el("span", "; stopped on "), el("code", job.problem.code, { class: "job-code" }), el("span", `: ${job.problem.problem}`));

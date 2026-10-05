@@ -322,6 +322,7 @@ class JobProjection(RunnerContract):
     state: JobState
     # The analysis the job runs (signal SH5); read from its sample token.
     analysis: Literal["fragment", "cell_origin", "copy_number"] = "fragment"
+    analysis_label: SafeText = "Fragment length"
     stage_label: SafeText
     updated_at: datetime
     revision: int = Field(ge=0)

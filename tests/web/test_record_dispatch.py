@@ -594,3 +594,38 @@ def test_real_browser_mixed_root_has_no_horizontal_scroll(probe, world, width: i
     assert not [
         m for m in report["messages"] if "Content Security Policy" in m or m == "exception"
     ], report
+
+
+# --- codex round 1: unrelated stores never hide a record; labels without a catalog ---
+
+
+def test_same_definition_under_another_slug_does_not_hide_the_record(probe, world) -> None:
+    root, fragment_record = world
+    record = _publish(root, fragment_record, "slugged", values=[13])
+    # SH1 allows one definition under several slugs; a second, later store
+    # with the same hash (and one damaged copy) must not hide the record.
+    ensure_method_authority(root, "ref", "other-slug", _CURRENT["definition"], now=T2)
+    ensure_method_authority(root, "ref", "third-slug", _CURRENT["definition"], now=T2)
+    damaged = next((root / "method-authority" / "ref" / "third-slug").iterdir()) / "pins.json"
+    damaged.chmod(0o600)
+    damaged.write_bytes(damaged.read_bytes().replace(b'"', b"'", 1))
+    with _serving(root) as (service, _):
+        cookie, _ = _exchange(service)
+        status, view = _get(service, f"/api/v1/records/{record}", cookie)
+        assert status == 200, view
+        states = {row["axis"]: row["token"] for row in view["states"]}
+        assert states["method_version"] == "current_method_version"
+
+
+@needs_node
+def test_dom_job_analysis_label_without_a_loaded_catalog(tmp_path: Path) -> None:
+    jobs = {"jobs": [
+        {"job_id": "job_" + "0" * 32, "state": "running", "analysis": "cell_origin",
+         "analysis_label": "Cell origin", "stage_label": "measure", "stale": False,
+         "updated_at": "2026-10-04T02:00:00Z", "headline": "Running", "problem": None},
+    ]}
+    report = _run(tmp_path, {
+        "responses": {"/api/v1/records": [{"status": 500, "payload": None}]},
+        "jobs": jobs,
+    })[0]
+    assert report["jobs"][0].startswith("Cell origin: ")

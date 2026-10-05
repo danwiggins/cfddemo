@@ -636,15 +636,18 @@ def _later_store_exists(root: Path, store: MethodAuthority) -> bool:
 def _bound_v4_authority(root: Path, reference_id: str, ref: Any) -> bool:
     """Reopen the authority a v4 row is bound to; return whether it is earlier.
 
-    The row's definition hash names one store under
-    ``ROOT/method-authority/<reference>/<slug>/``; it is reopened and validated
-    (never written) and its capability must equal the row's.  A record bound to
-    the built-in fragment store is checked against that store instead.  Any
-    mismatch or damage raises (HTTP 503); a later sibling store does not.
+    Every store under ``ROOT/method-authority/<reference>/<slug>/`` named by the
+    row's definition hash is reopened and validated (never written); the one
+    whose capability equals the row's is the record's authority.  Damaged or
+    differently bound stores are skipped, so they hide only their own records.
+    Without a bound method store, the built-in fragment store must be the
+    bound one.  Otherwise the record is unavailable (HTTP 503); a later sibling
+    store is a state, never a failure.
     """
 
     from traceback_runner.local_authority import (
         METHOD_AUTHORITY_DIRECTORY,
+        LocalAuthorityProblem,
         open_local_method_authority,
         open_method_authority,
         validate_method_slug,
@@ -653,7 +656,6 @@ def _bound_v4_authority(root: Path, reference_id: str, ref: Any) -> bool:
 
     definition_sha256 = ref.method_definition_sha256
     base = root / METHOD_AUTHORITY_DIRECTORY / reference_id
-    stores = []
     if base.is_dir() and not base.is_symlink():
         for entry in sorted(base.iterdir(), key=lambda item: item.name):
             try:
@@ -661,21 +663,18 @@ def _bound_v4_authority(root: Path, reference_id: str, ref: Any) -> bool:
             except ValueError:
                 continue  # a staging directory or a stray entry
             candidate = entry / definition_sha256
-            if candidate.exists() or candidate.is_symlink():
-                stores.append(
-                    open_method_authority(root, reference_id, entry.name, definition_sha256)
-                )
-    if len(stores) > 1:
-        raise RecordUnavailable("the definition hash names more than one method store")
-    if stores:
-        (store,) = stores
-        if not _capability_is_bound(store.capability, ref):
-            raise RecordUnavailable("the method authority on disk is not the bound one")
-        return _later_store_exists(root, store)
+            if not (candidate.exists() or candidate.is_symlink()):
+                continue
+            try:
+                store = open_method_authority(root, reference_id, entry.name, definition_sha256)
+            except (LocalAuthorityProblem, ValueError, OSError):
+                continue  # damaged: only records bound to it are hidden
+            if _capability_is_bound(store.capability, ref):
+                return _later_store_exists(root, store)
     registered = load_reference(root, reference_id).registered
     capability = open_local_method_authority(root, registered).capability
     if not _capability_is_bound(capability, ref):
-        raise RecordUnavailable("the method authority on disk is not the bound one")
+        raise RecordUnavailable("no method authority on disk is the bound one")
     return False
 
 
