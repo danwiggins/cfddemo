@@ -1098,6 +1098,7 @@ def _execute_signed_run(
     namespace: Any,
     worker_id: str,
     on_submitted: Callable[[Any], None] | None = None,
+    on_admitted: Callable[[str], None] | None = None,
 ) -> Any:
     """Seal the input, then run the signed stages unless the job is complete.
 
@@ -1108,7 +1109,11 @@ def _execute_signed_run(
     """
     from .signing import development_trust_bytes
 
-    record = runner.submit(request, source, relative_files)
+    record = (
+        runner.submit(request, source, relative_files, on_admitted=on_admitted)
+        if on_admitted is not None
+        else runner.submit(request, source, relative_files)
+    )
     if on_submitted is not None:
         on_submitted(record)
     if record.state != JobState.COMPLETE:
@@ -2564,6 +2569,10 @@ def _run_one_analysis(
                 "Bundle or development trust verification failed",
                 data=job,
             )
+        if any(base.__name__ in _RUN_BLOCKED_ERRORS for base in type(exc).mro()):
+            return ExitCode.BLOCKED, _result(
+                "run", "blocked", "Asset operation was blocked before use", data=job
+            )
         if isinstance(exc, (FileNotFoundError, KeyError)):
             return ExitCode.NOT_FOUND, _result(
                 "run",
@@ -2597,7 +2606,13 @@ _RUN_VERIFICATION_ERRORS = frozenset(
         "InvalidSignatureError",
         "TrustNamespaceError",
         "ResultTrustRegistryError",
+        "AssetEvidenceInputError",
+        "AssetIntegrityError",
+        "AssetPackageError",
     }
+)
+_RUN_BLOCKED_ERRORS = frozenset(
+    {"AssetAuthorityError", "AssetCapacityError", "AssetConflictError", "AssetFilesystemError"}
 )
 
 
@@ -2726,16 +2741,21 @@ def _run_with_runner(
     if parsed is None or parsed[1] != analysis:
         raise ValueError("the request's sample token does not name this analysis")
 
+    def on_admitted(job_id: str) -> None:
+        # Every job ID is printed as soon as the job row exists, before the
+        # input is copied (SH4).
+        submitted.append(job_id)
+        progress(f"JOB  {analysis} {job_id}")
+
     def on_submitted(record: Any) -> None:
-        submitted.append(record.job_id)
-        # Every job ID is printed as soon as the job is admitted (SH4).
-        progress(f"JOB  {analysis} {record.job_id}")
+        if not submitted:
+            submitted.append(record.job_id)
         refuse_failed(record)
 
     try:
         return _run_submitted(
             root, runner, request, source, relative_files, loaded, progress, submitted,
-            on_submitted, make_stages=make_stages, finish=finish,
+            on_submitted, make_stages=make_stages, finish=finish, on_admitted=on_admitted,
         )
     except BaseException as exc:
         # Every refusal after submit names its job (A3), whatever maps it.
@@ -2766,6 +2786,7 @@ def _run_submitted(
     *,
     make_stages: Callable[[Any], tuple[Any, ...]] | None = None,
     finish: Callable[[Any], tuple[ExitCode, dict[str, Any]]] | None = None,
+    on_admitted: Callable[[str], None] | None = None,
 ) -> tuple[ExitCode, dict[str, Any]]:
     from .signing import TrustNamespace
 
@@ -2784,6 +2805,7 @@ def _run_submitted(
             namespace=TrustNamespace.DEVELOPMENT_LOCAL,
             worker_id="local-cli",
             on_submitted=on_submitted,
+            on_admitted=on_admitted,
         )
     except LocalStageRefusal as refusal:
         raise _refusal_problem(refusal) from refusal
@@ -4233,11 +4255,16 @@ def _resume_local_stages(
 
         return fragment_stages
     kept = read_job_config(root, stored)
-    config = (
-        kept[2]
-        if kept is not None and kept[:2] == (loaded.registered.reference_id, analysis)
-        else {}
-    )
+    if kept is None or kept[:2] != (loaded.registered.reference_id, analysis):
+        # Without the kept settings nothing can rebuild this job's method;
+        # never fall back to defaults the job was not admitted under.
+        problem = _method_changed(job_id, analysis)
+        problem.cause = (
+            f"job {job_id}'s kept settings (ROOT/analysis-config) are missing or damaged, "
+            "so its method cannot be rebuilt"
+        )
+        raise problem
+    config = kept[2]
     resolved = _resolve_analysis(root, analysis, loaded, dict(config))
     if resolved.workflow_sha256 != stored or resolved.config != config:
         raise _method_changed(job_id, analysis)

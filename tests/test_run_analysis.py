@@ -442,6 +442,25 @@ def test_missing_tool_at_stage_time_is_retryable_then_resumes(
     assert resumed["data"]["record_id"] in _records(root)
 
 
+def test_the_job_id_is_printed_before_the_input_is_copied(
+    root, inputs, capsys, monkeypatch
+) -> None:
+    import traceback_runner.runner as runner_module
+
+    printed: list[bool] = []
+    real = runner_module.capture_snapshot
+
+    def capture(*args: Any, **kwargs: Any):
+        printed.append("JOB  fragment " in capsys.readouterr().out)
+        return real(*args, **kwargs)
+
+    monkeypatch.setattr(runner_module, "capture_snapshot", capture)
+    code = cli.main(["run", str(inputs.bam_path), "--reference", "ref", "--root", str(root),
+                     "--analysis", "fragment,copy-number"])
+    assert code == cli.ExitCode.BLOCKED
+    assert printed == [True]
+
+
 def test_free_space_is_checked_once_for_every_analysis(
     root, inputs, capsys, monkeypatch
 ) -> None:
@@ -727,3 +746,21 @@ def test_label_applies_to_every_record_and_a_failed_import_still_counts_it(
     for row in rows.values():
         assert read_label(root, row["record_id"]) == "batch note"
     assert "batch note" not in json.dumps(payload)
+
+
+def test_resume_refuses_tbx_job_003_when_the_kept_settings_are_lost(
+    root, inputs, capsys, probe  # noqa: F811
+) -> None:
+    fake = FakeAnalysis(CELL_ORIGIN, config_keys={"modbase_model"}).register()
+    _pause_after_first_stage(fake, root)
+    code, payload = _run(capsys, root, inputs.bam_path, "--analysis", "cell-origin",
+                         "--modbase-model", "model-a")
+    job_id = _rows(payload)[CELL_ORIGIN]["job_id"]
+    for kept in (root / "analysis-config").iterdir():
+        kept.unlink()
+    seen = len(fake.config_seen)
+    code, refused = _json(capsys, "resume", job_id, "--root", root)
+    assert code == cli.ExitCode.BLOCKED, refused
+    assert refused["data"]["code"] == "TBX-JOB-003"
+    assert "kept settings" in refused["data"]["cause"]
+    assert len(fake.config_seen) == seen  # no stages were built with defaults
