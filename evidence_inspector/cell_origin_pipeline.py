@@ -33,7 +33,7 @@ from pathlib import Path
 from typing import Any, Literal
 
 import numpy as np
-from pydantic import Field, model_validator
+from pydantic import Field, TypeAdapter, ValidationError, model_validator
 
 from evidence_inspector.cell_origin_inputs import (
     AtlasUColumns,
@@ -52,6 +52,7 @@ from evidence_inspector.cell_origin_models import (
     CellOriginResult,
     DigestArtifact,
     GenomicMarker,
+    Identifier,
     LOYFER_UXM_METHOD,
     NnlsRowScale,
     SoftwareVersion,
@@ -130,6 +131,8 @@ NORMALIZED_MODKIT_COLUMNS = ModkitExtractColumns(
     fail="fail",
 )
 
+# Row cap of every Loyfer resource file and of the derived atlas and marker tables.
+LOYFER_MAX_ROWS = 20_000
 MARKER_METADATA_HEADER = (
     "#chr",
     "start",
@@ -383,12 +386,29 @@ class _LoyferHealthyTable:
     source_id: str
 
 
+_IDENTIFIER = TypeAdapter(Identifier)
+# What a published result may not contain (``_model_safe``).  Labels and IDs
+# read from Loyfer files reach the result, so the readers refuse them early.
+_FORBIDDEN_OUTPUT_KEYS = frozenset({"fragment_digest", "path", "read_id", "sequence"})
+_FORBIDDEN_OUTPUT_SUBSTRING = ".bam"
+
+
+def _output_safe(value: str) -> bool:
+    return value not in _FORBIDDEN_OUTPUT_KEYS and _FORBIDDEN_OUTPUT_SUBSTRING not in value
+
+
 def _identifier(value: str, *, kind: str) -> str:
     normalized = re.sub(r"[^A-Za-z0-9_.:-]+", "-", value.strip())
     normalized = re.sub(r"-{2,}", "-", normalized).strip("-")
-    if not normalized or len(normalized) > 128:
-        raise CellOriginPipelineError(f"{kind} cannot be normalized safely")
-    return normalized
+    try:
+        # The models' own identifier rule (alphanumeric first character), so
+        # a label that normalizes but cannot be a model ID is refused here.
+        identifier = _IDENTIFIER.validate_python(normalized)
+    except ValidationError:
+        raise CellOriginPipelineError(f"{kind} cannot be normalized safely") from None
+    if not (_output_safe(identifier) and _output_safe(value)):
+        raise CellOriginPipelineError(f"{kind} cannot appear in a published result")
+    return identifier
 
 
 def _sha256(path: Path) -> str:
@@ -699,11 +719,107 @@ def _strict_dict_reader(
     return tuple(rows)
 
 
-def _read_regions(path: Path, *, max_rows: int) -> tuple[str, ...]:
+# Identity used when a shared reader runs the downstream loader on its own
+# file (registration has no atlas or source ID yet; neither changes validity).
+_SELF_CHECK_ID = "self-check"
+
+
+def _derived_atlas_matrix(
+    cell_ids: tuple[str, ...],
+    complete: Sequence[tuple[str, tuple[str, ...]]],
+    *,
+    atlas_id: str,
+    source_ids: tuple[str, ...],
+) -> AtlasUMatrix:
+    """Load the complete atlas rows through ``load_loyfer_atlas_u_matrix``."""
+
+    buffer = io.StringIO(newline="")
+    writer = csv.writer(buffer, delimiter="\t", lineterminator="\n")
+    writer.writerow(("marker_id", *cell_ids))
+    writer.writerows((region, *values) for region, values in complete)
+    buffer.seek(0)
+    try:
+        return load_loyfer_atlas_u_matrix(
+            buffer,
+            columns=AtlasUColumns(
+                marker_id="marker_id",
+                cell_type_columns=tuple((item, item) for item in cell_ids),
+            ),
+            atlas_id=atlas_id,
+            source_ids=source_ids,
+            expected_marker_ids=tuple(region for region, _ in complete),
+            expected_cell_type_ids=cell_ids,
+            max_rows=LOYFER_MAX_ROWS,
+        )
+    except CellOriginInputError as exc:
+        raise CellOriginPipelineError(str(exc)) from exc
+
+
+def _derived_markers(
+    metadata_groups: Mapping[str, Sequence[Mapping[str, str]]],
+    regions: Sequence[str],
+    *,
+    atlas_id: str,
+    source_ids: tuple[str, ...],
+    expected_cell_type_ids: Sequence[str] | None,
+) -> tuple[GenomicMarker, ...]:
+    """Load the marker rows of ``regions`` through ``load_marker_bed``."""
+
+    buffer = io.StringIO(newline="")
+    writer = csv.writer(buffer, delimiter="\t", lineterminator="\n")
+    for region in regions:
+        rows = metadata_groups[region]
+        row = rows[0]
+        targets = {item["target"] for item in rows}
+        writer.writerow(
+            (
+                row["#chr"],
+                row["start"],
+                row["end"],
+                region,
+                (
+                    _identifier(next(iter(targets)), kind="marker target")
+                    if len(targets) == 1
+                    else "multi-target"
+                ),
+            )
+        )
+    buffer.seek(0)
+    try:
+        return load_marker_bed(
+            buffer,
+            columns=MarkerBedColumns(
+                chromosome=0,
+                start0=1,
+                end0=2,
+                marker_id=3,
+                target_cell_type_id=4,
+            ),
+            atlas_id=atlas_id,
+            source_ids=source_ids,
+            expected_marker_ids=tuple(regions),
+            expected_cell_type_ids=expected_cell_type_ids,
+            max_rows=LOYFER_MAX_ROWS,
+        )
+    except CellOriginInputError as exc:
+        raise CellOriginPipelineError(str(exc)) from exc
+
+
+def read_marker_regions(
+    path: Path, *, max_rows: int = LOYFER_MAX_ROWS
+) -> tuple[str, ...]:
+    """Parse ``Regions.U250`` (headerless chrom/start/end BED) into region IDs.
+
+    The one parser of this file: the pipeline and method-asset registration
+    (``traceback_runner.references``) both call it.
+    """
+
     regions: list[str] = []
     try:
         with path.open("r", encoding="utf-8", newline="") as handle:
-            reader = csv.reader(handle, delimiter="\t")
+            # QUOTE_NONE: fields are read exactly as the prefilter's
+            # read_bed_regions reads them (a quote is part of the value).
+            reader = csv.reader(handle, delimiter="\t", quoting=csv.QUOTE_NONE)
             for row_number, row in enumerate(reader, start=1):
                 if row_number > max_rows:
                     raise CellOriginPipelineError(
@@ -724,19 +840,49 @@ def _read_regions(path: Path, *, max_rows: int) -> tuple[str, ...]:
                     raise CellOriginPipelineError(
                         "marker BED contains an invalid half-open interval"
                     )
-                regions.append(f"{chromosome}:{start0}-{end0}")
+                region = f"{chromosome}:{start0}-{end0}"
+                try:
+                    # The GenomicMarker rules (chromosome name, start0 >= 0)
+                    # hold for every row, not only for the usable ones.
+                    GenomicMarker(
+                        marker_id=region,
+                        chromosome=chromosome,
+                        start0=start0,
+                        end0=end0,
+                        target_cell_type_id="registration",
+                        atlas_id="registration",
+                        source_ids=("registration",),
+                    )
+                except ValidationError as exc:
+                    raise CellOriginPipelineError(
+                        "marker BED contains an unsupported chromosome or a negative start"
+                    ) from exc
+                regions.append(region)
     except (OSError, UnicodeError, csv.Error) as exc:
         raise CellOriginPipelineError("unable to parse marker BED") from exc
     if len(regions) != len(set(regions)):
         raise CellOriginPipelineError("marker BED contains duplicate regions")
+    try:
+        # The extraction step reads the same file with its own parser.
+        read_bed_regions(path)
+    except (OSError, UnicodeError, ValueError) as exc:
+        raise CellOriginPipelineError("the marker region BED could not be read") from exc
     return tuple(regions)
 
 
-def _load_loyfer_resources(config: PipelineConfig) -> _LoyferResources:
+def read_marker_metadata(
+    path: Path, *, max_rows: int = LOYFER_MAX_ROWS
+) -> tuple[tuple[dict[str, str], ...], dict[str, list[dict[str, str]]]]:
+    """Parse ``Markers.U250`` into its rows and rows grouped by region ID.
+
+    Rows sharing a region ID must agree on coordinates and direction.  The one
+    parser of this file (pipeline and method-asset registration).
+    """
+
     metadata_rows = _strict_dict_reader(
-        config.marker_metadata,
+        path,
         expected_header=MARKER_METADATA_HEADER,
-        max_rows=20_000,
+        max_rows=max_rows,
     )
     metadata_groups: dict[str, list[dict[str, str]]] = defaultdict(list)
     for row in metadata_rows:
@@ -761,20 +907,47 @@ def _load_loyfer_resources(config: PipelineConfig) -> _LoyferResources:
             raise CellOriginPipelineError(
                 "duplicate Loyfer region IDs disagree on coordinates or direction"
             )
-    metadata_by_region = {
-        region: rows[0] for region, rows in metadata_groups.items()
-    }
-    collapsed_duplicates = len(metadata_rows) - len(metadata_by_region)
-    regions = _read_regions(config.marker_bed, max_rows=20_000)
-    if set(regions) != set(metadata_by_region):
-        raise CellOriginPipelineError(
-            "marker BED and Markers.U250 region IDs do not match exactly"
-        )
+    # The downstream marker loader on this file's own rows (the analysis runs
+    # it again on the usable subset, with the atlas's cell types).
+    _derived_markers(
+        metadata_groups,
+        tuple(metadata_groups),
+        atlas_id=_SELF_CHECK_ID,
+        source_ids=(_SELF_CHECK_ID,),
+        expected_cell_type_ids=None,
+    )
+    return metadata_rows, dict(metadata_groups)
+
+
+@dataclass(frozen=True, slots=True)
+class AtlasU250Table:
+    """``Atlas.U250`` checked on its own; cross-file checks come later.
+
+    ``rows`` holds every data row in file order (duplicates included),
+    ``by_region`` the first row of each region, and ``complete`` the
+    ``(region, raw values)`` of each region with a value for every cell type.
+    """
+
+    raw_cell_labels: tuple[str, ...]
+    cell_ids: tuple[str, ...]
+    rows: tuple[dict[str, str], ...]
+    by_region: Mapping[str, dict[str, str]]
+    order: tuple[str, ...]
+    complete: tuple[tuple[str, tuple[str, ...]], ...]
+    incomplete: int
+
+
+def read_atlas_u250(path: Path, *, max_rows: int = LOYFER_MAX_ROWS) -> AtlasU250Table:
+    """Parse ``Atlas.U250`` and check it on its own.
+
+    The header, cell-type label normalization and collisions, the row cap,
+    malformed rows, the ``U`` direction, duplicate-region agreement and the
+    U fractions of complete rows.  The one parser of this file (pipeline and
+    method-asset registration).
+    """
 
     try:
-        with config.atlas_u_matrix.open(
-            "r", encoding="utf-8", newline=""
-        ) as handle:
+        with path.open("r", encoding="utf-8", newline="") as handle:
             reader = csv.DictReader(handle, delimiter="\t")
             header = tuple(reader.fieldnames or ())
             if header[:8] != ATLAS_METADATA_HEADER or len(header) <= 8:
@@ -785,44 +958,29 @@ def _load_loyfer_resources(config: PipelineConfig) -> _LoyferResources:
             cell_ids = tuple(
                 _identifier(value, kind="cell type") for value in raw_cell_labels
             )
-            if len(cell_ids) != len(set(cell_ids)):
+            # "marker_id" keys the derived atlas table, so no cell type may use it.
+            if len(cell_ids) != len(set(cell_ids)) or "marker_id" in cell_ids:
                 raise CellOriginPipelineError(
                     "cell type labels collide after identifier normalization"
                 )
-            labels = dict(zip(cell_ids, raw_cell_labels, strict=True))
+            rows: list[dict[str, str]] = []
             atlas_by_region: dict[str, dict[str, str]] = {}
             atlas_order: list[str] = []
-            incomplete = 0
             for row_number, row in enumerate(reader, start=1):
-                if row_number > 20_000:
+                if row_number > max_rows:
                     raise CellOriginPipelineError(
-                        "Atlas.U250 exceeds the row cap of 20000"
+                        f"Atlas.U250 exceeds the row cap of {max_rows}"
                     )
                 if None in row or any(value is None for value in row.values()):
                     raise CellOriginPipelineError(
                         "Atlas.U250 contains a malformed row"
                     )
-                region = row["name"]
-                metadata_rows_for_region = metadata_groups.get(region)
-                if metadata_rows_for_region is None:
-                    raise CellOriginPipelineError(
-                        "Atlas.U250 contains an unregistered marker"
-                    )
-                metadata = metadata_rows_for_region[0]
-                registered_targets = {
-                    item["target"] for item in metadata_rows_for_region
-                }
-                if (
-                    row["chr"] != metadata["#chr"]
-                    or row["start"] != metadata["start"]
-                    or row["end"] != metadata["end"]
-                    or row["target"] not in registered_targets
-                    or row["direction"] != metadata["direction"]
-                    or row["direction"] != "U"
-                ):
+                if row["direction"] != "U":
                     raise CellOriginPipelineError(
                         "Loyfer marker resources disagree on coordinates, target, or direction"
                     )
+                rows.append(row)
+                region = row["name"]
                 previous = atlas_by_region.get(region)
                 if previous is not None:
                     comparable_fields = (
@@ -842,116 +1000,101 @@ def _load_loyfer_resources(config: PipelineConfig) -> _LoyferResources:
                     continue
                 atlas_by_region[region] = dict(row)
                 atlas_order.append(region)
-
-            atlas_rows: list[dict[str, str]] = []
-            for region in atlas_order:
-                row = atlas_by_region[region]
-                values = tuple(row[label] for label in raw_cell_labels)
-                if any(value in {"", "NA"} for value in values):
-                    incomplete += 1
-                    continue
-                try:
-                    parsed = tuple(float(value) for value in values)
-                except ValueError as exc:
-                    raise CellOriginPipelineError(
-                        "Atlas.U250 contains a nonnumeric U fraction"
-                    ) from exc
-                if any(
-                    not np.isfinite(value) or not 0.0 <= value <= 1.0
-                    for value in parsed
-                ):
-                    raise CellOriginPipelineError(
-                        "Atlas.U250 contains an invalid U fraction"
-                    )
-                atlas_rows.append(
-                    {
-                        "marker_id": region,
-                        **{
-                            cell_id: value
-                            for cell_id, value in zip(
-                                cell_ids, values, strict=True
-                            )
-                        },
-                    }
-                )
     except (OSError, UnicodeError, csv.Error) as exc:
         raise CellOriginPipelineError("unable to parse Atlas.U250") from exc
+    complete: list[tuple[str, tuple[str, ...]]] = []
+    incomplete = 0
+    for region in atlas_order:
+        row = atlas_by_region[region]
+        values = tuple(row[label] for label in raw_cell_labels)
+        if any(value in {"", "NA"} for value in values):
+            incomplete += 1
+            continue
+        try:
+            parsed = tuple(float(value) for value in values)
+        except ValueError as exc:
+            raise CellOriginPipelineError(
+                "Atlas.U250 contains a nonnumeric U fraction"
+            ) from exc
+        if any(not np.isfinite(value) or not 0.0 <= value <= 1.0 for value in parsed):
+            raise CellOriginPipelineError("Atlas.U250 contains an invalid U fraction")
+        complete.append((region, values))
+    if not complete:
+        raise CellOriginPipelineError(
+            "Atlas.U250 has no complete marker rows across all cell types"
+        )
+    # The downstream atlas loader on exactly the rows the analysis loads.
+    _derived_atlas_matrix(
+        cell_ids, complete, atlas_id=_SELF_CHECK_ID, source_ids=(_SELF_CHECK_ID,)
+    )
+    return AtlasU250Table(
+        raw_cell_labels=raw_cell_labels,
+        cell_ids=cell_ids,
+        rows=tuple(rows),
+        by_region=atlas_by_region,
+        order=tuple(atlas_order),
+        complete=tuple(complete),
+        incomplete=incomplete,
+    )
 
+
+def _load_loyfer_resources(config: PipelineConfig) -> _LoyferResources:
+    metadata_rows, metadata_groups = read_marker_metadata(config.marker_metadata)
+    metadata_by_region = {
+        region: rows[0] for region, rows in metadata_groups.items()
+    }
+    collapsed_duplicates = len(metadata_rows) - len(metadata_by_region)
+    regions = read_marker_regions(config.marker_bed)
+    if set(regions) != set(metadata_by_region):
+        raise CellOriginPipelineError(
+            "marker BED and Markers.U250 region IDs do not match exactly"
+        )
+
+    table = read_atlas_u250(config.atlas_u_matrix)
+    raw_cell_labels = table.raw_cell_labels
+    cell_ids = table.cell_ids
+    labels = dict(zip(cell_ids, raw_cell_labels, strict=True))
+    atlas_by_region = table.by_region
+    incomplete = table.incomplete
+    for row in table.rows:
+        region = row["name"]
+        metadata_rows_for_region = metadata_groups.get(region)
+        if metadata_rows_for_region is None:
+            raise CellOriginPipelineError(
+                "Atlas.U250 contains an unregistered marker"
+            )
+        metadata = metadata_rows_for_region[0]
+        registered_targets = {
+            item["target"] for item in metadata_rows_for_region
+        }
+        if (
+            row["chr"] != metadata["#chr"]
+            or row["start"] != metadata["start"]
+            or row["end"] != metadata["end"]
+            or row["target"] not in registered_targets
+            or row["direction"] != metadata["direction"]
+        ):
+            raise CellOriginPipelineError(
+                "Loyfer marker resources disagree on coordinates, target, or direction"
+            )
     if set(atlas_by_region) != set(regions):
         raise CellOriginPipelineError(
             "Atlas.U250 and marker BED region IDs do not match exactly"
         )
-    if not atlas_rows:
-        raise CellOriginPipelineError(
-            "Atlas.U250 has no complete marker rows across all cell types"
-        )
-
-    atlas_buffer = io.StringIO(newline="")
-    atlas_writer = csv.DictWriter(
-        atlas_buffer,
-        fieldnames=("marker_id", *cell_ids),
-        delimiter="\t",
-        lineterminator="\n",
+    usable_regions = tuple(region for region, _ in table.complete)
+    atlas = _derived_atlas_matrix(
+        cell_ids,
+        table.complete,
+        atlas_id=config.atlas_id,
+        source_ids=(config.atlas_source_id,),
     )
-    atlas_writer.writeheader()
-    atlas_writer.writerows(atlas_rows)
-    atlas_buffer.seek(0)
-
-    usable_regions = tuple(row["marker_id"] for row in atlas_rows)
-    marker_buffer = io.StringIO(newline="")
-    marker_writer = csv.writer(
-        marker_buffer, delimiter="\t", lineterminator="\n"
+    markers = _derived_markers(
+        metadata_groups,
+        usable_regions,
+        atlas_id=config.atlas_id,
+        source_ids=(config.atlas_source_id,),
+        expected_cell_type_ids=(*cell_ids, "multi-target"),
     )
-    for region in usable_regions:
-        row = metadata_by_region[region]
-        targets = {
-            item["target"] for item in metadata_groups[region]
-        }
-        marker_writer.writerow(
-            (
-                row["#chr"],
-                row["start"],
-                row["end"],
-                region,
-                (
-                    _identifier(next(iter(targets)), kind="marker target")
-                    if len(targets) == 1
-                    else "multi-target"
-                ),
-            )
-        )
-    marker_buffer.seek(0)
-
-    try:
-        atlas = load_loyfer_atlas_u_matrix(
-            atlas_buffer,
-            columns=AtlasUColumns(
-                marker_id="marker_id",
-                cell_type_columns=tuple((item, item) for item in cell_ids),
-            ),
-            atlas_id=config.atlas_id,
-            source_ids=(config.atlas_source_id,),
-            expected_marker_ids=usable_regions,
-            expected_cell_type_ids=cell_ids,
-            max_rows=20_000,
-        )
-        markers = load_marker_bed(
-            marker_buffer,
-            columns=MarkerBedColumns(
-                chromosome=0,
-                start0=1,
-                end0=2,
-                marker_id=3,
-                target_cell_type_id=4,
-            ),
-            atlas_id=config.atlas_id,
-            source_ids=(config.atlas_source_id,),
-            expected_marker_ids=usable_regions,
-            expected_cell_type_ids=(*cell_ids, "multi-target"),
-            max_rows=20_000,
-        )
-    except CellOriginInputError as exc:
-        raise CellOriginPipelineError(str(exc)) from exc
     return _LoyferResources(
         markers=markers,
         atlas=atlas,
@@ -1385,7 +1528,7 @@ def _healthy_chart_rows(
 def _model_safe(result: CellOriginResult) -> bool:
     payload = result.model_dump(mode="json")
     serialized = json.dumps(payload, sort_keys=True)
-    forbidden_keys = {"fragment_digest", "path", "read_id", "sequence"}
+    forbidden_keys = _FORBIDDEN_OUTPUT_KEYS
 
     def keys(value: Any) -> Iterable[str]:
         if isinstance(value, dict):
@@ -1396,7 +1539,10 @@ def _model_safe(result: CellOriginResult) -> bool:
             for item in value:
                 yield from keys(item)
 
-    return not forbidden_keys.intersection(keys(payload)) and ".bam" not in serialized
+    return (
+        not forbidden_keys.intersection(keys(payload))
+        and _FORBIDDEN_OUTPUT_SUBSTRING not in serialized
+    )
 
 
 def _atomic_write(path: Path, bundle: CellOriginResultBundle) -> str:
@@ -2142,7 +2288,11 @@ def cli_main(argv: Sequence[str] | None = None) -> int:
 
 
 __all__ = [
+    "ATLAS_METADATA_HEADER",
+    "LOYFER_MAX_ROWS",
+    "MARKER_METADATA_HEADER",
     "AlignmentCommandPlan",
+    "AtlasU250Table",
     "CellOriginPipelineError",
     "CellOriginResultBundle",
     "ChartData",
@@ -2157,5 +2307,8 @@ __all__ = [
     "build_argument_parser",
     "cli_main",
     "preflight",
+    "read_atlas_u250",
+    "read_marker_metadata",
+    "read_marker_regions",
     "run_pipeline",
 ]

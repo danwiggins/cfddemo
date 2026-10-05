@@ -145,6 +145,38 @@ def _trust_registry_identity_arguments(parser: argparse.ArgumentParser) -> None:
     parser.add_argument("--trust-registry-head")
 
 
+def _method_asset_parser(commands: Any) -> None:
+    """``traceback method-asset register|show`` (signal SH2; not ``assets``)."""
+
+    from .references import AssetKind
+
+    method_asset = commands.add_parser(
+        "method-asset", help="register a local method input file (unqualified)"
+    )
+    method_asset_commands = method_asset.add_subparsers(
+        dest="method_asset_command", required=True
+    )
+    register = method_asset_commands.add_parser(
+        "register", help="record the SHA-256 and parse check of one asset file"
+    )
+    source = register.add_mutually_exclusive_group(required=True)
+    source.add_argument("--file", type=Path, dest="asset_file")
+    source.add_argument(
+        "--from-dir",
+        type=Path,
+        dest="from_dir",
+        help="register the three Loyfer files of this directory under fixed IDs",
+    )
+    register.add_argument("--kind", choices=[kind.value for kind in AssetKind])
+    register.add_argument("--id", dest="asset_id", type=_reference_id_argument)
+    _root_argument(register)
+    register.add_argument("--json", action="store_true", dest="as_json")
+    show = method_asset_commands.add_parser("show", help="show one registered asset")
+    show.add_argument("asset_id", type=_reference_id_argument)
+    _root_argument(show)
+    show.add_argument("--json", action="store_true", dest="as_json")
+
+
 def _parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(prog="traceback")
     commands = parser.add_subparsers(dest="command", required=True)
@@ -176,6 +208,8 @@ def _parser() -> argparse.ArgumentParser:
     )
     _root_argument(register)
     register.add_argument("--json", action="store_true", dest="as_json")
+
+    _method_asset_parser(commands)
 
     protocol = commands.add_parser("protocol", help="show fail-closed setup content")
     protocol_commands = protocol.add_subparsers(dest="protocol_command", required=True)
@@ -3880,6 +3914,70 @@ def _reference_register(args: argparse.Namespace) -> tuple[ExitCode, dict[str, A
     )
 
 
+def _asset_data(registered: Any, created: bool | None = None) -> dict[str, Any]:
+    check = registered.parse_check
+    return {
+        "asset_id": registered.asset_id,
+        "kind": registered.kind.value,
+        **({} if created is None else {"created": created}),
+        "file_sha256": registered.file_sha256,
+        "byte_size": registered.byte_size,
+        "parse_check": check.format,
+        **({"bin_size_bp": check.bin_size_bp} if check.bin_size_bp is not None else {}),
+        "qualified": False,
+    }
+
+
+def _method_asset(args: argparse.Namespace) -> tuple[ExitCode, dict[str, Any]]:
+    """``method-asset register|show``; registration holds the operator lock."""
+
+    from .references import load_asset, register_asset, register_loyfer_directory
+
+    if args.method_asset_command == "show":
+        loaded = load_asset(args.root, args.asset_id)
+        return ExitCode.OK, _result(
+            "method-asset show",
+            "ok",
+            f"Asset {args.asset_id} ({loaded.registered.kind.value}); unqualified, local",
+            data=_asset_data(loaded.registered),
+        )
+    if args.from_dir is not None:
+        if args.kind is not None or args.asset_id is not None:
+            return ExitCode.USAGE, _result(
+                "method-asset register",
+                "blocked",
+                "--from-dir derives each kind and ID; do not pass --kind or --id",
+            )
+        with _operator_lock(args.root):
+            results = register_loyfer_directory(args.root, args.from_dir)
+        return ExitCode.OK, _result(
+            "method-asset register",
+            "ok",
+            f"{sum(item.created for item in results)} of {len(results)} Loyfer assets "
+            "newly registered; unqualified, local",
+            data={
+                "assets": [_asset_data(item.registered, item.created) for item in results],
+                "qualified": False,
+            },
+        )
+    if args.kind is None or args.asset_id is None:
+        return ExitCode.USAGE, _result(
+            "method-asset register", "blocked", "--file needs --kind and --id"
+        )
+    with _operator_lock(args.root):
+        result = register_asset(args.root, args.kind, args.asset_id, args.asset_file)
+    return ExitCode.OK, _result(
+        "method-asset register",
+        "ok",
+        (
+            f"Asset {args.asset_id} registered ({args.kind}); unqualified, local"
+            if result.created
+            else f"Asset {args.asset_id} already registered with identical bytes"
+        ),
+        data=_asset_data(result.registered, result.created),
+    )
+
+
 def _existing_runner(
     root: Path,
     *,
@@ -4830,6 +4928,8 @@ def _dispatch(
         return _preflight(args)
     if args.command == "reference":
         return _reference_register(args)
+    if args.command == "method-asset":
+        return _method_asset(args)
     if args.command == "run":
         return _run(args, progress)
     if args.command == "status":
@@ -4910,7 +5010,7 @@ def _concerns_local_data(args: argparse.Namespace) -> bool:
     """
 
     command = args.command
-    if command in {"run", "reference", "catalog", "jobs", "label"}:
+    if command in {"run", "reference", "catalog", "jobs", "label", "method-asset"}:
         return True
     if command == "preflight":
         if args.reference_id is not None:
