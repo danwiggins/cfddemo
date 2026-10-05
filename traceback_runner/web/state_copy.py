@@ -21,6 +21,7 @@ from evidence_inspector.result_catalog import CatalogQualificationState
 from evidence_inspector.result_catalog import TrustState as CatalogTrustState
 from traceback_runner.contracts import JobState, PreflightOutcome
 from traceback_runner.export import ReferenceMatch
+from traceback_runner.measurement_schemas import ANALYSES
 
 #: Display-role token for a capability with no role assigned.
 NOT_ASSIGNED: Final = "not_assigned"
@@ -28,6 +29,11 @@ NOT_ASSIGNED: Final = "not_assigned"
 PREFLIGHT_NOT_AVAILABLE: Final = "not_available"
 #: Comparison token for a record shown on its own.
 NOT_COMPARED: Final = "not_compared"
+#: Method-version tokens of a v4 record (signal SH5).
+CURRENT_METHOD_VERSION: Final = "current_method_version"
+EARLIER_METHOD_VERSION: Final = "earlier_method_version"
+#: Job-problem token for a coded failure with no row of its own below.
+OTHER_JOB_PROBLEM: Final = "other"
 
 Copy = tuple[str, str]  # (label, meaning)
 
@@ -182,7 +188,7 @@ _JOB: dict[str, Copy] = {
         "The sort and index stage is running.",
     ),
     JobState.TECHNICAL_QC.value: ("Technical checks", "Technical checks are running."),
-    JobState.MEASURING.value: ("Measuring", "The fragment measurement is running."),
+    JobState.MEASURING.value: ("Measuring", "The measurement stage is running."),
     JobState.PAUSE_REQUESTED.value: (
         "Pausing",
         "A pause was requested; the job stops after its current stage.",
@@ -212,6 +218,67 @@ _JOB: dict[str, Copy] = {
     JobState.SUPERSEDED.value: ("Superseded", "A newer job replaced this one."),
 }
 
+_ANALYSIS: dict[str, Copy] = {
+    "fragment": (
+        "Fragment length",
+        "Counts of eligible alignments by aligned reference span, in the "
+        "policy's bins.",
+    ),
+    "cell_origin": (
+        "Cell origin",
+        "An estimated cell-type mixture from methylation at atlas marker "
+        "regions. Descriptive only.",
+    ),
+    "copy_number": (
+        "Copy number",
+        "A genome-wide profile of read depth in fixed bins, with a model's "
+        "segments. Descriptive only.",
+    ),
+}
+
+_METHOD_VERSION: dict[str, Copy] = {
+    CURRENT_METHOD_VERSION: (
+        "Made under the latest method version here",
+        "No later method definition for this analysis and reference exists in "
+        "this ROOT.",
+    ),
+    EARLIER_METHOD_VERSION: (
+        "Made under an earlier method version",
+        "A later method definition for this analysis and reference exists in "
+        "this ROOT, for example after a tool was reinstalled. This record still "
+        "verifies against the method version it was made under; its files are "
+        "unchanged.",
+    ),
+}
+
+# One row per problem code a job can stop on, shown on its row in the jobs
+# disclosure (code and label).  The cause and fix stay in traceback logs.
+_JOB_PROBLEM: dict[str, Copy] = {
+    "TBX-REF-001": ("Reference FASTA unusable", "The registered FASTA is missing, compressed, or its index contradicts it."),
+    "TBX-REF-003": ("Reference not registered", "The reference ID is not registered in this ROOT, or its registration is damaged."),
+    "TBX-BAM-001": ("BAM or index unreadable", "The BAM or its index is unreadable, truncated, not coordinate-sorted, or contradicts the other."),
+    "TBX-BAM-002": ("BAM header differs from the reference", "A contig name, length, order or checksum in the BAM header differs from the registered reference."),
+    "TBX-BAM-003": ("BAM is unaligned", "The BAM has no reference contigs; align it before a run."),
+    "TBX-BAM-004": ("BAM has no alignments", "The BAM has a header but no alignment records."),
+    "TBX-INTERNAL-001": ("Input checks stopped unexpectedly", "The input checks stopped on an internal error, not a BAM read or format error."),
+    "TBX-MOD-001": ("No modification tags", "No modification provenance or modification tags were found in the BAM."),
+    "TBX-MOD-002": ("Modification tags contradictory", "The sampled modification tags contradict each other."),
+    "TBX-RUN-004": ("Not enough free space", "The ROOT volume had less free space than the run needs, or filled during the run."),
+    "TBX-RUN-005": ("No eligible alignments", "No alignment passed the locked policy, so there is nothing to count."),
+    "TBX-RUN-006": ("Provenance key damaged", "The ROOT provenance key is not a private 32-byte file."),
+    "TBX-RUN-007": ("Signing key damaged", "The ROOT development signing key is not a private 32-byte file."),
+    "TBX-RUN-008": ("BAM missing or not a file", "The BAM is missing, is a symbolic link, or is not a regular file."),
+    "TBX-RUN-009": ("BAM index missing", "The BAM index was not found."),
+    "TBX-RUN-010": ("Input is not a BAM", "The input does not start with the bytes every BAM starts with."),
+    "TBX-JOB-001": ("Stopped for an unexpected reason", "The run stopped without a record, or lost its worker lease."),
+    "TBX-JOB-002": ("Held by another process", "Another traceback process holds this job's worker lease."),
+    "TBX-TOOL-001": ("Pinned tool missing or changed", "A pinned tool is not installed, or the installed one does not match its pin."),
+    "TBX-AUTH-LOCAL-001": ("Method authority damaged", "The local method authority is missing, not private, or fails its pinned check."),
+    "TBX-AUTH-LOCAL-002": ("Result trust registry damaged", "The local result trust registry or its pin is missing or does not open."),
+    "TBX-AUTH-LOCAL-003": ("Method authority store damaged", "A method authority store fails its pinned check; only its own records are hidden."),
+    OTHER_JOB_PROBLEM: ("Stopped on a coded problem", "Run traceback logs for this job to read the cause and the fix."),
+}
+
 #: Axis name -> token -> (label, meaning).  Read-only.
 STATE_COPY: Final = MappingProxyType(
     {
@@ -223,6 +290,9 @@ STATE_COPY: Final = MappingProxyType(
         "comparison": MappingProxyType(_COMPARISON),
         "record_status": MappingProxyType(_RECORD_STATUS),
         "job": MappingProxyType(_JOB),
+        "analysis": MappingProxyType(_ANALYSIS),
+        "method_version": MappingProxyType(_METHOD_VERSION),
+        "job_problem": MappingProxyType(_JOB_PROBLEM),
     }
 )
 
@@ -235,6 +305,9 @@ RECORD_AXES: Final = (
     "preflight",
     "comparison",
 )
+#: Axes of a non-fragment (v4) record view: the fragment axes, then whether a
+#: later method version exists.  The fragment view keeps :data:`RECORD_AXES`.
+ANALYSIS_RECORD_AXES: Final = (*RECORD_AXES, "method_version")
 
 #: Every enum whose members the site can show, by axis (C3 coverage test).
 ENUM_SOURCES: Final = MappingProxyType(
@@ -246,6 +319,9 @@ ENUM_SOURCES: Final = MappingProxyType(
         "preflight": (*(item.value for item in PreflightOutcome), PREFLIGHT_NOT_AVAILABLE),
         "comparison": (NOT_COMPARED, "comparable", "incompatible", "unknown"),
         "job": tuple(item.value for item in JobState),
+        "analysis": ANALYSES,
+        "method_version": (CURRENT_METHOD_VERSION, EARLIER_METHOD_VERSION),
+        "job_problem": tuple(_JOB_PROBLEM),
     }
 )
 
@@ -256,12 +332,23 @@ def copy_for(axis: str, token: str) -> Copy:
     return STATE_COPY[axis][token]
 
 
+def job_problem_copy(code: str) -> Copy:
+    """``(label, meaning)`` for the code a job stopped on; a generic row otherwise."""
+
+    return _JOB_PROBLEM.get(code, _JOB_PROBLEM[OTHER_JOB_PROBLEM])
+
+
 __all__ = [
+    "ANALYSIS_RECORD_AXES",
+    "CURRENT_METHOD_VERSION",
+    "EARLIER_METHOD_VERSION",
     "ENUM_SOURCES",
     "NOT_ASSIGNED",
     "NOT_COMPARED",
+    "OTHER_JOB_PROBLEM",
     "PREFLIGHT_NOT_AVAILABLE",
     "RECORD_AXES",
     "STATE_COPY",
     "copy_for",
+    "job_problem_copy",
 ]

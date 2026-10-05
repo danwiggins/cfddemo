@@ -277,7 +277,8 @@ class ProblemDetail(RunnerContract):
     schema_version: Literal["traceback.problem-detail.v1"] = (
         "traceback.problem-detail.v1"
     )
-    code: str = Field(pattern=r"^TBX-[A-Z]+-[0-9]{3}$")
+    # One or two letter groups: ``TBX-BAM-001`` and ``TBX-AUTH-LOCAL-003``.
+    code: str = Field(pattern=r"^TBX-[A-Z]+(?:-[A-Z]+)?-[0-9]{3}$")
     problem: SafeText
     cause: SafeText
     fix: SafeText
@@ -319,6 +320,8 @@ class JobProjection(RunnerContract):
     )
     job_id: OpaqueId
     state: JobState
+    # The analysis the job runs (signal SH5); read from its sample token.
+    analysis: Literal["fragment", "cell_origin", "copy_number"] = "fragment"
     stage_label: SafeText
     updated_at: datetime
     revision: int = Field(ge=0)
