@@ -409,8 +409,42 @@ the same record and the same output.
   the method it resolves now (reference, tool, asset or setting) is not the
   one the job was admitted under.
 
-Cell origin and copy number have no stages in this version yet: asking for
-them refuses that analysis with TBX-RUN-011 and runs the rest.
+Cell origin has no stages in this version yet: asking for it refuses that
+analysis with TBX-RUN-011 and runs the rest.
+
+### Copy number (ichorCNA, optional)
+
+`run --analysis copy-number` makes an ichorCNA copy-number record
+(`measurements/copy-number.v1.json`). It needs the optional toolchain and its
+three registered assets, once per machine and once per ROOT:
+
+```bash
+uv run traceback toolchain install copy-number --yes
+uv run traceback method-asset register --from-toolchain copy-number --root "$R"
+uv run traceback preflight "$BAM" --reference ref --analysis copy-number --root "$R"
+uv run traceback run "$BAM" --reference ref --analysis fragment,copy-number --root "$R"
+```
+
+- The method is locked: 1 Mb bins on chr1-chr22 (UCSC names), MAPQ >= 20,
+  eligible primary alignments only (a pysam pre-filter writes them, without
+  read names, sequences or tags, into a counting BAM inside the job; it is
+  deleted after `readCounter`), no reference panel (PoN), normal-fraction
+  starts 0.95-0.999 and at most 3 copies. Every setting is part of the
+  method hash.
+- Refusals: too few mapped records in the index (TBX-CNA-001), too few
+  counted reads, 1,000,000 by default (TBX-CNA-002), contigs not `chrN`
+  (TBX-CNA-003), and `readCounter` or ichorCNA failing, timing out or
+  writing output that fails validation (TBX-CNA-004). A missing or changed
+  toolchain is retryable (TBX-TOOL-002, exit 6).
+- An unidentifiable solution (too little altered structure for ichorCNA) is
+  still a record, with `identifiable: false` and a model fraction of 0.
+- ichorCNA runs through the isolated Rscript runner in a private staging
+  directory. Its `.RData` workspace and PDFs are never opened, signed or
+  kept: they are not byte-stable across runs. The record keeps its text
+  outputs and the read-count wig.
+- The tumour-fraction estimate is in the signed measurement file with its
+  stated lower limit (about 3% at about 0.1x short-read coverage with a PoN;
+  not established for this nanopore protocol). The report does not print it.
 
 ### Many BAMs: jobs, records and labels
 
@@ -545,7 +579,11 @@ says otherwise. Exit codes are listed under "Stable exit codes".
 | <a id="tbx-meth-006"></a>TBX-METH-006 | 3 | `run --analysis cell-origin`: the NNLS mixture fit did not converge; no record | Retrying will not change it; `traceback support-bundle JOB_ID --output DIR`, then report the code |
 | <a id="tbx-meth-007"></a>TBX-METH-007 | 3 | `run --analysis cell-origin`: the result failed a validation check (schema round trip, asset digests, markers against the atlas, U/X/M counts, normalized fractions, publication safety); the cause names the failed checks; no record | Retrying will not change it; `traceback support-bundle JOB_ID --output DIR`, then report the code |
 | <a id="tbx-tool-001"></a>TBX-TOOL-001 | 3, or 6 at stage time | Missing (retryable; a `run --analysis` job whose stage finds the tool missing or damaged ends retryable, exit 6, and resumes once the tool is installed): the pinned tool is not installed in the per-user cache, micromamba was not found, the install failed (no network, or a package digest did not match the lock), or this platform has no lock (macOS arm64 and Linux x86-64 only). Wrong version or digest: the installed binary's sha256 differs from its install receipt, the receipt or package record names another version or package, the binary does not report the pinned version, or the committed lock file was edited | Missing: run `traceback toolchain install modkit` to see the plan, then add `--yes`. Wrong version or digest: run `traceback toolchain install modkit --yes`, which replaces a damaged install; for an edited lock file, reinstall traceback from a clean checkout |
-| <a id="tbx-tool-002"></a>TBX-TOOL-002 | 3, or 0 (doctor WARN) | The optional copy-number (ichorCNA) toolchain. Missing (retryable): not installed, micromamba not found, an install that stopped part-way or failed (no network, a package digest did not match the lock, a Bioconductor data-package download failed so ichorCNA cannot load), or no lock for this platform. Wrong version or digest: `readCounter`, `Rscript` or the driver differs from the install receipt or its package record, the receipt names another lock, or (`doctor --deep`) an installed file, the package set or a Bioconductor data package changed | Missing: run `traceback toolchain install ichor` to see the plan, then add `--yes` (needs the network). Wrong version or digest: run `traceback toolchain install ichor --yes`, which replaces a damaged install; for an edited lock or driver, reinstall traceback from a clean checkout. Fragment length never needs it |
+| <a id="tbx-tool-002"></a>TBX-TOOL-002 | 3, 0 (doctor WARN), or 6 at stage time | The optional copy-number (ichorCNA) toolchain. Missing (retryable): not installed, micromamba not found, an install that stopped part-way or failed (no network, a package digest did not match the lock, a Bioconductor data-package download failed so ichorCNA cannot load), or no lock for this platform. Wrong version or digest: `readCounter`, `Rscript` or the driver differs from the install receipt or its package record, the receipt names another lock, or (`doctor --deep`) an installed file, the package set or a Bioconductor data package changed | Missing: run `traceback toolchain install ichor` to see the plan, then add `--yes` (needs the network). Wrong version or digest: run `traceback toolchain install ichor --yes`, which replaces a damaged install; for an edited lock or driver, reinstall traceback from a clean checkout. Fragment length never needs it |
+| <a id="tbx-cna-001"></a>TBX-CNA-001 | 3 | `run --analysis copy-number`, before counting: the BAM index reports fewer mapped records on chr1-chr22 than the locked floor of counted reads (1,000,000). The index count includes secondary, supplementary, duplicate and low-MAPQ records, so it is an upper bound; no record was made | Sequence deeper or pool runs of the same sample. The fragment analysis is unaffected |
+| <a id="tbx-cna-002"></a>TBX-CNA-002 | 3 | `run --analysis copy-number`: fewer eligible primary alignments (mapped, not secondary, supplementary, QC-failed or duplicate, MAPQ >= 20) on chr1-chr22 than the locked floor; no record was made | Sequence deeper or pool runs of the same sample. The fragment analysis is unaffected |
+| <a id="tbx-cna-003"></a>TBX-CNA-003 | 3 | `run --analysis copy-number` (and `preflight --analysis copy-number` for the registered reference): chr1-chr22 are not all present by their UCSC names, for example an Ensembl-style `1`..`22` alignment. The ichorCNA wigs and centromere table use UCSC names | Align to an hg38 reference with UCSC contig names, register it, and run again |
+| <a id="tbx-cna-004"></a>TBX-CNA-004 | 3 | `run --analysis copy-number`: `readCounter` or ichorCNA exited non-zero or timed out, readCounter's bins do not match the registered wigs, or ichorCNA's output failed the adapter's validation (its parsers and its replay of the segments). An unidentifiable solution is not this code: it is a record with `identifiable: false`; no record was made | Retrying will not change it; write `traceback support-bundle JOB_ID --output DIR` for the job and report the code. Other analyses are unaffected |
 | <a id="operator-busy"></a>Operator busy | 3 | `A local action or unexpired worker lease is active`: another CLI mutation holds `R/.operator.lock` | Wait for it to finish, then rerun |
 
 ## Stable exit codes

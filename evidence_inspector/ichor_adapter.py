@@ -518,6 +518,87 @@ class IchorParameterSet(StrictModel):
         return self
 
 
+def centromere_mask_bins(
+    bins: Sequence[CanonicalBin],
+    intervals: Sequence[CentromereInterval],
+    flank_bp: int,
+) -> set[CanonicalBin]:
+    """Bins ichorCNA removes as centromere or flank (the one rule for masks)."""
+
+    return {
+        bin_row
+        for bin_row in bins
+        for interval in intervals
+        if bin_row.contig == interval.contig
+        and bin_row.start < interval.end + flank_bp
+        and bin_row.end > max(0, interval.start - flank_bp)
+    }
+
+
+def low_mappability_mask_bins(
+    bins: Sequence[CanonicalBin],
+    map_values: Sequence[float] | None,
+    minimum_map_score: float,
+    centromere_masks: set[CanonicalBin],
+) -> set[CanonicalBin]:
+    """Bins below the map-score threshold that are not already centromere masks."""
+
+    return {
+        bin_row
+        for index, bin_row in enumerate(bins)
+        if bin_row not in centromere_masks
+        and map_values is not None
+        and map_values[index] < minimum_map_score
+    }
+
+
+def masked_canonical_grid(
+    bins: Sequence[CanonicalBin],
+    *,
+    contig_order: Sequence[str],
+    intervals: Sequence[CentromereInterval],
+    map_values: Sequence[float],
+    parameters: IchorParameterSet,
+    centromere_sha256: str,
+    map_sha256: str,
+) -> CanonicalGrid:
+    """The canonical grid with the masks a bound request would carry.
+
+    For a local run, which binds its inputs by digest without a full
+    :class:`CnvRunRequest`: the masks follow the same two rules the request
+    validator replays.
+    """
+
+    if len(map_values) != len(bins):
+        raise ValueError("mappability values do not cover the grid")
+    centromere = centromere_mask_bins(bins, intervals, parameters.centromere_flank_bp)
+    low = low_mappability_mask_bins(
+        bins, map_values, parameters.minimum_map_score, centromere
+    )
+    masks = tuple(
+        CanonicalBinMask(
+            bin=bin_row,
+            reason="centromere_or_flank",
+            source_artifact_sha256=centromere_sha256,
+        )
+        if bin_row in centromere
+        else CanonicalBinMask(
+            bin=bin_row,
+            reason="low_mappability",
+            source_artifact_sha256=map_sha256,
+            source_value=map_values[index],
+        )
+        for index, bin_row in enumerate(bins)
+        if bin_row in centromere or bin_row in low
+    )
+    return CanonicalGrid(
+        contig_order=tuple(contig_order),
+        bins=tuple(bins),
+        masks=masks,
+        bin_definition_sha256=_canonical_sha256(tuple(bins)),
+    )
+
+
 class CnvRunRequest(StrictModel):
     schema_version: Literal["traceback.ichor-request.v1"] = "traceback.ichor-request.v1"
     sample_id: Identifier
@@ -597,15 +678,11 @@ class CnvRunRequest(StrictModel):
             for item in self.assets.canonical_grid.masks
             if item.reason == "centromere_or_flank"
         }
-        expected_centromere_masks = {
-            bin_row
-            for bin_row in self.assets.canonical_grid.bins
-            for interval in self.assets.centromere.canonical_intervals
-            if bin_row.contig == interval.contig
-            and bin_row.start < interval.end + self.parameters.centromere_flank_bp
-            and bin_row.end
-            > max(0, interval.start - self.parameters.centromere_flank_bp)
-        }
+        expected_centromere_masks = centromere_mask_bins(
+            self.assets.canonical_grid.bins,
+            self.assets.centromere.canonical_intervals,
+            self.parameters.centromere_flank_bp,
+        )
         if centromere_masks != expected_centromere_masks:
             raise ValueError(
                 "centromere masks do not match the bound intervals and flank"
@@ -615,13 +692,12 @@ class CnvRunRequest(StrictModel):
             if self.assets.mappability is not None
             else None
         )
-        expected_low_masks = {
-            bin_row
-            for index, bin_row in enumerate(self.assets.canonical_grid.bins)
-            if bin_row not in expected_centromere_masks
-            and map_values is not None
-            and map_values[index] < self.parameters.minimum_map_score
-        }
+        expected_low_masks = low_mappability_mask_bins(
+            self.assets.canonical_grid.bins,
+            map_values,
+            self.parameters.minimum_map_score,
+            expected_centromere_masks,
+        )
         low_masks = {
             item.bin
             for item in self.assets.canonical_grid.masks
@@ -667,6 +743,9 @@ class OutputAvailability(StrEnum):
     DIRECTLY_EMITTED = "directly_emitted"
     REQUIRED_INPUT = "required_input"
     OPAQUE_RDATA = "opaque_rdata"
+    # Emitted upstream but never opened, hashed or kept (a local run's .RData:
+    # it is not byte-stable across runs, so nothing may bind its bytes).
+    EMITTED_NOT_READ = "emitted_not_read"
     NOT_EMITTED_BY_PINNED_UPSTREAM = "not_emitted_by_pinned_upstream"
 
 
@@ -684,6 +763,7 @@ class OutputCapability(StrictModel):
         emitted = self.availability in {
             OutputAvailability.DIRECTLY_EMITTED,
             OutputAvailability.OPAQUE_RDATA,
+            OutputAvailability.EMITTED_NOT_READ,
         }
         if emitted != (self.relative_path is not None):
             raise ValueError("only emitted output capabilities have paths")
@@ -732,7 +812,11 @@ def _r_vector(values: Sequence[int | float]) -> str:
     return "c(" + ",".join(format(value, ".15g") for value in values) + ")"
 
 
-def _output_capabilities(sample_id: str) -> tuple[OutputCapability, ...]:
+def _output_capabilities(
+    sample_id: str, *, read_workspace: bool = True
+) -> tuple[OutputCapability, ...]:
+    """What the pinned upstream emits; a local run never reads the .RData."""
+
     return (
         OutputCapability(role="raw_counts", availability="required_input"),
         OutputCapability(
@@ -762,7 +846,7 @@ def _output_capabilities(sample_id: str) -> tuple[OutputCapability, ...]:
         ),
         OutputCapability(
             role="r_workspace",
-            availability="opaque_rdata",
+            availability="opaque_rdata" if read_workspace else "emitted_not_read",
             relative_path=f"{sample_id}.RData",
         ),
         OutputCapability(
@@ -784,19 +868,90 @@ def _output_capabilities(sample_id: str) -> tuple[OutputCapability, ...]:
     )
 
 
+class IchorPaths(StrictModel):
+    """Where the driver reads its inputs and writes its outputs."""
+
+    counts_wig: str
+    gc_wig: str
+    map_wig: str | None
+    centromere: str
+    panel_of_normals: str | None
+    out_dir: str
+
+    @model_validator(mode="after")
+    def absolute_paths(self) -> IchorPaths:
+        for value in (
+            self.counts_wig,
+            self.gc_wig,
+            self.map_wig,
+            self.centromere,
+            self.panel_of_normals,
+            self.out_dir,
+        ):
+            if value is None:
+                continue
+            path = PurePosixPath(value)
+            if not path.is_absolute() or ".." in path.parts or chr(0) in value:
+                raise ValueError("ichor paths must be absolute and safe")
+        return self
+
+
+# The container layout the prepared (OCI) run binds.
+CONTAINER_PATHS = IchorPaths(
+    counts_wig="/input/counts.wig",
+    gc_wig="/assets/gc.wig",
+    map_wig="/assets/map.wig",
+    centromere="/assets/centromere.tsv",
+    panel_of_normals="/assets/pon.rds",
+    out_dir="/attempt",
+)
+
+
 def _expected_argv(request: CnvRunRequest) -> tuple[str, ...]:
-    params = request.parameters
-    argv = [
+    paths = CONTAINER_PATHS.model_copy(
+        update={
+            "map_wig": CONTAINER_PATHS.map_wig
+            if request.assets.mappability is not None
+            else None,
+            "panel_of_normals": CONTAINER_PATHS.panel_of_normals
+            if request.assets.panel_of_normals is not None
+            else None,
+        }
+    )
+    return (
         "Rscript",
         request.runtime.ichor_script_path,
+        *ichor_driver_arguments(
+            request.parameters,
+            sample_id=request.sample_id,
+            genome_build=request.assets.reference.assembly,
+            paths=paths,
+        ),
+    )
+
+
+def ichor_driver_arguments(
+    params: IchorParameterSet,
+    *,
+    sample_id: str,
+    genome_build: str,
+    paths: IchorPaths,
+) -> tuple[str, ...]:
+    """The driver's flags after the script path: one argv for every target.
+
+    The prepared (OCI) run passes :data:`CONTAINER_PATHS`; a local run passes
+    its private staging paths.  Only the paths differ.
+    """
+
+    argv = [
         "--id",
-        request.sample_id,
+        sample_id,
         "--WIG",
-        "/input/counts.wig",
+        paths.counts_wig,
         "--gcWig",
-        "/assets/gc.wig",
+        paths.gc_wig,
         "--centromere",
-        "/assets/centromere.tsv",
+        paths.centromere,
         "--normal",
         _r_vector(params.normal_fraction_starts),
         "--ploidy",
@@ -828,18 +983,18 @@ def _expected_argv(request: CnvRunRequest) -> tuple[str, ...]:
         "--chrNormalize",
         _r_vector(params.chromosomes),
         "--genomeBuild",
-        request.assets.reference.assembly,
+        genome_build,
         "--genomeStyle",
         "UCSC",
         "--includeHOMD",
         "FALSE",
         "--outDir",
-        "/attempt",
+        paths.out_dir,
     ]
-    if request.assets.mappability is not None:
-        argv.extend(("--mapWig", "/assets/map.wig"))
-    if request.assets.panel_of_normals is not None:
-        argv.extend(("--normalPanel", "/assets/pon.rds"))
+    if paths.map_wig is not None:
+        argv.extend(("--mapWig", paths.map_wig))
+    if paths.panel_of_normals is not None:
+        argv.extend(("--normalPanel", paths.panel_of_normals))
     return tuple(argv)
 
 
@@ -1049,13 +1204,17 @@ class CnvDevelopmentResult(StrictModel):
             set(artifact_roles)
         ):
             raise ValueError("output artifacts must be uniquely sorted by role")
-        expected_capabilities = _output_capabilities(self.selected_solution.sample_id)
-        if self.output_capabilities != expected_capabilities:
+        sample_id = self.selected_solution.sample_id
+        if self.output_capabilities not in (
+            _output_capabilities(sample_id),
+            _output_capabilities(sample_id, read_workspace=False),
+        ):
             raise ValueError("result output capabilities do not match pinned upstream")
         emitted = {
             item.role: item.relative_path
             for item in self.output_capabilities
             if item.relative_path is not None
+            and item.availability != OutputAvailability.EMITTED_NOT_READ
         }
         artifacts = {item.role: item.relative_path for item in self.artifacts}
         if artifacts != emitted:
@@ -1610,6 +1769,30 @@ def _selection_matches(
     )
 
 
+# The candidate table header: the pinned script's, or run_ichorCNA()'s at
+# v0.5.1 (starting values in two columns, no BIC).
+_CANDIDATE_HEADERS = (
+    [
+        "init",
+        "n_est",
+        "phi_est",
+        "BIC",
+        "Frac_genome_subclonal",
+        "Frac_CNA_subclonal",
+        "loglik",
+    ],
+    [
+        "n_0",
+        "phi_0",
+        "n_est",
+        "phi_est",
+        "Frac_genome_subclonal",
+        "Frac_CNA_subclonal",
+        "loglik",
+    ],
+)
+
+
 def _parse_params(
     path: Path,
     sample_id: str,
@@ -1632,25 +1815,17 @@ def _parse_params(
         raise IchorOutputError("selected parameter sample ID mismatch")
     selected_fraction = _finite(selected_values[1], "selected model fraction")
     selected_ploidy = _finite(selected_values[2], "selected ploidy")
-    candidate_header = [
-        "init",
-        "n_est",
-        "phi_est",
-        "BIC",
-        "Frac_genome_subclonal",
-        "Frac_CNA_subclonal",
-        "loglik",
-    ]
     header_index = next(
         (
             index
             for index, line in enumerate(lines)
-            if line.split("\t") == candidate_header
+            if line.split("\t") in _CANDIDATE_HEADERS
         ),
         None,
     )
     if header_index is None:
         raise IchorOutputError("candidate table is absent")
+    candidate_header = lines[header_index].split("\t")
     candidates: list[CandidateSolution] = []
     observed_initializations: list[str] = []
     for line in lines[header_index + 1 :]:
@@ -1660,6 +1835,14 @@ def _parse_params(
         if len(values) != len(candidate_header):
             raise IchorOutputError("candidate row has the wrong number of fields")
         row = dict(zip(candidate_header, values, strict=True))
+        if "init" not in row:
+            # run_ichorCNA() 0.5.1 writes the starting values as two columns
+            # and no BIC column (it computes none).
+            row["init"] = (
+                f"n{format(_finite(row['n_0'], 'initial normal'), '.15g')}"
+                f"-p{format(_finite(row['phi_0'], 'initial ploidy'), '.15g')}"
+            )
+            row["BIC"] = "NA"
         observed_initializations.append(row["init"])
         initial_normal, initial_ploidy = _parse_init(row["init"])
         estimated_normal = _finite(row["n_est"], "estimated normal")
@@ -1751,6 +1934,15 @@ def _replay_segment_structure(
         if item.status == "retained"
     }
     coverage = {key: 0 for key in retained_keys}
+    # Retained bins without a corrected value (native NA) carry no data to
+    # segment: run_ichorCNA() 0.5.1 leaves such bins at a segment's edge out of
+    # every segment.  They may be covered at most once; every bin with a value
+    # exactly once.
+    unvalued = {
+        (item.contig, item.start, item.end)
+        for item in statuses
+        if item.status == "retained" and item.corrected_log2 is None
+    }
     neutral_calls = {"NEUT", "NEUTRAL"}
     altered_segments: list[CnaSegment] = []
     for segment in segments:
@@ -1779,7 +1971,9 @@ def _replay_segment_structure(
             coverage[(row.contig, row.start, row.end)] += 1
         if segment.call.upper() not in neutral_calls:
             altered_segments.append(segment)
-    if any(value != 1 for value in coverage.values()):
+    if any(
+        value > 1 or (value == 0 and key not in unvalued) for key, value in coverage.items()
+    ):
         raise ValueError("segments do not cover every retained bin exactly once")
 
     largest = (
@@ -1823,6 +2017,58 @@ def validate_ichor_outputs(
 ) -> CnvDevelopmentResult:
     """Parse only files the pinned upstream emits; never execute or deserialize RData."""
 
+    return _validate_output_directory(
+        output_directory,
+        sample_id=prepared.request.sample_id,
+        grid=prepared.request.assets.canonical_grid,
+        parameters=prepared.request.parameters,
+        pon_mode=prepared.request.pon_mode,
+        request_sha256=prepared.request_sha256,
+        output_capabilities=prepared.output_capabilities,
+    )
+
+
+def validate_local_ichor_outputs(
+    output_directory: Path,
+    *,
+    sample_id: str,
+    grid: CanonicalGrid,
+    parameters: IchorParameterSet,
+    pon_mode: Literal["none_development", "protocol_matched_frozen"],
+    run_sha256: str,
+) -> CnvDevelopmentResult:
+    """Validate a local run's outputs with the same parsers and replay.
+
+    A local run binds its inputs by digest (``run_sha256``) instead of a full
+    :class:`CnvRunRequest`.  Its ``.RData`` is never opened, hashed or kept:
+    the workspace is not byte-stable across runs.
+    """
+
+    return _validate_output_directory(
+        output_directory,
+        sample_id=sample_id,
+        grid=grid,
+        parameters=parameters,
+        pon_mode=pon_mode,
+        request_sha256=run_sha256,
+        output_capabilities=_output_capabilities(sample_id, read_workspace=False),
+    )
+
+
+def _validate_output_directory(
+    output_directory: Path,
+    *,
+    sample_id: str,
+    grid: CanonicalGrid,
+    parameters: IchorParameterSet,
+    pon_mode: Literal["none_development", "protocol_matched_frozen"],
+    request_sha256: str,
+    output_capabilities: tuple[OutputCapability, ...],
+) -> CnvDevelopmentResult:
+    read_workspace = all(
+        item.availability != OutputAvailability.EMITTED_NOT_READ
+        for item in output_capabilities
+    )
     try:
         output_metadata = output_directory.lstat()
     except OSError:
@@ -1830,7 +2076,10 @@ def validate_ichor_outputs(
     if not stat.S_ISDIR(output_metadata.st_mode) or output_directory.is_symlink():
         raise IchorOutputError("output directory is absent")
     emitted = [
-        item for item in prepared.output_capabilities if item.relative_path is not None
+        item
+        for item in output_capabilities
+        if item.relative_path is not None
+        and item.availability != OutputAvailability.EMITTED_NOT_READ
     ]
     allowed = {item.relative_path for item in emitted}
     try:
@@ -1861,23 +2110,23 @@ def validate_ichor_outputs(
     try:
         corrected, bin_statuses = _parse_corrected(
             output_directory / str(role_paths["combined_corrected_depth"]),
-            prepared.request.assets.canonical_grid,
+            grid,
         )
         segments = _parse_segments(
             output_directory / str(role_paths["segments_detailed"]),
-            prepared.request.sample_id,
-            prepared.request.assets.canonical_grid,
+            sample_id,
+            grid,
             corrected,
         )
         bin_events = _parse_bin_events(
             output_directory / str(role_paths["bin_level_cna"]),
-            prepared.request.sample_id,
-            prepared.request.assets.canonical_grid,
+            sample_id,
+            grid,
         )
         selected, candidates = _parse_params(
             output_directory / str(role_paths["parameters_and_candidates"]),
-            prepared.request.sample_id,
-            prepared.request.parameters,
+            sample_id,
+            parameters,
         )
     except IchorOutputError:
         raise
@@ -1885,12 +2134,16 @@ def validate_ichor_outputs(
         raise IchorOutputError(
             "upstream output violates the adapter contract"
         ) from None
+    # The HMM's copy-number states are 0..maxCN; a segment outside them was
+    # not produced under the locked parameters.
+    if any(item.copy_number > parameters.max_copy_number for item in segments):
+        raise IchorOutputError("segment copy number exceeds the locked maxCN")
     try:
         identifiability_evidence = _replay_segment_structure(
-            prepared.request.assets.canonical_grid,
+            grid,
             bin_statuses,
             segments,
-            prepared.request.parameters,
+            parameters,
             bin_events,
         )
     except ValueError:
@@ -1911,7 +2164,11 @@ def validate_ichor_outputs(
         "Pinned ichorCNA development output; not analytically qualified.",
         "Model fraction is conditional on copy-state, ploidy, and parameter assumptions.",
         "Separate GC-only, map-only, and PoN-residual stages are not emitted upstream.",
-        "RData is retained by digest but is not deserialized by this parser.",
+        (
+            "RData is retained by digest but is not deserialized by this parser."
+            if read_workspace
+            else "RData is neither read nor retained."
+        ),
         "Raw .seg is retained by digest; v1 parses .seg.txt and bin-level .cna.seg.",
     ]
     if any(item.corrected_log2 is None for item in corrected):
@@ -1924,15 +2181,15 @@ def validate_ichor_outputs(
             "Native unavailable candidate BIC values are represented as null; "
             "no finite selection score is claimed."
         )
-    if prepared.request.pon_mode == "none_development":
+    if pon_mode == "none_development":
         limitations.append("No protocol-matched panel of normals was supplied.")
     try:
         return CnvDevelopmentResult(
             status=status,
-            request_sha256=prepared.request_sha256,
-            pon_mode=prepared.request.pon_mode,
-            canonical_grid=prepared.request.assets.canonical_grid,
-            parameters=prepared.request.parameters,
+            request_sha256=request_sha256,
+            pon_mode=pon_mode,
+            canonical_grid=grid,
+            parameters=parameters,
             corrected_bins=corrected,
             bin_statuses=bin_statuses,
             segments=segments,
@@ -1941,7 +2198,7 @@ def validate_ichor_outputs(
             selected_solution=selected,
             identifiability_evidence=identifiability_evidence,
             identifiability=identifiability,
-            output_capabilities=prepared.output_capabilities,
+            output_capabilities=output_capabilities,
             artifacts=tuple(sorted(artifacts, key=lambda item: item.role)),
             limitations=tuple(limitations),
         )
@@ -1976,6 +2233,8 @@ __all__ = [
     "ExternalComponentBinding",
     "IchorOutputError",
     "IchorParameterSet",
+    "IchorPaths",
+    "CONTAINER_PATHS",
     "IdentifiabilityEvidence",
     "PanelOfNormalsBinding",
     "ParsedFixedStepWig",
@@ -1984,11 +2243,16 @@ __all__ = [
     "ReferenceFastaBinding",
     "RuntimeBinding",
     "WigGridBinding",
+    "centromere_mask_bins",
     "check_wig_grid",
+    "ichor_driver_arguments",
+    "low_mappability_mask_bins",
+    "masked_canonical_grid",
     "contract_sha256",
     "parse_centromere_table",
     "parse_fixed_step_wig",
     "prepare_ichor_run",
     "validate_centromere_table",
     "validate_ichor_outputs",
+    "validate_local_ichor_outputs",
 ]

@@ -3770,7 +3770,7 @@ def _preflight_registered(
     blocked = report.outcome == PreflightOutcome.BLOCKED
     analyses = getattr(args, "analysis", None)
     readiness = (
-        {"analyses": _analysis_readiness(analyses, report, loaded, args)}
+        {"analyses": _analysis_readiness(analyses, report, loaded, args, index=index)}
         if analyses is not None
         else {}
     )
@@ -3847,7 +3847,12 @@ def _modkit_readiness() -> Any:
 
 
 def _analysis_readiness(
-    analyses: Sequence[str], report: Any, loaded: Any, args: argparse.Namespace
+    analyses: Sequence[str],
+    report: Any,
+    loaded: Any,
+    args: argparse.Namespace,
+    *,
+    index: Path | None = None,
 ) -> list[dict[str, Any]]:
     """``preflight --analysis``: what each analysis would need before ``run``.
 
@@ -3857,6 +3862,7 @@ def _analysis_readiness(
 
     from .analyses import (
         CELL_ORIGIN,
+        COPY_NUMBER,
         FRAGMENT,
         ReadinessRow,
         registered_analysis_stages,
@@ -3882,6 +3888,9 @@ def _analysis_readiness(
         if analysis == FRAGMENT:
             rows.append(bam_row)
         else:
+            if analysis == COPY_NUMBER:
+                # The copy-number validate stage runs the same BAM preflight.
+                rows.append(bam_row)
             if analysis == CELL_ORIGIN:
                 # The cell-origin validate stage runs the same BAM preflight.
                 rows.append(bam_row)
@@ -3903,6 +3912,10 @@ def _analysis_readiness(
             else:
                 config = resolved_config(spec, {"modbase_model": modbase_model})
                 rows.extend(spec.readiness_rows(args.root, loaded, config))
+                if analysis == COPY_NUMBER:
+                    from .copy_number import depth_readiness
+
+                    rows.append(depth_readiness(Path(args.input), index))
         ready = all(row.outcome == "ready" for row in rows)
         results.append(
             {
@@ -5286,3 +5299,7 @@ __all__ = ["ExitCode", "main"]
 # Registers the cell-origin measurement schema (v4) and its run --analysis
 # stages (signal CO3).  Imported last: its stages import this module lazily.
 from . import cell_origin as _cell_origin  # noqa: E402,F401
+
+# Registers the copy-number measurement schema (v4) and its run --analysis
+# stages (signal CN3).  Imported last: its stages import this module lazily.
+from . import copy_number as _copy_number  # noqa: E402,F401
