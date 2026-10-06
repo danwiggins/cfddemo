@@ -464,3 +464,37 @@ def test_toolchain_is_listed_in_top_level_help(capsys: pytest.CaptureFixture[str
     with pytest.raises(SystemExit):
         cli.main(["--help"])
     assert "toolchain" in capsys.readouterr().out
+
+
+def test_kill_process_group_kills_survivors_after_the_leader_exits(tmp_path) -> None:
+    import os
+    import signal
+    import subprocess
+    import sys
+    import time
+
+    from traceback_runner.toolchain import kill_process_group
+
+    pid_file = tmp_path / "child.pid"
+    script = (
+        "import os, subprocess, sys\n"
+        "child = subprocess.Popen([sys.executable, '-c', 'import time; time.sleep(60)'])\n"
+        f"open({str(pid_file)!r}, 'w').write(str(child.pid))\n"
+    )
+    leader = subprocess.Popen([sys.executable, "-c", script], start_new_session=True)
+    leader.wait(timeout=30)  # the leader exits; its child keeps the group alive
+    child_pid = int(pid_file.read_text())
+    assert leader.returncode == 0
+
+    kill_process_group(leader)
+
+    deadline = time.monotonic() + 10
+    while time.monotonic() < deadline:
+        try:
+            os.kill(child_pid, 0)
+        except ProcessLookupError:
+            break
+        time.sleep(0.05)
+    else:
+        os.kill(child_pid, signal.SIGKILL)
+        raise AssertionError("a group member survived kill_process_group")

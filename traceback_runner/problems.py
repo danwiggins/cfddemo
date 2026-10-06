@@ -169,6 +169,43 @@ PROBLEM_TABLE: dict[str, ProblemText] = {
         "no job was created for it, and the other analyses still ran",
         "Run the other analyses without it (for example --analysis fragment)",
     ),
+    # Cell origin (run --analysis cell-origin)
+    "TBX-METH-001": ProblemText(
+        "Cell origin needs modification calls: the sampled MM/ML tags are absent or "
+        "contradictory, or modkit could not extract calls from the BAM",
+        "Basecall with a 5mC model, keep MM/ML through alignment (samtools fastq -T "
+        "MM,ML,MN), and run again; the fragment analysis is unaffected",
+    ),
+    "TBX-METH-002": ProblemText(
+        "No basecall model is declared: the aligned BAM's header has no @RG "
+        "modbase_models= and run had no --modbase-model, or the declaration "
+        "contradicts the header",
+        "Copy the model from the unaligned BAM's @RG line and pass run --modbase-model ID",
+    ),
+    "TBX-METH-003": ProblemText(
+        "The registered reference lacks contigs the Loyfer marker regions use",
+        "Register and align against the hg38 FASTA the atlas uses (UCSC chr names)",
+    ),
+    "TBX-METH-004": ProblemText(
+        "Too few marker fragments to estimate a mixture: classified fragments or "
+        "observed markers fall below the locked floors, or the fit had no usable signal",
+        "Sequence deeper or pool more input; the floors are locked method parameters",
+    ),
+    "TBX-METH-005": ProblemText(
+        "The input exceeds a locked cell-origin cap (CpG calls or fragment-marker groups); "
+        "a cap hit refuses the record, never a partial one",
+        "The caps are locked method parameters; a larger input needs a new method version",
+    ),
+    "TBX-METH-006": ProblemText(
+        "The mixture fit (NNLS) did not converge; no record was made",
+        "Retrying will not change it; report the code with traceback support-bundle",
+    ),
+    "TBX-METH-007": ProblemText(
+        "The cell-origin result failed one of its validation checks (schema, asset "
+        "digests, markers against the atlas, U/X/M counts, normalized fractions, "
+        "publication safety)",
+        "Retrying will not change it; write traceback support-bundle JOB_ID and report it",
+    ),
     # Pinned analysis tools (reason: missing, or wrong version or digest)
     "TBX-TOOL-001": ProblemText(
         "Missing: the pinned tool or micromamba is not installed, or the install "

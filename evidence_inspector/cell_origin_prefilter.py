@@ -129,12 +129,22 @@ class PrefilterCounts:
     written: int
     outside_regions: int
     excluded: Mapping[ExclusionReason, int]
+    # Passing alignments (written or outside the regions) carrying an MM tag.
+    passing_with_mod_tags: int = 0
 
     def __post_init__(self) -> None:
         if self.records_scanned != self.written + self.outside_regions + sum(
             self.excluded.values()
         ):
             raise ValueError("every scanned record must be written, outside or excluded")
+        if not 0 <= self.passing_with_mod_tags <= self.written + self.outside_regions:
+            raise ValueError("modification-tagged alignments must be passing alignments")
+
+    @property
+    def passing(self) -> int:
+        """Alignments that passed every pre-filter exclusion."""
+
+        return self.written + self.outside_regions
 
 
 def write_prefiltered_bam(
@@ -152,7 +162,7 @@ def write_prefiltered_bam(
     import pysam
 
     excluded: Counter[ExclusionReason] = Counter()
-    scanned = written = outside = 0
+    scanned = written = outside = tagged = 0
     with pysam.AlignmentFile(str(source), "rb", check_sq=False) as reader:
         with pysam.AlignmentFile(str(destination), "wb", template=reader) as writer:
             for record in reader.fetch(until_eof=True):
@@ -163,6 +173,8 @@ def write_prefiltered_bam(
                 if reason is not None:
                     excluded[reason] += 1
                     continue
+                if record.has_tag("MM") or record.has_tag("Mm"):
+                    tagged += 1
                 end = record.reference_end
                 if end is None or not regions.overlaps(
                     record.reference_name, record.reference_start, end
@@ -177,6 +189,7 @@ def write_prefiltered_bam(
         written=written,
         outside_regions=outside,
         excluded={reason: excluded.get(reason, 0) for reason in PREFILTER_REASONS},
+        passing_with_mod_tags=tagged,
     )
 
 
