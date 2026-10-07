@@ -670,7 +670,8 @@ def test_preflight_analysis_reports_readiness(root, inputs, capsys, monkeypatch)
     assert cell["TBX-TOOL-001"]["outcome"] == "missing"
     assert cell["TBX-RUN-011"]["outcome"] == "blocked"
     copy = {check["code"] for check in results[COPY_NUMBER]["checks"]}
-    assert copy == {"TBX-RUN-011"}
+    # Copy number carries the shared BAM preflight row, as cell origin does.
+    assert copy == {"TBX-BAM-001", "TBX-RUN-011"}
     assert not (root / "runner").exists()
 
 

@@ -638,17 +638,22 @@ def _asset_missing(cause: str) -> ReferenceProblem:
 
 def _asset_not_registered(asset_id: str, kind: AssetKind | None, cause: str) -> ReferenceProblem:
     loyfer = kind is None or kind in LOYFER_DIRECTORY_FILES
+    fix = f"Run `{_register_command(kind, asset_id)}`"
+    if loyfer:
+        fix += (
+            "; for the three Loyfer files, `traceback method-asset register "
+            "--from-dir LOYFER_DIR --root ROOT`"
+        )
+    if kind in (AssetKind.ICHOR_GC_WIG, AssetKind.ICHOR_MAP_WIG, AssetKind.ICHOR_CENTROMERE):
+        fix += (
+            "; for the ichorCNA package files, `traceback method-asset register "
+            "--from-toolchain copy-number --root ROOT`"
+        )
     return ReferenceProblem(
         "TBX-ASSET-004",
         "Asset not registered under ROOT",
         cause=cause,
-        fix=f"Run `{_register_command(kind, asset_id)}`"
-        + (
-            "; for the three Loyfer files, `traceback method-asset register "
-            "--from-dir LOYFER_DIR --root ROOT`"
-            if loyfer
-            else ""
-        ),
+        fix=fix,
         exit_code=4,
     )
 
@@ -1006,6 +1011,79 @@ def register_loyfer_directory(root: Path, directory: Path) -> tuple[AssetRegistr
     )
 
 
+# ``method-asset register --from-toolchain copy-number`` (signal CN2): the
+# ichorCNA package's own hg38 files, inside the installed toolchain's
+# ``lib/R/library/ichorCNA/extdata``.  The names were read from the installed
+# r-ichorcna 0.5.1 package; the wigs come in 10, 50, 500 and 1000 kb bins and
+# the bin size is the locked method's, never a flag.
+ICHOR_EXTDATA_RELPATH = "ichorCNA/extdata"
+ICHOR_CENTROMERE_FILE = "GRCh38.GCA_000001405.2_centromere_acen.txt"
+ICHOR_TOOLCHAIN_KINDS = (
+    AssetKind.ICHOR_GC_WIG,
+    AssetKind.ICHOR_MAP_WIG,
+    AssetKind.ICHOR_CENTROMERE,
+)
+_ICHOR_WIG_BIN_SIZES_BP = frozenset({10_000, 50_000, 500_000, 1_000_000})
+
+
+def ichor_toolchain_files(
+    bin_size_bp: int, toolchain_tag: str
+) -> dict[AssetKind, tuple[str, str]]:
+    """The extdata file each ichorCNA kind is read from, and its asset ID.
+
+    ``toolchain_tag`` (the first 12 hex digits of the toolchain lock SHA-256)
+    is part of each ID: a relocked toolchain installs to a new directory, so
+    its files register under new IDs instead of colliding with the
+    write-once registrations of the old one.
+    """
+
+    if bin_size_bp not in _ICHOR_WIG_BIN_SIZES_BP:
+        raise ValueError("the ichorCNA package ships no hg38 wig for this bin size")
+    if not re.fullmatch(r"[0-9a-f]{12}", toolchain_tag):
+        raise ValueError("toolchain tag must be 12 lowercase hex characters")
+    kb = f"{bin_size_bp // 1000}kb"
+    return {
+        AssetKind.ICHOR_GC_WIG: (f"gc_hg38_{kb}.wig", f"asset_ichor_gc_hg38_{kb}_{toolchain_tag}"),
+        AssetKind.ICHOR_MAP_WIG: (
+            f"map_hg38_{kb}.wig",
+            f"asset_ichor_map_hg38_{kb}_{toolchain_tag}",
+        ),
+        AssetKind.ICHOR_CENTROMERE: (
+            ICHOR_CENTROMERE_FILE,
+            f"asset_ichor_centromere_grch38_{toolchain_tag}",
+        ),
+    }
+
+
+def register_ichor_toolchain_directory(
+    root: Path, extdata: Path, *, bin_size_bp: int, toolchain_tag: str
+) -> tuple[AssetRegistrationResult, ...]:
+    """Register the gc wig, map wig and centromere table of ``extdata``.
+
+    Every file is hashed and parsed first, and each wig's bin size must be
+    ``bin_size_bp``; only then is anything registered (each registration is
+    write-once and idempotent on its own).  A missing file raises
+    TBX-ASSET-003 naming the file, never a path; a wig of another bin size
+    raises TBX-ASSET-005.
+    """
+
+    extdata = Path(extdata)
+    files = ichor_toolchain_files(bin_size_bp, toolchain_tag)
+    for kind, (name, _) in files.items():
+        candidate = extdata / name
+        if not candidate.is_file():
+            raise _asset_missing(f"{name} is not in the installed ichorCNA package")
+        _, _, check = _scan_asset(kind, candidate)
+        if kind is not AssetKind.ICHOR_CENTROMERE and check.bin_size_bp != bin_size_bp:
+            raise _asset_malformed(
+                kind, f"{name} has {check.bin_size_bp} bp bins; the locked method uses {bin_size_bp}"
+            )
+    return tuple(
+        register_asset(root, kind, asset_id, extdata / name)
+        for kind, (name, asset_id) in files.items()
+    )
+
+
 def load_asset(root: Path, asset_id: str, *, kind: AssetKind | str | None = None) -> LoadedAsset:
     """Load one asset registration by ID; fail closed on any inconsistency.
 
@@ -1186,6 +1264,9 @@ __all__ = [
     "ASSETS_DIRECTORY",
     "ASSET_PARSERS",
     "DOCS_ANCHOR",
+    "ICHOR_CENTROMERE_FILE",
+    "ICHOR_EXTDATA_RELPATH",
+    "ICHOR_TOOLCHAIN_KINDS",
     "LOYFER_DIRECTORY_FILES",
     "AssetKind",
     "AssetParseCheck",
@@ -1195,10 +1276,12 @@ __all__ = [
     "RegisteredAsset",
     "asset_copy_name",
     "copy_registered_asset",
+    "ichor_toolchain_files",
     "list_assets",
     "load_asset",
     "register_asset",
     "r_serialized_envelope",
+    "register_ichor_toolchain_directory",
     "register_loyfer_directory",
     "verify_registered_asset",
     "LoadedReference",

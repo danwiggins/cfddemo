@@ -94,6 +94,15 @@ install refuses an environment that cannot load ichorCNA. `doctor --deep`
 re-hashes every installed file. A changed lock is a new directory; delete old
 ones by hand.
 
+`traceback method-asset register --from-toolchain copy-number --root ROOT`
+then registers the three ichorCNA assets the copy-number method binds, read
+from the installed package's `extdata`: the hg38 GC wig, the hg38 mappability
+wig and the GRCh38 centromere table. The wig bin size is the locked method's
+(1 Mb); there is no flag for it. Each asset ID ends in the first 12 hex digits
+of the toolchain lock, so a relocked toolchain registers new IDs rather than
+colliding with the old ones. Like every method asset, the files are referenced
+in place and each job copies and re-hashes them.
+
 `verify --trust-registry` checks a result bundle against the current trust of a
 protected result-trust registry (`docs/RESULT-TRUST-REGISTRY.md`). It needs the
 independently retained registry ID, epoch, and current head, refuses an older
@@ -400,8 +409,42 @@ the same record and the same output.
   the method it resolves now (reference, tool, asset or setting) is not the
   one the job was admitted under.
 
-Cell origin and copy number have no stages in this version yet: asking for
-them refuses that analysis with TBX-RUN-011 and runs the rest.
+Cell origin has no stages in this version yet: asking for it refuses that
+analysis with TBX-RUN-011 and runs the rest.
+
+### Copy number (ichorCNA, optional)
+
+`run --analysis copy-number` makes an ichorCNA copy-number record
+(`measurements/copy-number.v1.json`). It needs the optional toolchain and its
+three registered assets, once per machine and once per ROOT:
+
+```bash
+uv run traceback toolchain install copy-number --yes
+uv run traceback method-asset register --from-toolchain copy-number --root "$R"
+uv run traceback preflight "$BAM" --reference ref --analysis copy-number --root "$R"
+uv run traceback run "$BAM" --reference ref --analysis fragment,copy-number --root "$R"
+```
+
+- The method is locked: 1 Mb bins on chr1-chr22 (UCSC names), MAPQ >= 20,
+  eligible primary alignments only (a pysam pre-filter writes them, without
+  read names, sequences or tags, into a counting BAM inside the job; it is
+  deleted after `readCounter`), no reference panel (PoN), normal-fraction
+  starts 0.95-0.999 and at most 3 copies. Every setting is part of the
+  method hash.
+- Refusals: too few mapped records in the index (TBX-CNA-001), too few
+  counted reads, 1,000,000 by default (TBX-CNA-002), contigs not `chrN`
+  (TBX-CNA-003), and `readCounter` or ichorCNA failing, timing out or
+  writing output that fails validation (TBX-CNA-004). A missing or changed
+  toolchain is retryable (TBX-TOOL-002, exit 6).
+- An unidentifiable solution (too little altered structure for ichorCNA) is
+  still a record, with `identifiable: false` and a model fraction of 0.
+- ichorCNA runs through the isolated Rscript runner in a private staging
+  directory. Its `.RData` workspace and PDFs are never opened, signed or
+  kept: they are not byte-stable across runs. The record keeps its text
+  outputs and the read-count wig.
+- The tumour-fraction estimate is in the signed measurement file with its
+  stated lower limit (about 3% at about 0.1x short-read coverage with a PoN;
+  not established for this nanopore protocol). The report does not print it.
 
 ### Many BAMs: jobs, records and labels
 
@@ -481,9 +524,9 @@ says otherwise. Exit codes are listed under "Stable exit codes".
 | <a id="tbx-ref-003"></a>TBX-REF-003 | 3 | The reference ID is not registered under this ROOT, or its registration files are damaged | Run `reference register` first (check `--root`); remove a damaged `R/references/ID` and register again |
 | <a id="tbx-asset-001"></a>TBX-ASSET-001 | 3 | `method-asset register`: a different file (other bytes or another location) is already registered under this `--id`, or the ID is registered as another kind (registrations are write-once) | Keep the existing registration, or register the new file under a new `--id` |
 | <a id="tbx-asset-002"></a>TBX-ASSET-002 | 3 | A registered asset file changed since registration: its SHA-256 or size differs (checked again whenever a job copies it), or a job's own copy was changed | Restore the original file; to use the new file, register it under a new `--id` |
-| <a id="tbx-asset-003"></a>TBX-ASSET-003 | 4 | The asset file is missing or unreadable: `--file` does not exist, a `--from-dir` directory lacks one of the three Loyfer files (the cause names it), or a registered file was moved or deleted | Restore the file at its registered location, or pass the right `--file`/`--from-dir` |
-| <a id="tbx-asset-004"></a>TBX-ASSET-004 | 4 | The asset ID is not registered under this ROOT (or its registration files are damaged) | Run the command the FIX prints, for example `traceback method-asset register --kind KIND --id ID --file PATH --root R`, or `traceback method-asset register --from-dir LOYFER_DIR --root R` for the three Loyfer files |
-| <a id="tbx-asset-005"></a>TBX-ASSET-005 | 3 | The analysis's own parser for this `--kind` rejects the file (the cause gives its message: for example a header, column, row-cap, coordinate, wig-header or value-range rule), or a line or the file is implausibly large; nothing was registered. For `ichor-pon` only the envelope is checked (one complete gzip, bzip2 or xz stream holding an R serialization header); the panel itself is read and validated by `readRDS` when the copy-number analysis runs | Pass the unmodified file of the stated `--kind` |
+| <a id="tbx-asset-003"></a>TBX-ASSET-003 | 4 | The asset file is missing or unreadable: `--file` does not exist, a `--from-dir` directory lacks one of the three Loyfer files or the installed ichorCNA package lacks a `--from-toolchain` file (the cause names it), or a registered file was moved or deleted | Restore the file at its registered location, or pass the right `--file`/`--from-dir` |
+| <a id="tbx-asset-004"></a>TBX-ASSET-004 | 4 | The asset ID is not registered under this ROOT (or its registration files are damaged) | Run the command the FIX prints, for example `traceback method-asset register --kind KIND --id ID --file PATH --root R`, `traceback method-asset register --from-dir LOYFER_DIR --root R` for the three Loyfer files, or `traceback method-asset register --from-toolchain copy-number --root R` for the three ichorCNA package files |
+| <a id="tbx-asset-005"></a>TBX-ASSET-005 | 3 | The analysis's own parser for this `--kind` rejects the file (the cause gives its message: for example a header, column, row-cap, coordinate, wig-header or value-range rule), or a line or the file is implausibly large, or (`--from-toolchain`) a package wig's bin size differs from the locked method's; nothing was registered. For `ichor-pon` only the envelope is checked (one complete gzip, bzip2 or xz stream holding an R serialization header); the panel itself is read and validated by `readRDS` when the copy-number analysis runs | Pass the unmodified file of the stated `--kind` |
 | <a id="tbx-bam-001"></a>TBX-BAM-001 | 3 | BAM or index unreadable, truncated, not coordinate-sorted, or the index contradicts the BAM; or `--index` is not a `.bai`/`.csi` | `samtools sort`, then `samtools index`, and rerun |
 | <a id="tbx-bam-002"></a>TBX-BAM-002 | 0 (WARN) or 3 | WARN: header has no `M5`/`AS`, matched by name and length only. BLOCKED: a contig name, length, order, `M5` or `AS` differs from the registered reference; the problem lists the first 3 differing positions as `position name_in_BAM length_in_BAM \| name_in_reference length_in_reference` (`-` where a side has no contig) and the total | WARN needs no action (optionally `samtools reheader` with `M5`/`AS`). BLOCKED, names differ only by a `chr` prefix with every length matching: rename with `samtools reheader` (the FIX prints a `sed` example). Otherwise realign against the registered FASTA, or register the FASTA the BAM was aligned to |
 | <a id="tbx-bam-003"></a>TBX-BAM-003 | 3 | The BAM is unaligned (no `@SQ` lines); MinKNOW and Dorado write unaligned BAMs by default. `run` refuses before it creates a job | Align it with the printed command (see "Aligning MinKNOW output"), then preflight `OUT.sorted.bam` |
@@ -536,7 +579,11 @@ says otherwise. Exit codes are listed under "Stable exit codes".
 | <a id="tbx-meth-006"></a>TBX-METH-006 | 3 | `run --analysis cell-origin`: the NNLS mixture fit did not converge; no record | Retrying will not change it; `traceback support-bundle JOB_ID --output DIR`, then report the code |
 | <a id="tbx-meth-007"></a>TBX-METH-007 | 3 | `run --analysis cell-origin`: the result failed a validation check (schema round trip, asset digests, markers against the atlas, U/X/M counts, normalized fractions, publication safety); the cause names the failed checks; no record | Retrying will not change it; `traceback support-bundle JOB_ID --output DIR`, then report the code |
 | <a id="tbx-tool-001"></a>TBX-TOOL-001 | 3, or 6 at stage time | Missing (retryable; a `run --analysis` job whose stage finds the tool missing or damaged ends retryable, exit 6, and resumes once the tool is installed): the pinned tool is not installed in the per-user cache, micromamba was not found, the install failed (no network, or a package digest did not match the lock), or this platform has no lock (macOS arm64 and Linux x86-64 only). Wrong version or digest: the installed binary's sha256 differs from its install receipt, the receipt or package record names another version or package, the binary does not report the pinned version, or the committed lock file was edited | Missing: run `traceback toolchain install modkit` to see the plan, then add `--yes`. Wrong version or digest: run `traceback toolchain install modkit --yes`, which replaces a damaged install; for an edited lock file, reinstall traceback from a clean checkout |
-| <a id="tbx-tool-002"></a>TBX-TOOL-002 | 3, or 0 (doctor WARN) | The optional copy-number (ichorCNA) toolchain. Missing (retryable): not installed, micromamba not found, an install that stopped part-way or failed (no network, a package digest did not match the lock, a Bioconductor data-package download failed so ichorCNA cannot load), or no lock for this platform. Wrong version or digest: `readCounter`, `Rscript` or the driver differs from the install receipt or its package record, the receipt names another lock, or (`doctor --deep`) an installed file, the package set or a Bioconductor data package changed | Missing: run `traceback toolchain install ichor` to see the plan, then add `--yes` (needs the network). Wrong version or digest: run `traceback toolchain install ichor --yes`, which replaces a damaged install; for an edited lock or driver, reinstall traceback from a clean checkout. Fragment length never needs it |
+| <a id="tbx-tool-002"></a>TBX-TOOL-002 | 3, 0 (doctor WARN), or 6 at stage time | The optional copy-number (ichorCNA) toolchain. Missing (retryable): not installed, micromamba not found, an install that stopped part-way or failed (no network, a package digest did not match the lock, a Bioconductor data-package download failed so ichorCNA cannot load), or no lock for this platform. Wrong version or digest: `readCounter`, `Rscript` or the driver differs from the install receipt or its package record, the receipt names another lock, or (`doctor --deep`) an installed file, the package set or a Bioconductor data package changed | Missing: run `traceback toolchain install ichor` to see the plan, then add `--yes` (needs the network). Wrong version or digest: run `traceback toolchain install ichor --yes`, which replaces a damaged install; for an edited lock or driver, reinstall traceback from a clean checkout. Fragment length never needs it |
+| <a id="tbx-cna-001"></a>TBX-CNA-001 | 3 | `run --analysis copy-number`, before counting: the BAM index reports fewer mapped records on chr1-chr22 than the locked floor of counted reads (1,000,000). The index count includes secondary, supplementary, duplicate and low-MAPQ records, so it is an upper bound; no record was made | Sequence deeper or pool runs of the same sample. The fragment analysis is unaffected |
+| <a id="tbx-cna-002"></a>TBX-CNA-002 | 3 | `run --analysis copy-number`: fewer eligible primary alignments (mapped, not secondary, supplementary, QC-failed or duplicate, MAPQ >= 20) on chr1-chr22 than the locked floor; no record was made | Sequence deeper or pool runs of the same sample. The fragment analysis is unaffected |
+| <a id="tbx-cna-003"></a>TBX-CNA-003 | 3 | `run --analysis copy-number` (and `preflight --analysis copy-number` for the registered reference): chr1-chr22 are not all present by their UCSC names, for example an Ensembl-style `1`..`22` alignment. The ichorCNA wigs and centromere table use UCSC names | Align to an hg38 reference with UCSC contig names, register it, and run again |
+| <a id="tbx-cna-004"></a>TBX-CNA-004 | 3 | `run --analysis copy-number`: `readCounter` or ichorCNA exited non-zero or timed out, readCounter's bins do not match the registered wigs, or ichorCNA's output failed the adapter's validation (its parsers and its replay of the segments). An unidentifiable solution is not this code: it is a record with `identifiable: false`; no record was made | Retrying will not change it; write `traceback support-bundle JOB_ID --output DIR` for the job and report the code. Other analyses are unaffected |
 | <a id="operator-busy"></a>Operator busy | 3 | `A local action or unexpired worker lease is active`: another CLI mutation holds `R/.operator.lock` | Wait for it to finish, then rerun |
 
 ## Stable exit codes

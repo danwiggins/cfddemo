@@ -82,8 +82,9 @@ PROBLEM_TABLE: dict[str, ProblemText] = {
         "Restore the original file; to use the new file, register it under a new --id",
     ),
     "TBX-ASSET-003": ProblemText(
-        "The asset file is missing or unreadable, or a --from-dir directory lacks one of "
-        "the three Loyfer files",
+        "The asset file is missing or unreadable, a --from-dir directory lacks one of "
+        "the three Loyfer files, or the installed ichorCNA package lacks a "
+        "--from-toolchain file",
         "Restore the file at its registered location, or pass the right --file or --from-dir",
     ),
     "TBX-ASSET-004": ProblemText(
@@ -92,7 +93,8 @@ PROBLEM_TABLE: dict[str, ProblemText] = {
     ),
     "TBX-ASSET-005": ProblemText(
         "The analysis's own parser for this kind rejects the file, or a line or the file "
-        "is implausibly large; nothing was registered. For ichor-pon only the envelope is "
+        "is implausibly large, or a --from-toolchain wig's bin size differs from the "
+        "locked method's; nothing was registered. For ichor-pon only the envelope is "
         "checked; readRDS validates the panel when the analysis runs",
         "Pass the unmodified file of the stated --kind",
     ),
@@ -221,6 +223,30 @@ PROBLEM_TABLE: dict[str, ProblemText] = {
         "package no longer matches the lock and the install receipt",
         "Run traceback toolchain install ichor to see the plan, then add --yes; it "
         "replaces a damaged install. Fragment length never needs it",
+    ),
+    # Copy number (run --analysis copy-number)
+    "TBX-CNA-001": ProblemText(
+        "The BAM index reports fewer mapped records on chr1-chr22 than the locked floor "
+        "of counted reads (the index count is an upper bound); no record was made",
+        "Sequence deeper or pool runs of the same sample; the fragment analysis is "
+        "unaffected",
+    ),
+    "TBX-CNA-002": ProblemText(
+        "Fewer eligible primary alignments at MAPQ >= 20 on chr1-chr22 than the locked "
+        "floor; no record was made",
+        "Sequence deeper or pool runs of the same sample; the fragment analysis is "
+        "unaffected",
+    ),
+    "TBX-CNA-003": ProblemText(
+        "The BAM (or the registered reference) lacks UCSC-style chr1-chr22 contigs, "
+        "which the ichorCNA assets use",
+        "Align to an hg38 reference with UCSC contig names, register it and run again",
+    ),
+    "TBX-CNA-004": ProblemText(
+        "readCounter or ichorCNA exited with an error or timed out, or ichorCNA's "
+        "output failed the adapter's validation; no record was made",
+        "Retrying will not change it; write traceback support-bundle JOB_ID --output "
+        "DIR and report the code",
     ),
     # Catalog and local authority
     "TBX-CAT-001": ProblemText(
