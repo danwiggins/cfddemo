@@ -31,9 +31,11 @@ from evidence_inspector.ichor_adapter import (
     ReferenceFastaBinding,
     RuntimeBinding,
     WigGridBinding,
+    allowed_states,
     contract_sha256,
     prepare_ichor_run,
     validate_centromere_table,
+    upstream_call,
     validate_ichor_outputs,
 )
 
@@ -1079,23 +1081,111 @@ def test_local_validation_never_needs_or_reads_the_rdata(tmp_path: Path) -> None
         validate_ichor_outputs(prepare_ichor_run(_request()), output)
 
 
-@pytest.mark.parametrize("local", [True, False])
-def test_segment_copy_number_above_locked_max_cn_is_refused(
-    tmp_path: Path, local: bool
+def _rewrite_first_segment(
+    output: Path, *, copy_number: str, call: str, subclone: str = "FALSE"
 ) -> None:
-    output = _fixture(tmp_path, "arm_loss")
     segments = output / "sample.seg.txt"
     lines = segments.read_text().splitlines()
     fields = lines[1].split("\t")
-    assert fields[6] == "1"
-    fields[6] = "9"  # above the locked maxCN of 3; call stays HETD
+    assert fields[6:9] == ["1", "HETD", "FALSE"]
+    fields[6:9] = [copy_number, call, subclone]
     lines[1] = "\t".join(fields)
     segments.write_text("\n".join(lines) + "\n")
-    with pytest.raises(IchorOutputError, match="exceeds the locked maxCN"):
-        if local:
-            _local(output)
-        else:
-            validate_ichor_outputs(prepare_ichor_run(_request()), output)
+
+
+def _validate(output: Path, *, local: bool) -> CnvDevelopmentResult:
+    if local:
+        return _local(output)
+    return validate_ichor_outputs(prepare_ichor_run(_request()), output)
+
+
+def test_allowed_states_follow_the_pinned_upstream_vocabulary() -> None:
+    assert [upstream_call(value) for value in range(9)] == [
+        "HOMD",
+        "HETD",
+        "NEUT",
+        "GAIN",
+        "AMP",
+        "HLAMP",
+        "HLAMP2",
+        "HLAMP3",
+        "HLAMP4",
+    ]
+    params = _request().parameters
+    assert params.max_copy_number == 3 and not params.include_subclonal_states
+    assert allowed_states(params) == {
+        (1, "HETD", False),
+        (2, "NEUT", False),
+        (3, "GAIN", False),
+    }
+    widened = IchorParameterSet.model_validate(
+        {**params.model_dump(), "max_copy_number": 5, "include_subclonal_states": True}
+    )
+    assert allowed_states(widened) == {
+        (1, "HETD", False),
+        (2, "NEUT", False),
+        (3, "GAIN", False),
+        (4, "AMP", False),
+        (5, "HLAMP", False),
+        (1, "HETD", True),
+        (3, "GAIN", True),
+    }
+
+
+@pytest.mark.parametrize("local", [True, False])
+@pytest.mark.parametrize(
+    ("copy_number", "call", "subclone"),
+    [
+        pytest.param("9", "HLAMP5", "FALSE", id="above-locked-maxCN"),
+        pytest.param("4", "AMP", "FALSE", id="amp-above-locked-maxCN"),
+        pytest.param("0", "HOMD", "FALSE", id="homd-without-includeHOMD"),
+        pytest.param("1", "AMP", "FALSE", id="call-copy-mismatch"),
+        pytest.param("1", "XYZ", "FALSE", id="unknown-call"),
+        pytest.param("1", "hetd", "FALSE", id="call-case-differs"),
+        pytest.param("1", "HETD", "TRUE", id="subclonal-without-subclonal-states"),
+    ],
+)
+def test_segment_state_outside_the_locked_states_is_refused(
+    tmp_path: Path, local: bool, copy_number: str, call: str, subclone: str
+) -> None:
+    output = _fixture(tmp_path, "arm_loss")
+    _rewrite_first_segment(
+        output, copy_number=copy_number, call=call, subclone=subclone
+    )
+    with pytest.raises(IchorOutputError, match="outside the states the locked"):
+        _validate(output, local=local)
+
+
+@pytest.mark.parametrize("local", [True, False])
+def test_gain_segment_inside_the_locked_states_is_accepted(
+    tmp_path: Path, local: bool
+) -> None:
+    output = _fixture(tmp_path, "arm_loss")
+    _rewrite_first_segment(output, copy_number="3", call="GAIN")
+    result = _validate(output, local=local)
+    assert [(item.copy_number, item.call) for item in result.segments] == [
+        (3, "GAIN"),
+        (2, "NEUT"),
+    ]
+
+
+def test_amp_segment_is_accepted_when_the_locked_max_cn_allows_it(
+    tmp_path: Path,
+) -> None:
+    output = _fixture(tmp_path, "arm_loss")
+    _rewrite_first_segment(output, copy_number="4", call="AMP")
+    request = _request()
+    request = CnvRunRequest.model_validate(
+        {
+            **request.model_dump(),
+            "parameters": {**request.parameters.model_dump(), "max_copy_number": 4},
+        }
+    )
+    result = validate_ichor_outputs(prepare_ichor_run(request), output)
+    assert [(item.copy_number, item.call) for item in result.segments] == [
+        (4, "AMP"),
+        (2, "NEUT"),
+    ]
 
 
 def test_local_result_capabilities_are_checked(tmp_path: Path) -> None:

@@ -55,6 +55,14 @@ HMMCOPY_COMMIT = "3b5efcebea919cafed5b85ac5922f67e8127ce71"
 HMMCOPY_UTILS_COMMIT = "29a8d1d18dfd301600d5d91832e5fe231935058c"
 MAX_OUTPUT_BYTES = 128 * 1024 * 1024
 MAX_ROWS = 1_000_000
+# Driver flags the adapter fixes for every run (not locked parameters): the
+# HMM's clonal states start at copy number 1 unless HOMD is included, and the
+# subclonal states, when enabled, are these copy numbers.
+INCLUDE_HOMD = False
+SUBCLONAL_COPY_STATES: tuple[int, ...] = (1, 3)
+# ichorCNA 0.5.1 outputHMM() writes a segment's call as
+# names[copy.number + 1] over this vector, then "HLAMP2", "HLAMP3", ...
+_UPSTREAM_CALLS = ("HOMD", "HETD", "NEUT", "GAIN", "AMP", "HLAMP")
 
 Sha256 = Annotated[str, StringConstraints(pattern=r"^[0-9a-f]{64}$")]
 CommitSha1 = Annotated[str, StringConstraints(pattern=r"^[0-9a-f]{40}$")]
@@ -930,6 +938,33 @@ def _expected_argv(request: CnvRunRequest) -> tuple[str, ...]:
     )
 
 
+def upstream_call(copy_number: int) -> str:
+    """The call the pinned ichorCNA writes for an HMM copy-number state."""
+
+    if copy_number < 0:
+        raise ValueError("copy number cannot be negative")
+    if copy_number < len(_UPSTREAM_CALLS):
+        return _UPSTREAM_CALLS[copy_number]
+    return f"HLAMP{copy_number - len(_UPSTREAM_CALLS) + 2}"
+
+
+def allowed_states(params: IchorParameterSet) -> frozenset[tuple[int, str, bool]]:
+    """Every (copy number, call, subclone status) the locked run can emit.
+
+    ichorCNA 0.5.1's HMM states are copy numbers ``0..maxCN`` (``1..maxCN``
+    without HOMD), plus the subclonal copy numbers when subclonal states are
+    enabled; each segment's call is a fixed function of its copy number.  A
+    segment outside this set was not produced under the locked parameters.
+    """
+
+    clonal = range(0 if INCLUDE_HOMD else 1, params.max_copy_number + 1)
+    subclonal = SUBCLONAL_COPY_STATES if params.include_subclonal_states else ()
+    return frozenset(
+        {(value, upstream_call(value), False) for value in clonal}
+        | {(value, upstream_call(value), True) for value in subclonal}
+    )
+
+
 def ichor_driver_arguments(
     params: IchorParameterSet,
     *,
@@ -961,7 +996,7 @@ def ichor_driver_arguments(
         "--estimateScPrevalence",
         "TRUE" if params.include_subclonal_states else "FALSE",
         "--scStates",
-        "c(1,3)" if params.include_subclonal_states else "NULL",
+        _r_vector(SUBCLONAL_COPY_STATES) if params.include_subclonal_states else "NULL",
         "--lambda",
         "NULL" if params.lambda_values is None else _r_vector(params.lambda_values),
         "--minMapScore",
@@ -987,7 +1022,7 @@ def ichor_driver_arguments(
         "--genomeStyle",
         "UCSC",
         "--includeHOMD",
-        "FALSE",
+        "TRUE" if INCLUDE_HOMD else "FALSE",
         "--outDir",
         paths.out_dir,
     ]
@@ -2134,10 +2169,17 @@ def _validate_output_directory(
         raise IchorOutputError(
             "upstream output violates the adapter contract"
         ) from None
-    # The HMM's copy-number states are 0..maxCN; a segment outside them was
-    # not produced under the locked parameters.
-    if any(item.copy_number > parameters.max_copy_number for item in segments):
-        raise IchorOutputError("segment copy number exceeds the locked maxCN")
+    # One rule for every segment state: copy number, call and subclone status
+    # must be a state the locked parameters let the HMM emit (maxCN, HOMD,
+    # subclonal states).  A parameter change moves the set, not this check.
+    permitted = allowed_states(parameters)
+    if any(
+        (item.copy_number, item.call, item.subclone_status) not in permitted
+        for item in segments
+    ):
+        raise IchorOutputError(
+            "segment state is outside the states the locked parameters permit"
+        )
     try:
         identifiability_evidence = _replay_segment_structure(
             grid,
@@ -2235,6 +2277,7 @@ __all__ = [
     "IchorParameterSet",
     "IchorPaths",
     "CONTAINER_PATHS",
+    "INCLUDE_HOMD",
     "IdentifiabilityEvidence",
     "PanelOfNormalsBinding",
     "ParsedFixedStepWig",
@@ -2242,7 +2285,9 @@ __all__ = [
     "RawWigLineage",
     "ReferenceFastaBinding",
     "RuntimeBinding",
+    "SUBCLONAL_COPY_STATES",
     "WigGridBinding",
+    "allowed_states",
     "centromere_mask_bins",
     "check_wig_grid",
     "ichor_driver_arguments",
@@ -2252,6 +2297,7 @@ __all__ = [
     "parse_centromere_table",
     "parse_fixed_step_wig",
     "prepare_ichor_run",
+    "upstream_call",
     "validate_centromere_table",
     "validate_ichor_outputs",
     "validate_local_ichor_outputs",
