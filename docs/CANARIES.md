@@ -75,6 +75,33 @@ Other options: `--log-dir`, `--work-dir` (parent of the temporary roots; it
 needs about twice the BAM size free), `--keep` (keep the temporary roots for
 inspection), `--step-timeout SECONDS`, `--no-notify`.
 
+## Cell origin (`--analysis cell-origin`)
+
+`--analysis cell-origin` (default `fragment`, unchanged) makes a cell-origin
+record instead of the fragment record. `--loyfer-dir DIR` (required) names the
+directory with the three Loyfer files, registered in each fresh root. Pass
+`--modbase-model ID` when the BAM header does not declare the modified-base
+model. modkit must be installed (`traceback toolchain install modkit`).
+
+```bash
+uv run python scripts/canary/real_bam_canary.py \
+  --fasta /path/to/ref.fa --bam /path/to/sample.sorted.bam \
+  --analysis cell-origin --loyfer-dir /path/to/loyfer --modbase-model MODEL \
+  --record-baseline --repeat 2
+```
+
+- The measurement path is read from the record's bundle manifest.
+- Metrics: the canonical measurement SHA-256, the denominators, every
+  contributor fraction and `residual_l2`. Fractions are compared exactly; a
+  tolerance would be a scientist-approved method parameter, never a canary
+  setting.
+- The baseline is `baseline-cell-origin.json` beside `baseline.json`, mode 0600,
+  refused inside a Git work tree like the fragment baseline.
+- No fraction is printed to the console (gate G1); only counts are.
+- The nightly launchd canary stays fragment-only until a cell-origin baseline
+  exists. The synthetic CI canary does not run cell origin yet: it needs modkit
+  in CI.
+
 ## Install, uninstall, status (launchd)
 
 ```bash

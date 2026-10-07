@@ -3,7 +3,13 @@
 
 Usage:
     uv run python scripts/canary/real_bam_canary.py --fasta F --bam B \
+        [--analysis fragment|cell-origin --loyfer-dir DIR [--modbase-model ID]] \
         [--baseline PATH] [--record-baseline [--force]] [--repeat 2] [--keep]
+
+``--analysis`` (default ``fragment``, unchanged behaviour) picks the analysis
+the run makes a record for (signal CO6).  The record's measurement path is read
+from its bundle manifest.  Each analysis keeps its own baseline: ``baseline.json``
+for fragment length, ``baseline-<analysis>.json`` beside it otherwise.
 
 Each repeat runs in a fresh temporary root and collects deterministic metrics
 (exit codes, preflight outcome and per-check codes, scan and exclusion counts,
@@ -46,7 +52,11 @@ LOCAL_BANNER = (
     "Development signing key only."
 )
 TRUST_RELATIVE = Path("trust/development-result-trust.json")
-MEASUREMENT_RELATIVE = Path("measurements/fragment-length.v1.json")
+MANIFEST_RELATIVE = Path("bundle-manifest.json")
+FRAGMENT = "fragment"
+CELL_ORIGIN = "cell-origin"
+# Copy number joins with CN6, behind the CI toolchain lock.
+ANALYSES = (FRAGMENT, CELL_ORIGIN)
 SLOW_FACTOR = 2.0
 EXIT_PASS, EXIT_FAIL, EXIT_REFUSED = 0, 1, 2
 
@@ -65,11 +75,21 @@ def _utc_now() -> datetime:
     return datetime.now(timezone.utc)
 
 
-def _default_baseline() -> Path:
+def _default_baseline(analysis: str = FRAGMENT) -> Path:
+    """``baseline.json`` for fragment length; ``baseline-<analysis>.json`` beside it.
+
+    ``$TRACEBACK_CANARY_BASELINE`` names the fragment baseline; another
+    analysis's baseline sits in the same directory, so the two never share a
+    file.
+    """
+
     env = os.environ.get("TRACEBACK_CANARY_BASELINE")
-    if env:
-        return Path(env)
-    return Path.home() / ".config" / "traceback-canary" / "baseline.json"
+    fragment = (
+        Path(env) if env else Path.home() / ".config" / "traceback-canary" / "baseline.json"
+    )
+    if analysis == FRAGMENT:
+        return fragment
+    return fragment.with_name(f"baseline-{analysis}.json")
 
 
 def _default_log_dir() -> Path:
@@ -176,8 +196,65 @@ def _histogram(bins: list[dict[str, Any]]) -> dict[str, int]:
     return histogram
 
 
+def measurement_relative(record: Path) -> Path:
+    """The record's one measurement file, as its bundle manifest names it."""
+
+    manifest = json.loads((record / MANIFEST_RELATIVE).read_text(encoding="utf-8"))
+    paths = [
+        item["relative_path"]
+        for item in manifest.get("contents", [])
+        if isinstance(item, dict)
+        and str(item.get("relative_path", "")).startswith("measurements/")
+    ]
+    if len(paths) != 1:
+        raise ValueError("the bundle manifest names no single measurement file")
+    relative = Path(paths[0])
+    if relative.is_absolute() or ".." in relative.parts:
+        raise ValueError("the bundle manifest names an unsafe measurement path")
+    return relative
+
+
+def fragment_metrics(measurement: dict[str, Any]) -> dict[str, Any]:
+    return {
+        "schema_version": measurement.get("schema_version"),
+        "completion": measurement.get("completion"),
+        "records_scanned": measurement.get("records_scanned"),
+        "eligible_alignments": measurement.get("eligible_alignments"),
+        "exclusions": measurement.get("exclusions"),
+        "histogram": _histogram(measurement.get("histogram", [])),
+    }
+
+
+def cell_origin_metrics(measurement: dict[str, Any]) -> dict[str, Any]:
+    """Denominators, contributor fractions and the fit residual (spec §6).
+
+    Fractions are compared exactly: any drift fails.  A tolerance would be a
+    scientist-approved method parameter, never added here.
+    """
+
+    solver = measurement.get("solver") or {}
+    return {
+        "schema_version": measurement.get("schema_version"),
+        "denominators": measurement.get("denominators"),
+        "fractions": {
+            item["contributor_id"]: item["fraction"]
+            for item in measurement.get("estimates", [])
+        },
+        "residual_l2": solver.get("residual_l2"),
+    }
+
+
 def run_once(
-    fasta: Path, bam: Path, work: Path, scrub: Scrubber, timeout: float, log: Any
+    fasta: Path,
+    bam: Path,
+    work: Path,
+    scrub: Scrubber,
+    timeout: float,
+    log: Any,
+    *,
+    analysis: str = FRAGMENT,
+    modbase_model: str | None = None,
+    loyfer_dir: Path | None = None,
 ) -> dict[str, Any]:
     """One full golden-path pass in ``work``; returns metrics, timings and failures."""
 
@@ -217,9 +294,18 @@ def run_once(
                             REFERENCE_ID, "--root", str(root), "--json"])
     if reg is None:
         return result
+    if analysis == CELL_ORIGIN:
+        # Each fresh ROOT registers the three Loyfer files (write-once, by digest).
+        assets = step("assets", ["method-asset", "register", "--from-dir", str(loyfer_dir),
+                                 "--root", str(root), "--json"])
+        if assets is None:
+            return result
 
+    selected = [] if analysis == FRAGMENT else ["--analysis", analysis]
+    if modbase_model is not None:
+        selected += ["--modbase-model", modbase_model]
     pre = step("preflight", ["preflight", str(bam), "--reference", REFERENCE_ID,
-                             "--root", str(root), "--json"])
+                             "--root", str(root), "--json", *selected])
     if pre is None or (pre_json := json_of(pre)) is None:
         return result
     report = pre_json["data"]["report"]
@@ -240,12 +326,34 @@ def run_once(
         pre_json["data"].get("qualified") is not False
     ):
         failures.append("preflight result is not labelled local and unqualified")
+    if analysis != FRAGMENT:
+        readiness = {
+            item.get("analysis"): item for item in pre_json["data"].get("analyses", [])
+        }.get(analysis)
+        if readiness is None:
+            failures.append(f"preflight reported no {analysis} readiness")
+        else:
+            metrics["preflight"]["readiness"] = {
+                "readiness": readiness.get("readiness"),
+                "checks": [
+                    {"code": c.get("code"), "outcome": c.get("outcome")}
+                    for c in readiness.get("checks", [])
+                ],
+            }
+            if readiness.get("readiness") != "ready":
+                failures.append(f"preflight says {analysis} is not ready")
 
     run = step("run", ["run", str(bam), "--reference", REFERENCE_ID, "--root", str(root),
-                       "--json"])
+                       "--json", *selected])
     if run is None or (run_json := json_of(run)) is None:
         return result
     data = run_json["data"]
+    if analysis != FRAGMENT:
+        rows = [row for row in data.get("analyses", []) if row.get("analysis") == analysis]
+        if len(rows) != 1 or not rows[0].get("record_id"):
+            failures.append(f"run made no {analysis} record")
+            return result
+        data = rows[0]
     metrics["run"] = {
         "data_origin": run_json.get("data_origin"),
         "state": data.get("state"),
@@ -275,19 +383,23 @@ def run_once(
     step("logs", ["logs", job_id, "--root", str(root), "--json"])
     step("status", ["status", job_id, "--root", str(root), "--json"])
 
-    measurement_path = record / MEASUREMENT_RELATIVE
-    if not measurement_path.is_file():
-        failures.append(f"record has no {MEASUREMENT_RELATIVE.as_posix()}")
+    try:
+        relative = measurement_relative(record)
+    except (OSError, ValueError, TypeError, KeyError):
+        failures.append("record has no readable bundle manifest naming its measurement")
+        relative = None
+    measurement_path = record / relative if relative is not None else None
+    if measurement_path is None:
+        pass
+    elif not measurement_path.is_file():
+        failures.append(f"record has no {relative.as_posix()}")
     else:
         measurement = json.loads(measurement_path.read_text(encoding="utf-8"))
-        metrics["measurement"] = {
-            "schema_version": measurement.get("schema_version"),
-            "completion": measurement.get("completion"),
-            "records_scanned": measurement.get("records_scanned"),
-            "eligible_alignments": measurement.get("eligible_alignments"),
-            "exclusions": measurement.get("exclusions"),
-            "histogram": _histogram(measurement.get("histogram", [])),
-        }
+        metrics["measurement"] = (
+            fragment_metrics(measurement)
+            if analysis == FRAGMENT
+            else cell_origin_metrics(measurement)
+        )
         metrics["measurement_sha256"] = canonical_measurement_sha256(measurement)
 
     report_html = record / "report.html"
@@ -328,6 +440,8 @@ def flatten(value: Any, prefix: str = "") -> dict[str, Any]:
 
 
 _MISSING = "<missing>"
+#: Metric keys whose values a diff names but never prints (gate G1).
+_WITHHELD = "measurement.fractions."
 
 
 def diff_metrics(expected: Any, actual: Any) -> list[str]:
@@ -338,6 +452,10 @@ def diff_metrics(expected: Any, actual: Any) -> list[str]:
     for key in sorted(set(left) | set(right)):
         old, new = left.get(key, _MISSING), right.get(key, _MISSING)
         if old != new:
+            if _WITHHELD in key:
+                # A mixture fraction is never printed (gate G1); the field is named.
+                lines.append(f"{key}: changed (value withheld)")
+                continue
             lines.append(f"{key}: expected {json.dumps(old)}, got {json.dumps(new)}")
     if not lines and expected != actual:  # pragma: no cover - defensive
         lines.append("metrics differ")
@@ -451,9 +569,18 @@ def parse_args(argv: list[str] | None) -> argparse.Namespace:
     parser = argparse.ArgumentParser(description=__doc__.split("\n\n")[0])
     parser.add_argument("--fasta", type=Path, required=True)
     parser.add_argument("--bam", type=Path, required=True, help="coordinate-sorted, with .bai")
+    parser.add_argument("--analysis", choices=ANALYSES, default=FRAGMENT,
+                        help="the analysis to make a record for (default fragment)")
+    parser.add_argument("--loyfer-dir", type=Path, default=None,
+                        help="cell origin: the directory holding the three Loyfer files, "
+                        "registered in each fresh root")
+    parser.add_argument("--modbase-model", default=None,
+                        help="cell origin: the modified-base model, when the BAM header "
+                        "does not declare it")
     parser.add_argument("--baseline", type=Path, default=None,
                         help="baseline JSON (default $TRACEBACK_CANARY_BASELINE or "
-                        "~/.config/traceback-canary/baseline.json)")
+                        "~/.config/traceback-canary/baseline.json; baseline-<analysis>.json "
+                        "beside it for another analysis)")
     parser.add_argument("--record-baseline", action="store_true",
                         help="write the baseline from this run instead of comparing")
     parser.add_argument("--force", action="store_true",
@@ -474,6 +601,10 @@ def parse_args(argv: list[str] | None) -> argparse.Namespace:
         parser.error("--repeat must be at least 1")
     if args.force and not args.record_baseline:
         parser.error("--force only applies with --record-baseline")
+    if args.modbase_model is not None and args.analysis != CELL_ORIGIN:
+        parser.error("--modbase-model only applies with --analysis cell-origin")
+    if (args.loyfer_dir is not None) != (args.analysis == CELL_ORIGIN):
+        parser.error("--loyfer-dir is required with, and only with, --analysis cell-origin")
     return args
 
 
@@ -482,7 +613,7 @@ def main(argv: list[str] | None = None) -> int:
     # The CLI gets absolute paths, so the locator check covers every spelling.
     args.fasta = Path(os.path.abspath(args.fasta))
     args.bam = Path(os.path.abspath(args.bam))
-    baseline_path = args.baseline or _default_baseline()
+    baseline_path = args.baseline or _default_baseline(args.analysis)
     log_dir = args.log_dir or _default_log_dir()
     started = _utc_now()
     stamp = started.strftime("%Y%m%dT%H%M%SZ")
@@ -537,7 +668,13 @@ def main(argv: list[str] | None = None) -> int:
         work = Path(tempfile.mkdtemp(prefix="traceback-canary.", dir=args.work_dir))
         log(f"run {index + 1}/{args.repeat}")
         try:
-            outcome = run_once(args.fasta, args.bam, work, scrub, args.step_timeout, log)
+            outcome = run_once(
+                args.fasta, args.bam, work, scrub, args.step_timeout, log,
+                analysis=args.analysis, modbase_model=args.modbase_model,
+                loyfer_dir=(
+                    Path(os.path.abspath(args.loyfer_dir)) if args.loyfer_dir else None
+                ),
+            )
         except Exception as exc:  # noqa: BLE001 - any surprise is a canary failure
             outcome = {
                 "metrics": {},
@@ -627,6 +764,7 @@ def main(argv: list[str] | None = None) -> int:
     result = {
         "schema_version": RESULT_SCHEMA,
         "canary": "golden-path-real-bam",
+        "analysis": args.analysis,
         "qualified": False,
         "note": "Unqualified, local, not for clinical use. Input paths are never recorded.",
         "started_at": started.isoformat(),
@@ -664,8 +802,14 @@ def main(argv: list[str] | None = None) -> int:
     for line in failures:
         log(f"FAIL  {line}")
     measurement = metrics.get("measurement", {})
-    log(f"records scanned: {measurement.get('records_scanned')}")
-    log(f"eligible alignments: {measurement.get('eligible_alignments')}")
+    if args.analysis == FRAGMENT:
+        log(f"records scanned: {measurement.get('records_scanned')}")
+        log(f"eligible alignments: {measurement.get('eligible_alignments')}")
+    else:
+        # Counts only; no fraction is printed (gate G1).
+        denominators = measurement.get("denominators") or {}
+        log(f"records scanned: {denominators.get('records_scanned')}")
+        log(f"classified fragments: {denominators.get('classified_fragments')}")
     log(f"measurement sha256: {metrics.get('measurement_sha256')}")
     if reproducible is not None:
         log(f"reproducible across {args.repeat} runs: {reproducible}")
