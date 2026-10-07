@@ -50,9 +50,11 @@ from .cell_origin_method import (
 )
 from .contracts import ApprovalState, RunnerContract
 from .export import LOCAL_REPORT_BANNER, ReferenceMatch
+from . import cell_origin_view
 from .measurement_schemas import (
     BundleMeasurementSchema,
     LocalCatalogBinding,
+    RecordViewBinding,
     register_measurement_schema,
 )
 from .references import LOYFER_DIRECTORY_FILES, AssetKind
@@ -529,6 +531,14 @@ MEASUREMENT_SCHEMA = BundleMeasurementSchema(
         method_slug=METHOD_SLUG,
         # The explorer's E05 key binds the exact registered atlas (signal CO4).
         asset_roles=(("atlas_asset", LOYFER_DIRECTORY_FILES[AssetKind.LOYFER_ATLAS][1]),),
+    ),
+    # The local site's record view (signal CO5).
+    record_view=RecordViewBinding(
+        analysis="cell_origin",
+        view_schema_version=cell_origin_view.VIEW_SCHEMA_VERSION,
+        key_count_unit=cell_origin_view.KEY_COUNT_UNIT,
+        key_count=cell_origin_view.key_count,
+        build_body=cell_origin_view.build_body,
     ),
 )
 

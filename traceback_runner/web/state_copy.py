@@ -251,6 +251,49 @@ _METHOD_VERSION: dict[str, Copy] = {
     ),
 }
 
+# Cell-origin record view (signal CO5).  A refused record is shown only in
+# jobs; these rows name the states the record view and job rows can show.
+_CELL_ORIGIN: dict[str, Copy] = {
+    "ready": (
+        "Mixture estimated",
+        "The atlas mixture was estimated from this record's marker fragments; "
+        "it is descriptive only.",
+    ),
+    "low_coverage": (
+        "Too few marker fragments to estimate a mixture",
+        "The run counted fewer marker fragments or markers than the locked "
+        "floors, so no record was made.",
+    ),
+    "not_converged": (
+        "Mixture fit did not converge",
+        "The mixture fit did not converge, so no record was made.",
+    ),
+}
+
+_MODBASE: dict[str, Copy] = {
+    "operator_declared": (
+        "Basecall model declared by the operator",
+        "The modified-base model was declared on the command line, not read "
+        "from the file.",
+    ),
+    "header": (
+        "Basecall model read from the BAM header",
+        "The modified-base model was read from the BAM header.",
+    ),
+}
+
+_INTERVAL: dict[str, Copy] = {
+    "available": (
+        "Bootstrap interval available",
+        "A resampling interval is shown in the table for this contributor; the "
+        "chart draws no whiskers.",
+    ),
+    "insufficient_information": (
+        "No interval",
+        "Too little information to bound this estimate, so no interval is shown.",
+    ),
+}
+
 # One row per problem code a job can stop on, shown on its row in the jobs
 # disclosure (code and label).  The cause and fix stay in traceback logs.
 _JOB_PROBLEM: dict[str, Copy] = {
@@ -308,6 +351,9 @@ STATE_COPY: Final = MappingProxyType(
         "analysis": MappingProxyType(_ANALYSIS),
         "method_version": MappingProxyType(_METHOD_VERSION),
         "job_problem": MappingProxyType(_JOB_PROBLEM),
+        "cell_origin": MappingProxyType(_CELL_ORIGIN),
+        "modbase": MappingProxyType(_MODBASE),
+        "interval": MappingProxyType(_INTERVAL),
     }
 )
 
@@ -337,6 +383,10 @@ ENUM_SOURCES: Final = MappingProxyType(
         "analysis": ANALYSES,
         "method_version": (CURRENT_METHOD_VERSION, EARLIER_METHOD_VERSION),
         "job_problem": tuple(_JOB_PROBLEM),
+        # Pinned against the cell-origin models by tests/test_cell_origin_view.py.
+        "cell_origin": ("ready", "low_coverage", "not_converged"),
+        "modbase": ("operator_declared", "header"),
+        "interval": ("available", "insufficient_information"),
     }
 )
 

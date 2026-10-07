@@ -646,8 +646,117 @@
     details.append(list);
     return details;
   };
+  // --- cell origin (signal CO5) -------------------------------------------------
+  // Evidence first: the basis line, then a ranked bar of the top contributors
+  // and one "other contributors combined" row (always last, hatched, never a
+  // cell type), then the full table.  No whiskers: an interval appears only in
+  // the table, and only where its state is available.  Every string comes
+  // from the server's view body (cell_origin_view.py); this only lays it out.
+  const SVG_NS = ["http", "://www.w3.org/2000/svg"].join("");
+  const svgEl = (tag, attrs) => {
+    const node = doc.createElementNS(SVG_NS, tag);
+    Object.entries(attrs || {}).forEach(([name, value]) => node.setAttribute(name, String(value)));
+    return node;
+  };
+  const cellOriginBars = (body, compact) => {
+    const rows = [...body.top.map((row) => ({ label: row.contributor_id, fraction: row.fraction, text: row.fraction_text, other: false })),
+      { label: body.other.label, fraction: body.other.fraction, text: body.other.fraction_text, other: true }];
+    // Labels sit above each bar, starting at the left edge, so no label can
+    // run off the start of the SVG.  A label longer than fits is shortened
+    // with an ellipsis; its <title> and the table carry the full text.
+    const width = compact ? 360 : 720;
+    const labelWidth = 0;
+    // 12 units per character bounds the widest 12px glyph ("W" is about
+    // 11.2), so even an all-W label and its ellipsis fit the SVG's width.
+    const maxLabel = Math.floor(width / 12);
+    const valueWidth = 64;
+    const rowHeight = 40;
+    const barHeight = 16;
+    const top = 8;
+    const plot = width - labelWidth - valueWidth - 8;
+    const height = top + rows.length * rowHeight + 30;
+    const root = svgEl("svg", { viewBox: `0 0 ${width} ${height}`, class: "chart-svg co-bars", role: "img", "aria-labelledby": "co-bars-title co-bars-desc" });
+    const title = svgEl("title", { id: "co-bars-title" });
+    title.textContent = `${body.heading}: the top ${body.top.length} contributors and ${body.other.label.toLowerCase()}`;
+    const desc = svgEl("desc", { id: "co-bars-desc" });
+    desc.textContent = "Bar length is the estimated fraction. No interval whiskers are drawn; the table below lists every contributor with its interval, where available.";
+    const defs = svgEl("defs");
+    const pattern = svgEl("pattern", { id: "co-hatch", width: 8, height: 8, patternUnits: "userSpaceOnUse", patternTransform: "rotate(45)" });
+    pattern.append(svgEl("rect", { width: 8, height: 8, class: "hatch-ground" }), svgEl("line", { x1: 0, y1: 0, x2: 0, y2: 8, class: "hatch-line" }));
+    defs.append(pattern);
+    root.append(title, desc, defs);
+    rows.forEach((row, index) => {
+      const y = top + index * rowHeight + 16;
+      const label = svgEl("text", { x: 0, y: y - 4, class: "label-text", "data-full": row.label });
+      const shown = row.label.length > maxLabel ? `${row.label.slice(0, maxLabel - 1)}…` : row.label;
+      const full = svgEl("title");
+      full.textContent = row.label;
+      label.append(full, shown);
+      const bar = svgEl("rect", {
+        x: labelWidth, y, width: Math.max(0, row.fraction * plot).toFixed(2), height: barHeight,
+        class: row.other ? "bar bar-other" : "bar",
+        "data-rank": row.other ? "other" : index + 1,
+      });
+      if (row.other) bar.setAttribute("fill", "url(#co-hatch)");
+      const value = svgEl("text", { x: labelWidth + Math.max(0, row.fraction * plot) + 6, y: y + barHeight - 3, class: "tick-label" });
+      value.textContent = row.text;
+      root.append(label, bar, value);
+    });
+    const baseline = top + rows.length * rowHeight + 4;
+    root.append(svgEl("line", { x1: labelWidth, x2: labelWidth + plot, y1: baseline, y2: baseline, class: "axis" }));
+    [0, 0.5, 1].forEach((tick) => {
+      const x = labelWidth + tick * plot;
+      root.append(svgEl("line", { x1: x, x2: x, y1: baseline, y2: baseline + 5, class: "axis" }));
+      const text = svgEl("text", { x, y: baseline + 18, "text-anchor": tick === 0 ? "start" : tick === 1 ? "end" : "middle", class: "tick-label" });
+      text.textContent = `${tick * 100}%`;
+      root.append(text);
+    });
+    return root;
+  };
+  const renderCellOrigin = (_doc, record, options) => {
+    const body = record.body;
+    const section = el("section", null, { class: "panel", id: "analysis-body", "aria-labelledby": "analysis-body-title" });
+    section.append(el("h2", body.heading, { id: "analysis-body-title" }));
+    section.append(el("p", body.basis, { class: "identity", id: "co-basis" }));
+    section.append(el("p", `Basecall model ${body.model.id}, ${body.model.label}.`, { class: "identity", id: "co-model" }));
+    const figure = el("figure", null, { class: "chart", id: "co-chart" });
+    figure.append(cellOriginBars(body, options.compact));
+    figure.append(el("figcaption", `${body.axis_label}. No interval whiskers are drawn; intervals, where available, are in the table.`, { class: "chart-caption" }));
+    section.append(figure);
+    section.append(el("p", body.sum_note, { id: "co-sum-note" }), el("p", body.residual_text, { id: "co-residual" }));
+    const strip = el("ul", null, { class: "strip-list", id: "co-denominator", "aria-label": "Denominators" });
+    body.denominator_lines.forEach((line) => strip.append(el("li", line)));
+    section.append(strip);
+    const states = el("ul", null, { class: "strip-list", id: "co-states", "aria-label": "Cell-origin states" });
+    body.states.forEach((row) => states.append(el("li", `${row.label}. ${row.meaning}`, { "data-axis": row.axis, "data-token": row.token })));
+    section.append(states);
+    const wrap = el("div", null, { class: "table-wrap" });
+    const table = el("table", null, { class: "data-table co-table", id: "co-table" });
+    table.append(el("caption", `Every registered atlas contributor (${count(body.contributors.length)}), by estimated fraction`));
+    const head = el("thead");
+    const headRow = el("tr");
+    ["Rank", "Contributor", "Estimated fraction", "Interval"].forEach((name) => headRow.append(el("th", name, { scope: "col" })));
+    head.append(headRow);
+    const rowsBody = el("tbody");
+    body.contributors.forEach((row) => {
+      const tr = el("tr", null, { "data-interval": row.interval_state });
+      tr.append(
+        el("td", row.rank, { class: "num" }),
+        el("th", row.contributor_id, { scope: "row" }),
+        el("td", row.fraction_text, { class: "num" }),
+        el("td", row.interval ? row.interval.text : row.interval_label),
+      );
+      rowsBody.append(tr);
+    });
+    table.append(head, rowsBody);
+    wrap.append(table);
+    section.append(wrap);
+    return [section];
+  };
+  const BUILTIN_VIEWS = { "traceback.local-cell-origin-view.v1": renderCellOrigin };
+
   const analysisBody = (record) => {
-    const renderers = window.TracebackAnalysisViews || {};
+    const renderers = { ...(window.TracebackAnalysisViews || {}), ...BUILTIN_VIEWS };
     const renderer = Object.prototype.hasOwnProperty.call(renderers, record.schema_version) ? renderers[record.schema_version] : null;
     if (typeof renderer === "function") {
       return renderer(doc, record, { el, count, share, compact: isCompact() });
