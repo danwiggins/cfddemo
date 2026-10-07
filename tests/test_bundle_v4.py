@@ -695,6 +695,33 @@ def test_registration_refuses_catalog_text_the_explorer_would_reject(
         register_measurement_schema(_spec(catalog=binding))
 
 
+@pytest.mark.parametrize(
+    "roles, match",
+    [
+        ((("grid_asset", "asset_probe_grid"), ("grid_asset", "asset_probe_other")), "repeated"),
+        ((("reference_asset", "asset_probe_grid"),), "unknown"),
+        ((("atlas_asset", "../escape"),), "malformed ID"),
+        ((("atlas_asset", "asset_probe_x"), ("grid_asset", "asset_probe_x")), "two compatibility"),
+        ([("atlas_asset", "asset_probe_x")], "tuple"),
+        ((("atlas_asset",),), "pairs"),
+    ],
+)
+def test_registration_refuses_malformed_asset_roles(
+    roles: object, match: str, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(schemas_module, "_REGISTRY", {})
+    binding = LocalCatalogBinding(**{**_spec().catalog.__dict__, "asset_roles": roles})
+    with pytest.raises(MeasurementSchemaError, match=match):
+        register_measurement_schema(_spec(catalog=binding))
+
+
+def test_registration_accepts_one_asset_per_role(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(schemas_module, "_REGISTRY", {})
+    roles = (("grid_asset", "asset_probe_grid"), ("panel_asset", "asset_probe_panel"))
+    binding = LocalCatalogBinding(**{**_spec().catalog.__dict__, "asset_roles": roles})
+    assert register_measurement_schema(_spec(catalog=binding)).catalog.asset_roles == roles
+
+
 # --------------------------------------------------------------------------
 # Reader selection by (bundle_version, measurement_schema)
 # --------------------------------------------------------------------------
@@ -846,6 +873,28 @@ def _publish_probe(root: Path, name: str, **updates: object) -> str:
     record_id = json.loads((staging / MANIFEST_PATH).read_bytes())["record_id"]
     shutil.move(str(staging), root / "records" / record_id)
     return record_id
+
+
+def test_an_unbound_asset_role_refuses_before_any_catalog_row(
+    fragment_root: tuple[Path, str], tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(schemas_module, "_REGISTRY", {})
+    binding = LocalCatalogBinding(
+        **{**_spec().catalog.__dict__, "asset_roles": (("atlas_asset", "asset_not_bound"),)}
+    )
+    register_measurement_schema(_spec(catalog=binding))
+    source, _ = fragment_root
+    root = tmp_path / "root"
+    shutil.copytree(source, root, symlinks=True)
+    probe_record = _publish_probe(root, "unbound")
+    code, payload = _main("catalog", "import", root / "records" / probe_record, "--root", root)
+    assert code != cli.ExitCode.OK, payload
+    assert payload["data"]["code"] == "TBX-CAT-001", payload
+    assert "does not bind its atlas_asset" in json.dumps(payload)
+    code, listed = _main("catalog", "list", "--root", root)
+    assert code == cli.ExitCode.OK, listed
+    rows = {row["record_id"]: row for row in listed["data"]["records"]}
+    assert rows[probe_record]["imported"] is False, rows[probe_record]
 
 
 def test_a_mixed_root_imports_every_record(

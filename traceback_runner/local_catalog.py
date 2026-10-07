@@ -98,6 +98,7 @@ class _CatalogSchema:
     authority: Callable[[Path, Any], LocalMethodAuthority]
     denominator: Callable[[VerifiedBundle], Any]
     method_slug: str | None = None
+    asset_roles: tuple[tuple[str, str], ...] = ()
 
 
 def _catalog_schema(spec: BundleMeasurementSchema | None) -> _CatalogSchema:
@@ -125,6 +126,7 @@ def _catalog_schema(spec: BundleMeasurementSchema | None) -> _CatalogSchema:
         authority=binding.authority,
         denominator=binding.denominator,
         method_slug=binding.method_slug,
+        asset_roles=binding.asset_roles,
     )
 
 
@@ -421,6 +423,26 @@ def _denominator(verified: VerifiedBundle) -> Any:
     )
 
 
+def _compatibility_assets(
+    definition: Any, asset_roles: tuple[tuple[str, str], ...]
+) -> dict[str, Any]:
+    """The definition's registered asset for each compatibility role (signal CO4).
+
+    The asset is taken from the signed method definition by its registered ID,
+    never from current machine state, so the key carries the exact digest the
+    record was measured with.  A named asset that is absent, repeated, or is
+    the reference asset refuses the import.
+    """
+
+    found: dict[str, Any] = {}
+    for role, asset_id in asset_roles:
+        matches = [item for item in definition.assets if item.asset_id == asset_id]
+        if len(matches) != 1 or matches[0] == definition.assets[0]:
+            raise ValueError(f"the method definition does not bind its {role}")
+        found[role] = matches[0]
+    return found
+
+
 def build_local_explorer_artifact(
     reference: CatalogResultRef,
     verified: VerifiedBundle,
@@ -431,8 +453,9 @@ def build_local_explorer_artifact(
     The record's compatibility decision is against a derived *no-comparator*
     placeholder (``result_nocomparator_*``, execution ``not_run``): a single
     local record has no registered comparison, so the decision is ``unknown``
-    and never allows a delta or shared axis.  Grid, atlas and panel assets do not
-    apply to fragment length and stay unset.  The result schema, semantics,
+    and never allows a delta or shared axis.  Grid, atlas and panel assets are
+    bound from the method definition by the schema's ``asset_roles``; fragment
+    length names none, so they stay unset.  The result schema, semantics,
     label and denominator are chosen by the record's measurement schema.
     """
 
@@ -477,15 +500,16 @@ def build_local_explorer_artifact(
     policy_ref = CompatibilityPolicyReference(
         policy_id=_COMPATIBILITY_POLICY_ID, version="1.0.0"
     )
+    roles = _compatibility_assets(definition, chosen.asset_roles)
     key = MeasurementCompatibilityKey(
         measurement_family=definition.family,
         quantity_id=definition.quantity_id,
         unit=definition.unit,
         result_schema=schema,
         reference_asset=definition.assets[0],
-        grid_asset=None,
-        atlas_asset=None,
-        panel_asset=None,
+        grid_asset=roles.get("grid_asset"),
+        atlas_asset=roles.get("atlas_asset"),
+        panel_asset=roles.get("panel_asset"),
         normalization_semantics_id=chosen.normalization_semantics_id,
         coordinate_semantics_id=chosen.coordinate_semantics_id,
         denominator_semantics_id=chosen.denominator_semantics_id,
@@ -926,6 +950,12 @@ def import_local_record(root: Path, bundle: Path) -> CatalogImportOutcome:
         authority = open_method_authority(
             root, registered.reference_id, chosen.method_slug, definition_sha256
         )
+    # The explorer artifact binds these assets; refuse before any catalog write
+    # so no row is left without its explorer view (signal CO4).
+    try:
+        _compatibility_assets(authority.definition, chosen.asset_roles)
+    except ValueError as exc:
+        raise _not_a_record(str(exc)) from None
     trust = sync_local_result_trust(root, key_ids=frozenset({key_id}))
     try:
         catalog = open_local_catalog(root, trust, import_root=bundle.parent)

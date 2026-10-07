@@ -65,6 +65,12 @@ class LocalCatalogBinding:
     ``ROOT/method-authority/<reference>/<method_slug>/<definition sha256>``
     named by its own manifest (signal SH1); ``authority`` is then not called.
     The store is opened and validated, never created, by the import.
+
+    ``asset_roles`` names the registered assets the record's E05 compatibility
+    key binds, as ``(role, asset_id)`` pairs with role one of ``grid_asset``,
+    ``atlas_asset`` or ``panel_asset`` (signal CO4).  Each named asset must
+    appear exactly once in the record's method definition, or the import
+    refuses; a role left out stays unset.
     """
 
     result_schema_id: str
@@ -76,6 +82,11 @@ class LocalCatalogBinding:
     authority: Callable[[Any, Any], Any]
     denominator: Callable[[Any], Any]
     method_slug: str | None = None
+    asset_roles: tuple[tuple[str, str], ...] = ()
+
+
+#: The E05 compatibility-key roles a v4 schema may bind to a registered asset.
+COMPATIBILITY_ASSET_ROLES = frozenset({"grid_asset", "atlas_asset", "panel_asset"})
 
 
 @dataclass(frozen=True)
@@ -219,8 +230,34 @@ def _validate(spec: BundleMeasurementSchema) -> None:
             validate_method_slug(binding.method_slug)
         except (TypeError, ValueError) as exc:
             raise MeasurementSchemaError("catalog binding method slug is malformed") from exc
+    _validate_asset_roles(binding.asset_roles)
     if spec.record_view is not None:
         _validate_record_view(spec.record_view)
+
+
+def _validate_asset_roles(roles: object) -> None:
+    from pydantic import TypeAdapter
+
+    from evidence_inspector.method_registry import AssetId
+
+    if type(roles) is not tuple:
+        raise MeasurementSchemaError("catalog asset roles are a tuple of (role, asset_id)")
+    seen_roles: set[str] = set()
+    seen_ids: set[str] = set()
+    for item in roles:
+        if type(item) is not tuple or len(item) != 2:
+            raise MeasurementSchemaError("catalog asset roles are (role, asset_id) pairs")
+        role, asset_id = item
+        if role not in COMPATIBILITY_ASSET_ROLES or role in seen_roles:
+            raise MeasurementSchemaError("catalog asset role is unknown or repeated")
+        try:
+            TypeAdapter(AssetId).validate_python(asset_id)
+        except ValueError as exc:
+            raise MeasurementSchemaError("catalog asset role names a malformed ID") from exc
+        if asset_id in seen_ids:
+            raise MeasurementSchemaError("one asset cannot fill two compatibility roles")
+        seen_roles.add(role)
+        seen_ids.add(asset_id)
 
 
 def _validate_record_view(view: RecordViewBinding) -> None:
@@ -308,6 +345,7 @@ def schema_version_of(value: object) -> object:
 
 __all__ = [
     "ANALYSES",
+    "COMPATIBILITY_ASSET_ROLES",
     "FRAGMENT_PATH_STEM",
     "FRAGMENT_VIEW_SCHEMA",
     "MAX_MEASUREMENT_FILE_BYTES",
