@@ -76,6 +76,7 @@ dd { margin: 0; overflow-wrap: anywhere; font-family: ui-monospace, monospace; }
 .chart-svg { display: block; width: 100%; max-width: 52rem; height: auto; color: var(--chart-a); }
 .chart-svg .bar { fill: var(--chart-a); stroke: #ffffff; stroke-width: 1; }
 .chart-svg .bar-open { stroke: var(--chart-hatch); stroke-width: 1.5; }
+.chart-svg .bar.bar-other { fill: url(#co-hatch); stroke: var(--chart-hatch); stroke-width: 1.5; }
 .chart-svg .hatch-ground { fill: #ffffff; }
 .chart-svg .hatch-line { stroke: var(--chart-hatch); stroke-width: 3; }
 .chart-svg .density-line { stroke: var(--chart-a); stroke-width: 2; }
@@ -90,6 +91,8 @@ dd { margin: 0; overflow-wrap: anywhere; font-family: ui-monospace, monospace; }
 .chart-caption { margin: .5rem 0 0; font-weight: 650; }
 .footnotes { margin: .25rem 0 .75rem; padding-left: 1.25rem; color: var(--muted); }
 .data-table td, .data-table th { overflow-wrap: break-word; }
+/* Cell-origin table (CO5): a long registered ID must wrap, not widen the table. */
+.co-table th, .co-table td { overflow-wrap: anywhere; }
 .data-table tfoot th, .data-table tfoot td { font-weight: 700; border-top: 2px solid var(--neutral); }
 .strip-values { grid-template-columns: minmax(10rem, auto) 1fr; }
 .strip-values dd { font-family: inherit; font-variant-numeric: tabular-nums; }
