@@ -264,6 +264,56 @@ def test_the_record_verifies_imports_and_binds_its_method_store(setup: Setup) ->
     assert code == 0, exported
 
 
+def test_the_explorer_artifact_binds_the_registered_atlas(setup: Setup) -> None:
+    """CO4: the imported record's E05 key carries the exact registered atlas."""
+
+    from traceback_runner.local_catalog import explorer_paths
+    from traceback_runner.references import LOYFER_DIRECTORY_FILES, AssetKind
+    from traceback_runner.web.explorer import ExplorerArtifactRecord
+
+    root = setup.root()
+    code, payload = setup.run(root, "--modbase-model", "model-x", analyses="fragment,cell-origin")
+    assert code == 0, payload
+    keys = {}
+    for analysis in (FRAGMENT, CELL_ORIGIN):
+        record = root / "records" / _row(payload, analysis)["record_id"]
+        code, imported = _json(setup.capsys, "catalog", "import", record, "--root", root)
+        assert code == 0, imported
+        artifact_path, _ = explorer_paths(root, imported["data"]["result_id"])
+        artifact = ExplorerArtifactRecord.model_validate_json(artifact_path.read_bytes())
+        keys[analysis] = artifact.result_view_request.sources[0].record.compatibility_key
+    file_name, atlas_id = LOYFER_DIRECTORY_FILES[AssetKind.LOYFER_ATLAS]
+    atlas = keys[CELL_ORIGIN].atlas_asset
+    assert atlas is not None
+    assert atlas.asset_id == atlas_id
+    assert atlas.content_sha256 == hashlib.sha256(
+        (setup.inputs.loyfer_dir / file_name).read_bytes()
+    ).hexdigest()
+    assert keys[CELL_ORIGIN].reference_asset != atlas
+    assert keys[CELL_ORIGIN].grid_asset is None and keys[CELL_ORIGIN].panel_asset is None
+    # Fragment length binds no grid, atlas or panel, as before.
+    fragment = keys[FRAGMENT]
+    assert (fragment.grid_asset, fragment.atlas_asset, fragment.panel_asset) == (None,) * 3
+
+
+def test_the_atlas_role_refuses_a_definition_that_does_not_bind_it(setup: Setup) -> None:
+    from traceback_runner.local_catalog import _compatibility_assets
+    from traceback_runner.references import LOYFER_DIRECTORY_FILES, AssetKind, load_reference
+
+    root = setup.root()
+    definition = setup.analysis.definition(
+        load_reference(root, "ref"), {"modbase_model": "model-x"}, root=root
+    )
+    atlas_id = LOYFER_DIRECTORY_FILES[AssetKind.LOYFER_ATLAS][1]
+    found = _compatibility_assets(definition, (("atlas_asset", atlas_id),))
+    assert found["atlas_asset"].asset_id == atlas_id
+    with pytest.raises(ValueError, match="does not bind its atlas_asset"):
+        _compatibility_assets(definition, (("atlas_asset", "asset_not_in_definition"),))
+    with pytest.raises(ValueError, match="does not bind its atlas_asset"):
+        _compatibility_assets(definition, (("atlas_asset", definition.assets[0].asset_id),))
+    assert _compatibility_assets(definition, ()) == {}
+
+
 def test_a_header_declared_model_needs_no_flag(tmp_path, capsys, monkeypatch) -> None:
     setup = Setup(tmp_path, capsys, monkeypatch, header_model="model-h")
     root = setup.root()

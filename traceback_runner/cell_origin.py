@@ -527,6 +527,8 @@ MEASUREMENT_SCHEMA = BundleMeasurementSchema(
         authority=_no_reference_store,
         denominator=_denominator_ledger,
         method_slug=METHOD_SLUG,
+        # The explorer's E05 key binds the exact registered atlas (signal CO4).
+        asset_roles=(("atlas_asset", LOYFER_DIRECTORY_FILES[AssetKind.LOYFER_ATLAS][1]),),
     ),
 )
 
