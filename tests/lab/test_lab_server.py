@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from traceback_lab.interpretation.engine import load_library
+
 import http.client
 import io
 import json
@@ -107,7 +109,7 @@ def test_status_samples_and_sample(server) -> None:
     assert len(samples) == 1 and samples[0]["controls"]["split"] is True
     id12 = samples[0]["id12"]
     payload = json.loads(_get(server, f"/api/samples/{id12}", cookie)[1])
-    assert payload["found"] and payload["interpretation_version"] == "0.1.0"
+    assert payload["found"] and payload["interpretation_version"] == load_library().version
     ids = [a["algorithm_id"] for a in payload["algorithms"]]
     assert ids[:4] == ["read-summary", "bam-qc", "depth", "fragment-size"]
     assert payload["curve"]["fractions"] == [0.1, 0.25, 0.5, 1.0]
