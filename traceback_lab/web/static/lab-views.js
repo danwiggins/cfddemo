@@ -626,6 +626,22 @@
     const m = a && a.status === "ok" ? a.metrics.find((x) => x.metric_id === metric) : null;
     return m ? m.value : null;
   }
+  // Tier, performance footnote, full license callouts (first use on this route) and provenance.
+  function context(sample, algorithmId, seen) {
+    const c = (sample.catalog || []).find((x) => x.algorithm_id === algorithmId);
+    const out = [];
+    if (c) out.push(h("p", { class: "help" }, tierBadge(c.tier), ` As run here (ONT). Original evidence: ${c.origin_tier || "—"}. Footnote: ${c.footnote || "none published"}`,
+      c.citation_checked ? "" : [" ", h("span", { class: "unverified" }, "UNVERIFIED citation")]));
+    for (const id of (c ? c.license_ids : [])) {
+      if (seen.has(id)) { out.push(licenseRef(sample, id)); continue; }
+      seen.add(id);
+      const lic = (sample.licenses || []).find((x) => x.license_id === id);
+      if (lic) out.push(h("div", { class: "license-callout", id: `license-${id}` }, h("h3", {}, lic.headline), h("p", {}, lic.body)));
+    }
+    out.push(h("details", {}, h("summary", {}, "Provenance"), provenance(sample, algorithmId)));
+    return out;
+  }
+
   function absent(a, what) {
     return h("p", { class: "empty" }, !a ? `${what}: not computed for this sample.` : `${what}: ${a.status}${a.skip_reason ? ` (${a.skip_reason.replace(/_/g, " ")})` : ""}.`);
   }
@@ -655,7 +671,7 @@
     const section = h("section", { class: "panel" }, h("h2", {}, "Size density"));
     if (!a || a.status !== "ok") return [section, absent(a, "fragment-size")];
     const slot = h("div", {}, h("p", {}, "Loading…"));
-    section.append(h("p", { class: "help" }, "No kit cohort band yet (cohort n = " + sample.cohort_n + " of 10); 167 bp marked."), slot);
+    section.append(h("p", { class: "help" }, "No kit cohort band yet (cohort n = " + sample.cohort_n + " of 10); 167 bp marked."), ...context(sample, "fragment-size", new Set()), slot);
     artifact(sample, "fragment-size", "size-density").then((data) => {
       const points = data.span_bp.map((x, i) => [x, data.count[i]]).filter((p) => p[0] >= 50 && p[0] <= 700);
       slot.replaceWith(chart("Aligned-span density, 50 to 700 bp, with 167 bp marked.", {
@@ -682,7 +698,7 @@
     if (!a || a.status !== "ok") return [section, absent(a, "copy-number")];
     section.append(h("p", {}, `Tumour fraction ${fmt(tf)} · LoD 3% established at 0.1x Illumina with PoN; this run: ${pon === "none" ? "no PoN" : "PoN"}, ${fmt(counted)} reads. Not interpretable without a protocol-matched panel of normals.`));
     const slot = h("div", {}, h("p", {}, "Loading…"));
-    section.append(slot);
+    section.append(...context(sample, "copy-number", new Set()), slot);
     artifact(sample, "copy-number", "genome-track").then((data) => {
       const bins = data.bins.filter((b) => b.log2 !== null);
       const offsets = {};
@@ -719,19 +735,24 @@
     const a = algo(sample, "cell-origin");
     if (!a || a.status !== "ok") { out.push(absent(a, "cell-origin")); return out; }
     out.push(h("p", { class: "help" }, `No healthy cohort band yet (cohort n = ${sample.cohort_n} of 10). Minor tissues are not interpretable below 5x; their estimate and interval stay visible.`));
+    out.push(...context(sample, "cell-origin", new Set()));
     const rows = a.metrics.filter((m) => m.metric_id.startsWith("fraction_"));
+    const top = Math.min(1, Math.max(0.05, ...rows.map((m) => (m.ci ? m.ci[1] : m.value))));
+    const level = (rows.find((m) => m.ci_level) || {}).ci_level;
+    const intervalName = level ? `${Math.round(level * 100)}% bootstrap interval` : "interval";
     const groups = ORGANS.map(([name]) => [name, []]);
     for (const m of rows) {
       const contributor = m.label.split(" share")[0];
       const index = ORGANS.findIndex(([, test]) => test(contributor));
       groups[index][1].push(Object.assign({ contributor }, m));
     }
-    const tableRows = [];
     for (const [name, members] of groups) {
       if (!members.length) continue;
       members.sort((x, y) => y.value - x.value);
-      const w = 560, rowH = 22, left = 170, hgt = members.length * rowH + 20;
-      const x = (v) => left + Math.min(1, v / 0.6) * (w - left - 20);
+      const w = 560, rowH = 22, left = 170, hgt = members.length * rowH + 40;
+      const x = (v) => left + (v / top) * (w - left - 20);
+      const axisY = members.length * rowH + 22;
+      const ticks = [0, top / 2, top].map((t) => svg("text", { x: x(t), y: axisY + 12, "text-anchor": "middle", class: "axis" }, `${Math.round(t * 100)}%`));
       const marks = members.flatMap((m, i) => {
         const y = 14 + i * rowH;
         const out2 = [svg("text", { x: left - 6, y: y + 4, "text-anchor": "end", class: "axis" }, m.contributor)];
@@ -741,11 +762,12 @@
       });
       const label = `${name}: ${members.length} cell types; filled dots interpretable, hatched not interpretable at this depth.`;
       out.push(h("section", { class: "panel" }, h("h2", {}, name),
-        svg("svg", { viewBox: `0 0 ${w} ${hgt}`, role: "img", "aria-label": label, class: "composition-svg" }, svg("title", {}, label), ...marks)));
-      for (const m of members) tableRows.push([name, m.contributor, m.value, m.ci ? m.ci[0] : null, m.ci ? m.ci[1] : null, (STATE[m.state] || ["", m.state])[1] + (m.reason ? ` (${m.reason})` : "")]);
+        svg("svg", { viewBox: `0 0 ${w} ${hgt}`, role: "img", "aria-label": label, class: "composition-svg" }, svg("title", {}, label), ...marks,
+          svg("line", { x1: left, x2: w - 20, y1: axisY, y2: axisY, class: "ci" }), ...ticks),
+        dataTable(`${name} (${intervalName})`, ["Cell type", "Share", "Interval low", "Interval high", "State"],
+          members.map((m) => [m.contributor, m.value, m.ci ? m.ci[0] : null, m.ci ? m.ci[1] : null, (STATE[m.state] || ["", m.state])[1] + (m.reason ? ` (${m.reason})` : "")]))));
     }
-    const level = (rows.find((m) => m.ci_level) || {}).ci_level;
-    out.push(dataTable(`Body map: every cell type (${level ? Math.round(level * 100) + "% bootstrap interval" : "interval"})`, ["Group", "Cell type", "Share", "Interval low", "Interval high", "State"], tableRows));
+    out.push(h("p", { class: "help" }, "Groups are an editorial arrangement of atlas cell types by organ system, not an inferred tissue of origin."));
     return out;
   }
 
