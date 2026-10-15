@@ -34,9 +34,11 @@ SPLIT_SALT = b"split-v1"
 CHUNK_ROWS = 1 << 20
 MIN_MAPQ = 20
 FLAG_EXCLUDE = 0x4 | 0x100 | 0x200 | 0x400 | 0x800
-_CANONICAL = re.compile(r"^(chr)?([0-9]{1,2}|X|Y)$")
-_AUTOSOME = re.compile(r"^(chr)?([0-9]{1,2})$")
-_CHRM = re.compile(r"^(chr)?(M|MT)$")
+# D21: chr1-22, chrX, chrY (hg38 naming).  A reference with none of these
+# (a toy test reference) falls back to every contig, like the signed policy.
+_CANONICAL = re.compile(r"^chr([1-9]|1[0-9]|2[0-2]|X|Y)$")
+_AUTOSOME = re.compile(r"^chr([1-9]|1[0-9]|2[0-2])$")
+_CHRM = re.compile(r"^chrM$")
 
 COLUMNS: dict[str, str] = {
     "contig": "<i2",  # reference id, -1 when unmapped
@@ -228,9 +230,13 @@ class ReadSummary:
 def downsample_mask(h_ds: np.ndarray, fraction: float) -> np.ndarray:
     """Rows kept by downsample fraction ``f``: ``h_ds < f · 2⁶⁴`` (nests by construction)."""
 
+    from fractions import Fraction
+    from math import ceil
+
     fraction = validate_fraction(fraction)
-    threshold = int(fraction * 2**64)
-    return h_ds < np.uint64(min(threshold, 2**64 - 1))
+    # For an integer h: h < f·2⁶⁴  ⇔  h < ceil(f·2⁶⁴) (exact rational arithmetic).
+    threshold = ceil(Fraction(fraction) * 2**64)
+    return h_ds < np.uint64(threshold)
 
 
 def split_mask(h_split: np.ndarray, half: str) -> np.ndarray:

@@ -171,10 +171,34 @@ def test_interval_union() -> None:
     assert _union(np.array([], dtype=int), np.array([], dtype=int)) == 0
 
 
-def test_covered_fraction_counts_sampled_windows(aligned) -> None:
-    _, summary = aligned
-    value = covered_fraction(summary, summary.primary() & ((summary.column("flag") & 4) == 0))
-    assert 0 < value <= 1
+def test_covered_fraction_counts_aligned_blocks_not_deletions(tmp_path: Path) -> None:
+    header = {"HD": {"VN": "1.6", "SO": "coordinate"}, "SQ": [{"SN": "chr1", "LN": 10_000}]}
+    bam = tmp_path / "del.bam"
+    with pysam.AlignmentFile(str(bam), "wb", header=header) as out:
+        for name, start, cigar, mapq in (("a", 100, [(0, 50), (2, 100), (0, 50)], 60), ("b", 1000, [(0, 80)], 5)):
+            record = pysam.AlignedSegment(out.header)
+            record.query_name, record.reference_id, record.reference_start = name, 0, start
+            record.mapping_quality, record.cigartuples = mapq, cigar
+            record.query_sequence = "A" * sum(length for op, length in cigar if op == 0)
+            out.write(record)
+    pysam.index(str(bam))
+    summary_dir = tmp_path / "columns"
+    write_summary(bam, summary_dir)
+    value, total = covered_fraction(bam, ReadSummary.open(summary_dir), None)
+    assert total == 10_000
+    assert value == pytest.approx(100 / 10_000)  # 50M100D50M covers 100; MAPQ 5 is not eligible
+
+
+def test_canonical_contigs_are_chr1_22_x_y(tmp_path: Path) -> None:
+    summary = ReadSummary(tmp_path, {"rows": 0, "contigs": ["chr1", "chr22", "chr23", "chrX", "chrY", "chrM", "1"], "lengths": [1] * 7})
+    assert [summary.contigs[i] for i in summary.canonical_ids()] == ["chr1", "chr22", "chrX", "chrY"]
+    assert [summary.contigs[i] for i in summary.chrm_ids()] == ["chrM"]
+
+
+def test_downsample_threshold_is_exact_for_tiny_fractions() -> None:
+    hashes = np.array([0, 1, 2**63], dtype=np.uint64)
+    assert downsample_mask(hashes, 2.0**-65).tolist() == [True, False, False]
+    assert downsample_mask(hashes, 0.5).tolist() == [True, True, False]
 
 
 def test_corrupt_bam_is_an_error_not_an_empty_summary(tmp_path: Path) -> None:

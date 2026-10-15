@@ -7,7 +7,9 @@ Formulas follow Appendix A of the spec, computed from the read summary
 from __future__ import annotations
 
 from dataclasses import dataclass
+from collections.abc import Mapping
 from pathlib import Path
+from typing import Any
 
 import numpy as np
 
@@ -19,32 +21,65 @@ WINDOW = 1_000_000
 SAMPLE_EVERY = 100
 
 
-def covered_fraction(summary: ReadSummary, rows: np.ndarray) -> float | None:
-    """Bases with depth >= 1 in every 100th 1 Mb window of chr1-22."""
+def covered_fraction(
+    bam_path: Path, summary: ReadSummary, derived: Mapping[str, Any] | None
+) -> tuple[float | None, int]:
+    """Bases with depth >= 1 in every 100th 1 Mb window of chr1-22.
 
-    contig = summary.column("contig")
-    start = summary.column("start")
-    end = summary.column("end")
-    lengths = summary.lengths
+    Coverage is read from the BAM for the sampled windows only (about 1% of
+    the genome), using each eligible record's aligned blocks, so deletions and
+    skips are not counted as covered.  A derived input applies its row
+    predicate to each fetched record's name hash.
+    """
+
+    import pysam
+
+    from ..read_summary import DS_SALT, FLAG_EXCLUDE, MIN_MAPQ, SPLIT_SALT, h64, validate_fraction
+
+    keep = _derived_predicate(derived, h64, DS_SALT, SPLIT_SALT, validate_fraction)
     covered = total = 0
     serial = 0
-    for cid in summary.autosome_ids():
-        length = lengths[int(cid)]
-        on_contig = rows & (contig == cid)
-        starts = start[on_contig].astype(np.int64)
-        ends = end[on_contig].astype(np.int64)
-        order = np.argsort(starts, kind="stable")
-        starts, ends = starts[order], ends[order]
-        for window_start in range(0, length, WINDOW):
-            take = serial % SAMPLE_EVERY == 0
-            serial += 1
-            if not take:
-                continue
-            window_end = min(length, window_start + WINDOW)
-            total += window_end - window_start
-            inside = (ends > window_start) & (starts < window_end)
-            covered += _union(np.clip(starts[inside], window_start, window_end), np.clip(ends[inside], window_start, window_end))
-    return ratio(covered, total)
+    with pysam.AlignmentFile(str(bam_path), "rb") as bam:
+        for cid in summary.autosome_ids():
+            name = summary.contigs[int(cid)]
+            length = summary.lengths[int(cid)]
+            for window_start in range(0, length, WINDOW):
+                take = serial % SAMPLE_EVERY == 0
+                serial += 1
+                if not take:
+                    continue
+                window_end = min(length, window_start + WINDOW)
+                total += window_end - window_start
+                starts: list[int] = []
+                ends: list[int] = []
+                for record in bam.fetch(name, window_start, window_end):
+                    if record.flag & FLAG_EXCLUDE or record.mapping_quality < MIN_MAPQ:
+                        continue
+                    if keep is not None and not keep(record.query_name or ""):
+                        continue
+                    for block_start, block_end in record.get_blocks():
+                        starts.append(max(block_start, window_start))
+                        ends.append(min(block_end, window_end))
+                if starts:
+                    lo, hi = np.asarray(starts), np.asarray(ends)
+                    good = hi > lo
+                    covered += _union(lo[good], hi[good])
+    return ratio(covered, total), total
+
+
+def _derived_predicate(derived, h64, ds_salt, split_salt, validate_fraction):  # type: ignore[no-untyped-def]
+    if not derived:
+        return None
+    from fractions import Fraction
+    from math import ceil
+
+    if derived.get("transform") == "downsample":
+        threshold = ceil(Fraction(validate_fraction(float(derived["fraction"]))) * 2**64)
+        return lambda name: h64(ds_salt, name) < threshold
+    if derived.get("transform") == "split":
+        want_a = derived["half"] == "A"
+        return lambda name: (h64(split_salt, name) < 2**63) == want_a
+    raise ValueError(f"no row predicate for {derived.get('transform')!r}")
 
 
 def _union(starts: np.ndarray, ends: np.ndarray) -> int:
@@ -112,7 +147,9 @@ class BamQc(Base):
         n_primary = int(primary.sum())
         n_mapped = int(mapped.sum())
         duplicates = int((rows & ((flag & 0x400) != 0)).sum())
-        slope, gc_bins = gc_bias_slope(summary, mapped & (mapq >= 20), ctx.extras.get("reference_fasta"))
+        eligible = summary.eligible() & rows
+        slope, gc_bins = gc_bias_slope(summary, eligible, ctx.extras.get("reference_fasta"))
+        coverage, sampled_bases = covered_fraction(ctx.input_dir / "aligned.bam", summary, ctx.derived)
         return AlgorithmOutput(
             metrics=[
                 metric("total_reads", n_primary, unit="reads", n=n_primary),
@@ -120,7 +157,7 @@ class BamQc(Base):
                 metric("mapq_ge20_fraction", ratio(int((mapped & (mapq >= 20)).sum()), n_mapped), unit="fraction", n=n_mapped),
                 metric("supplementary_fraction", ratio(int(supplementary.sum()), n_mapped), unit="fraction", n=n_mapped),
                 metric("mean_read_q", float(quality.mean()) if quality.size else None, unit="phred", n=int(quality.size)),
-                metric("genome_ge1x_fraction", covered_fraction(summary, mapped), unit="fraction"),
+                metric("genome_ge1x_fraction", coverage, unit="fraction", n=sampled_bases),
                 metric("gc_bias_slope", slope, unit="log2/GC", n=gc_bins),
                 metric(
                     "duplicate_fraction",
