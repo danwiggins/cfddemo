@@ -20,7 +20,6 @@ from pathlib import Path
 from typing import Any, Literal, Protocol, runtime_checkable
 
 from .identity import ALGORITHM_ID_PATTERN, parameters_sha256
-from .problems import LabProblem
 
 Family = Literal["qc", "fragmentomics", "copy-number", "methylation", "non-human", "composite"]
 Consumes = Literal["read_summary", "meth_calls", "counting_bam", "full_bam"]
@@ -285,6 +284,8 @@ def plan(
             name = unknown[0]
             close = difflib.get_close_matches(name, list(by_id), n=1, cutoff=0.6)
             hint = f"Did you mean {close[0]}? " if close else ""
+            from .problems import LabProblem  # lazy: keeps worker start-up off the signed CLI import
+
             raise LabProblem(
                 "TBX-LAB-001",
                 cause=f"unknown algorithm id {name!r}",
