@@ -15,6 +15,7 @@ dependencies = [
     "openpyxl==3.1.5",
     "pydantic==2.11.7",
     "pysam==0.23.3",
+    "pyyaml==6.0.3",
     "streamlit==1.48.0",
 ]
 
@@ -36,4 +37,4 @@ markers = [
 ]
 
 [tool.hatch.build.targets.wheel]
-packages = ["bedrock_chat", "evidence_inspector", "evals", "traceback_runner"]
+packages = ["bedrock_chat", "evidence_inspector", "evals", "traceback_lab", "traceback_runner"]
