@@ -16,6 +16,19 @@ from traceback_lab.registry import Ready, Skip
 
 from .bam_fixtures import Read, context_for, values
 
+
+def _with_meth_calls(ctx):  # type: ignore[no-untyped-def]
+    """Run the meth-calls intermediate on the parent once and wire it upstream (v2 modbase-qc)."""
+
+    from traceback_lab.algorithms.meth_calls import METH_CALLS
+
+    store = ctx.root / "meth-calls"
+    if not (store / "calls" / "meta.json").exists():
+        parent = context_for(ctx.root, MOD_CONTIGS, ())
+        METH_CALLS.run(parent, store)
+    ctx.extras["upstream"]["meth-calls"] = str(store)
+    return ctx
+
 # ------------------------------------------------------------------ modbase-qc
 MOD_CONTIGS = [("chr1", 10_000)]
 
@@ -41,7 +54,7 @@ def _mod_reads(*, tags: bool = True) -> list[Read]:
 
 
 def test_modbase_qc_planted_values(tmp_path: Path) -> None:
-    ctx = context_for(tmp_path, MOD_CONTIGS, _mod_reads())
+    ctx = _with_meth_calls(context_for(tmp_path, MOD_CONTIGS, _mod_reads()))
     assert isinstance(MODBASE_QC.preflight(ctx), Ready)
     out = MODBASE_QC.run(ctx, tmp_path / "out")
     got = values(out)
@@ -75,9 +88,11 @@ def test_modbase_qc_skips_without_mm_tags(tmp_path: Path) -> None:
 
 
 def test_modbase_qc_split_halves_partition_the_calls(tmp_path: Path) -> None:
-    full = MODBASE_QC.run(context_for(tmp_path, MOD_CONTIGS, _mod_reads()), tmp_path / "o")
+    full = MODBASE_QC.run(_with_meth_calls(context_for(tmp_path, MOD_CONTIGS, _mod_reads())), tmp_path / "o")
     halves = [
-        MODBASE_QC.run(context_for(tmp_path, MOD_CONTIGS, (), derived={"transform": "split", "half": h}), tmp_path / "o")
+        MODBASE_QC.run(
+            _with_meth_calls(context_for(tmp_path, MOD_CONTIGS, (), derived={"transform": "split", "half": h})), tmp_path / "o"
+        )
         for h in "AB"
     ]
 
@@ -85,6 +100,7 @@ def test_modbase_qc_split_halves_partition_the_calls(tmp_path: Path) -> None:
         return next(m["n"] for m in output.metrics if m["metric_id"] == metric_id)
 
     for metric_id in ("ml_below_filter_fraction", "mm_tagged_fraction", "ml_mean"):
+        # every call is reached from exactly one half
         assert n(halves[0], metric_id) + n(halves[1], metric_id) == n(full, metric_id)
 
 
@@ -211,3 +227,25 @@ def test_every_l1_1_metric_has_a_citation_checked_library_entry() -> None:
             entry = library.entry(algorithm_id, metric_id)
             assert entry is not None and entry.citation_verified, (algorithm_id, metric_id)
     assert "PRIVACY" in library.entry("sex-check", "chry_chrx_ratio")["flags"]
+
+
+def test_modbase_qc_v2_counts_only_aligned_cpgs_and_masks_invalid_rows(tmp_path: Path) -> None:
+    reads = [
+        Read("ok", "chr1", 100, "ACGTTTTTTT", mm="C+m?,0;", ml=[255]),
+        # an adapter-like CpG in a soft clip: dropped by meth-calls, so not in the ML stats
+        Read("clip", "chr1", 200, "CGAAAAAAAA", cigar=[(4, 2), (0, 8)], mm="C+m?,0;", ml=[10]),
+        Read("bad", "chr1", 300, "ACGTTTTTTT", mm="C+m?,0;", ml=[10], mn=3),
+    ]
+    got = values(MODBASE_QC.run(_with_meth_calls(context_for(tmp_path, MOD_CONTIGS, reads)), tmp_path / "o"))
+    assert got["ml_mean"] == pytest.approx(1.0) and got["ml_below_filter_fraction"] == 0.0
+    assert got["invalid_mm_records"] == 1
+    halves = [
+        values(
+            MODBASE_QC.run(
+                _with_meth_calls(context_for(tmp_path, MOD_CONTIGS, (), derived={"transform": "split", "half": h})),
+                tmp_path / "o",
+            )
+        )["invalid_mm_records"]
+        for h in "AB"
+    ]
+    assert sorted(halves) == [0, 1]
