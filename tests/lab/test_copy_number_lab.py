@@ -203,7 +203,7 @@ def test_simulate_split_runs_every_summary_algorithm_on_both_halves(lab_world, c
         assert "read-summary" not in ran
         assert ran["copy-number"] == "skipped"
     record = json.loads(next((root / "lab" / "sources").glob("*.json")).read_text())
-    assert {d["label"] for d in record["derived"]} == {"split-A", "split-B"}
+    assert {"split-A", "split-B"} <= {d["label"] for d in record["derived"]}
     # A rerun is fully cached.
     code, again = _lab(capsys, "simulate", "split", "latest", "--root", str(root))
     assert all(s["cached"] for s in again["data"]["steps"] if s["status"] == "ok")

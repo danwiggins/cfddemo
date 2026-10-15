@@ -33,6 +33,8 @@ Lab data lives under `ROOT/lab/` and never touches signed records:
 ```
 traceback lab run (<BAM|uBAM|chunk dir>... | <id12> | latest)
     [--reference ID] [--profile all|fast] [--only a,b]
+    [--downsample 0.5,0.25,0.1 | --no-downsample]
+    [--controls | --no-controls] [--tf 0.03,0.10,0.30]
     [--skip-bad-chunks] [--force] [--timeout-s 3600]
     [--threads N] [--sort-mem 1G] [--mmi PATH]
     [--dry-run] [--verbose] [--json] [--root R]
@@ -61,7 +63,12 @@ of MinKNOW chunks (`*.bam`, not recursive). It:
 5. checks that every uBAM record came back (primary + unmapped), then
    publishes the aligned BAM and its index together;
 6. runs every registered algorithm, each in its own process group with a
-   timeout (`--timeout-s`, default 3600 s).
+   timeout (`--timeout-s`, default 3600 s);
+7. by default, reruns the summary algorithms and copy-number on nested
+   downsamples (0.5, 0.25, 0.1 of the reads) for the depth curve, and runs
+   the positive controls (synthetic CNA spike, split halves). These are row
+   masks over the one read summary plus small counting BAMs, never copies
+   of the BAM. `--no-downsample` and `--no-controls` turn them off.
 
 Alignment needs samtools ≥ 1.20 and minimap2 ≥ 2.28 (`brew install samtools
 minimap2`). The minimap2 index of the reference is built once under

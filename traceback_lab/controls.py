@@ -105,11 +105,12 @@ def run_derived(
         min_mapq=signed.min_mapq,
     )
     record_derived(store, parent.source_id, derived.values())
-    summary = (
-        ReadSummary.open(Path(read_summary.artifacts_dir) / "columns")
-        if read_summary is not None and read_summary.artifacts_dir
-        else None
-    )
+    summary = None
+    if read_summary is not None and read_summary.artifacts_dir:
+        try:
+            summary = ReadSummary.open(Path(read_summary.artifacts_dir) / "columns")
+        except (OSError, ValueError):
+            summary = None  # no columnar summary: derived depth falls back to the parent's
     runnable = [item for item in items if item.algorithm.consumes in DERIVED_CONSUMES]
     upstream = {"read-summary": read_summary} if read_summary is not None else {}
     runs: list[DerivedRun] = []
