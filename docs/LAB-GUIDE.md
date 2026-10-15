@@ -8,8 +8,8 @@ unchanged.
 
 **Research use only. Not CLIA-validated. Not a diagnosis.**
 
-This guide grows with the Lab. Sections for `lab run`, `lab serve`,
-`lab doctor` and `lab run --example` arrive with the commands themselves.
+This guide grows with the Lab. Sections for `lab serve`, `lab doctor` and
+`lab run --example` arrive with the commands themselves.
 
 ## ROOT
 
@@ -31,9 +31,64 @@ Lab data lives under `ROOT/lab/` and never touches signed records:
 ## Commands
 
 ```
+traceback lab run (<BAM|uBAM|chunk dir>... | <id12> | latest)
+    [--reference ID] [--profile all|fast] [--only a,b]
+    [--skip-bad-chunks] [--force] [--timeout-s 3600]
+    [--threads N] [--sort-mem 1G] [--mmi PATH]
+    [--dry-run] [--verbose] [--json] [--root R]
 traceback lab algorithms [--json]          registered algorithms (id, family, cost, inputs)
 traceback lab runs [RUN_ID] [--step S]     the run log, or one run's steps
 ```
+
+## Running on a kit
+
+`traceback lab run <chunk dir>` takes one file, several files or a directory
+of MinKNOW chunks (`*.bam`, not recursive). It:
+
+1. refuses symlinks, non-regular and unreadable files, truncated chunks
+   (`samtools quickcheck -u`), duplicate chunks and mixed basecall models;
+2. orders chunks by the `_<n>.bam` index, hashes them (cached by path, size
+   and mtime) and derives the sample identity (`id12`, the first 12+ hex of
+   the chunk-set digest);
+3. checks free space against the disk budget (about 2.2x the chunk bytes,
+   plus the minimap2 index the first time, plus 2 GB);
+4. aligns unaligned chunks in one process group:
+   `samtools cat | samtools fastq -T MM,ML,MN | minimap2 -ax map-ont -y -R <@RG> | samtools sort --write-index`,
+   keeping the `@RG` line (so the modified-base model is still declared) and
+   the MM/ML/MN tags;
+5. checks that every uBAM record came back (primary + unmapped), then
+   publishes the aligned BAM and its index together;
+6. runs every registered algorithm, each in its own process group with a
+   timeout (`--timeout-s`, default 3600 s).
+
+Alignment needs samtools ≥ 1.20 and minimap2 ≥ 2.28 (`brew install samtools
+minimap2`). The minimap2 index of the reference is built once under
+`ROOT/lab/refs/` (hg38: about 20–40 minutes and 8 GB); `--mmi PATH` reuses one
+you already have. The measured alignment speed is 2.8–5.5 minutes per GB of
+uBAM.
+
+The reference is the one registered under ROOT (`traceback reference
+register`); with several, pass `--reference ID`.
+
+**Reruns.** Rerunning the same command recomputes only missing or failed
+results; unchanged chunks are not re-hashed and the alignment is reused.
+`traceback lab run latest` or `traceback lab run <id12>` reruns on the stored
+sample without the chunk paths. `--force` recomputes every result.
+`--only a,b` runs just those algorithms (overriding `--profile`), plus the
+intermediates they need, labelled "(upstream)".
+
+**Dry run.** `--dry-run` writes nothing and takes no lock. It prints the
+resolved ROOT and reference, chunk count and bytes, whether alignment is
+needed or reused, the disk budget against free space and the plan.
+
+**Interruption.** Ctrl-C (or SIGTERM) stops the current step, kills its tools
+and exits 6. Completed results are kept; rerun the same command.
+
+**Output.** The run ends with a summary block (`ROOT`, `RUN`, `SAMPLE`,
+`DONE`, any `FAILED` lines, `NEXT`). With `--json`, stdout is one
+`traceback.cli-result.v2` object and progress goes to stderr. `--verbose`
+streams each tool's raw stderr to your terminal; only scrubbed stderr (paths,
+ROOT, home, login and chunk names redacted) is ever stored.
 
 ## Exit codes
 
@@ -57,12 +112,64 @@ anchor below); `--json` carries the same fields under `data`.
 Unknown algorithm id in `--only` (exit 2). The fix line suggests the closest
 id. `traceback lab algorithms` lists every id.
 
+### TBX-LAB-003
+
+samtools or minimap2 is missing or older than 1.20 / 2.28, and the input is unaligned (exit 3). `brew install samtools minimap2` (or `brew upgrade …`), then `traceback lab doctor`. An already-aligned BAM needs neither.
+
+### TBX-LAB-004
+
+No reference is registered (exit 3), or several are and `--reference` was not given (exit 2, listing the IDs). Register one with `traceback reference register --fasta hg38.fa --id hg38 --root R`, or add `--reference ID`. The `lab-example` reference is never picked by default for real input.
+
+### TBX-LAB-005
+
+An input is a symlink, not a regular file, missing or unreadable (exit 3). The data names the argument position and kind. Pass the real file (`realpath`) or fix its permissions.
+
+### TBX-LAB-006
+
+A chunk fails `samtools quickcheck -u`: it is truncated (exit 3). Re-download the named chunk indexes, or rerun with `--skip-bad-chunks`; the excluded indexes are recorded and the results are marked provisional.
+
+### TBX-LAB-007
+
+Two chunks have identical content, or one chunk index appears twice with different content (exit 3). Remove the duplicate download.
+
+### TBX-LAB-008
+
+Chunks declare different `@RG` basecall models (exit 3). Run each model's chunks as a separate sample.
+
+### TBX-LAB-009
+
+An aligned BAM's `@SQ` lines differ from the registered reference, or the inputs mix aligned and unaligned BAMs (exit 3). The cause lists the first three differences. Pass the unaligned chunks and let the Lab align, or register the FASTA the BAM was aligned to.
+
+### TBX-LAB-010
+
+Not enough free space for the step (exit 3, retryable). The data carries the step, the required bytes by part (aligned BAM, sort temp, minimap2 index, margin) and the free bytes. Free space, or use `--root` on a larger volume; `--dry-run` shows the budget first.
+
+### TBX-LAB-011
+
+The volume filled up during a step (exit 3, retryable). The staging directory was removed. Free space as for TBX-LAB-010, then rerun.
+
 ### TBX-LAB-012
 
 Another Lab writer is running (exit 3, retryable). Only one writer (`lab run`,
 `lab simulate`, `lab cohort add`, `lab cohort build`) may hold `ROOT/lab/.lock`
 at a time. The cause names the holder's command, run id, pid, step and start
 time. Wait for it (`traceback lab runs`), or stop that process.
+
+### TBX-LAB-013
+
+After alignment, the uBAM record total did not equal the aligned primary-plus-unmapped count (exit 3). Nothing was published. Not retryable as-is: run `traceback lab runs RUN_ID --step align`, then report.
+
+### TBX-LAB-014
+
+An alignment process failed or timed out (exit 3, retryable). The cause names the process and its first scrubbed stderr line. Rerun with `--verbose` to see live stderr; check `traceback lab doctor`.
+
+### TBX-LAB-015
+
+The run was interrupted by Ctrl-C or SIGTERM (exit 6, retryable). Completed results are kept. Rerun the same command; only missing results recompute.
+
+### TBX-LAB-016
+
+The run completed and one or more algorithms failed (exit 8). The summary's `FAILED` lines name them with their first scrubbed stderr line. `traceback lab runs RUN_ID --step ALG` shows the step; a rerun recomputes only the failed results.
 
 ### TBX-LAB-017
 
@@ -74,6 +181,10 @@ A run id, sample `id12` or `latest` was not found, or a prefix is ambiguous
 
 `ROOT/lab/STORE_VERSION` is newer than this checkout (exit 3). Update the
 checkout (`git pull && uv sync`). The store is never downgraded.
+
+### TBX-LAB-019
+
+A warning (exit 0): the samtools or minimap2 version changed since this sample was last aligned, so it is realigned under a new input identity (results from the old alignment are never reused). `--dry-run` shows it first. Pin the tools to avoid it.
 
 ### TBX-LAB-020
 

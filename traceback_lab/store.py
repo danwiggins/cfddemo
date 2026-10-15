@@ -612,6 +612,7 @@ def summarize_run(events: list[dict[str, Any]], store: LabStore) -> dict[str, An
     """One row of ``lab runs``: command, sample, status and step counts."""
 
     start = next((event for event in events if event.get("event") == "run_start"), {})
+    sample = next((event.get("sample") for event in events if event.get("event") == "sample"), None)
     end = next((event for event in reversed(events) if event.get("event") == "run_end"), None)
     steps_end = [event for event in events if event.get("event") == "step_end"]
     counts: dict[str, int] = {}
@@ -634,7 +635,7 @@ def summarize_run(events: list[dict[str, Any]], store: LabStore) -> dict[str, An
     return {
         "run_id": run_id,
         "command": start.get("command"),
-        "sample": start.get("sample"),
+        "sample": sample or start.get("sample"),
         "started_utc": start.get("utc"),
         "ended_utc": end.get("utc") if end else None,
         "status": state,

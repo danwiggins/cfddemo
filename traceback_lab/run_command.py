@@ -1,0 +1,588 @@
+"""``traceback lab run``: ingest, align, run the registry, summarize (D9, D20, D22, D36)."""
+
+from __future__ import annotations
+
+import argparse
+import errno
+import signal
+import sys
+import time
+from collections.abc import Callable
+from pathlib import Path
+from typing import Any
+
+from traceback_runner.cli import _local_envelope, _result, _with_human
+
+from . import registry
+from .ingest import (
+    AlignedInput,
+    ChunkSet,
+    collect_paths,
+    disk_budget,
+    ensure_mmi,
+    estimate_align_minutes,
+    id12_for,
+    ingest_prealigned,
+    input_manifest,
+    inspect_chunks,
+    is_sample_reference,
+    mmi_path,
+    align,
+    require_budget,
+    resolve_reference,
+    resolve_sample,
+    source_record,
+    write_source,
+    aligner_argv_identity,
+    cached_sha256,
+    GIB,
+)
+from .identity import aligned_input_id, prealigned_input_id
+from .problems import EXIT_OK, EXIT_PARTIAL, EXIT_USAGE, LabProblem, docs_anchor
+from .runner import DEFAULT_TIMEOUT_S, RunTarget, StepResult, run_plan
+from .scrub import Scrubber
+from .store import LabStore, new_run_id
+from .tools import find_minimap2, find_samtools, require_aligner_tools
+
+ALIGN_TIMEOUT_S = 48 * 3600.0
+QUICKSTART = (
+    "traceback lab algorithms",
+    "traceback lab run <chunk dir>",
+    "traceback lab runs",
+)
+
+
+def add_run_parser(commands: Any, common: Callable[[argparse.ArgumentParser], None]) -> None:
+    run = commands.add_parser(
+        "run",
+        help="ingest (and align) a kit BAM, then run every algorithm it supports",
+        description="Run the Lab on a BAM, uBAM, chunk directory, or a stored sample (id12 | latest).",
+    )
+    run.add_argument("inputs", nargs="*", metavar="INPUT", help="BAM | uBAM | chunk dir | id12 | latest")
+    run.add_argument("--reference", dest="reference_id", metavar="ID", help="registered reference id")
+    run.add_argument("--profile", choices=("all", "fast"), default="all")
+    run.add_argument("--only", metavar="A,B", help="only these algorithms (overrides --profile)")
+    run.add_argument("--skip-bad-chunks", action="store_true", help="exclude truncated chunks (provisional)")
+    run.add_argument("--force", action="store_true", help="recompute every result")
+    run.add_argument("--timeout-s", type=float, default=DEFAULT_TIMEOUT_S, metavar="S")
+    run.add_argument("--threads", type=_threads, metavar="N", help="alignment threads (default min(8, cores-2))")
+    run.add_argument("--sort-mem", type=_sort_mem, default="1G", metavar="MEM", help="samtools sort memory per thread (e.g. 768M, 2G)")
+    run.add_argument("--mmi", type=Path, metavar="PATH", help="reuse an existing minimap2 index")
+    run.add_argument("--dry-run", action="store_true", help="print the plan; write nothing, take no lock")
+    run.add_argument("--verbose", action="store_true", help="stream tool stderr live (never stored)")
+    common(run)
+    run.set_defaults(handler=run_command)
+
+
+def _sort_mem(value: str) -> str:
+    import re
+
+    if not re.fullmatch(r"[1-9][0-9]{0,5}[KMG]?", value):
+        raise argparse.ArgumentTypeError("--sort-mem is a size such as 768M or 2G")
+    return value
+
+
+def _threads(value: str) -> int:
+    number = int(value)
+    if not 1 <= number <= 256:
+        raise argparse.ArgumentTypeError("--threads is 1-256")
+    return number
+
+
+def _progress(as_json: bool) -> Callable[[str], None]:
+    stream = sys.stderr if as_json else sys.stdout
+
+    def emit(line: str) -> None:
+        print(line, file=stream, flush=True)
+
+    return emit
+
+
+def _echo(verbose: bool) -> Callable[[str], None] | None:
+    if not verbose:
+        return None
+
+    def echo(line: str) -> None:
+        print(f"  | {line}", file=sys.stderr, flush=True)
+
+    return echo
+
+
+def _only(text: str | None) -> list[str] | None:
+    if text is None:
+        return None
+    ids = [item.strip() for item in text.split(",") if item.strip()]
+    if not ids:
+        raise LabProblem(
+            "TBX-LAB-001",
+            cause="--only names no algorithm",
+            fix="`traceback lab algorithms` lists ids",
+            data={"unknown": []},
+        )
+    return ids
+
+
+def _interrupted_handler(signum: int, frame: Any) -> None:
+    raise KeyboardInterrupt
+
+
+def _usage_quickstart(store: LabStore) -> tuple[int, dict[str, Any]]:
+    payload = _local_envelope(
+        _result(
+            "lab run",
+            "usage",
+            "lab run needs an input (BAM, uBAM, chunk dir, id12 or latest)",
+            data={"root": str(store.root), "quickstart": list(QUICKSTART)},
+        )
+    )
+    return EXIT_USAGE, _with_human(
+        payload, [f"ROOT  {store.root}", "Quickstart:", *(f"  {line}" for line in QUICKSTART)], replace_data=True
+    )
+
+
+def _flags(args: argparse.Namespace) -> dict[str, Any]:
+    """Flags for the run log: no paths, ever."""
+
+    return {
+        "profile": args.profile,
+        "only": args.only,
+        "skip_bad_chunks": args.skip_bad_chunks,
+        "force": args.force,
+        "timeout_s": args.timeout_s,
+        "threads": args.threads,
+        "sort_mem": args.sort_mem,
+        "mmi_override": args.mmi is not None,
+        "reference_id": args.reference_id,
+        "stored_sample": len(args.inputs) == 1 and _is_stored(args.inputs[0]),
+    }
+
+
+def _is_stored(text: str) -> bool:
+    return is_sample_reference(text) and not Path(text).exists()
+
+
+def _target_from_input(aligned: AlignedInput, reference_id: str, reference_sha256: str, example: bool) -> RunTarget:
+    return RunTarget(
+        input_id=aligned.input_id,
+        source_id=aligned.source_id,
+        input_dir=aligned.directory,
+        reference_id=reference_id,
+        reference_sha256=reference_sha256,
+        label="full",
+        example=example,
+    )
+
+
+def _stored_input(store: LabStore, source_id: str) -> tuple[AlignedInput, dict[str, Any]]:
+    record = source_record(store, source_id) or {}
+    for entry in sorted(record.get("inputs", []), key=lambda item: item.get("used_utc", ""), reverse=True):
+        manifest = input_manifest(store, entry["input_id"])
+        if manifest is not None:
+            return (
+                AlignedInput(
+                    entry["input_id"], source_id, store.inputs_dir / entry["input_id"], manifest, reused=True
+                ),
+                record,
+            )
+    raise LabProblem(
+        "TBX-LAB-017",
+        cause="the sample has no aligned input left under this ROOT",
+        fix="Rerun with the chunk paths: `traceback lab run <chunk dir>`",
+        data={"candidates": []},
+    )
+
+
+def _aligner_change(store: LabStore, source_id: str, tools: dict[str, str | None]) -> dict[str, Any] | None:
+    record = source_record(store, source_id)
+    if not record:
+        return None
+    previous = [entry for entry in record.get("inputs", []) if entry.get("kind") == "aligned"]
+    if not previous:
+        return None
+    last = max(previous, key=lambda entry: entry.get("used_utc", ""))
+    if last.get("tools") == tools:
+        return None
+    return {"old": last.get("tools"), "new": tools}
+
+
+def _dry_run(args: argparse.Namespace, store: LabStore, progress: Callable[[str], None]) -> tuple[int, dict[str, Any]]:
+    store.check_version()
+    entries = registry.registry_entries()
+    items = registry.plan([alg for _, alg in entries], only=_only(args.only), profile=args.profile)
+    plan_rows = [
+        {"algorithm_id": item.algorithm.id, "upstream": item.upstream_only, "decision": "decided after alignment"}
+        for item in items
+    ]
+    data: dict[str, Any] = {"root": str(store.root), "dry_run": True, "plan": plan_rows}
+    lines = [f"ROOT      {store.root}"]
+    if len(args.inputs) == 1 and _is_stored(args.inputs[0]):
+        source_id = resolve_sample(store, args.inputs[0])
+        aligned, _ = _stored_input(store, source_id)
+        data["sample"] = {"id12": id12_for(store, source_id), "input_id": aligned.input_id}
+        data["alignment"] = "reused (stored sample)"
+        lines.append(f"SAMPLE    {id12_for(store, source_id)} (stored)")
+        lines.append("ALIGN     reused (stored sample)")
+    else:
+        paths = collect_paths(args.inputs)
+        chunkset = inspect_chunks(paths, store, skip_bad_chunks=args.skip_bad_chunks, write_cache=False)
+        reference = resolve_reference(store.root, args.reference_id)
+        data["reference_id"] = reference.reference_id
+        data["chunks"] = {"count": len(chunkset.chunks), "bytes": chunkset.total_bytes, "excluded": chunkset.excluded_indexes}
+        lines.append(f"REFERENCE {reference.reference_id}")
+        lines.append(
+            f"INPUT     {len(chunkset.chunks)} chunk(s) · {chunkset.total_bytes / GIB:.2f} GB · "
+            f"{chunkset.total_records:,} records" + (f" · excluded {chunkset.excluded_indexes}" if chunkset.excluded else "")
+        )
+        mmi_needed = not chunkset.aligned and args.mmi is None and not mmi_path(store, reference).is_file()
+        budget = disk_budget(
+            store, chunkset, mmi_needed=mmi_needed, fasta_bytes=reference.loaded.source.fasta_size_bytes
+        )
+        data["budget"] = budget.public()
+        lines.append(
+            f"DISK      needs {budget.required / GIB:.1f} GB, has {budget.free / GIB:.1f} GB "
+            f"({'ok' if budget.ok else 'SHORT: TBX-LAB-010'})"
+        )
+        if chunkset.aligned:
+            data["alignment"] = "not needed (aligned input)"
+            lines.append("ALIGN     not needed (aligned input)")
+        else:
+            samtools, minimap2 = find_samtools(), find_minimap2()
+            low, high = estimate_align_minutes(chunkset.total_bytes)
+            reason = "new source"
+            existing = mmi_path(store, reference)
+            if samtools.version and minimap2.version and existing.is_file() and args.mmi is None:
+                cache = store.load_hash_cache()
+                key = store.hash_cache_key(existing)
+                mmi_sha = cache.get(key, {}).get("sha256")
+                if mmi_sha:
+                    input_id = aligned_input_id(
+                        source_id=chunkset.source_id,
+                        reference_sha256=reference.sha256,
+                        mmi_sha256=mmi_sha,
+                        minimap2_version=str(minimap2.version),
+                        samtools_version=str(samtools.version),
+                        aligner_argv=aligner_argv_identity(chunkset.rg_lines),
+                    )
+                    if input_manifest(store, input_id) is not None:
+                        reason = "reused"
+                    elif _aligner_change(store, chunkset.source_id, {"samtools": samtools.version, "minimap2": minimap2.version}):
+                        reason = "aligner identity changed (TBX-LAB-019): realigns"
+            data["alignment"] = reason
+            data["estimate_min"] = [round(low, 1), round(high, 1)]
+            lines.append(
+                f"ALIGN     {reason}" + ("" if reason == "reused" else f" · estimate {low:.0f}-{high:.0f} min")
+                + (" · minimap2 index built first" if mmi_needed else "")
+            )
+    for row in plan_rows:
+        lines.append(f"PLAN      {row['algorithm_id']}{' (upstream)' if row['upstream'] else ''}: {row['decision']}")
+    if not plan_rows:
+        lines.append("PLAN      no algorithms registered")
+    payload = _local_envelope(_result("lab run", "ok", "dry run: nothing written", data=data))
+    return EXIT_OK, _with_human(payload, lines, replace_data=True)
+
+
+def run_command(args: argparse.Namespace, store: LabStore) -> tuple[int, dict[str, Any]]:
+    if not args.inputs:
+        return _usage_quickstart(store)
+    progress = _progress(args.as_json)
+    if args.dry_run:
+        return _dry_run(args, store, progress)
+    store.check_version()
+    entries = registry.registry_entries()
+    by_id = {alg.id: entry for entry, alg in entries}
+    items = registry.plan([alg for _, alg in entries], only=_only(args.only), profile=args.profile)
+    run_id = new_run_id()
+    started = time.monotonic()
+    progress(f"ROOT  {store.root}")
+    previous_term = signal.signal(signal.SIGTERM, _interrupted_handler)
+    try:
+        with store.writer("run", run_id, step="ingest") as lock:
+            log = store.run_log(run_id)
+            log.append("run_start", command="run", pid=_pid(), flags=_flags(args))
+            try:
+                stored = len(args.inputs) == 1 and _is_stored(args.inputs[0])
+                chunkset: ChunkSet | None = None
+                warnings: list[dict[str, Any]] = []
+                example = False
+                if stored:
+                    source_id = resolve_sample(store, args.inputs[0])
+                    aligned, record = _stored_input(store, source_id)
+                    example = bool(record.get("example"))
+                    reference_id = aligned.manifest["reference_id"]
+                    reference_sha256 = aligned.manifest["reference_sha256"]
+                    scrubber = Scrubber(root=store.root)
+                    progress(f"ingest                   stored sample {id12_for(store, source_id)}")
+                else:
+                    log.append("step_start", step="ingest")
+                    paths = collect_paths(args.inputs)
+                    scrubber = Scrubber(root=store.root, chunk_stems=[p.name[:-4] for p in paths])
+                    chunkset = inspect_chunks(
+                        paths, store, skip_bad_chunks=args.skip_bad_chunks, progress=progress
+                    )
+                    reference = resolve_reference(store.root, args.reference_id)
+                    reference_id, reference_sha256 = reference.reference_id, reference.sha256
+                    progress(
+                        f"ingest                   {len(chunkset.chunks)} chunk(s) · "
+                        f"{chunkset.total_records:,} records · reference {reference_id}"
+                    )
+                    log.append(
+                        "step_end",
+                        step="ingest",
+                        status="ok",
+                        chunks=len(chunkset.chunks),
+                        records=chunkset.total_records,
+                        excluded=chunkset.excluded_indexes,
+                        source_id=chunkset.source_id,
+                    )
+                    lock.set_step("align")
+                    log.append("step_start", step="align")
+                    if chunkset.aligned:
+                        prealigned_id = prealigned_input_id(
+                            source_id=chunkset.source_id, reference_sha256=reference.sha256
+                        )
+                        if input_manifest(store, prealigned_id) is None:
+                            budget = disk_budget(store, chunkset, mmi_needed=False, fasta_bytes=0)
+                            require_budget(budget, "ingest")
+                        aligned = ingest_prealigned(store, chunkset, reference, progress=progress)
+                    else:
+                        samtools, minimap2 = require_aligner_tools()
+                        # Reuse needs no disk: decide reuse before the budget.
+                        known_mmi = args.mmi if args.mmi is not None else mmi_path(store, reference)
+                        reusable = False
+                        if known_mmi.is_file():
+                            candidate = aligned_input_id(
+                                source_id=chunkset.source_id,
+                                reference_sha256=reference.sha256,
+                                mmi_sha256=cached_sha256(store, known_mmi),
+                                minimap2_version=str(minimap2.version),
+                                samtools_version=str(samtools.version),
+                                aligner_argv=aligner_argv_identity(chunkset.rg_lines),
+                            )
+                            reusable = input_manifest(store, candidate) is not None
+                        if not reusable:
+                            budget = disk_budget(
+                                store,
+                                chunkset,
+                                mmi_needed=not known_mmi.is_file(),
+                                fasta_bytes=reference.loaded.source.fasta_size_bytes,
+                            )
+                            require_budget(budget, "align")
+                        change = _aligner_change(
+                            store, chunkset.source_id, {"samtools": samtools.version, "minimap2": minimap2.version}
+                        )
+                        mmi, mmi_sha = ensure_mmi(
+                            store,
+                            reference,
+                            minimap2,
+                            override=args.mmi,
+                            scrubber=scrubber,
+                            timeout_s=ALIGN_TIMEOUT_S,
+                            echo=_echo(args.verbose),
+                            progress=progress,
+                        )
+                        if change is not None and not reusable:
+                            low, high = estimate_align_minutes(chunkset.total_bytes)
+                            warning = {
+                                "code": "TBX-LAB-019",
+                                "old": change["old"],
+                                "new": change["new"],
+                                "estimate_min": [round(low, 1), round(high, 1)],
+                                "docs": docs_anchor("TBX-LAB-019"),
+                            }
+                            warnings.append(warning)
+                            progress(
+                                f"WARN TBX-LAB-019 aligner identity changed {change['old']} -> {change['new']}; "
+                                f"realigning (~{low:.0f}-{high:.0f} min)"
+                            )
+                        aligned = align(
+                            store,
+                            chunkset,
+                            reference,
+                            samtools=samtools,
+                            minimap2=minimap2,
+                            mmi=mmi,
+                            mmi_sha256=mmi_sha,
+                            threads=args.threads,
+                            sort_mem=args.sort_mem,
+                            timeout_s=ALIGN_TIMEOUT_S,
+                            scrubber=scrubber,
+                            echo=_echo(args.verbose),
+                            progress=progress,
+                        )
+                    write_source(store, chunkset, aligned)
+                    align_info = aligned.manifest.get("align", {})
+                    log.append(
+                        "step_end",
+                        step="align",
+                        status="ok",
+                        reused=aligned.reused,
+                        input_id=aligned.input_id,
+                        duration_s=None if aligned.reused else align_info.get("duration_s"),
+                        peak_rss_bytes=None if aligned.reused else align_info.get("peak_rss_bytes"),
+                        peak_disk_bytes=None if aligned.reused else align_info.get("peak_disk_bytes"),
+                    )
+                    progress(
+                        f"align                    {'reused' if aligned.reused else 'done'} · input {aligned.input_id[:12]}"
+                    )
+                id12 = id12_for(store, aligned.source_id)
+                log.append("sample", sample=id12, source_id=aligned.source_id, input_id=aligned.input_id)
+                target = _target_from_input(aligned, reference_id, reference_sha256, example)
+                results = run_plan(
+                    store,
+                    lock,
+                    log,
+                    target,
+                    items,
+                    by_id,
+                    run_id=run_id,
+                    force=args.force,
+                    timeout_s=args.timeout_s,
+                    scrubber=scrubber,
+                    progress=progress,
+                    echo=_echo(args.verbose),
+                )
+                code, payload = _summary(
+                    store, run_id, aligned, id12, chunkset, results, warnings, time.monotonic() - started
+                )
+                log.append("run_end", status=payload["status"], exit_code=code)
+                return code, payload
+            except KeyboardInterrupt:
+                current = lock.step
+                log.append("run_end", status="interrupted", exit_code=6, step=current)
+                raise LabProblem(
+                    "TBX-LAB-015",
+                    cause=f"Interrupted during {current}. Completed results are kept.",
+                    fix="Rerun the same command; only missing results recompute",
+                    data={"step": current, "run_id": run_id},
+                ) from None
+            except LabProblem as problem:
+                log.append("run_end", status="blocked", exit_code=problem.exit_code, code=problem.code, step=lock.step)
+                raise
+            except OSError as exc:
+                if exc.errno != errno.ENOSPC:
+                    log.append("run_end", status="internal_error", exit_code=7, error=type(exc).__name__, step=lock.step)
+                    raise
+                log.append("run_end", status="blocked", exit_code=3, code="TBX-LAB-011", step=lock.step)
+                raise LabProblem(
+                    "TBX-LAB-011",
+                    cause=f"the volume filled up during {lock.step}; staging removed",
+                    fix="Free space, or use --root on a larger volume; then rerun",
+                    data={"step": lock.step, "volume": "ROOT"},
+                ) from exc
+            except Exception as exc:
+                log.append("run_end", status="internal_error", exit_code=7, error=type(exc).__name__, step=lock.step)
+                raise
+    finally:
+        signal.signal(signal.SIGTERM, previous_term)
+
+
+def _pid() -> int:
+    import os
+
+    return os.getpid()
+
+
+def _duration(seconds: float) -> str:
+    seconds = int(round(seconds))
+    if seconds < 60:
+        return f"{seconds}s"
+    minutes, seconds = divmod(seconds, 60)
+    if minutes < 60:
+        return f"{minutes}m {seconds:02d}s"
+    hours, minutes = divmod(minutes, 60)
+    return f"{hours}h {minutes:02d}m"
+
+
+def _summary(
+    store: LabStore,
+    run_id: str,
+    aligned: AlignedInput,
+    id12: str,
+    chunkset: ChunkSet | None,
+    results: list[StepResult],
+    warnings: list[dict[str, Any]],
+    elapsed: float,
+) -> tuple[int, dict[str, Any]]:
+    ok = sum(result.status == "ok" for result in results)
+    skipped: dict[str, int] = {}
+    for result in results:
+        if result.status == "skipped" and result.skip_reason:
+            skipped[result.skip_reason] = skipped.get(result.skip_reason, 0) + 1
+    failed = [result for result in results if result.status == "failed"]
+    records = aligned.manifest.get("records", {})
+    reads = records.get("ubam") or records.get("aligned_primary_plus_unmapped")
+    chunks = aligned.manifest.get("chunks")
+    next_argv = [["traceback", "lab", "runs", run_id]]
+    if failed:
+        next_argv.insert(0, ["traceback", "lab", "runs", run_id, "--step", failed[0].algorithm_id])
+    data: dict[str, Any] = {
+        "root": str(store.root),
+        "run_id": run_id,
+        "sample": {"id12": id12, "source_id": aligned.source_id, "input_id": aligned.input_id},
+        "depth": None,
+        "counts": {"ok": ok, "skipped": skipped, "failed": len(failed)},
+        "failed": [{"algorithm_id": result.algorithm_id, "first_line": result.first_line} for result in failed],
+        "steps": [result.public() for result in results],
+        "controls": None,
+        "excluded_chunks": aligned.manifest.get("excluded_chunks", []),
+        "warnings": warnings,
+        "next": next_argv,
+    }
+    skipped_text = ", ".join(
+        f"{count} skipped ({reason}: "
+        + ", ".join(r.algorithm_id for r in results if r.status == "skipped" and r.skip_reason == reason)
+        + ")"
+        for reason, count in sorted(skipped.items())
+    )
+    done = f"{_duration(elapsed)} · {ok} ok" + (f" · {skipped_text}" if skipped_text else "") + (
+        f" · {len(failed)} failed" if failed else ""
+    )
+    sample_line = f"{id12}   " + " · ".join(
+        part
+        for part in (
+            f"{chunks} chunks" if chunks else None,
+            f"{reads:,} reads" if isinstance(reads, int) else None,
+            "depth after read-summary",
+        )
+        if part
+    )
+    lines = [
+        f"ROOT    {store.root}",
+        f"RUN     {run_id}",
+        f"SAMPLE  {sample_line}",
+        f"DONE    {done}",
+    ]
+    if aligned.manifest.get("excluded_chunks"):
+        lines.append(f"        provisional: excluded chunks {aligned.manifest['excluded_chunks']}")
+    for result in failed:
+        lines.append(f"FAILED  {result.algorithm_id}: {result.first_line}")
+        lines.append(f"        details: traceback lab runs {run_id} --step {result.algorithm_id}")
+    for result in results:
+        if result.status == "skipped" and result.skip_reason in {"missing_toolchain", "missing_asset"}:
+            remedy = "traceback toolchain install ichor" if result.skip_reason == "missing_toolchain" else "traceback method-asset register"
+            lines.append(f"SKIP    {result.algorithm_id} skipped ({result.skip_reason}): {remedy}")
+    for argv in next_argv:
+        lines.append(f"NEXT    {' '.join(argv)}")
+    summary = f"run {run_id}: {ok} ok, {sum(skipped.values())} skipped, {len(failed)} failed"
+    if failed:
+        payload = _local_envelope(_result("lab run", "partial_failure", summary, data=data))
+        payload["data"].update(
+            {
+                "code": "TBX-LAB-016",
+                "cause": f"{len(failed)} algorithm(s) failed: " + ", ".join(r.algorithm_id for r in failed),
+                "fix": f"`traceback lab runs {run_id} --step ALG`; rerun recomputes only failed results",
+                "retryable": False,
+                "docs": docs_anchor("TBX-LAB-016"),
+            }
+        )
+        return EXIT_PARTIAL, _bare(_with_human(payload, lines, replace_data=True))
+    payload = _local_envelope(_result("lab run", "ok", summary, data=data))
+    return EXIT_OK, _bare(_with_human(payload, lines, replace_data=True))
+
+
+def _bare(payload: dict[str, Any]) -> dict[str, Any]:
+    payload["_human"]["bare"] = True
+    return payload
+
+
+__all__ = ["add_run_parser", "run_command"]

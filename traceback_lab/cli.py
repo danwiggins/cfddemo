@@ -71,6 +71,10 @@ def build_parser() -> argparse.ArgumentParser:
     _common(algorithms)
     algorithms.set_defaults(handler=_algorithms)
 
+    from .run_command import add_run_parser
+
+    add_run_parser(commands, _common)
+
     runs = commands.add_parser("runs", help="list Lab runs, or one run's steps")
     runs.add_argument("run_id", nargs="?", metavar="RUN_ID")
     runs.add_argument("--step", metavar="S", help="only this step's events")
@@ -199,6 +203,11 @@ def emit(payload: dict[str, Any], *, as_json: bool, root: Path) -> None:
     lines = list((human or {}).get("lines", ()))
     if not lines or not lines[0].startswith("ROOT  "):
         lines.insert(0, f"ROOT  {root}")
+    if (human or {}).get("bare"):
+        # A self-contained block (the run summary): no status label line.
+        for line in lines:
+            print(line)
+        return
     print(lines[0])
     _emit(_with_human(payload, lines[1:], replace_data=True), as_json=False)
 

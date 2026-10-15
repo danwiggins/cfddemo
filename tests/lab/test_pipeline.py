@@ -1,0 +1,111 @@
+"""pipeline.py: one process group, failure propagation, no orphans."""
+
+from __future__ import annotations
+
+import os
+import sys
+import time
+from pathlib import Path
+
+import pytest
+
+from traceback_lab.pipeline import Stage, run_pipeline
+from traceback_lab.scrub import Scrubber
+
+PY = sys.executable
+
+
+def _gone(pid: int, wait_s: float = 5.0) -> bool:
+    deadline = time.time() + wait_s
+    while time.time() < deadline:
+        try:
+            os.kill(pid, 0)
+        except ProcessLookupError:
+            return True
+        time.sleep(0.05)
+    return False
+
+
+def test_three_stage_pipe_succeeds(tmp_path: Path) -> None:
+    out = tmp_path / "out.txt"
+    result = run_pipeline(
+        [
+            Stage("emit", [PY, "-c", "print('\\n'.join(str(i) for i in range(1000)))"]),
+            Stage("filter", [PY, "-c", "import sys; [print(l, end='') for l in sys.stdin if l.strip().endswith('7')]"]),
+            Stage("count", [PY, "-c", "import sys; print(sum(1 for _ in sys.stdin))"]),
+        ],
+        timeout_s=60,
+        stdout_path=out,
+    )
+    assert result.ok
+    assert out.read_text().strip() == "100"
+    assert all(stage.returncode == 0 for stage in result.stages)
+    assert result.peak_rss_bytes and result.peak_rss_bytes > 0
+
+
+def test_middle_failure_fails_the_pipeline_and_names_the_stage(tmp_path: Path) -> None:
+    result = run_pipeline(
+        [
+            # Like samtools, the writer dies of SIGPIPE when its reader goes away.
+            Stage("emit", [PY, "-c", "import signal, time\nsignal.signal(signal.SIGPIPE, signal.SIG_DFL)\nwhile True:\n print('x' * 100, flush=True)\n time.sleep(0.001)"]),
+            Stage("aligner", [PY, "-c", "import sys; sys.stdin.readline(); print('[E] index corrupt at /Users/x/ref.mmi', file=sys.stderr); sys.exit(3)"]),
+            Stage("sink", [PY, "-c", "import sys; sys.stdin.read()"]),
+        ],
+        timeout_s=60,
+    )
+    assert not result.ok
+    assert result.failed_stage is not None and result.failed_stage.name == "aligner"
+    line = result.first_line(Scrubber(home=None, login=None))
+    assert line == "aligner exited 3: [E] index corrupt at <path>"
+    assert result.duration_s < 30
+
+
+def test_timeout_kills_the_group_including_a_grandchild(tmp_path: Path) -> None:
+    pidfile = tmp_path / "grandchild.pid"
+    script = (
+        "import subprocess, sys, time\n"
+        f"child = subprocess.Popen([{PY!r}, '-c', 'import time; time.sleep(600)'])\n"
+        f"open({str(pidfile)!r}, 'w').write(str(child.pid))\n"
+        "time.sleep(600)\n"
+    )
+    started = time.time()
+    result = run_pipeline([Stage("hang", [PY, "-c", script])], timeout_s=2)
+    assert result.timed_out and not result.ok
+    assert time.time() - started < 20
+    grandchild = int(pidfile.read_text())
+    assert _gone(grandchild)
+
+
+def test_interrupt_kills_the_group_and_reraises(tmp_path: Path) -> None:
+    pidfile = tmp_path / "child.pid"
+
+    def tick(elapsed: float) -> None:
+        if pidfile.exists() and elapsed > 0.5:
+            raise KeyboardInterrupt
+
+    script = f"import os, time; open({str(pidfile)!r}, 'w').write(str(os.getpid())); time.sleep(600)"
+    with pytest.raises(KeyboardInterrupt):
+        run_pipeline([Stage("sleep", [PY, "-c", script])], timeout_s=60, on_tick=tick)
+    assert _gone(int(pidfile.read_text()))
+
+
+def test_stage_executables_must_be_absolute() -> None:
+    with pytest.raises(ValueError):
+        Stage("rel", ["samtools", "view"])
+
+
+def test_stderr_is_echoed_raw_but_kept_bounded(tmp_path: Path) -> None:
+    seen: list[str] = []
+    script = "import sys\nfor i in range(500): print(f'line {i}', file=sys.stderr)"
+    result = run_pipeline([Stage("noisy", [PY, "-c", script])], timeout_s=30, echo=seen.append)
+    assert len(seen) == 500
+    raw = result.stages[0].stderr.raw_lines()
+    assert len(raw) == 20 + 1 + 50 and raw[-1] == "line 499"
+
+
+def test_disk_sampling(tmp_path: Path) -> None:
+    target = tmp_path / "staging"
+    target.mkdir()
+    script = f"open({str(target / 'blob')!r}, 'wb').write(b'x' * 2_000_000)"
+    result = run_pipeline([Stage("write", [PY, "-c", script])], timeout_s=30, disk_path=target)
+    assert result.peak_disk_bytes is not None and result.peak_disk_bytes >= 2_000_000
