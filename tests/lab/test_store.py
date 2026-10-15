@@ -84,12 +84,20 @@ def test_publish_selects_newest_and_bumps_generation(tmp_path: Path) -> None:
     assert (old / "artifacts" / "h" / "x.json").read_bytes() == b"{}"
 
 
-def test_unselected_attempts_are_pruned_to_three(tmp_path: Path) -> None:
+def _failed(n: int) -> ResultEnvelope:
+    data = json.loads(_envelope(n).to_bytes())
+    data.update(status="failed", metrics=[], failure={"first_line": f"boom {n}", "stderr_tail": []})
+    return ResultEnvelope.model_validate(data)
+
+
+def test_pruning_keeps_selected_previous_and_last_three_failures(tmp_path: Path) -> None:
     store = LabStore(tmp_path)
     store.ensure()
-    ids = [store.publish_result(_envelope(n), input_id=C) for n in range(6)]
+    failures = [store.publish_result(_failed(n), input_id=C) for n in range(4)]
+    oks = [store.publish_result(_envelope(n), input_id=C) for n in range(4)]
     attempts = sorted(path.name for path in (store.result_dir(C, "fragment-size", A) / "attempts").iterdir())
-    assert attempts == sorted(ids[-4:])
+    # selected (oks[-1]) + the one it replaced (oks[-2]) + the newest 3 failures
+    assert attempts == sorted([*failures[-3:], oks[-2], oks[-1]])
 
 
 def test_interrupted_publish_leaves_old_selection_and_no_staging(tmp_path: Path, monkeypatch) -> None:

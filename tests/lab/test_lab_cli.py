@@ -146,3 +146,15 @@ def test_problem_table_exit_codes() -> None:
     assert PROBLEMS["TBX-LAB-016"].exit_code == 8
     assert PROBLEMS["TBX-LAB-019"].exit_code == 0
     assert len(PROBLEMS) == 21
+
+
+def test_usage_errors_keep_the_json_contract(tmp_path: Path, capsys) -> None:
+    code = signed_cli.main(["lab", "runs", "--json", "--root", str(tmp_path), "--step"])
+    captured = capsys.readouterr()
+    assert code == 2
+    payload = json.loads(captured.out)
+    assert payload["status"] == "usage"
+    assert payload["data"]["root"] == str(tmp_path)
+    code = signed_cli.main(["lab", "bogus"])
+    captured = capsys.readouterr()
+    assert code == 2 and captured.out == "" and "invalid choice" in captured.err

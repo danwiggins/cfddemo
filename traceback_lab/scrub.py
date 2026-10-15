@@ -28,10 +28,11 @@ ROOT_TOKEN = "<ROOT>"
 PATH_TOKEN = "<path>"
 REDACTED = "<redacted>"
 
-# An absolute POSIX path or a ``~``-relative path, not preceded by a token
-# character (so ``<ROOT>/lab/x`` and ``a/b`` stay intact).  Quoted paths with
-# spaces are handled separately below.
-_PATH = re.compile(r"(?<![\w<>.~/-])(?:~|/)(?:[^\s'\"<>|;,:()\[\]{}]+)")
+# An absolute POSIX path or a ``~``-relative path, not preceded by a word
+# character (so ``a/b`` and ``12/40`` stay intact) and not the store-relative
+# tail of the ``<ROOT>`` token.  Delimiters such as ``<…>`` end a path but do
+# not protect it.  Quoted paths with spaces are handled separately below.
+_PATH = re.compile(r"(?<![\w.~/-])(?<!<ROOT>)(?:~|/)(?:[^\s'\"<>|;,:()\[\]{}]+)")
 _QUOTED_PATH = re.compile(r"(['\"])(?:~|/)[^'\"\n]*\1")
 
 
@@ -64,7 +65,7 @@ class Scrubber:
         return sorted((form.rstrip("/") for form in forms if form not in {"", "/"}), key=len, reverse=True)
 
     def _secrets(self) -> list[str]:
-        values = {stem for stem in self.chunk_stems if stem and len(stem) >= 3}
+        values = {stem for stem in self.chunk_stems if stem}
         if self.home and self.home not in {"", "/"}:
             values.add(self.home.rstrip("/"))
         if self.login and len(self.login) >= 2:

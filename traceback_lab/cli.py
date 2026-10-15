@@ -18,7 +18,7 @@ from typing import Any
 
 from traceback_runner.cli import _HUMAN, _emit, _local_envelope, _result, _with_human
 
-from .problems import EXIT_INTERNAL, EXIT_OK, LabProblem, problem_lines, problem_payload
+from .problems import EXIT_INTERNAL, EXIT_OK, EXIT_USAGE, LabProblem, problem_lines, problem_payload
 from .registry import load_registry
 from .store import LabStore, RunLog, summarize_run
 
@@ -36,6 +36,15 @@ def resolve_root(value: Path | None, environ: dict[str, str] | None = None) -> P
     return Path(os.path.abspath(chosen.expanduser()))
 
 
+class UsageError(Exception):
+    """An argparse refusal, routed through the Lab output contract (exit 2)."""
+
+
+class _Parser(argparse.ArgumentParser):
+    def error(self, message: str) -> None:  # type: ignore[override]
+        raise UsageError(f"{self.prog}: {message}")
+
+
 def _common(parser: argparse.ArgumentParser) -> None:
     parser.add_argument(
         "--root",
@@ -47,14 +56,16 @@ def _common(parser: argparse.ArgumentParser) -> None:
 
 
 def build_parser() -> argparse.ArgumentParser:
-    parser = argparse.ArgumentParser(
+    parser = _Parser(
         prog="traceback lab",
         description=(
             "Traceback Lab: run every cfDNA algorithm a kit BAM supports. "
             "Research use only. Not CLIA-validated. Not a diagnosis."
         ),
     )
-    commands = parser.add_subparsers(dest="lab_command", required=True, metavar="COMMAND")
+    commands = parser.add_subparsers(
+        dest="lab_command", required=True, metavar="COMMAND", parser_class=_Parser
+    )
 
     algorithms = commands.add_parser("algorithms", help="list registered algorithms")
     _common(algorithms)
@@ -192,9 +203,33 @@ def emit(payload: dict[str, Any], *, as_json: bool, root: Path) -> None:
     _emit(_with_human(payload, lines[1:], replace_data=True), as_json=False)
 
 
+def _usage(message: str, raw: Sequence[str]) -> int:
+    """Exit 2: a one-object JSON envelope with ``--json``, argparse text otherwise."""
+
+    if "--json" in raw:
+        root_value: Path | None = None
+        if "--root" in raw:
+            position = raw.index("--root")
+            if position + 1 < len(raw):
+                root_value = Path(raw[position + 1])
+        root = resolve_root(root_value)
+        payload = _local_envelope(
+            _result("lab", "usage", message, data={"root": str(root), "usage": message})
+        )
+        _emit(payload, as_json=True)
+    else:
+        print(message, file=sys.stderr)
+        print("See `traceback lab --help`.", file=sys.stderr)
+    return EXIT_USAGE
+
+
 def main(argv: Sequence[str] | None = None) -> int:
     parser = build_parser()
-    args = parser.parse_args(list(sys.argv[2:] if argv is None else argv))
+    raw = list(sys.argv[2:] if argv is None else argv)
+    try:
+        args = parser.parse_args(raw)
+    except UsageError as exc:
+        return _usage(str(exc), raw)
     root = resolve_root(args.root)
     store = LabStore(root)
     as_json = bool(getattr(args, "as_json", False))

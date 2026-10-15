@@ -66,3 +66,10 @@ def test_bounded_stderr_keeps_head_and_tail() -> None:
     ]
     scrubbed = buffer.scrubbed(Scrubber(home=None, login=None), last=2)
     assert scrubbed == ["line 8", "line 9"]
+
+
+def test_delimited_paths_and_short_stems_are_redacted() -> None:
+    scrubber = Scrubber(chunk_stems=["AB"], home=None, login=None)
+    assert scrubber.line("open </private/tmp/run.bam> failed") == "open <<path>> failed"
+    assert scrubber.line("reading AB.bam") == "reading <redacted>.bam"
+    assert scrubber.line("(/opt/x/y)") == "(<path>)"

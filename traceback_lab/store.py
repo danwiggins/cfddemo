@@ -47,7 +47,7 @@ from .problems import LabProblem
 
 HEARTBEAT_INTERVAL_S = 10.0
 HEARTBEAT_FRESH_S = 30.0
-KEEP_UNSELECTED_ATTEMPTS = 3
+KEEP_FAILED_ATTEMPTS = 3
 STAGING_PREFIX = ".staging-"
 _RUN_ID = r"^r-\d{8}-\d{4}-[0-9a-f]{4,8}$"
 _ATTEMPT_ID = r"^a-\d{8}T\d{12}-[0-9a-f]{8}$"
@@ -405,22 +405,46 @@ class LabStore:
                 target.parent.mkdir(parents=True, exist_ok=True)
                 target.write_bytes(content)
 
+        previous = self.selected_attempt(
+            input_id, envelope.algorithm_id, envelope.provenance.parameters_sha256
+        )
         self.publish_directory(attempts, attempt, build)
         write_atomic(
             directory / "selected.json", canonical_json_bytes({"attempt_id": attempt})
         )
-        self._prune_attempts(attempts, keep=attempt)
+        self._prune_attempts(
+            attempts, keep={attempt, *([previous.name] if previous is not None else [])}
+        )
         self.bump_generation()
         return attempt
 
-    def _prune_attempts(self, attempts: Path, *, keep: str) -> None:
+    @staticmethod
+    def _attempt_status(path: Path) -> str | None:
+        try:
+            return str(json.loads((path / "result.json").read_bytes()).get("status"))
+        except (OSError, ValueError, AttributeError):
+            return None
+
+    def _prune_attempts(self, attempts: Path, *, keep: set[str]) -> None:
+        """Keep the selected attempt, the one it replaced (a reader may still
+        hold it) and the newest ``KEEP_FAILED_ATTEMPTS`` failed attempts for
+        Trust/QC (D35).  Older superseded attempts are removed."""
+
         others = sorted(
-            (path for path in attempts.iterdir() if path.is_dir() and path.name != keep
-             and not path.name.startswith(STAGING_PREFIX)),
+            (
+                path
+                for path in attempts.iterdir()
+                if path.is_dir()
+                and path.name not in keep
+                and not path.name.startswith(STAGING_PREFIX)
+            ),
             key=lambda path: path.name,
         )
-        for stale in others[:-KEEP_UNSELECTED_ATTEMPTS] if len(others) > KEEP_UNSELECTED_ATTEMPTS else []:
-            shutil.rmtree(stale, ignore_errors=True)
+        failed = [path for path in others if self._attempt_status(path) == "failed"]
+        retained = {path.name for path in failed[-KEEP_FAILED_ATTEMPTS:]}
+        for stale in others:
+            if stale.name not in retained:
+                shutil.rmtree(stale, ignore_errors=True)
 
     def selected_attempt(
         self, input_id: str, algorithm_id: str, parameters_sha256: str
