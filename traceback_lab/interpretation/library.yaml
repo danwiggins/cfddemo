@@ -7,8 +7,8 @@
 # original evidence (D4).  citation_checked records who confirmed that every
 # DOI resolves and every displayed number matches the source (D27); an entry
 # without it renders an "UNVERIFIED citation" badge.
-version: 0.3.0
-hidden_algorithms: [read-summary]
+version: 0.4.0
+hidden_algorithms: [read-summary, meth-calls]
 entries:
   # ---------------------------------------------------------------- bam-qc
   - algorithm_id: bam-qc
@@ -2105,3 +2105,184 @@ entries:
     stability: {kind: relative, tolerance: 0.20}
     citations: ["doi:10.1038/s41586-019-1272-6"]
     citation_checked: {by: "lab build agent (Phase 1)", date: "2026-10-15", note: "PMC6774252: 'sensitivities of detection ranging from 57% to more than 99% among the seven cancer types at 98% specificity, with an overall area under the curve value of 0.94'; short 100-150 bp, long 151-220 bp; '504 windows of 5 Mb'; healthy profiles 'median correlation of 0.99'. Illumina 1-2x."}
+
+  # ------------------------------------------------------------ global-5mc
+  - algorithm_id: global-5mc
+    metric_id: cpg_5mc_fraction
+    label: "Genome-wide CpG 5mC fraction (argmax call)"
+    value_kind: proportion
+    tier: SPECULATIVE
+    origin_tier: SPECULATIVE
+    origin_platform: "ONT"
+    min_depth_x: null
+    reference: {kind: none}
+    performance: null
+    performance_missing_reason: "none published; no ONT cfDNA reference for a genome-wide 5mC fraction was found"
+    meaning_high: "Globally well-methylated cfDNA, typical of blood-cell-derived DNA."
+    meaning_low: "Global hypomethylation, a crude signal reported in tumour-derived DNA; also a calling or model artefact."
+    confounders: ["basecaller modbase model", "call confidence (see modbase-qc)", "cell-type mix", "depth (noise)"]
+    next_steps:
+      analytical: ["Exploratory only; never a headline", "Read with ml_below_filter_fraction in modbase-qc"]
+      clinical_setting: null
+    license_ids: []
+    flags: []
+    headline: true
+    stability: {kind: proportion}
+    citations: []
+    citation_checked: {by: "lab build agent (Phase 1)", date: "2026-10-15", note: "No citation displayed. PubMed search found no checkable healthy-plasma genome-wide CpG methylation fraction (ONT or bisulfite) to use as a reference; none is shown."}
+
+  # ----------------------------------------------------------- global-5hmc
+  - algorithm_id: global-5hmc
+    metric_id: cpg_5hmc_fraction
+    label: "Genome-wide CpG 5hmC fraction (argmax call)"
+    value_kind: proportion
+    tier: SPECULATIVE
+    origin_tier: SPECULATIVE
+    origin_platform: "5hmC-Seal (short-read), not ONT"
+    min_depth_x: null
+    reference: {kind: none}
+    performance:
+      kind: direction
+      value: "A global loss of 5hmC was reported in cfDNA of 203 breast cancer patients vs 60 healthy individuals, measured with 5hmC-Seal chemistry (short-read), not ONT"
+      platform: "5hmC-Seal"
+      depth: "not stated"
+      source: "Aishan 2025, Biomark Med"
+    performance_missing_reason: null
+    meaning_high: "More 5hmC calls."
+    meaning_low: "Fewer 5hmC calls; global 5hmC loss has been reported in cancer cfDNA with a different chemistry."
+    confounders: ["basecaller 5hmC model accuracy", "5hmC is rare: most calls are noise at low depth"]
+    next_steps:
+      analytical: ["Exploratory only; never a headline"]
+      clinical_setting: null
+    license_ids: []
+    flags: []
+    headline: true
+    stability: {kind: proportion}
+    citations: ["doi:10.1080/17520363.2025.2483156"]
+    citation_checked: {by: "lab build agent (Phase 1)", date: "2026-10-15", note: "PMID 40135698 abstract: 'We utilized the sensitive 5hmC seal method to map 5hmC profiles in cfDNA samples from 203 breast cancer patients and 60 healthy individuals'; 'A global loss of 5hmC was observed in the blood samples from cancer patients'. One study; full text not reachable (403)."}
+
+  # ------------------------------------------------------------- pmd-score
+  - algorithm_id: pmd-score
+    metric_id: pmd_delta
+    label: "PMD hypomethylation (5mC outside minus inside common PMDs)"
+    value_kind: signed
+    tier: SPECULATIVE
+    origin_tier: NEWER
+    origin_platform: "WGBS; one small ONT cfDNA study"
+    min_depth_x: null
+    reference: {kind: none}
+    performance:
+      kind: direction
+      value: "On ONT cfDNA, solo-WCGW CpGs in common PMDs were more hypomethylated (relative to each sample's genome average) in cancer bins (mean -0.10, SD 0.07) than healthy bins (mean -0.05, SD 0.04); 7 healthy samples. This Lab uses every CpG call, not solo-WCGW, so the numbers do not transfer"
+      platform: ONT
+      depth: "~0.2x"
+      source: "Katsman 2022, Genome Biol"
+    performance_missing_reason: null
+    meaning_high: "Stronger loss of methylation in late-replicating PMDs, linked to cumulative cell division and reported in tumour DNA."
+    meaning_low: "Little PMD-specific hypomethylation."
+    confounders: ["age", "cell-type mix", "depth (noise)", "all-CpG vs solo-WCGW definition"]
+    next_steps:
+      analytical: ["Exploratory only", "Compare with the copy-number tumour fraction"]
+      clinical_setting: null
+    license_ids: [zhou-pmd-terms-unknown]
+    flags: []
+    headline: true
+    stability: {kind: absolute, tolerance: 0.02}
+    citations: ["doi:10.1038/s41588-018-0073-4", "doi:10.1186/s13059-022-02710-1"]
+    citation_checked: {by: "lab build agent (Phase 1)", date: "2026-10-15", note: "PMID 29610480 (Zhou 2018): common PMDs defined on 100 kb bins with SD>0.15; most hypomethylation-prone context is solo-WCGW. PMC9283844: 'cancer sample bins (mean = - 0.10, SD = 0.07) than across all healthy sample bins (mean = - 0.05, SD = 0.04)', relative to each sample's genome-wide average, ONT."}
+
+  - algorithm_id: pmd-score
+    metric_id: pmd_meth
+    label: "CpG 5mC fraction inside common PMDs"
+    value_kind: proportion
+    tier: SPECULATIVE
+    origin_tier: NEWER
+    origin_platform: "WGBS"
+    min_depth_x: null
+    reference: {kind: none}
+    performance: null
+    performance_missing_reason: "none published for an all-CpG ONT measure"
+    meaning_high: "PMDs keep their methylation."
+    meaning_low: "PMDs are hypomethylated."
+    confounders: ["age", "cell-type mix", "depth (noise)"]
+    next_steps:
+      analytical: ["Read with pmd_delta"]
+      clinical_setting: null
+    license_ids: [zhou-pmd-terms-unknown]
+    flags: []
+    headline: false
+    stability: {kind: proportion}
+    citations: ["doi:10.1038/s41588-018-0073-4"]
+    citation_checked: {by: "lab build agent (Phase 1)", date: "2026-10-15", note: "PMID 29610480: common-PMD definition and the hg38 file from the authors' annotation page (no license stated)."}
+
+  - algorithm_id: pmd-score
+    metric_id: non_pmd_meth
+    label: "CpG 5mC fraction outside common PMDs"
+    value_kind: proportion
+    tier: SPECULATIVE
+    origin_tier: NEWER
+    origin_platform: "WGBS"
+    min_depth_x: null
+    reference: {kind: none}
+    performance: null
+    performance_missing_reason: "none published for an all-CpG ONT measure"
+    meaning_high: "Well-methylated genome outside PMDs."
+    meaning_low: "Hypomethylation outside PMDs too (global, not PMD-specific)."
+    confounders: ["cell-type mix", "depth (noise)"]
+    next_steps:
+      analytical: ["Read with pmd_delta"]
+      clinical_setting: null
+    license_ids: [zhou-pmd-terms-unknown]
+    flags: []
+    headline: false
+    stability: {kind: proportion}
+    citations: ["doi:10.1038/s41588-018-0073-4"]
+    citation_checked: {by: "lab build agent (Phase 1)", date: "2026-10-15", note: "PMID 29610480: common-PMD definition."}
+
+  # -------------------------------------------------------- hypometh-reads
+  - algorithm_id: hypometh-reads
+    metric_id: hypometh_read_fraction
+    label: "Reads with < 25% methylated CpGs (among reads with >= 4 CpG calls)"
+    value_kind: proportion
+    tier: SPECULATIVE
+    origin_tier: NEWER
+    origin_platform: "WGBS (UXM fragment-level classes)"
+    min_depth_x: null
+    reference: {kind: none}
+    performance: null
+    performance_missing_reason: "none published for a genome-wide read share; the thresholds come from the UXM fragment classes"
+    meaning_high: "Many fully unmethylated molecules: more DNA from cell types unmethylated at random sites, or a global hypomethylation signal."
+    meaning_low: "Few unmethylated molecules."
+    confounders: ["CpG density of the regions reads fall in", "call confidence", "depth (noise)"]
+    next_steps:
+      analytical: ["Exploratory only", "Read with global-5mc"]
+      clinical_setting: null
+    license_ids: []
+    flags: []
+    headline: true
+    stability: {kind: proportion}
+    citations: ["doi:10.1038/s41586-022-05580-6"]
+    citation_checked: {by: "lab build agent (Phase 1)", date: "2026-10-15", note: "PMC9811898 (Loyfer 2023): 'we used k = 4 and thresholds of less than or equal to 25% methylated CpGs for U reads, and more than or equal to 75% methylated CpGs for M reads' (>= 3 CpGs for cfDNA mixtures). Only the published thresholds are reused; no UXM/wgbs_tools code."}
+
+  - algorithm_id: hypometh-reads
+    metric_id: u_x_m_counts
+    label: "U / X / M read counts (UXM thresholds)"
+    value_kind: vector
+    tier: SPECULATIVE
+    origin_tier: NEWER
+    origin_platform: "WGBS"
+    min_depth_x: null
+    reference: {kind: none}
+    performance: null
+    performance_missing_reason: "counts, not a diagnostic"
+    meaning_high: "See the class shares."
+    meaning_low: "See the class shares."
+    confounders: ["CpG density", "depth"]
+    next_steps:
+      analytical: ["Exploratory only"]
+      clinical_setting: null
+    license_ids: []
+    flags: []
+    headline: false
+    citations: ["doi:10.1038/s41586-022-05580-6"]
+    citation_checked: {by: "lab build agent (Phase 1)", date: "2026-10-15", note: "PMC9811898: U <= 25%, M >= 75%, k = 4."}

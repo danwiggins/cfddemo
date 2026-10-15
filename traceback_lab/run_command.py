@@ -570,9 +570,17 @@ def _derived_phase(
     runs = run_derived(
         store, lock, log, target, specs, items, by_id, run_id=run_id, read_summary=read_summary,
         force=args.force, timeout_s=args.timeout_s, scrubber=scrubber, progress=progress,
+        parent_upstream=_parent_intermediates(items, results),
     )
     summary["cna"] = synthetic_summary(store, runs)
     return {"results": [r for run in runs for r in run.results], "summary": summary}
+
+
+def _parent_intermediates(items: Any, results: list[StepResult]) -> dict[str, StepResult]:
+    """Ok full-input results of intermediates (D33: derived inputs reuse them)."""
+
+    names = registry.intermediate_ids([item.algorithm for item in items])
+    return {r.algorithm_id: r for r in results if r.status == "ok" and r.input_label == "full" and r.algorithm_id in names}
 
 
 def _pid() -> int:

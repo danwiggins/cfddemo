@@ -50,3 +50,11 @@ licenses:
       runs. Do not link or embed them. AGPL also triggers on network use, so
       it matters if the front end is ever hosted.
     url: "https://github.com/broadinstitute/ichorCNA"
+  zhou-pmd-terms-unknown:
+    headline: "DATA TERMS UNKNOWN: Zhou 2018 PMD annotation"
+    body: >-
+      The hg38 common-PMD file (PMD_coordinates_hg38.bed.gz) is distributed
+      by the Zhou lab with a citation request and no stated license. It is not
+      in the repo: the operator places it under ROOT/lab/assets/pmd/, and the
+      Lab pins its sha256.
+    url: "https://zwdzwd.github.io/pmd"

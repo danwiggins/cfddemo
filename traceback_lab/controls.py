@@ -86,6 +86,7 @@ def run_derived(
     timeout_s: float,
     scrubber: Scrubber,
     progress: Callable[[str], None] | None = None,
+    parent_upstream: Mapping[str, StepResult] | None = None,
 ) -> list[DerivedRun]:
     if not specs:
         return []
@@ -129,7 +130,11 @@ def run_derived(
         counting=needs_counting,
     )
     record_derived(store, parent.source_id, derived.values())
-    upstream = {"read-summary": read_summary} if read_summary is not None else {}
+    # Intermediates computed on the parent (read-summary, meth-calls) are
+    # reused by every derived input through its row mask (D28, D33).
+    upstream = dict(parent_upstream or {})
+    if read_summary is not None:
+        upstream["read-summary"] = read_summary
     runs: list[DerivedRun] = []
     for spec in specs:
         item = derived[spec.label()]

@@ -97,12 +97,16 @@ def simulate_command(args: argparse.Namespace, store: LabStore) -> tuple[int, di
             )
             scrubber = Scrubber(root=store.root)
             try:
-                summary_items = [item for item in items if item.algorithm.id == "read-summary"]
+                # Intermediates (read-summary, meth-calls) on the parent; derived
+                # inputs reuse them through their row masks (D33).
+                names = registry.intermediate_ids([item.algorithm for item in items])
+                summary_items = [item for item in items if item.algorithm.id in names]
                 summary_results = run_plan(
                     store, lock, log, parent, summary_items, by_id, run_id=run_id,
                     timeout_s=args.timeout_s, scrubber=scrubber, progress=progress,
                 )
-                read_summary = summary_results[0] if summary_results else None
+                read_summary = next((r for r in summary_results if r.algorithm_id == "read-summary"), None)
+                parent_upstream = {r.algorithm_id: r for r in summary_results if r.status == "ok"}
                 if kind == "cna":
                     specs = cna_specs(store.root, aligned.directory / "aligned.bam", tfs)
                     if isinstance(specs, str):
@@ -125,7 +129,7 @@ def simulate_command(args: argparse.Namespace, store: LabStore) -> tuple[int, di
                 runs = run_derived(
                     store, lock, log, parent, specs, items, by_id, run_id=run_id,
                     read_summary=read_summary, force=args.force, timeout_s=args.timeout_s,
-                    scrubber=scrubber, progress=progress,
+                    scrubber=scrubber, progress=progress, parent_upstream=parent_upstream,
                 )
             except KeyboardInterrupt:
                 log.append("run_end", status="interrupted", exit_code=6, step=lock.step)

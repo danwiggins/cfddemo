@@ -53,6 +53,11 @@ ALGORITHMS: tuple[str, ...] = (
     "cell_origin:CELL_ORIGIN",
     "end_motifs:END_MOTIFS",
     "delfi_ratio:DELFI_RATIO",
+    "meth_calls:METH_CALLS",
+    "global_5mc:GLOBAL_5MC",
+    "global_5hmc:GLOBAL_5HMC",
+    "pmd_score:PMD_SCORE",
+    "hypometh_reads:HYPOMETH_READS",
 )
 
 
@@ -250,6 +255,16 @@ class PlanItem:
     upstream_only: bool  # added because a selected algorithm needs it
 
 
+def intermediate_ids(registry: Sequence[Algorithm]) -> frozenset[str]:
+    """Algorithms another algorithm lists as ``upstream`` (read-summary, meth-calls).
+
+    Their full-input outputs are reused by every derived input (D33): a
+    downsample or split half reads them through its row mask.
+    """
+
+    return frozenset(name for algorithm in registry for name in algorithm.upstream)
+
+
 def plan(
     registry: Sequence[Algorithm],
     *,
@@ -315,6 +330,7 @@ __all__ = [
     "context_from_json",
     "context_to_json",
     "execution_identity",
+    "intermediate_ids",
     "load_entry",
     "load_registry",
     "registry_entries",
