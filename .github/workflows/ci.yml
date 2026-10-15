@@ -37,11 +37,36 @@ jobs:
 
       - name: Install samtools (Linux)
         if: runner.os == 'Linux'
-        run: sudo apt-get update && sudo apt-get install -y samtools
+        run: >-
+          sudo apt-get update && sudo apt-get install -y samtools
+          libbz2-dev liblzma-dev zlib1g-dev libcurl4-openssl-dev
 
-      - name: Install samtools (macOS)
+      # Traceback Lab aligns uBAMs and needs samtools >= 1.20 and minimap2 >=
+      # 2.28 (spec D9); Ubuntu 24.04 ships 1.19 / 2.27. Pinned, checksummed
+      # upstream releases go to /usr/local/bin, ahead of the apt copies.
+      - name: Install Lab aligner tools (Linux)
+        if: runner.os == 'Linux'
+        run: |
+          set -euo pipefail
+          cd "$RUNNER_TEMP"
+          curl -sSLf -o minimap2.tar.bz2 https://github.com/lh3/minimap2/releases/download/v2.28/minimap2-2.28_x64-linux.tar.bz2
+          echo "51f2cf0e486d0f9f88ace1aa58fdc56571382a676ea0889ae607301c60693377  minimap2.tar.bz2" | sha256sum -c -
+          tar -xjf minimap2.tar.bz2
+          sudo install -m 0755 minimap2-2.28_x64-linux/minimap2 /usr/local/bin/minimap2
+          curl -sSLf -o samtools.tar.bz2 https://github.com/samtools/samtools/releases/download/1.21/samtools-1.21.tar.bz2
+          echo "05724b083a6b6f0305fcae5243a056cc36cf826309c3cb9347a6b89ee3fc5ada  samtools.tar.bz2" | sha256sum -c -
+          tar -xjf samtools.tar.bz2
+          cd samtools-1.21
+          ./configure --prefix=/usr/local --without-curses > /dev/null
+          make -j"$(nproc)" > /dev/null
+          sudo make install > /dev/null
+          hash -r
+          samtools --version | head -1
+          minimap2 --version
+
+      - name: Install samtools and minimap2 (macOS)
         if: runner.os == 'macOS'
-        run: brew install samtools
+        run: brew install samtools minimap2
 
       - name: Sync locked environment
         run: uv sync --frozen

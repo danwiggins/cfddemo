@@ -94,6 +94,38 @@ class InputContext:
     extras: Mapping[str, Any] = field(default_factory=dict)
 
 
+def context_to_json(ctx: InputContext) -> dict[str, Any]:
+    return {
+        "root": str(ctx.root),
+        "source_id": ctx.source_id,
+        "input_id": ctx.input_id,
+        "reference_id": ctx.reference_id,
+        "reference_sha256": ctx.reference_sha256,
+        "input_dir": str(ctx.input_dir),
+        "eligible_reads": ctx.eligible_reads,
+        "approx_depth_x": ctx.approx_depth_x,
+        "derived": dict(ctx.derived) if ctx.derived is not None else None,
+        "example": ctx.example,
+        "extras": dict(ctx.extras),
+    }
+
+
+def context_from_json(data: Mapping[str, Any]) -> InputContext:
+    return InputContext(
+        root=Path(data["root"]),
+        source_id=data["source_id"],
+        input_id=data["input_id"],
+        reference_id=data["reference_id"],
+        reference_sha256=data["reference_sha256"],
+        input_dir=Path(data["input_dir"]),
+        eligible_reads=data.get("eligible_reads"),
+        approx_depth_x=data.get("approx_depth_x"),
+        derived=data.get("derived"),
+        example=bool(data.get("example", False)),
+        extras=data.get("extras") or {},
+    )
+
+
 @dataclass
 class AlgorithmOutput:
     """What ``run`` returns: metrics and panels for the envelope, plus artifact bytes."""
@@ -160,18 +192,33 @@ def validate_algorithm(algorithm: Any) -> Algorithm:
     return algorithm
 
 
-def load_registry(entries: Sequence[str] = ALGORITHMS) -> tuple[Algorithm, ...]:
+def load_entry(entry: str) -> Algorithm:
+    """Import one ``module:attribute`` entry and validate it."""
+
+    module_name, _, attribute = entry.partition(":")
+    if not module_name or not attribute:
+        raise ValueError(f"registry entry {entry!r} must be 'module:attribute'")
+    qualified = module_name if "." in module_name else f"traceback_lab.algorithms.{module_name}"
+    module = importlib.import_module(qualified)
+    return validate_algorithm(getattr(module, attribute))
+
+
+def registry_entries(entries: Sequence[str] | None = None) -> tuple[tuple[str, Algorithm], ...]:
+    """``(entry, algorithm)`` pairs in registry order (``ALGORITHMS`` by default)."""
+
+    chosen = ALGORITHMS if entries is None else entries
+    algorithms = load_registry(chosen)
+    return tuple(zip(chosen, algorithms))
+
+
+def load_registry(entries: Sequence[str] | None = None) -> tuple[Algorithm, ...]:
     """Import each entry and validate ids, uniqueness and upstream order."""
 
+    entries = ALGORITHMS if entries is None else entries
     loaded: list[Algorithm] = []
     seen: set[str] = set()
     for entry in entries:
-        module_name, _, attribute = entry.partition(":")
-        if not module_name or not attribute:
-            raise ValueError(f"registry entry {entry!r} must be 'module:attribute'")
-        qualified = module_name if "." in module_name else f"traceback_lab.algorithms.{module_name}"
-        module = importlib.import_module(qualified)
-        algorithm = validate_algorithm(getattr(module, attribute))
+        algorithm = load_entry(entry)
         if algorithm.id in seen:
             raise ValueError(f"duplicate algorithm id {algorithm.id!r}")
         missing = [name for name in algorithm.upstream if name not in seen]
@@ -252,8 +299,12 @@ __all__ = [
     "Requirements",
     "Skip",
     "ToolPin",
+    "context_from_json",
+    "context_to_json",
     "execution_identity",
+    "load_entry",
     "load_registry",
+    "registry_entries",
     "plan",
     "validate_algorithm",
 ]
