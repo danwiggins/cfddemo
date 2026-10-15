@@ -133,6 +133,26 @@ progress", then "New results are available. [Reload]" (it never swaps
 content under you). The page is strict: same-origin scripts only, no inline
 script or style, no outside requests.
 
+## What the page shows
+
+- **Landing (`#/`)**: the CLIA explainer (short version, "Read the full
+  explainer" expands in place, full text at `#/about/clia`), one computed
+  headline sentence, the **defended results** (headline metrics that are
+  usable at half depth, stable across split halves, PROVEN or NEWER,
+  citation-checked and, for copy-number, whose synthetic spike at TF 0.10 was
+  recovered), the **depth → utility curve** (one row per algorithm; cells at
+  10/25/50/100% of the reads; literature minimums drawn as "literature, not
+  measured"), the **positive controls** (SYNTHETIC, REPEATABILITY,
+  KNOWN-STATUS), the samples table and the license callouts.
+- **Findings**: only above/below-reference results are cards (sorted by tier,
+  then severity); not-interpretable, no-reference and in-range metrics are
+  counted, collapsible rows. Before the kit cohort exists (n < 10) most
+  metrics read "no reference".
+- **Trust/QC**: depth against each algorithm's minimum, the run table with
+  scrubbed stderr for failures, provisional QC bands, library health.
+- **Stability**: one small multiple per metric: deviation from full depth at
+  each fraction, the stability band, and split halves A/B at 50%.
+
 ## Positive controls
 
 `traceback lab simulate cna <id12|latest>` builds a synthetic copy-number

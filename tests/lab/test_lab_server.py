@@ -242,20 +242,34 @@ def _chrome() -> str | None:
     return None
 
 
+def headless_dom(argv: list[str], *, ok, attempts: int = 4, timeout: int = 60) -> str:
+    """Run headless Chrome until ``ok(dom)``; a hung Chrome (seen on loaded macOS
+    runners) is killed and retried with a fresh profile instead of failing the test."""
+
+    dom = ""
+    for attempt in range(attempts):
+        args = [a.replace("{attempt}", str(attempt)) for a in argv]
+        try:
+            dom = subprocess.run(args, capture_output=True, text=True, timeout=timeout).stdout
+        except subprocess.TimeoutExpired as expired:
+            dom = expired.stdout.decode() if isinstance(expired.stdout, bytes) else (expired.stdout or "")
+        if ok(dom):
+            return dom
+    return dom
+
+
 @pytest.mark.skipif(_chrome() is None, reason="no Chrome/Chromium for the headless CSP check")
 def test_headless_page_renders_a_chart_with_zero_csp_violations(server, tmp_path) -> None:
+    id12 = api_module.LabApi(server.app.store).samples()["samples"][0]["id12"]
+    links = iter(server.issue_link() + f"&route=/sample/{id12}/trust-qc" for _ in range(4))
     dom = ""
-    for attempt in range(3):  # a loaded CI host can outrun the virtual-time budget once
-        link = server.issue_link()
-        completed = subprocess.run(
-            [
-                _chrome(), "--headless=new", "--disable-gpu", "--no-first-run", "--no-default-browser-check",
-                f"--user-data-dir={tmp_path / f'profile-{attempt}'}", "--virtual-time-budget=15000",
-                "--window-size=1280,800", "--dump-dom", link,
-            ],
-            capture_output=True, text=True, timeout=120,
+    for attempt in range(4):  # a loaded CI host can outrun the budget or hang Chrome
+        dom = headless_dom(
+            [_chrome(), "--headless=new", "--disable-gpu", "--no-first-run", "--no-default-browser-check",
+             f"--user-data-dir={tmp_path / f'profile-{attempt}'}", "--virtual-time-budget=15000",
+             "--window-size=1280,800", "--dump-dom", next(links)],
+            ok=lambda d: 'data-rendered="1"' in d, attempts=1,
         )
-        dom = completed.stdout
         if 'data-rendered="1"' in dom:
             break
     assert 'data-ready="1"' in dom, dom[:500]

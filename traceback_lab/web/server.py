@@ -66,6 +66,20 @@ _ROUTES = (
 MAX_BODY = 4096
 
 
+COPY = Path(__file__).resolve().parent / "copy"
+
+
+def clia_copy() -> dict[str, str]:
+    """One source (``copy/clia.md``) for the landing panel and ``#/about/clia``."""
+
+    text = (COPY / "clia.md").read_text(encoding="utf-8")
+    title = text.splitlines()[0].lstrip("# ").strip()
+    reviewed = re.search(r"^Last reviewed: (.+)$", text, flags=re.MULTILINE)
+    short = text.split("## Short", 1)[1].split("## Full", 1)[0].strip()
+    full = text.split("## Full", 1)[1].strip()
+    return {"title": title, "last_reviewed": reviewed.group(1) if reviewed else "", "short": short, "full": full}
+
+
 def _assets() -> dict[str, tuple[str, bytes]]:
     assets: dict[str, tuple[str, bytes]] = {}
     for path in sorted(STATIC.rglob("*")):
@@ -77,6 +91,7 @@ def _assets() -> dict[str, tuple[str, bytes]]:
             kind += "; charset=utf-8"
         assets[f"/assets/{relative}"] = (kind, path.read_bytes())
     assets["/assets/base.css"] = ("text/css; charset=utf-8", BASE_CSS.read_bytes())
+    assets["/assets/copy/clia.json"] = ("application/json; charset=utf-8", json.dumps(clia_copy()).encode("utf-8"))
     assets["/"] = ("text/html; charset=utf-8", (STATIC / "index.html").read_bytes())
     return assets
 

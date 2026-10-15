@@ -250,6 +250,9 @@ class LabApi:
         order = [a.id for a in _registry()]
         algorithms.sort(key=lambda row: order.index(row["algorithm_id"]) if row["algorithm_id"] in order else 99)
         panels = views.stability_panels(sample, library)
+        curve = views.depth_curve(sample, library)
+        synthetic = views.synthetic(sample)
+        defended_block, headline_block = _defended(algorithms, curve, panels, synthetic, library, order, depth_x)
         return {
             "found": True,
             "id12": self._id12s()[source_id],
@@ -262,10 +265,12 @@ class LabApi:
             "cohort_version": None,
             "cohort_n": 0,
             "algorithms": algorithms,
-            "curve": views.depth_curve(sample, library),
+            "curve": curve,
             "stability": panels,
             "repeatability": views.repeatability(panels),
-            "synthetic": views.synthetic(sample),
+            "synthetic": synthetic,
+            "defended": defended_block,
+            "headline": headline_block,
             "derived": [{"label": view.label, "transform": view.transform} for view in sample.derived],
             "licenses": [{"license_id": key, **library.licenses[key]} for key in used_licenses],
             "library_health": {
@@ -297,6 +302,64 @@ class LabApi:
             return None
         parts = [view.input_id, algorithm_id, envelope.provenance.parameters_sha256, "attempts", attempt.name]
         return _read_contained(self.store.results_dir, parts, panel.data_ref)
+
+
+def _defended(
+    algorithms: list[dict[str, Any]],
+    curve: dict[str, Any],
+    panels: list[dict[str, Any]],
+    synthetic: list[dict[str, Any]],
+    library: Library,
+    order: list[str],
+    depth_x: float | None,
+) -> tuple[dict[str, Any], dict[str, Any]]:
+    from ..defended import Candidate, defended, headline
+
+    rows = {row["algorithm_id"]: row for row in curve["rows"]}
+    by_metric = {(panel["algorithm_id"], panel["metric_id"]): panel for panel in panels}
+    spike = next((row for row in synthetic if abs(row["tf_expected"] - 0.10) < 1e-9), None)
+    candidates = []
+    usable = total = failed = 0
+    min_depths: dict[str, float | None] = {}
+    for algorithm in algorithms:
+        if algorithm["hidden"]:
+            continue
+        total += 1
+        failed += int(algorithm["status"] == "failed")
+        entry = library.headline(algorithm["algorithm_id"])
+        min_depths[algorithm["algorithm_id"]] = entry.get("min_depth_x") if entry else None
+        row = rows.get(algorithm["algorithm_id"])
+        if row and row["full_state"] == "ok_usable":
+            usable += 1
+        if entry is None:
+            continue
+        metric = next((m for m in algorithm["metrics"] if m["metric_id"] == entry.metric_id), None)
+        half = next((c for c in (row or {}).get("cells", []) if c["fraction"] == 0.5), None)
+        panel = by_metric.get((algorithm["algorithm_id"], entry.metric_id))
+        split = panel.get("split") if panel else None
+        candidates.append(
+            Candidate(
+                algorithm_id=algorithm["algorithm_id"],
+                label=entry["label"],
+                value=metric["value"] if metric else None,
+                unit=metric["unit"] if metric else None,
+                tier=entry.tier,
+                status=algorithm["status"],
+                state=metric["state"] if metric else None,
+                usable_at_half=bool(half and half.get("state") == "ok_usable"),
+                split_stable=split.get("stable") if split else None,
+                split_relative_diff=split.get("relative_abs_diff") if split else None,
+                citation_verified=entry.citation_verified,
+                control_recovered=(spike["recovered"] if spike else False) if algorithm["algorithm_id"] == "copy-number" else None,
+                order=order.index(algorithm["algorithm_id"]) if algorithm["algorithm_id"] in order else 99,
+                license_ids=list(entry.get("license_ids") or []),
+            )
+        )
+    block = defended(candidates)
+    sentence = headline(
+        depth_x, usable, total, len(block["rows"]), min_depths, downsampled=curve["downsampled"], failed=failed
+    )
+    return block, sentence
 
 
 def _registry() -> Iterable[Any]:

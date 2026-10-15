@@ -51,12 +51,13 @@ class _Strict(BaseModel):
 class Provenance(_Strict):
     """The provenance stamp: who computed what from which input, when."""
 
-    tool: str = Field(min_length=1, max_length=120)
-    tool_version: str = Field(min_length=1, max_length=40)
+    # Identifiers only: a provenance field can never carry a path (D34).
+    tool: str = Field(pattern=r"^[A-Za-z0-9_.:-]{1,120}$")
+    tool_version: str = Field(pattern=r"^[A-Za-z0-9_.+:-]{1,40}$")
     parameters_sha256: Sha256
     source_id: Sha256
     input_id: Sha256
-    reference_id: str = Field(min_length=1, max_length=128)
+    reference_id: str = Field(pattern=r"^[A-Za-z0-9][A-Za-z0-9_.:-]{0,127}$")
     timestamp_utc: str
 
     @field_validator("timestamp_utc")
