@@ -14,9 +14,10 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
-from traceback_runner.references import list_reference_ids, register_reference
+from traceback_runner.references import list_reference_ids, load_reference, register_reference
 
 from .ingest import EXAMPLE_REFERENCE_ID
+from .problems import LabProblem
 from .synthetic import write_chunks, write_reference
 
 SEED = 20261015
@@ -61,7 +62,31 @@ def prepare(root: Path, *, reads_per_chunk: int = READS_PER_CHUNK) -> tuple[Path
         marker.write_text(json.dumps(expected, sort_keys=True))
     if EXAMPLE_REFERENCE_ID not in list_reference_ids(root):
         register_reference(root, fasta, EXAMPLE_REFERENCE_ID)
+    registered = load_reference(root, EXAMPLE_REFERENCE_ID).registered.asset_sha256
+    if registered != _sha256(fasta):
+        raise LabProblem(
+            "TBX-LAB-004",
+            cause=f"another reference is registered as {EXAMPLE_REFERENCE_ID!r} under this ROOT",
+            fix="Run the example with a different --root; never register a real reference as lab-example",
+            data={"registered": [EXAMPLE_REFERENCE_ID]},
+        )
     return chunks, EXAMPLE_REFERENCE_ID
 
 
-__all__ = ["CHUNKS", "READS_PER_CHUNK", "SEED", "example_dir", "prepare"]
+def prepared(root: Path) -> bool:
+    """True when the example chunks already exist (a dry run never writes)."""
+
+    return (example_dir(root) / "example.json").is_file() and len(list((example_dir(root) / "chunks").glob("*.bam"))) == CHUNKS
+
+
+def _sha256(path: Path) -> str:
+    import hashlib
+
+    digest = hashlib.sha256()
+    with path.open("rb") as stream:
+        while block := stream.read(1 << 20):
+            digest.update(block)
+    return digest.hexdigest()
+
+
+__all__ = ["CHUNKS", "READS_PER_CHUNK", "SEED", "example_dir", "prepare", "prepared"]

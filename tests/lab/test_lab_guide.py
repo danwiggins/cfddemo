@@ -10,10 +10,9 @@ from pathlib import Path
 
 import pytest
 
-from tests.lab.test_landing import _body, _dom, needs_chrome
+from tests.lab.test_landing import _body, needs_chrome
 from traceback_lab.doctor import lab_checks
 from traceback_lab.store import LabStore
-from traceback_lab.web.server import RunningLabServer
 from traceback_runner import cli as signed_cli
 
 REPO = Path(__file__).resolve().parents[2]
@@ -115,8 +114,35 @@ def test_no_input_prints_the_three_line_quickstart(tmp_path, capsys) -> None:
 
 @needs_chrome
 def test_serve_step_reaches_the_landing_with_curve_repeatability_and_example_pill(journey_root, tmp_path) -> None:
-    with RunningLabServer(LabStore(journey_root["root"])) as server:
-        dom = _dom(server, tmp_path)
+    """The guide's own serve command, launched as a process (BROWSER=true keeps --open headless)."""
+
+    import os
+    import subprocess
+    import sys
+
+    from tests.lab.test_lab_server import _chrome
+
+    argv = next(a for a in journey() if a[-2:] == ["serve", "--open"])
+    env = {**os.environ, "TRACEBACK_ROOT": str(journey_root["root"]), "BROWSER": "true", "PYTHONPATH": str(REPO)}
+    process = subprocess.Popen(
+        [sys.executable, "-m", "traceback_runner", *argv[3:]],
+        cwd=REPO, env=env, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, stdin=subprocess.DEVNULL, text=True,
+    )
+    try:
+        lines = [process.stdout.readline().strip() for _ in range(2)]
+        assert lines[0] == f"ROOT  {journey_root['root']}"
+        link = lines[1]
+        assert re.match(r"^http://127\.0\.0\.1:\d+/#bootstrap=[A-Za-z0-9_-]{43,}$", link), lines
+        completed = subprocess.run(
+            [_chrome(), "--headless=new", "--disable-gpu", "--hide-scrollbars", "--no-first-run",
+             f"--user-data-dir={tmp_path / 'profile'}", "--virtual-time-budget=15000", "--window-size=1280,800",
+             "--dump-dom", link],
+            capture_output=True, text=True, timeout=120,
+        )
+        dom = completed.stdout
+    finally:
+        process.terminate()
+        process.wait(timeout=20)
     body = _body(dom)
     assert body["csp-violations"] == "0"
     assert "Depth → utility" in dom and 'class="curve-grid"' in dom
@@ -141,3 +167,46 @@ def test_doctor_blocks_only_on_the_example_journey(tmp_path, monkeypatch, capsys
     minimap2 = next(check for check in payload["data"]["checks"] if check["name"] == "lab_minimap2")
     assert minimap2["status"] == "blocked" and minimap2["fix"] == "brew install minimap2"
     assert payload["data"]["setup_steps"][0] == "brew install minimap2"
+
+
+def test_example_dry_run_writes_nothing(tmp_path, capsys) -> None:
+    root = tmp_path / "fresh"
+    code = signed_cli.main(["lab", "run", "--example", "--dry-run", "--root", str(root), "--json"])
+    assert code == 0 and json.loads(capsys.readouterr().out)["data"]["example"] is True
+    assert not root.exists()
+
+
+def test_a_foreign_lab_example_reference_is_refused(tmp_path, capsys, synthetic_world) -> None:
+    from traceback_runner.references import register_reference
+
+    root = tmp_path / "root"
+    register_reference(root, synthetic_world["fasta"], "lab-example")
+    code = signed_cli.main(["lab", "run", "--example", "--root", str(root), "--json"])
+    payload = json.loads(capsys.readouterr().out)
+    assert code == 3 and payload["data"]["code"] == "TBX-LAB-004"
+
+
+def test_doctor_json_carries_no_host_path_beyond_root(tmp_path, capsys) -> None:
+    root = tmp_path / "r"
+    signed_cli.main(["lab", "doctor", "--root", str(root), "--json"])
+    payload = json.loads(capsys.readouterr().out)
+    data = dict(payload["data"])
+    assert data.pop("root") == str(root)
+    assert str(tmp_path) not in json.dumps(data)
+
+
+def test_doctor_blocks_an_unwritable_root(tmp_path, capsys) -> None:
+    import os
+
+    if os.geteuid() == 0:
+        pytest.skip("root writes everywhere")
+    locked = tmp_path / "locked"
+    locked.mkdir()
+    locked.chmod(0o500)
+    try:
+        code = signed_cli.main(["lab", "doctor", "--root", str(locked / "root"), "--json"])
+        payload = json.loads(capsys.readouterr().out)
+    finally:
+        locked.chmod(0o700)
+    assert code == 3
+    assert next(c for c in payload["data"]["checks"] if c["name"] == "root")["status"] == "blocked"

@@ -36,6 +36,7 @@ from .ingest import (
     aligner_argv_identity,
     cached_sha256,
     GIB,
+    EXAMPLE_REFERENCE_ID,
 )
 from .identity import aligned_input_id, prealigned_input_id
 from .problems import EXIT_OK, EXIT_PARTIAL, EXIT_USAGE, LabProblem, docs_anchor
@@ -304,12 +305,20 @@ def run_command(args: argparse.Namespace, store: LabStore) -> tuple[int, dict[st
                 fix="Run `traceback lab run --example` on its own",
                 data={"argument": 1, "kind": "an input given with --example"},
             )
-        from .example import prepare
+        from .example import example_dir, prepared
 
         store.check_version()
-        chunks, reference_id = prepare(store.root)
-        args.inputs = [str(chunks)]
-        args.reference_id = reference_id
+        if args.dry_run and not prepared(store.root):
+            payload = _local_envelope(
+                _result("lab run", "ok", "dry run: nothing written", data={
+                    "root": str(store.root), "dry_run": True, "example": True,
+                    "alignment": "example not generated yet: generated and aligned on first run (~200k reads, under a minute)",
+                })
+            )
+            return EXIT_OK, _with_human(payload, [f"ROOT      {store.root}", "EXAMPLE   not generated yet: generated and aligned on first run (~200k reads, under a minute)"], replace_data=True)
+        # Generation and registration happen under the writer lock (below).
+        args.inputs = [str(example_dir(store.root) / "chunks")]
+        args.reference_id = EXAMPLE_REFERENCE_ID
     if not args.inputs:
         return _usage_quickstart(store)
     from .simulate_command import parse_fractions
@@ -346,6 +355,11 @@ def run_command(args: argparse.Namespace, store: LabStore) -> tuple[int, dict[st
                     progress(f"ingest                   stored sample {id12_for(store, source_id)}")
                 else:
                     log.append("step_start", step="ingest")
+                    if args.example:
+                        from .example import prepare
+
+                        progress(f"{'example':<24} generating the synthetic reference and chunks (once)")
+                        prepare(store.root)
                     paths = collect_paths(args.inputs)
                     scrubber = Scrubber(root=store.root, chunk_stems=[p.name[:-4] for p in paths])
                     chunkset = inspect_chunks(
