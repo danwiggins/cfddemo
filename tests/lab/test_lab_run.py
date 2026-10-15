@@ -470,3 +470,79 @@ def test_sigterm_is_an_interrupt_too(lab_world, shared_mmi, tmp_path) -> None:
     out, _ = process.communicate(timeout=60)
     assert process.returncode == 6
     assert json.loads(out)["data"]["code"] == "TBX-LAB-015"
+
+
+def test_index_from_another_reference_is_refused_before_publish(lab_world, capsys, monkeypatch, tmp_path) -> None:
+    _registry(monkeypatch)
+    from traceback_lab.synthetic import write_reference
+
+    other = write_reference(tmp_path / "other.fa", seed=3, length=30_000, contigs=("chr1", "chr2", "chrZ"))
+    mmi = tmp_path / "other.mmi"
+    subprocess.run([MINIMAP2, "-x", "map-ont", "-d", str(mmi), str(other.fasta)], check=True, capture_output=True)
+    root = lab_world["root"]
+    code, payload = _json(capsys, "run", str(lab_world["chunks"]), "--root", str(root), "--mmi", str(mmi))
+    assert code == 3 and payload["data"]["code"] == "TBX-LAB-009"
+    assert not list(LabStore(root).inputs_dir.glob("*/manifest.json"))
+    assert _no_staging(root)
+
+
+def test_chunk_changed_during_the_run_is_refused(lab_world, capsys, monkeypatch, shared_mmi) -> None:
+    _registry(monkeypatch)
+    from traceback_lab import ingest
+
+    original = ingest.run_pipeline
+    victim = lab_world["chunks"] / "SYNTH0001_pass_synthetic_2.bam"
+
+    def touching(*args, **kwargs):
+        os.utime(victim, ns=(1, 1))
+        return original(*args, **kwargs)
+
+    monkeypatch.setattr(ingest, "run_pipeline", touching)
+    root = lab_world["root"]
+    code, payload = _json(capsys, "run", str(lab_world["chunks"]), "--root", str(root), "--mmi", str(shared_mmi))
+    assert code == 3 and payload["data"]["code"] == "TBX-LAB-005"
+    assert payload["data"]["kind"] == "changed during the run"
+    assert not list(LabStore(root).inputs_dir.glob("*/manifest.json"))
+
+
+def test_existing_input_reruns_even_when_the_disk_is_now_short(lab_world, capsys, monkeypatch, shared_mmi) -> None:
+    _registry(monkeypatch)
+    from traceback_lab import ingest
+
+    argv = ("run", str(lab_world["chunks"]), "--root", str(lab_world["root"]), "--mmi", str(shared_mmi))
+    assert _json(capsys, *argv)[0] == 0
+
+    class Usage:
+        free = 1024
+
+    monkeypatch.setattr(ingest.shutil, "disk_usage", lambda path: Usage)
+    assert _json(capsys, *argv)[0] == 0
+
+
+def test_enospc_while_copying_a_prealigned_bam_is_tbx_lab_011(lab_world, capsys, monkeypatch, shared_mmi, tmp_path) -> None:
+    _registry(monkeypatch)
+    import errno
+
+    from traceback_lab import ingest
+    from traceback_runner.references import register_reference
+
+    code, first = _json(capsys, "run", str(lab_world["chunks"]), "--root", str(lab_world["root"]), "--mmi", str(shared_mmi))
+    copy = tmp_path / "aligned_copy.bam"
+    shutil.copyfile(lab_world["root"] / "lab" / "inputs" / first["data"]["sample"]["input_id"] / "aligned.bam", copy)
+    other = tmp_path / "root2"
+    register_reference(other, lab_world["fasta"], "synth")
+
+    def full(*args, **kwargs):
+        raise OSError(errno.ENOSPC, "No space left on device")
+
+    monkeypatch.setattr(ingest.shutil, "copyfile", full)
+    code, payload = _json(capsys, "run", str(copy), "--root", str(other))
+    assert code == 3 and payload["data"]["code"] == "TBX-LAB-011"
+    assert _no_staging(other)
+
+
+@pytest.mark.parametrize("flag", [["--sort-mem", "/tmp/DonorName"], ["--threads", "0"]])
+def test_alignment_flags_are_validated(lab_world, capsys, flag) -> None:
+    code, payload = _json(capsys, "run", str(lab_world["chunks"]), "--root", str(lab_world["root"]), *flag)
+    assert code == 2 and payload["status"] == "usage"
+    assert not (lab_world["root"] / "lab").exists()

@@ -202,3 +202,18 @@ def test_aligner_identity_argv_has_no_paths(lab_world) -> None:
     assert "minimap2 -ax map-ont -y -R <@RG>" in argv
     multi = ingest.aligner_argv_identity(["@RG\tID:x", "@RG\tID:y"])
     assert any("addreplacerg" in part for part in multi)
+
+
+def test_one_chunk_declaring_two_models_is_refused(lab_world) -> None:
+    store = LabStore(lab_world["root"])
+    store.ensure()
+    header = {
+        "HD": {"VN": "1.6", "SO": "unknown"},
+        "RG": [rg_line(run="a", model="model-a@v1"), rg_line(run="b", model="model-b@v1")],
+    }
+    path = lab_world["tmp"] / "two_0.bam"
+    with pysam.AlignmentFile(str(path), "wb", header=header):
+        pass
+    problem = _problem(ingest.inspect_chunks, ingest.collect_paths([str(path)]), store)
+    assert problem.code == "TBX-LAB-008"
+    assert set(problem.data["models"]) == {"model-a@v1", "model-b@v1"}

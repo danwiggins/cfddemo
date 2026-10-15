@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import argparse
+import errno
 import signal
 import sys
 import time
@@ -33,9 +34,10 @@ from .ingest import (
     source_record,
     write_source,
     aligner_argv_identity,
+    cached_sha256,
     GIB,
 )
-from .identity import aligned_input_id
+from .identity import aligned_input_id, prealigned_input_id
 from .problems import EXIT_OK, EXIT_PARTIAL, EXIT_USAGE, LabProblem, docs_anchor
 from .runner import DEFAULT_TIMEOUT_S, RunTarget, StepResult, run_plan
 from .scrub import Scrubber
@@ -63,13 +65,28 @@ def add_run_parser(commands: Any, common: Callable[[argparse.ArgumentParser], No
     run.add_argument("--skip-bad-chunks", action="store_true", help="exclude truncated chunks (provisional)")
     run.add_argument("--force", action="store_true", help="recompute every result")
     run.add_argument("--timeout-s", type=float, default=DEFAULT_TIMEOUT_S, metavar="S")
-    run.add_argument("--threads", type=int, metavar="N", help="alignment threads (default min(8, cores-2))")
-    run.add_argument("--sort-mem", default="1G", metavar="MEM", help="samtools sort memory per thread")
+    run.add_argument("--threads", type=_threads, metavar="N", help="alignment threads (default min(8, cores-2))")
+    run.add_argument("--sort-mem", type=_sort_mem, default="1G", metavar="MEM", help="samtools sort memory per thread (e.g. 768M, 2G)")
     run.add_argument("--mmi", type=Path, metavar="PATH", help="reuse an existing minimap2 index")
     run.add_argument("--dry-run", action="store_true", help="print the plan; write nothing, take no lock")
     run.add_argument("--verbose", action="store_true", help="stream tool stderr live (never stored)")
     common(run)
     run.set_defaults(handler=run_command)
+
+
+def _sort_mem(value: str) -> str:
+    import re
+
+    if not re.fullmatch(r"[1-9][0-9]{0,5}[KMG]?", value):
+        raise argparse.ArgumentTypeError("--sort-mem is a size such as 768M or 2G")
+    return value
+
+
+def _threads(value: str) -> int:
+    number = int(value)
+    if not 1 <= number <= 256:
+        raise argparse.ArgumentTypeError("--threads is 1-256")
+    return number
 
 
 def _progress(as_json: bool) -> Callable[[str], None]:
@@ -320,19 +337,36 @@ def run_command(args: argparse.Namespace, store: LabStore) -> tuple[int, dict[st
                     lock.set_step("align")
                     log.append("step_start", step="align")
                     if chunkset.aligned:
-                        budget = disk_budget(store, chunkset, mmi_needed=False, fasta_bytes=0)
-                        require_budget(budget, "ingest")
+                        prealigned_id = prealigned_input_id(
+                            source_id=chunkset.source_id, reference_sha256=reference.sha256
+                        )
+                        if input_manifest(store, prealigned_id) is None:
+                            budget = disk_budget(store, chunkset, mmi_needed=False, fasta_bytes=0)
+                            require_budget(budget, "ingest")
                         aligned = ingest_prealigned(store, chunkset, reference, progress=progress)
                     else:
                         samtools, minimap2 = require_aligner_tools()
-                        mmi_needed = args.mmi is None and not mmi_path(store, reference).is_file()
-                        budget = disk_budget(
-                            store,
-                            chunkset,
-                            mmi_needed=mmi_needed,
-                            fasta_bytes=reference.loaded.source.fasta_size_bytes,
-                        )
-                        require_budget(budget, "align")
+                        # Reuse needs no disk: decide reuse before the budget.
+                        known_mmi = args.mmi if args.mmi is not None else mmi_path(store, reference)
+                        reusable = False
+                        if known_mmi.is_file():
+                            candidate = aligned_input_id(
+                                source_id=chunkset.source_id,
+                                reference_sha256=reference.sha256,
+                                mmi_sha256=cached_sha256(store, known_mmi),
+                                minimap2_version=str(minimap2.version),
+                                samtools_version=str(samtools.version),
+                                aligner_argv=aligner_argv_identity(chunkset.rg_lines),
+                            )
+                            reusable = input_manifest(store, candidate) is not None
+                        if not reusable:
+                            budget = disk_budget(
+                                store,
+                                chunkset,
+                                mmi_needed=not known_mmi.is_file(),
+                                fasta_bytes=reference.loaded.source.fasta_size_bytes,
+                            )
+                            require_budget(budget, "align")
                         change = _aligner_change(
                             store, chunkset.source_id, {"samtools": samtools.version, "minimap2": minimap2.version}
                         )
@@ -346,29 +380,20 @@ def run_command(args: argparse.Namespace, store: LabStore) -> tuple[int, dict[st
                             echo=_echo(args.verbose),
                             progress=progress,
                         )
-                        if change is not None:
-                            input_id = aligned_input_id(
-                                source_id=chunkset.source_id,
-                                reference_sha256=reference.sha256,
-                                mmi_sha256=mmi_sha,
-                                minimap2_version=str(minimap2.version),
-                                samtools_version=str(samtools.version),
-                                aligner_argv=aligner_argv_identity(chunkset.rg_lines),
+                        if change is not None and not reusable:
+                            low, high = estimate_align_minutes(chunkset.total_bytes)
+                            warning = {
+                                "code": "TBX-LAB-019",
+                                "old": change["old"],
+                                "new": change["new"],
+                                "estimate_min": [round(low, 1), round(high, 1)],
+                                "docs": docs_anchor("TBX-LAB-019"),
+                            }
+                            warnings.append(warning)
+                            progress(
+                                f"WARN TBX-LAB-019 aligner identity changed {change['old']} -> {change['new']}; "
+                                f"realigning (~{low:.0f}-{high:.0f} min)"
                             )
-                            if input_manifest(store, input_id) is None:
-                                low, high = estimate_align_minutes(chunkset.total_bytes)
-                                warning = {
-                                    "code": "TBX-LAB-019",
-                                    "old": change["old"],
-                                    "new": change["new"],
-                                    "estimate_min": [round(low, 1), round(high, 1)],
-                                    "docs": docs_anchor("TBX-LAB-019"),
-                                }
-                                warnings.append(warning)
-                                progress(
-                                    f"WARN TBX-LAB-019 aligner identity changed {change['old']} -> {change['new']}; "
-                                    f"realigning (~{low:.0f}-{high:.0f} min)"
-                                )
                         aligned = align(
                             store,
                             chunkset,
@@ -433,6 +458,17 @@ def run_command(args: argparse.Namespace, store: LabStore) -> tuple[int, dict[st
             except LabProblem as problem:
                 log.append("run_end", status="blocked", exit_code=problem.exit_code, code=problem.code, step=lock.step)
                 raise
+            except OSError as exc:
+                if exc.errno != errno.ENOSPC:
+                    log.append("run_end", status="internal_error", exit_code=7, error=type(exc).__name__, step=lock.step)
+                    raise
+                log.append("run_end", status="blocked", exit_code=3, code="TBX-LAB-011", step=lock.step)
+                raise LabProblem(
+                    "TBX-LAB-011",
+                    cause=f"the volume filled up during {lock.step}; staging removed",
+                    fix="Free space, or use --root on a larger volume; then rerun",
+                    data={"step": lock.step, "volume": "ROOT"},
+                ) from exc
             except Exception as exc:
                 log.append("run_end", status="internal_error", exit_code=7, error=type(exc).__name__, step=lock.step)
                 raise

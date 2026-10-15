@@ -138,6 +138,7 @@ class Chunk:
     name: str
     index: int | None
     size: int
+    mtime_ns: int = 0
     sha256: str = ""
     records: int = 0
     rg_lines: tuple[str, ...] = ()
@@ -253,7 +254,13 @@ def inspect_chunks(
     bad: list[Chunk] = []
     for path in ordered:
         info = os.stat(path)
-        chunk = Chunk(path=path, name=path.name, index=chunk_index(path.name), size=info.st_size)
+        chunk = Chunk(
+            path=path,
+            name=path.name,
+            index=chunk_index(path.name),
+            size=info.st_size,
+            mtime_ns=info.st_mtime_ns,
+        )
         (chunks if _quickcheck(path) else bad).append(chunk)
     if bad and not skip_bad_chunks:
         indexes = [chunk.index for chunk in bad]
@@ -301,6 +308,28 @@ def inspect_chunks(
     return ChunkSet(chunks=chunks, excluded=bad)
 
 
+def require_unchanged(chunkset: ChunkSet) -> None:
+    """Refuse when a chunk changed after it was hashed (size or mtime moved).
+
+    The hash and the alignment read the same path at different times; this
+    binds the published identity to the bytes the pipeline read, as far as
+    the filesystem's metadata can tell.
+    """
+
+    for chunk in chunkset.chunks:
+        try:
+            info = os.stat(chunk.path)
+        except OSError as exc:
+            raise _refuse_path(0, "gone during the run", chunk.name) from exc
+        if (info.st_size, info.st_mtime_ns) != (chunk.size, chunk.mtime_ns):
+            raise LabProblem(
+                "TBX-LAB-005",
+                cause=f"chunk {chunk.index} changed while the run was reading it",
+                fix="Rerun once the files are no longer being written or replaced",
+                data={"argument": 0, "kind": "changed during the run", "chunk_index": chunk.index},
+            )
+
+
 def _refuse_duplicates(chunks: Sequence[Chunk]) -> None:
     by_hash: dict[str, Chunk] = {}
     by_index: dict[int, Chunk] = {}
@@ -326,6 +355,15 @@ def _refuse_duplicates(chunks: Sequence[Chunk]) -> None:
 
 
 def _refuse_mixed_models(chunks: Sequence[Chunk]) -> None:
+    for chunk in chunks:
+        if chunk.basecall_model and "|" in chunk.basecall_model:
+            raise LabProblem(
+                "TBX-LAB-008",
+                cause=f"chunk {chunk.index} declares several @RG basecall models: "
+                + chunk.basecall_model.replace("|", ", "),
+                fix="Run each model's chunks as a separate sample",
+                data={"models": {model: 1 for model in chunk.basecall_model.split("|")}},
+            )
     counts: dict[str, int] = {}
     for chunk in chunks:
         key = chunk.basecall_model or "(none declared)"
@@ -736,6 +774,10 @@ def align(
         metrics["peak_disk_bytes"] = result.peak_disk_bytes
         metrics["stage_rss_bytes"] = {stage.name: stage.peak_rss_bytes for stage in result.stages}
         bam = staging / "aligned.bam"
+        require_unchanged(chunkset)
+        staged = Chunk(path=bam, name=bam.name, index=None, size=0)
+        _read_header(staged)
+        check_sq(staged, reference)  # e.g. --mmi built from another reference
         aligned_count = count_records(bam, "-F", "0x900")
         if aligned_count != chunkset.total_records:
             raise LabProblem(
@@ -957,6 +999,7 @@ __all__ = [
     "ingest_prealigned",
     "input_manifest",
     "inspect_chunks",
+    "require_unchanged",
     "is_sample_reference",
     "mmi_path",
     "require_budget",
