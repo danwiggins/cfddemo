@@ -1,0 +1,452 @@
+# Traceback Lab interpretation library (D3, D7, D8, D27, D32).
+# Read-time only: nothing here enters a result or an execution identity, so
+# editing a footnote never re-keys a result.  One entry per
+# (algorithm_id, metric_id).  Exactly one `headline: true` per algorithm.
+#
+# tier is judged AS RUN (ONT, kit depth); origin_tier/origin_platform carry the
+# original evidence (D4).  citation_checked records who confirmed that every
+# DOI resolves and every displayed number matches the source (D27); an entry
+# without it renders an "UNVERIFIED citation" badge.
+version: 0.1.0
+hidden_algorithms: [read-summary]
+entries:
+  # ---------------------------------------------------------------- bam-qc
+  - algorithm_id: bam-qc
+    metric_id: total_reads
+    label: "Primary reads"
+    value_kind: count
+    tier: PROVEN
+    origin_tier: PROVEN
+    origin_platform: "any"
+    min_depth_x: null
+    reference: {kind: none}
+    performance: null
+    performance_missing_reason: "QC measure, not a diagnostic"
+    meaning_high: "More sequenced molecules: more depth for every other algorithm."
+    meaning_low: "Few molecules: most algorithms will be skipped or not interpretable."
+    confounders: ["flow-cell yield", "input cfDNA mass"]
+    next_steps:
+      analytical: ["Check the depth curve for what this read count supports"]
+      clinical_setting: null
+    license_ids: []
+    flags: []
+    headline: false
+    stability: {kind: scales_with_depth, tolerance: 0.10}
+    citations: []
+    citation_checked: {by: "lab build agent", date: "2026-10-15", note: "No citation displayed; QC count."}
+
+  - algorithm_id: bam-qc
+    metric_id: mapped_fraction
+    label: "Mapped share of primary reads"
+    value_kind: proportion
+    tier: PROVEN
+    origin_tier: PROVEN
+    origin_platform: "any"
+    min_depth_x: null
+    reference: {kind: none}
+    qc_band: {direction: higher_is_better, pass: 0.90, warn: 0.75}
+    performance: null
+    performance_missing_reason: "QC measure, not a diagnostic; bands are provisional team defaults"
+    meaning_high: "Reads are human DNA that aligns cleanly."
+    meaning_low: "Contamination, adapter dimers, very short inserts or a reference mismatch."
+    confounders: ["bacterial or viral DNA", "adapter dimers", "wrong reference"]
+    next_steps:
+      analytical: ["Inspect unmapped reads (length, adapter content)", "Confirm the reference build"]
+      clinical_setting: null
+    license_ids: []
+    flags: []
+    headline: true
+    stability: {kind: proportion}
+    citations: []
+    citation_checked: {by: "lab build agent", date: "2026-10-15", note: "No citation displayed; QC bands are provisional team defaults (not from literature)."}
+
+  - algorithm_id: bam-qc
+    metric_id: mapq_ge20_fraction
+    label: "Mapped reads with MAPQ >= 20"
+    value_kind: proportion
+    tier: PROVEN
+    origin_tier: PROVEN
+    origin_platform: "any"
+    min_depth_x: null
+    reference: {kind: none}
+    qc_band: {direction: higher_is_better, pass: 0.80, warn: 0.60}
+    performance: null
+    performance_missing_reason: "QC measure, not a diagnostic; bands are provisional team defaults"
+    meaning_high: "Most reads place uniquely on the genome."
+    meaning_low: "Many reads in repeats or ambiguous placements; fewer eligible reads for every algorithm."
+    confounders: ["short reads", "repeat-rich contamination"]
+    next_steps:
+      analytical: ["Compare with the fragment-size histogram (short reads map less uniquely)"]
+      clinical_setting: null
+    license_ids: []
+    flags: []
+    headline: false
+    stability: {kind: proportion}
+    citations: []
+    citation_checked: {by: "lab build agent", date: "2026-10-15", note: "No citation displayed; QC bands are provisional team defaults (not from literature)."}
+
+  - algorithm_id: bam-qc
+    metric_id: supplementary_fraction
+    label: "Supplementary alignments per mapped read (chimera proxy)"
+    value_kind: proportion
+    tier: NEWER
+    origin_tier: NEWER
+    origin_platform: "ONT"
+    min_depth_x: null
+    reference: {kind: none}
+    performance: null
+    performance_missing_reason: "none published"
+    meaning_high: "Ligation chimeras: two cfDNA molecules joined during library prep, which inflates apparent fragment lengths."
+    meaning_low: "Few chimeras."
+    confounders: ["library prep chemistry", "input mass"]
+    next_steps:
+      analytical: ["Compare across kit batches", "Check the long-fragment tail"]
+      clinical_setting: null
+    license_ids: []
+    flags: []
+    headline: false
+    stability: {kind: proportion}
+    citations: []
+    citation_checked: {by: "lab build agent", date: "2026-10-15", note: "No citation displayed. V1 (partial run): the read-coverage chimera proxy is uninformative on ONT; this share is the proxy used."}
+
+  - algorithm_id: bam-qc
+    metric_id: mean_read_q
+    label: "Mean read quality (Phred)"
+    value_kind: positive
+    tier: PROVEN
+    origin_tier: PROVEN
+    origin_platform: "ONT"
+    min_depth_x: null
+    reference: {kind: none}
+    performance: null
+    performance_missing_reason: "QC measure, not a diagnostic"
+    meaning_high: "Accurate basecalls."
+    meaning_low: "Noisy basecalls: methylation calls and end motifs are less reliable."
+    confounders: ["basecaller model", "flow-cell wear"]
+    next_steps:
+      analytical: ["Confirm the basecall model in the @RG line"]
+      clinical_setting: null
+    license_ids: []
+    flags: []
+    headline: false
+    stability: {kind: relative, tolerance: 0.05}
+    citations: []
+    citation_checked: {by: "lab build agent", date: "2026-10-15", note: "No citation displayed; QC measure."}
+
+  - algorithm_id: bam-qc
+    metric_id: genome_ge1x_fraction
+    label: "Sampled chr1-22 bases covered at least once"
+    value_kind: proportion
+    tier: PROVEN
+    origin_tier: PROVEN
+    origin_platform: "any"
+    min_depth_x: null
+    reference: {kind: none}
+    performance: null
+    performance_missing_reason: "QC measure; computed on every 100th 1 Mb window, so it grows with depth"
+    meaning_high: "Broad genome coverage."
+    meaning_low: "Shallow or uneven coverage."
+    confounders: ["sequencing depth", "GC bias"]
+    next_steps:
+      analytical: ["Read alongside approximate depth"]
+      clinical_setting: null
+    license_ids: []
+    flags: []
+    headline: false
+    stability: {kind: relative, tolerance: 0.10}
+    citations: []
+    citation_checked: {by: "lab build agent", date: "2026-10-15", note: "No citation displayed; QC measure."}
+
+  - algorithm_id: bam-qc
+    metric_id: gc_bias_slope
+    label: "GC bias (slope of log2 coverage on GC)"
+    value_kind: signed
+    tier: PROVEN
+    origin_tier: PROVEN
+    origin_platform: "any"
+    min_depth_x: null
+    reference: {kind: none}
+    performance: null
+    performance_missing_reason: "QC measure, not a diagnostic"
+    meaning_high: "GC-rich regions over-represented: copy-number calls need GC correction."
+    meaning_low: "GC-rich regions under-represented."
+    confounders: ["library amplification", "extraction kit"]
+    next_steps:
+      analytical: ["Confirm copy-number GC correction is applied"]
+      clinical_setting: null
+    license_ids: []
+    flags: []
+    headline: false
+    stability: {kind: absolute, tolerance: 0.25}
+    citations: []
+    citation_checked: {by: "lab build agent", date: "2026-10-15", note: "No citation displayed; QC measure."}
+
+  - algorithm_id: bam-qc
+    metric_id: duplicate_fraction
+    label: "Duplicate-marked share"
+    value_kind: proportion
+    tier: PROVEN
+    origin_tier: PROVEN
+    origin_platform: "any"
+    min_depth_x: null
+    reference: {kind: none, missing_note: "not marked (native ONT)"}
+    performance: null
+    performance_missing_reason: "Native ONT reads are not duplicate-marked; reported only when marked"
+    meaning_high: "PCR duplicates: library complexity is low."
+    meaning_low: "Few duplicates."
+    confounders: ["amplification cycles"]
+    next_steps:
+      analytical: ["Only meaningful if the kit amplifies"]
+      clinical_setting: null
+    license_ids: []
+    flags: []
+    headline: false
+    stability: {kind: proportion}
+    citations: []
+    citation_checked: {by: "lab build agent", date: "2026-10-15", note: "No citation displayed; QC measure."}
+
+  # ----------------------------------------------------------------- depth
+  - algorithm_id: depth
+    metric_id: approx_depth_x
+    label: "Approximate depth (eligible reads)"
+    value_kind: positive
+    tier: PROVEN
+    origin_tier: PROVEN
+    origin_platform: "any"
+    min_depth_x: null
+    reference: {kind: none}
+    performance: null
+    performance_missing_reason: "QC measure: sum of eligible spans / genome length"
+    meaning_high: "More algorithms clear their minimum depth."
+    meaning_low: "Most algorithms are skipped or not interpretable; see the depth curve."
+    confounders: ["flow-cell yield", "input cfDNA mass"]
+    next_steps:
+      analytical: ["Use the depth curve to see what more sequencing would add"]
+      clinical_setting: null
+    license_ids: []
+    flags: []
+    headline: true
+    stability: {kind: scales_with_depth, tolerance: 0.10}
+    citations: []
+    citation_checked: {by: "lab build agent", date: "2026-10-15", note: "No citation displayed; QC measure."}
+
+  - algorithm_id: depth
+    metric_id: eligible_reads
+    label: "Eligible reads (primary, MAPQ >= 20, chr1-22/X/Y)"
+    value_kind: count
+    tier: PROVEN
+    origin_tier: PROVEN
+    origin_platform: "any"
+    min_depth_x: null
+    reference: {kind: none}
+    performance: null
+    performance_missing_reason: "QC count"
+    meaning_high: "More reads count toward every algorithm's minimum."
+    meaning_low: "Few reads count toward minimums."
+    confounders: ["mapping quality", "chimeras"]
+    next_steps:
+      analytical: ["Compare with the index count (an upper bound)"]
+      clinical_setting: null
+    license_ids: []
+    flags: []
+    headline: false
+    stability: {kind: scales_with_depth, tolerance: 0.10}
+    citations: []
+    citation_checked: {by: "lab build agent", date: "2026-10-15", note: "No citation displayed; QC count."}
+
+  - algorithm_id: depth
+    metric_id: mean_span_bp
+    label: "Mean aligned span"
+    value_kind: positive
+    tier: PROVEN
+    origin_tier: PROVEN
+    origin_platform: "any"
+    min_depth_x: null
+    reference: {kind: none}
+    performance: null
+    performance_missing_reason: "QC measure"
+    meaning_high: "Longer molecules (or chimeras)."
+    meaning_low: "Shorter molecules."
+    confounders: ["library prep size bias", "chimeras"]
+    next_steps:
+      analytical: ["See the fragment-size histogram"]
+      clinical_setting: null
+    license_ids: []
+    flags: []
+    headline: false
+    stability: {kind: relative, tolerance: 0.05}
+    citations: []
+    citation_checked: {by: "lab build agent", date: "2026-10-15", note: "No citation displayed; QC measure."}
+
+  - algorithm_id: depth
+    metric_id: index_mapped_upper_bound
+    label: "Index mapped records (upper bound)"
+    value_kind: count
+    tier: PROVEN
+    origin_tier: PROVEN
+    origin_platform: "any"
+    min_depth_x: null
+    reference: {kind: none}
+    performance: null
+    performance_missing_reason: "Counts secondary and supplementary records; display only, never used for gating"
+    meaning_high: "Display only."
+    meaning_low: "Display only."
+    confounders: []
+    next_steps:
+      analytical: []
+      clinical_setting: null
+    license_ids: []
+    flags: []
+    headline: false
+    stability: {kind: scales_with_depth, tolerance: 0.10}
+    citations: []
+    citation_checked: {by: "lab build agent", date: "2026-10-15", note: "No citation displayed."}
+
+  # --------------------------------------------------------- fragment-size
+  - algorithm_id: fragment-size
+    metric_id: mode_bp
+    label: "Fragment length mode (aligned span)"
+    value_kind: positive
+    tier: NEWER
+    origin_tier: NEWER
+    origin_platform: "cfDNA literature (platform not stated) and Illumina"
+    min_depth_x: 0.0055
+    reference:
+      kind: published_mean
+      statistic: "mode, approximately"
+      value: 167
+      unit: bp
+      source: "Chen 2025, Genome Res, background citing earlier studies"
+    performance:
+      kind: enrichment
+      value: "Size selection of 90-150 bp fragments gave >2-fold median ctDNA enrichment in >95% of cases"
+      platform: Illumina
+      depth: "0.4x"
+      source: "Mouliere 2018, Sci Transl Med"
+    performance_missing_reason: null
+    meaning_low: "A shorter mode can reflect tumour-derived DNA or pregnancy."
+    meaning_high: "A longer mode can reflect library size bias (ONT over-represents fragments above 200 bp) or cell lysis."
+    confounders: ["ONT library size bias", "chimeras", "pregnancy", "pre-analytic delay"]
+    next_steps:
+      analytical: ["Compare with the copy-number tumour fraction", "Check the library batch"]
+      clinical_setting: "In a validated clinical setting, a shift like this would be read only together with a tumour-fraction estimate."
+    license_ids: []
+    flags: []
+    headline: true
+    stability: {kind: absolute, tolerance: 3}
+    citations: ["doi:10.1101/gr.279144.124", "doi:10.1126/scitranslmed.aat4921"]
+    citation_checked:
+      by: "lab build agent"
+      date: "2026-10-15"
+      note: "PubMed full text PMC12047234 states, as background citing earlier studies, 'cfDNA has a fragment length mode at ~167 bp and at ~332 bp' (a mode, not a cohort mean; no n). PubMed abstract PMID 30404863: 90-150 bp selection, >2-fold median enrichment in >95% of cases, 0.4x (Illumina)."
+
+  - algorithm_id: fragment-size
+    metric_id: peak_mono_bp
+    label: "Mono-nucleosome peak (100-250 bp)"
+    value_kind: positive
+    tier: NEWER
+    origin_tier: NEWER
+    origin_platform: "cfDNA literature (platform not stated) and Illumina"
+    min_depth_x: 0.0055
+    reference:
+      kind: published_mean
+      statistic: "mode, approximately"
+      value: 167
+      unit: bp
+      source: "Chen 2025, Genome Res, background citing earlier studies"
+    performance: null
+    performance_missing_reason: "none published"
+    meaning_low: "Shorter mono-nucleosomal fragments."
+    meaning_high: "Longer mono-nucleosomal fragments."
+    confounders: ["ONT library size bias"]
+    next_steps:
+      analytical: ["Same window as the mode; read together"]
+      clinical_setting: null
+    license_ids: []
+    flags: []
+    headline: false
+    stability: {kind: absolute, tolerance: 3}
+    citations: ["doi:10.1101/gr.279144.124"]
+    citation_checked: {by: "lab build agent", date: "2026-10-15", note: "PubMed full text PMC12047234 (background citing earlier studies): mode ~167 bp; no n."}
+
+  - algorithm_id: fragment-size
+    metric_id: peak_di_bp
+    label: "Di-nucleosome peak (250-450 bp)"
+    value_kind: positive
+    tier: NEWER
+    origin_tier: NEWER
+    origin_platform: "cfDNA literature (platform not stated)"
+    min_depth_x: 0.0055
+    reference:
+      kind: published_mean
+      statistic: "mode, approximately"
+      value: 332
+      unit: bp
+      source: "Chen 2025, Genome Res, background citing earlier studies"
+    performance: null
+    performance_missing_reason: "none published"
+    meaning_low: "Shorter di-nucleosomal fragments."
+    meaning_high: "Longer di-nucleosomal fragments."
+    confounders: ["ONT library size bias", "chimeras"]
+    next_steps:
+      analytical: ["Check the supplementary (chimera) share"]
+      clinical_setting: null
+    license_ids: []
+    flags: []
+    headline: false
+    stability: {kind: absolute, tolerance: 6}
+    citations: ["doi:10.1101/gr.279144.124"]
+    citation_checked: {by: "lab build agent", date: "2026-10-15", note: "PubMed full text PMC12047234 (background citing earlier studies): second mode ~332 bp; no n."}
+
+  - algorithm_id: fragment-size
+    metric_id: short_fraction_lt150
+    label: "Short-fragment share (50-149 of 50-1000 bp)"
+    value_kind: proportion
+    tier: NEWER
+    origin_tier: NEWER
+    origin_platform: "Illumina"
+    min_depth_x: 0.0055
+    reference: {kind: none}
+    performance:
+      kind: enrichment
+      value: "Size selection of 90-150 bp fragments gave >2-fold median ctDNA enrichment in >95% of cases"
+      platform: Illumina
+      depth: "0.4x"
+      source: "Mouliere 2018, Sci Transl Med"
+    performance_missing_reason: null
+    meaning_high: "More short fragments, where tumour-derived DNA is enriched; ONT prep under-represents them, so Illumina ranges do not apply."
+    meaning_low: "Fewer short fragments."
+    confounders: ["ONT library size bias", "pre-analytic delay"]
+    next_steps:
+      analytical: ["Compare with the copy-number tumour fraction", "Await the kit cohort for a reference"]
+      clinical_setting: null
+    license_ids: []
+    flags: []
+    headline: false
+    stability: {kind: proportion}
+    citations: ["doi:10.1126/scitranslmed.aat4921", "doi:10.1101/gr.279144.124"]
+    citation_checked: {by: "lab build agent", date: "2026-10-15", note: "PubMed abstract PMID 30404863 (enrichment figures); PMC12047234: sequencing enriches fragments above 200 bp."}
+
+  - algorithm_id: fragment-size
+    metric_id: periodicity_10bp_power
+    label: "10 bp periodicity (FFT power share, 50-150 bp)"
+    value_kind: proportion
+    tier: SPECULATIVE
+    origin_tier: NEWER
+    origin_platform: "cfDNA literature (platform not stated)"
+    min_depth_x: 0.0055
+    reference: {kind: none}
+    performance: null
+    performance_missing_reason: "none published"
+    meaning_high: "Stronger ~10 bp rhythm in short fragments, reported for tumour-derived DNA."
+    meaning_low: "Weak rhythm."
+    confounders: ["depth (noise)", "basecalling indels"]
+    next_steps:
+      analytical: ["Exploratory only"]
+      clinical_setting: null
+    license_ids: []
+    flags: []
+    headline: false
+    stability: {kind: absolute, tolerance: 0.01}
+    citations: ["doi:10.1101/gr.279144.124"]
+    citation_checked: {by: "lab build agent", date: "2026-10-15", note: "PubMed full text PMC12047234: ctDNA fragments 'exhibit a prominent ~10 bp periodicity'."}

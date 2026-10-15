@@ -88,7 +88,24 @@ def _ok(command: str, summary: str, data: dict[str, Any]) -> dict[str, Any]:
 
 
 def _algorithms(args: argparse.Namespace, store: LabStore) -> tuple[int, dict[str, Any]]:
+    from .interpretation.engine import load_library
+
     registry = load_registry()
+    library = load_library()
+
+    def catalog(algorithm_id: str) -> dict[str, Any]:
+        entry = library.headline(algorithm_id)
+        if entry is None:
+            return {"tier": None, "footnote": None, "license_ids": [], "min_depth_x": None, "headline_metric": None}
+        performance = entry.get("performance")
+        return {
+            "tier": entry.tier,
+            "footnote": performance.get("value") if performance else entry.get("performance_missing_reason"),
+            "license_ids": list(entry.get("license_ids") or []),
+            "min_depth_x": entry.get("min_depth_x"),
+            "headline_metric": entry.metric_id,
+        }
+
     rows = [
         {
             "id": algorithm.id,
@@ -98,6 +115,8 @@ def _algorithms(args: argparse.Namespace, store: LabStore) -> tuple[int, dict[st
             "consumes": algorithm.consumes,
             "min_eligible_reads": algorithm.requires.min_eligible_reads,
             "upstream": list(algorithm.upstream),
+            "hidden": algorithm.id in library.hidden_algorithms,
+            **catalog(algorithm.id),
             "tools": [
                 {"name": tool.name, "version": tool.version, "license_id": tool.license_id}
                 for tool in algorithm.tools
@@ -108,14 +127,22 @@ def _algorithms(args: argparse.Namespace, store: LabStore) -> tuple[int, dict[st
     payload = _ok(
         "algorithms",
         f"{len(rows)} algorithm(s) registered",
-        {"root": str(store.root), "algorithms": rows},
+        {"root": str(store.root), "algorithms": rows, "interpretation_version": library.version},
     )
     lines = [f"ROOT  {store.root}"]
     if rows:
         lines.append(_table(
-            ("ID", "FAMILY", "COST", "CONSUMES", "MIN READS"),
+            ("ID", "TIER", "FAMILY", "COST", "MIN DEPTH", "LICENSES", "FOOTNOTE"),
             [
-                (row["id"], row["family"], row["cost"], row["consumes"], f"{row['min_eligible_reads']:,}")
+                (
+                    row["id"] + (" (intermediate)" if row["hidden"] else ""),
+                    row["tier"] or "-",
+                    row["family"],
+                    row["cost"],
+                    f"{row['min_depth_x']:g}x" if row["min_depth_x"] else "any",
+                    ", ".join(row["license_ids"]) or "-",
+                    (row["footnote"] or "-")[:70],
+                )
                 for row in rows
             ],
         ))
