@@ -31,9 +31,11 @@ from evidence_inspector.ichor_adapter import (
     ReferenceFastaBinding,
     RuntimeBinding,
     WigGridBinding,
+    allowed_states,
     contract_sha256,
     prepare_ichor_run,
     validate_centromere_table,
+    upstream_call,
     validate_ichor_outputs,
 )
 
@@ -1012,3 +1014,253 @@ def test_runtime_requires_pinned_execution_dependencies() -> None:
     runtime["package_lock_sha256"] = "f" * 64
     with pytest.raises(ValidationError, match="manifest digest"):
         RuntimeBinding.model_validate(runtime)
+
+
+# ---------------------------------------------------------------------------
+# Local runs (signal CN3): same parsers and replay, no .RData, local paths
+# ---------------------------------------------------------------------------
+
+
+def _local(output: Path, request: CnvRunRequest | None = None) -> CnvDevelopmentResult:
+    from evidence_inspector.ichor_adapter import validate_local_ichor_outputs
+
+    request = request or _request()
+    return validate_local_ichor_outputs(
+        output,
+        sample_id=request.sample_id,
+        grid=request.assets.canonical_grid,
+        parameters=request.parameters,
+        pon_mode=request.pon_mode,
+        run_sha256="c" * 64,
+    )
+
+
+def test_local_driver_arguments_equal_the_prepared_argv_but_for_paths() -> None:
+    from evidence_inspector.ichor_adapter import (
+        CONTAINER_PATHS,
+        IchorPaths,
+        ichor_driver_arguments,
+    )
+
+    request = _request()
+    prepared = prepare_ichor_run(request)
+    local = IchorPaths(
+        counts_wig="/job/stage/counts.wig",
+        gc_wig="/job/stage/gc.wig",
+        map_wig="/job/stage/map.wig",
+        centromere="/job/stage/centromere.tsv",
+        panel_of_normals=None,
+        out_dir="/job/stage/out",
+    )
+    arguments = ichor_driver_arguments(
+        request.parameters,
+        sample_id=request.sample_id,
+        genome_build=request.assets.reference.assembly,
+        paths=local,
+    )
+    substitute = {
+        getattr(CONTAINER_PATHS, field): getattr(local, field)
+        for field in ("counts_wig", "gc_wig", "map_wig", "centromere", "out_dir")
+    }
+    assert arguments == tuple(substitute.get(item, item) for item in prepared.argv[2:])
+    assert "/attempt" not in arguments
+    assert not any(item.startswith("/assets/") for item in arguments)
+    with pytest.raises(ValidationError, match="absolute and safe"):
+        IchorPaths.model_validate({**local.model_dump(), "out_dir": "relative/out"})
+
+
+def test_local_validation_never_needs_or_reads_the_rdata(tmp_path: Path) -> None:
+    output = _fixture(tmp_path, "arm_loss")
+    (output / "sample.RData").unlink()
+    result = _local(output)
+    assert result.status == "complete"
+    assert "r_workspace" not in {item.role for item in result.artifacts}
+    assert "RData is neither read nor retained." in result.limitations
+    # The prepared (container) run still binds its .RData by digest.
+    with pytest.raises(IchorOutputError, match="missing required outputs"):
+        validate_ichor_outputs(prepare_ichor_run(_request()), output)
+
+
+def _rewrite_first_segment(
+    output: Path, *, copy_number: str, call: str, subclone: str = "FALSE"
+) -> None:
+    segments = output / "sample.seg.txt"
+    lines = segments.read_text().splitlines()
+    fields = lines[1].split("\t")
+    assert fields[6:9] == ["1", "HETD", "FALSE"]
+    fields[6:9] = [copy_number, call, subclone]
+    lines[1] = "\t".join(fields)
+    segments.write_text("\n".join(lines) + "\n")
+
+
+def _validate(output: Path, *, local: bool) -> CnvDevelopmentResult:
+    if local:
+        return _local(output)
+    return validate_ichor_outputs(prepare_ichor_run(_request()), output)
+
+
+def test_allowed_states_follow_the_pinned_upstream_vocabulary() -> None:
+    assert [upstream_call(value) for value in range(9)] == [
+        "HOMD",
+        "HETD",
+        "NEUT",
+        "GAIN",
+        "AMP",
+        "HLAMP",
+        "HLAMP2",
+        "HLAMP3",
+        "HLAMP4",
+    ]
+    params = _request().parameters
+    assert params.max_copy_number == 3 and not params.include_subclonal_states
+    assert allowed_states(params) == {
+        (1, "HETD", False),
+        (2, "NEUT", False),
+        (3, "GAIN", False),
+    }
+    widened = IchorParameterSet.model_validate(
+        {**params.model_dump(), "max_copy_number": 5, "include_subclonal_states": True}
+    )
+    assert allowed_states(widened) == {
+        (1, "HETD", False),
+        (2, "NEUT", False),
+        (3, "GAIN", False),
+        (4, "AMP", False),
+        (5, "HLAMP", False),
+        (1, "HETD", True),
+        (3, "GAIN", True),
+    }
+
+
+@pytest.mark.parametrize("local", [True, False])
+@pytest.mark.parametrize(
+    ("copy_number", "call", "subclone"),
+    [
+        pytest.param("9", "HLAMP5", "FALSE", id="above-locked-maxCN"),
+        pytest.param("4", "AMP", "FALSE", id="amp-above-locked-maxCN"),
+        pytest.param("0", "HOMD", "FALSE", id="homd-without-includeHOMD"),
+        pytest.param("1", "AMP", "FALSE", id="call-copy-mismatch"),
+        pytest.param("1", "XYZ", "FALSE", id="unknown-call"),
+        pytest.param("1", "hetd", "FALSE", id="call-case-differs"),
+        pytest.param("1", "HETD", "TRUE", id="subclonal-without-subclonal-states"),
+    ],
+)
+def test_segment_state_outside_the_locked_states_is_refused(
+    tmp_path: Path, local: bool, copy_number: str, call: str, subclone: str
+) -> None:
+    output = _fixture(tmp_path, "arm_loss")
+    _rewrite_first_segment(
+        output, copy_number=copy_number, call=call, subclone=subclone
+    )
+    with pytest.raises(IchorOutputError, match="outside the states the locked"):
+        _validate(output, local=local)
+
+
+@pytest.mark.parametrize("local", [True, False])
+def test_gain_segment_inside_the_locked_states_is_accepted(
+    tmp_path: Path, local: bool
+) -> None:
+    output = _fixture(tmp_path, "arm_loss")
+    _rewrite_first_segment(output, copy_number="3", call="GAIN")
+    result = _validate(output, local=local)
+    assert [(item.copy_number, item.call) for item in result.segments] == [
+        (3, "GAIN"),
+        (2, "NEUT"),
+    ]
+
+
+def test_amp_segment_is_accepted_when_the_locked_max_cn_allows_it(
+    tmp_path: Path,
+) -> None:
+    output = _fixture(tmp_path, "arm_loss")
+    _rewrite_first_segment(output, copy_number="4", call="AMP")
+    request = _request()
+    request = CnvRunRequest.model_validate(
+        {
+            **request.model_dump(),
+            "parameters": {**request.parameters.model_dump(), "max_copy_number": 4},
+        }
+    )
+    result = validate_ichor_outputs(prepare_ichor_run(request), output)
+    assert [(item.copy_number, item.call) for item in result.segments] == [
+        (4, "AMP"),
+        (2, "NEUT"),
+    ]
+
+
+def test_local_result_capabilities_are_checked(tmp_path: Path) -> None:
+    result = _local(_fixture(tmp_path, "arm_loss"))
+    data = result.model_dump()
+    data["artifacts"] = sorted(
+        [
+            *data["artifacts"],
+            {
+                "role": "r_workspace",
+                "relative_path": "sample.RData",
+                "content_sha256": "0" * 64,
+                "content_size_bytes": 1,
+            },
+        ],
+        key=lambda item: item["role"],
+    )
+    with pytest.raises(ValidationError, match="emitted capability paths"):
+        CnvDevelopmentResult.model_validate(data)
+
+
+_SCRIPT_HEADER = "init\tn_est\tphi_est\tBIC\tFrac_genome_subclonal\tFrac_CNA_subclonal\tloglik"
+_V051_HEADER = "n_0\tphi_0\tn_est\tphi_est\tFrac_genome_subclonal\tFrac_CNA_subclonal\tloglik"
+
+
+def test_ichorcna_051_candidate_table_parses_like_the_script_table(tmp_path: Path) -> None:
+    script = _local(_fixture(tmp_path / "script", "arm_loss"))
+    output = _fixture(tmp_path / "v051", "arm_loss")
+    params = output / "sample.params.txt"
+    lines = params.read_text().splitlines()
+    header = lines.index(_SCRIPT_HEADER)
+    rewritten = [*lines[:header], _V051_HEADER]
+    for line in lines[header + 1 :]:
+        init, n_est, phi_est, _bic, genome, cna, loglik = line.split("\t")
+        normal, ploidy = init[1:].split("-p")
+        rewritten.append("\t".join((normal, ploidy, n_est, phi_est, genome, cna, loglik)))
+    params.write_text("\n".join(rewritten) + "\n")
+    v051 = _local(output)
+    assert v051.candidates == script.candidates
+    assert v051.selected_solution == script.selected_solution
+
+
+_WHOLE_SEGMENT = "sample\tchr1\t1\t4000000\t4"
+_AFTER_FIRST_BIN = "sample\tchr1\t1000001\t4000000\t3"
+
+
+def test_an_na_bin_outside_every_segment_is_allowed_a_valued_one_is_not(
+    tmp_path: Path,
+) -> None:
+    output = _fixture(tmp_path / "edge", "native_na")
+    segments = output / "sample.seg.txt"
+    # ichorCNA 0.5.1 starts a segment after a leading NA bin.
+    segments.write_text(segments.read_text().replace(_WHOLE_SEGMENT, _AFTER_FIRST_BIN))
+    result = _local(output, _request(normal_fraction_starts=(1.0,)))
+    assert result.corrected_bins[0].corrected_log2 is None
+    # A bin with a value outside every segment is still refused.
+    output = _fixture(tmp_path / "valued", "neutral")
+    segments = output / "sample.seg.txt"
+    segments.write_text(segments.read_text().replace(_WHOLE_SEGMENT, _AFTER_FIRST_BIN))
+    with pytest.raises(IchorOutputError, match="structural evidence"):
+        _local(output)
+
+
+def test_masked_canonical_grid_matches_the_request_validator() -> None:
+    from evidence_inspector.ichor_adapter import masked_canonical_grid
+
+    request = _request(mask_index=1)
+    grid = request.assets.canonical_grid
+    rebuilt = masked_canonical_grid(
+        grid.bins,
+        contig_order=grid.contig_order,
+        intervals=request.assets.centromere.canonical_intervals,
+        map_values=request.assets.mappability.canonical_values,
+        parameters=request.parameters,
+        centromere_sha256=request.assets.centromere.identity.content_sha256,
+        map_sha256=request.assets.mappability.identity.content_sha256,
+    )
+    assert rebuilt == grid

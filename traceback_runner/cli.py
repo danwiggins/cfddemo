@@ -167,6 +167,13 @@ def _method_asset_parser(commands: Any) -> None:
         dest="from_dir",
         help="register the three Loyfer files of this directory under fixed IDs",
     )
+    source.add_argument(
+        "--from-toolchain",
+        choices=("copy-number", "ichor"),
+        dest="from_toolchain",
+        help="register the installed ichorCNA package's wigs and centromere table "
+        "(bin size from the locked method)",
+    )
     register.add_argument("--kind", choices=[kind.value for kind in AssetKind])
     register.add_argument("--id", dest="asset_id", type=_reference_id_argument)
     _root_argument(register)
@@ -3763,7 +3770,7 @@ def _preflight_registered(
     blocked = report.outcome == PreflightOutcome.BLOCKED
     analyses = getattr(args, "analysis", None)
     readiness = (
-        {"analyses": _analysis_readiness(analyses, report, loaded, args)}
+        {"analyses": _analysis_readiness(analyses, report, loaded, args, index=index)}
         if analyses is not None
         else {}
     )
@@ -3840,7 +3847,12 @@ def _modkit_readiness() -> Any:
 
 
 def _analysis_readiness(
-    analyses: Sequence[str], report: Any, loaded: Any, args: argparse.Namespace
+    analyses: Sequence[str],
+    report: Any,
+    loaded: Any,
+    args: argparse.Namespace,
+    *,
+    index: Path | None = None,
 ) -> list[dict[str, Any]]:
     """``preflight --analysis``: what each analysis would need before ``run``.
 
@@ -3850,6 +3862,7 @@ def _analysis_readiness(
 
     from .analyses import (
         CELL_ORIGIN,
+        COPY_NUMBER,
         FRAGMENT,
         ReadinessRow,
         registered_analysis_stages,
@@ -3875,6 +3888,9 @@ def _analysis_readiness(
         if analysis == FRAGMENT:
             rows.append(bam_row)
         else:
+            if analysis == COPY_NUMBER:
+                # The copy-number validate stage runs the same BAM preflight.
+                rows.append(bam_row)
             if analysis == CELL_ORIGIN:
                 # The cell-origin validate stage runs the same BAM preflight.
                 rows.append(bam_row)
@@ -3896,6 +3912,10 @@ def _analysis_readiness(
             else:
                 config = resolved_config(spec, {"modbase_model": modbase_model})
                 rows.extend(spec.readiness_rows(args.root, loaded, config))
+                if analysis == COPY_NUMBER:
+                    from .copy_number import depth_readiness
+
+                    rows.append(depth_readiness(Path(args.input), index))
         ready = all(row.outcome == "ready" for row in rows)
         results.append(
             {
@@ -3973,19 +3993,27 @@ def _method_asset(args: argparse.Namespace) -> tuple[ExitCode, dict[str, Any]]:
             f"Asset {args.asset_id} ({loaded.registered.kind.value}); unqualified, local",
             data=_asset_data(loaded.registered),
         )
-    if args.from_dir is not None:
+    if args.from_dir is not None or args.from_toolchain is not None:
+        flag = "--from-dir" if args.from_dir is not None else "--from-toolchain"
         if args.kind is not None or args.asset_id is not None:
             return ExitCode.USAGE, _result(
                 "method-asset register",
                 "blocked",
-                "--from-dir derives each kind and ID; do not pass --kind or --id",
+                f"{flag} derives each kind and ID; do not pass --kind or --id",
             )
         with _operator_lock(args.root):
-            results = register_loyfer_directory(args.root, args.from_dir)
+            if args.from_dir is not None:
+                results = register_loyfer_directory(args.root, args.from_dir)
+                label = "Loyfer"
+            else:
+                from .copy_number_method import register_toolchain_assets
+
+                results = register_toolchain_assets(args.root)
+                label = "ichorCNA"
         return ExitCode.OK, _result(
             "method-asset register",
             "ok",
-            f"{sum(item.created for item in results)} of {len(results)} Loyfer assets "
+            f"{sum(item.created for item in results)} of {len(results)} {label} assets "
             "newly registered; unqualified, local",
             data={
                 "assets": [_asset_data(item.registered, item.created) for item in results],
@@ -5271,3 +5299,7 @@ __all__ = ["ExitCode", "main"]
 # Registers the cell-origin measurement schema (v4) and its run --analysis
 # stages (signal CO3).  Imported last: its stages import this module lazily.
 from . import cell_origin as _cell_origin  # noqa: E402,F401
+
+# Registers the copy-number measurement schema (v4) and its run --analysis
+# stages (signal CN3).  Imported last: its stages import this module lazily.
+from . import copy_number as _copy_number  # noqa: E402,F401
