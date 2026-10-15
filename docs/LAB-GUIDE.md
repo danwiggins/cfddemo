@@ -114,6 +114,21 @@ ROOT, home, login and chunk names redacted) is ever stored.
 Fragment length is the aligned reference span, the same definition as the
 signed fragment metric; the Lab's 1-bp counter is parity-tested against it.
 
+## Opening the page
+
+`traceback lab serve [--open] [--root R]` starts a server on 127.0.0.1 only
+and prints ROOT, then a one-use link
+(`http://127.0.0.1:<port>/#bootstrap=<code>`). Open it within 60 seconds on
+this machine; `--open` opens it for you. Press Enter for a fresh link;
+Ctrl-C stops the server. Pass the same `--root` (or `TRACEBACK_ROOT`) you
+used for `lab run`; on an empty ROOT the server says so.
+
+The server never takes the writer lock, so a `lab run` can proceed while the
+page is open: the page polls every 15 seconds and shows "A Lab run is in
+progress", then "New results are available. [Reload]" (it never swaps
+content under you). The page is strict: same-origin scripts only, no inline
+script or style, no outside requests.
+
 ## Positive controls
 
 `traceback lab simulate cna <id12|latest>` builds a synthetic copy-number

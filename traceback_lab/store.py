@@ -159,6 +159,17 @@ class LabStore:
         return self.lab / "generation"
 
     @property
+    def last_run_file(self) -> Path:
+        return self.lab / "last_run.json"
+
+    def last_run_id(self) -> str | None:
+        try:
+            value = json.loads(self.last_run_file.read_bytes()).get("run_id")
+        except (FileNotFoundError, ValueError, AttributeError, OSError):
+            return None
+        return value if isinstance(value, str) and re.fullmatch(_RUN_ID, value) else None
+
+    @property
     def runs_dir(self) -> Path:
         return self.lab / "runs"
 
@@ -287,6 +298,8 @@ class LabStore:
             except BlockingIOError as exc:
                 raise self._busy_problem() from exc
             lock = WriterLock(self, command, run_id, step, heartbeat_s)
+            # One small pointer so readers find the newest run without a scan.
+            write_atomic(self.last_run_file, canonical_json_bytes({"run_id": run_id, "command": command}))
             lock.start()
             try:
                 yield lock

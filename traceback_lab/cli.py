@@ -79,6 +79,10 @@ def build_parser() -> argparse.ArgumentParser:
 
     add_simulate_parser(commands, _common)
 
+    from .serve_command import add_serve_parser
+
+    add_serve_parser(commands, _common)
+
     runs = commands.add_parser("runs", help="list Lab runs, or one run's steps")
     runs.add_argument("run_id", nargs="?", metavar="RUN_ID")
     runs.add_argument("--step", metavar="S", help="only this step's events")
@@ -272,6 +276,17 @@ def main(argv: Sequence[str] | None = None) -> int:
         return _usage(str(exc), raw)
     root = resolve_root(args.root)
     store = LabStore(root)
+    if getattr(args, "long_running", False):  # lab serve prints its own lines
+        try:
+            return int(args.handler(args, store))
+        except LabProblem as problem:
+            emit(
+                _with_human(problem_payload(f"lab {args.lab_command}", problem, root=str(root)),
+                            [f"ROOT  {root}", *problem_lines(problem)], replace_data=True),
+                as_json=bool(getattr(args, "as_json", False)),
+                root=root,
+            )
+            return problem.exit_code
     as_json = bool(getattr(args, "as_json", False))
     command = f"lab {args.lab_command}"
     try:
