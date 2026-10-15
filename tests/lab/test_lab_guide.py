@@ -133,13 +133,14 @@ def test_serve_step_reaches_the_landing_with_curve_repeatability_and_example_pil
         assert lines[0] == f"ROOT  {journey_root['root']}"
         link = lines[1]
         assert re.match(r"^http://127\.0\.0\.1:\d+/#bootstrap=[A-Za-z0-9_-]{43,}$", link), lines
-        completed = subprocess.run(
+        from tests.lab.test_lab_server import headless_dom
+
+        dom = headless_dom(
             [_chrome(), "--headless=new", "--disable-gpu", "--hide-scrollbars", "--no-first-run",
-             f"--user-data-dir={tmp_path / 'profile'}", "--virtual-time-budget=15000", "--window-size=1280,800",
+             f"--user-data-dir={tmp_path / 'profile-{attempt}'}", "--virtual-time-budget=15000", "--window-size=1280,800",
              "--dump-dom", link],
-            capture_output=True, text=True, timeout=120,
+            ok=lambda d: 'data-ready="1"' in d and "Depth → utility" in d,
         )
-        dom = completed.stdout
     finally:
         process.terminate()
         process.wait(timeout=20)
