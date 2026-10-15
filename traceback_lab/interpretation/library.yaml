@@ -776,7 +776,7 @@ entries:
   # ----------------------------------------------------------------- mtdna
   - algorithm_id: mtdna
     metric_id: chrm_fraction
-    label: "Mitochondrial (chrM) share of eligible molecules"
+    label: "Mitochondrial (chrM) share of primary reads (chrM at MAPQ >= 20)"
     value_kind: proportion
     tier: SPECULATIVE
     origin_tier: NEWER

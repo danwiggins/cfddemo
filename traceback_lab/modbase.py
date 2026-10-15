@@ -1,10 +1,11 @@
 """MM/ML decoding shared by ``modbase-qc`` and the ``meth-calls`` intermediate.
 
 pysam's ``modified_bases`` reports call positions on the **stored** sequence
-(reference-forward orientation).  For a reverse-strand record the call sits on
-the G of the stored sequence (the C of the original read), so a CpG call is
-``stored[p] == "C" and stored[p+1] == "G"`` on the forward strand and
-``stored[p-1] == "C" and stored[p] == "G"`` on the reverse strand.
+(reference-forward orientation).  For a reverse-strand record (and for an
+opposite-strand ``G-m`` call) the call sits on the G of the stored sequence,
+so a call is a CpG call when it sits on either base of a stored ``CG``.  An
+MM call without an ML value (pysam reports -1) makes the record invalid: an
+unknown probability is never read as canonical.
 
 Validity (D28): a record whose ``MN`` differs from its stored sequence length
 (hard-clipped supplementary records after ``minimap2 -y``), or whose MM/ML do
@@ -113,17 +114,19 @@ def cpg_calls(record: Any) -> Iterator[SiteCall]:
         if mm_tag(record) is not None:
             raise InvalidMM("MM/ML do not parse")
         return
-    reverse = record.is_reverse
     merged: dict[int, dict[str, int]] = {}
     for (base, _strand, code), calls in parsed.items():
-        if base != "C" or code not in ("m", "h"):
+        if base not in ("C", "G") or code not in ("m", "h"):
             continue
         for position, quality in calls:
-            if reverse:
-                cpg = 0 < position < len(sequence) and sequence[position - 1] == "C" and sequence[position] == "G"
-            else:
-                cpg = position + 1 < len(sequence) and sequence[position] == "C" and sequence[position + 1] == "G"
-            if not cpg:
+            if quality < 0:  # pysam reports -1 when ML is absent: unknown, not canonical
+                raise InvalidMM("MM call without an ML probability")
+            # Orientation-agnostic CpG test on the stored sequence: the call sits
+            # on the C or on the G of a CG dinucleotide (reverse-strand records
+            # and opposite-strand G-m/G-h calls land on the G).
+            on_c = position + 1 < len(sequence) and sequence[position] == "C" and sequence[position + 1] == "G"
+            on_g = 0 < position < len(sequence) and sequence[position - 1] == "C" and sequence[position] == "G"
+            if not (on_c or on_g):
                 continue
             merged.setdefault(position, {})[code] = int(quality)
     for position in sorted(merged):

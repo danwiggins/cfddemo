@@ -53,6 +53,21 @@ def test_modbase_qc_planted_values(tmp_path: Path) -> None:
     assert got["invalid_mm_records"] == 1
 
 
+def test_missing_ml_is_invalid_and_opposite_strand_g_calls_count(tmp_path: Path) -> None:
+    from traceback_lab.modbase import InvalidMM, cpg_calls
+
+    header = pysam.AlignmentHeader.from_dict({"SQ": [{"SN": "chr1", "LN": 100}]})
+    record = pysam.AlignedSegment(header)
+    record.query_sequence = "ACGT"
+    record.set_tag("MM", "C+m?,0;")
+    with pytest.raises(InvalidMM):
+        list(cpg_calls(record))
+    record.set_tag("MM", "G-m?,0;")
+    record.set_tag("ML", __import__("array").array("B", [200]))
+    calls = list(cpg_calls(record))
+    assert [(c.qpos, c.probabilities) for c in calls] == [(2, {"m": 200})]
+
+
 def test_modbase_qc_skips_without_mm_tags(tmp_path: Path) -> None:
     ctx = context_for(tmp_path, MOD_CONTIGS, _mod_reads(tags=False))
     decision = MODBASE_QC.preflight(ctx)
@@ -163,9 +178,15 @@ def test_mtdna_fraction_and_mode(tmp_path: Path) -> None:
     assert isinstance(MTDNA.preflight(ctx), Ready)
     out = MTDNA.run(ctx, tmp_path / "o")
     got = values(out)
-    assert got["chrm_fraction"] == pytest.approx(10 / 100)
+    assert got["chrm_fraction"] == pytest.approx(10 / 101)  # denominator: all primaries, incl. the MAPQ-0 one
     assert got["chrm_mode_bp"] == 80
     assert out.panels[0]["kind"] == "density" and "chrm_size_hist.json" in out.artifacts
+
+
+def test_mtdna_mode_is_not_truncated_by_the_panel_range(tmp_path: Path) -> None:
+    reads = [Read(f"l{i}", "chrM", 100 * i, "A" * 1200) for i in range(3)] + [Read("s", "chrM", 5000, "A" * 80)]
+    ctx = context_for(tmp_path, [("chr1", 10_000), ("chrM", 16_569)], reads)
+    assert values(MTDNA.run(ctx, tmp_path / "o"))["chrm_mode_bp"] == 1200
 
 
 def test_mtdna_skips_without_chrm(tmp_path: Path) -> None:
