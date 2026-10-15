@@ -121,3 +121,7 @@ pre.stderr { white-space: pre-wrap; overflow-wrap: anywhere; font-size: .85rem; 
 .composition-svg .ci { stroke: var(--chart-hatch); stroke-width: 2; }
 .composition-svg .pt { fill: var(--chart-a); font-size: 12px; }
 .composition-svg .axis { fill: var(--ink); font-size: 11px; }
+.evidence-columns { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: .75rem; }
+.evidence-card { border-top: 1px solid var(--rule); padding: .5rem 0; }
+.mono { font-family: ui-monospace, monospace; }
+@media (max-width: 1023px) { .evidence-columns { grid-template-columns: 1fr; } }
