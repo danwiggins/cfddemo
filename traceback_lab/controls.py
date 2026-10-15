@@ -26,7 +26,7 @@ from .derived import (
     split,
 )
 from .read_summary import ReadSummary, depth_stamp, derived_mask
-from .registry import PlanItem
+from .registry import PlanItem, intermediate_ids
 from .runner import RunTarget, StepResult, run_plan
 from .scrub import Scrubber
 from .store import LabStore, RunLog, WriterLock
@@ -86,6 +86,7 @@ def run_derived(
     timeout_s: float,
     scrubber: Scrubber,
     progress: Callable[[str], None] | None = None,
+    parent_upstream: Mapping[str, StepResult] | None = None,
 ) -> list[DerivedRun]:
     if not specs:
         return []
@@ -96,11 +97,14 @@ def run_derived(
         lock.set_step("derive")
     if progress:
         progress(f"{'derive':<24} {len(specs)} derived input(s): " + ", ".join(spec.label() for spec in specs))
-    # Intermediates that read the parent BAM (read-summary) never run on a
-    # derived input; other full-BAM consumers (cell-origin) get a transient BAM.
+    # Intermediates that read the parent BAM (read-summary, meth-calls) never
+    # run on a derived input: their parent output is reused through the row
+    # mask (D33), and a re-decode of a derived BAM would index different rows.
+    # Other full-BAM consumers (cell-origin) get a transient BAM.
+    intermediates = intermediate_ids([item.algorithm for item in items])
     runnable = [
         item for item in items
-        if item.algorithm.consumes in DERIVED_CONSUMES and item.algorithm.id != "read-summary"
+        if item.algorithm.consumes in DERIVED_CONSUMES and item.algorithm.id not in intermediates
     ]
     summary = None
     if read_summary is not None and read_summary.artifacts_dir:
@@ -129,7 +133,11 @@ def run_derived(
         counting=needs_counting,
     )
     record_derived(store, parent.source_id, derived.values())
-    upstream = {"read-summary": read_summary} if read_summary is not None else {}
+    # Intermediates computed on the parent (read-summary, meth-calls) are
+    # reused by every derived input through its row mask (D28, D33).
+    upstream = dict(parent_upstream or {})
+    if read_summary is not None:
+        upstream["read-summary"] = read_summary
     runs: list[DerivedRun] = []
     for spec in specs:
         item = derived[spec.label()]

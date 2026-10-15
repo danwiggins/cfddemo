@@ -229,10 +229,12 @@ def _id12(root: Path) -> str:
 def test_evidence_lists_every_algorithm_by_tier_with_exclusions(page_root, tmp_path) -> None:
     with RunningLabServer(LabStore(page_root)) as server:
         dom = _dom(server, tmp_path, route=f"/sample/{_id12(page_root)}/evidence")
+    from traceback_lab.interpretation.engine import load_library
     from traceback_lab.registry import load_registry
 
+    hidden = load_library().hidden_algorithms  # intermediates (read-summary, meth-calls)
     for algorithm in load_registry():
-        if algorithm.id != "read-summary":
+        if algorithm.id not in hidden:
             assert f">{algorithm.id}<" in dom, algorithm.id
     assert "jagged-ends" in dom and "low-vaf-snv" in dom
     callouts = re.findall(r'class="license-callout" id="license-([a-z-]+)"', dom)

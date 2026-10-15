@@ -152,13 +152,29 @@ ROOT, home, login and chunk names redacted) is ever stored.
 | `depth` | eligible reads (primary, MAPQ ≥ 20, chr1–22/X/Y), mean span, approximate depth; the index count is shown only as an upper bound |
 | `fragment-size` | 1-bp aligned-span histogram, mode, short (< 150 bp) share, mono/di peaks, 10 bp periodicity |
 | `copy-number` | tumour fraction, ploidy, genome log2 track and segments through the installed ichorCNA toolchain (no panel of normals yet, so read as not interpretable); needs 2M eligible reads, `traceback toolchain install ichor` and `traceback method-asset register --from-toolchain copy-number --root R` |
-| `modbase-qc` | mod codes in the MM tags, MM-tagged share, mean ML at CpG calls, share of CpG calls below 0.7 confidence, tagged reads with unusable MM/ML; skipped (`missing_tags`) when no read carries MM |
+| `modbase-qc` | mod codes in the MM tags, MM-tagged share, mean ML at aligned CpG calls (read from `meth-calls`), share of those calls below 0.7 confidence, tagged reads with unusable MM/ML; skipped (`missing_tags`) when no read carries MM |
 | `long-tail` | shares of molecules > 300 bp, 1–4 kb (delayed processing) and > 7.5 kb (lysis); a supplementary-split read counts at its read length |
 | `sex-check` | chrY/chrX read density per Mb of non-N, non-PAR reference and a male / female / indeterminate call; needs 500,000 eligible reads |
 | `mtdna` | chrM reads (MAPQ ≥ 20) as a share of all primary reads, and the chrM fragment mode |
 | `cell-origin` | share of cfDNA from each of 40 Loyfer U250 cell types with bootstrap intervals, through the signed method's own `compute_measurement` (modkit, UXM, NNLS); needs 2.5M eligible reads, `traceback toolchain install modkit` and `traceback method-asset register --from-dir LOYFER_DIR --root R`; minor cell types are not interpretable below 5x. Downsample and split runs read a transient filtered BAM that is deleted after publish |
 | `end-motifs` | reference 4-mers at both ends of each molecule (5′ forward end and the reverse complement of the other end), motif diversity score and CCCA share; needs 500,000 eligible reads and the registered FASTA |
 | `delfi-ratio` | short (100–150 bp) / long (151–220 bp) ratio per 5 Mb bin on chr1–22, median-centred, and its SD; no GC correction, cohort-relative only; needs 1,000,000 eligible reads |
+| `meth-calls` | intermediate: decodes MM/ML once into site-level CpG call chunks (read row, forward-strand C position, strand, 5mC/5hmC/canonical ML); derived inputs reuse it through their row mask |
+| `global-5mc` | share of CpG site calls whose most likely state is 5mC |
+| `global-5hmc` | share of CpG site calls (with a 5hmC channel) whose most likely state is 5hmC; skipped (`missing_channel`) when the MM tags carry no `C+h` |
+| `pmd-score` | 5mC share inside vs outside the Zhou 2018 common PMDs and their difference; needs 500,000 eligible reads and the PMD asset (below) |
+| `hypometh-reads` | among reads with ≥ 4 CpG calls, the share under 25% methylated, and U/X/M counts (≤ 25% / between / ≥ 75%); needs 500,000 eligible reads |
+
+**PMD asset.** `pmd-score` reads the Zhou 2018 hg38 common-PMD file, which
+the repo does not ship (no license is stated; see its callout). Place it once
+per ROOT; the Lab checks its pinned sha256 and otherwise skips with
+`missing_asset`:
+
+```
+mkdir -p "$TRACEBACK_ROOT/lab/assets/pmd"
+curl -fL -o "$TRACEBACK_ROOT/lab/assets/pmd/PMD_coordinates_hg38.bed.gz" \
+  https://zhouserver.research.chop.edu/GenomeAnnotation/hg38/PMD_coordinates_hg38.bed.gz
+```
 
 Fragment length is the aligned reference span, the same definition as the
 signed fragment metric; the Lab's 1-bp counter is parity-tested against it.
