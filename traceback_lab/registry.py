@@ -40,7 +40,12 @@ COSTS: tuple[str, ...] = ("fast", "slow")
 # Registry order is execution order (D20).  Each entry is "module:attribute"
 # under ``traceback_lab.algorithms`` (a dotted module name is used as given);
 # the attribute is an Algorithm instance.
-ALGORITHMS: tuple[str, ...] = ()
+ALGORITHMS: tuple[str, ...] = (
+    "read_summary:READ_SUMMARY",
+    "bam_qc:BAM_QC",
+    "depth:DEPTH",
+    "fragment_size:FRAGMENT_SIZE",
+)
 
 
 @dataclass(frozen=True)

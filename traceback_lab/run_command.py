@@ -161,7 +161,14 @@ def _is_stored(text: str) -> bool:
     return is_sample_reference(text) and not Path(text).exists()
 
 
-def _target_from_input(aligned: AlignedInput, reference_id: str, reference_sha256: str, example: bool) -> RunTarget:
+def _target_from_input(
+    aligned: AlignedInput, reference_id: str, reference_sha256: str, example: bool, store: LabStore
+) -> RunTarget:
+    extras: dict[str, Any] = {}
+    try:
+        extras["reference_fasta"] = str(resolve_reference(store.root, reference_id, example=True).fasta)
+    except LabProblem:
+        pass  # algorithms that need the FASTA fail or skip on their own
     return RunTarget(
         input_id=aligned.input_id,
         source_id=aligned.source_id,
@@ -170,6 +177,7 @@ def _target_from_input(aligned: AlignedInput, reference_id: str, reference_sha25
         reference_sha256=reference_sha256,
         label="full",
         example=example,
+        extras=extras,
     )
 
 
@@ -426,7 +434,7 @@ def run_command(args: argparse.Namespace, store: LabStore) -> tuple[int, dict[st
                     )
                 id12 = id12_for(store, aligned.source_id)
                 log.append("sample", sample=id12, source_id=aligned.source_id, input_id=aligned.input_id)
-                target = _target_from_input(aligned, reference_id, reference_sha256, example)
+                target = _target_from_input(aligned, reference_id, reference_sha256, example, store)
                 results = run_plan(
                     store,
                     lock,
@@ -442,7 +450,8 @@ def run_command(args: argparse.Namespace, store: LabStore) -> tuple[int, dict[st
                     echo=_echo(args.verbose),
                 )
                 code, payload = _summary(
-                    store, run_id, aligned, id12, chunkset, results, warnings, time.monotonic() - started
+                    store, run_id, aligned, id12, chunkset, results, warnings, time.monotonic() - started,
+                    depth=target.depth.model_dump() if target.depth is not None else None,
                 )
                 log.append("run_end", status=payload["status"], exit_code=code)
                 return code, payload
@@ -502,6 +511,8 @@ def _summary(
     results: list[StepResult],
     warnings: list[dict[str, Any]],
     elapsed: float,
+    *,
+    depth: dict[str, Any] | None = None,
 ) -> tuple[int, dict[str, Any]]:
     ok = sum(result.status == "ok" for result in results)
     skipped: dict[str, int] = {}
@@ -519,7 +530,7 @@ def _summary(
         "root": str(store.root),
         "run_id": run_id,
         "sample": {"id12": id12, "source_id": aligned.source_id, "input_id": aligned.input_id},
-        "depth": None,
+        "depth": depth,
         "counts": {"ok": ok, "skipped": skipped, "failed": len(failed)},
         "failed": [{"algorithm_id": result.algorithm_id, "first_line": result.first_line} for result in failed],
         "steps": [result.public() for result in results],
@@ -542,7 +553,7 @@ def _summary(
         for part in (
             f"{chunks} chunks" if chunks else None,
             f"{reads:,} reads" if isinstance(reads, int) else None,
-            "depth after read-summary",
+            f"{depth['approx_depth_x']:.3g}x eligible depth" if depth else "depth not measured",
         )
         if part
     )

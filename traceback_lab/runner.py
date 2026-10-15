@@ -51,6 +51,7 @@ class StepResult:
     peak_rss_bytes: int | None = None
     cached: bool = False
     input_label: str = "full"
+    artifacts_dir: str | None = None
 
     def public(self) -> dict[str, Any]:
         return {
@@ -179,12 +180,18 @@ def run_plan(
             result = StepResult(
                 algorithm.id, "ok", item.upstream_only, identity, cached=True, input_label=target.label
             )
+            _after_ok(store, target, algorithm, identity, result, existing)
             results.append(result)
             done[algorithm.id] = result
             if progress:
                 progress(f"{step:<24} ok (cached)")
             continue
         blocked = [name for name in algorithm.upstream if done.get(name) is None or done[name].status != "ok"]
+        target.extras["upstream"] = {
+            name: done[name].artifacts_dir
+            for name in algorithm.upstream
+            if name in done and done[name].artifacts_dir
+        }
         ctx = target.context(store.root)
         decision: Ready | Skip
         if blocked:
@@ -263,7 +270,7 @@ def run_plan(
                 try:
                     produced = json.loads((scratch / "output.json").read_bytes())
                     artifacts = {
-                        str(path.relative_to(scratch)): path.read_bytes()
+                        str(path.relative_to(scratch))
                         for path in sorted((scratch / "artifacts").rglob("*"))
                         if path.is_file() and not path.is_symlink()
                     }
@@ -290,7 +297,7 @@ def run_plan(
                     store.publish_result(
                         envelope,
                         input_id=target.input_id,
-                        artifacts={key[len("artifacts/"):]: value for key, value in artifacts.items()},
+                        artifacts_dir=scratch / "artifacts",
                     )
                     log.append(
                         "step_end",
@@ -310,6 +317,7 @@ def run_plan(
                         peak_rss_bytes=outcome.peak_rss_bytes,
                         input_label=target.label,
                     )
+                    _after_ok(store, target, algorithm, identity, result, envelope)
             else:
                 stage = outcome.stages[0]
                 tail = stage.stderr.scrubbed(scrubber, last=50)
@@ -332,6 +340,37 @@ def run_plan(
                 progress(f"{step:<24} failed: {result.first_line}")
     shutil.rmtree(scratch_root, ignore_errors=True)
     return results
+
+
+DEPTH_SOURCE = "read-summary"
+
+
+def _after_ok(
+    store: LabStore,
+    target: RunTarget,
+    algorithm: Algorithm,
+    identity: str,
+    result: StepResult,
+    envelope: ResultEnvelope,
+) -> None:
+    """Record where the result's artifacts live; the read summary also sets
+    the input's eligible-read depth for every later preflight (D33)."""
+
+    artifacts = store.selected_artifacts(target.input_id, algorithm.id, identity)
+    result.artifacts_dir = str(artifacts) if artifacts is not None else None
+    if algorithm.id == DEPTH_SOURCE and target.derived is None:
+        values = {metric.metric_id: metric.value for metric in envelope.metrics}
+        eligible = values.get("eligible_reads")
+        depth_x = values.get("approx_depth_x")
+        if isinstance(eligible, int) and isinstance(depth_x, (int, float)):
+            target.eligible_reads = eligible
+            target.approx_depth_x = float(depth_x)
+            target.depth = Depth(
+                eligible_reads=eligible,
+                index_mapped_upper_bound=values.get("index_mapped_upper_bound"),
+                mean_span_bp=values.get("mean_span_bp"),
+                approx_depth_x=float(depth_x),
+            )
 
 
 def _publish_failure(

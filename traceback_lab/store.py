@@ -381,9 +381,15 @@ class LabStore:
         *,
         input_id: str,
         artifacts: Mapping[str, bytes] | None = None,
+        artifacts_dir: Path | None = None,
         attempt_id: str | None = None,
     ) -> str:
-        """Publish one immutable attempt, then select it (callers hold the lock)."""
+        """Publish one immutable attempt, then select it (callers hold the lock).
+
+        ``artifacts_dir`` (a directory on the same volume, e.g. a worker's
+        scratch) is moved into the attempt as ``artifacts/`` instead of being
+        copied, so large columnar artifacts never pass through memory.
+        """
 
         directory = self.result_dir(
             input_id, envelope.algorithm_id, envelope.provenance.parameters_sha256
@@ -400,6 +406,11 @@ class LabStore:
 
         def build(staging: Path) -> None:
             (staging / "result.json").write_bytes(envelope.to_bytes())
+            if artifacts_dir is not None:
+                for path in artifacts_dir.rglob("*"):
+                    if path.is_symlink():
+                        raise ValueError("artifacts may not contain symlinks")
+                os.rename(artifacts_dir, staging / "artifacts")
             for relative, content in files.items():
                 target = staging / "artifacts" / relative
                 target.parent.mkdir(parents=True, exist_ok=True)
@@ -445,6 +456,12 @@ class LabStore:
         for stale in others:
             if stale.name not in retained:
                 shutil.rmtree(stale, ignore_errors=True)
+
+    def selected_artifacts(
+        self, input_id: str, algorithm_id: str, parameters_sha256: str
+    ) -> Path | None:
+        attempt = self.selected_attempt(input_id, algorithm_id, parameters_sha256)
+        return attempt / "artifacts" if attempt is not None else None
 
     def selected_attempt(
         self, input_id: str, algorithm_id: str, parameters_sha256: str
