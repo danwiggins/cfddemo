@@ -211,6 +211,7 @@ class LabApi:
         used_licenses: list[str] = []
         for algorithm_id, envelope in sample.full.results.items():
             metrics = []
+            cis = {m.metric_id: (m.ci, m.ci_level) for m in envelope.metrics}
             for row in interpret_result(envelope, library, depth_x=depth_x):
                 entry = row.entry
                 if entry is None and algorithm_id not in library.hidden_algorithms:
@@ -220,7 +221,11 @@ class LabApi:
                 for license_id in (entry.get("license_ids") or []) if entry else []:
                     if license_id not in used_licenses:
                         used_licenses.append(license_id)
-                metrics.append(_metric_payload(row, entry, qc_band(row.value, entry)))
+                payload = _metric_payload(row, entry, qc_band(row.value, entry))
+                stored = cis.get(row.metric_id)
+                payload["ci"] = list(stored[0]) if stored and stored[0] else None
+                payload["ci_level"] = stored[1] if stored else None
+                metrics.append(payload)
             headline = library.headline(algorithm_id)
             algorithms.append(
                 {

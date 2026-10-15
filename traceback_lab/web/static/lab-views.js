@@ -36,6 +36,9 @@
     { id: "findings", label: "Findings", count: (s) => ` (${outOfRange(s).length})` },
     { id: "trust-qc", label: "Trust/QC" },
     { id: "stability", label: "Stability" },
+    { id: "signals", label: "Signals" },
+    { id: "body-map", label: "Body map" },
+    { id: "agreement", label: "Agreement" },
     { id: "evidence", label: "Evidence" },
     { id: "methods", label: "Methods" },
   );
@@ -612,7 +615,170 @@
     return out;
   }
 
+  // -- shared helpers for L1.7 ------------------------------------------------------------------
+  function artifact(sample, algorithmId, panelId, label = "full") {
+    return fetch(`/api/samples/${sample.id12}/artifact/${label}/${algorithmId}/${panelId}`, { credentials: "same-origin" })
+      .then((r) => { if (!r.ok) throw new Error("data reference invalid"); return r.json(); });
+  }
+  function algo(sample, id) { return sample.algorithms.find((a) => a.algorithm_id === id); }
+  function value(sample, id, metric) {
+    const a = algo(sample, id);
+    const m = a && a.status === "ok" ? a.metrics.find((x) => x.metric_id === metric) : null;
+    return m ? m.value : null;
+  }
+  function absent(a, what) {
+    return h("p", { class: "empty" }, !a ? `${what}: not computed for this sample.` : `${what}: ${a.status}${a.skip_reason ? ` (${a.skip_reason.replace(/_/g, " ")})` : ""}.`);
+  }
+
+  // -- Signals: one sub-tab per family with results --------------------------------------------
+  function signals(sample) {
+    const out = [h("p", { class: "breadcrumb" }, `Lab › ${sample.id12} › Signals`), h("h1", { class: "view-title" }, "Signals")];
+    const families = [
+      ["fragmentomics", "Fragmentomics", fragmentSignals],
+      ["copy-number", "Copy number", copyNumberSignals],
+      ["methylation", "Methylation", methylationSignals],
+    ];
+    const tabs = h("div", { class: "subtabs", role: "group", "aria-label": "Signal families" });
+    const body = h("div", {});
+    const show = (index) => {
+      for (const [i, button] of [...tabs.children].entries()) button.setAttribute("aria-pressed", String(i === index));
+      body.replaceChildren(...families[index][2](sample));
+    };
+    families.forEach(([, label], i) => tabs.append(h("button", { type: "button", class: "control subtab", "aria-pressed": "false", onclick: () => show(i) }, label)));
+    out.push(tabs, body);
+    show(0);
+    return out;
+  }
+
+  function fragmentSignals(sample) {
+    const a = algo(sample, "fragment-size");
+    const section = h("section", { class: "panel" }, h("h2", {}, "Size density"));
+    if (!a || a.status !== "ok") return [section, absent(a, "fragment-size")];
+    const slot = h("div", {}, h("p", {}, "Loading…"));
+    section.append(h("p", { class: "help" }, "No kit cohort band yet (cohort n = " + sample.cohort_n + " of 10); 167 bp marked."), slot);
+    artifact(sample, "fragment-size", "size-density").then((data) => {
+      const points = data.span_bp.map((x, i) => [x, data.count[i]]).filter((p) => p[0] >= 50 && p[0] <= 700);
+      slot.replaceWith(chart("Aligned-span density, 50 to 700 bp, with 167 bp marked.", {
+        grid: { left: 60, right: 20, top: 20, bottom: 40 }, xAxis: { type: "value", name: "bp", min: 50, max: 700 }, yAxis: { type: "value", name: "molecules" },
+        series: [{ type: "line", showSymbol: false, data: points, lineStyle: { color: "#1f5f8b" }, markLine: { symbol: "none", data: [{ xAxis: 167, label: { formatter: "167 bp" } }] } }],
+      }, dataTable("Molecules by aligned span (bp)", ["Span (bp)", "Molecules"], points)));
+    }).catch((e) => slot.replaceWith(h("div", { class: "problem" }, `Chart could not be drawn (${e.message}).`)));
+    const more = [];
+    for (const id of ["end-motifs", "delfi-ratio", "long-tail", "mtdna"]) {
+      const other = algo(sample, id);
+      if (other) more.push(h("section", { class: "panel" }, h("h2", {}, id), other.status === "ok"
+        ? h("table", { class: "data-table" }, h("tbody", {}, ...other.metrics.filter((m) => m.value === null || typeof m.value !== "object").map((m) => h("tr", {}, h("th", { scope: "row" }, m.label), h("td", {}, fmt(m.value, m.unit))))))
+        : absent(other, id), id === "end-motifs" || id === "delfi-ratio" ? flagPill("LEGAL") : ""));
+    }
+    return [section, ...more];
+  }
+
+  function copyNumberSignals(sample) {
+    const a = algo(sample, "copy-number");
+    const tf = value(sample, "copy-number", "tumor_fraction");
+    const counted = value(sample, "copy-number", "counted_reads");
+    const pon = value(sample, "copy-number", "pon_policy");
+    const section = h("section", { class: "panel" }, h("div", { class: "findings-head" }, h("h2", {}, "Genome log2 track"), flagPill("FDA")));
+    if (!a || a.status !== "ok") return [section, absent(a, "copy-number")];
+    section.append(h("p", {}, `Tumour fraction ${fmt(tf)} · LoD 3% established at 0.1x Illumina with PoN; this run: ${pon === "none" ? "no PoN" : "PoN"}, ${fmt(counted)} reads. Not interpretable without a protocol-matched panel of normals.`));
+    const slot = h("div", {}, h("p", {}, "Loading…"));
+    section.append(slot);
+    artifact(sample, "copy-number", "genome-track").then((data) => {
+      const bins = data.bins.filter((b) => b.log2 !== null);
+      const offsets = {};
+      let cursor = 0;
+      for (const b of data.bins) { if (!(b.chr in offsets)) offsets[b.chr] = cursor; cursor = Math.max(cursor, offsets[b.chr] + b.end); }
+      const points = bins.map((b) => [(offsets[b.chr] + b.start) / 1e6, b.log2]);
+      slot.replaceWith(chart(`Copy-number log2 ratio across the genome, ${bins.length} bins; tumour fraction ${fmt(tf)}.`, {
+        grid: { left: 50, right: 20, top: 20, bottom: 40 }, xAxis: { type: "value", name: "Mb (genome order)" }, yAxis: { type: "value", name: "log2", min: -2, max: 2 },
+        series: [{ type: "scatter", symbolSize: 3, data: points, itemStyle: { color: "#1f5f8b" } }],
+      }, dataTable("Copy-number bins", ["Contig", "Start", "End", "log2", "Mask"], data.bins.map((b) => [b.chr, b.start, b.end, b.log2, b.mask || "—"]))));
+    }).catch((e) => slot.replaceWith(h("div", { class: "problem" }, `Chart could not be drawn (${e.message}).`)));
+    return [section];
+  }
+
+  function methylationSignals(sample) {
+    const ids = ["global-5mc", "global-5hmc", "pmd-score", "hypometh-reads", "modbase-qc"];
+    const present = ids.map((id) => algo(sample, id)).filter(Boolean);
+    if (!present.length) return [h("p", { class: "empty" }, "No methylation summary algorithm has run on this sample yet (Phase 1). Cell-type composition is in Body map.")];
+    return present.map((a) => h("section", { class: "panel" }, h("h2", {}, a.algorithm_id), a.status === "ok"
+      ? h("table", { class: "data-table" }, h("tbody", {}, ...a.metrics.filter((m) => m.value === null || typeof m.value !== "object").map((m) => h("tr", {}, h("th", { scope: "row" }, m.label), h("td", {}, fmt(m.value, m.unit)), h("td", {}, stateChip(m))))))
+      : absent(a, a.algorithm_id)));
+  }
+
+  // -- Body map: tissue composition with intervals (no donuts) -------------------------------------
+  const ORGANS = [
+    ["Blood", (c) => c.startsWith("Blood-") || c === "Megakaryocytes" || c === "Eryth-prog"],
+    ["Liver and gut", (c) => /^(Liver|Gallbladder|Colon|Small-Int|Gastric|Pancreas)/.test(c)],
+    ["Vascular, heart and lung", (c) => /^(Endothel|Heart|Lung|Smooth-Musc)/.test(c)],
+    ["Other", () => true],
+  ];
+  function bodyMap(sample) {
+    const out = [h("p", { class: "breadcrumb" }, `Lab › ${sample.id12} › Body map`),
+      h("div", { class: "findings-head" }, h("h1", { class: "view-title" }, "Body map"), flagPill("LEGAL", "FLAG: LEGAL — research-only licenses; atlas terms unknown."))];
+    const a = algo(sample, "cell-origin");
+    if (!a || a.status !== "ok") { out.push(absent(a, "cell-origin")); return out; }
+    out.push(h("p", { class: "help" }, `No healthy cohort band yet (cohort n = ${sample.cohort_n} of 10). Minor tissues are not interpretable below 5x; their estimate and interval stay visible.`));
+    const rows = a.metrics.filter((m) => m.metric_id.startsWith("fraction_"));
+    const groups = ORGANS.map(([name]) => [name, []]);
+    for (const m of rows) {
+      const contributor = m.label.split(" share")[0];
+      const index = ORGANS.findIndex(([, test]) => test(contributor));
+      groups[index][1].push(Object.assign({ contributor }, m));
+    }
+    const tableRows = [];
+    for (const [name, members] of groups) {
+      if (!members.length) continue;
+      members.sort((x, y) => y.value - x.value);
+      const w = 560, rowH = 22, left = 170, hgt = members.length * rowH + 20;
+      const x = (v) => left + Math.min(1, v / 0.6) * (w - left - 20);
+      const marks = members.flatMap((m, i) => {
+        const y = 14 + i * rowH;
+        const out2 = [svg("text", { x: left - 6, y: y + 4, "text-anchor": "end", class: "axis" }, m.contributor)];
+        if (m.ci) out2.push(svg("line", { x1: x(m.ci[0]), x2: x(m.ci[1]), y1: y, y2: y, class: "ci" }));
+        out2.push(svg("text", { x: x(m.value), y: y + 5, "text-anchor": "middle", class: m.state === "not_interpretable" ? "pt-open" : "pt" }, m.state === "not_interpretable" ? "▨" : "●"));
+        return out2;
+      });
+      const label = `${name}: ${members.length} cell types; filled dots interpretable, hatched not interpretable at this depth.`;
+      out.push(h("section", { class: "panel" }, h("h2", {}, name),
+        svg("svg", { viewBox: `0 0 ${w} ${hgt}`, role: "img", "aria-label": label, class: "composition-svg" }, svg("title", {}, label), ...marks)));
+      for (const m of members) tableRows.push([name, m.contributor, m.value, m.ci ? m.ci[0] : null, m.ci ? m.ci[1] : null, (STATE[m.state] || ["", m.state])[1] + (m.reason ? ` (${m.reason})` : "")]);
+    }
+    const level = (rows.find((m) => m.ci_level) || {}).ci_level;
+    out.push(dataTable(`Body map: every cell type (${level ? Math.round(level * 100) + "% bootstrap interval" : "interval"})`, ["Group", "Cell type", "Share", "Interval low", "Interval high", "State"], tableRows));
+    return out;
+  }
+
+  // -- Agreement: paired signals only, no combined score (D29) ----------------------------------------
+  function agreement(sample) {
+    const out = [h("p", { class: "breadcrumb" }, `Lab › ${sample.id12} › Agreement`), h("h1", { class: "view-title" }, "Agreement"),
+      h("p", { class: "status-line" }, "These signals share inputs and are not independent confirmation; agreement is not validation.")];
+    const tf = value(sample, "copy-number", "tumor_fraction");
+    const mode = value(sample, "fragment-size", "mode_bp");
+    const mt = value(sample, "mtdna", "chrm_fraction");
+    const pairs = [
+      ["Size mode vs copy-number TF", "fragment-size mode (bp)", mode, "tumour fraction", tf],
+      ["mtDNA fraction vs copy-number TF", "chrM fraction", mt, "tumour fraction", tf],
+    ];
+    for (const [title, xLabel, xValue, yLabel, yValue] of pairs) {
+      const section = h("section", { class: "panel" }, h("h2", {}, title), flagPill("FDA"));
+      if (xValue === null || yValue === null) {
+        section.append(h("p", { class: "empty" }, `Needs both signals at full depth (${xValue === null ? xLabel : yLabel} missing). Cohort samples are plotted once the kit cohort exists (n = ${sample.cohort_n}).`));
+      } else {
+        section.append(chart(`${title}: this sample at ${fmt(xValue)} and ${fmt(yValue)}; no cohort samples yet.`, {
+          grid: { left: 60, right: 20, top: 20, bottom: 40 }, xAxis: { type: "value", name: xLabel, scale: true }, yAxis: { type: "value", name: yLabel, min: 0 },
+          series: [{ type: "scatter", symbolSize: 12, data: [[xValue, yValue]], itemStyle: { color: "#8a4b08" } }],
+        }, dataTable(title, ["Sample", xLabel, yLabel], [[sample.id12, xValue, yValue]])));
+      }
+      out.push(section);
+    }
+    return out;
+  }
+
   window.TracebackLabViews = {
+    signals,
+    "body-map": bodyMap,
+    agreement,
     landing,
     findings,
     stability,

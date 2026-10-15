@@ -178,10 +178,10 @@ def test_navigation_order_and_absent_lenses(page_root, tmp_path) -> None:
     with RunningLabServer(LabStore(page_root)) as server:
         dom = _dom(server, tmp_path, route=f"/sample/{_id12(page_root)}/stability")
     nav = re.search(r'<nav aria-label="Lenses"[^>]*>(.*?)</nav>', dom, re.S).group(1)
-    labels = re.findall(r">([A-Za-z/]+)(?: \(\d+[^)]*\))?</a>", nav)
-    assert labels == ["Findings", "Trust/QC", "Stability", "Evidence", "Methods"]
+    labels = re.findall(r">([A-Za-z/ ]+?)(?: \(\d+[^)]*\))?</a>", nav)
+    assert labels == ["Findings", "Trust/QC", "Stability", "Signals", "Body map", "Agreement", "Evidence", "Methods"]
     assert 'aria-current="page">Stability' in nav
-    for absent in ("Signals", "Body map", "Agreement", "Compare"):
+    for absent in ("Compare",):
         assert absent not in nav
     options = re.findall(r"<option[^>]*>([^<]*)</option>", dom)
     assert len(options) == 1 and "@" not in options[0]  # derived inputs are never samples
@@ -252,3 +252,19 @@ def test_methods_shows_provenance_for_every_number(page_root, tmp_path) -> None:
     assert "source_id" in dom  # the full stamp sits in each row's disclosure
     callouts = re.findall(r'class="license-callout" id="license-([a-z-]+)"', dom)
     assert len(callouts) == len(set(callouts))
+
+
+@needs_chrome
+def test_signals_body_map_and_agreement(page_root, tmp_path) -> None:
+    id12 = _id12(page_root)
+    with RunningLabServer(LabStore(page_root)) as server:
+        signals = _dom(server, tmp_path / "s", route=f"/sample/{id12}/signals")
+        body = _dom(server, tmp_path / "b", route=f"/sample/{id12}/body-map")
+        agreement = _dom(server, tmp_path / "a", route=f"/sample/{id12}/agreement")
+    assert 'data-rendered="1"' in signals and "Size density" in signals and "Data table" in signals
+    assert 'aria-pressed="true"' in signals
+    assert "FLAG: LEGAL" in body and "cell-origin" in body
+    assert "These signals share inputs and are not independent confirmation; agreement is not validation." in agreement
+    assert "score" not in agreement.lower().split("agreement is not validation")[1][:2000]
+    for dom in (signals, body, agreement):
+        assert _body(dom)["csp-violations"] == "0"

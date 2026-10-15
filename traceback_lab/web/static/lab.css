@@ -125,3 +125,7 @@ pre.stderr { white-space: pre-wrap; overflow-wrap: anywhere; font-size: .85rem; 
 .evidence-card { border-top: 1px solid var(--rule); padding: .5rem 0; }
 .mono { font-family: ui-monospace, monospace; }
 @media (max-width: 1023px) { .evidence-columns { grid-template-columns: 1fr; } }
+.subtabs { display: flex; flex-wrap: wrap; gap: .5rem; margin: .5rem 0; }
+.subtab[aria-pressed="true"] { background: var(--ink); color: #ffffff; }
+.subtab[aria-pressed="false"] { background: #ffffff; color: var(--ink); }
+.composition-svg .pt-open { fill: var(--chart-hatch); font-size: 12px; }
