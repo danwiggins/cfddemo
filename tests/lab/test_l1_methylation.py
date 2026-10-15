@@ -342,3 +342,17 @@ def test_lab_run_reuses_meth_calls_on_derived_inputs(lab_world, capsys, shared_m
     assert (steps[("global-5hmc", "full")]["status"], steps[("global-5hmc", "full")]["skip_reason"]) == ("skipped", "missing_channel")
     # the toy input is far below 500k eligible reads
     assert steps[("hypometh-reads", "full")]["skip_reason"] == "depth"
+
+
+def test_l0_copy_number_metrics_have_library_entries() -> None:
+    """L0.6b: every metric copy-number emits has an entry (none falls to no_library_entry)."""
+
+    import re
+
+    from traceback_lab.interpretation.engine import load_library
+
+    source = (Path(__file__).resolve().parents[2] / "traceback_lab" / "algorithms" / "copy_number.py").read_text()
+    library = load_library()
+    for metric_id in set(re.findall(r'metric\("([a-z0-9_]+)"', source)):
+        entry = library.entry("copy-number", metric_id)
+        assert entry is not None and entry.citation_verified, metric_id

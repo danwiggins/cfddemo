@@ -510,6 +510,101 @@ entries:
     citations: []
     citation_checked: {by: "lab build agent", date: "2026-10-15", note: "No citation displayed."}
 
+  # L0.6b (Phase 1 builder): the remaining copy-number metrics
+  - algorithm_id: copy-number
+    metric_id: identifiable
+    label: "Tumour fraction and ploidy identifiable (ichorCNA solution)"
+    value_kind: categorical
+    tier: NEWER
+    origin_tier: NEWER
+    origin_platform: "Illumina ultra-low-pass WGS"
+    min_depth_x: null
+    reference: {kind: none}
+    performance: null
+    performance_missing_reason: "model descriptor, not a diagnostic"
+    meaning_high: "The model separated tumour fraction and ploidy."
+    meaning_low: "Not identifiable: tumour fraction near zero, so ploidy is arbitrary."
+    confounders: ["low depth", "no panel of normals"]
+    next_steps:
+      analytical: ["Read tumour fraction and ploidy only when identifiable"]
+      clinical_setting: null
+    license_ids: [gpl-copyleft]
+    flags: []
+    headline: false
+    citations: []
+    citation_checked: {by: "lab build agent (Phase 1)", date: "2026-10-15", note: "No citation displayed; model descriptor."}
+
+  - algorithm_id: copy-number
+    metric_id: pon_policy
+    label: "Panel-of-normals policy used"
+    value_kind: categorical
+    tier: NEWER
+    origin_tier: NEWER
+    origin_platform: "Illumina ultra-low-pass WGS"
+    min_depth_x: null
+    reference: {kind: none}
+    performance: null
+    performance_missing_reason: "run descriptor; 'none' until the kit cohort builds a panel of normals (L1.4)"
+    meaning_high: "A panel of normals was used."
+    meaning_low: "No panel of normals: tumour fraction is not interpretable."
+    confounders: []
+    next_steps:
+      analytical: ["Build the kit panel of normals once the cohort has 10 samples"]
+      clinical_setting: null
+    license_ids: [gpl-copyleft]
+    flags: []
+    headline: false
+    citations: []
+    citation_checked: {by: "lab build agent (Phase 1)", date: "2026-10-15", note: "No citation displayed; run descriptor."}
+
+  - algorithm_id: copy-number
+    metric_id: counted_reads
+    label: "Reads counted into copy-number bins"
+    value_kind: count
+    tier: NEWER
+    origin_tier: NEWER
+    origin_platform: "Illumina ultra-low-pass WGS"
+    min_depth_x: null
+    reference: {kind: none}
+    performance: null
+    performance_missing_reason: "QC count"
+    meaning_high: "More reads per bin: less noisy copy-number track."
+    meaning_low: "Few reads per bin: a noisy track; tumour fraction is not interpretable below the depth bar."
+    confounders: ["MAPQ filter", "contig set"]
+    next_steps:
+      analytical: ["Compare with eligible reads in depth"]
+      clinical_setting: null
+    license_ids: [gpl-copyleft]
+    flags: []
+    headline: false
+    stability: {kind: scales_with_depth, tolerance: 0.10}
+    citations: []
+    citation_checked: {by: "lab build agent (Phase 1)", date: "2026-10-15", note: "No citation displayed; QC count."}
+
+  - algorithm_id: copy-number
+    metric_id: segments_altered
+    label: "Segments called gained or lost"
+    value_kind: count
+    tier: SPECULATIVE
+    origin_tier: NEWER
+    origin_platform: "Illumina ultra-low-pass WGS"
+    min_depth_x: null
+    reference: {kind: none}
+    performance: null
+    performance_missing_reason: "none published for a segment count; noisy without a panel of normals"
+    meaning_high: "Many altered segments: copy-number changes, or noise without a panel of normals."
+    meaning_low: "Few altered segments."
+    confounders: ["no panel of normals", "low depth", "constitutional CNVs"]
+    next_steps:
+      analytical: ["Inspect the genome track", "Read with tumour fraction"]
+      clinical_setting: null
+    license_ids: [gpl-copyleft]
+    flags: [FDA]
+    headline: false
+    stability: {kind: absolute, tolerance: 3}
+    citations: []
+    citation_checked: {by: "lab build agent (Phase 1)", date: "2026-10-15", note: "No citation displayed."}
+
   # ------------------------------------------------------------ modbase-qc
   - algorithm_id: modbase-qc
     metric_id: mm_tagged_fraction
