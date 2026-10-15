@@ -51,6 +51,8 @@ ALGORITHMS: tuple[str, ...] = (
     "sex_check:SEX_CHECK",
     "mtdna:MTDNA",
     "cell_origin:CELL_ORIGIN",
+    "end_motifs:END_MOTIFS",
+    "delfi_ratio:DELFI_RATIO",
 )
 
 
