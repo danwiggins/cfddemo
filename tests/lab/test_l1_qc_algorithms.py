@@ -249,3 +249,10 @@ def test_modbase_qc_v2_counts_only_aligned_cpgs_and_masks_invalid_rows(tmp_path:
         for h in "AB"
     ]
     assert sorted(halves) == [0, 1]
+
+
+def test_modbase_qc_ml_stats_ignore_implicit_canonical_calls(tmp_path: Path) -> None:
+    reads = [Read("dot", "chr1", 100, "ACGTCG", mm="C+m.,0;", ml=[128])]
+    got = values(MODBASE_QC.run(_with_meth_calls(context_for(tmp_path, MOD_CONTIGS, reads)), tmp_path / "o"))
+    assert got["ml_mean"] == pytest.approx(128 / 255)
+    assert got["ml_below_filter_fraction"] == pytest.approx(1.0)

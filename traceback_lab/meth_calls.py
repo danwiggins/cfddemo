@@ -19,7 +19,11 @@ operation for streaming consumers):
   reverse-strand C;
 - ``p_m``, ``p_h`` (u1): ML values for C+m and C+h (0 when absent);
 - ``p_canonical`` (u1): 255 − p_m − p_h, floored at 0;
-- ``channels`` (u1): bit 0 = a C+m call exists, bit 1 = a C+h call exists.
+- ``channels`` (u1): bit 0 = a C+m call exists, bit 1 = a C+h call exists,
+  bit 2 / bit 3 = that C+m / C+h value is an explicit ML value (not an
+  implicit ``.`` canonical call);
+- ``invalid_rows.bin`` (u4): read-summary rows of MM-carrying records that
+  produced no calls (``invalid_mm``), so derived inputs can mask the count.
 
 Rules (D28):
 
@@ -49,7 +53,7 @@ import numpy as np
 
 from .modbase import mm_codes, mm_skip_modes, mm_tag, mn_ok
 
-SCHEMA = "traceback.lab.meth-calls.v1"
+SCHEMA = "traceback.lab.meth-calls.v2"
 CHUNK_CALLS = 1 << 20  # <= 1M calls per chunk (D28)
 CODE_SAMPLE = 10_000
 DTYPE = np.dtype(
@@ -66,6 +70,8 @@ DTYPE = np.dtype(
 )
 HAS_M = 1
 HAS_H = 2
+EXPLICIT_M = 4  # the C+m value came from ML (not an implicit "." canonical call)
+EXPLICIT_H = 8
 
 
 class _InvalidRecord(ValueError):
@@ -92,6 +98,7 @@ def _record_sites(record: Any) -> tuple[list[tuple[int, int, int, int, int]], in
     # CpG calls in stored coordinates: on the C of a stored CG (forward C+
     # calls) or on its G (reverse records, opposite-strand G- calls).
     sites: dict[int, dict[str, int]] = {}
+    explicit: set[tuple[int, str]] = set()
     for (base, _strand, code), calls in parsed.items():
         if base not in ("C", "G") or code not in ("m", "h"):
             continue
@@ -102,6 +109,7 @@ def _record_sites(record: Any) -> tuple[list[tuple[int, int, int, int, int]], in
             on_g = 0 < position < len(sequence) and sequence[position - 1] == "C" and sequence[position] == "G"
             if on_c or on_g:
                 sites.setdefault(position, {})[code] = int(quality)
+                explicit.add((position, code))
     modes = mm_skip_modes(mm)
     complement = {"C": "G", "G": "C"}
     for code, mode in modes.items():
@@ -135,7 +143,12 @@ def _record_sites(record: Any) -> tuple[list[tuple[int, int, int, int, int]], in
             dropped += 1
             continue
         calls = sites[position]
-        channels = (HAS_M if "m" in calls else 0) | (HAS_H if "h" in calls else 0)
+        channels = (
+            (HAS_M if "m" in calls else 0)
+            | (HAS_H if "h" in calls else 0)
+            | (EXPLICIT_M if (position, "m") in explicit else 0)
+            | (EXPLICIT_H if (position, "h") in explicit else 0)
+        )
         out.append((ref_c, 1 if on_g else 0, calls.get("m", 0), calls.get("h", 0), channels))
     return out, dropped
 
@@ -265,4 +278,4 @@ def contig_index(contigs: Container[str] | list[str]) -> dict[str, int]:
     return {name: index for index, name in enumerate(contigs)}  # type: ignore[arg-type]
 
 
-__all__ = ["CHUNK_CALLS", "DTYPE", "HAS_H", "HAS_M", "MethCalls", "SCHEMA", "argmax_state", "write_meth_calls"]
+__all__ = ["CHUNK_CALLS", "DTYPE", "EXPLICIT_H", "EXPLICIT_M", "HAS_H", "HAS_M", "MethCalls", "SCHEMA", "argmax_state", "write_meth_calls"]

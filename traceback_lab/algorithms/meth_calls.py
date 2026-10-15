@@ -22,11 +22,12 @@ from ._records import eligible_record
 
 @dataclass
 class MethCallsIntermediate(Base):
+    version: str = "2"
     family: str = "methylation"
     consumes: str = "full_bam"
     requires: Requirements = field(default_factory=lambda: Requirements(mm_tags=True))
     parameters: dict[str, Any] = field(
-        default_factory=lambda: {"chunk_calls": CHUNK_CALLS, "layout": "site-row-v1", "context": "CpG (read sequence)"}
+        default_factory=lambda: {"chunk_calls": CHUNK_CALLS, "layout": "site-row-v2", "context": "CpG (read sequence)"}
     )
 
     def preflight(self, ctx: InputContext) -> Ready | Skip:

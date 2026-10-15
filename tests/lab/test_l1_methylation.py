@@ -62,7 +62,7 @@ def test_meth_calls_site_rows_and_counted_drops(tmp_path: Path) -> None:
     store, metrics = _run_meth_calls(tmp_path)
     rows = np.concatenate(list(store.chunks()))
     got = sorted(
-        (int(r["ref_pos0"]), int(r["strand"]), int(r["p_m"]), int(r["p_h"]), int(r["p_canonical"]), int(r["channels"]))
+        (int(r["ref_pos0"]), int(r["strand"]), int(r["p_m"]), int(r["p_h"]), int(r["p_canonical"]), int(r["channels"]) & (HAS_M | HAS_H))
         for r in rows
     )
     assert got == sorted(
