@@ -179,9 +179,9 @@ def test_navigation_order_and_absent_lenses(page_root, tmp_path) -> None:
         dom = _dom(server, tmp_path, route=f"/sample/{_id12(page_root)}/stability")
     nav = re.search(r'<nav aria-label="Lenses"[^>]*>(.*?)</nav>', dom, re.S).group(1)
     labels = re.findall(r">([A-Za-z/]+)(?: \(\d+[^)]*\))?</a>", nav)
-    assert labels == ["Findings", "Trust/QC", "Stability"]
+    assert labels == ["Findings", "Trust/QC", "Stability", "Evidence", "Methods"]
     assert 'aria-current="page">Stability' in nav
-    for absent in ("Signals", "Body map", "Agreement", "Compare", "Evidence", "Methods"):
+    for absent in ("Signals", "Body map", "Agreement", "Compare"):
         assert absent not in nav
     options = re.findall(r"<option[^>]*>([^<]*)</option>", dom)
     assert len(options) == 1 and "@" not in options[0]  # derived inputs are never samples
@@ -223,3 +223,30 @@ def _id12(root: Path) -> str:
     from traceback_lab.web.api import LabApi
 
     return LabApi(LabStore(root)).samples()["samples"][0]["id12"]
+
+
+@needs_chrome
+def test_evidence_lists_every_algorithm_by_tier_with_exclusions(page_root, tmp_path) -> None:
+    with RunningLabServer(LabStore(page_root)) as server:
+        dom = _dom(server, tmp_path, route=f"/sample/{_id12(page_root)}/evidence")
+    from traceback_lab.registry import load_registry
+
+    for algorithm in load_registry():
+        if algorithm.id != "read-summary":
+            assert f">{algorithm.id}<" in dom, algorithm.id
+    assert "jagged-ends" in dom and "low-vaf-snv" in dom
+    callouts = re.findall(r'class="license-callout" id="license-([a-z-]+)"', dom)
+    assert len(callouts) == len(set(callouts)) and callouts  # one full block per license
+
+
+@needs_chrome
+def test_methods_shows_provenance_for_every_number(page_root, tmp_path) -> None:
+    with RunningLabServer(LabStore(page_root)) as server:
+        dom = _dom(server, tmp_path, route=f"/sample/{_id12(page_root)}/methods")
+    assert "Every number with its provenance" in dom
+    assert "Interpretation library v" in dom and "provenance stamp only" in dom
+    assert "FLAG: PII" in dom
+    assert "/Users/" not in dom and "/home/" not in dom
+    assert "source_id" in dom  # the full stamp sits in each row's disclosure
+    callouts = re.findall(r'class="license-callout" id="license-([a-z-]+)"', dom)
+    assert len(callouts) == len(set(callouts))

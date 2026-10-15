@@ -272,7 +272,9 @@ class LabApi:
             "defended": defended_block,
             "headline": headline_block,
             "derived": [{"label": view.label, "transform": view.transform} for view in sample.derived],
-            "licenses": [{"license_id": key, **library.licenses[key]} for key in used_licenses],
+            "licenses": [{"license_id": key, **library.licenses[key]} for key in _all_used(used_licenses, library, order)],
+            "catalog": _catalog(library, order, algorithms),
+            "excluded": EXCLUDED,
             "library_health": {
                 **self.libraries.health(),
                 "no_library_entry": no_entry,
@@ -360,6 +362,60 @@ def _defended(
         depth_x, usable, total, len(block["rows"]), min_depths, downsampled=curve["downsampled"], failed=failed
     )
     return block, sentence
+
+
+EXCLUDED = [
+    {"id": "jagged-ends", "reason": "needs Jag-seq library preparation; not computable from a standard ONT BAM"},
+    {"id": "low-vaf-snv", "reason": "needs a matched tumour sample; not computable from one plasma BAM"},
+]
+
+
+def _all_used(used: list[str], library: Library, order: list[str]) -> list[str]:
+    """Licenses of every registered algorithm's entries (Evidence lists them all)."""
+
+    out = list(used)
+    for (algorithm_id, _), entry in library.entries.items():
+        if algorithm_id in order:
+            for license_id in entry.get("license_ids") or []:
+                if license_id not in out:
+                    out.append(license_id)
+    return out
+
+
+def _catalog(library: Library, order: list[str], algorithms: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """Every registered (non-hidden) algorithm with its tier, footnote and status here."""
+
+    by_id = {row["algorithm_id"]: row for row in algorithms}
+    rows = []
+    for algorithm_id in order:
+        if algorithm_id in library.hidden_algorithms:
+            continue
+        entry = library.headline(algorithm_id)
+        licenses: list[str] = []
+        for (alg, _), item in library.entries.items():
+            if alg == algorithm_id:
+                for license_id in item.get("license_ids") or []:
+                    if license_id not in licenses:
+                        licenses.append(license_id)
+        performance = entry.get("performance") if entry else None
+        result = by_id.get(algorithm_id)
+        rows.append(
+            {
+                "algorithm_id": algorithm_id,
+                "label": entry["label"] if entry else algorithm_id,
+                "tier": entry.tier if entry else None,
+                "origin_tier": entry.get("origin_tier") if entry else None,
+                "origin_platform": entry.get("origin_platform") if entry else None,
+                "footnote": (performance or {}).get("value") if performance else (entry.get("performance_missing_reason") if entry else None),
+                "footnote_source": (performance or {}).get("source") if performance else None,
+                "min_depth_x": entry.get("min_depth_x") if entry else None,
+                "license_ids": licenses,
+                "citation_checked": bool(entry and entry.citation_verified),
+                "status": result["status"] if result else "not run",
+                "skip_reason": result["skip_reason"] if result else None,
+            }
+        )
+    return rows
 
 
 def _registry() -> Iterable[Any]:

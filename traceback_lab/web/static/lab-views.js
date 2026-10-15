@@ -36,6 +36,8 @@
     { id: "findings", label: "Findings", count: (s) => ` (${outOfRange(s).length})` },
     { id: "trust-qc", label: "Trust/QC" },
     { id: "stability", label: "Stability" },
+    { id: "evidence", label: "Evidence" },
+    { id: "methods", label: "Methods" },
   );
 
   function svg(tag, attrs, ...children) {
@@ -545,10 +547,77 @@
     return [h("p", { class: "back" }, h("a", { href: "#/" }, "← Back to Lab home")), h("h1", { class: "view-title" }, c.title), ...paragraphs(c.full), h("p", { class: "help" }, `Last reviewed: ${c.last_reviewed}`)];
   }
 
+  // -- Evidence -------------------------------------------------------------------------------
+  function evidence(sample) {
+    const out = [h("p", { class: "breadcrumb" }, `Lab › ${sample.id12} › Evidence`), h("h1", { class: "view-title" }, "Evidence")];
+    out.push(h("p", { class: "help" }, "Tier is judged as run here (ONT, this depth); the original evidence is shown beside it. Every algorithm the BAM can support is listed, weak ones included, with its weakness in the footnote."));
+    // One full block per license at the top; pills below (callout-once).
+    const used = sample.licenses || [];
+    if (used.length) out.push(h("section", { class: "panel" }, h("h2", {}, "License callouts"),
+      ...used.map((lic) => h("div", { class: "license-callout", id: `license-${lic.license_id}` }, h("h3", {}, lic.headline), h("p", {}, lic.body)))));
+    const columns = h("div", { class: "evidence-columns" });
+    for (const tier of ["PROVEN", "NEWER", "SPECULATIVE"]) {
+      const rows = sample.catalog.filter((c) => c.tier === tier);
+      columns.append(h("section", { class: "panel evidence-column", "aria-labelledby": `ev-${tier}` },
+        h("h2", { id: `ev-${tier}` }, tierBadge(tier), ` ${rows.length}`),
+        ...rows.map((c) => h("article", { class: "evidence-card" },
+          h("h3", {}, c.label), h("p", { class: "help" }, c.algorithm_id),
+          h("p", {}, `Original evidence: ${c.origin_tier || "—"} (${c.origin_platform || "—"})`),
+          h("p", {}, "Footnote: ", c.footnote || "none published", c.footnote_source ? ` (${c.footnote_source})` : "",
+            c.citation_checked ? "" : [" ", h("span", { class: "unverified" }, "UNVERIFIED citation")]),
+          h("p", {}, c.status === "skipped" ? `skipped (${(c.skip_reason || "").replace(/_/g, " ")})` : c.status === "ok" ? "ran" : c.status,
+            c.min_depth_x ? ` · literature minimum ${c.min_depth_x}x` : ""),
+          h("p", {}, ...c.license_ids.map((id) => licenseRef(sample, id)))))));
+    }
+    out.push(columns);
+    out.push(h("section", { class: "panel" }, h("h2", {}, "Excluded (not computable from this BAM)"),
+      h("ul", {}, ...sample.excluded.map((x) => h("li", {}, h("strong", {}, x.id), `: ${x.reason}`)))));
+    return out;
+  }
+
+  // -- Methods --------------------------------------------------------------------------------
+  function methods(sample) {
+    const out = [h("p", { class: "breadcrumb" }, `Lab › ${sample.id12} › Methods`), h("h1", { class: "view-title" }, "Methods"),
+      h("p", {}, `Interpretation library v${sample.interpretation_version} · cohort ${sample.cohort_version || "none yet"} · provenance stamp only (no signing). `, flagPill("PII", "FLAG: PII — file paths often embed donor names. Hashes only, never paths."))];
+    const rows = [];
+    const seen = new Set();
+    const firstUse = (id) => {
+      if (seen.has(id)) return licenseRef(sample, id);
+      seen.add(id);
+      const lic = (sample.licenses || []).find((x) => x.license_id === id);
+      return lic ? h("div", { class: "license-callout", id: `license-${id}` }, h("h3", {}, lic.headline), h("p", {}, lic.body)) : "";
+    };
+    for (const a of sample.algorithms) {
+      if (a.hidden) continue;
+      for (const m of a.metrics) {
+        if (m.value !== null && typeof m.value === "object") continue;
+        const e = m.entry || {};
+        const ref = e.reference || {};
+        rows.push(h("tr", {},
+          h("th", { scope: "row" }, m.label), h("td", {}, fmt(m.value, m.unit)),
+          h("td", {}, a.provenance.tool, " ", a.provenance.tool_version),
+          h("td", { class: "mono" }, h("details", {}, h("summary", {}, a.provenance.parameters_sha256.slice(0, 12)), provenance(sample, a.algorithm_id))),
+          h("td", { class: "mono" }, a.provenance.input_id.slice(0, 12)),
+          h("td", {}, a.provenance.reference_id),
+          h("td", {}, a.provenance.timestamp_utc),
+          h("td", {}, ...(e.license_ids || []).map(firstUse)),
+          h("td", {}, (e.citations || []).join(", ") || "—", m.entry && !e.citation_checked ? [" ", h("span", { class: "unverified" }, "UNVERIFIED citation")] : ""),
+          h("td", {}, ref.kind === "none" || !ref.kind ? "none" : `${ref.kind}${ref.source ? ": " + ref.source : ""}`)));
+      }
+    }
+    out.push(h("div", { class: "table-wrap" }, h("table", { class: "data-table" },
+      h("caption", {}, "Every number with its provenance"),
+      h("thead", {}, h("tr", {}, ...["Metric", "Value", "Tool", "Provenance stamp (parameters sha256)", "Input", "Reference", "Computed (UTC)", "License", "Citation", "Range source"].map((t) => h("th", { scope: "col" }, t)))),
+      h("tbody", {}, ...rows))));
+    return out;
+  }
+
   window.TracebackLabViews = {
     landing,
     findings,
     stability,
+    evidence,
+    methods,
     clia: () => { const holder = h("div", {}, h("h1", { class: "view-title" }, "What CLIA means for this demo"), h("p", {}, "Loading…")); clia().then((nodes) => { holder.replaceChildren(...nodes); const t = holder.querySelector("h1"); if (t) { t.tabIndex = -1; t.focus(); } }); return [holder]; },
   };
 })();
