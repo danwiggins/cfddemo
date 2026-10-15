@@ -121,6 +121,7 @@ def _validate_entry(raw: Mapping[str, Any], licenses: Mapping[str, Any]) -> Entr
     where = f"{raw.get('algorithm_id')}/{raw.get('metric_id')}"
     for key in ("algorithm_id", "metric_id", "label", "tier", "reference", "headline", "value_kind"):
         _require(key in raw, where, f"missing {key}")
+    _require(isinstance(raw["headline"], bool), where, "headline must be true or false")
     _require(raw["tier"] in TIERS, where, f"tier must be one of {TIERS}")
     _require(raw.get("origin_tier", raw["tier"]) in TIERS, where, "origin_tier must be a tier")
     _require(raw["value_kind"] in VALUE_KINDS, where, f"value_kind must be one of {VALUE_KINDS}")
@@ -252,20 +253,20 @@ class Interpretation:
 
 def percentile_of(value: float, values: Sequence[float]) -> float:
     """Empirical percentile of ``value`` among ``values``: the inverse of numpy's
-    default (linear) percentile, clamped to 0-100."""
+    default (linear) percentile, clamped to 0-100.  Exact ties take the
+    mid-rank of the tied block (numpy's forward quantile does not fix a
+    convention for the inverse)."""
 
     data = np.sort(np.asarray(values, dtype=float))
-    if data.size == 1:
-        return 50.0 if value == data[0] else (100.0 if value > data[0] else 0.0)
     ranks = np.linspace(0.0, 100.0, data.size)
-    if value <= data[0]:
-        return 0.0 if value < data[0] else float(ranks[data == data[0]].max())
-    if value >= data[-1]:
+    if value < data[0]:
+        return 0.0
+    if value > data[-1]:
         return 100.0
-    # Ties: take the highest rank of an exact match, else interpolate.
+    # Ties: the mid-rank of the tied block (a value equal to every member is p = 50).
     exact = data == value
     if exact.any():
-        return float(ranks[exact].max())
+        return float(ranks[exact].mean())
     return float(np.interp(value, data, ranks))
 
 
@@ -289,15 +290,19 @@ def classify(
 ) -> Interpretation:
     """The D7/D8 state of one metric value (the algorithm itself is ``ok``)."""
 
-    if entry is None:
-        return Interpretation("no_reference", "no_library_entry", caption="No library entry for this metric.")
-    reference = entry["reference"]
+    reference = entry["reference"] if entry is not None else {}
     kind = reference.get("kind", "none")
     if not_interpretable is not None:
         if not_interpretable not in NOT_INTERPRETABLE_REASONS:
             raise ValueError(f"unknown not_interpretable reason {not_interpretable!r}")
         return Interpretation("not_interpretable", not_interpretable, kind)
+    if entry is None:
+        return Interpretation("no_reference", "no_library_entry", caption="No library entry for this metric.")
     if value is None or (isinstance(value, float) and not math.isfinite(value)):
+        if reference.get("missing_note"):
+            # The producer leaves this metric empty by design (e.g. duplicates
+            # are not marked on native ONT), not for lack of depth.
+            return Interpretation("no_reference", "none_published", kind, caption=str(reference["missing_note"]))
         return Interpretation("not_interpretable", "depth", kind, caption="No molecules counted at this depth.")
     minimum = entry.get("min_depth_x")
     if minimum is not None and depth_x is not None and depth_x < minimum:
@@ -312,8 +317,8 @@ def classify(
     number = float(value)
     if kind in ("none", "published_mean"):
         caption = (
-            f"Published mean {reference['value']:g} {reference.get('unit', '')} ({reference.get('source', '')}"
-            f"{', n = ' + str(reference['n']) if reference.get('n') else ''}), no interval"
+            f"Published {reference.get('statistic', 'mean')} {reference['value']:g} {reference.get('unit', '')} "
+            f"({reference.get('source', '')}{', n = ' + str(reference['n']) if reference.get('n') else ''}), no interval"
             if kind == "published_mean"
             else reference.get("missing_note") or "No published reference."
         )

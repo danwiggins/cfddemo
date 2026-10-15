@@ -244,3 +244,27 @@ def test_license_callouts_once_each_in_first_use_order() -> None:
     entries = [library.entry("bam-qc", "total_reads"), library.entry("bam-qc", "mapped_fraction")]
     assert [c["license_id"] for c in license_callouts(entries, library)] == ["method-patents", "gpl-copyleft"]
     assert all(c["headline"] for c in license_callouts(entries, library))
+
+
+def test_d7_precedence_and_null_causes() -> None:
+    assert classify(0.1, None, not_interpretable="qc").state == "not_interpretable"
+    dup = LIB.entry("bam-qc", "duplicate_fraction")
+    result = classify(None, dup, depth_x=1.0)
+    assert (result.state, result.caption) == ("no_reference", "not marked (native ONT)")
+    assert classify(None, LIB.entry("bam-qc", "mapped_fraction"), depth_x=1.0).reason == "depth"
+
+
+def test_ties_take_the_mid_rank() -> None:
+    assert percentile_of(7.0, [7.0] * 30) == pytest.approx(50.0)
+    assert classify(7.0, COHORT, depth_x=1.0, cohort=Cohort(values=[7.0] * 30)).state == "in_range"
+
+
+def test_headline_must_be_a_boolean() -> None:
+    with pytest.raises(LibraryError, match="true or false"):
+        parse_library(_mutate(lambda d: d["entries"][0].update(headline="false")), LICENSES)
+
+
+def test_published_mode_caption_states_the_statistic() -> None:
+    result = classify(168, LIB.entry("fragment-size", "mode_bp"), depth_x=0.26)
+    assert result.caption.startswith("Published mode, approximately 167 bp")
+    assert "n = " not in result.caption

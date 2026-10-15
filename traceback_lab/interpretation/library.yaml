@@ -309,14 +309,14 @@ entries:
     value_kind: positive
     tier: NEWER
     origin_tier: NEWER
-    origin_platform: "ONT (rolling-circle consensus) and Illumina"
+    origin_platform: "cfDNA literature (platform not stated) and Illumina"
     min_depth_x: 0.0055
     reference:
       kind: published_mean
+      statistic: "mode, approximately"
       value: 167
       unit: bp
-      source: "Chen 2025, Genome Res (NanoRCS; 7 healthy controls)"
-      n: 7
+      source: "Chen 2025, Genome Res, background citing earlier studies"
     performance:
       kind: enrichment
       value: "Size selection of 90-150 bp fragments gave >2-fold median ctDNA enrichment in >95% of cases"
@@ -338,7 +338,7 @@ entries:
     citation_checked:
       by: "lab build agent"
       date: "2026-10-15"
-      note: "PubMed full text PMC12047234: 'fragment length mode at ~167 bp and at ~332 bp'; NanoRCS is rolling-circle consensus nanopore sequencing, not the kit's ligation chemistry. PubMed abstract PMID 30404863: 90-150 bp selection, >2-fold median enrichment in >95% of cases, 0.4x."
+      note: "PubMed full text PMC12047234 states, as background citing earlier studies, 'cfDNA has a fragment length mode at ~167 bp and at ~332 bp' (a mode, not a cohort mean; no n). PubMed abstract PMID 30404863: 90-150 bp selection, >2-fold median enrichment in >95% of cases, 0.4x (Illumina)."
 
   - algorithm_id: fragment-size
     metric_id: peak_mono_bp
@@ -346,14 +346,14 @@ entries:
     value_kind: positive
     tier: NEWER
     origin_tier: NEWER
-    origin_platform: "ONT (rolling-circle consensus) and Illumina"
+    origin_platform: "cfDNA literature (platform not stated) and Illumina"
     min_depth_x: 0.0055
     reference:
       kind: published_mean
+      statistic: "mode, approximately"
       value: 167
       unit: bp
-      source: "Chen 2025, Genome Res (NanoRCS; 7 healthy controls)"
-      n: 7
+      source: "Chen 2025, Genome Res, background citing earlier studies"
     performance: null
     performance_missing_reason: "none published"
     meaning_low: "Shorter mono-nucleosomal fragments."
@@ -367,7 +367,7 @@ entries:
     headline: false
     stability: {kind: absolute, tolerance: 3}
     citations: ["doi:10.1101/gr.279144.124"]
-    citation_checked: {by: "lab build agent", date: "2026-10-15", note: "PubMed full text PMC12047234: mode ~167 bp."}
+    citation_checked: {by: "lab build agent", date: "2026-10-15", note: "PubMed full text PMC12047234 (background citing earlier studies): mode ~167 bp; no n."}
 
   - algorithm_id: fragment-size
     metric_id: peak_di_bp
@@ -375,14 +375,14 @@ entries:
     value_kind: positive
     tier: NEWER
     origin_tier: NEWER
-    origin_platform: "ONT (rolling-circle consensus)"
+    origin_platform: "cfDNA literature (platform not stated)"
     min_depth_x: 0.0055
     reference:
       kind: published_mean
+      statistic: "mode, approximately"
       value: 332
       unit: bp
-      source: "Chen 2025, Genome Res (NanoRCS; 7 healthy controls)"
-      n: 7
+      source: "Chen 2025, Genome Res, background citing earlier studies"
     performance: null
     performance_missing_reason: "none published"
     meaning_low: "Shorter di-nucleosomal fragments."
@@ -396,7 +396,7 @@ entries:
     headline: false
     stability: {kind: absolute, tolerance: 6}
     citations: ["doi:10.1101/gr.279144.124"]
-    citation_checked: {by: "lab build agent", date: "2026-10-15", note: "PubMed full text PMC12047234: second mode ~332 bp."}
+    citation_checked: {by: "lab build agent", date: "2026-10-15", note: "PubMed full text PMC12047234 (background citing earlier studies): second mode ~332 bp; no n."}
 
   - algorithm_id: fragment-size
     metric_id: short_fraction_lt150
@@ -433,7 +433,7 @@ entries:
     value_kind: proportion
     tier: SPECULATIVE
     origin_tier: NEWER
-    origin_platform: "ONT (rolling-circle consensus)"
+    origin_platform: "cfDNA literature (platform not stated)"
     min_depth_x: 0.0055
     reference: {kind: none}
     performance: null
