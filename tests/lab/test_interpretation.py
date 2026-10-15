@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import re
 
 import numpy as np
 import pytest
@@ -152,7 +153,7 @@ def _mutate(mutator) -> str:
 
 
 def test_shipped_library_is_valid_and_covers_every_registered_metric_family() -> None:
-    assert LIB.version == "0.1.0"
+    assert re.fullmatch(r"\d+\.\d+\.\d+", LIB.version)
     registered = {algorithm.id for algorithm in load_registry()}
     for algorithm_id in LIB.algorithms():
         assert algorithm_id in registered

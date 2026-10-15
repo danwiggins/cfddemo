@@ -217,10 +217,14 @@ def test_lab_run_computes_the_slice_algorithms(lab_world, capsys, shared_mmi) ->
     payload = json.loads(capsys.readouterr().out)
     assert code == 0, payload
     steps = {step["algorithm_id"]: step["status"] for step in payload["data"]["steps"]}
-    assert {k: v for k, v in steps.items() if k != "copy-number"} == {
+    assert {k: steps[k] for k in ("read-summary", "bam-qc", "depth", "fragment-size")} == {
         "read-summary": "ok", "bam-qc": "ok", "depth": "ok", "fragment-size": "ok"
     }
     assert steps["copy-number"] == "skipped"  # depth (and no assets) on the toy input
+    # L1.1 on the synthetic world: MM tags and chrM present; sex-check is below its 500k-read bar.
+    assert {k: steps[k] for k in ("modbase-qc", "long-tail", "mtdna", "sex-check")} == {
+        "modbase-qc": "ok", "long-tail": "ok", "mtdna": "ok", "sex-check": "skipped"
+    }
     depth = payload["data"]["depth"]
     assert depth["eligible_reads"] > 1500
     from traceback_lab.store import LabStore

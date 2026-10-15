@@ -7,7 +7,7 @@
 # original evidence (D4).  citation_checked records who confirmed that every
 # DOI resolves and every displayed number matches the source (D27); an entry
 # without it renders an "UNVERIFIED citation" badge.
-version: 0.1.0
+version: 0.2.0
 hidden_algorithms: [read-summary]
 entries:
   # ---------------------------------------------------------------- bam-qc
@@ -509,3 +509,325 @@ entries:
     stability: {kind: absolute, tolerance: 0.5}
     citations: []
     citation_checked: {by: "lab build agent", date: "2026-10-15", note: "No citation displayed."}
+
+  # ------------------------------------------------------------ modbase-qc
+  - algorithm_id: modbase-qc
+    metric_id: mm_tagged_fraction
+    label: "Eligible reads carrying modified-base (MM) tags"
+    value_kind: proportion
+    tier: NEWER
+    origin_tier: NEWER
+    origin_platform: "ONT"
+    min_depth_x: null
+    reference: {kind: none}
+    qc_band: {direction: higher_is_better, pass: 0.95, warn: 0.50}
+    performance:
+      kind: depth_threshold
+      value: "Cell-type proportions held from full depth down to 0.2x (about 2.5M aligned fragments) and degraded at 0.05x and below (under 700,000 aligned fragments); one ONT study"
+      platform: ONT
+      depth: "0.05-0.2x"
+      source: "Katsman 2022, Genome Biol"
+    performance_missing_reason: null
+    meaning_high: "Methylation calls are present on nearly every read."
+    meaning_low: "Many reads lack modified-base calls: basecalled without a modbase model, or tags dropped during alignment."
+    confounders: ["basecaller configuration", "tags dropped by an aligner without -y"]
+    next_steps:
+      analytical: ["Confirm the modbase model in the @RG line", "Confirm alignment carried MM/ML (samtools fastq -T, minimap2 -y)"]
+      clinical_setting: null
+    license_ids: []
+    flags: []
+    headline: true
+    stability: {kind: proportion}
+    citations: ["doi:10.1186/s13059-022-02710-1"]
+    citation_checked: {by: "lab build agent (Phase 1)", date: "2026-10-15", note: "PMC9283844 full text: 'From full depth down to 0.2x (about 2.5M aligned fragments), all samples were dominated by the expected cell types'; 'significantly degraded at 0.05x coverage and below (corresponding to less than 700,000 aligned fragments)'. These thresholds are for cell-type deconvolution quality. QC bands are provisional team defaults (not from literature)."}
+
+  - algorithm_id: modbase-qc
+    metric_id: mod_codes
+    label: "Modification codes in the MM tags (first 10,000 tagged reads)"
+    value_kind: categorical
+    tier: NEWER
+    origin_tier: NEWER
+    origin_platform: "ONT"
+    min_depth_x: null
+    reference: {kind: none}
+    performance: null
+    performance_missing_reason: "QC descriptor, not a diagnostic"
+    meaning_high: "C+h present: a 5hmC channel exists and global-5hmc can run."
+    meaning_low: "C+m only: no 5hmC channel; global-5hmc is skipped (missing_channel)."
+    confounders: ["basecaller modbase model"]
+    next_steps:
+      analytical: ["Check the modbase model name in the @RG line"]
+      clinical_setting: null
+    license_ids: []
+    flags: []
+    headline: false
+    citations: []
+    citation_checked: {by: "lab build agent (Phase 1)", date: "2026-10-15", note: "No citation displayed; QC descriptor."}
+
+  - algorithm_id: modbase-qc
+    metric_id: ml_mean
+    label: "Mean ML probability at CpG calls (C+m and C+h values)"
+    value_kind: proportion
+    tier: NEWER
+    origin_tier: NEWER
+    origin_platform: "ONT"
+    min_depth_x: null
+    reference: {kind: none}
+    performance: null
+    performance_missing_reason: "QC measure, not a diagnostic; no published ONT cfDNA reference"
+    meaning_high: "The model assigns high modification probability on average (more methylated CpGs, or confident calls)."
+    meaning_low: "Lower average modification probability (hypomethylation or low-confidence calls)."
+    confounders: ["global methylation level", "basecaller model", "read quality"]
+    next_steps:
+      analytical: ["Read with ml_below_filter_fraction to separate confidence from biology"]
+      clinical_setting: null
+    license_ids: []
+    flags: []
+    headline: false
+    stability: {kind: absolute, tolerance: 0.02}
+    citations: []
+    citation_checked: {by: "lab build agent (Phase 1)", date: "2026-10-15", note: "No citation displayed; QC measure."}
+
+  - algorithm_id: modbase-qc
+    metric_id: ml_below_filter_fraction
+    label: "CpG calls below 0.7 confidence"
+    value_kind: proportion
+    tier: NEWER
+    origin_tier: NEWER
+    origin_platform: "ONT"
+    min_depth_x: null
+    reference: {kind: none}
+    performance: null
+    performance_missing_reason: "QC measure; the 0.7 cut-off is a fixed team default, not modkit's per-sample filter threshold"
+    meaning_high: "Many ambiguous calls: methylation estimates are noisier."
+    meaning_low: "Most calls are confident."
+    confounders: ["read quality", "basecaller model", "flow-cell wear"]
+    next_steps:
+      analytical: ["Compare with mean read quality", "Check the basecaller version"]
+      clinical_setting: null
+    license_ids: []
+    flags: []
+    headline: false
+    stability: {kind: proportion}
+    citations: []
+    citation_checked: {by: "lab build agent (Phase 1)", date: "2026-10-15", note: "No citation displayed; QC measure."}
+
+  - algorithm_id: modbase-qc
+    metric_id: invalid_mm_records
+    label: "Tagged reads with unusable MM/ML (MN mismatch or unparsable)"
+    value_kind: count
+    tier: NEWER
+    origin_tier: NEWER
+    origin_platform: "ONT"
+    min_depth_x: null
+    reference: {kind: none}
+    performance: null
+    performance_missing_reason: "QC count"
+    meaning_high: "Many reads lost their calls (hard-clipped records, or a tag-handling problem in alignment)."
+    meaning_low: "Calls survived alignment."
+    confounders: ["aligner flags"]
+    next_steps:
+      analytical: ["Confirm minimap2 ran with -y and samtools fastq -T MM,ML,MN"]
+      clinical_setting: null
+    license_ids: []
+    flags: []
+    headline: false
+    stability: {kind: scales_with_depth, tolerance: 0.10}
+    citations: []
+    citation_checked: {by: "lab build agent (Phase 1)", date: "2026-10-15", note: "No citation displayed; QC count."}
+
+  # ------------------------------------------------------------- long-tail
+  - algorithm_id: long-tail
+    metric_id: gt300_fraction
+    label: "Molecules longer than 300 bp"
+    value_kind: proportion
+    tier: NEWER
+    origin_tier: NEWER
+    origin_platform: "ONT"
+    min_depth_x: null
+    reference: {kind: none}
+    performance:
+      kind: classes
+      value: "Single-cohort classes, no published cut-off: 1-4 kb fragments marked delayed blood processing (over 40% of samples stored 6-24 h showed it; rapidly processed samples did not); >7.5 kb marked cell lysis during plasma processing"
+      platform: "ONT MinION (median 4.7M reads)"
+      depth: "1-16M reads"
+      source: "Berman 2026, Genome Biol"
+    performance_missing_reason: null
+    meaning_high: "More long molecules: delayed processing (white-cell DNA) or cell lysis, or library chimeras."
+    meaning_low: "Mostly mono- and di-nucleosomal cfDNA."
+    confounders: ["time to spin", "tube type", "ligation chimeras", "ONT size bias toward longer fragments"]
+    next_steps:
+      analytical: ["Check time to spin and tube type", "Compare with the supplementary (chimera) share"]
+      clinical_setting: "In a validated setting, a pre-analytic signal like this would typically prompt recollection. FLAG: CLIA — donor-directed instruction."
+    license_ids: []
+    flags: [CLIA]
+    headline: true
+    stability: {kind: proportion}
+    citations: ["doi:10.1186/s13059-026-04060-8"]
+    citation_checked: {by: "lab build agent (Phase 1)", date: "2026-10-15", note: "PMC13173744 abstract: 'Hypofragmented samples (characterized by 1-4 kb fragments) exhibit hallmarks of DNASE1L3-mediated fragmentation due to blood-derived DNA release during delayed blood processing, while samples with ultra-long fragments (> 7.5 kb) indicate release due to cell lysis during plasma processing.' 'More than 40% of samples with storage times of 6-24 h showed this signature'. Median 4.7M reads, ONT MinION. No numeric healthy range."}
+
+  - algorithm_id: long-tail
+    metric_id: kb1_4_fraction
+    label: "Molecules of 1-4 kb (delayed-processing class)"
+    value_kind: proportion
+    tier: NEWER
+    origin_tier: NEWER
+    origin_platform: "ONT"
+    min_depth_x: null
+    reference: {kind: none}
+    performance:
+      kind: classes
+      value: "Over 40% of samples stored 6-24 h before processing showed the 1-4 kb signature; rapidly processed samples did not. No published cut-off"
+      platform: "ONT MinION"
+      depth: "1-16M reads"
+      source: "Berman 2026, Genome Biol"
+    performance_missing_reason: null
+    meaning_high: "Delayed blood processing released white-cell DNA (DNASE1L3-type fragmentation)."
+    meaning_low: "No sign of delayed processing."
+    confounders: ["time to spin", "tube type", "cancer with high cfDNA levels (the same paper reports 1-4 kb DNA in some cancers)"]
+    next_steps:
+      analytical: ["Check time to spin and tube type"]
+      clinical_setting: "In a validated setting this would typically prompt recollection with prompt processing. FLAG: CLIA — donor-directed instruction."
+    license_ids: []
+    flags: [CLIA]
+    headline: false
+    stability: {kind: proportion}
+    citations: ["doi:10.1186/s13059-026-04060-8"]
+    citation_checked: {by: "lab build agent (Phase 1)", date: "2026-10-15", note: "PMC13173744: 1-4 kb class tied to delayed blood processing; '>40% of samples with storage times of 6-24 h'; 'The cancers in this group had between 20-66% of all DNA in fragments 900-4300 bp' (affected samples, not a threshold)."}
+
+  - algorithm_id: long-tail
+    metric_id: gt7500_fraction
+    label: "Molecules longer than 7.5 kb (cell-lysis class)"
+    value_kind: proportion
+    tier: NEWER
+    origin_tier: NEWER
+    origin_platform: "ONT"
+    min_depth_x: null
+    reference: {kind: none}
+    qc_band: {direction: lower_is_better, pass: 0.001, warn: 0.01}
+    performance:
+      kind: classes
+      value: "Ultra-long (>7.5 kb) fragments marked cell lysis during plasma processing; no published cut-off"
+      platform: "ONT MinION"
+      depth: "1-16M reads"
+      source: "Berman 2026, Genome Biol"
+    performance_missing_reason: null
+    meaning_high: "Cells lysed during plasma processing, releasing genomic DNA."
+    meaning_low: "No sign of lysis."
+    confounders: ["centrifugation protocol", "freeze-thaw", "tube type"]
+    next_steps:
+      analytical: ["Check the plasma spin protocol"]
+      clinical_setting: "In a validated setting this would typically prompt recollection. FLAG: CLIA — donor-directed instruction."
+    license_ids: []
+    flags: [CLIA]
+    headline: false
+    stability: {kind: proportion}
+    citations: ["doi:10.1186/s13059-026-04060-8"]
+    citation_checked: {by: "lab build agent (Phase 1)", date: "2026-10-15", note: "PMC13173744 abstract (>7.5 kb = lysis during plasma processing). QC band is a provisional team default (not from literature)."}
+
+  # ------------------------------------------------------------- sex-check
+  - algorithm_id: sex-check
+    metric_id: chry_chrx_ratio
+    label: "chrY/chrX read density (per Mb of non-N, non-PAR reference)"
+    value_kind: positive
+    tier: PROVEN
+    origin_tier: PROVEN
+    origin_platform: "any (QC)"
+    min_depth_x: null
+    reference: {kind: none}
+    performance: null
+    performance_missing_reason: "QC check; the 0.3 (male) and 0.05 (female) cut-offs are team defaults (no checkable cfDNA source found). Female-with-chrY has several benign causes"
+    meaning_high: "chrY present: male donor, or male DNA in a female donor (male fetus, male-donor transplant, contamination)."
+    meaning_low: "No chrY signal: female donor (or loss of Y)."
+    confounders: ["pregnancy with a male fetus", "male-donor transplant or transfusion", "contamination", "mosaic loss of Y with age"]
+    next_steps:
+      analytical: ["Compare with the manifest sex", "Hold all results on a mismatch and investigate the sample chain"]
+      clinical_setting: null
+    license_ids: []
+    flags: [PRIVACY]
+    headline: true
+    stability: {kind: absolute, tolerance: 0.05}
+    citations: []
+    citation_checked: {by: "lab build agent (Phase 1)", date: "2026-10-15", note: "No citation displayed. PubMed search found no cfDNA/low-pass source for chrY/chrX cut-offs; thresholds are the spec's team defaults."}
+
+  - algorithm_id: sex-check
+    metric_id: call
+    label: "Sex call (male / female / indeterminate)"
+    value_kind: categorical
+    tier: PROVEN
+    origin_tier: PROVEN
+    origin_platform: "any (QC)"
+    min_depth_x: null
+    reference: {kind: none}
+    performance: null
+    performance_missing_reason: "QC check; compared with the manifest when one is supplied"
+    meaning_high: "male"
+    meaning_low: "female"
+    confounders: ["pregnancy with a male fetus", "transplant", "contamination"]
+    next_steps:
+      analytical: ["A mismatch with the manifest holds every result"]
+      clinical_setting: null
+    license_ids: []
+    flags: [PRIVACY]
+    headline: false
+    citations: []
+    citation_checked: {by: "lab build agent (Phase 1)", date: "2026-10-15", note: "No citation displayed."}
+
+  # ----------------------------------------------------------------- mtdna
+  - algorithm_id: mtdna
+    metric_id: chrm_fraction
+    label: "Mitochondrial (chrM) share of primary reads (chrM at MAPQ >= 20)"
+    value_kind: proportion
+    tier: SPECULATIVE
+    origin_tier: NEWER
+    origin_platform: "Illumina WGS"
+    min_depth_x: null
+    reference:
+      kind: published_mean
+      statistic: "median, cancer and healthy samples pooled (Illumina)"
+      value: 0.0032
+      unit: "% of reads"
+      source: "van der Pol 2023, Genome Biol"
+    performance:
+      kind: auc
+      value: "Adding mtDNA features to copy number raised AUC from 0.73 to 0.81 (abstract; the Results text says 0.82); 655 cancer and 200 healthy samples, random forest"
+      platform: Illumina
+      depth: "0.1-30x"
+      source: "van der Pol 2023, Genome Biol"
+    performance_missing_reason: null
+    meaning_high: "More mitochondrial DNA: reported in some GI, liver and prostate cancers; also platelets or incomplete centrifugation."
+    meaning_low: "Less mitochondrial DNA."
+    confounders: ["NUMT-mapped reads", "platelet contamination", "incomplete centrifugation", "collection center"]
+    next_steps:
+      analytical: ["Exploratory only; await the kit cohort", "Check the plasma spin protocol"]
+      clinical_setting: null
+    license_ids: []
+    flags: []
+    headline: true
+    stability: {kind: proportion}
+    citations: ["doi:10.1186/s13059-023-03074-w"]
+    citation_checked: {by: "lab build agent (Phase 1)", date: "2026-10-15", note: "PMC10571306: AUC 'from 0.73 when using copy number alterations alone to an AUC of 0.81' (abstract; Results say 0.82). 'The overall median abundance of mtDNA in liquid biopsy was 0.0032% (range: 0.0017-0.0047%)' (all samples pooled; authors recommend a protocol baseline). Illumina NovaSeq 0.1-30x."}
+
+  - algorithm_id: mtdna
+    metric_id: chrm_mode_bp
+    label: "chrM fragment-length mode (aligned span)"
+    value_kind: positive
+    tier: SPECULATIVE
+    origin_tier: NEWER
+    origin_platform: "Illumina WGS"
+    min_depth_x: null
+    reference: {kind: none}
+    performance: null
+    performance_missing_reason: "none published"
+    meaning_high: "Longer mitochondrial fragments (less protected, platelet-derived, or lysis)."
+    meaning_low: "Shorter mitochondrial fragments (mtDNA lacks nucleosomes and degrades further)."
+    confounders: ["NUMT-mapped reads", "very few chrM reads at kit depth"]
+    next_steps:
+      analytical: ["Exploratory only"]
+      clinical_setting: null
+    license_ids: []
+    flags: []
+    headline: false
+    stability: {kind: absolute, tolerance: 10}
+    citations: []
+    citation_checked: {by: "lab build agent (Phase 1)", date: "2026-10-15", note: "No citation displayed."}
