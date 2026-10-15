@@ -126,7 +126,8 @@ def _record_sites(record: Any) -> tuple[list[tuple[int, int, int, int, int]], in
             continue
         if not calls:
             continue
-        # One key lists each position once (MM deltas), so a dict keeps them all.
+        # A position listed twice under one key (repeated MM codes) keeps its
+        # last value, as the per-call loop's overwrite did.
         by_position = dict(calls)
         if min(by_position.values()) < 0:
             raise _InvalidRecord("MM call without ML")
@@ -151,7 +152,7 @@ def _record_sites(record: Any) -> tuple[list[tuple[int, int, int, int, int]], in
     if not sites:
         return [], 0
     cigar = record.cigartuples or []
-    if len(cigar) == 1 and cigar[0][0] in _MATCH_OPS:
+    if len(cigar) == 1 and cigar[0][0] in _MATCH_OPS and not record.is_unmapped and record.reference_start >= 0:
         start, span = record.reference_start, cigar[0][1]
 
         def reference_of(qpos: int) -> int | None:
@@ -194,6 +195,8 @@ def write_meth_calls(
 
     import pysam
 
+    if chunk_calls < 1:
+        raise ValueError("chunk_calls must be at least 1")
     out.mkdir(parents=True, exist_ok=True)
     buffer = np.zeros(chunk_calls, dtype=DTYPE)
     filled = 0

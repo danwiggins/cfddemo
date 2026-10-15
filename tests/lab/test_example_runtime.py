@@ -239,24 +239,52 @@ def test_decoder_matches_the_reference_on_the_example_generator(tmp_path: Path) 
 def test_batched_rows_split_exactly_at_chunk_calls(tmp_path: Path) -> None:
     reads = [Read(f"c{i:03d}", "chr1", 10 * i, "ACGACGACG", mm="C+m?,0,0,0;", ml=[i % 256, 7, 250]) for i in range(50)]
     bam = write_bam(tmp_path / "chunks.bam", [("chr1", 10_000)], reads)
+    # The per-call writer's rows, spelled out: read i has CpG Cs at query 1, 4, 7.
+    expected = np.array(
+        [
+            (i, 0, 10 * i + offset, 0, p_m, 0, 255 - p_m, HAS_M | EXPLICIT_M)
+            for i in range(50)
+            for offset, p_m in zip((1, 4, 7), (i % 256, 7, 250), strict=True)
+        ],
+        dtype=meth_calls.DTYPE,
+    )
 
     def store(name: str, chunk_calls: int, pending: int) -> MethCalls:
         original = meth_calls.PENDING_CALLS
         meth_calls.PENDING_CALLS = pending
         try:
-            write_meth_calls(bam, tmp_path / name, eligible=lambda r: True, contig_index={"chr1": 0}, chunk_calls=chunk_calls)
+            meta = write_meth_calls(bam, tmp_path / name, eligible=lambda r: True, contig_index={"chr1": 0}, chunk_calls=chunk_calls)
         finally:
             meth_calls.PENDING_CALLS = original
+        assert meta["calls"] == 150
         return MethCalls.open(tmp_path / name)
 
-    whole = store("whole", 1 << 20, 1 << 16)
-    split = store("split", 7, 5)
-    assert whole.meta["chunks"] == [150]
-    assert split.meta["chunks"] == [7] * 21 + [3]
-    assert np.array_equal(np.concatenate(list(whole.chunks())), np.concatenate(list(split.chunks())))
-    rows = np.concatenate(list(whole.chunks()))
-    assert np.array_equal(rows["p_canonical"], np.maximum(0, 255 - rows["p_m"].astype(int) - rows["p_h"].astype(int)))
-    assert array.array("I", rows["read_row"][:3]) == array.array("I", [0, 0, 0])
+    for name, chunk_calls, pending, chunks in [
+        ("whole", 1 << 20, 1 << 16, [150]),
+        ("small-batches", 7, 5, [7] * 21 + [3]),
+        ("batch-spans-chunks", 7, 40, [7] * 21 + [3]),
+        ("exact", 50, 1, [50, 50, 50]),
+    ]:
+        store_ = store(name, chunk_calls, pending)
+        assert store_.meta["chunks"] == chunks, name
+        assert np.concatenate(list(store_.chunks())).tobytes() == expected.tobytes(), name
+    with pytest.raises(ValueError, match="chunk_calls"):
+        write_meth_calls(bam, tmp_path / "zero", eligible=lambda r: True, contig_index={"chr1": 0}, chunk_calls=0)
+
+
+def test_single_block_shortcut_needs_a_mapped_start() -> None:
+    header = pysam.AlignmentHeader.from_dict({"SQ": [{"SN": "chr1", "LN": 1_000}]})
+    for flag, start in [(4, -1), (4, 10), (0, 10), (16, 10)]:
+        record = pysam.AlignedSegment(header)
+        record.query_name = "unmapped"
+        record.query_sequence = "CG"
+        record.flag = flag
+        record.reference_id = 0 if start >= 0 else -1
+        record.reference_start = start
+        record.cigartuples = [(0, 2)]
+        record.set_tag("MM", "C+m?,0;" if not flag & 16 else "C+m?;", value_type="Z")
+        record.set_tag("ML", array.array("B", [200] if not flag & 16 else []))
+        assert _outcome(meth_calls._record_sites, record) == _outcome(_reference_record_sites, record), (flag, start)
 
 
 def test_decoder_refuses_mm_without_ml_like_the_reference() -> None:
