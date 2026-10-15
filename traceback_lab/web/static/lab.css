@@ -66,8 +66,8 @@ pre.stderr { white-space: pre-wrap; overflow-wrap: anywhere; font-size: .85rem; 
 .curve-heading { display: flex; flex-wrap: wrap; gap: .5rem 1rem; align-items: baseline; }
 .legend { color: var(--muted); }
 .curve-grid { display: grid; gap: 0; }
-.curve-row { display: grid; grid-template-columns: 11rem 1fr; align-items: center; min-height: 2.75rem; border-bottom: 1px solid var(--rule); }
-.curve-label { background: none; color: var(--ink); border: 0; text-align: left; font-weight: 600; min-height: 2.75rem; padding: 0 .25rem; }
+.curve-row { display: grid; grid-template-columns: 13rem 1fr; align-items: center; min-height: 2.75rem; border-bottom: 1px solid var(--rule); }
+.curve-label { background: none; color: var(--ink); border: 0; text-align: left; font-weight: 600; min-height: 2.75rem; padding: 0 .25rem; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; max-width: 100%; }
 .curve-track { position: relative; height: 2.5rem; }
 .curve-axis .curve-track { height: 1.75rem; }
 .curve-cell, .curve-lit, .curve-tick, .curve-run { position: absolute; top: 50%; transform: translate(-50%, -50%); }
@@ -110,6 +110,7 @@ pre.stderr { white-space: pre-wrap; overflow-wrap: anywhere; font-size: .85rem; 
   .multiples { grid-template-columns: 1fr; }
   .app-header { flex-wrap: wrap; }
   .curve-row { grid-template-columns: 1fr; }
+  .curve-label { white-space: normal; }
   .curve-detail { padding: .25rem; }
 }
 .lenses[hidden] { display: none; }

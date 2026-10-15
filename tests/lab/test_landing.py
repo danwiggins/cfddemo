@@ -146,7 +146,7 @@ def test_landing_pixel_budget_at_1280x800(page_root, tmp_path) -> None:
     assert int(body["header-height"]) <= 56
     assert int(body["clia-height"]) <= 320 and body["clia-clipped"] == "false"
     assert body["headline-visible"] == "true"
-    assert int(body["curve-rows-visible"]) >= 4
+    assert int(body["curve-rows-visible"]) >= 4, body
     # >= 3 defended rows (or every row when fewer qualify) or the none state, above the fold.
     total = int(body["defended-total"])
     if body["none-defended"] == "true":

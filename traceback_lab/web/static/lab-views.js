@@ -190,7 +190,8 @@
     grid.append(axis);
     for (const row of curve.rows) {
       const line = h("div", { class: "curve-row" });
-      const name = h("button", { type: "button", class: "curve-label", "aria-expanded": "false" }, row.label);
+      // One line per row (a fixed 44 px target) so the fold budget holds with any font; full label in title + data table.
+      const name = h("button", { type: "button", class: "curve-label", "aria-expanded": "false", title: row.label }, row.label);
       const cells = h("div", { class: "curve-track" });
       for (const cell of row.cells) {
         const [glyph, text] = CELL[cell.state] || ["·", "no result"];
