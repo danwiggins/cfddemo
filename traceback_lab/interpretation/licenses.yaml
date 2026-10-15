@@ -1,0 +1,52 @@
+# License and public-use callouts (spec: Front end § License callouts).
+# Headlines match the roadmap report's callouts. Rendered as a full-width
+# callout (>= 20px bold) once per route, pills elsewhere.
+version: 0.1.0
+licenses:
+  modkit-ont-public:
+    headline: "RESEARCH-ONLY: modkit"
+    body: >-
+      ONT Public License v1.0 grants use "solely for Research Purposes",
+      defined as not directed toward commercial advantage. Commercial use
+      needs an ONT agreement or an in-house MM/ML parser.
+    url: "https://github.com/nanoporetech/modkit/blob/master/LICENSE.md"
+  yissum-uxm:
+    headline: "RESEARCH-ONLY: Loyfer UXM / wgbs_tools / meth_atlas (Yissum)"
+    body: >-
+      The Yissum Software Research License excludes "direct or indirect
+      commercial ... gain". The existing cell-origin method is built on this.
+    url: "https://github.com/nloyfer/UXM_deconv"
+  loyfer-atlas-terms-unknown:
+    headline: "ATLAS DATA-USE TERMS UNKNOWN: Loyfer atlas / nanomix"
+    body: >-
+      No explicit data license was found for the processed atlas. Raw data is
+      controlled-access at EGA. nanomix's MIT license covers its code, not the
+      Loyfer-derived atlas file it ships.
+    url: "https://doi.org/10.1038/s41586-022-05580-6"
+  non-commercial-not-adopted:
+    headline: "NON-COMMERCIAL: WisecondorX, Triton, Zhao-lab code (none adopted)"
+    body: >-
+      WisecondorX is CC BY-NC-SA; Triton needs a Fred Hutch license for any
+      commercial entity; Zhao-lab code is under an academic EULA plus WARF
+      patents. None of them is used.
+    url: "https://github.com/CenterForMedicalGeneticsGhent/WisecondorX/blob/master/LICENSE.md"
+  no-license-not-adopted:
+    headline: "NO LICENSE FILE: delfi_scripts, pughlab (none adopted)"
+    body: >-
+      No license means all rights reserved. The Lab uses its own
+      implementation (or the MIT FinaleToolkit reimplementation) instead.
+    url: "https://github.com/cancer-genomics/delfi_scripts"
+  method-patents:
+    headline: "METHOD PATENTS: DELFI, Lo-lab end motifs/MDS, Griffin"
+    body: >-
+      Code licenses do not grant patent rights, and Griffin's BSD-3-Clear
+      license says so expressly. DELFI is a commercial test. No
+      freedom-to-operate review has been done.
+    url: "https://github.com/adoebley/Griffin"
+  gpl-copyleft:
+    headline: "GPL/AGPL COPYLEFT: ichorCNA, Bracken, NIPTeR (LGPL), CelFiE/cfNOMe (AGPL; not adopted)"
+    body: >-
+      GPL tools are acceptable as separate processes, which is how ichorCNA
+      runs. Do not link or embed them. AGPL also triggers on network use, so
+      it matters if the front end is ever hosted.
+    url: "https://github.com/broadinstitute/ichorCNA"
