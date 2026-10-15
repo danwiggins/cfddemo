@@ -90,6 +90,20 @@ and exits 6. Completed results are kept; rerun the same command.
 streams each tool's raw stderr to your terminal; only scrubbed stderr (paths,
 ROOT, home, login and chunk names redacted) is ever stored.
 
+## Algorithms
+
+`traceback lab algorithms` lists what is registered. The slice ships:
+
+| id | What it reports |
+|---|---|
+| `read-summary` | intermediate: one pass over the aligned BAM into memmapped columns (no read names); every pysam algorithm and every downsample or split-half view reads it |
+| `bam-qc` | primaries, mapped and MAPQ ≥ 20 shares, supplementary share (chimera proxy), mean read Q, share of sampled genome covered ≥ 1x, GC-bias slope, duplicate share (only when marked) |
+| `depth` | eligible reads (primary, MAPQ ≥ 20, chr1–22/X/Y), mean span, approximate depth; the index count is shown only as an upper bound |
+| `fragment-size` | 1-bp aligned-span histogram, mode, short (< 150 bp) share, mono/di peaks, 10 bp periodicity |
+
+Fragment length is the aligned reference span, the same definition as the
+signed fragment metric; the Lab's 1-bp counter is parity-tested against it.
+
 ## Exit codes
 
 | Code | Meaning |
