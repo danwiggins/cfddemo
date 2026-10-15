@@ -62,6 +62,11 @@ def add_run_parser(commands: Any, common: Callable[[argparse.ArgumentParser], No
     run.add_argument("--reference", dest="reference_id", metavar="ID", help="registered reference id")
     run.add_argument("--profile", choices=("all", "fast"), default="all")
     run.add_argument("--only", metavar="A,B", help="only these algorithms (overrides --profile)")
+    run.add_argument("--downsample", default="0.5,0.25,0.1", metavar="F,F,F", help="depth-curve fractions (default 0.5,0.25,0.1)")
+    run.add_argument("--no-downsample", action="store_true", help="skip the depth curve")
+    run.add_argument("--controls", dest="controls", action="store_true", default=True, help="run the positive controls (default)")
+    run.add_argument("--no-controls", dest="controls", action="store_false", help="skip the CNA spike and split halves")
+    run.add_argument("--tf", default="0.03,0.10,0.30", metavar="TF,TF", help="synthetic CNA spike tumour fractions")
     run.add_argument("--skip-bad-chunks", action="store_true", help="exclude truncated chunks (provisional)")
     run.add_argument("--force", action="store_true", help="recompute every result")
     run.add_argument("--timeout-s", type=float, default=DEFAULT_TIMEOUT_S, metavar="S")
@@ -292,6 +297,10 @@ def _dry_run(args: argparse.Namespace, store: LabStore, progress: Callable[[str]
 def run_command(args: argparse.Namespace, store: LabStore) -> tuple[int, dict[str, Any]]:
     if not args.inputs:
         return _usage_quickstart(store)
+    from .simulate_command import parse_fractions
+
+    fractions = () if args.no_downsample else parse_fractions(args.downsample, "--downsample")
+    tfs = parse_fractions(args.tf, "--tf") if args.controls else ()
     progress = _progress(args.as_json)
     if args.dry_run:
         return _dry_run(args, store, progress)
@@ -449,9 +458,15 @@ def run_command(args: argparse.Namespace, store: LabStore) -> tuple[int, dict[st
                     progress=progress,
                     echo=_echo(args.verbose),
                 )
+                controls = _derived_phase(
+                    store, lock, log, target, items, by_id, results, args,
+                    run_id=run_id, fractions=fractions, tfs=tfs, scrubber=scrubber, progress=progress,
+                )
+                results = [*results, *controls["results"]]
                 code, payload = _summary(
                     store, run_id, aligned, id12, chunkset, results, warnings, time.monotonic() - started,
                     depth=target.depth.model_dump() if target.depth is not None else None,
+                    controls=controls["summary"],
                 )
                 log.append("run_end", status=payload["status"], exit_code=code)
                 return code, payload
@@ -485,6 +500,51 @@ def run_command(args: argparse.Namespace, store: LabStore) -> tuple[int, dict[st
         signal.signal(signal.SIGTERM, previous_term)
 
 
+def _derived_phase(
+    store: LabStore,
+    lock: Any,
+    log: Any,
+    target: RunTarget,
+    items: Any,
+    by_id: dict[str, str],
+    results: list[StepResult],
+    args: argparse.Namespace,
+    *,
+    run_id: str,
+    fractions: tuple[float, ...],
+    tfs: tuple[float, ...],
+    scrubber: Scrubber,
+    progress: Callable[[str], None],
+) -> dict[str, Any]:
+    """Default downsample curve and positive controls (D24, D25, D36)."""
+
+    from .controls import cna_specs, run_derived, split_specs, synthetic_summary
+    from .derived import downsample
+
+    summary: dict[str, Any] = {"downsample": list(fractions), "split": False, "cna": [], "cna_skipped": None}
+    read_summary = next((r for r in results if r.algorithm_id == "read-summary" and r.status == "ok"), None)
+    if read_summary is None:
+        summary["note"] = "read-summary not ok; no derived inputs"
+        return {"results": [], "summary": summary}
+    specs = [downsample(fraction) for fraction in fractions]
+    if args.controls:
+        specs.extend(split_specs())
+        summary["split"] = True
+        built = cna_specs(store.root, target.input_dir / "aligned.bam", tfs)
+        if isinstance(built, str):
+            summary["cna_skipped"] = "example_reference" if target.example else built
+        else:
+            specs.extend(built)
+    if not specs:
+        return {"results": [], "summary": summary}
+    runs = run_derived(
+        store, lock, log, target, specs, items, by_id, run_id=run_id, read_summary=read_summary,
+        force=args.force, timeout_s=args.timeout_s, scrubber=scrubber, progress=progress,
+    )
+    summary["cna"] = synthetic_summary(store, runs)
+    return {"results": [r for run in runs for r in run.results], "summary": summary}
+
+
 def _pid() -> int:
     import os
 
@@ -513,6 +573,7 @@ def _summary(
     elapsed: float,
     *,
     depth: dict[str, Any] | None = None,
+    controls: dict[str, Any] | None = None,
 ) -> tuple[int, dict[str, Any]]:
     ok = sum(result.status == "ok" for result in results)
     skipped: dict[str, int] = {}
@@ -534,14 +595,14 @@ def _summary(
         "counts": {"ok": ok, "skipped": skipped, "failed": len(failed)},
         "failed": [{"algorithm_id": result.algorithm_id, "first_line": result.first_line} for result in failed],
         "steps": [result.public() for result in results],
-        "controls": None,
+        "controls": controls,
         "excluded_chunks": aligned.manifest.get("excluded_chunks", []),
         "warnings": warnings,
         "next": next_argv,
     }
     skipped_text = ", ".join(
         f"{count} skipped ({reason}: "
-        + ", ".join(r.algorithm_id for r in results if r.status == "skipped" and r.skip_reason == reason)
+        + ", ".join(dict.fromkeys(r.algorithm_id for r in results if r.status == "skipped" and r.skip_reason == reason))
         + ")"
         for reason, count in sorted(skipped.items())
     )
@@ -563,14 +624,38 @@ def _summary(
         f"SAMPLE  {sample_line}",
         f"DONE    {done}",
     ]
+    if controls is not None:
+        parts = []
+        if controls.get("downsample"):
+            parts.append("depth curve at " + "/".join(f"{f:g}" for f in controls["downsample"]))
+        if controls.get("cna"):
+            parts.append("CNA spike at " + "/".join(f"{row['tf_expected']:g}" for row in controls["cna"]))
+        elif controls.get("cna_skipped"):
+            parts.append(f"CNA spike not built ({controls['cna_skipped']})")
+        if controls.get("split"):
+            parts.append("split halves A/B")
+        if parts:
+            lines.append("        controls: " + " · ".join(parts))
+        for row in controls.get("cna", []):
+            recovered = "-" if row["tf_recovered"] is None else f"{row['tf_recovered']:.3f}"
+            verdict = "recovered" if row["recovered_within_tolerance"] else "not recovered"
+            lines.append(f"        spike TF {row['tf_expected']:g} -> {recovered} ({verdict})")
     if aligned.manifest.get("excluded_chunks"):
         lines.append(f"        provisional: excluded chunks {aligned.manifest['excluded_chunks']}")
     for result in failed:
         lines.append(f"FAILED  {result.algorithm_id}: {result.first_line}")
         lines.append(f"        details: traceback lab runs {run_id} --step {result.algorithm_id}")
+    remedied: set[tuple[str, str]] = set()
     for result in results:
         if result.status == "skipped" and result.skip_reason in {"missing_toolchain", "missing_asset"}:
-            remedy = "traceback toolchain install ichor" if result.skip_reason == "missing_toolchain" else "traceback method-asset register"
+            if (result.algorithm_id, result.skip_reason) in remedied:
+                continue
+            remedied.add((result.algorithm_id, result.skip_reason))
+            remedy = (
+                "traceback toolchain install ichor"
+                if result.skip_reason == "missing_toolchain"
+                else f"traceback method-asset register --from-toolchain copy-number --root {store.root}"
+            )
             lines.append(f"SKIP    {result.algorithm_id} skipped ({result.skip_reason}): {remedy}")
     for argv in next_argv:
         lines.append(f"NEXT    {' '.join(argv)}")

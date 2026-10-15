@@ -96,6 +96,24 @@ def run_derived(
         lock.set_step("derive")
     if progress:
         progress(f"{'derive':<24} {len(specs)} derived input(s): " + ", ".join(spec.label() for spec in specs))
+    runnable = [item for item in items if item.algorithm.consumes in DERIVED_CONSUMES]
+    summary = None
+    if read_summary is not None and read_summary.artifacts_dir:
+        try:
+            summary = ReadSummary.open(Path(read_summary.artifacts_dir) / "columns")
+        except (OSError, ValueError):
+            summary = None
+    if summary is None:
+        # Row masks need the parent's columns; without them a downsample or
+        # split half would carry the parent's depth.  Only the CNA spike
+        # (counting BAM only, parent depth by definition) can still run.
+        dropped = [spec.label() for spec in specs if spec.transform in ("downsample", "split")]
+        specs = [spec for spec in specs if spec.transform not in ("downsample", "split")]
+        if dropped and progress:
+            progress(f"{'derive':<24} skipped {', '.join(dropped)}: read summary unavailable")
+        if not specs:
+            return []
+    needs_counting = any(item.algorithm.consumes == "counting_bam" for item in runnable)
     derived = materialize(
         store,
         parent.input_id,
@@ -103,14 +121,9 @@ def run_derived(
         specs,
         counting_contigs=signed.counting_contigs,
         min_mapq=signed.min_mapq,
+        counting=needs_counting,
     )
     record_derived(store, parent.source_id, derived.values())
-    summary = (
-        ReadSummary.open(Path(read_summary.artifacts_dir) / "columns")
-        if read_summary is not None and read_summary.artifacts_dir
-        else None
-    )
-    runnable = [item for item in items if item.algorithm.consumes in DERIVED_CONSUMES]
     upstream = {"read-summary": read_summary} if read_summary is not None else {}
     runs: list[DerivedRun] = []
     for spec in specs:
@@ -127,9 +140,15 @@ def run_derived(
             example=parent.example,
             extras={
                 **{key: value for key, value in parent.extras.items() if key != "upstream"},
-                "counting_bam": str(item.counting_bam),
-                "counted_reads": item.counted_reads,
-                "records_scanned": item.records_scanned,
+                **(
+                    {
+                        "counting_bam": str(item.counting_bam),
+                        "counted_reads": item.counted_reads,
+                        "records_scanned": item.records_scanned,
+                    }
+                    if item.counting is not None
+                    else {}
+                ),
             },
         )
         if summary is not None and spec.transform in ("downsample", "split"):
@@ -205,8 +224,8 @@ def synthetic_summary(store: LabStore, runs: Sequence[DerivedRun]) -> list[dict[
                 and abs(recovered - expected) <= TF_TOLERANCE,
                 "status": status,
                 "derived_input_id": run.derived.input_id,
-                "duplicated": run.derived.manifest.get("duplicated"),
-                "removed": run.derived.manifest.get("removed"),
+                "duplicated": (run.derived.counting or {}).get("duplicated"),
+                "removed": (run.derived.counting or {}).get("removed"),
             }
         )
     return rows

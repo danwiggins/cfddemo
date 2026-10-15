@@ -159,8 +159,8 @@ def test_cna_spike_gives_one_plus_tf_over_two(derived_world) -> None:
         assert abs(loss - (1 - tf / 2)) < 4 * sd + 1e-9
         assert neutral == 1.0
         assert spiked[("chr17", False)] < base[("chr17", False)]  # 17p loss
-        manifest = made[f"cna-{tf!r}"].manifest
-        assert manifest["duplicated"] > 0 and manifest["removed"] > 0
+        counting = made[f"cna-{tf!r}"].counting
+        assert counting["duplicated"] > 0 and counting["removed"] > 0
 
 
 def test_split_halves_partition_and_downsample_nests(derived_world) -> None:
@@ -203,7 +203,7 @@ def test_simulate_split_runs_every_summary_algorithm_on_both_halves(lab_world, c
         assert "read-summary" not in ran
         assert ran["copy-number"] == "skipped"
     record = json.loads(next((root / "lab" / "sources").glob("*.json")).read_text())
-    assert {d["label"] for d in record["derived"]} == {"split-A", "split-B"}
+    assert {"split-A", "split-B"} <= {d["label"] for d in record["derived"]}
     # A rerun is fully cached.
     code, again = _lab(capsys, "simulate", "split", "latest", "--root", str(root))
     assert all(s["cached"] for s in again["data"]["steps"] if s["status"] == "ok")
@@ -281,6 +281,8 @@ def test_duplicate_specs_materialize_once(tmp_path) -> None:
     store.ensure()
     made = materialize(store, "e" * 64, bam, [cna(0.1, ARMS), cna(0.10, ARMS)], counting_contigs=AUTOSOMES, min_mapq=20)
     assert list(made) == ["cna-0.1"]
+    # A summary-only request never touches the BAM; a counting request checks reuse.
+    assert materialize(store, "e" * 64, bam, [split("A")], counting_contigs=AUTOSOMES, min_mapq=20, counting=False)["split-A"].counting is None
     with pytest.raises(ValueError, match="other contigs"):
         materialize(store, "e" * 64, bam, [cna(0.1, ARMS)], counting_contigs=AUTOSOMES[:5], min_mapq=20)
 

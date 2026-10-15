@@ -30,7 +30,13 @@ MINIMAP2 = shutil.which("minimap2")
 FAKES = "tests.lab.fake_algorithms"
 
 
+QUIET = ("--no-downsample", "--no-controls")
+
+
 def _lab(capsys, *argv: str) -> tuple[int, str, str]:
+    # S2-era tests check the main plan only; S5 covers the default derived phase.
+    if argv and argv[0] == "run" and "--dry-run" not in argv and "--downsample" not in argv:
+        argv = (*argv, *QUIET)
     code = signed_cli.main(["lab", *argv])
     captured = capsys.readouterr()
     return code, captured.out, captured.err
@@ -419,7 +425,7 @@ def test_interrupt_exits_6_and_rerun_recomputes_only_the_interrupted(lab_world, 
         """
     )
     env = {**os.environ, "LAB_TEST_READY": str(ready), "LAB_TEST_MARKER": str(marker), "PYTHONPATH": str(REPO)}
-    argv = [sys.executable, "-c", script, "lab", "run", str(lab_world["chunks"]), "--root", str(root), "--mmi", str(shared_mmi)]
+    argv = [sys.executable, "-c", script, "lab", "run", str(lab_world["chunks"]), "--root", str(root), "--mmi", str(shared_mmi), *QUIET]
     process = subprocess.Popen(argv, cwd=REPO, env=env, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
     deadline = time.time() + 120
     while not ready.exists() and time.time() < deadline and process.poll() is None:
@@ -438,7 +444,7 @@ def test_interrupt_exits_6_and_rerun_recomputes_only_the_interrupted(lab_world, 
     # Rerun (without the waiting plug-in): the two finished results are cached.
     script2 = script.replace(f', "{FAKES}:WAITS"', "")
     rerun = subprocess.run(
-        [sys.executable, "-c", script2, "lab", "run", "latest", "--root", str(root), "--json"],
+        [sys.executable, "-c", script2, "lab", "run", "latest", "--root", str(root), "--json", *QUIET],
         cwd=REPO, env=env, capture_output=True, text=True, timeout=120,
     )
     assert rerun.returncode == 0, rerun.stdout + rerun.stderr
