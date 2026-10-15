@@ -6,7 +6,9 @@ CpGs that align to the reference count (CpGs in the soft-clipped adapter are
 dropped by ``meth-calls``).
 
 - ``mod_codes``: the mod codes declared in the first 10,000 D21-eligible reads
-  (``C+m`` only means no 5hmC channel), as recorded by ``meth-calls``;
+  of the **parent** input (``C+m`` only means no 5hmC channel), as recorded by
+  ``meth-calls``; the codes are a property of the basecall model, so a derived
+  input reports its parent's;
 - ``mm_tagged_fraction``: eligible records carrying MM / eligible records
   (from the read summary);
 - ``ml_mean``: mean ML/255 over every C+m and C+h value at aligned CpG calls;
@@ -24,7 +26,7 @@ from typing import Any
 
 import numpy as np
 
-from ..meth_calls import HAS_H, HAS_M
+from ..meth_calls import EXPLICIT_H, EXPLICIT_M
 from ..registry import AlgorithmOutput, InputContext, Ready, Skip
 from ._base import load_summary, metric, ratio
 from ._meth import MethBase, load_calls
@@ -60,12 +62,15 @@ class ModbaseQc(MethBase):
         cut = float(self.parameters["filter_threshold"]) * 255.0
         ml_sum = ml_values = sites = low = 0
         for chunk in calls.chunks(mask):
-            has_m = (chunk["channels"] & HAS_M) != 0
-            has_h = (chunk["channels"] & HAS_H) != 0
+            # ML statistics describe the caller's own probabilities: only
+            # explicit ML values count, never implicit "." canonical calls.
+            has_m = (chunk["channels"] & EXPLICIT_M) != 0
+            has_h = (chunk["channels"] & EXPLICIT_H) != 0
             ml_sum += int(chunk["p_m"][has_m].sum(dtype=np.int64)) + int(chunk["p_h"][has_h].sum(dtype=np.int64))
             ml_values += int(has_m.sum()) + int(has_h.sum())
-            sites += int(chunk.size)
-            best = np.maximum(np.maximum(chunk["p_m"], chunk["p_h"]), chunk["p_canonical"]).astype(np.float64)
+            called = chunk[has_m | has_h]
+            sites += int(called.size)
+            best = np.maximum(np.maximum(called["p_m"], called["p_h"]), called["p_canonical"]).astype(np.float64)
             low += int((best < cut).sum())
         return AlgorithmOutput(
             metrics=[
