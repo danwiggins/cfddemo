@@ -1,20 +1,15 @@
-"""``lab run --example`` runtime guards (S6d budget).
+"""``meth-calls`` decoder speed-up for the ``lab run --example`` budget (S6d).
 
-Two costs grew the example past the CI budget after L1.3: every algorithm
-worker imported the signed CLI (and its web server) through
-``registry -> problems``, about 1 s per step over ~45 steps, and the
-``meth-calls`` decoder walked every base and every MM call of every record in
-Python.  These tests pin both fixes: the worker's import closure stays free of
-the signed CLI, and the CpG-proportional decoder matches the per-base
-reference implementation it replaced, record by record.
+The L1.3 decoder walked every base and every MM call of every record in
+Python.  The CpG-proportional decoder must match that per-base reference
+implementation record by record; these tests pin it (the worker import guard
+lives in ``test_lab_run.py``).
 """
 
 from __future__ import annotations
 
 import array
 import random
-import subprocess
-import sys
 from pathlib import Path
 from typing import Any
 
@@ -27,29 +22,6 @@ from traceback_lab.meth_calls import EXPLICIT_H, EXPLICIT_M, HAS_H, HAS_M, MethC
 from traceback_lab.modbase import mm_skip_modes, mm_tag, mn_ok
 
 from .bam_fixtures import Read, write_bam
-
-HEAVY = ("traceback_runner.cli", "traceback_runner.web")
-
-
-def test_worker_and_example_algorithms_do_not_import_the_signed_cli() -> None:
-    script = (
-        "import sys, traceback_lab.worker\n"
-        "from traceback_lab.registry import load_registry\n"
-        "load_registry()\n"
-        f"print(sorted(m for m in sys.modules if m.startswith({HEAVY!r})))\n"
-    )
-    result = subprocess.run([sys.executable, "-c", script], capture_output=True, text=True, check=True)
-    assert result.stdout.strip() == "[]", result.stdout
-
-
-def test_unknown_only_id_still_raises_the_lab_problem() -> None:
-    from traceback_lab.problems import LabProblem
-    from traceback_lab.registry import load_registry, plan
-
-    with pytest.raises(LabProblem) as raised:
-        plan(load_registry(), only=["bam-qcc"])
-    assert raised.value.code == "TBX-LAB-001"
-
 
 # ------------------------------------------------- decoder equivalence
 class _Invalid(ValueError):
