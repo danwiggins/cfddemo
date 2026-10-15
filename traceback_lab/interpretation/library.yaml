@@ -831,3 +831,1187 @@ entries:
     stability: {kind: absolute, tolerance: 10}
     citations: []
     citation_checked: {by: "lab build agent (Phase 1)", date: "2026-10-15", note: "No citation displayed."}
+  # ----------------------------------------------------------- cell-origin (L0.5b)
+  - algorithm_id: cell-origin
+    metric_id: fraction_adipocytes
+    label: "Adipocytes share of cfDNA (Loyfer U250 atlas)"
+    value_kind: proportion
+    tier: SPECULATIVE
+    origin_tier: NEWER
+    origin_platform: "WGBS atlas; ONT deconvolution reported"
+    min_depth_x: 5.0
+    reference: {kind: none}
+    performance:
+      kind: depth_robustness
+      value: "Minor cell types are not interpretable below 5x (Lab rule); only majors were shown stable to 0.2x"
+      platform: ONT
+      depth: "0.2x"
+      source: "Katsman 2022, Genome Biol"
+    performance_missing_reason: null
+    meaning_high: "A larger Adipocytes share of the cell-free DNA; for non-blood cell types this can reflect tissue injury or turnover."
+    meaning_low: "A smaller Adipocytes share of the cell-free DNA."
+    confounders: ["low depth noise", "atlas built from WGBS, not ONT", "basecall model of the 5mC calls", "exercise and inflammation (blood shares)"]
+    next_steps:
+      analytical: ["Confirm depth (minor tissues need >= 5x)", "Compare against the kit cohort when it exists"]
+      clinical_setting: null
+    license_ids: [modkit-ont-public, yissum-uxm, loyfer-atlas-terms-unknown]
+    flags: [LEGAL]
+    headline: false
+    stability: {kind: proportion}
+    citations: ["doi:10.1186/s13059-022-02710-1", "doi:10.1038/s41586-022-05580-6"]
+    citation_checked: {by: "lab build agent", date: "2026-10-15", note: "PubMed full text PMC9283844 (Katsman 2022, ONT cfDNA): from full depth down to 0.2x (about 2.5M aligned fragments) samples were dominated by monocytes, lymphocytes, megakaryocytes, neutrophils/granulocytes; proportions degraded at 0.05x and below (< 700,000 fragments). PMID 36599988: Loyfer 2023 atlas."}
+
+  - algorithm_id: cell-origin
+    metric_id: fraction_bladder_ep
+    label: "Bladder-Ep share of cfDNA (Loyfer U250 atlas)"
+    value_kind: proportion
+    tier: SPECULATIVE
+    origin_tier: NEWER
+    origin_platform: "WGBS atlas; ONT deconvolution reported"
+    min_depth_x: 5.0
+    reference: {kind: none}
+    performance:
+      kind: depth_robustness
+      value: "Minor cell types are not interpretable below 5x (Lab rule); only majors were shown stable to 0.2x"
+      platform: ONT
+      depth: "0.2x"
+      source: "Katsman 2022, Genome Biol"
+    performance_missing_reason: null
+    meaning_high: "A larger Bladder-Ep share of the cell-free DNA; for non-blood cell types this can reflect tissue injury or turnover."
+    meaning_low: "A smaller Bladder-Ep share of the cell-free DNA."
+    confounders: ["low depth noise", "atlas built from WGBS, not ONT", "basecall model of the 5mC calls", "exercise and inflammation (blood shares)"]
+    next_steps:
+      analytical: ["Confirm depth (minor tissues need >= 5x)", "Compare against the kit cohort when it exists"]
+      clinical_setting: null
+    license_ids: [modkit-ont-public, yissum-uxm, loyfer-atlas-terms-unknown]
+    flags: [LEGAL]
+    headline: false
+    stability: {kind: proportion}
+    citations: ["doi:10.1186/s13059-022-02710-1", "doi:10.1038/s41586-022-05580-6"]
+    citation_checked: {by: "lab build agent", date: "2026-10-15", note: "PubMed full text PMC9283844 (Katsman 2022, ONT cfDNA): from full depth down to 0.2x (about 2.5M aligned fragments) samples were dominated by monocytes, lymphocytes, megakaryocytes, neutrophils/granulocytes; proportions degraded at 0.05x and below (< 700,000 fragments). PMID 36599988: Loyfer 2023 atlas."}
+
+  - algorithm_id: cell-origin
+    metric_id: fraction_blood_b
+    label: "Blood-B share of cfDNA (Loyfer U250 atlas)"
+    value_kind: proportion
+    tier: NEWER
+    origin_tier: NEWER
+    origin_platform: "WGBS atlas; ONT deconvolution reported"
+    min_depth_x: 0.2
+    reference: {kind: none}
+    performance:
+      kind: depth_robustness
+      value: "Major cell types held from full depth down to 0.2x (about 2.5M fragments); degraded at 0.05x and below"
+      platform: ONT
+      depth: "0.2x"
+      source: "Katsman 2022, Genome Biol"
+    performance_missing_reason: null
+    meaning_high: "A larger Blood-B share of the cell-free DNA; for non-blood cell types this can reflect tissue injury or turnover."
+    meaning_low: "A smaller Blood-B share of the cell-free DNA."
+    confounders: ["low depth noise", "atlas built from WGBS, not ONT", "basecall model of the 5mC calls", "exercise and inflammation (blood shares)"]
+    next_steps:
+      analytical: ["Confirm depth (minor tissues need >= 5x)", "Compare against the kit cohort when it exists"]
+      clinical_setting: null
+    license_ids: [modkit-ont-public, yissum-uxm, loyfer-atlas-terms-unknown]
+    flags: [LEGAL]
+    headline: false
+    stability: {kind: proportion}
+    citations: ["doi:10.1186/s13059-022-02710-1", "doi:10.1038/s41586-022-05580-6"]
+    citation_checked: {by: "lab build agent", date: "2026-10-15", note: "PubMed full text PMC9283844 (Katsman 2022, ONT cfDNA): from full depth down to 0.2x (about 2.5M aligned fragments) samples were dominated by monocytes, lymphocytes, megakaryocytes, neutrophils/granulocytes; proportions degraded at 0.05x and below (< 700,000 fragments). PMID 36599988: Loyfer 2023 atlas."}
+
+  - algorithm_id: cell-origin
+    metric_id: fraction_blood_granul
+    label: "Blood-Granul share of cfDNA (Loyfer U250 atlas)"
+    value_kind: proportion
+    tier: NEWER
+    origin_tier: NEWER
+    origin_platform: "WGBS atlas; ONT deconvolution reported"
+    min_depth_x: 0.2
+    reference: {kind: none}
+    performance:
+      kind: depth_robustness
+      value: "Major cell types held from full depth down to 0.2x (about 2.5M fragments); degraded at 0.05x and below"
+      platform: ONT
+      depth: "0.2x"
+      source: "Katsman 2022, Genome Biol"
+    performance_missing_reason: null
+    meaning_high: "A larger Blood-Granul share of the cell-free DNA; for non-blood cell types this can reflect tissue injury or turnover."
+    meaning_low: "A smaller Blood-Granul share of the cell-free DNA."
+    confounders: ["low depth noise", "atlas built from WGBS, not ONT", "basecall model of the 5mC calls", "exercise and inflammation (blood shares)"]
+    next_steps:
+      analytical: ["Confirm depth (minor tissues need >= 5x)", "Compare against the kit cohort when it exists"]
+      clinical_setting: null
+    license_ids: [modkit-ont-public, yissum-uxm, loyfer-atlas-terms-unknown]
+    flags: [LEGAL]
+    headline: true
+    stability: {kind: proportion}
+    citations: ["doi:10.1186/s13059-022-02710-1", "doi:10.1038/s41586-022-05580-6"]
+    citation_checked: {by: "lab build agent", date: "2026-10-15", note: "PubMed full text PMC9283844 (Katsman 2022, ONT cfDNA): from full depth down to 0.2x (about 2.5M aligned fragments) samples were dominated by monocytes, lymphocytes, megakaryocytes, neutrophils/granulocytes; proportions degraded at 0.05x and below (< 700,000 fragments). PMID 36599988: Loyfer 2023 atlas."}
+
+  - algorithm_id: cell-origin
+    metric_id: fraction_blood_mono_macro
+    label: "Blood-Mono-Macro share of cfDNA (Loyfer U250 atlas)"
+    value_kind: proportion
+    tier: NEWER
+    origin_tier: NEWER
+    origin_platform: "WGBS atlas; ONT deconvolution reported"
+    min_depth_x: 0.2
+    reference: {kind: none}
+    performance:
+      kind: depth_robustness
+      value: "Major cell types held from full depth down to 0.2x (about 2.5M fragments); degraded at 0.05x and below"
+      platform: ONT
+      depth: "0.2x"
+      source: "Katsman 2022, Genome Biol"
+    performance_missing_reason: null
+    meaning_high: "A larger Blood-Mono-Macro share of the cell-free DNA; for non-blood cell types this can reflect tissue injury or turnover."
+    meaning_low: "A smaller Blood-Mono-Macro share of the cell-free DNA."
+    confounders: ["low depth noise", "atlas built from WGBS, not ONT", "basecall model of the 5mC calls", "exercise and inflammation (blood shares)"]
+    next_steps:
+      analytical: ["Confirm depth (minor tissues need >= 5x)", "Compare against the kit cohort when it exists"]
+      clinical_setting: null
+    license_ids: [modkit-ont-public, yissum-uxm, loyfer-atlas-terms-unknown]
+    flags: [LEGAL]
+    headline: false
+    stability: {kind: proportion}
+    citations: ["doi:10.1186/s13059-022-02710-1", "doi:10.1038/s41586-022-05580-6"]
+    citation_checked: {by: "lab build agent", date: "2026-10-15", note: "PubMed full text PMC9283844 (Katsman 2022, ONT cfDNA): from full depth down to 0.2x (about 2.5M aligned fragments) samples were dominated by monocytes, lymphocytes, megakaryocytes, neutrophils/granulocytes; proportions degraded at 0.05x and below (< 700,000 fragments). PMID 36599988: Loyfer 2023 atlas."}
+
+  - algorithm_id: cell-origin
+    metric_id: fraction_blood_nk
+    label: "Blood-NK share of cfDNA (Loyfer U250 atlas)"
+    value_kind: proportion
+    tier: NEWER
+    origin_tier: NEWER
+    origin_platform: "WGBS atlas; ONT deconvolution reported"
+    min_depth_x: 0.2
+    reference: {kind: none}
+    performance:
+      kind: depth_robustness
+      value: "Major cell types held from full depth down to 0.2x (about 2.5M fragments); degraded at 0.05x and below"
+      platform: ONT
+      depth: "0.2x"
+      source: "Katsman 2022, Genome Biol"
+    performance_missing_reason: null
+    meaning_high: "A larger Blood-NK share of the cell-free DNA; for non-blood cell types this can reflect tissue injury or turnover."
+    meaning_low: "A smaller Blood-NK share of the cell-free DNA."
+    confounders: ["low depth noise", "atlas built from WGBS, not ONT", "basecall model of the 5mC calls", "exercise and inflammation (blood shares)"]
+    next_steps:
+      analytical: ["Confirm depth (minor tissues need >= 5x)", "Compare against the kit cohort when it exists"]
+      clinical_setting: null
+    license_ids: [modkit-ont-public, yissum-uxm, loyfer-atlas-terms-unknown]
+    flags: [LEGAL]
+    headline: false
+    stability: {kind: proportion}
+    citations: ["doi:10.1186/s13059-022-02710-1", "doi:10.1038/s41586-022-05580-6"]
+    citation_checked: {by: "lab build agent", date: "2026-10-15", note: "PubMed full text PMC9283844 (Katsman 2022, ONT cfDNA): from full depth down to 0.2x (about 2.5M aligned fragments) samples were dominated by monocytes, lymphocytes, megakaryocytes, neutrophils/granulocytes; proportions degraded at 0.05x and below (< 700,000 fragments). PMID 36599988: Loyfer 2023 atlas."}
+
+  - algorithm_id: cell-origin
+    metric_id: fraction_blood_t
+    label: "Blood-T share of cfDNA (Loyfer U250 atlas)"
+    value_kind: proportion
+    tier: NEWER
+    origin_tier: NEWER
+    origin_platform: "WGBS atlas; ONT deconvolution reported"
+    min_depth_x: 0.2
+    reference: {kind: none}
+    performance:
+      kind: depth_robustness
+      value: "Major cell types held from full depth down to 0.2x (about 2.5M fragments); degraded at 0.05x and below"
+      platform: ONT
+      depth: "0.2x"
+      source: "Katsman 2022, Genome Biol"
+    performance_missing_reason: null
+    meaning_high: "A larger Blood-T share of the cell-free DNA; for non-blood cell types this can reflect tissue injury or turnover."
+    meaning_low: "A smaller Blood-T share of the cell-free DNA."
+    confounders: ["low depth noise", "atlas built from WGBS, not ONT", "basecall model of the 5mC calls", "exercise and inflammation (blood shares)"]
+    next_steps:
+      analytical: ["Confirm depth (minor tissues need >= 5x)", "Compare against the kit cohort when it exists"]
+      clinical_setting: null
+    license_ids: [modkit-ont-public, yissum-uxm, loyfer-atlas-terms-unknown]
+    flags: [LEGAL]
+    headline: false
+    stability: {kind: proportion}
+    citations: ["doi:10.1186/s13059-022-02710-1", "doi:10.1038/s41586-022-05580-6"]
+    citation_checked: {by: "lab build agent", date: "2026-10-15", note: "PubMed full text PMC9283844 (Katsman 2022, ONT cfDNA): from full depth down to 0.2x (about 2.5M aligned fragments) samples were dominated by monocytes, lymphocytes, megakaryocytes, neutrophils/granulocytes; proportions degraded at 0.05x and below (< 700,000 fragments). PMID 36599988: Loyfer 2023 atlas."}
+
+  - algorithm_id: cell-origin
+    metric_id: fraction_bone_osteob
+    label: "Bone-Osteob share of cfDNA (Loyfer U250 atlas)"
+    value_kind: proportion
+    tier: SPECULATIVE
+    origin_tier: NEWER
+    origin_platform: "WGBS atlas; ONT deconvolution reported"
+    min_depth_x: 5.0
+    reference: {kind: none}
+    performance:
+      kind: depth_robustness
+      value: "Minor cell types are not interpretable below 5x (Lab rule); only majors were shown stable to 0.2x"
+      platform: ONT
+      depth: "0.2x"
+      source: "Katsman 2022, Genome Biol"
+    performance_missing_reason: null
+    meaning_high: "A larger Bone-Osteob share of the cell-free DNA; for non-blood cell types this can reflect tissue injury or turnover."
+    meaning_low: "A smaller Bone-Osteob share of the cell-free DNA."
+    confounders: ["low depth noise", "atlas built from WGBS, not ONT", "basecall model of the 5mC calls", "exercise and inflammation (blood shares)"]
+    next_steps:
+      analytical: ["Confirm depth (minor tissues need >= 5x)", "Compare against the kit cohort when it exists"]
+      clinical_setting: null
+    license_ids: [modkit-ont-public, yissum-uxm, loyfer-atlas-terms-unknown]
+    flags: [LEGAL]
+    headline: false
+    stability: {kind: proportion}
+    citations: ["doi:10.1186/s13059-022-02710-1", "doi:10.1038/s41586-022-05580-6"]
+    citation_checked: {by: "lab build agent", date: "2026-10-15", note: "PubMed full text PMC9283844 (Katsman 2022, ONT cfDNA): from full depth down to 0.2x (about 2.5M aligned fragments) samples were dominated by monocytes, lymphocytes, megakaryocytes, neutrophils/granulocytes; proportions degraded at 0.05x and below (< 700,000 fragments). PMID 36599988: Loyfer 2023 atlas."}
+
+  - algorithm_id: cell-origin
+    metric_id: fraction_breast_basal_ep
+    label: "Breast-Basal-Ep share of cfDNA (Loyfer U250 atlas)"
+    value_kind: proportion
+    tier: SPECULATIVE
+    origin_tier: NEWER
+    origin_platform: "WGBS atlas; ONT deconvolution reported"
+    min_depth_x: 5.0
+    reference: {kind: none}
+    performance:
+      kind: depth_robustness
+      value: "Minor cell types are not interpretable below 5x (Lab rule); only majors were shown stable to 0.2x"
+      platform: ONT
+      depth: "0.2x"
+      source: "Katsman 2022, Genome Biol"
+    performance_missing_reason: null
+    meaning_high: "A larger Breast-Basal-Ep share of the cell-free DNA; for non-blood cell types this can reflect tissue injury or turnover."
+    meaning_low: "A smaller Breast-Basal-Ep share of the cell-free DNA."
+    confounders: ["low depth noise", "atlas built from WGBS, not ONT", "basecall model of the 5mC calls", "exercise and inflammation (blood shares)"]
+    next_steps:
+      analytical: ["Confirm depth (minor tissues need >= 5x)", "Compare against the kit cohort when it exists"]
+      clinical_setting: null
+    license_ids: [modkit-ont-public, yissum-uxm, loyfer-atlas-terms-unknown]
+    flags: [LEGAL]
+    headline: false
+    stability: {kind: proportion}
+    citations: ["doi:10.1186/s13059-022-02710-1", "doi:10.1038/s41586-022-05580-6"]
+    citation_checked: {by: "lab build agent", date: "2026-10-15", note: "PubMed full text PMC9283844 (Katsman 2022, ONT cfDNA): from full depth down to 0.2x (about 2.5M aligned fragments) samples were dominated by monocytes, lymphocytes, megakaryocytes, neutrophils/granulocytes; proportions degraded at 0.05x and below (< 700,000 fragments). PMID 36599988: Loyfer 2023 atlas."}
+
+  - algorithm_id: cell-origin
+    metric_id: fraction_breast_luminal_ep
+    label: "Breast-Luminal-Ep share of cfDNA (Loyfer U250 atlas)"
+    value_kind: proportion
+    tier: SPECULATIVE
+    origin_tier: NEWER
+    origin_platform: "WGBS atlas; ONT deconvolution reported"
+    min_depth_x: 5.0
+    reference: {kind: none}
+    performance:
+      kind: depth_robustness
+      value: "Minor cell types are not interpretable below 5x (Lab rule); only majors were shown stable to 0.2x"
+      platform: ONT
+      depth: "0.2x"
+      source: "Katsman 2022, Genome Biol"
+    performance_missing_reason: null
+    meaning_high: "A larger Breast-Luminal-Ep share of the cell-free DNA; for non-blood cell types this can reflect tissue injury or turnover."
+    meaning_low: "A smaller Breast-Luminal-Ep share of the cell-free DNA."
+    confounders: ["low depth noise", "atlas built from WGBS, not ONT", "basecall model of the 5mC calls", "exercise and inflammation (blood shares)"]
+    next_steps:
+      analytical: ["Confirm depth (minor tissues need >= 5x)", "Compare against the kit cohort when it exists"]
+      clinical_setting: null
+    license_ids: [modkit-ont-public, yissum-uxm, loyfer-atlas-terms-unknown]
+    flags: [LEGAL]
+    headline: false
+    stability: {kind: proportion}
+    citations: ["doi:10.1186/s13059-022-02710-1", "doi:10.1038/s41586-022-05580-6"]
+    citation_checked: {by: "lab build agent", date: "2026-10-15", note: "PubMed full text PMC9283844 (Katsman 2022, ONT cfDNA): from full depth down to 0.2x (about 2.5M aligned fragments) samples were dominated by monocytes, lymphocytes, megakaryocytes, neutrophils/granulocytes; proportions degraded at 0.05x and below (< 700,000 fragments). PMID 36599988: Loyfer 2023 atlas."}
+
+  - algorithm_id: cell-origin
+    metric_id: fraction_colon_ep
+    label: "Colon-Ep share of cfDNA (Loyfer U250 atlas)"
+    value_kind: proportion
+    tier: SPECULATIVE
+    origin_tier: NEWER
+    origin_platform: "WGBS atlas; ONT deconvolution reported"
+    min_depth_x: 5.0
+    reference: {kind: none}
+    performance:
+      kind: depth_robustness
+      value: "Minor cell types are not interpretable below 5x (Lab rule); only majors were shown stable to 0.2x"
+      platform: ONT
+      depth: "0.2x"
+      source: "Katsman 2022, Genome Biol"
+    performance_missing_reason: null
+    meaning_high: "A larger Colon-Ep share of the cell-free DNA; for non-blood cell types this can reflect tissue injury or turnover."
+    meaning_low: "A smaller Colon-Ep share of the cell-free DNA."
+    confounders: ["low depth noise", "atlas built from WGBS, not ONT", "basecall model of the 5mC calls", "exercise and inflammation (blood shares)"]
+    next_steps:
+      analytical: ["Confirm depth (minor tissues need >= 5x)", "Compare against the kit cohort when it exists"]
+      clinical_setting: null
+    license_ids: [modkit-ont-public, yissum-uxm, loyfer-atlas-terms-unknown]
+    flags: [LEGAL]
+    headline: false
+    stability: {kind: proportion}
+    citations: ["doi:10.1186/s13059-022-02710-1", "doi:10.1038/s41586-022-05580-6"]
+    citation_checked: {by: "lab build agent", date: "2026-10-15", note: "PubMed full text PMC9283844 (Katsman 2022, ONT cfDNA): from full depth down to 0.2x (about 2.5M aligned fragments) samples were dominated by monocytes, lymphocytes, megakaryocytes, neutrophils/granulocytes; proportions degraded at 0.05x and below (< 700,000 fragments). PMID 36599988: Loyfer 2023 atlas."}
+
+  - algorithm_id: cell-origin
+    metric_id: fraction_colon_fibro
+    label: "Colon-Fibro share of cfDNA (Loyfer U250 atlas)"
+    value_kind: proportion
+    tier: SPECULATIVE
+    origin_tier: NEWER
+    origin_platform: "WGBS atlas; ONT deconvolution reported"
+    min_depth_x: 5.0
+    reference: {kind: none}
+    performance:
+      kind: depth_robustness
+      value: "Minor cell types are not interpretable below 5x (Lab rule); only majors were shown stable to 0.2x"
+      platform: ONT
+      depth: "0.2x"
+      source: "Katsman 2022, Genome Biol"
+    performance_missing_reason: null
+    meaning_high: "A larger Colon-Fibro share of the cell-free DNA; for non-blood cell types this can reflect tissue injury or turnover."
+    meaning_low: "A smaller Colon-Fibro share of the cell-free DNA."
+    confounders: ["low depth noise", "atlas built from WGBS, not ONT", "basecall model of the 5mC calls", "exercise and inflammation (blood shares)"]
+    next_steps:
+      analytical: ["Confirm depth (minor tissues need >= 5x)", "Compare against the kit cohort when it exists"]
+      clinical_setting: null
+    license_ids: [modkit-ont-public, yissum-uxm, loyfer-atlas-terms-unknown]
+    flags: [LEGAL]
+    headline: false
+    stability: {kind: proportion}
+    citations: ["doi:10.1186/s13059-022-02710-1", "doi:10.1038/s41586-022-05580-6"]
+    citation_checked: {by: "lab build agent", date: "2026-10-15", note: "PubMed full text PMC9283844 (Katsman 2022, ONT cfDNA): from full depth down to 0.2x (about 2.5M aligned fragments) samples were dominated by monocytes, lymphocytes, megakaryocytes, neutrophils/granulocytes; proportions degraded at 0.05x and below (< 700,000 fragments). PMID 36599988: Loyfer 2023 atlas."}
+
+  - algorithm_id: cell-origin
+    metric_id: fraction_dermal_fibro
+    label: "Dermal-Fibro share of cfDNA (Loyfer U250 atlas)"
+    value_kind: proportion
+    tier: SPECULATIVE
+    origin_tier: NEWER
+    origin_platform: "WGBS atlas; ONT deconvolution reported"
+    min_depth_x: 5.0
+    reference: {kind: none}
+    performance:
+      kind: depth_robustness
+      value: "Minor cell types are not interpretable below 5x (Lab rule); only majors were shown stable to 0.2x"
+      platform: ONT
+      depth: "0.2x"
+      source: "Katsman 2022, Genome Biol"
+    performance_missing_reason: null
+    meaning_high: "A larger Dermal-Fibro share of the cell-free DNA; for non-blood cell types this can reflect tissue injury or turnover."
+    meaning_low: "A smaller Dermal-Fibro share of the cell-free DNA."
+    confounders: ["low depth noise", "atlas built from WGBS, not ONT", "basecall model of the 5mC calls", "exercise and inflammation (blood shares)"]
+    next_steps:
+      analytical: ["Confirm depth (minor tissues need >= 5x)", "Compare against the kit cohort when it exists"]
+      clinical_setting: null
+    license_ids: [modkit-ont-public, yissum-uxm, loyfer-atlas-terms-unknown]
+    flags: [LEGAL]
+    headline: false
+    stability: {kind: proportion}
+    citations: ["doi:10.1186/s13059-022-02710-1", "doi:10.1038/s41586-022-05580-6"]
+    citation_checked: {by: "lab build agent", date: "2026-10-15", note: "PubMed full text PMC9283844 (Katsman 2022, ONT cfDNA): from full depth down to 0.2x (about 2.5M aligned fragments) samples were dominated by monocytes, lymphocytes, megakaryocytes, neutrophils/granulocytes; proportions degraded at 0.05x and below (< 700,000 fragments). PMID 36599988: Loyfer 2023 atlas."}
+
+  - algorithm_id: cell-origin
+    metric_id: fraction_endothel
+    label: "Endothel share of cfDNA (Loyfer U250 atlas)"
+    value_kind: proportion
+    tier: SPECULATIVE
+    origin_tier: NEWER
+    origin_platform: "WGBS atlas; ONT deconvolution reported"
+    min_depth_x: 5.0
+    reference: {kind: none}
+    performance:
+      kind: depth_robustness
+      value: "Minor cell types are not interpretable below 5x (Lab rule); only majors were shown stable to 0.2x"
+      platform: ONT
+      depth: "0.2x"
+      source: "Katsman 2022, Genome Biol"
+    performance_missing_reason: null
+    meaning_high: "A larger Endothel share of the cell-free DNA; for non-blood cell types this can reflect tissue injury or turnover."
+    meaning_low: "A smaller Endothel share of the cell-free DNA."
+    confounders: ["low depth noise", "atlas built from WGBS, not ONT", "basecall model of the 5mC calls", "exercise and inflammation (blood shares)"]
+    next_steps:
+      analytical: ["Confirm depth (minor tissues need >= 5x)", "Compare against the kit cohort when it exists"]
+      clinical_setting: null
+    license_ids: [modkit-ont-public, yissum-uxm, loyfer-atlas-terms-unknown]
+    flags: [LEGAL]
+    headline: false
+    stability: {kind: proportion}
+    citations: ["doi:10.1186/s13059-022-02710-1", "doi:10.1038/s41586-022-05580-6"]
+    citation_checked: {by: "lab build agent", date: "2026-10-15", note: "PubMed full text PMC9283844 (Katsman 2022, ONT cfDNA): from full depth down to 0.2x (about 2.5M aligned fragments) samples were dominated by monocytes, lymphocytes, megakaryocytes, neutrophils/granulocytes; proportions degraded at 0.05x and below (< 700,000 fragments). PMID 36599988: Loyfer 2023 atlas."}
+
+  - algorithm_id: cell-origin
+    metric_id: fraction_epid_kerat
+    label: "Epid-Kerat share of cfDNA (Loyfer U250 atlas)"
+    value_kind: proportion
+    tier: SPECULATIVE
+    origin_tier: NEWER
+    origin_platform: "WGBS atlas; ONT deconvolution reported"
+    min_depth_x: 5.0
+    reference: {kind: none}
+    performance:
+      kind: depth_robustness
+      value: "Minor cell types are not interpretable below 5x (Lab rule); only majors were shown stable to 0.2x"
+      platform: ONT
+      depth: "0.2x"
+      source: "Katsman 2022, Genome Biol"
+    performance_missing_reason: null
+    meaning_high: "A larger Epid-Kerat share of the cell-free DNA; for non-blood cell types this can reflect tissue injury or turnover."
+    meaning_low: "A smaller Epid-Kerat share of the cell-free DNA."
+    confounders: ["low depth noise", "atlas built from WGBS, not ONT", "basecall model of the 5mC calls", "exercise and inflammation (blood shares)"]
+    next_steps:
+      analytical: ["Confirm depth (minor tissues need >= 5x)", "Compare against the kit cohort when it exists"]
+      clinical_setting: null
+    license_ids: [modkit-ont-public, yissum-uxm, loyfer-atlas-terms-unknown]
+    flags: [LEGAL]
+    headline: false
+    stability: {kind: proportion}
+    citations: ["doi:10.1186/s13059-022-02710-1", "doi:10.1038/s41586-022-05580-6"]
+    citation_checked: {by: "lab build agent", date: "2026-10-15", note: "PubMed full text PMC9283844 (Katsman 2022, ONT cfDNA): from full depth down to 0.2x (about 2.5M aligned fragments) samples were dominated by monocytes, lymphocytes, megakaryocytes, neutrophils/granulocytes; proportions degraded at 0.05x and below (< 700,000 fragments). PMID 36599988: Loyfer 2023 atlas."}
+
+  - algorithm_id: cell-origin
+    metric_id: fraction_eryth_prog
+    label: "Eryth-prog share of cfDNA (Loyfer U250 atlas)"
+    value_kind: proportion
+    tier: SPECULATIVE
+    origin_tier: NEWER
+    origin_platform: "WGBS atlas; ONT deconvolution reported"
+    min_depth_x: 5.0
+    reference: {kind: none}
+    performance:
+      kind: depth_robustness
+      value: "Minor cell types are not interpretable below 5x (Lab rule); only majors were shown stable to 0.2x"
+      platform: ONT
+      depth: "0.2x"
+      source: "Katsman 2022, Genome Biol"
+    performance_missing_reason: null
+    meaning_high: "A larger Eryth-prog share of the cell-free DNA; for non-blood cell types this can reflect tissue injury or turnover."
+    meaning_low: "A smaller Eryth-prog share of the cell-free DNA."
+    confounders: ["low depth noise", "atlas built from WGBS, not ONT", "basecall model of the 5mC calls", "exercise and inflammation (blood shares)"]
+    next_steps:
+      analytical: ["Confirm depth (minor tissues need >= 5x)", "Compare against the kit cohort when it exists"]
+      clinical_setting: null
+    license_ids: [modkit-ont-public, yissum-uxm, loyfer-atlas-terms-unknown]
+    flags: [LEGAL]
+    headline: false
+    stability: {kind: proportion}
+    citations: ["doi:10.1186/s13059-022-02710-1", "doi:10.1038/s41586-022-05580-6"]
+    citation_checked: {by: "lab build agent", date: "2026-10-15", note: "PubMed full text PMC9283844 (Katsman 2022, ONT cfDNA): from full depth down to 0.2x (about 2.5M aligned fragments) samples were dominated by monocytes, lymphocytes, megakaryocytes, neutrophils/granulocytes; proportions degraded at 0.05x and below (< 700,000 fragments). PMID 36599988: Loyfer 2023 atlas."}
+
+  - algorithm_id: cell-origin
+    metric_id: fraction_fallopian_ep
+    label: "Fallopian-Ep share of cfDNA (Loyfer U250 atlas)"
+    value_kind: proportion
+    tier: SPECULATIVE
+    origin_tier: NEWER
+    origin_platform: "WGBS atlas; ONT deconvolution reported"
+    min_depth_x: 5.0
+    reference: {kind: none}
+    performance:
+      kind: depth_robustness
+      value: "Minor cell types are not interpretable below 5x (Lab rule); only majors were shown stable to 0.2x"
+      platform: ONT
+      depth: "0.2x"
+      source: "Katsman 2022, Genome Biol"
+    performance_missing_reason: null
+    meaning_high: "A larger Fallopian-Ep share of the cell-free DNA; for non-blood cell types this can reflect tissue injury or turnover."
+    meaning_low: "A smaller Fallopian-Ep share of the cell-free DNA."
+    confounders: ["low depth noise", "atlas built from WGBS, not ONT", "basecall model of the 5mC calls", "exercise and inflammation (blood shares)"]
+    next_steps:
+      analytical: ["Confirm depth (minor tissues need >= 5x)", "Compare against the kit cohort when it exists"]
+      clinical_setting: null
+    license_ids: [modkit-ont-public, yissum-uxm, loyfer-atlas-terms-unknown]
+    flags: [LEGAL]
+    headline: false
+    stability: {kind: proportion}
+    citations: ["doi:10.1186/s13059-022-02710-1", "doi:10.1038/s41586-022-05580-6"]
+    citation_checked: {by: "lab build agent", date: "2026-10-15", note: "PubMed full text PMC9283844 (Katsman 2022, ONT cfDNA): from full depth down to 0.2x (about 2.5M aligned fragments) samples were dominated by monocytes, lymphocytes, megakaryocytes, neutrophils/granulocytes; proportions degraded at 0.05x and below (< 700,000 fragments). PMID 36599988: Loyfer 2023 atlas."}
+
+  - algorithm_id: cell-origin
+    metric_id: fraction_gallbladder
+    label: "Gallbladder share of cfDNA (Loyfer U250 atlas)"
+    value_kind: proportion
+    tier: SPECULATIVE
+    origin_tier: NEWER
+    origin_platform: "WGBS atlas; ONT deconvolution reported"
+    min_depth_x: 5.0
+    reference: {kind: none}
+    performance:
+      kind: depth_robustness
+      value: "Minor cell types are not interpretable below 5x (Lab rule); only majors were shown stable to 0.2x"
+      platform: ONT
+      depth: "0.2x"
+      source: "Katsman 2022, Genome Biol"
+    performance_missing_reason: null
+    meaning_high: "A larger Gallbladder share of the cell-free DNA; for non-blood cell types this can reflect tissue injury or turnover."
+    meaning_low: "A smaller Gallbladder share of the cell-free DNA."
+    confounders: ["low depth noise", "atlas built from WGBS, not ONT", "basecall model of the 5mC calls", "exercise and inflammation (blood shares)"]
+    next_steps:
+      analytical: ["Confirm depth (minor tissues need >= 5x)", "Compare against the kit cohort when it exists"]
+      clinical_setting: null
+    license_ids: [modkit-ont-public, yissum-uxm, loyfer-atlas-terms-unknown]
+    flags: [LEGAL]
+    headline: false
+    stability: {kind: proportion}
+    citations: ["doi:10.1186/s13059-022-02710-1", "doi:10.1038/s41586-022-05580-6"]
+    citation_checked: {by: "lab build agent", date: "2026-10-15", note: "PubMed full text PMC9283844 (Katsman 2022, ONT cfDNA): from full depth down to 0.2x (about 2.5M aligned fragments) samples were dominated by monocytes, lymphocytes, megakaryocytes, neutrophils/granulocytes; proportions degraded at 0.05x and below (< 700,000 fragments). PMID 36599988: Loyfer 2023 atlas."}
+
+  - algorithm_id: cell-origin
+    metric_id: fraction_gastric_ep
+    label: "Gastric-Ep share of cfDNA (Loyfer U250 atlas)"
+    value_kind: proportion
+    tier: SPECULATIVE
+    origin_tier: NEWER
+    origin_platform: "WGBS atlas; ONT deconvolution reported"
+    min_depth_x: 5.0
+    reference: {kind: none}
+    performance:
+      kind: depth_robustness
+      value: "Minor cell types are not interpretable below 5x (Lab rule); only majors were shown stable to 0.2x"
+      platform: ONT
+      depth: "0.2x"
+      source: "Katsman 2022, Genome Biol"
+    performance_missing_reason: null
+    meaning_high: "A larger Gastric-Ep share of the cell-free DNA; for non-blood cell types this can reflect tissue injury or turnover."
+    meaning_low: "A smaller Gastric-Ep share of the cell-free DNA."
+    confounders: ["low depth noise", "atlas built from WGBS, not ONT", "basecall model of the 5mC calls", "exercise and inflammation (blood shares)"]
+    next_steps:
+      analytical: ["Confirm depth (minor tissues need >= 5x)", "Compare against the kit cohort when it exists"]
+      clinical_setting: null
+    license_ids: [modkit-ont-public, yissum-uxm, loyfer-atlas-terms-unknown]
+    flags: [LEGAL]
+    headline: false
+    stability: {kind: proportion}
+    citations: ["doi:10.1186/s13059-022-02710-1", "doi:10.1038/s41586-022-05580-6"]
+    citation_checked: {by: "lab build agent", date: "2026-10-15", note: "PubMed full text PMC9283844 (Katsman 2022, ONT cfDNA): from full depth down to 0.2x (about 2.5M aligned fragments) samples were dominated by monocytes, lymphocytes, megakaryocytes, neutrophils/granulocytes; proportions degraded at 0.05x and below (< 700,000 fragments). PMID 36599988: Loyfer 2023 atlas."}
+
+  - algorithm_id: cell-origin
+    metric_id: fraction_head_neck_ep
+    label: "Head-Neck-Ep share of cfDNA (Loyfer U250 atlas)"
+    value_kind: proportion
+    tier: SPECULATIVE
+    origin_tier: NEWER
+    origin_platform: "WGBS atlas; ONT deconvolution reported"
+    min_depth_x: 5.0
+    reference: {kind: none}
+    performance:
+      kind: depth_robustness
+      value: "Minor cell types are not interpretable below 5x (Lab rule); only majors were shown stable to 0.2x"
+      platform: ONT
+      depth: "0.2x"
+      source: "Katsman 2022, Genome Biol"
+    performance_missing_reason: null
+    meaning_high: "A larger Head-Neck-Ep share of the cell-free DNA; for non-blood cell types this can reflect tissue injury or turnover."
+    meaning_low: "A smaller Head-Neck-Ep share of the cell-free DNA."
+    confounders: ["low depth noise", "atlas built from WGBS, not ONT", "basecall model of the 5mC calls", "exercise and inflammation (blood shares)"]
+    next_steps:
+      analytical: ["Confirm depth (minor tissues need >= 5x)", "Compare against the kit cohort when it exists"]
+      clinical_setting: null
+    license_ids: [modkit-ont-public, yissum-uxm, loyfer-atlas-terms-unknown]
+    flags: [LEGAL]
+    headline: false
+    stability: {kind: proportion}
+    citations: ["doi:10.1186/s13059-022-02710-1", "doi:10.1038/s41586-022-05580-6"]
+    citation_checked: {by: "lab build agent", date: "2026-10-15", note: "PubMed full text PMC9283844 (Katsman 2022, ONT cfDNA): from full depth down to 0.2x (about 2.5M aligned fragments) samples were dominated by monocytes, lymphocytes, megakaryocytes, neutrophils/granulocytes; proportions degraded at 0.05x and below (< 700,000 fragments). PMID 36599988: Loyfer 2023 atlas."}
+
+  - algorithm_id: cell-origin
+    metric_id: fraction_heart_cardio
+    label: "Heart-Cardio share of cfDNA (Loyfer U250 atlas)"
+    value_kind: proportion
+    tier: SPECULATIVE
+    origin_tier: NEWER
+    origin_platform: "WGBS atlas; ONT deconvolution reported"
+    min_depth_x: 5.0
+    reference: {kind: none}
+    performance:
+      kind: depth_robustness
+      value: "Minor cell types are not interpretable below 5x (Lab rule); only majors were shown stable to 0.2x"
+      platform: ONT
+      depth: "0.2x"
+      source: "Katsman 2022, Genome Biol"
+    performance_missing_reason: null
+    meaning_high: "A larger Heart-Cardio share of the cell-free DNA; for non-blood cell types this can reflect tissue injury or turnover."
+    meaning_low: "A smaller Heart-Cardio share of the cell-free DNA."
+    confounders: ["low depth noise", "atlas built from WGBS, not ONT", "basecall model of the 5mC calls", "exercise and inflammation (blood shares)"]
+    next_steps:
+      analytical: ["Confirm depth (minor tissues need >= 5x)", "Compare against the kit cohort when it exists"]
+      clinical_setting: null
+    license_ids: [modkit-ont-public, yissum-uxm, loyfer-atlas-terms-unknown]
+    flags: [LEGAL]
+    headline: false
+    stability: {kind: proportion}
+    citations: ["doi:10.1186/s13059-022-02710-1", "doi:10.1038/s41586-022-05580-6"]
+    citation_checked: {by: "lab build agent", date: "2026-10-15", note: "PubMed full text PMC9283844 (Katsman 2022, ONT cfDNA): from full depth down to 0.2x (about 2.5M aligned fragments) samples were dominated by monocytes, lymphocytes, megakaryocytes, neutrophils/granulocytes; proportions degraded at 0.05x and below (< 700,000 fragments). PMID 36599988: Loyfer 2023 atlas."}
+
+  - algorithm_id: cell-origin
+    metric_id: fraction_heart_fibro
+    label: "Heart-Fibro share of cfDNA (Loyfer U250 atlas)"
+    value_kind: proportion
+    tier: SPECULATIVE
+    origin_tier: NEWER
+    origin_platform: "WGBS atlas; ONT deconvolution reported"
+    min_depth_x: 5.0
+    reference: {kind: none}
+    performance:
+      kind: depth_robustness
+      value: "Minor cell types are not interpretable below 5x (Lab rule); only majors were shown stable to 0.2x"
+      platform: ONT
+      depth: "0.2x"
+      source: "Katsman 2022, Genome Biol"
+    performance_missing_reason: null
+    meaning_high: "A larger Heart-Fibro share of the cell-free DNA; for non-blood cell types this can reflect tissue injury or turnover."
+    meaning_low: "A smaller Heart-Fibro share of the cell-free DNA."
+    confounders: ["low depth noise", "atlas built from WGBS, not ONT", "basecall model of the 5mC calls", "exercise and inflammation (blood shares)"]
+    next_steps:
+      analytical: ["Confirm depth (minor tissues need >= 5x)", "Compare against the kit cohort when it exists"]
+      clinical_setting: null
+    license_ids: [modkit-ont-public, yissum-uxm, loyfer-atlas-terms-unknown]
+    flags: [LEGAL]
+    headline: false
+    stability: {kind: proportion}
+    citations: ["doi:10.1186/s13059-022-02710-1", "doi:10.1038/s41586-022-05580-6"]
+    citation_checked: {by: "lab build agent", date: "2026-10-15", note: "PubMed full text PMC9283844 (Katsman 2022, ONT cfDNA): from full depth down to 0.2x (about 2.5M aligned fragments) samples were dominated by monocytes, lymphocytes, megakaryocytes, neutrophils/granulocytes; proportions degraded at 0.05x and below (< 700,000 fragments). PMID 36599988: Loyfer 2023 atlas."}
+
+  - algorithm_id: cell-origin
+    metric_id: fraction_kidney_ep
+    label: "Kidney-Ep share of cfDNA (Loyfer U250 atlas)"
+    value_kind: proportion
+    tier: SPECULATIVE
+    origin_tier: NEWER
+    origin_platform: "WGBS atlas; ONT deconvolution reported"
+    min_depth_x: 5.0
+    reference: {kind: none}
+    performance:
+      kind: depth_robustness
+      value: "Minor cell types are not interpretable below 5x (Lab rule); only majors were shown stable to 0.2x"
+      platform: ONT
+      depth: "0.2x"
+      source: "Katsman 2022, Genome Biol"
+    performance_missing_reason: null
+    meaning_high: "A larger Kidney-Ep share of the cell-free DNA; for non-blood cell types this can reflect tissue injury or turnover."
+    meaning_low: "A smaller Kidney-Ep share of the cell-free DNA."
+    confounders: ["low depth noise", "atlas built from WGBS, not ONT", "basecall model of the 5mC calls", "exercise and inflammation (blood shares)"]
+    next_steps:
+      analytical: ["Confirm depth (minor tissues need >= 5x)", "Compare against the kit cohort when it exists"]
+      clinical_setting: null
+    license_ids: [modkit-ont-public, yissum-uxm, loyfer-atlas-terms-unknown]
+    flags: [LEGAL]
+    headline: false
+    stability: {kind: proportion}
+    citations: ["doi:10.1186/s13059-022-02710-1", "doi:10.1038/s41586-022-05580-6"]
+    citation_checked: {by: "lab build agent", date: "2026-10-15", note: "PubMed full text PMC9283844 (Katsman 2022, ONT cfDNA): from full depth down to 0.2x (about 2.5M aligned fragments) samples were dominated by monocytes, lymphocytes, megakaryocytes, neutrophils/granulocytes; proportions degraded at 0.05x and below (< 700,000 fragments). PMID 36599988: Loyfer 2023 atlas."}
+
+  - algorithm_id: cell-origin
+    metric_id: fraction_liver_hep
+    label: "Liver-Hep share of cfDNA (Loyfer U250 atlas)"
+    value_kind: proportion
+    tier: SPECULATIVE
+    origin_tier: NEWER
+    origin_platform: "WGBS atlas; ONT deconvolution reported"
+    min_depth_x: 5.0
+    reference: {kind: none}
+    performance:
+      kind: depth_robustness
+      value: "Minor cell types are not interpretable below 5x (Lab rule); only majors were shown stable to 0.2x"
+      platform: ONT
+      depth: "0.2x"
+      source: "Katsman 2022, Genome Biol"
+    performance_missing_reason: null
+    meaning_high: "A larger Liver-Hep share of the cell-free DNA; for non-blood cell types this can reflect tissue injury or turnover."
+    meaning_low: "A smaller Liver-Hep share of the cell-free DNA."
+    confounders: ["low depth noise", "atlas built from WGBS, not ONT", "basecall model of the 5mC calls", "exercise and inflammation (blood shares)"]
+    next_steps:
+      analytical: ["Confirm depth (minor tissues need >= 5x)", "Compare against the kit cohort when it exists"]
+      clinical_setting: null
+    license_ids: [modkit-ont-public, yissum-uxm, loyfer-atlas-terms-unknown]
+    flags: [LEGAL]
+    headline: false
+    stability: {kind: proportion}
+    citations: ["doi:10.1186/s13059-022-02710-1", "doi:10.1038/s41586-022-05580-6"]
+    citation_checked: {by: "lab build agent", date: "2026-10-15", note: "PubMed full text PMC9283844 (Katsman 2022, ONT cfDNA): from full depth down to 0.2x (about 2.5M aligned fragments) samples were dominated by monocytes, lymphocytes, megakaryocytes, neutrophils/granulocytes; proportions degraded at 0.05x and below (< 700,000 fragments). PMID 36599988: Loyfer 2023 atlas."}
+
+  - algorithm_id: cell-origin
+    metric_id: fraction_lung_ep_alveo
+    label: "Lung-Ep-Alveo share of cfDNA (Loyfer U250 atlas)"
+    value_kind: proportion
+    tier: SPECULATIVE
+    origin_tier: NEWER
+    origin_platform: "WGBS atlas; ONT deconvolution reported"
+    min_depth_x: 5.0
+    reference: {kind: none}
+    performance:
+      kind: depth_robustness
+      value: "Minor cell types are not interpretable below 5x (Lab rule); only majors were shown stable to 0.2x"
+      platform: ONT
+      depth: "0.2x"
+      source: "Katsman 2022, Genome Biol"
+    performance_missing_reason: null
+    meaning_high: "A larger Lung-Ep-Alveo share of the cell-free DNA; for non-blood cell types this can reflect tissue injury or turnover."
+    meaning_low: "A smaller Lung-Ep-Alveo share of the cell-free DNA."
+    confounders: ["low depth noise", "atlas built from WGBS, not ONT", "basecall model of the 5mC calls", "exercise and inflammation (blood shares)"]
+    next_steps:
+      analytical: ["Confirm depth (minor tissues need >= 5x)", "Compare against the kit cohort when it exists"]
+      clinical_setting: null
+    license_ids: [modkit-ont-public, yissum-uxm, loyfer-atlas-terms-unknown]
+    flags: [LEGAL]
+    headline: false
+    stability: {kind: proportion}
+    citations: ["doi:10.1186/s13059-022-02710-1", "doi:10.1038/s41586-022-05580-6"]
+    citation_checked: {by: "lab build agent", date: "2026-10-15", note: "PubMed full text PMC9283844 (Katsman 2022, ONT cfDNA): from full depth down to 0.2x (about 2.5M aligned fragments) samples were dominated by monocytes, lymphocytes, megakaryocytes, neutrophils/granulocytes; proportions degraded at 0.05x and below (< 700,000 fragments). PMID 36599988: Loyfer 2023 atlas."}
+
+  - algorithm_id: cell-origin
+    metric_id: fraction_lung_ep_bron
+    label: "Lung-Ep-Bron share of cfDNA (Loyfer U250 atlas)"
+    value_kind: proportion
+    tier: SPECULATIVE
+    origin_tier: NEWER
+    origin_platform: "WGBS atlas; ONT deconvolution reported"
+    min_depth_x: 5.0
+    reference: {kind: none}
+    performance:
+      kind: depth_robustness
+      value: "Minor cell types are not interpretable below 5x (Lab rule); only majors were shown stable to 0.2x"
+      platform: ONT
+      depth: "0.2x"
+      source: "Katsman 2022, Genome Biol"
+    performance_missing_reason: null
+    meaning_high: "A larger Lung-Ep-Bron share of the cell-free DNA; for non-blood cell types this can reflect tissue injury or turnover."
+    meaning_low: "A smaller Lung-Ep-Bron share of the cell-free DNA."
+    confounders: ["low depth noise", "atlas built from WGBS, not ONT", "basecall model of the 5mC calls", "exercise and inflammation (blood shares)"]
+    next_steps:
+      analytical: ["Confirm depth (minor tissues need >= 5x)", "Compare against the kit cohort when it exists"]
+      clinical_setting: null
+    license_ids: [modkit-ont-public, yissum-uxm, loyfer-atlas-terms-unknown]
+    flags: [LEGAL]
+    headline: false
+    stability: {kind: proportion}
+    citations: ["doi:10.1186/s13059-022-02710-1", "doi:10.1038/s41586-022-05580-6"]
+    citation_checked: {by: "lab build agent", date: "2026-10-15", note: "PubMed full text PMC9283844 (Katsman 2022, ONT cfDNA): from full depth down to 0.2x (about 2.5M aligned fragments) samples were dominated by monocytes, lymphocytes, megakaryocytes, neutrophils/granulocytes; proportions degraded at 0.05x and below (< 700,000 fragments). PMID 36599988: Loyfer 2023 atlas."}
+
+  - algorithm_id: cell-origin
+    metric_id: fraction_megakaryocytes
+    label: "Megakaryocytes share of cfDNA (Loyfer U250 atlas)"
+    value_kind: proportion
+    tier: NEWER
+    origin_tier: NEWER
+    origin_platform: "WGBS atlas; ONT deconvolution reported"
+    min_depth_x: 0.2
+    reference: {kind: none}
+    performance:
+      kind: depth_robustness
+      value: "Major cell types held from full depth down to 0.2x (about 2.5M fragments); degraded at 0.05x and below"
+      platform: ONT
+      depth: "0.2x"
+      source: "Katsman 2022, Genome Biol"
+    performance_missing_reason: null
+    meaning_high: "A larger Megakaryocytes share of the cell-free DNA; for non-blood cell types this can reflect tissue injury or turnover."
+    meaning_low: "A smaller Megakaryocytes share of the cell-free DNA."
+    confounders: ["low depth noise", "atlas built from WGBS, not ONT", "basecall model of the 5mC calls", "exercise and inflammation (blood shares)"]
+    next_steps:
+      analytical: ["Confirm depth (minor tissues need >= 5x)", "Compare against the kit cohort when it exists"]
+      clinical_setting: null
+    license_ids: [modkit-ont-public, yissum-uxm, loyfer-atlas-terms-unknown]
+    flags: [LEGAL]
+    headline: false
+    stability: {kind: proportion}
+    citations: ["doi:10.1186/s13059-022-02710-1", "doi:10.1038/s41586-022-05580-6"]
+    citation_checked: {by: "lab build agent", date: "2026-10-15", note: "PubMed full text PMC9283844 (Katsman 2022, ONT cfDNA): from full depth down to 0.2x (about 2.5M aligned fragments) samples were dominated by monocytes, lymphocytes, megakaryocytes, neutrophils/granulocytes; proportions degraded at 0.05x and below (< 700,000 fragments). PMID 36599988: Loyfer 2023 atlas."}
+
+  - algorithm_id: cell-origin
+    metric_id: fraction_neuron
+    label: "Neuron share of cfDNA (Loyfer U250 atlas)"
+    value_kind: proportion
+    tier: SPECULATIVE
+    origin_tier: NEWER
+    origin_platform: "WGBS atlas; ONT deconvolution reported"
+    min_depth_x: 5.0
+    reference: {kind: none}
+    performance:
+      kind: depth_robustness
+      value: "Minor cell types are not interpretable below 5x (Lab rule); only majors were shown stable to 0.2x"
+      platform: ONT
+      depth: "0.2x"
+      source: "Katsman 2022, Genome Biol"
+    performance_missing_reason: null
+    meaning_high: "A larger Neuron share of the cell-free DNA; for non-blood cell types this can reflect tissue injury or turnover."
+    meaning_low: "A smaller Neuron share of the cell-free DNA."
+    confounders: ["low depth noise", "atlas built from WGBS, not ONT", "basecall model of the 5mC calls", "exercise and inflammation (blood shares)"]
+    next_steps:
+      analytical: ["Confirm depth (minor tissues need >= 5x)", "Compare against the kit cohort when it exists"]
+      clinical_setting: null
+    license_ids: [modkit-ont-public, yissum-uxm, loyfer-atlas-terms-unknown]
+    flags: [LEGAL]
+    headline: false
+    stability: {kind: proportion}
+    citations: ["doi:10.1186/s13059-022-02710-1", "doi:10.1038/s41586-022-05580-6"]
+    citation_checked: {by: "lab build agent", date: "2026-10-15", note: "PubMed full text PMC9283844 (Katsman 2022, ONT cfDNA): from full depth down to 0.2x (about 2.5M aligned fragments) samples were dominated by monocytes, lymphocytes, megakaryocytes, neutrophils/granulocytes; proportions degraded at 0.05x and below (< 700,000 fragments). PMID 36599988: Loyfer 2023 atlas."}
+
+  - algorithm_id: cell-origin
+    metric_id: fraction_oligodend
+    label: "Oligodend share of cfDNA (Loyfer U250 atlas)"
+    value_kind: proportion
+    tier: SPECULATIVE
+    origin_tier: NEWER
+    origin_platform: "WGBS atlas; ONT deconvolution reported"
+    min_depth_x: 5.0
+    reference: {kind: none}
+    performance:
+      kind: depth_robustness
+      value: "Minor cell types are not interpretable below 5x (Lab rule); only majors were shown stable to 0.2x"
+      platform: ONT
+      depth: "0.2x"
+      source: "Katsman 2022, Genome Biol"
+    performance_missing_reason: null
+    meaning_high: "A larger Oligodend share of the cell-free DNA; for non-blood cell types this can reflect tissue injury or turnover."
+    meaning_low: "A smaller Oligodend share of the cell-free DNA."
+    confounders: ["low depth noise", "atlas built from WGBS, not ONT", "basecall model of the 5mC calls", "exercise and inflammation (blood shares)"]
+    next_steps:
+      analytical: ["Confirm depth (minor tissues need >= 5x)", "Compare against the kit cohort when it exists"]
+      clinical_setting: null
+    license_ids: [modkit-ont-public, yissum-uxm, loyfer-atlas-terms-unknown]
+    flags: [LEGAL]
+    headline: false
+    stability: {kind: proportion}
+    citations: ["doi:10.1186/s13059-022-02710-1", "doi:10.1038/s41586-022-05580-6"]
+    citation_checked: {by: "lab build agent", date: "2026-10-15", note: "PubMed full text PMC9283844 (Katsman 2022, ONT cfDNA): from full depth down to 0.2x (about 2.5M aligned fragments) samples were dominated by monocytes, lymphocytes, megakaryocytes, neutrophils/granulocytes; proportions degraded at 0.05x and below (< 700,000 fragments). PMID 36599988: Loyfer 2023 atlas."}
+
+  - algorithm_id: cell-origin
+    metric_id: fraction_ovary_ep
+    label: "Ovary-Ep share of cfDNA (Loyfer U250 atlas)"
+    value_kind: proportion
+    tier: SPECULATIVE
+    origin_tier: NEWER
+    origin_platform: "WGBS atlas; ONT deconvolution reported"
+    min_depth_x: 5.0
+    reference: {kind: none}
+    performance:
+      kind: depth_robustness
+      value: "Minor cell types are not interpretable below 5x (Lab rule); only majors were shown stable to 0.2x"
+      platform: ONT
+      depth: "0.2x"
+      source: "Katsman 2022, Genome Biol"
+    performance_missing_reason: null
+    meaning_high: "A larger Ovary-Ep share of the cell-free DNA; for non-blood cell types this can reflect tissue injury or turnover."
+    meaning_low: "A smaller Ovary-Ep share of the cell-free DNA."
+    confounders: ["low depth noise", "atlas built from WGBS, not ONT", "basecall model of the 5mC calls", "exercise and inflammation (blood shares)"]
+    next_steps:
+      analytical: ["Confirm depth (minor tissues need >= 5x)", "Compare against the kit cohort when it exists"]
+      clinical_setting: null
+    license_ids: [modkit-ont-public, yissum-uxm, loyfer-atlas-terms-unknown]
+    flags: [LEGAL]
+    headline: false
+    stability: {kind: proportion}
+    citations: ["doi:10.1186/s13059-022-02710-1", "doi:10.1038/s41586-022-05580-6"]
+    citation_checked: {by: "lab build agent", date: "2026-10-15", note: "PubMed full text PMC9283844 (Katsman 2022, ONT cfDNA): from full depth down to 0.2x (about 2.5M aligned fragments) samples were dominated by monocytes, lymphocytes, megakaryocytes, neutrophils/granulocytes; proportions degraded at 0.05x and below (< 700,000 fragments). PMID 36599988: Loyfer 2023 atlas."}
+
+  - algorithm_id: cell-origin
+    metric_id: fraction_pancreas_acinar
+    label: "Pancreas-Acinar share of cfDNA (Loyfer U250 atlas)"
+    value_kind: proportion
+    tier: SPECULATIVE
+    origin_tier: NEWER
+    origin_platform: "WGBS atlas; ONT deconvolution reported"
+    min_depth_x: 5.0
+    reference: {kind: none}
+    performance:
+      kind: depth_robustness
+      value: "Minor cell types are not interpretable below 5x (Lab rule); only majors were shown stable to 0.2x"
+      platform: ONT
+      depth: "0.2x"
+      source: "Katsman 2022, Genome Biol"
+    performance_missing_reason: null
+    meaning_high: "A larger Pancreas-Acinar share of the cell-free DNA; for non-blood cell types this can reflect tissue injury or turnover."
+    meaning_low: "A smaller Pancreas-Acinar share of the cell-free DNA."
+    confounders: ["low depth noise", "atlas built from WGBS, not ONT", "basecall model of the 5mC calls", "exercise and inflammation (blood shares)"]
+    next_steps:
+      analytical: ["Confirm depth (minor tissues need >= 5x)", "Compare against the kit cohort when it exists"]
+      clinical_setting: null
+    license_ids: [modkit-ont-public, yissum-uxm, loyfer-atlas-terms-unknown]
+    flags: [LEGAL]
+    headline: false
+    stability: {kind: proportion}
+    citations: ["doi:10.1186/s13059-022-02710-1", "doi:10.1038/s41586-022-05580-6"]
+    citation_checked: {by: "lab build agent", date: "2026-10-15", note: "PubMed full text PMC9283844 (Katsman 2022, ONT cfDNA): from full depth down to 0.2x (about 2.5M aligned fragments) samples were dominated by monocytes, lymphocytes, megakaryocytes, neutrophils/granulocytes; proportions degraded at 0.05x and below (< 700,000 fragments). PMID 36599988: Loyfer 2023 atlas."}
+
+  - algorithm_id: cell-origin
+    metric_id: fraction_pancreas_alpha
+    label: "Pancreas-Alpha share of cfDNA (Loyfer U250 atlas)"
+    value_kind: proportion
+    tier: SPECULATIVE
+    origin_tier: NEWER
+    origin_platform: "WGBS atlas; ONT deconvolution reported"
+    min_depth_x: 5.0
+    reference: {kind: none}
+    performance:
+      kind: depth_robustness
+      value: "Minor cell types are not interpretable below 5x (Lab rule); only majors were shown stable to 0.2x"
+      platform: ONT
+      depth: "0.2x"
+      source: "Katsman 2022, Genome Biol"
+    performance_missing_reason: null
+    meaning_high: "A larger Pancreas-Alpha share of the cell-free DNA; for non-blood cell types this can reflect tissue injury or turnover."
+    meaning_low: "A smaller Pancreas-Alpha share of the cell-free DNA."
+    confounders: ["low depth noise", "atlas built from WGBS, not ONT", "basecall model of the 5mC calls", "exercise and inflammation (blood shares)"]
+    next_steps:
+      analytical: ["Confirm depth (minor tissues need >= 5x)", "Compare against the kit cohort when it exists"]
+      clinical_setting: null
+    license_ids: [modkit-ont-public, yissum-uxm, loyfer-atlas-terms-unknown]
+    flags: [LEGAL]
+    headline: false
+    stability: {kind: proportion}
+    citations: ["doi:10.1186/s13059-022-02710-1", "doi:10.1038/s41586-022-05580-6"]
+    citation_checked: {by: "lab build agent", date: "2026-10-15", note: "PubMed full text PMC9283844 (Katsman 2022, ONT cfDNA): from full depth down to 0.2x (about 2.5M aligned fragments) samples were dominated by monocytes, lymphocytes, megakaryocytes, neutrophils/granulocytes; proportions degraded at 0.05x and below (< 700,000 fragments). PMID 36599988: Loyfer 2023 atlas."}
+
+  - algorithm_id: cell-origin
+    metric_id: fraction_pancreas_beta
+    label: "Pancreas-Beta share of cfDNA (Loyfer U250 atlas)"
+    value_kind: proportion
+    tier: SPECULATIVE
+    origin_tier: NEWER
+    origin_platform: "WGBS atlas; ONT deconvolution reported"
+    min_depth_x: 5.0
+    reference: {kind: none}
+    performance:
+      kind: depth_robustness
+      value: "Minor cell types are not interpretable below 5x (Lab rule); only majors were shown stable to 0.2x"
+      platform: ONT
+      depth: "0.2x"
+      source: "Katsman 2022, Genome Biol"
+    performance_missing_reason: null
+    meaning_high: "A larger Pancreas-Beta share of the cell-free DNA; for non-blood cell types this can reflect tissue injury or turnover."
+    meaning_low: "A smaller Pancreas-Beta share of the cell-free DNA."
+    confounders: ["low depth noise", "atlas built from WGBS, not ONT", "basecall model of the 5mC calls", "exercise and inflammation (blood shares)"]
+    next_steps:
+      analytical: ["Confirm depth (minor tissues need >= 5x)", "Compare against the kit cohort when it exists"]
+      clinical_setting: null
+    license_ids: [modkit-ont-public, yissum-uxm, loyfer-atlas-terms-unknown]
+    flags: [LEGAL]
+    headline: false
+    stability: {kind: proportion}
+    citations: ["doi:10.1186/s13059-022-02710-1", "doi:10.1038/s41586-022-05580-6"]
+    citation_checked: {by: "lab build agent", date: "2026-10-15", note: "PubMed full text PMC9283844 (Katsman 2022, ONT cfDNA): from full depth down to 0.2x (about 2.5M aligned fragments) samples were dominated by monocytes, lymphocytes, megakaryocytes, neutrophils/granulocytes; proportions degraded at 0.05x and below (< 700,000 fragments). PMID 36599988: Loyfer 2023 atlas."}
+
+  - algorithm_id: cell-origin
+    metric_id: fraction_pancreas_delta
+    label: "Pancreas-Delta share of cfDNA (Loyfer U250 atlas)"
+    value_kind: proportion
+    tier: SPECULATIVE
+    origin_tier: NEWER
+    origin_platform: "WGBS atlas; ONT deconvolution reported"
+    min_depth_x: 5.0
+    reference: {kind: none}
+    performance:
+      kind: depth_robustness
+      value: "Minor cell types are not interpretable below 5x (Lab rule); only majors were shown stable to 0.2x"
+      platform: ONT
+      depth: "0.2x"
+      source: "Katsman 2022, Genome Biol"
+    performance_missing_reason: null
+    meaning_high: "A larger Pancreas-Delta share of the cell-free DNA; for non-blood cell types this can reflect tissue injury or turnover."
+    meaning_low: "A smaller Pancreas-Delta share of the cell-free DNA."
+    confounders: ["low depth noise", "atlas built from WGBS, not ONT", "basecall model of the 5mC calls", "exercise and inflammation (blood shares)"]
+    next_steps:
+      analytical: ["Confirm depth (minor tissues need >= 5x)", "Compare against the kit cohort when it exists"]
+      clinical_setting: null
+    license_ids: [modkit-ont-public, yissum-uxm, loyfer-atlas-terms-unknown]
+    flags: [LEGAL]
+    headline: false
+    stability: {kind: proportion}
+    citations: ["doi:10.1186/s13059-022-02710-1", "doi:10.1038/s41586-022-05580-6"]
+    citation_checked: {by: "lab build agent", date: "2026-10-15", note: "PubMed full text PMC9283844 (Katsman 2022, ONT cfDNA): from full depth down to 0.2x (about 2.5M aligned fragments) samples were dominated by monocytes, lymphocytes, megakaryocytes, neutrophils/granulocytes; proportions degraded at 0.05x and below (< 700,000 fragments). PMID 36599988: Loyfer 2023 atlas."}
+
+  - algorithm_id: cell-origin
+    metric_id: fraction_pancreas_duct
+    label: "Pancreas-Duct share of cfDNA (Loyfer U250 atlas)"
+    value_kind: proportion
+    tier: SPECULATIVE
+    origin_tier: NEWER
+    origin_platform: "WGBS atlas; ONT deconvolution reported"
+    min_depth_x: 5.0
+    reference: {kind: none}
+    performance:
+      kind: depth_robustness
+      value: "Minor cell types are not interpretable below 5x (Lab rule); only majors were shown stable to 0.2x"
+      platform: ONT
+      depth: "0.2x"
+      source: "Katsman 2022, Genome Biol"
+    performance_missing_reason: null
+    meaning_high: "A larger Pancreas-Duct share of the cell-free DNA; for non-blood cell types this can reflect tissue injury or turnover."
+    meaning_low: "A smaller Pancreas-Duct share of the cell-free DNA."
+    confounders: ["low depth noise", "atlas built from WGBS, not ONT", "basecall model of the 5mC calls", "exercise and inflammation (blood shares)"]
+    next_steps:
+      analytical: ["Confirm depth (minor tissues need >= 5x)", "Compare against the kit cohort when it exists"]
+      clinical_setting: null
+    license_ids: [modkit-ont-public, yissum-uxm, loyfer-atlas-terms-unknown]
+    flags: [LEGAL]
+    headline: false
+    stability: {kind: proportion}
+    citations: ["doi:10.1186/s13059-022-02710-1", "doi:10.1038/s41586-022-05580-6"]
+    citation_checked: {by: "lab build agent", date: "2026-10-15", note: "PubMed full text PMC9283844 (Katsman 2022, ONT cfDNA): from full depth down to 0.2x (about 2.5M aligned fragments) samples were dominated by monocytes, lymphocytes, megakaryocytes, neutrophils/granulocytes; proportions degraded at 0.05x and below (< 700,000 fragments). PMID 36599988: Loyfer 2023 atlas."}
+
+  - algorithm_id: cell-origin
+    metric_id: fraction_prostate_ep
+    label: "Prostate-Ep share of cfDNA (Loyfer U250 atlas)"
+    value_kind: proportion
+    tier: SPECULATIVE
+    origin_tier: NEWER
+    origin_platform: "WGBS atlas; ONT deconvolution reported"
+    min_depth_x: 5.0
+    reference: {kind: none}
+    performance:
+      kind: depth_robustness
+      value: "Minor cell types are not interpretable below 5x (Lab rule); only majors were shown stable to 0.2x"
+      platform: ONT
+      depth: "0.2x"
+      source: "Katsman 2022, Genome Biol"
+    performance_missing_reason: null
+    meaning_high: "A larger Prostate-Ep share of the cell-free DNA; for non-blood cell types this can reflect tissue injury or turnover."
+    meaning_low: "A smaller Prostate-Ep share of the cell-free DNA."
+    confounders: ["low depth noise", "atlas built from WGBS, not ONT", "basecall model of the 5mC calls", "exercise and inflammation (blood shares)"]
+    next_steps:
+      analytical: ["Confirm depth (minor tissues need >= 5x)", "Compare against the kit cohort when it exists"]
+      clinical_setting: null
+    license_ids: [modkit-ont-public, yissum-uxm, loyfer-atlas-terms-unknown]
+    flags: [LEGAL]
+    headline: false
+    stability: {kind: proportion}
+    citations: ["doi:10.1186/s13059-022-02710-1", "doi:10.1038/s41586-022-05580-6"]
+    citation_checked: {by: "lab build agent", date: "2026-10-15", note: "PubMed full text PMC9283844 (Katsman 2022, ONT cfDNA): from full depth down to 0.2x (about 2.5M aligned fragments) samples were dominated by monocytes, lymphocytes, megakaryocytes, neutrophils/granulocytes; proportions degraded at 0.05x and below (< 700,000 fragments). PMID 36599988: Loyfer 2023 atlas."}
+
+  - algorithm_id: cell-origin
+    metric_id: fraction_skeletal_musc
+    label: "Skeletal-Musc share of cfDNA (Loyfer U250 atlas)"
+    value_kind: proportion
+    tier: SPECULATIVE
+    origin_tier: NEWER
+    origin_platform: "WGBS atlas; ONT deconvolution reported"
+    min_depth_x: 5.0
+    reference: {kind: none}
+    performance:
+      kind: depth_robustness
+      value: "Minor cell types are not interpretable below 5x (Lab rule); only majors were shown stable to 0.2x"
+      platform: ONT
+      depth: "0.2x"
+      source: "Katsman 2022, Genome Biol"
+    performance_missing_reason: null
+    meaning_high: "A larger Skeletal-Musc share of the cell-free DNA; for non-blood cell types this can reflect tissue injury or turnover."
+    meaning_low: "A smaller Skeletal-Musc share of the cell-free DNA."
+    confounders: ["low depth noise", "atlas built from WGBS, not ONT", "basecall model of the 5mC calls", "exercise and inflammation (blood shares)"]
+    next_steps:
+      analytical: ["Confirm depth (minor tissues need >= 5x)", "Compare against the kit cohort when it exists"]
+      clinical_setting: null
+    license_ids: [modkit-ont-public, yissum-uxm, loyfer-atlas-terms-unknown]
+    flags: [LEGAL]
+    headline: false
+    stability: {kind: proportion}
+    citations: ["doi:10.1186/s13059-022-02710-1", "doi:10.1038/s41586-022-05580-6"]
+    citation_checked: {by: "lab build agent", date: "2026-10-15", note: "PubMed full text PMC9283844 (Katsman 2022, ONT cfDNA): from full depth down to 0.2x (about 2.5M aligned fragments) samples were dominated by monocytes, lymphocytes, megakaryocytes, neutrophils/granulocytes; proportions degraded at 0.05x and below (< 700,000 fragments). PMID 36599988: Loyfer 2023 atlas."}
+
+  - algorithm_id: cell-origin
+    metric_id: fraction_small_int_ep
+    label: "Small-Int-Ep share of cfDNA (Loyfer U250 atlas)"
+    value_kind: proportion
+    tier: SPECULATIVE
+    origin_tier: NEWER
+    origin_platform: "WGBS atlas; ONT deconvolution reported"
+    min_depth_x: 5.0
+    reference: {kind: none}
+    performance:
+      kind: depth_robustness
+      value: "Minor cell types are not interpretable below 5x (Lab rule); only majors were shown stable to 0.2x"
+      platform: ONT
+      depth: "0.2x"
+      source: "Katsman 2022, Genome Biol"
+    performance_missing_reason: null
+    meaning_high: "A larger Small-Int-Ep share of the cell-free DNA; for non-blood cell types this can reflect tissue injury or turnover."
+    meaning_low: "A smaller Small-Int-Ep share of the cell-free DNA."
+    confounders: ["low depth noise", "atlas built from WGBS, not ONT", "basecall model of the 5mC calls", "exercise and inflammation (blood shares)"]
+    next_steps:
+      analytical: ["Confirm depth (minor tissues need >= 5x)", "Compare against the kit cohort when it exists"]
+      clinical_setting: null
+    license_ids: [modkit-ont-public, yissum-uxm, loyfer-atlas-terms-unknown]
+    flags: [LEGAL]
+    headline: false
+    stability: {kind: proportion}
+    citations: ["doi:10.1186/s13059-022-02710-1", "doi:10.1038/s41586-022-05580-6"]
+    citation_checked: {by: "lab build agent", date: "2026-10-15", note: "PubMed full text PMC9283844 (Katsman 2022, ONT cfDNA): from full depth down to 0.2x (about 2.5M aligned fragments) samples were dominated by monocytes, lymphocytes, megakaryocytes, neutrophils/granulocytes; proportions degraded at 0.05x and below (< 700,000 fragments). PMID 36599988: Loyfer 2023 atlas."}
+
+  - algorithm_id: cell-origin
+    metric_id: fraction_smooth_musc
+    label: "Smooth-Musc share of cfDNA (Loyfer U250 atlas)"
+    value_kind: proportion
+    tier: SPECULATIVE
+    origin_tier: NEWER
+    origin_platform: "WGBS atlas; ONT deconvolution reported"
+    min_depth_x: 5.0
+    reference: {kind: none}
+    performance:
+      kind: depth_robustness
+      value: "Minor cell types are not interpretable below 5x (Lab rule); only majors were shown stable to 0.2x"
+      platform: ONT
+      depth: "0.2x"
+      source: "Katsman 2022, Genome Biol"
+    performance_missing_reason: null
+    meaning_high: "A larger Smooth-Musc share of the cell-free DNA; for non-blood cell types this can reflect tissue injury or turnover."
+    meaning_low: "A smaller Smooth-Musc share of the cell-free DNA."
+    confounders: ["low depth noise", "atlas built from WGBS, not ONT", "basecall model of the 5mC calls", "exercise and inflammation (blood shares)"]
+    next_steps:
+      analytical: ["Confirm depth (minor tissues need >= 5x)", "Compare against the kit cohort when it exists"]
+      clinical_setting: null
+    license_ids: [modkit-ont-public, yissum-uxm, loyfer-atlas-terms-unknown]
+    flags: [LEGAL]
+    headline: false
+    stability: {kind: proportion}
+    citations: ["doi:10.1186/s13059-022-02710-1", "doi:10.1038/s41586-022-05580-6"]
+    citation_checked: {by: "lab build agent", date: "2026-10-15", note: "PubMed full text PMC9283844 (Katsman 2022, ONT cfDNA): from full depth down to 0.2x (about 2.5M aligned fragments) samples were dominated by monocytes, lymphocytes, megakaryocytes, neutrophils/granulocytes; proportions degraded at 0.05x and below (< 700,000 fragments). PMID 36599988: Loyfer 2023 atlas."}
+
+  - algorithm_id: cell-origin
+    metric_id: fraction_thyroid_ep
+    label: "Thyroid-Ep share of cfDNA (Loyfer U250 atlas)"
+    value_kind: proportion
+    tier: SPECULATIVE
+    origin_tier: NEWER
+    origin_platform: "WGBS atlas; ONT deconvolution reported"
+    min_depth_x: 5.0
+    reference: {kind: none}
+    performance:
+      kind: depth_robustness
+      value: "Minor cell types are not interpretable below 5x (Lab rule); only majors were shown stable to 0.2x"
+      platform: ONT
+      depth: "0.2x"
+      source: "Katsman 2022, Genome Biol"
+    performance_missing_reason: null
+    meaning_high: "A larger Thyroid-Ep share of the cell-free DNA; for non-blood cell types this can reflect tissue injury or turnover."
+    meaning_low: "A smaller Thyroid-Ep share of the cell-free DNA."
+    confounders: ["low depth noise", "atlas built from WGBS, not ONT", "basecall model of the 5mC calls", "exercise and inflammation (blood shares)"]
+    next_steps:
+      analytical: ["Confirm depth (minor tissues need >= 5x)", "Compare against the kit cohort when it exists"]
+      clinical_setting: null
+    license_ids: [modkit-ont-public, yissum-uxm, loyfer-atlas-terms-unknown]
+    flags: [LEGAL]
+    headline: false
+    stability: {kind: proportion}
+    citations: ["doi:10.1186/s13059-022-02710-1", "doi:10.1038/s41586-022-05580-6"]
+    citation_checked: {by: "lab build agent", date: "2026-10-15", note: "PubMed full text PMC9283844 (Katsman 2022, ONT cfDNA): from full depth down to 0.2x (about 2.5M aligned fragments) samples were dominated by monocytes, lymphocytes, megakaryocytes, neutrophils/granulocytes; proportions degraded at 0.05x and below (< 700,000 fragments). PMID 36599988: Loyfer 2023 atlas."}
+
+  - algorithm_id: cell-origin
+    metric_id: classified_fragments
+    label: "Fragments classified at atlas markers"
+    value_kind: count
+    tier: PROVEN
+    origin_tier: PROVEN
+    origin_platform: "any"
+    min_depth_x: null
+    reference: {kind: none}
+    performance: null
+    performance_missing_reason: "QC count: how much evidence the composition rests on"
+    meaning_high: "More marker evidence."
+    meaning_low: "Little marker evidence: intervals are wide or unavailable."
+    confounders: ["depth"]
+    next_steps:
+      analytical: ["Read with the composition intervals"]
+      clinical_setting: null
+    license_ids: []
+    flags: []
+    headline: false
+    stability: {kind: scales_with_depth, tolerance: 0.15}
+    citations: []
+    citation_checked: {by: "lab build agent", date: "2026-10-15", note: "No citation displayed; QC count."}
