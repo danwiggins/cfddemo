@@ -563,7 +563,8 @@
         ...rows.map((c) => h("article", { class: "evidence-card" },
           h("h3", {}, c.label), h("p", { class: "help" }, c.algorithm_id),
           h("p", {}, `Original evidence: ${c.origin_tier || "—"} (${c.origin_platform || "—"})`),
-          h("p", {}, "Footnote: ", c.footnote || "none published", c.footnote_source ? ` (${c.footnote_source})` : ""),
+          h("p", {}, "Footnote: ", c.footnote || "none published", c.footnote_source ? ` (${c.footnote_source})` : "",
+            c.citation_checked ? "" : [" ", h("span", { class: "unverified" }, "UNVERIFIED citation")]),
           h("p", {}, c.status === "skipped" ? `skipped (${(c.skip_reason || "").replace(/_/g, " ")})` : c.status === "ok" ? "ran" : c.status,
             c.min_depth_x ? ` · literature minimum ${c.min_depth_x}x` : ""),
           h("p", {}, ...c.license_ids.map((id) => licenseRef(sample, id)))))));
@@ -579,6 +580,13 @@
     const out = [h("p", { class: "breadcrumb" }, `Lab › ${sample.id12} › Methods`), h("h1", { class: "view-title" }, "Methods"),
       h("p", {}, `Interpretation library v${sample.interpretation_version} · cohort ${sample.cohort_version || "none yet"} · provenance stamp only (no signing). `, flagPill("PII", "FLAG: PII — file paths often embed donor names. Hashes only, never paths."))];
     const rows = [];
+    const seen = new Set();
+    const firstUse = (id) => {
+      if (seen.has(id)) return licenseRef(sample, id);
+      seen.add(id);
+      const lic = (sample.licenses || []).find((x) => x.license_id === id);
+      return lic ? h("div", { class: "license-callout", id: `license-${id}` }, h("h3", {}, lic.headline), h("p", {}, lic.body)) : "";
+    };
     for (const a of sample.algorithms) {
       if (a.hidden) continue;
       for (const m of a.metrics) {
@@ -588,21 +596,19 @@
         rows.push(h("tr", {},
           h("th", { scope: "row" }, m.label), h("td", {}, fmt(m.value, m.unit)),
           h("td", {}, a.provenance.tool, " ", a.provenance.tool_version),
-          h("td", { class: "mono" }, a.provenance.parameters_sha256.slice(0, 12)),
+          h("td", { class: "mono" }, h("details", {}, h("summary", {}, a.provenance.parameters_sha256.slice(0, 12)), provenance(sample, a.algorithm_id))),
           h("td", { class: "mono" }, a.provenance.input_id.slice(0, 12)),
           h("td", {}, a.provenance.reference_id),
           h("td", {}, a.provenance.timestamp_utc),
-          h("td", {}, ...(e.license_ids || []).map((id) => licenseRef(sample, id))),
-          h("td", {}, (e.citations || []).join(", ") || "—", e.citations && e.citations.length && !e.citation_checked ? [" ", h("span", { class: "unverified" }, "UNVERIFIED citation")] : ""),
+          h("td", {}, ...(e.license_ids || []).map(firstUse)),
+          h("td", {}, (e.citations || []).join(", ") || "—", m.entry && !e.citation_checked ? [" ", h("span", { class: "unverified" }, "UNVERIFIED citation")] : ""),
           h("td", {}, ref.kind === "none" || !ref.kind ? "none" : `${ref.kind}${ref.source ? ": " + ref.source : ""}`)));
       }
     }
     out.push(h("div", { class: "table-wrap" }, h("table", { class: "data-table" },
       h("caption", {}, "Every number with its provenance"),
-      h("thead", {}, h("tr", {}, ...["Metric", "Value", "Tool", "Parameters sha256", "Input", "Reference", "Computed (UTC)", "License", "Citation", "Range source"].map((t) => h("th", { scope: "col" }, t)))),
+      h("thead", {}, h("tr", {}, ...["Metric", "Value", "Tool", "Provenance stamp (parameters sha256)", "Input", "Reference", "Computed (UTC)", "License", "Citation", "Range source"].map((t) => h("th", { scope: "col" }, t)))),
       h("tbody", {}, ...rows))));
-    const lics = sample.licenses || [];
-    if (lics.length) out.push(h("section", { class: "panel" }, h("h2", {}, "License callouts"), ...lics.map((lic) => h("div", { class: "license-callout", id: `license-${lic.license_id}` }, h("h3", {}, lic.headline), h("p", {}, lic.body)))));
     return out;
   }
 

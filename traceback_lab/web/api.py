@@ -410,6 +410,7 @@ def _catalog(library: Library, order: list[str], algorithms: list[dict[str, Any]
                 "footnote_source": (performance or {}).get("source") if performance else None,
                 "min_depth_x": entry.get("min_depth_x") if entry else None,
                 "license_ids": licenses,
+                "citation_checked": bool(entry and entry.citation_verified),
                 "status": result["status"] if result else "not run",
                 "skip_reason": result["skip_reason"] if result else None,
             }

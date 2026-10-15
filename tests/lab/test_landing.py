@@ -247,3 +247,6 @@ def test_methods_shows_provenance_for_every_number(page_root, tmp_path) -> None:
     assert "Interpretation library v" in dom and "provenance stamp only" in dom
     assert "FLAG: PII" in dom
     assert "/Users/" not in dom and "/home/" not in dom
+    assert "source_id" in dom  # the full stamp sits in each row's disclosure
+    callouts = re.findall(r'class="license-callout" id="license-([a-z-]+)"', dom)
+    assert len(callouts) == len(set(callouts))
