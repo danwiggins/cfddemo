@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import re
-import subprocess
 from pathlib import Path
 
 import pytest
@@ -113,17 +112,20 @@ def _dom(server, tmp_path, *, size="1280,800", route=None) -> str:
     link = server.issue_link()
     if route:
         link += f"&route={route}"
-    for attempt in range(3):
-        completed = subprocess.run(
+    dom = ""
+    for attempt in range(4):
+        from tests.lab.test_lab_server import headless_dom
+
+        dom = headless_dom(
             [_chrome(), "--headless=new", "--disable-gpu", "--hide-scrollbars", "--no-first-run",
              f"--user-data-dir={tmp_path / f'p-{size}-{attempt}'}", "--virtual-time-budget=15000",
              f"--window-size={size}", "--dump-dom", link],
-            capture_output=True, text=True, timeout=120,
+            ok=lambda d: 'data-ready="1"' in d and ("data-measured" in d or route), attempts=1,
         )
-        if 'data-ready="1"' in completed.stdout and ("data-measured" in completed.stdout or route):
-            return completed.stdout
+        if 'data-ready="1"' in dom and ("data-measured" in dom or route):
+            return dom
         link = server.issue_link() + (f"&route={route}" if route else "")
-    return completed.stdout
+    return dom
 
 
 def _body(dom: str) -> dict[str, str]:
