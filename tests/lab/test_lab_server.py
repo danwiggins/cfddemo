@@ -262,3 +262,36 @@ def test_headless_page_renders_a_chart_with_zero_csp_violations(server, tmp_path
     assert "Data table" in dom
     assert "Research use only. Not CLIA-validated. Not a diagnosis." in dom
     assert "FLAG: PII" in dom
+
+
+def test_read_contained_refuses_symlinked_ancestors_and_hard_links(tmp_path) -> None:
+    base = tmp_path / "results"
+    real = tmp_path / "elsewhere" / "attempt"
+    (real / "artifacts").mkdir(parents=True)
+    (real / "artifacts" / "x.json").write_text("{}")
+    (base / "input").mkdir(parents=True)
+    (base / "input" / "attempt").symlink_to(real)  # a symlinked attempt directory
+    assert api_module._read_contained(base, ["input", "attempt"], "artifacts/x.json") is None
+    (base / "input" / "attempt").unlink()
+    shutil.copytree(real, base / "input" / "attempt")
+    assert api_module._read_contained(base, ["input", "attempt"], "artifacts/x.json") == b"{}"
+    os.link(base / "input" / "attempt" / "artifacts" / "x.json", tmp_path / "hard.json")
+    assert api_module._read_contained(base, ["input", "attempt"], "artifacts/x.json") is None
+
+
+def test_unreadable_library_error_names_no_path(monkeypatch, tmp_path) -> None:
+    holder = api_module.LibraryHolder()
+    holder.get()
+    monkeypatch.setattr(api_module, "LIBRARY_FILE", tmp_path / "missing" / "library.yaml")
+    holder.get()
+    assert holder.health()["error"] == "the library file is unreadable"
+
+
+def test_status_finds_an_interrupted_run_through_the_pointer(tmp_path) -> None:
+    store = LabStore(tmp_path)
+    run_id = "r-20261015-0101-abcd"
+    with store.writer("run", run_id):
+        store.run_log(run_id).append("run_start", command="run")
+        store.run_log(run_id).append("step_start", step="align")
+    status = api_module.LabApi(store).status()
+    assert status["interrupted"] == {"run_id": run_id, "step": "align"}

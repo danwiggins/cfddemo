@@ -42,3 +42,4 @@ pre.stderr { white-space: pre-wrap; overflow-wrap: anywhere; font-size: .85rem; 
 #key-dialog { max-width: min(48rem, calc(100% - 2rem)); }
 @media (max-width: 47.99rem) { .lenses { flex-wrap: nowrap; overflow-x: auto; } .switcher { flex-basis: 100%; } }
 @media (prefers-reduced-motion: reduce) { * { transition: none !important; animation: none !important; } }
+.lenses a.disabled, main a.disabled { pointer-events: none; color: var(--muted); }

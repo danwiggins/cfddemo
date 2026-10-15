@@ -9,6 +9,7 @@ result's own attempt directory and no component is a symlink.
 from __future__ import annotations
 
 import os
+import stat
 import threading
 import time
 from collections.abc import Iterable
@@ -43,17 +44,24 @@ class LibraryHolder:
     def get(self) -> Library:
         with self._lock:
             try:
-                mtimes = (LIBRARY_FILE.stat().st_mtime_ns, LICENSES_FILE.stat().st_mtime_ns)
+                stats = (LIBRARY_FILE.stat(), LICENSES_FILE.stat())
+                mtimes = tuple(
+                    (st.st_mtime_ns, st.st_size, st.st_ino) for st in stats
+                )
             except OSError:
-                mtimes = self._mtimes or (0, 0)
+                mtimes = ("unreadable",)
             if mtimes != self._mtimes:
                 self._mtimes = mtimes
                 try:
                     self.library = parse_library(LIBRARY_FILE.read_text(), LICENSES_FILE.read_text())
                     self.loaded_at = time.strftime("%H:%M", time.localtime())
                     self.error = None
-                except (LibraryError, OSError) as exc:
-                    self.error = str(exc)[:300]
+                except LibraryError as exc:
+                    self.error = str(exc)[:300]  # names the entry or YAML line, never a path
+                    if self.library is None:
+                        raise
+                except OSError:
+                    self.error = "the library file is unreadable"
                     if self.library is None:
                         raise
             assert self.library is not None
@@ -67,23 +75,55 @@ class LibraryHolder:
         }
 
 
-def _contained(attempt: Path, data_ref: str) -> Path | None:
+_NOFOLLOW = getattr(os, "O_NOFOLLOW", 0)
+_DIRECTORY = getattr(os, "O_DIRECTORY", 0)
+
+
+def _read_contained(base: Path, parts: list[str], data_ref: str, *, limit: int = 64 * 1024 * 1024) -> bytes | None:
+    """Read ``base/parts…/data_ref`` without following any symlink (D34).
+
+    Every component below ``base`` (the store's results directory) is opened
+    with ``O_NOFOLLOW`` relative to its parent's descriptor, so a symlinked
+    attempt, artifact directory or file, or a swap after a check, cannot
+    redirect the read.  The file must be a regular file with one link.
+    """
+
     reference = PurePosixPath(data_ref)
     if reference.is_absolute() or ".." in reference.parts or not reference.parts:
         return None
-    current = attempt
-    for part in reference.parts:
-        current = current / part
-        if current.is_symlink():
-            return None
+    components = [*parts, *reference.parts]
+    if any(part in ("", ".", "..") or "/" in part for part in components):
+        return None
     try:
-        real = Path(os.path.realpath(current))
-        base = Path(os.path.realpath(attempt))
+        fd = os.open(base, os.O_RDONLY | _DIRECTORY)
     except OSError:
         return None
-    if base not in real.parents or not real.is_file():
+    try:
+        for part in components[:-1]:
+            next_fd = os.open(part, os.O_RDONLY | _DIRECTORY | _NOFOLLOW, dir_fd=fd)
+            os.close(fd)
+            fd = next_fd
+        file_fd = os.open(components[-1], os.O_RDONLY | _NOFOLLOW, dir_fd=fd)
+    except OSError:
+        os.close(fd)
         return None
-    return real
+    os.close(fd)
+    try:
+        info = os.fstat(file_fd)
+        if not stat.S_ISREG(info.st_mode) or info.st_nlink != 1 or info.st_size > limit:
+            return None
+        chunks = []
+        while chunk := os.read(file_fd, 1 << 20):
+            chunks.append(chunk)
+        return b"".join(chunks)
+    finally:
+        os.close(file_fd)
+
+
+def _contained(attempt: Path, data_ref: str) -> Path | None:
+    """Compatibility check used by tests: is ``data_ref`` readable without symlinks?"""
+
+    return attempt / data_ref if _read_contained(attempt, [], data_ref) is not None else None
 
 
 class LabApi:
@@ -96,9 +136,10 @@ class LabApi:
         status = self.store.status()
         interrupted = None
         if status["active"] is None:
-            run_ids = self.store.run_ids()
-            if run_ids:
-                summary = summarize_run(self.store.run_log(run_ids[0]).events(), self.store)
+            # Bounded (D22): one pointer file and that one run's log, never a scan.
+            last = self.store.last_run_id()
+            if last is not None:
+                summary = summarize_run(self.store.run_log(last).events(), self.store)
                 if summary["status"] == "interrupted":
                     interrupted = {"run_id": summary["run_id"], "step": summary["open_step"]}
         try:
@@ -254,10 +295,8 @@ class LabApi:
         attempt = self.store.selected_attempt(view.input_id, algorithm_id, envelope.provenance.parameters_sha256)
         if attempt is None:
             return None
-        path = _contained(attempt, panel.data_ref)
-        if path is None:
-            return None
-        return path.read_bytes()
+        parts = [view.input_id, algorithm_id, envelope.provenance.parameters_sha256, "attempts", attempt.name]
+        return _read_contained(self.store.results_dir, parts, panel.data_ref)
 
 
 def _registry() -> Iterable[Any]:

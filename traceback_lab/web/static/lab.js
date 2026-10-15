@@ -243,7 +243,13 @@
         table,
       ));
     }).catch((error) => {
-      slot.replaceWith(h("div", { class: "problem" }, `Chart could not be drawn (${error.message}). The data table below has the same numbers.`));
+      // No panel data reached the page, so there is no data table to open;
+      // the summary metrics stay in the table below.
+      const rows = algorithm.metrics.map((m) => [m.label, m.value]);
+      slot.replaceWith(h("div", {},
+        h("div", { class: "problem" }, `Chart could not be drawn (${error.message}). The summary numbers are in the table below.`),
+        h("div", { class: "table-wrap" }, h("table", { class: "data-table" }, h("caption", {}, "fragment-size summary"),
+          h("tbody", {}, ...rows.map(([label, value]) => h("tr", {}, h("th", { scope: "row" }, label), h("td", {}, fmt(value)))))))));
     });
     return section;
   }
@@ -275,8 +281,9 @@
     out.push(h("section", { class: "panel" }, h("h2", {}, "Depth against each algorithm's minimum"),
       h("div", { class: "table-wrap" }, h("table", {}, h("thead", {}, h("tr", {}, h("th", {}, "Algorithm"), h("th", {}, "Depth"), h("th", {}, "Verdict"))), h("tbody", {}, ...rows)))));
     // Run table.
+    const running = state.lastStatus && state.lastStatus.active ? state.lastStatus.active.step : null;
     const runRows = sample.algorithms.map((a) => {
-      const status = a.status === "skipped" ? `skipped (${a.skip_reason})` : a.status;
+      const status = running === a.algorithm_id ? "running" : a.status === "skipped" ? `skipped (${a.skip_reason})` : a.status;
       const cells = [h("th", { scope: "row" }, a.algorithm_id + (a.hidden ? " (intermediate)" : "")), h("td", { class: a.status === "failed" ? "problem" : null }, status), h("td", { class: "num" }, a.duration_s !== null && a.duration_s !== undefined ? `${a.duration_s.toFixed(1)} s` : "—")];
       const detail = a.failure
         ? h("details", {}, h("summary", {}, "Last 50 stderr lines (scrubbed)"), h("pre", { class: "stderr" }, a.failure.stderr_tail.join("\n") || a.failure.first_line))
@@ -335,15 +342,26 @@
       if (status.active) {
         const minutes = Math.max(0, Math.round((Date.now() - Date.parse(status.active.started_utc)) / 60000));
         setStatus(`A Lab run is in progress (step: ${status.active.step}, ${minutes} min). Results below are from completed steps.`);
+      } else if (status.interrupted) {
+        // A run that died (stale heartbeat, open log) is "interrupted", even
+        // if it published results before it stopped.
+        setStatus(`The last run (${status.interrupted.run_id}) stopped during ${status.interrupted.step || "a step"}. Results shown are from completed steps. Rerun the same command; only missing results recompute.`,
+          status.generation > state.generationAtLoad ? "Reload" : null);
       } else if (status.generation > state.generationAtLoad && previous && previous.active) {
         setStatus("New results are available.", "Reload");
       } else if (status.generation > state.generationAtLoad) {
         setStatus("Results changed on disk since this page loaded.", "Reload");
-      } else if (status.interrupted) {
-        setStatus(`The last run (${status.interrupted.run_id}) stopped during ${status.interrupted.step || "a step"}. Results shown are from completed steps. Rerun the same command; only missing results recompute.`);
       } else {
         setStatus("");
       }
+      if (status.library && status.library.error) {
+        document.getElementById("status").append(h("span", { class: "problem" },
+          ` Interpretation library on disk is invalid (${status.library.error}). Showing v${status.library.version}, loaded at ${status.library.loaded_at}.`));
+      }
+      setControlsEnabled(true);
+      const wasRunning = previous && previous.active ? previous.active.step : null;
+      const nowRunning = status.active ? status.active.step : null;
+      if (wasRunning !== nowRunning && state.route.name === "lens") render();
     } catch (error) {
       if (error.session) { setStatus("Session expired. Restart `traceback lab serve --open`; it opens a fresh page."); return; }
       state.missed += 1;
@@ -351,9 +369,23 @@
         const since = state.lastOk ? state.lastOk.toTimeString().slice(0, 5) : "page load";
         setStatus(`Lab server not responding since ${since}. What you see may be out of date. Restart \`traceback lab serve --open\`; it opens a fresh page.`);
         document.body.classList.add("dimmed");
+        setControlsEnabled(false);
       }
     }
   }
+
+  // Disconnected: the page stays readable but every control that would fetch is off.
+  function setControlsEnabled(enabled) {
+    document.getElementById("sample-switcher").disabled = !enabled;
+    for (const link of document.querySelectorAll("#lenses a, main a[href^='#/']")) {
+      if (enabled) { link.removeAttribute("aria-disabled"); link.removeAttribute("tabindex"); link.classList.remove("disabled"); }
+      else { link.setAttribute("aria-disabled", "true"); link.setAttribute("tabindex", "-1"); link.classList.add("disabled"); }
+    }
+    document.body.dataset.disconnected = enabled ? "0" : "1";
+  }
+  window.addEventListener("hashchange", (event) => {
+    if (document.body.dataset.disconnected === "1") event.stopImmediatePropagation();
+  }, true);
 
   // -- start ----------------------------------------------------------------------------
   async function start() {
