@@ -180,12 +180,20 @@ def materialize(
 
     from evidence_inspector.cell_origin_prefilter import prefilter_exclusion
 
-    wanted = list(specs)
+    wanted: list[DerivedSpec] = []
+    for spec in specs:  # one entry per derived identity (``--tf 0.1,0.10`` is one spike)
+        if all(spec.input_id(parent_input_id) != other.input_id(parent_input_id) for other in wanted):
+            wanted.append(spec)
     found: dict[str, DerivedInput] = {}
     missing: list[DerivedSpec] = []
     for spec in wanted:
         existing = load_derived(store, parent_input_id, spec)
         if existing is not None:
+            if (
+                existing.manifest.get("counting_contigs") != list(counting_contigs)
+                or existing.manifest.get("min_mapq") != min_mapq
+            ):
+                raise ValueError("a stored derived input was counted with other contigs or MAPQ")
             found[spec.label()] = existing
         else:
             missing.append(spec)

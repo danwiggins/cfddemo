@@ -273,3 +273,39 @@ def test_copy_number_algorithm_run_in_process(tmp_path, monkeypatch) -> None:
     assert cn_module.COPY_NUMBER.preflight(small).reason_code == "depth"
     example = InputContext(**{**ctx.__dict__, "example": True})
     assert cn_module.COPY_NUMBER.preflight(example).reason_code == "example_reference"
+
+
+def test_duplicate_specs_materialize_once(tmp_path) -> None:
+    bam = _uniform_bam(tmp_path / "aligned.bam", reads=2000)
+    store = LabStore(tmp_path / "root")
+    store.ensure()
+    made = materialize(store, "e" * 64, bam, [cna(0.1, ARMS), cna(0.10, ARMS)], counting_contigs=AUTOSOMES, min_mapq=20)
+    assert list(made) == ["cna-0.1"]
+    with pytest.raises(ValueError, match="other contigs"):
+        materialize(store, "e" * 64, bam, [cna(0.1, ARMS)], counting_contigs=AUTOSOMES[:5], min_mapq=20)
+
+
+def test_parse_fractions_dedupes() -> None:
+    from traceback_lab.simulate_command import parse_fractions
+
+    assert parse_fractions("0.1,0.10,0.3", "--tf") == (0.1, 0.3)
+
+
+def test_copy_number_identity_binds_asset_digests(tmp_path, monkeypatch) -> None:
+    from traceback_lab.algorithms import copy_number as cn_module
+    from traceback_lab.registry import execution_identity
+    from traceback_runner.copy_number_method import LOCKED_BIN_SIZE_BP
+    from traceback_runner.references import register_ichor_toolchain_directory
+
+    toolchain = _fake_toolchain(tmp_path / "toolchain")
+    monkeypatch.setattr(cn_module, "toolchain_or_none", lambda: toolchain)
+    root = tmp_path / "root"
+    assert cn_module.COPY_NUMBER.asset_sha256s(root) == []
+    register_ichor_toolchain_directory(
+        root, _write_assets(tmp_path / "extdata"), bin_size_bp=LOCKED_BIN_SIZE_BP, toolchain_tag=PIN.lock_sha256[:12]
+    )
+    digests = cn_module.COPY_NUMBER.asset_sha256s(root)
+    assert len(digests) == 3
+    with_assets = execution_identity(cn_module.COPY_NUMBER, reference_sha256="a" * 64, asset_sha256s=digests)
+    without = execution_identity(cn_module.COPY_NUMBER, reference_sha256="a" * 64)
+    assert with_assets != without

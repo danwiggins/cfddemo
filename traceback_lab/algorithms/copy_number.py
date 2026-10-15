@@ -51,6 +51,19 @@ class CopyNumber(Base):
     def tools(self, value: Any) -> None:
         pass
 
+    def asset_sha256s(self, root: Path) -> list[str]:
+        """Registered asset digests for the execution identity ([] when missing:
+        preflight then skips with missing_asset)."""
+
+        toolchain = toolchain_or_none()
+        if toolchain is None:
+            return []
+        try:
+            assets = ichor.resolve_assets(root, toolchain)
+        except Exception:  # noqa: BLE001
+            return []
+        return sorted(ichor.asset_sha256s(assets).values())
+
     def preflight(self, ctx: InputContext) -> Ready | Skip:
         if ctx.example:
             return Skip("example_reference", "copy-number needs hg38-scale assets; not in the synthetic example")

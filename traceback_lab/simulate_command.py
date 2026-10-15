@@ -39,6 +39,7 @@ def parse_fractions(text: str, flag: str) -> tuple[float, ...]:
             fix=f"For example: {flag} 0.5,0.25,0.1",
             data={"flag": flag, "value_ok": False},
         ) from exc
+    values = tuple(dict.fromkeys(values))  # 0.1 and 0.10 are one value
     if not values:
         raise LabProblem(
             "TBX-LAB-002",
