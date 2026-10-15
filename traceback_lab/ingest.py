@@ -921,6 +921,7 @@ def write_source(
         "basecall_model": chunkset.basecall_model,
         "created_utc": previous.get("created_utc") or time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
         "inputs": inputs,
+        "derived": previous.get("derived", []),
     }
     write_atomic(store.sources_dir / f"{aligned.source_id}.json", canonical_json_bytes(record))
     return record

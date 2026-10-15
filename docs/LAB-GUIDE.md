@@ -36,7 +36,9 @@ traceback lab run (<BAM|uBAM|chunk dir>... | <id12> | latest)
     [--skip-bad-chunks] [--force] [--timeout-s 3600]
     [--threads N] [--sort-mem 1G] [--mmi PATH]
     [--dry-run] [--verbose] [--json] [--root R]
-traceback lab algorithms [--json]          registered algorithms (id, family, cost, inputs)
+traceback lab simulate cna <id12|latest> [--tf 0.03,0.10,0.30]   synthetic CNA spike, copy-number recovery
+traceback lab simulate split <id12|latest>                         split-half pseudo-replicate
+traceback lab algorithms [--json]          registered algorithms (id, tier, min depth, licenses, footnote)
 traceback lab runs [RUN_ID] [--step S]     the run log, or one run's steps
 ```
 
@@ -100,9 +102,28 @@ ROOT, home, login and chunk names redacted) is ever stored.
 | `bam-qc` | primaries, mapped and MAPQ ≥ 20 shares, supplementary share (chimera proxy), mean read Q, share of sampled genome covered ≥ 1x, GC-bias slope, duplicate share (only when marked) |
 | `depth` | eligible reads (primary, MAPQ ≥ 20, chr1–22/X/Y), mean span, approximate depth; the index count is shown only as an upper bound |
 | `fragment-size` | 1-bp aligned-span histogram, mode, short (< 150 bp) share, mono/di peaks, 10 bp periodicity |
+| `copy-number` | tumour fraction, ploidy, genome log2 track and segments through the installed ichorCNA toolchain (no panel of normals yet, so read as not interpretable); needs 2M eligible reads, `traceback toolchain install ichor` and `traceback method-asset register --from-toolchain copy-number --root R` |
 
 Fragment length is the aligned reference span, the same definition as the
 signed fragment metric; the Lab's 1-bp counter is parity-tested against it.
+
+## Positive controls
+
+`traceback lab simulate cna <id12|latest>` builds a synthetic copy-number
+spike from the healthy aligned input, with no external data: one-copy gains
+on 1q and 8q and losses on 13q and 17p at tumour fraction TF (default 0.03,
+0.10 and 0.30). Each read in a gain arm is duplicated with probability TF/2
+and each read in a loss arm removed with probability TF/2, drawn from a
+salted hash of the read name, so the spike is deterministic. The spike is a
+stripped counting BAM (positions only, about 1-2% of the aligned BAM).
+Copy-number then runs on each, and the output shows expected against
+recovered TF (recovered means within ±0.05).
+
+`traceback lab simulate split <id12|latest>` splits the reads into halves A
+and B by a second salted hash and runs every summary algorithm and
+copy-number on each. It measures sampling noise only, not a known answer.
+
+Both take the writer lock and rerun only what is missing.
 
 ## Exit codes
 
@@ -125,6 +146,11 @@ anchor below); `--json` carries the same fields under `data`.
 
 Unknown algorithm id in `--only` (exit 2). The fix line suggests the closest
 id. `traceback lab algorithms` lists every id.
+
+### TBX-LAB-002
+
+A `--tf` (or `--downsample`) value is not a comma list of fractions with
+0 < f < 1 (exit 2). Example: `--tf 0.03,0.10,0.30`.
 
 ### TBX-LAB-003
 

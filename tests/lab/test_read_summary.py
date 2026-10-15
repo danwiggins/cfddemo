@@ -217,7 +217,10 @@ def test_lab_run_computes_the_slice_algorithms(lab_world, capsys, shared_mmi) ->
     payload = json.loads(capsys.readouterr().out)
     assert code == 0, payload
     steps = {step["algorithm_id"]: step["status"] for step in payload["data"]["steps"]}
-    assert steps == {"read-summary": "ok", "bam-qc": "ok", "depth": "ok", "fragment-size": "ok"}
+    assert {k: v for k, v in steps.items() if k != "copy-number"} == {
+        "read-summary": "ok", "bam-qc": "ok", "depth": "ok", "fragment-size": "ok"
+    }
+    assert steps["copy-number"] == "skipped"  # depth (and no assets) on the toy input
     depth = payload["data"]["depth"]
     assert depth["eligible_reads"] > 1500
     from traceback_lab.store import LabStore
