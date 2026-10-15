@@ -79,9 +79,17 @@
   }
 
   // -- license callouts: one full callout per id per route, pills elsewhere ---------------
+  // A pill jumps to the route's full callout without touching the hash route.
   function licenseRef(sample, id) {
     const lic = (sample.licenses || []).find((x) => x.license_id === id);
-    return h("a", { class: "license-pill", href: `#license-${id}` }, `${lic ? lic.headline : id} ↗`);
+    return h("button", { type: "button", class: "license-pill", "aria-describedby": `license-${id}`, onclick: () => {
+      const target = document.getElementById(`license-${id}`);
+      if (target) { target.setAttribute("tabindex", "-1"); target.scrollIntoView({ block: "center" }); target.focus({ preventScroll: true }); }
+    } }, `${lic ? lic.headline : id} ↗`);
+  }
+  function unverifiedBadge(metric) {
+    const entry = metric.entry || {};
+    return entry.citations && entry.citations.length && !entry.citation_checked ? h("span", { class: "unverified" }, "UNVERIFIED citation") : "";
   }
   function licenseCallouts(sample) {
     const used = sample.licenses || [];
@@ -195,7 +203,15 @@
         lit.style.left = pos(Math.min(row.min_depth_x, 10));
         cells.append(lit);
       }
-      const detail = h("div", { class: "curve-detail", hidden: true }, `${row.label}: full-depth state ${row.full_state}; tier ${row.tier}; literature minimum ${row.min_depth_x ? row.min_depth_x + "x" : "none"}.`);
+      const secondary = (sample.stability || []).filter((p) => p.algorithm_id === row.algorithm_id && p.metric_id !== row.metric_id);
+      const detail = h("div", { class: "curve-detail", hidden: true },
+        h("p", {}, `${row.label}: full-depth state ${(CELL[row.full_state] || ["", row.full_state])[1]}; tier ${row.tier}; literature minimum ${row.min_depth_x ? row.min_depth_x + "x (literature, not measured)" : "none"}.`),
+        secondary.length ? h("table", { class: "data-table" }, h("caption", {}, "Secondary metrics by fraction"),
+          h("thead", {}, h("tr", {}, h("th", { scope: "col" }, "Metric"), ...curve.fractions.map((f) => h("th", { scope: "col" }, `${f * 100}%`)))),
+          h("tbody", {}, ...secondary.map((p) => h("tr", {}, h("th", { scope: "row" }, p.label), ...curve.fractions.map((f) => {
+            const pt = p.points.find((q) => q.fraction === f);
+            return h("td", {}, pt ? (CELL[pt.state] || ["", pt.state || "—"])[1] : "—");
+          }))))) : "");
       name.addEventListener("click", () => { const open = name.getAttribute("aria-expanded") !== "true"; name.setAttribute("aria-expanded", String(open)); detail.hidden = !open; });
       line.append(name, cells);
       grid.append(line, detail);
@@ -281,6 +297,9 @@
     body.headlineVisible = String(Boolean(headline && headline.bottom <= viewport));
     const visible = (selector) => [...document.querySelectorAll(selector)].filter((el) => rect(el).bottom <= viewport).length;
     body.defendedVisible = String(visible(".defended-row") + visible(".none-defended"));
+    body.defendedTotal = String(document.querySelectorAll(".defended-row").length);
+    body.noneDefended = String(Boolean(document.querySelector(".none-defended")));
+    if (panel) body.cliaFullyVisible = String(rect(panel).top >= 0 && rect(panel).bottom <= viewport);
     body.curveRowsVisible = String(visible(".curve-grid > .curve-row:not(.curve-axis)"));
     body.pageScrollX = String(document.documentElement.scrollWidth > document.documentElement.clientWidth);
     body.measured = "1";
@@ -309,9 +328,23 @@
         svg("title", {}, metric.caption),
         svg("line", { x1: 10, x2: width - 10, y1: 17, y2: 17, class: "strip-track" }),
         svg("rect", { x: x(lo), y: 10, width: Math.max(2, x(hi) - x(lo)), height: 14, class: "strip-band" }),
+        // Outside the range the track continues past a break mark (⫽).
+        v > hi ? svg("text", { x: (x(hi) + x(v)) / 2, y: 22, class: "strip-break", "text-anchor": "middle" }, "⫽") : "",
+        v < lo ? svg("text", { x: (x(lo) + x(v)) / 2, y: 22, class: "strip-break", "text-anchor": "middle" }, "⫽") : "",
         svg("text", { x: x(v), y: 22, class: "strip-mark", "text-anchor": "middle" }, "◆")), h("figcaption", {}, metric.caption));
     }
-    if (metric.exploratory_n) return h("figure", { class: "strip" }, h("figcaption", {}, metric.caption));
+    if (metric.exploratory_n && metric.interval) {
+      // Variant E: the cohort min–max bracket with this sample as ◆ (the dot plot
+      // of every member arrives with the cohort store, L1.6).
+      const [lo, hi] = metric.interval;
+      const v = Number(metric.value);
+      const min = Math.min(lo, v), max = Math.max(hi, v);
+      const x = (t) => 10 + ((t - min) / (max - min || 1)) * (width - 20);
+      return h("figure", { class: "strip" }, svg("svg", { viewBox: `0 0 ${width} ${height}`, role: "img", "aria-label": metric.caption, class: "strip-svg" },
+        svg("title", {}, metric.caption),
+        svg("path", { d: `M${x(lo)},8 v18 M${x(lo)},17 H${x(hi)} M${x(hi)},8 v18`, class: "strip-track" }),
+        svg("text", { x: x(v), y: 22, class: "strip-mark", "text-anchor": "middle" }, "◆")), h("figcaption", {}, metric.caption));
+    }
     if (metric.percentile !== null && metric.percentile !== undefined) {
       const x = (p) => 10 + (p / 100) * (width - 20);
       return h("figure", { class: "strip" }, svg("svg", { viewBox: `0 0 ${width} ${height}`, role: "img", "aria-label": metric.caption, class: "strip-svg" },
@@ -395,12 +428,18 @@
       for (const m of groups[key]) { out.push(card(sample, m, seen, first)); first = false; }
     }
     const reasons = (list) => { const c = {}; for (const m of list) c[m.reason || "—"] = (c[m.reason || "—"] || 0) + 1; return Object.entries(c).map(([k, v]) => `${k.replace(/_/g, " ")} ${v}`).join(" · "); };
-    out.push(collapsed(`Not interpretable (${groups.not_interpretable.length})`, reasons(groups.not_interpretable), ["Metric", "Value", "Reason", "Needs"],
-      groups.not_interpretable.map((m) => [m.label, fmt(m.value, m.unit), (m.reason || "").replace(/_/g, " "), m.entry && m.entry.min_depth_x ? `${m.entry.min_depth_x}x` : "—"])));
-    out.push(collapsed(`No reference (${groups.no_reference.length})`, reasons(groups.no_reference), ["Metric", "Value", "Reason"],
-      groups.no_reference.map((m) => [m.label, fmt(m.value, m.unit), (m.reason || "").replace(/_/g, " ")])));
-    out.push(collapsed(`In range (${groups.in_range.length})`, "", ["Metric", "Value", "Reference"],
-      groups.in_range.map((m) => [m.label, fmt(m.value, m.unit), m.caption])));
+    const extras = (m) => [h("span", {}, ...(m.entry && m.entry.license_ids || []).map((id) => seen.has(id) ? licenseRef(sample, id) : (seen.add(id), licenseRef(sample, id)))), unverifiedBadge(m)];
+    out.push(collapsed(`Not interpretable (${groups.not_interpretable.length})`, reasons(groups.not_interpretable), ["Metric", "Value", "Reason", "Needs", ""],
+      groups.not_interpretable.map((m) => [m.label, fmt(m.value, m.unit), (m.reason || "").replace(/_/g, " "), m.entry && m.entry.min_depth_x ? `${m.entry.min_depth_x}x` : "—", extras(m)])));
+    out.push(collapsed(`No reference (${groups.no_reference.length})`, reasons(groups.no_reference), ["Metric", "Value", "Reason", "Reference shown", ""],
+      groups.no_reference.map((m) => [m.label, fmt(m.value, m.unit), (m.reason || "").replace(/_/g, " "), m.caption || "—", extras(m)])));
+    out.push(collapsed(`In range (${groups.in_range.length})`, "", ["Metric", "Value", "Reference", ""],
+      groups.in_range.map((m) => [m.label, fmt(m.value, m.unit), strip(m), extras(m)])));
+    // Full callouts for licenses first used in the grouped rows (callout-once per route).
+    const pending = (sample.licenses || []).filter((lic) => !document.getElementById(`license-${lic.license_id}`) && [...seen].includes(lic.license_id));
+    const cardIds = new Set(out.flatMap((node) => node instanceof Element ? [...node.querySelectorAll(".license-callout")].map((c) => c.id) : []));
+    const remaining = pending.filter((lic) => !cardIds.has(`license-${lic.license_id}`));
+    if (remaining.length) out.push(h("section", { class: "panel" }, h("h2", {}, "License callouts"), ...remaining.map((lic) => h("div", { class: "license-callout", id: `license-${lic.license_id}` }, h("h3", {}, lic.headline), h("p", {}, lic.body)))));
     const expand = h("button", { type: "button", class: "control" }, "Expand all");
     expand.addEventListener("click", () => { for (const b of document.querySelectorAll(".finding-card button[aria-expanded]")) { b.setAttribute("aria-expanded", "true"); document.getElementById(b.getAttribute("aria-controls")).hidden = false; } });
     out.splice(3, 0, expand);
@@ -408,9 +447,10 @@
   }
 
   function collapsed(title, breakdown, headers, rows) {
+    const cell = (c) => h("td", {}, ...(Array.isArray(c) ? c : [c instanceof Node ? c : String(c)]));
     return h("details", { class: "finding-group" }, h("summary", {}, title, breakdown ? h("span", { class: "help" }, `  ${breakdown}`) : ""),
       h("div", { class: "table-wrap" }, h("table", {}, h("thead", {}, h("tr", {}, ...headers.map((t) => h("th", { scope: "col" }, t)))),
-        h("tbody", {}, ...rows.map((r) => h("tr", {}, ...r.map((c) => h("td", {}, String(c)))))))));
+        h("tbody", {}, ...rows.map((r) => h("tr", {}, ...r.map(cell)))))));
   }
 
   // -- Stability ------------------------------------------------------------------------------
@@ -426,7 +466,8 @@
       const x = (f) => pad + ((Math.log10(f) - Math.log10(0.08)) / (Math.log10(1.2) - Math.log10(0.08))) * (w - pad - 8);
       const unit = (panel.points.find((p) => p.unit) || {}).unit || "percent";
       const clip = 50;
-      const maxAbs = unit === "unit" ? Math.max(1e-9, ...panel.points.map((p) => Math.abs(p.deviation || 0)), ...(panel.points.map((p) => p.band ? Math.max(Math.abs(p.band.lo), Math.abs(p.band.hi)) : 0).filter(Number.isFinite))) : clip;
+      const splitDevs = panel.split ? [Math.abs(panel.split.deviation_a || 0), Math.abs(panel.split.deviation_b || 0)] : [];
+      const maxAbs = unit === "unit" ? Math.max(1e-9, ...splitDevs, ...panel.points.map((p) => Math.abs(p.deviation || 0)), ...(panel.points.map((p) => p.band ? Math.max(Math.abs(p.band.lo), Math.abs(p.band.hi)) : 0).filter(Number.isFinite))) : clip;
       const y = (v) => { const c = Math.max(-maxAbs, Math.min(maxAbs, v)); return hgt / 2 - (c / maxAbs) * (hgt / 2 - 12); };
       const marks = [svg("line", { x1: pad, x2: w - 8, y1: y(0), y2: y(0), class: "zero" })];
       for (const p of panel.points) {
@@ -439,8 +480,10 @@
         }
       }
       if (panel.split) {
-        marks.push(svg("text", { x: x(0.5) - 9, y: y(panel.split.deviation_a) + 4, "text-anchor": "middle", class: "split" }, "○"));
-        marks.push(svg("text", { x: x(0.5) + 9, y: y(panel.split.deviation_b) + 4, "text-anchor": "middle", class: "split" }, "○"));
+        for (const [dx, d] of [[-9, panel.split.deviation_a], [9, panel.split.deviation_b]]) {
+          const clipped = unit !== "unit" && Math.abs(d) > clip;
+          marks.push(svg("text", { x: x(0.5) + dx, y: y(d) + 4, "text-anchor": "middle", class: "split" }, clipped ? (d > 0 ? "⇡" : "⇣") : "○"));
+        }
       }
       for (const f of fracs) marks.push(svg("text", { x: x(f), y: hgt - 18, "text-anchor": "middle", class: "axis" }, `${f * 100}%`));
       const label = `${panel.label}: ${panel.verdict}. Deviation from full depth in ${unit === "unit" ? "the metric's unit" : "%"}${panel.split ? `; split halves ${panel.split.stable ? "stable" : "unstable"}` : ""}.`;
@@ -451,6 +494,11 @@
       if (panel.split) tableRows.push([panel.label, "split A / B", `${fmt(panel.split.a)} / ${fmt(panel.split.b)}`, `${(panel.split.relative_abs_diff * 100).toFixed(1)}% |A−B|`, panel.split.stable ? "stable" : "unstable"]);
     }
     out.push(grid, dataTable("Stability: every point", ["Metric", "Fraction", "Value", "Deviation", "State"], tableRows));
+    const shown = new Set(sample.stability.map((p) => p.algorithm_id));
+    const ids = new Set();
+    for (const a of sample.algorithms) if (shown.has(a.algorithm_id)) for (const m of a.metrics) for (const id of (m.entry && m.entry.license_ids) || []) ids.add(id);
+    const lics = (sample.licenses || []).filter((lic) => ids.has(lic.license_id));
+    if (lics.length) out.push(h("section", { class: "panel" }, h("h2", {}, "License callouts"), ...lics.map((lic) => h("div", { class: "license-callout", id: `license-${lic.license_id}` }, h("h3", {}, lic.headline), h("p", {}, lic.body)))));
     return out;
   }
 

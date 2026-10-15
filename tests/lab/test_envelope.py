@@ -114,3 +114,11 @@ def test_provenance_timestamp_format() -> None:
             reference_id="r",
             timestamp_utc="2026-10-14 21:00",
         )
+
+
+@pytest.mark.parametrize("field,value", [("tool", "/Users/x/tool"), ("reference_id", "../ref"), ("reference_id", "a b")])
+def test_provenance_fields_are_identifiers_not_paths(field, value) -> None:
+    kwargs = dict(tool="t", parameters_sha256=A, source_id=B, input_id=C, reference_id="ref", timestamp_utc="2026-10-14T21:00:00Z")
+    kwargs[field] = value
+    with pytest.raises(ValidationError):
+        provenance(**kwargs)

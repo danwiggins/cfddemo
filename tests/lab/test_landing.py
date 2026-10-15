@@ -145,7 +145,13 @@ def test_landing_pixel_budget_at_1280x800(page_root, tmp_path) -> None:
     assert int(body["clia-height"]) <= 320 and body["clia-clipped"] == "false"
     assert body["headline-visible"] == "true"
     assert int(body["curve-rows-visible"]) >= 4
-    assert int(body["defended-visible"]) >= 1  # every defended row or the none state is above the fold
+    # >= 3 defended rows (or every row when fewer qualify) or the none state, above the fold.
+    total = int(body["defended-total"])
+    if body["none-defended"] == "true":
+        assert int(body["defended-visible"]) >= 1
+    else:
+        assert int(body["defended-visible"]) >= min(3, total) and total >= 1
+    assert body["clia-fully-visible"] == "true"
     assert body["page-scroll-x"] == "false"
     for text in (
         "What CLIA means for this demo", "FLAG: LEGAL — verify", "Defended results", "Depth → utility",

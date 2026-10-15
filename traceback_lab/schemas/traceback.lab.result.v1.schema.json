@@ -273,8 +273,7 @@
           "type": "string"
         },
         "reference_id": {
-          "maxLength": 128,
-          "minLength": 1,
+          "pattern": "^[A-Za-z0-9][A-Za-z0-9_.:-]{0,127}$",
           "title": "Reference Id",
           "type": "string"
         },
@@ -288,14 +287,12 @@
           "type": "string"
         },
         "tool": {
-          "maxLength": 120,
-          "minLength": 1,
+          "pattern": "^[A-Za-z0-9_.:-]{1,120}$",
           "title": "Tool",
           "type": "string"
         },
         "tool_version": {
-          "maxLength": 40,
-          "minLength": 1,
+          "pattern": "^[A-Za-z0-9_.+:-]{1,40}$",
           "title": "Tool Version",
           "type": "string"
         }

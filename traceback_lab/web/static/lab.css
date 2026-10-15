@@ -114,3 +114,5 @@ pre.stderr { white-space: pre-wrap; overflow-wrap: anywhere; font-size: .85rem; 
 }
 .lenses[hidden] { display: none; }
 .curve-axis .curve-track { height: 1.5rem; }
+.license-pill { background: #ffffff; cursor: pointer; min-height: 2.75rem; }
+.strip-break { fill: var(--chart-hatch); font-size: 14px; }
