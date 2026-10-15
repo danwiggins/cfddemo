@@ -46,9 +46,9 @@ from .tools import find_minimap2, find_samtools, require_aligner_tools
 
 ALIGN_TIMEOUT_S = 48 * 3600.0
 QUICKSTART = (
-    "traceback lab algorithms",
-    "traceback lab run <chunk dir>",
-    "traceback lab runs",
+    "traceback lab doctor",
+    "traceback lab run --example",
+    "traceback lab serve --open",
 )
 
 
@@ -59,6 +59,7 @@ def add_run_parser(commands: Any, common: Callable[[argparse.ArgumentParser], No
         description="Run the Lab on a BAM, uBAM, chunk directory, or a stored sample (id12 | latest).",
     )
     run.add_argument("inputs", nargs="*", metavar="INPUT", help="BAM | uBAM | chunk dir | id12 | latest")
+    run.add_argument("--example", action="store_true", help="synthetic walkthrough generated at runtime (EXAMPLE sample)")
     run.add_argument("--reference", dest="reference_id", metavar="ID", help="registered reference id")
     run.add_argument("--profile", choices=("all", "fast"), default="all")
     run.add_argument("--only", metavar="A,B", help="only these algorithms (overrides --profile)")
@@ -295,6 +296,20 @@ def _dry_run(args: argparse.Namespace, store: LabStore, progress: Callable[[str]
 
 
 def run_command(args: argparse.Namespace, store: LabStore) -> tuple[int, dict[str, Any]]:
+    if args.example:
+        if args.inputs:
+            raise LabProblem(
+                "TBX-LAB-005",
+                cause="--example takes no input paths",
+                fix="Run `traceback lab run --example` on its own",
+                data={"argument": 1, "kind": "an input given with --example"},
+            )
+        from .example import prepare
+
+        store.check_version()
+        chunks, reference_id = prepare(store.root)
+        args.inputs = [str(chunks)]
+        args.reference_id = reference_id
     if not args.inputs:
         return _usage_quickstart(store)
     from .simulate_command import parse_fractions
@@ -336,8 +351,9 @@ def run_command(args: argparse.Namespace, store: LabStore) -> tuple[int, dict[st
                     chunkset = inspect_chunks(
                         paths, store, skip_bad_chunks=args.skip_bad_chunks, progress=progress
                     )
-                    reference = resolve_reference(store.root, args.reference_id)
+                    reference = resolve_reference(store.root, args.reference_id, example=args.example)
                     reference_id, reference_sha256 = reference.reference_id, reference.sha256
+                    example = bool(args.example)
                     progress(
                         f"ingest                   {len(chunkset.chunks)} chunk(s) · "
                         f"{chunkset.total_records:,} records · reference {reference_id}"
@@ -426,7 +442,7 @@ def run_command(args: argparse.Namespace, store: LabStore) -> tuple[int, dict[st
                             echo=_echo(args.verbose),
                             progress=progress,
                         )
-                    write_source(store, chunkset, aligned)
+                    write_source(store, chunkset, aligned, example=example)
                     align_info = aligned.manifest.get("align", {})
                     log.append(
                         "step_end",
@@ -584,7 +600,7 @@ def _summary(
     records = aligned.manifest.get("records", {})
     reads = records.get("ubam") or records.get("aligned_primary_plus_unmapped")
     chunks = aligned.manifest.get("chunks")
-    next_argv = [["traceback", "lab", "runs", run_id]]
+    next_argv = [["traceback", "lab", "serve", "--open"]]
     if failed:
         next_argv.insert(0, ["traceback", "lab", "runs", run_id, "--step", failed[0].algorithm_id])
     data: dict[str, Any] = {

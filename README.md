@@ -111,6 +111,7 @@ uv run python -m scripts.regenerate_copy_number \
 
 - [Scientist quick guide: your BAMs to a browsable record](docs/SCIENTIST-QUICK-GUIDE.md)
 - [Operator guide: every command, error code and recovery step](docs/OPERATOR-GUIDE.md)
+- [Lab guide: every cfDNA algorithm on a kit BAM, unsigned, research only](docs/LAB-GUIDE.md)
 - [Canaries: the nightly real-data and CI checks](docs/CANARIES.md)
 - [Three-minute demo](docs/DEMO.md)
 - [75-second recording script](docs/RECORDING-SCRIPT.md)

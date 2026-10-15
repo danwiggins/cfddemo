@@ -58,6 +58,8 @@ def _common(parser: argparse.ArgumentParser) -> None:
 def build_parser() -> argparse.ArgumentParser:
     parser = _Parser(
         prog="traceback lab",
+        epilog="Quickstart:\n  traceback lab doctor\n  traceback lab run --example\n  traceback lab serve --open",
+        formatter_class=argparse.RawDescriptionHelpFormatter,
         description=(
             "Traceback Lab: run every cfDNA algorithm a kit BAM supports. "
             "Research use only. Not CLIA-validated. Not a diagnosis."
@@ -78,6 +80,10 @@ def build_parser() -> argparse.ArgumentParser:
     from .simulate_command import add_simulate_parser
 
     add_simulate_parser(commands, _common)
+
+    from .doctor import add_doctor_parser
+
+    add_doctor_parser(commands, _common)
 
     from .serve_command import add_serve_parser
 

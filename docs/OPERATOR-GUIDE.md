@@ -187,7 +187,7 @@ Two rules apply before any real data enters this path:
 ### Aligning MinKNOW output
 
 Alignment is an assisted prerequisite, outside traceback: traceback prints the
-command but never aligns for you, because the preset and the reference are
+command but never aligns for you (the Lab aligns; see the [Lab guide](LAB-GUIDE.md)), because the preset and the reference are
 scientific choices. `preflight` and `run` refuse an unaligned BAM (no `@SQ`
 lines) with TBX-BAM-003 and print this command; `preflight --reference ID`
 fills in the registered FASTA in its human output.

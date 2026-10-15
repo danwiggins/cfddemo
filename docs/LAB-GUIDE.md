@@ -8,8 +8,48 @@ unchanged.
 
 **Research use only. Not CLIA-validated. Not a diagnosis.**
 
-This guide grows with the Lab. Sections for `lab serve`, `lab doctor` and
-`lab run --example` arrive with the commands themselves.
+## First five minutes
+
+On a Mac with only `uv`, samtools and minimap2 (`brew install samtools
+minimap2`), this reaches the Lab page with a synthetic sample:
+
+<!-- lab-journey -->
+```bash
+uv sync
+uv run traceback lab doctor
+uv run traceback lab run --example
+uv run traceback lab serve --open
+```
+
+`lab doctor` lists anything missing, each with the one command that fixes it,
+and the missing setup steps in order. `lab run --example` generates a small
+synthetic reference and three unaligned chunks (about 200k reads, a planted
+167 bp size mode, 5mC calls and chrY reads), registers the reference as
+`lab-example` in ROOT and runs the real ingest, alignment, read summary,
+algorithms, depth curve and split halves. It takes about 45 seconds on an
+M-series Mac. Copy-number is skipped (`example_reference`): it needs
+hg38-scale assets. The sample carries an **EXAMPLE (synthetic)** pill.
+`lab serve --open` prints the one-use link and opens it.
+
+Measured time to the page on a clean Mac by a teammate: not yet measured
+(target ≤ 5 minutes).
+
+## One-time setup for real kits
+
+1. `brew install samtools minimap2` (samtools ≥ 1.20, minimap2 ≥ 2.28).
+2. Register hg38: `traceback reference register --fasta hg38.fa --id hg38 --root R`.
+3. For copy-number: `traceback toolchain install ichor`, then
+   `traceback method-asset register --from-toolchain copy-number --root R`.
+4. `traceback lab doctor --root R` should then show no blocked checks.
+
+## Duration and disk for a real run
+
+For a full ~400-chunk run (~44 GB of uBAM), the disk check asks for about
+2.2x the chunk bytes plus the minimap2 index the first time (hg38: ~8 GB)
+plus 2 GB. Measured on a 30-chunk partial run (3.55 GB): the hg38 index
+built in about 1.5 minutes, alignment took about 4.5 minutes at 8 threads
+(peak RSS ~10 GB for minimap2), the aligned BAM kept 0.65x of the chunk
+bytes, and every algorithm then ran in under a minute.
 
 ## ROOT
 
@@ -31,7 +71,7 @@ Lab data lives under `ROOT/lab/` and never touches signed records:
 ## Commands
 
 ```
-traceback lab run (<BAM|uBAM|chunk dir>... | <id12> | latest)
+traceback lab run (<BAM|uBAM|chunk dir>... | <id12> | latest | --example)
     [--reference ID] [--profile all|fast] [--only a,b]
     [--downsample 0.5,0.25,0.1 | --no-downsample]
     [--controls | --no-controls] [--tf 0.03,0.10,0.30]
@@ -41,6 +81,8 @@ traceback lab run (<BAM|uBAM|chunk dir>... | <id12> | latest)
 traceback lab simulate cna <id12|latest> [--tf 0.03,0.10,0.30]   synthetic CNA spike, copy-number recovery
 traceback lab simulate split <id12|latest>                         split-half pseudo-replicate
 traceback lab algorithms [--json]          registered algorithms (id, tier, min depth, licenses, footnote)
+traceback lab doctor [--json]              setup checks, each with a fix command
+traceback lab serve [--open]               the local page (loopback only)
 traceback lab runs [RUN_ID] [--step S]     the run log, or one run's steps
 ```
 
@@ -276,3 +318,23 @@ A warning (exit 0): the samtools or minimap2 version changed since this sample w
 
 Unexpected internal error (exit 7). Run `traceback lab runs RUN_ID`, then
 report the code and the command.
+
+## Adding an algorithm
+
+1. Add a module under `traceback_lab/algorithms/` exposing an instance of the
+   plug-in Protocol (`id`, `version`, `family`, `requires`, `consumes`,
+   `cost`, `parameters`, `tools`, `upstream`, `preflight`, `run`). Declare
+   measurement identity only: tier, footnote, license, reference and next
+   steps belong in the library.
+2. Add one line to `ALGORITHMS` in `traceback_lab/registry.py` (registry
+   order is execution order; upstream entries come first).
+3. Add `traceback_lab/interpretation/library.yaml` entries for every metric,
+   with exactly one `headline: true` and a citation check (or the entry
+   shows UNVERIFIED).
+4. Add tests under `tests/lab/` on synthetic fixtures. No other shared file
+   changes.
+
+## Changes
+
+- 2026-10-15: first slice: `lab run`, `lab runs`, `lab algorithms`,
+  `lab simulate cna|split`, `lab serve`, `lab doctor`, `lab run --example`.
