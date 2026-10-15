@@ -134,8 +134,14 @@ class _Writer:
     removed: int = 0
 
 
+COUNTING_DIR = "counting"
+
+
 @dataclass(frozen=True)
 class DerivedInput:
+    """A derived input: ``manifest.json`` always; ``counting/`` (a stripped
+    counting BAM) only once a counting-BAM consumer has needed it."""
+
     spec: DerivedSpec
     input_id: str
     parent_input_id: str
@@ -143,16 +149,29 @@ class DerivedInput:
     manifest: Mapping[str, Any] = field(default_factory=dict)
 
     @property
+    def counting_dir(self) -> Path:
+        return self.directory / COUNTING_DIR
+
+    @property
     def counting_bam(self) -> Path:
-        return self.directory / COUNTING_BAM
+        return self.counting_dir / COUNTING_BAM
 
     @property
-    def counted_reads(self) -> int:
-        return int(self.manifest["counted_reads"])
+    def counting(self) -> Mapping[str, Any] | None:
+        try:
+            return json.loads((self.counting_dir / "counting.json").read_bytes())
+        except (FileNotFoundError, ValueError):
+            return None
 
     @property
-    def records_scanned(self) -> int:
-        return int(self.manifest["records_scanned"])
+    def counted_reads(self) -> int | None:
+        counting = self.counting
+        return int(counting["counted_reads"]) if counting else None
+
+    @property
+    def records_scanned(self) -> int | None:
+        counting = self.counting
+        return int(counting["records_scanned"]) if counting else None
 
 
 def load_derived(store: LabStore, parent_input_id: str, spec: DerivedSpec) -> DerivedInput | None:
@@ -165,6 +184,14 @@ def load_derived(store: LabStore, parent_input_id: str, spec: DerivedSpec) -> De
     return DerivedInput(spec, input_id, parent_input_id, directory, manifest)
 
 
+def _unique(specs: Iterable[DerivedSpec], parent_input_id: str) -> list[DerivedSpec]:
+    wanted: list[DerivedSpec] = []
+    for spec in specs:  # one entry per derived identity (``--tf 0.1,0.10`` is one spike)
+        if all(spec.input_id(parent_input_id) != other.input_id(parent_input_id) for other in wanted):
+            wanted.append(spec)
+    return wanted
+
+
 def materialize(
     store: LabStore,
     parent_input_id: str,
@@ -173,33 +200,70 @@ def materialize(
     *,
     counting_contigs: Sequence[str],
     min_mapq: int,
+    counting: bool = True,
 ) -> dict[str, DerivedInput]:
-    """Publish every missing derived input of ``parent`` in one pass (callers hold the lock)."""
+    """Publish every missing derived input of ``parent`` (callers hold the lock).
+
+    Manifests are cheap (no read pass).  With ``counting`` every derived input
+    without a counting BAM gets one, all written in **one** pass over the
+    parent; summary-only runs never touch the BAM (D33).
+    """
+
+    wanted = _unique(specs, parent_input_id)
+    found: dict[str, DerivedInput] = {}
+    for spec in wanted:
+        existing = load_derived(store, parent_input_id, spec)
+        if existing is None:
+            input_id = spec.input_id(parent_input_id)
+            manifest = {
+                "schema": DERIVED_SCHEMA,
+                "input_id": input_id,
+                "parent_input_id": parent_input_id,
+                "transform": spec.transform,
+                "parameters": dict(spec.parameters),
+                "salt": spec.salt,
+                "label": spec.label(),
+                "created_utc": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
+            }
+
+            def build(staging: Path, manifest: dict[str, Any] = manifest) -> None:
+                (staging / "manifest.json").write_bytes(canonical_json_bytes(manifest))
+
+            try:
+                store.publish_directory(store.inputs_dir, input_id, build)
+            except FileExistsError:
+                pass
+            store.bump_generation()
+            existing = load_derived(store, parent_input_id, spec)
+            assert existing is not None
+        found[spec.label()] = existing
+    if counting:
+        need = [item for item in found.values() if item.counting is None]
+        for item in found.values():
+            current = item.counting
+            if current is not None and (
+                current.get("counting_contigs") != list(counting_contigs) or current.get("min_mapq") != min_mapq
+            ):
+                raise ValueError("a stored derived input was counted with other contigs or MAPQ")
+        if need:
+            _write_counting(store, parent_bam, need, counting_contigs=counting_contigs, min_mapq=min_mapq)
+    return found
+
+
+def _write_counting(
+    store: LabStore,
+    parent_bam: Path,
+    items: Sequence[DerivedInput],
+    *,
+    counting_contigs: Sequence[str],
+    min_mapq: int,
+) -> None:
+    import shutil
 
     import pysam
 
     from evidence_inspector.cell_origin_prefilter import prefilter_exclusion
 
-    wanted: list[DerivedSpec] = []
-    for spec in specs:  # one entry per derived identity (``--tf 0.1,0.10`` is one spike)
-        if all(spec.input_id(parent_input_id) != other.input_id(parent_input_id) for other in wanted):
-            wanted.append(spec)
-    found: dict[str, DerivedInput] = {}
-    missing: list[DerivedSpec] = []
-    for spec in wanted:
-        existing = load_derived(store, parent_input_id, spec)
-        if existing is not None:
-            if (
-                existing.manifest.get("counting_contigs") != list(counting_contigs)
-                or existing.manifest.get("min_mapq") != min_mapq
-            ):
-                raise ValueError("a stored derived input was counted with other contigs or MAPQ")
-            found[spec.label()] = existing
-        else:
-            missing.append(spec)
-    if not missing:
-        return found
-    store.inputs_dir.mkdir(parents=True, exist_ok=True)
     staging_root = store.lab / "tmp" / f"derive-{time.time_ns()}"
     staging_root.mkdir(parents=True)
     writers: list[_Writer] = []
@@ -212,11 +276,11 @@ def materialize(
                     "SQ": [{"SN": name, "LN": reader.get_reference_length(name)} for name in reader.references],
                 }
             )
-            for spec in missing:
-                directory = staging_root / spec.input_id(parent_input_id)
+            for item in items:
+                directory = staging_root / item.input_id
                 directory.mkdir()
                 writers.append(
-                    _Writer(spec, directory, pysam.AlignmentFile(str(directory / COUNTING_BAM), "wb", header=header))
+                    _Writer(item.spec, directory, pysam.AlignmentFile(str(directory / COUNTING_BAM), "wb", header=header))
                 )
             predicates = [_predicate(writer.spec) for writer in writers]
             for contig in counting_contigs:
@@ -225,7 +289,7 @@ def materialize(
                     scanned += 1
                     if prefilter_exclusion(record.flag, record.mapping_quality, min_mapq=min_mapq) is not None:
                         continue
-                    name = record.query_name or ""
+                    hashes = _Hashes(record.query_name or "")
                     stripped = pysam.AlignedSegment(header)
                     stripped.query_name = "r"
                     stripped.flag = 0
@@ -234,7 +298,7 @@ def materialize(
                     stripped.mapping_quality = record.mapping_quality
                     stripped.cigartuples = record.cigartuples
                     for writer, predicate in zip(writers, predicates):
-                        copies = predicate(name, contig, record.reference_start)
+                        copies = predicate(hashes, contig, record.reference_start)
                         for _ in range(copies):
                             writer.handle.write(stripped)
                         writer.counted += copies
@@ -245,70 +309,70 @@ def materialize(
         for writer in writers:
             writer.handle.close()
             pysam.index(str(writer.staging / COUNTING_BAM))
-        for writer in writers:
-            input_id = writer.spec.input_id(parent_input_id)
-            manifest = {
-                "schema": DERIVED_SCHEMA,
-                "input_id": input_id,
-                "parent_input_id": parent_input_id,
-                "transform": writer.spec.transform,
-                "parameters": dict(writer.spec.parameters),
-                "salt": writer.spec.salt,
-                "label": writer.spec.label(),
+        for item, writer in zip(items, writers):
+            facts = {
                 "counting_contigs": list(counting_contigs),
                 "min_mapq": min_mapq,
                 "records_scanned": scanned,
                 "counted_reads": writer.counted,
                 "duplicated": writer.duplicated,
                 "removed": writer.removed,
-                "created_utc": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
             }
-            source_dir = writer.staging
 
-            def build(staging: Path, source_dir: Path = source_dir, manifest: dict[str, Any] = manifest) -> None:
-                for path in source_dir.iterdir():
+            def build(staging: Path, source: Path = writer.staging, facts: dict[str, Any] = facts) -> None:
+                for path in source.iterdir():
                     path.rename(staging / path.name)
-                (staging / "manifest.json").write_bytes(canonical_json_bytes(manifest))
+                (staging / "counting.json").write_bytes(canonical_json_bytes(facts))
 
             try:
-                store.publish_directory(store.inputs_dir, input_id, build)
+                store.publish_directory(item.directory, COUNTING_DIR, build)
             except FileExistsError:
                 pass
             store.bump_generation()
-            loaded = load_derived(store, parent_input_id, writer.spec)
-            assert loaded is not None
-            found[writer.spec.label()] = loaded
     finally:
         for writer in writers:
             try:
                 writer.handle.close()
             except Exception:  # noqa: BLE001
                 pass
-        import shutil
-
         shutil.rmtree(staging_root, ignore_errors=True)
-    return found
+
+
+class _Hashes:
+    """Per-record salted hashes, each computed at most once per record."""
+
+    __slots__ = ("name", "_cache")
+
+    def __init__(self, name: str) -> None:
+        self.name = name
+        self._cache: dict[bytes, int] = {}
+
+    def __call__(self, salt: bytes) -> int:
+        value = self._cache.get(salt)
+        if value is None:
+            value = self._cache[salt] = h64(salt, self.name)
+        return value
 
 
 def _predicate(spec: DerivedSpec):  # type: ignore[no-untyped-def]
-    """``(qname, contig, start) -> copies written`` (0, 1 or 2)."""
+    """``(hashes, contig, start) -> copies written`` (0, 1 or 2)."""
 
     if spec.transform == "downsample":
         threshold = _threshold(float(spec.parameters["fraction"]))
-        return lambda name, contig, start: int(h64(DS_SALT, name) < threshold)
+        return lambda hashes, contig, start: int(hashes(DS_SALT) < threshold)
     if spec.transform == "split":
         want_a = spec.parameters["half"] == "A"
-        return lambda name, contig, start: int((h64(SPLIT_SALT, name) < 2**63) == want_a)
+        return lambda hashes, contig, start: int((hashes(SPLIT_SALT) < 2**63) == want_a)
     if spec.transform == "cna":
         tf = float(spec.parameters["tf"])
         threshold = _threshold(tf / 2)
         salt = spec.salt.encode()
         arms = [Arm(**arm) for arm in spec.parameters["arms"]]
 
-        def spike(name: str, contig: str, start: int) -> int:
+        def spike(hashes: _Hashes, contig: str, start: int) -> int:
             for arm in arms:
                 if arm.contig == contig and arm.start <= start < arm.end:
-                    drawn = h64(salt, name) < threshold
+                    drawn = hashes(salt) < threshold
                     if arm.kind == "gain":
                         # The duplicate is a renamed copy (<qname>#dup1); a
                         # stripped counting BAM carries no names at all.

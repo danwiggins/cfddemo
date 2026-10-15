@@ -7,7 +7,7 @@ import json
 import pytest
 
 from traceback_lab import views
-from traceback_lab.stability import Side, band, deviation, stable
+from traceback_lab.stability import Side, band_at, deviation, stable
 from traceback_lab.store import LabStore
 from traceback_runner import cli as signed_cli
 
@@ -58,8 +58,14 @@ def test_deviation_and_band_units() -> None:
     assert deviation(A, 170, 167) == (3, "unit")
     assert deviation(R, 0.1, 0.0) == (0.1, "unit")  # full value 0: relative undefined
     assert deviation(S, 500, 1000, 0.5) == (0.0, "percent")
-    assert band(A, 167) == (3.0, "unit")
-    assert band(R, 100.0) == (10.0, "percent")
+    assert band_at(A, Side(170), Side(167)) == (-3.0, 3.0, "unit")
+    lo, hi, unit = band_at(R, Side(110.0), Side(100.0))
+    assert unit == "percent" and lo < 0 < hi
+    # the band matches the D32 verdict at its edges
+    assert stable(R, Side(100.0 * (1 + hi / 100) - 1e-9), Side(100.0)) is True
+    assert stable(R, Side(100.0 * (1 + hi / 100) + 1e-6), Side(100.0)) is False
+    small = band_at(P, Side(0.36, n=20), Side(0.30, n=10))
+    assert small[1] > 20  # small counts: a wide proportion band, as the verdict
 
 
 # ----------------------------------------------------------- default lab run
@@ -92,7 +98,8 @@ def test_default_run_builds_the_curve_and_controls(default_run) -> None:
     assert depths == sorted(depths)
     panels = views.stability_panels(sample)
     assert panels[0]["headline"]
-    assert all(panel["split"] is not None for panel in panels if panel["algorithm_id"] != "copy-number")
+    with_split = [panel for panel in panels if panel["split"] is not None]
+    assert {panel["algorithm_id"] for panel in with_split} >= {"bam-qc", "depth", "fragment-size"}
     block = views.repeatability(panels)
     assert block["metrics"] == len([p for p in panels if p["split"]])
 
@@ -131,3 +138,34 @@ def test_odd_fractions_work(lab_world, capsys, shared_mmi) -> None:
     assert code == 0
     labels = {step["input"] for step in payload["data"]["steps"]}
     assert {"0.05", "0.125", "full"} <= labels
+
+
+def test_stale_derived_results_are_not_compared(default_run) -> None:
+    root, payload = default_run
+    store = LabStore(root)
+    sample = views.load_sample(store, payload["data"]["sample"]["source_id"])
+    full_identity = sample.full.results["fragment-size"].provenance.parameters_sha256
+    for view in sample.derived:
+        if "fragment-size" in view.results:
+            assert view.results["fragment-size"].provenance.parameters_sha256 == full_identity
+    rows = views.selected_results(store, sample.derived[0].input_id, {"fragment-size": "0" * 64})
+    assert rows == {}
+
+
+def test_usable_to_agrees_with_the_curve(default_run) -> None:
+    root, payload = default_run
+    sample = views.load_sample(LabStore(root), payload["data"]["sample"]["source_id"])
+    curve = {row["algorithm_id"]: row for row in views.depth_curve(sample)["rows"]}
+    for panel in views.stability_panels(sample):
+        if not panel["headline"]:
+            continue
+        cells = [c for c in curve[panel["algorithm_id"]]["cells"] if c["fraction"] < 1.0]
+        if panel["verdict"].startswith("usable to "):
+            floor = float(panel["verdict"].split()[-1])
+            assert all(c["state"] == "ok_usable" for c in cells if c["fraction"] >= floor)
+
+
+def test_null_split_values_never_break_panels() -> None:
+    from traceback_lab.views import _numeric
+
+    assert not _numeric(None) and not _numeric(True) and _numeric(3)

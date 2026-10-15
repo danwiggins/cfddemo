@@ -25,7 +25,7 @@ from .envelope import ResultEnvelope
 from .ingest import id12_for, input_manifest, source_record
 from .interpretation.engine import Library, classify, load_library
 from .registry import load_registry
-from .stability import Side, band, deviation, stable
+from .stability import Side, band_at, deviation, stable
 from .store import LabStore
 
 CELL_STATES = ("ok_usable", "ok_unstable", "not_interpretable", "skipped", "failed")
@@ -33,15 +33,30 @@ _ROW_ORDER = {state: index for index, state in enumerate(CELL_STATES)}
 _TIER_ORDER = {"PROVEN": 0, "NEWER": 1, "SPECULATIVE": 2, None: 3}
 
 
-def selected_results(store: LabStore, input_id: str) -> dict[str, ResultEnvelope]:
-    """The newest selected result per algorithm for one input (unreadable ones skipped)."""
+def selected_results(
+    store: LabStore, input_id: str, identities: Mapping[str, str] | None = None
+) -> dict[str, ResultEnvelope]:
+    """The selected result per algorithm for one input.
+
+    Without ``identities`` the newest execution identity wins; with them (a
+    derived input compared to its full input) only the result computed under
+    the full input's own ``parameters_sha256`` is used, so a stale derived
+    result from older parameters is never compared to a newer full result.
+    """
 
     base = store.results_dir / input_id
     out: dict[str, tuple[str, ResultEnvelope]] = {}
     if not base.is_dir():
         return {}
     for algorithm_dir in sorted(base.iterdir()):
-        for identity_dir in sorted(algorithm_dir.iterdir()) if algorithm_dir.is_dir() else []:
+        if not algorithm_dir.is_dir():
+            continue
+        wanted = None if identities is None else identities.get(algorithm_dir.name)
+        if identities is not None and wanted is None:
+            continue
+        for identity_dir in sorted(algorithm_dir.iterdir()):
+            if wanted is not None and identity_dir.name != wanted:
+                continue
             try:
                 attempt_id = json.loads((identity_dir / "selected.json").read_bytes())["attempt_id"]
                 attempt = store.selected_attempt(input_id, algorithm_dir.name, identity_dir.name)
@@ -93,6 +108,7 @@ def load_sample(store: LabStore, source_id: str) -> SampleView | None:
     if full_input is None:
         return None
     full = InputView("full", full_input, None, {}, selected_results(store, full_input))
+    identities = {alg: envelope.provenance.parameters_sha256 for alg, envelope in full.results.items()}
     derived = []
     for entry in record.get("derived", []):
         if entry.get("parent_input_id") != full_input:
@@ -104,7 +120,7 @@ def load_sample(store: LabStore, source_id: str) -> SampleView | None:
                 entry["input_id"],
                 entry["transform"],
                 entry.get("parameters", {}),
-                selected_results(store, entry["input_id"]),
+                selected_results(store, entry["input_id"], identities),
                 fraction=fraction if entry["transform"] in ("downsample", "split") else 1.0,
             )
         )
@@ -118,6 +134,10 @@ def _value(envelope: ResultEnvelope | None, metric_id: str) -> Any:
         if metric.metric_id == metric_id:
             return metric
     return None
+
+
+def _numeric(value: Any) -> bool:
+    return isinstance(value, (int, float)) and not isinstance(value, bool)
 
 
 def _side(metric: Any, fraction: float) -> Side:
@@ -223,24 +243,31 @@ def stability_panels(sample: SampleView, library: Library | None = None) -> list
                 continue
             points = []
             for view in [*downs, sample.full]:
+                state = cell_state(view, sample.full, algorithm_id, metric.metric_id, library)
                 envelope = view.results.get(algorithm_id)
-                if envelope is None:
-                    points.append({"fraction": view.fraction, "state": None})
-                    continue
-                if envelope.status != "ok":
-                    points.append({"fraction": view.fraction, "state": envelope.status, "reason": envelope.skip_reason})
-                    continue
-                current = _value(envelope, metric.metric_id)
+                current = _value(envelope, metric.metric_id) if envelope is not None else None
                 y, unit = deviation(spec, current.value if current else None, metric.value, view.fraction)
-                points.append({"fraction": view.fraction, "state": "ok", "value": current.value if current else None, "deviation": y, "unit": unit})
+                interval = band_at(spec, _side(current, view.fraction), _side(metric, 1.0)) if current else None
+                points.append(
+                    {
+                        "fraction": view.fraction,
+                        "label": view.label,
+                        "state": state.get("state"),
+                        "reason": state.get("reason"),
+                        "value": current.value if current else None,
+                        "deviation": y,
+                        "unit": unit,
+                        "band": {"lo": interval[0], "hi": interval[1], "unit": interval[2]} if interval else None,
+                    }
+                )
             split = None
-            a = _value(halves.get("A").results.get(algorithm_id), metric.metric_id) if halves.get("A") else None
-            b = _value(halves.get("B").results.get(algorithm_id), metric.metric_id) if halves.get("B") else None
-            if a is not None and b is not None:
+            a = _value(halves["A"].results.get(algorithm_id), metric.metric_id) if "A" in halves else None
+            b = _value(halves["B"].results.get(algorithm_id), metric.metric_id) if "B" in halves else None
+            if a is not None and b is not None and _numeric(a.value) and _numeric(b.value):
                 verdict = stable(spec, _side(a, 0.5), _side(b, 0.5))
                 da, unit = deviation(spec, a.value, metric.value, 0.5)
                 db, _ = deviation(spec, b.value, metric.value, 0.5)
-                mean = (abs(a.value) + abs(b.value)) / 2 if isinstance(a.value, (int, float)) else 0
+                mean = (abs(a.value) + abs(b.value)) / 2
                 split = {
                     "a": a.value,
                     "b": b.value,
@@ -250,18 +277,15 @@ def stability_panels(sample: SampleView, library: Library | None = None) -> list
                     "relative_abs_diff": (abs(a.value - b.value) / mean) if mean else 0.0,
                     "stable": verdict,
                 }
-            # "usable to f": every measured fraction from full depth down to f is stable.
+            # "usable to f" (D24): every measured fraction from full depth down
+            # to f is ok and usable (interpretable and stable).
             usable_to = None
             for point in sorted(points, key=lambda p: p["fraction"], reverse=True):
                 if point["fraction"] >= 1.0:
                     continue
-                ok = point.get("state") == "ok" and stable(
-                    spec, Side(point.get("value"), fraction=point["fraction"]), Side(metric.value)
-                )
-                if not ok:
+                if point["state"] != "ok_usable":
                     break
                 usable_to = point["fraction"]
-            tolerance = band(spec, metric.value)
             panels.append(
                 {
                     "algorithm_id": algorithm_id,
@@ -270,7 +294,6 @@ def stability_panels(sample: SampleView, library: Library | None = None) -> list
                     "headline": bool(entry and entry.headline),
                     "full_value": metric.value,
                     "points": points,
-                    "band": {"half_width": tolerance[0], "unit": tolerance[1]} if tolerance else None,
                     "split": split,
                     "verdict": f"usable to {usable_to:g}" if usable_to is not None else "not measured below full depth" if not downs else "unstable below full depth",
                 }

@@ -105,21 +105,39 @@ def deviation(spec: Mapping[str, Any] | None, value: Any, full: Any, fraction: f
     return (x - y) / abs(y) * 100.0, "percent"
 
 
-def band(spec: Mapping[str, Any] | None, full: Any) -> tuple[float, str] | None:
-    """The tolerance band drawn around 0 on the Stability panel."""
+def band_at(spec: Mapping[str, Any] | None, a: Side, full: Side) -> tuple[float, float, str] | None:
+    """The D32 acceptance interval for ``a`` against ``full``, on the Stability
+    lens axis (``deviation``): stable iff lo <= deviation <= hi (up to the
+    pooled-proportion approximation, which uses the full value for p̄)."""
 
-    y = _number(full)
+    y = _number(full.value)
     if spec is None or y is None:
         return None
     kind = spec.get("kind")
     tolerance = spec.get("tolerance")
-    if kind == "absolute" or y == 0:
-        if kind == "absolute":
-            return float(tolerance), "unit"
-        return float(tolerance or PROPORTION_FLOOR), "unit"
+    if a.ci is not None and full.ci is not None and a.ci_level is not None and a.ci_level == full.ci_level:
+        width = math.sqrt(((a.ci[1] - a.ci[0]) / 2) ** 2 + ((full.ci[1] - full.ci[0]) / 2) ** 2)
+        return _as_axis(width, y, kind)
+    if kind == "absolute":
+        return -float(tolerance), float(tolerance), "unit"
     if kind == "proportion":
-        return PROPORTION_FLOOR / abs(y) * 100.0, "percent"
-    return float(tolerance if tolerance is not None else DEFAULT_RELATIVE) * 100.0, "percent"
+        bound = PROPORTION_FLOOR
+        if a.n and full.n:
+            p = min(max(y, 0.0), 1.0)
+            bound = max(PROPORTION_FLOOR, Z * math.sqrt(p * (1 - p) * (1 / a.n + 1 / full.n)))
+        return _as_axis(bound, y, kind)
+    t = float(tolerance if tolerance is not None else DEFAULT_RELATIVE)
+    if y == 0:
+        return -t, t, "unit"
+    if t >= 2:
+        return -100.0, math.inf, "percent"
+    return ((2 - t) / (2 + t) - 1) * 100.0, ((2 + t) / (2 - t) - 1) * 100.0, "percent"
 
 
-__all__ = ["Side", "band", "deviation", "stable"]
+def _as_axis(width: float, full: float, kind: Any) -> tuple[float, float, str]:
+    if kind == "absolute" or full == 0:
+        return -width, width, "unit"
+    return -width / abs(full) * 100.0, width / abs(full) * 100.0, "percent"
+
+
+__all__ = ["Side", "band_at", "deviation", "stable"]
