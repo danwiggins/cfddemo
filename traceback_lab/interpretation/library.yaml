@@ -7,7 +7,7 @@
 # original evidence (D4).  citation_checked records who confirmed that every
 # DOI resolves and every displayed number matches the source (D27); an entry
 # without it renders an "UNVERIFIED citation" badge.
-version: 0.2.0
+version: 0.3.0
 hidden_algorithms: [read-summary]
 entries:
   # ---------------------------------------------------------------- bam-qc
@@ -831,3 +831,92 @@ entries:
     stability: {kind: absolute, tolerance: 10}
     citations: []
     citation_checked: {by: "lab build agent (Phase 1)", date: "2026-10-15", note: "No citation displayed."}
+
+  # ------------------------------------------------------------ end-motifs
+  - algorithm_id: end-motifs
+    metric_id: mds
+    label: "End-motif diversity score (4-mer, both fragment ends)"
+    value_kind: positive
+    tier: SPECULATIVE
+    origin_tier: NEWER
+    origin_platform: "Illumina"
+    min_depth_x: null
+    reference: {kind: none}
+    performance:
+      kind: auc
+      value: "Interval MDS over the 100 most variable genomic intervals reached AUC 0.84 in cross-validation (25 matched pairs, early breast cancer); genome-wide MDS gave AUC 0.44. Direction: MDS is higher in hepatocellular carcinoma"
+      platform: Illumina
+      depth: "WGS (not stated per sample)"
+      source: "Li 2025, Bioinform Adv (FinaleToolkit); Jiang 2020, Cancer Discov"
+    performance_missing_reason: null
+    meaning_high: "More diverse fragment ends, reported in cancer (altered nuclease activity)."
+    meaning_low: "Less diverse fragment ends."
+    confounders: ["ONT alignment-end precision", "library prep end repair", "depth (noise)"]
+    next_steps:
+      analytical: ["Exploratory only; never a headline", "Compare against the kit cohort once it exists"]
+      clinical_setting: null
+    license_ids: [method-patents]
+    flags: [LEGAL]
+    headline: true
+    stability: {kind: absolute, tolerance: 0.01}
+    citations: ["doi:10.1093/bioadv/vbaf236", "doi:10.1158/2159-8290.CD-19-0622"]
+    citation_checked: {by: "lab build agent (Phase 1)", date: "2026-10-15", note: "PMC12597888 (FinaleToolkit, PMID 41221372): 'AUC of 0.44 in cross-validation ... achieving an AUC of 0.70 or 0.84' with the top 1 or 100 most variable intervals; 25 matched pairs, Illumina. PMID 32111602 abstract: 'a significant increase in the diversity of plasma DNA end motifs in patients with hepatocellular carcinoma'. Jiang full text paywalled: no healthy MDS value is shown."}
+
+  - algorithm_id: end-motifs
+    metric_id: ccca_fraction
+    label: "CCCA end-motif share"
+    value_kind: proportion
+    tier: SPECULATIVE
+    origin_tier: NEWER
+    origin_platform: "Illumina"
+    min_depth_x: null
+    reference: {kind: none}
+    performance:
+      kind: direction
+      value: "CCCA was much lower in hepatocellular carcinoma than in subjects without HCC; no threshold published in the abstract"
+      platform: Illumina
+      depth: "WGS"
+      source: "Jiang 2020, Cancer Discov"
+    performance_missing_reason: null
+    meaning_high: "More CCCA ends (DNASE1L3-type cutting, typical of healthy plasma)."
+    meaning_low: "Fewer CCCA ends, reported in cancer."
+    confounders: ["ONT alignment-end precision", "library prep end repair", "batch (a small ONT study saw a batch shift)"]
+    next_steps:
+      analytical: ["Exploratory only", "Compare against the kit cohort once it exists"]
+      clinical_setting: null
+    license_ids: [method-patents]
+    flags: [LEGAL]
+    headline: false
+    stability: {kind: proportion}
+    citations: ["doi:10.1158/2159-8290.CD-19-0622", "doi:10.1186/s13059-022-02710-1"]
+    citation_checked: {by: "lab build agent (Phase 1)", date: "2026-10-15", note: "PMID 32111602 abstract: 'the abundance of plasma DNA motif CCCA was much lower in patients with HCC'. PMC9283844 (ONT, n=7 healthy) reports a healthy CCCA mean of 1.9 (SD 0.13) without stated units and notes a batch difference, so it is not shown as a reference."}
+
+  # ----------------------------------------------------------- delfi-ratio
+  - algorithm_id: delfi-ratio
+    metric_id: ratio_sd
+    label: "DELFI-style short/long ratio variability (SD across 5 Mb bins)"
+    value_kind: positive
+    tier: SPECULATIVE
+    origin_tier: PROVEN
+    origin_platform: "Illumina (commercial lung test)"
+    min_depth_x: null
+    reference: {kind: none}
+    performance:
+      kind: sensitivity
+      value: "Original DELFI classifier: sensitivity 57% to >99% across seven cancer types at 98% specificity, AUC 0.94. This Lab computes the ratio profile only (no GC correction, no classifier), so the figure does not transfer"
+      platform: Illumina
+      depth: "1-2x"
+      source: "Cristiano 2019, Nature"
+    performance_missing_reason: null
+    meaning_high: "An uneven fragmentation profile across the genome, the pattern DELFI associates with cancer; also copy-number changes and GC bias."
+    meaning_low: "An even profile (healthy profiles correlated at a median 0.99 on Illumina)."
+    confounders: ["GC bias (not corrected)", "copy-number changes", "ONT size bias", "depth (noise per bin)"]
+    next_steps:
+      analytical: ["Cohort-relative only; compare once the kit cohort exists", "Check the GC-bias slope in bam-qc"]
+      clinical_setting: null
+    license_ids: [method-patents, no-license-not-adopted]
+    flags: [LEGAL]
+    headline: true
+    stability: {kind: relative, tolerance: 0.20}
+    citations: ["doi:10.1038/s41586-019-1272-6"]
+    citation_checked: {by: "lab build agent (Phase 1)", date: "2026-10-15", note: "PMC6774252: 'sensitivities of detection ranging from 57% to more than 99% among the seven cancer types at 98% specificity, with an overall area under the curve value of 0.94'; short 100-150 bp, long 151-220 bp; '504 windows of 5 Mb'; healthy profiles 'median correlation of 0.99'. Illumina 1-2x."}

@@ -93,7 +93,11 @@ def test_default_run_builds_the_curve_and_controls(default_run) -> None:
     assert [cell["label"] for cell in rows["bam-qc"]["cells"]] == ["0.1", "0.25", "0.5", "full"]
     assert rows["bam-qc"]["cells"][-1]["state"] == "ok_usable"
     assert rows["copy-number"]["full_state"] == "skipped"
-    assert curve["rows"][-1]["algorithm_id"] == "copy-number"  # skipped rows sort last
+    # skipped rows sort last (more than one algorithm skips on the toy input)
+    states = [row["full_state"] for row in curve["rows"]]
+    first_skipped = states.index("skipped")
+    assert set(states[first_skipped:]) == {"skipped"}
+    assert "copy-number" in [row["algorithm_id"] for row in curve["rows"][first_skipped:]]
     depths = [cell["depth_x"] for cell in rows["depth"]["cells"]]
     assert depths == sorted(depths)
     panels = views.stability_panels(sample)

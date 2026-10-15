@@ -50,6 +50,8 @@ ALGORITHMS: tuple[str, ...] = (
     "long_tail:LONG_TAIL",
     "sex_check:SEX_CHECK",
     "mtdna:MTDNA",
+    "end_motifs:END_MOTIFS",
+    "delfi_ratio:DELFI_RATIO",
 )
 
 
