@@ -116,6 +116,22 @@ ROOT, home, login and chunk names redacted) is ever stored.
 | `mtdna` | chrM reads (MAPQ ≥ 20) as a share of all primary reads, and the chrM fragment mode |
 | `end-motifs` | reference 4-mers at both ends of each molecule (5′ forward end and the reverse complement of the other end), motif diversity score and CCCA share; needs 500,000 eligible reads and the registered FASTA |
 | `delfi-ratio` | short (100–150 bp) / long (151–220 bp) ratio per 5 Mb bin on chr1–22, median-centred, and its SD; no GC correction, cohort-relative only; needs 1,000,000 eligible reads |
+| `meth-calls` | intermediate: decodes MM/ML once into site-level CpG call chunks (read row, forward-strand C position, strand, 5mC/5hmC/canonical ML); derived inputs reuse it through their row mask |
+| `global-5mc` | share of CpG site calls whose most likely state is 5mC |
+| `global-5hmc` | share of CpG site calls (with a 5hmC channel) whose most likely state is 5hmC; skipped (`missing_channel`) when the MM tags carry no `C+h` |
+| `pmd-score` | 5mC share inside vs outside the Zhou 2018 common PMDs and their difference; needs 500,000 eligible reads and the PMD asset (below) |
+| `hypometh-reads` | among reads with ≥ 4 CpG calls, the share under 25% methylated, and U/X/M counts (≤ 25% / between / ≥ 75%); needs 500,000 eligible reads |
+
+**PMD asset.** `pmd-score` reads the Zhou 2018 hg38 common-PMD file, which
+the repo does not ship (no license is stated; see its callout). Place it once
+per ROOT; the Lab checks its pinned sha256 and otherwise skips with
+`missing_asset`:
+
+```
+mkdir -p "$TRACEBACK_ROOT/lab/assets/pmd"
+curl -fL -o "$TRACEBACK_ROOT/lab/assets/pmd/PMD_coordinates_hg38.bed.gz" \
+  https://zhouserver.research.chop.edu/GenomeAnnotation/hg38/PMD_coordinates_hg38.bed.gz
+```
 
 Fragment length is the aligned reference span, the same definition as the
 signed fragment metric; the Lab's 1-bp counter is parity-tested against it.
