@@ -33,8 +33,9 @@ def world(tmp_path, monkeypatch):
         pysam.index(str(inputs.bam_path))
     (input_dir / "aligned.bam.bai").symlink_to(index)
     ctx = InputContext(
-        root=root, source_id="a" * 64, input_id="b" * 64, reference_id="ref", reference_sha256="c" * 64,
+        root=root, source_id="a" * 64, input_id="b" * 64, reference_id="ref",
         input_dir=input_dir, eligible_reads=3_000_000, extras={"reference_fasta": str(inputs.fasta_path)},
+        reference_sha256=__import__("hashlib").sha256(Path(inputs.fasta_path).read_bytes()).hexdigest(),
     )
     return {"inputs": inputs, "root": root, "ctx": ctx, "tmp": tmp_path}
 
@@ -98,3 +99,12 @@ def test_metric_ids_and_library_cover_the_atlas() -> None:
     entry = library.entry("cell-origin", "fraction_liver_hep")
     assert entry["min_depth_x"] == 5.0 and entry.tier == "SPECULATIVE"
     assert set(entry["license_ids"]) == {"modkit-ont-public", "yissum-uxm", "loyfer-atlas-terms-unknown"}
+
+
+def test_a_changed_fasta_is_refused(world) -> None:
+    register_loyfer_directory(world["root"], world["inputs"].loyfer_dir)
+    ctx = InputContext(**{**world["ctx"].__dict__, "reference_sha256": "f" * 64})
+    out = world["tmp"] / "a2" / "artifacts"
+    out.mkdir(parents=True)
+    with pytest.raises(RuntimeError, match="FASTA changed"):
+        co.CELL_ORIGIN.run(ctx, out)

@@ -117,3 +117,7 @@ pre.stderr { white-space: pre-wrap; overflow-wrap: anywhere; font-size: .85rem; 
 .curve-axis .curve-track { height: 1.5rem; }
 .license-pill { background: #ffffff; cursor: pointer; min-height: 2.75rem; }
 .strip-break { fill: var(--chart-hatch); font-size: 14px; }
+.composition-svg { width: 100%; max-width: 40rem; height: auto; }
+.composition-svg .ci { stroke: var(--chart-hatch); stroke-width: 2; }
+.composition-svg .pt { fill: var(--chart-a); font-size: 12px; }
+.composition-svg .axis { fill: var(--ink); font-size: 11px; }

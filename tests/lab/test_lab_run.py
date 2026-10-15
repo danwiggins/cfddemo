@@ -552,3 +552,23 @@ def test_alignment_flags_are_validated(lab_world, capsys, flag) -> None:
     code, payload = _json(capsys, "run", str(lab_world["chunks"]), "--root", str(lab_world["root"]), *flag)
     assert code == 2 and payload["status"] == "usage"
     assert not (lab_world["root"] / "lab").exists()
+
+
+def test_algorithm_timeout_kills_a_child_in_another_session(lab_world, capsys, monkeypatch, shared_mmi) -> None:
+    _registry(monkeypatch, "SESSION_HANGS")
+    pidfile = lab_world["tmp"] / "session-child.pid"
+    monkeypatch.setenv("LAB_TEST_PIDFILE", str(pidfile))
+    code, payload = _json(
+        capsys, "run", str(lab_world["chunks"]), "--root", str(lab_world["root"]), "--mmi", str(shared_mmi), "--timeout-s", "3"
+    )
+    assert code == 8
+    child = int(pidfile.read_text())
+    deadline = time.time() + 5
+    while time.time() < deadline:
+        try:
+            os.kill(child, 0)
+        except ProcessLookupError:
+            break
+        time.sleep(0.05)
+    else:
+        pytest.fail("a child that left the worker's process group survived the timeout")

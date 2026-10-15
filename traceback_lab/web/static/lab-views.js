@@ -441,10 +441,47 @@
     const cardIds = new Set(out.flatMap((node) => node instanceof Element ? [...node.querySelectorAll(".license-callout")].map((c) => c.id) : []));
     const remaining = pending.filter((lic) => !cardIds.has(`license-${lic.license_id}`));
     if (remaining.length) out.push(h("section", { class: "panel" }, h("h2", {}, "License callouts"), ...remaining.map((lic) => h("div", { class: "license-callout", id: `license-${lic.license_id}` }, h("h3", {}, lic.headline), h("p", {}, lic.body)))));
+    out.push(composition(sample));
     const expand = h("button", { type: "button", class: "control" }, "Expand all");
     expand.addEventListener("click", () => { for (const b of document.querySelectorAll(".finding-card button[aria-expanded]")) { b.setAttribute("aria-expanded", "true"); document.getElementById(b.getAttribute("aria-controls")).hidden = false; } });
     out.splice(3, 0, expand);
     return out;
+  }
+
+  // Cell-type composition (cell-origin): dot and interval per cell type, no donut.
+  function composition(sample) {
+    const section = h("section", { class: "panel", "aria-labelledby": "composition-title" },
+      h("h2", { id: "composition-title" }, "Cell-type composition (cell-origin)"),
+      flagPill("LEGAL", "FLAG: LEGAL — research-only licenses; atlas terms unknown."));
+    const a = sample.algorithms.find((x) => x.algorithm_id === "cell-origin");
+    if (!a || a.status !== "ok") {
+      section.append(h("p", { class: "empty" }, a ? `cell-origin ${a.status}${a.skip_reason ? ` (${a.skip_reason})` : ""}: no composition at this depth.` : "cell-origin has no result for this sample."));
+      return section;
+    }
+    const slot = h("div", {}, h("p", {}, "Loading…"));
+    section.append(slot);
+    fetch(`/api/samples/${sample.id12}/artifact/full/cell-origin/composition`, { credentials: "same-origin" })
+      .then((r) => { if (!r.ok) throw new Error("data reference invalid"); return r.json(); })
+      .then((data) => {
+        const rows = data.contributors.filter((c) => c.fraction > 0 || (c.interval && c.interval[1] > 0)).sort((x, y) => y.fraction - x.fraction);
+        const w = 560, rowH = 22, left = 170, hgt = rows.length * rowH + 30;
+        const max = Math.max(0.05, ...rows.map((c) => (c.interval ? c.interval[1] : c.fraction)));
+        const x = (v) => left + (v / max) * (w - left - 20);
+        const label = `Cell-type shares with ${Math.round(data.confidence_level * 100)}% bootstrap intervals; ${rows.length} cell types above zero.`;
+        const marks = rows.flatMap((c, i) => {
+          const y = 20 + i * rowH;
+          const out = [svg("text", { x: left - 6, y: y + 4, "text-anchor": "end", class: "axis" }, c.contributor_id)];
+          if (c.interval) out.push(svg("line", { x1: x(c.interval[0]), x2: x(c.interval[1]), y1: y, y2: y, class: "ci" }));
+          out.push(svg("text", { x: x(c.fraction), y: y + 5, "text-anchor": "middle", class: "pt" }, "●"));
+          return out;
+        });
+        const chartSvg = svg("svg", { viewBox: `0 0 ${w} ${hgt}`, role: "img", "aria-label": label, class: "composition-svg" }, svg("title", {}, label), ...marks);
+        slot.replaceWith(h("div", {}, chartSvg,
+          dataTable(`Cell-type composition (${Math.round(data.confidence_level * 100)}% bootstrap interval)`, ["Cell type", "Share", "Interval low", "Interval high", "Interval"],
+            data.contributors.map((c) => [c.contributor_id, c.fraction, c.interval ? c.interval[0] : null, c.interval ? c.interval[1] : null, c.interval_state]))));
+      })
+      .catch((error) => slot.replaceWith(h("div", { class: "problem" }, `Chart could not be drawn (${error.message}).`)));
+    return section;
   }
 
   function collapsed(title, breakdown, headers, rows) {

@@ -200,6 +200,7 @@ def test_findings_grouping_and_flags(page_root, tmp_path) -> None:
     groups = re.findall(r"<summary>(Not interpretable|No reference|In range) \((\d+)\)", dom)
     assert [name for name, _ in groups] == ["Not interpretable", "No reference", "In range"]
     assert "No metric is outside a reference." in dom  # pre-cohort: no card groups
+    assert "Cell-type composition (cell-origin)" in dom and "no composition at this depth" in dom
 
 
 @needs_chrome

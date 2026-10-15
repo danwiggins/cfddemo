@@ -50,6 +50,16 @@ def loyfer_assets(root: Path) -> dict[str, Any]:
     }
 
 
+def _sha256_file(path: Path) -> str:
+    import hashlib
+
+    digest = hashlib.sha256()
+    with path.open("rb") as stream:
+        while block := stream.read(16 << 20):
+            digest.update(block)
+    return digest.hexdigest()
+
+
 def metric_id_for(contributor: str) -> str:
     return "fraction_" + "".join(ch if ch.isalnum() else "_" for ch in contributor.lower()).strip("_")
 
@@ -140,6 +150,11 @@ class CellOrigin(Base):
         from traceback_runner.cell_origin import ModbaseModel, compute_measurement
         from traceback_runner.cell_origin_method import default_parameters
 
+        fasta = Path(ctx.extras["reference_fasta"])
+        if _sha256_file(fasta) != ctx.reference_sha256:
+            # The signed stage refuses this too: the FASTA on disk is not the
+            # registered reference this input was aligned against.
+            raise RuntimeError("the reference FASTA changed since it was registered")
         model_id = header_model(ctx.input_dir / "aligned.bam")
         model = ModbaseModel(id=model_id, source="header")
         parameters = default_parameters(modbase_model=model_id)
@@ -155,7 +170,7 @@ class CellOrigin(Base):
                 reference_id=ctx.reference_id,
                 modbase_model=model,
                 bam=bam,
-                fasta=Path(ctx.extras["reference_fasta"]),
+                fasta=fasta,
                 atlas=Path(assets["loyfer-atlas"].source.file_path),
                 markers=Path(assets["loyfer-markers"].source.file_path),
                 regions=Path(assets["loyfer-regions"].source.file_path),
