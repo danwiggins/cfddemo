@@ -46,6 +46,10 @@ ALGORITHMS: tuple[str, ...] = (
     "depth:DEPTH",
     "fragment_size:FRAGMENT_SIZE",
     "copy_number:COPY_NUMBER",
+    "modbase_qc:MODBASE_QC",
+    "long_tail:LONG_TAIL",
+    "sex_check:SEX_CHECK",
+    "mtdna:MTDNA",
 )
 
 
