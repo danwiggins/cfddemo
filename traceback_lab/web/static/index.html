@@ -1,0 +1,34 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Traceback Lab</title>
+<link rel="stylesheet" href="/assets/base.css">
+<link rel="stylesheet" href="/assets/lab.css">
+<script src="/assets/vendor/echarts.min.js" defer></script>
+<script src="/assets/lab.js" defer></script>
+</head>
+<body class="lab" data-ready="0" data-csp-violations="0">
+<a class="skip-link" href="#main">Skip to results</a>
+<header class="lab-chrome">
+  <p class="banner lab-banner" id="banner">Research use only. Not CLIA-validated. Not a diagnosis. <a href="#/about/clia">About CLIA</a></p>
+  <div class="app-header">
+    <a class="lab-title" href="#/">Traceback Lab</a>
+    <label class="switcher">Sample
+      <select id="sample-switcher" aria-label="Sample"></select>
+    </label>
+    <span class="flag-pill" id="pii-flag">FLAG: PII — donor metadata on screen; de-identified IDs only; never a name or MRN</span>
+    <button type="button" id="key-button" class="control">Key</button>
+    <p id="status" class="lab-status" role="status" aria-live="polite"></p>
+  </div>
+</header>
+<nav aria-label="Lenses" id="lenses" class="lenses"></nav>
+<main id="main" tabindex="-1"></main>
+<dialog id="key-dialog" aria-labelledby="key-title">
+  <h2 id="key-title">Key</h2>
+  <div id="key-body"></div>
+  <button type="button" id="key-close" class="control">Close</button>
+</dialog>
+</body>
+</html>
