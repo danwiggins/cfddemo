@@ -429,14 +429,18 @@ def interpret_result(
 
     if envelope.status != "ok":
         return []
+    values = {metric.metric_id: metric.value for metric in envelope.metrics}
     out: list[InterpretedMetric] = []
     for metric in envelope.metrics:
         entry = library.entry(envelope.algorithm_id, metric.metric_id)
+        reason = (not_interpretable or {}).get(metric.metric_id)
+        if reason is None and entry is not None and entry.get("requires_pon") and values.get("pon_policy") in (None, "none"):
+            reason = "no_pon"  # Appendix A: without a PoN the value stays visible
         interpretation = classify(
             metric.value,
             entry,
             depth_x=depth_x,
-            not_interpretable=(not_interpretable or {}).get(metric.metric_id),
+            not_interpretable=reason,
             cohort=(cohorts or {}).get(metric.metric_id),
         )
         out.append(

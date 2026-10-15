@@ -450,3 +450,62 @@ entries:
     stability: {kind: absolute, tolerance: 0.01}
     citations: ["doi:10.1101/gr.279144.124"]
     citation_checked: {by: "lab build agent", date: "2026-10-15", note: "PubMed full text PMC12047234: ctDNA fragments 'exhibit a prominent ~10 bp periodicity'."}
+
+  # ----------------------------------------------------------- copy-number
+  - algorithm_id: copy-number
+    metric_id: tumor_fraction
+    label: "Tumour fraction (ichorCNA)"
+    value_kind: proportion
+    tier: NEWER
+    origin_tier: NEWER
+    origin_platform: "Illumina ultra-low-pass WGS with a panel of normals; ONT reported concordant"
+    min_depth_x: 0.1
+    requires_pon: true
+    reference: {kind: none}
+    performance:
+      kind: limit_of_detection
+      value: "About 3% tumour fraction at about 0.1x with a panel of normals; this run: no panel of normals"
+      platform: Illumina
+      depth: "0.1x"
+      source: "Adalsteinsson 2017, Nat Commun"
+    performance_missing_reason: null
+    meaning_high: "Copy-number changes consistent with tumour-derived DNA; also pregnancy, a maternal CNV or a noisy sample."
+    meaning_low: "No genome-wide copy-number signal above the detection limit."
+    confounders: ["no panel of normals", "pregnancy", "constitutional CNVs", "low depth", "GC bias"]
+    next_steps:
+      analytical: ["Build the kit panel of normals (cohort)", "Check the synthetic spike recovery at this depth", "Compare with the fragment-size mode"]
+      clinical_setting: "In a validated clinical setting, a signal like this would typically prompt imaging or a specialist referral; this is not a diagnosis."
+    license_ids: [gpl-copyleft]
+    flags: [FDA]
+    headline: true
+    stability: {kind: absolute, tolerance: 0.03}
+    citations: ["doi:10.1038/s41467-017-00965-y"]
+    citation_checked:
+      by: "lab build agent"
+      date: "2026-10-15"
+      note: "PubMed abstract PMID 29109393: tumour content from 0.1x WGS. Full text PMC5673918: 'a lower limit of 0.03 tumor fraction' from arm-level events, coverages >= 0.10x; Illumina, healthy-donor panel of normals."
+
+  - algorithm_id: copy-number
+    metric_id: ploidy
+    label: "Ploidy (ichorCNA)"
+    value_kind: positive
+    tier: SPECULATIVE
+    origin_tier: NEWER
+    origin_platform: "Illumina ultra-low-pass WGS"
+    min_depth_x: 0.1
+    requires_pon: true
+    reference: {kind: none}
+    performance: null
+    performance_missing_reason: "Not identifiable at low tumour fraction; reported for completeness"
+    meaning_high: "Model ploidy above 2; unreliable when tumour fraction is near zero."
+    meaning_low: "Model ploidy near 2."
+    confounders: ["tumour fraction near zero", "no panel of normals"]
+    next_steps:
+      analytical: ["Read only together with tumour fraction"]
+      clinical_setting: null
+    license_ids: [gpl-copyleft]
+    flags: []
+    headline: false
+    stability: {kind: absolute, tolerance: 0.5}
+    citations: []
+    citation_checked: {by: "lab build agent", date: "2026-10-15", note: "No citation displayed."}
