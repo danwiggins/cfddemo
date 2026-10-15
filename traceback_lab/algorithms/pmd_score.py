@@ -34,6 +34,8 @@ from ._meth import MethBase, load_calls
 ASSET_NAME = "PMD_coordinates_hg38.bed.gz"
 ASSET_SHA256 = "e6be0642b7b8dd530247c0c43cbc63165092aa9b9ada632710cedfbdc9b8e3dc"
 LABEL = "commonPMD"
+# The annotation is in hg38 coordinates: refuse any other reference.
+HG38_CHR1_LENGTH = 248_956_422
 
 
 def asset_path(root: Path) -> Path:
@@ -90,6 +92,10 @@ class PmdScore(MethBase):
         decision = super().preflight(ctx)
         if isinstance(decision, Skip):
             return decision
+        summary, _ = load_summary(ctx)
+        lengths = dict(zip(summary.contigs, summary.lengths))
+        if lengths.get("chr1") != HG38_CHR1_LENGTH:
+            return Skip("reference", "the PMD annotation is in hg38 coordinates; this reference is not hg38")
         path = asset_path(ctx.root)
         if not path.is_file():
             return Skip("missing_asset", f"the Zhou 2018 PMD annotation is not under ROOT/lab/assets/pmd/ ({ASSET_NAME})")
