@@ -32,6 +32,7 @@ from .scrub import Scrubber
 from .store import LabStore, RunLog, WriterLock
 
 TF_TOLERANCE = 0.05
+DETECTED_MIN = 0.01  # a recovered TF below this is 'not detected'
 DERIVED_CONSUMES = ("read_summary", "meth_calls", "counting_bam")
 
 
@@ -196,7 +197,12 @@ def synthetic_summary(store: LabStore, runs: Sequence[DerivedRun]) -> list[dict[
             {
                 "tf_expected": expected,
                 "tf_recovered": recovered,
-                "recovered_within_tolerance": recovered is not None and abs(recovered - expected) <= TF_TOLERANCE,
+                # A spike counts as recovered only when it is detected at all:
+                # at TF 0.03 a recovered 0.0 sits inside ±0.05 by arithmetic alone.
+                "detected": recovered is not None and recovered >= DETECTED_MIN,
+                "recovered_within_tolerance": recovered is not None
+                and recovered >= DETECTED_MIN
+                and abs(recovered - expected) <= TF_TOLERANCE,
                 "status": status,
                 "derived_input_id": run.derived.input_id,
                 "duplicated": run.derived.manifest.get("duplicated"),
