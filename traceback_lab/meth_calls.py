@@ -25,11 +25,14 @@ Rules (D28):
 
 - only D21-eligible records are decoded;
 - query positions map to the reference with
-  ``get_aligned_pairs(matches_only=True)``; a call on a base without an aligned
-  reference position (insertion, soft clip) is dropped and counted;
-- skip mode ``.`` (or none): every CpG C of the read that the code does not
-  list is an implicit canonical call for that code; ``?``: unlisted is
-  missing;
+  ``get_aligned_pairs(matches_only=True)``; both bases of the CpG must align to
+  adjacent reference positions, else the call (in an insertion, a soft clip,
+  or split by a deletion) is dropped and counted;
+- skip mode ``.`` (or none): every CpG base of the code's fundamental base
+  (``C+`` or ``G-``) that the code does not list is an implicit canonical call
+  for that code; ``?``: unlisted is missing;
+- ``codes_sampled`` holds the codes seen in the first 10,000 eligible reads
+  (tagged or not), the population of the ``global-5hmc`` channel gate;
 - a record whose ``MN`` differs from its sequence length, or whose MM/ML do
   not parse, contributes no calls and is counted under ``invalid_mm``.
 """
@@ -86,8 +89,8 @@ def _record_sites(record: Any) -> tuple[list[tuple[int, int, int, int, int]], in
     if parsed is None:
         raise _InvalidRecord("MM/ML do not parse")
     reverse = record.is_reverse
-    # CpG sites of the read in stored coordinates: the C of a stored CG for a
-    # forward record, the G for a reverse record (the read's own C).
+    # CpG calls in stored coordinates: on the C of a stored CG (forward C+
+    # calls) or on its G (reverse records, opposite-strand G- calls).
     sites: dict[int, dict[str, int]] = {}
     for (base, _strand, code), calls in parsed.items():
         if base not in ("C", "G") or code not in ("m", "h"):
@@ -100,31 +103,40 @@ def _record_sites(record: Any) -> tuple[list[tuple[int, int, int, int, int]], in
             if on_c or on_g:
                 sites.setdefault(position, {})[code] = int(quality)
     modes = mm_skip_modes(mm)
-    implicit = [code[-1] for code, mode in modes.items() if code[:2] == "C+" and code[-1] in ("m", "h") and mode == "."]
-    if implicit:
-        offset = 1 if reverse else 0
-        for index in range(len(sequence) - 1):
-            if sequence[index] == "C" and sequence[index + 1] == "G":
-                position = index + offset
-                entry = sites.setdefault(position, {})
-                for code in implicit:
-                    entry.setdefault(code, 0)
+    complement = {"C": "G", "G": "C"}
+    for code, mode in modes.items():
+        base, letter = code[0], code[-1]
+        if mode != "." or base not in complement or letter not in ("m", "h"):
+            continue
+        # Implicit canonical calls: every CpG base of the code's fundamental
+        # base in the original read orientation (its complement on the stored
+        # sequence of a reverse record) that the code does not list.
+        target = complement[base] if reverse else base
+        for index, stored in enumerate(sequence):
+            if stored != target:
+                continue
+            on_c = stored == "C" and index + 1 < len(sequence) and sequence[index + 1] == "G"
+            on_g = stored == "G" and index > 0 and sequence[index - 1] == "C"
+            if on_c or on_g:
+                sites.setdefault(index, {}).setdefault(letter, 0)
     if not sites:
         return [], 0
     pairs = dict(record.get_aligned_pairs(matches_only=True))
     out: list[tuple[int, int, int, int, int]] = []
     dropped = 0
     for position in sorted(sites):
-        ref = pairs.get(position)
-        if ref is None:
+        on_g = sequence[position] == "G"
+        c_pos = position - 1 if on_g else position
+        ref_c, ref_g = pairs.get(c_pos), pairs.get(c_pos + 1)
+        # Both bases of the CpG must align, adjacently, to the reference;
+        # otherwise (insertion, soft clip, deletion between them) the call
+        # has no genomic CpG coordinate and is dropped.
+        if ref_c is None or ref_g is None or ref_g != ref_c + 1:
             dropped += 1
             continue
-        on_g = sequence[position] == "G"
-        ref_pos0 = ref - 1 if on_g else ref
-        strand = 1 if on_g else 0
         calls = sites[position]
         channels = (HAS_M if "m" in calls else 0) | (HAS_H if "h" in calls else 0)
-        out.append((ref_pos0, strand, calls.get("m", 0), calls.get("h", 0), channels))
+        out.append((ref_c, 1 if on_g else 0, calls.get("m", 0), calls.get("h", 0), channels))
     return out, dropped
 
 
@@ -161,14 +173,14 @@ def write_meth_calls(
                 continue
             counts["records_decoded"] += 1
             mm = mm_tag(record)
+            if sampled < CODE_SAMPLE:  # the first 10,000 eligible reads, tagged or not
+                sampled += 1
+                for code in mm_codes(mm or ""):
+                    if code not in codes:
+                        codes.append(code)
             if mm is None:
                 continue
             counts["records_with_mm"] += 1
-            if sampled < CODE_SAMPLE:
-                sampled += 1
-                for code in mm_codes(mm):
-                    if code not in codes:
-                        codes.append(code)
             try:
                 sites, dropped = _record_sites(record)
             except _InvalidRecord:

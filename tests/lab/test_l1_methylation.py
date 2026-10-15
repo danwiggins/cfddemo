@@ -92,6 +92,41 @@ def test_meth_calls_read_rows_index_the_read_summary(tmp_path: Path) -> None:
     assert np.all((rows["ref_pos0"] >= starts - 1) & (rows["ref_pos0"] < summary.column("end")[rows["read_row"]]))
 
 
+def test_meth_calls_drop_cpgs_split_by_a_deletion_and_expand_g_minus_channels(tmp_path: Path) -> None:
+    reads = [
+        # reverse record, query CG split by a 4 bp deletion: no genomic CpG, dropped
+        Read("del", "chr1", 100, "CGAA", flag=16, cigar=[(0, 1), (2, 4), (0, 3)], mm="C+m?,0;", ml=[250]),
+        # duplex-style forward record: C+m and G-m with implicit canonical calls
+        Read("dup", "chr1", 200, "ACGTACGT", mm="C+m.,0;G-m.,0;", ml=[250, 250]),
+    ]
+    store_dir = tmp_path / "mc"
+    ctx = context_for(tmp_path, CONTIGS, reads)
+    output = METH_CALLS.run(ctx, store_dir)
+    metrics = {m["metric_id"]: m["value"] for m in output.metrics}
+    rows = sorted((int(r["ref_pos0"]), int(r["strand"]), int(r["p_m"])) for r in np.concatenate(list(MethCalls.open(store_dir / "calls").chunks())))
+    assert rows == [(201, 0, 250), (201, 1, 250), (205, 0, 0), (205, 1, 0)]
+    assert metrics["dropped_unaligned"] == 1
+
+
+def test_channel_gate_samples_the_first_reads_tagged_or_not(tmp_path: Path) -> None:
+    from traceback_lab.algorithms._records import eligible_record
+    from traceback_lab.meth_calls import write_meth_calls
+
+    reads = [Read(f"u{i:02d}", "chr1", 10 * i, "ACGTACGT") for i in range(5)]
+    reads.append(Read("h", "chr1", 900, "ACGTACGT", mm="C+h?,0;", ml=[200]))
+    context_for(tmp_path, CONTIGS, reads)
+    bam = tmp_path / "input" / "aligned.bam"
+    import traceback_lab.meth_calls as module
+
+    original = module.CODE_SAMPLE
+    module.CODE_SAMPLE = 5
+    try:
+        meta = write_meth_calls(bam, tmp_path / "calls", eligible=lambda r: eligible_record(r, {"chr1"}), contig_index={"chr1": 0})
+    finally:
+        module.CODE_SAMPLE = original
+    assert meta["codes_sampled"] == [] and meta["code_sample_records"] == 5
+
+
 def test_meth_calls_skip_without_mm(tmp_path: Path) -> None:
     reads = [Read("a", "chr1", 0, "ACGTACGT")]
     ctx = context_for(tmp_path, CONTIGS, reads)
@@ -113,9 +148,9 @@ def _write_store(directory: Path, rows: list[tuple], *, chunk: int = 3, codes=("
     return directory
 
 
-def _consumer_ctx(tmp_path: Path, rows: list[tuple], *, codes=("C+h", "C+m"), derived=None, reads=None):  # type: ignore[no-untyped-def]
+def _consumer_ctx(tmp_path: Path, rows: list[tuple], *, codes=("C+h", "C+m"), derived=None, reads=None, contigs=CONTIGS):  # type: ignore[no-untyped-def]
     reads = reads or [Read(f"r{i}", "chr1", 100 * i, "A" * 50) for i in range(10)]
-    ctx = context_for(tmp_path, CONTIGS, reads, derived=derived, eligible_reads=600_000)
+    ctx = context_for(tmp_path, contigs, reads, derived=derived, eligible_reads=600_000)
     _write_store(tmp_path / "mc" / "calls", rows, codes=codes)
     ctx.extras["upstream"]["meth-calls"] = str(tmp_path / "mc")
     return ctx
@@ -183,7 +218,10 @@ def test_pmd_score_inside_vs_outside(tmp_path: Path) -> None:
     sha = hashlib.sha256(bed.read_bytes()).hexdigest()
     algorithm = PmdScore("pmd-score", parameters={"asset": ASSET_NAME, "asset_sha256": sha, "label": "commonPMD", "call": "argmax"})
     rows = [_row(0, 50, 5), _row(0, 60, 230), _row(1, 150, 230), _row(1, 160, 230), _row(2, 250, 5)]
-    ctx = _consumer_ctx(tmp_path, rows)
+    toy = _consumer_ctx(tmp_path / "toy", rows)
+    decision = algorithm.preflight(toy)
+    assert isinstance(decision, Skip) and decision.reason_code == "reference"  # not hg38 coordinates
+    ctx = _consumer_ctx(tmp_path, rows, contigs=[("chr1", 248_956_422)])
     decision = algorithm.preflight(ctx)
     assert isinstance(decision, Skip) and decision.reason_code == "missing_asset"
     target = tmp_path / "lab" / "assets" / "pmd" / ASSET_NAME
