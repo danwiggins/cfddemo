@@ -75,6 +75,17 @@ class Hangs(_Base):
 
 
 @dataclass
+class SessionHangs(_Base):
+    """Starts a child in a NEW session (like exec_pinned's modkit), then hangs."""
+
+    def run(self, ctx: InputContext, out: Path) -> AlgorithmOutput:
+        child = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(600)"], start_new_session=True)
+        Path(os.environ["LAB_TEST_PIDFILE"]).write_text(str(child.pid))
+        time.sleep(600)
+        return AlgorithmOutput()
+
+
+@dataclass
 class Waits(_Base):
     """Writes LAB_TEST_READY, then sleeps (for interrupt tests)."""
 
@@ -108,3 +119,4 @@ WAITS = Waits("cell-origin", cost="slow")
 SKIPS = SkipsDepth("instability", cost="slow")
 BAD_PANEL = BadPanel("mtdna")
 DEPENDS_ON_FAILURE = Counter("tf-concordance", family="composite", upstream=("copy-number",))
+SESSION_HANGS = SessionHangs("cell-origin", cost="slow")

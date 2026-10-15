@@ -85,7 +85,7 @@ def test_example_step_runs_within_budget_and_prints_the_summary(journey_root) ->
     sample = next(line for line in block if line.startswith("SAMPLE  "))
     assert re.match(r"SAMPLE  [0-9a-f]{12,} ", sample)
     assert any(line == "NEXT    traceback lab serve --open" for line in block)
-    assert "skipped (example_reference: copy-number)" in out
+    assert re.search(r"skipped \(example_reference: [a-z-, ]*copy-number", out)
     record = json.loads(next((journey_root["root"] / "lab" / "sources").glob("*.json")).read_text())
     assert record["example"] is True
 

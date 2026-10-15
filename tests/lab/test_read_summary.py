@@ -221,6 +221,7 @@ def test_lab_run_computes_the_slice_algorithms(lab_world, capsys, shared_mmi) ->
         "read-summary": "ok", "bam-qc": "ok", "depth": "ok", "fragment-size": "ok"
     }
     assert steps["copy-number"] == "skipped"  # depth (and no assets) on the toy input
+    assert steps["cell-origin"] == "skipped"  # L0.5b: no modkit/Loyfer atlas and below 2.5M reads on the toy input
     # L1.1 on the synthetic world: MM tags and chrM present; sex-check is below its 500k-read bar.
     assert {k: steps[k] for k in ("modbase-qc", "long-tail", "mtdna", "sex-check")} == {
         "modbase-qc": "ok", "long-tail": "ok", "mtdna": "ok", "sex-check": "skipped"

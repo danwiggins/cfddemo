@@ -33,7 +33,7 @@ from .store import LabStore, RunLog, WriterLock
 
 TF_TOLERANCE = 0.05
 DETECTED_MIN = 0.01  # a recovered TF below this is 'not detected'
-DERIVED_CONSUMES = ("read_summary", "meth_calls", "counting_bam")
+DERIVED_CONSUMES = ("read_summary", "meth_calls", "counting_bam", "full_bam")
 
 
 @dataclass
@@ -96,7 +96,12 @@ def run_derived(
         lock.set_step("derive")
     if progress:
         progress(f"{'derive':<24} {len(specs)} derived input(s): " + ", ".join(spec.label() for spec in specs))
-    runnable = [item for item in items if item.algorithm.consumes in DERIVED_CONSUMES]
+    # Intermediates that read the parent BAM (read-summary) never run on a
+    # derived input; other full-BAM consumers (cell-origin) get a transient BAM.
+    runnable = [
+        item for item in items
+        if item.algorithm.consumes in DERIVED_CONSUMES and item.algorithm.id != "read-summary"
+    ]
     summary = None
     if read_summary is not None and read_summary.artifacts_dir:
         try:
