@@ -572,3 +572,20 @@ def test_algorithm_timeout_kills_a_child_in_another_session(lab_world, capsys, m
         time.sleep(0.05)
     else:
         pytest.fail("a child that left the worker's process group survived the timeout")
+
+
+def test_worker_start_up_does_not_import_the_signed_cli() -> None:
+    """Every algorithm step is its own process; importing traceback_runner.cli
+    (and its web server) cost ~1.5 s per step and pushed --example past its CI budget."""
+
+    import subprocess
+    import sys
+
+    code = (
+        "import sys, traceback_lab.worker\n"
+        "from traceback_lab.registry import ALGORITHMS, load_entry\n"
+        "[load_entry(entry) for entry in ALGORITHMS]\n"
+        "print('traceback_runner.cli' in sys.modules)\n"
+    )
+    out = subprocess.run([sys.executable, "-c", code], capture_output=True, text=True, check=True).stdout.strip()
+    assert out == "False"

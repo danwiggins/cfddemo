@@ -108,23 +108,26 @@ def page_root(tmp_path_factory, synthetic_world) -> Path:
     return root
 
 
-def _dom(server, tmp_path, *, size="1280,800", route=None) -> str:
-    link = server.issue_link()
-    if route:
-        link += f"&route={route}"
-    dom = ""
-    for attempt in range(4):
-        from tests.lab.test_lab_server import headless_dom
+def _dom(server, tmp_path, *, size="1280,800", route=None, want=None) -> str:
+    """Dump the page; retry (fresh link, fresh profile, longer virtual-time budget)
+    until it is ready and ``want`` holds (default: landing measured)."""
 
+    from tests.lab.test_lab_server import headless_dom
+
+    if want is None:
+        want = (lambda d: True) if route else (lambda d: "data-measured" in d)
+    good = lambda d: 'data-ready="1"' in d and want(d)  # noqa: E731
+    dom = ""
+    for attempt in range(5):
+        link = server.issue_link() + (f"&route={route}" if route else "")
         dom = headless_dom(
             [_chrome(), "--headless=new", "--disable-gpu", "--hide-scrollbars", "--no-first-run",
-             f"--user-data-dir={tmp_path / f'p-{size}-{attempt}'}", "--virtual-time-budget=15000",
+             f"--user-data-dir={tmp_path / f'p-{size}-{attempt}'}", f"--virtual-time-budget={15000 + 15000 * attempt}",
              f"--window-size={size}", "--dump-dom", link],
-            ok=lambda d: 'data-ready="1"' in d and ("data-measured" in d or route), attempts=1,
+            ok=good, attempts=1, timeout=90,
         )
-        if 'data-ready="1"' in dom and ("data-measured" in dom or route):
+        if good(dom):
             return dom
-        link = server.issue_link() + (f"&route={route}" if route else "")
     return dom
 
 
@@ -178,10 +181,10 @@ def test_navigation_order_and_absent_lenses(page_root, tmp_path) -> None:
     with RunningLabServer(LabStore(page_root)) as server:
         dom = _dom(server, tmp_path, route=f"/sample/{_id12(page_root)}/stability")
     nav = re.search(r'<nav aria-label="Lenses"[^>]*>(.*?)</nav>', dom, re.S).group(1)
-    labels = re.findall(r">([A-Za-z/]+)(?: \(\d+[^)]*\))?</a>", nav)
-    assert labels == ["Findings", "Trust/QC", "Stability", "Evidence", "Methods"]
+    labels = re.findall(r">([A-Za-z/ ]+?)(?: \(\d+[^)]*\))?</a>", nav)
+    assert labels == ["Findings", "Trust/QC", "Stability", "Signals", "Body map", "Agreement", "Evidence", "Methods"]
     assert 'aria-current="page">Stability' in nav
-    for absent in ("Signals", "Body map", "Agreement", "Compare"):
+    for absent in ("Compare",):
         assert absent not in nav
     options = re.findall(r"<option[^>]*>([^<]*)</option>", dom)
     assert len(options) == 1 and "@" not in options[0]  # derived inputs are never samples
@@ -252,3 +255,19 @@ def test_methods_shows_provenance_for_every_number(page_root, tmp_path) -> None:
     assert "source_id" in dom  # the full stamp sits in each row's disclosure
     callouts = re.findall(r'class="license-callout" id="license-([a-z-]+)"', dom)
     assert len(callouts) == len(set(callouts))
+
+
+@needs_chrome
+def test_signals_body_map_and_agreement(page_root, tmp_path) -> None:
+    id12 = _id12(page_root)
+    with RunningLabServer(LabStore(page_root)) as server:
+        signals = _dom(server, tmp_path / "s", route=f"/sample/{id12}/signals", want=lambda d: 'data-rendered="1"' in d)
+        body = _dom(server, tmp_path / "b", route=f"/sample/{id12}/body-map")
+        agreement = _dom(server, tmp_path / "a", route=f"/sample/{id12}/agreement")
+    assert 'data-rendered="1"' in signals and "Size density" in signals and "Data table" in signals
+    assert 'aria-pressed="true"' in signals
+    assert "FLAG: LEGAL" in body and "cell-origin" in body
+    assert "These signals share inputs and are not independent confirmation; agreement is not validation." in agreement
+    assert "score" not in agreement.lower().split("agreement is not validation")[1][:2000]
+    for dom in (signals, body, agreement):
+        assert _body(dom)["csp-violations"] == "0"
