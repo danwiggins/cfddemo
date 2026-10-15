@@ -245,8 +245,9 @@ def _chrome() -> str | None:
 @pytest.mark.skipif(_chrome() is None, reason="no Chrome/Chromium for the headless CSP check")
 def test_headless_page_renders_a_chart_with_zero_csp_violations(server, tmp_path) -> None:
     dom = ""
+    id12 = api_module.LabApi(server.app.store).samples()["samples"][0]["id12"]
     for attempt in range(3):  # a loaded CI host can outrun the virtual-time budget once
-        link = server.issue_link()
+        link = server.issue_link() + f"&route=/sample/{id12}/trust-qc"
         completed = subprocess.run(
             [
                 _chrome(), "--headless=new", "--disable-gpu", "--no-first-run", "--no-default-browser-check",

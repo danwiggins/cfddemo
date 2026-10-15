@@ -11,7 +11,7 @@ body.lab { background: #f3f1ec; }
 .lab-chrome { width: min(76rem, calc(100% - 2rem)); margin-inline: auto; padding: 0; border: 0; }
 .lab-banner { max-height: none; margin: .5rem 0 0; padding: .4rem .75rem; line-height: 1.3; }
 .app-header { display: flex; flex-wrap: wrap; align-items: center; gap: .5rem 1rem; min-height: 3.5rem; padding-block: .25rem; }
-.lab-title { font: 700 1.35rem/1.2 ui-serif, Georgia, serif; color: var(--ink); text-decoration: none; min-height: 2.75rem; display: inline-flex; align-items: center; }
+.lab-title { white-space: nowrap; font: 700 1.35rem/1.2 ui-serif, Georgia, serif; color: var(--ink); text-decoration: none; min-height: 2.75rem; display: inline-flex; align-items: center; }
 .switcher { display: flex; gap: .5rem; align-items: center; font-weight: 650; }
 .switcher select { width: auto; max-width: 22rem; }
 .lab-status { flex-basis: 100%; margin: 0; min-height: 1.4rem; color: var(--ink); font-weight: 600; }
@@ -43,3 +43,74 @@ pre.stderr { white-space: pre-wrap; overflow-wrap: anywhere; font-size: .85rem; 
 @media (max-width: 47.99rem) { .lenses { flex-wrap: nowrap; overflow-x: auto; } .switcher { flex-basis: 100%; } }
 @media (prefers-reduced-motion: reduce) { * { transition: none !important; animation: none !important; } }
 .lenses a.disabled, main a.disabled { pointer-events: none; color: var(--muted); }
+/* ---- S6c: landing, Findings, Stability ---------------------------------------------- */
+.app-header { flex-wrap: nowrap; }
+.app-header .flag-pill { font-size: .875rem; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; min-width: 0; }
+.lab-status { flex-basis: auto; }
+.lab-chrome .lab-status:not(:empty) { display: block; }
+#main { width: min(76rem, calc(100% - 2rem)); margin-inline: auto; display: block; padding-block: .5rem 3rem; }
+.clia-panel { margin: .5rem 0 0; padding: .75rem 1rem; background: #ffffff; border: 1px solid var(--rule); border-radius: .5rem; overflow: visible; }
+.clia-title { margin: 0 0 .3rem; font: 700 1.5rem/1.15 ui-serif, Georgia, serif; }
+.clia-short { column-count: 1; column-gap: 2rem; font-size: .9rem; line-height: 1.3; }
+.clia-short p { margin: 0 0 .3rem; break-inside: avoid; }
+.clia-actions { margin: .1rem 0 0; display: flex; gap: 1rem; align-items: center; }
+.clia-toggle { background: #ffffff; color: var(--ink); }
+.clia-full p { max-width: 70ch; }
+.headline { margin: .6rem 0 .4rem; font-size: 1.1rem; font-weight: 700; }
+.landing-band { display: grid; grid-template-columns: 1fr; gap: 1rem; }
+.landing-band .panel { margin-top: 0; padding-top: .5rem; }
+.defended-rows { list-style: none; margin: .25rem 0; padding: 0; }
+.defended-row { min-height: 3.5rem; padding: .25rem 0; border-bottom: 1px solid var(--rule); }
+.defended-row > a { display: flex; flex-wrap: wrap; gap: .25rem .5rem; align-items: center; color: var(--ink); text-decoration: none; min-height: 2.75rem; }
+.defended-evidence { flex-basis: 100%; color: var(--muted); font-size: .9rem; }
+.curve-heading { display: flex; flex-wrap: wrap; gap: .5rem 1rem; align-items: baseline; }
+.legend { color: var(--muted); }
+.curve-grid { display: grid; gap: 0; }
+.curve-row { display: grid; grid-template-columns: 11rem 1fr; align-items: center; min-height: 2.75rem; border-bottom: 1px solid var(--rule); }
+.curve-label { background: none; color: var(--ink); border: 0; text-align: left; font-weight: 600; min-height: 2.75rem; padding: 0 .25rem; }
+.curve-track { position: relative; height: 2.5rem; }
+.curve-axis .curve-track { height: 1.75rem; }
+.curve-cell, .curve-lit, .curve-tick, .curve-run { position: absolute; top: 50%; transform: translate(-50%, -50%); }
+.curve-cell { font-size: 1.1rem; color: var(--chart-a); }
+.curve-lit { color: var(--muted); font-size: .85rem; white-space: nowrap; }
+.curve-tick { color: var(--muted); font-size: .8rem; }
+.curve-run { color: var(--this-run); font-weight: 700; font-size: .8rem; white-space: nowrap; border-left: 2px solid var(--this-run); padding-left: .2rem; transform: translate(0, -50%); }
+.curve-detail { padding: .25rem 11rem; color: var(--muted); }
+.control-block { margin: .5rem 0; }
+.control-badge { display: inline-block; padding: .15rem .45rem; border: 2px solid var(--ink); font-size: .875rem; font-weight: 700; text-transform: uppercase; }
+.controls .echart { height: 12rem; }
+.example-pill { font-size: .8rem; margin-left: .35rem; }
+.findings-head { display: flex; flex-wrap: wrap; gap: .5rem 1rem; align-items: center; }
+.finding-card { margin: .75rem 0; padding: .75rem 1rem; background: #ffffff; border: 1px solid var(--rule); border-radius: .5rem; }
+.card-head { display: flex; flex-wrap: wrap; gap: .5rem; align-items: center; }
+.card-value { font-size: 1.25rem; margin: .25rem 0; }
+.strip { margin: .25rem 0; }
+.strip-svg { width: 100%; max-width: 20rem; height: auto; }
+.strip-track { stroke: var(--chart-hatch); stroke-width: 2; }
+.strip-band { fill: #e3e8ee; stroke: var(--chart-hatch); }
+.strip-tick { stroke: var(--chart-hatch); }
+.strip-mark { fill: var(--this-run); font-size: 16px; }
+.multiples { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: .75rem; }
+.multiple { margin: 0; padding: .5rem; background: #ffffff; border: 1px solid var(--rule); border-radius: .35rem; }
+.multiple-svg { width: 100%; height: auto; }
+.multiple-svg .zero { stroke: var(--chart-hatch); }
+.multiple-svg .band { fill: #e3e8ee; }
+.multiple-svg .pt { fill: var(--chart-a); font-size: 14px; }
+.multiple-svg .split { fill: var(--this-run); font-size: 14px; }
+.multiple-svg .gap, .multiple-svg .axis { fill: var(--muted); font-size: 10px; }
+@media (min-width: 1200px) {
+  .landing-band { grid-template-columns: 4fr 8fr; align-items: start; }
+  .landing-band .defended { grid-column: 1; grid-row: 1; }
+  .landing-band .curve { grid-column: 2; grid-row: 1 / span 2; }
+  .landing-band .controls { grid-column: 1; grid-row: 2; }
+  .clia-short { column-count: 2; }
+}
+@media (max-width: 1199px) { .multiples { grid-template-columns: repeat(2, minmax(0, 1fr)); } }
+@media (max-width: 767px) {
+  .multiples { grid-template-columns: 1fr; }
+  .app-header { flex-wrap: wrap; }
+  .curve-row { grid-template-columns: 1fr; }
+  .curve-detail { padding: .25rem; }
+}
+.lenses[hidden] { display: none; }
+.curve-axis .curve-track { height: 1.5rem; }

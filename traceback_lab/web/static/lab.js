@@ -62,7 +62,10 @@
     const params = new URLSearchParams(location.hash.slice(1));
     const code = params.get("bootstrap");
     if (!code) return;
-    history.replaceState(null, "", location.pathname + "#/");
+    // An optional start route travels with the one-use link (e.g. for a deep link).
+    const route = params.get("route");
+    const safe = route && /^\/[A-Za-z0-9/?=._-]{0,120}$/.test(route) ? route : "/";
+    history.replaceState(null, "", location.pathname + "#" + safe);
     const response = await fetch("/api/v1/session/bootstrap", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
@@ -134,7 +137,9 @@
     const nav = document.getElementById("lenses");
     const sample = state.sample && state.sample.found ? state.sample : null;
     nav.replaceChildren();
-    if (!sample) return;
+    // Lens tabs belong to a sample's lens routes; the landing page has none (spec layout).
+    nav.hidden = !sample || state.route.name !== "lens";
+    if (!sample || nav.hidden) return;
     const current = state.route.name === "lens" ? state.route.lens : LENSES[0].id;
     for (const lens of LENSES) {
       let label = lens.label;
