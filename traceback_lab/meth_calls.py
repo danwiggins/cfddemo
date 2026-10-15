@@ -159,6 +159,7 @@ def write_meth_calls(
     counts = {"records_decoded": 0, "records_with_mm": 0, "invalid_mm": 0, "dropped_unaligned": 0, "calls": 0}
     codes: list[str] = []
     sampled = 0
+    invalid_rows: list[int] = []
 
     def flush() -> None:
         nonlocal filled
@@ -185,6 +186,7 @@ def write_meth_calls(
                 sites, dropped = _record_sites(record)
             except _InvalidRecord:
                 counts["invalid_mm"] += 1
+                invalid_rows.append(row)
                 continue
             counts["dropped_unaligned"] += dropped
             cid = contig_index[record.reference_name]
@@ -195,6 +197,7 @@ def write_meth_calls(
                 if filled == chunk_calls:
                     flush()
         flush()
+    np.asarray(invalid_rows, dtype="<u4").tofile(out / "invalid_rows.bin")
     meta = {
         "schema": SCHEMA,
         "dtype": [list(field) for field in DTYPE.descr],
@@ -234,6 +237,16 @@ class MethCalls:
             if row_mask is not None:
                 chunk = chunk[row_mask[chunk["read_row"]]]
             yield chunk
+
+
+    def invalid_records(self, row_mask: np.ndarray | None = None) -> int:
+        """Records with MM that contributed no calls (D28 ``invalid_mm``), masked."""
+
+        path = self.directory / "invalid_rows.bin"
+        if not path.exists() or int(self.meta.get("invalid_mm", 0)) == 0:
+            return 0
+        rows = np.fromfile(path, dtype="<u4")
+        return int(rows.size if row_mask is None else row_mask[rows].sum())
 
 
 def argmax_state(chunk: np.ndarray) -> np.ndarray:
