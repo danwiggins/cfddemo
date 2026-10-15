@@ -26,7 +26,7 @@ and the missing setup steps in order. `lab run --example` generates a small
 synthetic reference and three unaligned chunks (about 200k reads, a planted
 167 bp size mode, 5mC calls and chrY reads), registers the reference as
 `lab-example` in ROOT and runs the real ingest, alignment, read summary,
-algorithms, depth curve and split halves. It takes about 45 seconds on an
+algorithms, depth curve and split halves. It takes about 30 seconds on an idle
 M-series Mac. Copy-number is skipped (`example_reference`): it needs
 hg38-scale assets. The sample carries an **EXAMPLE (synthetic)** pill.
 `lab serve --open` prints the one-use link and opens it.
