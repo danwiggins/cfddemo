@@ -123,6 +123,24 @@ def write_atomic(path: Path, content: bytes) -> None:
         temporary.unlink(missing_ok=True)
 
 
+def open_regular_no_follow(path: Path) -> int:
+    """Open a regular-file candidate without following symlink components on POSIX."""
+
+    flags = os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_NONBLOCK", 0)
+    if os.name != "posix" or not hasattr(os, "O_NOFOLLOW"):
+        return os.open(path, flags)
+    absolute = Path(os.path.abspath(path))
+    directory = os.open(absolute.anchor, os.O_RDONLY | os.O_DIRECTORY)
+    try:
+        for part in absolute.parts[1:-1]:
+            child = os.open(part, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW, dir_fd=directory)
+            os.close(directory)
+            directory = child
+        return os.open(absolute.name, flags, dir_fd=directory)
+    finally:
+        os.close(directory)
+
+
 def pid_alive(pid: int) -> bool:
     if pid <= 0:
         return False
@@ -973,6 +991,7 @@ __all__ = [
     "WriterLock",
     "new_attempt_id",
     "new_run_id",
+    "open_regular_no_follow",
     "pid_alive",
     "summarize_run",
     "write_atomic",

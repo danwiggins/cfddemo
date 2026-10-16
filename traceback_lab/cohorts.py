@@ -8,10 +8,12 @@ cannot mix old and new members in one response.
 from __future__ import annotations
 
 import json
+import os
 import re
+import stat
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 from pydantic import ValidationError
 
@@ -19,10 +21,13 @@ from traceback_runner.serialization import canonical_json_bytes
 
 from .cohort_contracts import CohortGeneration, CohortMember, CohortResult, MetricProjection, project_metric
 from .identity import SHA256_PATTERN, cohort_compat_key
-from .ingest import input_manifest, resolve_sample, source_record
+from .ingest import resolve_sample, source_ids
 from .problems import LabProblem
 from .registry import execution_identity, load_registry
-from .store import LabStore, new_run_id, write_atomic
+from .store import LabStore, new_run_id, open_regular_no_follow, write_atomic
+
+if TYPE_CHECKING:
+    from .pon import PonInput
 
 _COHORT_ID = re.compile(r"^[a-z][a-z0-9-]{0,39}$")
 _ROSTER_SCHEMA = "traceback.lab.cohort-roster.v1"
@@ -121,14 +126,29 @@ def read_roster(store: LabStore, cohort_id: str) -> tuple[str, ...]:
     return tuple(members)
 
 
+def _read_stored_metadata(path: Path, problem: LabProblem) -> Any | None:
+    """Read a store record without traversing a substituted symlink."""
+
+    try:
+        with os.fdopen(open_regular_no_follow(path), "rb") as stream:
+            if not stat.S_ISREG(os.fstat(stream.fileno()).st_mode):
+                raise OSError("stored metadata is not a regular file")
+            return json.loads(stream.read())
+    except FileNotFoundError:
+        return None
+    except (OSError, ValueError, UnicodeDecodeError) as exc:
+        raise problem from exc
+
+
 def _checked_source_record(store: LabStore, source_id: str) -> dict[str, Any]:
-    record = source_record(store, source_id)
+    missing = LabProblem(
+        "TBX-LAB-020", cause=f"stored source record {source_id[:12]} is missing, malformed or unsafe",
+        fix="Restore a regular source record matching its filename before cohort add/build",
+        data={"source_id": source_id, "field": "source record"},
+    )
+    record = _read_stored_metadata(store.sources_dir / f"{source_id}.json", missing)
     if record is None:
-        raise LabProblem(
-            "TBX-LAB-020", cause=f"stored source record {source_id[:12]} is missing or malformed",
-            fix="Restore the source record matching its filename before cohort add/build",
-            data={"source_id": source_id, "field": "source record"},
-        )
+        raise missing
     if not isinstance(record, dict) or record.get("source_id") != source_id:
         raise LabProblem(
             "TBX-LAB-020",
@@ -139,11 +159,46 @@ def _checked_source_record(store: LabStore, source_id: str) -> dict[str, Any]:
     return record
 
 
+def _resolve_cohort_sample(store: LabStore, sample_ref: str) -> str:
+    if sample_ref != "latest":
+        return resolve_sample(store, sample_ref)
+    ids = source_ids(store)
+    if not ids:
+        return resolve_sample(store, sample_ref)
+    dated: list[tuple[str, str]] = []
+    for source_id in ids:
+        record = _checked_source_record(store, source_id)
+        inputs = record.get("inputs", [])
+        if not isinstance(inputs, list):
+            raise LabProblem(
+                "TBX-LAB-020", cause=f"stored source record {source_id[:12]} has invalid inputs",
+                fix="Restore the intact source record before cohort add",
+                data={"source_id": source_id, "field": "inputs"},
+            )
+        timestamps: list[str] = []
+        for item in inputs:
+            if not isinstance(item, dict):
+                field = "inputs"
+            elif not isinstance(item.get("used_utc", ""), str):
+                field = "used_utc"
+            else:
+                timestamps.append(item.get("used_utc", ""))
+                continue
+            raise LabProblem(
+                "TBX-LAB-020", cause=f"stored source record {source_id[:12]} has invalid {field}",
+                fix="Restore the intact source record before cohort add",
+                data={"source_id": source_id, "field": field},
+            )
+        newest = max(timestamps, default="")
+        dated.append((newest, source_id))
+    return max(dated)[1]
+
+
 def add_sample(store: LabStore, cohort_id: str, sample_ref: str) -> bool:
     """Admit a stored full-input source once; return False on an exact duplicate."""
 
     with store.writer("cohort add", new_run_id()):
-        source_id = resolve_sample(store, sample_ref)
+        source_id = _resolve_cohort_sample(store, sample_ref)
         record = _checked_source_record(store, source_id)
         if record.get("example"):
             raise LabProblem(
@@ -222,7 +277,9 @@ def _full_input(store: LabStore, record: dict[str, Any]) -> tuple[str, dict[str,
             raise _invalid_input("unknown", "input_id")
         if item.get("kind") not in ("aligned", "prealigned"):
             raise _invalid_input(input_id, "source input kind")
-        manifest = _validate_full_manifest(input_manifest(store, input_id), input_id, source_id)
+        manifest_path = store.inputs_dir / input_id / "manifest.json"
+        manifest = _read_stored_metadata(manifest_path, _invalid_input(input_id, "manifest"))
+        manifest = _validate_full_manifest(manifest, input_id, source_id)
         if manifest["kind"] != item["kind"]:
             raise _invalid_input(input_id, "source/manifest kind")
         return input_id, manifest
@@ -306,6 +363,34 @@ def member_from_store(store: LabStore, source_id: str) -> CohortMember:
     label, _ = _aligner(manifest, input_id)
     return CohortMember(source_id=source_id, input_id=input_id, aligner_identity=label,
                         results=_selected_results(store, input_id, manifest))
+
+
+def pon_inputs_for_members(store: LabStore, members: tuple[CohortMember, ...]) -> tuple[PonInput, ...]:
+    """Resolve eligible full aligned inputs for the isolated PoN builder.
+
+    Pre-aligned inputs have unknown protocol provenance and cannot establish a
+    protocol-matched panel. The caller holds the cohort writer lock.
+    """
+
+    from .pon import PonInput
+
+    eligible: list[PonInput] = []
+    for member in members:
+        selected = _full_input(store, _checked_source_record(store, member.source_id))
+        if selected is None or selected[0] != member.input_id:
+            raise _invalid_input(member.input_id, "selected full input changed")
+        input_id, manifest = selected
+        label, _ = _aligner(manifest, input_id)
+        if label != member.aligner_identity:
+            raise _invalid_input(input_id, "aligner identity changed")
+        if manifest["kind"] != "aligned":
+            continue
+        eligible.append(PonInput(
+            source_id=member.source_id, input_id=input_id,
+            reference_sha256=manifest["reference_sha256"], aligner_identity=label,
+            bam_path=store.inputs_dir / input_id / "aligned.bam",
+        ))
+    return tuple(eligible)
 
 
 def read_current(store: LabStore, cohort_id: str) -> CohortGeneration | None:
@@ -439,6 +524,6 @@ def project_sample_metric(
 
 
 __all__ = [
-    "CohortListing", "add_sample", "build_cohort", "list_cohorts", "member_from_store",
+    "CohortListing", "add_sample", "build_cohort", "list_cohorts", "member_from_store", "pon_inputs_for_members",
     "project_current_metric", "project_sample_metric", "read_current", "read_roster",
 ]
