@@ -41,9 +41,9 @@ _SITE_DTYPE = np.dtype(
 def _distinct_sites(rows: np.ndarray) -> np.ndarray:
     """Keep the first call at each (read, contig, CpG, strand) site.
 
-    The producer normally emits each site once.  This also gives a stable
-    rule for a duplicated call in an imported/corrupt intermediate, including
-    duplicates split across adjacent chunk files after carry concatenation.
+    The producer normally emits each site once. Identical duplicates are
+    collapsed, including across chunk boundaries. Conflicting probabilities
+    or channel declarations fail as a malformed intermediate.
     """
 
     if rows.size < 2:
@@ -76,7 +76,7 @@ class FragXMeth(MethBase):
             "short_bp_inclusive": list(SHORT_BP),
             "long_bp_inclusive": list(LONG_BP),
             "delta": "mean_long_minus_mean_short",
-            "duplicate_site": "first_call",
+            "duplicate_site": "identical_collapse_conflicts_rejected",
         }
     )
 
