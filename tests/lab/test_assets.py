@@ -416,6 +416,28 @@ def test_manifest_replaced_during_read_is_not_treated_as_verified(
     assert retained.is_file()
 
 
+def test_verified_reader_rejects_mutation_and_replacement_during_use(
+    pinned: tuple[LabStore, Path, bytes],
+) -> None:
+    store, source, data = pinned
+    record = _add(store, source)
+    with assets.open_verified_asset(store, record) as stream:
+        assert stream.read() == data
+
+    with pytest.raises(assets.AssetError, match="changed during consumption"):
+        with assets.open_verified_asset(store, record) as stream:
+            assert stream.read(1) == data[:1]
+            record.file.write_bytes(b"changed but still present")
+
+    record.file.write_bytes(data)
+    replaced = record.file.with_name("original-pmd.gz")
+    with pytest.raises(assets.AssetError, match="changed during consumption"):
+        with assets.open_verified_asset(store, record) as stream:
+            record.file.rename(replaced)
+            record.file.write_bytes(data)
+            assert stream.read() == data
+
+
 def test_file_in_place_of_asset_directory_is_reported_without_replacement(
     pinned: tuple[LabStore, Path, bytes],
 ) -> None:

@@ -21,11 +21,11 @@ from __future__ import annotations
 import gzip
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any
+from typing import Any, BinaryIO
 
 import numpy as np
 
-from ..assets import AssetError, PMD_FILENAME, PMD_SHA256, inspect_asset
+from ..assets import AssetError, PMD_FILENAME, PMD_SHA256, inspect_asset, open_verified_asset
 from ..meth_calls import HAS_M, argmax_state
 from ..registry import AlgorithmOutput, InputContext, Ready, Requirements, Skip
 from ._base import load_summary, metric, ratio
@@ -42,7 +42,7 @@ def asset_path(root: Path) -> Path:
     return root / "lab" / "assets" / "pmd" / ASSET_NAME
 
 
-def read_intervals(path: Path, label: str = LABEL) -> dict[str, tuple[np.ndarray, np.ndarray]]:
+def read_intervals(path: Path | BinaryIO, label: str = LABEL) -> dict[str, tuple[np.ndarray, np.ndarray]]:
     """Sorted, merged ``label`` intervals per contig (0-based half-open)."""
 
     raw: dict[str, list[tuple[int, int]]] = {}
@@ -112,7 +112,11 @@ class PmdScore(MethBase):
             asset = inspect_asset(LabStore(ctx.root), expected_sha256=str(self.parameters["asset_sha256"]))
         except AssetError as exc:
             raise RuntimeError("PMD asset changed after preflight") from exc
-        intervals = read_intervals(asset.file)
+        try:
+            with open_verified_asset(LabStore(ctx.root), asset) as stream:
+                intervals = read_intervals(stream)
+        except AssetError as exc:
+            raise RuntimeError("PMD asset changed while loading intervals") from exc
         summary, _ = load_summary(ctx)
         calls, mask = load_calls(ctx)
         tally = np.zeros(4, dtype=np.int64)  # in_sites, in_meth, out_sites, out_meth

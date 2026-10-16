@@ -12,10 +12,11 @@ import os
 import shutil
 import stat
 import tempfile
+from contextlib import contextmanager
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, BinaryIO, Iterator
 
 from pydantic import ValidationError
 from traceback_runner.serialization import canonical_json_bytes
@@ -156,6 +157,53 @@ def _digest(path: Path) -> tuple[str, int]:
     if not stat.S_ISREG(current.st_mode):
         raise AssetError("asset must be a regular file, without symlinks")
     return digest.hexdigest(), after.st_size
+
+
+@contextmanager
+def open_verified_asset(store: LabStore, record: AssetRecord) -> Iterator[BinaryIO]:
+    """Consume one pinned handle, rejecting changes before or during use."""
+
+    path = _directory(store, record.descriptor.kind) / PMD_FILENAME
+    if record.file != path:
+        raise AssetError("asset record points outside its registered location")
+    _check_contained(store, path)
+    try:
+        with os.fdopen(_open_regular(path), "rb") as stream:
+            before = os.fstat(stream.fileno())
+            if not stat.S_ISREG(before.st_mode):
+                raise AssetError("asset must be a regular file, without symlinks")
+            digest = hashlib.sha256()
+            while block := stream.read(_BLOCK):
+                digest.update(block)
+            checked = os.fstat(stream.fileno())
+            _check_contained(store, path)
+            current = os.lstat(path)
+            if (
+                _file_identity(before) != _file_identity(checked)
+                or _file_identity(checked) != _file_identity(current)
+                or digest.hexdigest() != record.sha256
+                or checked.st_size != record.descriptor.size_bytes
+            ):
+                raise AssetError("asset changed before consumption; it was not used")
+            stream.seek(0)
+            try:
+                yield stream
+            finally:
+                stream.seek(0)
+                digest = hashlib.sha256()
+                while block := stream.read(_BLOCK):
+                    digest.update(block)
+                consumed = os.fstat(stream.fileno())
+                _check_contained(store, path)
+                current = os.lstat(path)
+                if (
+                    _file_identity(before) != _file_identity(consumed)
+                    or _file_identity(consumed) != _file_identity(current)
+                    or digest.hexdigest() != record.sha256
+                ):
+                    raise AssetError("asset changed during consumption; result was not used")
+    except OSError as exc:
+        raise AssetError("asset became unavailable during consumption") from exc
 
 
 def _descriptor(
