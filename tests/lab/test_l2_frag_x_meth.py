@@ -388,3 +388,31 @@ def test_panel_includes_molecules_outside_scalar_size_bands(tmp_path: Path) -> N
     assert panel["counts"][3][2] == 1  # 260 bp, 0.5 fraction
     assert scalar["n"] == panel["short_n"] + panel["long_n"] == 2
     assert scalar["value"] == pytest.approx(1.0)
+
+
+def test_complete_read_batches_preserve_duplicates_and_derived_results(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from traceback_lab.algorithms import frag_x_meth as module
+
+    ctx = _fixture(tmp_path)
+    rows = np.concatenate(list(module.load_calls(ctx)[0].chunks())).tolist()
+    # Keep a repeated site nonadjacent within one read. A processing batch
+    # boundary must not turn its four distinct sites into five calls.
+    rows.insert(4, rows[0])
+    variants = (
+        None,
+        {"transform": "split", "half": "A"},
+        {"transform": "downsample", "fraction": 0.5},
+    )
+    expected = {}
+    for variant in variants:
+        derived_ctx = _fixture_ctx(ctx, variant) if variant else ctx
+        expected[str(variant)] = _result(derived_ctx, tmp_path)
+
+    monkeypatch.setattr(module, "PROCESS_CALLS", 5)
+    for chunk_size in (2, 17):
+        _store(tmp_path, rows, chunk_size=chunk_size)
+        for variant in variants:
+            derived_ctx = _fixture_ctx(ctx, variant) if variant else ctx
+            assert _result(derived_ctx, tmp_path) == expected[str(variant)]

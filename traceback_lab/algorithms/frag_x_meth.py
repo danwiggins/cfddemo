@@ -9,8 +9,12 @@ regardless of how many CpGs it contains.
 The panel is a 2-D count distribution.  The scalar is a separate descriptive
 difference of per-read mean fractions (long minus short), not a classifier or
 an interpretation of any individual panel cell.  No reference range is known.
-Call processing holds one chunk plus a carried molecule; derived inputs also
-hold the D33 read-row mask allocated by the shared meth-calls loader.
+Call processing holds one producer chunk plus a carried molecule; derived
+inputs also hold the D33 read-row mask allocated by the shared meth-calls
+loader. Temporary duplicate-site and aggregate arrays target 65,536 calls per
+batch and extend only to finish the boundary molecule. A molecule spanning
+chunks remains resident until its last call arrives. Thus peak memory depends
+on the largest molecule as well as the fixed producer chunk size.
 """
 
 from __future__ import annotations
@@ -29,6 +33,7 @@ from ._base import metric
 from ._meth import MethBase, load_calls
 
 MIN_CPGS = 4
+PROCESS_CALLS = 1 << 16  # bound temporary arrays even when the store uses 1M-call chunks
 # Half-open bins, except the final methylation bin includes 1.0.
 SIZE_EDGES_BP = (1, 100, 151, 221, 301, 501, 1001)
 METH_EDGES = (0.0, 0.25, 0.5, 0.75, 1.0)
@@ -99,7 +104,7 @@ class FragXMeth(MethBase):
         sum_short = sum_long = 0.0
         n_panel = 0
 
-        def add(rows: np.ndarray) -> None:
+        def add_batch(rows: np.ndarray) -> None:
             nonlocal n_short, n_long, sum_short, sum_long, n_panel
             rows = _distinct_sites(rows)
             if rows.size == 0:
@@ -138,6 +143,21 @@ class FragXMeth(MethBase):
             n_long += int(long_.sum())
             sum_short += float(fraction[short].sum())
             sum_long += float(fraction[long_].sum())
+
+        def add(rows: np.ndarray) -> None:
+            """Batch complete reads; one oversized read is kept intact."""
+
+            offset = 0
+            while offset < rows.size:
+                limit = min(offset + PROCESS_CALLS, rows.size)
+                if limit < rows.size:
+                    limit = int(
+                        np.searchsorted(
+                            rows["read_row"], rows[limit - 1]["read_row"], side="right"
+                        )
+                    )
+                add_batch(rows[offset:limit])
+                offset = limit
 
         carry = np.empty(0, dtype=DTYPE)
         previous_row = -1

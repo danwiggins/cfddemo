@@ -263,3 +263,41 @@ def test_large_row_summary_keeps_peak_memory_bounded(
         tracemalloc.stop()
     assert peak < 32 * 1024 * 1024
     assert output.metrics[0]["n"] == 2 * n_reads and panel["near_ends"] == 0
+
+
+def test_chunk_and_reference_windows_preserve_eligible_derived_ends(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    fasta = tmp_path / "mixed.fa"
+    sequence = list("A" * 200)
+    sequence[15:17] = "CG"  # exercises the reference-window margin
+    sequence[63:65] = "CG"
+    fasta.write_text(">chr1\n" + "".join(sequence) + "\n")
+    pysam.faidx(str(fasta))
+    reads = [
+        Read("eligible-1", "chr1", 0, "A" * 20),
+        Read("duplicate", "chr1", 20, "A" * 20, flag=0x400),
+        Read("eligible-2", "chr1", 40, "A" * 20),
+        Read("low-mapq", "chr1", 60, "A" * 20, mapq=19),
+        Read("eligible-3", "chr1", 80, "A" * 20),
+    ]
+    ctx = context_for(tmp_path, [("chr1", 200)], reads, fasta=fasta)
+    summary = ReadSummary.open(tmp_path / "read-summary" / "columns")
+    variants = (
+        None,
+        {"transform": "split", "half": "A"},
+        {"transform": "downsample", "fraction": 0.5},
+    )
+    expected = {}
+    for variant in variants:
+        run_ctx = replace(ctx, derived=variant)
+        expected[str(variant)] = _result(run_ctx, tmp_path)
+        selected = summary.eligible()
+        if variant:
+            selected &= derived_mask(summary, variant)
+        assert expected[str(variant)][0].metrics[0]["n"] == 2 * int(selected.sum())
+
+    monkeypatch.setattr(module, "CHUNK_ROWS", 2)
+    monkeypatch.setattr(module, "REFERENCE_WINDOW_BP", 16)
+    for variant in variants:
+        assert _result(replace(ctx, derived=variant), tmp_path) == expected[str(variant)]
