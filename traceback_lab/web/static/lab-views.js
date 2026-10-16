@@ -280,7 +280,9 @@
         h("td", {}, row.run_utc ? row.run_utc.slice(0, 10) : "—"),
         h("td", { class: "num" }, row.depth_x !== null ? `${row.depth_x.toPrecision(3)}x` : "—"),
         h("td", {}, `${row.counts.ok} / ${row.counts.skipped} / ${row.counts.failed}`),
-        h("td", { class: "num" }, String(row.outside_reference)),
+        h("td", { class: "num" }, String(row.outside_reference),
+          ["cohort_unavailable", "target_unavailable", "stale_target"].includes(row.cohort_state)
+            ? h("span", { class: "problem" }, ` · cohort ${row.cohort_state.replace(/_/g, " ")}`) : ""),
         h("td", {}, row.controls.spike === null ? "spike not run" : row.controls.spike ? "spike recovered ✓" : "spike not recovered"),
         h("td", {}, h("a", { href: `#/?sample=${row.id12}` }, "Show on landing"))))));
     return h("section", { class: "panel", "aria-labelledby": "samples-title" }, h("h2", { id: "samples-title" }, "Samples"), h("div", { class: "table-wrap" }, table));
@@ -414,11 +416,16 @@
     const tierOrder = { PROVEN: 0, NEWER: 1, SPECULATIVE: 2 };
     for (const key of ["markedly_above", "markedly_below", "above_typical", "below_typical"]) groups[key].sort((a, b) => (tierOrder[a.tier] ?? 9) - (tierOrder[b.tier] ?? 9) || b.severity - a.severity);
     const outside = groups.markedly_above.length + groups.markedly_below.length + groups.above_typical.length + groups.below_typical.length;
+    const cohortIssue = ["cohort_unavailable", "target_unavailable", "stale_target"].includes(sample.cohort_state);
+    const cohortContext = cohortIssue ? `cohort ${sample.cohort_state.replace(/_/g, " ")}`
+      : sample.cohort_n < 10 ? `cohort n = ${sample.cohort_n} of 10`
+        : `cohort ${sample.cohort_version}; eligibility varies by metric`;
     const out = [
       h("p", { class: "breadcrumb" }, `Lab › ${sample.id12} › Findings`),
       h("div", { class: "findings-head" }, h("h1", { class: "view-title" }, "Findings"), flagPill("CLIA")),
-      h("p", { class: "findings-summary" }, `${outside} outside a reference · ${groups.not_interpretable.length} not interpretable · ${groups.no_reference.length} without a reference (${sample.cohort_n < 10 ? `cohort n = ${sample.cohort_n} of 10` : `cohort ${sample.cohort_version}; eligibility varies by metric`}) · ${groups.in_range.length} in range`),
+      h("p", { class: "findings-summary" }, `${outside} outside a reference · ${groups.not_interpretable.length} not interpretable · ${groups.no_reference.length} without a reference (${cohortContext}) · ${groups.in_range.length} in range`),
     ];
+    if (cohortIssue) out.push(h("p", { class: "problem" }, `Cohort reference ${sample.cohort_state.replace(/_/g, " ")}. Cohort states are unavailable for this view; measurements and published references remain visible. ${sample.cohort_problem ? sample.cohort_problem.fix : "Check cohort build and reload."}`));
     if (sample.excluded_chunks && sample.excluded_chunks.length) out.push(h("p", { class: "status-line" }, `Provisional: this input excludes ${sample.excluded_chunks.length} truncated chunks; depth reflects the reads present.`));
     for (const a of sample.algorithms.filter((x) => x.status === "failed")) {
       out.push(h("div", { class: "problem" }, `${a.algorithm_id} failed: ${a.failure ? a.failure.first_line : ""}. `, h("a", { href: `#/sample/${sample.id12}/trust-qc` }, "Details in Trust/QC →")));
@@ -427,7 +434,7 @@
     let first = true;
     if (!outside) {
       const withReference = metrics.filter((m) => m.state !== "no_reference" && m.state !== "not_interpretable").length;
-      out.push(h("p", { class: "empty" }, `No metric is outside a reference. ${withReference} metrics have a reference; ${groups.no_reference.length} ${sample.cohort_n < 10 ? `await the cohort (n = ${sample.cohort_n} of 10)` : `have no eligible reference in cohort ${sample.cohort_version}`}. `,
+      out.push(h("p", { class: "empty" }, `No metric is outside a reference. ${withReference} metrics have a reference; ${groups.no_reference.length} ${cohortIssue ? "lack a cohort reference while the cohort is unavailable" : sample.cohort_n < 10 ? `await the cohort (n = ${sample.cohort_n} of 10)` : `have no eligible reference in cohort ${sample.cohort_version}`}. `,
         h("a", { href: `#/sample/${sample.id12}/trust-qc` }, "Trust/QC"), " · ", h("a", { href: `#/sample/${sample.id12}/stability` }, "Stability")));
     }
     const titles = { markedly_above: "Markedly above", markedly_below: "Markedly below", above_typical: "Above typical", below_typical: "Below typical" };
@@ -814,17 +821,11 @@
       h("div", { class: "findings-head" }, h("h1", { class: "view-title" }, "Body map"), flagPill("LEGAL", "FLAG: LEGAL — research-only licenses; atlas terms unknown."))];
     const a = algo(sample, "cell-origin");
     if (!a || a.status !== "ok") { out.push(absent(a, "cell-origin")); return out; }
-    out.push(h("p", { class: "help" }, `Healthy kit cohort ${sample.cohort_version || "not built"} (${sample.cohort_n} members). A tissue band appears only with at least 10 eligible comparable samples after leave-one-out; 10–29 use observed min–max, 30+ use the observed 5th–95th percentile. Minor tissues are not interpretable below 5x; their estimate and interval stay visible.`));
+    out.push(h("p", { class: "help" }, `Reference cohort ${sample.cohort_version || "not built"} (${sample.cohort_n} members)${sample.cohort_kind === "provisional_external" ? "; protocol-mismatched external reference" : ""}. Tissue references use eligible comparable samples after leave-one-out: 10–29 show observed min–max; 30+ show the 90% bootstrap interval of the 95th-percentile cutoff. The diamond marks the eligible mean. Minor tissues are not interpretable below 5x; their estimate and interval stay visible.`));
     out.push(...context(sample, "cell-origin", new Set()));
     const rows = a.metrics.filter((m) => m.metric_id.startsWith("fraction_"));
-    const cohortSummary = (m) => {
-      const values = (m.cohort_values || []).filter(Number.isFinite).sort((a, b) => a - b);
-      if (values.length < 10) return null;
-      const quantile = (p) => { const index = p * (values.length - 1); const lo = Math.floor(index); return values[lo] + (values[Math.ceil(index)] - values[lo]) * (index - lo); };
-      return { mean: values.reduce((sum, value) => sum + value, 0) / values.length,
-        low: values.length < 30 ? values[0] : quantile(0.05),
-        high: values.length < 30 ? values[values.length - 1] : quantile(0.95), n: values.length };
-    };
+    const cohortSummary = (m) => m.eligible_n >= 10 && m.cohort_mean !== null && Array.isArray(m.interval)
+      ? { mean: m.cohort_mean, low: m.interval[0], high: m.interval[1] } : null;
     const top = Math.min(1, Math.max(0.05, ...rows.map((m) => Math.max(m.ci ? m.ci[1] : m.value, (cohortSummary(m) || {}).high || 0))));
     const level = (rows.find((m) => m.ci_level) || {}).ci_level;
     const intervalName = level ? `${Math.round(level * 100)}% bootstrap interval` : "interval";
@@ -853,11 +854,11 @@
         out2.push(svg("text", { x: x(m.value), y: y + 5, "text-anchor": "middle", class: m.state === "not_interpretable" ? "pt-open" : "pt" }, m.state === "not_interpretable" ? "▨" : "●"));
         return out2;
       });
-      const label = `${name}: ${members.length} cell types; dots are this sample, diamonds are eligible healthy-cohort means, upper lines are observed cohort bands, lower lines are sample intervals. Hatched dots are not interpretable at this depth.`;
+      const label = `${name}: ${members.length} cell types; dots are this sample, diamonds are eligible cohort means, upper lines are reference intervals, lower lines are sample intervals. Hatched dots are not interpretable at this depth.`;
       out.push(h("section", { class: "panel" }, h("h2", {}, name),
         svg("svg", { viewBox: `0 0 ${w} ${hgt}`, role: "img", "aria-label": label, class: "composition-svg" }, svg("title", {}, label), ...marks,
           svg("line", { x1: left, x2: w - 20, y1: axisY, y2: axisY, class: "ci" }), ...ticks),
-        dataTable(`${name} (${intervalName})`, ["Cell type", "Share", "Interval low", "Interval high", "Healthy mean", "Healthy band low", "Healthy band high", "Eligible n", "State"],
+        dataTable(`${name} (${intervalName})`, ["Cell type", "Share", "Interval low", "Interval high", "Cohort mean", "Reference low", "Reference high", "Eligible n", "State"],
           members.map((m) => { const cohort = cohortSummary(m); return [m.contributor, m.value, m.ci ? m.ci[0] : null, m.ci ? m.ci[1] : null,
             cohort ? cohort.mean : null, cohort ? cohort.low : null, cohort ? cohort.high : null, m.eligible_n,
             (STATE[m.state] || ["", m.state])[1] + (m.reason ? ` (${m.reason})` : "")]; }))));

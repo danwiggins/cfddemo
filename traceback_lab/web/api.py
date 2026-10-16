@@ -165,7 +165,18 @@ class LabApi:
         ids = source_ids(self.store)
         return shortest_unique_prefixes(ids) if ids else {}
 
-    def _sample_cohort(self, source_id: str, sample: Any) -> tuple[CohortGeneration | None, CohortMember | None, str]:
+    def _published_sample_cohort(self) -> tuple[CohortGeneration | None, dict[str, str] | None]:
+        """Read one immutable generation pointer for an entire API response."""
+
+        try:
+            return read_current(self.store, "healthy-v1"), None
+        except LabProblem as problem:
+            return None, _recovery_problem(problem)
+
+    def _sample_cohort(
+        self, source_id: str, sample: Any,
+        snapshot: tuple[CohortGeneration | None, dict[str, str] | None] | None = None,
+    ) -> tuple[CohortGeneration | None, CohortMember | None, str, dict[str, str] | None]:
         """Pin the default kit cohort and the same full input shown by the page.
 
         A broken cohort or stale target must not turn an unrelated published
@@ -173,20 +184,25 @@ class LabApi:
         """
 
         if sample.example:
-            return None, None, "example"
-        try:
-            generation = read_current(self.store, "healthy-v1")
-        except LabProblem:
-            return None, None, "cohort_unavailable"
+            return None, None, "example", None
+        generation, problem = snapshot if snapshot is not None else self._published_sample_cohort()
+        if problem is not None:
+            return None, None, "cohort_unavailable", problem
         if generation is None:
-            return None, None, "not_built"
+            return None, None, "not_built", None
         try:
             target = member_from_store(self.store, source_id)
-        except (LabProblem, ValueError):
-            return generation, None, "target_unavailable"
+        except LabProblem as error:
+            return generation, None, "target_unavailable", _recovery_problem(error)
+        except ValueError:
+            error = LabProblem("TBX-LAB-017", cause="sample has no readable current full input",
+                               fix="Inspect Lab runs, restore the input, then reload the sample")
+            return generation, None, "target_unavailable", _recovery_problem(error)
         if target.source_id != source_id or target.input_id != sample.full.input_id:
-            return generation, None, "stale_target"
-        return generation, target, "ready"
+            error = LabProblem("TBX-LAB-017", cause="sample results changed while its cohort reference was loading",
+                               fix="Reload the sample to pin its current full input")
+            return generation, None, "stale_target", _recovery_problem(error)
+        return generation, target, "ready", None
 
     @staticmethod
     def _interpret_sample_envelope(
@@ -201,7 +217,7 @@ class LabApi:
         if target_result is None or target_result.parameters_sha256 != envelope.provenance.parameters_sha256:
             return interpret_result(envelope, library, depth_x=depth_x), {}
         projections: dict[str, MetricProjection] = {}
-        entries = dict(library.entries)
+        entries: dict[tuple[str, str], Entry] | None = None
         for metric in envelope.metrics:
             entry = library.entry(envelope.algorithm_id, metric.metric_id)
             if entry is None or entry["reference"]["kind"] not in ("internal_cohort", "provisional_external"):
@@ -214,14 +230,18 @@ class LabApi:
             )
             projections[metric.metric_id] = projection
             if entry["reference"]["kind"] != generation.kind:
+                if entries is None:
+                    entries = dict(library.entries)
                 entries[(envelope.algorithm_id, metric.metric_id)] = Entry(
                     envelope.algorithm_id, metric.metric_id,
                     {**entry.raw, "reference": {"kind": generation.kind}},
                 )
         interpreted = interpret_result(
             envelope,
-            Library(version=library.version, entries=entries, licenses=library.licenses,
-                    hidden_algorithms=library.hidden_algorithms),
+            library if entries is None else Library(
+                version=library.version, entries=entries, licenses=library.licenses,
+                hidden_algorithms=library.hidden_algorithms,
+            ),
             depth_x=depth_x,
             cohorts={key: projection.interpretation_cohort() for key, projection in projections.items()},
         )
@@ -229,13 +249,16 @@ class LabApi:
 
     def samples(self) -> dict[str, Any]:
         library = self.libraries.get()
+        cohort_snapshot = self._published_sample_cohort()
         rows = []
         for source_id, id12 in self._id12s().items():
             record = source_record(self.store, source_id) or {}
             sample = views.load_sample(self.store, source_id)
             if sample is None:
                 continue
-            generation, target, _ = self._sample_cohort(source_id, sample)
+            generation, target, cohort_state, cohort_problem = self._sample_cohort(
+                source_id, sample, cohort_snapshot,
+            )
             used = max((entry.get("used_utc", "") for entry in record.get("inputs", [])), default="")
             counts = {"ok": 0, "skipped": 0, "failed": 0}
             outside = 0
@@ -255,6 +278,11 @@ class LabApi:
                     "run_utc": used,
                     "depth_x": sample.full.depth_x(),
                     "example": sample.example,
+                    "cohort_version": generation.version_id if generation else None,
+                    "cohort_kind": generation.kind if generation else None,
+                    "cohort_n": generation.percentile_n if generation else 0,
+                    "cohort_state": cohort_state,
+                    "cohort_problem": cohort_problem,
                     "counts": counts,
                     "outside_reference": outside,
                     "controls": {
@@ -283,7 +311,7 @@ class LabApi:
         library = self.libraries.get()
         record = source_record(self.store, source_id) or {}
         depth_x = sample.full.depth_x()
-        generation, target, cohort_state = self._sample_cohort(source_id, sample)
+        generation, target, cohort_state, cohort_problem = self._sample_cohort(source_id, sample)
         algorithms = []
         no_entry = 0
         unverified: set[tuple[str, str]] = set()
@@ -305,9 +333,13 @@ class LabApi:
                         used_licenses.append(license_id)
                 payload = _metric_payload(row, entry, qc_band(row.value, entry))
                 projection = projections.get(row.metric_id)
-                payload["eligible_n"] = projection.percentile_n if projection else 0 if row.interpretation.reference_kind in ("internal_cohort", "provisional_external") else None
+                payload["eligible_n"] = projection.percentile_n if projection else None
                 payload["cohort_values"] = list(projection.values) if projection else []
                 payload["cohort_excluded"] = dict(projection.exclusions) if projection else {}
+                payload["cohort_mean"] = (
+                    sum(projection.values) / projection.percentile_n
+                    if projection and projection.percentile_n >= 10 else None
+                )
                 stored = cis.get(row.metric_id)
                 payload["ci"] = list(stored[0]) if stored and stored[0] else None
                 payload["ci_level"] = stored[1] if stored else None
@@ -354,9 +386,11 @@ class LabApi:
             "excluded_chunks": record.get("excluded", []),
             "interpretation_version": library.version,
             "cohort_version": generation.version_id if generation else None,
+            "cohort_kind": generation.kind if generation else None,
             "cohort_n": generation.percentile_n if generation else 0,
             "cohort_id": generation.cohort_id if generation else "healthy-v1",
             "cohort_state": cohort_state,
+            "cohort_problem": cohort_problem,
             "algorithms": algorithms,
             "curve": curve,
             "stability": panels,
