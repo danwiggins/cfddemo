@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import argparse
 import errno
+import shlex
 import signal
 import sys
 import time
@@ -600,6 +601,39 @@ def _duration(seconds: float) -> str:
     return f"{hours}h {minutes:02d}m"
 
 
+def _skip_remedy(algorithm_id: str, reason: str, root: Path) -> dict[str, Any] | None:
+    """Give each missing dependency its own recovery action, including Lab assets."""
+
+    argv: list[str]
+    asset: str
+    if reason == "missing_toolchain":
+        tool = {"copy-number": "ichor", "cell-origin": "modkit"}.get(algorithm_id)
+        if tool is None:
+            return None
+        asset, argv = tool, ["traceback", "toolchain", "install", tool]
+    elif reason == "missing_asset" and algorithm_id == "copy-number":
+        asset = "ichorCNA toolchain assets"
+        argv = [
+            "traceback", "method-asset", "register", "--from-toolchain",
+            "copy-number", "--root", str(root),
+        ]
+    elif reason == "missing_asset" and algorithm_id == "cell-origin":
+        asset = "Loyfer atlas"
+        argv = [
+            "traceback", "method-asset", "register", "--from-dir",
+            "LOYFER_DIR", "--root", str(root),
+        ]
+    elif reason == "missing_asset" and algorithm_id == "pmd-score":
+        asset = "Zhou 2018 hg38 commonPMD BED"
+        argv = [
+            "traceback", "lab", "asset", "add", "pmd", "--file",
+            "YOUR_LOCAL_PMD_coordinates_hg38.bed.gz", "--source-label",
+            "Zhou-2018-operator-supplied", "--terms", "unknown", "--root", str(root),
+        ]
+    else:
+        return None
+    return {"asset": asset, "argv": argv, "command": shlex.join(argv)}
+
 def _summary(
     store: LabStore,
     run_id: str,
@@ -625,6 +659,18 @@ def _summary(
     next_argv = [["traceback", "lab", "serve", "--open"]]
     if failed:
         next_argv.insert(0, ["traceback", "lab", "runs", run_id, "--step", failed[0].algorithm_id])
+    remedies: list[dict[str, Any]] = []
+    seen_remedies: set[tuple[str, str]] = set()
+    for result in results:
+        if result.status != "skipped" or result.skip_reason is None:
+            continue
+        key = (result.algorithm_id, result.skip_reason)
+        if key in seen_remedies:
+            continue
+        seen_remedies.add(key)
+        remedy = _skip_remedy(*key, store.root)
+        if remedy is not None:
+            remedies.append({"algorithm_id": key[0], "reason": key[1], **remedy})
     data: dict[str, Any] = {
         "root": str(store.root),
         "run_id": run_id,
@@ -636,6 +682,7 @@ def _summary(
         "controls": controls,
         "excluded_chunks": aligned.manifest.get("excluded_chunks", []),
         "warnings": warnings,
+        "remediations": remedies,
         "next": next_argv,
     }
     skipped_text = ", ".join(
@@ -683,18 +730,11 @@ def _summary(
     for result in failed:
         lines.append(f"FAILED  {result.algorithm_id}: {result.first_line}")
         lines.append(f"        details: traceback lab runs {run_id} --step {result.algorithm_id}")
-    remedied: set[tuple[str, str]] = set()
-    for result in results:
-        if result.status == "skipped" and result.skip_reason in {"missing_toolchain", "missing_asset"}:
-            if (result.algorithm_id, result.skip_reason) in remedied:
-                continue
-            remedied.add((result.algorithm_id, result.skip_reason))
-            remedy = (
-                "traceback toolchain install ichor"
-                if result.skip_reason == "missing_toolchain"
-                else f"traceback method-asset register --from-toolchain copy-number --root {store.root}"
-            )
-            lines.append(f"SKIP    {result.algorithm_id} skipped ({result.skip_reason}): {remedy}")
+    for remedy in remedies:
+        lines.append(
+            f"SKIP    {remedy['algorithm_id']} skipped ({remedy['reason']}): "
+            f"{remedy['asset']}: {remedy['command']}"
+        )
     for argv in next_argv:
         lines.append(f"NEXT    {' '.join(argv)}")
     summary = f"run {run_id}: {ok} ok, {sum(skipped.values())} skipped, {len(failed)} failed"
