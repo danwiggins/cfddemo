@@ -58,6 +58,19 @@ _ATTEMPT_ID = r"^a-\d{8}T\d{12}-[0-9a-f]{8}$"
 class ResultOrderUnavailable(OSError):
     """Attempt publication order cannot be read safely."""
 
+
+class ResultPublishUncertain(LabProblem):
+    """The selector is visible, but its durability was not confirmed."""
+
+    def __init__(self) -> None:
+        super().__init__(
+            "TBX-LAB-020",
+            summary="Result selection durability is unconfirmed",
+            cause="The selected result is visible, but its directory sync failed.",
+            fix="Inspect the selected result and run history before retrying.",
+        )
+
+
 def _utc(epoch: float | None = None) -> str:
     moment = datetime.fromtimestamp(time.time() if epoch is None else epoch, UTC)
     return moment.strftime("%Y-%m-%dT%H:%M:%SZ")
@@ -532,6 +545,10 @@ class LabStore:
         if last_success is not None:
             selection["last_success_attempt_id"] = last_success
         write_atomic(directory / "selected.json", canonical_json_bytes(selection))
+        try:
+            _fsync_dir(directory)
+        except OSError as exc:
+            raise ResultPublishUncertain() from exc
         keep = {attempt, *([previous.name] if previous is not None else [])}
         if last_success is not None:
             keep.add(last_success)
