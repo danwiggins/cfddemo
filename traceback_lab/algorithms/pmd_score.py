@@ -19,20 +19,20 @@ are not comparable with solo-WCGW numbers.
 from __future__ import annotations
 
 import gzip
-import hashlib
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
 import numpy as np
 
+from ..assets import AssetError, PMD_FILENAME, PMD_SHA256, inspect_asset
 from ..meth_calls import HAS_M, argmax_state
 from ..registry import AlgorithmOutput, InputContext, Ready, Requirements, Skip
 from ._base import load_summary, metric, ratio
 from ._meth import MethBase, load_calls
 
-ASSET_NAME = "PMD_coordinates_hg38.bed.gz"
-ASSET_SHA256 = "e6be0642b7b8dd530247c0c43cbc63165092aa9b9ada632710cedfbdc9b8e3dc"
+ASSET_NAME = PMD_FILENAME
+ASSET_SHA256 = PMD_SHA256
 LABEL = "commonPMD"
 # The annotation is in hg38 coordinates: refuse any other reference.
 HG38_CHR1_LENGTH = 248_956_422
@@ -40,10 +40,6 @@ HG38_CHR1_LENGTH = 248_956_422
 
 def asset_path(root: Path) -> Path:
     return root / "lab" / "assets" / "pmd" / ASSET_NAME
-
-
-def _sha256(path: Path) -> str:
-    return hashlib.sha256(path.read_bytes()).hexdigest()
 
 
 def read_intervals(path: Path, label: str = LABEL) -> dict[str, tuple[np.ndarray, np.ndarray]]:
@@ -86,7 +82,12 @@ class PmdScore(MethBase):
     )
 
     def asset_sha256s(self, root: Path) -> list[str]:
-        return [str(self.parameters["asset_sha256"])]
+        from ..store import LabStore
+
+        try:
+            return [inspect_asset(LabStore(root), expected_sha256=str(self.parameters["asset_sha256"])).sha256]
+        except AssetError:
+            return []
 
     def preflight(self, ctx: InputContext) -> Ready | Skip:
         decision = super().preflight(ctx)
@@ -96,18 +97,22 @@ class PmdScore(MethBase):
         lengths = dict(zip(summary.contigs, summary.lengths))
         if lengths.get("chr1") != HG38_CHR1_LENGTH:
             return Skip("reference", "the PMD annotation is in hg38 coordinates; this reference is not hg38")
-        path = asset_path(ctx.root)
-        if not path.is_file():
-            return Skip("missing_asset", f"the Zhou 2018 PMD annotation is not under ROOT/lab/assets/pmd/ ({ASSET_NAME})")
-        if _sha256(path) != self.parameters["asset_sha256"]:
-            return Skip("missing_asset", "ROOT/lab/assets/pmd holds a different PMD file than the pinned sha256")
+        from ..store import LabStore
+
+        try:
+            inspect_asset(LabStore(ctx.root), expected_sha256=str(self.parameters["asset_sha256"]))
+        except AssetError as exc:
+            return Skip("missing_asset", str(exc))
         return Ready()
 
     def run(self, ctx: InputContext, out: Path) -> AlgorithmOutput:
-        path = asset_path(ctx.root)
-        if _sha256(path) != self.parameters["asset_sha256"]:
-            raise RuntimeError("PMD asset changed after preflight")
-        intervals = read_intervals(path)
+        from ..store import LabStore
+
+        try:
+            asset = inspect_asset(LabStore(ctx.root), expected_sha256=str(self.parameters["asset_sha256"]))
+        except AssetError as exc:
+            raise RuntimeError("PMD asset changed after preflight") from exc
+        intervals = read_intervals(asset.file)
         summary, _ = load_summary(ctx)
         calls, mask = load_calls(ctx)
         tally = np.zeros(4, dtype=np.int64)  # in_sites, in_meth, out_sites, out_meth
