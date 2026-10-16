@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import argparse
 import errno
+import shlex
 import signal
 import sys
 import time
@@ -600,31 +601,38 @@ def _duration(seconds: float) -> str:
     return f"{hours}h {minutes:02d}m"
 
 
-def _skip_remedy(algorithm_id: str, reason: str, root: Path) -> dict[str, str] | None:
+def _skip_remedy(algorithm_id: str, reason: str, root: Path) -> dict[str, Any] | None:
     """Give each missing dependency its own recovery action, including Lab assets."""
 
+    argv: list[str]
+    asset: str
     if reason == "missing_toolchain":
         tool = {"copy-number": "ichor", "cell-origin": "modkit"}.get(algorithm_id)
-        if tool is not None:
-            return {"asset": tool, "command": f"traceback toolchain install {tool}"}
-    if reason == "missing_asset":
-        if algorithm_id == "copy-number":
-            return {
-                "asset": "ichorCNA toolchain assets",
-                "command": f"traceback method-asset register --from-toolchain copy-number --root {root}",
-            }
-        if algorithm_id == "cell-origin":
-            return {
-                "asset": "Loyfer atlas",
-                "command": f"traceback method-asset register --from-dir LOYFER_DIR --root {root}",
-            }
-        if algorithm_id == "pmd-score":
-            return {
-                "asset": "Zhou 2018 hg38 commonPMD BED",
-                "command": f"traceback lab asset add pmd --file PMD_coordinates_hg38.bed.gz --source-label Zhou-2018-operator-supplied --terms unknown --root {root}",
-            }
-    return None
-
+        if tool is None:
+            return None
+        asset, argv = tool, ["traceback", "toolchain", "install", tool]
+    elif reason == "missing_asset" and algorithm_id == "copy-number":
+        asset = "ichorCNA toolchain assets"
+        argv = [
+            "traceback", "method-asset", "register", "--from-toolchain",
+            "copy-number", "--root", str(root),
+        ]
+    elif reason == "missing_asset" and algorithm_id == "cell-origin":
+        asset = "Loyfer atlas"
+        argv = [
+            "traceback", "method-asset", "register", "--from-dir",
+            "LOYFER_DIR", "--root", str(root),
+        ]
+    elif reason == "missing_asset" and algorithm_id == "pmd-score":
+        asset = "Zhou 2018 hg38 commonPMD BED"
+        argv = [
+            "traceback", "lab", "asset", "add", "pmd", "--file",
+            "YOUR_LOCAL_PMD_coordinates_hg38.bed.gz", "--source-label",
+            "Zhou-2018-operator-supplied", "--terms", "unknown", "--root", str(root),
+        ]
+    else:
+        return None
+    return {"asset": asset, "argv": argv, "command": shlex.join(argv)}
 
 def _summary(
     store: LabStore,
@@ -651,7 +659,7 @@ def _summary(
     next_argv = [["traceback", "lab", "serve", "--open"]]
     if failed:
         next_argv.insert(0, ["traceback", "lab", "runs", run_id, "--step", failed[0].algorithm_id])
-    remedies: list[dict[str, str]] = []
+    remedies: list[dict[str, Any]] = []
     seen_remedies: set[tuple[str, str]] = set()
     for result in results:
         if result.status != "skipped" or result.skip_reason is None:

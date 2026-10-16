@@ -187,3 +187,30 @@ def test_interrupted_legacy_manifest_keeps_pinned_bytes_usable(
     assert record.legacy and record.file.read_bytes() == data
     assert not (directory / "manifest.json").exists()
     assert not list(directory.glob(".staging-*"))
+
+def test_oversized_manifest_is_rejected_before_parse(
+    pinned: tuple[LabStore, Path, bytes],
+) -> None:
+    store, source, _ = pinned
+    record = _add(store, source)
+    (record.file.parent / "manifest.json").write_bytes(b"x" * 70_000)
+    with pytest.raises(assets.AssetError, match="64 KiB"):
+        assets.inspect_asset(store)
+
+
+def test_legacy_publish_os_error_is_structured_and_keeps_bytes(
+    pinned: tuple[LabStore, Path, bytes], monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    store, source, data = pinned
+    directory = store.lab / "assets" / "pmd"
+    directory.mkdir(parents=True)
+    (directory / assets.PMD_FILENAME).write_bytes(data)
+
+    def denied(*args: object, **kwargs: object) -> None:
+        raise OSError("read-only")
+
+    monkeypatch.setattr(assets.os, "link", denied)
+    with pytest.raises(assets.AssetError, match="publish PMD metadata"):
+        _add(store, source)
+    assert assets.inspect_asset(store).legacy
+    assert (directory / assets.PMD_FILENAME).read_bytes() == data

@@ -171,7 +171,14 @@ def inspect_asset(
         return AssetRecord(legacy, path, True)
     _regular_file(manifest_path)
     try:
-        manifest = json.loads(manifest_path.read_bytes())
+        with manifest_path.open("rb") as stream:
+            raw = stream.read(65_537)
+    except OSError as exc:
+        raise AssetError("Lab asset manifest is unreadable") from exc
+    if len(raw) > 65_536:
+        raise AssetError("Lab asset manifest exceeds 64 KiB")
+    try:
+        manifest = json.loads(raw)
         if (
             not isinstance(manifest, dict)
             or set(manifest) != {"schema", "descriptor", "file", "registered_utc"}
@@ -224,8 +231,9 @@ def add_asset(
         record = AssetRecord(descriptor, existing.file, False)
         manifest_path = directory / "manifest.json"
         _check_contained(store, manifest_path)
-        staging = Path(tempfile.mkdtemp(prefix=".staging-", dir=directory))
+        staging: Path | None = None
         try:
+            staging = Path(tempfile.mkdtemp(prefix=".staging-", dir=directory))
             staged_manifest = staging / "manifest.json"
             with staged_manifest.open("xb") as stream:
                 stream.write(canonical_json_bytes(_manifest(record)))
@@ -237,8 +245,11 @@ def add_asset(
                 os.fsync(parent_fd)
             finally:
                 os.close(parent_fd)
+        except OSError as exc:
+            raise AssetError("could not publish PMD metadata safely") from exc
         finally:
-            shutil.rmtree(staging)
+            if staging is not None:
+                shutil.rmtree(staging, ignore_errors=True)
         return record
 
     def build(staging: Path) -> None:

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from pathlib import Path
+import shlex
 from types import SimpleNamespace
 
 from traceback_lab.run_command import _skip_remedy, _summary
@@ -57,3 +58,18 @@ def test_human_and_json_remediation_agree_and_deduplicate(tmp_path: Path) -> Non
             and remedy["command"] in line
             for line in lines
         )
+
+def test_remediation_quotes_operator_root_and_preserves_json_argv(tmp_path: Path) -> None:
+    root = tmp_path / "root with a'quote"
+    for algorithm, reason in (
+        ("pmd-score", "missing_asset"),
+        ("copy-number", "missing_asset"),
+        ("cell-origin", "missing_asset"),
+    ):
+        remedy = _skip_remedy(algorithm, reason, root)
+        assert remedy is not None
+        assert shlex.split(remedy["command"]) == remedy["argv"]
+        assert remedy["argv"][-1] == str(root)
+    pmd = _skip_remedy("pmd-score", "missing_asset", root)
+    assert pmd is not None
+    assert "YOUR_LOCAL_PMD_coordinates_hg38.bed.gz" in pmd["argv"]
