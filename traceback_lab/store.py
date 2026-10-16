@@ -58,6 +58,43 @@ _ATTEMPT_ID = r"^a-\d{8}T\d{12}-[0-9a-f]{8}$"
 class ResultOrderUnavailable(OSError):
     """Attempt publication order cannot be read safely."""
 
+
+class ResultPublishUncertain(LabProblem):
+    """The selector is visible, but its durability was not confirmed."""
+
+    def __init__(
+        self,
+        *,
+        input_id: str,
+        algorithm_id: str,
+        parameters_sha256: str,
+        attempt_id: str,
+        generation_notified: bool,
+    ) -> None:
+        if generation_notified:
+            notification = "the generation counter advanced"
+            fix = "Inspect the selected result and run history before retrying."
+        else:
+            notification = "the generation notification could not be confirmed"
+            fix = (
+                "Manually reload or reopen the Lab view, then inspect the selected "
+                "result and run history before retrying."
+            )
+        super().__init__(
+            "TBX-LAB-020",
+            summary="Result selection durability is unconfirmed",
+            cause=f"The selected result is visible, but its directory sync failed; {notification}.",
+            fix=fix,
+            data={
+                "input_id": input_id,
+                "algorithm_id": algorithm_id,
+                "parameters_sha256": parameters_sha256,
+                "attempt_id": attempt_id,
+                "generation_notified": generation_notified,
+            },
+        )
+
+
 def _utc(epoch: float | None = None) -> str:
     moment = datetime.fromtimestamp(time.time() if epoch is None else epoch, UTC)
     return moment.strftime("%Y-%m-%dT%H:%M:%SZ")
@@ -532,6 +569,26 @@ class LabStore:
         if last_success is not None:
             selection["last_success_attempt_id"] = last_success
         write_atomic(directory / "selected.json", canonical_json_bytes(selection))
+        try:
+            _fsync_dir(directory)
+        except OSError as exc:
+            # The replacement selector may already be visible to readers.
+            # Notify the UI without allowing a counter failure to hide the
+            # selector's uncertain durability or trigger pruning.
+            generation_notified = False
+            try:
+                self.bump_generation()
+            except Exception:  # noqa: BLE001 - preserve the original publication failure
+                pass
+            else:
+                generation_notified = True
+            raise ResultPublishUncertain(
+                input_id=input_id,
+                algorithm_id=envelope.algorithm_id,
+                parameters_sha256=envelope.provenance.parameters_sha256,
+                attempt_id=attempt,
+                generation_notified=generation_notified,
+            ) from exc
         keep = {attempt, *([previous.name] if previous is not None else [])}
         if last_success is not None:
             keep.add(last_success)
