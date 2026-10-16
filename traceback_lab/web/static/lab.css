@@ -48,15 +48,15 @@ pre.stderr { white-space: pre-wrap; overflow-wrap: anywhere; font-size: .85rem; 
 .app-header .flag-pill { font-size: .875rem; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; min-width: 0; }
 .lab-status { flex-basis: auto; }
 .lab-chrome .lab-status:not(:empty) { display: block; }
-#main { width: min(76rem, calc(100% - 2rem)); margin-inline: auto; display: block; padding-block: .5rem 3rem; }
-.clia-panel { margin: .5rem 0 0; padding: .75rem 1rem; background: #ffffff; border: 1px solid var(--rule); border-radius: .5rem; overflow: visible; }
+#main { width: min(76rem, calc(100% - 2rem)); margin-inline: auto; display: block; padding-block: .25rem 3rem; }
+.clia-panel { margin: 0; padding: .5rem .75rem; background: #ffffff; border: 1px solid var(--rule); border-radius: .5rem; overflow: visible; }
 .clia-title { margin: 0 0 .3rem; font: 700 1.5rem/1.15 ui-serif, Georgia, serif; }
 .clia-short { column-count: 1; column-gap: 2rem; font-size: .9rem; line-height: 1.3; }
-.clia-short p { margin: 0 0 .3rem; break-inside: avoid; }
+.clia-short p { margin: 0 0 .15rem; break-inside: avoid; }
 .clia-actions { margin: .1rem 0 0; display: flex; gap: 1rem; align-items: center; }
 .clia-toggle { background: #ffffff; color: var(--ink); }
 .clia-full p { max-width: 70ch; }
-.headline { margin: .6rem 0 .4rem; font-size: 1.1rem; font-weight: 700; }
+.headline { margin: .35rem 0 .25rem; font-size: 1.1rem; font-weight: 700; }
 .landing-band { display: grid; grid-template-columns: 1fr; gap: 1rem; }
 .landing-band .panel { margin-top: 0; padding-top: .5rem; }
 .defended-rows { list-style: none; margin: .25rem 0; padding: 0; }

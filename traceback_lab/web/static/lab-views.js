@@ -122,7 +122,7 @@
     cliaCopy().then((c) => {
       shortBox.replaceChildren(...paragraphs(c.short));
       fullBox.replaceChildren(...paragraphs(c.full));
-      requestAnimationFrame(() => setTimeout(measure, 0));
+      measure();
     });
     out.push(panel);
     if (sample.excluded_chunks && sample.excluded_chunks.length) {
@@ -293,6 +293,7 @@
     const header = rect(document.querySelector(".app-header"));
     const panel = document.querySelector(".clia-panel");
     const viewport = window.innerHeight;
+    body.viewportHeight = String(viewport);
     body.bannerHeight = banner ? Math.round(banner.height) : "";
     body.headerHeight = header ? Math.round(header.height) : "";
     if (panel) {
@@ -713,14 +714,55 @@
     return [section];
   }
 
+  function fragXMethSignals(sample) {
+    const a = algo(sample, "frag-x-meth");
+    const section = h("section", { class: "panel" }, h("h2", {}, "Fragment size × methylation"));
+    if (!a || a.status !== "ok") return a ? [section, absent(a, "frag-x-meth")] : [];
+    const delta = value(sample, "frag-x-meth", "short_fragment_hypomethylation_delta");
+    section.append(
+      h("p", {}, "Each molecule contributes once after at least four distinct CpG calls. The matrix is descriptive; no normal range is claimed."),
+      h("p", {}, "Long (151–220 bp) mean minus short (100–150 bp) mean: ",
+        h("strong", {}, fmt(delta, "fraction")),
+        delta === null ? " (one or both groups have no eligible molecules)." : ". A positive value means the short fragments have lower 5mC fraction."),
+      ...context(sample, "frag-x-meth", new Set()),
+    );
+    const slot = h("div", { "aria-live": "polite" }, h("p", {}, "Loading size × methylation counts…"));
+    section.append(slot);
+    artifact(sample, "frag-x-meth", "size-methylation").then((data) => {
+      if (!Array.isArray(data.size_edges_bp) || !Array.isArray(data.methylation_edges)
+          || !Array.isArray(data.counts) || data.counts.length !== data.size_edges_bp.length
+          || data.counts.some((row) => !Array.isArray(row) || row.length !== data.methylation_edges.length - 1)) {
+        throw new Error("panel dimensions invalid");
+      }
+      const methylLabels = data.methylation_edges.slice(0, -1).map((edge, i) =>
+        `${Math.round(edge * 100)}–${Math.round(data.methylation_edges[i + 1] * 100)}% ${i === data.methylation_edges.length - 2 ? "(inclusive)" : ""}`);
+      const sizeLabels = data.size_edges_bp.map((edge, i) =>
+        i + 1 === data.size_edges_bp.length ? `${edge}+ bp` : `${edge}–${data.size_edges_bp[i + 1] - 1} bp`);
+      const table = h("table", { class: "data-table" },
+        h("caption", {}, `Molecules by aligned size and 5mC fraction; ${fmt(data.n)} eligible molecules`),
+        h("thead", {}, h("tr", {}, h("th", { scope: "col" }, "Aligned size"),
+          ...methylLabels.map((label) => h("th", { scope: "col" }, label)))),
+        h("tbody", {}, ...data.counts.map((row, i) =>
+          h("tr", {}, h("th", { scope: "row" }, sizeLabels[i]),
+            ...row.map((count) => h("td", { class: "num" }, fmt(count)))))));
+      slot.replaceWith(
+        h("p", { class: "help" }, `Short group n = ${fmt(data.short_n)}, mean = ${fmt(data.short_mean)}; long group n = ${fmt(data.long_n)}, mean = ${fmt(data.long_mean)}. A missing mean is not zero.`),
+        h("div", { class: "table-wrap" }, table),
+      );
+    }).catch((error) => slot.replaceWith(h("p", { class: "problem" }, `Size × methylation table unavailable (${error.message}). The scalar result remains above.`)));
+    return [section];
+  }
+
   function methylationSignals(sample) {
     const ids = ["global-5mc", "global-5hmc", "pmd-score", "hypometh-reads", "modbase-qc"];
     const present = ids.map((id) => algo(sample, id)).filter(Boolean);
-    if (!present.length) return [h("p", { class: "empty" }, "No methylation summary algorithm has run on this sample yet (Phase 1). Cell-type composition is in Body map.")];
-    return present.map((a) => h("section", { class: "panel" }, h("h2", {}, a.algorithm_id), a.status === "ok"
+    const joint = fragXMethSignals(sample);
+    if (!present.length && !joint.length) return [h("p", { class: "empty" }, "No methylation summary algorithm has run on this sample yet (Phase 1). Cell-type composition is in Body map.")];
+    return [...joint, ...present.map((a) => h("section", { class: "panel" }, h("h2", {}, a.algorithm_id), a.status === "ok"
       ? h("table", { class: "data-table" }, h("tbody", {}, ...a.metrics.filter((m) => m.value === null || typeof m.value !== "object").map((m) => h("tr", {}, h("th", { scope: "row" }, m.label), h("td", {}, fmt(m.value, m.unit)), h("td", {}, stateChip(m))))))
-      : absent(a, a.algorithm_id)));
+      : absent(a, a.algorithm_id)))];
   }
+
 
   // -- Body map: tissue composition with intervals (no donuts) -------------------------------------
   const ORGANS = [
