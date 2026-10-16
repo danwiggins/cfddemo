@@ -483,6 +483,88 @@ def test_cohort_listing_reports_symlink_without_following_it(store: LabStore, tm
     assert entries[1].generation == healthy
 
 
+@pytest.mark.parametrize("field,value", [("version", "1"), ("pon_n", "0")])
+def test_generation_rejects_coerced_integer_fields(store: LabStore, field: str, value: str) -> None:
+    source_id = _sample(store, 1)
+    add_sample(store, "healthy", source_id)
+    build_cohort(store, "healthy")
+    directory = store.lab / "cohorts" / "healthy"
+    pointer = directory / "current.json"
+    before_pointer = pointer.read_bytes()
+    before_generation = store.generation()
+    generation_file = directory / "generations" / "1" / "generation.json"
+    record = json.loads(generation_file.read_text())
+    record[field] = value
+    generation_file.write_text(json.dumps(record))
+    with pytest.raises(LabProblem, match="TBX-LAB-022") as error:
+        read_current(store, "healthy")
+    assert error.value.data["field"] == "generation.json"
+    with pytest.raises(LabProblem, match="TBX-LAB-022"):
+        build_cohort(store, "healthy")
+    assert pointer.read_bytes() == before_pointer
+    assert store.generation() == before_generation
+    assert not (directory / "generations" / "2").exists()
+
+
+@pytest.mark.parametrize("location", ["source", "manifest"])
+def test_symlinked_source_metadata_refuses_cohort_add(store: LabStore, location: str) -> None:
+    source_id = _sample(store, 1)
+    input_id = _sha(101)
+    original = (store.sources_dir / f"{source_id}.json" if location == "source"
+                else store.inputs_dir / input_id / "manifest.json")
+    surrogate = store.root / f"surrogate-{location}.json"
+    surrogate.write_bytes(original.read_bytes())
+    original.unlink()
+    original.symlink_to(surrogate)
+    with pytest.raises(LabProblem, match="TBX-LAB-020"):
+        add_sample(store, "healthy", source_id)
+    assert read_roster(store, "healthy") == ()
+
+
+def test_latest_cohort_add_does_not_read_symlinked_source(store: LabStore) -> None:
+    source_id = _sample(store, 1)
+    original = store.sources_dir / f"{source_id}.json"
+    surrogate = store.root / "surrogate-source.json"
+    surrogate.write_bytes(original.read_bytes())
+    original.unlink()
+    original.symlink_to(surrogate)
+    with pytest.raises(LabProblem, match="TBX-LAB-020"):
+        add_sample(store, "healthy", "latest")
+    assert read_roster(store, "healthy") == ()
+
+
+@pytest.mark.parametrize("location", ["sources_dir", "input_dir"])
+def test_cohort_add_refuses_symlinked_metadata_directory(store: LabStore, location: str) -> None:
+    source_id = _sample(store, 1)
+    original = store.sources_dir if location == "sources_dir" else store.inputs_dir / _sha(101)
+    surrogate = store.root / f"surrogate-{location}"
+    original.rename(surrogate)
+    original.symlink_to(surrogate, target_is_directory=True)
+    with pytest.raises(LabProblem, match="TBX-LAB-020"):
+        add_sample(store, "healthy", source_id)
+    assert read_roster(store, "healthy") == ()
+
+
+@pytest.mark.parametrize("location", ["source", "manifest"])
+def test_symlinked_source_metadata_preserves_current_generation(store: LabStore, location: str) -> None:
+    source_id = _sample(store, 1)
+    add_sample(store, "healthy", source_id)
+    old = build_cohort(store, "healthy")
+    before = store.generation()
+    input_id = _sha(101)
+    original = (store.sources_dir / f"{source_id}.json" if location == "source"
+                else store.inputs_dir / input_id / "manifest.json")
+    surrogate = store.root / f"surrogate-{location}.json"
+    surrogate.write_bytes(original.read_bytes())
+    original.unlink()
+    original.symlink_to(surrogate)
+    with pytest.raises(LabProblem, match="TBX-LAB-020"):
+        build_cohort(store, "healthy")
+    assert read_current(store, "healthy") == old
+    assert store.generation() == before
+    assert not (store.lab / "cohorts" / "healthy" / "generations" / "2").exists()
+
+
 def test_cohort_listing_keeps_healthy_entry_after_one_stat_error(store: LabStore, monkeypatch) -> None:
     from pathlib import Path
     from traceback_lab.cohorts import list_cohorts
