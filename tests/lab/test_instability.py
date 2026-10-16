@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import math
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -13,7 +14,7 @@ from traceback_lab.algorithms.instability import INSTABILITY, segment_tmad
 from traceback_lab.algorithms._base import Base
 from traceback_lab.controls import derived_plan_items
 from traceback_lab.derived import DerivedInput, cna, downsample, split
-from traceback_lab.registry import AlgorithmOutput, InputContext, PlanItem, execution_identity, intermediate_ids, load_registry, plan
+from traceback_lab.registry import AlgorithmOutput, InputContext, PlanItem, Skip, execution_identity, intermediate_ids, load_registry, plan
 from traceback_lab.run_command import _parent_intermediates
 from traceback_lab.runner import RunTarget, StepResult, run_plan
 from traceback_lab.scrub import Scrubber
@@ -43,10 +44,22 @@ FAKE_CN = FakeCopyNumber("copy-number")
 
 def test_tmad_weights_each_segment_by_supporting_bins() -> None:
     # Expanded bins are [0,0,0,0,1,2,2,2]. Their median is 0.5 and MAD 0.5.
-    value, n = segment_tmad([_segment(0, 4), _segment(1, 1), _segment(2, 3)])
-    assert (value, n) == (0.5, 8)
-    assert segment_tmad([_segment(None, 8), _segment(1, 0)]) == (None, 0)
-    assert segment_tmad([_segment(0.2, 5)]) == (0.0, 5)
+    result = segment_tmad([_segment(0, 4), _segment(1, 1), _segment(2, 3)])
+    assert (result.value, result.bins_used, result.segments_used) == (0.5, 8, 3)
+    assert (result.bins_missing_estimate, result.segments_missing_estimate) == (0, 0)
+    missing = segment_tmad([_segment(None, 8), _segment(0.2, 5)])
+    assert (missing.value, missing.bins_used, missing.segments_used) == (0.0, 5, 1)
+    assert (missing.bins_missing_estimate, missing.segments_missing_estimate) == (8, 1)
+    assert segment_tmad([]).value is None
+
+
+@pytest.mark.parametrize("segment", [
+    _segment(1, 0), _segment(1, -1), _segment(1, 1.5), _segment(1, "2"),
+    _segment(math.nan, 2), _segment(math.inf, 2), _segment("0.2", 2),
+])
+def test_malformed_segment_is_not_silently_excluded(segment) -> None:
+    with pytest.raises(ValueError, match="invalid"):
+        segment_tmad([segment])
 
 
 def test_instability_reads_only_the_selected_copy_number_artifact(tmp_path: Path) -> None:
@@ -62,9 +75,18 @@ def test_instability_reads_only_the_selected_copy_number_artifact(tmp_path: Path
         extras={"upstream": {"copy-number": str(selected)}},
     )
     output = INSTABILITY.run(ctx, tmp_path)
-    assert output.metrics == [{"metric_id": "tmad", "value": 1.0, "unit": "log2", "n": 4}]
+    assert output.metrics == [
+        {"metric_id": "tmad", "value": 1.0, "unit": "log2", "n": 4},
+        {"metric_id": "segments_used", "value": 2, "unit": "segments", "n": None},
+        {"metric_id": "segments_missing_estimate", "value": 0, "unit": "segments", "n": None},
+        {"metric_id": "bins_missing_estimate", "value": 0, "unit": "bins", "n": None},
+    ]
     with pytest.raises(RuntimeError, match="selected copy-number"):
         INSTABILITY.run(InputContext(**{**ctx.__dict__, "extras": {}}), tmp_path)
+    (selected / "cn_segments.json").write_text("{}", encoding="utf-8")
+    with pytest.raises(ValueError, match="no segment list"):
+        INSTABILITY.run(ctx, tmp_path)
+    assert INSTABILITY.preflight(InputContext(**{**ctx.__dict__, "eligible_reads": 1_999_999})).reason_code == "depth"
 
 
 def test_full_and_derived_plans_keep_copy_number_per_input() -> None:
@@ -149,4 +171,31 @@ def test_derived_runs_use_their_own_copy_number_artifacts(tmp_path: Path, monkey
         assert [result.status for result in run.results] == ["ok", "ok"]
         result = store.read_result(run.derived.input_id, "instability", run.results[1].parameters_sha256)
         assert result is not None and result.metrics[0].value == 1.0
+        # The parameter hash may legitimately match the parent's; input ID
+        # separates the store entries and their selected artifact directories.
+        assert run.results[0].parameters_sha256 == full[0].parameters_sha256
+        assert run.results[1].parameters_sha256 == full[1].parameters_sha256
         assert run.results[0].artifacts_dir != full[0].artifacts_dir
+
+
+def test_non_ok_copy_number_propagates_as_upstream_skip(tmp_path: Path) -> None:
+    @dataclass
+    class SkippingCopyNumber(FakeCopyNumber):
+        def preflight(self, ctx: InputContext) -> Skip:
+            return Skip("missing_asset", "synthetic copy-number unavailable")
+
+    store = LabStore(tmp_path / "store")
+    store.ensure()
+    target = RunTarget(
+        input_id="a" * 64, source_id="b" * 64, input_dir=tmp_path,
+        reference_id="hg38", reference_sha256="c" * 64, eligible_reads=2_000_000,
+    )
+    results = run_plan(
+        store, None, store.run_log("r-20261016-1201-aaab"), target,
+        [PlanItem(SkippingCopyNumber("copy-number"), True), PlanItem(INSTABILITY, False)],
+        {"copy-number": "tests.lab.test_instability:FAKE_CN", "instability": "instability:INSTABILITY"},
+        run_id="r-20261016-1201-aaab", scrubber=Scrubber(root=store.root),
+    )
+    assert [(result.status, result.skip_reason) for result in results] == [
+        ("skipped", "missing_asset"), ("skipped", "upstream"),
+    ]

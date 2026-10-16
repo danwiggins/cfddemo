@@ -7,7 +7,7 @@
 # original evidence (D4).  citation_checked records who confirmed that every
 # DOI resolves and every displayed number matches the source (D27); an entry
 # without it renders an "UNVERIFIED citation" badge.
-version: 0.6.2
+version: 0.6.3
 hidden_algorithms: [read-summary, meth-calls]
 entries:
   # ---------------------------------------------------------------- bam-qc
@@ -628,6 +628,69 @@ entries:
     headline: true
     citations: []
     citation_checked: {by: "lab build agent", date: "2026-10-16", note: "No citation or numerical performance claim displayed; exploratory Lab estimator."}
+
+  - algorithm_id: instability
+    metric_id: segments_used
+    label: "Segments with a log2 estimate used for TMAD"
+    value_kind: count
+    tier: SPECULATIVE
+    origin_tier: NEWER
+    origin_platform: "Lab copy-number artifact"
+    min_depth_x: null
+    reference: {kind: none}
+    performance: null
+    performance_missing_reason: "coverage count, not a diagnostic"
+    meaning_high: "More segments contributed to the instability estimate."
+    meaning_low: "Fewer segments contributed to the instability estimate."
+    confounders: ["segmentation", "masked bins"]
+    next_steps: {analytical: ["Inspect the selected copy-number segments"], clinical_setting: null}
+    license_ids: [gpl-copyleft]
+    flags: []
+    headline: false
+    citations: []
+    citation_checked: {by: "lab build agent", date: "2026-10-16", note: "No citation displayed; artifact coverage count."}
+
+  - algorithm_id: instability
+    metric_id: segments_missing_estimate
+    label: "Segments without a log2 estimate"
+    value_kind: count
+    tier: SPECULATIVE
+    origin_tier: NEWER
+    origin_platform: "Lab copy-number artifact"
+    min_depth_x: null
+    reference: {kind: none}
+    performance: null
+    performance_missing_reason: "coverage count, not a diagnostic"
+    meaning_high: "More segments were excluded because their log2 estimate was null."
+    meaning_low: "Fewer segments lacked a log2 estimate."
+    confounders: ["masked bins", "segmentation"]
+    next_steps: {analytical: ["Inspect the selected copy-number segments"], clinical_setting: null}
+    license_ids: [gpl-copyleft]
+    flags: []
+    headline: false
+    citations: []
+    citation_checked: {by: "lab build agent", date: "2026-10-16", note: "No citation displayed; missing-estimate count."}
+
+  - algorithm_id: instability
+    metric_id: bins_missing_estimate
+    label: "Segment bins without a log2 estimate"
+    value_kind: count
+    tier: SPECULATIVE
+    origin_tier: NEWER
+    origin_platform: "Lab copy-number artifact"
+    min_depth_x: null
+    reference: {kind: none}
+    performance: null
+    performance_missing_reason: "coverage count, not a diagnostic"
+    meaning_high: "More supporting bins were excluded because their segment log2 estimate was null."
+    meaning_low: "Fewer supporting bins lacked a segment log2 estimate."
+    confounders: ["masked bins", "segmentation"]
+    next_steps: {analytical: ["Inspect the selected copy-number segments"], clinical_setting: null}
+    license_ids: [gpl-copyleft]
+    flags: []
+    headline: false
+    citations: []
+    citation_checked: {by: "lab build agent", date: "2026-10-16", note: "No citation displayed; missing-estimate bin count."}
 
   # ------------------------------------------------------------ modbase-qc
   - algorithm_id: modbase-qc
