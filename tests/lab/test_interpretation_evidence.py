@@ -62,7 +62,7 @@ def test_partial_input_does_not_enter_the_ui_defended_rule() -> None:
     block = defended([candidate])
     assert block["qualified"] == 1
     assert block["rows"][0]["algorithm_id"] == "fragment-size"
-    sentence = headline(0.26, 1, 1, block["qualified"], {}, downsampled=True)
+    sentence = headline(0.42, 1, 1, block["qualified"], {}, downsampled=True)
     assert "result is defended" in sentence["sentence"]
 
 
@@ -82,8 +82,8 @@ def test_placeholder_header_model_is_not_evidence_of_a_known_model(monkeypatch) 
     from traceback_lab.algorithms.cell_origin import header_model
     from traceback_runner import cell_origin
 
-    monkeypatch.setattr(cell_origin, "_header_models", lambda _bam: ["modbase_model_version_id"])
-    assert header_model(Path("synthetic.bam")) == "modbase_model_version_id"
+    monkeypatch.setattr(cell_origin, "_header_models", lambda _bam: ["unknown_modbase_model"])
+    assert header_model(Path("synthetic.bam")) == "unknown_modbase_model"
     # Header parsing establishes only that one string was declared. The
     # actual model and its calibration remain an external owner decision.
 
