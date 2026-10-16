@@ -9,6 +9,7 @@ from traceback_lab import cohorts
 from traceback_lab.cohorts import add_sample, build_cohort, project_current_metric, project_sample_metric, read_current, read_roster
 from traceback_lab.envelope import Metric, ResultEnvelope, provenance
 from traceback_lab.identity import parameters_sha256
+from traceback_lab.ingest import resolve_sample
 from traceback_lab.problems import LabProblem
 from traceback_lab.store import LabStore
 
@@ -531,6 +532,38 @@ def test_latest_cohort_add_does_not_read_symlinked_source(store: LabStore) -> No
     with pytest.raises(LabProblem, match="TBX-LAB-020"):
         add_sample(store, "healthy", "latest")
     assert read_roster(store, "healthy") == ()
+
+
+@pytest.mark.parametrize("bad_input,field", [(None, "inputs"), ({"used_utc": 42}, "used_utc")])
+def test_latest_cohort_add_rejects_malformed_source_inputs(store: LabStore, bad_input: object, field: str) -> None:
+    source_id = _sample(store, 1)
+    path = store.sources_dir / f"{source_id}.json"
+    record = json.loads(path.read_text())
+    record["inputs"].append(bad_input)
+    path.write_text(json.dumps(record))
+    with pytest.raises(LabProblem, match="TBX-LAB-020") as error:
+        add_sample(store, "healthy", "latest")
+    assert error.value.data == {"source_id": source_id, "field": field}
+    assert read_roster(store, "healthy") == ()
+
+
+@pytest.mark.parametrize("first_time,second_time,expected_index", [
+    ("2026-10-17T00:00:00Z", "2026-10-16T00:00:00Z", 1),
+    ("2026-10-16T00:00:00Z", "2026-10-16T00:00:00Z", 2),
+])
+def test_latest_cohort_add_matches_well_formed_sample_resolution(
+    store: LabStore, first_time: str, second_time: str, expected_index: int,
+) -> None:
+    first, second = _sample(store, 1), _sample(store, 2)
+    for source_id, used_utc in ((first, first_time), (second, second_time)):
+        path = store.sources_dir / f"{source_id}.json"
+        record = json.loads(path.read_text())
+        record["inputs"][0]["used_utc"] = used_utc
+        path.write_text(json.dumps(record))
+    expected = _sha(expected_index)
+    assert resolve_sample(store, "latest") == expected
+    assert add_sample(store, "healthy", "latest")
+    assert read_roster(store, "healthy") == (expected,)
 
 
 @pytest.mark.parametrize("location", ["sources_dir", "input_dir"])

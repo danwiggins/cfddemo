@@ -172,8 +172,21 @@ def _resolve_cohort_sample(store: LabStore, sample_ref: str) -> str:
                 fix="Restore the intact source record before cohort add",
                 data={"source_id": source_id, "field": "inputs"},
             )
-        newest = max((item.get("used_utc", "") for item in inputs if isinstance(item, dict)
-                      and isinstance(item.get("used_utc", ""), str)), default="")
+        timestamps: list[str] = []
+        for item in inputs:
+            if not isinstance(item, dict):
+                field = "inputs"
+            elif not isinstance(item.get("used_utc", ""), str):
+                field = "used_utc"
+            else:
+                timestamps.append(item.get("used_utc", ""))
+                continue
+            raise LabProblem(
+                "TBX-LAB-020", cause=f"stored source record {source_id[:12]} has invalid {field}",
+                fix="Restore the intact source record before cohort add",
+                data={"source_id": source_id, "field": field},
+            )
+        newest = max(timestamps, default="")
         dated.append((newest, source_id))
     return max(dated)[1]
 
