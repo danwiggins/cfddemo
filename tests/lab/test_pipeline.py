@@ -3,13 +3,14 @@
 from __future__ import annotations
 
 import os
+import signal
 import sys
 import time
 from pathlib import Path
 
 import pytest
 
-from traceback_lab.pipeline import Stage, run_pipeline
+from traceback_lab.pipeline import PipelineResult, Stage, StageOutcome, run_pipeline
 from traceback_lab.scrub import Scrubber
 
 PY = sys.executable
@@ -109,3 +110,51 @@ def test_disk_sampling(tmp_path: Path) -> None:
     script = f"open({str(target / 'blob')!r}, 'wb').write(b'x' * 2_000_000)"
     result = run_pipeline([Stage("write", [PY, "-c", script])], timeout_s=30, disk_path=target)
     assert result.peak_disk_bytes is not None and result.peak_disk_bytes >= 2_000_000
+
+def test_upstream_independent_failure_wins_despite_reversed_reap_times() -> None:
+    """Observed reap times cannot prove which stage exited first."""
+
+    result = PipelineResult(
+        stages=[
+            StageOutcome("minimap2", returncode=1, exited_at=2.10),
+            StageOutcome("samtools sort", returncode=1, exited_at=2.00),
+        ],
+        duration_s=0.2,
+        peak_disk_bytes=None,
+    )
+    assert result.failed_stage is result.stages[0]
+
+
+@pytest.mark.parametrize(
+    "consequence", [-signal.SIGPIPE, -signal.SIGTERM, -signal.SIGKILL]
+)
+def test_upstream_signal_consequence_does_not_hide_downstream_failure(
+    consequence: int,
+) -> None:
+    result = PipelineResult(
+        stages=[
+            StageOutcome("writer", returncode=consequence, exited_at=2.00),
+            StageOutcome("reader", returncode=1, exited_at=2.10),
+        ],
+        duration_s=0.2,
+        peak_disk_bytes=None,
+    )
+    assert result.failed_stage is result.stages[1]
+
+
+def test_only_signal_consequences_fall_back_to_first_failed_stage() -> None:
+    result = PipelineResult(
+        stages=[
+            StageOutcome("writer", returncode=-signal.SIGPIPE, exited_at=2.10),
+            StageOutcome("reader", returncode=-signal.SIGTERM, exited_at=2.00),
+        ],
+        duration_s=0.2,
+        peak_disk_bytes=None,
+    )
+    assert result.failed_stage is result.stages[0]
+    pending = PipelineResult(
+        stages=[StageOutcome("pending"), StageOutcome("ok", returncode=0)],
+        duration_s=0.2,
+        peak_disk_bytes=None,
+    )
+    assert pending.failed_stage is None

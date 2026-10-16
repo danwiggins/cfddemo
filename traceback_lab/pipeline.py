@@ -76,26 +76,22 @@ class PipelineResult:
 
     @property
     def failed_stage(self) -> StageOutcome | None:
-        """The root-cause stage: the first to exit non-zero on its own.
+        """The upstreammost independent non-zero failure in the pipeline.
 
-        Stages we killed (SIGTERM/SIGKILL) or that died of a broken pipe
-        (SIGPIPE: their reader went away) are consequences.  Within one poll
-        interval the upstream stage wins, because a reader that hits a
-        truncated stream fails *because* its writer died.
+        Stages killed by us (SIGTERM/SIGKILL) or by a broken pipe (SIGPIPE)
+        are consequences. A reader may reject truncated input after its
+        writer fails; selecting by observed reap time is scheduling-dependent
+        and cannot establish which process actually exited first. If every
+        failure is a signal consequence, return the first such stage only as
+        context.
         """
 
         consequences = {-signal.SIGTERM, -signal.SIGKILL, -signal.SIGPIPE}
-        causes = [
-            (stage.exited_at if stage.exited_at is not None else float("inf"), -position, stage)
-            for position, stage in enumerate(self.stages)
-            if stage.returncode not in (0, None) and stage.returncode not in consequences
-        ]
-        if causes:
-            first = min(causes, key=lambda item: item[0])[0]
-            tied = [item for item in causes if item[0] - first <= 2 * POLL_S]
-            return max(tied, key=lambda item: item[1])[2]
         for stage in self.stages:
-            if stage.returncode != 0:
+            if stage.returncode not in (0, None) and stage.returncode not in consequences:
+                return stage
+        for stage in self.stages:
+            if stage.returncode not in (0, None):
                 return stage
         return None
 
