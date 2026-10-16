@@ -250,6 +250,10 @@ def test_compare_and_joint_panel_render_in_native_tables(tmp_path, monkeypatch) 
             "metrics": [], "problem": problem,
         })
         target_unavailable = dom("compare", "unavailable-profile", "This sample: Cohort generation unavailable")
+        monkeypatch.setattr(web_api.LabApi, "cohorts", lambda self: {
+            "cohorts": [], "unavailable": [{"cohort_id": "broken", "problem": problem}],
+        })
+        only_broken = dom("compare", "only-broken-profile", "No selectable cohort generation is available")
         signals = dom("signals", "signals-profile", "Molecules by aligned size and 5mC fraction")
         motif_algorithm = {
             **algorithm, "algorithm_id": "breakpoint-motifs",
@@ -283,7 +287,11 @@ def test_compare_and_joint_panel_render_in_native_tables(tmp_path, monkeypatch) 
     assert "Next action: " in with_broken and "docs/LAB-GUIDE.md#tbx-lab-022" in with_broken
     assert "This sample: Cohort generation unavailable" in target_unavailable
     assert "Comparison against healthy:7" not in target_unavailable
+    assert "No selectable cohort generation is available" in only_broken
+    assert "Cohort broken: Cohort generation unavailable" in only_broken
+    assert 'aria-label="Cohort generation"' not in only_broken
     assert 'data-csp-violations="0"' in with_broken and 'data-csp-violations="0"' in target_unavailable
+    assert 'data-csp-violations="0"' in only_broken
     assert "1001+ bp" in signals and "75–100% (inclusive)" in signals
     assert "Short group n = 0, mean = —" in signals
     assert "A missing mean is not zero" in signals
