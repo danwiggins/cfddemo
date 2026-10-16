@@ -100,9 +100,13 @@ def _full_input(store: LabStore, record: dict[str, Any]) -> tuple[str, dict[str,
     return None
 
 
-def _aligner(manifest: dict[str, Any]) -> tuple[str, dict[str, Any]]:
+def _aligner(manifest: dict[str, Any], input_id: str) -> tuple[str, dict[str, Any]]:
     if manifest["kind"] == "prealigned":
-        return "pre-aligned", {"kind": "pre-aligned"}
+        # No recorded aligner/tool argv: do not pool distinct external pipelines.
+        return (
+            f"pre-aligned; provenance unknown ({input_id[:12]})",
+            {"kind": "pre-aligned", "input_id": input_id},
+        )
     tools = manifest.get("tools") or {}
     label = f"minimap2 {tools.get('minimap2', '?')}; samtools {tools.get('samtools', '?')}"
     return label, {
@@ -114,7 +118,7 @@ def _aligner(manifest: dict[str, Any]) -> tuple[str, dict[str, Any]]:
 def _selected_results(store: LabStore, input_id: str, manifest: dict[str, Any]) -> tuple[CohortResult, ...]:
     """Snapshot only selected status-ok results on the full input."""
 
-    label, aligner = _aligner(manifest)
+    label, aligner = _aligner(manifest, input_id)
     del label
     found: list[CohortResult] = []
     identities: dict[str, str] = {}
@@ -172,7 +176,7 @@ def member_from_store(store: LabStore, source_id: str) -> CohortMember:
     if selected is None:
         raise ValueError("admitted source has no full aligned input")
     input_id, manifest = selected
-    label, _ = _aligner(manifest)
+    label, _ = _aligner(manifest, input_id)
     return CohortMember(source_id=source_id, input_id=input_id, aligner_identity=label,
                         results=_selected_results(store, input_id, manifest))
 

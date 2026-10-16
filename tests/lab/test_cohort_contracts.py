@@ -122,3 +122,22 @@ def test_nested_cohort_values_cannot_mutate_after_validation() -> None:
     with pytest.raises(TypeError):
         projection.exclusions["self"] = 1
     assert projection.model_dump(mode="json")["values"] == [100.0]
+
+
+def test_asset_descriptor_dump_roundtrips_and_rejects_bad_digest() -> None:
+    asset = AssetDescriptor(kind="pmd", sha256=_sha(15), size_bytes=42,
+                            origin="user", source_label="fixture", terms="unknown")
+    assert AssetDescriptor.model_validate(asset.model_dump()) == asset
+    assert AssetDescriptor.model_validate_json(asset.model_dump_json(by_alias=True)) == asset
+    with pytest.raises(ValidationError):
+        AssetDescriptor(kind="pmd", sha256="not-a-digest", size_bytes=42,
+                        origin="user", source_label="fixture", terms="unknown")
+
+
+def test_member_rejects_duplicate_algorithm_and_pon_overcount() -> None:
+    result = _member(0).results[0]
+    with pytest.raises(ValidationError, match="one selected result per algorithm"):
+        CohortMember(source_id=_sha(1), input_id=_sha(100), aligner_identity="pre-aligned",
+                     results=(result, result))
+    with pytest.raises(ValidationError, match="pon_n"):
+        CohortGeneration(cohort_id="kit-a", version=1, members=(_member(0),), pon_n=2)
