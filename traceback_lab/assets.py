@@ -12,10 +12,11 @@ import os
 import shutil
 import stat
 import tempfile
+from contextlib import contextmanager
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, BinaryIO, Iterator
 
 from pydantic import ValidationError
 from traceback_runner.serialization import canonical_json_bytes
@@ -109,15 +110,100 @@ def _regular_file(path: Path) -> None:
         raise AssetError("asset must be a regular file, without symlinks")
 
 
-def _digest(path: Path) -> str:
+def _open_regular(path: Path) -> int:
+    """Open without following path-component symlinks where dirfd is available."""
+
+    flags = os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_NONBLOCK", 0)
+    if os.name != "posix" or not hasattr(os, "O_NOFOLLOW"):
+        return os.open(path, flags)
+    absolute = Path(os.path.abspath(path))
+    directory = os.open(absolute.anchor, os.O_RDONLY | os.O_DIRECTORY)
+    try:
+        for part in absolute.parts[1:-1]:
+            child = os.open(part, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW, dir_fd=directory)
+            os.close(directory)
+            directory = child
+        return os.open(absolute.name, flags, dir_fd=directory)
+    finally:
+        os.close(directory)
+
+
+def _file_identity(info: os.stat_result) -> tuple[int, int, int, int, int]:
+    return (info.st_dev, info.st_ino, info.st_size, info.st_mtime_ns, info.st_ctime_ns)
+
+
+def _digest(path: Path) -> tuple[str, int]:
+    """Hash one regular file handle and reject changes during the read.
+
+    The path is checked again after hashing so a replacement cannot make a
+    digest of the old inode look like verification of the new pathname.
+    """
+
     digest = hashlib.sha256()
     try:
-        with path.open("rb") as stream:
+        descriptor = _open_regular(path)
+        with os.fdopen(descriptor, "rb") as stream:
+            before = os.fstat(stream.fileno())
+            if not stat.S_ISREG(before.st_mode):
+                raise AssetError("asset must be a regular file, without symlinks")
             while block := stream.read(_BLOCK):
                 digest.update(block)
+            after = os.fstat(stream.fileno())
+        current = os.lstat(path)
     except OSError as exc:
         raise AssetError("asset file is unreadable or changed while hashing") from exc
-    return digest.hexdigest()
+    if _file_identity(before) != _file_identity(after) or _file_identity(after) != _file_identity(current):
+        raise AssetError("asset file changed while hashing; inspect it again")
+    if not stat.S_ISREG(current.st_mode):
+        raise AssetError("asset must be a regular file, without symlinks")
+    return digest.hexdigest(), after.st_size
+
+
+@contextmanager
+def open_verified_asset(store: LabStore, record: AssetRecord) -> Iterator[BinaryIO]:
+    """Consume one pinned handle, rejecting changes before or during use."""
+
+    path = _directory(store, record.descriptor.kind) / PMD_FILENAME
+    if record.file != path:
+        raise AssetError("asset record points outside its registered location")
+    _check_contained(store, path)
+    try:
+        with os.fdopen(_open_regular(path), "rb") as stream:
+            before = os.fstat(stream.fileno())
+            if not stat.S_ISREG(before.st_mode):
+                raise AssetError("asset must be a regular file, without symlinks")
+            digest = hashlib.sha256()
+            while block := stream.read(_BLOCK):
+                digest.update(block)
+            checked = os.fstat(stream.fileno())
+            _check_contained(store, path)
+            current = os.lstat(path)
+            if (
+                _file_identity(before) != _file_identity(checked)
+                or _file_identity(checked) != _file_identity(current)
+                or digest.hexdigest() != record.sha256
+                or checked.st_size != record.descriptor.size_bytes
+            ):
+                raise AssetError("asset changed before consumption; it was not used")
+            stream.seek(0)
+            try:
+                yield stream
+            finally:
+                stream.seek(0)
+                digest = hashlib.sha256()
+                while block := stream.read(_BLOCK):
+                    digest.update(block)
+                consumed = os.fstat(stream.fileno())
+                _check_contained(store, path)
+                current = os.lstat(path)
+                if (
+                    _file_identity(before) != _file_identity(consumed)
+                    or _file_identity(consumed) != _file_identity(current)
+                    or digest.hexdigest() != record.sha256
+                ):
+                    raise AssetError("asset changed during consumption; result was not used")
+    except OSError as exc:
+        raise AssetError("asset became unavailable during consumption") from exc
 
 
 def _descriptor(
@@ -160,15 +246,17 @@ def inspect_asset(
 
     directory = _directory(store, kind)
     _check_contained(store, directory)
+    if directory.exists() and not directory.is_dir():
+        raise AssetError("asset directory is not a directory; inspect it without replacing it")
     path = directory / PMD_FILENAME
     manifest_path = directory / "manifest.json"
     _check_contained(store, path)
     _check_contained(store, manifest_path)
     _regular_file(path)
-    digest = _digest(path)
+    digest, size = _digest(path)
+    _check_contained(store, path)
     if digest != (expected_sha256 or PMD_SHA256):
         raise AssetError("PMD file differs from the pinned SHA-256; it was not used")
-    size = path.stat().st_size
     if not manifest_path.exists():
         legacy = _descriptor(
             size, "Legacy pinned PMD; source unrecorded", "unknown", None, sha256=digest,
@@ -176,10 +264,24 @@ def inspect_asset(
         return AssetRecord(legacy, path, True)
     _regular_file(manifest_path)
     try:
-        with manifest_path.open("rb") as stream:
+        with os.fdopen(_open_regular(manifest_path), "rb") as stream:
+            before = os.fstat(stream.fileno())
+            if not stat.S_ISREG(before.st_mode):
+                raise AssetError("Lab asset manifest must be a regular file")
             raw = stream.read(65_537)
+            after = os.fstat(stream.fileno())
     except OSError as exc:
         raise AssetError("Lab asset manifest is unreadable") from exc
+    _check_contained(store, manifest_path)
+    try:
+        current = os.lstat(manifest_path)
+    except OSError as exc:
+        raise AssetError("Lab asset manifest changed while being read; inspect it again") from exc
+    if (
+        _file_identity(before) != _file_identity(after)
+        or _file_identity(after) != _file_identity(current)
+    ):
+        raise AssetError("Lab asset manifest changed while being read; inspect it again")
     if len(raw) > 65_536:
         raise AssetError("Lab asset manifest exceeds 64 KiB")
     try:
@@ -229,10 +331,10 @@ def add_asset(
 
     directory = _directory(store, kind)
     source = _regular_source(source)
-    digest = _digest(source)
+    digest, source_size = _digest(source)
     if digest != PMD_SHA256:
         raise AssetError("source PMD file does not match the pinned SHA-256")
-    descriptor = _descriptor(source.stat().st_size, source_label, terms, license_id)
+    descriptor = _descriptor(source_size, source_label, terms, license_id)
     parent = directory.parent
     _check_contained(store, parent)
     if directory.exists() or directory.is_symlink():
@@ -271,10 +373,33 @@ def add_asset(
     def build(staging: Path) -> None:
         target = staging / PMD_FILENAME
         copied = hashlib.sha256()
-        with source.open("rb") as reader, target.open("xb") as writer:
-            while block := reader.read(_BLOCK):
-                writer.write(block)
-                copied.update(block)
+        try:
+            with os.fdopen(_open_regular(source), "rb") as reader:
+                before = os.fstat(reader.fileno())
+                if not stat.S_ISREG(before.st_mode):
+                    raise AssetError("asset source must be a regular file")
+                try:
+                    with target.open("xb") as writer:
+                        while True:
+                            try:
+                                block = reader.read(_BLOCK)
+                            except OSError as exc:
+                                raise AssetError("source PMD file changed while being copied") from exc
+                            if not block:
+                                break
+                            writer.write(block)
+                            copied.update(block)
+                except OSError as exc:
+                    raise AssetError(
+                        "could not write staged PMD asset; check free space and storage health, then retry"
+                    ) from exc
+                after = os.fstat(reader.fileno())
+            current = os.lstat(source)
+        except OSError as exc:
+            raise AssetError("source PMD file changed while being copied") from exc
+        _regular_source(source)
+        if _file_identity(before) != _file_identity(after) or _file_identity(after) != _file_identity(current):
+            raise AssetError("source PMD file changed while being copied")
         if copied.hexdigest() != PMD_SHA256 or target.stat().st_size != descriptor.size_bytes:
             raise AssetError("source PMD file changed while being copied")
         (staging / "manifest.json").write_bytes(
