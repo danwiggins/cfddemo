@@ -164,17 +164,25 @@ ROOT, home, login and chunk names redacted) is ever stored.
 | `global-5hmc` | share of CpG site calls (with a 5hmC channel) whose most likely state is 5hmC; skipped (`missing_channel`) when the MM tags carry no `C+h` |
 | `pmd-score` | 5mC share inside vs outside the Zhou 2018 common PMDs and their difference; needs 500,000 eligible reads and the PMD asset (below) |
 | `hypometh-reads` | among reads with ≥ 4 CpG calls, the share under 25% methylated, and U/X/M counts (≤ 25% / between / ≥ 75%); needs 500,000 eligible reads |
+| `frag-x-meth` | descriptive molecule-count matrix of aligned-size bins by per-read 5mC fraction (at least four distinct CpG sites/read); the scalar is long (151–220 bp) mean minus short (100–150 bp) mean, null if either group is empty; no normal range |
+| `breakpoint-motifs` | 4-mer counts at aligned-reference-span start and end−1, stratified by CpG proximity; the scalar is the fraction of ends near a CpG. These are not proven physical cleavage positions, and the methylation link is unavailable without a supported joint input |
 
-**PMD asset.** `pmd-score` reads the Zhou 2018 hg38 common-PMD file, which
-the repo does not ship (no license is stated; see its callout). Place it once
-per ROOT; the Lab checks its pinned sha256 and otherwise skips with
-`missing_asset`:
+**PMD asset.** `pmd-score` needs an operator-supplied Zhou 2018 hg38
+common-PMD BED.gz file. The repository does not ship or download it; its
+redistribution terms remain unknown. Obtain the file through your approved
+local process, then register its exact bytes and provenance under the same
+ROOT as the run:
 
+```bash
+traceback lab asset add pmd --file YOUR_LOCAL_PMD_coordinates_hg38.bed.gz \
+  --source-label Zhou-2018-operator-supplied --terms unknown --root R
+traceback lab asset inspect pmd --root R
 ```
-mkdir -p "$TRACEBACK_ROOT/lab/assets/pmd"
-curl -fL -o "$TRACEBACK_ROOT/lab/assets/pmd/PMD_coordinates_hg38.bed.gz" \
-  https://zhouserver.research.chop.edu/GenomeAnnotation/hg38/PMD_coordinates_hg38.bed.gz
-```
+
+`inspect` rehashes the pinned file; absent or altered bytes block
+`pmd-score` with an asset-specific recovery command. Registering a PMD
+asset does not establish redistribution rights or make a skipped result zero.
+
 
 Fragment length is the aligned reference span, the same definition as the
 signed fragment metric; the Lab's 1-bp counter is parity-tested against it.
@@ -242,8 +250,11 @@ traceback lab serve --root R --open
 atomically. Open **Compare** and choose that cohort; the page names the exact
 generation used for the whole response. Build again after a member or its
 results change. Different aligners or incompatible algorithm parameters are
-excluded per metric, with counts shown. The separate PoN denominator does
-not become a percentile denominator.
+excluded per metric, with counts shown. Pre-aligned inputs whose processing
+provenance is unknown are isolated by their input identity; they are not
+pooled as protocol-matched references. Distinct source IDs are not proof of
+independent donors. The separate PoN denominator does not become a
+percentile denominator.
 
 ## Positive controls
 

@@ -907,6 +907,8 @@
             return;
           }
           nodes.push(h("p", {}, `Target aligner: ${data.target_aligner}. Eligible members are counted separately for each metric after self-exclusion.`));
+          if (data.target_aligner.startsWith("pre-aligned; provenance unknown")) nodes.push(h("p", { class: "status-line" },
+            "Pre-aligned processing provenance is unknown. The cohort store isolates these inputs by input identity; they are not pooled as protocol-matched references."));
           const alignerRows = Object.entries(data.aligner_counts || {}).map(([name, count]) =>
             h("tr", {}, h("th", { scope: "row" }, name), h("td", { class: "num" }, fmt(count))));
           const alignerTable = h("table", { class: "data-table" },

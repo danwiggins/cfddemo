@@ -225,3 +225,17 @@ def test_compare_and_joint_panel_render_in_native_tables(tmp_path, monkeypatch) 
     assert "Invalid contexts: near 2, far 3" in motif_dom
     assert "AAAA" in motif_dom and "TTTT" in motif_dom
     assert 'data-csp-violations="0"' in motif_dom
+
+
+def test_asset_commands_are_registered_with_common_root_and_json() -> None:
+    from traceback_lab.cli import build_parser
+
+    parser = build_parser()
+    add = parser.parse_args([
+        "asset", "add", "pmd", "--file", "/tmp/pmd.bed.gz",
+        "--source-label", "synthetic fixture", "--terms", "unknown",
+        "--root", "/tmp/lab", "--json",
+    ])
+    inspect = parser.parse_args(["asset", "inspect", "pmd", "--root", "/tmp/lab", "--json"])
+    assert add.asset_action == "add" and add.as_json and str(add.root) == "/tmp/lab"
+    assert inspect.asset_action == "inspect" and inspect.as_json and str(inspect.root) == "/tmp/lab"
