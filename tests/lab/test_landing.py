@@ -252,6 +252,27 @@ def test_methods_shows_provenance_for_every_number(page_root, tmp_path) -> None:
 
 
 @needs_chrome
+def test_deep_link_waits_for_deferred_lens_script(page_root, tmp_path, monkeypatch) -> None:
+    """Fast API responses must not outrun the later deferred views script."""
+
+    import time
+    from traceback_lab.web.server import _Handler
+
+    original = _Handler.do_GET
+
+    def delayed_views(handler):
+        if handler.path == "/assets/lab-views.js":
+            time.sleep(3)
+        original(handler)
+
+    monkeypatch.setattr(_Handler, "do_GET", delayed_views)
+    with RunningLabServer(LabStore(page_root)) as server:
+        dom = _dom(server, tmp_path, route=f"/sample/{_id12(page_root)}/methods")
+    assert "Every number with its provenance" in dom
+    assert "Unknown sample" not in dom
+
+
+@needs_chrome
 def test_signals_body_map_and_agreement(page_root, tmp_path) -> None:
     id12 = _id12(page_root)
     with RunningLabServer(LabStore(page_root)) as server:
