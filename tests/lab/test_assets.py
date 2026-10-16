@@ -262,3 +262,30 @@ def test_copied_size_must_match_descriptor_before_publication(
     with pytest.raises(assets.AssetError, match="changed while being copied"):
         _add(store, source)
     assert not (store.lab / "assets" / "pmd").exists()
+
+
+def test_asset_command_is_reachable_through_signed_cli(
+    pinned: tuple[LabStore, Path, bytes], capsys: pytest.CaptureFixture[str],
+) -> None:
+    import json
+
+    from traceback_runner import cli as signed_cli
+
+    store, source, _ = pinned
+    code = signed_cli.main([
+        "lab", "asset", "add", "pmd", "--file", str(source),
+        "--source-label", "synthetic-Zhou-file", "--terms", "unknown",
+        "--root", str(store.root), "--json",
+    ])
+    added = json.loads(capsys.readouterr().out)
+    assert code == 0
+    assert added["command"] == "lab asset add"
+    assert added["data"]["asset"]["kind"] == "pmd"
+
+    code = signed_cli.main([
+        "lab", "asset", "inspect", "pmd", "--root", str(store.root), "--json",
+    ])
+    inspected = json.loads(capsys.readouterr().out)
+    assert code == 0
+    assert inspected["command"] == "lab asset inspect"
+    assert inspected["data"]["asset"] == added["data"]["asset"]
