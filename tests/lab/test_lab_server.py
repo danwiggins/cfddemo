@@ -16,6 +16,7 @@ import tempfile
 import threading
 import time
 import urllib.request
+from collections import deque
 from pathlib import Path
 
 import pytest
@@ -453,11 +454,48 @@ def _wait_for_chart(read_state, *, timeout: float, clock=None, pause=None) -> di
         pause(min(0.2, remaining))
 
 
+def _cdp_command(connection, method: str, params: dict, request_id: int, deadline: float,
+                 events: deque[str], *, clock=None) -> dict:
+    """Bound one response even if unrelated console events keep arriving."""
+
+    clock = clock or time.monotonic
+    command_deadline = min(deadline, clock() + 15)
+    remaining = command_deadline - clock()
+    if remaining <= 0:
+        raise TimeoutError(f"DevTools {method} exceeded its deadline")
+    connection.settimeout(remaining)
+    connection.send(json.dumps({"id": request_id, "method": method, "params": params}))
+    while True:
+        remaining = command_deadline - clock()
+        if remaining <= 0:
+            raise TimeoutError(f"DevTools {method} exceeded its deadline")
+        connection.settimeout(remaining)
+        message = json.loads(connection.recv())
+        if message.get("id") == request_id:
+            if "error" in message:
+                raise AssertionError(f"DevTools {method} failed: {message['error']!r}")
+            return message.get("result", {})
+        if message.get("method") in ("Runtime.consoleAPICalled", "Runtime.exceptionThrown", "Log.entryAdded"):
+            events.append(json.dumps(message, ensure_ascii=False)[-500:])
+
+
+def _read_debug_port(path: Path) -> str | None:
+    """An empty or partly written Chrome port file means startup is ongoing."""
+
+    try:
+        lines = path.read_text().splitlines()
+    except OSError:
+        return None
+    if len(lines) < 2 or not lines[0].isdecimal() or not lines[1].startswith("/devtools/browser/"):
+        return None
+    return lines[0]
+
+
 def _chart_dom_cdp(argv: list[str], profile: Path, *, timeout: float = 90) -> str:
     """Wait for one Chrome page's actual chart marker through DevTools."""
 
     deadline = time.monotonic() + timeout
-    events: list[str] = []
+    events: deque[str] = deque(maxlen=8)
     dom = ""
     failure: Exception | None = None
     cleanup_error = None
@@ -465,7 +503,7 @@ def _chart_dom_cdp(argv: list[str], profile: Path, *, timeout: float = 90) -> st
     with tempfile.TemporaryFile() as stdout, tempfile.TemporaryFile() as stderr:
         process = subprocess.Popen(
             [*argv[:-1], "--remote-debugging-address=127.0.0.1", "--remote-debugging-port=0",
-             "--remote-allow-origins=*", argv[-1]],
+             argv[-1]],
             stdout=stdout, stderr=stderr, start_new_session=os.name != "nt",
         )
         try:
@@ -473,8 +511,8 @@ def _chart_dom_cdp(argv: list[str], profile: Path, *, timeout: float = 90) -> st
             target_url = None
             direct_http = urllib.request.build_opener(urllib.request.ProxyHandler({}))
             while time.monotonic() < deadline and process.poll() is None:
-                if active_port.is_file():
-                    port = active_port.read_text().splitlines()[0]
+                port = _read_debug_port(active_port)
+                if port:
                     try:
                         with direct_http.open(f"http://127.0.0.1:{port}/json/list", timeout=2) as response:
                             targets = json.load(response)
@@ -490,26 +528,19 @@ def _chart_dom_cdp(argv: list[str], profile: Path, *, timeout: float = 90) -> st
                 time.sleep(0.1)
             if not target_url:
                 raise AssertionError("Chrome did not expose its Lab page through DevTools")
-            connection = websocket.create_connection(target_url, timeout=5, origin="http://localhost")
-            connection.settimeout(5)
+            connection = websocket.create_connection(
+                target_url, timeout=min(5, max(0.1, deadline - time.monotonic())), suppress_origin=True,
+            )
             command_id = 0
 
-            def command(method: str, params: dict | None = None):
+            def command(method: str, params: dict | None = None, *, until: float | None = None):
                 nonlocal command_id
                 command_id += 1
-                request_id = command_id
-                connection.send(json.dumps({"id": request_id, "method": method, "params": params or {}}))
-                while True:
-                    message = json.loads(connection.recv())
-                    if message.get("id") == request_id:
-                        if "error" in message:
-                            raise AssertionError(f"DevTools {method} failed: {message['error']!r}")
-                        return message.get("result", {})
-                    if message.get("method") in ("Runtime.consoleAPICalled", "Runtime.exceptionThrown", "Log.entryAdded"):
-                        events.append(json.dumps(message, ensure_ascii=False)[-500:])
+                return _cdp_command(connection, method, params or {}, command_id,
+                                    deadline if until is None else until, events)
 
-            def evaluate(expression: str):
-                result = command("Runtime.evaluate", {"expression": expression, "returnByValue": True})
+            def evaluate(expression: str, *, until: float | None = None):
+                result = command("Runtime.evaluate", {"expression": expression, "returnByValue": True}, until=until)
                 if "exceptionDetails" in result:
                     raise AssertionError(f"DevTools evaluation failed: {result['exceptionDetails']!r}")
                 return result["result"].get("value")
@@ -529,12 +560,15 @@ def _chart_dom_cdp(argv: list[str], profile: Path, *, timeout: float = 90) -> st
             failure = exc
             if connection is not None:
                 try:
-                    dom = evaluate("document.documentElement.outerHTML")
+                    dom = evaluate("document.documentElement.outerHTML", until=time.monotonic() + 2)
                 except Exception:
                     pass
         finally:
             if connection is not None:
-                connection.close()
+                try:
+                    connection.close()
+                except Exception as exc:
+                    cleanup_error = f"DevTools close failed: {exc!r}"
             if os.name == "nt":
                 try:
                     subprocess.run(
@@ -563,7 +597,7 @@ def _chart_dom_cdp(argv: list[str], profile: Path, *, timeout: float = 90) -> st
         raise AssertionError(
             f"Chrome chart wait failed: {failure!r}; cleanup_error={cleanup_error!r}; "
             f"data_ready={_body_attr(dom, 'ready')}, csp_violations={_body_attr(dom, 'csp-violations')}, "
-            f"fallback={'Chart could not be drawn' in dom}, console_tail={events[-8:]!r}, "
+            f"fallback={'Chart could not be drawn' in dom}, console_tail={list(events)!r}, "
             f"stderr_tail={stderr_tail!r}"
         ) from failure
     return dom
@@ -592,6 +626,37 @@ def test_chart_wait_accepts_a_chart_that_renders_after_page_readiness() -> None:
         now[0] += seconds
 
     assert _wait_for_chart(read_state, timeout=1, clock=lambda: now[0], pause=pause)["rendered"]
+
+
+def test_cdp_command_has_a_deadline_under_continuous_console_events() -> None:
+    now = [0.0]
+    events: deque[str] = deque(maxlen=8)
+
+    class FloodingConnection:
+        def settimeout(self, seconds: float) -> None:
+            assert 0 < seconds <= 15
+
+        def send(self, payload: str) -> None:
+            assert json.loads(payload)["id"] == 1
+
+        def recv(self) -> str:
+            now[0] += 1
+            return json.dumps({"method": "Runtime.consoleAPICalled", "params": {"tick": now[0]}})
+
+    with pytest.raises(TimeoutError, match="exceeded its deadline"):
+        _cdp_command(FloodingConnection(), "Runtime.evaluate", {}, 1, 90, events, clock=lambda: now[0])
+    assert now[0] == 15 and len(events) == 8
+
+
+def test_debug_port_waits_for_complete_chrome_startup_file(tmp_path) -> None:
+    active_port = tmp_path / "DevToolsActivePort"
+    assert _read_debug_port(active_port) is None
+    active_port.write_text("")
+    assert _read_debug_port(active_port) is None
+    active_port.write_text("1234\n")
+    assert _read_debug_port(active_port) is None
+    active_port.write_text("1234\n/devtools/browser/synthetic\n")
+    assert _read_debug_port(active_port) == "1234"
 
 
 @pytest.mark.skipif(_chrome() is None, reason="no Chrome/Chromium for the headless CSP check")
