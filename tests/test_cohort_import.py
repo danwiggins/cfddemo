@@ -24,6 +24,7 @@ from evidence_inspector.cohort_import import (
     CohortRecordWithheldReason,
 )
 from evidence_inspector.cohort_manifest import MeasurementAnchor
+from evidence_inspector.cohort_registry import CohortRegistry
 from evidence_inspector.fault_controller import (
     FAULT_POINTS,
     NO_FAULTS,
@@ -116,6 +117,13 @@ def _setup(tmp_path: Path, live, fault_controller=NO_FAULTS):
         authority_sha256="a" * 64,
     )
     manifest = _manifest(authority, (member,), measurement_anchor=anchor)
+    cohort_registry = CohortRegistry(
+        tmp_path / "cohort-registry",
+        linkage_store=store,
+        expected_trust_snapshot_sha256_by_provider=_pins(),
+    )
+    cohort_registry.register(manifest)
+    selector = cohort_registry.list_selectors().records[0]
     results = ResultCatalog(
         tmp_path / "results",
         import_roots={"root_primary": import_root},
@@ -126,6 +134,7 @@ def _setup(tmp_path: Path, live, fault_controller=NO_FAULTS):
         tmp_path / "cohort-records",
         result_catalog=results,
         linkage_store=store,
+        cohort_registry=cohort_registry,
         expected_trust_snapshot_sha256_by_provider=_pins(),
         reader_registry=DEFAULT_RESULT_BUNDLE_READER_REGISTRY,
         fault_controller=fault_controller,
@@ -142,6 +151,8 @@ def _setup(tmp_path: Path, live, fault_controller=NO_FAULTS):
         head,
         head_sha256,
         capability,
+        cohort_registry,
+        selector,
     )
 
 
@@ -177,9 +188,20 @@ def _import(values, **updates):
         head,
         head_sha256,
         capability,
+        cohort_registry,
+        default_selector,
     ) = values
+    manifest_history = updates.pop("manifest_history", (manifest,))
+    for item in manifest_history:
+        cohort_registry.register(item)
+    selector = next(
+        item
+        for item in cohort_registry.list_selectors().records
+        if item.cohort_version == manifest_history[-1].version
+    )
     request = {
-        "manifest_history": (manifest,),
+        "selector_id": selector.selector_id,
+        "cohort_version": selector.cohort_version,
         "provider_namespace": member.provider_namespace,
         "analysis_record_id": member.analysis_record_id,
         "root_id": "root_primary",
@@ -191,6 +213,34 @@ def _import(values, **updates):
     }
     request.update(updates)
     return cohorts.import_bundle(**request)
+
+
+def _bindings(values, manifest_history=None):
+    history = manifest_history or (values[2],)
+    for item in history:
+        values[11].register(item)
+    selector = next(
+        item
+        for item in values[11].list_selectors().records
+        if item.cohort_version == history[-1].version
+    )
+    return values[0].bindings_for_manifest(
+        selector.selector_id, selector.cohort_version
+    )
+
+
+def _status(values, manifest_history=None):
+    history = manifest_history or (values[2],)
+    for item in history:
+        values[11].register(item)
+    selector = next(
+        item
+        for item in values[11].list_selectors().records
+        if item.cohort_version == history[-1].version
+    )
+    return values[0].record_status_for_manifest(
+        selector.selector_id, selector.cohort_version
+    )
 
 
 def _binding_path(root: Path, binding) -> Path:

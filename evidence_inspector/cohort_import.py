@@ -13,7 +13,7 @@ import hashlib
 import os
 import stat
 import threading
-from collections.abc import Mapping, Sequence
+from collections.abc import Mapping
 from enum import StrEnum
 from pathlib import Path
 from types import MappingProxyType
@@ -28,11 +28,12 @@ from evidence_inspector.cohort_manifest import (
     CohortMember,
     MemberLineageRole,
     capture_expected_trust_pins,
-    cohort_manifest_bytes,
-    cohort_manifest_from_bytes,
     cohort_manifest_sha256,
     validate_manifest_against_linkage_store,
-    validate_manifest_history,
+)
+from evidence_inspector.cohort_registry import (
+    CohortRegistry,
+    RegisteredCohortHistory,
 )
 from evidence_inspector.fault_controller import (
     NO_FAULTS,
@@ -100,6 +101,8 @@ _PINNED_RESULT_MODULE_VERIFY = result_catalog_module._PINNED_VERIFY_BUNDLE
 _PINNED_RESULT_MODULE_TRUST_RESOLVE = result_catalog_module._PINNED_TRUST_RESOLVE
 _PINNED_MANIFEST_ACTIVE_SNAPSHOT = cohort_manifest_module._PINNED_ACTIVE_SNAPSHOT
 _PINNED_MANIFEST_STORE_CALLABLES = cohort_manifest_module._PINNED_STORE_CALLABLES
+_PINNED_REGISTRY_RESOLVE_HISTORY = CohortRegistry.resolve_history
+_PINNED_REGISTRY_LIST = CohortRegistry.list_selectors
 _PINNED_FAULT_SNAPSHOT = fault_controller_snapshot
 _PINNED_FAULT_HIT = DeterministicFaultController.hit
 
@@ -119,10 +122,15 @@ class CohortImportFilesystemError(CohortImportError):
 class CohortRecordBinding(RegistryContract):
     """Immutable link from one trusted aggregate record to one D05 member."""
 
-    schema_version: Literal["traceback.cohort-record-binding.v2"] = (
-        "traceback.cohort-record-binding.v2"
+    schema_version: Literal["traceback.cohort-record-binding.v3"] = (
+        "traceback.cohort-record-binding.v3"
     )
     binding_id: BindingId
+    registry_id: str = Field(pattern=r"^cohort_registry_[0-9a-f]{32}$")
+    registry_epoch_sha256: Sha256
+    registry_state_version: int = Field(ge=1, le=100_000)
+    registry_state_head_sha256: Sha256
+    selector_id: str = Field(pattern=r"^cohort_selector_[0-9a-f]{40}$")
     cohort_id: str = Field(pattern=r"^cohort_[0-9a-f]{32}$")
     cohort_version: int = Field(ge=1, le=100_000)
     cohort_manifest_sha256: Sha256
@@ -148,6 +156,9 @@ class CohortRecordBinding(RegistryContract):
     @model_validator(mode="after")
     def identity_is_bound(self) -> CohortRecordBinding:
         expected = _binding_id(
+            registry_id=self.registry_id,
+            registry_epoch_sha256=self.registry_epoch_sha256,
+            selector_id=self.selector_id,
             cohort_manifest_sha256=self.cohort_manifest_sha256,
             provider_namespace=self.provider_namespace,
             analysis_record_id=self.analysis_record_id,
@@ -219,9 +230,14 @@ class CohortMemberRecordStatus(RegistryContract):
 
 
 class CohortManifestRecordStatus(RegistryContract):
-    schema_version: Literal["traceback.cohort-manifest-record-status.v1"] = (
-        "traceback.cohort-manifest-record-status.v1"
+    schema_version: Literal["traceback.cohort-manifest-record-status.v2"] = (
+        "traceback.cohort-manifest-record-status.v2"
     )
+    registry_id: str = Field(pattern=r"^cohort_registry_[0-9a-f]{32}$")
+    registry_epoch_sha256: Sha256
+    registry_state_version: int = Field(ge=1, le=100_000)
+    registry_state_head_sha256: Sha256
+    selector_id: str = Field(pattern=r"^cohort_selector_[0-9a-f]{40}$")
     cohort_id: str = Field(pattern=r"^cohort_[0-9a-f]{32}$")
     cohort_version: int = Field(ge=1, le=100_000)
     cohort_manifest_sha256: Sha256
@@ -241,8 +257,26 @@ class CohortManifestRecordStatus(RegistryContract):
         return self
 
 
+class CohortManifestBindings(RegistryContract):
+    schema_version: Literal["traceback.cohort-manifest-bindings.v1"] = (
+        "traceback.cohort-manifest-bindings.v1"
+    )
+    registry_id: str = Field(pattern=r"^cohort_registry_[0-9a-f]{32}$")
+    registry_epoch_sha256: Sha256
+    registry_state_version: int = Field(ge=1, le=100_000)
+    registry_state_head_sha256: Sha256
+    selector_id: str = Field(pattern=r"^cohort_selector_[0-9a-f]{40}$")
+    cohort_id: str = Field(pattern=r"^cohort_[0-9a-f]{32}$")
+    cohort_version: int = Field(ge=1, le=100_000)
+    cohort_manifest_sha256: Sha256
+    bindings: tuple[CohortRecordBinding, ...] = Field(max_length=MAX_BINDINGS)
+
+
 def _binding_id(
     *,
+    registry_id: str,
+    registry_epoch_sha256: str,
+    selector_id: str,
     cohort_manifest_sha256: str,
     provider_namespace: str,
     analysis_record_id: str,
@@ -252,6 +286,9 @@ def _binding_id(
 ) -> str:
     payload = canonical_json_bytes(
         {
+            "registry_id": registry_id,
+            "registry_epoch_sha256": registry_epoch_sha256,
+            "selector_id": selector_id,
             "cohort_manifest_sha256": cohort_manifest_sha256,
             "provider_namespace": provider_namespace,
             "analysis_record_id": analysis_record_id,
@@ -262,7 +299,7 @@ def _binding_id(
     )
     return (
         "binding_"
-        + hashlib.sha256(b"traceback-cohort-record-binding-v2\0" + payload).hexdigest()
+        + hashlib.sha256(b"traceback-cohort-record-binding-v3\0" + payload).hexdigest()
     )
 
 
@@ -292,19 +329,6 @@ def _opaque_alias(prefix: str, domain: bytes, values: object) -> str:
     return f"{prefix}_{digest[:16]}"
 
 
-def _canonical_history(history: Sequence[CohortManifest]) -> tuple[CohortManifest, ...]:
-    if not history or len(history) > 100_000:
-        raise CohortImportError("cohort manifest history count is invalid")
-    try:
-        normalized = tuple(
-            cohort_manifest_from_bytes(cohort_manifest_bytes(item)) for item in history
-        )
-        validate_manifest_history(normalized)
-    except Exception as exc:
-        raise CohortImportError("cohort manifest history is invalid") from exc
-    return normalized
-
-
 def _canonical_contract(
     model: type[RegistryContract], value: object
 ) -> RegistryContract:
@@ -327,6 +351,10 @@ class CohortRecordCatalog:
             "_catalog_reader_identity_sha256",
             "_linkage_store",
             "_linkage_store_identity",
+            "_cohort_registry",
+            "_cohort_registry_identity",
+            "_cohort_registry_id",
+            "_cohort_registry_epoch_sha256",
             "_expected_trust_snapshot_sha256_by_provider",
             "_reader_registry",
             "_reader_registry_bytes",
@@ -348,6 +376,7 @@ class CohortRecordCatalog:
         *,
         result_catalog: ResultCatalog,
         linkage_store: ProviderLinkageStore,
+        cohort_registry: CohortRegistry,
         expected_trust_snapshot_sha256_by_provider: Mapping[str, str],
         reader_registry: ResultBundleReaderRegistry,
         fault_controller: DeterministicFaultController = NO_FAULTS,
@@ -379,6 +408,21 @@ class CohortRecordCatalog:
                 raise TypeError("result catalog authority callable was shadowed")
         if type(linkage_store) is not ProviderLinkageStore:
             raise TypeError("cohort import requires the exact linkage store type")
+        if (
+            type(cohort_registry) is not CohortRegistry
+            or "resolve_history" in vars(cohort_registry)
+            or "list_selectors" in vars(cohort_registry)
+            or CohortRegistry.__dict__.get("resolve_history")
+            is not _PINNED_REGISTRY_RESOLVE_HISTORY
+            or CohortRegistry.__dict__.get("list_selectors")
+            is not _PINNED_REGISTRY_LIST
+        ):
+            raise TypeError("cohort import requires the exact cohort registry")
+        registry_identity = _PINNED_REGISTRY_LIST(cohort_registry)
+        if vars(cohort_registry).get("_linkage_store") is not linkage_store:
+            raise CohortImportError(
+                "cohort registry and import linkage authority do not match"
+            )
         if type(reader_registry) is not ResultBundleReaderRegistry:
             raise TypeError("cohort import requires the exact reader registry type")
         if (
@@ -409,6 +453,12 @@ class CohortRecordCatalog:
         self._catalog_reader_identity_sha256 = authority.reader_registry_sha256
         self._linkage_store = linkage_store
         self._linkage_store_identity = id(linkage_store)
+        self._cohort_registry = cohort_registry
+        self._cohort_registry_identity = id(cohort_registry)
+        self._cohort_registry_id = registry_identity.registry_id
+        self._cohort_registry_epoch_sha256 = (
+            registry_identity.registry_epoch_sha256
+        )
         self._expected_trust_snapshot_sha256_by_provider = MappingProxyType(pins)
         self._reader_registry = normalized_registry
         self._reader_registry_bytes = canonical_json_bytes(normalized_registry)
@@ -1107,6 +1157,41 @@ class CohortRecordCatalog:
             )
             raise CohortImportError(message) from exc
 
+    def _resolve_registered_history(
+        self,
+        selector_id: str,
+        cohort_version: int,
+        *,
+        expected: RegisteredCohortHistory | None = None,
+    ) -> RegisteredCohortHistory:
+        registry = self._cohort_registry
+        if (
+            type(registry) is not CohortRegistry
+            or id(registry) != self._cohort_registry_identity
+            or vars(registry).get("_linkage_store") is not self._linkage_store
+            or "resolve_history" in vars(registry)
+            or CohortRegistry.__dict__.get("resolve_history")
+            is not _PINNED_REGISTRY_RESOLVE_HISTORY
+        ):
+            raise CohortImportError("cohort registry authority changed")
+        try:
+            history = _PINNED_REGISTRY_RESOLVE_HISTORY(
+                registry, selector_id, cohort_version
+            )
+        except Exception:
+            raise CohortImportError(
+                "cohort registry selection is not current and trusted"
+            ) from None
+        if (
+            history.registry_id != self._cohort_registry_id
+            or history.registry_epoch_sha256
+            != self._cohort_registry_epoch_sha256
+        ):
+            raise CohortImportError("cohort registry authority changed")
+        if expected is not None and history != expected:
+            raise CohortImportConflict("cohort registry state changed")
+        return history
+
     def _read(self, name: str) -> CohortRecordBinding:
         _CC_VALIDATE_ROOT(self)
         parts = name.split(".")
@@ -1201,7 +1286,13 @@ class CohortRecordCatalog:
     def _binding_equivalent(
         existing: CohortRecordBinding, candidate: CohortRecordBinding
     ) -> bool:
-        ignored = {"binding_id", "publication_id", "catalog_result_preexisting"}
+        ignored = {
+            "binding_id",
+            "publication_id",
+            "catalog_result_preexisting",
+            "registry_state_version",
+            "registry_state_head_sha256",
+        }
         return existing.model_dump(exclude=ignored) == candidate.model_dump(
             exclude=ignored
         )
@@ -1276,6 +1367,8 @@ class CohortRecordCatalog:
 
     def _revalidate_publication(
         self,
+        selector_id: str,
+        registered_history: RegisteredCohortHistory,
         manifest: CohortManifest,
         prepared: PreparedCatalogImport,
         binding: CohortRecordBinding,
@@ -1294,6 +1387,12 @@ class CohortRecordCatalog:
         ):
             raise CohortImportConflict("result catalog authority changed")
         _CC_VALIDATE_MANIFEST(self, manifest, changed=changed)
+        _CC_RESOLVE_REGISTERED_HISTORY(
+            self,
+            selector_id,
+            manifest.version,
+            expected=registered_history,
+        )
         _PINNED_RESULT_VERIFY_PREPARED(self._result_catalog, prepared)
         if final_name is not None:
             pending_name = f".pending.{binding.publication_id}.json"
@@ -1320,7 +1419,8 @@ class CohortRecordCatalog:
     def import_bundle(
         self,
         *,
-        manifest_history: Sequence[CohortManifest],
+        selector_id: str,
+        cohort_version: int,
         provider_namespace: str,
         analysis_record_id: str,
         root_id: str,
@@ -1332,7 +1432,10 @@ class CohortRecordCatalog:
     ) -> CohortRecordBinding:
         """Verify and atomically bind one aggregate record to current D05 authority."""
 
-        history = _canonical_history(manifest_history)
+        registered_history = _CC_RESOLVE_REGISTERED_HISTORY(
+            self, selector_id, cohort_version
+        )
+        history = registered_history.manifests
         manifest = history[-1]
         _CC_VALIDATE_READER_REGISTRY(self)
         try:
@@ -1470,10 +1573,21 @@ class CohortRecordCatalog:
             if authority != prepared.authority:
                 raise CohortImportConflict("result catalog authority changed")
             _CC_VALIDATE_MANIFEST(self, manifest, changed=True)
+            _CC_RESOLVE_REGISTERED_HISTORY(
+                self,
+                selector_id,
+                cohort_version,
+                expected=registered_history,
+            )
             _, reader = _PINNED_RESULT_VERIFY_PREPARED(self._result_catalog, prepared)
             manifest_digest = cohort_manifest_sha256(manifest)
             binding = CohortRecordBinding(
                 binding_id=_binding_id(
+                    registry_id=registered_history.registry_id,
+                    registry_epoch_sha256=(
+                        registered_history.registry_epoch_sha256
+                    ),
+                    selector_id=selector_id,
                     cohort_manifest_sha256=manifest_digest,
                     provider_namespace=member.provider_namespace,
                     analysis_record_id=member.analysis_record_id,
@@ -1481,6 +1595,13 @@ class CohortRecordCatalog:
                     publication_id=prepared.publication_id,
                     catalog_authority_sha256=prepared.authority_sha256,
                 ),
+                registry_id=registered_history.registry_id,
+                registry_epoch_sha256=registered_history.registry_epoch_sha256,
+                registry_state_version=registered_history.state_version,
+                registry_state_head_sha256=(
+                    registered_history.state_head_sha256
+                ),
+                selector_id=selector_id,
                 cohort_id=manifest.cohort_id,
                 cohort_version=manifest.version,
                 cohort_manifest_sha256=manifest_digest,
@@ -1556,6 +1677,8 @@ class CohortRecordCatalog:
                                 _CC_FAULT(self, "before_idempotent_return")
                                 _CC_REVALIDATE_PUBLICATION(
                                     self,
+                                    selector_id,
+                                    registered_history,
                                     manifest,
                                     prepared,
                                     item,
@@ -1569,6 +1692,12 @@ class CohortRecordCatalog:
                                 prepared = None
                                 _CC_VALIDATE_ROOT(self)
                                 _CC_VALIDATE_MANIFEST(self, manifest, changed=True)
+                                _CC_RESOLVE_REGISTERED_HISTORY(
+                                    self,
+                                    selector_id,
+                                    cohort_version,
+                                    expected=registered_history,
+                                )
                                 if (
                                     _CC_VALIDATE_CATALOG_AUTHORITY(self)
                                     != prepared_authority
@@ -1587,6 +1716,12 @@ class CohortRecordCatalog:
                                 _PINNED_RESULT_VERIFY(self._result_catalog, item.result)
                                 _CC_VALIDATE_ROOT(self)
                                 _CC_VALIDATE_MANIFEST(self, manifest, changed=True)
+                                _CC_RESOLVE_REGISTERED_HISTORY(
+                                    self,
+                                    selector_id,
+                                    cohort_version,
+                                    expected=registered_history,
+                                )
                                 return item
                             raise CohortImportConflict(
                                 "cohort record binding conflicts"
@@ -1602,11 +1737,25 @@ class CohortRecordCatalog:
                     )
                     _CC_FAULT(self, "after_result_stage")
                     _CC_REVALIDATE_PUBLICATION(
-                        self, manifest, prepared, binding, None, changed=True
+                        self,
+                        selector_id,
+                        registered_history,
+                        manifest,
+                        prepared,
+                        binding,
+                        None,
+                        changed=True,
                     )
                     _CC_FAULT(self, "before_binding_publish")
                     _CC_REVALIDATE_PUBLICATION(
-                        self, manifest, prepared, binding, None, changed=True
+                        self,
+                        selector_id,
+                        registered_history,
+                        manifest,
+                        prepared,
+                        binding,
+                        None,
+                        changed=True,
                     )
                     _CC_VALIDATE_ROOT(self)
                     try:
@@ -1626,7 +1775,14 @@ class CohortRecordCatalog:
                     _CC_VALIDATE_ROOT(self)
                     _CC_FAULT(self, "after_binding_publish")
                     _CC_REVALIDATE_PUBLICATION(
-                        self, manifest, prepared, binding, final_name, changed=True
+                        self,
+                        selector_id,
+                        registered_history,
+                        manifest,
+                        prepared,
+                        binding,
+                        final_name,
+                        changed=True,
                     )
 
                     # Rollback intent must be durable before visibility. If this
@@ -1634,16 +1790,37 @@ class CohortRecordCatalog:
                     _CC_WRITE_ROLLBACK(self, marker)
                     _CC_FAULT(self, "before_visibility")
                     _CC_REVALIDATE_PUBLICATION(
-                        self, manifest, prepared, binding, final_name, changed=True
+                        self,
+                        selector_id,
+                        registered_history,
+                        manifest,
+                        prepared,
+                        binding,
+                        final_name,
+                        changed=True,
                     )
                     _PINNED_RESULT_ADOPT(self._result_catalog, prepared)
                     _CC_FAULT(self, "after_visibility_staged")
                     _CC_REVALIDATE_PUBLICATION(
-                        self, manifest, prepared, binding, final_name, changed=True
+                        self,
+                        selector_id,
+                        registered_history,
+                        manifest,
+                        prepared,
+                        binding,
+                        final_name,
+                        changed=True,
                     )
                     _CC_FAULT(self, "after_visibility_commit")
                     _CC_REVALIDATE_PUBLICATION(
-                        self, manifest, prepared, binding, final_name, changed=True
+                        self,
+                        selector_id,
+                        registered_history,
+                        manifest,
+                        prepared,
+                        binding,
+                        final_name,
+                        changed=True,
                     )
                     _PINNED_RESULT_VERIFY(self._result_catalog, prepared.reference)
                     os.unlink(temporary_name, dir_fd=self._root_fd)
@@ -1690,8 +1867,8 @@ class CohortRecordCatalog:
             raise
 
     def bindings_for_manifest(
-        self, manifest_history: Sequence[CohortManifest]
-    ) -> tuple[CohortRecordBinding, ...]:
+        self, selector_id: str, cohort_version: int
+    ) -> CohortManifestBindings:
         """Return bindings while a shared root lock fences recovery/publication."""
 
         with _PROCESS_LOCK:
@@ -1710,18 +1887,20 @@ class CohortRecordCatalog:
                 ):
                     raise CohortImportFilesystemError("cohort record root changed")
                 fcntl.flock(descriptor, fcntl.LOCK_SH)
-                return _CC_BINDINGS_BODY(self, manifest_history)
+                return _CC_BINDINGS_BODY(self, selector_id, cohort_version)
             finally:
                 fcntl.flock(descriptor, fcntl.LOCK_UN)
                 os.close(descriptor)
 
     def _bindings_for_manifest_body(
-        self, manifest_history: Sequence[CohortManifest]
-    ) -> tuple[CohortRecordBinding, ...]:
+        self, selector_id: str, cohort_version: int
+    ) -> CohortManifestBindings:
         """Return only bindings still valid under live linkage and current trust."""
 
-        history = _canonical_history(manifest_history)
-        manifest = history[-1]
+        registered_history = _CC_RESOLVE_REGISTERED_HISTORY(
+            self, selector_id, cohort_version
+        )
+        manifest = registered_history.manifests[-1]
         _CC_VALIDATE_READER_REGISTRY(self)
         _CC_VALIDATE_MANIFEST(self, manifest)
         authority = _CC_VALIDATE_CATALOG_AUTHORITY(self)
@@ -1747,6 +1926,10 @@ class CohortRecordCatalog:
             )
             if (
                 member is None
+                or binding.registry_id != registered_history.registry_id
+                or binding.registry_epoch_sha256
+                != registered_history.registry_epoch_sha256
+                or binding.selector_id != selector_id
                 or binding.cohort_id != manifest.cohort_id
                 or binding.cohort_version != manifest.version
                 or _member_sha256(member) != binding.member_sha256
@@ -1809,6 +1992,12 @@ class CohortRecordCatalog:
         _CC_FAULT(self, "before_read_return")
         _CC_VALIDATE_ROOT(self)
         _CC_VALIDATE_MANIFEST(self, manifest, changed=True)
+        _CC_RESOLVE_REGISTERED_HISTORY(
+            self,
+            selector_id,
+            cohort_version,
+            expected=registered_history,
+        )
         if _CC_VALIDATE_CATALOG_AUTHORITY(self) != authority:
             raise CohortImportConflict("cohort record catalog authority changed")
         for item in ordered:
@@ -1828,10 +2017,26 @@ class CohortRecordCatalog:
                 raise CohortImportConflict(
                     "cohort record publication ownership changed"
                 )
-        return ordered
+        _CC_RESOLVE_REGISTERED_HISTORY(
+            self,
+            selector_id,
+            cohort_version,
+            expected=registered_history,
+        )
+        return CohortManifestBindings(
+            registry_id=registered_history.registry_id,
+            registry_epoch_sha256=registered_history.registry_epoch_sha256,
+            registry_state_version=registered_history.state_version,
+            registry_state_head_sha256=registered_history.state_head_sha256,
+            selector_id=selector_id,
+            cohort_id=manifest.cohort_id,
+            cohort_version=manifest.version,
+            cohort_manifest_sha256=digest,
+            bindings=ordered,
+        )
 
     def record_status_for_manifest(
-        self, manifest_history: Sequence[CohortManifest]
+        self, selector_id: str, cohort_version: int
     ) -> CohortManifestRecordStatus:
         """Return status while a shared root lock fences recovery/publication."""
 
@@ -1851,18 +2056,20 @@ class CohortRecordCatalog:
                 ):
                     raise CohortImportFilesystemError("cohort record root changed")
                 fcntl.flock(descriptor, fcntl.LOCK_SH)
-                return _CC_STATUS_BODY(self, manifest_history)
+                return _CC_STATUS_BODY(self, selector_id, cohort_version)
             finally:
                 fcntl.flock(descriptor, fcntl.LOCK_UN)
                 os.close(descriptor)
 
     def _record_status_for_manifest_body(
-        self, manifest_history: Sequence[CohortManifest]
+        self, selector_id: str, cohort_version: int
     ) -> CohortManifestRecordStatus:
         """Return complete canonical availability without exposing withheld results."""
 
-        history = _canonical_history(manifest_history)
-        manifest = history[-1]
+        registered_history = _CC_RESOLVE_REGISTERED_HISTORY(
+            self, selector_id, cohort_version
+        )
+        manifest = registered_history.manifests[-1]
         _CC_VALIDATE_READER_REGISTRY(self)
         _CC_VALIDATE_MANIFEST(self, manifest)
         authority = _CC_VALIDATE_CATALOG_AUTHORITY(self)
@@ -1889,6 +2096,10 @@ class CohortRecordCatalog:
             if (
                 member is None
                 or key in indexed
+                or binding.registry_id != registered_history.registry_id
+                or binding.registry_epoch_sha256
+                != registered_history.registry_epoch_sha256
+                or binding.selector_id != selector_id
                 or binding.cohort_id != manifest.cohort_id
                 or binding.cohort_version != manifest.version
                 or binding.cohort_manifest_sha256 != digest
@@ -1977,11 +2188,23 @@ class CohortRecordCatalog:
         _CC_FAULT(self, "before_status_return")
         _CC_VALIDATE_ROOT(self)
         _CC_VALIDATE_MANIFEST(self, manifest, changed=True)
+        _CC_RESOLVE_REGISTERED_HISTORY(
+            self,
+            selector_id,
+            cohort_version,
+            expected=registered_history,
+        )
         final_authority = _CC_VALIDATE_CATALOG_AUTHORITY(self)
         if final_authority != authority:
             raise CohortImportConflict("cohort record catalog authority changed")
         linkage_snapshot = _PINNED_MANIFEST_ACTIVE_SNAPSHOT(self._linkage_store)
         _CC_VALIDATE_MANIFEST(self, manifest, changed=True)
+        _CC_RESOLVE_REGISTERED_HISTORY(
+            self,
+            selector_id,
+            cohort_version,
+            expected=registered_history,
+        )
         if _PINNED_MANIFEST_ACTIVE_SNAPSHOT(self._linkage_store) != linkage_snapshot:
             raise CohortImportConflict("cohort linkage authority changed")
         for binding in selected:
@@ -2001,11 +2224,24 @@ class CohortRecordCatalog:
                 raise CohortImportConflict(
                     "cohort record publication ownership changed"
                 )
+        _CC_RESOLVE_REGISTERED_HISTORY(
+            self,
+            selector_id,
+            cohort_version,
+            expected=registered_history,
+        )
         linkage_snapshot_sha256 = hashlib.sha256(
             canonical_json_bytes(linkage_snapshot.model_dump(mode="json"))
         ).hexdigest()
         payload = {
-            "schema_version": "traceback.cohort-manifest-record-status.v1",
+            "schema_version": "traceback.cohort-manifest-record-status.v2",
+            "registry_id": registered_history.registry_id,
+            "registry_epoch_sha256": registered_history.registry_epoch_sha256,
+            "registry_state_version": registered_history.state_version,
+            "registry_state_head_sha256": (
+                registered_history.state_head_sha256
+            ),
+            "selector_id": selector_id,
             "cohort_id": manifest.cohort_id,
             "cohort_version": manifest.version,
             "cohort_manifest_sha256": digest,
@@ -2038,6 +2274,7 @@ _COHORT_METHOD_SEAL = MappingProxyType(
             "_read_rollback_marker",
             "_recover_pending",
             "_record_status_for_manifest_body",
+            "_resolve_registered_history",
             "_revalidate_publication",
             "_validate_catalog_authority",
             "_validate_manifest",
@@ -2064,6 +2301,10 @@ _COHORT_PINNED_FINGERPRINTS = MappingProxyType(
         "active_snapshot": _authority_value_fingerprint(
             _PINNED_MANIFEST_ACTIVE_SNAPSHOT
         ),
+        "registry_resolve_history": _authority_value_fingerprint(
+            _PINNED_REGISTRY_RESOLVE_HISTORY
+        ),
+        "registry_list": _authority_value_fingerprint(_PINNED_REGISTRY_LIST),
         "register_candidate": _authority_value_fingerprint(
             _PINNED_RESULT_REGISTER_CANDIDATE
         ),
@@ -2113,6 +2354,10 @@ def _assert_cohort_runtime(
         != _COHORT_PINNED_FINGERPRINTS["result_assert"]
         or _authority_value_fingerprint(_PINNED_MANIFEST_ACTIVE_SNAPSHOT)
         != _COHORT_PINNED_FINGERPRINTS["active_snapshot"]
+        or _authority_value_fingerprint(_PINNED_REGISTRY_RESOLVE_HISTORY)
+        != _COHORT_PINNED_FINGERPRINTS["registry_resolve_history"]
+        or _authority_value_fingerprint(_PINNED_REGISTRY_LIST)
+        != _COHORT_PINNED_FINGERPRINTS["registry_list"]
         or _authority_value_fingerprint(_PINNED_RESULT_REGISTER_CANDIDATE)
         != _COHORT_PINNED_FINGERPRINTS["register_candidate"]
         or _authority_value_fingerprint(_PINNED_RESULT_CANDIDATES)
@@ -2137,6 +2382,7 @@ _CC_READ = CohortRecordCatalog._read
 _CC_READ_PENDING = CohortRecordCatalog._read_pending
 _CC_READ_ROLLBACK = CohortRecordCatalog._read_rollback_marker
 _CC_RECOVER_PENDING = CohortRecordCatalog._recover_pending
+_CC_RESOLVE_REGISTERED_HISTORY = CohortRecordCatalog._resolve_registered_history
 _CC_STATUS_BODY = CohortRecordCatalog._record_status_for_manifest_body
 _CC_REVALIDATE_PUBLICATION = CohortRecordCatalog._revalidate_publication
 _CC_VALIDATE_CATALOG_AUTHORITY = CohortRecordCatalog._validate_catalog_authority
@@ -2157,6 +2403,7 @@ _COHORT_ALIAS_SEAL = MappingProxyType(
             "_CC_READ_PENDING",
             "_CC_READ_ROLLBACK",
             "_CC_RECOVER_PENDING",
+            "_CC_RESOLVE_REGISTERED_HISTORY",
             "_CC_STATUS_BODY",
             "_CC_REVALIDATE_PUBLICATION",
             "_CC_VALIDATE_CATALOG_AUTHORITY",
@@ -2168,6 +2415,8 @@ _COHORT_ALIAS_SEAL = MappingProxyType(
             "_PINNED_RESULT_REGISTER_CANDIDATE",
             "_PINNED_RESULT_CANDIDATES",
             "_PINNED_RESULT_FINISH_CANDIDATE",
+            "_PINNED_REGISTRY_RESOLVE_HISTORY",
+            "_PINNED_REGISTRY_LIST",
         )
     }
 )
@@ -2184,6 +2433,7 @@ __all__ = [
     "CohortImportConflict",
     "CohortImportError",
     "CohortImportFilesystemError",
+    "CohortManifestBindings",
     "CohortManifestRecordStatus",
     "CohortMemberRecordStatus",
     "CohortRecordAvailability",
