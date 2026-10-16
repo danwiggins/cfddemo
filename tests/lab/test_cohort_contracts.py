@@ -105,3 +105,20 @@ def test_metric_values_require_finite_numbers(bad: object) -> None:
     with pytest.raises(ValidationError):
         CohortResult(algorithm_id="fragment-size", parameters_sha256=_sha(3),
                      cohort_compat_key=_sha(7), metrics={"mode_bp": bad})
+
+
+def test_nested_cohort_values_cannot_mutate_after_validation() -> None:
+    result = CohortResult(algorithm_id="fragment-size", parameters_sha256=_sha(3),
+                          cohort_compat_key=_sha(7), metrics={"mode_bp": 100.0})
+    with pytest.raises(TypeError):
+        result.metrics["mode_bp"] = float("nan")
+    generation = CohortGeneration(cohort_id="kit-a", version=1,
+                                  members=(CohortMember(source_id=_sha(1), input_id=_sha(2),
+                                                        aligner_identity="pre-aligned", results=(result,)),))
+    restored = CohortGeneration.model_validate_json(generation.model_dump_json(by_alias=True))
+    assert restored == generation
+    projection = project_metric(restored, algorithm_id="fragment-size", metric_id="mode_bp",
+                                cohort_compat_key=_sha(7))
+    with pytest.raises(TypeError):
+        projection.exclusions["self"] = 1
+    assert projection.model_dump(mode="json")["values"] == [100.0]
