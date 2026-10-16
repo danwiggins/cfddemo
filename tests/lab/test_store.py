@@ -280,7 +280,10 @@ def test_selection_write_failure_keeps_prior_success(tmp_path: Path, monkeypatch
     assert (directory / "attempts" / first).is_dir()
 
 
-def test_selection_directory_sync_failure_keeps_every_attempt(tmp_path: Path, monkeypatch) -> None:
+@pytest.mark.parametrize("fail_generation", [False, True])
+def test_selection_directory_sync_failure_keeps_every_attempt(
+    tmp_path: Path, monkeypatch, fail_generation: bool
+) -> None:
     store = LabStore(tmp_path)
     store.ensure()
     first = store.publish_result(_envelope(1), input_id=C)
@@ -294,10 +297,17 @@ def test_selection_directory_sync_failure_keeps_every_attempt(tmp_path: Path, mo
         real_fsync_dir(path)
 
     monkeypatch.setattr(store_module, "_fsync_dir", fail_selection_sync)
+    if fail_generation:
+        def fail_bump() -> int:
+            raise OSError(28, "simulated generation write failure")
+
+        monkeypatch.setattr(store, "bump_generation", fail_bump)
     with pytest.raises(ResultPublishUncertain) as caught:
         store.publish_result(_envelope(3), input_id=C)
 
     assert caught.value.code == "TBX-LAB-020"
+    assert isinstance(caught.value.__cause__, OSError)
+    assert "selector directory sync failure" in str(caught.value.__cause__)
     assert "visible" in caught.value.cause
     assert "before retrying" in caught.value.fix
     selected = json.loads((directory / "selected.json").read_bytes())["attempt_id"]
@@ -305,7 +315,7 @@ def test_selection_directory_sync_failure_keeps_every_attempt(tmp_path: Path, mo
     assert store.selected_attempt(C, "fragment-size", A).name == selected
     assert store.read_result(C, "fragment-size", A).metrics[0].value == 3
     assert {path.name for path in (directory / "attempts").iterdir()} == {first, second, selected}
-    assert store.generation() == 2
+    assert store.generation() == (2 if fail_generation else 3)
 
 def test_publish_directory_refuses_existing_destination(tmp_path: Path) -> None:
     store = LabStore(tmp_path)

@@ -548,6 +548,13 @@ class LabStore:
         try:
             _fsync_dir(directory)
         except OSError as exc:
+            # The replacement selector may already be visible to readers.
+            # Notify the UI without allowing a counter failure to hide the
+            # selector's uncertain durability or trigger pruning.
+            try:
+                self.bump_generation()
+            except Exception:  # noqa: BLE001 - preserve the original publication failure
+                pass
             raise ResultPublishUncertain() from exc
         keep = {attempt, *([previous.name] if previous is not None else [])}
         if last_success is not None:
