@@ -198,3 +198,17 @@ def test_parser_hook_exposes_add_and_build_without_cli_edit() -> None:
     assert build.cohort_action == "build" and callable(build.handler)
     with pytest.raises(SystemExit):
         parser.parse_args(["cohort", "build", "--cohort", "../escape"])
+
+
+def test_symlinked_generations_are_refused_by_read_and_build(store: LabStore, tmp_path) -> None:
+    directory = store.lab / "cohorts" / "healthy"
+    directory.mkdir(parents=True)
+    outside = tmp_path / "outside-generations"
+    outside.mkdir()
+    (directory / "generations").symlink_to(outside, target_is_directory=True)
+    (directory / "current.json").write_text('{"version":1}')
+    with pytest.raises(ValueError, match="generations may not be a symlink"):
+        read_current(store, "healthy")
+    with pytest.raises(ValueError, match="generations may not be a symlink"):
+        build_cohort(store, "healthy")
+    assert list(outside.iterdir()) == []

@@ -187,7 +187,10 @@ def read_current(store: LabStore, cohort_id: str) -> CohortGeneration | None:
     version = pointer.get("version")
     if type(version) is not int or version < 1:
         raise ValueError("invalid cohort current version")
-    generation_dir = directory / "generations" / str(version)
+    generations = directory / "generations"
+    if generations.is_symlink():
+        raise ValueError("cohort generations may not be a symlink")
+    generation_dir = generations / str(version)
     generation_file = generation_dir / "generation.json"
     if generation_dir.is_symlink() or generation_file.is_symlink():
         raise ValueError("cohort generation may not be a symlink")
@@ -205,6 +208,8 @@ def build_cohort(store: LabStore, cohort_id: str, *, kind: str = "internal_cohor
         directory = _cohort_dir(store, cohort_id)
         members = tuple(member_from_store(store, source_id) for source_id in read_roster(store, cohort_id))
         generations = directory / "generations"
+        if generations.is_symlink():
+            raise ValueError("cohort generations may not be a symlink")
         versions = [int(path.name) for path in generations.iterdir() if path.is_dir() and path.name.isdigit()] if generations.is_dir() else []
         version = max(versions, default=0) + 1
         snapshot = CohortGeneration(cohort_id=cohort_id, version=version, kind=kind, members=members)
