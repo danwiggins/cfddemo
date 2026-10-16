@@ -172,15 +172,13 @@ def test_no_horizontal_page_scroll(page_root, tmp_path, size) -> None:
 
 
 @needs_chrome
-def test_navigation_order_and_absent_lenses(page_root, tmp_path) -> None:
+def test_navigation_order_with_compare(page_root, tmp_path) -> None:
     with RunningLabServer(LabStore(page_root)) as server:
         dom = _dom(server, tmp_path, route=f"/sample/{_id12(page_root)}/stability")
     nav = re.search(r'<nav aria-label="Lenses"[^>]*>(.*?)</nav>', dom, re.S).group(1)
     labels = re.findall(r">([A-Za-z/ ]+?)(?: \(\d+[^)]*\))?</a>", nav)
-    assert labels == ["Findings", "Trust/QC", "Stability", "Signals", "Body map", "Agreement", "Evidence", "Methods"]
+    assert labels == ["Findings", "Trust/QC", "Stability", "Signals", "Compare", "Body map", "Agreement", "Evidence", "Methods"]
     assert 'aria-current="page">Stability' in nav
-    for absent in ("Compare",):
-        assert absent not in nav
     options = re.findall(r"<option[^>]*>([^<]*)</option>", dom)
     assert len(options) == 1 and "@" not in options[0]  # derived inputs are never samples
     assert "usable to" in dom or "unstable below full depth" in dom
