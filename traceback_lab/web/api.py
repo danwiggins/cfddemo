@@ -22,6 +22,7 @@ from ..cohorts import list_cohorts, member_from_store, read_current
 from ..identity import resolve_prefix, shortest_unique_prefixes
 from ..ingest import source_ids, source_record
 from ..interpretation.engine import (
+    COHORT_MIN,
     LIBRARY_FILE,
     LICENSES_FILE,
     Entry,
@@ -208,14 +209,17 @@ class LabApi:
     def _interpret_sample_envelope(
         envelope: Any, library: Library, depth_x: float | None, source_id: str,
         generation: CohortGeneration | None, target: CohortMember | None,
+        *, include_interval: bool = True,
     ) -> tuple[list[Any], dict[str, MetricProjection]]:
         """Apply D8 only to library-declared cohort metrics, using D31 keys."""
 
         if envelope.status != "ok" or generation is None or target is None:
-            return interpret_result(envelope, library, depth_x=depth_x), {}
+            return interpret_result(envelope, library, depth_x=depth_x,
+                                    include_interval=include_interval), {}
         target_result = next((row for row in target.results if row.algorithm_id == envelope.algorithm_id), None)
         if target_result is None or target_result.parameters_sha256 != envelope.provenance.parameters_sha256:
-            return interpret_result(envelope, library, depth_x=depth_x), {}
+            return interpret_result(envelope, library, depth_x=depth_x,
+                                    include_interval=include_interval), {}
         projections: dict[str, MetricProjection] = {}
         entries: dict[tuple[str, str], Entry] | None = None
         for metric in envelope.metrics:
@@ -244,6 +248,7 @@ class LabApi:
             ),
             depth_x=depth_x,
             cohorts={key: projection.interpretation_cohort() for key, projection in projections.items()},
+            include_interval=include_interval,
         )
         return interpreted, projections
 
@@ -268,6 +273,7 @@ class LabApi:
                 counts[envelope.status] = counts.get(envelope.status, 0) + 1
                 interpreted, _ = self._interpret_sample_envelope(
                     envelope, library, sample.full.depth_x(), source_id, generation, target,
+                    include_interval=False,
                 )
                 for row in interpreted:
                     outside += int(row.interpretation.out_of_range)
@@ -281,6 +287,7 @@ class LabApi:
                     "cohort_version": generation.version_id if generation else None,
                     "cohort_kind": generation.kind if generation else None,
                     "cohort_n": generation.percentile_n if generation else 0,
+                    "cohort_min": COHORT_MIN,
                     "cohort_state": cohort_state,
                     "cohort_problem": cohort_problem,
                     "counts": counts,
@@ -338,7 +345,7 @@ class LabApi:
                 payload["cohort_excluded"] = dict(projection.exclusions) if projection else {}
                 payload["cohort_mean"] = (
                     sum(projection.values) / projection.percentile_n
-                    if projection and projection.percentile_n >= 10 else None
+                    if projection and projection.percentile_n >= COHORT_MIN else None
                 )
                 stored = cis.get(row.metric_id)
                 payload["ci"] = list(stored[0]) if stored and stored[0] else None
@@ -388,6 +395,7 @@ class LabApi:
             "cohort_version": generation.version_id if generation else None,
             "cohort_kind": generation.kind if generation else None,
             "cohort_n": generation.percentile_n if generation else 0,
+            "cohort_min": COHORT_MIN,
             "cohort_id": generation.cohort_id if generation else "healthy-v1",
             "cohort_state": cohort_state,
             "cohort_problem": cohort_problem,

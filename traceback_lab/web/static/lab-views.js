@@ -326,6 +326,23 @@
   }
   function outOfRange(sample) { return allMetrics(sample).filter((m) => ["above_typical", "markedly_above", "below_typical", "markedly_below"].includes(m.state)); }
 
+  function cohortReadiness(sample, metrics) {
+    if (["cohort_unavailable", "target_unavailable", "stale_target"].includes(sample.cohort_state))
+      return `cohort ${sample.cohort_state.replace(/_/g, " ")}`;
+    const cohort = metrics.filter((m) => ["internal_cohort", "provisional_external"].includes(m.reference_kind));
+    const eligible = cohort.filter((m) => Number.isInteger(m.eligible_n)).map((m) => m.eligible_n);
+    if (!eligible.length) return sample.cohort_state === "not_built" ? "cohort not built" : "no comparable cohort values for these metrics";
+    const low = Math.min(...eligible), high = Math.max(...eligible);
+    const n = low === high ? String(low) : `${low}–${high} by metric`;
+    const self = cohort.some((m) => m.cohort_excluded && m.cohort_excluded.self);
+    const minimum = sample.cohort_min || 10;
+    const phase = high < minimum ? ` of ${minimum} needed` : low < minimum ? `; some metrics need ${minimum}`
+      : cohort.some((m) => m.percentile !== null && m.percentile !== undefined) ? "; percentile reference"
+        : cohort.some((m) => m.exploratory_n !== null && m.exploratory_n !== undefined) ? "; exploratory reference"
+          : "; metric not interpretable at this depth or QC";
+    return `eligible cohort n = ${n}${phase}${self ? " after leave-one-out" : ""}`;
+  }
+
   function strip(metric) {
     const ref = (metric.entry && metric.entry.reference) || {};
     const width = 320, height = 34;
@@ -418,8 +435,7 @@
     const outside = groups.markedly_above.length + groups.markedly_below.length + groups.above_typical.length + groups.below_typical.length;
     const cohortIssue = ["cohort_unavailable", "target_unavailable", "stale_target"].includes(sample.cohort_state);
     const cohortContext = cohortIssue ? `cohort ${sample.cohort_state.replace(/_/g, " ")}`
-      : sample.cohort_n < 10 ? `cohort n = ${sample.cohort_n} of 10`
-        : `cohort ${sample.cohort_version}; eligibility varies by metric`;
+      : cohortReadiness(sample, metrics);
     const out = [
       h("p", { class: "breadcrumb" }, `Lab › ${sample.id12} › Findings`),
       h("div", { class: "findings-head" }, h("h1", { class: "view-title" }, "Findings"), flagPill("CLIA")),
@@ -434,7 +450,7 @@
     let first = true;
     if (!outside) {
       const withReference = metrics.filter((m) => m.state !== "no_reference" && m.state !== "not_interpretable").length;
-      out.push(h("p", { class: "empty" }, `No metric is outside a reference. ${withReference} metrics have a reference; ${groups.no_reference.length} ${cohortIssue ? "lack a cohort reference while the cohort is unavailable" : sample.cohort_n < 10 ? `await the cohort (n = ${sample.cohort_n} of 10)` : `have no eligible reference in cohort ${sample.cohort_version}`}. `,
+      out.push(h("p", { class: "empty" }, `No metric is outside a reference. ${withReference} metrics have a reference; ${groups.no_reference.length} have no reference (${cohortContext}). `,
         h("a", { href: `#/sample/${sample.id12}/trust-qc` }, "Trust/QC"), " · ", h("a", { href: `#/sample/${sample.id12}/stability` }, "Stability")));
     }
     const titles = { markedly_above: "Markedly above", markedly_below: "Markedly below", above_typical: "Above typical", below_typical: "Below typical" };
@@ -717,7 +733,8 @@
     const section = h("section", { class: "panel" }, h("h2", {}, "Size density"));
     if (!a || a.status !== "ok") return [section, absent(a, "fragment-size"), ...breakpointMotifSignals(sample)];
     const slot = h("div", {}, h("p", {}, "Loading…"));
-    section.append(h("p", { class: "help" }, "No kit cohort band yet (cohort n = " + sample.cohort_n + " of 10); 167 bp marked."), ...context(sample, "fragment-size", new Set()), slot);
+    const short = a.metrics.find((m) => m.metric_id === "short_fraction_lt150");
+    section.append(h("p", { class: "help" }, `No size-density cohort band yet; 167 bp marked. Short-fragment reference: ${cohortReadiness(sample, short ? [short] : [])}.`), ...context(sample, "fragment-size", new Set()), slot);
     artifact(sample, "fragment-size", "size-density").then((data) => {
       const points = data.span_bp.map((x, i) => [x, data.count[i]]).filter((p) => p[0] >= 50 && p[0] <= 700);
       slot.replaceWith(chart("Aligned-span density, 50 to 700 bp, with 167 bp marked.", {

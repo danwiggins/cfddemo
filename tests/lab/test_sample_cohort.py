@@ -8,6 +8,8 @@ import pytest
 
 from traceback_lab.cohort_contracts import CohortGeneration, CohortMember, CohortResult
 from traceback_lab.envelope import Metric, ResultEnvelope, provenance
+from traceback_lab.interpretation import engine as interpretation_engine
+from traceback_lab.interpretation.engine import Cohort, classify, load_library
 from traceback_lab.problems import LabProblem
 from traceback_lab.store import LabStore
 from traceback_lab.web import api as web_api
@@ -17,6 +19,22 @@ SOURCE = f"{1:064x}"
 INPUT = f"{101:064x}"
 PARAMETERS = "b" * 64
 COMPAT = "a" * 64
+
+
+def test_state_only_interpretation_matches_full_state_without_bootstrap(monkeypatch) -> None:
+    entry = load_library().entry("fragment-size", "short_fraction_lt150")
+    assert entry is not None
+    cohort = Cohort(tuple(index / 100 for index in range(30)))
+    full = classify(0.95, entry, depth_x=1.0, cohort=cohort)
+    assert full.interval is not None
+    monkeypatch.setattr(interpretation_engine, "bootstrap_p95_interval", lambda values: pytest.fail(
+        "state-only interpretation must not bootstrap",
+    ))
+    state_only = classify(0.95, entry, depth_x=1.0, cohort=cohort, include_interval=False)
+    assert (state_only.state, state_only.reason, state_only.percentile, state_only.severity) == (
+        full.state, full.reason, full.percentile, full.severity,
+    )
+    assert state_only.interval is None
 
 
 def member(index: int, *, compat: str = COMPAT) -> CohortMember:
@@ -30,20 +48,21 @@ def member(index: int, *, compat: str = COMPAT) -> CohortMember:
     )
 
 
-@pytest.mark.parametrize("member_n,kind,expected_state,eligible_n", [
-    (10, "internal_cohort", "no_reference", 9),
-    (11, "internal_cohort", "above_typical", 10),
-    (11, "provisional_external", "above_typical", 10),
-    (31, "internal_cohort", "markedly_above", 30),
+@pytest.mark.parametrize("member_n,kind,expected_state,eligible_n,is_member", [
+    (10, "internal_cohort", "no_reference", 9, True),
+    (10, "internal_cohort", "above_typical", 10, False),
+    (11, "internal_cohort", "above_typical", 10, True),
+    (11, "provisional_external", "above_typical", 10, True),
+    (31, "internal_cohort", "markedly_above", 30, True),
 ])
 def test_sample_lenses_pin_eligible_loo_reference(
-    tmp_path, monkeypatch, member_n: int, kind: str, expected_state: str, eligible_n: int,
+    tmp_path, monkeypatch, member_n: int, kind: str, expected_state: str, eligible_n: int, is_member: bool,
 ) -> None:
-    members = tuple(member(index) for index in range(1, member_n + 1))
+    members = tuple(member(index) for index in range(1 if is_member else 2, member_n + (1 if is_member else 2)))
     generation = CohortGeneration(cohort_id="healthy-v1", version=7, kind=kind, members=members)
     reads: list[str] = []
     monkeypatch.setattr(web_api, "read_current", lambda store, cohort_id: (reads.append(cohort_id), generation)[1])
-    monkeypatch.setattr(web_api, "member_from_store", lambda store, source_id: members[0])
+    monkeypatch.setattr(web_api, "member_from_store", lambda store, source_id: member(1))
     envelope = ResultEnvelope(
         algorithm_id="fragment-size", algorithm_version="1", status="ok",
         provenance=provenance(tool="fixture", parameters_sha256=PARAMETERS,
@@ -74,7 +93,7 @@ def test_sample_lenses_pin_eligible_loo_reference(
     assert metric["eligible_n"] == eligible_n
     assert len(metric["cohort_values"]) == eligible_n
     assert metric["cohort_mean"] == (sum(metric["cohort_values"]) / eligible_n if eligible_n >= 10 else None)
-    assert metric["cohort_excluded"] == {"self": 1}
+    assert metric["cohort_excluded"] == ({"self": 1} if is_member else {})
     assert metric["state"] == expected_state
     if eligible_n < 10:
         assert metric["reason"] == "cohort_too_small"
@@ -130,8 +149,8 @@ def test_incompatible_or_stale_target_never_scores_against_cohort(tmp_path, monk
 def test_sample_list_pins_one_generation_for_all_rows(tmp_path, monkeypatch) -> None:
     sources = (SOURCE, f"{2:064x}")
     generations = [
-        CohortGeneration(cohort_id="healthy-v1", version=7, members=tuple(member(i) for i in range(1, 12))),
-        CohortGeneration(cohort_id="healthy-v1", version=8, members=tuple(member(i) for i in range(1, 32))),
+        CohortGeneration(cohort_id="healthy-v1", version=7, members=tuple(member(i) for i in range(1, 32))),
+        CohortGeneration(cohort_id="healthy-v1", version=8, members=tuple(member(i) for i in range(1, 42))),
     ]
     reads: list[str] = []
     def current(store, cohort_id):
@@ -156,12 +175,15 @@ def test_sample_list_pins_one_generation_for_all_rows(tmp_path, monkeypatch) -> 
     monkeypatch.setattr(web_api, "source_record", lambda store, source_id: {})
     api = web_api.LabApi(LabStore(tmp_path))
     monkeypatch.setattr(api, "_id12s", lambda: {source: source[:12] for source in sources})
+    monkeypatch.setattr(interpretation_engine, "bootstrap_p95_interval", lambda values: pytest.fail(
+        "sample list must classify without computing bootstrap intervals",
+    ))
 
     rows = api.samples()["samples"]
     assert reads == ["healthy-v1"]
     assert {row["cohort_version"] for row in rows} == {"healthy-v1:7"}
     assert {row["cohort_kind"] for row in rows} == {"internal_cohort"}
-    assert all(row["cohort_n"] == 11 and row["cohort_state"] == "ready" for row in rows)
+    assert all(row["cohort_n"] == 31 and row["cohort_state"] == "ready" for row in rows)
     assert all(row["outside_reference"] == 1 for row in rows)
 
 
@@ -195,3 +217,20 @@ def test_unavailable_cohort_is_explicit_not_an_empty_healthy_reference(tmp_path,
     assert row["cohort_problem"]["code"] == "TBX-LAB-022"
     assert row["cohort_version"] is None
     assert row["outside_reference"] == 0
+
+
+@pytest.mark.parametrize("failure", [
+    LabProblem("TBX-LAB-017", cause="source result unreadable", fix="Restore the sample result"),
+    ValueError("admitted source has no full aligned input"),
+])
+def test_target_unavailable_preserves_recovery_state(tmp_path, monkeypatch, failure) -> None:
+    api = web_api.LabApi(LabStore(tmp_path))
+    generation = CohortGeneration(cohort_id="healthy-v1", version=2, members=())
+    monkeypatch.setattr(web_api, "read_current", lambda store, cohort_id: generation)
+    monkeypatch.setattr(web_api, "member_from_store", lambda store, source_id: (_ for _ in ()).throw(failure))
+    sample = SimpleNamespace(example=False, full=SimpleNamespace(input_id=INPUT))
+
+    pinned, target, state, detail = api._sample_cohort(SOURCE, sample)
+    assert pinned is generation and target is None and state == "target_unavailable"
+    assert detail is not None and detail["code"] == "TBX-LAB-017"
+    assert detail["fix"]
