@@ -310,12 +310,31 @@ def test_selection_directory_sync_failure_keeps_every_attempt(
     assert "selector directory sync failure" in str(caught.value.__cause__)
     assert "visible" in caught.value.cause
     assert "before retrying" in caught.value.fix
+    assert caught.value.data["generation_notified"] is not fail_generation
+    if fail_generation:
+        assert "Manually reload" in caught.value.fix
+        assert "generation notification could not be confirmed" in caught.value.cause
+    else:
+        assert "generation counter advanced" in caught.value.cause
     selected = json.loads((directory / "selected.json").read_bytes())["attempt_id"]
+    assert caught.value.data == {
+        "input_id": C,
+        "algorithm_id": "fragment-size",
+        "parameters_sha256": A,
+        "attempt_id": selected,
+        "generation_notified": not fail_generation,
+    }
     assert selected not in {first, second}
     assert store.selected_attempt(C, "fragment-size", A).name == selected
     assert store.read_result(C, "fragment-size", A).metrics[0].value == 3
     assert {path.name for path in (directory / "attempts").iterdir()} == {first, second, selected}
     assert store.generation() == (2 if fail_generation else 3)
+
+    monkeypatch.undo()
+    fourth = store.publish_result(_envelope(4), input_id=C)
+    assert {path.name for path in (directory / "attempts").iterdir()} == {selected, fourth}
+    assert store.read_result(C, "fragment-size", A).metrics[0].value == 4
+
 
 def test_publish_directory_refuses_existing_destination(tmp_path: Path) -> None:
     store = LabStore(tmp_path)

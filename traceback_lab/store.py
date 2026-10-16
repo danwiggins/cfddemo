@@ -62,12 +62,36 @@ class ResultOrderUnavailable(OSError):
 class ResultPublishUncertain(LabProblem):
     """The selector is visible, but its durability was not confirmed."""
 
-    def __init__(self) -> None:
+    def __init__(
+        self,
+        *,
+        input_id: str,
+        algorithm_id: str,
+        parameters_sha256: str,
+        attempt_id: str,
+        generation_notified: bool,
+    ) -> None:
+        if generation_notified:
+            notification = "the generation counter advanced"
+            fix = "Inspect the selected result and run history before retrying."
+        else:
+            notification = "the generation notification could not be confirmed"
+            fix = (
+                "Manually reload or reopen the Lab view, then inspect the selected "
+                "result and run history before retrying."
+            )
         super().__init__(
             "TBX-LAB-020",
             summary="Result selection durability is unconfirmed",
-            cause="The selected result is visible, but its directory sync failed.",
-            fix="Inspect the selected result and run history before retrying.",
+            cause=f"The selected result is visible, but its directory sync failed; {notification}.",
+            fix=fix,
+            data={
+                "input_id": input_id,
+                "algorithm_id": algorithm_id,
+                "parameters_sha256": parameters_sha256,
+                "attempt_id": attempt_id,
+                "generation_notified": generation_notified,
+            },
         )
 
 
@@ -551,11 +575,20 @@ class LabStore:
             # The replacement selector may already be visible to readers.
             # Notify the UI without allowing a counter failure to hide the
             # selector's uncertain durability or trigger pruning.
+            generation_notified = False
             try:
                 self.bump_generation()
             except Exception:  # noqa: BLE001 - preserve the original publication failure
                 pass
-            raise ResultPublishUncertain() from exc
+            else:
+                generation_notified = True
+            raise ResultPublishUncertain(
+                input_id=input_id,
+                algorithm_id=envelope.algorithm_id,
+                parameters_sha256=envelope.provenance.parameters_sha256,
+                attempt_id=attempt,
+                generation_notified=generation_notified,
+            ) from exc
         keep = {attempt, *([previous.name] if previous is not None else [])}
         if last_success is not None:
             keep.add(last_success)
