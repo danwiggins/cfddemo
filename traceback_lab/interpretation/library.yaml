@@ -7,7 +7,7 @@
 # original evidence (D4).  citation_checked records who confirmed that every
 # DOI resolves and every displayed number matches the source (D27); an entry
 # without it renders an "UNVERIFIED citation" badge.
-version: 0.4.0
+version: 0.6.0
 hidden_algorithms: [read-summary, meth-calls]
 entries:
   # ---------------------------------------------------------------- bam-qc
@@ -2381,3 +2381,61 @@ entries:
     headline: false
     citations: ["doi:10.1038/s41586-022-05580-6"]
     citation_checked: {by: "lab build agent (Phase 1)", date: "2026-10-15", note: "PMC9811898: U <= 25%, M >= 75%, k = 4."}
+
+
+  # ------------------------------------------------------------- frag-x-meth
+  - algorithm_id: frag-x-meth
+    metric_id: short_fragment_hypomethylation_delta
+    label: "Long minus short per-molecule CpG 5mC share"
+    value_kind: signed
+    tier: SPECULATIVE
+    origin_tier: SPECULATIVE
+    origin_platform: "ONT; this Lab implementation"
+    min_depth_x: null
+    reference: {kind: none}
+    performance: null
+    performance_missing_reason: "No validated performance for this exact ONT estimator or kit"
+    meaning_high: "The observed long-fragment group has a higher mean per-molecule 5mC share than the short-fragment group."
+    meaning_low: "The observed short-fragment group has a higher mean per-molecule 5mC share than the long-fragment group."
+    confounders: ["fragment-size selection", "CpG call coverage", "basecall modification model", "sequencing depth"]
+    next_steps:
+      analytical: ["Inspect short and long molecule counts separately", "Compare only with a protocol-matched cohort when available"]
+      clinical_setting: null
+    license_ids: []
+    flags: []
+    headline: true
+    stability: {kind: absolute, tolerance: 0.10}
+    citations: []
+    citation_checked:
+      by: "Lab S4 evidence audit"
+      date: "2026-10-16"
+      note: "No scientific citation or reference interval displayed. Engineering formula: D21 eligible molecules with at least four C+m CpG calls; per-molecule 5mC fraction is argmax-5mC calls divided by C+m CpG calls; group means are unweighted by call count; delta is mean for 151-220 bp minus mean for 100-150 bp. Null when either group is empty. Stability tolerance is an engineering comparison rule, not a biological threshold."
+
+
+  # ------------------------------------------------------ breakpoint-motifs
+  - algorithm_id: breakpoint-motifs
+    metric_id: cpg_near_end_fraction
+    label: "Aligned-span ends near a reference CpG"
+    value_kind: proportion
+    tier: SPECULATIVE
+    origin_tier: SPECULATIVE
+    origin_platform: "ONT; this Lab implementation"
+    min_depth_x: null
+    reference: {kind: none}
+    performance: null
+    performance_missing_reason: "No validated performance or healthy range for this exact ONT aligned-end estimator"
+    meaning_high: "A larger share of valid aligned-span ends falls within 10 bp of a reference CpG C coordinate."
+    meaning_low: "A smaller share of valid aligned-span ends falls within 10 bp of a reference CpG C coordinate."
+    confounders: ["reference build and CpG density", "alignment clipping", "fragment-length selection", "sequencing depth"]
+    next_steps:
+      analytical: ["Inspect valid-end count and endpoint motifs", "Compare only with a protocol-matched cohort when available"]
+      clinical_setting: null
+    license_ids: []
+    flags: [LEGAL]
+    headline: true
+    stability: {kind: proportion}
+    citations: []
+    citation_checked:
+      by: "Lab S4 evidence audit"
+      date: "2026-10-16"
+      note: "No scientific citation or reference interval displayed. Engineering formula: D21 eligible molecules supply aligned-span start and end-1, not claimed physical cleavage sites. Each valid end contributes once to the denominator, including both ends of one read even if they select the same CpG. A reference CG C coordinate within 10 bp inclusive is near; equal-distance ties select the lower C. Endpoint motifs are separate panels and require complete A/C/G/T contexts. LEGAL is a caution flag, not a rights clearance."

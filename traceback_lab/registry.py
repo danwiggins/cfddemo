@@ -50,6 +50,7 @@ ALGORITHMS: tuple[str, ...] = (
     "mtdna:MTDNA",
     "cell_origin:CELL_ORIGIN",
     "end_motifs:END_MOTIFS",
+    "breakpoint_motifs:BREAKPOINT_MOTIFS",
     "delfi_ratio:DELFI_RATIO",
     "meth_calls:METH_CALLS",
     "modbase_qc:MODBASE_QC",
@@ -57,6 +58,7 @@ ALGORITHMS: tuple[str, ...] = (
     "global_5hmc:GLOBAL_5HMC",
     "pmd_score:PMD_SCORE",
     "hypometh_reads:HYPOMETH_READS",
+    "frag_x_meth:FRAG_X_METH",
 )
 
 
