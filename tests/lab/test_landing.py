@@ -259,15 +259,18 @@ def test_deep_link_waits_for_deferred_lens_script(page_root, tmp_path, monkeypat
     from traceback_lab.web.server import _Handler
 
     original = _Handler.do_GET
+    delayed = []
 
     def delayed_views(handler):
-        if handler.path == "/assets/lab-views.js":
+        if handler.path.split("?", 1)[0] == "/assets/lab-views.js":
+            delayed.append(handler.path)
             time.sleep(3)
         original(handler)
 
     monkeypatch.setattr(_Handler, "do_GET", delayed_views)
     with RunningLabServer(LabStore(page_root)) as server:
         dom = _dom(server, tmp_path, route=f"/sample/{_id12(page_root)}/methods")
+    assert delayed, "the regression must actually delay the deferred lens script"
     assert "Every number with its provenance" in dom
     assert "Unknown sample" not in dom
 
