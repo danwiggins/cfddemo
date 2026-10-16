@@ -23,7 +23,7 @@ from __future__ import annotations
 import hashlib
 import re
 import shutil
-from collections.abc import Mapping
+from collections.abc import Callable, Mapping
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Literal
@@ -363,6 +363,7 @@ def measure(
     assets: IchorAssets,
     parameters: LabCopyNumberParameters,
     pon: Path | None = None,
+    validate_grid: Callable[[str], None] | None = None,
 ) -> CopyNumberResult:
     """readCounter → grid → ichorCNA → validated → mapped.  ``work`` is scratch."""
 
@@ -373,6 +374,8 @@ def measure(
     counts_wig = work / "counts.wig"
     read_counter(toolchain, parameters, counting_bam, counts_wig)
     grid, run_sha256 = analysis_grid(parameters, assets, counts_wig, counted_reads)
+    if validate_grid is not None:
+        validate_grid(grid.bin_definition_sha256)
     result = run_ichor(toolchain, parameters, assets, counts_wig, grid, run_sha256, work, pon=pon)
     return map_result(result, counted_reads=counted_reads, records_scanned=records_scanned)
 

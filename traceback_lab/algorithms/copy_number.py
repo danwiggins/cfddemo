@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import json
 import tempfile
+from collections.abc import Callable
 from functools import lru_cache
 from pathlib import Path
 from typing import Any
@@ -80,9 +81,23 @@ class CopyNumber(Base):
         return super().preflight(ctx)
 
     def run(self, ctx: InputContext, out: Path) -> AlgorithmOutput:
+        parameters = ichor.default_parameters(min_counted_reads=int(ctx.extras.get("min_counted_reads", 1)))
+        return self.run_configured(ctx, out, parameters=parameters)
+
+    def run_configured(
+        self, ctx: InputContext, out: Path, *,
+        parameters: ichor.LabCopyNumberParameters,
+        pon: Path | None = None,
+        validate_grid: Callable[[str], None] | None = None,
+    ) -> AlgorithmOutput:
+        """Execute one pinned Lab CN contract; the caller selects any PoN."""
+
+        if (pon is None) != (parameters.pon_policy == "none"):
+            raise ichor.CopyNumberError("a PoN is required exactly for the PoN policy")
+        if pon is not None and validate_grid is None:
+            raise ichor.CopyNumberError("a selected PoN requires grid verification")
         toolchain = _toolchain()
         assets = ichor.resolve_assets(ctx.root, toolchain)
-        parameters = ichor.default_parameters(min_counted_reads=int(ctx.extras.get("min_counted_reads", 1)))
         with tempfile.TemporaryDirectory(prefix="cn-", dir=out.parent) as scratch:
             work = Path(scratch)
             given = ctx.extras.get("counting_bam")
@@ -94,7 +109,8 @@ class CopyNumber(Base):
                 counting = work / "counting.bam"
                 scanned, _, counted = ichor.write_counting(ctx.input_dir / "aligned.bam", counting, parameters)
             result = ichor.measure(
-                counting, counted, scanned, work, toolchain=toolchain, assets=assets, parameters=parameters
+                counting, counted, scanned, work, toolchain=toolchain, assets=assets, parameters=parameters,
+                pon=pon, validate_grid=validate_grid,
             )
         track = {"bins": result.bins}
         segments = {"segments": result.segments}
