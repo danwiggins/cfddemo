@@ -4,13 +4,14 @@ from __future__ import annotations
 
 import hashlib
 import errno
+import shlex
 from pathlib import Path
 
 import pytest
 
 from traceback_lab import assets
 from traceback_lab.algorithms.pmd_score import PMD_SCORE
-from traceback_lab.doctor import _pmd_asset_check, lab_checks
+from traceback_lab.doctor import _pmd_asset_check, doctor_command, lab_checks
 from traceback_lab.registry import execution_identity
 from traceback_lab.store import LabStore
 
@@ -116,6 +117,24 @@ def test_doctor_warns_without_leaking_a_path_when_pmd_stat_fails(
     assert "could not be inspected" in check["detail"]
     assert str(store.root) not in str(check)
     assert "traceback lab asset inspect pmd --root <ROOT>" in check["fix"]
+
+
+def test_doctor_quotes_root_in_pmd_repair_commands(tmp_path: Path) -> None:
+    root = tmp_path / "PMD space' $(touch injected)"
+    store = LabStore(root)
+    directory = store.lab / "assets" / "pmd"
+
+    _, absent = doctor_command(None, store)
+    absent_line = next(line for line in absent["_human"]["lines"] if "fix: traceback lab asset add pmd" in line)
+    assert shlex.split(absent_line.split("fix: ", 1)[1])[-2:] == ["--root", str(root)]
+
+    directory.mkdir(parents=True)
+    _, empty = doctor_command(None, store)
+    empty_line = next(line for line in empty["_human"]["lines"] if "fix: rmdir " in line)
+    words = shlex.split(empty_line.split("fix: ", 1)[1])
+    assert words[:3] == ["rmdir", str(directory), "&&"]
+    assert words[-2:] == ["--root", str(root)]
+    assert not (tmp_path / "injected").exists()
 
 
 def test_exact_legacy_file_gains_manifest_without_byte_replacement(

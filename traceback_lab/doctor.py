@@ -10,6 +10,7 @@ skip algorithms.
 from __future__ import annotations
 
 import os
+import shlex
 import sys
 from pathlib import Path
 from typing import Any
@@ -207,15 +208,16 @@ def doctor_command(args: Any, store: LabStore) -> tuple[int, dict[str, Any]]:
         _result("lab doctor", "blocked" if blocked else "ok", summary, data={"root": str(store.root), "checks": checks, "setup_steps": steps})
     )
     real = str(store.root)
+    quoted_root = shlex.quote(real)
     lines = [f"ROOT  {real}"]
     for check in checks:
         label = {"pass": "PASS", "warn": "WARN", "blocked": "BLOCKED"}.get(check["status"], check["status"].upper())
         lines.append(f"{label:<8} {check['name']:<16} {check['detail']}")
         if check["status"] != "pass":
-            lines.append(f"{'':<8} {'':<16} fix: {check['fix'].replace('<ROOT>', real)}")
+            lines.append(f"{'':<8} {'':<16} fix: {check['fix'].replace('<ROOT>', quoted_root)}")
     if steps:
         lines.append("Missing setup steps, in order:")
-        lines.extend(f"  {number}. {step.replace('<ROOT>', real)}" for number, step in enumerate(steps, start=1))
+        lines.extend(f"  {number}. {step.replace('<ROOT>', quoted_root)}" for number, step in enumerate(steps, start=1))
     return (EXIT_BLOCKED if blocked else EXIT_OK), _with_human(payload, lines, replace_data=True)
 
 
