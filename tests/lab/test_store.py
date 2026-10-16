@@ -18,8 +18,18 @@ from traceback_lab import STORE_VERSION
 from traceback_lab import store as store_module
 from traceback_lab.envelope import ResultEnvelope, provenance
 from traceback_lab.problems import LabProblem
-from traceback_lab.store import LabStore, ResultPublishUncertain, new_run_id, summarize_run
+from traceback_lab.registry import PlanItem, execution_identity
+from traceback_lab.runner import RunTarget, run_plan
+from traceback_lab.scrub import Scrubber
+from traceback_lab.store import (
+    LabStore,
+    ResultPublishUncertain,
+    ResultSelectionNotificationFailed,
+    new_run_id,
+    summarize_run,
+)
 from traceback_lab.views import selected_results
+from tests.lab.fake_algorithms import _Base
 
 A = "a" * 64
 B = "b" * 64
@@ -249,6 +259,122 @@ def test_invalid_newer_identity_does_not_expose_older_success(
     assert selected_results(store, C) == {}
     with pytest.raises(store_module.ResultOrderUnavailable, match="publication order"):
         store.publish_result(_envelope(3), input_id=C)
+
+
+def test_cached_runner_reselects_prior_identity_once(tmp_path: Path) -> None:
+    store = LabStore(tmp_path)
+    store.ensure()
+    algorithm = _Base("fragment-size")
+    identity = execution_identity(algorithm, reference_sha256=B)
+    first = json.loads(_envelope(1).to_bytes())
+    first["provenance"]["parameters_sha256"] = identity
+    attempt = store.publish_result(
+        ResultEnvelope.model_validate(first), input_id=C, artifacts={"h/x.json": b"ok"},
+    )
+    newer = json.loads(_failed(2).to_bytes())
+    newer["provenance"]["parameters_sha256"] = A
+    store.publish_result(ResultEnvelope.model_validate(newer), input_id=C)
+    assert selected_results(store, C)["fragment-size"].status == "failed"
+    attempts = store.result_dir(C, "fragment-size", identity) / "attempts"
+    result_bytes = (attempts / attempt / "result.json").read_bytes()
+    artifact_bytes = (attempts / attempt / "artifacts" / "h" / "x.json").read_bytes()
+    target = RunTarget(C, B, tmp_path, "ref", B)
+
+    def cached_run() -> None:
+        results = run_plan(
+            store, None, store.run_log(new_run_id()), target,
+            [PlanItem(algorithm, False)], {}, run_id=new_run_id(),
+            scrubber=Scrubber(root=tmp_path),
+        )
+        assert len(results) == 1 and results[0].cached
+
+    cached_run()
+    assert selected_results(store, C)["fragment-size"].provenance.parameters_sha256 == identity
+    assert {path.name for path in attempts.iterdir()} == {attempt}
+    assert (attempts / attempt / "result.json").read_bytes() == result_bytes
+    assert (attempts / attempt / "artifacts" / "h" / "x.json").read_bytes() == artifact_bytes
+    assert store.generation() == 3
+    selector = store.result_dir(C, "fragment-size", identity) / "selected.json"
+    selected_bytes = selector.read_bytes()
+
+    cached_run()
+    assert selector.read_bytes() == selected_bytes
+    assert store.generation() == 3
+
+
+def test_cached_reselection_refuses_invalid_other_selector(tmp_path: Path) -> None:
+    store = LabStore(tmp_path)
+    store.ensure()
+    store.publish_result(_envelope(1), input_id=C)
+    other = json.loads(_failed(2).to_bytes())
+    other["provenance"]["parameters_sha256"] = B
+    store.publish_result(ResultEnvelope.model_validate(other), input_id=C)
+    selector = store.result_dir(C, "fragment-size", B) / "selected.json"
+    selection = json.loads(selector.read_bytes())
+    selection["attempt_id"] = "../../wrong"
+    selector.write_text(json.dumps(selection))
+    before = (store.result_dir(C, "fragment-size", A) / "selected.json").read_bytes()
+
+    with pytest.raises(store_module.ResultOrderUnavailable, match="Another result selection"):
+        store.reselect_cached_result(C, "fragment-size", A)
+    assert (store.result_dir(C, "fragment-size", A) / "selected.json").read_bytes() == before
+    assert selected_results(store, C) == {}
+
+
+def test_missing_selected_artifact_does_not_expose_older_identity(tmp_path: Path) -> None:
+    store = LabStore(tmp_path)
+    store.ensure()
+    store.publish_result(_envelope(1), input_id=C)
+    newer = json.loads(_envelope(2).to_bytes())
+    newer["provenance"]["parameters_sha256"] = B
+    attempt = store.publish_result(
+        ResultEnvelope.model_validate(newer), input_id=C,
+        artifacts={"h/new.json": b"new"},
+    )
+    artifact = store.result_dir(C, "fragment-size", B) / "attempts" / attempt / "artifacts" / "h" / "new.json"
+    artifact.unlink()
+
+    assert store.read_result(C, "fragment-size", B) is None
+    assert selected_results(store, C) == {}
+    with pytest.raises(store_module.ResultOrderUnavailable, match="Another result selection"):
+        store.reselect_cached_result(C, "fragment-size", A)
+    assert selected_results(store, C) == {}
+
+
+@pytest.mark.parametrize("fail_stage", ["selector_sync", "generation"])
+def test_cached_reselection_reports_visible_io_failure(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, fail_stage: str,
+) -> None:
+    store = LabStore(tmp_path)
+    store.ensure()
+    first = store.publish_result(_envelope(1), input_id=C)
+    other = json.loads(_failed(2).to_bytes())
+    other["provenance"]["parameters_sha256"] = B
+    store.publish_result(ResultEnvelope.model_validate(other), input_id=C)
+    directory = store.result_dir(C, "fragment-size", A)
+    if fail_stage == "selector_sync":
+        real_fsync = store_module._fsync_dir
+
+        def fail_sync(path: Path) -> None:
+            if path == directory:
+                raise OSError(5, "simulated selector sync failure")
+            real_fsync(path)
+
+        monkeypatch.setattr(store_module, "_fsync_dir", fail_sync)
+        expected = ResultPublishUncertain
+    else:
+        def fail_generation() -> int:
+            raise OSError(28, "simulated generation failure")
+
+        monkeypatch.setattr(store, "bump_generation", fail_generation)
+        expected = ResultSelectionNotificationFailed
+
+    with pytest.raises(expected) as caught:
+        store.reselect_cached_result(C, "fragment-size", A)
+    assert isinstance(caught.value.__cause__, OSError)
+    assert selected_results(store, C)["fragment-size"].metrics[0].value == 1
+    assert {path.name for path in (directory / "attempts").iterdir()} == {first}
+    assert store.generation() == (3 if fail_stage == "selector_sync" else 2)
 
 
 def test_ambiguous_legacy_successes_are_not_pruned(tmp_path: Path, monkeypatch) -> None:

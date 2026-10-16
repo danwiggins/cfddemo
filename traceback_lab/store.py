@@ -96,6 +96,26 @@ class ResultPublishUncertain(LabProblem):
         )
 
 
+class ResultSelectionNotificationFailed(LabProblem):
+    """A cached result was reselected durably, but readers may need a reload."""
+
+    def __init__(
+        self, *, input_id: str, algorithm_id: str, parameters_sha256: str, attempt_id: str,
+    ) -> None:
+        super().__init__(
+            "TBX-LAB-020",
+            summary="Cached result selection changed but notification failed",
+            cause="The selected result is visible, but the Lab generation update could not be confirmed.",
+            fix="Manually reload or reopen the Lab view and inspect the selected result.",
+            data={
+                "input_id": input_id,
+                "algorithm_id": algorithm_id,
+                "parameters_sha256": parameters_sha256,
+                "attempt_id": attempt_id,
+            },
+        )
+
+
 def _utc(epoch: float | None = None) -> str:
     moment = datetime.fromtimestamp(time.time() if epoch is None else epoch, UTC)
     return moment.strftime("%Y-%m-%dT%H:%M:%SZ")
@@ -497,11 +517,11 @@ class LabStore:
             raise ValueError("Lab result publication order is invalid")
         return order
 
-    def _next_result_order(self, input_id: str, algorithm_id: str) -> int:
-        """Order selections across execution identities without using the clock."""
+    def _result_selection_orders(self, input_id: str, algorithm_id: str) -> dict[str, int | None]:
+        """Read selection order across identities without using the clock."""
 
         algorithm_dir = self.results_dir / input_id / algorithm_id
-        latest = 0
+        orders: dict[str, int | None] = {}
         try:
             with os.scandir(algorithm_dir) as entries:
                 for entry in entries:
@@ -516,14 +536,92 @@ class LabStore:
                         continue
                     if not isinstance(selection, dict):
                         raise ValueError("Lab result selection is invalid")
-                    order = self._publication_order(selection)
-                    if order is not None:
-                        latest = max(latest, order)
+                    orders[entry.name] = self._publication_order(selection)
         except FileNotFoundError:
-            return 1
+            return {}
         except (OSError, ValueError) as exc:
             raise ResultOrderUnavailable("Lab result publication order is unreadable") from exc
-        return latest + 1
+        return orders
+
+    def _next_result_order(self, input_id: str, algorithm_id: str) -> int:
+        orders = self._result_selection_orders(input_id, algorithm_id)
+        return max((order or 0 for order in orders.values()), default=0) + 1
+
+    def _switch_result_selection(
+        self, directory: Path, selection: dict[str, Any], *,
+        input_id: str, algorithm_id: str, parameters_sha256: str,
+    ) -> None:
+        attempt_id = selection["attempt_id"]
+        write_atomic(directory / "selected.json", canonical_json_bytes(selection))
+        try:
+            _fsync_dir(directory)
+        except OSError as exc:
+            # The replacement selector may already be visible to readers.
+            # Notify the UI without allowing a counter failure to hide the
+            # selector's uncertain durability or trigger pruning.
+            generation_notified = False
+            try:
+                self.bump_generation()
+            except Exception:  # noqa: BLE001 - preserve the original publication failure
+                pass
+            else:
+                generation_notified = True
+            raise ResultPublishUncertain(
+                input_id=input_id,
+                algorithm_id=algorithm_id,
+                parameters_sha256=parameters_sha256,
+                attempt_id=attempt_id,
+                generation_notified=generation_notified,
+            ) from exc
+
+    def reselect_cached_result(
+        self, input_id: str, algorithm_id: str, parameters_sha256: str,
+    ) -> bool:
+        """Make a validated cached success current, without rewriting its attempt."""
+
+        selected = self._selected_result(input_id, algorithm_id, parameters_sha256)
+        if selected is None or selected[1].status != "ok":
+            raise ResultOrderUnavailable("Cached result selection is invalid")
+        orders = self._result_selection_orders(input_id, algorithm_id)
+        for identity in orders:
+            try:
+                candidate = self._selected_result(input_id, algorithm_id, identity)
+            except ValueError as exc:
+                raise ResultOrderUnavailable("Another result selection is invalid") from exc
+            if candidate is None:
+                raise ResultOrderUnavailable("Another result selection is invalid")
+        if parameters_sha256 not in orders:
+            raise ResultOrderUnavailable("Cached result selection is missing")
+        current_order = orders[parameters_sha256]
+        highest = max((order or 0 for order in orders.values()), default=0)
+        if len(orders) == 1 or (
+            current_order is not None
+            and current_order == highest
+            and sum(order == highest for order in orders.values()) == 1
+        ):
+            return False
+
+        directory = self.result_dir(input_id, algorithm_id, parameters_sha256)
+        attempt_id = selected[0].name
+        self._switch_result_selection(
+            directory,
+            {
+                "attempt_id": attempt_id,
+                "last_success_attempt_id": attempt_id,
+                "publication_order": highest + 1,
+            },
+            input_id=input_id,
+            algorithm_id=algorithm_id,
+            parameters_sha256=parameters_sha256,
+        )
+        try:
+            self.bump_generation()
+        except OSError as exc:
+            raise ResultSelectionNotificationFailed(
+                input_id=input_id, algorithm_id=algorithm_id,
+                parameters_sha256=parameters_sha256, attempt_id=attempt_id,
+            ) from exc
+        return True
 
     def publish_result(
         self,
@@ -607,27 +705,12 @@ class LabStore:
         selection = {"attempt_id": attempt, "publication_order": publication_order}
         if last_success is not None:
             selection["last_success_attempt_id"] = last_success
-        write_atomic(directory / "selected.json", canonical_json_bytes(selection))
-        try:
-            _fsync_dir(directory)
-        except OSError as exc:
-            # The replacement selector may already be visible to readers.
-            # Notify the UI without allowing a counter failure to hide the
-            # selector's uncertain durability or trigger pruning.
-            generation_notified = False
-            try:
-                self.bump_generation()
-            except Exception:  # noqa: BLE001 - preserve the original publication failure
-                pass
-            else:
-                generation_notified = True
-            raise ResultPublishUncertain(
-                input_id=input_id,
-                algorithm_id=envelope.algorithm_id,
-                parameters_sha256=envelope.provenance.parameters_sha256,
-                attempt_id=attempt,
-                generation_notified=generation_notified,
-            ) from exc
+        self._switch_result_selection(
+            directory, selection,
+            input_id=input_id,
+            algorithm_id=envelope.algorithm_id,
+            parameters_sha256=envelope.provenance.parameters_sha256,
+        )
         keep = {attempt, *([previous.name] if previous is not None else [])}
         if last_success is not None:
             keep.add(last_success)
