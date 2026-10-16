@@ -322,3 +322,18 @@ def test_real_d28_producer_to_join(tmp_path: Path) -> None:
     metric, panel = _result(ctx, tmp_path)
     assert (panel["n"], panel["short_n"], panel["long_n"]) == (2, 1, 1)
     assert metric["value"] == pytest.approx(0.75)
+
+
+def test_conflicting_duplicate_call_probabilities_are_refused(tmp_path: Path) -> None:
+    ctx = _fixture(tmp_path)
+    rows = [_row(0, 101, True), _row(0, 101, False)]
+    _store(tmp_path, rows, chunk_size=1)
+    with pytest.raises(ValueError, match="conflicting duplicate"):
+        _result(ctx, tmp_path)
+
+
+def test_out_of_bounds_read_row_is_refused(tmp_path: Path) -> None:
+    ctx = _fixture(tmp_path)
+    _store(tmp_path, [_row(99, 101 + i, True) for i in range(4)], chunk_size=2)
+    with pytest.raises(ValueError, match="outside read-summary"):
+        _result(ctx, tmp_path)

@@ -51,12 +51,17 @@ def _distinct_sites(rows: np.ndarray) -> np.ndarray:
     keys = np.empty(rows.size, dtype=_SITE_DTYPE)
     for name in _SITE_DTYPE.names:
         keys[name] = rows[name]
-    _, first = np.unique(keys, return_index=True)
+    _, first, inverse = np.unique(keys, return_index=True, return_inverse=True)
+    representative = first[inverse]
+    for name in ("p_m", "p_h", "p_canonical", "channels"):
+        if np.any(rows[name] != rows[name][representative]):
+            raise ValueError("conflicting duplicate CpG site calls in meth-calls")
     return rows[np.sort(first)]
 
 
 @dataclass
 class FragXMeth(MethBase):
+    # The 1M availability gate is the approved L2 catalog row, not a clinical cutoff.
     requires: Requirements = field(
         default_factory=lambda: Requirements(mm_tags=True, min_eligible_reads=1_000_000)
     )
@@ -98,6 +103,8 @@ class FragXMeth(MethBase):
             if rows.size == 0:
                 return
             read_rows = rows["read_row"]
+            if np.any(read_rows >= summary.rows):
+                raise ValueError("meth-calls read_row lies outside read-summary")
             boundaries = np.flatnonzero(np.r_[True, read_rows[1:] != read_rows[:-1]])
             total = np.diff(np.r_[boundaries, rows.size])
             methylated = np.add.reduceat(
