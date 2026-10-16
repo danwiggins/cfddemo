@@ -27,6 +27,7 @@ dev = [
     "pytest==8.4.1",
     "pytest-timeout==2.4.0",
     "pytest-xdist==3.8.0",
+    "websocket-client==1.9.2",
 ]
 
 [tool.pytest.ini_options]
