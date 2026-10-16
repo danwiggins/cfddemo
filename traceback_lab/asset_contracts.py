@@ -19,7 +19,7 @@ ASSET_SCHEMA = "traceback.lab.asset.v1"
 class AssetDescriptor(BaseModel):
     """Stable Lab metadata for one exact local asset byte sequence."""
 
-    model_config = ConfigDict(extra="forbid", frozen=True)
+    model_config = ConfigDict(extra="forbid", frozen=True, populate_by_name=True)
 
     schema_: Literal["traceback.lab.asset.v1"] = Field(default=ASSET_SCHEMA, alias="schema")
     kind: str = Field(pattern=r"^[a-z][a-z0-9-]{0,39}$")
