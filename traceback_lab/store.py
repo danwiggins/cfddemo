@@ -13,7 +13,8 @@ Layout (D11, D19, D22, D35)::
     ROOT/lab/inputs/<input_id>/   aligned or derived input (published as a unit)
     ROOT/lab/results/<input_id>/<algorithm_id>/<parameters_sha256>/
         attempts/<attempt_id>/{result.json, artifacts/, artifacts.json}
-        selected.json             {attempt_id, last_success_attempt_id?}, switched by os.replace
+        selected.json             {attempt_id, publication_order,
+                                   last_success_attempt_id?}, switched by os.replace
 
 Every multi-file write is staged in a ``.staging-<random>`` sibling and
 published with one ``rename_directory_exclusive_at`` call, so readers see the
@@ -487,6 +488,43 @@ class LabStore:
         except OSError as exc:
             raise ResultOrderUnavailable("Lab attempt order is unreadable") from exc
 
+    @staticmethod
+    def _publication_order(selection: dict[str, Any]) -> int | None:
+        if "publication_order" not in selection:
+            return None  # selected.json from an older store
+        order = selection["publication_order"]
+        if not isinstance(order, int) or isinstance(order, bool) or order <= 0:
+            raise ValueError("Lab result publication order is invalid")
+        return order
+
+    def _next_result_order(self, input_id: str, algorithm_id: str) -> int:
+        """Order selections across execution identities without using the clock."""
+
+        algorithm_dir = self.results_dir / input_id / algorithm_id
+        latest = 0
+        try:
+            with os.scandir(algorithm_dir) as entries:
+                for entry in entries:
+                    if not entry.is_dir(follow_symlinks=False):
+                        continue
+                    selector = Path(entry.path) / "selected.json"
+                    try:
+                        if selector.is_symlink():
+                            raise ValueError("Lab result selection is a symlink")
+                        selection = json.loads(selector.read_bytes())
+                    except FileNotFoundError:
+                        continue
+                    if not isinstance(selection, dict):
+                        raise ValueError("Lab result selection is invalid")
+                    order = self._publication_order(selection)
+                    if order is not None:
+                        latest = max(latest, order)
+        except FileNotFoundError:
+            return 1
+        except (OSError, ValueError) as exc:
+            raise ResultOrderUnavailable("Lab result publication order is unreadable") from exc
+        return latest + 1
+
     def publish_result(
         self,
         envelope: ResultEnvelope,
@@ -511,6 +549,7 @@ class LabStore:
         attempts = directory / "attempts"
         attempt = attempt_id or new_attempt_id()
         ordinal = self._next_attempt_order(attempts)
+        publication_order = self._next_result_order(input_id, envelope.algorithm_id)
         files = dict(artifacts or {})
         for relative in files:
             parts = Path(relative).parts
@@ -565,7 +604,7 @@ class LabStore:
             except (OSError, ValueError, AttributeError):
                 pass
         self.publish_directory(attempts, attempt, build)
-        selection = {"attempt_id": attempt}
+        selection = {"attempt_id": attempt, "publication_order": publication_order}
         if last_success is not None:
             selection["last_success_attempt_id"] = last_success
         write_atomic(directory / "selected.json", canonical_json_bytes(selection))
@@ -726,7 +765,7 @@ class LabStore:
 
     def _selected_result(
         self, input_id: str, algorithm_id: str, parameters_sha256: str
-    ) -> tuple[Path, ResultEnvelope] | None:
+    ) -> tuple[Path, ResultEnvelope, int | None] | None:
         directory = self.result_dir(input_id, algorithm_id, parameters_sha256)
         selector = directory / "selected.json"
         try:
@@ -734,6 +773,7 @@ class LabStore:
                 return None
             data = json.loads(selector.read_bytes())
             attempt_id = str(data["attempt_id"])
+            publication_order = self._publication_order(data)
         except (OSError, ValueError, KeyError, TypeError):
             return None
         if not re.fullmatch(_ATTEMPT_ID, attempt_id):
@@ -780,7 +820,15 @@ class LabStore:
                     return None
             if not artifact.is_file():
                 return None
-        return path, envelope
+        return path, envelope, publication_order
+
+    def selected_result_with_order(
+        self, input_id: str, algorithm_id: str, parameters_sha256: str
+    ) -> tuple[ResultEnvelope, int | None] | None:
+        """Return a validated selection and its cross-identity publication order."""
+
+        selected = self._selected_result(input_id, algorithm_id, parameters_sha256)
+        return (selected[1], selected[2]) if selected is not None else None
 
     def read_result(
         self, input_id: str, algorithm_id: str, parameters_sha256: str

@@ -19,10 +19,12 @@ from traceback_lab import store as store_module
 from traceback_lab.envelope import ResultEnvelope, provenance
 from traceback_lab.problems import LabProblem
 from traceback_lab.store import LabStore, ResultPublishUncertain, new_run_id, summarize_run
+from traceback_lab.views import selected_results
 
 A = "a" * 64
 B = "b" * 64
 C = "c" * 64
+D = "d" * 64
 REPO = Path(__file__).resolve().parents[2]
 
 
@@ -158,6 +160,96 @@ def test_reversed_attempt_timestamps_keep_publication_order(
     attempts = directory / "attempts"
     assert not (attempts / older).exists()
     assert sorted(path.name for path in attempts.iterdir()) == sorted([latest_success, *failures[-3:]])
+
+
+def test_reversed_clock_across_identities_shows_latest_failure(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    ids = iter((
+        "a-20261016T205100000002-00000002",
+        "a-20261016T205100000001-00000001",
+    ))
+    monkeypatch.setattr(store_module, "new_attempt_id", lambda: next(ids))
+    store = LabStore(tmp_path)
+    store.ensure()
+    store.publish_result(_envelope(1), input_id=C)
+    failed = json.loads(_failed(2).to_bytes())
+    failed["provenance"]["parameters_sha256"] = B
+    store.publish_result(ResultEnvelope.model_validate(failed), input_id=C)
+
+    first_order = json.loads((store.result_dir(C, "fragment-size", A) / "selected.json").read_bytes())
+    second_order = json.loads((store.result_dir(C, "fragment-size", B) / "selected.json").read_bytes())
+    assert second_order["publication_order"] > first_order["publication_order"]
+    chosen = selected_results(store, C)["fragment-size"]
+    assert chosen.status == "failed"
+    assert chosen.provenance.parameters_sha256 == B
+
+
+def test_legacy_cross_identity_selection_does_not_guess(tmp_path: Path) -> None:
+    store = LabStore(tmp_path)
+    store.ensure()
+    store.publish_result(_envelope(1), input_id=C)
+    first_selector = store.result_dir(C, "fragment-size", A) / "selected.json"
+    first_selection = json.loads(first_selector.read_bytes())
+    first_selection.pop("publication_order")
+    first_selector.write_text(json.dumps(first_selection))
+    assert selected_results(store, C)["fragment-size"].metrics[0].value == 1
+
+    failed = json.loads(_failed(2).to_bytes())
+    failed["provenance"]["parameters_sha256"] = B
+    store.publish_result(ResultEnvelope.model_validate(failed), input_id=C)
+    assert selected_results(store, C)["fragment-size"].status == "failed"
+    selector = store.result_dir(C, "fragment-size", B) / "selected.json"
+    selection = json.loads(selector.read_bytes())
+    selection.pop("publication_order")
+    selector.write_text(json.dumps(selection))
+
+    assert selected_results(store, C) == {}
+    assert selected_results(store, C, {"fragment-size": B})["fragment-size"].status == "failed"
+    store.publish_result(_envelope(3), input_id=C)
+    assert selected_results(store, C)["fragment-size"].metrics[0].value == 3
+
+
+def test_higher_publication_order_resolves_tied_older_identities(tmp_path: Path) -> None:
+    store = LabStore(tmp_path)
+    store.ensure()
+    for identity, value in ((A, 1), (B, 2)):
+        data = json.loads(_envelope(value).to_bytes())
+        data["provenance"]["parameters_sha256"] = identity
+        store.publish_result(ResultEnvelope.model_validate(data), input_id=C)
+    second = store.result_dir(C, "fragment-size", B) / "selected.json"
+    tied = json.loads(second.read_bytes())
+    tied["publication_order"] = 1
+    second.write_text(json.dumps(tied))
+    assert selected_results(store, C) == {}
+
+    latest = json.loads(_envelope(3).to_bytes())
+    latest["provenance"]["parameters_sha256"] = D
+    store.publish_result(ResultEnvelope.model_validate(latest), input_id=C)
+    third = json.loads((store.result_dir(C, "fragment-size", D) / "selected.json").read_bytes())
+    assert third["publication_order"] == 2
+    assert selected_results(store, C)["fragment-size"].provenance.parameters_sha256 == D
+
+
+@pytest.mark.parametrize("bad_order", ["not-an-order", None, True, 0])
+def test_invalid_newer_identity_does_not_expose_older_success(
+    tmp_path: Path, bad_order: object,
+) -> None:
+    store = LabStore(tmp_path)
+    store.ensure()
+    store.publish_result(_envelope(1), input_id=C)
+    failed = json.loads(_failed(2).to_bytes())
+    failed["provenance"]["parameters_sha256"] = B
+    store.publish_result(ResultEnvelope.model_validate(failed), input_id=C)
+    selector = store.result_dir(C, "fragment-size", B) / "selected.json"
+    selection = json.loads(selector.read_bytes())
+    selection["publication_order"] = bad_order
+    selector.write_text(json.dumps(selection))
+
+    assert selected_results(store, C) == {}
+    with pytest.raises(store_module.ResultOrderUnavailable, match="publication order"):
+        store.publish_result(_envelope(3), input_id=C)
+
 
 def test_ambiguous_legacy_successes_are_not_pruned(tmp_path: Path, monkeypatch) -> None:
     ids = iter(
