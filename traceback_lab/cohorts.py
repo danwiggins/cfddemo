@@ -236,7 +236,31 @@ def project_current_metric(
                           cohort_compat_key=cohort_compat_key, target_source_id=target_source_id)
 
 
+def project_sample_metric(
+    store: LabStore, cohort_id: str, *, target_source_id: str,
+    algorithm_id: str, metric_id: str,
+) -> MetricProjection | None:
+    """S5 adapter: derive the target's current compatible key, then project.
+
+    Returns ``None`` if there is no current generation or target status-ok
+    result.  It pins one generation and excludes the target by source ID even
+    when its selected input or execution hash differs from its stored member.
+    """
+
+    generation = read_current(store, cohort_id)
+    if generation is None:
+        return None
+    target = member_from_store(store, target_source_id)
+    result = next((item for item in target.results if item.algorithm_id == algorithm_id), None)
+    if result is None:
+        return None
+    return project_metric(
+        generation, algorithm_id=algorithm_id, metric_id=metric_id,
+        cohort_compat_key=result.cohort_compat_key, target_source_id=target_source_id,
+    )
+
+
 __all__ = [
-    "add_sample", "build_cohort", "member_from_store", "project_current_metric",
+    "add_sample", "build_cohort", "member_from_store", "project_current_metric", "project_sample_metric",
     "read_current", "read_roster",
 ]

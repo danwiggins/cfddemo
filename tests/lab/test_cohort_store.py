@@ -6,7 +6,7 @@ from types import SimpleNamespace
 import pytest
 
 from traceback_lab import cohorts
-from traceback_lab.cohorts import add_sample, build_cohort, project_current_metric, read_current, read_roster
+from traceback_lab.cohorts import add_sample, build_cohort, project_current_metric, project_sample_metric, read_current, read_roster
 from traceback_lab.envelope import Metric, ResultEnvelope, provenance
 from traceback_lab.identity import parameters_sha256
 from traceback_lab.problems import LabProblem
@@ -69,6 +69,8 @@ def test_add_is_idempotent_and_build_publishes_immutable_generations(store: LabS
     assert projected is not None
     assert projected.values == (110.0,)
     assert projected.exclusions == {"self": 1}
+    assert project_sample_metric(store, "healthy", target_source_id=first,
+                                 algorithm_id="fragment-size", metric_id="mode_bp") == projected
     two = build_cohort(store, "healthy", kind="provisional_external")
     assert two.version_id == "healthy:2"
     assert two.kind == "provisional_external"
