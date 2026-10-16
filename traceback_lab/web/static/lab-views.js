@@ -417,7 +417,7 @@
     const out = [
       h("p", { class: "breadcrumb" }, `Lab › ${sample.id12} › Findings`),
       h("div", { class: "findings-head" }, h("h1", { class: "view-title" }, "Findings"), flagPill("CLIA")),
-      h("p", { class: "findings-summary" }, `${outside} outside a reference · ${groups.not_interpretable.length} not interpretable · ${groups.no_reference.length} awaiting a reference (cohort n = ${sample.cohort_n} of 10) · ${groups.in_range.length} in range`),
+      h("p", { class: "findings-summary" }, `${outside} outside a reference · ${groups.not_interpretable.length} not interpretable · ${groups.no_reference.length} without a reference (${sample.cohort_n < 10 ? `cohort n = ${sample.cohort_n} of 10` : `cohort ${sample.cohort_version}; eligibility varies by metric`}) · ${groups.in_range.length} in range`),
     ];
     if (sample.excluded_chunks && sample.excluded_chunks.length) out.push(h("p", { class: "status-line" }, `Provisional: this input excludes ${sample.excluded_chunks.length} truncated chunks; depth reflects the reads present.`));
     for (const a of sample.algorithms.filter((x) => x.status === "failed")) {
@@ -427,7 +427,7 @@
     let first = true;
     if (!outside) {
       const withReference = metrics.filter((m) => m.state !== "no_reference" && m.state !== "not_interpretable").length;
-      out.push(h("p", { class: "empty" }, `No metric is outside a reference. ${withReference} metrics have a reference; ${groups.no_reference.length} await the cohort (n = ${sample.cohort_n} of 10). `,
+      out.push(h("p", { class: "empty" }, `No metric is outside a reference. ${withReference} metrics have a reference; ${groups.no_reference.length} ${sample.cohort_n < 10 ? `await the cohort (n = ${sample.cohort_n} of 10)` : `have no eligible reference in cohort ${sample.cohort_version}`}. `,
         h("a", { href: `#/sample/${sample.id12}/trust-qc` }, "Trust/QC"), " · ", h("a", { href: `#/sample/${sample.id12}/stability` }, "Stability")));
     }
     const titles = { markedly_above: "Markedly above", markedly_below: "Markedly below", above_typical: "Above typical", below_typical: "Below typical" };
@@ -814,10 +814,18 @@
       h("div", { class: "findings-head" }, h("h1", { class: "view-title" }, "Body map"), flagPill("LEGAL", "FLAG: LEGAL — research-only licenses; atlas terms unknown."))];
     const a = algo(sample, "cell-origin");
     if (!a || a.status !== "ok") { out.push(absent(a, "cell-origin")); return out; }
-    out.push(h("p", { class: "help" }, `No healthy cohort band yet (cohort n = ${sample.cohort_n} of 10). Minor tissues are not interpretable below 5x; their estimate and interval stay visible.`));
+    out.push(h("p", { class: "help" }, `Healthy kit cohort ${sample.cohort_version || "not built"} (${sample.cohort_n} members). A tissue band appears only with at least 10 eligible comparable samples after leave-one-out; 10–29 use observed min–max, 30+ use the observed 5th–95th percentile. Minor tissues are not interpretable below 5x; their estimate and interval stay visible.`));
     out.push(...context(sample, "cell-origin", new Set()));
     const rows = a.metrics.filter((m) => m.metric_id.startsWith("fraction_"));
-    const top = Math.min(1, Math.max(0.05, ...rows.map((m) => (m.ci ? m.ci[1] : m.value))));
+    const cohortSummary = (m) => {
+      const values = (m.cohort_values || []).filter(Number.isFinite).sort((a, b) => a - b);
+      if (values.length < 10) return null;
+      const quantile = (p) => { const index = p * (values.length - 1); const lo = Math.floor(index); return values[lo] + (values[Math.ceil(index)] - values[lo]) * (index - lo); };
+      return { mean: values.reduce((sum, value) => sum + value, 0) / values.length,
+        low: values.length < 30 ? values[0] : quantile(0.05),
+        high: values.length < 30 ? values[values.length - 1] : quantile(0.95), n: values.length };
+    };
+    const top = Math.min(1, Math.max(0.05, ...rows.map((m) => Math.max(m.ci ? m.ci[1] : m.value, (cohortSummary(m) || {}).high || 0))));
     const level = (rows.find((m) => m.ci_level) || {}).ci_level;
     const intervalName = level ? `${Math.round(level * 100)}% bootstrap interval` : "interval";
     const groups = ORGANS.map(([name]) => [name, []]);
@@ -836,16 +844,23 @@
       const marks = members.flatMap((m, i) => {
         const y = 14 + i * rowH;
         const out2 = [svg("text", { x: left - 6, y: y + 4, "text-anchor": "end", class: "axis" }, m.contributor)];
+        const cohort = cohortSummary(m);
+        if (cohort) {
+          out2.push(svg("line", { x1: x(cohort.low), x2: x(cohort.high), y1: y - 5, y2: y - 5, class: "cohort-band" }));
+          out2.push(svg("text", { x: x(cohort.mean), y: y - 7, "text-anchor": "middle", class: "cohort-mean" }, "◆"));
+        }
         if (m.ci) out2.push(svg("line", { x1: x(m.ci[0]), x2: x(m.ci[1]), y1: y, y2: y, class: "ci" }));
         out2.push(svg("text", { x: x(m.value), y: y + 5, "text-anchor": "middle", class: m.state === "not_interpretable" ? "pt-open" : "pt" }, m.state === "not_interpretable" ? "▨" : "●"));
         return out2;
       });
-      const label = `${name}: ${members.length} cell types; filled dots interpretable, hatched not interpretable at this depth.`;
+      const label = `${name}: ${members.length} cell types; dots are this sample, diamonds are eligible healthy-cohort means, upper lines are observed cohort bands, lower lines are sample intervals. Hatched dots are not interpretable at this depth.`;
       out.push(h("section", { class: "panel" }, h("h2", {}, name),
         svg("svg", { viewBox: `0 0 ${w} ${hgt}`, role: "img", "aria-label": label, class: "composition-svg" }, svg("title", {}, label), ...marks,
           svg("line", { x1: left, x2: w - 20, y1: axisY, y2: axisY, class: "ci" }), ...ticks),
-        dataTable(`${name} (${intervalName})`, ["Cell type", "Share", "Interval low", "Interval high", "State"],
-          members.map((m) => [m.contributor, m.value, m.ci ? m.ci[0] : null, m.ci ? m.ci[1] : null, (STATE[m.state] || ["", m.state])[1] + (m.reason ? ` (${m.reason})` : "")]))));
+        dataTable(`${name} (${intervalName})`, ["Cell type", "Share", "Interval low", "Interval high", "Healthy mean", "Healthy band low", "Healthy band high", "Eligible n", "State"],
+          members.map((m) => { const cohort = cohortSummary(m); return [m.contributor, m.value, m.ci ? m.ci[0] : null, m.ci ? m.ci[1] : null,
+            cohort ? cohort.mean : null, cohort ? cohort.low : null, cohort ? cohort.high : null, m.eligible_n,
+            (STATE[m.state] || ["", m.state])[1] + (m.reason ? ` (${m.reason})` : "")]; }))));
     }
     out.push(h("p", { class: "help" }, "Groups are an editorial arrangement of atlas cell types by organ system, not an inferred tissue of origin."));
     return out;

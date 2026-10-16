@@ -308,7 +308,9 @@
         h("tbody", {}, ...banded.map(([label, value, band]) => h("tr", {}, h("th", { scope: "row" }, label), h("td", {}, value), h("td", {}, h("span", { class: "qc-band" }, glyph[band])))))))));
     const health = sample.library_health;
     out.push(h("section", { class: "panel" }, h("h2", {}, "Library health"),
-      h("p", {}, `no_library_entry: ${health.no_library_entry} · UNVERIFIED citations: ${health.unverified_citations} · interpretation v${health.version} · cohort healthy-v1 (n = ${sample.cohort_n})`),
+      h("p", {}, `no_library_entry: ${health.no_library_entry} · UNVERIFIED citations: ${health.unverified_citations} · interpretation v${health.version} · cohort ${sample.cohort_version || "none yet"} (members = ${sample.cohort_n})`),
+      ["cohort_unavailable", "target_unavailable", "stale_target"].includes(sample.cohort_state)
+        ? h("p", { class: "problem" }, `Cohort reference unavailable (${sample.cohort_state.replace(/_/g, " ")}); sample measurements remain visible without cohort states. Check cohort build and reload.`) : "",
       health.error ? h("div", { class: "problem" }, `Interpretation library on disk is invalid (${health.error}). Showing v${health.version}, loaded at ${health.loaded_at}.`) : ""));
     out.push(sizeDensity(sample));
     return out;
