@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import hashlib
+import errno
 from pathlib import Path
 
 import pytest
@@ -312,3 +313,177 @@ def test_legacy_manifest_size_uses_retained_file(
     inspected = assets.inspect_asset(store)
     assert added.descriptor.size_bytes == len(data)
     assert inspected.descriptor == added.descriptor
+
+
+def test_replaced_asset_between_check_and_open_is_not_followed(
+    pinned: tuple[LabStore, Path, bytes], monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    store, source, _ = pinned
+    record = _add(store, source)
+    real_open = assets.os.open
+
+    def replace_before_open(path: Path, flags: int, *args: object, **kwargs: object) -> int:
+        if Path(path).name == record.file.name:
+            record.file.unlink()
+            record.file.symlink_to(source)
+        return real_open(path, flags, *args, **kwargs)
+
+    monkeypatch.setattr(assets.os, "open", replace_before_open)
+    with pytest.raises(assets.AssetError, match="unreadable or changed"):
+        assets.inspect_asset(store)
+
+
+def test_replaced_asset_directory_is_not_followed(
+    pinned: tuple[LabStore, Path, bytes], monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    store, source, _ = pinned
+    record = _add(store, source)
+    directory = record.file.parent
+    moved = directory.parent / "old-pmd"
+    real_open = assets.os.open
+
+    def replace_before_directory_open(path: Path, flags: int, *args: object, **kwargs: object) -> int:
+        if path == "pmd" and kwargs.get("dir_fd") is not None:
+            directory.rename(moved)
+            directory.symlink_to(moved, target_is_directory=True)
+        return real_open(path, flags, *args, **kwargs)
+
+    monkeypatch.setattr(assets.os, "open", replace_before_directory_open)
+    with pytest.raises(assets.AssetError, match="unreadable or changed"):
+        assets.inspect_asset(store)
+
+
+def test_mutation_during_hash_cannot_verify_old_bytes(
+    pinned: tuple[LabStore, Path, bytes], monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    store, source, _ = pinned
+    record = _add(store, source)
+    real_sha256 = hashlib.sha256
+
+    class MutatingDigest:
+        def __init__(self) -> None:
+            self._digest = real_sha256()
+
+        def update(self, block: bytes) -> None:
+            self._digest.update(block)
+            record.file.write_bytes(b"changed asset bytes")
+
+        def hexdigest(self) -> str:
+            return self._digest.hexdigest()
+
+    monkeypatch.setattr(assets.hashlib, "sha256", MutatingDigest)
+    with pytest.raises(assets.AssetError, match="changed while hashing"):
+        assets.inspect_asset(store)
+
+
+def test_source_replaced_after_initial_hash_cannot_be_copied(
+    pinned: tuple[LabStore, Path, bytes], monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    store, source, _ = pinned
+    retained = source.with_name("retained-pmd.gz")
+    real_digest = assets._digest
+
+    def replace_after_hash(path: Path) -> tuple[str, int]:
+        result = real_digest(path)
+        source.rename(retained)
+        source.symlink_to(retained)
+        return result
+
+    monkeypatch.setattr(assets, "_digest", replace_after_hash)
+    with pytest.raises(assets.AssetError, match="changed while being copied"):
+        _add(store, source)
+    assert not (store.lab / "assets" / "pmd").exists()
+    assert retained.is_file()
+
+
+def test_manifest_replaced_during_read_is_not_treated_as_verified(
+    pinned: tuple[LabStore, Path, bytes], monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    store, source, _ = pinned
+    manifest = _add(store, source).file.parent / "manifest.json"
+    retained = manifest.with_name("retained-manifest.json")
+    real_open = assets._open_regular
+
+    def replace_after_open(path: Path) -> int:
+        descriptor = real_open(path)
+        if path == manifest:
+            manifest.rename(retained)
+            manifest.write_text("{}")
+        return descriptor
+
+    monkeypatch.setattr(assets, "_open_regular", replace_after_open)
+    with pytest.raises(assets.AssetError, match="manifest changed while being read"):
+        assets.inspect_asset(store)
+    assert retained.is_file()
+
+
+def test_verified_reader_rejects_mutation_and_replacement_during_use(
+    pinned: tuple[LabStore, Path, bytes],
+) -> None:
+    store, source, data = pinned
+    record = _add(store, source)
+    with assets.open_verified_asset(store, record) as stream:
+        assert stream.read() == data
+
+    with pytest.raises(assets.AssetError, match="changed during consumption"):
+        with assets.open_verified_asset(store, record) as stream:
+            assert stream.read(1) == data[:1]
+            record.file.write_bytes(b"changed but still present")
+
+    record.file.write_bytes(data)
+    replaced = record.file.with_name("original-pmd.gz")
+    with pytest.raises(assets.AssetError, match="changed during consumption"):
+        with assets.open_verified_asset(store, record) as stream:
+            record.file.rename(replaced)
+            record.file.write_bytes(data)
+            assert stream.read() == data
+
+
+def test_file_in_place_of_asset_directory_is_reported_without_replacement(
+    pinned: tuple[LabStore, Path, bytes],
+) -> None:
+    store, source, _ = pinned
+    directory = store.lab / "assets" / "pmd"
+    directory.parent.mkdir(parents=True)
+    directory.write_bytes(b"operator data")
+    with pytest.raises(assets.AssetError, match="directory is not a directory"):
+        assets.inspect_asset(store)
+    with pytest.raises(assets.AssetError, match="directory is not a directory"):
+        _add(store, source)
+    assert directory.read_bytes() == b"operator data"
+
+
+@pytest.mark.parametrize("phase", ["open", "write"])
+def test_destination_write_failure_names_storage_and_publishes_nothing(
+    pinned: tuple[LabStore, Path, bytes], monkeypatch: pytest.MonkeyPatch, phase: str,
+) -> None:
+    store, source, data = pinned
+    real_open = Path.open
+
+    class FailedWriter:
+        def __init__(self, writer: object) -> None:
+            self.writer = writer
+
+        def __enter__(self) -> FailedWriter:
+            return self
+
+        def __exit__(self, *args: object) -> None:
+            self.writer.close()
+
+        def write(self, block: bytes) -> None:
+            raise OSError(errno.EIO, "I/O error")
+
+    def no_space(path: Path, mode: str = "r", *args: object, **kwargs: object):
+        if path.name == assets.PMD_FILENAME and path.parent.name.startswith(".staging-") and mode == "xb":
+            if phase == "open":
+                raise OSError(errno.ENOSPC, "No space left on device")
+            return FailedWriter(real_open(path, mode, *args, **kwargs))
+        return real_open(path, mode, *args, **kwargs)
+
+    monkeypatch.setattr(Path, "open", no_space)
+    with pytest.raises(assets.AssetError, match="could not write staged PMD asset; check free space"):
+        _add(store, source)
+    parent = store.lab / "assets"
+    assert not (parent / "pmd").exists()
+    assert not list(parent.glob(".staging-*"))
+    assert source.read_bytes() == data
