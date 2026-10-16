@@ -303,7 +303,8 @@ def classify(
             # The producer leaves this metric empty by design (e.g. duplicates
             # are not marked on native ONT), not for lack of depth.
             return Interpretation("no_reference", "none_published", kind, caption=str(reference["missing_note"]))
-        return Interpretation("not_interpretable", "depth", kind, caption="No molecules counted at this depth.")
+        caption = entry.get("missing_value_caption") or "Metric unavailable at this depth."
+        return Interpretation("not_interpretable", "depth", kind, caption=str(caption))
     minimum = entry.get("min_depth_x")
     if minimum is not None and depth_x is not None and depth_x < minimum:
         return Interpretation(
