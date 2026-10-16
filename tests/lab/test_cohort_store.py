@@ -25,7 +25,7 @@ def store(tmp_path, monkeypatch) -> LabStore:
     return lab
 
 
-def _sample(store: LabStore, index: int, *, example: bool = False, value: float = 100.0, stale: bool = False) -> str:
+def _sample(store: LabStore, index: int, *, example: bool = False, value: float = 100.0, stale: bool = False, aligned: bool = True) -> str:
     source_id, input_id = _sha(index), _sha(index + 100)
     parameters = parameters_sha256(
         algorithm_id="fragment-size", algorithm_version="1",
@@ -34,12 +34,16 @@ def _sample(store: LabStore, index: int, *, example: bool = False, value: float 
     store.sources_dir.mkdir(parents=True, exist_ok=True)
     (store.sources_dir / f"{source_id}.json").write_text(json.dumps({
         "source_id": source_id, "example": example,
-        "inputs": [{"input_id": input_id, "kind": "prealigned", "used_utc": "2026-10-16T00:00:00Z"}],
+        "inputs": [{"input_id": input_id, "kind": "aligned" if aligned else "prealigned", "used_utc": "2026-10-16T00:00:00Z"}],
     }))
     input_dir = store.inputs_dir / input_id
     input_dir.mkdir(parents=True, exist_ok=True)
     (input_dir / "manifest.json").write_text(json.dumps({
-        "kind": "prealigned", "source_id": source_id, "reference_sha256": _sha(900),
+        "kind": "aligned" if aligned else "prealigned", "source_id": source_id,
+        "input_id": input_id, "reference_sha256": _sha(900),
+        "tools": {"samtools": "1.20", "minimap2": "2.28"} if aligned else None,
+        "mmi_sha256": _sha(901) if aligned else None,
+        "aligner_argv": ["minimap2", "-ax", "map-ont"] if aligned else None,
     }))
     result = ResultEnvelope(
         algorithm_id="fragment-size", algorithm_version="1", status="ok",
@@ -63,6 +67,7 @@ def test_add_is_idempotent_and_build_publishes_immutable_generations(store: LabS
     assert store.generation() == before + 1
     assert one.version_id == "healthy:1"
     assert one.percentile_n == 2
+    assert one.members[0].results[0].cohort_compat_key == one.members[1].results[0].cohort_compat_key
     compat = one.members[0].results[0].cohort_compat_key
     projected = project_current_metric(store, "healthy", algorithm_id="fragment-size", metric_id="mode_bp",
                                        cohort_compat_key=compat, target_source_id=first)
@@ -214,3 +219,24 @@ def test_symlinked_generations_are_refused_by_read_and_build(store: LabStore, tm
     with pytest.raises(ValueError, match="generations may not be a symlink"):
         build_cohort(store, "healthy")
     assert list(outside.iterdir()) == []
+
+
+def test_unknown_prealigned_provenance_never_pools_distinct_inputs(store: LabStore) -> None:
+    first = _sample(store, 1, aligned=False)
+    second = _sample(store, 2, aligned=False)
+    add_sample(store, "healthy", first)
+    add_sample(store, "healthy", second)
+    generation = build_cohort(store, "healthy")
+    first_key = generation.members[0].results[0].cohort_compat_key
+    second_key = generation.members[1].results[0].cohort_compat_key
+    assert first_key != second_key
+    assert all("provenance unknown" in member.aligner_identity for member in generation.members)
+    projection = project_sample_metric(store, "healthy", target_source_id=first,
+                                       algorithm_id="fragment-size", metric_id="mode_bp")
+    assert projection is not None
+    assert projection.percentile_n == 0
+    assert projection.exclusions == {"self": 1, "incompatible": 1}
+    from traceback_lab.cohort_command import _build
+    _, payload = _build(SimpleNamespace(cohort="healthy", kind="internal_cohort"), store)
+    assert "each input is isolated" in payload["data"]["comparability_note"]
+    assert any("provenance is unknown" in line for line in payload["_human"]["lines"])

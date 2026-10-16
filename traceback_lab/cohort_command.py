@@ -51,14 +51,21 @@ def _build(args: argparse.Namespace, store: LabStore) -> tuple[int, dict[str, An
     counts: dict[str, int] = {}
     for member in generation.members:
         counts[member.aligner_identity] = counts.get(member.aligner_identity, 0) + 1
+    comparability_note = (
+        "Pre-aligned provenance is unknown; each input is isolated for cohort comparison."
+        if any(name.startswith("pre-aligned; provenance unknown") for name in counts) else None
+    )
     payload = _local_envelope(_result("lab cohort build", "ok", "cohort generation published", data={
         "root": str(store.root), "cohort": args.cohort, "cohort_version": generation.version_id,
         "kind": generation.kind, "member_n": generation.percentile_n,
         "pon_n": generation.pon_n, "aligner_counts": counts,
+        "comparability_note": comparability_note,
     }))
     lines = [f"ROOT  {store.root}", f"COHORT  {generation.version_id}",
              f"KIND    {generation.kind}", f"MEMBERS {generation.percentile_n} (PoN n={generation.pon_n})"]
     lines.extend(f"ALIGNER {name}: {n}" for name, n in sorted(counts.items()))
+    if comparability_note is not None:
+        lines.append(f"NOTE    {comparability_note}")
     return EXIT_OK, _with_human(payload, lines, replace_data=True)
 
 
