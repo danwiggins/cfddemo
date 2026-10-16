@@ -43,6 +43,7 @@ from traceback_runner.serialization import canonical_json_bytes
 
 from . import STORE_VERSION
 from .envelope import ResultEnvelope
+from .file_access import open_regular_no_follow
 from .identity import ALGORITHM_ID_PATTERN, SHA256_PATTERN
 from .problems import LabProblem
 
@@ -121,24 +122,6 @@ def write_atomic(path: Path, content: bytes) -> None:
         os.replace(temporary, path)
     finally:
         temporary.unlink(missing_ok=True)
-
-
-def open_regular_no_follow(path: Path) -> int:
-    """Open a regular-file candidate without following symlink components on POSIX."""
-
-    flags = os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_NONBLOCK", 0)
-    if os.name != "posix" or not hasattr(os, "O_NOFOLLOW"):
-        return os.open(path, flags)
-    absolute = Path(os.path.abspath(path))
-    directory = os.open(absolute.anchor, os.O_RDONLY | os.O_DIRECTORY)
-    try:
-        for part in absolute.parts[1:-1]:
-            child = os.open(part, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW, dir_fd=directory)
-            os.close(directory)
-            directory = child
-        return os.open(absolute.name, flags, dir_fd=directory)
-    finally:
-        os.close(directory)
 
 
 def pid_alive(pid: int) -> bool:
