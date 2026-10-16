@@ -147,15 +147,17 @@ class FragXMeth(MethBase):
         def add(rows: np.ndarray) -> None:
             """Batch complete reads; one oversized read is kept intact."""
 
+            read_rows = rows["read_row"]
             offset = 0
             while offset < rows.size:
                 limit = min(offset + PROCESS_CALLS, rows.size)
-                if limit < rows.size:
-                    limit = int(
-                        np.searchsorted(
-                            rows["read_row"], rows[limit - 1]["read_row"], side="right"
-                        )
-                    )
+                # A structured-array field is strided: searchsorted copies
+                # its entire column. Advance only across the boundary read.
+                while (
+                    limit < rows.size
+                    and read_rows[limit] == read_rows[limit - 1]
+                ):
+                    limit += 1
                 add_batch(rows[offset:limit])
                 offset = limit
 

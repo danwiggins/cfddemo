@@ -295,7 +295,9 @@ def test_chunk_and_reference_windows_preserve_eligible_derived_ends(
         selected = summary.eligible()
         if variant:
             selected &= derived_mask(summary, variant)
+        assert int(selected.sum()) > 0
         assert expected[str(variant)][0].metrics[0]["n"] == 2 * int(selected.sum())
+    assert expected[str(None)][1]["near_ends"] > 0
 
     monkeypatch.setattr(module, "CHUNK_ROWS", 2)
     monkeypatch.setattr(module, "REFERENCE_WINDOW_BP", 16)

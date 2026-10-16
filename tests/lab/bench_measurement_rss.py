@@ -148,7 +148,7 @@ def _worker(base: Path, n_reads: int, algorithm: str, baseline: Path | None) -> 
                 "reads": n_reads,
                 "selected_reads": (n_reads // 4) * 2 + min(n_reads % 4, 2),
                 "implementation": "baseline" if baseline is not None else "current",
-                "rss_before_bytes": before,
+                "peak_before_run_bytes": before,
                 "peak_rss_bytes": after,
                 "metric": output.metrics[0],
             },
@@ -169,7 +169,10 @@ def main() -> None:
     parser.add_argument("--worker", action="store_true", help=argparse.SUPPRESS)
     parser.add_argument("--base", type=Path, help=argparse.SUPPRESS)
     parser.add_argument("--reads", type=int, help=argparse.SUPPRESS)
-    parser.add_argument("--algorithm", choices=("frag-x-meth", "breakpoint-motifs"))
+    parser.add_argument(
+        "--algorithm", choices=("frag-x-meth", "breakpoint-motifs"),
+        help=argparse.SUPPRESS,
+    )
     args = parser.parse_args()
     if args.worker:
         if args.base is None or args.reads is None or args.algorithm is None:
