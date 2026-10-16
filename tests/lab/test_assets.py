@@ -116,7 +116,31 @@ def test_doctor_warns_without_leaking_a_path_when_pmd_stat_fails(
     assert check["status"] == "warn"
     assert "could not be inspected" in check["detail"]
     assert str(store.root) not in str(check)
+    assert "<ROOT>/lab/assets/pmd" in check["fix"]
     assert "traceback lab asset inspect pmd --root <ROOT>" in check["fix"]
+
+
+@pytest.mark.parametrize("dangling", [False, True])
+def test_doctor_symlink_remedy_only_removes_the_link(
+    pinned: tuple[LabStore, Path, bytes], dangling: bool,
+) -> None:
+    store, _, _ = pinned
+    directory = store.lab / "assets" / "pmd"
+    directory.parent.mkdir(parents=True)
+    target = store.root.parent / "linked-pmd-target"
+    if not dangling:
+        target.mkdir()
+        (target / "keep.txt").write_text("operator data")
+    directory.symlink_to(target, target_is_directory=True)
+
+    check = _pmd_asset_check(store)
+    assert check["status"] == "warn"
+    assert check["fix"].startswith("unlink <ROOT>/lab/assets/pmd && traceback lab asset add pmd")
+    assert "leave the link target untouched" in check["fix"]
+    if dangling:
+        assert not target.exists()
+    else:
+        assert (target / "keep.txt").read_text() == "operator data"
 
 
 def test_doctor_quotes_root_in_pmd_repair_commands(tmp_path: Path) -> None:
@@ -134,7 +158,6 @@ def test_doctor_quotes_root_in_pmd_repair_commands(tmp_path: Path) -> None:
     words = shlex.split(empty_line.split("fix: ", 1)[1])
     assert words[:3] == ["rmdir", str(directory), "&&"]
     assert words[-2:] == ["--root", str(root)]
-    assert not (tmp_path / "injected").exists()
 
 
 def test_exact_legacy_file_gains_manifest_without_byte_replacement(

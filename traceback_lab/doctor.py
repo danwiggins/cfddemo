@@ -75,7 +75,7 @@ def _pmd_asset_check(store: LabStore) -> dict[str, Any]:
     """Verify the operator-supplied PMD bytes used by ``pmd-score``."""
 
     unreadable_fix = (
-        "Check access to ROOT/lab/assets/pmd, then run "
+        "Check access to <ROOT>/lab/assets/pmd, then run "
         "traceback lab asset inspect pmd --root <ROOT>"
     )
     try:
@@ -87,9 +87,11 @@ def _pmd_asset_check(store: LabStore) -> dict[str, Any]:
             "--source-label Zhou-2018-operator-supplied --terms unknown --root <ROOT>"
         )
         try:
-            if not directory.exists() and not directory.is_symlink():
+            if directory.is_symlink():
+                fix = f"unlink <ROOT>/lab/assets/pmd && {register}  # leave the link target untouched"
+            elif not directory.exists():
                 fix = register
-            elif directory.is_dir() and not directory.is_symlink() and not any(directory.iterdir()):
+            elif directory.is_dir() and not any(directory.iterdir()):
                 # Registration never replaces an existing directory, even an empty one.
                 fix = f"rmdir <ROOT>/lab/assets/pmd && {register}"
             else:
