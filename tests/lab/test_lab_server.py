@@ -11,7 +11,6 @@ import os
 import signal
 import shutil
 import socket
-import sys
 import subprocess
 import tempfile
 import threading
@@ -316,69 +315,6 @@ def _chrome() -> str | None:
     return None
 
 
-def headless_dom(argv: list[str], *, ok, timeout: float = 60) -> str:
-    """Dump one page and preserve evidence when Chrome does not reach readiness.
-
-    A timeout kills Chrome's process group on POSIX, including children that
-    otherwise keep its temporary profile open. Persistent failure is reported
-    with its process and DOM state rather than hidden by another launch.
-    """
-
-    with tempfile.TemporaryFile() as stdout, tempfile.TemporaryFile() as errors:
-        process = subprocess.Popen(
-            argv, stdout=stdout, stderr=errors, start_new_session=os.name != "nt",
-        )
-        timed_out = False
-        cleanup_error = None
-        try:
-            process.wait(timeout=timeout)
-        except subprocess.TimeoutExpired:
-            timed_out = True
-            if os.name == "nt":
-                try:
-                    subprocess.run(
-                        ["taskkill", "/PID", str(process.pid), "/T", "/F"],
-                        stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
-                        check=False, timeout=5,
-                    )
-                except subprocess.TimeoutExpired:
-                    cleanup_error = "taskkill timed out"
-            else:
-                try:
-                    os.killpg(process.pid, signal.SIGKILL)
-                except ProcessLookupError:
-                    pass
-            try:
-                process.wait(timeout=5)
-            except subprocess.TimeoutExpired:
-                process.kill()
-                try:
-                    process.wait(timeout=1)
-                except subprocess.TimeoutExpired:
-                    cleanup_error = "direct browser process did not exit after kill"
-        if os.name != "nt" and not timed_out:
-            # Chrome may exit while a child still holds its profile and output
-            # handles. The isolated session belongs to this one invocation.
-            try:
-                os.killpg(process.pid, signal.SIGKILL)
-            except ProcessLookupError:
-                pass
-        stdout.seek(0)
-        dom = stdout.read().decode("utf-8", errors="replace")
-        errors.seek(0, os.SEEK_END)
-        errors.seek(max(0, errors.tell() - 4096))
-        stderr = errors.read().decode("utf-8", errors="replace")
-    if not timed_out and process.returncode == 0 and ok(dom):
-        return dom
-    raise AssertionError(
-        f"Chrome page not ready: timed_out={timed_out}, exit={process.returncode}, "
-        f"dom_bytes={len(dom.encode())}, data_ready={_body_attr(dom, 'ready')}, "
-        f"chart_rendered={_body_attr(dom, 'rendered')}, measured={_body_attr(dom, 'measured')}, "
-        f"csp_violations={_body_attr(dom, 'csp-violations')}, clia_loading={'Loading…' in dom}, "
-        f"cleanup_error={cleanup_error!r}, stderr_tail={stderr[-1000:]!r}"
-    )
-
-
 def _body_attr(dom: str, name: str) -> str | None:
     import re
 
@@ -386,73 +322,19 @@ def _body_attr(dom: str, name: str) -> str | None:
     return match.group(1) if match else None
 
 
-def test_headless_dom_reports_process_and_readiness_failure() -> None:
-    with pytest.raises(AssertionError, match=r"exit=4, dom_bytes=0, data_ready=None") as caught:
-        headless_dom([sys.executable, "-c", "import sys; print('browser failed', file=sys.stderr); sys.exit(4)"],
-                     ok=lambda _: True)
-    assert "browser failed" in str(caught.value)
-
-
-def test_headless_dom_kills_a_timed_out_process() -> None:
-    script = (
-        "import subprocess,sys,time; "
-        "print('<body data-ready=\"1\" data-rendered=\"1\" data-csp-violations=\"0\">', flush=True); "
-        "print('browser stalled', file=sys.stderr, flush=True); "
-        "subprocess.Popen([sys.executable, '-c', 'import time; time.sleep(30)']); "
-        "time.sleep(30)"
-    )
-    with pytest.raises(AssertionError, match=r"timed_out=True") as caught:
-        headless_dom([sys.executable, "-c", script], ok=lambda d: 'data-ready="1"' in d, timeout=5)
-    diagnostic = str(caught.value)
-    assert "data_ready=1" in diagnostic and "chart_rendered=1" in diagnostic
-    assert "csp_violations=0" in diagnostic and "browser stalled" in diagnostic
-
-
-def test_headless_dom_does_not_wait_for_descendant_capture_handles(tmp_path, monkeypatch) -> None:
-    parent_pid = tmp_path / "parent.pid"
-    child_pid = tmp_path / "child.pid"
-    killed_groups = []
-    if os.name != "nt":
-        real_killpg = os.killpg
-
-        def record_group_kill(group: int, sig: int) -> None:
-            killed_groups.append((group, sig))
-            real_killpg(group, sig)
-
-        monkeypatch.setattr(os, "killpg", record_group_kill)
-    script = (
-        "import os,pathlib,subprocess,sys; "
-        f"pathlib.Path({str(parent_pid)!r}).write_text(str(os.getpid())); "
-        "child=subprocess.Popen([sys.executable, '-c', 'import time; time.sleep(30)']); "
-        f"pathlib.Path({str(child_pid)!r}).write_text(str(child.pid)); "
-        "print('<body data-ready=\"1\">', flush=True)"
-    )
-    try:
-        dom = headless_dom([sys.executable, "-c", script], ok=lambda d: 'data-ready="1"' in d, timeout=5)
-        assert 'data-ready="1"' in dom
-        if os.name != "nt":
-            assert killed_groups[-1] == (int(parent_pid.read_text()), signal.SIGKILL)
-    finally:
-        if os.name == "nt" and child_pid.exists():
-            try:
-                os.kill(int(child_pid.read_text()), signal.SIGTERM)
-            except ProcessLookupError:
-                pass
-
-
-def _wait_for_chart(read_state, *, timeout: float, clock=None, pause=None) -> dict:
-    """Wait for the renderer's marker, rather than an earlier page-ready flag."""
+def _wait_for_dom(read_state, *, timeout: float, clock=None, pause=None) -> dict:
+    """Wait for a caller's actual DOM predicate within one deadline."""
 
     clock = clock or time.monotonic
     pause = pause or time.sleep
     deadline = clock() + timeout
     while True:
         state = read_state()
-        if state.get("rendered"):
+        if state.get("matched"):
             return state
         remaining = deadline - clock()
         if remaining <= 0:
-            raise AssertionError(f"Chrome chart not rendered before timeout: {state!r}")
+            raise AssertionError(f"Chrome DOM predicate not met before timeout: {state!r}")
         pause(min(0.2, remaining))
 
 
@@ -493,8 +375,8 @@ def _read_debug_port(path: Path) -> str | None:
     return lines[0]
 
 
-def _chart_dom_cdp(argv: list[str], profile: Path, *, timeout: float = 90) -> str:
-    """Wait for one Chrome page's actual chart marker through DevTools."""
+def _dom_cdp(argv: list[str], profile: Path, *, ok, timeout: float = 90) -> str:
+    """Wait for one Chrome page's caller-defined DOM state through DevTools."""
 
     deadline = time.monotonic() + timeout
     events: deque[str] = deque(maxlen=8)
@@ -562,20 +444,23 @@ def _chart_dom_cdp(argv: list[str], profile: Path, *, timeout: float = 90) -> st
 
             command("Runtime.enable")
             command("Log.enable")
-            state_expression = """(() => ({
-              ready: document.body?.dataset.ready ?? null,
-              rendered: !!document.querySelector('.echart[data-rendered="1"]'),
-              csp: document.body?.dataset.cspViolations ?? null,
-              fallback: [...document.querySelectorAll('.chart-wrap .problem')].map(el => el.textContent).join('; '),
-              loading: document.body?.innerText.includes('Loading…') ?? false
-            }))()"""
-            _wait_for_chart(lambda: evaluate(state_expression), timeout=max(0, deadline - time.monotonic()))
-            dom = evaluate("document.documentElement.outerHTML")
+            def read_state() -> dict:
+                nonlocal dom
+                dom = evaluate("document.documentElement?.outerHTML ?? ''")
+                return {
+                    "matched": bool(ok(dom)), "ready": _body_attr(dom, "ready"),
+                    "rendered": 'data-rendered="1"' in dom,
+                    "csp": _body_attr(dom, "csp-violations"),
+                    "fallback": "Chart could not be drawn" in dom,
+                    "loading": "Loading…" in dom,
+                }
+
+            _wait_for_dom(read_state, timeout=max(0, deadline - time.monotonic()))
         except Exception as exc:
             failure = exc
             if connection is not None:
                 try:
-                    dom = evaluate("document.documentElement.outerHTML", until=time.monotonic() + 2)
+                        dom = evaluate("document.documentElement?.outerHTML ?? ''", until=time.monotonic() + 2)
                 except Exception:
                     pass
         finally:
@@ -584,7 +469,9 @@ def _chart_dom_cdp(argv: list[str], profile: Path, *, timeout: float = 90) -> st
                     connection.close()
                 except Exception as exc:
                     cleanup_error = f"DevTools close failed: {exc!r}"
-            if os.name == "nt":
+            if process.poll() is not None:
+                pass  # Reaped leader PID must never be used as a process-group target.
+            elif os.name == "nt":
                 try:
                     subprocess.run(
                         ["taskkill", "/PID", str(process.pid), "/T", "/F"],
@@ -610,7 +497,7 @@ def _chart_dom_cdp(argv: list[str], profile: Path, *, timeout: float = 90) -> st
             stderr_tail = stderr.read().decode("utf-8", errors="replace")[-1000:]
     if failure or cleanup_error:
         raise AssertionError(
-            f"Chrome chart wait failed: {failure!r}; cleanup_error={cleanup_error!r}; "
+            f"Chrome DOM wait failed: {failure!r}; cleanup_error={cleanup_error!r}; "
             f"data_ready={_body_attr(dom, 'ready')}, csp_violations={_body_attr(dom, 'csp-violations')}, "
             f"fallback={'Chart could not be drawn' in dom}, console_tail={list(events)!r}, "
             f"stderr_tail={stderr_tail!r}"
@@ -618,29 +505,30 @@ def _chart_dom_cdp(argv: list[str], profile: Path, *, timeout: float = 90) -> st
     return dom
 
 
-def test_chart_wait_does_not_accept_ready_page_without_rendered_chart() -> None:
+def test_dom_wait_does_not_accept_ready_page_without_rendered_chart() -> None:
     now = [0.0]
-    state = {"ready": "1", "rendered": False, "csp": "0", "fallback": "Chart could not be drawn"}
+    state = {"ready": "1", "rendered": False, "matched": False, "csp": "0", "fallback": "Chart could not be drawn"}
 
     def pause(seconds: float) -> None:
         now[0] += seconds
 
-    with pytest.raises(AssertionError, match="Chrome chart not rendered before timeout") as caught:
-        _wait_for_chart(lambda: state, timeout=0.5, clock=lambda: now[0], pause=pause)
+    with pytest.raises(AssertionError, match="Chrome DOM predicate not met before timeout") as caught:
+        _wait_for_dom(lambda: state, timeout=0.5, clock=lambda: now[0], pause=pause)
     assert "'ready': '1'" in str(caught.value) and "Chart could not be drawn" in str(caught.value)
 
 
-def test_chart_wait_accepts_a_chart_that_renders_after_page_readiness() -> None:
+def test_dom_wait_accepts_a_chart_that_renders_after_page_readiness() -> None:
     now = [0.0]
     observations = iter((False, False, True))
 
     def read_state() -> dict:
-        return {"ready": "1", "rendered": next(observations), "csp": "0"}
+        rendered = next(observations)
+        return {"ready": "1", "rendered": rendered, "matched": rendered, "csp": "0"}
 
     def pause(seconds: float) -> None:
         now[0] += seconds
 
-    assert _wait_for_chart(read_state, timeout=1, clock=lambda: now[0], pause=pause)["rendered"]
+    assert _wait_for_dom(read_state, timeout=1, clock=lambda: now[0], pause=pause)["rendered"]
 
 
 def test_cdp_command_has_a_deadline_under_continuous_console_events() -> None:
@@ -674,13 +562,35 @@ def test_debug_port_waits_for_complete_chrome_startup_file(tmp_path) -> None:
     assert _read_debug_port(active_port) == "1234"
 
 
+@pytest.mark.skipif(os.name == "nt", reason="POSIX process-group cleanup")
+def test_cdp_does_not_signal_an_already_reaped_browser(tmp_path, monkeypatch) -> None:
+    class ExitedBrowser:
+        pid = 1234
+
+        def poll(self) -> int:
+            return 1
+
+        def wait(self, timeout: float) -> int:
+            return 1
+
+    monkeypatch.setattr(subprocess, "Popen", lambda *args, **kwargs: ExitedBrowser())
+
+    def unexpected_kill(*args: object) -> None:
+        raise AssertionError("reaped browser PID was signalled")
+
+    monkeypatch.setattr(os, "killpg", unexpected_kill)
+    with pytest.raises(AssertionError, match="did not expose its Lab page"):
+        _dom_cdp(["chrome", "http://127.0.0.1/"], tmp_path / "profile", ok=lambda dom: True, timeout=1)
+
+
 @pytest.mark.skipif(_chrome() is None, reason="no Chrome/Chromium for the headless CSP check")
 def test_headless_page_renders_a_chart_with_zero_csp_violations(server, tmp_path) -> None:
     id12 = api_module.LabApi(server.app.store).samples()["samples"][0]["id12"]
-    dom = _chart_dom_cdp(
+    dom = _dom_cdp(
         [_chrome(), "--headless=new", "--disable-gpu", "--no-first-run", "--no-default-browser-check",
          f"--user-data-dir={tmp_path / 'profile'}", "--window-size=1280,800",
          server.issue_link() + f"&route=/sample/{id12}/trust-qc"], tmp_path / "profile",
+        ok=lambda page: 'data-ready="1"' in page and 'class="echart"' in page and 'data-rendered="1"' in page,
     )
     assert 'data-ready="1"' in dom, dom[:500]
     assert 'data-csp-violations="0"' in dom

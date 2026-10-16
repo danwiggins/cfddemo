@@ -109,19 +109,20 @@ def page_root(tmp_path_factory, synthetic_world) -> Path:
 
 
 def _dom(server, tmp_path, *, size="1280,800", route=None, want=None) -> str:
-    """Dump one page with a fresh one-use link and report any readiness failure."""
+    """Inspect one page with a fresh link and bounded readiness wait."""
 
-    from tests.lab.test_lab_server import headless_dom
+    from tests.lab.test_lab_server import _dom_cdp
 
     if want is None:
         want = (lambda d: True) if route else (lambda d: "data-measured" in d)
     good = lambda d: 'data-ready="1"' in d and want(d)  # noqa: E731
     link = server.issue_link() + (f"&route={route}" if route else "")
-    return headless_dom(
+    tmp_path.mkdir(parents=True, exist_ok=True)
+    profile = tmp_path / "profile"
+    return _dom_cdp(
         [_chrome(), "--headless=new", "--disable-gpu", "--hide-scrollbars", "--no-first-run",
-         f"--user-data-dir={tmp_path / 'profile'}", "--virtual-time-budget=15000",
-         f"--window-size={size}", "--dump-dom", link],
-        ok=good, timeout=90,
+         f"--user-data-dir={profile}", f"--window-size={size}", link],
+        profile, ok=good, timeout=90,
     )
 
 

@@ -320,7 +320,7 @@ def test_cohort_commands_are_registered_with_common_root_and_json() -> None:
 def test_compare_and_joint_panel_render_in_native_tables(tmp_path, monkeypatch) -> None:
     import json
 
-    from tests.lab.test_lab_server import _chrome, headless_dom
+    from tests.lab.test_lab_server import _chrome, _dom_cdp
     from traceback_lab.web.server import RunningLabServer
 
     id12 = _TARGET[:12]
@@ -376,11 +376,12 @@ def test_compare_and_joint_panel_render_in_native_tables(tmp_path, monkeypatch) 
 
     with RunningLabServer(LabStore(tmp_path)) as server:
         def dom(route: str, profile: str, want: str) -> str:
-            return headless_dom([
+            profile_path = tmp_path / profile
+            return _dom_cdp([
                 _chrome(), "--headless=new", "--disable-gpu", "--no-first-run",
-                f"--user-data-dir={tmp_path / profile}", "--virtual-time-budget=15000",
-                "--window-size=360,740", "--dump-dom", server.issue_link() + f"&route=/sample/{id12}/{route}",
-            ], ok=lambda page: 'data-ready="1"' in page and want in page, timeout=90)
+                f"--user-data-dir={profile_path}", "--window-size=360,740",
+                server.issue_link() + f"&route=/sample/{id12}/{route}",
+            ], profile_path, ok=lambda page: 'data-ready="1"' in page and want in page, timeout=90)
 
         compare = dom("compare", "compare-profile", "Comparison against healthy:7")
         problem = {
