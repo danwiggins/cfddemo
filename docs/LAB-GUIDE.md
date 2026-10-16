@@ -263,6 +263,13 @@ pooled as protocol-matched references. Distinct source IDs are not proof of
 independent donors. The separate PoN denominator does not become a
 percentile denominator.
 
+If a selected cohort cannot be verified, **Compare** lists it as unavailable
+with a problem code and a next action. Other verified generations remain
+selectable. Follow that action, then reload the page; an unavailable cohort or
+target sample has no comparison values, and the Lab does not fall back to an
+older generation. A cohort with members but no published generation needs
+`traceback lab cohort build --cohort ID --root R` before it can be selected.
+
 ## Positive controls
 
 `traceback lab simulate cna <id12|latest>` builds a synthetic copy-number

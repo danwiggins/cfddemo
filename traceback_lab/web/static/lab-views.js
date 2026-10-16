@@ -878,6 +878,16 @@
   }
 
   // -- Compare: each response is pinned to one immutable cohort generation ---------
+  function recoveryNotice(subject, problem) {
+    const detail = problem || {};
+    return h("div", { class: "problem" },
+      h("p", { class: "problem-title" }, `${subject}: ${detail.summary || "unavailable"}`),
+      detail.code ? h("p", {}, `Code ${detail.code}`) : "",
+      detail.cause ? h("p", {}, detail.cause) : "",
+      h("p", {}, h("strong", {}, "Next action: "), detail.fix || "Reload Compare and check the Lab run log."),
+      detail.docs ? h("p", { class: "help" }, `Guide: ${detail.docs}`) : "");
+  }
+
   function compare(sample) {
     const out = [h("p", { class: "breadcrumb" }, `Lab › ${sample.id12} › Compare`),
       h("div", { class: "findings-head" }, h("h1", { class: "view-title" }, "Compare"), flagPill("CLIA")),
@@ -896,6 +906,10 @@
         .then((response) => { if (!response.ok) throw new Error(`HTTP ${response.status}`); return response.json(); })
         .then((data) => {
           if (!results.isConnected || current !== request) return;
+          if (data.state === "cohort_unavailable" || data.state === "target_unavailable") {
+            results.replaceChildren(recoveryNotice(data.state === "target_unavailable" ? "This sample" : `Cohort ${cohort.cohort_id}`, data.problem));
+            return;
+          }
           const nodes = [
             h("p", {}, `Generation ${data.cohort_version} · ${data.member_n} distinct members · PoN n = ${data.pon_n} (separate denominator).`),
           ];
@@ -920,7 +934,7 @@
             h("caption", {}, "Generation members by aligner identity"),
             h("thead", {}, h("tr", {}, h("th", { scope: "col" }, "Aligner"), h("th", { scope: "col" }, "Members"))),
             h("tbody", {}, ...alignerRows));
-          nodes.push(h("div", { class: "table-wrap" }, alignerTable));
+          nodes.push(h("div", { class: "table-wrap", tabindex: "0", role: "region", "aria-label": "Generation aligner counts" }, alignerTable));
           if (!data.metrics.length) nodes.push(h("p", { class: "empty" }, "No current compatible cohort-reference metric is available for this sample. Missing or failed metrics are not zero."));
           else {
             const rows = data.metrics.map((metric) => {
@@ -956,7 +970,7 @@
                 h("td", {}, exclusions),
                 h("td", {}, publishedEvidence));
             });
-            nodes.push(h("div", { class: "table-wrap" }, h("table", { class: "data-table" },
+            nodes.push(h("div", { class: "table-wrap", tabindex: "0", role: "region", "aria-label": "Comparison metrics" }, h("table", { class: "data-table" },
               h("caption", {}, `Comparison against ${data.cohort_version}; each n is post-exclusion`),
               h("thead", {}, h("tr", {}, ...["Metric", "This sample", "Selected cohort interpretation", "Eligible n", "Eligible aligners", "Excluded", "Original library reference"].map((name) => h("th", { scope: "col" }, name)))),
               h("tbody", {}, ...rows))));
@@ -974,14 +988,22 @@
       .then((response) => { if (!response.ok) throw new Error(`HTTP ${response.status}`); return response.json(); })
       .then((data) => {
         if (!slot.isConnected) return;
+        const unavailable = data.unavailable || [];
+        const rootProblem = data.problem ? recoveryNotice("Cohort storage", data.problem) : "";
+        const unavailablePanel = unavailable.length ? h("section", { class: "panel", "aria-labelledby": "compare-unavailable-title" },
+          h("h3", { id: "compare-unavailable-title" }, "Unavailable cohorts"),
+          h("p", { class: "help" }, "These cohorts cannot be selected. Other published generations remain available."),
+          ...unavailable.map((row) => recoveryNotice(`Cohort ${row.cohort_id}`, row.problem))) : "";
         if (!data.cohorts.length) {
-          slot.replaceChildren(h("p", { class: "empty" }, "No cohort generation has been built under this ROOT. Add eligible samples with `traceback lab cohort add`, then publish with `traceback lab cohort build`."));
+          slot.replaceChildren(h("p", { class: "empty" }, data.problem || unavailable.length ?
+            "No selectable cohort generation is available. Follow the recovery action below, then reload Compare." :
+            "No cohort generation has been built under this ROOT. Add eligible samples with `traceback lab cohort add`, then publish with `traceback lab cohort build`."), rootProblem, unavailablePanel);
           return;
         }
         const picker = h("select", { "aria-label": "Cohort generation" },
           ...data.cohorts.map((row) => h("option", { value: row.cohort_id }, `${row.cohort_id} · ${row.cohort_version} · n = ${row.member_n}`)));
         results = h("div", { "aria-live": "polite" });
-        slot.replaceChildren(h("label", {}, "Choose cohort ", picker), results);
+        slot.replaceChildren(h("label", {}, "Choose cohort ", picker), rootProblem, unavailablePanel, results);
         // The selected generation is read once by the API for every metric.
         picker.addEventListener("change", () => show(data.cohorts.find((row) => row.cohort_id === picker.value)));
         show(data.cohorts[0]);
