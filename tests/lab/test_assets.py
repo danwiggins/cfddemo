@@ -289,3 +289,26 @@ def test_asset_command_is_reachable_through_signed_cli(
     assert code == 0
     assert inspected["command"] == "lab asset inspect"
     assert inspected["data"]["asset"] == added["data"]["asset"]
+
+
+def test_legacy_manifest_size_uses_retained_file(
+    pinned: tuple[LabStore, Path, bytes], monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from types import SimpleNamespace
+
+    store, source, data = pinned
+    directory = store.lab / "assets" / "pmd"
+    directory.mkdir(parents=True)
+    (directory / assets.PMD_FILENAME).write_bytes(data)
+    real_stat = Path.stat
+
+    def changed_source_stat(path: Path, *args: object, **kwargs: object):
+        if path == source and kwargs.get("follow_symlinks", True):
+            return SimpleNamespace(st_size=len(data) + 1)
+        return real_stat(path, *args, **kwargs)
+
+    monkeypatch.setattr(Path, "stat", changed_source_stat)
+    added = _add(store, source)
+    inspected = assets.inspect_asset(store)
+    assert added.descriptor.size_bytes == len(data)
+    assert inspected.descriptor == added.descriptor

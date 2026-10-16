@@ -241,6 +241,7 @@ def add_asset(
             if existing.descriptor != descriptor:
                 raise AssetError("asset already registered with different provenance or terms")
             return existing
+        descriptor = _descriptor(existing.descriptor.size_bytes, source_label, terms, license_id)
         record = AssetRecord(descriptor, existing.file, False)
         manifest_path = directory / "manifest.json"
         _check_contained(store, manifest_path)
