@@ -99,3 +99,19 @@ def test_frag_x_meth_entry_states_formula_and_evidence_limit() -> None:
     assert entry["stability"] == {"kind": "absolute", "tolerance": 0.10}
     assert classify(0.12, entry).state == "no_reference"
     assert "151-220 bp minus mean for 100-150 bp" in entry["citation_checked"]["note"]
+
+
+def test_breakpoint_motifs_entry_uses_valid_end_denominator_without_a_range() -> None:
+    entry = load_library().entry("breakpoint-motifs", "cpg_near_end_fraction")
+    assert entry is not None and entry.headline
+    assert entry.tier == "SPECULATIVE"
+    assert entry["reference"] == {"kind": "none"}
+    assert entry["performance"] is None
+    assert entry["citations"] == []
+    assert entry["flags"] == ["LEGAL"]
+    assert entry["stability"] == {"kind": "proportion"}
+    assert classify(0.5, entry).state == "no_reference"
+    note = entry["citation_checked"]["note"]
+    assert "Each valid end contributes once to the denominator" in note
+    assert "not claimed physical cleavage sites" in note
+    assert "10 bp inclusive" in note

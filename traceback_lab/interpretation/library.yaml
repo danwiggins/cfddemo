@@ -7,7 +7,7 @@
 # original evidence (D4).  citation_checked records who confirmed that every
 # DOI resolves and every displayed number matches the source (D27); an entry
 # without it renders an "UNVERIFIED citation" badge.
-version: 0.5.0
+version: 0.6.0
 hidden_algorithms: [read-summary, meth-calls]
 entries:
   # ---------------------------------------------------------------- bam-qc
@@ -2410,3 +2410,32 @@ entries:
       by: "Lab S4 evidence audit"
       date: "2026-10-16"
       note: "No scientific citation or reference interval displayed. Engineering formula: D21 eligible molecules with at least four C+m CpG calls; per-molecule 5mC fraction is argmax-5mC calls divided by C+m CpG calls; group means are unweighted by call count; delta is mean for 151-220 bp minus mean for 100-150 bp. Null when either group is empty. Stability tolerance is an engineering comparison rule, not a biological threshold."
+
+
+  # ------------------------------------------------------ breakpoint-motifs
+  - algorithm_id: breakpoint-motifs
+    metric_id: cpg_near_end_fraction
+    label: "Aligned-span ends near a reference CpG"
+    value_kind: proportion
+    tier: SPECULATIVE
+    origin_tier: SPECULATIVE
+    origin_platform: "ONT; this Lab implementation"
+    min_depth_x: null
+    reference: {kind: none}
+    performance: null
+    performance_missing_reason: "No validated performance or healthy range for this exact ONT aligned-end estimator"
+    meaning_high: "A larger share of valid aligned-span ends falls within 10 bp of a reference CpG C coordinate."
+    meaning_low: "A smaller share of valid aligned-span ends falls within 10 bp of a reference CpG C coordinate."
+    confounders: ["reference build and CpG density", "alignment clipping", "fragment-length selection", "sequencing depth"]
+    next_steps:
+      analytical: ["Inspect valid-end count and endpoint motifs", "Compare only with a protocol-matched cohort when available"]
+      clinical_setting: null
+    license_ids: []
+    flags: [LEGAL]
+    headline: true
+    stability: {kind: proportion}
+    citations: []
+    citation_checked:
+      by: "Lab S4 evidence audit"
+      date: "2026-10-16"
+      note: "No scientific citation or reference interval displayed. Engineering formula: D21 eligible molecules supply aligned-span start and end-1, not claimed physical cleavage sites. Each valid end contributes once to the denominator, including both ends of one read even if they select the same CpG. A reference CG C coordinate within 10 bp inclusive is near; equal-distance ties select the lower C. Endpoint motifs are separate panels and require complete A/C/G/T contexts. LEGAL is a caution flag, not a rights clearance."
