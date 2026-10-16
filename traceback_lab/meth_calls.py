@@ -56,6 +56,7 @@ from .modbase import mm_codes, mm_skip_modes, mm_tag, mn_ok
 SCHEMA = "traceback.lab.meth-calls.v2"
 CHUNK_CALLS = 1 << 20  # <= 1M calls per chunk (D28)
 CODE_SAMPLE = 10_000
+PENDING_CALLS = 1 << 16  # rows converted to DTYPE per batch
 DTYPE = np.dtype(
     [
         ("read_row", "<u4"),
@@ -78,9 +79,29 @@ class _InvalidRecord(ValueError):
     pass
 
 
+_MATCH_OPS = frozenset((0, 7, 8))  # M, =, X: what get_aligned_pairs(matches_only=True) reports
+
+
+def _cpg_bases(sequence: str) -> tuple[list[int], list[int]]:
+    """Stored positions of the C and of the G of every stored CG (CG never overlaps itself)."""
+
+    c_positions: list[int] = []
+    index = sequence.find("CG")
+    while index >= 0:
+        c_positions.append(index)
+        index = sequence.find("CG", index + 2)
+    return c_positions, [index + 1 for index in c_positions]
+
+
 def _record_sites(record: Any) -> tuple[list[tuple[int, int, int, int, int]], int]:
     """``(ref_pos0, strand, p_m, p_h, channels)`` per CpG site of one record,
-    and how many calls were dropped (no aligned reference base)."""
+    and how many calls were dropped (no aligned reference base).
+
+    Work is proportional to the record's CpG sites, not to its length or to
+    the number of MM calls: the CpG bases come from ``str.find``, the calls
+    are looked up by position, and a single-block alignment maps by offset.
+    ``tests/lab`` pins this to the per-base reference implementation.
+    """
 
     mm = mm_tag(record)
     if mm is None:
@@ -95,6 +116,7 @@ def _record_sites(record: Any) -> tuple[list[tuple[int, int, int, int, int]], in
     if parsed is None:
         raise _InvalidRecord("MM/ML do not parse")
     reverse = record.is_reverse
+    c_positions, g_positions = _cpg_bases(sequence)
     # CpG calls in stored coordinates: on the C of a stored CG (forward C+
     # calls) or on its G (reverse records, opposite-strand G- calls).
     sites: dict[int, dict[str, int]] = {}
@@ -102,14 +124,20 @@ def _record_sites(record: Any) -> tuple[list[tuple[int, int, int, int, int]], in
     for (base, _strand, code), calls in parsed.items():
         if base not in ("C", "G") or code not in ("m", "h"):
             continue
-        for position, quality in calls:
-            if quality < 0:
-                raise _InvalidRecord("MM call without ML")
-            on_c = position + 1 < len(sequence) and sequence[position] == "C" and sequence[position + 1] == "G"
-            on_g = 0 < position < len(sequence) and sequence[position - 1] == "C" and sequence[position] == "G"
-            if on_c or on_g:
-                sites.setdefault(position, {})[code] = int(quality)
-                explicit.add((position, code))
+        if not calls:
+            continue
+        # The reference decoder rejects every missing ML value, including an
+        # earlier duplicate later overwritten by a valid value.
+        if any(quality < 0 for _, quality in calls):
+            raise _InvalidRecord("MM call without ML")
+        # A position listed twice under one key keeps its last valid value.
+        by_position = dict(calls)
+        for positions in (c_positions, g_positions):
+            for position in positions:
+                quality = by_position.get(position)
+                if quality is not None:
+                    sites.setdefault(position, {})[code] = int(quality)
+                    explicit.add((position, code))
     modes = mm_skip_modes(mm)
     complement = {"C": "G", "G": "C"}
     for code, mode in modes.items():
@@ -120,22 +148,25 @@ def _record_sites(record: Any) -> tuple[list[tuple[int, int, int, int, int]], in
         # base in the original read orientation (its complement on the stored
         # sequence of a reverse record) that the code does not list.
         target = complement[base] if reverse else base
-        for index, stored in enumerate(sequence):
-            if stored != target:
-                continue
-            on_c = stored == "C" and index + 1 < len(sequence) and sequence[index + 1] == "G"
-            on_g = stored == "G" and index > 0 and sequence[index - 1] == "C"
-            if on_c or on_g:
-                sites.setdefault(index, {}).setdefault(letter, 0)
+        for index in c_positions if target == "C" else g_positions:
+            sites.setdefault(index, {}).setdefault(letter, 0)
     if not sites:
         return [], 0
-    pairs = dict(record.get_aligned_pairs(matches_only=True))
+    cigar = record.cigartuples or []
+    if len(cigar) == 1 and cigar[0][0] in _MATCH_OPS and not record.is_unmapped and record.reference_start >= 0:
+        start, span = record.reference_start, cigar[0][1]
+
+        def reference_of(qpos: int) -> int | None:
+            return start + qpos if 0 <= qpos < span else None
+
+    else:
+        reference_of = dict(record.get_aligned_pairs(matches_only=True)).get
     out: list[tuple[int, int, int, int, int]] = []
     dropped = 0
     for position in sorted(sites):
         on_g = sequence[position] == "G"
         c_pos = position - 1 if on_g else position
-        ref_c, ref_g = pairs.get(c_pos), pairs.get(c_pos + 1)
+        ref_c, ref_g = reference_of(c_pos), reference_of(c_pos + 1)
         # Both bases of the CpG must align, adjacently, to the reference;
         # otherwise (insertion, soft clip, deletion between them) the call
         # has no genomic CpG coordinate and is dropped.
@@ -165,6 +196,8 @@ def write_meth_calls(
 
     import pysam
 
+    if chunk_calls < 1:
+        raise ValueError("chunk_calls must be at least 1")
     out.mkdir(parents=True, exist_ok=True)
     buffer = np.zeros(chunk_calls, dtype=DTYPE)
     filled = 0
@@ -180,6 +213,26 @@ def write_meth_calls(
             buffer[:filled].tofile(out / f"calls-{len(chunks):05d}.bin")
             chunks.append(filled)
             filled = 0
+
+    # Rows are converted to the structured dtype in batches (one numpy call
+    # per batch, not one item assignment per call), then split at chunk_calls.
+    pending: list[tuple[int, int, int, int, int, int, int, int]] = []
+
+    def drain() -> None:
+        nonlocal filled
+        if not pending:
+            return
+        rows = np.array(pending, dtype=DTYPE)
+        pending.clear()
+        counts["calls"] += rows.size
+        done = 0
+        while done < rows.size:
+            take = min(rows.size - done, chunk_calls - filled)
+            buffer[filled : filled + take] = rows[done : done + take]
+            filled += take
+            done += take
+            if filled == chunk_calls:
+                flush()
 
     with pysam.AlignmentFile(str(bam_path), "rb") as bam:
         for row, record in enumerate(bam.fetch(until_eof=True)):
@@ -203,12 +256,14 @@ def write_meth_calls(
                 continue
             counts["dropped_unaligned"] += dropped
             cid = contig_index[record.reference_name]
-            for ref_pos0, strand, p_m, p_h, channels in sites:
-                buffer[filled] = (row, cid, ref_pos0, strand, p_m, p_h, max(0, 255 - p_m - p_h), channels)
-                filled += 1
-                counts["calls"] += 1
-                if filled == chunk_calls:
-                    flush()
+            for start in range(0, len(sites), PENDING_CALLS):
+                pending.extend(
+                    (row, cid, ref_pos0, strand, p_m, p_h, max(0, 255 - p_m - p_h), channels)
+                    for ref_pos0, strand, p_m, p_h, channels in sites[start : start + PENDING_CALLS]
+                )
+                if len(pending) >= PENDING_CALLS:
+                    drain()
+        drain()
         flush()
     np.asarray(invalid_rows, dtype="<u4").tofile(out / "invalid_rows.bin")
     meta = {
