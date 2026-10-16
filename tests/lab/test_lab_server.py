@@ -10,12 +10,14 @@ import json
 import os
 import signal
 import shutil
+import socket
 import sys
 import subprocess
 import tempfile
 import threading
 import time
 import urllib.request
+import urllib.parse
 from collections import deque
 from pathlib import Path
 
@@ -528,9 +530,22 @@ def _chart_dom_cdp(argv: list[str], profile: Path, *, timeout: float = 90) -> st
                 time.sleep(0.1)
             if not target_url:
                 raise AssertionError("Chrome did not expose its Lab page through DevTools")
-            connection = websocket.create_connection(
-                target_url, timeout=min(5, max(0.1, deadline - time.monotonic())), suppress_origin=True,
-            )
+            target = urllib.parse.urlsplit(target_url)
+            if target.scheme != "ws" or target.hostname != "127.0.0.1" or target.port != int(port):
+                raise AssertionError("Chrome DevTools target is not on the expected loopback port")
+            connect_timeout = min(5, max(0.1, deadline - time.monotonic()))
+            # websocket-client 1.9.2 ignores http_no_proxy unless a proxy host
+            # option is also supplied. An already-connected local socket avoids
+            # proxy environment variables without broadening Chrome's origins.
+            direct_socket = socket.create_connection(("127.0.0.1", target.port), timeout=connect_timeout)
+            try:
+                connection = websocket.create_connection(
+                    target_url, timeout=connect_timeout, suppress_origin=True,
+                    http_no_proxy=["127.0.0.1", "localhost"], socket=direct_socket,
+                )
+            except Exception:
+                direct_socket.close()
+                raise
             command_id = 0
 
             def command(method: str, params: dict | None = None, *, until: float | None = None):
