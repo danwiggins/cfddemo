@@ -600,6 +600,32 @@ def _duration(seconds: float) -> str:
     return f"{hours}h {minutes:02d}m"
 
 
+def _skip_remedy(algorithm_id: str, reason: str, root: Path) -> dict[str, str] | None:
+    """Give each missing dependency its own recovery action, including Lab assets."""
+
+    if reason == "missing_toolchain":
+        tool = {"copy-number": "ichor", "cell-origin": "modkit"}.get(algorithm_id)
+        if tool is not None:
+            return {"asset": tool, "command": f"traceback toolchain install {tool}"}
+    if reason == "missing_asset":
+        if algorithm_id == "copy-number":
+            return {
+                "asset": "ichorCNA toolchain assets",
+                "command": f"traceback method-asset register --from-toolchain copy-number --root {root}",
+            }
+        if algorithm_id == "cell-origin":
+            return {
+                "asset": "Loyfer atlas",
+                "command": f"traceback method-asset register --from-dir LOYFER_DIR --root {root}",
+            }
+        if algorithm_id == "pmd-score":
+            return {
+                "asset": "Zhou 2018 hg38 commonPMD BED",
+                "command": f"traceback lab asset add pmd --file PMD_coordinates_hg38.bed.gz --source-label Zhou-2018-operator-supplied --terms unknown --root {root}",
+            }
+    return None
+
+
 def _summary(
     store: LabStore,
     run_id: str,
@@ -625,6 +651,18 @@ def _summary(
     next_argv = [["traceback", "lab", "serve", "--open"]]
     if failed:
         next_argv.insert(0, ["traceback", "lab", "runs", run_id, "--step", failed[0].algorithm_id])
+    remedies: list[dict[str, str]] = []
+    seen_remedies: set[tuple[str, str]] = set()
+    for result in results:
+        if result.status != "skipped" or result.skip_reason is None:
+            continue
+        key = (result.algorithm_id, result.skip_reason)
+        if key in seen_remedies:
+            continue
+        seen_remedies.add(key)
+        remedy = _skip_remedy(*key, store.root)
+        if remedy is not None:
+            remedies.append({"algorithm_id": key[0], "reason": key[1], **remedy})
     data: dict[str, Any] = {
         "root": str(store.root),
         "run_id": run_id,
@@ -636,6 +674,7 @@ def _summary(
         "controls": controls,
         "excluded_chunks": aligned.manifest.get("excluded_chunks", []),
         "warnings": warnings,
+        "remediations": remedies,
         "next": next_argv,
     }
     skipped_text = ", ".join(
@@ -683,18 +722,11 @@ def _summary(
     for result in failed:
         lines.append(f"FAILED  {result.algorithm_id}: {result.first_line}")
         lines.append(f"        details: traceback lab runs {run_id} --step {result.algorithm_id}")
-    remedied: set[tuple[str, str]] = set()
-    for result in results:
-        if result.status == "skipped" and result.skip_reason in {"missing_toolchain", "missing_asset"}:
-            if (result.algorithm_id, result.skip_reason) in remedied:
-                continue
-            remedied.add((result.algorithm_id, result.skip_reason))
-            remedy = (
-                "traceback toolchain install ichor"
-                if result.skip_reason == "missing_toolchain"
-                else f"traceback method-asset register --from-toolchain copy-number --root {store.root}"
-            )
-            lines.append(f"SKIP    {result.algorithm_id} skipped ({result.skip_reason}): {remedy}")
+    for remedy in remedies:
+        lines.append(
+            f"SKIP    {remedy['algorithm_id']} skipped ({remedy['reason']}): "
+            f"{remedy['asset']}: {remedy['command']}"
+        )
     for argv in next_argv:
         lines.append(f"NEXT    {' '.join(argv)}")
     summary = f"run {run_id}: {ok} ok, {sum(skipped.values())} skipped, {len(failed)} failed"
