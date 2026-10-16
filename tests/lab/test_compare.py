@@ -234,6 +234,22 @@ def test_compare_and_joint_panel_render_in_native_tables(tmp_path, monkeypatch) 
             ], ok=lambda page: 'data-ready="1"' in page and want in page, timeout=90)
 
         compare = dom("compare", "compare-profile", "Comparison against healthy:7")
+        problem = {
+            "code": "TBX-LAB-022", "summary": "Cohort generation unavailable",
+            "cause": "selected generation cannot be verified",
+            "fix": "Inspect the cohort manifest, then rebuild the generation",
+            "docs": "docs/LAB-GUIDE.md#tbx-lab-022",
+        }
+        monkeypatch.setattr(web_api.LabApi, "cohorts", lambda self: {"cohorts": [{
+            "cohort_id": "healthy", "cohort_version": "healthy:7", "kind": "internal_cohort",
+            "member_n": 11, "pon_n": 0,
+        }], "unavailable": [{"cohort_id": "broken", "problem": problem}]})
+        with_broken = dom("compare", "broken-profile", "Unavailable cohorts")
+        monkeypatch.setattr(web_api.LabApi, "compare", lambda self, value, cohort: {
+            "found": True, "state": "target_unavailable", "cohort_id": "healthy",
+            "metrics": [], "problem": problem,
+        })
+        target_unavailable = dom("compare", "unavailable-profile", "This sample: Cohort generation unavailable")
         signals = dom("signals", "signals-profile", "Molecules by aligned size and 5mC fraction")
         motif_algorithm = {
             **algorithm, "algorithm_id": "breakpoint-motifs",
@@ -256,9 +272,18 @@ def test_compare_and_joint_panel_render_in_native_tables(tmp_path, monkeypatch) 
     assert "No reference yet (cohort n = 9 of 10)" in compare
     assert "missing metric: 1" in compare and "minimap2 2.28; samtools 1.20: 9" in compare
     assert "Eligible values (9)" in compare and "Original library reference" in compare
+    assert 'aria-label="Comparison metrics"' in compare and 'aria-label="Generation aligner counts"' in compare
+    assert compare.count('tabindex="0" role="region"') >= 2
     assert "Published mean: 167 bp" in compare and "Original evidence tier:" in compare
     assert "https://doi.org/10.1234%2Fsynthetic" in compare
     assert 'data-csp-violations="0"' in compare
+    assert "Comparison against healthy:7" in with_broken
+    assert 'value="healthy"' in with_broken and 'value="broken"' not in with_broken
+    assert "Cohort broken: Cohort generation unavailable" in with_broken
+    assert "Next action: " in with_broken and "docs/LAB-GUIDE.md#tbx-lab-022" in with_broken
+    assert "This sample: Cohort generation unavailable" in target_unavailable
+    assert "Comparison against healthy:7" not in target_unavailable
+    assert 'data-csp-violations="0"' in with_broken and 'data-csp-violations="0"' in target_unavailable
     assert "1001+ bp" in signals and "75–100% (inclusive)" in signals
     assert "Short group n = 0, mean = —" in signals
     assert "A missing mean is not zero" in signals
