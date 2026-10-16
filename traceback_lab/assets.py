@@ -374,13 +374,25 @@ def add_asset(
         target = staging / PMD_FILENAME
         copied = hashlib.sha256()
         try:
-            with os.fdopen(_open_regular(source), "rb") as reader, target.open("xb") as writer:
+            with os.fdopen(_open_regular(source), "rb") as reader:
                 before = os.fstat(reader.fileno())
                 if not stat.S_ISREG(before.st_mode):
                     raise AssetError("asset source must be a regular file")
-                while block := reader.read(_BLOCK):
-                    writer.write(block)
-                    copied.update(block)
+                try:
+                    with target.open("xb") as writer:
+                        while True:
+                            try:
+                                block = reader.read(_BLOCK)
+                            except OSError as exc:
+                                raise AssetError("source PMD file changed while being copied") from exc
+                            if not block:
+                                break
+                            writer.write(block)
+                            copied.update(block)
+                except OSError as exc:
+                    raise AssetError(
+                        "could not write staged PMD asset; check free space and storage health, then retry"
+                    ) from exc
                 after = os.fstat(reader.fileno())
             current = os.lstat(source)
         except OSError as exc:

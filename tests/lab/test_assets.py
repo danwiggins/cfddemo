@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import hashlib
+import errno
 from pathlib import Path
 
 import pytest
@@ -450,3 +451,39 @@ def test_file_in_place_of_asset_directory_is_reported_without_replacement(
     with pytest.raises(assets.AssetError, match="directory is not a directory"):
         _add(store, source)
     assert directory.read_bytes() == b"operator data"
+
+
+@pytest.mark.parametrize("phase", ["open", "write"])
+def test_destination_write_failure_names_storage_and_publishes_nothing(
+    pinned: tuple[LabStore, Path, bytes], monkeypatch: pytest.MonkeyPatch, phase: str,
+) -> None:
+    store, source, data = pinned
+    real_open = Path.open
+
+    class FailedWriter:
+        def __init__(self, writer: object) -> None:
+            self.writer = writer
+
+        def __enter__(self) -> FailedWriter:
+            return self
+
+        def __exit__(self, *args: object) -> None:
+            self.writer.close()
+
+        def write(self, block: bytes) -> None:
+            raise OSError(errno.EIO, "I/O error")
+
+    def no_space(path: Path, mode: str = "r", *args: object, **kwargs: object):
+        if path.name == assets.PMD_FILENAME and path.parent.name.startswith(".staging-") and mode == "xb":
+            if phase == "open":
+                raise OSError(errno.ENOSPC, "No space left on device")
+            return FailedWriter(real_open(path, mode, *args, **kwargs))
+        return real_open(path, mode, *args, **kwargs)
+
+    monkeypatch.setattr(Path, "open", no_space)
+    with pytest.raises(assets.AssetError, match="could not write staged PMD asset; check free space"):
+        _add(store, source)
+    parent = store.lab / "assets"
+    assert not (parent / "pmd").exists()
+    assert not list(parent.glob(".staging-*"))
+    assert source.read_bytes() == data
