@@ -89,14 +89,64 @@ def add_sample(store: LabStore, cohort_id: str, sample_ref: str) -> bool:
         return True
 
 
+def _invalid_input(input_id: str, field: str) -> LabProblem:
+    return LabProblem(
+        "TBX-LAB-020",
+        cause=f"stored full input {input_id[:12]} has invalid {field}",
+        fix="Rerun input ingest or restore the intact Lab input manifest before cohort build",
+        data={"input_id": input_id, "field": field},
+    )
+
+
+def _validate_full_manifest(manifest: Any, input_id: str, source_id: str) -> dict[str, Any]:
+    """Refuse corrupt identity metadata before result eligibility is considered."""
+
+    if not isinstance(manifest, dict):
+        raise _invalid_input(input_id, "manifest")
+    if manifest.get("input_id") != input_id or manifest.get("source_id") != source_id:
+        raise _invalid_input(input_id, "input/source identity")
+    if manifest.get("kind") not in ("aligned", "prealigned"):
+        raise _invalid_input(input_id, "input kind")
+    reference = manifest.get("reference_sha256")
+    if not isinstance(reference, str) or not SHA256_PATTERN.fullmatch(reference):
+        raise _invalid_input(input_id, "reference_sha256")
+    if manifest["kind"] == "aligned":
+        tools = manifest.get("tools")
+        if not isinstance(tools, dict) or any(
+            not isinstance(tools.get(name), str) or not tools[name]
+            for name in ("samtools", "minimap2")
+        ):
+            raise _invalid_input(input_id, "aligner tools")
+        mmi = manifest.get("mmi_sha256")
+        if not isinstance(mmi, str) or not SHA256_PATTERN.fullmatch(mmi):
+            raise _invalid_input(input_id, "mmi_sha256")
+        argv = manifest.get("aligner_argv")
+        if not isinstance(argv, list) or not argv or any(
+            not isinstance(part, str) or not part for part in argv
+        ):
+            raise _invalid_input(input_id, "aligner_argv")
+    return manifest
+
+
 def _full_input(store: LabStore, record: dict[str, Any]) -> tuple[str, dict[str, Any]] | None:
-    for item in reversed(record.get("inputs", [])):
+    source_id = record.get("source_id")
+    if not isinstance(source_id, str) or not SHA256_PATTERN.fullmatch(source_id):
+        raise _invalid_input("unknown", "source_id")
+    inputs = record.get("inputs", [])
+    if not isinstance(inputs, list):
+        raise _invalid_input("unknown", "source inputs")
+    for item in reversed(inputs):
+        if not isinstance(item, dict):
+            raise _invalid_input("unknown", "source input entry")
         input_id = item.get("input_id")
         if not isinstance(input_id, str) or not SHA256_PATTERN.fullmatch(input_id):
-            continue
-        manifest = input_manifest(store, input_id)
-        if manifest is not None and manifest.get("kind") in ("aligned", "prealigned") and manifest.get("source_id") == record.get("source_id"):
-            return input_id, manifest
+            raise _invalid_input("unknown", "input_id")
+        if item.get("kind") not in ("aligned", "prealigned"):
+            raise _invalid_input(input_id, "source input kind")
+        manifest = _validate_full_manifest(input_manifest(store, input_id), input_id, source_id)
+        if manifest["kind"] != item["kind"]:
+            raise _invalid_input(input_id, "source/manifest kind")
+        return input_id, manifest
     return None
 
 
@@ -107,11 +157,11 @@ def _aligner(manifest: dict[str, Any], input_id: str) -> tuple[str, dict[str, An
             f"pre-aligned; provenance unknown ({input_id[:12]})",
             {"kind": "pre-aligned", "input_id": input_id},
         )
-    tools = manifest.get("tools") or {}
-    label = f"minimap2 {tools.get('minimap2', '?')}; samtools {tools.get('samtools', '?')}"
+    tools = manifest["tools"]
+    label = f"minimap2 {tools['minimap2']}; samtools {tools['samtools']}"
     return label, {
-        "kind": "aligned", "tools": tools, "mmi_sha256": manifest.get("mmi_sha256"),
-        "aligner_argv": manifest.get("aligner_argv"),
+        "kind": "aligned", "tools": tools, "mmi_sha256": manifest["mmi_sha256"],
+        "aligner_argv": manifest["aligner_argv"],
     }
 
 

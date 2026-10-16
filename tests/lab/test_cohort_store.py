@@ -240,3 +240,23 @@ def test_unknown_prealigned_provenance_never_pools_distinct_inputs(store: LabSto
     _, payload = _build(SimpleNamespace(cohort="healthy", kind="internal_cohort"), store)
     assert "each input is isolated" in payload["data"]["comparability_note"]
     assert any("provenance is unknown" in line for line in payload["_human"]["lines"])
+
+
+@pytest.mark.parametrize("field,bad", [("reference_sha256", None), ("tools", [])])
+def test_corrupt_selected_input_manifest_preserves_current(
+    store: LabStore, field: str, bad: object,
+) -> None:
+    source_id = _sample(store, 1)
+    add_sample(store, "healthy", source_id)
+    old = build_cohort(store, "healthy")
+    before = store.generation()
+    manifest_path = store.inputs_dir / _sha(101) / "manifest.json"
+    manifest = json.loads(manifest_path.read_text())
+    manifest[field] = bad
+    manifest_path.write_text(json.dumps(manifest))
+    with pytest.raises(LabProblem, match="TBX-LAB-020") as error:
+        build_cohort(store, "healthy")
+    assert error.value.data["field"] == ("aligner tools" if field == "tools" else field)
+    assert read_current(store, "healthy") == old
+    assert store.generation() == before
+    assert not (store.lab / "cohorts" / "healthy" / "generations" / "2").exists()
