@@ -209,10 +209,41 @@ script or style, no outside requests.
   then severity); not-interpretable, no-reference and in-range metrics are
   counted, collapsible rows. Before the kit cohort exists (n < 10) most
   metrics read "no reference".
+- **Compare**: choose a published Lab cohort generation and read finite scalar
+  metrics against compatible, status-ok members. This is an exploratory
+  selected-cohort distribution, not a healthy or clinical reference. The
+  original library reference remains visible and unchanged. The page names the immutable version,
+  target aligner, eligible and excluded counts and aligners. If the target is a
+  member, its own sample is excluded before deciding whether n is sufficient.
+  At n < 10 there is no reference; n = 10–29 shows an exploratory min–max
+  without percentile or confidence-interval claims; n ≥ 30 enables the
+  interpretation library's percentile and interval. A provisional external
+  generation is labelled as such. Missing or failed metrics are never zero.
+  The synthetic EXAMPLE cannot be scored against a real kit cohort.
 - **Trust/QC**: depth against each algorithm's minimum, the run table with
   scrubbed stderr for failures, provisional QC bands, library health.
 - **Stability**: one small multiple per metric: deviation from full depth at
   each fraction, the stability band, and split halves A/B at 50%.
+
+## Building a Lab cohort
+
+Use the same `--root R` as the source runs. The sample ID12 is printed by
+`lab run` and listed on the Lab landing page. Only stored, full-input,
+non-EXAMPLE samples can be added. A repeat add of the same source is
+idempotent; rerunning an analysis does not create a new member.
+
+```bash
+traceback lab cohort add ID12 --cohort healthy --root R
+traceback lab cohort build --cohort healthy --root R
+traceback lab serve --root R --open
+```
+
+`build` publishes an immutable generation and changes the current pointer
+atomically. Open **Compare** and choose that cohort; the page names the exact
+generation used for the whole response. Build again after a member or its
+results change. Different aligners or incompatible algorithm parameters are
+excluded per metric, with counts shown. The separate PoN denominator does
+not become a percentile denominator.
 
 ## Positive controls
 
@@ -337,6 +368,12 @@ A warning (exit 0): the samtools or minimap2 version changed since this sample w
 
 Unexpected internal error (exit 7). Run `traceback lab runs RUN_ID`, then
 report the code and the command.
+
+### TBX-LAB-021
+
+An EXAMPLE synthetic sample was offered to `lab cohort add` (exit 3). Add
+a stored real kit sample instead. EXAMPLE results remain labelled synthetic
+and are not scored against a real cohort in Compare.
 
 ## Adding an algorithm
 

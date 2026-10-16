@@ -54,12 +54,15 @@ SECURITY_HEADERS = {
 _COOKIE_NAME = re.compile(r"^[!#$%&'*+\-.^_`|~0-9A-Za-z]+$")
 _COOKIE_VALUE = re.compile(r"^[A-Za-z0-9_-]{0,256}$")
 ID12 = r"[0-9a-f]{12,64}"
+COHORT = r"[a-z][a-z0-9-]{0,39}"
 ALG = r"[a-z0-9-]{1,40}"
 PANEL = r"[a-z0-9-]{1,64}"
 DERIVED = r"(?:full|[0-9.e-]{1,20}|split-[AB]|cna-[0-9.e-]{1,20})"
 _ROUTES = (
     ("status", re.compile(r"^/api/status$")),
     ("samples", re.compile(r"^/api/samples$")),
+    ("cohorts", re.compile(r"^/api/cohorts$")),
+    ("compare", re.compile(rf"^/api/cohorts/({COHORT})/samples/({ID12})/compare$")),
     ("sample", re.compile(rf"^/api/samples/({ID12})$")),
     ("artifact", re.compile(rf"^/api/samples/({ID12})/artifact/({DERIVED})/({ALG})/({PANEL})$")),
 )
@@ -199,6 +202,11 @@ class _Handler(BaseHTTPRequestHandler):
                     self._json(200, self.app.api.status())
                 elif name == "samples":
                     self._json(200, self.app.api.samples())
+                elif name == "cohorts":
+                    self._json(200, self.app.api.cohorts())
+                elif name == "compare":
+                    payload = self.app.api.compare(match.group(2), match.group(1))
+                    self._json(200 if payload.get("found") else 404, payload)
                 elif name == "sample":
                     payload = self.app.api.sample(match.group(1))
                     self._json(200 if payload.get("found") else 404, payload)
