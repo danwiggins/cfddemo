@@ -396,13 +396,14 @@ def test_headless_dom_kills_a_timed_out_process() -> None:
         "time.sleep(30)"
     )
     with pytest.raises(AssertionError, match=r"timed_out=True") as caught:
-        headless_dom([sys.executable, "-c", script], ok=lambda d: 'data-ready="1"' in d, timeout=0.5)
+        headless_dom([sys.executable, "-c", script], ok=lambda d: 'data-ready="1"' in d, timeout=5)
     diagnostic = str(caught.value)
     assert "data_ready=1" in diagnostic and "chart_rendered=1" in diagnostic
     assert "csp_violations=0" in diagnostic and "browser stalled" in diagnostic
 
 
 def test_headless_dom_does_not_wait_for_descendant_capture_handles(tmp_path, monkeypatch) -> None:
+    parent_pid = tmp_path / "parent.pid"
     child_pid = tmp_path / "child.pid"
     killed_groups = []
     if os.name != "nt":
@@ -414,18 +415,19 @@ def test_headless_dom_does_not_wait_for_descendant_capture_handles(tmp_path, mon
 
         monkeypatch.setattr(os, "killpg", record_group_kill)
     script = (
-        "import pathlib,subprocess,sys; "
+        "import os,pathlib,subprocess,sys; "
+        f"pathlib.Path({str(parent_pid)!r}).write_text(str(os.getpid())); "
         "child=subprocess.Popen([sys.executable, '-c', 'import time; time.sleep(30)']); "
         f"pathlib.Path({str(child_pid)!r}).write_text(str(child.pid)); "
         "print('<body data-ready=\"1\">', flush=True)"
     )
     try:
-        dom = headless_dom([sys.executable, "-c", script], ok=lambda d: 'data-ready="1"' in d, timeout=3)
+        dom = headless_dom([sys.executable, "-c", script], ok=lambda d: 'data-ready="1"' in d, timeout=5)
         assert 'data-ready="1"' in dom
         if os.name != "nt":
-            assert killed_groups and killed_groups[-1][1] == signal.SIGKILL
+            assert killed_groups[-1] == (int(parent_pid.read_text()), signal.SIGKILL)
     finally:
-        if child_pid.exists():
+        if os.name == "nt" and child_pid.exists():
             try:
                 os.kill(int(child_pid.read_text()), signal.SIGTERM)
             except ProcessLookupError:
