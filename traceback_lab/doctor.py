@@ -26,6 +26,7 @@ from traceback_runner.cli import (
 )
 
 from . import STORE_VERSION
+from .assets import AssetError, inspect_asset
 from .ingest import BUDGET_FACTOR, GIB, MARGIN_BYTES, MMI_FACTOR, mmi_path, resolve_reference
 from .problems import EXIT_BLOCKED, EXIT_OK, LabProblem
 from .store import LabStore
@@ -67,6 +68,27 @@ def _writable(path: Path) -> bool:
     while not candidate.exists() and candidate != candidate.parent:
         candidate = candidate.parent
     return candidate.is_dir() and os.access(candidate, os.W_OK | os.X_OK)
+
+
+def _pmd_asset_check(store: LabStore) -> dict[str, Any]:
+    """Verify the operator-supplied PMD bytes used by ``pmd-score``."""
+
+    try:
+        asset = inspect_asset(store)
+    except AssetError as exc:
+        directory = store.lab / "assets" / "pmd"
+        if not directory.exists() and not directory.is_symlink():
+            fix = (
+                "traceback lab asset add pmd --file YOUR_LOCAL_PMD_coordinates_hg38.bed.gz "
+                "--source-label Zhou-2018-operator-supplied --terms unknown --root <ROOT>"
+            )
+        else:
+            fix = (
+                "Restore the original pinned PMD bytes from the approved local source, "
+                "then run traceback lab asset inspect pmd --root <ROOT>"
+            )
+        return _check("pmd_asset", "warn", f"PMD asset unavailable or invalid: {exc} (pmd-score will skip)", fix)
+    return _check("pmd_asset", "pass", f"PMD asset verified ({asset.sha256[:12]})")
 
 
 def lab_checks(store: LabStore) -> list[dict[str, Any]]:
@@ -147,6 +169,7 @@ def lab_checks(store: LabStore) -> list[dict[str, Any]]:
         checks.append(_check("loyfer_assets", "pass", "Loyfer atlas assets registered"))
     else:
         checks.append(_check("loyfer_assets", "warn", "Loyfer atlas assets not registered (cell-origin will skip; Phase 0b)", "traceback method-asset register --from-dir LOYFER_DIR --root <ROOT>"))
+    checks.append(_pmd_asset_check(store))
     active = store.read_active()
     if active is not None and not active.active:
         checks.append(_check("active", "warn", f"stale heartbeat from {active.run_id} (pid {active.pid} gone); the run was interrupted", "rerun the same lab command; only missing results recompute"))

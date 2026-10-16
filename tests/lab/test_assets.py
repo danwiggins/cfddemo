@@ -10,6 +10,7 @@ import pytest
 
 from traceback_lab import assets
 from traceback_lab.algorithms.pmd_score import PMD_SCORE
+from traceback_lab.doctor import _pmd_asset_check, lab_checks
 from traceback_lab.registry import execution_identity
 from traceback_lab.store import LabStore
 
@@ -63,6 +64,31 @@ def test_absent_wrong_valid_and_tampered_asset(pinned: tuple[LabStore, Path, byt
     with pytest.raises(assets.AssetError, match="differs"):
         _add(store, source)
     assert record.file.read_bytes() == b"tampered"
+
+
+def test_doctor_reports_missing_valid_and_altered_pmd_asset(
+    pinned: tuple[LabStore, Path, bytes],
+) -> None:
+    store, source, _ = pinned
+    missing = _pmd_asset_check(store)
+    assert missing["status"] == "warn"
+    assert "pmd-score will skip" in missing["detail"]
+    assert "traceback lab asset add pmd --file" in missing["fix"]
+    assert "--terms unknown --root <ROOT>" in missing["fix"]
+    assert [check for check in lab_checks(store) if check["name"] == "pmd_asset"] == [missing]
+
+    record = _add(store, source)
+    ready = _pmd_asset_check(store)
+    assert ready["status"] == "pass"
+    assert record.sha256[:12] in ready["detail"]
+    assert "fix" not in ready
+
+    record.file.write_bytes(b"tampered")
+    altered = _pmd_asset_check(store)
+    assert altered["status"] == "warn"
+    assert "differs from the pinned SHA-256" in altered["detail"]
+    assert "Restore the original pinned PMD bytes" in altered["fix"]
+    assert "traceback lab asset inspect pmd --root <ROOT>" in altered["fix"]
 
 
 def test_exact_legacy_file_gains_manifest_without_byte_replacement(
