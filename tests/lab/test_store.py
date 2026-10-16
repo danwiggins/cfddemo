@@ -11,6 +11,7 @@ import threading
 import time
 from pathlib import Path
 
+import numpy as np
 import pytest
 
 from traceback_lab import STORE_VERSION
@@ -120,6 +121,38 @@ def test_interrupted_publish_leaves_old_selection_and_no_staging(tmp_path: Path,
     assert store.generation() == 1
 
 
+def test_failed_retry_selects_failure_but_retains_prior_success(tmp_path: Path) -> None:
+    store = LabStore(tmp_path)
+    store.ensure()
+    success = store.publish_result(_envelope(1), input_id=C, artifacts={"h/x.json": b"ok"})
+    failures = [store.publish_result(_failed(n), input_id=C) for n in range(5)]
+
+    selected = store.selected_attempt(C, "fragment-size", A)
+    assert selected is not None and selected.name == failures[-1]
+    assert store.read_result(C, "fragment-size", A).status == "failed"
+    attempts = store.result_dir(C, "fragment-size", A) / "attempts"
+    assert (attempts / success / "artifacts" / "h" / "x.json").read_bytes() == b"ok"
+    assert sorted(path.name for path in attempts.iterdir()) == sorted([success, *failures[-3:]])
+
+
+def test_selection_write_failure_keeps_prior_success(tmp_path: Path, monkeypatch) -> None:
+    store = LabStore(tmp_path)
+    store.ensure()
+    first = store.publish_result(_envelope(1), input_id=C)
+    real_write = store_module.write_atomic
+
+    def fail_selection(path: Path, content: bytes) -> None:
+        if path.name == "selected.json":
+            raise OSError(5, "simulated selection write failure")
+        real_write(path, content)
+
+    monkeypatch.setattr(store_module, "write_atomic", fail_selection)
+    with pytest.raises(OSError, match="selection write failure"):
+        store.publish_result(_envelope(2), input_id=C)
+    assert store.selected_attempt(C, "fragment-size", A).name == first
+    assert store.read_result(C, "fragment-size", A).metrics[0].value == 1
+    assert store.generation() == 1
+
 def test_publish_directory_refuses_existing_destination(tmp_path: Path) -> None:
     store = LabStore(tmp_path)
     store.ensure()
@@ -153,6 +186,135 @@ def test_selected_json_with_a_bad_attempt_id_reads_as_missing(tmp_path: Path) ->
     (store.result_dir(C, "fragment-size", A) / "selected.json").write_text('{"attempt_id":"../../x"}')
     assert store.read_result(C, "fragment-size", A) is None
 
+
+@pytest.mark.parametrize(
+    ("field", "value"),
+    [
+        ("algorithm_id", "copy-number"),
+        ("parameters_sha256", B),
+        ("input_id", B),
+    ],
+)
+def test_selected_result_with_wrong_identity_is_unavailable(
+    tmp_path: Path, field: str, value: str,
+) -> None:
+    store = LabStore(tmp_path)
+    store.ensure()
+    store.publish_result(_envelope(1), input_id=C)
+    attempt = store.selected_attempt(C, "fragment-size", A)
+    assert attempt is not None
+    data = json.loads((attempt / "result.json").read_bytes())
+    if field in ("parameters_sha256", "input_id"):
+        data["provenance"][field] = value
+    else:
+        data[field] = value
+    (attempt / "result.json").write_text(json.dumps(data))
+    assert store.selected_attempt(C, "fragment-size", A) is None
+    assert store.read_result(C, "fragment-size", A) is None
+
+
+def test_malformed_selected_result_is_unavailable(tmp_path: Path) -> None:
+    store = LabStore(tmp_path)
+    store.ensure()
+    store.publish_result(_envelope(1), input_id=C)
+    attempt = store.selected_attempt(C, "fragment-size", A)
+    assert attempt is not None
+    (attempt / "result.json").write_bytes(b"{broken")
+    assert store.selected_attempt(C, "fragment-size", A) is None
+    assert store.read_result(C, "fragment-size", A) is None
+
+
+def test_incomplete_new_panel_attempt_does_not_replace_success(tmp_path: Path) -> None:
+    store = LabStore(tmp_path)
+    store.ensure()
+    first = store.publish_result(_envelope(1), input_id=C)
+    data = json.loads(_envelope(2).to_bytes())
+    data["panels"] = [{"panel_id": "histogram", "kind": "chart", "data_ref": "artifacts/h/x.json"}]
+    with pytest.raises(ValueError, match="panel data_ref"):
+        store.publish_result(ResultEnvelope.model_validate(data), input_id=C)
+    assert store.selected_attempt(C, "fragment-size", A).name == first
+    assert store.read_result(C, "fragment-size", A).metrics[0].value == 1
+    assert store.orphaned_staging() == []
+
+def test_missing_selected_panel_artifact_is_unavailable(tmp_path: Path) -> None:
+    store = LabStore(tmp_path)
+    store.ensure()
+    data = json.loads(_envelope(1).to_bytes())
+    data["panels"] = [{"panel_id": "histogram", "kind": "chart", "data_ref": "artifacts/h/x.json"}]
+    envelope = ResultEnvelope.model_validate(data)
+    store.publish_result(envelope, input_id=C, artifacts={"h/x.json": b"{}"})
+    attempt = store.selected_attempt(C, "fragment-size", A)
+    assert attempt is not None
+    (attempt / "artifacts" / "h" / "x.json").unlink()
+    assert store.selected_attempt(C, "fragment-size", A) is None
+    assert store.read_result(C, "fragment-size", A) is None
+
+@pytest.mark.parametrize("damage", ["missing", "truncated"])
+def test_incomplete_upstream_artifact_is_not_reused(tmp_path: Path, damage: str) -> None:
+    store = LabStore(tmp_path)
+    store.ensure()
+    store.publish_result(
+        _envelope(1), input_id=C,
+        artifacts={"columns/meta.json": b"meta", "columns/flag.bin": b"1234"},
+    )
+    attempt = store.selected_attempt(C, "fragment-size", A)
+    assert attempt is not None
+    artifact = attempt / "artifacts" / "columns" / "flag.bin"
+    if damage == "missing":
+        artifact.unlink()
+    else:
+        artifact.write_bytes(b"12")
+    assert store.read_result(C, "fragment-size", A) is None
+    assert store.selected_artifacts(C, "fragment-size", A) is None
+
+def test_pre_index_scalar_result_remains_readable(tmp_path: Path) -> None:
+    store = LabStore(tmp_path)
+    store.ensure()
+    store.publish_result(_envelope(1), input_id=C)
+    attempt = store.selected_attempt(C, "fragment-size", A)
+    assert attempt is not None
+    (attempt / "artifacts.json").unlink()
+    assert store.read_result(C, "fragment-size", A).metrics[0].value == 1
+
+
+@pytest.mark.parametrize("algorithm_id", ["read-summary", "meth-calls"])
+def test_pre_index_intermediate_requires_complete_layout(
+    tmp_path: Path, algorithm_id: str,
+) -> None:
+    from traceback_lab import meth_calls, read_summary
+
+    store = LabStore(tmp_path)
+    store.ensure()
+    data = json.loads(_envelope(1).to_bytes())
+    data["algorithm_id"] = algorithm_id
+    envelope = ResultEnvelope.model_validate(data)
+    if algorithm_id == "read-summary":
+        meta = {"schema": read_summary.SCHEMA, "rows": 1, "columns": read_summary.COLUMNS}
+        artifacts = {
+            **{
+                f"columns/{name}.bin": bytes(np.dtype(dtype).itemsize)
+                for name, dtype in read_summary.COLUMNS.items()
+            },
+            "columns/meta.json": json.dumps(meta).encode(),
+        }
+        damaged = "columns/flag.bin"
+    else:
+        meta = {
+            "schema": meth_calls.SCHEMA, "dtype": [list(field) for field in meth_calls.DTYPE.descr], "chunks": [1], "invalid_mm": 1,
+        }
+        artifacts = {
+            "calls/meta.json": json.dumps(meta).encode(),
+            "calls/calls-00000.bin": bytes(meth_calls.DTYPE.itemsize),
+            "calls/invalid_rows.bin": bytes(4),
+        }
+        damaged = "calls/calls-00000.bin"
+    store.publish_result(envelope, input_id=C, artifacts=artifacts)
+    attempt = store.selected_attempt(C, algorithm_id, A)
+    assert attempt is not None
+    (attempt / "artifacts.json").unlink()
+    assert store.read_result(C, algorithm_id, A) is not None
+    (attempt / "artifacts" / damaged).write_bytes(b"")
+    assert store.read_result(C, algorithm_id, A) is None
 
 def test_writer_lock_heartbeat_and_cleanup(tmp_path: Path) -> None:
     store = LabStore(tmp_path)

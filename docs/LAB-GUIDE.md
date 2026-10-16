@@ -128,6 +128,13 @@ sample without the chunk paths. `--force` recomputes every result.
 `--only a,b` runs just those algorithms (overriding `--profile`), plus the
 intermediates they need, labelled "(upstream)".
 
+A result is reused only when its selected attempt matches the input, algorithm,
+and execution identity. New attempts record artifact file sizes; older attempts
+remain readable, with known upstream layouts checked against their metadata.
+Missing or truncated required artifacts are recomputed. A completed failed
+forced rerun is shown as failed; the prior successful attempt remains on disk.
+Artifact sizes check completeness, not byte-level integrity.
+
 **Dry run.** `--dry-run` writes nothing and takes no lock. It prints the
 resolved ROOT and reference, chunk count and bytes, whether alignment is
 needed or reused, the disk budget against free space and the plan.
