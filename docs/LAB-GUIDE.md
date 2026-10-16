@@ -338,6 +338,12 @@ A warning (exit 0): the samtools or minimap2 version changed since this sample w
 Unexpected internal error (exit 7). Run `traceback lab runs RUN_ID`, then
 report the code and the command.
 
+### TBX-LAB-021
+
+An EXAMPLE synthetic sample was offered to `lab cohort add` (exit 3). Add
+a stored real kit sample instead. EXAMPLE results remain labelled synthetic
+and are not scored against a real cohort in Compare.
+
 ## Adding an algorithm
 
 1. Add a module under `traceback_lab/algorithms/` exposing an instance of the
