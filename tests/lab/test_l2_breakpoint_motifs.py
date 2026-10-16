@@ -208,3 +208,58 @@ def test_no_cpg_with_valid_ends_is_zero_not_null(tmp_path: Path) -> None:
     output, panel = _result(ctx, tmp_path)
     assert output.metrics[0]["value"] == 0.0 and output.metrics[0]["n"] == 2
     assert panel["near_ends"] == 0 and panel["far_ends"] == 2
+
+
+def test_large_row_summary_keeps_peak_memory_bounded(
+    tmp_path: Path, monkeypatch
+) -> None:
+    import tracemalloc
+
+    from traceback_lab.read_summary import SCHEMA as SUMMARY_SCHEMA
+    from traceback_lab.registry import InputContext
+
+    n_reads = 10_000
+    fasta = tmp_path / "large.fa"
+    fasta.write_text(">chr1\n" + "A" * 100_010 + "\n")
+    pysam.faidx(str(fasta))
+    columns = tmp_path / "summary" / "columns"
+    columns.mkdir(parents=True)
+    (columns / "meta.json").write_text(
+        json.dumps(
+            {
+                "schema": SUMMARY_SCHEMA,
+                "rows": n_reads,
+                "contigs": ["chr1"],
+                "lengths": [100_010],
+            }
+        )
+    )
+    np.zeros(n_reads, dtype="<u2").tofile(columns / "flag.bin")
+    np.zeros(n_reads, dtype="<i2").tofile(columns / "contig.bin")
+    np.full(n_reads, 60, dtype="<u1").tofile(columns / "mapq.bin")
+    starts = np.arange(n_reads, dtype="<i4") * 10
+    starts.tofile(columns / "start.bin")
+    (starts + 4).tofile(columns / "end.bin")
+    ctx = InputContext(
+        root=tmp_path,
+        source_id="0" * 64,
+        input_id="0" * 64,
+        reference_id="synth",
+        reference_sha256="0" * 64,
+        input_dir=tmp_path,
+        eligible_reads=n_reads,
+        extras={
+            "upstream": {"read-summary": str(tmp_path / "summary")},
+            "reference_fasta": str(fasta),
+        },
+    )
+    monkeypatch.setattr(module, "CHUNK_ROWS", 128)
+    monkeypatch.setattr(module, "REFERENCE_WINDOW_BP", 4096)
+    tracemalloc.start()
+    try:
+        output, panel = _result(ctx, tmp_path)
+        _, peak = tracemalloc.get_traced_memory()
+    finally:
+        tracemalloc.stop()
+    assert peak < 32 * 1024 * 1024
+    assert output.metrics[0]["n"] == 2 * n_reads and panel["near_ends"] == 0
