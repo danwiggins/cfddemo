@@ -7,7 +7,7 @@
 # original evidence (D4).  citation_checked records who confirmed that every
 # DOI resolves and every displayed number matches the source (D27); an entry
 # without it renders an "UNVERIFIED citation" badge.
-version: 0.6.0
+version: 0.6.1
 hidden_algorithms: [read-summary, meth-calls]
 entries:
   # ---------------------------------------------------------------- bam-qc
@@ -2395,6 +2395,7 @@ entries:
     reference: {kind: none}
     performance: null
     performance_missing_reason: "No validated performance for this exact ONT estimator or kit"
+    missing_value_caption: "Delta unavailable: at least one size group has no eligible molecules. Inspect short_n and long_n."
     meaning_high: "The observed long-fragment group has a higher mean per-molecule 5mC share than the short-fragment group."
     meaning_low: "The observed short-fragment group has a higher mean per-molecule 5mC share than the long-fragment group."
     confounders: ["fragment-size selection", "CpG call coverage", "basecall modification model", "sequencing depth"]
