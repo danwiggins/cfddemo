@@ -12,8 +12,8 @@ Layout (D11, D19, D22, D35)::
     ROOT/lab/inputs/index.json    hash cache (realpath, size, mtime_ns) -> digest
     ROOT/lab/inputs/<input_id>/   aligned or derived input (published as a unit)
     ROOT/lab/results/<input_id>/<algorithm_id>/<parameters_sha256>/
-        attempts/<attempt_id>/{result.json, artifacts/}
-        selected.json             {attempt_id}, switched by os.replace
+        attempts/<attempt_id>/{result.json, artifacts/, artifacts.json}
+        selected.json             {attempt_id, last_success_attempt_id?}, switched by os.replace
 
 Every multi-file write is staged in a ``.staging-<random>`` sibling and
 published with one ``rename_directory_exclusive_at`` call, so readers see the
@@ -28,6 +28,7 @@ import os
 import re
 import secrets
 import shutil
+import stat
 import threading
 import time
 from collections.abc import Callable, Iterator, Mapping
@@ -49,9 +50,13 @@ HEARTBEAT_INTERVAL_S = 10.0
 HEARTBEAT_FRESH_S = 30.0
 KEEP_FAILED_ATTEMPTS = 3
 STAGING_PREFIX = ".staging-"
+ARTIFACT_INDEX_SCHEMA = "traceback.lab.artifact-index.v1"
 _RUN_ID = r"^r-\d{8}-\d{4}-[0-9a-f]{4,8}$"
 _ATTEMPT_ID = r"^a-\d{8}T\d{12}-[0-9a-f]{8}$"
 
+
+class ResultOrderUnavailable(OSError):
+    """Attempt publication order cannot be read safely."""
 
 def _utc(epoch: float | None = None) -> str:
     moment = datetime.fromtimestamp(time.time() if epoch is None else epoch, UTC)
@@ -388,6 +393,63 @@ class LabStore:
         return sorted(found)
 
     # -- results ------------------------------------------------------------
+    @staticmethod
+    def _load_artifact_index(path: Path) -> dict[str, Any] | None:
+        index_path = path / "artifacts.json"
+        try:
+            info = os.lstat(index_path)
+        except FileNotFoundError:
+            return None
+        except OSError as exc:
+            raise ResultOrderUnavailable("Lab attempt metadata is unreadable") from exc
+        if not stat.S_ISREG(info.st_mode):
+            raise ResultOrderUnavailable("Lab attempt metadata is not a regular file")
+        try:
+            index = json.loads(index_path.read_bytes())
+        except (OSError, ValueError) as exc:
+            raise ResultOrderUnavailable("Lab attempt metadata is unreadable or invalid") from exc
+        if (
+            not isinstance(index, dict)
+            or set(index) not in ({"schema", "files"}, {"schema", "files", "ordinal"})
+            or index.get("schema") != ARTIFACT_INDEX_SCHEMA
+            or not isinstance(index.get("files"), dict)
+        ):
+            raise ResultOrderUnavailable("Lab attempt metadata has invalid fields")
+        ordinal = index.get("ordinal")
+        if "ordinal" in index and (
+            not isinstance(ordinal, int) or isinstance(ordinal, bool) or ordinal <= 0
+        ):
+            raise ResultOrderUnavailable("Lab attempt publication ordinal is invalid")
+        return index
+
+    @classmethod
+    def _attempt_order(cls, path: Path) -> int:
+        index = cls._load_artifact_index(path)
+        return 0 if index is None else int(index.get("ordinal", 0))
+
+    @classmethod
+    def _next_attempt_order(cls, attempts: Path) -> int:
+        try:
+            info = os.lstat(attempts)
+        except FileNotFoundError:
+            return 1
+        except OSError as exc:
+            raise ResultOrderUnavailable("Lab attempts are unreadable") from exc
+        if not stat.S_ISDIR(info.st_mode):
+            raise ResultOrderUnavailable("Lab attempts path is not a directory")
+        try:
+            with os.scandir(attempts) as entries:
+                orders = [
+                    cls._attempt_order(Path(entry.path))
+                    for entry in entries
+                    if not entry.name.startswith(STAGING_PREFIX) and entry.is_dir(follow_symlinks=False)
+                ]
+            return 1 + max(orders, default=0)
+        except ResultOrderUnavailable:
+            raise
+        except OSError as exc:
+            raise ResultOrderUnavailable("Lab attempt order is unreadable") from exc
+
     def publish_result(
         self,
         envelope: ResultEnvelope,
@@ -411,6 +473,7 @@ class LabStore:
             raise ValueError("a result is stored under the input it consumed (D19)")
         attempts = directory / "attempts"
         attempt = attempt_id or new_attempt_id()
+        ordinal = self._next_attempt_order(attempts)
         files = dict(artifacts or {})
         for relative in files:
             parts = Path(relative).parts
@@ -428,17 +491,51 @@ class LabStore:
                 target = staging / "artifacts" / relative
                 target.parent.mkdir(parents=True, exist_ok=True)
                 target.write_bytes(content)
+            artifact_root = staging / "artifacts"
+            inventory: dict[str, int] = {}
+            if artifact_root.exists():
+                for path in artifact_root.rglob("*"):
+                    if path.is_symlink():
+                        raise ValueError("artifacts may not contain symlinks")
+                    if path.is_file():
+                        inventory[path.relative_to(artifact_root).as_posix()] = path.stat().st_size
+            for panel in envelope.panels:
+                if (
+                    not panel.data_ref.startswith("artifacts/")
+                    or panel.data_ref.removeprefix("artifacts/") not in inventory
+                ):
+                    raise ValueError("panel data_ref was not published with its artifact")
+            (staging / "artifacts.json").write_bytes(canonical_json_bytes({
+                "schema": ARTIFACT_INDEX_SCHEMA, "files": inventory, "ordinal": ordinal,
+            }))
 
         previous = self.selected_attempt(
             input_id, envelope.algorithm_id, envelope.provenance.parameters_sha256
         )
+        last_success = attempt if envelope.status == "ok" else None
+        if last_success is None and previous is not None and self._attempt_status(previous) == "ok":
+            last_success = previous.name
+        if last_success is None:
+            try:
+                selected = json.loads((directory / "selected.json").read_bytes())
+                candidate = selected.get("last_success_attempt_id")
+                if (
+                    isinstance(candidate, str)
+                    and re.fullmatch(_ATTEMPT_ID, candidate)
+                    and self._attempt_status(attempts / candidate) == "ok"
+                ):
+                    last_success = candidate
+            except (OSError, ValueError, AttributeError):
+                pass
         self.publish_directory(attempts, attempt, build)
-        write_atomic(
-            directory / "selected.json", canonical_json_bytes({"attempt_id": attempt})
-        )
-        self._prune_attempts(
-            attempts, keep={attempt, *([previous.name] if previous is not None else [])}
-        )
+        selection = {"attempt_id": attempt}
+        if last_success is not None:
+            selection["last_success_attempt_id"] = last_success
+        write_atomic(directory / "selected.json", canonical_json_bytes(selection))
+        keep = {attempt, *([previous.name] if previous is not None else [])}
+        if last_success is not None:
+            keep.add(last_success)
+        self._prune_attempts(attempts, keep=keep)
         self.bump_generation()
         return attempt
 
@@ -450,55 +547,189 @@ class LabStore:
             return None
 
     def _prune_attempts(self, attempts: Path, *, keep: set[str]) -> None:
-        """Keep the selected attempt, the one it replaced (a reader may still
-        hold it) and the newest ``KEEP_FAILED_ATTEMPTS`` failed attempts for
-        Trust/QC (D35).  Older superseded attempts are removed."""
+        """Keep selected/replaced attempts, the last success, and the newest
+        failed attempts for Trust/QC (D35). Unknown order never triggers deletion."""
 
-        others = sorted(
-            (
-                path
-                for path in attempts.iterdir()
-                if path.is_dir()
-                and path.name not in keep
-                and not path.name.startswith(STAGING_PREFIX)
-            ),
-            key=lambda path: path.name,
-        )
-        failed = [path for path in others if self._attempt_status(path) == "failed"]
-        retained = {path.name for path in failed[-KEEP_FAILED_ATTEMPTS:]}
-        for stale in others:
+        try:
+            with os.scandir(attempts) as entries:
+                published = [
+                    Path(entry.path)
+                    for entry in entries
+                    if not entry.name.startswith(STAGING_PREFIX) and entry.is_dir(follow_symlinks=False)
+                ]
+            candidates = sorted(
+                published, key=lambda path: (self._attempt_order(path), path.name),
+            )
+            by_status = [(path, self._attempt_status(path)) for path in candidates]
+            failed = [path for path, status in by_status if status == "failed"]
+            successful = [path for path, status in by_status if status == "ok"]
+            retained = set(keep)
+            retained.update(path.name for path in failed[-KEEP_FAILED_ATTEMPTS:])
+            # Legacy attempts have no reliable ordinal; retain their successes.
+            retained.update(path.name for path in successful if self._attempt_order(path) == 0)
+            if successful and not any(path.name in retained for path in successful):
+                retained.add(successful[-1].name)
+        except OSError:
+            return
+        for stale in candidates:
             if stale.name not in retained:
                 shutil.rmtree(stale, ignore_errors=True)
 
     def selected_artifacts(
         self, input_id: str, algorithm_id: str, parameters_sha256: str
     ) -> Path | None:
-        attempt = self.selected_attempt(input_id, algorithm_id, parameters_sha256)
-        return attempt / "artifacts" if attempt is not None else None
+        selected = self._selected_result(input_id, algorithm_id, parameters_sha256)
+        if selected is None:
+            return None
+        artifacts = selected[0] / "artifacts"
+        return artifacts if artifacts.is_dir() and not artifacts.is_symlink() else None
 
     def selected_attempt(
         self, input_id: str, algorithm_id: str, parameters_sha256: str
     ) -> Path | None:
-        """The selected attempt directory, read via ``selected.json``."""
+        """Return only a complete selected attempt bound to this exact identity."""
 
-        directory = self.result_dir(input_id, algorithm_id, parameters_sha256)
+        selected = self._selected_result(input_id, algorithm_id, parameters_sha256)
+        return selected[0] if selected is not None else None
+
+    @staticmethod
+    def _artifact_matches(root: Path, relative: str, size: int) -> bool:
+        if not relative or Path(relative).is_absolute() or ".." in Path(relative).parts:
+            return False
+        path = root
+        for part in Path(relative).parts:
+            path = path / part
+            if path.is_symlink():
+                return False
         try:
-            data = json.loads((directory / "selected.json").read_bytes())
-            attempt = str(data["attempt_id"])
-        except (FileNotFoundError, ValueError, KeyError, TypeError):
+            return path.is_file() and path.stat().st_size == size
+        except OSError:
+            return False
+
+    @classmethod
+    def _legacy_artifacts_complete(cls, path: Path, algorithm_id: str) -> bool:
+        """Validate old attempts without an inventory, including both upstream layouts."""
+
+        root = path / "artifacts"
+        if root.is_symlink():
+            return False
+        if algorithm_id == "read-summary":
+            from .read_summary import COLUMNS, SCHEMA
+
+            meta_file = root / "columns" / "meta.json"
+            try:
+                if meta_file.parent.is_symlink() or meta_file.is_symlink():
+                    return False
+                meta = json.loads(meta_file.read_bytes())
+                rows = meta["rows"]
+                if (
+                    meta.get("schema") != SCHEMA
+                    or meta.get("columns") != COLUMNS
+                    or not isinstance(rows, int)
+                    or isinstance(rows, bool)
+                    or rows < 0
+                ):
+                    return False
+            except (OSError, ValueError, KeyError, TypeError):
+                return False
+            return all(
+                cls._artifact_matches(root, f"columns/{name}.bin", rows * int(dtype[2:]))
+                for name, dtype in COLUMNS.items()
+            )
+        if algorithm_id == "meth-calls":
+            from .meth_calls import CHUNK_CALLS, DTYPE, SCHEMA
+
+            meta_file = root / "calls" / "meta.json"
+            try:
+                if meta_file.parent.is_symlink() or meta_file.is_symlink():
+                    return False
+                meta = json.loads(meta_file.read_bytes())
+                chunks = meta["chunks"]
+                invalid = meta["invalid_mm"]
+                if (
+                    meta.get("schema") != SCHEMA
+                    or meta.get("dtype") != [list(field) for field in DTYPE.descr]
+                    or not isinstance(chunks, list)
+                    or not all(isinstance(n, int) and not isinstance(n, bool) and 0 < n <= CHUNK_CALLS for n in chunks)
+                    or not isinstance(invalid, int)
+                    or isinstance(invalid, bool)
+                    or invalid < 0
+                ):
+                    return False
+            except (OSError, ValueError, KeyError, TypeError):
+                return False
+            return (
+                all(
+                    cls._artifact_matches(root, f"calls/calls-{index:05d}.bin", n * DTYPE.itemsize)
+                    for index, n in enumerate(chunks)
+                )
+                and cls._artifact_matches(root, "calls/invalid_rows.bin", invalid * 4)
+            )
+        return True
+
+    def _selected_result(
+        self, input_id: str, algorithm_id: str, parameters_sha256: str
+    ) -> tuple[Path, ResultEnvelope] | None:
+        directory = self.result_dir(input_id, algorithm_id, parameters_sha256)
+        selector = directory / "selected.json"
+        try:
+            if selector.is_symlink():
+                return None
+            data = json.loads(selector.read_bytes())
+            attempt_id = str(data["attempt_id"])
+        except (OSError, ValueError, KeyError, TypeError):
             return None
-        if not re.fullmatch(_ATTEMPT_ID, attempt):
+        if not re.fullmatch(_ATTEMPT_ID, attempt_id):
             return None
-        path = directory / "attempts" / attempt
-        return path if path.is_dir() else None
+        attempts = directory / "attempts"
+        path = attempts / attempt_id
+        result_file = path / "result.json"
+        try:
+            if attempts.is_symlink() or path.is_symlink() or result_file.is_symlink():
+                return None
+            envelope = ResultEnvelope.from_bytes(result_file.read_bytes())
+        except (OSError, ValueError, TypeError):
+            return None
+        if (
+            envelope.provenance.input_id != input_id
+            or envelope.algorithm_id != algorithm_id
+            or envelope.provenance.parameters_sha256 != parameters_sha256
+        ):
+            return None
+        artifact_root = path / "artifacts"
+        try:
+            index = self._load_artifact_index(path)
+        except ResultOrderUnavailable:
+            return None
+        if index is not None:
+            if artifact_root.is_symlink():
+                return None
+            for relative, size in index["files"].items():
+                if (
+                    not isinstance(relative, str)
+                    or not isinstance(size, int)
+                    or isinstance(size, bool)
+                    or size < 0
+                    or not self._artifact_matches(artifact_root, relative, size)
+                ):
+                    return None
+        elif envelope.status == "ok" and not self._legacy_artifacts_complete(path, algorithm_id):
+            return None
+        for panel in envelope.panels:
+            artifact = path
+            for part in Path(panel.data_ref).parts:
+                artifact = artifact / part
+                if artifact.is_symlink():
+                    return None
+            if not artifact.is_file():
+                return None
+        return path, envelope
 
     def read_result(
         self, input_id: str, algorithm_id: str, parameters_sha256: str
     ) -> ResultEnvelope | None:
-        attempt = self.selected_attempt(input_id, algorithm_id, parameters_sha256)
-        if attempt is None:
-            return None
-        return ResultEnvelope.from_bytes((attempt / "result.json").read_bytes())
+        selected = self._selected_result(input_id, algorithm_id, parameters_sha256)
+        return selected[1] if selected is not None else None
 
     # -- hash cache (D11) ---------------------------------------------------
     def load_hash_cache(self) -> dict[str, dict[str, Any]]:

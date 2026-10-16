@@ -116,6 +116,31 @@ def test_run_aligns_publishes_and_reruns_from_cache(lab_world, capsys, monkeypat
         assert str(chunks) not in text and "SYNTH0001" not in text
 
 
+def test_missing_cached_upstream_artifact_recomputes_only_that_step(
+    lab_world, capsys, monkeypatch, shared_mmi,
+) -> None:
+    _registry(monkeypatch, "SUMMARY", "COUNTER")
+    root = lab_world["root"]
+    code, first = _json(
+        capsys, "run", str(lab_world["chunks"]), "--root", str(root), "--mmi", str(shared_mmi),
+    )
+    assert code == 0
+    input_id = first["data"]["sample"]["input_id"]
+    store = LabStore(root)
+    identity_dir = next((store.results_dir / input_id / "read-summary").iterdir())
+    attempt = store.selected_attempt(input_id, "read-summary", identity_dir.name)
+    assert attempt is not None
+    (attempt / "artifacts" / "counts.json").unlink()
+
+    code, retry = _json(capsys, "run", "latest", "--root", str(root))
+    assert code == 0
+    steps = {step["algorithm_id"]: step for step in retry["data"]["steps"]}
+    assert not steps["read-summary"]["cached"]
+    assert steps["fragment-size"]["cached"]
+    replacement = store.selected_attempt(input_id, "read-summary", identity_dir.name)
+    assert replacement is not None and replacement != attempt
+    assert (replacement / "artifacts" / "counts.json").is_file()
+
 def test_json_stdout_is_one_object_and_progress_goes_to_stderr(lab_world, capsys, monkeypatch, shared_mmi) -> None:
     _registry(monkeypatch)
     code, out, err = _lab(
