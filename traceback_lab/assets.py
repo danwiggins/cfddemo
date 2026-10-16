@@ -15,13 +15,14 @@ import tempfile
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 from pydantic import ValidationError
 from traceback_runner.serialization import canonical_json_bytes
 
 from .asset_contracts import AssetDescriptor
-from .store import LabStore
+if TYPE_CHECKING:
+    from .store import LabStore
 
 REGISTRATION_SCHEMA = "traceback.lab.asset-registration.v1"
 PMD_KIND = "pmd"
