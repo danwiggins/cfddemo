@@ -906,6 +906,11 @@
             results.replaceChildren(...nodes);
             return;
           }
+          if (data.state === "stale_target") {
+            nodes.push(h("p", { class: "status-line" }, "The sample changed while Compare loaded. Reload to compare its current full input."));
+            results.replaceChildren(...nodes);
+            return;
+          }
           nodes.push(h("p", {}, `Target aligner: ${data.target_aligner}. Eligible members are counted separately for each metric after self-exclusion.`));
           if (data.target_aligner.startsWith("pre-aligned; provenance unknown")) nodes.push(h("p", { class: "status-line" },
             "Pre-aligned processing provenance is unknown. The cohort store isolates these inputs by input identity; they are not pooled as protocol-matched references."));

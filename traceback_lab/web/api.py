@@ -341,6 +341,12 @@ class LabApi:
             if exc.code == "TBX-LAB-021":
                 return {**base, "state": "example_unscorable", "metrics": [], "unscored": []}
             raise
+        # Both reads must describe the same full input. A newer run may become
+        # current between load_sample and member_from_store while retaining the
+        # same algorithm parameter hash; comparing its compatibility key with
+        # the older envelope would mix two sample snapshots.
+        if target.source_id != source_id or target.input_id != sample.full.input_id:
+            return {**base, "state": "stale_target", "metrics": [], "unscored": []}
         current = {result.algorithm_id: result for result in target.results}
         library = self.libraries.get()
         rows = []

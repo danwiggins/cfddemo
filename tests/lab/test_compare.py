@@ -59,7 +59,7 @@ def test_compare_pins_one_generation_and_gates_after_leave_one_out(
         ],
     )
     sample = SimpleNamespace(example=False, full=SimpleNamespace(
-        results={"fragment-size": envelope}, depth_x=lambda: 1.0,
+        input_id=f"{101:064x}", results={"fragment-size": envelope}, depth_x=lambda: 1.0,
     ))
     monkeypatch.setattr(web_api.views, "load_sample", lambda store, source_id: sample)
     original = load_library().entry("fragment-size", "mode_bp")
@@ -105,6 +105,44 @@ def test_compare_pins_one_generation_and_gates_after_leave_one_out(
     else:
         assert payload["metrics"][0]["percentile"] is not None
         assert payload["metrics"][0]["interval"] is not None
+
+
+@pytest.mark.parametrize("target_source,target_input", [
+    (_TARGET, f"{102:064x}"),
+    (f"{2:064x}", f"{101:064x}"),
+])
+def test_compare_rejects_changed_full_input_or_source(
+    tmp_path, monkeypatch, target_source, target_input,
+) -> None:
+    generation = CohortGeneration(cohort_id="healthy", version=1, members=())
+    monkeypatch.setattr(web_api, "read_current", lambda store, cohort_id: generation)
+    envelope = ResultEnvelope(
+        algorithm_id="fragment-size", algorithm_version="1", status="ok",
+        provenance=provenance(
+            tool="fixture", parameters_sha256=_PARAMETERS, source_id=_TARGET,
+            input_id=f"{101:064x}", reference_id="synthetic",
+        ),
+        metrics=[Metric(metric_id="mode_bp", value=101.0)],
+    )
+    sample = SimpleNamespace(example=False, full=SimpleNamespace(
+        input_id=f"{101:064x}", results={"fragment-size": envelope},
+    ))
+    monkeypatch.setattr(web_api.views, "load_sample", lambda store, source_id: sample)
+    target = CohortMember(
+        source_id=target_source, input_id=target_input,
+        aligner_identity="minimap2 2.28; samtools 1.20",
+        results=(_result(target_source, 101.0),),
+    )
+    monkeypatch.setattr(web_api, "member_from_store", lambda store, source_id: target)
+    api = web_api.LabApi(LabStore(tmp_path))
+    monkeypatch.setattr(api, "_resolve", lambda id12: (_TARGET, []))
+    monkeypatch.setattr(api, "_id12s", lambda: {_TARGET: _TARGET[:12]})
+
+    payload = api.compare(_TARGET[:12], "healthy")
+
+    assert payload["state"] == "stale_target"
+    assert payload["metrics"] == [] and payload["unscored"] == []
+    assert payload["cohort_version"] == "healthy:1"
 
 
 def test_example_is_explicitly_unscorable(tmp_path, monkeypatch) -> None:
