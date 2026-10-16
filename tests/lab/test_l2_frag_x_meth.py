@@ -32,6 +32,8 @@ def _store(
 ) -> None:
     path = base / "mc" / "calls"
     path.mkdir(parents=True, exist_ok=True)
+    for old_chunk in path.glob("calls-*.bin"):
+        old_chunk.unlink()
     array = np.array(rows, dtype=DTYPE)
     chunks = []
     for index, offset in enumerate(range(0, len(array), chunk_size)):
@@ -180,7 +182,7 @@ def test_streaming_peak_memory_is_bounded_by_chunk_not_total_calls(
     from traceback_lab.read_summary import SCHEMA as SUMMARY_SCHEMA
     from traceback_lab.registry import InputContext
 
-    n_reads = 20_000
+    n_reads = 80_000
     summary_dir = tmp_path / "read-summary" / "columns"
     summary_dir.mkdir(parents=True)
     (summary_dir / "meta.json").write_text(
@@ -189,7 +191,7 @@ def test_streaming_peak_memory_is_bounded_by_chunk_not_total_calls(
                 "schema": SUMMARY_SCHEMA,
                 "rows": n_reads,
                 "contigs": ["chr1"],
-                "lengths": [5_000_000],
+                "lengths": [20_000_000],
             }
         )
     )
@@ -238,7 +240,11 @@ def test_streaming_peak_memory_is_bounded_by_chunk_not_total_calls(
         _, peak = tracemalloc.get_traced_memory()
     finally:
         tracemalloc.stop()
-    assert peak < 32 * 1024 * 1024
+    # The 320k-call store exceeds 4 MiB. Data is built before tracing;
+    # this caps per-run Python/NumPy allocations, not mmap page cache or RSS.
+    # The shared derived-input mask is absent here; chunks are 1,024 rows.
+    assert n_reads * 4 * DTYPE.itemsize > 4 * 1024 * 1024
+    assert peak < 3 * 1024 * 1024
     assert panel["n"] == n_reads and metric["value"] == pytest.approx(0.0)
 
 
@@ -337,3 +343,48 @@ def test_out_of_bounds_read_row_is_refused(tmp_path: Path) -> None:
     _store(tmp_path, [_row(99, 101 + i, True) for i in range(4)], chunk_size=2)
     with pytest.raises(ValueError, match="outside read-summary"):
         _result(ctx, tmp_path)
+
+
+def test_conflicting_missing_m_channel_across_chunks_is_refused(tmp_path: Path) -> None:
+    ctx = _fixture(tmp_path)
+    rows = [
+        _row(0, 101, True, channels=HAS_M),
+        _row(0, 102, False),
+        _row(0, 103, False),
+        _row(0, 101, False, channels=HAS_H),
+    ]
+    _store(tmp_path, rows, chunk_size=3)
+    with pytest.raises(ValueError, match="conflicting duplicate"):
+        _result(ctx, tmp_path)
+
+
+def test_nonpositive_aligned_span_fails_for_qualifying_read(tmp_path: Path) -> None:
+    ctx = _fixture(tmp_path)
+    ends_path = tmp_path / "read-summary" / "columns" / "end.bin"
+    ends = np.memmap(ends_path, dtype="<i4", mode="r+")
+    ends[0] = 100  # read 0 also starts at 100
+    ends.flush()
+    del ends
+    with pytest.raises(ValueError, match="nonpositive aligned span"):
+        _result(ctx, tmp_path)
+
+
+def test_panel_includes_molecules_outside_scalar_size_bands(tmp_path: Path) -> None:
+    reads = [
+        Read("short", "chr1", 100, "A" * 100),
+        Read("long", "chr1", 300, "A" * 151),
+        Read("other", "chr1", 600, "A" * 260),
+    ]
+    ctx = context_for(tmp_path, [("chr1", 2000)], reads, eligible_reads=1_000_000)
+    rows = (
+        [_row(0, 101 + i, False) for i in range(4)]
+        + [_row(1, 301 + i, True) for i in range(4)]
+        + [_row(2, 601 + i, i < 2) for i in range(4)]
+    )
+    _store(tmp_path, rows, chunk_size=3)
+    ctx.extras["upstream"]["meth-calls"] = str(tmp_path / "mc")
+    scalar, panel = _result(ctx, tmp_path)
+    assert panel["n"] == 3
+    assert panel["counts"][3][2] == 1  # 260 bp, 0.5 fraction
+    assert scalar["n"] == panel["short_n"] + panel["long_n"] == 2
+    assert scalar["value"] == pytest.approx(1.0)

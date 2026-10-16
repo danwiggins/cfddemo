@@ -9,6 +9,8 @@ regardless of how many CpGs it contains.
 The panel is a 2-D count distribution.  The scalar is a separate descriptive
 difference of per-read mean fractions (long minus short), not a classifier or
 an interpretation of any individual panel cell.  No reference range is known.
+Call processing holds one chunk plus a carried molecule; derived inputs also
+hold the D33 read-row mask allocated by the shared meth-calls loader.
 """
 
 from __future__ import annotations
@@ -102,9 +104,12 @@ class FragXMeth(MethBase):
             rows = _distinct_sites(rows)
             if rows.size == 0:
                 return
-            read_rows = rows["read_row"]
-            if np.any(read_rows >= summary.rows):
+            if np.any(rows["read_row"] >= summary.rows):
                 raise ValueError("meth-calls read_row lies outside read-summary")
+            rows = rows[(rows["channels"] & HAS_M) != 0]
+            if rows.size == 0:
+                return
+            read_rows = rows["read_row"]
             boundaries = np.flatnonzero(np.r_[True, read_rows[1:] != read_rows[:-1]])
             total = np.diff(np.r_[boundaries, rows.size])
             methylated = np.add.reduceat(
@@ -116,9 +121,10 @@ class FragXMeth(MethBase):
             ids = read_rows[boundaries[keep]]
             span = ends[ids].astype(np.int64) - starts[ids].astype(np.int64)
             fraction = methylated[keep] / total[keep]
-            positive = span > 0
-            span = span[positive]
-            fraction = fraction[positive]
+            if np.any(span <= 0):
+                raise ValueError(
+                    "read-summary has a nonpositive aligned span for a methylation-bearing read"
+                )
             n_panel += int(span.size)
             size_bin = np.searchsorted(SIZE_EDGES_BP, span, side="right") - 1
             meth_bin = np.minimum(
@@ -136,7 +142,6 @@ class FragXMeth(MethBase):
         carry = np.empty(0, dtype=DTYPE)
         previous_row = -1
         for chunk in calls.chunks(mask):
-            chunk = chunk[(chunk["channels"] & HAS_M) != 0]
             if chunk.size == 0:
                 continue
             if int(chunk["read_row"][0]) < previous_row or np.any(
