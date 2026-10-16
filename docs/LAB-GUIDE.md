@@ -75,7 +75,7 @@ traceback lab run (<BAM|uBAM|chunk dir>... | <id12> | latest | --example)
     [--reference ID] [--profile all|fast] [--only a,b]
     [--downsample 0.5,0.25,0.1 | --no-downsample]
     [--controls | --no-controls] [--tf 0.03,0.10,0.30]
-    [--skip-bad-chunks] [--force] [--timeout-s 3600]
+    [--skip-bad-chunks] [--sex M|F] [--force] [--timeout-s 3600]
     [--threads N] [--sort-mem 1G] [--mmi PATH]
     [--dry-run] [--verbose] [--json] [--root R]
 traceback lab simulate cna <id12|latest> [--tf 0.03,0.10,0.30]   synthetic CNA spike, copy-number recovery
@@ -87,6 +87,13 @@ traceback lab runs [RUN_ID] [--step S]     the run log, or one run's steps
 ```
 
 ## Running on a kit
+
+`--sex M|F` records an operator assertion in versioned local sample metadata.
+It does not change the measured `sex-check` ratio, source or input identity, or
+cached results. A definite male/female call can be compared with the assertion
+at read time as a pre-analytic check; an absent assertion or indeterminate call
+has no mismatch verdict. A later conflicting assertion is refused, not
+silently substituted.
 
 `traceback lab run <chunk dir>` takes one file, several files or a directory
 of MinKNOW chunks (`*.bam`, not recursive). It:
@@ -412,6 +419,13 @@ must be inspected and moved aside manually after preserving them. If only the
 current pointer is missing and the member roster is intact, `lab cohort build`
 publishes a fresh generation from that roster while retaining earlier
 generation directories.
+
+### TBX-LAB-023
+
+An operator-supplied `--sex` conflicts with an assertion already recorded for
+the same sample, or the local sex metadata is malformed (exit 3). Reuse the
+recorded assertion or omit the flag. Inspect and restore malformed metadata
+from a known-good local backup before rerunning; no measured result is changed.
 
 ## Adding an algorithm
 

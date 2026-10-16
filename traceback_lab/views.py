@@ -25,6 +25,7 @@ from .envelope import ResultEnvelope
 from .ingest import id12_for, input_manifest, source_record
 from .interpretation.engine import Library, classify, load_library
 from .registry import load_registry
+from .sample_metadata import sex_assertion, sex_concordance
 from .stability import Side, band_at, deviation, stable
 from .store import LabStore
 
@@ -94,6 +95,7 @@ class SampleView:
     example: bool
     full: InputView
     derived: list[InputView] = field(default_factory=list)
+    operator_metadata: dict[str, str] | None = None
 
     def by_transform(self, transform: str) -> list[InputView]:
         return [item for item in self.derived if item.transform == transform]
@@ -124,7 +126,21 @@ def load_sample(store: LabStore, source_id: str) -> SampleView | None:
                 fraction=fraction if entry["transform"] in ("downsample", "split") else 1.0,
             )
         )
-    return SampleView(source_id, id12_for(store, source_id), bool(record.get("example")), full, derived)
+    return SampleView(
+        source_id, id12_for(store, source_id), bool(record.get("example")), full, derived,
+        sex_assertion(record),
+    )
+
+
+def sex_check_view(sample: SampleView) -> dict[str, str | None]:
+    """Compare a local operator assertion with an already measured definite call."""
+
+    declared = sample.operator_metadata["sex"] if sample.operator_metadata else None
+    observed = None
+    result = sample.full.results.get("sex-check")
+    if result is not None and result.status == "ok":
+        observed = next((str(row.value) for row in result.metrics if row.metric_id == "call" and row.value is not None), None)
+    return sex_concordance(declared, observed)
 
 
 def _value(envelope: ResultEnvelope | None, metric_id: str) -> Any:
@@ -366,6 +382,7 @@ __all__ = [
     "repeatability",
     "sample_ids",
     "selected_results",
+    "sex_check_view",
     "stability_panels",
     "synthetic",
 ]

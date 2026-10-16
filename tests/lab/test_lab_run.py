@@ -116,6 +116,47 @@ def test_run_aligns_publishes_and_reruns_from_cache(lab_world, capsys, monkeypat
         assert str(chunks) not in text and "SYNTH0001" not in text
 
 
+def test_sex_assertion_is_local_metadata_and_does_not_rekey_results(
+    lab_world, capsys, monkeypatch, shared_mmi,
+) -> None:
+    _registry(monkeypatch, "SUMMARY", "COUNTER")
+    root = lab_world["root"]
+    args = ("run", str(lab_world["chunks"]), "--root", str(root), "--mmi", str(shared_mmi))
+    code, first = _json(capsys, *args)
+    assert code == 0
+    original = first["data"]["sample"]
+
+    code, asserted = _json(capsys, "run", "latest", "--sex", "M", "--root", str(root))
+    assert code == 0 and asserted["data"]["sample"] == original
+    assert all(step["cached"] for step in asserted["data"]["steps"])
+    from traceback_lab.ingest import source_record
+    from traceback_lab.views import load_sample, sex_check_view
+
+    record = source_record(LabStore(root), original["source_id"])
+    assert record is not None and record["operator_metadata"]["sex"] == "M"
+    sample = load_sample(LabStore(root), original["source_id"])
+    assert sample is not None
+    assert sex_check_view(sample)["state"] == "no_verdict"  # fake registry has no sex-check
+
+    code, conflict = _json(capsys, "run", "latest", "--sex", "F", "--root", str(root))
+    assert code == 3 and conflict["data"]["code"] == "TBX-LAB-023"
+    assert {"cause", "fix", "retryable", "docs"} <= set(conflict["data"])
+    code, human, _ = _lab(capsys, "run", "latest", "--sex", "F", "--root", str(root))
+    assert code == 3
+    for label in ("CODE", "CAUSE", "FIX", "RETRYABLE", "DOCS"):
+        assert any(line.startswith(label) for line in human.splitlines())
+    assert source_record(LabStore(root), original["source_id"]) == record
+    code, same = _json(capsys, "run", "latest", "--sex", "M", "--root", str(root))
+    assert code == 0 and same["data"]["sample"] == original
+    code, reingested = _json(capsys, *args)
+    assert code == 0 and reingested["data"]["sample"] == original
+    assert source_record(LabStore(root), original["source_id"])["operator_metadata"] == record["operator_metadata"]
+
+    code, conflict = _json(capsys, *args, "--sex", "F")
+    assert code == 3 and conflict["data"]["code"] == "TBX-LAB-023"
+    assert source_record(LabStore(root), original["source_id"])["operator_metadata"] == record["operator_metadata"]
+
+
 def test_missing_cached_upstream_artifact_recomputes_only_that_step(
     lab_world, capsys, monkeypatch, shared_mmi,
 ) -> None:
