@@ -63,14 +63,26 @@ def read_roster(store: LabStore, cohort_id: str) -> tuple[str, ...]:
     return tuple(members)
 
 
+def _checked_source_record(store: LabStore, source_id: str) -> dict[str, Any]:
+    record = source_record(store, source_id)
+    if record is None:
+        raise ValueError("the sample has no source record")
+    if not isinstance(record, dict) or record.get("source_id") != source_id:
+        raise LabProblem(
+            "TBX-LAB-020",
+            cause=f"stored source record {source_id[:12]} has a mismatched source_id",
+            fix="Restore the source record matching its filename before cohort add/build",
+            data={"source_id": source_id, "field": "source_id"},
+        )
+    return record
+
+
 def add_sample(store: LabStore, cohort_id: str, sample_ref: str) -> bool:
     """Admit a stored full-input source once; return False on an exact duplicate."""
 
     with store.writer("cohort add", new_run_id()):
         source_id = resolve_sample(store, sample_ref)
-        record = source_record(store, source_id)
-        if record is None:
-            raise ValueError("the sample has no source record")
+        record = _checked_source_record(store, source_id)
         if record.get("example"):
             raise LabProblem(
                 "TBX-LAB-021", cause=f"{source_id[:12]} is an EXAMPLE sample",
@@ -216,9 +228,7 @@ def _selected_results(store: LabStore, input_id: str, manifest: dict[str, Any]) 
 def member_from_store(store: LabStore, source_id: str) -> CohortMember:
     """Pin current full-input result attempts for one admitted source."""
 
-    record = source_record(store, source_id)
-    if record is None:
-        raise ValueError("admitted source is missing")
+    record = _checked_source_record(store, source_id)
     if record.get("example"):
         raise LabProblem("TBX-LAB-021", cause=f"{source_id[:12]} is an EXAMPLE sample",
                          fix="Add a real kit sample", data={"id12": source_id[:12]})
