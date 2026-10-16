@@ -14,9 +14,12 @@ import sys
 import subprocess
 import tempfile
 import threading
+import time
+import urllib.request
 from pathlib import Path
 
 import pytest
+import websocket
 
 from traceback_lab.store import LabStore
 from traceback_lab.web import api as api_module
@@ -434,14 +437,170 @@ def test_headless_dom_does_not_wait_for_descendant_capture_handles(tmp_path, mon
                 pass
 
 
+def _wait_for_chart(read_state, *, timeout: float, clock=None, pause=None) -> dict:
+    """Wait for the renderer's marker, rather than an earlier page-ready flag."""
+
+    clock = clock or time.monotonic
+    pause = pause or time.sleep
+    deadline = clock() + timeout
+    while True:
+        state = read_state()
+        if state.get("rendered"):
+            return state
+        remaining = deadline - clock()
+        if remaining <= 0:
+            raise AssertionError(f"Chrome chart not rendered before timeout: {state!r}")
+        pause(min(0.2, remaining))
+
+
+def _chart_dom_cdp(argv: list[str], profile: Path, *, timeout: float = 90) -> str:
+    """Wait for one Chrome page's actual chart marker through DevTools."""
+
+    deadline = time.monotonic() + timeout
+    events: list[str] = []
+    dom = ""
+    failure: Exception | None = None
+    cleanup_error = None
+    connection = None
+    with tempfile.TemporaryFile() as stdout, tempfile.TemporaryFile() as stderr:
+        process = subprocess.Popen(
+            [*argv[:-1], "--remote-debugging-address=127.0.0.1", "--remote-debugging-port=0",
+             "--remote-allow-origins=*", argv[-1]],
+            stdout=stdout, stderr=stderr, start_new_session=os.name != "nt",
+        )
+        try:
+            active_port = profile / "DevToolsActivePort"
+            target_url = None
+            direct_http = urllib.request.build_opener(urllib.request.ProxyHandler({}))
+            while time.monotonic() < deadline and process.poll() is None:
+                if active_port.is_file():
+                    port = active_port.read_text().splitlines()[0]
+                    try:
+                        with direct_http.open(f"http://127.0.0.1:{port}/json/list", timeout=2) as response:
+                            targets = json.load(response)
+                        target_url = next(
+                            (target["webSocketDebuggerUrl"] for target in targets
+                             if target.get("type") == "page" and target.get("url", "").startswith("http://127.0.0.1:")),
+                            None,
+                        )
+                    except (OSError, ValueError, KeyError):
+                        pass
+                if target_url:
+                    break
+                time.sleep(0.1)
+            if not target_url:
+                raise AssertionError("Chrome did not expose its Lab page through DevTools")
+            connection = websocket.create_connection(target_url, timeout=5, origin="http://localhost")
+            connection.settimeout(5)
+            command_id = 0
+
+            def command(method: str, params: dict | None = None):
+                nonlocal command_id
+                command_id += 1
+                request_id = command_id
+                connection.send(json.dumps({"id": request_id, "method": method, "params": params or {}}))
+                while True:
+                    message = json.loads(connection.recv())
+                    if message.get("id") == request_id:
+                        if "error" in message:
+                            raise AssertionError(f"DevTools {method} failed: {message['error']!r}")
+                        return message.get("result", {})
+                    if message.get("method") in ("Runtime.consoleAPICalled", "Runtime.exceptionThrown", "Log.entryAdded"):
+                        events.append(json.dumps(message, ensure_ascii=False)[-500:])
+
+            def evaluate(expression: str):
+                result = command("Runtime.evaluate", {"expression": expression, "returnByValue": True})
+                if "exceptionDetails" in result:
+                    raise AssertionError(f"DevTools evaluation failed: {result['exceptionDetails']!r}")
+                return result["result"].get("value")
+
+            command("Runtime.enable")
+            command("Log.enable")
+            state_expression = """(() => ({
+              ready: document.body?.dataset.ready ?? null,
+              rendered: !!document.querySelector('.echart[data-rendered="1"]'),
+              csp: document.body?.dataset.cspViolations ?? null,
+              fallback: [...document.querySelectorAll('.chart-wrap .problem')].map(el => el.textContent).join('; '),
+              loading: document.body?.innerText.includes('Loading…') ?? false
+            }))()"""
+            _wait_for_chart(lambda: evaluate(state_expression), timeout=max(0, deadline - time.monotonic()))
+            dom = evaluate("document.documentElement.outerHTML")
+        except Exception as exc:
+            failure = exc
+            if connection is not None:
+                try:
+                    dom = evaluate("document.documentElement.outerHTML")
+                except Exception:
+                    pass
+        finally:
+            if connection is not None:
+                connection.close()
+            if os.name == "nt":
+                try:
+                    subprocess.run(
+                        ["taskkill", "/PID", str(process.pid), "/T", "/F"],
+                        stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, check=False, timeout=5,
+                    )
+                except subprocess.TimeoutExpired:
+                    cleanup_error = "taskkill timed out"
+            else:
+                try:
+                    os.killpg(process.pid, signal.SIGKILL)
+                except ProcessLookupError:
+                    pass
+            try:
+                process.wait(timeout=5)
+            except subprocess.TimeoutExpired:
+                process.kill()
+                try:
+                    process.wait(timeout=1)
+                except subprocess.TimeoutExpired:
+                    cleanup_error = "direct browser process did not exit after kill"
+            stderr.seek(0, os.SEEK_END)
+            stderr.seek(max(0, stderr.tell() - 4096))
+            stderr_tail = stderr.read().decode("utf-8", errors="replace")[-1000:]
+    if failure or cleanup_error:
+        raise AssertionError(
+            f"Chrome chart wait failed: {failure!r}; cleanup_error={cleanup_error!r}; "
+            f"data_ready={_body_attr(dom, 'ready')}, csp_violations={_body_attr(dom, 'csp-violations')}, "
+            f"fallback={'Chart could not be drawn' in dom}, console_tail={events[-8:]!r}, "
+            f"stderr_tail={stderr_tail!r}"
+        ) from failure
+    return dom
+
+
+def test_chart_wait_does_not_accept_ready_page_without_rendered_chart() -> None:
+    now = [0.0]
+    state = {"ready": "1", "rendered": False, "csp": "0", "fallback": "Chart could not be drawn"}
+
+    def pause(seconds: float) -> None:
+        now[0] += seconds
+
+    with pytest.raises(AssertionError, match="Chrome chart not rendered before timeout") as caught:
+        _wait_for_chart(lambda: state, timeout=0.5, clock=lambda: now[0], pause=pause)
+    assert "'ready': '1'" in str(caught.value) and "Chart could not be drawn" in str(caught.value)
+
+
+def test_chart_wait_accepts_a_chart_that_renders_after_page_readiness() -> None:
+    now = [0.0]
+    observations = iter((False, False, True))
+
+    def read_state() -> dict:
+        return {"ready": "1", "rendered": next(observations), "csp": "0"}
+
+    def pause(seconds: float) -> None:
+        now[0] += seconds
+
+    assert _wait_for_chart(read_state, timeout=1, clock=lambda: now[0], pause=pause)["rendered"]
+
+
 @pytest.mark.skipif(_chrome() is None, reason="no Chrome/Chromium for the headless CSP check")
 def test_headless_page_renders_a_chart_with_zero_csp_violations(server, tmp_path) -> None:
     id12 = api_module.LabApi(server.app.store).samples()["samples"][0]["id12"]
-    dom = headless_dom(
+    dom = _chart_dom_cdp(
         [_chrome(), "--headless=new", "--disable-gpu", "--no-first-run", "--no-default-browser-check",
-         f"--user-data-dir={tmp_path / 'profile'}", "--virtual-time-budget=15000",
-         "--window-size=1280,800", "--dump-dom", server.issue_link() + f"&route=/sample/{id12}/trust-qc"],
-        ok=lambda d: 'data-ready="1"' in d and 'data-rendered="1"' in d,
+         f"--user-data-dir={tmp_path / 'profile'}", "--window-size=1280,800",
+         server.issue_link() + f"&route=/sample/{id12}/trust-qc"], tmp_path / "profile",
     )
     assert 'data-ready="1"' in dom, dom[:500]
     assert 'data-csp-violations="0"' in dom
