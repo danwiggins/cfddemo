@@ -11,7 +11,9 @@ import pytest
 
 from traceback_lab.adapters.ichor import CopyNumberError, LabCopyNumberParameters, stage_verified_pon
 from traceback_lab.algorithms import copy_number as cn_module
-from traceback_lab.registry import InputContext
+from traceback_lab.identity import cohort_compat_key
+from traceback_lab.pon_consumer import bind_copy_number
+from traceback_lab.registry import InputContext, execution_identity, load_registry, plan
 
 
 def test_pon_contract_requires_policy_and_digest_together() -> None:
@@ -89,3 +91,28 @@ def test_copy_number_configured_boundary_passes_one_verified_panel(tmp_path: Pat
     assert next(metric for metric in output.metrics if metric["metric_id"] == "pon_policy")["value"] == "lab_loo_v1"
     with pytest.raises(CopyNumberError, match="requires grid verification"):
         cn_module.COPY_NUMBER.run_configured(ctx, out, parameters=parameters, pon=panel)
+
+
+def test_bound_panel_changes_execution_but_not_cohort_compatibility() -> None:
+    items = plan(load_registry(), only=["instability"])
+    first = bind_copy_number(items, SimpleNamespace(pon_policy="lab_loo_v1", pon_sha256="a" * 64))
+    second = bind_copy_number(items, SimpleNamespace(pon_policy="lab_loo_v1", pon_sha256="b" * 64))
+    copy_a = next(item.algorithm for item in first if item.algorithm.id == "copy-number")
+    copy_b = next(item.algorithm for item in second if item.algorithm.id == "copy-number")
+    assert copy_a.parameters["pon_sha256"] == "a" * 64
+    assert copy_b.parameters["pon_sha256"] == "b" * 64
+    cn_a = execution_identity(copy_a, reference_sha256="c" * 64)
+    cn_b = execution_identity(copy_b, reference_sha256="c" * 64)
+    assert cn_a != cn_b
+    compat = dict(
+        algorithm_id="copy-number", algorithm_version=copy_a.version,
+        tools=[tool.identity() for tool in copy_a.tools], reference_sha256="c" * 64,
+        aligner_identity={"kind": "aligned"}, pon_policy="lab_loo_v1",
+        per_sample_asset_keys=("pon_sha256",),
+    )
+    assert cohort_compat_key(parameters=copy_a.parameters, **compat) == cohort_compat_key(
+        parameters=copy_b.parameters, **compat
+    )
+    assert cohort_compat_key(parameters=copy_a.parameters, **compat) != cohort_compat_key(
+        parameters=items[1].algorithm.parameters, **{**compat, "pon_policy": "none"}
+    )
