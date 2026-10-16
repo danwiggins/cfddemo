@@ -3,13 +3,14 @@
 from __future__ import annotations
 
 import argparse
+import shlex
 from collections.abc import Callable
 from pathlib import Path
 from typing import Any
 
 from traceback_runner.cli import _local_envelope, _result, _with_human
 
-from .assets import AssetError, add_asset, inspect_asset
+from .assets import AssetError, AssetPublishUncertain, add_asset, inspect_asset
 from .problems import EXIT_BLOCKED, EXIT_OK
 from .store import LabStore, new_run_id
 
@@ -48,6 +49,12 @@ def _add(args: argparse.Namespace, store: LabStore) -> tuple[int, dict[str, Any]
                 store, args.kind, args.file,
                 source_label=args.source_label, terms=args.terms, license_id=args.license_id,
             )
+    except AssetPublishUncertain as exc:
+        payload = _result_payload(
+            "lab asset add", "blocked", "Asset registration incomplete; inspect before retry", store,
+            {"kind": args.kind, "cause": str(exc), "fix": shlex.join(["traceback", "lab", "asset", "inspect", args.kind, "--root", str(store.root)])},
+        )
+        return EXIT_BLOCKED, _with_human(payload, [f"ASSET   {args.kind}", f"INCOMPLETE {exc}"])
     except AssetError as exc:
         payload = _result_payload(
             "lab asset add", "blocked", "Asset not registered", store,
