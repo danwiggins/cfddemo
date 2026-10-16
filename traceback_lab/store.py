@@ -28,6 +28,7 @@ import os
 import re
 import secrets
 import shutil
+import stat
 import threading
 import time
 from collections.abc import Callable, Iterator, Mapping
@@ -53,6 +54,9 @@ ARTIFACT_INDEX_SCHEMA = "traceback.lab.artifact-index.v1"
 _RUN_ID = r"^r-\d{8}-\d{4}-[0-9a-f]{4,8}$"
 _ATTEMPT_ID = r"^a-\d{8}T\d{12}-[0-9a-f]{8}$"
 
+
+class ResultOrderUnavailable(OSError):
+    """Attempt publication order cannot be read safely."""
 
 def _utc(epoch: float | None = None) -> str:
     moment = datetime.fromtimestamp(time.time() if epoch is None else epoch, UTC)
@@ -390,22 +394,62 @@ class LabStore:
 
     # -- results ------------------------------------------------------------
     @staticmethod
-    def _attempt_order(path: Path) -> int:
+    def _load_artifact_index(path: Path) -> dict[str, Any] | None:
+        index_path = path / "artifacts.json"
         try:
-            index = json.loads((path / "artifacts.json").read_bytes())
-            ordinal = index.get("ordinal")
-        except (OSError, ValueError, AttributeError):
-            return 0
-        return ordinal if isinstance(ordinal, int) and not isinstance(ordinal, bool) and ordinal > 0 else 0
+            info = os.lstat(index_path)
+        except FileNotFoundError:
+            return None
+        except OSError as exc:
+            raise ResultOrderUnavailable("Lab attempt metadata is unreadable") from exc
+        if not stat.S_ISREG(info.st_mode):
+            raise ResultOrderUnavailable("Lab attempt metadata is not a regular file")
+        try:
+            index = json.loads(index_path.read_bytes())
+        except (OSError, ValueError) as exc:
+            raise ResultOrderUnavailable("Lab attempt metadata is unreadable or invalid") from exc
+        if (
+            not isinstance(index, dict)
+            or set(index) not in ({"schema", "files"}, {"schema", "files", "ordinal"})
+            or index.get("schema") != ARTIFACT_INDEX_SCHEMA
+            or not isinstance(index.get("files"), dict)
+        ):
+            raise ResultOrderUnavailable("Lab attempt metadata has invalid fields")
+        ordinal = index.get("ordinal")
+        if "ordinal" in index and (
+            not isinstance(ordinal, int) or isinstance(ordinal, bool) or ordinal <= 0
+        ):
+            raise ResultOrderUnavailable("Lab attempt publication ordinal is invalid")
+        return index
+
+    @classmethod
+    def _attempt_order(cls, path: Path) -> int:
+        index = cls._load_artifact_index(path)
+        return 0 if index is None else int(index.get("ordinal", 0))
 
     @classmethod
     def _next_attempt_order(cls, attempts: Path) -> int:
-        if not attempts.is_dir():
+        try:
+            info = os.lstat(attempts)
+        except FileNotFoundError:
             return 1
-        return 1 + max(
-            (cls._attempt_order(path) for path in attempts.iterdir() if path.is_dir()),
-            default=0,
-        )
+        except OSError as exc:
+            raise ResultOrderUnavailable("Lab attempts are unreadable") from exc
+        if not stat.S_ISDIR(info.st_mode):
+            raise ResultOrderUnavailable("Lab attempts path is not a directory")
+        try:
+            with os.scandir(attempts) as entries:
+                orders = [
+                    cls._attempt_order(Path(entry.path))
+                    for entry in entries
+                    if not entry.name.startswith(STAGING_PREFIX) and entry.is_dir(follow_symlinks=False)
+                ]
+            return 1 + max(orders, default=0)
+        except ResultOrderUnavailable:
+            raise
+        except OSError as exc:
+            raise ResultOrderUnavailable("Lab attempt order is unreadable") from exc
+
     def publish_result(
         self,
         envelope: ResultEnvelope,
@@ -504,26 +548,29 @@ class LabStore:
 
     def _prune_attempts(self, attempts: Path, *, keep: set[str]) -> None:
         """Keep selected/replaced attempts, the last success, and the newest
-        failed attempts for Trust/QC (D35)."""
+        failed attempts for Trust/QC (D35). Unknown order never triggers deletion."""
 
-        candidates = sorted(
-            (
-                path
-                for path in attempts.iterdir()
-                if path.is_dir() and not path.name.startswith(STAGING_PREFIX)
-            ),
-            key=lambda path: (self._attempt_order(path), path.name),
-        )
-        by_status = [(path, self._attempt_status(path)) for path in candidates]
-        failed = [path for path, status in by_status if status == "failed"]
-        successful = [path for path, status in by_status if status == "ok"]
-        retained = set(keep)
-        retained.update(path.name for path in failed[-KEEP_FAILED_ATTEMPTS:])
-        # Old attempts have no ordinal. Keep their successes when no reliable
-        # publication order can distinguish them after a clock reversal.
-        retained.update(path.name for path in successful if self._attempt_order(path) == 0)
-        if successful and not any(path.name in retained for path in successful):
-            retained.add(successful[-1].name)
+        try:
+            with os.scandir(attempts) as entries:
+                published = [
+                    Path(entry.path)
+                    for entry in entries
+                    if not entry.name.startswith(STAGING_PREFIX) and entry.is_dir(follow_symlinks=False)
+                ]
+            candidates = sorted(
+                published, key=lambda path: (self._attempt_order(path), path.name),
+            )
+            by_status = [(path, self._attempt_status(path)) for path in candidates]
+            failed = [path for path, status in by_status if status == "failed"]
+            successful = [path for path, status in by_status if status == "ok"]
+            retained = set(keep)
+            retained.update(path.name for path in failed[-KEEP_FAILED_ATTEMPTS:])
+            # Legacy attempts have no reliable ordinal; retain their successes.
+            retained.update(path.name for path in successful if self._attempt_order(path) == 0)
+            if successful and not any(path.name in retained for path in successful):
+                retained.add(successful[-1].name)
+        except OSError:
+            return
         for stale in candidates:
             if stale.name not in retained:
                 shutil.rmtree(stale, ignore_errors=True)
@@ -650,21 +697,12 @@ class LabStore:
         ):
             return None
         artifact_root = path / "artifacts"
-        index_path = path / "artifacts.json"
-        if index_path.exists() or index_path.is_symlink():
-            try:
-                if index_path.is_symlink() or artifact_root.is_symlink():
-                    return None
-                index = json.loads(index_path.read_bytes())
-            except (OSError, ValueError):
-                return None
-            if (
-                not isinstance(index, dict)
-                or set(index) not in ({"schema", "files"}, {"schema", "files", "ordinal"})
-                or index["schema"] != ARTIFACT_INDEX_SCHEMA
-                or not isinstance(index["files"], dict)
-                or ("ordinal" in index and self._attempt_order(path) == 0)
-            ):
+        try:
+            index = self._load_artifact_index(path)
+        except ResultOrderUnavailable:
+            return None
+        if index is not None:
+            if artifact_root.is_symlink():
                 return None
             for relative, size in index["files"].items():
                 if (

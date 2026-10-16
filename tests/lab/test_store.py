@@ -159,6 +159,101 @@ def test_reversed_attempt_timestamps_keep_publication_order(
     assert not (attempts / older).exists()
     assert sorted(path.name for path in attempts.iterdir()) == sorted([latest_success, *failures[-3:]])
 
+def test_ambiguous_legacy_successes_are_not_pruned(tmp_path: Path, monkeypatch) -> None:
+    ids = iter(
+        f"a-20261016T205200{n:06d}-{n:08x}"
+        for n in range(6, 0, -1)
+    )
+    monkeypatch.setattr(store_module, "new_attempt_id", lambda: next(ids))
+    store = LabStore(tmp_path)
+    store.ensure()
+    older = store.publish_result(_envelope(1), input_id=C)
+    newer = store.publish_result(_envelope(2), input_id=C)
+    attempts = store.result_dir(C, "fragment-size", A) / "attempts"
+    for name in (older, newer):
+        (attempts / name / "artifacts.json").unlink()
+
+    for n in range(4):
+        store.publish_result(_failed(n), input_id=C)
+    assert (attempts / older).is_dir()
+    assert (attempts / newer).is_dir()
+    assert store.read_result(C, "fragment-size", A).status == "failed"
+
+def test_unreadable_ordinal_aborts_publication_without_reusing_it(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    store = LabStore(tmp_path)
+    store.ensure()
+    store.publish_result(_envelope(1), input_id=C)
+    latest = store.publish_result(_envelope(2), input_id=C)
+    directory = store.result_dir(C, "fragment-size", A)
+    attempts = directory / "attempts"
+    before_attempts = {path.name for path in attempts.iterdir()}
+    before_selector = (directory / "selected.json").read_bytes()
+    before_generation = store.generation()
+    target = attempts / latest / "artifacts.json"
+    real_read = Path.read_bytes
+
+    def unreadable(path: Path) -> bytes:
+        if path == target:
+            raise OSError(5, "synthetic EIO")
+        return real_read(path)
+
+    monkeypatch.setattr(Path, "read_bytes", unreadable)
+    assert store.read_result(C, "fragment-size", A) is None
+    with pytest.raises(store_module.ResultOrderUnavailable, match="unreadable"):
+        store.publish_result(_failed(3), input_id=C)
+    assert (directory / "selected.json").read_bytes() == before_selector
+    assert {path.name for path in attempts.iterdir()} == before_attempts
+    assert store.generation() == before_generation
+
+    monkeypatch.setattr(Path, "read_bytes", real_read)
+    assert store.read_result(C, "fragment-size", A).metrics[0].value == 2
+    retry = store.publish_result(_failed(3), input_id=C)
+    index = json.loads((attempts / retry / "artifacts.json").read_bytes())
+    assert index["ordinal"] == 3
+
+
+def test_unreadable_order_during_prune_keeps_every_attempt(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    store = LabStore(tmp_path)
+    store.ensure()
+    first = store.publish_result(_envelope(1), input_id=C)
+    second = store.publish_result(_envelope(2), input_id=C)
+    real_order = LabStore._attempt_order
+    calls = 0
+
+    def intermittent(path: Path) -> int:
+        nonlocal calls
+        calls += 1
+        if calls == 3:
+            raise store_module.ResultOrderUnavailable("synthetic pruning EIO")
+        return real_order(path)
+
+    monkeypatch.setattr(LabStore, "_attempt_order", staticmethod(intermittent))
+    failed = store.publish_result(_failed(3), input_id=C)
+    directory = store.result_dir(C, "fragment-size", A)
+    assert store.selected_attempt(C, "fragment-size", A).name == failed
+    assert {path.name for path in (directory / "attempts").iterdir()} == {first, second, failed}
+
+def test_invalid_modern_ordinal_is_not_treated_as_legacy(tmp_path: Path) -> None:
+    store = LabStore(tmp_path)
+    store.ensure()
+    attempt = store.publish_result(_envelope(1), input_id=C)
+    directory = store.result_dir(C, "fragment-size", A)
+    index_path = directory / "attempts" / attempt / "artifacts.json"
+    index = json.loads(index_path.read_bytes())
+    index["ordinal"] = 0
+    index_path.write_text(json.dumps(index))
+    before_selector = (directory / "selected.json").read_bytes()
+
+    assert store.read_result(C, "fragment-size", A) is None
+    with pytest.raises(store_module.ResultOrderUnavailable, match="ordinal"):
+        store.publish_result(_envelope(2), input_id=C)
+    assert (directory / "selected.json").read_bytes() == before_selector
+    assert [path.name for path in (directory / "attempts").iterdir()] == [attempt]
+
 def test_selection_write_failure_keeps_prior_success(tmp_path: Path, monkeypatch) -> None:
     store = LabStore(tmp_path)
     store.ensure()
