@@ -398,10 +398,13 @@ and are not scored against a real cohort in Compare.
 Stored cohort metadata or an immutable generation is missing or malformed
 (exit 3). The reported cohort and field identify what to inspect. Restore the
 matching file from a known-good backup, then retry. The Lab does not replace
-the current pointer or repair a generation automatically; other intact
-cohorts remain available. If only the current pointer is missing and the
-member roster is intact, `lab cohort build` publishes a fresh generation from
-that roster while retaining earlier generation directories.
+the current pointer or repair a generation automatically. The backend listing
+reports each affected cohort separately so callers can retain intact cohorts.
+Finder's `.DS_Store` file is ignored; other unexpected generation entries
+must be inspected and moved aside manually after preserving them. If only the
+current pointer is missing and the member roster is intact, `lab cohort build`
+publishes a fresh generation from that roster while retaining earlier
+generation directories.
 
 ## Adding an algorithm
 

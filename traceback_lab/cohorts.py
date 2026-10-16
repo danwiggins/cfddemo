@@ -38,11 +38,13 @@ class CohortListing:
     problem: LabProblem | None
 
 
-def _storage_problem(cohort_id: str, field: str) -> LabProblem:
+def _storage_problem(cohort_id: str, field: str, *, fix: str | None = None) -> LabProblem:
+    if fix is None and field == "generation name":
+        fix = "Inspect the unexpected generations entry and move it aside after preserving it; restore any damaged numeric generation from a known-good backup"
     return LabProblem(
         "TBX-LAB-022",
         cause=f"stored cohort {cohort_id} has missing or invalid {field}",
-        fix="Restore the matching cohort file from a known-good backup before retrying",
+        fix=fix or "Restore the matching cohort file from a known-good backup before retrying",
         data={"cohort_id": cohort_id, "field": field},
     )
 
@@ -87,10 +89,15 @@ def _generation_versions(directory: Path, cohort_id: str) -> tuple[int, ...]:
         raise _storage_problem(cohort_id, "generations") from exc
     versions: list[int] = []
     for child in children:
-        if child.name.startswith(".staging-") and child.is_dir() and not child.is_symlink():
-            continue
-        if child.is_symlink() or not child.is_dir() or not _VERSION_NAME.fullmatch(child.name):
-            raise _storage_problem(cohort_id, "generation name")
+        try:
+            if child.name == ".DS_Store" and child.is_file() and not child.is_symlink():
+                continue
+            if child.name.startswith(".staging-") and child.is_dir() and not child.is_symlink():
+                continue
+            if child.is_symlink() or not child.is_dir() or not _VERSION_NAME.fullmatch(child.name):
+                raise _storage_problem(cohort_id, "generation name")
+        except OSError as exc:
+            raise _storage_problem(cohort_id, "generation name") from exc
         try:
             versions.append(int(child.name))
         except ValueError as exc:
@@ -145,10 +152,15 @@ def add_sample(store: LabStore, cohort_id: str, sample_ref: str) -> bool:
             )
         if not _full_input(store, record):
             raise ValueError("the source has no stored full aligned input")
+        directory = _cohort_dir(store, cohort_id)
+        roster_path = directory / "members.json"
+        if not roster_path.exists() and not roster_path.is_symlink():
+            pointer_path = directory / "current.json"
+            if pointer_path.exists() or pointer_path.is_symlink() or _generation_versions(directory, cohort_id):
+                raise _storage_problem(cohort_id, "members.json")
         roster = read_roster(store, cohort_id)
         if source_id in roster:
             return False
-        directory = _cohort_dir(store, cohort_id)
         write_atomic(directory / "members.json", canonical_json_bytes({
             "schema": _ROSTER_SCHEMA, "source_ids": [*roster, source_id],
         }))
@@ -303,7 +315,10 @@ def read_current(store: LabStore, cohort_id: str) -> CohortGeneration | None:
     pointer = _read_cohort_json(directory / "current.json", cohort_id)
     if pointer is None:
         if _generation_versions(directory, cohort_id):
-            raise _storage_problem(cohort_id, "current.json")
+            raise _storage_problem(
+                cohort_id, "current.json",
+                fix="If the member roster is intact, run lab cohort build with the same --root to publish a new generation; otherwise restore current.json from a known-good backup",
+            )
         return None
     version = pointer.get("version")
     if type(version) is not int or version < 1:
@@ -331,21 +346,31 @@ def list_cohorts(store: LabStore) -> tuple[CohortListing, ...]:
     """Inspect each named cohort without hiding intact neighbors."""
 
     base = store.lab / "cohorts"
-    if base.is_symlink():
-        raise ValueError("cohort directory may not be a symlink")
-    if not base.is_dir():
-        return ()
+    try:
+        if base.is_symlink():
+            raise _storage_problem("cohorts", "cohort root")
+        if not base.is_dir():
+            return ()
+        directories = sorted(base.iterdir())
+    except OSError as exc:
+        raise _storage_problem("cohorts", "cohort root") from exc
     rows: list[CohortListing] = []
-    for directory in sorted(base.iterdir()):
+    for directory in directories:
         if not _COHORT_ID.fullmatch(directory.name):
             continue
-        if directory.is_symlink() or not directory.is_dir():
+        try:
+            valid_directory = not directory.is_symlink() and directory.is_dir()
+        except OSError:
+            valid_directory = False
+        if not valid_directory:
             rows.append(CohortListing(directory.name, None, _storage_problem(directory.name, "cohort directory")))
             continue
         try:
             generation = read_current(store, directory.name)
         except LabProblem as problem:
             rows.append(CohortListing(directory.name, None, problem))
+        except (OSError, ValueError):
+            rows.append(CohortListing(directory.name, None, _storage_problem(directory.name, "cohort metadata")))
         else:
             if generation is not None:
                 rows.append(CohortListing(directory.name, generation, None))

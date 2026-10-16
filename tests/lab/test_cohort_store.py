@@ -342,6 +342,39 @@ def test_corrupt_roster_and_missing_source_fail_before_publish(store: LabStore) 
     assert store.generation() == before
 
 
+def test_add_refuses_missing_roster_after_publication_without_replacing_history(store: LabStore) -> None:
+    first = _sample(store, 1)
+    second = _sample(store, 2)
+    add_sample(store, "healthy", first)
+    build_cohort(store, "healthy")
+    directory = store.lab / "cohorts" / "healthy"
+    pointer = directory / "current.json"
+    generation = directory / "generations" / "1" / "generation.json"
+    pointer_before, generation_before = pointer.read_bytes(), generation.read_bytes()
+    (directory / "members.json").unlink()
+    before = store.generation()
+
+    with pytest.raises(LabProblem, match="TBX-LAB-022") as error:
+        add_sample(store, "healthy", second)
+    assert error.value.data == {"cohort_id": "healthy", "field": "members.json"}
+    assert not (directory / "members.json").exists()
+    assert pointer.read_bytes() == pointer_before
+    assert generation.read_bytes() == generation_before
+    assert store.generation() == before
+
+
+def test_missing_pointer_problem_explains_roster_rebuild(store: LabStore) -> None:
+    first = _sample(store, 1)
+    add_sample(store, "healthy", first)
+    build_cohort(store, "healthy")
+    (store.lab / "cohorts" / "healthy" / "current.json").unlink()
+    with pytest.raises(LabProblem, match="TBX-LAB-022") as error:
+        read_current(store, "healthy")
+    assert error.value.data["field"] == "current.json"
+    assert "cohort build" in error.value.fix
+    assert "roster" in error.value.fix
+
+
 @pytest.mark.parametrize("damage,field", [
     ("missing", "generation.json"),
     ("json", "generation.json"),
@@ -448,3 +481,46 @@ def test_cohort_listing_reports_symlink_without_following_it(store: LabStore, tm
     assert entries[0].problem is not None
     assert entries[0].problem.data["field"] == "cohort directory"
     assert entries[1].generation == healthy
+
+
+def test_cohort_listing_keeps_healthy_entry_after_one_stat_error(store: LabStore, monkeypatch) -> None:
+    from pathlib import Path
+    from traceback_lab.cohorts import list_cohorts
+
+    source_id = _sample(store, 1)
+    add_sample(store, "healthy", source_id)
+    healthy = build_cohort(store, "healthy")
+    (store.lab / "cohorts" / "broken").mkdir()
+    original = Path.is_dir
+
+    def fail_one(directory: Path) -> bool:
+        if directory.name == "broken":
+            raise OSError("synthetic stat failure")
+        return original(directory)
+
+    monkeypatch.setattr(Path, "is_dir", fail_one)
+    entries = list_cohorts(store)
+    assert [entry.cohort_id for entry in entries] == ["broken", "healthy"]
+    assert entries[0].problem is not None
+    assert entries[0].problem.data["field"] == "cohort directory"
+    assert entries[1].generation == healthy
+
+
+def test_symlinked_cohort_root_has_typed_problem(store: LabStore, tmp_path) -> None:
+    from traceback_lab.cohorts import list_cohorts
+
+    outside = tmp_path / "outside-root"
+    outside.mkdir()
+    (store.lab / "cohorts").parent.mkdir(parents=True)
+    (store.lab / "cohorts").symlink_to(outside, target_is_directory=True)
+    with pytest.raises(LabProblem, match="TBX-LAB-022") as error:
+        list_cohorts(store)
+    assert error.value.data["field"] == "cohort root"
+
+
+def test_finder_metadata_does_not_block_next_generation(store: LabStore) -> None:
+    source_id = _sample(store, 1)
+    add_sample(store, "healthy", source_id)
+    build_cohort(store, "healthy")
+    (store.lab / "cohorts" / "healthy" / "generations" / ".DS_Store").write_bytes(b"finder")
+    assert build_cohort(store, "healthy").version == 2
