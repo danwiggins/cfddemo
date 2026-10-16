@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import shlex
 from types import SimpleNamespace
 
 import pytest
@@ -214,7 +215,8 @@ def test_compare_cohort_unavailable_has_no_metrics(tmp_path, monkeypatch, cohort
         return None
     monkeypatch.setattr(web_api, "read_current", current)
     monkeypatch.setattr(web_api.views, "load_sample", lambda store, source_id: SimpleNamespace(example=False))
-    api = web_api.LabApi(LabStore(tmp_path))
+    root = tmp_path / "root with spaces"
+    api = web_api.LabApi(LabStore(root))
     monkeypatch.setattr(api, "_resolve", lambda id12: (_TARGET, []))
 
     payload = api.compare(_TARGET[:12], "broken")
@@ -223,6 +225,9 @@ def test_compare_cohort_unavailable_has_no_metrics(tmp_path, monkeypatch, cohort
     assert payload["metrics"] == [] and payload["unscored"] == []
     assert payload["problem"]["code"] == ("TBX-LAB-022" if cohort_failure == "damaged" else "TBX-LAB-017")
     assert "fix" in payload["problem"] and "docs" in payload["problem"]
+    if cohort_failure == "unbuilt":
+        assert f"--root {shlex.quote(str(root))}" in payload["problem"]["fix"]
+        assert "--root R" not in payload["problem"]["fix"]
 
 
 def test_compare_target_unavailable_has_no_metrics(tmp_path, monkeypatch) -> None:
@@ -246,6 +251,24 @@ def test_compare_target_unavailable_has_no_metrics(tmp_path, monkeypatch) -> Non
     assert payload["cohort_version"] == "healthy:7"
     assert payload["metrics"] == [] and payload["unscored"] == []
     assert payload["problem"]["code"] == "TBX-LAB-020"
+
+
+def test_compare_missing_full_input_has_prose_recovery(tmp_path, monkeypatch) -> None:
+    generation = CohortGeneration(cohort_id="healthy", version=7, members=())
+    monkeypatch.setattr(web_api, "read_current", lambda store, cohort_id: generation)
+    monkeypatch.setattr(web_api.views, "load_sample", lambda store, source_id: SimpleNamespace(example=False))
+    def missing_input(store, source_id):
+        raise ValueError("admitted source has no full aligned input")
+    monkeypatch.setattr(web_api, "member_from_store", missing_input)
+    api = web_api.LabApi(LabStore(tmp_path))
+    monkeypatch.setattr(api, "_resolve", lambda id12: (_TARGET, []))
+    monkeypatch.setattr(api, "_id12s", lambda: {_TARGET: _TARGET[:12]})
+
+    payload = api.compare(_TARGET[:12], "healthy")
+
+    assert payload["state"] == "target_unavailable" and payload["metrics"] == []
+    assert "original input" in payload["problem"]["fix"]
+    assert "--root R" not in payload["problem"]["fix"] and "ID12" not in payload["problem"]["fix"]
 
 
 def test_example_is_explicitly_unscorable(tmp_path, monkeypatch) -> None:

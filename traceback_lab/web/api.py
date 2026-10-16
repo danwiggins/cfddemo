@@ -9,6 +9,7 @@ result's own attempt directory and no component is a symlink.
 from __future__ import annotations
 
 import os
+import shlex
 import stat
 import threading
 import time
@@ -340,7 +341,8 @@ class LabApi:
         if generation is None:
             problem = LabProblem(
                 "TBX-LAB-017", cause=f"cohort {cohort_id} has no published generation",
-                fix=f"Run `traceback lab cohort build --cohort {cohort_id} --root R`, then reload Compare",
+                fix="Run `" + shlex.join(["traceback", "lab", "cohort", "build", "--cohort", cohort_id,
+                                          "--root", str(self.store.root)]) + "`, then reload Compare",
             )
             return {"found": True, "id12": id12, "cohort_id": cohort_id,
                     "state": "cohort_unavailable", "metrics": [], "unscored": [],
@@ -371,7 +373,8 @@ class LabApi:
                 raise
             problem = LabProblem(
                 "TBX-LAB-017", cause=f"sample {id12} has no stored full aligned input",
-                fix="Run `traceback lab run ID12 --root R`, then reload Compare",
+                fix="Inspect `traceback lab runs`, restore the sample's full input if needed, "
+                    "then rerun from its original input and reload Compare",
             )
             return {**base, "state": "target_unavailable", "metrics": [], "unscored": [],
                     "problem": _recovery_problem(problem)}
