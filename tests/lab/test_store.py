@@ -11,6 +11,7 @@ import threading
 import time
 from pathlib import Path
 
+import numpy as np
 import pytest
 
 from traceback_lab import STORE_VERSION
@@ -120,6 +121,164 @@ def test_interrupted_publish_leaves_old_selection_and_no_staging(tmp_path: Path,
     assert store.generation() == 1
 
 
+def test_failed_retry_selects_failure_but_retains_prior_success(tmp_path: Path) -> None:
+    store = LabStore(tmp_path)
+    store.ensure()
+    success = store.publish_result(_envelope(1), input_id=C, artifacts={"h/x.json": b"ok"})
+    failures = [store.publish_result(_failed(n), input_id=C) for n in range(5)]
+
+    selected = store.selected_attempt(C, "fragment-size", A)
+    assert selected is not None and selected.name == failures[-1]
+    assert store.read_result(C, "fragment-size", A).status == "failed"
+    attempts = store.result_dir(C, "fragment-size", A) / "attempts"
+    assert (attempts / success / "artifacts" / "h" / "x.json").read_bytes() == b"ok"
+    assert sorted(path.name for path in attempts.iterdir()) == sorted([success, *failures[-3:]])
+
+
+def test_reversed_attempt_timestamps_keep_publication_order(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    ids = iter(
+        f"a-20261016T205100{n:06d}-{n:08x}"
+        for n in range(7, 0, -1)
+    )
+    monkeypatch.setattr(store_module, "new_attempt_id", lambda: next(ids))
+    store = LabStore(tmp_path)
+    store.ensure()
+    older = store.publish_result(_envelope(1), input_id=C)
+    latest_success = store.publish_result(_envelope(2), input_id=C)
+    failures = [store.publish_result(_failed(n), input_id=C) for n in range(5)]
+
+    directory = store.result_dir(C, "fragment-size", A)
+    selected = store.selected_attempt(C, "fragment-size", A)
+    assert selected is not None and selected.name == failures[-1]
+    assert store.read_result(C, "fragment-size", A).status == "failed"
+    selector = json.loads((directory / "selected.json").read_bytes())
+    assert selector["last_success_attempt_id"] == latest_success
+    attempts = directory / "attempts"
+    assert not (attempts / older).exists()
+    assert sorted(path.name for path in attempts.iterdir()) == sorted([latest_success, *failures[-3:]])
+
+def test_ambiguous_legacy_successes_are_not_pruned(tmp_path: Path, monkeypatch) -> None:
+    ids = iter(
+        f"a-20261016T205200{n:06d}-{n:08x}"
+        for n in range(6, 0, -1)
+    )
+    monkeypatch.setattr(store_module, "new_attempt_id", lambda: next(ids))
+    store = LabStore(tmp_path)
+    store.ensure()
+    older = store.publish_result(_envelope(1), input_id=C)
+    newer = store.publish_result(_envelope(2), input_id=C)
+    attempts = store.result_dir(C, "fragment-size", A) / "attempts"
+    for name in (older, newer):
+        (attempts / name / "artifacts.json").unlink()
+
+    for n in range(4):
+        store.publish_result(_failed(n), input_id=C)
+    assert (attempts / older).is_dir()
+    assert (attempts / newer).is_dir()
+    assert store.read_result(C, "fragment-size", A).status == "failed"
+
+def test_unreadable_ordinal_aborts_publication_without_reusing_it(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    store = LabStore(tmp_path)
+    store.ensure()
+    store.publish_result(_envelope(1), input_id=C)
+    latest = store.publish_result(_envelope(2), input_id=C)
+    directory = store.result_dir(C, "fragment-size", A)
+    attempts = directory / "attempts"
+    before_attempts = {path.name for path in attempts.iterdir()}
+    before_selector = (directory / "selected.json").read_bytes()
+    before_generation = store.generation()
+    target = attempts / latest / "artifacts.json"
+    real_read = Path.read_bytes
+
+    def unreadable(path: Path) -> bytes:
+        if path == target:
+            raise OSError(5, "synthetic EIO")
+        return real_read(path)
+
+    monkeypatch.setattr(Path, "read_bytes", unreadable)
+    assert store.read_result(C, "fragment-size", A) is None
+    with pytest.raises(store_module.ResultOrderUnavailable, match="unreadable"):
+        store.publish_result(_failed(3), input_id=C)
+    assert (directory / "selected.json").read_bytes() == before_selector
+    assert {path.name for path in attempts.iterdir()} == before_attempts
+    assert store.generation() == before_generation
+
+    monkeypatch.setattr(Path, "read_bytes", real_read)
+    assert store.read_result(C, "fragment-size", A).metrics[0].value == 2
+    retry = store.publish_result(_failed(3), input_id=C)
+    index = json.loads((attempts / retry / "artifacts.json").read_bytes())
+    assert index["ordinal"] == 3
+
+
+def test_unreadable_order_during_prune_keeps_every_attempt(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    store = LabStore(tmp_path)
+    store.ensure()
+    first = store.publish_result(_envelope(1), input_id=C)
+    second = store.publish_result(_envelope(2), input_id=C)
+    real_order = LabStore._attempt_order
+    calls = 0
+
+    def intermittent(path: Path) -> int:
+        nonlocal calls
+        calls += 1
+        if calls == 3:
+            raise store_module.ResultOrderUnavailable("synthetic pruning EIO")
+        return real_order(path)
+
+    monkeypatch.setattr(LabStore, "_attempt_order", staticmethod(intermittent))
+    failed = store.publish_result(_failed(3), input_id=C)
+    directory = store.result_dir(C, "fragment-size", A)
+    assert store.selected_attempt(C, "fragment-size", A).name == failed
+    assert {path.name for path in (directory / "attempts").iterdir()} == {first, second, failed}
+
+def test_invalid_modern_ordinal_is_not_treated_as_legacy(tmp_path: Path) -> None:
+    store = LabStore(tmp_path)
+    store.ensure()
+    attempt = store.publish_result(_envelope(1), input_id=C)
+    directory = store.result_dir(C, "fragment-size", A)
+    index_path = directory / "attempts" / attempt / "artifacts.json"
+    index = json.loads(index_path.read_bytes())
+    index["ordinal"] = 0
+    index_path.write_text(json.dumps(index))
+    before_selector = (directory / "selected.json").read_bytes()
+
+    assert store.read_result(C, "fragment-size", A) is None
+    with pytest.raises(store_module.ResultOrderUnavailable, match="ordinal"):
+        store.publish_result(_envelope(2), input_id=C)
+    assert (directory / "selected.json").read_bytes() == before_selector
+    assert [path.name for path in (directory / "attempts").iterdir()] == [attempt]
+
+def test_selection_write_failure_keeps_prior_success(tmp_path: Path, monkeypatch) -> None:
+    store = LabStore(tmp_path)
+    store.ensure()
+    first = store.publish_result(_envelope(1), input_id=C)
+    real_write = store_module.write_atomic
+
+    def fail_selection(path: Path, content: bytes) -> None:
+        if path.name == "selected.json":
+            raise OSError(5, "simulated selection write failure")
+        real_write(path, content)
+
+    monkeypatch.setattr(store_module, "write_atomic", fail_selection)
+    with pytest.raises(OSError, match="selection write failure"):
+        store.publish_result(_envelope(2), input_id=C)
+    assert store.selected_attempt(C, "fragment-size", A).name == first
+    assert store.read_result(C, "fragment-size", A).metrics[0].value == 1
+    assert store.generation() == 1
+    monkeypatch.setattr(store_module, "write_atomic", real_write)
+    for n in range(4):
+        store.publish_result(_failed(n), input_id=C)
+    directory = store.result_dir(C, "fragment-size", A)
+    selected = json.loads((directory / "selected.json").read_bytes())
+    assert selected["last_success_attempt_id"] == first
+    assert (directory / "attempts" / first).is_dir()
+
 def test_publish_directory_refuses_existing_destination(tmp_path: Path) -> None:
     store = LabStore(tmp_path)
     store.ensure()
@@ -153,6 +312,161 @@ def test_selected_json_with_a_bad_attempt_id_reads_as_missing(tmp_path: Path) ->
     (store.result_dir(C, "fragment-size", A) / "selected.json").write_text('{"attempt_id":"../../x"}')
     assert store.read_result(C, "fragment-size", A) is None
 
+
+@pytest.mark.parametrize(
+    ("field", "value"),
+    [
+        ("algorithm_id", "copy-number"),
+        ("parameters_sha256", B),
+        ("input_id", B),
+    ],
+)
+def test_selected_result_with_wrong_identity_is_unavailable(
+    tmp_path: Path, field: str, value: str,
+) -> None:
+    store = LabStore(tmp_path)
+    store.ensure()
+    store.publish_result(_envelope(1), input_id=C)
+    attempt = store.selected_attempt(C, "fragment-size", A)
+    assert attempt is not None
+    data = json.loads((attempt / "result.json").read_bytes())
+    if field in ("parameters_sha256", "input_id"):
+        data["provenance"][field] = value
+    else:
+        data[field] = value
+    (attempt / "result.json").write_text(json.dumps(data))
+    assert store.selected_attempt(C, "fragment-size", A) is None
+    assert store.read_result(C, "fragment-size", A) is None
+
+
+def test_malformed_selected_result_is_unavailable(tmp_path: Path) -> None:
+    store = LabStore(tmp_path)
+    store.ensure()
+    store.publish_result(_envelope(1), input_id=C)
+    attempt = store.selected_attempt(C, "fragment-size", A)
+    assert attempt is not None
+    (attempt / "result.json").write_bytes(b"{broken")
+    assert store.selected_attempt(C, "fragment-size", A) is None
+    assert store.read_result(C, "fragment-size", A) is None
+
+
+def test_incomplete_new_panel_attempt_does_not_replace_success(tmp_path: Path) -> None:
+    store = LabStore(tmp_path)
+    store.ensure()
+    first = store.publish_result(_envelope(1), input_id=C)
+    data = json.loads(_envelope(2).to_bytes())
+    data["panels"] = [{"panel_id": "histogram", "kind": "chart", "data_ref": "artifacts/h/x.json"}]
+    with pytest.raises(ValueError, match="panel data_ref"):
+        store.publish_result(ResultEnvelope.model_validate(data), input_id=C)
+    assert store.selected_attempt(C, "fragment-size", A).name == first
+    assert store.read_result(C, "fragment-size", A).metrics[0].value == 1
+    assert store.orphaned_staging() == []
+
+def test_missing_selected_panel_artifact_is_unavailable(tmp_path: Path) -> None:
+    store = LabStore(tmp_path)
+    store.ensure()
+    data = json.loads(_envelope(1).to_bytes())
+    data["panels"] = [{"panel_id": "histogram", "kind": "chart", "data_ref": "artifacts/h/x.json"}]
+    envelope = ResultEnvelope.model_validate(data)
+    store.publish_result(envelope, input_id=C, artifacts={"h/x.json": b"{}"})
+    attempt = store.selected_attempt(C, "fragment-size", A)
+    assert attempt is not None
+    (attempt / "artifacts" / "h" / "x.json").unlink()
+    assert store.selected_attempt(C, "fragment-size", A) is None
+    assert store.read_result(C, "fragment-size", A) is None
+
+@pytest.mark.parametrize("damage", ["missing", "truncated"])
+def test_incomplete_upstream_artifact_is_not_reused(tmp_path: Path, damage: str) -> None:
+    store = LabStore(tmp_path)
+    store.ensure()
+    store.publish_result(
+        _envelope(1), input_id=C,
+        artifacts={"columns/meta.json": b"meta", "columns/flag.bin": b"1234"},
+    )
+    attempt = store.selected_attempt(C, "fragment-size", A)
+    assert attempt is not None
+    artifact = attempt / "artifacts" / "columns" / "flag.bin"
+    if damage == "missing":
+        artifact.unlink()
+    else:
+        artifact.write_bytes(b"12")
+    assert store.read_result(C, "fragment-size", A) is None
+    assert store.selected_artifacts(C, "fragment-size", A) is None
+
+def test_pre_index_scalar_result_remains_readable(tmp_path: Path) -> None:
+    store = LabStore(tmp_path)
+    store.ensure()
+    store.publish_result(_envelope(1), input_id=C)
+    attempt = store.selected_attempt(C, "fragment-size", A)
+    assert attempt is not None
+    (attempt / "artifacts.json").unlink()
+    assert store.read_result(C, "fragment-size", A).metrics[0].value == 1
+
+
+@pytest.mark.parametrize("algorithm_id", ["read-summary", "meth-calls"])
+def test_pre_index_intermediate_requires_complete_layout(
+    tmp_path: Path, algorithm_id: str,
+) -> None:
+    from traceback_lab import meth_calls, read_summary
+
+    store = LabStore(tmp_path)
+    store.ensure()
+    data = json.loads(_envelope(1).to_bytes())
+    data["algorithm_id"] = algorithm_id
+    envelope = ResultEnvelope.model_validate(data)
+    if algorithm_id == "read-summary":
+        meta = {"schema": read_summary.SCHEMA, "rows": 1, "columns": read_summary.COLUMNS}
+        artifacts = {
+            **{
+                f"columns/{name}.bin": bytes(np.dtype(dtype).itemsize)
+                for name, dtype in read_summary.COLUMNS.items()
+            },
+            "columns/meta.json": json.dumps(meta).encode(),
+        }
+        damaged = "columns/flag.bin"
+    else:
+        meta = {
+            "schema": meth_calls.SCHEMA, "dtype": [list(field) for field in meth_calls.DTYPE.descr], "chunks": [1], "invalid_mm": 1,
+        }
+        artifacts = {
+            "calls/meta.json": json.dumps(meta).encode(),
+            "calls/calls-00000.bin": bytes(meth_calls.DTYPE.itemsize),
+            "calls/invalid_rows.bin": bytes(4),
+        }
+        damaged = "calls/calls-00000.bin"
+    store.publish_result(envelope, input_id=C, artifacts=artifacts)
+    attempt = store.selected_attempt(C, algorithm_id, A)
+    assert attempt is not None
+    (attempt / "artifacts.json").unlink()
+    assert store.read_result(C, algorithm_id, A) is not None
+    (attempt / "artifacts" / damaged).write_bytes(b"")
+    assert store.read_result(C, algorithm_id, A) is None
+
+@pytest.mark.parametrize("algorithm_id", ["read-summary", "meth-calls"])
+@pytest.mark.parametrize("status", ["failed", "skipped"])
+def test_pre_index_intermediate_non_ok_result_remains_visible(
+    tmp_path: Path, algorithm_id: str, status: str,
+) -> None:
+    store = LabStore(tmp_path)
+    store.ensure()
+    data = json.loads(_envelope(1).to_bytes())
+    data["algorithm_id"] = algorithm_id
+    data["status"] = status
+    data["metrics"] = []
+    if status == "failed":
+        data["failure"] = {"first_line": "synthetic failure", "stderr_tail": []}
+    else:
+        data["skip_reason"] = "depth"
+        data["skip_message"] = "synthetic preflight skip"
+    store.publish_result(ResultEnvelope.model_validate(data), input_id=C)
+    attempt = store.selected_attempt(C, algorithm_id, A)
+    assert attempt is not None
+    (attempt / "artifacts.json").unlink()
+
+    selected = store.read_result(C, algorithm_id, A)
+    assert selected is not None and selected.status == status
+    assert store.selected_attempt(C, algorithm_id, A) == attempt
+    assert store.selected_artifacts(C, algorithm_id, A) is None
 
 def test_writer_lock_heartbeat_and_cleanup(tmp_path: Path) -> None:
     store = LabStore(tmp_path)
