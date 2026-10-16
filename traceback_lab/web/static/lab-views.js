@@ -924,6 +924,18 @@
               const original = metric.original_reference || {};
               const sourceReference = !metric.original_reference ? "no library entry" :
                 `${original.kind || "none"}${original.source ? ": " + original.source : ""}`;
+              const evidence = metric.entry || {};
+              const publishedValue = original.kind === "published_mean" ? `Published mean: ${original.value} ${original.unit || ""}` :
+                original.kind === "published_range" ? `Published range: ${original.lo}–${original.hi} ${original.unit || ""}` : "No published numeric range";
+              const citations = (evidence.citations || []).map((citation) => citation.startsWith("doi:") ?
+                h("a", { href: `https://doi.org/${encodeURIComponent(citation.slice(4))}`, rel: "noreferrer noopener", target: "_blank" }, citation) : citation);
+              const publishedEvidence = !metric.original_reference ? sourceReference : h("details", {},
+                h("summary", {}, sourceReference),
+                h("p", {}, publishedValue, original.statistic ? ` (${original.statistic})` : ""),
+                h("p", {}, "Original evidence tier: ", tierBadge(evidence.origin_tier || metric.tier),
+                  evidence.origin_platform ? ` · ${evidence.origin_platform}` : ""),
+                h("p", {}, "Citations: ", citations.length ? citations.flatMap((citation, i) => i ? [", ", citation] : [citation]) : "none",
+                  citations.length && !evidence.citation_checked ? h("span", { class: "unverified" }, " UNVERIFIED citation") : ""));
               const values = metric.cohort_values || [];
               const valueTable = values.length ? h("details", {},
                 h("summary", {}, `Eligible values (${values.length})`),
@@ -937,7 +949,7 @@
                 h("td", { class: "num" }, fmt(metric.eligible_n)),
                 h("td", {}, alignerCounts),
                 h("td", {}, exclusions),
-                h("td", {}, sourceReference));
+                h("td", {}, publishedEvidence));
             });
             nodes.push(h("div", { class: "table-wrap" }, h("table", { class: "data-table" },
               h("caption", {}, `Comparison against ${data.cohort_version}; each n is post-exclusion`),

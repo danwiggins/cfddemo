@@ -173,7 +173,10 @@ def test_compare_and_joint_panel_render_in_native_tables(tmp_path, monkeypatch) 
             "state": "no_reference", "reason": "cohort_too_small", "caption": "No reference yet (cohort n = 9 of 10).",
             "exploratory_n": None, "eligible_n": 9, "cohort_values": list(range(1, 10)),
             "excluded": {"self": 1, "missing_metric": 1},
-            "aligner_counts": {"minimap2 2.28; samtools 1.20": 9}, "original_reference": {"kind": "published_mean", "source": "synthetic"},
+            "aligner_counts": {"minimap2 2.28; samtools 1.20": 9},
+            "tier": "NEWER", "entry": {"origin_tier": "NEWER", "origin_platform": "synthetic source",
+                                      "citations": ["doi:10.1234/synthetic"], "citation_checked": {"by": "fixture"}},
+            "original_reference": {"kind": "published_mean", "value": 167, "unit": "bp", "source": "synthetic"},
         }], "unscored": [],
     })
     artifact = {
@@ -215,6 +218,8 @@ def test_compare_and_joint_panel_render_in_native_tables(tmp_path, monkeypatch) 
     assert "No reference yet (cohort n = 9 of 10)" in compare
     assert "missing metric: 1" in compare and "minimap2 2.28; samtools 1.20: 9" in compare
     assert "Eligible values (9)" in compare and "Original library reference" in compare
+    assert "Published mean: 167 bp" in compare and "Original evidence tier:" in compare
+    assert "https://doi.org/10.1234%2Fsynthetic" in compare
     assert 'data-csp-violations="0"' in compare
     assert "1001+ bp" in signals and "75–100% (inclusive)" in signals
     assert "Short group n = 0, mean = —" in signals
