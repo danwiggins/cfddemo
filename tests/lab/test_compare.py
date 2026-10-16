@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 import shlex
 from types import SimpleNamespace
 
@@ -173,6 +174,26 @@ def test_cohort_list_keeps_healthy_selectable_beside_damaged(tmp_path, monkeypat
     }]
 
 
+def test_cohort_root_symlink_returns_actionable_api_problem(tmp_path) -> None:
+    from tests.lab.test_lab_server import _get, _session
+    from traceback_lab.web.server import RunningLabServer
+
+    store = LabStore(tmp_path)
+    store.lab.mkdir(parents=True)
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    (store.lab / "cohorts").symlink_to(outside, target_is_directory=True)
+
+    with RunningLabServer(store) as server:
+        response, body = _get(server, "/api/cohorts", _session(server))
+
+    assert response.status == 200
+    payload = json.loads(body)
+    assert payload["cohorts"] == [] and payload["unavailable"] == []
+    assert payload["problem"]["code"] == "TBX-LAB-022"
+    assert payload["problem"]["fix"] and payload["problem"]["docs"]
+
+
 def test_real_store_list_and_compare_fail_closed_after_pointer_damage(tmp_path, monkeypatch) -> None:
     store = LabStore(tmp_path)
     healthy = CohortGeneration(cohort_id="healthy", version=1, members=())
@@ -254,13 +275,15 @@ def test_compare_target_unavailable_has_no_metrics(tmp_path, monkeypatch) -> Non
 
 
 def test_compare_missing_full_input_has_prose_recovery(tmp_path, monkeypatch) -> None:
+    store = LabStore(tmp_path)
+    store.sources_dir.mkdir(parents=True)
+    (store.sources_dir / f"{_TARGET}.json").write_text(json.dumps({
+        "source_id": _TARGET, "example": False, "inputs": [],
+    }))
     generation = CohortGeneration(cohort_id="healthy", version=7, members=())
     monkeypatch.setattr(web_api, "read_current", lambda store, cohort_id: generation)
     monkeypatch.setattr(web_api.views, "load_sample", lambda store, source_id: SimpleNamespace(example=False))
-    def missing_input(store, source_id):
-        raise ValueError("admitted source has no full aligned input")
-    monkeypatch.setattr(web_api, "member_from_store", missing_input)
-    api = web_api.LabApi(LabStore(tmp_path))
+    api = web_api.LabApi(store)
     monkeypatch.setattr(api, "_resolve", lambda id12: (_TARGET, []))
     monkeypatch.setattr(api, "_id12s", lambda: {_TARGET: _TARGET[:12]})
 
@@ -380,6 +403,10 @@ def test_compare_and_joint_panel_render_in_native_tables(tmp_path, monkeypatch) 
             "cohorts": [], "unavailable": [{"cohort_id": "broken", "problem": problem}],
         })
         only_broken = dom("compare", "only-broken-profile", "No selectable cohort generation is available")
+        monkeypatch.setattr(web_api.LabApi, "cohorts", lambda self: {
+            "cohorts": [], "unavailable": [], "problem": problem,
+        })
+        root_unavailable = dom("compare", "root-unavailable-profile", "Cohort storage: Cohort generation unavailable")
         signals = dom("signals", "signals-profile", "Molecules by aligned size and 5mC fraction")
         motif_algorithm = {
             **algorithm, "algorithm_id": "breakpoint-motifs",
@@ -418,6 +445,10 @@ def test_compare_and_joint_panel_render_in_native_tables(tmp_path, monkeypatch) 
     assert 'aria-label="Cohort generation"' not in only_broken
     assert 'data-csp-violations="0"' in with_broken and 'data-csp-violations="0"' in target_unavailable
     assert 'data-csp-violations="0"' in only_broken
+    assert "No selectable cohort generation is available" in root_unavailable
+    assert "Next action: " in root_unavailable and "docs/LAB-GUIDE.md#tbx-lab-022" in root_unavailable
+    assert 'aria-label="Cohort generation"' not in root_unavailable
+    assert 'data-csp-violations="0"' in root_unavailable
     assert "1001+ bp" in signals and "75–100% (inclusive)" in signals
     assert "Short group n = 0, mean = —" in signals
     assert "A missing mean is not zero" in signals

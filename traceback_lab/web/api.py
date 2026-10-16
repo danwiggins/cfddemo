@@ -303,7 +303,11 @@ class LabApi:
     def cohorts(self) -> dict[str, Any]:
         rows = []
         unavailable = []
-        for listing in list_cohorts(self.store):
+        try:
+            listings = list_cohorts(self.store)
+        except LabProblem as problem:
+            return {"cohorts": [], "unavailable": [], "problem": _recovery_problem(problem)}
+        for listing in listings:
             if listing.problem is not None:
                 unavailable.append({"cohort_id": listing.cohort_id,
                                     "problem": _recovery_problem(listing.problem)})

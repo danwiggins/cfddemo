@@ -989,20 +989,21 @@
       .then((data) => {
         if (!slot.isConnected) return;
         const unavailable = data.unavailable || [];
+        const rootProblem = data.problem ? recoveryNotice("Cohort storage", data.problem) : "";
         const unavailablePanel = unavailable.length ? h("section", { class: "panel", "aria-labelledby": "compare-unavailable-title" },
           h("h3", { id: "compare-unavailable-title" }, "Unavailable cohorts"),
           h("p", { class: "help" }, "These cohorts cannot be selected. Other published generations remain available."),
           ...unavailable.map((row) => recoveryNotice(`Cohort ${row.cohort_id}`, row.problem))) : "";
         if (!data.cohorts.length) {
-          slot.replaceChildren(h("p", { class: "empty" }, unavailable.length ?
+          slot.replaceChildren(h("p", { class: "empty" }, data.problem || unavailable.length ?
             "No selectable cohort generation is available. Follow the recovery action below, then reload Compare." :
-            "No cohort generation has been built under this ROOT. Add eligible samples with `traceback lab cohort add`, then publish with `traceback lab cohort build`."), unavailablePanel);
+            "No cohort generation has been built under this ROOT. Add eligible samples with `traceback lab cohort add`, then publish with `traceback lab cohort build`."), rootProblem, unavailablePanel);
           return;
         }
         const picker = h("select", { "aria-label": "Cohort generation" },
           ...data.cohorts.map((row) => h("option", { value: row.cohort_id }, `${row.cohort_id} · ${row.cohort_version} · n = ${row.member_n}`)));
         results = h("div", { "aria-live": "polite" });
-        slot.replaceChildren(h("label", {}, "Choose cohort ", picker), unavailablePanel, results);
+        slot.replaceChildren(h("label", {}, "Choose cohort ", picker), rootProblem, unavailablePanel, results);
         // The selected generation is read once by the API for every metric.
         picker.addEventListener("change", () => show(data.cohorts.find((row) => row.cohort_id === picker.value)));
         show(data.cohorts[0]);
