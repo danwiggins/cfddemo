@@ -9,7 +9,6 @@ result's own attempt directory and no component is a symlink.
 from __future__ import annotations
 
 import os
-import re
 import stat
 import threading
 import time
@@ -18,7 +17,7 @@ from pathlib import Path, PurePosixPath
 from typing import Any
 
 from ..cohort_contracts import project_metric
-from ..cohorts import member_from_store, read_current
+from ..cohorts import list_cohorts, member_from_store, read_current
 from ..identity import resolve_prefix, shortest_unique_prefixes
 from ..ingest import source_ids, source_record
 from ..interpretation.engine import (
@@ -34,6 +33,13 @@ from ..interpretation.engine import (
 from ..problems import LabProblem
 from ..store import LabStore, summarize_run
 from .. import views
+
+
+def _recovery_problem(problem: LabProblem) -> dict[str, str]:
+    """Only operator-safe fields cross the local Compare API boundary."""
+
+    return {"code": problem.code, "summary": problem.summary,
+            "cause": problem.cause, "fix": problem.fix, "docs": problem.docs}
 
 
 class LibraryHolder:
@@ -294,22 +300,23 @@ class LabApi:
 
     # -- Compare (L1.6): one pinned immutable cohort generation ----------------------
     def cohorts(self) -> dict[str, Any]:
-        base = self.store.lab / "cohorts"
         rows = []
-        if base.is_dir() and not base.is_symlink():
-            for directory in sorted(base.iterdir()):
-                if not directory.is_dir() or directory.is_symlink() or not re.fullmatch(r"[a-z][a-z0-9-]{0,39}", directory.name):
-                    continue
-                generation = read_current(self.store, directory.name)
-                if generation is not None:
-                    rows.append({
-                        "cohort_id": directory.name,
-                        "cohort_version": generation.version_id,
-                        "kind": generation.kind,
-                        "member_n": generation.percentile_n,
-                        "pon_n": generation.pon_n,
-                    })
-        return {"cohorts": rows}
+        unavailable = []
+        for listing in list_cohorts(self.store):
+            if listing.problem is not None:
+                unavailable.append({"cohort_id": listing.cohort_id,
+                                    "problem": _recovery_problem(listing.problem)})
+                continue
+            generation = listing.generation
+            if generation is not None:
+                rows.append({
+                    "cohort_id": listing.cohort_id,
+                    "cohort_version": generation.version_id,
+                    "kind": generation.kind,
+                    "member_n": generation.percentile_n,
+                    "pon_n": generation.pon_n,
+                })
+        return {"cohorts": rows, "unavailable": unavailable}
 
     def compare(self, id12: str, cohort_id: str) -> dict[str, Any]:
         source_id, candidates = self._resolve(id12)
@@ -317,10 +324,27 @@ class LabApi:
             return {"found": False, "candidates": candidates}
         sample = views.load_sample(self.store, source_id)
         if sample is None:
-            return {"found": False, "candidates": []}
-        generation = read_current(self.store, cohort_id)
+            problem = LabProblem(
+                "TBX-LAB-017", cause=f"sample {id12} has no readable current full input",
+                fix="Inspect `traceback lab runs`, restore the source record if needed, then rerun the sample",
+            )
+            return {"found": True, "id12": id12, "cohort_id": cohort_id,
+                    "state": "target_unavailable", "metrics": [], "unscored": [],
+                    "problem": _recovery_problem(problem)}
+        try:
+            generation = read_current(self.store, cohort_id)
+        except LabProblem as problem:
+            return {"found": True, "id12": id12, "cohort_id": cohort_id,
+                    "state": "cohort_unavailable", "metrics": [], "unscored": [],
+                    "problem": _recovery_problem(problem)}
         if generation is None:
-            return {"found": False, "cohort_missing": True}
+            problem = LabProblem(
+                "TBX-LAB-017", cause=f"cohort {cohort_id} has no published generation",
+                fix=f"Run `traceback lab cohort build --cohort {cohort_id} --root R`, then reload Compare",
+            )
+            return {"found": True, "id12": id12, "cohort_id": cohort_id,
+                    "state": "cohort_unavailable", "metrics": [], "unscored": [],
+                    "problem": _recovery_problem(problem)}
         base = {
             "found": True,
             "id12": self._id12s()[source_id],
@@ -337,10 +361,20 @@ class LabApi:
             return {**base, "state": "example_unscorable", "metrics": [], "unscored": []}
         try:
             target = member_from_store(self.store, source_id)
-        except LabProblem as exc:
-            if exc.code == "TBX-LAB-021":
+        except LabProblem as problem:
+            if problem.code == "TBX-LAB-021":
                 return {**base, "state": "example_unscorable", "metrics": [], "unscored": []}
-            raise
+            return {**base, "state": "target_unavailable", "metrics": [], "unscored": [],
+                    "problem": _recovery_problem(problem)}
+        except ValueError as exc:
+            if str(exc) != "admitted source has no full aligned input":
+                raise
+            problem = LabProblem(
+                "TBX-LAB-017", cause=f"sample {id12} has no stored full aligned input",
+                fix="Run `traceback lab run ID12 --root R`, then reload Compare",
+            )
+            return {**base, "state": "target_unavailable", "metrics": [], "unscored": [],
+                    "problem": _recovery_problem(problem)}
         # Both reads must describe the same full input. A newer run may become
         # current between load_sample and member_from_store while retaining the
         # same algorithm parameter hash; comparing its compatibility key with

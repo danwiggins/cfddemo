@@ -7,8 +7,10 @@ from types import SimpleNamespace
 import pytest
 
 from traceback_lab.cohort_contracts import CohortGeneration, CohortMember, CohortResult
+from traceback_lab.cohorts import CohortListing
 from traceback_lab.envelope import Metric, ResultEnvelope, provenance
 from traceback_lab.interpretation.engine import Entry, Library, classify, load_library
+from traceback_lab.problems import LabProblem
 from traceback_lab.store import LabStore
 from traceback_lab.web import api as web_api
 
@@ -143,6 +145,107 @@ def test_compare_rejects_changed_full_input_or_source(
     assert payload["state"] == "stale_target"
     assert payload["metrics"] == [] and payload["unscored"] == []
     assert payload["cohort_version"] == "healthy:1"
+
+
+def test_cohort_list_keeps_healthy_selectable_beside_damaged(tmp_path, monkeypatch) -> None:
+    healthy = CohortGeneration(cohort_id="healthy", version=7, members=())
+    damaged = LabProblem(
+        "TBX-LAB-022", cause="stored cohort broken has invalid generation.json",
+        fix="Restore the matching cohort file from a known-good backup before retrying",
+    )
+    monkeypatch.setattr(web_api, "list_cohorts", lambda store: (
+        CohortListing("broken", None, damaged),
+        CohortListing("healthy", healthy, None),
+        CohortListing("pending", None, None),
+    ))
+
+    payload = web_api.LabApi(LabStore(tmp_path)).cohorts()
+
+    assert [row["cohort_id"] for row in payload["cohorts"]] == ["healthy"]
+    assert payload["cohorts"][0]["cohort_version"] == "healthy:7"
+    assert payload["unavailable"] == [{
+        "cohort_id": "broken", "problem": {
+            "code": "TBX-LAB-022", "summary": damaged.summary,
+            "cause": damaged.cause, "fix": damaged.fix,
+            "docs": "docs/LAB-GUIDE.md#tbx-lab-022",
+        },
+    }]
+
+
+def test_real_store_list_and_compare_fail_closed_after_pointer_damage(tmp_path, monkeypatch) -> None:
+    store = LabStore(tmp_path)
+    healthy = CohortGeneration(cohort_id="healthy", version=1, members=())
+    generation_dir = store.lab / "cohorts" / "healthy" / "generations" / "1"
+    generation_dir.mkdir(parents=True)
+    (generation_dir / "generation.json").write_text(healthy.model_dump_json(by_alias=True))
+    pointer = generation_dir.parent.parent / "current.json"
+    pointer.write_text('{"version":1}')
+    broken_dir = store.lab / "cohorts" / "broken"
+    broken_dir.mkdir()
+    (broken_dir / "current.json").write_text("{")
+    api = web_api.LabApi(store)
+
+    listing = api.cohorts()
+    assert [row["cohort_id"] for row in listing["cohorts"]] == ["healthy"]
+    assert listing["unavailable"][0]["cohort_id"] == "broken"
+    assert listing["unavailable"][0]["problem"]["code"] == "TBX-LAB-022"
+
+    monkeypatch.setattr(api, "_resolve", lambda id12: (_TARGET, []))
+    monkeypatch.setattr(web_api.views, "load_sample", lambda store, source_id: SimpleNamespace(example=False))
+    selected_broken = api.compare(_TARGET[:12], "broken")
+    assert selected_broken["state"] == "cohort_unavailable" and selected_broken["metrics"] == []
+
+    pointer.write_text("{")
+    selected_damaged = api.compare(_TARGET[:12], "healthy")
+    assert selected_damaged["state"] == "cohort_unavailable" and selected_damaged["metrics"] == []
+    assert selected_damaged["problem"]["code"] == "TBX-LAB-022"
+    assert api.cohorts()["cohorts"] == []
+
+
+@pytest.mark.parametrize("cohort_failure", ["damaged", "unbuilt"])
+def test_compare_cohort_unavailable_has_no_metrics(tmp_path, monkeypatch, cohort_failure) -> None:
+    problem = LabProblem(
+        "TBX-LAB-022", cause="stored cohort broken has invalid current.json",
+        fix="Restore the matching cohort file from a known-good backup before retrying",
+    )
+    def current(store, cohort_id):
+        if cohort_failure == "damaged":
+            raise problem
+        return None
+    monkeypatch.setattr(web_api, "read_current", current)
+    monkeypatch.setattr(web_api.views, "load_sample", lambda store, source_id: SimpleNamespace(example=False))
+    api = web_api.LabApi(LabStore(tmp_path))
+    monkeypatch.setattr(api, "_resolve", lambda id12: (_TARGET, []))
+
+    payload = api.compare(_TARGET[:12], "broken")
+
+    assert payload["found"] is True and payload["state"] == "cohort_unavailable"
+    assert payload["metrics"] == [] and payload["unscored"] == []
+    assert payload["problem"]["code"] == ("TBX-LAB-022" if cohort_failure == "damaged" else "TBX-LAB-017")
+    assert "fix" in payload["problem"] and "docs" in payload["problem"]
+
+
+def test_compare_target_unavailable_has_no_metrics(tmp_path, monkeypatch) -> None:
+    generation = CohortGeneration(cohort_id="healthy", version=7, members=())
+    monkeypatch.setattr(web_api, "read_current", lambda store, cohort_id: generation)
+    monkeypatch.setattr(web_api.views, "load_sample", lambda store, source_id: SimpleNamespace(example=False))
+    problem = LabProblem(
+        "TBX-LAB-020", cause="stored source record is malformed",
+        fix="Restore the source record matching its filename before cohort add/build",
+    )
+    def unavailable(store, source_id):
+        raise problem
+    monkeypatch.setattr(web_api, "member_from_store", unavailable)
+    api = web_api.LabApi(LabStore(tmp_path))
+    monkeypatch.setattr(api, "_resolve", lambda id12: (_TARGET, []))
+    monkeypatch.setattr(api, "_id12s", lambda: {_TARGET: _TARGET[:12]})
+
+    payload = api.compare(_TARGET[:12], "healthy")
+
+    assert payload["found"] is True and payload["state"] == "target_unavailable"
+    assert payload["cohort_version"] == "healthy:7"
+    assert payload["metrics"] == [] and payload["unscored"] == []
+    assert payload["problem"]["code"] == "TBX-LAB-020"
 
 
 def test_example_is_explicitly_unscorable(tmp_path, monkeypatch) -> None:
