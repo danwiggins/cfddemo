@@ -109,26 +109,21 @@ def page_root(tmp_path_factory, synthetic_world) -> Path:
 
 
 def _dom(server, tmp_path, *, size="1280,800", route=None, want=None) -> str:
-    """Dump the page; retry (fresh link, fresh profile, longer virtual-time budget)
-    until it is ready and ``want`` holds (default: landing measured)."""
+    """Dump one page with a fresh one-use link and report any readiness failure."""
 
     from tests.lab.test_lab_server import headless_dom
 
     if want is None:
         want = (lambda d: True) if route else (lambda d: "data-measured" in d)
     good = lambda d: 'data-ready="1"' in d and want(d)  # noqa: E731
-    dom = ""
-    for attempt in range(5):
-        link = server.issue_link() + (f"&route={route}" if route else "")
-        dom = headless_dom(
-            [_chrome(), "--headless=new", "--disable-gpu", "--hide-scrollbars", "--no-first-run",
-             f"--user-data-dir={tmp_path / f'p-{size}-{attempt}'}", f"--virtual-time-budget={15000 + 15000 * attempt}",
-             f"--window-size={size}", "--dump-dom", link],
-            ok=good, attempts=1, timeout=90,
-        )
-        if good(dom):
-            return dom
-    return dom
+    link = server.issue_link() + (f"&route={route}" if route else "")
+    return headless_dom(
+        [_chrome(), "--headless=new", "--disable-gpu", "--hide-scrollbars", "--no-first-run",
+         f"--user-data-dir={tmp_path / 'profile'}", "--virtual-time-budget=15000",
+         f"--window-size={size}", "--dump-dom", link],
+        ok=good, timeout=90,
+    )
+
 
 
 def _body(dom: str) -> dict[str, str]:
@@ -177,15 +172,13 @@ def test_no_horizontal_page_scroll(page_root, tmp_path, size) -> None:
 
 
 @needs_chrome
-def test_navigation_order_and_absent_lenses(page_root, tmp_path) -> None:
+def test_navigation_order_with_compare(page_root, tmp_path) -> None:
     with RunningLabServer(LabStore(page_root)) as server:
         dom = _dom(server, tmp_path, route=f"/sample/{_id12(page_root)}/stability")
     nav = re.search(r'<nav aria-label="Lenses"[^>]*>(.*?)</nav>', dom, re.S).group(1)
     labels = re.findall(r">([A-Za-z/ ]+?)(?: \(\d+[^)]*\))?</a>", nav)
-    assert labels == ["Findings", "Trust/QC", "Stability", "Signals", "Body map", "Agreement", "Evidence", "Methods"]
+    assert labels == ["Findings", "Trust/QC", "Stability", "Signals", "Compare", "Body map", "Agreement", "Evidence", "Methods"]
     assert 'aria-current="page">Stability' in nav
-    for absent in ("Compare",):
-        assert absent not in nav
     options = re.findall(r"<option[^>]*>([^<]*)</option>", dom)
     assert len(options) == 1 and "@" not in options[0]  # derived inputs are never samples
     assert "usable to" in dom or "unstable below full depth" in dom

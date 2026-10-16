@@ -37,6 +37,7 @@
     { id: "trust-qc", label: "Trust/QC" },
     { id: "stability", label: "Stability" },
     { id: "signals", label: "Signals" },
+    { id: "compare", label: "Compare" },
     { id: "body-map", label: "Body map" },
     { id: "agreement", label: "Agreement" },
     { id: "evidence", label: "Evidence" },
@@ -122,7 +123,7 @@
     cliaCopy().then((c) => {
       shortBox.replaceChildren(...paragraphs(c.short));
       fullBox.replaceChildren(...paragraphs(c.full));
-      requestAnimationFrame(() => setTimeout(measure, 0));
+      measure();
     });
     out.push(panel);
     if (sample.excluded_chunks && sample.excluded_chunks.length) {
@@ -293,6 +294,7 @@
     const header = rect(document.querySelector(".app-header"));
     const panel = document.querySelector(".clia-panel");
     const viewport = window.innerHeight;
+    body.viewportHeight = String(viewport);
     body.bannerHeight = banner ? Math.round(banner.height) : "";
     body.headerHeight = header ? Math.round(header.height) : "";
     if (panel) {
@@ -349,6 +351,7 @@
       return h("figure", { class: "strip" }, svg("svg", { viewBox: `0 0 ${width} ${height}`, role: "img", "aria-label": metric.caption, class: "strip-svg" },
         svg("title", {}, metric.caption),
         svg("path", { d: `M${x(lo)},8 v18 M${x(lo)},17 H${x(hi)} M${x(hi)},8 v18`, class: "strip-track" }),
+        ...(metric.cohort_values || []).map((value) => svg("circle", { cx: x(value), cy: 17, r: 2.5, class: "strip-member" })),
         svg("text", { x: x(v), y: 22, class: "strip-mark", "text-anchor": "middle" }, "◆")), h("figcaption", {}, metric.caption));
     }
     if (metric.percentile !== null && metric.percentile !== undefined) {
@@ -662,14 +665,50 @@
     };
     families.forEach(([, label], i) => tabs.append(h("button", { type: "button", class: "control subtab", "aria-pressed": "false", onclick: () => show(i) }, label)));
     out.push(tabs, body);
-    show(0);
+    const initial = ["fragment-size", "end-motifs", "delfi-ratio", "long-tail", "mtdna", "breakpoint-motifs"].some((id) => algo(sample, id))
+      ? 0 : algo(sample, "copy-number") ? 1 : 2;
+    show(initial);
     return out;
+  }
+
+  function breakpointMotifSignals(sample) {
+    const a = algo(sample, "breakpoint-motifs");
+    if (!a) return [];
+    const section = h("section", { class: "panel" }, h("h2", {}, "CpG-proximal aligned ends"), flagPill("LEGAL"));
+    if (a.status !== "ok") return [section, absent(a, "breakpoint-motifs")];
+    section.append(
+      h("p", {}, "These are aligned-reference-span start and end−1 contexts; physical cleavage sites are not established by this BAM. Near and far 4-mer counts exclude invalid or off-contig contexts."),
+      ...context(sample, "breakpoint-motifs", new Set()),
+    );
+    const slot = h("div", { "aria-live": "polite" }, h("p", {}, "Loading 4-mer counts…"));
+    section.append(slot);
+    artifact(sample, "breakpoint-motifs", "cpg-end-motifs").then((data) => {
+      if (!Array.isArray(data.motif) || data.motif.length !== 256 ||
+          !Array.isArray(data.near_count) || data.near_count.length !== 256 ||
+          !Array.isArray(data.far_count) || data.far_count.length !== 256) {
+        throw new Error("motif panel dimensions invalid");
+      }
+      const rows = data.motif.map((motif, i) => [motif, data.near_count[i], data.far_count[i]]);
+      const table = h("table", { class: "data-table" },
+        h("caption", {}, "Aligned-end 4-mers near and far from CpG; 256 motifs"),
+        h("thead", {}, h("tr", {}, ...["4-mer", "Near count", "Far count"].map((name) => h("th", { scope: "col" }, name)))),
+        h("tbody", {}, ...rows.map(([motif, near, far]) =>
+          h("tr", {}, h("th", { scope: "row" }, motif), h("td", { class: "num" }, fmt(near)), h("td", { class: "num" }, fmt(far))))));
+      const details = h("details", {}, h("summary", {}, "All 256 aligned-end motifs"), h("div", { class: "table-wrap" }, table));
+      slot.replaceWith(
+        h("p", {}, `Near ends: ${fmt(data.near_ends)}; far ends: ${fmt(data.far_ends)}. Invalid contexts: near ${fmt(data.invalid_context_near)}, far ${fmt(data.invalid_context_far)}.`),
+        data.methylation_link && data.methylation_link.status === "unavailable"
+          ? h("p", { class: "help" }, `Methylation link unavailable: ${data.methylation_link.reason || "no supported joint input"}.`) : "",
+        details,
+      );
+    }).catch((error) => slot.replaceWith(h("p", { class: "problem" }, `4-mer table unavailable (${error.message}). The scalar result remains in Findings.`)));
+    return [section];
   }
 
   function fragmentSignals(sample) {
     const a = algo(sample, "fragment-size");
     const section = h("section", { class: "panel" }, h("h2", {}, "Size density"));
-    if (!a || a.status !== "ok") return [section, absent(a, "fragment-size")];
+    if (!a || a.status !== "ok") return [section, absent(a, "fragment-size"), ...breakpointMotifSignals(sample)];
     const slot = h("div", {}, h("p", {}, "Loading…"));
     section.append(h("p", { class: "help" }, "No kit cohort band yet (cohort n = " + sample.cohort_n + " of 10); 167 bp marked."), ...context(sample, "fragment-size", new Set()), slot);
     artifact(sample, "fragment-size", "size-density").then((data) => {
@@ -686,7 +725,7 @@
         ? h("table", { class: "data-table" }, h("tbody", {}, ...other.metrics.filter((m) => m.value === null || typeof m.value !== "object").map((m) => h("tr", {}, h("th", { scope: "row" }, m.label), h("td", {}, fmt(m.value, m.unit))))))
         : absent(other, id), id === "end-motifs" || id === "delfi-ratio" ? flagPill("LEGAL") : ""));
     }
-    return [section, ...more];
+    return [section, ...more, ...breakpointMotifSignals(sample)];
   }
 
   function copyNumberSignals(sample) {
@@ -713,14 +752,55 @@
     return [section];
   }
 
+  function fragXMethSignals(sample) {
+    const a = algo(sample, "frag-x-meth");
+    const section = h("section", { class: "panel" }, h("h2", {}, "Fragment size × methylation"));
+    if (!a || a.status !== "ok") return a ? [section, absent(a, "frag-x-meth")] : [];
+    const delta = value(sample, "frag-x-meth", "short_fragment_hypomethylation_delta");
+    section.append(
+      h("p", {}, "Each molecule contributes once after at least four distinct CpG calls. The matrix is descriptive; no normal range is claimed."),
+      h("p", {}, "Long (151–220 bp) mean minus short (100–150 bp) mean: ",
+        h("strong", {}, fmt(delta, "fraction")),
+        delta === null ? " (one or both groups have no eligible molecules)." : ". A positive value means the short fragments have lower 5mC fraction."),
+      ...context(sample, "frag-x-meth", new Set()),
+    );
+    const slot = h("div", { "aria-live": "polite" }, h("p", {}, "Loading size × methylation counts…"));
+    section.append(slot);
+    artifact(sample, "frag-x-meth", "size-methylation").then((data) => {
+      if (!Array.isArray(data.size_edges_bp) || !Array.isArray(data.methylation_edges)
+          || !Array.isArray(data.counts) || data.counts.length !== data.size_edges_bp.length
+          || data.counts.some((row) => !Array.isArray(row) || row.length !== data.methylation_edges.length - 1)) {
+        throw new Error("panel dimensions invalid");
+      }
+      const methylLabels = data.methylation_edges.slice(0, -1).map((edge, i) =>
+        `${Math.round(edge * 100)}–${Math.round(data.methylation_edges[i + 1] * 100)}% ${i === data.methylation_edges.length - 2 ? "(inclusive)" : ""}`);
+      const sizeLabels = data.size_edges_bp.map((edge, i) =>
+        i + 1 === data.size_edges_bp.length ? `${edge}+ bp` : `${edge}–${data.size_edges_bp[i + 1] - 1} bp`);
+      const table = h("table", { class: "data-table" },
+        h("caption", {}, `Molecules by aligned size and 5mC fraction; ${fmt(data.n)} eligible molecules`),
+        h("thead", {}, h("tr", {}, h("th", { scope: "col" }, "Aligned size"),
+          ...methylLabels.map((label) => h("th", { scope: "col" }, label)))),
+        h("tbody", {}, ...data.counts.map((row, i) =>
+          h("tr", {}, h("th", { scope: "row" }, sizeLabels[i]),
+            ...row.map((count) => h("td", { class: "num" }, fmt(count)))))));
+      slot.replaceWith(
+        h("p", { class: "help" }, `Short group n = ${fmt(data.short_n)}, mean = ${fmt(data.short_mean)}; long group n = ${fmt(data.long_n)}, mean = ${fmt(data.long_mean)}. A missing mean is not zero.`),
+        h("div", { class: "table-wrap" }, table),
+      );
+    }).catch((error) => slot.replaceWith(h("p", { class: "problem" }, `Size × methylation table unavailable (${error.message}). The scalar result remains above.`)));
+    return [section];
+  }
+
   function methylationSignals(sample) {
     const ids = ["global-5mc", "global-5hmc", "pmd-score", "hypometh-reads", "modbase-qc"];
     const present = ids.map((id) => algo(sample, id)).filter(Boolean);
-    if (!present.length) return [h("p", { class: "empty" }, "No methylation summary algorithm has run on this sample yet (Phase 1). Cell-type composition is in Body map.")];
-    return present.map((a) => h("section", { class: "panel" }, h("h2", {}, a.algorithm_id), a.status === "ok"
+    const joint = fragXMethSignals(sample);
+    if (!present.length && !joint.length) return [h("p", { class: "empty" }, "No methylation summary algorithm has run on this sample yet (Phase 1). Cell-type composition is in Body map.")];
+    return [...joint, ...present.map((a) => h("section", { class: "panel" }, h("h2", {}, a.algorithm_id), a.status === "ok"
       ? h("table", { class: "data-table" }, h("tbody", {}, ...a.metrics.filter((m) => m.value === null || typeof m.value !== "object").map((m) => h("tr", {}, h("th", { scope: "row" }, m.label), h("td", {}, fmt(m.value, m.unit)), h("td", {}, stateChip(m))))))
-      : absent(a, a.algorithm_id)));
+      : absent(a, a.algorithm_id)))];
   }
+
 
   // -- Body map: tissue composition with intervals (no donuts) -------------------------------------
   const ORGANS = [
@@ -797,8 +877,124 @@
     return out;
   }
 
+  // -- Compare: each response is pinned to one immutable cohort generation ---------
+  function compare(sample) {
+    const out = [h("p", { class: "breadcrumb" }, `Lab › ${sample.id12} › Compare`),
+      h("div", { class: "findings-head" }, h("h1", { class: "view-title" }, "Compare"), flagPill("CLIA")),
+      h("p", { class: "help" }, "Compared with the selected cohort: an exploratory distribution, not a healthy or clinical reference. Only eligible, compatible, status-ok results count; a scored member is removed before the sample-size gate.")];
+    const shell = h("section", { class: "panel", "aria-labelledby": "compare-title" },
+      h("h2", { id: "compare-title" }, "Cohort generation"));
+    const slot = h("div", { "aria-live": "polite" }, h("p", {}, "Loading cohorts…"));
+    shell.append(slot);
+    out.push(shell);
+    let request = 0;
+    let results = null;
+    const show = (cohort) => {
+      const current = ++request;
+      results.replaceChildren(h("p", {}, "Loading comparison…"));
+      fetch(`/api/cohorts/${encodeURIComponent(cohort.cohort_id)}/samples/${sample.id12}/compare`, { credentials: "same-origin" })
+        .then((response) => { if (!response.ok) throw new Error(`HTTP ${response.status}`); return response.json(); })
+        .then((data) => {
+          if (!results.isConnected || current !== request) return;
+          const nodes = [
+            h("p", {}, `Generation ${data.cohort_version} · ${data.member_n} distinct members · PoN n = ${data.pon_n} (separate denominator).`),
+          ];
+          if (data.cohort_version !== cohort.cohort_version) nodes.push(h("p", { class: "status-line" }, "A newer cohort generation was published after the list loaded. This comparison uses the generation named above; reload to refresh the list."));
+          if (data.kind === "provisional_external") nodes.push(h("p", { class: "status-line" }, "Provisional external reference: protocol mismatch. Interpret ranges cautiously."));
+          if (data.state === "example_unscorable") {
+            nodes.push(h("p", { class: "empty" }, "EXAMPLE (synthetic) cannot be scored against a real kit cohort."));
+            results.replaceChildren(...nodes);
+            return;
+          }
+          if (data.state === "stale_target") {
+            nodes.push(h("p", { class: "status-line" }, "The sample changed while Compare loaded. Reload to compare its current full input."));
+            results.replaceChildren(...nodes);
+            return;
+          }
+          nodes.push(h("p", {}, `Target aligner: ${data.target_aligner}. Eligible members are counted separately for each metric after self-exclusion.`));
+          if (data.target_aligner.startsWith("pre-aligned; provenance unknown")) nodes.push(h("p", { class: "status-line" },
+            "Pre-aligned processing provenance is unknown. The cohort store isolates these inputs by input identity; they are not pooled as protocol-matched references."));
+          const alignerRows = Object.entries(data.aligner_counts || {}).map(([name, count]) =>
+            h("tr", {}, h("th", { scope: "row" }, name), h("td", { class: "num" }, fmt(count))));
+          const alignerTable = h("table", { class: "data-table" },
+            h("caption", {}, "Generation members by aligner identity"),
+            h("thead", {}, h("tr", {}, h("th", { scope: "col" }, "Aligner"), h("th", { scope: "col" }, "Members"))),
+            h("tbody", {}, ...alignerRows));
+          nodes.push(h("div", { class: "table-wrap" }, alignerTable));
+          if (!data.metrics.length) nodes.push(h("p", { class: "empty" }, "No current compatible cohort-reference metric is available for this sample. Missing or failed metrics are not zero."));
+          else {
+            const rows = data.metrics.map((metric) => {
+              const exclusions = Object.entries(metric.excluded || {}).map(([reason, count]) => `${reason.replace(/_/g, " ")}: ${count}`).join("; ") || "none";
+              const alignerCounts = Object.entries(metric.aligner_counts || {}).map(([name, count]) => `${name}: ${count}`).join("; ") || "none";
+              const original = metric.original_reference || {};
+              const sourceReference = !metric.original_reference ? "no library entry" :
+                `${original.kind || "none"}${original.source ? ": " + original.source : ""}`;
+              const evidence = metric.entry || {};
+              const publishedValue = original.kind === "published_mean" ? `Published mean: ${original.value} ${original.unit || ""}` :
+                original.kind === "published_range" ? `Published range: ${original.lo}–${original.hi} ${original.unit || ""}` : "No published numeric range";
+              const citations = (evidence.citations || []).map((citation) => citation.startsWith("doi:") ?
+                h("a", { href: `https://doi.org/${encodeURIComponent(citation.slice(4))}`, rel: "noreferrer noopener", target: "_blank" }, citation) : citation);
+              const publishedEvidence = !metric.original_reference ? sourceReference : h("details", {},
+                h("summary", {}, sourceReference),
+                h("p", {}, publishedValue, original.statistic ? ` (${original.statistic})` : ""),
+                h("p", {}, "Original evidence tier: ", tierBadge(evidence.origin_tier || metric.tier),
+                  evidence.origin_platform ? ` · ${evidence.origin_platform}` : ""),
+                h("p", {}, "Citations: ", citations.length ? citations.flatMap((citation, i) => i ? [", ", citation] : [citation]) : "none",
+                  citations.length && !evidence.citation_checked ? h("span", { class: "unverified" }, " UNVERIFIED citation") : ""));
+              const values = metric.cohort_values || [];
+              const valueTable = values.length ? h("details", {},
+                h("summary", {}, `Eligible values (${values.length})`),
+                h("table", { class: "data-table" }, h("caption", {}, "Anonymous compatible cohort members after self-exclusion"),
+                  h("thead", {}, h("tr", {}, h("th", { scope: "col" }, "Member"), h("th", { scope: "col" }, "Value"))),
+                  h("tbody", {}, ...values.map((value, i) => h("tr", {}, h("th", { scope: "row" }, String(i + 1)), h("td", {}, fmt(value, metric.unit))))))) : "";
+              return h("tr", {},
+                h("th", { scope: "row" }, metric.label),
+                h("td", {}, fmt(metric.value, metric.unit)),
+                h("td", {}, stateChip(metric), strip(metric), valueTable),
+                h("td", { class: "num" }, fmt(metric.eligible_n)),
+                h("td", {}, alignerCounts),
+                h("td", {}, exclusions),
+                h("td", {}, publishedEvidence));
+            });
+            nodes.push(h("div", { class: "table-wrap" }, h("table", { class: "data-table" },
+              h("caption", {}, `Comparison against ${data.cohort_version}; each n is post-exclusion`),
+              h("thead", {}, h("tr", {}, ...["Metric", "This sample", "Selected cohort interpretation", "Eligible n", "Eligible aligners", "Excluded", "Original library reference"].map((name) => h("th", { scope: "col" }, name)))),
+              h("tbody", {}, ...rows))));
+          }
+          if (data.unscored && data.unscored.length) {
+            nodes.push(h("p", { class: "help" }, `Not scored: ${data.unscored.map((item) => `${item.algorithm_id} (${item.status}: ${item.reason})`).join("; ")}. No value was substituted.`));
+          }
+          results.replaceChildren(...nodes);
+        })
+        .catch((error) => {
+          if (results.isConnected && current === request) results.replaceChildren(h("p", { class: "problem" }, `Comparison could not be loaded (${error.message}). Check the Lab server, then reload.`));
+        });
+    };
+    fetch("/api/cohorts", { credentials: "same-origin" })
+      .then((response) => { if (!response.ok) throw new Error(`HTTP ${response.status}`); return response.json(); })
+      .then((data) => {
+        if (!slot.isConnected) return;
+        if (!data.cohorts.length) {
+          slot.replaceChildren(h("p", { class: "empty" }, "No cohort generation has been built under this ROOT. Add eligible samples with `traceback lab cohort add`, then publish with `traceback lab cohort build`."));
+          return;
+        }
+        const picker = h("select", { "aria-label": "Cohort generation" },
+          ...data.cohorts.map((row) => h("option", { value: row.cohort_id }, `${row.cohort_id} · ${row.cohort_version} · n = ${row.member_n}`)));
+        results = h("div", { "aria-live": "polite" });
+        slot.replaceChildren(h("label", {}, "Choose cohort ", picker), results);
+        // The selected generation is read once by the API for every metric.
+        picker.addEventListener("change", () => show(data.cohorts.find((row) => row.cohort_id === picker.value)));
+        show(data.cohorts[0]);
+      })
+      .catch((error) => {
+        if (slot.isConnected) slot.replaceChildren(h("p", { class: "problem" }, `Cohorts could not be loaded (${error.message}). Check the Lab server, then reload.`));
+      });
+    return out;
+  }
+
   window.TracebackLabViews = {
     signals,
+    compare,
     "body-map": bodyMap,
     agreement,
     landing,

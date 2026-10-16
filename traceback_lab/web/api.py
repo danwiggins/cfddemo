@@ -9,6 +9,7 @@ result's own attempt directory and no component is a symlink.
 from __future__ import annotations
 
 import os
+import re
 import stat
 import threading
 import time
@@ -16,17 +17,21 @@ from collections.abc import Iterable
 from pathlib import Path, PurePosixPath
 from typing import Any
 
+from ..cohort_contracts import project_metric
+from ..cohorts import member_from_store, read_current
 from ..identity import resolve_prefix, shortest_unique_prefixes
 from ..ingest import source_ids, source_record
 from ..interpretation.engine import (
     LIBRARY_FILE,
     LICENSES_FILE,
+    Entry,
     Library,
     LibraryError,
     interpret_result,
     parse_library,
     qc_band,
 )
+from ..problems import LabProblem
 from ..store import LabStore, summarize_run
 from .. import views
 
@@ -286,6 +291,138 @@ class LabApi:
                 "unverified_citations": len(unverified),
             },
         }
+
+    # -- Compare (L1.6): one pinned immutable cohort generation ----------------------
+    def cohorts(self) -> dict[str, Any]:
+        base = self.store.lab / "cohorts"
+        rows = []
+        if base.is_dir() and not base.is_symlink():
+            for directory in sorted(base.iterdir()):
+                if not directory.is_dir() or directory.is_symlink() or not re.fullmatch(r"[a-z][a-z0-9-]{0,39}", directory.name):
+                    continue
+                generation = read_current(self.store, directory.name)
+                if generation is not None:
+                    rows.append({
+                        "cohort_id": directory.name,
+                        "cohort_version": generation.version_id,
+                        "kind": generation.kind,
+                        "member_n": generation.percentile_n,
+                        "pon_n": generation.pon_n,
+                    })
+        return {"cohorts": rows}
+
+    def compare(self, id12: str, cohort_id: str) -> dict[str, Any]:
+        source_id, candidates = self._resolve(id12)
+        if source_id is None:
+            return {"found": False, "candidates": candidates}
+        sample = views.load_sample(self.store, source_id)
+        if sample is None:
+            return {"found": False, "candidates": []}
+        generation = read_current(self.store, cohort_id)
+        if generation is None:
+            return {"found": False, "cohort_missing": True}
+        base = {
+            "found": True,
+            "id12": self._id12s()[source_id],
+            "cohort_id": cohort_id,
+            "cohort_version": generation.version_id,
+            "kind": generation.kind,
+            "member_n": generation.percentile_n,
+            "pon_n": generation.pon_n,
+            "store_generation": self.store.generation(),
+        }
+        # EXAMPLE cannot enter the real kit cohort, and its invented biological
+        # values must not be presented as a patient-vs-cohort comparison.
+        if sample.example:
+            return {**base, "state": "example_unscorable", "metrics": [], "unscored": []}
+        try:
+            target = member_from_store(self.store, source_id)
+        except LabProblem as exc:
+            if exc.code == "TBX-LAB-021":
+                return {**base, "state": "example_unscorable", "metrics": [], "unscored": []}
+            raise
+        # Both reads must describe the same full input. A newer run may become
+        # current between load_sample and member_from_store while retaining the
+        # same algorithm parameter hash; comparing its compatibility key with
+        # the older envelope would mix two sample snapshots.
+        if target.source_id != source_id or target.input_id != sample.full.input_id:
+            return {**base, "state": "stale_target", "metrics": [], "unscored": []}
+        current = {result.algorithm_id: result for result in target.results}
+        library = self.libraries.get()
+        rows = []
+        unscored = []
+        for algorithm_id, envelope in sample.full.results.items():
+            if algorithm_id in library.hidden_algorithms:
+                continue
+            if envelope.status != "ok":
+                unscored.append({"algorithm_id": algorithm_id, "status": envelope.status,
+                                 "reason": envelope.skip_reason or "failed"})
+                continue
+            scalar_metrics = []
+            for metric in envelope.metrics:
+                entry = library.entry(algorithm_id, metric.metric_id)
+                if entry is not None and entry["value_kind"] in ("vector", "categorical"):
+                    unscored.append({"algorithm_id": algorithm_id, "status": "non_scalar",
+                                     "reason": metric.metric_id})
+                    continue
+                if metric.value is None or (isinstance(metric.value, (int, float)) and not isinstance(metric.value, bool)):
+                    scalar_metrics.append(metric)
+            if not scalar_metrics:
+                continue
+            target_result = current.get(algorithm_id)
+            if target_result is None or target_result.parameters_sha256 != envelope.provenance.parameters_sha256:
+                unscored.append({"algorithm_id": algorithm_id, "status": "incompatible",
+                                 "reason": "current target result unavailable"})
+                continue
+            projections = {}
+            comparison_entries = dict(library.entries)
+            for metric in scalar_metrics:
+                entry = library.entry(algorithm_id, metric.metric_id)
+                if entry is None or entry["value_kind"] in ("vector", "categorical"):
+                    continue
+                projection = project_metric(
+                    generation, algorithm_id=algorithm_id, metric_id=metric.metric_id,
+                    cohort_compat_key=target_result.cohort_compat_key, target_source_id=source_id,
+                )
+                projections[metric.metric_id] = projection
+                # D8 still classifies the value. This copy applies only to the
+                # selected Compare response; the library and normal sample
+                # interpretation retain their original reference policy.
+                comparison_entries[(algorithm_id, metric.metric_id)] = Entry(
+                    algorithm_id, metric.metric_id,
+                    {**entry.raw, "reference": {"kind": generation.kind}},
+                )
+            comparison_library = Library(
+                version=library.version, entries=comparison_entries,
+                licenses=library.licenses, hidden_algorithms=library.hidden_algorithms,
+            )
+            interpreted = interpret_result(
+                envelope, comparison_library, depth_x=sample.full.depth_x(),
+                cohorts={metric_id: projection.interpretation_cohort()
+                         for metric_id, projection in projections.items()},
+            )
+            for row in interpreted:
+                if row.metric_id not in {metric.metric_id for metric in scalar_metrics}:
+                    continue
+                projection = projections.get(row.metric_id)
+                original_entry = library.entry(algorithm_id, row.metric_id)
+                payload = _metric_payload(row, original_entry, qc_band(row.value, original_entry))
+                payload.update({
+                    "algorithm_id": algorithm_id,
+                    "eligible_n": projection.percentile_n if projection else None,
+                    "cohort_values": list(projection.values) if projection else [],
+                    "excluded": dict(projection.exclusions) if projection else {},
+                    "aligner_counts": dict(projection.aligner_counts) if projection else {},
+                    "original_reference": original_entry.get("reference") if original_entry else None,
+                    "comparison_context": "selected_cohort" if projection else "no_library_entry",
+                })
+                rows.append(payload)
+        aligners: dict[str, int] = {}
+        for member in generation.members:
+            aligners[member.aligner_identity] = aligners.get(member.aligner_identity, 0) + 1
+        return {**base, "state": "ready", "target_aligner": target.aligner_identity,
+                "aligner_counts": dict(sorted(aligners.items())),
+                "metrics": rows, "unscored": unscored}
 
     # -- artifacts (D34 containment) -------------------------------------------------
     def artifact(self, id12: str, label: str, algorithm_id: str, panel_id: str) -> bytes | None:
