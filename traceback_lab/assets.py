@@ -15,13 +15,14 @@ import tempfile
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 from pydantic import ValidationError
 from traceback_runner.serialization import canonical_json_bytes
 
 from .asset_contracts import AssetDescriptor
-from .store import LabStore
+if TYPE_CHECKING:
+    from .store import LabStore
 
 REGISTRATION_SCHEMA = "traceback.lab.asset-registration.v1"
 PMD_KIND = "pmd"
@@ -32,6 +33,10 @@ _BLOCK = 16 << 20
 
 class AssetError(ValueError):
     """An asset is absent, unsafe, altered, or not the pinned version."""
+
+
+class AssetPublishUncertain(AssetError):
+    """Metadata is visible, but durable publication was not confirmed."""
 
 
 @dataclass(frozen=True)
@@ -199,6 +204,14 @@ def inspect_asset(
     return AssetRecord(descriptor, path, False)
 
 
+def _fsync_asset_directory(directory: Path) -> None:
+    descriptor = os.open(directory, os.O_RDONLY)
+    try:
+        os.fsync(descriptor)
+    finally:
+        os.close(descriptor)
+
+
 def add_asset(
     store: LabStore,
     kind: str,
@@ -232,6 +245,7 @@ def add_asset(
         manifest_path = directory / "manifest.json"
         _check_contained(store, manifest_path)
         staging: Path | None = None
+        linked = False
         try:
             staging = Path(tempfile.mkdtemp(prefix=".staging-", dir=directory))
             staged_manifest = staging / "manifest.json"
@@ -240,12 +254,13 @@ def add_asset(
                 stream.flush()
                 os.fsync(stream.fileno())
             os.link(staged_manifest, manifest_path)
-            parent_fd = os.open(directory, os.O_RDONLY)
-            try:
-                os.fsync(parent_fd)
-            finally:
-                os.close(parent_fd)
+            linked = True
+            _fsync_asset_directory(directory)
         except OSError as exc:
+            if linked:
+                raise AssetPublishUncertain(
+                    "PMD metadata is visible but durability is unconfirmed; inspect before retry"
+                ) from exc
             raise AssetError("could not publish PMD metadata safely") from exc
         finally:
             if staging is not None:
@@ -259,7 +274,7 @@ def add_asset(
             while block := reader.read(_BLOCK):
                 writer.write(block)
                 copied.update(block)
-        if copied.hexdigest() != PMD_SHA256:
+        if copied.hexdigest() != PMD_SHA256 or target.stat().st_size != descriptor.size_bytes:
             raise AssetError("source PMD file changed while being copied")
         (staging / "manifest.json").write_bytes(
             canonical_json_bytes(_manifest(AssetRecord(descriptor, target, False)))

@@ -214,3 +214,51 @@ def test_legacy_publish_os_error_is_structured_and_keeps_bytes(
         _add(store, source)
     assert assets.inspect_asset(store).legacy
     assert (directory / assets.PMD_FILENAME).read_bytes() == data
+
+def test_linked_manifest_fsync_failure_reports_uncertainty(
+    pinned: tuple[LabStore, Path, bytes], monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import argparse
+    import shlex
+
+    from traceback_lab import asset_command
+
+    store, source, data = pinned
+    directory = store.lab / "assets" / "pmd"
+    directory.mkdir(parents=True)
+    (directory / assets.PMD_FILENAME).write_bytes(data)
+
+    def sync_fails(path: Path) -> None:
+        assert path == directory
+        raise OSError("disk sync failed")
+
+    monkeypatch.setattr(assets, "_fsync_asset_directory", sync_fails)
+    args = argparse.Namespace(
+        kind="pmd", file=source, source_label="synthetic-Zhou-file",
+        terms="unknown", license_id=None,
+    )
+    code, payload = asset_command._add(args, store)
+    assert code == 3
+    assert "incomplete" in payload["summary"].lower()
+    assert "durability is unconfirmed" in payload["data"]["cause"]
+    assert shlex.split(payload["data"]["fix"])[-1] == str(store.root)
+    assert assets.inspect_asset(store).file.read_bytes() == data
+    assert (directory / "manifest.json").is_file()
+
+
+def test_copied_size_must_match_descriptor_before_publication(
+    pinned: tuple[LabStore, Path, bytes], monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    store, source, _ = pinned
+    real = assets._descriptor
+
+    def wrong_size(
+        size_bytes: int, source_label: str, terms: str,
+        license_id: str | None, *, sha256: str | None = None,
+    ) -> assets.AssetDescriptor:
+        return real(size_bytes + 1, source_label, terms, license_id, sha256=sha256)
+
+    monkeypatch.setattr(assets, "_descriptor", wrong_size)
+    with pytest.raises(assets.AssetError, match="changed while being copied"):
+        _add(store, source)
+    assert not (store.lab / "assets" / "pmd").exists()
