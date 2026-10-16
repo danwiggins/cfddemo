@@ -10,9 +10,10 @@ from __future__ import annotations
 
 import math
 from collections import Counter
+from types import MappingProxyType
 from typing import Literal
 
-from pydantic import BaseModel, ConfigDict, Field, StrictFloat, StrictInt, model_validator
+from pydantic import BaseModel, ConfigDict, Field, StrictFloat, StrictInt, field_serializer, model_validator
 
 from .identity import ALGORITHM_ID_PATTERN, METRIC_ID_PATTERN, SHA256_PATTERN
 from .interpretation.engine import Cohort
@@ -37,7 +38,12 @@ class CohortResult(BaseModel):
                 raise ValueError(f"invalid metric id {name!r}")
             if value is not None and (isinstance(value, bool) or not math.isfinite(value)):
                 raise ValueError(f"metric {name!r} must be finite or null")
+        object.__setattr__(self, "metrics", MappingProxyType(dict(self.metrics)))
         return self
+
+    @field_serializer("metrics")
+    def _serialize_metrics(self, value: dict[str, StrictFloat | StrictInt | None]) -> dict[str, float | int | None]:
+        return dict(value)
 
 
 class CohortMember(BaseModel):
@@ -103,6 +109,16 @@ class MetricProjection(BaseModel):
     aligner_counts: dict[str, int]
     exclusions: dict[str, int]
     pon_n: int
+
+    @model_validator(mode="after")
+    def _freeze_counts(self) -> MetricProjection:
+        object.__setattr__(self, "aligner_counts", MappingProxyType(dict(self.aligner_counts)))
+        object.__setattr__(self, "exclusions", MappingProxyType(dict(self.exclusions)))
+        return self
+
+    @field_serializer("aligner_counts", "exclusions")
+    def _serialize_counts(self, value: dict[str, int]) -> dict[str, int]:
+        return dict(value)
 
     @property
     def percentile_n(self) -> int:
