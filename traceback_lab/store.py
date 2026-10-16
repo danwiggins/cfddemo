@@ -13,7 +13,7 @@ Layout (D11, D19, D22, D35)::
     ROOT/lab/inputs/<input_id>/   aligned or derived input (published as a unit)
     ROOT/lab/results/<input_id>/<algorithm_id>/<parameters_sha256>/
         attempts/<attempt_id>/{result.json, artifacts/, artifacts.json}
-        selected.json             {attempt_id}, switched by os.replace
+        selected.json             {attempt_id, last_success_attempt_id?}, switched by os.replace
 
 Every multi-file write is staged in a ``.staging-<random>`` sibling and
 published with one ``rename_directory_exclusive_at`` call, so readers see the
@@ -389,6 +389,23 @@ class LabStore:
         return sorted(found)
 
     # -- results ------------------------------------------------------------
+    @staticmethod
+    def _attempt_order(path: Path) -> int:
+        try:
+            index = json.loads((path / "artifacts.json").read_bytes())
+            ordinal = index.get("ordinal")
+        except (OSError, ValueError, AttributeError):
+            return 0
+        return ordinal if isinstance(ordinal, int) and not isinstance(ordinal, bool) and ordinal > 0 else 0
+
+    @classmethod
+    def _next_attempt_order(cls, attempts: Path) -> int:
+        if not attempts.is_dir():
+            return 1
+        return 1 + max(
+            (cls._attempt_order(path) for path in attempts.iterdir() if path.is_dir()),
+            default=0,
+        )
     def publish_result(
         self,
         envelope: ResultEnvelope,
@@ -412,6 +429,7 @@ class LabStore:
             raise ValueError("a result is stored under the input it consumed (D19)")
         attempts = directory / "attempts"
         attempt = attempt_id or new_attempt_id()
+        ordinal = self._next_attempt_order(attempts)
         files = dict(artifacts or {})
         for relative in files:
             parts = Path(relative).parts
@@ -444,19 +462,36 @@ class LabStore:
                 ):
                     raise ValueError("panel data_ref was not published with its artifact")
             (staging / "artifacts.json").write_bytes(canonical_json_bytes({
-                "schema": ARTIFACT_INDEX_SCHEMA, "files": inventory,
+                "schema": ARTIFACT_INDEX_SCHEMA, "files": inventory, "ordinal": ordinal,
             }))
 
         previous = self.selected_attempt(
             input_id, envelope.algorithm_id, envelope.provenance.parameters_sha256
         )
+        last_success = attempt if envelope.status == "ok" else None
+        if last_success is None and previous is not None and self._attempt_status(previous) == "ok":
+            last_success = previous.name
+        if last_success is None:
+            try:
+                selected = json.loads((directory / "selected.json").read_bytes())
+                candidate = selected.get("last_success_attempt_id")
+                if (
+                    isinstance(candidate, str)
+                    and re.fullmatch(_ATTEMPT_ID, candidate)
+                    and self._attempt_status(attempts / candidate) == "ok"
+                ):
+                    last_success = candidate
+            except (OSError, ValueError, AttributeError):
+                pass
         self.publish_directory(attempts, attempt, build)
-        write_atomic(
-            directory / "selected.json", canonical_json_bytes({"attempt_id": attempt})
-        )
-        self._prune_attempts(
-            attempts, keep={attempt, *([previous.name] if previous is not None else [])}
-        )
+        selection = {"attempt_id": attempt}
+        if last_success is not None:
+            selection["last_success_attempt_id"] = last_success
+        write_atomic(directory / "selected.json", canonical_json_bytes(selection))
+        keep = {attempt, *([previous.name] if previous is not None else [])}
+        if last_success is not None:
+            keep.add(last_success)
+        self._prune_attempts(attempts, keep=keep)
         self.bump_generation()
         return attempt
 
@@ -477,14 +512,17 @@ class LabStore:
                 for path in attempts.iterdir()
                 if path.is_dir() and not path.name.startswith(STAGING_PREFIX)
             ),
-            key=lambda path: path.name,
+            key=lambda path: (self._attempt_order(path), path.name),
         )
         by_status = [(path, self._attempt_status(path)) for path in candidates]
         failed = [path for path, status in by_status if status == "failed"]
         successful = [path for path, status in by_status if status == "ok"]
         retained = set(keep)
         retained.update(path.name for path in failed[-KEEP_FAILED_ATTEMPTS:])
-        if successful:
+        # Old attempts have no ordinal. Keep their successes when no reliable
+        # publication order can distinguish them after a clock reversal.
+        retained.update(path.name for path in successful if self._attempt_order(path) == 0)
+        if successful and not any(path.name in retained for path in successful):
             retained.add(successful[-1].name)
         for stale in candidates:
             if stale.name not in retained:
@@ -622,9 +660,10 @@ class LabStore:
                 return None
             if (
                 not isinstance(index, dict)
-                or set(index) != {"schema", "files"}
+                or set(index) not in ({"schema", "files"}, {"schema", "files", "ordinal"})
                 or index["schema"] != ARTIFACT_INDEX_SCHEMA
                 or not isinstance(index["files"], dict)
+                or ("ordinal" in index and self._attempt_order(path) == 0)
             ):
                 return None
             for relative, size in index["files"].items():
@@ -636,7 +675,7 @@ class LabStore:
                     or not self._artifact_matches(artifact_root, relative, size)
                 ):
                     return None
-        elif not self._legacy_artifacts_complete(path, algorithm_id):
+        elif envelope.status == "ok" and not self._legacy_artifacts_complete(path, algorithm_id):
             return None
         for panel in envelope.panels:
             artifact = path

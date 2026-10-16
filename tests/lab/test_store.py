@@ -135,6 +135,30 @@ def test_failed_retry_selects_failure_but_retains_prior_success(tmp_path: Path) 
     assert sorted(path.name for path in attempts.iterdir()) == sorted([success, *failures[-3:]])
 
 
+def test_reversed_attempt_timestamps_keep_publication_order(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    ids = iter(
+        f"a-20261016T205100{n:06d}-{n:08x}"
+        for n in range(7, 0, -1)
+    )
+    monkeypatch.setattr(store_module, "new_attempt_id", lambda: next(ids))
+    store = LabStore(tmp_path)
+    store.ensure()
+    older = store.publish_result(_envelope(1), input_id=C)
+    latest_success = store.publish_result(_envelope(2), input_id=C)
+    failures = [store.publish_result(_failed(n), input_id=C) for n in range(5)]
+
+    directory = store.result_dir(C, "fragment-size", A)
+    selected = store.selected_attempt(C, "fragment-size", A)
+    assert selected is not None and selected.name == failures[-1]
+    assert store.read_result(C, "fragment-size", A).status == "failed"
+    selector = json.loads((directory / "selected.json").read_bytes())
+    assert selector["last_success_attempt_id"] == latest_success
+    attempts = directory / "attempts"
+    assert not (attempts / older).exists()
+    assert sorted(path.name for path in attempts.iterdir()) == sorted([latest_success, *failures[-3:]])
+
 def test_selection_write_failure_keeps_prior_success(tmp_path: Path, monkeypatch) -> None:
     store = LabStore(tmp_path)
     store.ensure()
@@ -152,6 +176,13 @@ def test_selection_write_failure_keeps_prior_success(tmp_path: Path, monkeypatch
     assert store.selected_attempt(C, "fragment-size", A).name == first
     assert store.read_result(C, "fragment-size", A).metrics[0].value == 1
     assert store.generation() == 1
+    monkeypatch.setattr(store_module, "write_atomic", real_write)
+    for n in range(4):
+        store.publish_result(_failed(n), input_id=C)
+    directory = store.result_dir(C, "fragment-size", A)
+    selected = json.loads((directory / "selected.json").read_bytes())
+    assert selected["last_success_attempt_id"] == first
+    assert (directory / "attempts" / first).is_dir()
 
 def test_publish_directory_refuses_existing_destination(tmp_path: Path) -> None:
     store = LabStore(tmp_path)
@@ -315,6 +346,32 @@ def test_pre_index_intermediate_requires_complete_layout(
     assert store.read_result(C, algorithm_id, A) is not None
     (attempt / "artifacts" / damaged).write_bytes(b"")
     assert store.read_result(C, algorithm_id, A) is None
+
+@pytest.mark.parametrize("algorithm_id", ["read-summary", "meth-calls"])
+@pytest.mark.parametrize("status", ["failed", "skipped"])
+def test_pre_index_intermediate_non_ok_result_remains_visible(
+    tmp_path: Path, algorithm_id: str, status: str,
+) -> None:
+    store = LabStore(tmp_path)
+    store.ensure()
+    data = json.loads(_envelope(1).to_bytes())
+    data["algorithm_id"] = algorithm_id
+    data["status"] = status
+    data["metrics"] = []
+    if status == "failed":
+        data["failure"] = {"first_line": "synthetic failure", "stderr_tail": []}
+    else:
+        data["skip_reason"] = "depth"
+        data["skip_message"] = "synthetic preflight skip"
+    store.publish_result(ResultEnvelope.model_validate(data), input_id=C)
+    attempt = store.selected_attempt(C, algorithm_id, A)
+    assert attempt is not None
+    (attempt / "artifacts.json").unlink()
+
+    selected = store.read_result(C, algorithm_id, A)
+    assert selected is not None and selected.status == status
+    assert store.selected_attempt(C, algorithm_id, A) == attempt
+    assert store.selected_artifacts(C, algorithm_id, A) is None
 
 def test_writer_lock_heartbeat_and_cleanup(tmp_path: Path) -> None:
     store = LabStore(tmp_path)
