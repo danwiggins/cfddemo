@@ -260,3 +260,32 @@ def test_corrupt_selected_input_manifest_preserves_current(
     assert read_current(store, "healthy") == old
     assert store.generation() == before
     assert not (store.lab / "cohorts" / "healthy" / "generations" / "2").exists()
+
+
+def test_mismatched_source_record_refuses_add(store: LabStore) -> None:
+    source_id = _sample(store, 1)
+    source_path = store.sources_dir / f"{source_id}.json"
+    record = json.loads(source_path.read_text())
+    record["source_id"] = _sha(2)
+    source_path.write_text(json.dumps(record))
+    with pytest.raises(LabProblem, match="TBX-LAB-020") as error:
+        add_sample(store, "healthy", source_id)
+    assert error.value.data["field"] == "source_id"
+    assert read_roster(store, "healthy") == ()
+
+
+def test_mismatched_source_record_preserves_current_generation(store: LabStore) -> None:
+    source_id = _sample(store, 1)
+    add_sample(store, "healthy", source_id)
+    old = build_cohort(store, "healthy")
+    before = store.generation()
+    source_path = store.sources_dir / f"{source_id}.json"
+    record = json.loads(source_path.read_text())
+    record["source_id"] = _sha(2)
+    source_path.write_text(json.dumps(record))
+    with pytest.raises(LabProblem, match="TBX-LAB-020") as error:
+        build_cohort(store, "healthy")
+    assert error.value.data["field"] == "source_id"
+    assert read_current(store, "healthy") == old
+    assert store.generation() == before
+    assert not (store.lab / "cohorts" / "healthy" / "generations" / "2").exists()
