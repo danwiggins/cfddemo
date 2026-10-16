@@ -69,6 +69,7 @@ PROBLEMS: dict[str, ProblemSpec] = {
     "TBX-LAB-019": ProblemSpec(EXIT_OK, "Aligner identity changed; the sample will be realigned"),
     "TBX-LAB-020": ProblemSpec(EXIT_INTERNAL, "Unexpected internal error"),
     "TBX-LAB-021": ProblemSpec(EXIT_BLOCKED, "An EXAMPLE (synthetic) sample cannot join a cohort"),
+    "TBX-LAB-022": ProblemSpec(EXIT_BLOCKED, "Stored cohort metadata needs restoration"),
 }
 
 

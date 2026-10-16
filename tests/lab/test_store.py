@@ -18,7 +18,7 @@ from traceback_lab import STORE_VERSION
 from traceback_lab import store as store_module
 from traceback_lab.envelope import ResultEnvelope, provenance
 from traceback_lab.problems import LabProblem
-from traceback_lab.store import LabStore, new_run_id, summarize_run
+from traceback_lab.store import LabStore, ResultPublishUncertain, new_run_id, summarize_run
 
 A = "a" * 64
 B = "b" * 64
@@ -278,6 +278,63 @@ def test_selection_write_failure_keeps_prior_success(tmp_path: Path, monkeypatch
     selected = json.loads((directory / "selected.json").read_bytes())
     assert selected["last_success_attempt_id"] == first
     assert (directory / "attempts" / first).is_dir()
+
+
+@pytest.mark.parametrize("fail_generation", [False, True])
+def test_selection_directory_sync_failure_keeps_every_attempt(
+    tmp_path: Path, monkeypatch, fail_generation: bool
+) -> None:
+    store = LabStore(tmp_path)
+    store.ensure()
+    first = store.publish_result(_envelope(1), input_id=C)
+    second = store.publish_result(_envelope(2), input_id=C)
+    directory = store.result_dir(C, "fragment-size", A)
+    real_fsync_dir = store_module._fsync_dir
+
+    def fail_selection_sync(path: Path) -> None:
+        if path == directory:
+            raise OSError(5, "simulated selector directory sync failure")
+        real_fsync_dir(path)
+
+    monkeypatch.setattr(store_module, "_fsync_dir", fail_selection_sync)
+    if fail_generation:
+        def fail_bump() -> int:
+            raise OSError(28, "simulated generation write failure")
+
+        monkeypatch.setattr(store, "bump_generation", fail_bump)
+    with pytest.raises(ResultPublishUncertain) as caught:
+        store.publish_result(_envelope(3), input_id=C)
+
+    assert caught.value.code == "TBX-LAB-020"
+    assert isinstance(caught.value.__cause__, OSError)
+    assert "selector directory sync failure" in str(caught.value.__cause__)
+    assert "visible" in caught.value.cause
+    assert "before retrying" in caught.value.fix
+    assert caught.value.data["generation_notified"] is not fail_generation
+    if fail_generation:
+        assert "Manually reload" in caught.value.fix
+        assert "generation notification could not be confirmed" in caught.value.cause
+    else:
+        assert "generation counter advanced" in caught.value.cause
+    selected = json.loads((directory / "selected.json").read_bytes())["attempt_id"]
+    assert caught.value.data == {
+        "input_id": C,
+        "algorithm_id": "fragment-size",
+        "parameters_sha256": A,
+        "attempt_id": selected,
+        "generation_notified": not fail_generation,
+    }
+    assert selected not in {first, second}
+    assert store.selected_attempt(C, "fragment-size", A).name == selected
+    assert store.read_result(C, "fragment-size", A).metrics[0].value == 3
+    assert {path.name for path in (directory / "attempts").iterdir()} == {first, second, selected}
+    assert store.generation() == (2 if fail_generation else 3)
+
+    monkeypatch.undo()
+    fourth = store.publish_result(_envelope(4), input_id=C)
+    assert {path.name for path in (directory / "attempts").iterdir()} == {selected, fourth}
+    assert store.read_result(C, "fragment-size", A).metrics[0].value == 4
+
 
 def test_publish_directory_refuses_existing_destination(tmp_path: Path) -> None:
     store = LabStore(tmp_path)

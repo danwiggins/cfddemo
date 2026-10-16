@@ -127,7 +127,7 @@ def test_corrupt_pointer_and_unsafe_cohort_id_are_refused(store: LabStore) -> No
     build_cohort(store, "healthy")
     pointer = store.lab / "cohorts" / "healthy" / "current.json"
     pointer.write_text('{"version":true}')
-    with pytest.raises(ValueError, match="current version"):
+    with pytest.raises(LabProblem, match="TBX-LAB-022"):
         read_current(store, "healthy")
     with pytest.raises(ValueError, match="cohort id"):
         read_current(store, "../escape")
@@ -214,9 +214,9 @@ def test_symlinked_generations_are_refused_by_read_and_build(store: LabStore, tm
     outside.mkdir()
     (directory / "generations").symlink_to(outside, target_is_directory=True)
     (directory / "current.json").write_text('{"version":1}')
-    with pytest.raises(ValueError, match="generations may not be a symlink"):
+    with pytest.raises(LabProblem, match="TBX-LAB-022"):
         read_current(store, "healthy")
-    with pytest.raises(ValueError, match="generations may not be a symlink"):
+    with pytest.raises(LabProblem, match="TBX-LAB-022"):
         build_cohort(store, "healthy")
     assert list(outside.iterdir()) == []
 
@@ -289,3 +289,238 @@ def test_mismatched_source_record_preserves_current_generation(store: LabStore) 
     assert read_current(store, "healthy") == old
     assert store.generation() == before
     assert not (store.lab / "cohorts" / "healthy" / "generations" / "2").exists()
+
+
+@pytest.mark.parametrize("contents,field", [
+    ('{"version":true}', "current version"),
+    ('{"version":1', "current.json"),
+    ('[]', "current.json"),
+])
+def test_corrupt_current_pointer_has_actionable_problem(
+    store: LabStore, contents: str, field: str,
+) -> None:
+    directory = store.lab / "cohorts" / "healthy"
+    directory.mkdir(parents=True)
+    (directory / "current.json").write_text(contents)
+    with pytest.raises(LabProblem, match="TBX-LAB-022") as error:
+        read_current(store, "healthy")
+    assert error.value.data == {"cohort_id": "healthy", "field": field}
+    assert error.value.fix
+
+
+def test_corrupt_pointer_cannot_be_overwritten_by_build(store: LabStore) -> None:
+    source_id = _sample(store, 1)
+    add_sample(store, "healthy", source_id)
+    old = build_cohort(store, "healthy")
+    pointer = store.lab / "cohorts" / "healthy" / "current.json"
+    pointer.write_text("{")
+    before = store.generation()
+    with pytest.raises(LabProblem, match="TBX-LAB-022"):
+        build_cohort(store, "healthy")
+    assert pointer.read_text() == "{"
+    assert store.generation() == before
+    assert (store.lab / "cohorts" / "healthy" / "generations" / str(old.version) / "generation.json").is_file()
+
+
+def test_corrupt_roster_and_missing_source_fail_before_publish(store: LabStore) -> None:
+    source_id = _sample(store, 1)
+    add_sample(store, "healthy", source_id)
+    old = build_cohort(store, "healthy")
+    before = store.generation()
+    roster = store.lab / "cohorts" / "healthy" / "members.json"
+    saved = roster.read_bytes()
+    roster.write_text("{")
+    with pytest.raises(LabProblem, match="TBX-LAB-022") as error:
+        build_cohort(store, "healthy")
+    assert error.value.data["field"] == "members.json"
+    roster.write_bytes(saved)
+    (store.sources_dir / f"{source_id}.json").unlink()
+    with pytest.raises(LabProblem, match="TBX-LAB-020") as error:
+        build_cohort(store, "healthy")
+    assert error.value.data["field"] == "source record"
+    assert read_current(store, "healthy") == old
+    assert store.generation() == before
+
+
+def test_add_refuses_missing_roster_after_publication_without_replacing_history(store: LabStore) -> None:
+    first = _sample(store, 1)
+    second = _sample(store, 2)
+    add_sample(store, "healthy", first)
+    build_cohort(store, "healthy")
+    directory = store.lab / "cohorts" / "healthy"
+    pointer = directory / "current.json"
+    generation = directory / "generations" / "1" / "generation.json"
+    pointer_before, generation_before = pointer.read_bytes(), generation.read_bytes()
+    (directory / "members.json").unlink()
+    before = store.generation()
+
+    with pytest.raises(LabProblem, match="TBX-LAB-022") as error:
+        add_sample(store, "healthy", second)
+    assert error.value.data == {"cohort_id": "healthy", "field": "members.json"}
+    assert not (directory / "members.json").exists()
+    assert pointer.read_bytes() == pointer_before
+    assert generation.read_bytes() == generation_before
+    assert store.generation() == before
+
+
+def test_missing_pointer_problem_explains_roster_rebuild(store: LabStore) -> None:
+    first = _sample(store, 1)
+    add_sample(store, "healthy", first)
+    build_cohort(store, "healthy")
+    (store.lab / "cohorts" / "healthy" / "current.json").unlink()
+    with pytest.raises(LabProblem, match="TBX-LAB-022") as error:
+        read_current(store, "healthy")
+    assert error.value.data["field"] == "current.json"
+    assert "cohort build" in error.value.fix
+    assert "roster" in error.value.fix
+
+
+@pytest.mark.parametrize("damage,field", [
+    ("missing", "generation.json"),
+    ("json", "generation.json"),
+    ("identity", "generation identity"),
+    ("source", "generation.json"),
+])
+def test_damaged_generation_has_actionable_problem(
+    store: LabStore, damage: str, field: str,
+) -> None:
+    source_id = _sample(store, 1)
+    add_sample(store, "healthy", source_id)
+    old = build_cohort(store, "healthy")
+    path = store.lab / "cohorts" / "healthy" / "generations" / "1" / "generation.json"
+    if damage == "missing":
+        path.unlink()
+    elif damage == "json":
+        path.write_text("{")
+    else:
+        record = json.loads(path.read_text())
+        if damage == "identity":
+            record["cohort_id"] = "other"
+        else:
+            record["members"][0]["source_id"] = "not-a-sha"
+        path.write_text(json.dumps(record))
+    with pytest.raises(LabProblem, match="TBX-LAB-022") as error:
+        read_current(store, "healthy")
+    assert error.value.data == {"cohort_id": "healthy", "field": field}
+    assert old.version == 1
+
+
+def test_missing_pointer_with_existing_generation_fails_closed(store: LabStore) -> None:
+    source_id = _sample(store, 1)
+    add_sample(store, "healthy", source_id)
+    build_cohort(store, "healthy")
+    (store.lab / "cohorts" / "healthy" / "current.json").unlink()
+    with pytest.raises(LabProblem, match="TBX-LAB-022") as error:
+        read_current(store, "healthy")
+    assert error.value.data["field"] == "current.json"
+
+
+def test_orphan_generation_can_be_rebuilt_from_intact_roster(store: LabStore) -> None:
+    source_id = _sample(store, 1)
+    add_sample(store, "healthy", source_id)
+    first = build_cohort(store, "healthy")
+    (store.lab / "cohorts" / "healthy" / "current.json").unlink()
+    second = build_cohort(store, "healthy")
+    assert second.version == 2
+    assert read_current(store, "healthy") == second
+    assert (store.lab / "cohorts" / "healthy" / "generations" / "1" / "generation.json").is_file()
+    assert first.members == second.members
+
+
+def test_invalid_generation_name_blocks_build_without_changing_pointer(store: LabStore) -> None:
+    source_id = _sample(store, 1)
+    add_sample(store, "healthy", source_id)
+    old = build_cohort(store, "healthy")
+    before = store.generation()
+    (store.lab / "cohorts" / "healthy" / "generations" / "01").mkdir()
+    with pytest.raises(LabProblem, match="TBX-LAB-022") as error:
+        build_cohort(store, "healthy")
+    assert error.value.data["field"] == "generation name"
+    assert read_current(store, "healthy") == old
+    assert store.generation() == before
+
+
+def test_damaged_old_generation_does_not_hide_valid_current(store: LabStore) -> None:
+    source_id = _sample(store, 1)
+    add_sample(store, "healthy", source_id)
+    build_cohort(store, "healthy")
+    current = build_cohort(store, "healthy")
+    (store.lab / "cohorts" / "healthy" / "generations" / "1" / "generation.json").write_text("{")
+    assert read_current(store, "healthy") == current
+
+
+def test_cohort_listing_keeps_healthy_entries_when_one_is_damaged(store: LabStore) -> None:
+    from traceback_lab.cohorts import list_cohorts
+
+    source_id = _sample(store, 1)
+    for cohort_id in ("broken", "healthy"):
+        add_sample(store, cohort_id, source_id)
+        build_cohort(store, cohort_id)
+    add_sample(store, "pending", source_id)
+    (store.lab / "cohorts" / "broken" / "current.json").write_text("{")
+    entries = list_cohorts(store)
+    assert [entry.cohort_id for entry in entries] == ["broken", "healthy"]
+    assert entries[0].generation is None
+    assert entries[0].problem is not None
+    assert entries[0].problem.code == "TBX-LAB-022"
+    assert entries[1].generation == read_current(store, "healthy")
+    assert entries[1].problem is None
+
+
+def test_cohort_listing_reports_symlink_without_following_it(store: LabStore, tmp_path) -> None:
+    from traceback_lab.cohorts import list_cohorts
+
+    source_id = _sample(store, 1)
+    add_sample(store, "healthy", source_id)
+    healthy = build_cohort(store, "healthy")
+    outside = tmp_path / "outside-cohort"
+    outside.mkdir()
+    (store.lab / "cohorts" / "broken").symlink_to(outside, target_is_directory=True)
+    entries = list_cohorts(store)
+    assert [entry.cohort_id for entry in entries] == ["broken", "healthy"]
+    assert entries[0].problem is not None
+    assert entries[0].problem.data["field"] == "cohort directory"
+    assert entries[1].generation == healthy
+
+
+def test_cohort_listing_keeps_healthy_entry_after_one_stat_error(store: LabStore, monkeypatch) -> None:
+    from pathlib import Path
+    from traceback_lab.cohorts import list_cohorts
+
+    source_id = _sample(store, 1)
+    add_sample(store, "healthy", source_id)
+    healthy = build_cohort(store, "healthy")
+    (store.lab / "cohorts" / "broken").mkdir()
+    original = Path.is_dir
+
+    def fail_one(directory: Path) -> bool:
+        if directory.name == "broken":
+            raise OSError("synthetic stat failure")
+        return original(directory)
+
+    monkeypatch.setattr(Path, "is_dir", fail_one)
+    entries = list_cohorts(store)
+    assert [entry.cohort_id for entry in entries] == ["broken", "healthy"]
+    assert entries[0].problem is not None
+    assert entries[0].problem.data["field"] == "cohort directory"
+    assert entries[1].generation == healthy
+
+
+def test_symlinked_cohort_root_has_typed_problem(store: LabStore, tmp_path) -> None:
+    from traceback_lab.cohorts import list_cohorts
+
+    outside = tmp_path / "outside-root"
+    outside.mkdir()
+    (store.lab / "cohorts").parent.mkdir(parents=True)
+    (store.lab / "cohorts").symlink_to(outside, target_is_directory=True)
+    with pytest.raises(LabProblem, match="TBX-LAB-022") as error:
+        list_cohorts(store)
+    assert error.value.data["field"] == "cohort root"
+
+
+def test_finder_metadata_does_not_block_next_generation(store: LabStore) -> None:
+    source_id = _sample(store, 1)
+    add_sample(store, "healthy", source_id)
+    build_cohort(store, "healthy")
+    (store.lab / "cohorts" / "healthy" / "generations" / ".DS_Store").write_bytes(b"finder")
+    assert build_cohort(store, "healthy").version == 2
