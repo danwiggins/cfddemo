@@ -12,6 +12,7 @@ import signal
 import shutil
 import sys
 import subprocess
+import tempfile
 import threading
 from pathlib import Path
 
@@ -208,7 +209,7 @@ def test_invalid_library_on_disk_keeps_the_last_good_one(monkeypatch, tmp_path) 
     del engine
 
 
-def test_serve_command_prints_root_first_and_warns_on_an_empty_root(tmp_path) -> None:
+def _serve_lines_after_ready(root: Path, *, timeout: float = 60) -> list[str]:
     from traceback_lab.serve_command import serve_command
 
     class Args:
@@ -216,18 +217,83 @@ def test_serve_command_prints_root_first_and_warns_on_an_empty_root(tmp_path) ->
 
     out = io.StringIO()
     stop = threading.Event()
+    ready = threading.Event()
     seen = []
+    errors = []
+
+    def run() -> None:
+        try:
+            serve_command(
+                Args(), LabStore(root), out=out, stdin=io.StringIO(""), stop=stop,
+                ready=lambda server: (seen.append(server), ready.set()),
+            )
+        except BaseException as exc:
+            errors.append(exc)
+
     thread = threading.Thread(
-        target=serve_command,
-        args=(Args(), LabStore(tmp_path / "empty")),
-        kwargs={"out": out, "stdin": io.StringIO(""), "stop": stop, "ready": lambda s: (seen.append(s), stop.set())},
+        target=run, daemon=True,
     )
     thread.start()
-    thread.join(timeout=20)
+    try:
+        ready.wait(timeout=timeout)
+    finally:
+        stop.set()
+        thread.join(timeout=5)
     lines = out.getvalue().splitlines()
+    assert not thread.is_alive(), f"serve thread did not stop; output={lines!r}, errors={errors!r}"
+    assert not errors, f"serve startup failed; output={lines!r}, error={errors[0]!r}"
+    assert ready.is_set() and seen, f"serve did not become ready within {timeout}s; output={lines!r}"
+    return lines
+
+
+def test_serve_command_prints_root_first_and_warns_on_an_empty_root(tmp_path) -> None:
+    lines = _serve_lines_after_ready(tmp_path / "empty")
     assert lines[0] == f"ROOT  {tmp_path / 'empty'}"
     assert "has no Lab runs" in lines[1]
     assert lines[2].startswith("http://127.0.0.1:") and "#bootstrap=" in lines[2]
+
+
+def test_serve_output_waits_for_delayed_readiness(tmp_path, monkeypatch) -> None:
+    from traceback_lab import serve_command as serve_module
+
+    entered = threading.Event()
+    release = threading.Event()
+
+    class DelayedServer:
+        def __init__(self, store) -> None:
+            pass
+
+        def __enter__(self):
+            entered.set()
+            assert release.wait(10), "test did not release server startup"
+            return self
+
+        def __exit__(self, *args) -> None:
+            pass
+
+        def issue_link(self) -> str:
+            return "http://127.0.0.1:1234/#bootstrap=synthetic"
+
+    monkeypatch.setattr(serve_module, "RunningLabServer", DelayedServer)
+    result: list[list[str]] = []
+    errors: list[BaseException] = []
+
+    def capture() -> None:
+        try:
+            result.append(_serve_lines_after_ready(tmp_path / "empty", timeout=10))
+        except BaseException as exc:
+            errors.append(exc)
+
+    waiter = threading.Thread(target=capture, daemon=True)
+    waiter.start()
+    try:
+        assert entered.wait(5)
+        assert waiter.is_alive(), "serve capture returned before startup completed"
+    finally:
+        release.set()
+        waiter.join(10)
+    assert not waiter.is_alive() and not errors, errors
+    assert result[0][2] == "http://127.0.0.1:1234/#bootstrap=synthetic"
 
 
 def _chrome() -> str | None:
@@ -244,7 +310,7 @@ def _chrome() -> str | None:
     return None
 
 
-def headless_dom(argv: list[str], *, ok, timeout: int = 60) -> str:
+def headless_dom(argv: list[str], *, ok, timeout: float = 60) -> str:
     """Dump one page and preserve evidence when Chrome does not reach readiness.
 
     A timeout kills Chrome's process group on POSIX, including children that
@@ -252,23 +318,50 @@ def headless_dom(argv: list[str], *, ok, timeout: int = 60) -> str:
     with its process and DOM state rather than hidden by another launch.
     """
 
-    process = subprocess.Popen(
-        argv, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True,
-        start_new_session=os.name != "nt",
-    )
-    timed_out = False
-    try:
-        dom, stderr = process.communicate(timeout=timeout)
-    except subprocess.TimeoutExpired:
-        timed_out = True
-        if os.name == "nt":
-            subprocess.run(["taskkill", "/PID", str(process.pid), "/T", "/F"], capture_output=True, check=False, timeout=5)
-        else:
+    with tempfile.TemporaryFile() as stdout, tempfile.TemporaryFile() as errors:
+        process = subprocess.Popen(
+            argv, stdout=stdout, stderr=errors, start_new_session=os.name != "nt",
+        )
+        timed_out = False
+        cleanup_error = None
+        try:
+            process.wait(timeout=timeout)
+        except subprocess.TimeoutExpired:
+            timed_out = True
+            if os.name == "nt":
+                try:
+                    subprocess.run(
+                        ["taskkill", "/PID", str(process.pid), "/T", "/F"],
+                        stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+                        check=False, timeout=5,
+                    )
+                except subprocess.TimeoutExpired:
+                    cleanup_error = "taskkill timed out"
+            else:
+                try:
+                    os.killpg(process.pid, signal.SIGKILL)
+                except ProcessLookupError:
+                    pass
+            try:
+                process.wait(timeout=5)
+            except subprocess.TimeoutExpired:
+                process.kill()
+                try:
+                    process.wait(timeout=1)
+                except subprocess.TimeoutExpired:
+                    cleanup_error = "direct browser process did not exit after kill"
+        if os.name != "nt" and not timed_out:
+            # Chrome may exit while a child still holds its profile and output
+            # handles. The isolated session belongs to this one invocation.
             try:
                 os.killpg(process.pid, signal.SIGKILL)
             except ProcessLookupError:
                 pass
-        dom, stderr = process.communicate(timeout=5)
+        stdout.seek(0)
+        dom = stdout.read().decode("utf-8", errors="replace")
+        errors.seek(0, os.SEEK_END)
+        errors.seek(max(0, errors.tell() - 4096))
+        stderr = errors.read().decode("utf-8", errors="replace")
     if not timed_out and process.returncode == 0 and ok(dom):
         return dom
     raise AssertionError(
@@ -276,7 +369,7 @@ def headless_dom(argv: list[str], *, ok, timeout: int = 60) -> str:
         f"dom_bytes={len(dom.encode())}, data_ready={_body_attr(dom, 'ready')}, "
         f"chart_rendered={_body_attr(dom, 'rendered')}, measured={_body_attr(dom, 'measured')}, "
         f"csp_violations={_body_attr(dom, 'csp-violations')}, clia_loading={'Loading…' in dom}, "
-        f"stderr_tail={stderr[-1000:]!r}"
+        f"cleanup_error={cleanup_error!r}, stderr_tail={stderr[-1000:]!r}"
     )
 
 
@@ -295,8 +388,50 @@ def test_headless_dom_reports_process_and_readiness_failure() -> None:
 
 
 def test_headless_dom_kills_a_timed_out_process() -> None:
-    with pytest.raises(AssertionError, match=r"timed_out=True"):
-        headless_dom([sys.executable, "-c", "import time; time.sleep(30)"], ok=lambda _: True, timeout=0.1)
+    script = (
+        "import subprocess,sys,time; "
+        "print('<body data-ready=\"1\" data-rendered=\"1\" data-csp-violations=\"0\">', flush=True); "
+        "print('browser stalled', file=sys.stderr, flush=True); "
+        "subprocess.Popen([sys.executable, '-c', 'import time; time.sleep(30)']); "
+        "time.sleep(30)"
+    )
+    with pytest.raises(AssertionError, match=r"timed_out=True") as caught:
+        headless_dom([sys.executable, "-c", script], ok=lambda d: 'data-ready="1"' in d, timeout=5)
+    diagnostic = str(caught.value)
+    assert "data_ready=1" in diagnostic and "chart_rendered=1" in diagnostic
+    assert "csp_violations=0" in diagnostic and "browser stalled" in diagnostic
+
+
+def test_headless_dom_does_not_wait_for_descendant_capture_handles(tmp_path, monkeypatch) -> None:
+    parent_pid = tmp_path / "parent.pid"
+    child_pid = tmp_path / "child.pid"
+    killed_groups = []
+    if os.name != "nt":
+        real_killpg = os.killpg
+
+        def record_group_kill(group: int, sig: int) -> None:
+            killed_groups.append((group, sig))
+            real_killpg(group, sig)
+
+        monkeypatch.setattr(os, "killpg", record_group_kill)
+    script = (
+        "import os,pathlib,subprocess,sys; "
+        f"pathlib.Path({str(parent_pid)!r}).write_text(str(os.getpid())); "
+        "child=subprocess.Popen([sys.executable, '-c', 'import time; time.sleep(30)']); "
+        f"pathlib.Path({str(child_pid)!r}).write_text(str(child.pid)); "
+        "print('<body data-ready=\"1\">', flush=True)"
+    )
+    try:
+        dom = headless_dom([sys.executable, "-c", script], ok=lambda d: 'data-ready="1"' in d, timeout=5)
+        assert 'data-ready="1"' in dom
+        if os.name != "nt":
+            assert killed_groups[-1] == (int(parent_pid.read_text()), signal.SIGKILL)
+    finally:
+        if os.name == "nt" and child_pid.exists():
+            try:
+                os.kill(int(child_pid.read_text()), signal.SIGTERM)
+            except ProcessLookupError:
+                pass
 
 
 @pytest.mark.skipif(_chrome() is None, reason="no Chrome/Chromium for the headless CSP check")
