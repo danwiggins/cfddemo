@@ -73,21 +73,36 @@ def _writable(path: Path) -> bool:
 def _pmd_asset_check(store: LabStore) -> dict[str, Any]:
     """Verify the operator-supplied PMD bytes used by ``pmd-score``."""
 
+    unreadable_fix = (
+        "Check access to ROOT/lab/assets/pmd, then run "
+        "traceback lab asset inspect pmd --root <ROOT>"
+    )
     try:
         asset = inspect_asset(store)
     except AssetError as exc:
         directory = store.lab / "assets" / "pmd"
-        if not directory.exists() and not directory.is_symlink():
-            fix = (
-                "traceback lab asset add pmd --file YOUR_LOCAL_PMD_coordinates_hg38.bed.gz "
-                "--source-label Zhou-2018-operator-supplied --terms unknown --root <ROOT>"
-            )
-        else:
-            fix = (
-                "Restore the original pinned PMD bytes from the approved local source, "
-                "then run traceback lab asset inspect pmd --root <ROOT>"
-            )
+        register = (
+            "traceback lab asset add pmd --file YOUR_LOCAL_PMD_coordinates_hg38.bed.gz "
+            "--source-label Zhou-2018-operator-supplied --terms unknown --root <ROOT>"
+        )
+        try:
+            if not directory.exists() and not directory.is_symlink():
+                fix = register
+            elif directory.is_dir() and not directory.is_symlink() and not any(directory.iterdir()):
+                # Registration never replaces an existing directory, even an empty one.
+                fix = f"rmdir <ROOT>/lab/assets/pmd && {register}"
+            else:
+                fix = (
+                    "Restore the original pinned PMD bytes from the approved local source, "
+                    "then run traceback lab asset inspect pmd --root <ROOT>"
+                )
+        except OSError:
+            fix = unreadable_fix
         return _check("pmd_asset", "warn", f"PMD asset unavailable or invalid: {exc} (pmd-score will skip)", fix)
+    except OSError:
+        # Path inspection can fail before assets.py converts an error to AssetError.
+        # Never persist an OSError message: it may contain an absolute path.
+        return _check("pmd_asset", "warn", "PMD asset could not be inspected (pmd-score is not ready)", unreadable_fix)
     return _check("pmd_asset", "pass", f"PMD asset verified ({asset.sha256[:12]})")
 
 

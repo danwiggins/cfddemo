@@ -77,6 +77,13 @@ def test_doctor_reports_missing_valid_and_altered_pmd_asset(
     assert "--terms unknown --root <ROOT>" in missing["fix"]
     assert [check for check in lab_checks(store) if check["name"] == "pmd_asset"] == [missing]
 
+    empty = store.lab / "assets" / "pmd"
+    empty.mkdir(parents=True)
+    empty_check = _pmd_asset_check(store)
+    assert empty_check["status"] == "warn"
+    assert empty_check["fix"].startswith("rmdir <ROOT>/lab/assets/pmd && traceback lab asset add pmd")
+    empty.rmdir()
+
     record = _add(store, source)
     ready = _pmd_asset_check(store)
     assert ready["status"] == "pass"
@@ -89,6 +96,26 @@ def test_doctor_reports_missing_valid_and_altered_pmd_asset(
     assert "differs from the pinned SHA-256" in altered["detail"]
     assert "Restore the original pinned PMD bytes" in altered["fix"]
     assert "traceback lab asset inspect pmd --root <ROOT>" in altered["fix"]
+
+
+def test_doctor_warns_without_leaking_a_path_when_pmd_stat_fails(
+    pinned: tuple[LabStore, Path, bytes], monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    store, _, _ = pinned
+    target = store.lab / "assets" / "pmd"
+    original = Path.is_symlink
+
+    def denied(path: Path) -> bool:
+        if path == target:
+            raise PermissionError(13, "access denied", str(target))
+        return original(path)
+
+    monkeypatch.setattr(Path, "is_symlink", denied)
+    check = _pmd_asset_check(store)
+    assert check["status"] == "warn"
+    assert "could not be inspected" in check["detail"]
+    assert str(store.root) not in str(check)
+    assert "traceback lab asset inspect pmd --root <ROOT>" in check["fix"]
 
 
 def test_exact_legacy_file_gains_manifest_without_byte_replacement(
