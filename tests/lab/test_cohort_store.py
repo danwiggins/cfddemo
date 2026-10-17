@@ -4,6 +4,7 @@ import json
 from types import SimpleNamespace
 
 import pytest
+import pysam
 
 from traceback_lab import cohorts
 from traceback_lab.cohorts import add_sample, build_cohort, project_current_metric, project_sample_metric, read_current, read_roster
@@ -11,6 +12,7 @@ from traceback_lab.envelope import Metric, ResultEnvelope, provenance
 from traceback_lab.identity import parameters_sha256
 from traceback_lab.ingest import resolve_sample
 from traceback_lab.problems import LabProblem
+from traceback_lab.registry import ToolPin, execution_identity
 from traceback_lab.store import LabStore
 from traceback_runner import cli as signed_cli
 
@@ -50,6 +52,10 @@ def _sample(
         "mmi_sha256": _sha(901) if aligned else None,
         "aligner_argv": ["minimap2", "-ax", "map-ont"] if aligned else None,
     }))
+    header = {"HD": {"VN": "1.6"}, "SQ": [{"SN": "chr1", "LN": 1000}],
+              "RG": [{"ID": "one", "PL": "ONT"}]}
+    with pysam.AlignmentFile(str(input_dir / "aligned.bam"), "wb", header=header):
+        pass
     result = ResultEnvelope(
         algorithm_id="fragment-size", algorithm_version="1", status="ok",
         provenance=provenance(tool="fixture", parameters_sha256=parameters,
@@ -86,6 +92,98 @@ def test_add_is_idempotent_and_build_publishes_immutable_generations(store: LabS
     assert two.kind == "provisional_external"
     assert (store.lab / "cohorts" / "healthy" / "generations" / "1" / "generation.json").is_file()
     assert read_current(store, "healthy") == two
+
+
+@pytest.mark.parametrize("name", ["cell-origin", "methylbert"])
+def test_cohort_reads_recorded_effective_identity_without_runtime_probe(
+    store: LabStore, monkeypatch, name: str,
+) -> None:
+    source_id = _sample(store, 42, aligned=False)
+    input_id = _sha(142)
+    static_parameters = {"method": "pinned"}
+    effective_parameters = ({**static_parameters, "numerical_runtime": {"model": "A"}}
+                            if name == "methylbert" else static_parameters)
+    assets = [_sha(810)] if name == "methylbert" else []
+    produced_tools = [ToolPin("parser", "A").identity()]
+    algorithm = SimpleNamespace(
+        id=name, version="1", parameters=static_parameters,
+        tools=[ToolPin("parser", "B" if name == "cell-origin" else "A")],
+        upstream=(), requires=SimpleNamespace(platforms=frozenset({"ont"})),
+    )
+    if name == "methylbert":
+        algorithm.identity_assets = lambda _: pytest.fail("reader must not probe model assets")
+        algorithm.identity_parameters = lambda _: pytest.fail("reader must not probe GPU runtime")
+    monkeypatch.setattr(cohorts, "load_registry", lambda: (algorithm,))
+    identity = execution_identity(
+        algorithm, reference_sha256=_sha(900), asset_sha256s=assets,
+        tool_pins=produced_tools, parameters=effective_parameters,
+    )
+    plan = {
+        "schema": "traceback.lab.execution-plan.v1",
+        "algorithm_id": name, "algorithm_version": "1", "input_id": input_id,
+        "reference_sha256": _sha(900), "platform": "ont",
+        "parameters": effective_parameters, "tools": produced_tools,
+        "asset_sha256s": assets, "upstream": [],
+    }
+    store.publish_result(ResultEnvelope(
+        algorithm_id=name, algorithm_version="1", status="ok",
+        provenance=provenance(tool="fixture", parameters_sha256=identity,
+                              source_id=source_id, input_id=input_id, reference_id="synthetic"),
+        metrics=[Metric(metric_id="signal", value=0.25)],
+    ), input_id=input_id, execution_plan=plan)
+    add_sample(store, "healthy", source_id)
+    generation = build_cohort(store, "healthy")
+    assert [result.parameters_sha256 for result in generation.members[0].results] == [identity]
+    if name == "cell-origin":
+        attempt = store.selected_attempt(input_id, name, identity)
+        assert attempt is not None
+        (attempt / "execution_plan.json").write_text(json.dumps({**plan, "platform": "illumina"}))
+        assert build_cohort(store, "healthy").members[0].results == ()
+    if name == "methylbert":
+        attempt = store.selected_attempt(input_id, name, identity)
+        assert attempt is not None
+        (attempt / "execution_plan.json").write_bytes(b"[" * 1500 + b"0" + b"]" * 1500)
+        assert build_cohort(store, "healthy").members[0].results == ()
+
+
+def test_cohort_omits_dependent_after_same_identity_upstream_reselection(
+    store: LabStore, monkeypatch,
+) -> None:
+    source_id = _sample(store, 43, aligned=False)
+    input_id = _sha(143)
+    parent = SimpleNamespace(id="fragment-size", version="1", parameters={},
+                             tools=[], upstream=())
+    child = SimpleNamespace(id="dependent", version="1", parameters={},
+                            tools=[], upstream=("fragment-size",))
+    monkeypatch.setattr(cohorts, "load_registry", lambda: (parent, child))
+    parent_id = execution_identity(parent, reference_sha256=_sha(900))
+    parent_attempt = store.selected_attempt(input_id, parent.id, parent_id)
+    assert parent_attempt is not None
+    child_id = execution_identity(child, reference_sha256=_sha(900), upstream=[
+        {"algorithm_id": parent.id, "parameters_sha256": parent_id},
+    ])
+    store.publish_result(ResultEnvelope(
+        algorithm_id=child.id, algorithm_version="1", status="ok",
+        provenance=provenance(tool="fixture", parameters_sha256=child_id,
+                              source_id=source_id, input_id=input_id, reference_id="synthetic"),
+        metrics=[Metric(metric_id="signal", value=1.0)],
+    ), input_id=input_id, upstream_selections=[{
+        "algorithm_id": parent.id, "input_id": input_id,
+        "parameters_sha256": parent_id, "attempt_id": parent_attempt.name,
+    }])
+    add_sample(store, "healthy", source_id)
+    assert {result.algorithm_id for result in build_cohort(store, "healthy").members[0].results} == {
+        "fragment-size", "dependent",
+    }
+    store.publish_result(ResultEnvelope(
+        algorithm_id=parent.id, algorithm_version="1", status="ok",
+        provenance=provenance(tool="fixture", parameters_sha256=parent_id,
+                              source_id=source_id, input_id=input_id, reference_id="synthetic"),
+        metrics=[Metric(metric_id="mode_bp", value=99.0)],
+    ), input_id=input_id)
+    assert [result.algorithm_id for result in build_cohort(store, "healthy").members[0].results] == [
+        "fragment-size",
+    ]
 
 
 def test_cohort_cli_reports_distinct_aligner_versions(store: LabStore, capsys) -> None:
@@ -264,6 +362,37 @@ def test_unknown_prealigned_provenance_never_pools_distinct_inputs(store: LabSto
     _, payload = _build(SimpleNamespace(cohort="healthy", kind="internal_cohort"), store)
     assert "each input is isolated" in payload["data"]["comparability_note"]
     assert any("provenance is unknown" in line for line in payload["_human"]["lines"])
+
+
+@pytest.mark.parametrize("damage", ["missing", "unreadable", "mismatched", "unknown"])
+@pytest.mark.parametrize("aligned", [False, True])
+def test_bam_platform_damage_preserves_current_generation(
+    store: LabStore, damage: str, aligned: bool,
+) -> None:
+    source_id = _sample(store, 1, aligned=aligned)
+    add_sample(store, "healthy", source_id)
+    old = build_cohort(store, "healthy")
+    before = store.generation()
+    bam_path = store.inputs_dir / _sha(101) / "aligned.bam"
+    if damage == "missing":
+        bam_path.unlink()
+    elif damage == "unreadable":
+        bam_path.write_bytes(b"not a BAM")
+    else:
+        header = {"HD": {"VN": "1.6"}, "SQ": [{"SN": "chr1", "LN": 1000}]}
+        if damage == "mismatched":
+            header["RG"] = [{"ID": "one", "PL": "ILLUMINA"}]
+            manifest_path = bam_path.parent / "manifest.json"
+            manifest = json.loads(manifest_path.read_text())
+            manifest["platform"] = "ont"
+            manifest_path.write_text(json.dumps(manifest))
+        with pysam.AlignmentFile(str(bam_path), "wb", header=header):
+            pass
+    with pytest.raises(LabProblem, match="TBX-LAB-024"):
+        build_cohort(store, "healthy")
+    assert read_current(store, "healthy") == old
+    assert store.generation() == before
+    assert not (store.lab / "cohorts" / "healthy" / "generations" / "2").exists()
 
 
 @pytest.mark.parametrize("field,bad", [("reference_sha256", None), ("tools", [])])

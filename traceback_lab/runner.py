@@ -83,6 +83,7 @@ class RunTarget:
     input_dir: Path
     reference_id: str
     reference_sha256: str
+    platform: str = "ont"
     label: str = "full"
     eligible_reads: int | None = None
     approx_depth_x: float | None = None
@@ -99,6 +100,7 @@ class RunTarget:
             reference_id=self.reference_id,
             reference_sha256=self.reference_sha256,
             input_dir=self.input_dir,
+            platform=self.platform,
             eligible_reads=self.eligible_reads,
             approx_depth_x=self.approx_depth_x,
             derived=self.derived,
@@ -194,13 +196,26 @@ def run_plan(
     scratch_root = store.lab / "tmp" / run_id
     for item in items:
         algorithm = item.algorithm
+        platform_rejected = target.platform not in algorithm.requires.platforms
         upstream = [
             {"algorithm_id": name, "parameters_sha256": done[name].parameters_sha256}
             for name in algorithm.upstream
             if name in done
         ]
+        identity_ctx = target.context(store.root)
+        identity_assets = getattr(algorithm, "identity_assets", None)
         assets_of = getattr(algorithm, "asset_sha256s", None)
-        planned_assets = list(assets_of(store.root) if callable(assets_of) else ())
+        if platform_rejected:
+            planned_assets = []
+        elif callable(identity_assets):
+            planned_assets = list(identity_assets(identity_ctx))
+        elif callable(assets_of):
+            planned_assets = list(assets_of(store.root))
+        else:
+            planned_assets = []
+        identity_parameters = getattr(algorithm, "identity_parameters", None)
+        planned_parameters = (identity_parameters(identity_ctx)
+                              if callable(identity_parameters) and not platform_rejected else algorithm.parameters)
         tool_pins = tuple(algorithm.tools)
         planned_tools = [tool.identity() for tool in tool_pins]
         identity = execution_identity(
@@ -210,8 +225,18 @@ def run_plan(
             # Consumed assets enter the execution identity (D19), so a
             # re-registered asset never reuses an older result.
             asset_sha256s=planned_assets,
+            platform=target.platform if target.platform != "ont" else None,
             tool_pins=planned_tools,
+            parameters=planned_parameters,
         )
+        execution_plan = {
+            "schema": "traceback.lab.execution-plan.v1",
+            "algorithm_id": algorithm.id, "algorithm_version": algorithm.version,
+            "input_id": target.input_id, "reference_sha256": target.reference_sha256,
+            "platform": target.platform, "parameters": planned_parameters,
+            "tools": planned_tools, "asset_sha256s": planned_assets,
+            "upstream": upstream,
+        }
         step = algorithm.id if target.label == "full" else f"{algorithm.id}@{target.label}"
         existing = store.read_result(target.input_id, algorithm.id, identity)
         blocked = [name for name in algorithm.upstream if done.get(name) is None or done[name].status != "ok"]
@@ -220,7 +245,8 @@ def run_plan(
             consumed is not None
             and store.selected_upstream_selections(target.input_id, algorithm.id, identity) == consumed
         )
-        if existing is not None and existing.status == "ok" and not force and not blocked and cache_valid:
+        if (existing is not None and existing.status == "ok" and not force
+                and not platform_rejected and not blocked and cache_valid):
             store.reselect_cached_result(target.input_id, algorithm.id, identity)
             selected = store.selected_attempt(target.input_id, algorithm.id, identity)
             result = StepResult(
@@ -242,9 +268,13 @@ def run_plan(
         target.extras["tool_versions"] = {pin.name: pin.version for pin in tool_pins}
         target.extras["planned_asset_sha256s"] = planned_assets
         target.extras["planned_tool_pins"] = planned_tools
+        target.extras["planned_parameters"] = planned_parameters
         ctx = target.context(store.root)
         decision: Ready | Skip
-        if blocked:
+        if platform_rejected:
+            supported = ", ".join(sorted(algorithm.requires.platforms))
+            decision = Skip("platform", f"{algorithm.id} supports {supported}; this input declares {target.platform}")
+        elif blocked:
             decision = Skip("upstream", f"upstream not ok: {', '.join(blocked)}")
         else:
             try:
@@ -360,6 +390,7 @@ def run_plan(
                         input_id=target.input_id,
                         artifacts_dir=scratch / "artifacts",
                         upstream_selections=consumed,
+                        execution_plan=execution_plan,
                     )
                     log.append(
                         "step_end",
