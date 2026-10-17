@@ -33,6 +33,8 @@ def test_stored_platform_must_match_bam_header(tmp_path: Path) -> None:
     assert for_input({"kind": "prealigned", "platform": "illumina"}, bam_path) == "illumina"
     with pytest.raises(ValueError, match="differs"):
         for_input({"kind": "prealigned", "platform": "ont"}, bam_path)
+    with pytest.raises(ValueError, match="does not declare ONT"):
+        for_input({"kind": "aligned", "platform": "ont"}, bam_path)
 
 
 @pytest.mark.parametrize("platform", ["ILLUMINA", None])
@@ -94,9 +96,10 @@ def test_unknown_prealigned_platform_is_blocked_in_normal_and_dry_runs(
     assert payload["data"]["code"] == "TBX-LAB-024"
 
 
+@pytest.mark.parametrize("tamper", ["platform", "kind"])
 @pytest.mark.parametrize("dry_run", [False, True])
 def test_stored_platform_mismatch_is_same_typed_refusal(
-    tmp_path: Path, capsys: pytest.CaptureFixture[str], dry_run: bool,
+    tmp_path: Path, capsys: pytest.CaptureFixture[str], dry_run: bool, tamper: str,
 ) -> None:
     root, bam_path = _prealigned_world(tmp_path, ("ILLUMINA",))
     code = signed_cli.main([
@@ -109,6 +112,8 @@ def test_stored_platform_mismatch_is_same_typed_refusal(
     manifest = root / "lab" / "inputs" / input_id / "manifest.json"
     changed = json.loads(manifest.read_text())
     changed["platform"] = "ont"
+    if tamper == "kind":
+        changed["kind"] = "aligned"
     manifest.write_text(json.dumps(changed))
     argv = ["lab", "run", "latest", "--root", str(root), "--json"]
     if dry_run:
@@ -117,3 +122,35 @@ def test_stored_platform_mismatch_is_same_typed_refusal(
     payload = json.loads(capsys.readouterr().out)
     assert code == 3
     assert payload["data"]["code"] == "TBX-LAB-024"
+
+
+def test_cohort_refuses_mismatched_stored_platform(tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> None:
+    from traceback_lab.cohorts import member_from_store
+    from traceback_lab.problems import LabProblem
+    from traceback_lab.store import LabStore
+
+    root, bam_path = _prealigned_world(tmp_path, ("ILLUMINA",))
+    code = signed_cli.main([
+        "lab", "run", str(bam_path), "--root", str(root), "--reference", "hg38",
+        "--only", "short-read-fragment-size", "--no-downsample", "--no-controls", "--json",
+    ])
+    payload = json.loads(capsys.readouterr().out)
+    assert code == 0, payload
+    sample = payload["data"]["sample"]
+    manifest = root / "lab" / "inputs" / sample["input_id"] / "manifest.json"
+    changed = json.loads(manifest.read_text())
+    changed["platform"] = "ont"
+    manifest.write_text(json.dumps(changed))
+    with pytest.raises(LabProblem, match="TBX-LAB-024"):
+        member_from_store(LabStore(root), sample["source_id"])
+
+
+def test_valid_dry_run_reports_platform_in_sample(tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> None:
+    root, bam_path = _prealigned_world(tmp_path, ("ILLUMINA",))
+    code = signed_cli.main([
+        "lab", "run", str(bam_path), "--root", str(root), "--reference", "hg38",
+        "--dry-run", "--json",
+    ])
+    payload = json.loads(capsys.readouterr().out)
+    assert code == 0, payload
+    assert payload["data"]["sample"]["platform"] == "illumina"

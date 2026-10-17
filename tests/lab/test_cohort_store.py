@@ -47,11 +47,10 @@ def _sample(store: LabStore, index: int, *, example: bool = False, value: float 
         "mmi_sha256": _sha(901) if aligned else None,
         "aligner_argv": ["minimap2", "-ax", "map-ont"] if aligned else None,
     }))
-    if not aligned:
-        header = {"HD": {"VN": "1.6"}, "SQ": [{"SN": "chr1", "LN": 1000}],
-                  "RG": [{"ID": "one", "PL": "ONT"}]}
-        with pysam.AlignmentFile(str(input_dir / "aligned.bam"), "wb", header=header):
-            pass
+    header = {"HD": {"VN": "1.6"}, "SQ": [{"SN": "chr1", "LN": 1000}],
+              "RG": [{"ID": "one", "PL": "ONT"}]}
+    with pysam.AlignmentFile(str(input_dir / "aligned.bam"), "wb", header=header):
+        pass
     result = ResultEnvelope(
         algorithm_id="fragment-size", algorithm_version="1", status="ok",
         provenance=provenance(tool="fixture", parameters_sha256=parameters,
@@ -247,6 +246,37 @@ def test_unknown_prealigned_provenance_never_pools_distinct_inputs(store: LabSto
     _, payload = _build(SimpleNamespace(cohort="healthy", kind="internal_cohort"), store)
     assert "each input is isolated" in payload["data"]["comparability_note"]
     assert any("provenance is unknown" in line for line in payload["_human"]["lines"])
+
+
+@pytest.mark.parametrize("damage", ["missing", "unreadable", "mismatched", "unknown"])
+@pytest.mark.parametrize("aligned", [False, True])
+def test_bam_platform_damage_preserves_current_generation(
+    store: LabStore, damage: str, aligned: bool,
+) -> None:
+    source_id = _sample(store, 1, aligned=aligned)
+    add_sample(store, "healthy", source_id)
+    old = build_cohort(store, "healthy")
+    before = store.generation()
+    bam_path = store.inputs_dir / _sha(101) / "aligned.bam"
+    if damage == "missing":
+        bam_path.unlink()
+    elif damage == "unreadable":
+        bam_path.write_bytes(b"not a BAM")
+    else:
+        header = {"HD": {"VN": "1.6"}, "SQ": [{"SN": "chr1", "LN": 1000}]}
+        if damage == "mismatched":
+            header["RG"] = [{"ID": "one", "PL": "ILLUMINA"}]
+            manifest_path = bam_path.parent / "manifest.json"
+            manifest = json.loads(manifest_path.read_text())
+            manifest["platform"] = "ont"
+            manifest_path.write_text(json.dumps(manifest))
+        with pysam.AlignmentFile(str(bam_path), "wb", header=header):
+            pass
+    with pytest.raises(LabProblem, match="TBX-LAB-024"):
+        build_cohort(store, "healthy")
+    assert read_current(store, "healthy") == old
+    assert store.generation() == before
+    assert not (store.lab / "cohorts" / "healthy" / "generations" / "2").exists()
 
 
 @pytest.mark.parametrize("field,bad", [("reference_sha256", None), ("tools", [])])

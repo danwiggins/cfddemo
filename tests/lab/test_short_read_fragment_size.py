@@ -247,9 +247,15 @@ def test_normal_lab_run_dispatches_illumina_without_ont_results(
     steps = {step["algorithm_id"]: step for step in payload["data"]["steps"]}
     for algorithm_id in ("read-summary", "depth", "bam-qc", "short-read-fragment-size"):
         assert steps[algorithm_id]["status"] == "ok", steps[algorithm_id]
-    for algorithm_id in ("fragment-size", "copy-number", "long-tail", "meth-calls"):
+    for algorithm_id in ("fragment-size", "copy-number", "cell-origin", "long-tail", "meth-calls"):
         assert steps[algorithm_id]["status"] == "skipped"
         assert steps[algorithm_id]["skip_reason"] == "platform"
+    from traceback_lab.store import LabStore
+    from traceback_lab.views import load_sample
+
+    sample = load_sample(LabStore(root), payload["data"]["sample"]["source_id"])
+    assert sample is not None
+    assert sample.full.results["cell-origin"].skip_reason == "platform"
     assert payload["data"]["counts"]["failed"] == 0
     assert payload["data"]["controls"]["cna_skipped"] == "platform"
     assert payload["data"]["controls"]["split"] is True
