@@ -1020,13 +1020,23 @@ def test_status_reports_unavailable_latest_log_without_claiming_interruption(tmp
     assert status["run_log_unavailable"] == {"run_id": run_id, "reason": reason}
 
 
-@pytest.mark.parametrize("command", ("cohort add", "cohort remove"))
-def test_status_does_not_require_run_logs_from_other_writer_commands(tmp_path, command) -> None:
+@pytest.mark.parametrize(("command", "step"), (
+    ("cohort add", None), ("cohort remove", None),
+    ("asset register-clock-map", "epi-clock-map"),
+    ("asset griffin-register", "griffin"),
+    ("asset end-catalogues-register", "aligned-ends"),
+    ("microbial db add", "database"),
+    ("fetal register", "fetal-fraction"),
+    ("fetal chrY register", "fetal-fraction-chry"),
+    ("donor register", "dd-cfdna-chry"),
+))
+def test_status_does_not_require_run_logs_from_other_writer_commands(tmp_path, command, step) -> None:
     store = LabStore(tmp_path)
     run_id = "r-20261015-0101-abcd"
-    with store.writer(command, run_id):
+    with store.writer(command, run_id, step=step):
         active = api_module.LabApi(store).status()
         assert active["active"]["command"] == command
+        assert active["active"]["step"] == step
         assert active["run_log_unavailable"] is None
     ended = api_module.LabApi(store).status()
     assert ended["active"] is None and ended["interrupted"] is None
