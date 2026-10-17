@@ -180,6 +180,45 @@ def test_depth_full_input_and_pinned_asset_gates(tmp_path: Path) -> None:
     assert old_identity
 
 
+def test_downsample_and_split_use_selected_depth_and_rows(tmp_path: Path) -> None:
+    root, _, _ = _catalogues(tmp_path)
+    parent = tmp_path / "read-summary"
+    _summary(parent)
+    columns = parent / "columns"
+    rows = 200
+    values = {
+        "contig": [0] * rows, "start": [440] * rows, "end": [561] * rows,
+        "flag": [0] * rows, "mapq": [60] * rows,
+        "h_ds": [0, 2**62, 2**63, 3 * 2**62] * (rows // 4),
+        "h_split": [0, 2**63] * (rows // 2),
+    }
+    for name, dtype in COLUMNS.items():
+        np.asarray(values.get(name, [0] * rows), dtype=dtype).tofile(columns / f"{name}.bin")
+    meta = json.loads((columns / "meta.json").read_text(encoding="utf-8"))
+    meta["rows"] = rows
+    (columns / "meta.json").write_text(json.dumps(meta), encoding="utf-8")
+
+    for derived in ({"transform": "downsample", "fraction": 0.5},
+                    {"transform": "split", "half": "A"}):
+        ctx = _context(root, parent, derived=derived, depth=99.0)
+        assert isinstance(ALIGNED_END_STRUCTURE.preflight(ctx), Ready)
+        artifact = json.loads(ALIGNED_END_STRUCTURE.run(ctx, tmp_path / "out").artifacts["aligned_end_structure.json"])
+        assert artifact["valid_molecules"] == 100
+        assert artifact["observed_depth_x"] == 12.1
+        assert artifact["preferred_u_hits"] == artifact["preferred_d_hits"] == 100
+
+    # An untrusted depth hint cannot make a low-depth subset eligible.
+    assert ALIGNED_END_STRUCTURE.preflight(_context(
+        root, parent, derived={"transform": "downsample", "fraction": 0.1}, depth=99.0,
+    )).reason_code == "depth"
+    assert ALIGNED_END_STRUCTURE.preflight(_context(
+        root, parent, derived={"transform": "cna", "tf": 0.1}, depth=99.0,
+    )).reason_code == "derived_input"
+    assert ALIGNED_END_STRUCTURE.preflight(_context(
+        root, parent, derived={"transform": "split", "half": "invalid"}, depth=99.0,
+    )).reason_code == "derived_input"
+
+
 @pytest.mark.parametrize("bad", [
     "chr1\t490\t510\nchr1\t600\t620\n",  # windows overlap
     "chr2\t490\t510\nchr1\t700\t720\n",  # unsorted chromosomes

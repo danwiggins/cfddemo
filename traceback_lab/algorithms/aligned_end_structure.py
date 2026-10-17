@@ -14,7 +14,7 @@ from typing import Any
 import numpy as np
 
 from ..end_catalog_assets import EndCatalogueError, end_catalogue_identity, inspect_end_catalogues
-from ..read_summary import CHUNK_ROWS, FLAG_EXCLUDE, MIN_MAPQ
+from ..read_summary import CHUNK_ROWS, FLAG_EXCLUDE, MIN_MAPQ, depth_stamp
 from ..registry import AlgorithmOutput, InputContext, Ready, Requirements, Skip
 from ._base import Base, load_summary, metric, ratio
 
@@ -71,8 +71,8 @@ class AlignedEndStructure(Base):
     def preflight(self, ctx: InputContext) -> Ready | Skip:
         if ctx.example:
             return Skip("example_reference", "aligned-end structure requires a genuine hg38 ONT input")
-        if ctx.derived is not None:
-            return Skip("derived_input", "aligned-end structure requires the full aligned ONT input")
+        if ctx.derived is not None and ctx.derived.get("transform") not in {"downsample", "split"}:
+            return Skip("derived_input", "aligned-end structure supports only downsample and split row masks")
         if ctx.reference_id != "hg38":
             return Skip("reference", "aligned-end structure requires a full, genuine hg38 ONT input")
         try:
@@ -82,7 +82,14 @@ class AlignedEndStructure(Base):
         if not isinstance(manifest, dict) or manifest.get("kind") != "aligned":
             return Skip("input_kind", "aligned-end structure requires a native ONT alignment")
         # Only the native ONT aligner publishes kind=aligned; imported BAMs are prealigned.
-        if ctx.approx_depth_x is None or not np.isfinite(ctx.approx_depth_x) or ctx.approx_depth_x < MIN_DEPTH_X:
+        depth = ctx.approx_depth_x
+        if ctx.derived is not None:
+            try:
+                summary, mask = load_summary(ctx)
+                depth = depth_stamp(summary, mask)["approx_depth_x"]
+            except (OSError, RuntimeError, ValueError, KeyError, TypeError):
+                return Skip("derived_input", "aligned-end structure requires a valid derived read-summary mask")
+        if depth is None or not np.isfinite(depth) or depth < MIN_DEPTH_X:
             return Skip("depth", "aligned-end structure needs at least 10x observed eligible depth")
         expected = ctx.extras.get("planned_asset_sha256s")
         if expected is not None:
@@ -102,6 +109,7 @@ class AlignedEndStructure(Base):
         if expected is not None and expected != [catalogues.identity]:
             raise EndCatalogueError("pinned end catalogues changed after execution identity was set")
         summary, mask = load_summary(ctx)
+        observed_depth_x = depth_stamp(summary, mask)["approx_depth_x"] if mask is not None else ctx.approx_depth_x
         names = summary.contigs
         lengths = summary.lengths
         allowed = set(int(cid) for cid in summary.autosome_ids())
@@ -169,7 +177,7 @@ class AlignedEndStructure(Base):
             "centers_source": catalogues.centers_source,
             "preferred_source": catalogues.preferred_source,
             "terms": catalogues.terms,
-            "observed_depth_x": ctx.approx_depth_x,
+            "observed_depth_x": observed_depth_x,
             "interpretation": "ONT aligned-span proxy; exploratory; no tissue-origin calibration",
             "offset_bp": list(range(-RADIUS, RADIUS + 1)),
             "u_count": u_counts.tolist(), "d_count": d_counts.tolist(),
