@@ -306,6 +306,18 @@
       h("p", { class: "help" }, "provisional (not from literature)"),
       h("div", { class: "table-wrap" }, h("table", {}, h("thead", {}, h("tr", {}, h("th", {}, "Metric"), h("th", {}, "Value"), h("th", {}, "Band"))),
         h("tbody", {}, ...banded.map(([label, value, band]) => h("tr", {}, h("th", { scope: "row" }, label), h("td", {}, value), h("td", {}, h("span", { class: "qc-band" }, glyph[band])))))))));
+    const sex = sample.preanalytic_sex;
+    const sexMessage = !sex || sex.state === "no_verdict"
+      ? sex && sex.reason === "no_definite_call"
+        ? "No definite measured chrX/chrY call is available; no comparison verdict."
+        : "No operator sex assertion was supplied; no comparison was made."
+      : sex.state === "mismatch"
+        ? `Pre-analytic mismatch: operator-declared ${sex.declared} differs from the measured chrX/chrY call (${sex.observed}). Review sample metadata and processing.`
+        : `Operator assertion (${sex.declared}) and measured chrX/chrY call (${sex.observed}) agree.`;
+    out.push(h("section", { class: "panel" }, h("h2", {}, "Pre-analytic sex assertion check"),
+      h("p", {}, h("span", { class: "flag-pill" }, "FLAG: PRIVACY — can reveal pregnancy or transplant status.")),
+      h("p", { class: sex && sex.state === "mismatch" ? "problem" : "status-line" }, sexMessage),
+      h("p", { class: "help" }, "This is not a diagnostic sex or gender determination.")));
     const health = sample.library_health;
     out.push(h("section", { class: "panel" }, h("h2", {}, "Library health"),
       h("p", {}, `no_library_entry: ${health.no_library_entry} · UNVERIFIED citations: ${health.unverified_citations} · interpretation v${health.version} · cohort healthy-v1 (n = ${sample.cohort_n})`),
