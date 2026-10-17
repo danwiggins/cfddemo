@@ -20,8 +20,8 @@ def add_asset_parser(commands: Any, common: Callable[[argparse.ArgumentParser], 
     asset = commands.add_parser("asset", help="register or inspect local Lab assets")
     actions = asset.add_subparsers(dest="asset_action", required=True)
     add = actions.add_parser("add", help="register operator-supplied pinned bytes")
-    add.add_argument("kind", choices=("pmd", "viral-fasta"))
-    add.add_argument("--file", type=Path, required=True, help="local PMD BED.gz or viral FASTA")
+    add.add_argument("kind", choices=("pmd", "tss-annotation", "viral-fasta"))
+    add.add_argument("--file", type=Path, required=True, help="local pinned asset file")
     add.add_argument("--targets", type=Path, help="viral-fasta TSV: contig, virus, accession")
     add.add_argument(
         "--source-label", "--provenance", dest="source_label", required=True,
@@ -32,7 +32,7 @@ def add_asset_parser(commands: Any, common: Callable[[argparse.ArgumentParser], 
     common(add)
     add.set_defaults(handler=_add)
     inspect = actions.add_parser("inspect", help="rehash and describe a local asset")
-    inspect.add_argument("kind", choices=("pmd", "viral-fasta"))
+    inspect.add_argument("kind", choices=("pmd", "tss-annotation", "viral-fasta"))
     common(inspect)
     inspect.set_defaults(handler=_inspect)
 
@@ -56,7 +56,7 @@ def _add(args: argparse.Namespace, store: LabStore) -> tuple[int, dict[str, Any]
                 )
             else:
                 if getattr(args, "targets", None) is not None:
-                    raise AssetError("pmd does not accept --targets")
+                    raise AssetError("only viral-fasta accepts --targets")
                 record = add_asset(
                     store, args.kind, args.file,
                     source_label=args.source_label, terms=args.terms, license_id=args.license_id,
