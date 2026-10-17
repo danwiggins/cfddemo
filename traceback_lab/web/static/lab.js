@@ -419,6 +419,9 @@
     document.body.dataset.ready = "1";
   }
 
-  if (document.readyState === "loading") document.addEventListener("DOMContentLoaded", start);
+  // Deferred scripts run while readyState is "interactive", before later
+  // deferred scripts (including lab-views.js) have necessarily executed.
+  // DOMContentLoaded waits for that whole ordered script set.
+  if (document.readyState !== "complete") document.addEventListener("DOMContentLoaded", start, { once: true });
   else start();
 })();
