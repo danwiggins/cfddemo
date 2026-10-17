@@ -52,6 +52,7 @@ def test_cohort_in_range_count_matches_collapsed_group(tmp_path, monkeypatch) ->
     assert "1 in range" in summary
     assert "eligible cohort n = 10" in summary
     assert "No metric is outside a reference. 1 metric has a reference" in dom
+    assert "1 metric has no reference" in dom
     assert "<summary>In range (1)</summary>" in dom
     assert "Short fragment share" in dom and "Observed cohort min–max" in dom
     assert 'data-csp-violations="0"' in dom
