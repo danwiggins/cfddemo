@@ -95,9 +95,12 @@
       if (target) { target.setAttribute("tabindex", "-1"); target.scrollIntoView({ block: "center" }); target.focus({ preventScroll: true }); }
     } }, `${lic ? lic.headline : id} ↗`);
   }
-  function unverifiedBadge(metric) {
-    const entry = metric.entry || {};
-    return entry.citations && entry.citations.length && !entry.citation_checked ? h("span", { class: "unverified" }, "UNVERIFIED citation") : "";
+  function unverifiedBadge(entry) {
+    return entry && !entry.citation_checked ? h("span", { class: "unverified" }, "UNVERIFIED citation") : "";
+  }
+  function spacedUnverifiedBadge(entry) {
+    const badge = unverifiedBadge(entry);
+    return badge ? [" ", badge] : [];
   }
   function licenseCallouts(sample) {
     const used = sample.licenses || [];
@@ -415,7 +418,7 @@
       h("p", { class: "card-value" }, h("strong", {}, fmt(metric.value, metric.unit))),
       strip(metric),
       h("p", {}, "Performance: ", perf ? `${perf.value} (${perf.platform || ""}${perf.depth ? ", " + perf.depth : ""}; ${perf.source || ""})` : (entry.performance_missing_reason || "none published"),
-        entry.citation_checked ? "" : [" ", h("span", { class: "unverified" }, "UNVERIFIED citation")]),
+        spacedUnverifiedBadge(metric.entry)),
       meaning ? h("p", {}, meaning.split(". ")[0] + ".") : "",
       h("p", {}, ...(entry.flags || []).map((f) => flagPill(f)), ...licenses),
       toggle, details);
@@ -473,7 +476,7 @@
       for (const m of groups[key]) { out.push(card(sample, m, seen, first)); first = false; }
     }
     const reasons = (list) => { const c = {}; for (const m of list) c[m.reason || "—"] = (c[m.reason || "—"] || 0) + 1; return Object.entries(c).map(([k, v]) => `${k.replace(/_/g, " ")} ${v}`).join(" · "); };
-    const extras = (m) => [h("span", {}, ...(m.entry && m.entry.license_ids || []).map((id) => seen.has(id) ? licenseRef(sample, id) : (seen.add(id), licenseRef(sample, id)))), unverifiedBadge(m)];
+    const extras = (m) => [h("span", {}, ...(m.entry && m.entry.license_ids || []).map((id) => seen.has(id) ? licenseRef(sample, id) : (seen.add(id), licenseRef(sample, id)))), unverifiedBadge(m.entry)];
     out.push(collapsed(`Not interpretable (${groups.not_interpretable.length})`, reasons(groups.not_interpretable), ["Metric", "Value", "Reason", "Needs", ""],
       groups.not_interpretable.map((m) => [m.label, fmt(m.value, m.unit), (m.reason || "").replace(/_/g, " "), m.entry && m.entry.min_depth_x ? `${m.entry.min_depth_x}x` : "—", extras(m)])));
     out.push(collapsed(`No reference (${groups.no_reference.length})`, reasons(groups.no_reference), ["Metric", "Value", "Reason", "Reference shown", ""],
@@ -606,7 +609,7 @@
           h("h3", {}, c.label), h("p", { class: "help" }, c.algorithm_id),
           h("p", {}, `Original evidence: ${c.origin_tier || "—"} (${c.origin_platform || "—"})`),
           h("p", {}, "Footnote: ", c.footnote || "none published", c.footnote_source ? ` (${c.footnote_source})` : "",
-            c.citation_checked ? "" : [" ", h("span", { class: "unverified" }, "UNVERIFIED citation")]),
+            spacedUnverifiedBadge(c.has_library_entry ? c : null)),
           h("p", {}, c.status === "skipped" ? `skipped (${(c.skip_reason || "").replace(/_/g, " ")})` : c.status === "ok" ? "ran" : c.status,
             c.min_depth_x ? ` · literature minimum ${c.min_depth_x}x` : ""),
           h("p", {}, ...c.license_ids.map((id) => licenseRef(sample, id)))))));
@@ -643,7 +646,7 @@
           h("td", {}, a.provenance.reference_id),
           h("td", {}, a.provenance.timestamp_utc),
           h("td", {}, ...(e.license_ids || []).map(firstUse)),
-          h("td", {}, (e.citations || []).join(", ") || "—", m.entry && !e.citation_checked ? [" ", h("span", { class: "unverified" }, "UNVERIFIED citation")] : ""),
+          h("td", {}, (e.citations || []).join(", ") || "—", spacedUnverifiedBadge(m.entry)),
           h("td", {}, ref.kind === "none" || !ref.kind ? "none" : `${ref.kind}${ref.source ? ": " + ref.source : ""}`)));
       }
     }
@@ -670,7 +673,7 @@
     const c = (sample.catalog || []).find((x) => x.algorithm_id === algorithmId);
     const out = [];
     if (c) out.push(h("p", { class: "help" }, tierBadge(c.tier), ` As run here (ONT). Original evidence: ${c.origin_tier || "—"}. Footnote: ${c.footnote || "none published"}`,
-      c.citation_checked ? "" : [" ", h("span", { class: "unverified" }, "UNVERIFIED citation")]));
+      spacedUnverifiedBadge(c.has_library_entry ? c : null)));
     for (const id of (c ? c.license_ids : [])) {
       if (seen.has(id)) { out.push(licenseRef(sample, id)); continue; }
       seen.add(id);
@@ -701,7 +704,7 @@
     };
     families.forEach(([, label], i) => tabs.append(h("button", { type: "button", class: "control subtab", "aria-pressed": "false", onclick: () => show(i) }, label)));
     out.push(tabs, body);
-    const initial = ["fragment-size", "end-motifs", "delfi-ratio", "tss-profile", "long-tail", "mtdna", "breakpoint-motifs"].some((id) => algo(sample, id))
+    const initial = ["fragment-size", "end-motifs", "delfi-ratio", "tss-profile", "long-tail", "mtdna", "breakpoint-motifs", "lionheart"].some((id) => algo(sample, id))
       ? 0 : algo(sample, "copy-number") ? 1 : 2;
     show(initial);
     return out;
@@ -741,10 +744,37 @@
     return [section];
   }
 
+  function lionheartSignals(sample) {
+    const a = algo(sample, "lionheart");
+    if (!a) return [];
+    const section = h("section", { class: "panel" }, h("h2", {}, "LIONHEART cell-type scores"), flagPill("LEGAL"),
+      h("p", {}, "Experimental ONT single-end extraction. Scores are sample-standardized correlations, not cell fractions or cancer predictions."),
+      ...context(sample, "lionheart", new Set()));
+    if (a.status !== "ok") return [section, absent(a, "lionheart")];
+    const slot = h("div", { "aria-live": "polite" }, h("p", {}, "Loading raw cell-type scores…"));
+    section.append(slot);
+    artifact(sample, "lionheart", "cell-type-scores").then((data) => {
+      if (data.kind !== "lionheart-scores.v1" || data.input_mode !== "experimental_single_end_ont" ||
+          data.score_kind !== "sample_standardized_pearson_r" || !Array.isArray(data.scores) ||
+          data.scores.length !== 898 || data.scores.some((row) =>
+            !["ATAC", "DNase"].includes(row.assay) || typeof row.cell_type !== "string" ||
+            (row.score !== null && (typeof row.score !== "number" || !Number.isFinite(row.score))))) {
+        throw new Error("score panel is malformed");
+      }
+      const table = h("table", { class: "data-table" },
+        h("caption", {}, "LIONHEART raw standardized correlation scores; 898 cell-type references"),
+        h("thead", {}, h("tr", {}, ...["Assay", "Cell type", "Score"].map((name) => h("th", { scope: "col" }, name)))),
+        h("tbody", {}, ...data.scores.map((row) => h("tr", {}, h("th", { scope: "row" }, row.assay),
+          h("td", {}, row.cell_type), h("td", { class: "num" }, fmt(row.score))))));
+      slot.replaceWith(h("details", {}, h("summary", {}, "All 898 raw scores"), h("div", { class: "table-wrap" }, table)));
+    }).catch((error) => slot.replaceWith(h("p", { class: "problem" }, `Cell-type scores unavailable (${error.message}).`)));
+    return [section];
+  }
+
   function fragmentSignals(sample) {
     const a = algo(sample, "fragment-size");
     const section = h("section", { class: "panel" }, h("h2", {}, "Size density"));
-    if (!a || a.status !== "ok") return [section, absent(a, "fragment-size"), ...tssProfileSignals(sample), ...breakpointMotifSignals(sample)];
+    if (!a || a.status !== "ok") return [section, absent(a, "fragment-size"), ...tssProfileSignals(sample), ...breakpointMotifSignals(sample), ...lionheartSignals(sample)];
     const slot = h("div", {}, h("p", {}, "Loading…"));
     const short = a.metrics.find((m) => m.metric_id === "short_fraction_lt150");
     section.append(h("p", { class: "help" }, `No size-density cohort band yet; 167 bp marked. Short-fragment reference: ${cohortReadiness(sample, short ? [short] : [])}.`), ...context(sample, "fragment-size", new Set()), slot);
@@ -762,7 +792,7 @@
         ? h("table", { class: "data-table" }, h("tbody", {}, ...other.metrics.filter((m) => m.value === null || typeof m.value !== "object").map((m) => h("tr", {}, h("th", { scope: "row" }, m.label), h("td", {}, fmt(m.value, m.unit))))))
         : absent(other, id), id === "end-motifs" || id === "delfi-ratio" ? flagPill("LEGAL") : ""));
     }
-    return [section, ...more, ...tssProfileSignals(sample), ...breakpointMotifSignals(sample)];
+    return [section, ...more, ...tssProfileSignals(sample), ...breakpointMotifSignals(sample), ...lionheartSignals(sample)];
   }
 
   function tssProfileSignals(sample) {

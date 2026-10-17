@@ -50,6 +50,8 @@ class StepResult:
     first_line: str | None = None
     duration_s: float | None = None
     peak_rss_bytes: int | None = None
+    peak_tree_rss_bytes: int | None = None
+    peak_disk_bytes: int | None = None
     cached: bool = False
     input_label: str = "full"
     artifacts_dir: str | None = None
@@ -65,6 +67,8 @@ class StepResult:
             "first_line": self.first_line,
             "duration_s": self.duration_s,
             "peak_rss_bytes": self.peak_rss_bytes,
+            "peak_tree_rss_bytes": self.peak_tree_rss_bytes,
+            "peak_disk_bytes": self.peak_disk_bytes,
             "cached": self.cached,
             "input": self.input_label,
         }
@@ -197,7 +201,8 @@ def run_plan(
         ]
         assets_of = getattr(algorithm, "asset_sha256s", None)
         planned_assets = list(assets_of(store.root) if callable(assets_of) else ())
-        planned_tools = [tool.identity() for tool in algorithm.tools]
+        tool_pins = tuple(algorithm.tools)
+        planned_tools = [tool.identity() for tool in tool_pins]
         identity = execution_identity(
             algorithm,
             reference_sha256=target.reference_sha256,
@@ -233,6 +238,8 @@ def run_plan(
             for name in algorithm.upstream
             if name in done and done[name].artifacts_dir
         }
+        target.extras["asset_sha256s"] = planned_assets
+        target.extras["tool_versions"] = {pin.name: pin.version for pin in tool_pins}
         target.extras["planned_asset_sha256s"] = planned_assets
         target.extras["planned_tool_pins"] = planned_tools
         ctx = target.context(store.root)
@@ -246,7 +253,8 @@ def run_plan(
                 result = _publish_failure(
                     store, algorithm, target, identity, item, log, step,
                     first_line=scrubber.line(f"preflight raised {type(exc).__name__}: {exc}"),
-                    tail=[], exit_code=None, timed_out=False, duration_s=0.0, peak_rss=None,
+                    tail=[], exit_code=None, timed_out=False, duration_s=0.0,
+                    peak_rss=None, peak_disk=None,
                 )
                 results.append(result)
                 done[algorithm.id] = result
@@ -315,6 +323,7 @@ def run_plan(
                 env=_worker_env(),
                 cwd=scratch,
                 echo=echo,
+                disk_path=scratch,
             )
             if outcome.ok:
                 try:
@@ -342,6 +351,8 @@ def run_plan(
                         first_line=scrubber.line(f"invalid output: {type(exc).__name__}: {exc}"),
                         tail=[], exit_code=0, timed_out=False,
                         duration_s=outcome.duration_s, peak_rss=outcome.peak_rss_bytes,
+                        peak_tree_rss=outcome.sampled_tree_peak_rss_bytes,
+                        peak_disk=outcome.peak_disk_bytes,
                     )
                 else:
                     attempt_id = store.publish_result(
@@ -356,6 +367,8 @@ def run_plan(
                         status="ok",
                         duration_s=round(outcome.duration_s, 3),
                         peak_rss_bytes=outcome.peak_rss_bytes,
+                        peak_tree_rss_bytes=outcome.sampled_tree_peak_rss_bytes,
+                        peak_disk_bytes=outcome.peak_disk_bytes,
                         parameters_sha256=identity,
                         input_id=target.input_id,
                         attempt_id=attempt_id,
@@ -368,6 +381,8 @@ def run_plan(
                         identity,
                         duration_s=outcome.duration_s,
                         peak_rss_bytes=outcome.peak_rss_bytes,
+                        peak_tree_rss_bytes=outcome.sampled_tree_peak_rss_bytes,
+                        peak_disk_bytes=outcome.peak_disk_bytes,
                         input_label=target.label,
                         input_id=target.input_id,
                         attempt_id=attempt_id,
@@ -383,6 +398,8 @@ def run_plan(
                     first_line=scrubber.line(first), tail=tail, exit_code=stage.returncode,
                     timed_out=outcome.timed_out, duration_s=outcome.duration_s,
                     peak_rss=outcome.peak_rss_bytes,
+                    peak_tree_rss=outcome.sampled_tree_peak_rss_bytes,
+                    peak_disk=outcome.peak_disk_bytes,
                 )
         finally:
             shutil.rmtree(scratch, ignore_errors=True)
@@ -443,6 +460,8 @@ def _publish_failure(
     timed_out: bool,
     duration_s: float,
     peak_rss: int | None,
+    peak_disk: int | None,
+    peak_tree_rss: int | None = None,
 ) -> StepResult:
     failure = Failure(
         first_line=first_line[:300] or "failed",
@@ -461,6 +480,8 @@ def _publish_failure(
         first_line=failure.first_line,
         duration_s=round(duration_s, 3),
         peak_rss_bytes=peak_rss,
+        peak_tree_rss_bytes=peak_tree_rss,
+        peak_disk_bytes=peak_disk,
         timed_out=timed_out,
         parameters_sha256=identity,
         input_id=target.input_id,
@@ -474,6 +495,8 @@ def _publish_failure(
         first_line=failure.first_line,
         duration_s=duration_s,
         peak_rss_bytes=peak_rss,
+        peak_tree_rss_bytes=peak_tree_rss,
+        peak_disk_bytes=peak_disk,
         input_label=target.label,
         input_id=target.input_id,
         attempt_id=attempt_id,
