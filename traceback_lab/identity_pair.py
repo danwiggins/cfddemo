@@ -10,7 +10,6 @@ import math
 import os
 import re
 import stat
-import subprocess
 import tempfile
 from dataclasses import dataclass
 from pathlib import Path
@@ -24,6 +23,7 @@ from .file_access import open_regular_no_follow
 from .identity import SHA256_PATTERN, canonical_sha256, resolve_prefix
 from .identity_sites import IdentitySitesError, inspect_sites
 from .ingest import id12_for, resolve_reference, source_ids
+from .pipeline import Stage, run_pipeline
 from .registry import execution_identity
 from .store import LabStore, new_attempt_id, write_atomic
 from . import views
@@ -33,6 +33,7 @@ MAX_PAIRS_SHOWN = 64
 MAX_PAIR_DIRECTORIES_SCANNED = 4096
 MAX_PAIR_PEERS_VERIFIED = 4  # each selected sketch can be up to 16 MiB
 _PAIR_HEADER = {"sample_a", "sample_b", "relatedness", "ibs0", "ibs2", "hom_concordance", "n"}
+SOMALIER_COMPARE_TIMEOUT_S = 600
 
 
 class IdentityPairError(ValueError):
@@ -282,15 +283,19 @@ def compare_pair(store: LabStore, sample_a: str, sample_b: str, *, force: bool =
         env = _somalier_env(sketches[0].input_id)
         env["SOMALIER_REPORT_ALL_PAIRS"] = "1"
         try:
-            process = subprocess.run(
-                [tool[0], "relate", "--sites", str(sites.file),
-                 "--min-depth", "7", "--min-ab", "0.3", "--output-prefix", str(prefix),
-                 str(paths[0]), str(paths[1])], env=env,
-                stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=600, check=False,
+            outcome = run_pipeline(
+                [Stage("somalier-relate", [
+                    str(Path(tool[0]).absolute()), "relate", "--sites", str(sites.file),
+                    "--min-depth", "7", "--min-ab", "0.3", "--output-prefix", str(prefix),
+                    str(paths[0]), str(paths[1]),
+                ])],
+                env=env, cwd=work, timeout_s=SOMALIER_COMPARE_TIMEOUT_S,
             )
-        except (OSError, subprocess.TimeoutExpired) as exc:
+        except OSError as exc:
             raise IdentityPairError("Somalier pair comparison could not complete") from exc
-        if process.returncode != 0:
+        if outcome.timed_out or outcome.interrupted:
+            raise IdentityPairError("Somalier pair comparison could not complete")
+        if not outcome.ok:
             raise IdentityPairError("Somalier pair comparison failed")
         table = prefix.with_name(prefix.name + ".pairs.tsv")
         try:
