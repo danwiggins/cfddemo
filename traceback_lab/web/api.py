@@ -301,8 +301,13 @@ class LabApi:
             if reason:
                 run_log_unavailable = {"run_id": None if reason == "invalid_run_id" else run_id,
                                        "reason": reason}
-            status["active"] = {**status["active"], **_run_sample_identity(events)}
+            status["active"] = {**status["active"], **_run_sample_identity(events),
+                                "run_id": None if reason == "invalid_run_id" else run_id}
         else:
+            if status["active"] is not None:
+                active_id = status["active"].get("run_id")
+                if not isinstance(active_id, str) or not re.fullmatch(r"r-\d{8}-\d{4}-[0-9a-f]{4,8}", active_id):
+                    status["active"] = {**status["active"], "run_id": None}
             # Bounded (D22): one pointer file and that one run's log, never a scan.
             last, pointer_unavailable = _latest_analysis_run(self.store)
             if pointer_unavailable:
