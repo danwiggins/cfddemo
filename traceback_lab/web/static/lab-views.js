@@ -535,7 +535,7 @@
       const x = (f) => pad + ((Math.log10(f) - Math.log10(0.08)) / (Math.log10(1.2) - Math.log10(0.08))) * (w - pad - 8);
       const unit = (panel.points.find((p) => p.unit) || {}).unit || "percent";
       const clip = 50;
-      const splitDevs = panel.split ? [Math.abs(panel.split.deviation_a || 0), Math.abs(panel.split.deviation_b || 0)] : [];
+      const splitDevs = panel.split ? [panel.split.deviation_a, panel.split.deviation_b].filter(Number.isFinite).map(Math.abs) : [];
       const maxAbs = unit === "unit" ? Math.max(1e-9, ...splitDevs, ...panel.points.map((p) => Math.abs(p.deviation || 0)), ...(panel.points.map((p) => p.band ? Math.max(Math.abs(p.band.lo), Math.abs(p.band.hi)) : 0).filter(Number.isFinite))) : clip;
       const y = (v) => { const c = Math.max(-maxAbs, Math.min(maxAbs, v)); return hgt / 2 - (c / maxAbs) * (hgt / 2 - 12); };
       const marks = [svg("line", { x1: pad, x2: w - 8, y1: y(0), y2: y(0), class: "zero" })];
@@ -550,6 +550,7 @@
       }
       if (panel.split) {
         for (const [dx, d] of [[-9, panel.split.deviation_a], [9, panel.split.deviation_b]]) {
+          if (!Number.isFinite(d)) continue;
           const clipped = unit !== "unit" && Math.abs(d) > clip;
           marks.push(svg("text", { x: x(0.5) + dx, y: y(d) + 4, "text-anchor": "middle", class: "split" }, clipped ? (d > 0 ? "⇡" : "⇣") : "○"));
         }
@@ -566,7 +567,7 @@
       const label = `${panel.label}: ${panel.verdict}. Deviation from full depth in ${unit === "unit" ? "the metric's unit" : "%"}; ${splitSummary}; ${splitVerdict}.`;
       grid.append(h("figure", { class: "multiple" }, h("figcaption", {}, h("strong", {}, panel.label), ` — ${panel.verdict}`),
         svg("svg", { viewBox: `0 0 ${w} ${hgt}`, role: "img", "aria-label": label, class: "multiple-svg" }, svg("title", {}, label), ...marks),
-        h("p", { class: "help" }, unit === "unit" ? "y: difference from full depth (metric's unit)" : "y: relative deviation from full depth, % (clipped ±50%)"),
+        h("p", { class: "help" }, unit === "none" ? "No validated stability deviation scale" : unit === "unit" ? "y: difference from full depth (metric's unit)" : "y: relative deviation from full depth, % (clipped ±50%)"),
         splitVerdict !== "no split-half stability verdict" ? "" : h("p", { class: "help" }, `Split halves: ${splitSummary}. No split-half stability verdict.`)));
       for (const p of panel.points) tableRows.push([panel.label, `${p.fraction * 100}%`, p.value, p.deviation, p.state || "—"]);
       if (panel.split) tableRows.push([panel.label, "split A / B", `${fmt(panel.split.a)} / ${fmt(panel.split.b)}`, `${(panel.split.relative_abs_diff * 100).toFixed(1)}% |A−B|`, splitVerdict]);

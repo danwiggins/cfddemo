@@ -106,10 +106,12 @@ def test_default_run_builds_the_curve_and_controls(default_run) -> None:
     block = views.repeatability(panels)
     assert block["metrics"] == len([p for p in panels if p["split"]])
 
-    with patch.object(views, "stable", return_value=None):
+    with patch.object(views, "stable", return_value=None), patch.object(views, "deviation", return_value=(None, "none")):
         no_verdict = next(p for p in views.stability_panels(sample)
                           if p["algorithm_id"] == "fragment-size" and p["metric_id"] == "mode_bp")
     assert no_verdict["split"]["stable"] is None
+    assert no_verdict["split"]["deviation_a"] is None
+    assert no_verdict["split"]["relative_abs_diff"] >= 0
     assert all(no_verdict["split_status"][half]["state"] == "ok" for half in ("A", "B"))
     assert all(no_verdict["split_status"][half]["value"] is not None for half in ("A", "B"))
 

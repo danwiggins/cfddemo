@@ -344,17 +344,16 @@ def stability_panels(sample: SampleView, library: Library | None = None) -> list
                 verdict = stable(spec, _side(a, 0.5), _side(b, 0.5))
                 da, unit = deviation(spec, a.value, metric.value, 0.5)
                 db, _ = deviation(spec, b.value, metric.value, 0.5)
-                if da is not None and db is not None:
-                    mean = (abs(a.value) + abs(b.value)) / 2
-                    split = {
-                        "a": a.value,
-                        "b": b.value,
-                        "deviation_a": da,
-                        "deviation_b": db,
-                        "unit": unit,
-                        "relative_abs_diff": (abs(a.value - b.value) / mean) if mean else 0.0,
-                        "stable": verdict,
-                    }
+                mean = (abs(a.value) + abs(b.value)) / 2
+                split = {
+                    "a": a.value,
+                    "b": b.value,
+                    "deviation_a": da,
+                    "deviation_b": db,
+                    "unit": unit,
+                    "relative_abs_diff": (abs(a.value - b.value) / mean) if mean else 0.0,
+                    "stable": verdict,
+                }
             # "usable to f" (D24): every measured fraction from full depth down
             # to f is ok and usable (interpretable and stable).
             usable_to = None
