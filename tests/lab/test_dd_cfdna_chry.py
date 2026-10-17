@@ -16,8 +16,10 @@ import pytest
 from traceback_lab.algorithms import dd_cfdna_chry as donor
 from traceback_lab.cli import main as lab_main
 from traceback_lab.dd_contract import DonorContractError, inspect_contract, register_contract
-from traceback_lab.registry import InputContext, Ready, Skip, context_to_json
-from traceback_lab.store import LabStore
+from traceback_lab.registry import InputContext, PlanItem, Ready, Skip, context_to_json
+from traceback_lab.runner import RunTarget, run_plan
+from traceback_lab.scrub import Scrubber
+from traceback_lab.store import LabStore, new_run_id
 
 from .bam_fixtures import Read, context_for
 
@@ -171,3 +173,20 @@ def test_real_bam_summary_and_worker_obey_d21_and_par_boundaries(tmp_path: Path)
     assert metrics["chry_reads_per_million"]["value"] == 200_000
     assert metrics["dd_cfdna_fraction"]["value"] == pytest.approx(0.5)
     assert metrics["dd_cfdna_fraction"]["n"] == 10
+
+
+def test_derived_donor_skip_publishes_through_runner(tmp_path: Path) -> None:
+    store = LabStore(tmp_path / "root")
+    store.ensure()
+    run_id = new_run_id()
+    target = RunTarget(INPUT, SOURCE, tmp_path, "hg38", REFERENCE,
+                       eligible_reads=10, derived={"transform": "split", "half": "A"})
+    algorithm = replace(donor.DD_CFDNA_CHRY, upstream=())
+    results = run_plan(store, None, store.run_log(run_id), target,
+                       [PlanItem(algorithm, False)], {}, run_id=run_id,
+                       scrubber=Scrubber(root=store.root))
+    assert len(results) == 1 and results[0].status == "skipped"
+    assert results[0].skip_reason == "unsupported_input"
+    saved = store.read_result(INPUT, algorithm.id, results[0].parameters_sha256)
+    assert saved is not None and saved.status == "skipped"
+    assert saved.skip_reason == "unsupported_input"
