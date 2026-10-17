@@ -25,8 +25,9 @@ from types import SimpleNamespace
 import pytest
 import websocket
 
-from traceback_lab.envelope import Metric, ResultEnvelope, provenance
+from traceback_lab.envelope import Depth, Metric, ResultEnvelope, provenance
 from traceback_lab.store import LabStore
+from traceback_lab import views
 from traceback_lab.web import api as api_module
 from traceback_lab.web.server import CSP, RunningLabServer
 from traceback_runner import cli as signed_cli
@@ -129,6 +130,57 @@ def test_status_samples_and_sample(server) -> None:
     assert payload["preanalytic_sex"]["reason"] == "no_assertion"
     text = json.dumps(payload)
     assert "/Users/" not in text and "chunks" not in text.lower().replace("excluded_chunks", "")
+
+
+def _sample_with_unvalidated_wps(server, monkeypatch):
+    """Keep the real stored sample and add WPS measurements at each control depth."""
+    api = api_module.LabApi(server.app.store)
+    sample = views.load_sample(server.app.store, next(iter(api._id12s())))
+    assert sample is not None
+    for view in [sample.full, *sample.derived]:
+        source = next(envelope for envelope in view.results.values() if envelope.status == "ok")
+        value = 0.7 if view is sample.full else 0.4
+        wps = source.model_copy(update={
+            "algorithm_id": "wps",
+            "depth": Depth(eligible_reads=1_000_000, approx_depth_x=200 * view.fraction),
+            "metrics": [Metric(metric_id="qualifying_fragment_depth_x", value=value)],
+            "panels": [],
+        })
+        # The read-side sample depth comes from the first result; put the
+        # injected WPS measurement first so this fixture exercises its gate.
+        view.results = {"wps": wps, **{key: result for key, result in view.results.items() if key != "wps"}}
+    original = views.load_sample
+    monkeypatch.setattr(api_module.views, "load_sample", lambda store, source_id: sample if source_id == sample.source_id else original(store, source_id))
+    return sample.id12
+
+
+def test_sample_api_keeps_unvalidated_wps_values_without_stability_verdict(server, monkeypatch) -> None:
+    id12 = _sample_with_unvalidated_wps(server, monkeypatch)
+    payload = json.loads(_get(server, f"/api/samples/{id12}", _session(server))[1])
+    panel = next(p for p in payload["stability"] if p["algorithm_id"] == "wps" and p["metric_id"] == "qualifying_fragment_depth_x")
+    assert panel["verdict"] == "stability not validated"
+    assert panel["points"][0]["value"] == 0.4
+    assert panel["points"][0]["state"] == "ok_unvalidated"
+    assert panel["points"][0]["deviation"] is None
+    assert panel["split"]["stable"] is None
+    assert not any(p["algorithm_id"] == "wps" and p["metric_id"] == "qualifying_fragment_depth_x" for p in payload.get("defended", {}).get("rows", []))
+
+
+def test_stability_dom_names_unvalidated_wps_without_false_verdict(server, tmp_path, monkeypatch) -> None:
+    if _chrome() is None:
+        pytest.skip("no Chrome/Chromium for the headless Stability check")
+    id12 = _sample_with_unvalidated_wps(server, monkeypatch)
+    dom = _dom_cdp(
+        [_chrome(), "--headless=new", "--disable-gpu", "--no-first-run", "--no-default-browser-check",
+         f"--user-data-dir={tmp_path / 'profile'}", "--window-size=1280,800",
+         server.issue_link() + f"&route=/sample/{id12}/stability"], tmp_path / "profile",
+        ok=lambda page: 'data-ready="1"' in page and "Stability: every point" in page,
+    )
+    assert ("<strong>WPS-eligible 120–180 bp aligned-fragment depth</strong>"
+            " — stability not validated") in dom
+    assert "no split-half stability verdict" in dom
+    assert "No validated stability deviation scale; numeric values are in the table." in dom
+    assert "0.4" in dom
 
 
 def test_sample_api_explains_unavailable_somalier(server, monkeypatch) -> None:

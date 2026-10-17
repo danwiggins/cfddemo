@@ -7,9 +7,9 @@ serves these structures; the CLI can print them too.
 Depth→utility curve (D24): one row per (non-hidden) algorithm, keyed by its
 ``headline: true`` metric.  Cells: one per measured fraction (downsample
 inputs plus the full input).  States: ``failed``, ``skipped``,
-``not_interpretable``, ``ok_unstable`` or ``ok_usable``.  "Usable" means not
+``not_interpretable``, ``ok_unvalidated``, ``ok_unstable`` or ``ok_usable``.  "Usable" means not
 skipped, not not-interpretable, and stable against the full-depth value under
-the metric's D32 stability function (the full-depth cell is usable by
+the metric's D32 stability function (a measured full-depth cell is usable by
 definition).  Above this run's depth there are no cells; the library's
 ``min_depth_x`` is drawn as a "literature, not measured" marker.
 """
@@ -33,7 +33,7 @@ from .sample_metadata import sex_assertion, sex_concordance
 from .stability import Side, band_at, deviation, stable
 from .store import LabStore
 
-CELL_STATES = ("ok_usable", "ok_unstable", "not_interpretable", "unavailable", "skipped", "failed")
+CELL_STATES = ("ok_usable", "ok_unvalidated", "ok_unstable", "not_interpretable", "unavailable", "skipped", "failed")
 _ROW_ORDER = {state: index for index, state in enumerate(CELL_STATES)}
 _TIER_ORDER = {"PROVEN": 0, "NEWER": 1, "SPECULATIVE": 2, None: 3}
 
@@ -178,6 +178,7 @@ class SampleView:
     derived: list[InputView] = field(default_factory=list)
     operator_metadata: dict[str, str] | None = None
     operator_metadata_problem: LabProblem | None = None
+    platform: str = "ont"
 
     def by_transform(self, transform: str) -> list[InputView]:
         return [item for item in self.derived if item.transform == transform]
@@ -315,7 +316,7 @@ def load_sample(store: LabStore, source_id: str) -> SampleView | None:
         metadata_problem = problem
     return SampleView(
         source_id, id12_for(store, source_id), bool(record.get("example")), full, derived,
-        assertion, metadata_problem,
+        assertion, metadata_problem, platform,
     )
 
 
@@ -417,12 +418,24 @@ def cell_state(
     interpretation = classify(metric.value, entry, depth_x=view.depth_x(), not_interpretable=reason)
     if interpretation.state == "not_interpretable":
         return {"state": "not_interpretable", "reason": interpretation.reason, "value": metric.value}
+    if metric.value is None:
+        # A deliberately unpublished value may have no reference rather than
+        # a depth failure, but it still has no measured stability verdict.
+        return {"state": "not_interpretable", "reason": interpretation.reason or "metric_value_unavailable",
+                "value": None}
     if view is full:
         return {"state": "ok_usable", "value": metric.value}
     full_metric = _value(full.results.get(algorithm_id), metric_id)
-    verdict = stable(entry.stability if entry else None, _side(metric, view.fraction), _side(full_metric, 1.0))
+    spec = entry.stability if entry else None
+    if spec is None:
+        return {"state": "not_interpretable", "reason": "no_stability_verdict", "value": metric.value}
+    if spec.get("kind") == "unvalidated":
+        return {"state": "ok_unvalidated", "value": metric.value, "verdict": None}
+    verdict = stable(spec, _side(metric, view.fraction), _side(full_metric, 1.0))
+    if verdict is None:
+        return {"state": "not_interpretable", "reason": "comparison_unavailable", "value": metric.value}
     return {
-        "state": "ok_usable" if verdict else "ok_unstable",
+        "state": "ok_usable" if verdict is True else "ok_unstable" if verdict is False else "ok_unvalidated",
         "value": metric.value,
         "verdict": verdict,
     }
@@ -430,7 +443,9 @@ def cell_state(
 
 def depth_curve(sample: SampleView, library: Library | None = None) -> dict[str, Any]:
     library = library or load_library()
-    registry_order = [algorithm.id for algorithm in load_registry()]
+    registry = load_registry()
+    registry_order = [algorithm.id for algorithm in registry]
+    input_gates = {algorithm.id: getattr(algorithm, "input_gate", None) for algorithm in registry}
     columns = sorted(sample.by_transform("downsample"), key=lambda view: view.fraction) + [sample.full]
     run_depth = sample.full.depth_x()
     rows = []
@@ -452,6 +467,7 @@ def depth_curve(sample: SampleView, library: Library | None = None) -> dict[str,
                 "metric_id": headline.metric_id,
                 "label": headline["label"],
                 "tier": headline.tier,
+                "input_gate": input_gates[algorithm_id],
                 "min_depth_x": headline.get("min_depth_x"),
                 "literature_marker": "literature, not measured" if headline.get("min_depth_x") else None,
                 "cells": cells,
@@ -551,8 +567,10 @@ def stability_panels(sample: SampleView, library: Library | None = None) -> list
                 usable_to = point["fraction"]
             if usable_to is not None:
                 verdict_text = f"usable to {usable_to:g}"
-            elif not downs:
+            elif not downs or all(point["state"] == "skipped" for point in points if point["fraction"] < 1.0):
                 verdict_text = "not measured below full depth"
+            elif any(point["state"] == "ok_unvalidated" for point in points if point["fraction"] < 1.0):
+                verdict_text = "stability not validated"
             elif unstable_below:
                 verdict_text = "unstable below full depth"
             elif any(point["state"] == "ok_usable" for point in points if point["fraction"] < 1.0):
@@ -602,6 +620,7 @@ def repeatability(panels: list[dict[str, Any]]) -> dict[str, Any] | None:
             1 for panel in panels if panel.get("split") is None
             and any(status.get("state") != "not_recorded" for status in panel.get("split_status", {}).values())
         ),
+        "no_verdict": sum(1 for row in rows if row[2] is None),
         "worst": [{"label": label, "relative_abs_diff": diff, "stable": ok} for diff, label, ok in worst],
     }
 

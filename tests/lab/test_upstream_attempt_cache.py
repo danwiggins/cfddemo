@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import os
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -11,10 +12,10 @@ import pytest
 from traceback_lab.algorithms._base import Base
 from traceback_lab.algorithms.instability import INSTABILITY
 from traceback_lab.envelope import ResultEnvelope, provenance
-from traceback_lab.registry import AlgorithmOutput, InputContext, PlanItem, Ready, Skip
+from traceback_lab.registry import AlgorithmOutput, InputContext, PlanItem, Ready, Skip, ToolPin
 from traceback_lab.runner import RunTarget, StepResult, run_plan
 from traceback_lab.scrub import Scrubber
-from traceback_lab.store import MAX_UPSTREAM_SELECTIONS_BYTES, LabStore, new_run_id
+from traceback_lab.store import MAX_EXECUTION_PLAN_BYTES, MAX_UPSTREAM_SELECTIONS_BYTES, LabStore, new_run_id
 from traceback_runner.serialization import canonical_json_bytes
 
 
@@ -70,6 +71,20 @@ SUMMARY_TWO = SyntheticSummary("read-summary", value=2)
 DEPENDENT = SyntheticDependent("synthetic-dependent")
 
 
+@dataclass
+class SyntheticDynamic(Base):
+    upstream: tuple[str, ...] = ()
+
+    def identity_tools(self, *, worker_pythonpath: str | None = None) -> tuple[ToolPin, ...]:
+        return (ToolPin("synthetic-runtime", "1"),)
+
+    def run(self, ctx: InputContext, out: Path) -> AlgorithmOutput:
+        return AlgorithmOutput(metrics=[{"metric_id": "value", "value": 1}])
+
+
+DYNAMIC = SyntheticDynamic("synthetic-dynamic")
+
+
 def _target(store: LabStore, input_id: str, *, derived: bool = False) -> RunTarget:
     return RunTarget(
         input_id=input_id, source_id="b" * 64, input_dir=store.root,
@@ -94,6 +109,78 @@ def _tmad(store: LabStore, target: RunTarget, result: StepResult) -> float | Non
     envelope = store.read_result(target.input_id, "instability", result.parameters_sha256)
     assert envelope is not None
     return next(metric.value for metric in envelope.metrics if metric.metric_id == "tmad")
+
+
+def test_dynamic_identity_legacy_cache_is_republished_with_a_plan(tmp_path: Path) -> None:
+    store = LabStore(tmp_path)
+    store.ensure()
+    target = _target(store, "a" * 64)
+    items = [PlanItem(DYNAMIC, False)]
+    entries = {DYNAMIC.id: "tests.lab.test_upstream_attempt_cache:DYNAMIC"}
+    first, = _run(store, target, items, entries)
+    assert first.status == "ok" and not first.cached
+    old_attempt = store.selected_attempt(target.input_id, DYNAMIC.id, first.parameters_sha256)
+    assert old_attempt is not None
+    (old_attempt / "execution_plan.json").unlink()  # Simulate a result published before plans existed.
+    second, = _run(store, target, items, entries)
+    assert second.status == "ok" and not second.cached
+    assert second.attempt_id != first.attempt_id
+    new_attempt = store.selected_attempt(target.input_id, DYNAMIC.id, second.parameters_sha256)
+    assert new_attempt is not None and (new_attempt / "execution_plan.json").is_file()
+
+
+@pytest.mark.parametrize("damage", ["malformed", "schema", "identity", "oversize", "symlink", "hardlink"])
+def test_invalid_cached_plan_is_recomputed(tmp_path: Path, damage: str) -> None:
+    store = LabStore(tmp_path)
+    store.ensure()
+    target = _target(store, "a" * 64)
+    items = [PlanItem(DYNAMIC, False)]
+    entries = {DYNAMIC.id: "tests.lab.test_upstream_attempt_cache:DYNAMIC"}
+    first, = _run(store, target, items, entries)
+    assert first.status == "ok" and not first.cached
+    attempt = store.selected_attempt(target.input_id, DYNAMIC.id, first.parameters_sha256)
+    assert attempt is not None
+    path = attempt / "execution_plan.json"
+    if damage in {"schema", "identity"}:
+        plan = json.loads(path.read_bytes())
+        if damage == "schema":
+            plan["schema"] = "traceback.lab.execution-plan.v0"
+        else:
+            plan["parameters"]["changed"] = True
+        path.write_bytes(canonical_json_bytes(plan))
+    elif damage == "malformed":
+        path.write_bytes(b"{invalid")
+    elif damage == "oversize":
+        path.write_bytes(b"x" * (MAX_EXECUTION_PLAN_BYTES + 1))
+    elif damage == "symlink":
+        saved = tmp_path / "saved-plan.json"
+        saved.write_bytes(path.read_bytes())
+        path.unlink()
+        path.symlink_to(saved)
+    else:
+        os.link(path, tmp_path / "linked-plan.json")
+    second, = _run(store, target, items, entries)
+    assert second.status == "ok" and not second.cached
+    assert second.attempt_id != first.attempt_id
+    third, = _run(store, target, items, entries)
+    assert third.status == "ok" and third.cached
+    assert third.attempt_id == second.attempt_id
+
+
+def test_static_legacy_cache_without_plan_remains_reusable(tmp_path: Path) -> None:
+    store = LabStore(tmp_path)
+    store.ensure()
+    target = _target(store, "a" * 64)
+    items = [PlanItem(SUMMARY_ONE, False)]
+    entries = {SUMMARY_ONE.id: "tests.lab.test_upstream_attempt_cache:SUMMARY_ONE"}
+    first, = _run(store, target, items, entries)
+    assert first.status == "ok" and not first.cached
+    attempt = store.selected_attempt(target.input_id, SUMMARY_ONE.id, first.parameters_sha256)
+    assert attempt is not None
+    (attempt / "execution_plan.json").unlink()
+    second, = _run(store, target, items, entries)
+    assert second.status == "ok" and second.cached
+    assert second.attempt_id == first.attempt_id
 
 
 def test_upstream_attempt_metadata_write_matches_read_limit(tmp_path: Path) -> None:

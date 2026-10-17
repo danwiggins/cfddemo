@@ -22,8 +22,8 @@ entries:
     reference: {kind: none}
     performance: null
     performance_missing_reason: "QC measure, not a diagnostic"
-    meaning_high: "More sequenced molecules: more depth for every other algorithm."
-    meaning_low: "Few molecules: most algorithms will be skipped or not interpretable."
+    meaning_high: "More primary reads: more depth for other algorithms. Paired-end libraries contribute two reads per molecule."
+    meaning_low: "Few primary reads: many algorithms will be skipped or not interpretable."
     confounders: ["flow-cell yield", "input cfDNA mass"]
     next_steps:
       analytical: ["Check the depth curve for what this read count supports"]
@@ -91,23 +91,23 @@ entries:
     value_kind: proportion
     tier: NEWER
     origin_tier: NEWER
-    origin_platform: "ONT"
+    origin_platform: "any"
     min_depth_x: null
     reference: {kind: none}
     performance: null
     performance_missing_reason: "none published"
-    meaning_high: "More supplementary alignments; on ONT this can indicate ligation chimeras, while short-read split alignments have other causes."
-    meaning_low: "Fewer supplementary alignments; this alone does not establish a low chimera rate."
-    confounders: ["sequencing platform and alignment method", "library prep chemistry", "input mass"]
+    meaning_high: "More alignments have supplementary records; inspect their mapping and library origin."
+    meaning_low: "Fewer alignments have supplementary records."
+    confounders: ["library prep chemistry", "read length", "aligner settings"]
     next_steps:
-      analytical: ["Compare only within a matched platform and alignment method", "On ONT, check the long-fragment tail"]
+      analytical: ["Compare only within one sequencing platform and aligner protocol"]
       clinical_setting: null
     license_ids: []
     flags: []
     headline: false
     stability: {kind: proportion}
     citations: []
-    citation_checked: {by: "lab build agent", date: "2026-10-15", note: "No citation displayed. V1 (partial run): the read-coverage chimera proxy is uninformative on ONT; this share is the proxy used."}
+    citation_checked: {by: "Lab S5 platform review", date: "2026-10-17", note: "No citation displayed. This is a raw supplementary-alignment QC share; no cross-platform chimera threshold is supplied."}
 
   - algorithm_id: bam-qc
     metric_id: mean_read_q
@@ -115,23 +115,23 @@ entries:
     value_kind: positive
     tier: PROVEN
     origin_tier: PROVEN
-    origin_platform: "ONT"
+    origin_platform: "any"
     min_depth_x: null
     reference: {kind: none}
     performance: null
     performance_missing_reason: "QC measure, not a diagnostic"
-    meaning_high: "Higher reported base quality within the same sequencing platform and quality pipeline."
-    meaning_low: "Lower reported base quality within the same sequencing platform and quality pipeline; ONT methylation calls and end motifs may be less reliable."
-    confounders: ["sequencing platform and quality-score calibration", "basecaller model", "flow-cell wear"]
+    meaning_high: "Higher average recorded base quality."
+    meaning_low: "Lower average recorded base quality; inspect the platform-specific quality distribution."
+    confounders: ["sequencing platform", "basecaller or sequencer model", "quality calibration"]
     next_steps:
-      analytical: ["Compare within one platform and quality pipeline", "For ONT, confirm the basecall model"]
+      analytical: ["Compare quality only within one sequencing platform and protocol"]
       clinical_setting: null
     license_ids: []
     flags: []
     headline: false
     stability: {kind: relative, tolerance: 0.05}
     citations: []
-    citation_checked: {by: "lab build agent", date: "2026-10-15", note: "No citation displayed; QC measure."}
+    citation_checked: {by: "Lab S5 platform review", date: "2026-10-17", note: "No citation displayed. This is raw recorded base quality; interpretation is restricted to platform- and protocol-matched QC."}
 
   - algorithm_id: bam-qc
     metric_id: genome_ge1x_fraction
@@ -2906,6 +2906,53 @@ entries:
       note: "No scientific citation or reference interval displayed. Engineering formula: D21 eligible molecules with at least four C+m CpG calls; per-molecule 5mC fraction is argmax-5mC calls divided by C+m CpG calls; group means are unweighted by call count; delta is mean for 151-220 bp minus mean for 100-150 bp. Null when either group is empty. Stability tolerance is an engineering comparison rule, not a biological threshold."
 
 
+  # -------------------------------------------------------------- griffin
+  - algorithm_id: griffin
+    metric_id: central_coverage
+    label: "Griffin GC-corrected central TF-site coverage"
+    value_kind: positive
+    tier: SPECULATIVE
+    origin_tier: NEWER
+    origin_platform: "paired-end cfDNA WGS, hg38"
+    min_depth_x: null
+    reference: {kind: none}
+    performance: null
+    performance_missing_reason: "No validated performance or reference range for this TF-site list and sample"
+    meaning_high: "More corrected nucleosome protection at the registered primary TF-site list; this is not a TF expression call."
+    meaning_low: "Less corrected nucleosome protection at the registered primary TF-site list; this is not a TF expression call."
+    confounders: ["TF binding-site selection", "GC correction and mappability filtering", "cell-type mixture", "sequencing depth", "fragment-size selection"]
+    next_steps:
+      analytical: ["Inspect the full site-centered profile and registered TF-site list", "Compare only against protocol-matched samples"]
+      clinical_setting: null
+    license_ids: [method-patents]
+    flags: [LEGAL]
+    headline: true
+    stability: {kind: relative, tolerance: 0.10}
+    citations: ["doi:10.1038/s41467-022-35076-w"]
+    citation_checked: {by: "Lab S5 method audit", date: "2026-10-16", note: "Doebley et al. Griffin reports GC-corrected central TF-site coverage for paired-end cfDNA WGS. The Lab's registered primary site list determines this scalar. The 10% stability tolerance is an engineering comparison rule, not a biological threshold; no diagnostic interpretation is asserted."}
+
+  - algorithm_id: griffin
+    metric_id: site_count
+    label: "Sites in primary Griffin TF list"
+    value_kind: count
+    tier: SPECULATIVE
+    origin_tier: NEWER
+    origin_platform: "paired-end cfDNA WGS, hg38"
+    min_depth_x: null
+    reference: {kind: none}
+    performance: null
+    performance_missing_reason: "Site count is coverage metadata, not a diagnostic"
+    meaning_high: "The registered primary site list contains more sites."
+    meaning_low: "The registered primary site list contains fewer sites."
+    confounders: ["TF-site annotation and filtering"]
+    next_steps: {analytical: ["Inspect the registered site list"], clinical_setting: null}
+    license_ids: [method-patents]
+    flags: [LEGAL]
+    headline: false
+    stability: {kind: absolute, tolerance: 1}
+    citations: ["doi:10.1038/s41467-022-35076-w"]
+    citation_checked: {by: "Lab S5 method audit", date: "2026-10-16", note: "Griffin output reports number_of_sites for each site list. The one-site stability tolerance is an engineering comparison rule, not a biological threshold."}
+
   # ------------------------------------------------------ breakpoint-motifs
   - algorithm_id: breakpoint-motifs
     metric_id: cpg_near_end_fraction
@@ -3024,6 +3071,55 @@ entries:
     meaning_low: "All candidate microbial taxa fit in the displayed profile."
     headline: false
     stability: {kind: absolute, tolerance: 1}
+  # ----------------------------------------------- aligned-end-structure
+  - algorithm_id: aligned-end-structure
+    metric_id: ocf_like_end_asymmetry
+    label: "Open-chromatin aligned-end asymmetry (OCF-like)"
+    value_kind: signed
+    tier: SPECULATIVE
+    origin_tier: NEWER
+    origin_platform: "ONT aligned-span proxy; published OCF used paired-end short reads"
+    min_depth_x: 10
+    reference: {kind: none}
+    performance: null
+    performance_missing_reason: "No calibrated reference range or tissue-origin performance for this ONT estimator"
+    meaning_high: "More D−U ends left of catalogued centers and U−D ends right of them; no tissue fraction is inferred."
+    meaning_low: "More negative values indicate the opposite directional end-count pattern in the pinned regions; no tissue fraction is inferred."
+    confounders: ["catalogue tissue and assay", "alignment clipping", "aligned-span length distribution", "ONT library preparation", "depth and region coverage"]
+    next_steps:
+      analytical: ["Inspect eligible centers and raw U/D end counts", "Compare only with the same pinned catalogue and protocol"]
+      clinical_setting: null
+    license_ids: [method-patents]
+    flags: [LEGAL]
+    headline: true
+    stability: {kind: unvalidated}
+    citations: ["doi:10.1101/gr.242719.118"]
+    citation_checked: {by: "Lab S5 evidence audit", date: "2026-10-17", note: "Sun 2019 Genome Research (PMID 30808726) displays D−U summed from −60−10 to −60+10 and U−D from +60−10 to +60+10, while calling these 20-bp windows. This Lab measurement follows the displayed inclusive integer bounds (21 positions each); the paper does not resolve the counting convention. It uses ONT aligned-span ends and operator-pinned hg38 regions, and does not reproduce short-read tissue calibration."}
+
+  - algorithm_id: aligned-end-structure
+    metric_id: preferred_end_support_fraction
+    label: "Pinned preferred-end site support"
+    value_kind: proportion
+    tier: SPECULATIVE
+    origin_tier: NEWER
+    origin_platform: "ONT aligned-span proxy; published site discovery used deep paired-end short reads"
+    min_depth_x: 10
+    reference: {kind: none}
+    performance: null
+    performance_missing_reason: "No validated background, diagnostic performance or tissue-specific calibration for this ONT support fraction"
+    meaning_high: "A larger fraction of eligible aligned-span ends coincides with pinned U/D site coordinates."
+    meaning_low: "A smaller fraction of eligible aligned-span ends coincides with pinned U/D site coordinates."
+    confounders: ["site catalogue provenance", "alignment-end precision", "library preparation", "fragment-length distribution"]
+    next_steps:
+      analytical: ["Inspect eligible end count and catalogue digest", "Compare only with the same pinned site catalogue and library protocol", "Do not treat a 10x sample as de novo preferred-site discovery"]
+      clinical_setting: null
+    license_ids: [method-patents]
+    flags: [LEGAL]
+    headline: false
+    stability: {kind: unvalidated}
+    citations: ["doi:10.1073/pnas.1804134115"]
+    citation_checked: {by: "Lab S5 evidence audit", date: "2026-10-17", note: "Sun 2018 PNAS (PMID 29760053) mined size-tagged preferred ends from approximately 470x pooled paired-end plasma sequencing. This Lab metric only counts exact matches to an operator-pinned catalogue; it does not discover or validate tissue-specific sites."}
+
   # ------------------------------------------------------------- viral-reads
   - algorithm_id: viral-reads
     metric_id: ebv_rpm
@@ -3405,6 +3501,83 @@ entries:
     stability: {kind: relative, tolerance: 0.10}
     citations: []
 
+  # -------------------------------------------------------------------- wps
+  - algorithm_id: wps
+    metric_id: qualifying_fragment_depth_x
+    label: "WPS-eligible 120–180 bp aligned-fragment depth"
+    value_kind: positive
+    tier: SPECULATIVE
+    origin_tier: SPECULATIVE
+    origin_platform: "ONT aligned-span support for this Lab WPS implementation"
+    min_depth_x: null
+    reference: {kind: none}
+    performance: null
+    performance_missing_reason: "No validated support-depth threshold or biological interpretation is established"
+    meaning_high: "More eligible aligned-fragment span bases support the WPS calculation."
+    meaning_low: "Sparse eligible span depth can leave a WPS score with little molecular support."
+    confounders: ["ONT fragment-length distribution", "mapping and copy-number bias", "sequencing depth"]
+    next_steps:
+      analytical: ["Inspect qualifying fragment count and depth in the WPS summary"]
+      clinical_setting: null
+    license_ids: [method-patents]
+    flags: [LEGAL]
+    headline: true
+    stability: {kind: unvalidated}
+    citations: []
+    citation_checked: {by: "Lab S5 source review", date: "2026-10-17", note: "No citation displayed. This support-depth metric is a Lab-specific descriptive count, not a measure or threshold validated by Snyder et al."}
+
+  # ---------------------------------------------- finaletoolkit-xcheck
+  - algorithm_id: finaletoolkit-xcheck
+    metric_id: motif_pearson_r
+    label: "FinaleToolkit paired-end 4-mer frequency concordance"
+    value_kind: signed
+    tier: SPECULATIVE
+    origin_tier: NEWER
+    origin_platform: "paired-end Illumina"
+    min_depth_x: null
+    reference: {kind: none}
+    performance: null
+    performance_missing_reason: "Method parity is not biological or clinical validation"
+    missing_value_caption: "Correlation unavailable when paired-end motifs have insufficient variation."
+    meaning_high: "The pinned toolkit and independent paired-end counter have correlated 4-mer frequency patterns; inspect the artifact for absolute differences."
+    meaning_low: "The toolkit and independent counter disagree; inspect input filters and the paired-end artifact."
+    confounders: ["BAM pair flags", "MAPQ", "reference end coordinates", "sparse motifs"]
+    next_steps:
+      analytical: ["Inspect paired-end method settings and the 256-frequency artifact", "Do not transfer this concordance to single-end ONT"]
+      clinical_setting: null
+    license_ids: [method-patents]
+    flags: [LEGAL]
+    headline: true
+    stability: {kind: absolute, tolerance: 0.01}
+    citations: ["doi:10.1093/bioadv/vbaf236"]
+    citation_checked: {by: "Lab S5 cross-check audit", date: "2026-10-17", note: "Official FinaleToolkit 1.1.0 documentation and tagged source define paired-end 5-prime motifs; correlation is an engineering parity check only."}
+
+  - algorithm_id: finaletoolkit-xcheck
+    metric_id: delfi_ratio_pearson_r
+    label: "FinaleToolkit paired-end uncorrected DELFI-bin concordance"
+    value_kind: signed
+    tier: SPECULATIVE
+    origin_tier: NEWER
+    origin_platform: "paired-end Illumina"
+    min_depth_x: null
+    reference: {kind: none}
+    performance: null
+    performance_missing_reason: "Uncorrected 100-kb method parity is not the published GC-corrected classifier"
+    missing_value_caption: "Correlation unavailable without at least two variable bins containing long fragments."
+    meaning_high: "The toolkit and independent paired-end counter agree on comparable short/long bins."
+    meaning_low: "The toolkit and independent counter disagree on comparable short/long bins."
+    confounders: ["BAM pair flags", "MAPQ", "sparse bins", "GC correction intentionally disabled"]
+    next_steps:
+      analytical: ["Inspect per-bin counts and method settings", "Do not transfer this concordance to the Lab ONT track"]
+      clinical_setting: null
+    license_ids: [method-patents, no-license-not-adopted]
+    flags: [LEGAL]
+    headline: false
+    stability: {kind: absolute, tolerance: 0.01}
+    citations: ["doi:10.1093/bioadv/vbaf236", "doi:10.1038/s41586-019-1272-6"]
+    citation_checked: {by: "Lab S5 cross-check audit", date: "2026-10-17", note: "Official FinaleToolkit 1.1.0 DELFI API documents paired-end BAM, 100-kb input bins, optional GC correction and 5-Mb merging; both are disabled here for raw-count parity. The Cristiano classifier is not evaluated."}
+
+  # -------------------------------------------------------------- epi-clock
   - algorithm_id: epi-clock
     metric_id: epigenetic_age_years
     label: "Exploratory Weidner three-CpG age estimate"

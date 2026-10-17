@@ -14,8 +14,8 @@ import pytest
 from tests.lab.test_landing import _dom, needs_chrome
 from traceback_lab import views
 from traceback_lab.controls import derived_plan_items
-from traceback_lab.envelope import Failure, Metric, ResultEnvelope, provenance
-from traceback_lab.interpretation.engine import load_library
+from traceback_lab.envelope import Depth, Failure, Metric, Provenance, ResultEnvelope, provenance
+from traceback_lab.interpretation.engine import Entry, NOT_INTERPRETABLE_REASONS, load_library
 from traceback_lab.read_summary import ReadSummary, depth_stamp, derived_mask
 from traceback_lab.registry import load_registry, plan
 from traceback_lab.stability import Side, band_at, deviation, stable
@@ -65,6 +65,117 @@ def test_d32_table(spec, a, b, expected) -> None:
 def test_absolute_needs_a_tolerance() -> None:
     with pytest.raises(ValueError):
         stable({"kind": "absolute"}, Side(1.0), Side(1.0))
+
+
+def test_unvalidated_depth_dependent_fraction_has_no_stability_verdict() -> None:
+    spec = {"kind": "unvalidated"}
+    assert stable(spec, Side(0.2, n=1_000_000), Side(0.8, n=1_000_000)) is None
+    assert deviation(spec, 0.2, 0.8, 0.5) == (None, "none")
+    assert band_at(spec, Side(0.2), Side(0.8)) is None
+
+
+def test_deliberately_unpublished_value_is_not_called_usable_or_unvalidated() -> None:
+    provenance = Provenance(
+        tool="bam-qc", tool_version="1", parameters_sha256="a" * 64,
+        source_id="b" * 64, input_id="c" * 64, reference_id="hg38",
+        timestamp_utc="2026-10-17T00:00:00Z",
+    )
+    result = ResultEnvelope(
+        algorithm_id="bam-qc", algorithm_version="1", status="ok", provenance=provenance,
+        depth=Depth(eligible_reads=100, approx_depth_x=20),
+        metrics=[Metric(metric_id="duplicate_fraction", value=None)],
+    )
+    full = views.InputView("full", "c" * 64, None, {}, {"bam-qc": result}, 1.0)
+    half = views.InputView("0.5", "d" * 64, "downsample", {}, {"bam-qc": result}, 0.5)
+    library = views.load_library()
+    for view in (full, half):
+        assert views.cell_state(view, full, "bam-qc", "duplicate_fraction", library) == {
+            "state": "not_interpretable", "reason": "none_published", "value": None,
+        }
+
+
+def test_wps_control_values_are_measured_but_not_declared_usable() -> None:
+    provenance = Provenance(
+        tool="wps", tool_version="1", parameters_sha256="a" * 64,
+        source_id="b" * 64, input_id="c" * 64, reference_id="hg38",
+        timestamp_utc="2026-10-17T00:00:00Z",
+    )
+
+    def view(label: str, fraction: float, value: float, transform: str | None = None) -> views.InputView:
+        result = ResultEnvelope(
+            algorithm_id="wps", algorithm_version="1", status="ok", provenance=provenance,
+            depth=Depth(eligible_reads=1_000_000, approx_depth_x=20 * fraction),
+            metrics=[Metric(metric_id="qualifying_fragment_depth_x", value=value)],
+        )
+        return views.InputView(label, "c" * 64, transform, {"half": label[-1]} if transform == "split" else {},
+                               {"wps": result}, fraction)
+
+    full = view("full", 1.0, 0.7)
+    half = view("0.5", 0.5, 0.4, "downsample")
+    sample = views.SampleView("b" * 64, "b" * 12, False, full,
+                              [half, view("split-A", 0.5, 0.2, "split"),
+                               view("split-B", 0.5, 0.6, "split")])
+    library = views.load_library()
+    cell = views.cell_state(half, full, "wps", "qualifying_fragment_depth_x", library)
+    assert cell == {"state": "ok_unvalidated", "value": 0.4, "verdict": None}
+    panel = next(p for p in views.stability_panels(sample, library)
+                 if p["metric_id"] == "qualifying_fragment_depth_x")
+    assert panel["verdict"] == "stability not validated"
+    assert panel["points"][0]["value"] == 0.4
+    assert panel["points"][0]["deviation"] is None
+    assert panel["split"]["stable"] is None
+    repeatability = views.repeatability(views.stability_panels(sample, library))
+    assert repeatability["metrics"] == 1
+    assert repeatability["no_verdict"] == 1
+    assert repeatability["unstable"] == 0
+    assert all(row["stable"] is None for row in repeatability["worst"])
+
+
+def test_all_skipped_wps_controls_are_not_called_unstable() -> None:
+    provenance = Provenance(
+        tool="wps", tool_version="1", parameters_sha256="a" * 64,
+        source_id="b" * 64, input_id="c" * 64, reference_id="hg38",
+        timestamp_utc="2026-10-17T00:00:00Z",
+    )
+    full_result = ResultEnvelope(
+        algorithm_id="wps", algorithm_version="1", status="ok", provenance=provenance,
+        depth=Depth(eligible_reads=1_000_000, approx_depth_x=12),
+        metrics=[Metric(metric_id="qualifying_fragment_depth_x", value=0.7)],
+    )
+    skipped_result = full_result.model_copy(update={"status": "skipped", "skip_reason": "depth", "metrics": []})
+    full = views.InputView("full", "c" * 64, None, {}, {"wps": full_result}, 1.0)
+    half = views.InputView("0.5", "d" * 64, "downsample", {}, {"wps": skipped_result}, 0.5)
+    sample = views.SampleView("b" * 64, "b" * 12, False, full, [half])
+
+    panel = next(p for p in views.stability_panels(sample)
+                 if p["algorithm_id"] == "wps" and p["metric_id"] == "qualifying_fragment_depth_x")
+    assert panel["points"][0]["state"] == "skipped"
+    assert panel["verdict"] == "not measured below full depth"
+def test_downsample_without_a_stability_rule_has_no_verdict() -> None:
+    metric = SimpleNamespace(metric_id="unlisted_metric", value=3, n=None, ci=None, ci_level=None)
+    result = SimpleNamespace(status="ok", metrics=[metric], depth=None)
+    full = views.InputView("full", "a" * 64, None, {}, {"unknown-algorithm": result})
+    half = views.InputView("0.5", "b" * 64, "downsample", {},
+                           {"unknown-algorithm": result}, fraction=0.5)
+    assert views.cell_state(half, full, "unknown-algorithm", "unlisted_metric", load_library()) == {
+        "state": "not_interpretable", "reason": "no_stability_verdict", "value": 3,
+    }
+    assert "no_stability_verdict" in NOT_INTERPRETABLE_REASONS
+
+
+def test_known_stability_rule_with_unavailable_full_value_is_not_comparable() -> None:
+    half_metric = SimpleNamespace(metric_id="score", value=3, n=None, ci=None, ci_level=None)
+    full_metric = SimpleNamespace(metric_id="score", value=None, n=None, ci=None, ci_level=None)
+    half = views.InputView("0.5", "b" * 64, "downsample", {},
+                           {"fixture": SimpleNamespace(status="ok", metrics=[half_metric], depth=None)}, 0.5)
+    full = views.InputView("full", "a" * 64, None, {},
+                           {"fixture": SimpleNamespace(status="ok", metrics=[full_metric], depth=None)})
+    entry = Entry("fixture", "score", {"reference": {"kind": "none"}, "value_kind": "scalar", "stability": R})
+    library = SimpleNamespace(entry=lambda algorithm_id, metric_id: entry)
+    assert views.cell_state(half, full, "fixture", "score", library) == {
+        "state": "not_interpretable", "reason": "comparison_unavailable", "value": 3,
+    }
+    assert "comparison_unavailable" in NOT_INTERPRETABLE_REASONS
 
 
 def test_deviation_and_band_units() -> None:

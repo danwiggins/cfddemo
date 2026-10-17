@@ -249,7 +249,10 @@ new measurement.
 | `cell-origin` | share of cfDNA from each of 40 Loyfer U250 cell types with bootstrap intervals; the Lab decodes MM/ML CpG calls in-house and uses the registered Loyfer atlas with UXM and NNLS. It needs 2.5M eligible reads and `traceback method-asset register --from-dir LOYFER_DIR --root R`; minor cell types are not interpretable below 5x. Missing or uncertain calls stay unknown; confident 5hmC and 5mC both enter the UXM methylated (M) state. Every run writes a private prefiltered BAM in worker scratch; downsample and split runs first select their reads into a second transient BAM. Both are deleted after normal run completion, and neither is published. The signed cell-origin method retains its separate modkit path |
 | `meth-tf` | slow-profile exploratory tumour share of a two-component, nonnegative methylation-marker fit; needs 2.5M eligible reads, C+m calls, and an operator-registered reference with matching genome and modified-base model; no clinical calibration or threshold |
 | `end-motifs` | reference 4-mers at both ends of each molecule (5′ forward end and the reverse complement of the other end), motif diversity score and CCCA share; needs 500,000 eligible reads and the registered FASTA |
+| `griffin` | pinned Griffin GC-corrected TF-site nucleosome profile on a registered hg38 site list; needs an Illumina-declared paired-end BAM, at least 5 million eligible autosomal pairs, the registered reference assets, Snakemake 5.19.2 importable by the Lab Python interpreter, and bedtools, samtools, pyBigWig and pybedtools. Native ONT and derived inputs skip; site profiles are descriptive, not a tissue-origin or clinical call |
 | `delfi-ratio` | short (100–150 bp) / long (151–220 bp) ratio per 5 Mb bin on chr1–22, median-centred, and its SD; no GC correction, cohort-relative only; needs 1,000,000 eligible reads |
+| `wps` | long-fragment windowed protection score from D21-eligible 120–180 bp ONT aligned spans: spanning 120 bp windows minus molecules with either aligned-span endpoint inside them. Requires hg38 with `chr1`–`chr22` autosome names and known approximate depth ≥ 10x for each input, including derived controls. No minimum qualifying-fragment depth has been validated; its measured depth and fragment count are reported as support, not a biological WPS score. The full input also needs free lab-volume space for its exact track (four bytes per autosomal base, 10% overhead, plus 2 GiB margin); insufficient space yields a `disk` skip. The full result publishes exact per-base scores in compressed 1 Mb chunks indexed by `wps_exact_index.json`. Derived downsample and split controls that meet the 10x gate publish a separate mean-per-1 kb-bin preview in `wps_track.npz`, but do not retain another exact per-base track. The preview smooths away per-base detail and cannot recover the exact track. A genome-wide or 1 kb average of raw WPS is dominated by qualifying-fragment coverage and is not reported as an interpreted scalar. No nucleosome calls, validated stability tolerance, or clinical cutoff. |
+| `finaletoolkit-xcheck` | FinaleToolkit **1.1.0** cross-check on a verified prealigned, indexed, paired-end Illumina hg38 BAM with at least 1M eligible reads. Set `TRACEBACK_FINALETOOLKIT_BIN` to that release's executable (or place it on `PATH`); an `env`-style launcher or Windows wrapper can also use `TRACEBACK_FINALETOOLKIT_PYTHON` to run the pinned package module under that interpreter, so the attested runtime performs the measurement. The full input only is checked; ONT and derived inputs receive labelled skips. The upstream 4-mer 5′-end frequencies and uncorrected, unmerged 100-kb DELFI short/long counts (MAPQ ≥20) are compared with an independent paired-end counter on the same BAM and registered FASTA. The artifact gives Pearson correlations, matched-bin count, exact count agreement and the fixed 0.95/0.90 engineering thresholds; concordance also requires exact DELFI short/long count agreement. It retains the upstream and reference TSVs. A sparse or constant track has no correlation verdict. Its 1.1.0 end-motif region worker accepts but does not apply the declared minimum-length option, so the comparator follows the actual output and records that behavior. These settings intentionally differ from the published GC-corrected, arm-merged DELFI classifier and from the Lab's single-end ONT `end-motifs` and `delfi-ratio`; no clinical or cross-platform equivalence is implied. FinaleToolkit 1.1.0 produced no usable single-end ONT fragments in the D13 spike. |
 | `meth-calls` | intermediate: decodes MM/ML once into site-level CpG call chunks (read row, forward-strand C position, strand, 5mC/5hmC/canonical ML); derived inputs reuse it through their row mask |
 | `global-5mc` | share of CpG site calls whose most likely state is 5mC |
 | `global-5hmc` | share of CpG site calls (with a 5hmC channel) whose most likely state is 5hmC; skipped (`missing_channel`) when the MM tags carry no `C+h` |
@@ -258,6 +261,7 @@ new measurement.
 | `hypometh-reads` | among reads with ≥ 4 CpG calls, the share under 25% methylated, and U/X/M counts (≤ 25% / between / ≥ 75%); needs 500,000 eligible reads |
 | `frag-x-meth` | descriptive molecule-count matrix of aligned-size bins by per-read 5mC fraction (at least four distinct CpG sites/read); the scalar is long (151–220 bp) mean minus short (100–150 bp) mean, null if either group is empty; no normal range |
 | `breakpoint-motifs` | 4-mer counts at aligned-reference-span start and end−1, stratified by CpG proximity; the scalar is the fraction of ends near a CpG. These are not proven physical cleavage positions, and the methylation link is unavailable without a supported joint input |
+| `aligned-end-structure` | exploratory ONT aligned-span U/D end asymmetry around operator-pinned hg38 open-chromatin centers and exact support for separately pinned U/D preferred-end coordinates; needs a native ONT input or its downsample/split subset at ≥10x observed eligible depth and both catalogues registered below. No tissue-origin or clinical calibration |
 
 The Lab's cell-origin v2 execution identity pins normalized source digests of
 its MM/ML decoder and reused UXM, NNLS, bootstrap, model, and prefilter code,
@@ -268,6 +272,12 @@ alignments, confident CpG calls, classified fragments, or observed markers
 publish a `skipped/low_support` result with no composition metrics or artifact.
 Parser errors, resource caps, non-convergence, and validation failures still
 publish failed attempts for investigation.
+
+The FinaleToolkit verdict uses the D13 Pearson correlation thresholds and
+exact DELFI counts. Pearson compares 4-mer frequency patterns: even a value
+of 1 can coexist with different absolute frequencies. The artifact and Signals
+show their maximum absolute frequency difference as a diagnostic, without an
+additional acceptance cutoff.
 
 **Exploratory epi-clock.** Verify the three hg38 assay-site coordinates, then
 follow the [epi-clock map instructions](epi-clock.md) to prepare the JSON map and
@@ -386,6 +396,76 @@ results on such an Illumina input remain stored but appear as platform skips
 in sample views and the local API; rerun records those skips in the store.
 The same read-side mask applies when an old prealigned input cannot verify ONT
 provenance from its BAM.
+
+**Aligned-end catalogues.** `aligned-end-structure` requires two local,
+operator-supplied hg38 files. The center file is sorted BED3
+(`chrN<TAB>start<TAB>end`, 0-based half-open); the center is the integer
+midpoint, and centers must be more than 200 bp apart so ±100 bp profiles do
+not overlap. The preferred-end file is sorted BED4 with 0-based half-open
+one-base intervals
+and `U` or `D` in column four. `U` means the lower-coordinate aligned end;
+`D` means the higher-coordinate aligned end. Both files use chr1–chr22 and
+numeric chromosome order, contain no header or extra columns, and must each
+be at most 64 MiB. Filter raw peak files to these columns and autosomes,
+then sort numerically by chromosome and position (for example,
+`sort -k1.4,1n -k2,2n`) and thin centers before registration; the Lab does
+not silently discard overlapping peaks or convert genome builds. Confirm the
+source build and convert any 1-based source positions before registration:
+a wrong build or one-base shift can produce a plausible but incorrect score.
+A U and D site may share
+one coordinate, but duplicate sites in the same direction are rejected. Both files
+must identify their provenance outside the file, including source accession,
+release, assembly, coordinate convention and terms. The Lab validates and
+rehashes their exact bytes. It neither downloads nor redistributes them.
+
+```bash
+traceback lab asset end-catalogues-register \
+  --centers YOUR_SORTED_hg38_centers.bed \
+  --preferred YOUR_SORTED_hg38_preferred_U_D_sites.bed \
+  --source-label YOUR_SHORT_DESCRIPTION \
+  --centers-source YOUR_CENTER_ACCESSION_AND_RELEASE \
+  --preferred-source YOUR_END_SITE_ACCESSION_AND_RELEASE \
+  --terms unknown --root R
+traceback lab asset end-catalogues-inspect --root R
+```
+
+The result measures raw `D−U` end counts at integer offsets [−70, −50] bp
+and `U−D` at [50, 70] bp around pinned centers. These bounds follow the
+published OCF summation at peaks −60 and +60 with a ±10 offset. The paper
+calls them 20-bp windows, while summing both integer endpoints includes 21
+positions. This implementation follows the displayed summation literally;
+the paper does not resolve that counting convention. It also reports the
+fraction of valid aligned ends exactly matching the pinned U/D site catalogue;
+this is a support count, not de novo site discovery or enrichment against a calibrated
+background. The raw count difference scales with depth, eligible-region count
+and end coverage; it is null when no aligned ends fall in its measurement
+windows or when either side of the center lacks window observations.
+The proxy does not impose the short-fragment length constraint of the
+published cfDNA method. Its artifact reports aggregate aligned-span counts
+in five length bins so that this difference can be assessed for each run.
+The artifact also records the strongest left-side D and right-side U peak
+offsets as clipping diagnostics; these are descriptive and do not validate
+the score's biological origin.
+Downsample and split results use the same selected read-summary rows as other
+Lab measurements. The 10x gate is recalculated from those selected rows;
+CNA-derived inputs remain unsupported. The reported 10x minimum is an input
+gate, not a validated adequacy threshold.
+The raw count score changes with retained depth, so a downsampled score should
+not be read as a biological difference from the full-input score; split halves
+are descriptive repeatability checks only.
+The 201-position raw U/D profiles and exact preferred-site support are
+sample-level derivatives. Treat the artifact as sample-identifiable data,
+especially when registering a small or targeted catalogue.
+The score has no validated stability tolerance or biological acceptance
+interval. Its headline placement is for Lab navigation and does not imply
+clinical or tissue-origin validity. Both are ONT aligned-span proxies, not confirmed physical
+cleavage positions. The [OCF study](https://pubmed.ncbi.nlm.nih.gov/30808726/)
+used tissue-specific short-read open-chromatin signals, while the
+[size-tagged preferred-end study](https://www.pnas.org/doi/10.1073/pnas.1804134115)
+mined sites from roughly 470x pooled paired-end data. A substituted hg38
+ATAC peak set is not the original tissue-specific DNase-seq catalogue.
+Neither a 10x ONT result nor an unverified site set supports a tissue-origin,
+fetal-fraction, cancer or clinical call.
 
 **PMD asset.** `pmd-score` needs an operator-supplied Zhou 2018 hg38
 common-PMD BED.gz file. The repository does not ship or download it; its
@@ -679,6 +759,8 @@ serve as a history of every interrupted run.
   is labelled as such rather than claiming stability through missing higher-depth
   evidence. If a full-depth selected result is unreadable or ambiguous, Stability names that
   algorithm without inventing a metric-level panel from damaged data.
+  When a metric lacks a stability rule or numeric values, the downsample cell
+  says no stability verdict instead of calling it unstable.
 
 ## Building a Lab cohort
 

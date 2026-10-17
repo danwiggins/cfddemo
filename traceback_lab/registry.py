@@ -58,8 +58,11 @@ ALGORITHMS: tuple[str, ...] = (
     "viral_reads:VIRAL_READS",
     "cell_origin:CELL_ORIGIN",
     "end_motifs:END_MOTIFS",
+    "finaletoolkit_xcheck:FINALETOOLKIT_XCHECK",
     "breakpoint_motifs:BREAKPOINT_MOTIFS",
+    "aligned_end_structure:ALIGNED_END_STRUCTURE",
     "delfi_ratio:DELFI_RATIO",
+    "wps:WPS",
     "tss_profile:TSS_PROFILE",
     "meth_calls:METH_CALLS",
     "modbase_qc:MODBASE_QC",
@@ -72,6 +75,7 @@ ALGORITHMS: tuple[str, ...] = (
     "fetal_fraction:FETAL_FRACTION",
     "fetal_fraction_chry:FETAL_FRACTION_CHRY",
     "meth_tf:METH_TF",
+    "griffin:GRIFFIN",
     "epi_clock:EPI_CLOCK",
 )
 
@@ -199,15 +203,20 @@ def execution_identity(
     upstream: Iterable[Mapping[str, str]] = (),
     platform: str | None = None,
     tool_pins: Iterable[Mapping[str, str]] | None = None,
+    tool_identities: Iterable[Mapping[str, str]] | None = None,
     parameters: Mapping[str, Any] | None = None,
 ) -> str:
     """``parameters_sha256`` for one algorithm on one reference (D19)."""
 
+    if tool_pins is not None and tool_identities is not None:
+        raise ValueError("provide only one planned tool-identity list")
+    selected_tools = tool_pins if tool_pins is not None else tool_identities
+
     return parameters_sha256(
         algorithm_id=algorithm.id,
         algorithm_version=algorithm.version,
-        parameters=parameters if parameters is not None else algorithm.parameters,
-        tools=list(tool_pins) if tool_pins is not None else [tool.identity() for tool in algorithm.tools],
+        parameters=algorithm.parameters if parameters is None else parameters,
+        tools=list(selected_tools) if selected_tools is not None else [tool.identity() for tool in algorithm.tools],
         reference_sha256=reference_sha256,
         asset_sha256s=asset_sha256s,
         upstream=upstream,

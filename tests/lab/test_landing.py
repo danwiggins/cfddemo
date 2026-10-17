@@ -486,6 +486,7 @@ def test_signals_body_map_and_agreement(page_root, tmp_path) -> None:
         body = _dom(server, tmp_path / "b", route=f"/sample/{id12}/body-map")
         agreement = _dom(server, tmp_path / "a", route=f"/sample/{id12}/agreement")
     assert 'data-rendered="1"' in signals and "Size density" in signals and "Data table" in signals
+    assert "Griffin TF-site profile" in signals and "FLAG: LEGAL" in signals
     assert 'aria-pressed="true"' in signals
     assert "FLAG: LEGAL" in body and "cell-origin" in body
     assert "These signals share inputs and are not independent confirmation; agreement is not validation." in agreement

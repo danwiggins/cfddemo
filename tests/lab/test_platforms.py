@@ -212,6 +212,7 @@ def test_stored_view_qualifies_unverified_platform_before_rerun(
     if expected == "skipped":
         assert sample.full.results["fragment-size"].skip_reason == "platform"
     response = LabApi(store).sample(source_id[:12])
+    assert response["platform"] == sample.platform
     visible = next(item for item in response["algorithms"] if item["algorithm_id"] == "fragment-size")
     assert visible["status"] == expected
     if expected == "skipped":

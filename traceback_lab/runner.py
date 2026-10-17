@@ -14,6 +14,7 @@ from __future__ import annotations
 import json
 import os
 import shutil
+import stat
 import sys
 from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass, field
@@ -34,9 +35,35 @@ from .registry import (
     execution_identity,
 )
 from .scrub import Scrubber
-from .store import LabStore, RunLog, WriterLock
+from .store import MAX_EXECUTION_PLAN_BYTES, LabStore, RunLog, WriterLock, open_regular_no_follow
 
 DEFAULT_TIMEOUT_S = 3600.0
+
+
+def _cached_plan_matches(attempt: Path | None, expected: Mapping[str, Any], *, required: bool) -> bool:
+    """Reuse only a bounded producer plan matching this run's complete identity."""
+    if attempt is None:
+        return False
+    path = attempt / "execution_plan.json"
+    try:
+        path.lstat()
+    except FileNotFoundError:
+        # Static pre-plan results remain eligible for the legacy cache path.
+        return not required
+    except OSError:
+        return False
+    try:
+        with os.fdopen(open_regular_no_follow(path), "rb") as stream:
+            info = os.fstat(stream.fileno())
+            if (not stat.S_ISREG(info.st_mode) or info.st_nlink != 1
+                    or info.st_size > MAX_EXECUTION_PLAN_BYTES):
+                return False
+            data = stream.read(MAX_EXECUTION_PLAN_BYTES + 1)
+        if len(data) > MAX_EXECUTION_PLAN_BYTES:
+            return False
+        return canonical_json_bytes(json.loads(data)) == canonical_json_bytes(expected)
+    except (OSError, ValueError, TypeError, RecursionError):
+        return False
 
 
 @dataclass
@@ -207,6 +234,14 @@ def run_plan(
         identity_assets = getattr(algorithm, "identity_assets", None)
         assets_of = getattr(algorithm, "asset_sha256s", None)
         scoped_assets_of = getattr(algorithm, "asset_sha256s_for_input", None)
+        identity_parameters = getattr(algorithm, "identity_parameters", None)
+        identity_tools = getattr(algorithm, "identity_tools", None)
+        worker_env = _worker_env()
+        tool_pins = tuple(algorithm.tools)
+        planned_tools = [tool.identity() for tool in
+                         (identity_tools(worker_pythonpath=worker_env["PYTHONPATH"])
+                          if callable(identity_tools) and not platform_rejected
+                          else tool_pins)]
         if platform_rejected or pon_unavailable:
             planned_assets = []
         elif callable(identity_assets):
@@ -217,11 +252,9 @@ def run_plan(
             planned_assets = list(assets_of(store.root))
         else:
             planned_assets = []
-        identity_parameters = getattr(algorithm, "identity_parameters", None)
         planned_parameters = (identity_parameters(identity_ctx)
-                              if callable(identity_parameters) and not platform_rejected and not pon_unavailable else algorithm.parameters)
-        tool_pins = tuple(algorithm.tools)
-        planned_tools = [tool.identity() for tool in tool_pins]
+                              if callable(identity_parameters) and not platform_rejected and not pon_unavailable
+                              else algorithm.parameters)
         identity = execution_identity(
             algorithm,
             reference_sha256=target.reference_sha256,
@@ -241,6 +274,9 @@ def run_plan(
             "tools": planned_tools, "asset_sha256s": planned_assets,
             "upstream": upstream,
         }
+        target.extras["planned_asset_sha256s"] = list(planned_assets)
+        target.extras["planned_tool_identities"] = planned_tools
+        target.extras["planned_parameters"] = planned_parameters
         step = algorithm.id if target.label == "full" else f"{algorithm.id}@{target.label}"
         existing = store.read_result(target.input_id, algorithm.id, identity)
         blocked = [name for name in algorithm.upstream if done.get(name) is None or done[name].status != "ok"]
@@ -249,8 +285,18 @@ def run_plan(
             consumed is not None
             and store.selected_upstream_selections(target.input_id, algorithm.id, identity) == consumed
         )
-        if (existing is not None and existing.status == "ok" and not force
-                and not platform_rejected and not pon_unavailable and not blocked and cache_valid):
+        if existing is not None:
+            # Dynamic identities require their producer plan. A present plan,
+            # even for a static method, must describe this exact run before
+            # its result can be reselected from cache.
+            dynamic_plan = any(callable(hook) for hook in
+                               (identity_tools, identity_assets, identity_parameters))
+            cached_attempt = store.selected_attempt(target.input_id, algorithm.id, identity)
+            cache_valid = cache_valid and _cached_plan_matches(
+                cached_attempt, execution_plan, required=dynamic_plan,
+            )
+        if (existing is not None and existing.status == "ok" and not force and
+                not platform_rejected and not pon_unavailable and not blocked and cache_valid):
             store.reselect_cached_result(target.input_id, algorithm.id, identity)
             selected = store.selected_attempt(target.input_id, algorithm.id, identity)
             result = StepResult(
@@ -361,7 +407,7 @@ def run_plan(
             outcome = run_pipeline(
                 [Stage("worker", [sys.executable, "-m", "traceback_lab.worker", str(request)])],
                 timeout_s=timeout_s,
-                env=_worker_env(),
+                env=worker_env,
                 cwd=scratch,
                 echo=echo,
                 disk_path=scratch,

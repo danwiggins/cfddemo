@@ -14,7 +14,7 @@ from __future__ import annotations
 import hashlib
 import json
 from pathlib import Path
-from typing import Any
+from typing import Any, Callable
 
 import numpy as np
 import pysam
@@ -80,24 +80,32 @@ def header_model(bam: Path) -> str | None:
     return models[0] if len(models) == 1 else None
 
 
-def write_transient_bam(source: Path, destination: Path, derived: dict[str, Any]) -> int:
-    """Copy the records a derived input keeps (same predicate as the row masks)."""
+def derived_name_predicate(derived: dict[str, Any]) -> Callable[[str], bool]:
+    """The shared read-name selection used by row masks and transient BAMs."""
 
     from fractions import Fraction
     from math import ceil
 
-    import pysam
-
-    from ..read_summary import DS_SALT, SPLIT_SALT, h64
+    from ..read_summary import DS_SALT, SPLIT_SALT, h64, validate_fraction
 
     if derived.get("transform") == "downsample":
-        threshold = ceil(Fraction(float(derived["fraction"])) * 2**64)
-        keep = lambda name: h64(DS_SALT, name) < threshold  # noqa: E731
+        threshold = ceil(Fraction(validate_fraction(float(derived["fraction"]))) * 2**64)
+        return lambda name: h64(DS_SALT, name) < threshold
     elif derived.get("transform") == "split":
+        if derived.get("half") not in {"A", "B"}:
+            raise ValueError("a split half is A or B")
         want_a = derived["half"] == "A"
-        keep = lambda name: (h64(SPLIT_SALT, name) < 2**63) == want_a  # noqa: E731
+        return lambda name: (h64(SPLIT_SALT, name) < 2**63) == want_a
     else:
         raise ValueError(f"cell-origin has no transient BAM for {derived.get('transform')!r}")
+
+
+def write_transient_bam(source: Path, destination: Path, derived: dict[str, Any]) -> int:
+    """Copy the records a derived input keeps (same predicate as the row masks)."""
+
+    import pysam
+
+    keep = derived_name_predicate(derived)
     kept = 0
     with pysam.AlignmentFile(str(source), "rb") as reader, pysam.AlignmentFile(
         str(destination), "wb", template=reader

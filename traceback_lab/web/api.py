@@ -625,6 +625,8 @@ class LabApi:
         library = self.libraries.get()
         record = source_record(self.store, source_id) or {}
         depth_x = sample.full.depth_x()
+        registry = _registry()
+        input_gates = {algorithm.id: getattr(algorithm, "input_gate", None) for algorithm in registry}
         generation, target, cohort_state, cohort_problem = self._sample_cohort(source_id, sample)
         algorithms = []
         no_entry = 0
@@ -690,6 +692,7 @@ class LabApi:
                     "duration_s": envelope.duration_s,
                     "tier": headline.tier if headline else None,
                     "min_depth_x": headline.get("min_depth_x") if headline else None,
+                    "input_gate": input_gates.get(algorithm_id),
                     "headline_metric": headline.metric_id if headline else None,
                     "panels": [{"panel_id": panel.panel_id, "kind": panel.kind} for panel in envelope.panels],
                     "metrics": metrics,
@@ -705,7 +708,7 @@ class LabApi:
                     },
                 }
             )
-        order = [a.id for a in _registry()]
+        order = [a.id for a in registry]
         algorithms.sort(key=lambda row: order.index(row["algorithm_id"]) if row["algorithm_id"] in order else 99)
         panels = views.stability_panels(sample, library)
         curve = views.depth_curve(sample, library)
@@ -724,6 +727,7 @@ class LabApi:
             "id12": self._id12s()[source_id],
             "source_id": source_id,
             "full_input_id": sample.full.input_id,
+            "platform": sample.platform,
             "example": sample.example,
             "run_utc": max((entry.get("used_utc", "") for entry in record.get("inputs", [])), default=""),
             "depth": next((env.depth.model_dump() for env in sample.full.results.values() if env.depth), None),

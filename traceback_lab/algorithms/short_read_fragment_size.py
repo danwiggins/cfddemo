@@ -80,7 +80,7 @@ class ShortReadFragmentSize(Base):
         try:
             manifest = json.loads((ctx.input_dir / "manifest.json").read_bytes())
         except (OSError, ValueError):
-            return Skip("platform", "short-read TLEN needs a stored prealigned BAM")
+            return Skip("input_unavailable", "short-read TLEN needs a readable stored input manifest")
         if manifest.get("kind") != "prealigned":
             return Skip("platform", "short-read TLEN needs a prealigned BAM; Lab alignment is ONT-only")
         try:
@@ -90,7 +90,7 @@ class ShortReadFragmentSize(Base):
                 if not _contigs(bam):
                     return Skip("reference", "short-read TLEN needs canonical hg38 nuclear contigs")
         except (OSError, ValueError):
-            return Skip("platform", "short-read TLEN needs a readable prealigned BAM")
+            return Skip("input_unavailable", "short-read TLEN needs a readable prealigned BAM")
         return Ready()
 
     def run(self, ctx: InputContext, out: Path) -> AlgorithmOutput:

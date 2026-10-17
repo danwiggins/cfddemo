@@ -18,6 +18,7 @@
   };
   const CELL = {
     ok_usable: ["●", "usable"],
+    ok_unvalidated: ["?", "stability not validated"],
     ok_unstable: ["◐", "unstable"],
     not_interpretable: ["▨", "not interpretable"],
     skipped: ["○", "skipped"],
@@ -191,7 +192,7 @@
     const run = curve.run_depth_x;
     const section = h("section", { class: "panel curve", "aria-labelledby": "curve-title" });
     const heading = h("div", { class: "curve-heading" }, h("h3", { id: "curve-title" }, "Depth → utility"),
-      h("span", { class: "legend", "aria-hidden": "true" }, "● usable ◐ unstable ▨ not interpretable ○ skipped ✕ failed ? unavailable ◇ literature"));
+      h("span", { class: "legend", "aria-hidden": "true" }, "● usable ? unavailable or stability not validated ◐ unstable ▨ not interpretable ○ skipped ✕ failed ◇ literature"));
     section.append(heading);
     if (!curve.downsampled) {
       section.append(h("p", { class: "empty" }, h("span", {}, "This run used "), h("code", {}, "--no-downsample"), `. Run `, h("code", {}, `traceback lab run ${sample.id12}`), " to draw the curve."));
@@ -214,7 +215,7 @@
     for (const row of curve.rows) {
       const line = h("div", { class: "curve-row" });
       // One line per row (a fixed 44 px target) so the fold budget holds with any font; full label in title + data table.
-      const name = h("button", { type: "button", class: "curve-label", "aria-expanded": "false", title: row.label }, row.label);
+      const name = h("button", { type: "button", class: "curve-label", "aria-expanded": "false", title: row.input_gate ? `${row.label}: ${row.input_gate}` : row.label }, row.label);
       const cells = h("div", { class: "curve-track" });
       for (const cell of row.cells) {
         const [glyph, text] = CELL[cell.state] || ["·", "no result"];
@@ -230,7 +231,7 @@
       }
       const secondary = (sample.stability || []).filter((p) => p.algorithm_id === row.algorithm_id && p.metric_id !== row.metric_id);
       const detail = h("div", { class: "curve-detail", hidden: true },
-        h("p", {}, `${row.label}: full-depth state ${(CELL[row.full_state] || ["", row.full_state])[1]}; tier ${row.tier}; literature minimum ${row.min_depth_x ? row.min_depth_x + "x (literature, not measured)" : "none"}.`),
+        h("p", {}, `${row.label}: full-depth state ${(CELL[row.full_state] || ["", row.full_state])[1]}; tier ${row.tier}; literature minimum ${row.min_depth_x ? row.min_depth_x + "x (literature, not measured)" : "none"}${row.input_gate ? `; input gate ${row.input_gate}` : ""}.`),
         secondary.length ? h("table", { class: "data-table" }, h("caption", {}, "Secondary metrics by fraction"),
           h("thead", {}, h("tr", {}, h("th", { scope: "col" }, "Metric"), ...curve.fractions.map((f) => h("th", { scope: "col" }, `${f * 100}%`)))),
           h("tbody", {}, ...secondary.map((p) => h("tr", {}, h("th", { scope: "row" }, p.label), ...curve.fractions.map((f) => {
@@ -242,8 +243,8 @@
       grid.append(line, detail);
     }
     section.append(grid);
-    section.append(dataTable("Depth curve cells (literature minimums are not measured)", ["Algorithm", ...curve.fractions.map((f) => `${f * 100}%`), "Literature minimum"],
-      curve.rows.map((row) => [row.label, ...row.cells.map((c) => stateReason(c.state, c.reason, (CELL[c.state] || ["", "—"])[1])), row.min_depth_x ? `${row.min_depth_x}x (literature, not measured)` : "—"])));
+    section.append(dataTable("Depth curve cells (literature minimums are not measured)", ["Algorithm", ...curve.fractions.map((f) => `${f * 100}%`), "Literature minimum", "Input gate"],
+      curve.rows.map((row) => [row.label, ...row.cells.map((c) => stateReason(c.state, c.reason, (CELL[c.state] || ["", "—"])[1])), row.min_depth_x ? `${row.min_depth_x}x (literature, not measured)` : "—", row.input_gate || "—"])));
     return section;
   }
 
@@ -628,13 +629,14 @@
       const marks = [svg("line", { x1: pad, x2: w - 8, y1: y(0), y2: y(0), class: "zero" })];
       for (const p of panel.points) {
         if (p.band && Number.isFinite(p.band.lo) && Number.isFinite(p.band.hi)) marks.push(svg("rect", { x: x(p.fraction) - 6, width: 12, y: y(p.band.hi), height: Math.max(1, y(p.band.lo) - y(p.band.hi)), class: "band" }));
-        if (p.state === "ok_usable" || p.state === "ok_unstable") {
+        if ((p.state === "ok_usable" || p.state === "ok_unstable") && Number.isFinite(p.deviation)) {
           const clipped = unit !== "unit" && Math.abs(p.deviation) > clip;
           marks.push(svg("text", { x: x(p.fraction), y: y(p.deviation) + 4, "text-anchor": "middle", class: "pt" }, clipped ? (p.deviation > 0 ? "↑" : "↓") : "●"));
         } else {
           const description = (CELL[p.state] || ["", p.state || "gap"])[1];
           const gapLabel = p.reason === "result unreadable" ? "unreadable"
-            : p.reason === "result selection ambiguous" ? "ambiguous" : description.slice(0, 10);
+            : p.reason === "result selection ambiguous" ? "ambiguous"
+              : p.state === "ok_unvalidated" ? "no verdict" : description.slice(0, 10);
           marks.push(svg("text", { x: x(p.fraction), y: hgt - 6, "text-anchor": "middle", class: "gap" }, gapLabel));
         }
       }
@@ -771,7 +773,7 @@
   function context(sample, algorithmId, seen) {
     const c = (sample.catalog || []).find((x) => x.algorithm_id === algorithmId);
     const out = [];
-    if (c) out.push(h("p", { class: "help" }, tierBadge(c.tier), ` As run here (ONT). Original evidence: ${c.origin_tier || "—"}. Footnote: ${c.footnote || "none published"}`,
+    if (c) out.push(h("p", { class: "help" }, tierBadge(c.tier), ` As run here (${sample.platform === "illumina" ? "Illumina" : sample.platform === "ont" ? "ONT" : "unverified platform"}). Original evidence: ${c.origin_tier || "—"}. Footnote: ${c.footnote || "none published"}`,
       spacedUnverifiedBadge(c.has_library_entry ? c : null)));
     for (const id of (c ? c.license_ids : [])) {
       if (seen.has(id)) { out.push(licenseRef(sample, id)); continue; }
@@ -803,7 +805,7 @@
     };
     families.forEach(([, label], i) => tabs.append(h("button", { type: "button", class: "control subtab", "aria-pressed": "false", onclick: () => show(i) }, label)));
     out.push(tabs, body);
-    const initial = ["fragment-size", "end-motifs", "delfi-ratio", "tss-profile", "long-tail", "mtdna", "breakpoint-motifs", "lionheart"].some((id) => algo(sample, id))
+    const initial = ["fragment-size", "end-motifs", "delfi-ratio", "finaletoolkit-xcheck", "tss-profile", "long-tail", "mtdna", "breakpoint-motifs", "griffin", "aligned-end-structure", "lionheart"].some((id) => algo(sample, id))
       ? 0 : algo(sample, "copy-number") ? 1 : 2;
     show(initial);
     return out;
@@ -840,6 +842,42 @@
         details,
       );
     }).catch((error) => slot.replaceWith(h("p", { class: "problem" }, `4-mer table unavailable (${error.message}). The scalar result remains in Findings.`)));
+    return [section];
+  }
+
+  function alignedEndSignals(sample) {
+    const a = algo(sample, "aligned-end-structure");
+    if (!a) return [];
+    const section = h("section", { class: "panel" }, h("h2", {}, "Open-chromatin aligned ends"), flagPill("LEGAL"));
+    if (a.status !== "ok") return [section, absent(a, "aligned-end-structure")];
+    section.append(h("p", { class: "help" },
+      "Exploratory ONT aligned-span proxies, not physical cleavage validation, tissue-origin inference, or a clinical cutoff. The catalogues are pinned to hg38; published OCF and preferred-end studies used paired-end short reads."));
+    const slot = h("div", {}, h("p", {}, "Loading pinned end counts…"));
+    section.append(...context(sample, "aligned-end-structure", new Set()), slot);
+    artifact(sample, "aligned-end-structure", "aligned-end-structure").then((data) => {
+      const rows = data.offset_bp.map((bp, i) => [bp, data.u_count[i], data.d_count[i]]);
+      const spans = data.aligned_span_length_bins_bp;
+      const spanRows = spans ? [
+        ["Under 100", spans.lt100], ["100–200", spans["100_200"]], ["201–500", spans["201_500"]],
+        ["501–2000", spans["501_2000"]], ["Over 2000", spans.gt2000],
+      ] : null;
+      slot.replaceWith(h("div", {},
+        h("p", { class: "help" }, `Pinned catalogue: ${data.source_label}; centers: ${data.centers_source}; end sites: ${data.preferred_source}; terms: ${data.terms}. These operator labels identify the declared source, not independent assembly or tissue validation.`),
+        h("p", {}, `Observed eligible depth: ${fmt(data.observed_depth_x)}x; valid molecules: ${fmt(data.valid_molecules)}; eligible centers: ${fmt(data.eligible_centers)} of ${fmt(data.catalogue_centers)}; eligible pinned sites: ${fmt(data.eligible_preferred_sites)} of ${fmt(data.catalogue_preferred_sites)}.`),
+        h("p", {}, `OCF-like left/right contributions: ${fmt(data.ocf_like_left)} / ${fmt(data.ocf_like_right)} end-count differences from ${fmt(data.ocf_like_left_ends)} / ${fmt(data.ocf_like_right_ends)} ends in the two measurement windows. The score is unavailable if either window has no ends. Exact preferred-site U/D hits: ${fmt(data.preferred_u_hits)} / ${fmt(data.preferred_d_hits)} of ${fmt(data.valid_ends)} valid ends.`),
+        spanRows ? dataTable("Aligned spans by length (bp)", ["Aligned span (bp)", "Molecules"], spanRows)
+          : h("p", { class: "help" }, "Aligned-span length diagnostic was not recorded."),
+        h("p", { class: "help" }, `Left D peak offset: ${fmt(data.left_d_peak_offset_bp)} bp; right U peak offset: ${fmt(data.right_u_peak_offset_bp)} bp. These observed endpoint peaks do not measure soft clipping or validate physical cleavage.`),
+        chart("Upstream and downstream aligned-end counts around pinned hg38 centers.", {
+          grid: { left: 55, right: 20, top: 20, bottom: 40 },
+          xAxis: { type: "value", name: "bp from center", min: -100, max: 100 },
+          yAxis: { type: "value", name: "raw ends (not depth-normalized)" },
+          series: [
+            { type: "line", name: "U", showSymbol: false, data: rows.map((row) => [row[0], row[1]]) },
+            { type: "line", name: "D", showSymbol: false, data: rows.map((row) => [row[0], row[2]]) },
+          ],
+        }, dataTable("Aligned-end counts by offset", ["Offset (bp)", "U ends", "D ends"], rows))));
+    }).catch(() => slot.replaceWith(h("p", { class: "problem" }, "Pinned end-count panel could not be loaded.")));
     return [section];
   }
 
@@ -987,7 +1025,73 @@
       }
       more.push(panel);
     }
-    return [section, ...more, ...tssProfileSignals(sample), ...breakpointMotifSignals(sample, seen), ...lionheartSignals(sample)];
+    return [section, ...more, ...tssProfileSignals(sample), ...breakpointMotifSignals(sample, seen), ...griffinSignals(sample), ...alignedEndSignals(sample), ...finaletoolkitSignals(sample), ...lionheartSignals(sample)];
+  }
+
+  function griffinSignals(sample) {
+    const a = algo(sample, "griffin");
+    if (!a) return [];
+    const section = h("section", { class: "panel" },
+      h("div", { class: "findings-head" }, h("h2", {}, "Griffin TF-site profile"), flagPill("LEGAL")));
+    if (a.status !== "ok") return [section, absent(a, "griffin")];
+    section.append(h("p", { class: "help" }, "GC-corrected nucleosome protection from the pinned Griffin workflow on a compatible paired-end WGS BAM. The primary TF list is an operator-registered choice; this is not a TF expression call."));
+    const slot = h("div", { "aria-live": "polite" }, h("p", {}, "Loading Griffin profile…"));
+    section.append(...context(sample, "griffin", new Set()), slot);
+    artifact(sample, "griffin", "tf-site-profile").then((data) => {
+      const profiles = Array.isArray(data.profiles) ? data.profiles : [];
+      const primary = profiles.find((profile) => profile.site_name === data.primary_site);
+      if (!primary || !Array.isArray(primary.bin_start_bp) || !Array.isArray(primary.gc_corrected_coverage) ||
+          primary.bin_start_bp.length !== primary.gc_corrected_coverage.length || primary.bin_start_bp.length < 3) {
+        throw new Error("primary Griffin profile is incomplete");
+      }
+      const step = primary.bin_start_bp[1] - primary.bin_start_bp[0];
+      const points = primary.bin_start_bp.map((start, i) => [start + step / 2, primary.gc_corrected_coverage[i]]);
+      const rows = profiles.map((profile) => [profile.site_name, profile.site_count, profile.central_coverage, profile.amplitude]);
+      slot.replaceWith(
+        h("p", {}, `Primary TF list: ${data.primary_site}; ${fmt(primary.site_count)} sites. Bin coordinates below are starts, while chart points are bin centers.`),
+        chart(`GC-corrected Griffin nucleosome coverage at ${data.primary_site} sites.`, {
+          grid: { left: 65, right: 20, top: 20, bottom: 45 },
+          xAxis: { type: "value", name: "bp from site" }, yAxis: { type: "value", name: "relative coverage" },
+          series: [{ type: "line", showSymbol: false, data: points, lineStyle: { color: "#1f5f8b" } }],
+        }, dataTable(`Griffin ${data.primary_site} corrected profile`, ["Bin start (bp)", "Relative coverage"],
+          primary.bin_start_bp.map((start, i) => [start, primary.gc_corrected_coverage[i]]))),
+        dataTable("Griffin TF-site lists", ["Site list", "Sites", "Central coverage", "Amplitude"], rows),
+      );
+    }).catch((error) => slot.replaceWith(h("p", { class: "problem" }, `Griffin profile unavailable (${error.message}).`)));
+    return [section];
+  }
+
+  function finaletoolkitSignals(sample) {
+    const a = algo(sample, "finaletoolkit-xcheck");
+    if (!a) return [];
+    const section = h("section", { class: "panel" }, h("h2", {}, "FinaleToolkit paired-end cross-check"), flagPill("LEGAL"));
+    if (a.status !== "ok") return [section, absent(a, "finaletoolkit-xcheck")];
+    section.append(h("p", { class: "help" }, "Engineering parity on a verified paired-end Illumina BAM. Neither the single-end ONT results nor the published GC-corrected DELFI classifier are compared here."),
+      ...context(sample, "finaletoolkit-xcheck", new Set()));
+    const slot = h("div", { "aria-live": "polite" }, h("p", {}, "Loading paired-end cross-check…"));
+    section.append(slot);
+    artifact(sample, "finaletoolkit-xcheck", "finaletoolkit-xcheck").then((data) => {
+      const correlation = (value) => value === null || (typeof value === "number" && Number.isFinite(value) && value >= -1 && value <= 1);
+      const motifDifference = data.motif?.max_abs_frequency_difference;
+      if (data.schema !== "traceback.lab.finaletoolkit-xcheck.v1" || data.version !== "1.1.0" ||
+          !/^[0-9a-f]{64}$/.test(data.runtime_pin_sha256 || "") ||
+          !correlation(data.motif?.r) || !correlation(data.delfi?.r) ||
+          (motifDifference !== undefined && (typeof motifDifference !== "number" || !Number.isFinite(motifDifference) || motifDifference < 0 || motifDifference > 1)) ||
+          !Number.isInteger(data.delfi?.comparable_bins) || data.delfi.comparable_bins < 0 ||
+          !Number.isInteger(data.pairs) || data.pairs < 0 ||
+          !["concordant", "discordant", "insufficient_variation"].includes(data.verdict)) {
+        throw new Error("cross-check artifact is malformed");
+      }
+      slot.replaceWith(
+        h("p", {}, `Result: ${data.verdict.replace(/_/g, " ")}; ${data.pairs.toLocaleString("en-US")} paired molecules; runtime pin ${data.runtime_pin_sha256.slice(0, 12)}.`),
+        dataTable("Paired-end method concordance", ["Comparison", "Pearson r", "Engineering threshold", "Support"], [
+          ["4-mer end frequencies", fmt(data.motif.r), "≥0.95", "256 motifs"],
+          ["Uncorrected 100-kb short/long ratios", fmt(data.delfi.r), "≥0.90", `${data.delfi.comparable_bins} bins with long fragments`],
+        ]),
+        h("p", { class: "help" }, `Maximum absolute 4-mer frequency difference: ${motifDifference === undefined ? "not recorded" : motifDifference.toExponential(2)}. Pearson compares patterns and does not establish absolute frequency equality. Exact short/long count agreement: ${data.delfi.upstream_counts_equal ? "yes" : "no"}. ${data.note}`),
+      );
+    }).catch((error) => slot.replaceWith(h("p", { class: "problem" }, `Paired-end cross-check unavailable (${error.message}).`)));
+    return [section];
   }
 
   function tssProfileSignals(sample) {

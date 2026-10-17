@@ -40,6 +40,19 @@ def add_asset_parser(commands: Any, common: Callable[[argparse.ArgumentParser], 
     inspect.add_argument("--sha256", help="registered MethylBERT bundle digest")
     common(inspect)
     inspect.set_defaults(handler=_inspect)
+    griffin = actions.add_parser("griffin-register", help="pin local Griffin code, reference assets and TF-site lists")
+    griffin.add_argument("--upstream-root", type=Path, required=True)
+    griffin.add_argument("--ref-assets", type=Path, required=True)
+    griffin.add_argument("--site-list", action="append", required=True, metavar="NAME=FILE")
+    griffin.add_argument("--primary-site", required=True)
+    griffin.add_argument("--source-label", required=True)
+    griffin.add_argument("--terms", choices=("known", "restricted", "unknown"), required=True)
+    griffin.add_argument("--license-id", help="required when terms are known")
+    common(griffin)
+    griffin.set_defaults(handler=_griffin_register)
+    griffin_inspect = actions.add_parser("griffin-inspect", help="rehash registered Griffin inputs")
+    common(griffin_inspect)
+    griffin_inspect.set_defaults(handler=_griffin_inspect)
 
     clock = actions.add_parser("register-clock-map", help="register a SHA-pinned hg38 Weidner assay-site map")
     clock.add_argument("--file", type=Path, required=True)
@@ -51,6 +64,20 @@ def add_asset_parser(commands: Any, common: Callable[[argparse.ArgumentParser], 
     common(clock_inspect)
     clock_inspect.set_defaults(handler=_inspect_clock_map)
 
+
+    ends = actions.add_parser("end-catalogues-register", help="pin hg38 open-chromatin centers and preferred-end sites")
+    ends.add_argument("--centers", type=Path, required=True, help="sorted hg38 BED3 open-chromatin regions")
+    ends.add_argument("--preferred", type=Path, required=True, help="sorted hg38 BED4 one-base U/D end sites")
+    ends.add_argument("--source-label", required=True, help="short public source description, not a file path")
+    ends.add_argument("--centers-source", required=True, help="open-chromatin accession and release")
+    ends.add_argument("--preferred-source", required=True, help="preferred-end accession and release")
+    ends.add_argument("--terms", choices=("unknown", "restricted", "known"), required=True)
+    ends.add_argument("--license-id", help="required when terms are known")
+    common(ends)
+    ends.set_defaults(handler=_end_catalogues_register)
+    check_ends = actions.add_parser("end-catalogues-inspect", help="rehash registered end catalogues")
+    common(check_ends)
+    check_ends.set_defaults(handler=_end_catalogues_inspect)
 
 def _clock_payload(store: LabStore, model: Any) -> dict[str, Any]:
     return {"root": str(store.root), "model": "Weidner-3", "genome_build": "hg38",
@@ -187,3 +214,84 @@ def _inspect(args: argparse.Namespace, store: LabStore) -> tuple[int, dict[str, 
             f"FILE    {record.file}",
         ],
     )
+
+
+def _griffin_register(args: argparse.Namespace, store: LabStore) -> tuple[int, dict[str, Any]]:
+    from .griffin_assets import GriffinAssetError, register_griffin_assets
+
+    store.check_version()
+    try:
+        sites = {}
+        for item in args.site_list:
+            name, separator, path = item.partition("=")
+            if not separator or name in sites:
+                raise GriffinAssetError("each --site-list must be a unique NAME=FILE")
+            sites[name] = Path(path)
+        with store.writer("asset griffin-register", new_run_id(), step="griffin"):
+            record = register_griffin_assets(
+                store.root, upstream_root=args.upstream_root, ref_assets=args.ref_assets,
+                site_lists=sites, primary_site=args.primary_site,
+                source_label=args.source_label, terms=args.terms,
+                license_id=args.license_id,
+            )
+    except (GriffinAssetError, OSError) as exc:
+        payload = _result_payload("lab asset griffin-register", "blocked", "Griffin assets not registered", store, {"cause": str(exc)})
+        return EXIT_BLOCKED, _with_human(payload, [f"BLOCKED {exc}"])
+    payload = _result_payload("lab asset griffin-register", "ok", "Griffin assets pinned", store, {
+        "sha256": record.sha256, "primary_site": record.primary_site,
+        "site_lists": sorted(record.site_lists), "terms": record.terms,
+    })
+    return EXIT_OK, _with_human(payload, [f"GRIFFIN {record.sha256}", f"PRIMARY {record.primary_site}"])
+
+
+def _griffin_inspect(args: argparse.Namespace, store: LabStore) -> tuple[int, dict[str, Any]]:
+    from .griffin_assets import GriffinAssetError, inspect_griffin_assets
+
+    store.check_version()
+    try:
+        record = inspect_griffin_assets(store.root)
+    except GriffinAssetError as exc:
+        payload = _result_payload("lab asset griffin-inspect", "blocked", "Griffin assets unavailable", store, {"cause": str(exc)})
+        return EXIT_BLOCKED, _with_human(payload, [f"BLOCKED {exc}"])
+    payload = _result_payload("lab asset griffin-inspect", "ok", "Griffin assets verified", store, {
+        "sha256": record.sha256, "primary_site": record.primary_site,
+        "site_lists": sorted(record.site_lists), "terms": record.terms,
+    })
+    return EXIT_OK, _with_human(payload, [f"GRIFFIN {record.sha256}", f"PRIMARY {record.primary_site}"])
+def _end_catalogues_register(args: argparse.Namespace, store: LabStore) -> tuple[int, dict[str, Any]]:
+    from .end_catalog_assets import EndCatalogueError, register_end_catalogues
+
+    store.check_version()
+    try:
+        with store.writer("asset end-catalogues-register", new_run_id(), step="aligned-ends"):
+            record = register_end_catalogues(
+                store.root, centers=args.centers, preferred=args.preferred,
+                source_label=args.source_label, centers_source=args.centers_source,
+                preferred_source=args.preferred_source, terms=args.terms, license_id=args.license_id,
+            )
+    except (EndCatalogueError, OSError):
+        payload = _result_payload("lab asset end-catalogues-register", "blocked", "End catalogues not registered", store,
+                                  {"cause": "End catalogues are absent, unsafe, invalid or could not be published"})
+        return EXIT_BLOCKED, _with_human(payload, ["BLOCKED End catalogues are absent, unsafe, invalid or could not be published"])
+    payload = _result_payload("lab asset end-catalogues-register", "ok", "End catalogues pinned", store,
+                              {"identity": record.identity, "centers": record.center_count,
+                               "preferred_sites": record.preferred_count, "terms": record.terms})
+    return EXIT_OK, _with_human(payload, [f"IDENTITY {record.identity}", f"CENTERS {record.center_count}",
+                                         f"SITES {record.preferred_count}"])
+
+
+def _end_catalogues_inspect(args: argparse.Namespace, store: LabStore) -> tuple[int, dict[str, Any]]:
+    from .end_catalog_assets import EndCatalogueError, inspect_end_catalogues
+
+    store.check_version()
+    try:
+        record = inspect_end_catalogues(store.root)
+    except (EndCatalogueError, OSError):
+        payload = _result_payload("lab asset end-catalogues-inspect", "blocked", "End catalogues unavailable", store,
+                                  {"cause": "End catalogues are absent, unsafe, invalid or changed"})
+        return EXIT_BLOCKED, _with_human(payload, ["BLOCKED End catalogues are absent, unsafe, invalid or changed"])
+    payload = _result_payload("lab asset end-catalogues-inspect", "ok", "End catalogues verified", store,
+                              {"identity": record.identity, "centers": record.center_count,
+                               "preferred_sites": record.preferred_count, "terms": record.terms})
+    return EXIT_OK, _with_human(payload, [f"IDENTITY {record.identity}", f"CENTERS {record.center_count}",
+                                         f"SITES {record.preferred_count}"])
