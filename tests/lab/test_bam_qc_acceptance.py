@@ -66,23 +66,31 @@ def test_qc_primary_denominators_and_per_read_quality(tmp_path: Path, marked_dup
 def test_gc_slope_uses_eligible_positive_bins_and_acgt_fraction(tmp_path: Path) -> None:
     # GC = .3,.5,.7 with counts = 1,2,4: log2(count/median)=-1,0,1;
     # therefore the hand-calculated OLS slope is 5 log2/GC.
-    # The remaining bins are out-of-range GC, mostly N, and zero coverage.
+    # Other bins isolate out-of-range GC, mostly N, zero coverage, and an
+    # eligible N-containing bin whose GC must use only the ACGT denominator.
     sequences = [
         "G" * 300_000 + "A" * 700_000,
         "C" * 500_000 + "T" * 500_000,
         "G" * 700_000 + "A" * 300_000,
         "G" * 200_000 + "A" * 800_000,
-        "G" * 200_000 + "A" * 200_000 + "N" * 600_000,
+        "G" * 300_000 + "A" * 150_000 + "N" * 550_000,
         "G" * 400_000 + "A" * 600_000,
+        "G" * 250_000 + "A" * 350_000 + "N" * 400_000,
     ]
     fasta = tmp_path / "reference.fa"
     fasta.write_text(">chr1\n" + "\n".join(sequences) + "\n", encoding="ascii")
     pysam.faidx(str(fasta))
     rows = [(window * 1_000_000 + index * 20, 10, 0, 60, 30)
-            for window, count in enumerate([1, 2, 4, 16, 16, 0]) for index in range(count)]
+            for window, count in enumerate([1, 2, 4, 16, 16, 0, 2]) for index in range(count)]
     rows.extend([(500, 10, 0x400, 60, 30), (600, 10, 0, 19, 30)])
-    summary = _bam(tmp_path / "aligned.bam", rows, 6_000_000)
-    slope, bins = gc_bias_slope(summary, summary.eligible(), str(fasta))
+    summary = _bam(tmp_path / "aligned.bam", rows, 7_000_000)
+    eligible = summary.eligible()
+    slope, bins = gc_bias_slope(summary, eligible & (summary.column("start") < 6_000_000), str(fasta))
     assert bins == 3
     assert slope == pytest.approx(5.0)
+    # Add x=5/12, y=0. Centered cross-product is 2/5; x sum of squares
+    # is 2/25 + 1/192 = 409/4800, giving slope 1920/409.
+    slope, bins = gc_bias_slope(summary, eligible, str(fasta))
+    assert bins == 4
+    assert slope == pytest.approx(1920 / 409)
 
