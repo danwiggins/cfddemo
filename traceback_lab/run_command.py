@@ -318,6 +318,30 @@ def _aligner_warning(change: dict[str, Any], low: float, high: float) -> dict[st
     }
 
 
+def _memory_warning() -> dict[str, Any] | None:
+    from .doctor import MIN_RAM, _ram
+
+    try:
+        physical_ram = _ram()
+    except Exception:  # noqa: BLE001 - an advisory probe must never abort a run
+        return None
+    if physical_ram is None or physical_ram >= MIN_RAM:
+        return None
+    recommended_gib = MIN_RAM // GIB
+    physical_gib = physical_ram / GIB
+    return {
+        "kind": "low_memory",
+        "code": "TBX-LAB-025",
+        "cause": f"physical RAM is {physical_gib:g} GiB, below the {recommended_gib} GiB alignment recommendation",
+        "retryable": False,
+        "docs": "docs/LAB-GUIDE.md#tbx-lab-025",
+        "summary": f"Less than {recommended_gib} GiB of physical RAM detected; alignment may fail or be slow",
+        "physical_ram_bytes": physical_ram,
+        "recommended_bytes": MIN_RAM,
+        "fix": f"Use a machine with at least {recommended_gib} GiB RAM for a full hg38 alignment",
+    }
+
+
 def _dry_run(args: argparse.Namespace, store: LabStore, progress: Callable[[str], None]) -> tuple[int, dict[str, Any]]:
     store.check_version()
     from .pon_consumer import require_built_cohort
@@ -329,8 +353,13 @@ def _dry_run(args: argparse.Namespace, store: LabStore, progress: Callable[[str]
         {"algorithm_id": item.algorithm.id, "upstream": item.upstream_only, "decision": "decided after alignment"}
         for item in items
     ]
-    data: dict[str, Any] = {"root": str(store.root), "dry_run": True, "plan": plan_rows}
+    memory_warning = _memory_warning()
+    data: dict[str, Any] = {"root": str(store.root), "dry_run": True, "plan": plan_rows,
+                            "warnings": [memory_warning] if memory_warning else []}
     lines = [f"ROOT      {store.root}"]
+    if memory_warning:
+        lines.append(f"WARN      {memory_warning['code']}: {memory_warning['summary']}")
+        lines.append(f"          {memory_warning['fix']}")
     alignment_required = False
 
     def mark_platform_skips(platform: str) -> None:
@@ -519,13 +548,19 @@ def run_command(args: argparse.Namespace, store: LabStore) -> tuple[int, dict[st
 
         store.check_version()
         if args.dry_run and not prepared(store.root):
+            memory_warning = _memory_warning()
             payload = _local_envelope(
                 _result("lab run", "ok", "dry run: nothing written", data={
                     "root": str(store.root), "dry_run": True, "example": True,
                     "alignment": "example not generated yet: generated and aligned on first run (~200k reads, under a minute)",
+                    "warnings": [memory_warning] if memory_warning else [],
                 })
             )
-            return EXIT_OK, _with_human(payload, [f"ROOT      {store.root}", "EXAMPLE   not generated yet: generated and aligned on first run (~200k reads, under a minute)"], replace_data=True)
+            lines = [f"ROOT      {store.root}", "EXAMPLE   not generated yet: generated and aligned on first run (~200k reads, under a minute)"]
+            if memory_warning:
+                lines.append(f"WARN      {memory_warning['code']}: {memory_warning['summary']}")
+                lines.append(f"          {memory_warning['fix']}")
+            return EXIT_OK, _with_human(payload, lines, replace_data=True)
         # Generation and registration happen under the writer lock (below).
         args.inputs = [str(example_dir(store.root) / "chunks")]
         args.reference_id = EXAMPLE_REFERENCE_ID
@@ -554,6 +589,11 @@ def run_command(args: argparse.Namespace, store: LabStore) -> tuple[int, dict[st
                 stored = len(args.inputs) == 1 and _is_stored(args.inputs[0])
                 chunkset: ChunkSet | None = None
                 warnings: list[dict[str, Any]] = []
+                memory_warning = _memory_warning()
+                if memory_warning:
+                    warnings.append(memory_warning)
+                    progress(f"WARN {memory_warning['code']}: {memory_warning['summary']}")
+                    progress(f"     {memory_warning['fix']}")
                 example = False
                 if stored:
                     source_id = resolve_sample(store, args.inputs[0])
@@ -954,6 +994,8 @@ def _summary(
         lines.append(f"FAILED  {result.algorithm_id}: {result.first_line}")
         lines.append(f"        details: traceback lab runs {run_id} --step {result.algorithm_id}")
     for warning in warnings:
+        if warning.get("kind") == "low_memory":
+            continue  # already shown before alignment, including the next action
         lines.append(f"WARN    {warning['summary']}")
         lines.extend(problem_lines(LabProblem(
             warning["code"], cause=warning["cause"], fix=warning["fix"],
