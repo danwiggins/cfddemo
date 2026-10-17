@@ -946,8 +946,12 @@
         const residual = support.fit_rms === null
           ? "Fit residual unavailable."
           : `Unnormalized weight-fit residual RMS ${fmt(support.fit_rms)}.`;
+        const exactFitCaveat = support.markers_covered === 2
+          ? " With two covered markers, an interior fit is exactly determined; zero residual does not establish fit quality." : "";
         section.append(h("p", { class: "help" },
-          `Methylation numerical fit: ${String(support.markers_covered)} covered markers, ${String(support.cpg_calls_used)} CpG calls; condition number ${support.reference_condition_number === null ? "unavailable" : fmt(support.reference_condition_number)}. ${residual} These counts do not establish biological calibration.`));
+          `Methylation numerical fit: ${String(support.markers_covered)} covered markers, ${String(support.cpg_calls_used)} CpG calls; condition number ${support.reference_condition_number === null ? "unavailable" : fmt(support.reference_condition_number)}. ${residual}${exactFitCaveat} These counts do not establish biological calibration.`));
+        if (support.markers_covered === 0)
+          section.append(h("p", { class: "problem" }, "No registered CpG marker has a usable C+m call on this input. Check zero-based CpG-C positions, the genome reference, and modification-call coverage."));
       }
       if (pair.state !== "ok") {
         const unavailable = pair.unavailable_reasons?.length ? pair.unavailable_reasons : [pair.state];

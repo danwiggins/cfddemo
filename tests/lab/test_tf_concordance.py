@@ -110,6 +110,21 @@ def test_missing_methylation_and_stale_target_are_named_unavailable() -> None:
     assert report["pairs"][2]["state"] == "no_mtdna_baseline"
 
 
+def test_same_input_parameter_drift_refuses_only_its_baseline() -> None:
+    members = tuple(_member(index) for index in range(1, 12))
+    generation = CohortGeneration(cohort_id="synthetic", version=1, members=members)
+    sample = _sample(members[0])
+    sample.full.results["fragment-size"].provenance.parameters_sha256 = "e" * 64
+    report = report_tf_concordance(sample, generation, members[0])
+    pairs = {pair["id"]: pair for pair in report["pairs"]}
+    assert pairs["cn-size"]["state"] == "no_size_baseline"
+    assert pairs["cn-size"]["unavailable_reasons"] == ["no_size_baseline"]
+    assert pairs["cn-size"]["reference_n"] == 0
+    assert pairs["cn-size"]["baseline_median"] is None
+    assert pairs["cn-size"]["x"] is None and pairs["cn-size"]["y"] is None
+    assert pairs["cn-mtdna"]["state"] == "ok" and pairs["cn-mtdna"]["reference_n"] == 10
+
+
 def test_both_axes_report_their_unavailable_reasons() -> None:
     target = _member(1)
     sample = _sample(target)
