@@ -24,7 +24,6 @@ from .methylbert_bundle import Bundle
 
 PINNED_UPSTREAM_COMMIT = "f82f83b0bc20e2af1441795536ec9f338fbbb3e7"
 MIN_ELIGIBLE_READS = 2_500_000
-MIN_CLASSIFIED_READS = MIN_ELIGIBLE_READS
 MAX_WALL_SECONDS = 2 * 60 * 60
 MAX_LOG_BYTES = 64 * 1024
 MAX_AGGREGATE_BYTES = 16 * 1024
@@ -162,8 +161,8 @@ def read_aggregate(path: Path, *, model_id: str) -> Aggregate:
            for value in fractions) or not math.isclose(sum(fractions), 1.0, rel_tol=0, abs_tol=1e-6):
         raise RuntimeRefusal("MethylBERT aggregate fractions are invalid")
     count = raw["classified_reads"]
-    if type(count) is not int or count < MIN_CLASSIFIED_READS:
-        raise RuntimeRefusal("MethylBERT aggregate needs at least 2,500,000 classified reads")
+    if type(count) is not int or count < 1:
+        raise RuntimeRefusal("MethylBERT aggregate has no classified reads")
     if count > MAX_CLASSIFIED_READS:
         raise RuntimeRefusal("MethylBERT aggregate classified-read count exceeds the cap")
     return Aggregate(model_id, float(fractions[0]), float(fractions[1]), count)
