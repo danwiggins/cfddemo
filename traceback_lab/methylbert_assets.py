@@ -1,4 +1,4 @@
-"""Write-once, Lab-owned registration of operator-trusted MethylBERT bundles."""
+"""API write-once, Lab-owned registration of operator-trusted bundles."""
 
 from __future__ import annotations
 
@@ -14,7 +14,7 @@ from pydantic import ValidationError
 from traceback_runner.serialization import canonical_json_bytes
 
 from .asset_contracts import AssetDescriptor
-from .assets import AssetError, AssetRecord, _check_contained, _digest, _file_identity, _open_regular, _regular_source
+from .assets import AssetError, AssetPublishUncertain, AssetRecord, _check_contained, _file_identity, _open_regular, _regular_source
 from .methylbert_bundle import MAX_ARCHIVE_BYTES, BundleError, verify_bundle
 
 if TYPE_CHECKING:
@@ -26,6 +26,37 @@ MANIFEST = "manifest.json"
 SCHEMA = "traceback.lab.methylbert-registration.v1"
 _SHA256 = re.compile(r"[0-9a-f]{64}\Z")
 _BLOCK = 16 << 20
+
+
+class MethylbertPublishUncertain(AssetPublishUncertain):
+    def __init__(self, sha256: str):
+        self.sha256 = sha256
+        super().__init__("MethylBERT bundle is visible but durability is unconfirmed; inspect before retry")
+
+
+def _hash_archive(path: Path) -> tuple[str, int]:
+    """Hash one stable regular handle without reading beyond the archive cap."""
+
+    digest = hashlib.sha256()
+    size = 0
+    try:
+        with os.fdopen(_open_regular(path), "rb") as stream:
+            before = os.fstat(stream.fileno())
+            if not stat.S_ISREG(before.st_mode) or not 1 <= before.st_size <= MAX_ARCHIVE_BYTES:
+                raise AssetError("MethylBERT archive exceeds its size cap")
+            while block := stream.read(_BLOCK):
+                size += len(block)
+                if size > MAX_ARCHIVE_BYTES:
+                    raise AssetError("MethylBERT archive exceeds its size cap")
+                digest.update(block)
+            after = os.fstat(stream.fileno())
+        current = os.lstat(path)
+    except OSError as exc:
+        raise AssetError("MethylBERT archive is absent or unreadable") from exc
+    if (size != before.st_size or _file_identity(before) != _file_identity(after)
+            or _file_identity(after) != _file_identity(current)):
+        raise AssetError("MethylBERT archive changed while hashing")
+    return digest.hexdigest(), size
 
 
 def _directory(store: LabStore, sha256: str) -> Path:
@@ -84,7 +115,7 @@ def inspect_methylbert_bundle(store: LabStore, sha256: str) -> AssetRecord:
     if (descriptor.kind != KIND or descriptor.origin != "user" or descriptor.sha256 != sha256
             or not 1 <= descriptor.size_bytes <= MAX_ARCHIVE_BYTES):
         raise AssetError("MethylBERT registration identity is invalid")
-    digest, size = _digest(archive)
+    digest, size = _hash_archive(archive)
     if digest != sha256 or size != descriptor.size_bytes:
         raise AssetError("MethylBERT bundle differs from registration")
     try:
@@ -111,7 +142,7 @@ def register_methylbert_bundle(
         expected_bundle = verify_bundle(source)
     except BundleError as exc:
         raise AssetError("MethylBERT bundle is malformed") from exc
-    sha256, size = _digest(source)
+    sha256, size = _hash_archive(source)
     descriptor = _descriptor(sha256, size, source_label, terms, license_id)
     directory = _directory(store, sha256)
     if directory.exists() or directory.is_symlink():
@@ -156,6 +187,10 @@ def register_methylbert_bundle(
         store.publish_directory(directory.parent, sha256, build)
     except FileExistsError as exc:
         raise AssetError("MethylBERT bundle was registered concurrently; inspect before retry") from exc
+    except OSError as exc:
+        if directory.is_dir():
+            raise MethylbertPublishUncertain(sha256) from exc
+        raise AssetError("MethylBERT bundle could not be published") from exc
     return inspect_methylbert_bundle(store, sha256)
 
 

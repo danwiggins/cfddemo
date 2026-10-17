@@ -11,7 +11,7 @@ from typing import Any
 from traceback_runner.cli import _local_envelope, _result, _with_human
 
 from .assets import AssetError, AssetPublishUncertain, add_asset, inspect_asset
-from .methylbert_assets import inspect_methylbert_bundle, register_methylbert_bundle
+from .methylbert_assets import MethylbertPublishUncertain, inspect_methylbert_bundle, register_methylbert_bundle
 from .problems import EXIT_BLOCKED, EXIT_OK
 from .store import LabStore, new_run_id
 
@@ -58,9 +58,12 @@ def _add(args: argparse.Namespace, store: LabStore) -> tuple[int, dict[str, Any]
                     source_label=args.source_label, terms=args.terms, license_id=args.license_id,
                 )
     except AssetPublishUncertain as exc:
+        command = ["traceback", "lab", "asset", "inspect", args.kind, "--root", str(store.root)]
+        if isinstance(exc, MethylbertPublishUncertain):
+            command.extend(["--sha256", exc.sha256])
         payload = _result_payload(
             "lab asset add", "blocked", "Asset registration incomplete; inspect before retry", store,
-            {"kind": args.kind, "cause": str(exc), "fix": shlex.join(["traceback", "lab", "asset", "inspect", args.kind, "--root", str(store.root)])},
+            {"kind": args.kind, "cause": str(exc), "fix": shlex.join(command)},
         )
         return EXIT_BLOCKED, _with_human(payload, [f"ASSET   {args.kind}", f"INCOMPLETE {exc}"])
     except AssetError as exc:

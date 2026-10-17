@@ -116,7 +116,10 @@ def require_ready(
     bundle: Bundle, *, reference_sha256: str, eligible_reads: int | None,
     platform: str, gpu_available: bool, expected_code_sha256: str,
 ) -> InstalledCodeIdentity:
-    """Gate the exact registered model, reference, ONT depth and CUDA runtime."""
+    """Check a bundle and caller-asserted reference, ONT depth, and CUDA state.
+
+    The eventual adapter must derive those assertions from verified inputs.
+    """
 
     code = installed_identity()
     if bundle.upstream_commit != PINNED_UPSTREAM_COMMIT or code.commit != PINNED_UPSTREAM_COMMIT:
@@ -180,7 +183,10 @@ def run_worker(
     aggregate_path: Path, model_id: str, eligible_reads: int,
     should_abort: Callable[[], bool] | None = None,
 ) -> Aggregate:
-    """Bound a pinned worker's process group, logs, time and published result."""
+    """Run a supplied command with bounded time, logs, and aggregate output.
+
+    The future adapter must enforce readiness and outer-worker cancellation.
+    """
 
     if not argv or not os.path.isabs(argv[0]):
         raise RuntimeRefusal("MethylBERT worker executable must be absolute")

@@ -14,7 +14,10 @@ import pytest
 
 import traceback_lab.methylbert_bundle as bundle_module
 from traceback_lab.assets import AssetError
-from traceback_lab.methylbert_assets import copy_methylbert_bundle, inspect_methylbert_bundle, register_methylbert_bundle
+from traceback_lab.methylbert_assets import (
+    MethylbertPublishUncertain, copy_methylbert_bundle, inspect_methylbert_bundle,
+    register_methylbert_bundle,
+)
 from traceback_lab.methylbert_bundle import MAX_ARCHIVE_BYTES, BundleError, REQUIRED_FILES, SCHEMA, unpack_bundle, verify_bundle
 from traceback_lab.store import LabStore
 
@@ -122,6 +125,24 @@ def test_lab_asset_command_registers_and_inspects_bundle(tmp_path, capsys):
     inspected = json.loads(capsys.readouterr().out)
     assert code == 0
     assert inspected["data"]["asset"] == added["data"]["asset"]
+
+
+def test_uncertain_publication_retains_digest_for_inspection(tmp_path, monkeypatch):
+    archive = tmp_path / "model.tar"
+    _bundle(archive)
+    store = LabStore(tmp_path / "root")
+    publish = store.publish_directory
+
+    def fail_after_publish(parent, name, build):
+        publish(parent, name, build)
+        raise OSError("injected durability failure")
+
+    monkeypatch.setattr(store, "publish_directory", fail_after_publish)
+    with pytest.raises(MethylbertPublishUncertain) as raised:
+        register_methylbert_bundle(
+            store, archive, source_label="fixture", terms="restricted",
+        )
+    assert inspect_methylbert_bundle(store, raised.value.sha256).sha256 == raised.value.sha256
 
 
 @pytest.mark.parametrize("damage,message", [
