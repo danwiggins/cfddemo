@@ -101,14 +101,15 @@ def test_sample_switcher_round_trips_through_home_deep_link(tmp_path) -> None:
     samples = {ID12: first, second_id: second}
     observed = {}
     with _server(tmp_path, first) as server:
-        server.app.api.samples = lambda: {"samples": [
-            {"id12": id12, "run_utc": sample["run_utc"], "depth_x": 1.0, "example": False}
-            for id12, sample in samples.items()
-        ], "root_has_runs": True}
+        listing = server.app.api.samples()
+        second_row = copy.deepcopy(listing["samples"][0])
+        second_row["id12"] = second_id
+        server.app.api.samples = lambda: {**listing, "samples": [listing["samples"][0], second_row]}
         server.app.api.sample = lambda id12: copy.deepcopy(samples[id12]) if id12 in samples else {"found": False}
         profile = tmp_path / "switcher"
 
         def switch(_command, evaluate) -> None:
+            assert evaluate("document.querySelector('#main h1')?.textContent.trim()") == f"Traceback Lab — {ID12}"
             evaluate(f"document.querySelector('#sample-switcher').value = '{second_id}'")
             evaluate("document.querySelector('#sample-switcher').dispatchEvent(new Event('change'))")
             for _ in range(100):
@@ -122,7 +123,7 @@ def test_sample_switcher_round_trips_through_home_deep_link(tmp_path) -> None:
         _dom_cdp(
             [_chrome(), "--headless=new", "--disable-gpu", "--no-first-run",
              f"--user-data-dir={profile}", server.issue_link() + "&route=/"],
-            profile, ok=lambda dom: 'data-ready="1"' in dom and f"Traceback Lab — {ID12}" in dom,
+            profile, ok=lambda dom: 'data-ready="1"' in dom,
             interact=switch,
         )
         deep_link = _dom(server, tmp_path / "deep-link", route=f"/?sample={second_id}",
