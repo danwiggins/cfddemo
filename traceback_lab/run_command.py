@@ -184,13 +184,7 @@ def _target_from_input(
         extras["reference_fasta"] = str(resolve_reference(store.root, reference_id, example=True).fasta)
     except LabProblem:
         pass  # algorithms that need the FASTA fail or skip on their own
-    try:
-        platform = for_input(aligned.manifest, aligned.directory / "aligned.bam")
-    except (OSError, ValueError) as exc:
-        raise LabProblem(
-            "TBX-LAB-024", cause="stored input platform disagrees with its BAM header",
-            fix="Inspect the stored input and rerun from the original BAM",
-        ) from exc
+    platform = _stored_platform(aligned)
     return RunTarget(
         input_id=aligned.input_id,
         source_id=aligned.source_id,
@@ -202,6 +196,37 @@ def _target_from_input(
         example=example,
         extras=extras,
     )
+
+
+def _stored_platform(aligned: AlignedInput) -> str:
+    try:
+        platform = for_input(aligned.manifest, aligned.directory / "aligned.bam")
+    except (OSError, ValueError) as exc:
+        raise LabProblem(
+            "TBX-LAB-024", cause="stored input platform disagrees with its BAM header",
+            fix="Inspect the stored input and rerun from the original BAM",
+        ) from exc
+    if platform == "unknown":
+        raise LabProblem(
+            "TBX-LAB-024", cause="prealigned BAM has no unanimous supported platform declaration",
+            fix="Use a BAM whose read groups all declare PL:ONT or PL:ILLUMINA",
+        )
+    return platform
+
+
+def _declared_platform(chunkset: ChunkSet) -> str:
+    platform = from_rg_lines(chunkset.rg_lines)
+    if platform == "unknown":
+        raise LabProblem(
+            "TBX-LAB-024", cause="BAM read groups have no unanimous supported platform declaration",
+            fix="Use input whose read groups all declare PL:ONT or PL:ILLUMINA",
+        )
+    if not chunkset.aligned and platform != "ont":
+        raise LabProblem(
+            "TBX-LAB-024", cause="unaligned Illumina input cannot use the ONT alignment path",
+            fix="Align the short reads externally and supply a prealigned BAM",
+        )
+    return platform
 
 
 def _stored_input(store: LabStore, source_id: str) -> tuple[AlignedInput, dict[str, Any]]:
@@ -277,7 +302,7 @@ def _dry_run(args: argparse.Namespace, store: LabStore, progress: Callable[[str]
         source_id = resolve_sample(store, args.inputs[0])
         with_sex_assertion(source_record(store, source_id) or {}, args.sex)
         aligned, _ = _stored_input(store, source_id)
-        data["platform"] = for_input(aligned.manifest, aligned.directory / "aligned.bam")
+        data["platform"] = _stored_platform(aligned)
         data["sample"] = {"id12": id12_for(store, source_id), "input_id": aligned.input_id}
         data["alignment"] = "reused (stored sample)"
         lines.append(f"SAMPLE    {id12_for(store, source_id)} (stored)")
@@ -285,10 +310,7 @@ def _dry_run(args: argparse.Namespace, store: LabStore, progress: Callable[[str]
     else:
         paths = collect_paths(args.inputs)
         chunkset = inspect_chunks(paths, store, skip_bad_chunks=args.skip_bad_chunks, write_cache=False)
-        input_platform = from_rg_lines(chunkset.rg_lines)
-        if not chunkset.aligned and input_platform != "ont":
-            raise LabProblem("TBX-LAB-024", cause="unaligned input does not unanimously declare ONT",
-                             fix="Use input with @RG PL:ONT, or align short reads externally and supply a prealigned BAM")
+        input_platform = _declared_platform(chunkset)
         data["platform"] = input_platform if chunkset.aligned else "ont"
         with_sex_assertion(source_record(store, chunkset.source_id) or {}, args.sex)
         reference = resolve_reference(store.root, args.reference_id)
@@ -417,10 +439,7 @@ def run_command(args: argparse.Namespace, store: LabStore) -> tuple[int, dict[st
                     chunkset = inspect_chunks(
                         paths, store, skip_bad_chunks=args.skip_bad_chunks, progress=progress
                     )
-                    input_platform = from_rg_lines(chunkset.rg_lines)
-                    if not chunkset.aligned and input_platform != "ont":
-                        raise LabProblem("TBX-LAB-024", cause="unaligned input does not unanimously declare ONT",
-                                         fix="Use input with @RG PL:ONT, or align short reads externally and supply a prealigned BAM")
+                    input_platform = _declared_platform(chunkset)
                     with_sex_assertion(source_record(store, chunkset.source_id) or {}, args.sex)
                     reference = resolve_reference(store.root, args.reference_id, example=args.example)
                     reference_id, reference_sha256 = reference.reference_id, reference.sha256

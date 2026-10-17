@@ -71,7 +71,7 @@ PROBLEMS: dict[str, ProblemSpec] = {
     "TBX-LAB-021": ProblemSpec(EXIT_BLOCKED, "An EXAMPLE (synthetic) sample cannot join a cohort"),
     "TBX-LAB-022": ProblemSpec(EXIT_BLOCKED, "Stored cohort metadata needs restoration"),
     "TBX-LAB-023": ProblemSpec(EXIT_BLOCKED, "Sample sex assertion conflicts or needs restoration"),
-    "TBX-LAB-024": ProblemSpec(EXIT_BLOCKED, "Unaligned input cannot use ONT alignment without ONT declaration"),
+    "TBX-LAB-024": ProblemSpec(EXIT_BLOCKED, "Input platform is unknown, unsupported, or inconsistent"),
 }
 
 
