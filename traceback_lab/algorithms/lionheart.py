@@ -61,6 +61,13 @@ def _mosdepth_library_dir(mosdepth: Path) -> Path | None:
     return directory.resolve() if directory.is_dir() else None
 
 
+def _libhts(library_dir: Path | None) -> Path | None:
+    if library_dir is None:
+        return None
+    candidate = library_dir / "libhts.so"
+    return candidate.resolve() if candidate.is_file() else None
+
+
 def _resources(root: Path) -> tuple[Path, Path]:
     directory = Path(os.environ.get("TRACEBACK_LIONHEART_RESOURCES") or
                      root / "lab" / "assets" / "lionheart" / "inference_resources_v003")
@@ -237,6 +244,7 @@ class Lionheart(Base):
         samtools = _program(None, "samtools")
         unpigz = _program(None, "unpigz")
         library_dir = _mosdepth_library_dir(mosdepth) if mosdepth else None
+        libhts = _libhts(library_dir)
         package = _package_pin(lionheart) if lionheart else None
         return (
             ToolPin("lionheart-cli", _file_hash(lionheart) if lionheart else "missing"),
@@ -244,6 +252,7 @@ class Lionheart(Base):
             ToolPin("lionheart-mosdepth", _file_hash(mosdepth) if mosdepth else "missing"),
             ToolPin("lionheart-library-directory", hashlib.sha256(str(library_dir).encode()).hexdigest()
                     if library_dir else "missing"),
+            ToolPin("lionheart-libhts", _file_hash(libhts) if libhts else "missing"),
             ToolPin("lionheart-samtools", _file_hash(samtools) if samtools else "missing"),
             ToolPin("lionheart-unpigz", _file_hash(unpigz) if unpigz else "missing"),
         )
@@ -277,8 +286,8 @@ class Lionheart(Base):
         mosdepth = _program("TRACEBACK_LIONHEART_MOSDEPTH_BIN", "mosdepth")
         if executable is None or mosdepth is None or _program(None, "samtools") is None or _program(None, "unpigz") is None:
             return Skip("missing_toolchain", "Install LIONHEART v2.2.0, modified mosdepth, samtools, and unpigz")
-        if _mosdepth_library_dir(mosdepth) is None:
-            return Skip("missing_toolchain", "LIONHEART mosdepth library directory is missing")
+        if _libhts(_mosdepth_library_dir(mosdepth)) is None:
+            return Skip("missing_toolchain", "LIONHEART mosdepth library directory must contain libhts.so")
         package = _package_pin(executable)
         if package is None or package[0] != LIONHEART_VERSION:
             return Skip("missing_toolchain", "LIONHEART v2.2.0 installed package files must be available for provenance")
@@ -336,6 +345,8 @@ class Lionheart(Base):
             completed = subprocess.run(command, stdout=log, stderr=subprocess.STDOUT, check=False)
         if completed.returncode != 0:
             raise RuntimeError(f"LIONHEART feature extraction failed (exit {completed.returncode})")
+        if planned_tools != {pin.name: pin.version for pin in self.tools}:
+            raise RuntimeError("LIONHEART toolchain changed during extraction")
         if resource_tree_digest(snapshot) != expected[0]:
             raise RuntimeError("LIONHEART resource snapshot changed during extraction")
         matrix_path = work / "dataset" / "feature_dataset.npy"

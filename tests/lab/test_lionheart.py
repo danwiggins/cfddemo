@@ -72,6 +72,8 @@ assert pathlib.Path(args.mosdepth_path).is_file()
 assert pathlib.Path(args.ld_library_path).is_dir()
 if os.environ.get('TRACEBACK_LIONHEART_MUTATE_RESOURCES'):
     (pathlib.Path(args.resources_dir) / 'gc_contents_bin_edges.npy').write_bytes(b'mutated')
+if os.environ.get('TRACEBACK_LIONHEART_MUTATE_LIBHTS'):
+    (pathlib.Path(args.ld_library_path) / 'libhts.so').write_bytes(b'mutated')
 output = pathlib.Path(args.out_dir) / 'dataset'
 output.mkdir(parents=True)
 matrix = np.zeros((10, 898))
@@ -82,6 +84,7 @@ np.save(output / 'feature_dataset.npy', matrix)
     mosdepth = tmp_path / "mosdepth"
     mosdepth.write_text("#!/bin/sh\necho 'modified mosdepth --single-end-length'\n")
     mosdepth.chmod(0o755)
+    (tmp_path / "libhts.so").write_bytes(b"fixture libhts")
     for helper in ("samtools", "unpigz"):
         helper_path = tmp_path / helper
         helper_path.write_text("#!/bin/sh\nexit 0\n")
@@ -144,10 +147,15 @@ def test_lionheart_preflight_requires_upstream_helpers_and_library_dir(tmp_path,
     original_pins = lionheart.LIONHEART.tools
     alternate_library = tmp_path / "other-library"
     alternate_library.mkdir()
+    (alternate_library / "libhts.so").write_bytes(b"fixture libhts")
     monkeypatch.setenv("TRACEBACK_LIONHEART_LD_LIBRARY_PATH", str(alternate_library))
     assert lionheart.LIONHEART.tools != original_pins
+    alternate_pins = lionheart.LIONHEART.tools
+    (alternate_library / "libhts.so").write_bytes(b"replacement libhts")
+    assert lionheart.LIONHEART.tools != alternate_pins
     monkeypatch.delenv("TRACEBACK_LIONHEART_LD_LIBRARY_PATH")
     (tmp_path / "unpigz").unlink()
+    monkeypatch.setenv("PATH", str(tmp_path))
     assert lionheart.LIONHEART.preflight(ctx).reason_code == "missing_toolchain"
     (tmp_path / "unpigz").write_text("#!/bin/sh\nexit 0\n")
     (tmp_path / "unpigz").chmod(0o755)
@@ -180,6 +188,23 @@ def test_toolchain_change_after_planning_is_refused(tmp_path, monkeypatch) -> No
     out = tmp_path / "scratch" / "artifacts"
     out.mkdir(parents=True)
     with pytest.raises(RuntimeError, match="toolchain changed"):
+        lionheart.LIONHEART.run(ctx, out)
+
+
+def test_loaded_libhts_change_after_planning_or_during_extraction_is_refused(tmp_path, monkeypatch) -> None:
+    ctx, _ = _setup(tmp_path, monkeypatch)
+    library = tmp_path / "libhts.so"
+    library.write_bytes(b"changed after planning")
+    out = tmp_path / "scratch" / "artifacts"
+    out.mkdir(parents=True)
+    with pytest.raises(RuntimeError, match="toolchain changed since execution planning"):
+        lionheart.LIONHEART.run(ctx, out)
+
+    ctx, _ = _setup(tmp_path / "second", monkeypatch)
+    monkeypatch.setenv("TRACEBACK_LIONHEART_MUTATE_LIBHTS", "1")
+    out = tmp_path / "scratch-second" / "artifacts"
+    out.mkdir(parents=True)
+    with pytest.raises(RuntimeError, match="toolchain changed during extraction"):
         lionheart.LIONHEART.run(ctx, out)
 
 
