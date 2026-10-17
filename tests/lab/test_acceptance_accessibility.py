@@ -9,7 +9,7 @@ from pathlib import Path
 
 import pytest
 
-from tests.lab.test_acceptance_synthetic_routes import ID12, _sample, _server
+from tests.lab.test_acceptance_synthetic_routes import ID12, _run_marker, _sample, _server
 from tests.lab.test_lab_server import _chrome, _dom_cdp
 from tests.lab.test_landing import _dom, needs_chrome
 
@@ -194,6 +194,126 @@ def test_keyboard_focus_order_disclosures_dialog_and_route_focus(tmp_path) -> No
             assert evaluate("document.activeElement?.tagName") == "H1"
             assert evaluate("document.activeElement?.textContent") == "Stability"
 
+        _dom_cdp(
+            [_chrome(), "--headless=new", "--disable-gpu", "--no-first-run",
+             f"--user-data-dir={profile}", server.issue_link() + f"&route=/sample/{ID12}/findings"],
+            profile, ok=lambda d: 'data-ready="1"' in d and 'class="finding-card"' in d,
+            interact=interact, timeout=180,
+        )
+
+
+@needs_chrome
+def test_live_status_changes_keep_focus_and_open_disclosure(tmp_path) -> None:
+    sample = _sample()
+    phase = {"state": "idle"}
+    with _server(tmp_path, sample) as server:
+        kind, source = server.app.assets["/assets/lab.js"]
+        server.app.assets["/assets/lab.js"] = (
+            kind, source.replace(b"const POLL_MS = 15000;", b"const POLL_MS = 500;"),
+        )
+
+        def status():
+            if phase["state"] == "disconnected":
+                raise OSError("synthetic disconnect")
+            row = {"generation": 2 if phase["state"] == "stale" else 1,
+                   "active": None, "interrupted": None, "library": sample["library_health"]}
+            if phase["state"] == "active":
+                row["active"] = {**_run_marker(), "started_utc": "2026-10-16T00:00:00Z"}
+            elif phase["state"] == "interrupted":
+                row["interrupted"] = _run_marker()
+            return row
+
+        server.app.api.status = status
+
+        def interact(command, evaluate) -> None:
+            evaluate("""(() => {
+              window.pinnedMain = document.getElementById('main');
+              window.pinnedSummary = document.querySelector('.finding-group summary');
+              window.pinnedSummary.closest('details').open = true;
+              window.pinnedSummary.focus();
+            })()""")
+
+            def expect_status(fragment):
+                for _ in range(30):
+                    if evaluate(f"document.getElementById('status').textContent.includes({json.dumps(fragment)})"):
+                        break
+                    time.sleep(0.2)
+                else:
+                    pytest.fail(f"status did not update to {fragment!r}")
+                assert evaluate("document.getElementById('main') === window.pinnedMain")
+                assert evaluate("document.activeElement === window.pinnedSummary")
+                assert evaluate("window.pinnedSummary.closest('details').open")
+
+            phase["state"] = "active"
+            expect_status("A Lab run is in progress")
+            phase["state"] = "interrupted"
+            expect_status("stopped during bam-qc")
+            phase["state"] = "stale"
+            expect_status("Results changed on disk")
+            phase["state"] = "disconnected"
+            expect_status("Lab server not responding")
+
+            phase["state"] = "idle"
+            for _ in range(30):
+                if evaluate("document.body.dataset.disconnected === '0'"):
+                    break
+                time.sleep(0.2)
+            else:
+                pytest.fail("Lab page did not reconnect")
+            evaluate(f"location.hash = '#/sample/{ID12}/trust-qc'")
+            for _ in range(30):
+                if evaluate("document.querySelector('#main h1')?.textContent === 'Trust / QC'"):
+                    break
+                time.sleep(0.2)
+            else:
+                pytest.fail("Trust / QC did not render")
+            evaluate("""(() => {
+              window.pinnedRunButton = document.querySelector('button[aria-label="Run log line for bam-qc"]');
+              window.pinnedRunButton.focus();
+            })()""")
+            phase["state"] = "active"
+            for _ in range(30):
+                if evaluate("""document.querySelector('[data-run-algorithm="bam-qc"] [data-run-note]')?.textContent === 'latest run in progress'"""):
+                    break
+                time.sleep(0.2)
+            else:
+                pytest.fail("Trust / QC run note did not update")
+            assert evaluate("document.activeElement === window.pinnedRunButton")
+            phase["state"] = "interrupted"
+            for _ in range(30):
+                if evaluate("""document.querySelector('[data-run-algorithm="bam-qc"] [data-run-note]')?.textContent === 'latest run interrupted'"""):
+                    break
+                time.sleep(0.2)
+            else:
+                pytest.fail("Trust / QC interrupted note did not update")
+            assert evaluate("document.activeElement === window.pinnedRunButton")
+
+            phase["state"] = "idle"
+            evaluate(f"location.hash = '#/sample/{ID12}/signals'")
+            for _ in range(30):
+                if evaluate("document.querySelector('#main h1')?.textContent === 'Signals'"):
+                    break
+                time.sleep(0.2)
+            else:
+                pytest.fail("Signals did not render")
+            evaluate("""(() => {
+              window.pinnedSubtab = [...document.querySelectorAll('.subtab')]
+                .find((button) => button.textContent === 'Copy number');
+              window.pinnedSubtab.click();
+              window.pinnedSubtab.focus();
+            })()""")
+            assert evaluate("window.pinnedSubtab.getAttribute('aria-pressed') === 'true'")
+            phase["state"] = "active"
+            for _ in range(30):
+                if evaluate("document.getElementById('status').textContent.includes('A Lab run is in progress')"):
+                    break
+                time.sleep(0.2)
+            else:
+                pytest.fail("Signals status did not update")
+            assert evaluate("document.activeElement === window.pinnedSubtab")
+            assert evaluate("window.pinnedSubtab.getAttribute('aria-pressed') === 'true'")
+
+        profile = tmp_path / "browser-profile"
         _dom_cdp(
             [_chrome(), "--headless=new", "--disable-gpu", "--no-first-run",
              f"--user-data-dir={profile}", server.issue_link() + f"&route=/sample/{ID12}/findings"],

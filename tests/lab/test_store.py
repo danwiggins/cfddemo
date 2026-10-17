@@ -220,6 +220,32 @@ def test_legacy_cross_identity_selection_does_not_guess(tmp_path: Path) -> None:
     assert selected_results(store, C)["fragment-size"].metrics[0].value == 3
 
 
+@pytest.mark.parametrize("damage", ("older_result", "newer_result", "older_selector"))
+def test_corrupt_selection_only_blocks_a_newer_or_unorderable_identity(tmp_path: Path, damage: str) -> None:
+    store = LabStore(tmp_path)
+    store.ensure()
+    store.publish_result(_envelope(1), input_id=C)
+    newer = json.loads(_failed(2).to_bytes())
+    newer["provenance"]["parameters_sha256"] = B
+    store.publish_result(ResultEnvelope.model_validate(newer), input_id=C)
+
+    identity = B if damage == "newer_result" else A
+    directory = store.result_dir(C, "fragment-size", identity)
+    selector = directory / "selected.json"
+    selection = json.loads(selector.read_bytes())
+    if damage == "older_selector":
+        selection["attempt_id"] = "../../outside"
+        selector.write_text(json.dumps(selection))
+    else:
+        (directory / "attempts" / selection["attempt_id"] / "result.json").write_text("damaged")
+
+    selected = selected_results(store, C)
+    if damage == "older_result":
+        assert selected["fragment-size"].provenance.parameters_sha256 == B
+    else:
+        assert selected == {}
+
+
 def test_higher_publication_order_resolves_tied_older_identities(tmp_path: Path) -> None:
     store = LabStore(tmp_path)
     store.ensure()

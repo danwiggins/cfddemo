@@ -987,6 +987,28 @@ class LabStore:
         selected = self._selected_result(input_id, algorithm_id, parameters_sha256)
         return (selected[0].name, selected[1], selected[2]) if selected is not None else None
 
+    def selected_order_from_selector(
+        self, input_id: str, algorithm_id: str, parameters_sha256: str
+    ) -> int | None:
+        """Read an intact selector's order even when its result payload is damaged.
+
+        An unsafe, invalid, or legacy selector has no trustworthy cross-identity
+        order and must still block fallback to another selected result.
+        """
+
+        directory = self.result_dir(input_id, algorithm_id, parameters_sha256)
+        selector = directory / "selected.json"
+        try:
+            if directory.parent.is_symlink() or directory.is_symlink() or selector.is_symlink():
+                return None
+            data = json.loads(selector.read_bytes())
+            attempt_id = str(data["attempt_id"])
+            if not re.fullmatch(_ATTEMPT_ID, attempt_id):
+                return None
+            return self._publication_order(data)
+        except (OSError, ValueError, KeyError, TypeError):
+            return None
+
     def read_result(
         self, input_id: str, algorithm_id: str, parameters_sha256: str
     ) -> ResultEnvelope | None:

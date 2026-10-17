@@ -123,8 +123,20 @@
   // -- render -------------------------------------------------------------------------
   function setStatus(text, action) {
     const status = document.getElementById("status");
-    status.replaceChildren(text ? text : "");
-    if (action) status.append(" ", h("button", { type: "button", class: "control reload", onclick: () => location.reload() }, action));
+    let message = status.querySelector("[data-status-message]");
+    if (!message) {
+      message = h("span", { "data-status-message": "" });
+      status.prepend(message);
+    }
+    message.textContent = text || "";
+    status.querySelector("[data-library-error]")?.remove();
+    let reload = status.querySelector("button.reload");
+    if (action) {
+      if (!reload) {
+        reload = h("button", { type: "button", class: "control reload", onclick: () => location.reload() }, action);
+        status.append(" ", reload);
+      } else reload.textContent = action;
+    } else if (reload) reload.remove();
   }
 
   function renderSwitcher() {
@@ -316,20 +328,26 @@
       const runNote = matches(active) ? "latest run in progress" : matches(interrupted) ? interruptedLabel : null;
       const duration = a.duration_s !== null && a.duration_s !== undefined ? `${a.duration_s.toFixed(1)} s` : "—";
       const cells = [h("th", { scope: "row" }, a.algorithm_id + (a.hidden ? " (intermediate)" : "")),
-        h("td", { class: a.status === "failed" ? "problem" : null }, status, runNote ? " " : "",
-          runNote ? h("span", { class: "state-chip run-note" }, runNote) : ""),
-        h("td", { class: "num" }, runNote === "latest run in progress" && duration !== "—"
+        h("td", { class: a.status === "failed" ? "problem" : null,
+          "data-run-algorithm": a.algorithm_id, "data-run-input": a.provenance?.input_id || "" }, status, " ",
+          h("span", { class: "state-chip run-note", "data-run-note": "", hidden: !runNote }, runNote || "")),
+        h("td", { class: "num", "data-run-duration": duration }, runNote === "latest run in progress" && duration !== "—"
           ? `${duration} (selected result)` : duration)];
       const pin = a.provenance;
       const canPin = pin && /^[0-9a-f]{64}$/.test(pin.input_id) && /^[0-9a-f]{64}$/.test(pin.parameters_sha256) &&
         /^a-\d{8}T\d{12}-[0-9a-f]{8}$/.test(pin.attempt_id);
       const logKey = `${sample.id12}:${a.algorithm_id}:${pin?.input_id}:${pin?.parameters_sha256}:${pin?.attempt_id}`;
-      const logLine = h("span", { class: "help", "aria-live": "polite", "data-run-log-line": "" }, state.runLogLines.get(logKey) || "");
+      const logLine = h("span", { class: "help", "aria-live": "polite", "data-run-log-line": "",
+        "data-run-log-key": logKey }, state.runLogLines.get(logKey) || "");
       const showLogLine = (message) => {
         state.runLogLines.set(logKey, message);
         if (logLine.isConnected) logLine.replaceChildren(message);
         else if (state.route.name === "lens" && state.route.lens === "trust-qc" &&
-                 state.sample && state.sample.id12 === sample.id12) render();
+                 state.sample && state.sample.id12 === sample.id12) {
+          const current = [...document.querySelectorAll("[data-run-log-key]")]
+            .find((node) => node.dataset.runLogKey === logKey);
+          if (current) current.replaceChildren(message);
+        }
       };
       const logLink = canPin ? h("button", { type: "button", class: "control",
         "aria-label": `Run log line for ${a.algorithm_id}`, onclick: async () => {
@@ -363,7 +381,8 @@
         h("td", {}, "—"), h("td", {}, "—"), h("td", {}, "More than one selected result was found.")));
     }
     out.push(h("section", { class: "panel" }, h("h2", {}, "Run"),
-      pending ? h("p", { class: "status-line" }, `${pending === active ? "Latest run in progress" : interruptedLabel.replace(/^./, (letter) => letter.toUpperCase())} during ${pending.step}; no result was published for this step.`) : "",
+      h("p", { class: "status-line", "data-run-pending": "", hidden: !pending }, pending
+        ? `${pending === active ? "Latest run in progress" : interruptedLabel.replace(/^./, (letter) => letter.toUpperCase())} during ${pending.step}; no result was published for this step.` : ""),
       h("div", { class: "table-wrap" }, h("table", {}, h("thead", {}, h("tr", {}, ...["Algorithm", "Status", "Duration", "Run log", "Detail"].map((t) => h("th", { scope: "col" }, t)))), h("tbody", {}, ...runRows)))));
     // QC bands.
     const banded = [];
@@ -440,6 +459,40 @@
   }
 
   // -- polling (D22: generation + heartbeat, never the lock) --------------------------------
+  function updateTrustQcRunStatus(status) {
+    if (state.route.name !== "lens" || state.route.lens !== "trust-qc" || !state.sample?.found) return;
+    const sample = state.sample;
+    const active = status.active;
+    const interrupted = status.interrupted;
+    const interruptedLabel = active && interrupted && active.run_id !== interrupted.run_id
+      ? "earlier run interrupted" : "latest run interrupted";
+    const matches = (run, algorithm, input) => run && run.step === algorithm &&
+      run.source_id === sample.source_id && run.input_id === input;
+    for (const cell of document.querySelectorAll("#main [data-run-algorithm]")) {
+      const algorithm = cell.dataset.runAlgorithm;
+      const input = cell.dataset.runInput;
+      const note = matches(active, algorithm, input) ? "latest run in progress"
+        : matches(interrupted, algorithm, input) ? interruptedLabel : "";
+      const chip = cell.querySelector("[data-run-note]");
+      chip.textContent = note;
+      chip.hidden = !note;
+      const duration = cell.nextElementSibling;
+      const base = duration.dataset.runDuration;
+      duration.textContent = note === "latest run in progress" && base !== "—"
+        ? `${base} (selected result)` : base;
+    }
+    const unavailable = new Set([...(sample.unreadable_results || []), ...(sample.ambiguous_results || [])]);
+    const pending = [active, interrupted].find((run) => run && run.step && run.source_id === sample.source_id &&
+      run.input_id === sample.full_input_id && !unavailable.has(run.step) &&
+      !sample.algorithms.some((algorithm) => algorithm.algorithm_id === run.step));
+    const pendingLine = document.querySelector("#main [data-run-pending]");
+    if (pendingLine) {
+      pendingLine.textContent = pending
+        ? `${pending === active ? "Latest run in progress" : interruptedLabel.replace(/^./, (letter) => letter.toUpperCase())} during ${pending.step}; no result was published for this step.` : "";
+      pendingLine.hidden = !pending;
+    }
+  }
+
   async function poll() {
     try {
       const status = await api("/api/status");
@@ -484,14 +537,11 @@
         setStatus("");
       }
       if (status.library && status.library.error) {
-        document.getElementById("status").append(h("span", { class: "problem" },
+        document.getElementById("status").append(h("span", { class: "problem", "data-library-error": "" },
           ` Interpretation library on disk is invalid (${status.library.error}). Showing v${status.library.version}, loaded at ${status.library.loaded_at}.`));
       }
       setControlsEnabled(true);
-      const runMarker = (row) => row ? [row.run_id, row.step, row.source_id, row.input_id].join(":") : null;
-      if (state.route.name === "lens" &&
-          (runMarker(previous && previous.active) !== runMarker(status.active) ||
-           runMarker(previous && previous.interrupted) !== runMarker(status.interrupted))) render();
+      updateTrustQcRunStatus(status);
     } catch (error) {
       if (error.session) { setStatus("Session expired. Restart `traceback lab serve --open`; it opens a fresh page."); return; }
       state.missed += 1;
