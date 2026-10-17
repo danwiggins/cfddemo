@@ -71,6 +71,7 @@ PROBLEMS: dict[str, ProblemSpec] = {
     "TBX-LAB-021": ProblemSpec(EXIT_BLOCKED, "An EXAMPLE (synthetic) sample cannot join a cohort"),
     "TBX-LAB-022": ProblemSpec(EXIT_BLOCKED, "Stored cohort metadata needs restoration"),
     "TBX-LAB-023": ProblemSpec(EXIT_BLOCKED, "Sample sex assertion conflicts or needs restoration"),
+    "TBX-LAB-025": ProblemSpec(EXIT_OK, "Physical RAM is below the alignment recommendation"),
 }
 
 

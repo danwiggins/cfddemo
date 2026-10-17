@@ -180,6 +180,9 @@ Artifact sizes check completeness, not byte-level integrity.
 **Dry run.** `--dry-run` writes nothing and takes no lock. It prints the
 resolved ROOT and reference, chunk count and bytes, whether alignment is
 needed or reused, the disk budget against free space and the plan.
+When detected physical RAM is below 16 GiB, both dry run and execution show
+an advisory warning in human and JSON output. This does not block a run; a
+full hg38 alignment may be slow or fail for lack of memory.
 
 **Interruption.** Ctrl-C (or SIGTERM) stops the current step, kills its tools
 and exits 6. Completed results are kept; rerun the same command.
@@ -535,6 +538,13 @@ An operator-supplied `--sex` conflicts with an assertion already recorded for
 the same sample, or the local sex metadata is malformed (exit 3). Reuse the
 recorded assertion or omit the flag. Inspect and restore malformed metadata
 from a known-good local backup before rerunning; no measured result is changed.
+
+### TBX-LAB-025
+
+An advisory warning (exit 0): physical RAM is below the 16 GiB recommendation
+for full hg38 alignment. The run continues, but alignment may fail or be slow.
+Use a machine with at least 16 GiB RAM for a full alignment. If physical RAM
+cannot be detected, the Lab omits this advisory rather than blocking the run.
 
 ## Adding an algorithm
 
