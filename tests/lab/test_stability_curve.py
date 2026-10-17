@@ -63,6 +63,26 @@ def test_unvalidated_depth_dependent_fraction_has_no_stability_verdict() -> None
     assert band_at(spec, Side(0.2), Side(0.8)) is None
 
 
+def test_deliberately_unpublished_value_is_not_called_usable_or_unvalidated() -> None:
+    provenance = Provenance(
+        tool="bam-qc", tool_version="1", parameters_sha256="a" * 64,
+        source_id="b" * 64, input_id="c" * 64, reference_id="hg38",
+        timestamp_utc="2026-10-17T00:00:00Z",
+    )
+    result = ResultEnvelope(
+        algorithm_id="bam-qc", algorithm_version="1", status="ok", provenance=provenance,
+        depth=Depth(eligible_reads=100, approx_depth_x=20),
+        metrics=[Metric(metric_id="duplicate_fraction", value=None)],
+    )
+    full = views.InputView("full", "c" * 64, None, {}, {"bam-qc": result}, 1.0)
+    half = views.InputView("0.5", "d" * 64, "downsample", {}, {"bam-qc": result}, 0.5)
+    library = views.load_library()
+    for view in (full, half):
+        assert views.cell_state(view, full, "bam-qc", "duplicate_fraction", library) == {
+            "state": "not_interpretable", "reason": "none_published", "value": None,
+        }
+
+
 def test_wps_control_values_are_measured_but_not_declared_usable() -> None:
     provenance = Provenance(
         tool="wps", tool_version="1", parameters_sha256="a" * 64,

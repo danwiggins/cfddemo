@@ -9,7 +9,7 @@ Depth→utility curve (D24): one row per (non-hidden) algorithm, keyed by its
 inputs plus the full input).  States: ``failed``, ``skipped``,
 ``not_interpretable``, ``ok_unvalidated``, ``ok_unstable`` or ``ok_usable``.  "Usable" means not
 skipped, not not-interpretable, and stable against the full-depth value under
-the metric's D32 stability function (the full-depth cell is usable by
+the metric's D32 stability function (a measured full-depth cell is usable by
 definition).  Above this run's depth there are no cells; the library's
 ``min_depth_x`` is drawn as a "literature, not measured" marker.
 """
@@ -277,6 +277,11 @@ def cell_state(
     interpretation = classify(metric.value, entry, depth_x=view.depth_x(), not_interpretable=reason)
     if interpretation.state == "not_interpretable":
         return {"state": "not_interpretable", "reason": interpretation.reason, "value": metric.value}
+    if metric.value is None:
+        # A deliberately unpublished value may have no reference rather than
+        # a depth failure, but it still has no measured stability verdict.
+        return {"state": "not_interpretable", "reason": interpretation.reason or "metric_value_unavailable",
+                "value": None}
     if view is full:
         return {"state": "ok_usable", "value": metric.value}
     full_metric = _value(full.results.get(algorithm_id), metric_id)
