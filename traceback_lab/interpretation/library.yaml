@@ -2528,6 +2528,55 @@ entries:
       date: "2026-10-16"
       note: "No scientific citation or reference interval displayed. Engineering formula: D21 eligible molecules supply aligned-span start and end-1, not claimed physical cleavage sites. Each valid end contributes once to the denominator, including both ends of one read even if they select the same CpG. A reference CG C coordinate within 10 bp inclusive is near; equal-distance ties select the lower C. Endpoint motifs are separate panels and require complete A/C/G/T contexts. LEGAL is a caution flag, not a rights clearance."
 
+  # ----------------------------------------------- aligned-end-structure
+  - algorithm_id: aligned-end-structure
+    metric_id: ocf_like_end_asymmetry
+    label: "Open-chromatin aligned-end asymmetry (OCF-like)"
+    value_kind: signed
+    tier: SPECULATIVE
+    origin_tier: NEWER
+    origin_platform: "ONT aligned-span proxy; published OCF used paired-end short reads"
+    min_depth_x: 10
+    reference: {kind: none}
+    performance: null
+    performance_missing_reason: "No calibrated reference range or tissue-origin performance for this ONT estimator"
+    meaning_high: "More D−U ends left of catalogued centers and U−D ends right of them; no tissue fraction is inferred."
+    meaning_low: "Less of this directional asymmetry in the pinned regions; no tissue fraction is inferred."
+    confounders: ["catalogue tissue and assay", "alignment clipping", "ONT library preparation", "depth and region coverage"]
+    next_steps:
+      analytical: ["Inspect eligible centers and raw U/D end counts", "Compare only with the same pinned catalogue and protocol"]
+      clinical_setting: null
+    license_ids: [method-patents]
+    flags: [LEGAL]
+    headline: true
+    stability: {kind: absolute, tolerance: 1}
+    citations: ["doi:10.1101/gr.242719.118"]
+    citation_checked: {by: "Lab S5 evidence audit", date: "2026-10-17", note: "Sun 2019 Genome Research (PMID 30808726) defines D−U at −60 bp and U−D at +60 bp in 20-bp windows around tissue-specific open chromatin. This Lab score uses ONT aligned-span ends and operator-pinned hg38 regions; it does not reproduce short-read tissue calibration."}
+
+  - algorithm_id: aligned-end-structure
+    metric_id: preferred_end_support_fraction
+    label: "Pinned preferred-end site support"
+    value_kind: proportion
+    tier: SPECULATIVE
+    origin_tier: NEWER
+    origin_platform: "ONT aligned-span proxy; published site discovery used deep paired-end short reads"
+    min_depth_x: 10
+    reference: {kind: none}
+    performance: null
+    performance_missing_reason: "No validated background, diagnostic performance or tissue-specific calibration for this ONT support fraction"
+    meaning_high: "A larger fraction of eligible aligned-span ends coincides with pinned U/D site coordinates."
+    meaning_low: "A smaller fraction of eligible aligned-span ends coincides with pinned U/D site coordinates."
+    confounders: ["site catalogue provenance", "alignment-end precision", "library preparation", "fragment-length distribution"]
+    next_steps:
+      analytical: ["Inspect eligible end count and catalogue digest", "Do not treat a 10x sample as de novo preferred-site discovery"]
+      clinical_setting: null
+    license_ids: [method-patents]
+    flags: [LEGAL]
+    headline: false
+    stability: {kind: proportion}
+    citations: ["doi:10.1073/pnas.1804134115"]
+    citation_checked: {by: "Lab S5 evidence audit", date: "2026-10-17", note: "Sun 2018 PNAS (PMID 29760053) mined size-tagged preferred ends from approximately 470x pooled paired-end plasma sequencing. This Lab metric only counts exact matches to an operator-pinned catalogue; it does not discover or validate tissue-specific sites."}
+
   # ----------------------------------------------- short-read-fragment-size
   - algorithm_id: short-read-fragment-size
     metric_id: mode_bp

@@ -194,6 +194,7 @@ ROOT, home, login and chunk names redacted) is ever stored.
 | `hypometh-reads` | among reads with ≥ 4 CpG calls, the share under 25% methylated, and U/X/M counts (≤ 25% / between / ≥ 75%); needs 500,000 eligible reads |
 | `frag-x-meth` | descriptive molecule-count matrix of aligned-size bins by per-read 5mC fraction (at least four distinct CpG sites/read); the scalar is long (151–220 bp) mean minus short (100–150 bp) mean, null if either group is empty; no normal range |
 | `breakpoint-motifs` | 4-mer counts at aligned-reference-span start and end−1, stratified by CpG proximity; the scalar is the fraction of ends near a CpG. These are not proven physical cleavage positions, and the methylation link is unavailable without a supported joint input |
+| `aligned-end-structure` | exploratory ONT aligned-span U/D end asymmetry around operator-pinned hg38 open-chromatin centers and exact support for separately pinned U/D preferred-end coordinates; needs a full native ONT input at ≥10x observed eligible depth and both catalogues registered below. No tissue-origin or clinical calibration |
 
 **Short-read TLEN slice.** For a prealigned paired-end Illumina BAM against
 the registered hg38 reference, run the separate measurement explicitly:
@@ -215,6 +216,41 @@ metrics are keyed to `short-read-fragment-size`; `fragment-size` remains the
 ONT aligned-span measurement. No clinical cutoff, short-read healthy range,
 or cross-platform comparison is supplied by this slice. Other Lab algorithms
 are still designed around the ONT run, so use `--only` for this opt-in path.
+
+**Aligned-end catalogues.** `aligned-end-structure` requires two local,
+operator-supplied hg38 files. The center file is sorted BED3
+(`chrN<TAB>start<TAB>end`, 0-based half-open); the center is the integer
+midpoint, and centers must be more than 200 bp apart so ±100 bp profiles do
+not overlap. The preferred-end file is sorted BED4 with one-base intervals
+and `U` or `D` in column four. `U` means the lower-coordinate aligned end;
+`D` means the higher-coordinate aligned end. Both files use chr1–chr22 and
+must identify their provenance outside the file, including source accession,
+release, assembly, coordinate convention and terms. The Lab validates and
+rehashes their exact bytes. It neither downloads nor redistributes them.
+
+```bash
+traceback lab asset end-catalogues-register \
+  --centers YOUR_SORTED_hg38_centers.bed \
+  --preferred YOUR_SORTED_hg38_preferred_U_D_sites.bed \
+  --source-label YOUR_SHORT_DESCRIPTION \
+  --centers-source YOUR_CENTER_ACCESSION_AND_RELEASE \
+  --preferred-source YOUR_END_SITE_ACCESSION_AND_RELEASE \
+  --terms unknown --root R
+traceback lab asset end-catalogues-inspect --root R
+```
+
+The result measures raw `D−U` end counts in [−70, −50) bp and `U−D` in
+[50, 70) bp around pinned centers. It also reports the fraction of valid
+aligned ends exactly matching the pinned U/D site catalogue; this is a
+support count, not de novo site discovery or enrichment against a calibrated
+background. Both are ONT aligned-span proxies, not confirmed physical
+cleavage positions. The [OCF study](https://pubmed.ncbi.nlm.nih.gov/30808726/)
+used tissue-specific short-read open-chromatin signals, while the
+[size-tagged preferred-end study](https://www.pnas.org/doi/10.1073/pnas.1804134115)
+mined sites from roughly 470x pooled paired-end data. A substituted hg38
+ATAC peak set is not the original tissue-specific DNase-seq catalogue.
+Neither a 10x ONT result nor an unverified site set supports a tissue-origin,
+fetal-fraction, cancer or clinical call.
 
 **PMD asset.** `pmd-score` needs an operator-supplied Zhou 2018 hg38
 common-PMD BED.gz file. The repository does not ship or download it; its

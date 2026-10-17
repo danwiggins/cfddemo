@@ -688,7 +688,7 @@
     };
     families.forEach(([, label], i) => tabs.append(h("button", { type: "button", class: "control subtab", "aria-pressed": "false", onclick: () => show(i) }, label)));
     out.push(tabs, body);
-    const initial = ["fragment-size", "end-motifs", "delfi-ratio", "long-tail", "mtdna", "breakpoint-motifs"].some((id) => algo(sample, id))
+    const initial = ["fragment-size", "end-motifs", "delfi-ratio", "long-tail", "mtdna", "breakpoint-motifs", "aligned-end-structure"].some((id) => algo(sample, id))
       ? 0 : algo(sample, "copy-number") ? 1 : 2;
     show(initial);
     return out;
@@ -728,10 +728,37 @@
     return [section];
   }
 
+  function alignedEndSignals(sample) {
+    const a = algo(sample, "aligned-end-structure");
+    if (!a) return [];
+    const section = h("section", { class: "panel" }, h("h2", {}, "Open-chromatin aligned ends"), flagPill("LEGAL"));
+    if (a.status !== "ok") return [section, absent(a, "aligned-end-structure")];
+    section.append(h("p", { class: "help" },
+      "Exploratory ONT aligned-span proxies, not physical cleavage validation, tissue-origin inference, or a clinical cutoff. The catalogues are pinned to hg38; published OCF and preferred-end studies used paired-end short reads."));
+    const slot = h("div", {}, h("p", {}, "Loading pinned end counts…"));
+    section.append(...context(sample, "aligned-end-structure", new Set()), slot);
+    artifact(sample, "aligned-end-structure", "aligned-end-structure").then((data) => {
+      const rows = data.offset_bp.map((bp, i) => [bp, data.u_count[i], data.d_count[i]]);
+      slot.replaceWith(h("div", {},
+        h("p", {}, `Valid molecules: ${fmt(data.valid_molecules)}; eligible centers: ${fmt(data.eligible_centers)} of ${fmt(data.catalogue_centers)}; eligible pinned sites: ${fmt(data.eligible_preferred_sites)} of ${fmt(data.catalogue_preferred_sites)}.`),
+        h("p", {}, `OCF-like left/right contributions: ${fmt(data.ocf_like_left)} / ${fmt(data.ocf_like_right)} end-count differences. Exact preferred-site U/D hits: ${fmt(data.preferred_u_hits)} / ${fmt(data.preferred_d_hits)} of ${fmt(data.valid_ends)} valid ends.`),
+        chart("Upstream and downstream aligned-end counts around pinned hg38 centers.", {
+          grid: { left: 55, right: 20, top: 20, bottom: 40 },
+          xAxis: { type: "value", name: "bp from center", min: -100, max: 100 },
+          yAxis: { type: "value", name: "ends" },
+          series: [
+            { type: "line", name: "U", showSymbol: false, data: rows.map((row) => [row[0], row[1]]) },
+            { type: "line", name: "D", showSymbol: false, data: rows.map((row) => [row[0], row[2]]) },
+          ],
+        }, dataTable("Aligned-end counts by offset", ["Offset (bp)", "U ends", "D ends"], rows))));
+    }).catch(() => slot.replaceWith(h("p", { class: "problem" }, "Pinned end-count panel could not be loaded.")));
+    return [section];
+  }
+
   function fragmentSignals(sample) {
     const a = algo(sample, "fragment-size");
     const section = h("section", { class: "panel" }, h("h2", {}, "Size density"));
-    if (!a || a.status !== "ok") return [section, absent(a, "fragment-size"), ...breakpointMotifSignals(sample)];
+    if (!a || a.status !== "ok") return [section, absent(a, "fragment-size"), ...breakpointMotifSignals(sample), ...alignedEndSignals(sample)];
     const slot = h("div", {}, h("p", {}, "Loading…"));
     const short = a.metrics.find((m) => m.metric_id === "short_fraction_lt150");
     section.append(h("p", { class: "help" }, `No size-density cohort band yet; 167 bp marked. Short-fragment reference: ${cohortReadiness(sample, short ? [short] : [])}.`), ...context(sample, "fragment-size", new Set()), slot);
@@ -749,7 +776,7 @@
         ? h("table", { class: "data-table" }, h("tbody", {}, ...other.metrics.filter((m) => m.value === null || typeof m.value !== "object").map((m) => h("tr", {}, h("th", { scope: "row" }, m.label), h("td", {}, fmt(m.value, m.unit))))))
         : absent(other, id), id === "end-motifs" || id === "delfi-ratio" ? flagPill("LEGAL") : ""));
     }
-    return [section, ...more, ...breakpointMotifSignals(sample)];
+    return [section, ...more, ...breakpointMotifSignals(sample), ...alignedEndSignals(sample)];
   }
 
   function copyNumberSignals(sample) {

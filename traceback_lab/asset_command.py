@@ -33,6 +33,19 @@ def add_asset_parser(commands: Any, common: Callable[[argparse.ArgumentParser], 
     inspect.add_argument("kind", choices=("pmd",))
     common(inspect)
     inspect.set_defaults(handler=_inspect)
+    ends = actions.add_parser("end-catalogues-register", help="pin hg38 open-chromatin centers and preferred-end sites")
+    ends.add_argument("--centers", type=Path, required=True, help="sorted hg38 BED3 open-chromatin regions")
+    ends.add_argument("--preferred", type=Path, required=True, help="sorted hg38 BED4 one-base U/D end sites")
+    ends.add_argument("--source-label", required=True, help="short public source description, not a file path")
+    ends.add_argument("--centers-source", required=True, help="open-chromatin accession and release")
+    ends.add_argument("--preferred-source", required=True, help="preferred-end accession and release")
+    ends.add_argument("--terms", choices=("unknown", "restricted", "known"), required=True)
+    ends.add_argument("--license-id", help="required when terms are known")
+    common(ends)
+    ends.set_defaults(handler=_end_catalogues_register)
+    check_ends = actions.add_parser("end-catalogues-inspect", help="rehash registered end catalogues")
+    common(check_ends)
+    check_ends.set_defaults(handler=_end_catalogues_inspect)
 
 
 def _result_payload(
@@ -99,3 +112,42 @@ def _inspect(args: argparse.Namespace, store: LabStore) -> tuple[int, dict[str, 
             f"FILE    {record.file}",
         ],
     )
+
+
+def _end_catalogues_register(args: argparse.Namespace, store: LabStore) -> tuple[int, dict[str, Any]]:
+    from .end_catalog_assets import EndCatalogueError, register_end_catalogues
+
+    store.check_version()
+    try:
+        with store.writer("asset end-catalogues-register", new_run_id(), step="aligned-ends"):
+            record = register_end_catalogues(
+                store.root, centers=args.centers, preferred=args.preferred,
+                source_label=args.source_label, centers_source=args.centers_source,
+                preferred_source=args.preferred_source, terms=args.terms, license_id=args.license_id,
+            )
+    except (EndCatalogueError, OSError):
+        payload = _result_payload("lab asset end-catalogues-register", "blocked", "End catalogues not registered", store,
+                                  {"cause": "End catalogues are absent, unsafe, invalid or could not be published"})
+        return EXIT_BLOCKED, _with_human(payload, ["BLOCKED End catalogues are absent, unsafe, invalid or could not be published"])
+    payload = _result_payload("lab asset end-catalogues-register", "ok", "End catalogues pinned", store,
+                              {"identity": record.identity, "centers": record.center_count,
+                               "preferred_sites": record.preferred_count, "terms": record.terms})
+    return EXIT_OK, _with_human(payload, [f"IDENTITY {record.identity}", f"CENTERS {record.center_count}",
+                                         f"SITES {record.preferred_count}"])
+
+
+def _end_catalogues_inspect(args: argparse.Namespace, store: LabStore) -> tuple[int, dict[str, Any]]:
+    from .end_catalog_assets import EndCatalogueError, inspect_end_catalogues
+
+    store.check_version()
+    try:
+        record = inspect_end_catalogues(store.root)
+    except (EndCatalogueError, OSError):
+        payload = _result_payload("lab asset end-catalogues-inspect", "blocked", "End catalogues unavailable", store,
+                                  {"cause": "End catalogues are absent, unsafe, invalid or changed"})
+        return EXIT_BLOCKED, _with_human(payload, ["BLOCKED End catalogues are absent, unsafe, invalid or changed"])
+    payload = _result_payload("lab asset end-catalogues-inspect", "ok", "End catalogues verified", store,
+                              {"identity": record.identity, "centers": record.center_count,
+                               "preferred_sites": record.preferred_count, "terms": record.terms})
+    return EXIT_OK, _with_human(payload, [f"IDENTITY {record.identity}", f"CENTERS {record.center_count}",
+                                         f"SITES {record.preferred_count}"])
