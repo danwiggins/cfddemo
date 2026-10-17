@@ -450,7 +450,8 @@
     let first = true;
     if (!outside) {
       const withReference = metrics.filter((m) => m.state !== "no_reference" && m.state !== "not_interpretable").length;
-      out.push(h("p", { class: "empty" }, `No metric is outside a reference. ${withReference} metrics have a reference; ${groups.no_reference.length} have no reference (${cohortContext}). `,
+      const withoutReference = groups.no_reference.length;
+      out.push(h("p", { class: "empty" }, `No metric is outside a reference. ${withReference} ${withReference === 1 ? "metric has" : "metrics have"} a reference; ${withoutReference} ${withoutReference === 1 ? "metric has" : "metrics have"} no reference (${cohortContext}). `,
         h("a", { href: `#/sample/${sample.id12}/trust-qc` }, "Trust/QC"), " · ", h("a", { href: `#/sample/${sample.id12}/stability` }, "Stability")));
     }
     const titles = { markedly_above: "Markedly above", markedly_below: "Markedly below", above_typical: "Above typical", below_typical: "Below typical" };
@@ -694,14 +695,14 @@
     return out;
   }
 
-  function breakpointMotifSignals(sample) {
+  function breakpointMotifSignals(sample, seen) {
     const a = algo(sample, "breakpoint-motifs");
     if (!a) return [];
     const section = h("section", { class: "panel" }, h("h2", {}, "CpG-proximal aligned ends"), flagPill("LEGAL"));
     if (a.status !== "ok") return [section, absent(a, "breakpoint-motifs")];
     section.append(
       h("p", {}, "These are aligned-reference-span start and end−1 contexts; physical cleavage sites are not established by this BAM. Near and far 4-mer counts exclude invalid or off-contig contexts."),
-      ...context(sample, "breakpoint-motifs", new Set()),
+      ...context(sample, "breakpoint-motifs", seen),
     );
     const slot = h("div", { "aria-live": "polite" }, h("p", {}, "Loading 4-mer counts…"));
     section.append(slot);
@@ -730,26 +731,89 @@
 
   function fragmentSignals(sample) {
     const a = algo(sample, "fragment-size");
+    const seen = new Set();
     const section = h("section", { class: "panel" }, h("h2", {}, "Size density"));
-    if (!a || a.status !== "ok") return [section, absent(a, "fragment-size"), ...breakpointMotifSignals(sample)];
-    const slot = h("div", {}, h("p", {}, "Loading…"));
-    const short = a.metrics.find((m) => m.metric_id === "short_fraction_lt150");
-    section.append(h("p", { class: "help" }, `No size-density cohort band yet; 167 bp marked. Short-fragment reference: ${cohortReadiness(sample, short ? [short] : [])}.`), ...context(sample, "fragment-size", new Set()), slot);
-    artifact(sample, "fragment-size", "size-density").then((data) => {
-      const points = data.span_bp.map((x, i) => [x, data.count[i]]).filter((p) => p[0] >= 50 && p[0] <= 700);
-      slot.replaceWith(chart("Aligned-span density, 50 to 700 bp, with 167 bp marked.", {
-        grid: { left: 60, right: 20, top: 20, bottom: 40 }, xAxis: { type: "value", name: "bp", min: 50, max: 700 }, yAxis: { type: "value", name: "molecules" },
-        series: [{ type: "line", showSymbol: false, data: points, lineStyle: { color: "#1f5f8b" }, markLine: { symbol: "none", data: [{ xAxis: 167, label: { formatter: "167 bp" } }] } }],
-      }, dataTable("Molecules by aligned span (bp)", ["Span (bp)", "Molecules"], points)));
-    }).catch((e) => slot.replaceWith(h("div", { class: "problem" }, `Chart could not be drawn (${e.message}).`)));
+    if (!a || a.status !== "ok") {
+      section.append(absent(a, "fragment-size"));
+    } else {
+      const slot = h("div", {}, h("p", {}, "Loading…"));
+      const short = a.metrics.find((m) => m.metric_id === "short_fraction_lt150");
+      section.append(h("p", { class: "help" }, `No size-density cohort band yet; 167 bp marked. Short-fragment reference: ${cohortReadiness(sample, short ? [short] : [])}.`), ...context(sample, "fragment-size", seen), slot);
+      artifact(sample, "fragment-size", "size-density").then((data) => {
+        const points = data.span_bp.map((x, i) => [x, data.count[i]]).filter((p) => p[0] >= 50 && p[0] <= 700);
+        slot.replaceWith(chart("Aligned-span density, 50 to 700 bp, with 167 bp marked.", {
+          grid: { left: 60, right: 20, top: 20, bottom: 40 }, xAxis: { type: "value", name: "bp", min: 50, max: 700 }, yAxis: { type: "value", name: "molecules" },
+          series: [{ type: "line", showSymbol: false, data: points, lineStyle: { color: "#1f5f8b" }, markLine: { symbol: "none", data: [{ xAxis: 167, label: { formatter: "167 bp" } }] } }],
+        }, dataTable("Molecules by aligned span (bp)", ["Span (bp)", "Molecules"], points)));
+      }).catch((e) => slot.replaceWith(h("div", { class: "problem" }, `Chart could not be drawn (${e.message}).`)));
+    }
     const more = [];
     for (const id of ["end-motifs", "delfi-ratio", "long-tail", "mtdna"]) {
       const other = algo(sample, id);
-      if (other) more.push(h("section", { class: "panel" }, h("h2", {}, id), other.status === "ok"
-        ? h("table", { class: "data-table" }, h("tbody", {}, ...other.metrics.filter((m) => m.value === null || typeof m.value !== "object").map((m) => h("tr", {}, h("th", { scope: "row" }, m.label), h("td", {}, fmt(m.value, m.unit))))))
-        : absent(other, id), id === "end-motifs" || id === "delfi-ratio" ? flagPill("LEGAL") : ""));
+      if (!other) continue;
+      const panel = h("section", { class: "panel" }, h("h2", {}, id),
+        id === "end-motifs" || id === "delfi-ratio" ? flagPill("LEGAL") : "");
+      if (other.status !== "ok") {
+        panel.append(absent(other, id));
+      } else {
+        panel.append(...context(sample, id, seen), h("table", { class: "data-table" },
+          h("tbody", {}, ...other.metrics.filter((m) => m.value === null || typeof m.value !== "object")
+            .map((m) => h("tr", {}, h("th", { scope: "row" }, m.label), h("td", {}, fmt(m.value, m.unit)))))));
+        if (id === "end-motifs") {
+          const slot = h("div", { "aria-live": "polite" }, h("p", {}, "Loading end-motif frequencies…"));
+          panel.append(h("p", { class: "help" }, "Aligned-reference 4-mers at both fragment ends; all 256 motifs are in the data table."), slot);
+          artifact(sample, id, "motif-freq").then((data) => {
+            if (!Array.isArray(data.motif) || data.motif.length !== 256 ||
+                !Array.isArray(data.count) || data.count.length !== 256 ||
+                !Array.isArray(data.freq) || data.freq.length !== 256) throw new Error("motif panel dimensions invalid");
+            if (new Set(data.motif).size !== 256 ||
+                data.motif.some((motif) => typeof motif !== "string" || !/^[ACGT]{4}$/.test(motif)) ||
+                data.count.some((count) => !Number.isSafeInteger(count) || count < 0) ||
+                data.freq.some((freq) => !Number.isFinite(freq) || freq < 0 || freq > 1)) {
+              throw new Error("motif panel values invalid");
+            }
+            const rows = data.motif.map((motif, i) => [motif, data.count[i], data.freq[i]]);
+            const top = [...rows].sort((a, b) => b[2] - a[2] || a[0].localeCompare(b[0])).slice(0, 16);
+            slot.replaceWith(chart("Sixteen most frequent aligned-end 4-mers; fraction of counted ends.", {
+              grid: { left: 60, right: 20, top: 20, bottom: 45 },
+              xAxis: { type: "category", name: "4-mer", data: top.map((row) => row[0]), axisLabel: { rotate: 45 } },
+              yAxis: { type: "value", name: "fraction", min: 0 },
+              series: [{ type: "bar", data: top.map((row) => row[2]), itemStyle: { color: "#1f5f8b" } }],
+            }, dataTable("All 256 aligned-end 4-mers", ["4-mer", "Count", "Fraction"], rows)));
+          }).catch((e) => slot.replaceWith(h("p", { class: "problem" }, `End-motif chart unavailable (${e.message}).`)));
+        }
+        if (id === "delfi-ratio") {
+          const slot = h("div", { "aria-live": "polite" }, h("p", {}, "Loading short/long ratio track…"));
+          panel.append(h("p", { class: "help" }, "5 Mb genomic bins; short (100–150 bp) divided by long (151–220 bp), median-centred. No GC correction or classifier."), slot);
+          artifact(sample, id, "ratio-track").then((data) => {
+            if (!Array.isArray(data.bins) || data.bin_bp !== 5000000 || data.median_ratio_removed !== true) {
+              throw new Error("ratio track contract invalid");
+            }
+            if (data.bins.length > 1024 || data.bins.some((bin) =>
+              !bin || typeof bin.contig !== "string" || !/^(?:chr)?(?:[1-9]|1[0-9]|2[0-2])$/.test(bin.contig) ||
+              !Number.isSafeInteger(bin.start) || bin.start < 0 || bin.start % data.bin_bp !== 0 ||
+              !Number.isSafeInteger(bin.short) || bin.short < 0 ||
+              !Number.isSafeInteger(bin.long) || bin.long < 0 ||
+              (bin.long === 0
+                ? bin.ratio !== null || bin.centred !== null
+                : !Number.isFinite(bin.ratio) || bin.ratio < 0 || !Number.isFinite(bin.centred)))) {
+              throw new Error("ratio track bin values invalid");
+            }
+            const labels = data.bins.map((b) => `${b.contig}:${(b.start / 1e6).toFixed(0)} Mb`);
+            const values = data.bins.map((b) => b.centred);
+            slot.replaceWith(chart(`Median-centred short/long ratio across ${data.bins.length} genomic bins; gaps have no long fragments.`, {
+              grid: { left: 65, right: 20, top: 20, bottom: 45 },
+              xAxis: { type: "category", name: "5 Mb bin (genome order)", data: labels, axisLabel: { show: false } },
+              yAxis: { type: "value", name: "centred ratio" },
+              series: [{ type: "line", showSymbol: false, connectNulls: false, data: values, lineStyle: { color: "#1f5f8b" } }],
+            }, dataTable("DELFI-style 5 Mb bins", ["Contig", "Start (bp)", "Short", "Long", "Ratio", "Median-centred ratio"],
+              data.bins.map((b) => [b.contig, b.start, b.short, b.long, b.ratio, b.centred]))));
+          }).catch((e) => slot.replaceWith(h("p", { class: "problem" }, `Short/long ratio track unavailable (${e.message}).`)));
+        }
+      }
+      more.push(panel);
     }
-    return [section, ...more, ...breakpointMotifSignals(sample)];
+    return [section, ...more, ...breakpointMotifSignals(sample, seen)];
   }
 
   function copyNumberSignals(sample) {
@@ -873,6 +937,7 @@
       });
       const label = `${name}: ${members.length} cell types; dots are this sample, diamonds are eligible cohort means, upper lines are observed min–max for 10–29 eligible values or the 90% bootstrap interval of the 95th-percentile cutoff for 30 or more, lower lines are sample intervals. The mean may lie outside a cutoff interval. Hatched dots are not interpretable at this depth.`;
       out.push(h("section", { class: "panel" }, h("h2", {}, name),
+        h("p", { class: "help" }, "● Sample share · lower line: sample bootstrap interval · ◆ eligible cohort mean · upper line: cohort reference interval (observed min–max at n = 10–29; 90% bootstrap interval of the 95th-percentile cutoff at n ≥ 30)."),
         svg("svg", { viewBox: `0 0 ${w} ${hgt}`, role: "img", "aria-label": label, class: "composition-svg" }, svg("title", {}, label), ...marks,
           svg("line", { x1: left, x2: w - 20, y1: axisY, y2: axisY, class: "ci" }), ...ticks),
         dataTable(`${name} (${intervalName})`, ["Cell type", "Share", "Interval low", "Interval high", "Cohort mean", "Reference low", "Reference high", "Reference interval meaning", "Eligible n", "State"],
