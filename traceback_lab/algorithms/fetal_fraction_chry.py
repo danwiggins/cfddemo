@@ -130,6 +130,12 @@ class FetalFractionChrY(Base):
         if not isinstance(self.preflight(ctx), Ready):
             raise RuntimeError("fetal calibration or input changed after preflight")
         contract = inspect_contract(LabStore(ctx.root), ctx.input_id)
+        planned_assets = list(ctx.extras.get("planned_asset_sha256s", ()))
+        if (planned_assets != [contract.manifest_sha256]
+                or contract.source_id != ctx.source_id
+                or contract.reference_sha256 != ctx.reference_sha256
+                or contract.calibration_status != "operator_verified"):
+            raise RuntimeError("fetal calibration changed after execution planning")
         summary, _ = load_summary(ctx)
         if not _canonical_layout(summary):
             raise RuntimeError("fetal BAM reference layout changed after preflight")
@@ -137,7 +143,7 @@ class FetalFractionChrY(Base):
         if denominator != ctx.eligible_reads:
             raise RuntimeError("fetal read count changed after preflight")
         estimate = _fraction(y_count, denominator, contract)
-        if self.asset_sha256s_for_input(ctx.root, ctx.input_id) != [contract.manifest_sha256]:
+        if self.asset_sha256s_for_input(ctx.root, ctx.input_id) != planned_assets:
             raise RuntimeError("fetal calibration changed during execution")
         return AlgorithmOutput(metrics=[
             metric("fetal_fraction", estimate, unit="fraction", n=denominator),

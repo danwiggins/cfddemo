@@ -28,6 +28,21 @@ INPUT = "b" * 64
 REFERENCE = "c" * 64
 
 
+def _strings(value):
+    if isinstance(value, str):
+        yield value
+    elif isinstance(value, dict):
+        for child in value.values():
+            yield from _strings(child)
+    elif isinstance(value, list):
+        for child in value:
+            yield from _strings(child)
+
+
+def _assert_private_path_absent(payload: dict, path: Path) -> None:
+    assert all(str(path) not in value and path.name not in value for value in _strings(payload))
+
+
 def _file(tmp_path: Path, *, status: str = "operator_verified", **changes) -> tuple[Path, str]:
     data = {"schema": "traceback.lab.fetal-chry-calibration.v1", "source_id": SOURCE,
             "input_id": INPUT, "reference_sha256": REFERENCE,
@@ -56,7 +71,7 @@ def test_registration_is_immutable_and_cli_keeps_labels_private(tmp_path: Path, 
     response = json.loads(capsys.readouterr().out)
     assert response["data"]["manifest_sha256"] == digest
     assert "private study label" not in json.dumps(response)
-    assert str(path) not in json.dumps(response)
+    _assert_private_path_absent(response, path)
     assert lab_main(["fetal", "chry-inspect", INPUT, "--root", str(store.root), "--json"]) == 0
     inspected = json.loads(capsys.readouterr().out)["data"]
     assert inspected["female_control_n"] == 10
@@ -99,7 +114,7 @@ def test_deeply_nested_calibration_is_structured_failure(tmp_path: Path, capsys)
                      "--root", str(tmp_path / "root"), "--json"]) != 0
     response = json.loads(capsys.readouterr().out)
     assert response["status"] == "blocked"
-    assert str(path) not in json.dumps(response)
+    _assert_private_path_absent(response, path)
 
 
 def test_deeply_nested_receipt_is_structured_failure(tmp_path: Path) -> None:
@@ -150,7 +165,7 @@ def test_registration_publish_error_is_path_free(tmp_path: Path, monkeypatch, ca
                      "--root", str(root), "--json"]) != 0
     response = json.loads(capsys.readouterr().out)
     assert response["status"] == "blocked"
-    assert str(path) not in json.dumps(response)
+    _assert_private_path_absent(response, path)
     assert not (root / "lab" / "assets" / "fetal-fraction-chry" / INPUT).exists()
 
 
@@ -162,7 +177,7 @@ def test_registration_source_error_is_path_free(tmp_path: Path, monkeypatch, cap
                         lambda _path: (_ for _ in ()).throw(OSError(f"private path {path}")))
     assert lab_main(["fetal", "chry-register", "--file", str(path), "--sha256", digest,
                      "--root", str(tmp_path / "root"), "--json"]) != 0
-    assert str(path) not in capsys.readouterr().out
+    _assert_private_path_absent(json.loads(capsys.readouterr().out), path)
 
 
 def test_chry_counting_uses_half_open_par_boundaries_and_bounded_slices(monkeypatch) -> None:
@@ -234,6 +249,12 @@ def test_real_summary_counts_nonpar_y_and_calibrates_only_within_bounds(
     assert measured == {"fetal_fraction": pytest.approx(0.5),
                         "fetal_chry_nonpar_reads": 2,
                         "fetal_chry_reads_per_million": 200_000}
+    changed_contract = replace(contract, manifest_sha256="e" * 64)
+    with monkeypatch.context() as patch:
+        reads = iter((contract, changed_contract, changed_contract))
+        patch.setattr(fetal, "inspect_contract", lambda *_args: next(reads))
+        with pytest.raises(RuntimeError, match="changed after execution planning"):
+            algorithm.run(ctx, tmp_path)
     wrong_order = SimpleNamespace(contigs=("chrY", *summary.contigs[1:]), lengths=summary.lengths)
     with monkeypatch.context() as patch:
         patch.setattr(fetal, "load_summary", lambda _ctx: (wrong_order, None))
