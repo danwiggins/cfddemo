@@ -101,6 +101,7 @@ if os.environ.get('TRACEBACK_LIONHEART_CAPTURE_NAMES'):
     import pysam
     with pysam.AlignmentFile(args.bam_file, 'rb') as bam:
         names = [record.query_name for record in bam.fetch(until_eof=True)]
+        assert names == [record.query_name for record in bam.fetch('chr1', 0, 100_000)]
     (pathlib.Path(args.out_dir) / 'seen-names.json').write_text(json.dumps(names))
 else:
     assert pathlib.Path(args.bam_file).read_bytes() == b'BAM from selected input'
@@ -220,11 +221,12 @@ def test_lionheart_derived_inputs_use_nested_read_masks_and_disjoint_halves(tmp_
 
     below_gate = replace(ctx, derived={"transform": "split", "half": "A"}, eligible_reads=4_999_999)
     assert lionheart.LIONHEART.preflight(below_gate).reason_code == "depth"
+    assert lionheart.LIONHEART.preflight(replace(ctx, derived={})).reason_code == "derived_not_supported"
 
     monkeypatch.setenv("TRACEBACK_LIONHEART_FAIL", "1")
     out = tmp_path / "failed" / "artifacts"
     out.mkdir(parents=True)
-    with pytest.raises(RuntimeError, match="feature extraction failed"):
+    with pytest.raises(RuntimeError, match=r"feature extraction failed \(exit 7\)"):
         lionheart.LIONHEART.run(replace(ctx, derived={"transform": "split", "half": "A"}), out)
     assert not list(out.parent.glob("lionheart-bam-*"))
 

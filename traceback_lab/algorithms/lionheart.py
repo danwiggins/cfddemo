@@ -317,7 +317,7 @@ class Lionheart(Base):
     def preflight(self, ctx: InputContext) -> Ready | Skip:
         if ctx.example:
             return Skip("example_reference", "LIONHEART needs hg38 resources; not in the synthetic example")
-        if ctx.derived and ctx.derived.get("transform") not in {"downsample", "split"}:
+        if ctx.derived is not None and ctx.derived.get("transform") not in {"downsample", "split"}:
             return Skip("derived_not_supported", "LIONHEART supports downsample and split derived inputs")
         if ctx.reference_id.lower() not in {"hg38", "grch38"}:
             return Skip("reference", "LIONHEART v2.2.0 requires an hg38-aligned BAM")
@@ -392,7 +392,7 @@ class Lionheart(Base):
         shutil.copytree(directory, snapshot)
         if validated_resource_digest(snapshot, archive) != expected[0]:
             raise RuntimeError("LIONHEART resources changed since execution planning")
-        selected = tempfile.TemporaryDirectory(prefix="lionheart-bam-", dir=out.parent) if ctx.derived else nullcontext(None)
+        selected = tempfile.TemporaryDirectory(prefix="lionheart-bam-", dir=out.parent) if ctx.derived is not None else nullcontext(None)
         with selected as scratch:
             bam = ctx.input_dir / "aligned.bam"
             if scratch is not None:
