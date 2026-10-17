@@ -8,6 +8,7 @@ cannot mix old and new members in one response.
 from __future__ import annotations
 
 import json
+import math
 import os
 import re
 import stat
@@ -21,7 +22,7 @@ from pydantic import ValidationError
 from traceback_runner.serialization import canonical_json_bytes
 
 from .cohort_contracts import CohortGeneration, CohortMember, CohortResult, MetricProjection, project_metric
-from .identity import SHA256_PATTERN, cohort_compat_key
+from .identity import SHA256_PATTERN, canonical_sha256, cohort_compat_key
 from .ingest import resolve_sample, source_ids
 from .problems import LabProblem
 from .registry import execution_identity, load_registry
@@ -515,6 +516,19 @@ def _selected_results(
             for metric in chosen.metrics
             if metric.value is None or (isinstance(metric.value, (int, float)) and not isinstance(metric.value, bool))
         }
+        if algorithm.id == "microbial":
+            primary = metrics.get("primary_reads")
+            candidates = metrics.get("candidate_unmapped_reads")
+            too_short = metrics.get("too_short_unmapped_reads")
+            missing_sequence = metrics.get("missing_sequence_unmapped_reads")
+            if (any(isinstance(value, bool) or not isinstance(value, (int, float))
+                    or not math.isfinite(value) or value < 0
+                    for value in (primary, candidates, too_short, missing_sequence))
+                    or primary == 0 or (candidates == 0 and too_short + missing_sequence > 0)
+                    or metrics.get("microbial_rpm_primary") is None):
+                # Missing counters in older snapshots cannot distinguish an
+                # assayed zero from unassayable unmapped molecules.
+                continue
         compat_tools = list(tool_identities)
         if algorithm.id == "arm-summary":
             # Unlike member-specific PoNs, the arm-definition bytes are shared
@@ -530,6 +544,11 @@ def _selected_results(
             per_sample_asset_keys=("pon_sha256",) if effective_parameters.get("pon_policy") == "lab_loo_v1" else (),
             platform=platform if platform != "ont" else None,
         )
+        if algorithm.id == "microbial":
+            # Preserve the aligner match in the generic key and also pin the
+            # exact DB/tool/upstream execution identity for this method.
+            compat = canonical_sha256({"cohort": compat,
+                                       "execution": chosen.provenance.parameters_sha256})
         found.append(CohortResult(
             algorithm_id=algorithm.id, parameters_sha256=chosen.provenance.parameters_sha256,
             cohort_compat_key=compat, metrics=metrics,

@@ -813,6 +813,18 @@ class LabStore:
         artifacts = selected[0] / "artifacts"
         return artifacts if artifacts.is_dir() and not artifacts.is_symlink() else None
 
+    def selected_result_artifacts(
+        self, input_id: str, algorithm_id: str, parameters_sha256: str
+    ) -> tuple[ResultEnvelope, Path] | None:
+        """Return the result and artifacts from one verified selected attempt."""
+        selected = self._selected_result(input_id, algorithm_id, parameters_sha256)
+        if selected is None:
+            return None
+        artifacts = selected[0] / "artifacts"
+        if not artifacts.is_dir() or artifacts.is_symlink():
+            return None
+        return selected[1], artifacts
+
     def selected_attempt(
         self, input_id: str, algorithm_id: str, parameters_sha256: str
     ) -> Path | None:

@@ -100,6 +100,11 @@ def build_parser() -> argparse.ArgumentParser:
     from .arm_zscore_command import add_arm_zscore_parser
 
     add_arm_zscore_parser(commands, _common)
+
+    from .microbial_command import add_microbial_parser
+
+    add_microbial_parser(commands, _common)
+
     from .identity_command import add_identity_parser
 
     add_identity_parser(commands, _common)
