@@ -7,6 +7,12 @@ licenses:
     headline: "LGPL: NIPTeR prenatal analysis"
     body: "The installed NIPTeR 1.0.2 DESCRIPTION says GNU Lesser General Public License without a version. NIPTeR runs as a separate R process; its license terms and the control cohort's data rights require independent review."
     url: "https://github.com/molgenis/NIPTeR"
+  somalier-mit:
+    headline: "MIT: Somalier"
+    body: >-
+      Somalier is MIT-licensed. Its fingerprint and relatedness output can
+      reveal family relationships; use it only for explicitly selected pairs.
+    url: "https://github.com/brentp/somalier/blob/master/LICENSE"
   modkit-ont-public:
     headline: "RESEARCH-ONLY: modkit"
     body: >-

@@ -197,9 +197,10 @@ def run_plan(
         ]
         assets_of = getattr(algorithm, "asset_sha256s", None)
         scoped_assets_of = getattr(algorithm, "asset_sha256s_for_input", None)
-        planned_assets = tuple(scoped_assets_of(store.root, target.input_id)) if callable(scoped_assets_of) else (
-            tuple(assets_of(store.root)) if callable(assets_of) else ()
+        planned_assets = list(scoped_assets_of(store.root, target.input_id)) if callable(scoped_assets_of) else (
+            list(assets_of(store.root)) if callable(assets_of) else []
         )
+        planned_tools = [tool.identity() for tool in algorithm.tools]
         identity = execution_identity(
             algorithm,
             reference_sha256=target.reference_sha256,
@@ -207,6 +208,7 @@ def run_plan(
             # Consumed assets enter the execution identity (D19), so a
             # re-registered asset never reuses an older result.
             asset_sha256s=planned_assets,
+            tool_pins=planned_tools,
         )
         step = algorithm.id if target.label == "full" else f"{algorithm.id}@{target.label}"
         existing = store.read_result(target.input_id, algorithm.id, identity)
@@ -235,6 +237,7 @@ def run_plan(
             if name in done and done[name].artifacts_dir
         }
         target.extras["planned_asset_sha256s"] = planned_assets
+        target.extras["planned_tool_pins"] = planned_tools
         ctx = target.context(store.root)
         decision: Ready | Skip
         if blocked:
