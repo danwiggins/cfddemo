@@ -47,7 +47,7 @@ from ..tf_concordance import report_tf_concordance
 
 _LOGGED_SAMPLE_COMMANDS = frozenset({"run", "simulate cna", "simulate split", "cohort build"})
 _STATUS_COMMANDS = _LOGGED_SAMPLE_COMMANDS | frozenset({
-    "asset add", "cohort add", "cohort build", "identity sites add", "identity compare",
+    "asset add", "cohort add", "cohort remove", "identity sites add", "identity compare",
 })
 _STATUS_STEPS = frozenset({
     "start", "sites", "relate", "ingest", "align", "derive", "read-summary",
