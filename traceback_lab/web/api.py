@@ -301,7 +301,8 @@ class LabApi:
             if reason:
                 run_log_unavailable = {"run_id": None if reason == "invalid_run_id" else run_id,
                                        "reason": reason}
-            status["active"] = {**status["active"], **_run_sample_identity(events)}
+            status["active"] = {**status["active"], **_run_sample_identity(events),
+                                "run_id": None if reason == "invalid_run_id" else run_id}
         else:
             # Bounded (D22): one pointer file and that one run's log, never a scan.
             last, pointer_unavailable = _latest_analysis_run(self.store)
