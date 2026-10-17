@@ -13,7 +13,10 @@ import pytest
 
 import traceback_lab.algorithms.methylbert as adapter
 import traceback_lab.controls as controls
+from traceback_lab import cohorts
+from traceback_lab.algorithms.read_summary import READ_SUMMARY
 from traceback_lab.derived import DerivedInput, downsample
+from traceback_lab.envelope import Metric, ResultEnvelope, provenance
 from traceback_lab.methylbert_bundle import Bundle
 from traceback_lab.methylbert_child import _training_counts, _tumour_dmrs
 from traceback_lab.methylbert_runtime import Aggregate, MIN_ELIGIBLE_READS, NUMERICAL_PACKAGES, RuntimeRefusal
@@ -28,6 +31,84 @@ def _context(tmp_path: Path, **extras: Any) -> InputContext:
         reference_sha256="a" * 64, input_dir=tmp_path / "input",
         eligible_reads=MIN_ELIGIBLE_READS, extras=extras,
     )
+
+
+def _publish_cohort_methylbert(
+    store: LabStore, *, index: int, bundle_sha256: str, runtime_name: str,
+) -> tuple[str, str]:
+    source_id, input_id, reference_sha256 = f"{index:064x}", f"{index + 100:064x}", "a" * 64
+    store.sources_dir.mkdir(parents=True, exist_ok=True)
+    (store.sources_dir / f"{source_id}.json").write_text(json.dumps({
+        "source_id": source_id, "example": False,
+        "inputs": [{"input_id": input_id, "kind": "aligned", "used_utc": "2026-10-17T00:00:00Z"}],
+    }), encoding="utf-8")
+    input_dir = store.inputs_dir / input_id
+    input_dir.mkdir(parents=True, exist_ok=True)
+    (input_dir / "manifest.json").write_text(json.dumps({
+        "kind": "aligned", "source_id": source_id, "input_id": input_id,
+        "reference_sha256": reference_sha256,
+        "tools": {"samtools": "1.21", "minimap2": "2.28"},
+        "mmi_sha256": "b" * 64, "aligner_argv": ["minimap2", "-ax", "map-ont"],
+    }), encoding="utf-8")
+    read_hash = execution_identity(READ_SUMMARY, reference_sha256=reference_sha256)
+    store.publish_result(ResultEnvelope(
+        algorithm_id=READ_SUMMARY.id, algorithm_version=READ_SUMMARY.version, status="ok",
+        provenance=provenance(tool="fixture", parameters_sha256=read_hash,
+                              source_id=source_id, input_id=input_id, reference_id="hg38"),
+    ), input_id=input_id)
+    ctx = InputContext(
+        root=store.root, source_id=source_id, input_id=input_id, reference_id="hg38",
+        reference_sha256=reference_sha256, input_dir=input_dir, eligible_reads=MIN_ELIGIBLE_READS,
+        extras={"methylbert_bundle_sha256": bundle_sha256,
+                "methylbert_code_sha256": "c" * 64,
+                "methylbert_min_classified_reads": 100_000},
+    )
+    parameters = adapter.METHYLBERT.identity_parameters(ctx)
+    parameters["numerical_runtime"] = {"fixture_runtime": runtime_name}
+    methylbert_hash = execution_identity(
+        adapter.METHYLBERT, reference_sha256=reference_sha256,
+        asset_sha256s=adapter.METHYLBERT.identity_assets(ctx), parameters=parameters,
+        upstream=[{"algorithm_id": READ_SUMMARY.id, "parameters_sha256": read_hash}],
+    )
+    store.publish_result(ResultEnvelope(
+        algorithm_id="methylbert", algorithm_version=adapter.METHYLBERT.version, status="ok",
+        provenance=provenance(tool="fixture", parameters_sha256=methylbert_hash,
+                              source_id=source_id, input_id=input_id, reference_id="hg38"),
+        metrics=[Metric(metric_id="tumour_fraction", value=0.25)],
+    ), input_id=input_id)
+    return source_id, methylbert_hash
+
+
+@pytest.mark.xfail(strict=True, reason="S5 owns the shared recorded-identity cohort reader repair")
+def test_cohort_reads_recorded_methylbert_identity_without_live_runtime(tmp_path, monkeypatch):
+    store = LabStore(tmp_path)
+    monkeypatch.setattr(cohorts, "load_registry", lambda: (READ_SUMMARY, adapter.METHYLBERT))
+    monkeypatch.setattr(adapter, "header_model", lambda *_args: "dorado-model")
+    monkeypatch.setattr(adapter, "numerical_runtime_identity", lambda **_kwargs: {"fixture_runtime": "A"})
+    first, first_hash = _publish_cohort_methylbert(store, index=1, bundle_sha256="d" * 64, runtime_name="A")
+    second, second_hash = _publish_cohort_methylbert(store, index=2, bundle_sha256="e" * 64, runtime_name="B")
+    assert first_hash != second_hash
+
+    def no_live_probe(*_args, **_kwargs):
+        pytest.fail("cohort reading must use the recorded runtime, not probe this host")
+
+    monkeypatch.setattr(adapter.METHYLBERT, "identity_parameters", no_live_probe)
+    member = cohorts.member_from_store(store, first)
+    selected = {row.algorithm_id: row for row in member.results}
+    assert selected["methylbert"].parameters_sha256 == first_hash
+    cohorts.add_sample(store, "model-cohort", first)
+    cohorts.add_sample(store, "model-cohort", second)
+    generation = cohorts.build_cohort(store, "model-cohort")
+    by_source = {row.source_id: row for row in generation.members}
+    first_result = next(row for row in by_source[first].results if row.algorithm_id == "methylbert")
+    second_result = next(row for row in by_source[second].results if row.algorithm_id == "methylbert")
+    assert first_result.cohort_compat_key != second_result.cohort_compat_key
+    projected = cohorts.project_sample_metric(
+        store, "model-cohort", target_source_id=first,
+        algorithm_id="methylbert", metric_id="tumour_fraction",
+    )
+    assert projected is not None and projected.percentile_n == 0
+    assert projected.exclusions == {"self": 1, "incompatible": 1}
 
 
 def test_derived_plan_keeps_model_pins_and_absolute_support_floor(tmp_path, monkeypatch):
