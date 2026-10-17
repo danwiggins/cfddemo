@@ -177,7 +177,10 @@ def _run_events(store: LabStore, run_id: str) -> tuple[list[tuple[int, dict[str,
     raw = _read_run_log(store.runs_dir / f"{run_id}.jsonl")
     if raw is None:
         return [], "unreadable_or_over_1mib"
-    lines = raw.splitlines()
+    lines = raw.split(b"\n")
+    complete_tail = raw.endswith(b"\n")
+    if complete_tail:
+        lines.pop()
     if len(lines) > 4096:
         return [], "over_4096_lines"
     events = []
@@ -187,7 +190,7 @@ def _run_events(store: LabStore, run_id: str) -> tuple[list[tuple[int, dict[str,
         except (ValueError, UnicodeDecodeError):
             # One crash-torn append can leave an unterminated final fragment.
             # Keep its validated prefix, but never skip a complete or middle line.
-            if events and number == len(lines) and not raw.endswith(b"\n"):
+            if events and number == len(lines) and not complete_tail:
                 break
             return [], "malformed_or_empty"
         if not isinstance(event, dict):
