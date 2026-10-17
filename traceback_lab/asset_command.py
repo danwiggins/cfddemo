@@ -11,6 +11,7 @@ from typing import Any
 from traceback_runner.cli import _local_envelope, _result, _with_human
 
 from .assets import AssetError, AssetPublishUncertain, add_asset, inspect_asset
+from .methylbert_assets import inspect_methylbert_bundle, register_methylbert_bundle
 from .problems import EXIT_BLOCKED, EXIT_OK
 from .store import LabStore, new_run_id
 
@@ -19,7 +20,7 @@ def add_asset_parser(commands: Any, common: Callable[[argparse.ArgumentParser], 
     asset = commands.add_parser("asset", help="register or inspect local Lab assets")
     actions = asset.add_subparsers(dest="asset_action", required=True)
     add = actions.add_parser("add", help="register operator-supplied pinned bytes")
-    add.add_argument("kind", choices=("pmd", "tss-annotation"))
+    add.add_argument("kind", choices=("pmd", "tss-annotation", "methylbert-bundle"))
     add.add_argument("--file", type=Path, required=True, help="local pinned asset file")
     add.add_argument(
         "--source-label", "--provenance", dest="source_label", required=True,
@@ -30,7 +31,8 @@ def add_asset_parser(commands: Any, common: Callable[[argparse.ArgumentParser], 
     common(add)
     add.set_defaults(handler=_add)
     inspect = actions.add_parser("inspect", help="rehash and describe a local asset")
-    inspect.add_argument("kind", choices=("pmd", "tss-annotation"))
+    inspect.add_argument("kind", choices=("pmd", "tss-annotation", "methylbert-bundle"))
+    inspect.add_argument("--sha256", help="registered MethylBERT bundle digest")
     common(inspect)
     inspect.set_defaults(handler=_inspect)
 
@@ -45,10 +47,16 @@ def _add(args: argparse.Namespace, store: LabStore) -> tuple[int, dict[str, Any]
     store.check_version()
     try:
         with store.writer("asset add", new_run_id(), step=args.kind):
-            record = add_asset(
-                store, args.kind, args.file,
-                source_label=args.source_label, terms=args.terms, license_id=args.license_id,
-            )
+            if args.kind == "methylbert-bundle":
+                record = register_methylbert_bundle(
+                    store, args.file, source_label=args.source_label,
+                    terms=args.terms, license_id=args.license_id,
+                )
+            else:
+                record = add_asset(
+                    store, args.kind, args.file,
+                    source_label=args.source_label, terms=args.terms, license_id=args.license_id,
+                )
     except AssetPublishUncertain as exc:
         payload = _result_payload(
             "lab asset add", "blocked", "Asset registration incomplete; inspect before retry", store,
@@ -79,7 +87,14 @@ def _add(args: argparse.Namespace, store: LabStore) -> tuple[int, dict[str, Any]
 def _inspect(args: argparse.Namespace, store: LabStore) -> tuple[int, dict[str, Any]]:
     store.check_version()
     try:
-        record = inspect_asset(store, args.kind)
+        if args.kind == "methylbert-bundle":
+            if not args.sha256:
+                raise AssetError("MethylBERT bundle inspection needs --sha256")
+            record = inspect_methylbert_bundle(store, args.sha256)
+        else:
+            if args.sha256:
+                raise AssetError("--sha256 is only for methylbert-bundle")
+            record = inspect_asset(store, args.kind)
     except AssetError as exc:
         payload = _result_payload(
             "lab asset inspect", "blocked", "Asset unavailable", store,

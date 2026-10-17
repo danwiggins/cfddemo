@@ -13,9 +13,10 @@ from pathlib import Path
 import pytest
 
 import traceback_lab.methylbert_bundle as bundle_module
-import traceback_runner.references as references
+from traceback_lab.assets import AssetError
+from traceback_lab.methylbert_assets import copy_methylbert_bundle, inspect_methylbert_bundle, register_methylbert_bundle
 from traceback_lab.methylbert_bundle import MAX_ARCHIVE_BYTES, BundleError, REQUIRED_FILES, SCHEMA, unpack_bundle, verify_bundle
-from traceback_runner.references import AssetKind, ReferenceProblem, copy_registered_asset, register_asset
+from traceback_lab.store import LabStore
 
 
 def _bundle(path, *, bad_digest=False, extra=False, link=False, model_id="test-tumour-normal"):
@@ -60,29 +61,67 @@ def test_bundle_verifies_all_files_before_private_copy(tmp_path):
 def test_bundle_registers_by_digest_then_reverifies_worker_copy(tmp_path):
     archive = tmp_path / "model.tar"
     _bundle(archive)
-    root = tmp_path / "root"
-    result = register_asset(root, AssetKind.METHYLBERT_BUNDLE, "asset_methylbert_test", archive)
-    assert result.registered.parse_check.format == "methylbert-bundle-tar"
+    store = LabStore(tmp_path / "root")
+    record = register_methylbert_bundle(
+        store, archive, source_label="fixture", terms="restricted",
+    )
+    assert record.file == store.lab / "assets" / "methylbert-bundle" / record.sha256 / "model.tar"
+    assert inspect_methylbert_bundle(store, record.sha256) == record
+    assert register_methylbert_bundle(
+        store, archive, source_label="fixture", terms="restricted",
+    ) == record
+    with pytest.raises(AssetError, match="different provenance"):
+        register_methylbert_bundle(store, archive, source_label="other", terms="restricted")
     scratch = tmp_path / "scratch"
     scratch.mkdir()
-    copy = copy_registered_asset(
-        root, "asset_methylbert_test", scratch, kind=AssetKind.METHYLBERT_BUNDLE,
-    )
+    copy = copy_methylbert_bundle(store, record.sha256, scratch / "model.tar")
     assert unpack_bundle(copy, scratch / "model").model_id == "test-tumour-normal"
+    record.file.write_bytes(b"changed")
+    with pytest.raises(AssetError, match="differs from registration"):
+        inspect_methylbert_bundle(store, record.sha256)
 
 
 def test_registration_refuses_malformed_bundle_before_publication(tmp_path):
     archive = tmp_path / "model.tar"
     _bundle(archive, bad_digest=True)
+    store = LabStore(tmp_path / "root")
+    with pytest.raises(AssetError, match="malformed"):
+        register_methylbert_bundle(store, archive, source_label="fixture", terms="restricted")
+    assert not (store.lab / "assets" / "methylbert-bundle").exists()
+
+
+def test_registration_and_consumer_share_the_bundle_size_cap(tmp_path):
+    archive = tmp_path / "oversized.tar"
+    with archive.open("wb") as stream:
+        stream.truncate(MAX_ARCHIVE_BYTES + 1)
+    with pytest.raises(AssetError, match="size cap"):
+        register_methylbert_bundle(
+            LabStore(tmp_path / "root"), archive, source_label="fixture", terms="restricted",
+        )
+
+
+def test_lab_asset_command_registers_and_inspects_bundle(tmp_path, capsys):
+    from traceback_runner import cli
+
+    archive = tmp_path / "model.tar"
+    _bundle(archive)
     root = tmp_path / "root"
-    with pytest.raises(ReferenceProblem) as raised:
-        register_asset(root, AssetKind.METHYLBERT_BUNDLE, "asset_bad_model", archive)
-    assert raised.value.code == "TBX-ASSET-005"
-    assert not (root / "assets-local" / AssetKind.METHYLBERT_BUNDLE.value / "asset_bad_model").exists()
-
-
-def test_registration_and_consumer_share_the_bundle_size_cap():
-    assert references._MAX_BUNDLE_BYTES == MAX_ARCHIVE_BYTES
+    code = cli.main([
+        "lab", "asset", "add", "methylbert-bundle", "--file", str(archive),
+        "--source-label", "synthetic fixture", "--terms", "restricted",
+        "--root", str(root), "--json",
+    ])
+    added = json.loads(capsys.readouterr().out)
+    assert code == 0
+    digest = added["data"]["asset"]["sha256"]
+    assert added["data"]["asset"]["kind"] == "methylbert-bundle"
+    code = cli.main([
+        "lab", "asset", "inspect", "methylbert-bundle", "--sha256", digest,
+        "--root", str(root), "--json",
+    ])
+    inspected = json.loads(capsys.readouterr().out)
+    assert code == 0
+    assert inspected["data"]["asset"] == added["data"]["asset"]
 
 
 @pytest.mark.parametrize("damage,message", [
