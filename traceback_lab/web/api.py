@@ -47,6 +47,64 @@ def _recovery_problem(problem: LabProblem) -> dict[str, str]:
             "cause": problem.cause, "fix": problem.fix, "docs": problem.docs}
 
 
+_AGREEMENT_AXES = (
+    ("size-cn", ("fragment-size", "mode_bp"), ("copy-number", "tumor_fraction")),
+    ("mtdna-cn", ("mtdna", "chrm_fraction"), ("copy-number", "tumor_fraction")),
+)
+
+
+def _agreement_pairs(
+    sample: Any, generation: CohortGeneration | None, target: CohortMember | None,
+    source_id: str, cohort_state: str,
+) -> list[dict[str, Any]]:
+    """Pair only compatible scalar values from one pinned generation by source ID."""
+
+    rows = []
+    for pair_id, (x_algorithm, x_metric), (y_algorithm, y_metric) in _AGREEMENT_AXES:
+        row: dict[str, Any] = {
+            "pair_id": pair_id, "state": cohort_state if cohort_state != "ready" else "unavailable",
+            "cohort_version": generation.version_id if generation else None,
+            "eligible_n": 0, "points": [], "excluded": {},
+        }
+        if generation is None or target is None or cohort_state != "ready":
+            rows.append(row)
+            continue
+        projections: list[MetricProjection] = []
+        for algorithm_id, metric_id in ((x_algorithm, x_metric), (y_algorithm, y_metric)):
+            envelope = sample.full.results.get(algorithm_id)
+            selected = next((result for result in target.results if result.algorithm_id == algorithm_id), None)
+            if (envelope is None or envelope.status != "ok" or selected is None or
+                    selected.parameters_sha256 != envelope.provenance.parameters_sha256 or
+                    selected.metrics.get(metric_id) is None):
+                break
+            projections.append(project_metric(
+                generation, algorithm_id=algorithm_id, metric_id=metric_id,
+                cohort_compat_key=selected.cohort_compat_key, target_source_id=source_id,
+            ))
+        if len(projections) != 2:
+            row["state"] = "target_metric_unavailable"
+            rows.append(row)
+            continue
+        x_projection, y_projection = projections
+        y_by_source = dict(zip(y_projection.source_ids, y_projection.values, strict=True))
+        points = [
+            {"source_id": member_source, "x": x_value, "y": y_by_source[member_source]}
+            for member_source, x_value in zip(x_projection.source_ids, x_projection.values, strict=True)
+            if member_source in y_by_source
+        ]
+        row.update({
+            "state": "ready" if points else "no_paired_values",
+            "eligible_n": len(points), "points": points,
+            "excluded": {
+                "x": dict(x_projection.exclusions), "y": dict(y_projection.exclusions),
+                "unpaired_x": x_projection.percentile_n - len(points),
+                "unpaired_y": y_projection.percentile_n - len(points),
+            },
+        })
+        rows.append(row)
+    return rows
+
+
 class LibraryHolder:
     """The last good library; a broken edit on disk never blanks the page."""
 
@@ -405,6 +463,7 @@ class LabApi:
             "cohort_id": generation.cohort_id if generation else "healthy-v1",
             "cohort_state": cohort_state,
             "cohort_problem": cohort_problem,
+            "agreement_pairs": _agreement_pairs(sample, generation, target, source_id, cohort_state),
             "algorithms": algorithms,
             "identity_pairs": identity_pairs,
             "identity_pairs_reason": (
