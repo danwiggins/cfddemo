@@ -295,6 +295,9 @@ def _aligner_warning(change: dict[str, Any], low: float, high: float) -> dict[st
 
 def _dry_run(args: argparse.Namespace, store: LabStore, progress: Callable[[str], None]) -> tuple[int, dict[str, Any]]:
     store.check_version()
+    from .pon_consumer import require_built_cohort
+
+    cohort = require_built_cohort(store, args.cohort) if args.cohort is not None else None
     entries = registry.registry_entries()
     items = registry.plan([alg for _, alg in entries], only=_only(args.only), profile=args.profile)
     plan_rows = [
@@ -303,6 +306,7 @@ def _dry_run(args: argparse.Namespace, store: LabStore, progress: Callable[[str]
     ]
     data: dict[str, Any] = {"root": str(store.root), "dry_run": True, "plan": plan_rows}
     lines = [f"ROOT      {store.root}"]
+    alignment_required = False
     if len(args.inputs) == 1 and _is_stored(args.inputs[0]):
         source_id = resolve_sample(store, args.inputs[0])
         with_sex_assertion(source_record(store, source_id) or {}, args.sex)
@@ -362,11 +366,19 @@ def _dry_run(args: argparse.Namespace, store: LabStore, progress: Callable[[str]
                     elif _aligner_change(store, chunkset.source_id, {"samtools": samtools.version, "minimap2": minimap2.version}):
                         reason = "aligner identity changed (TBX-LAB-019): realigns"
             data["alignment"] = reason
+            alignment_required = reason != "reused"
             data["estimate_min"] = [round(low, 1), round(high, 1)]
             lines.append(
                 f"ALIGN     {reason}" + ("" if reason == "reused" else f" · estimate {low:.0f}-{high:.0f} min")
                 + (" · minimap2 index built first" if mmi_needed else "")
             )
+    if cohort is not None:
+        compatibility = "after alignment" if alignment_required else "during run"
+        data["cohort"] = {
+            "id": cohort.cohort_id, "version": cohort.version_id,
+            "panel": "built", "compatibility": compatibility,
+        }
+        lines.append(f"COHORT    {cohort.version_id} (built; compatibility checked {compatibility})")
     for row in plan_rows:
         lines.append(f"PLAN      {row['algorithm_id']}{' (upstream)' if row['upstream'] else ''}: {row['decision']}")
     if not plan_rows:
@@ -377,6 +389,12 @@ def _dry_run(args: argparse.Namespace, store: LabStore, progress: Callable[[str]
 
 def run_command(args: argparse.Namespace, store: LabStore) -> tuple[int, dict[str, Any]]:
     if args.example:
+        if args.cohort is not None:
+            raise LabProblem(
+                "TBX-LAB-021", cause="an EXAMPLE input cannot use a real cohort panel",
+                fix="Omit --cohort for EXAMPLE, or use a real ONT input",
+                data={"cohort_id": args.cohort, "field": "EXAMPLE"},
+            )
         if args.inputs:
             raise LabProblem(
                 "TBX-LAB-005",

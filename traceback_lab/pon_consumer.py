@@ -64,19 +64,37 @@ def selection_for_target(
     from .cohorts import read_current
 
     chosen = cohort_id or DEFAULT_COHORT
-    generation = read_current(store, chosen)
-    if generation is None or generation.pon_asset_sha256 is None:
-        if cohort_id is None:
+    if cohort_id is not None:
+        generation = require_built_cohort(store, cohort_id)
+    else:
+        generation = read_current(store, chosen)
+        if generation is None or generation.pon_asset_sha256 is None:
             return None
-        raise LabProblem(
-            "TBX-LAB-020", cause=f"selected cohort {chosen} has no built panel of normals",
-            fix="Build a verified protocol-matched panel or omit --cohort for the no-PoN baseline",
-            data={"cohort_id": chosen, "field": "panel of normals"},
-        )
     return selection_for_generation(
         store, generation, source_id=source_id,
         reference_sha256=reference_sha256, aligner_identity=aligner_identity,
     )
+
+
+def require_built_cohort(store: LabStore, cohort_id: str) -> Any:
+    """Check explicit panel availability without selecting it or changing the store."""
+
+    from .cohorts import read_current
+
+    generation = read_current(store, cohort_id)
+    if generation is None or generation.pon_asset_sha256 is None:
+        raise LabProblem(
+            "TBX-LAB-020", cause=f"selected cohort {cohort_id} has no built panel of normals",
+            fix="Build a verified protocol-matched panel or omit --cohort for the no-PoN baseline",
+            data={"cohort_id": cohort_id, "field": "panel of normals"},
+        )
+    if generation.kind != "internal_cohort":
+        raise LabProblem(
+            "TBX-LAB-020", cause=f"selected cohort {cohort_id} is not an internal protocol-matched cohort",
+            fix="Use a verified internal cohort with a built panel of normals",
+            data={"cohort_id": cohort_id, "field": "panel of normals"},
+        )
+    return generation
 
 
 def selection_for_generation(
