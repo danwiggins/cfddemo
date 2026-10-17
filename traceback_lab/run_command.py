@@ -425,6 +425,7 @@ def run_command(args: argparse.Namespace, store: LabStore) -> tuple[int, dict[st
                 if stored:
                     source_id = resolve_sample(store, args.inputs[0])
                     aligned, record = _stored_input(store, source_id)
+                    _stored_platform(aligned)
                     record = record_source_sex(store, source_id, args.sex)
                     example = bool(record.get("example"))
                     reference_id = aligned.manifest["reference_id"]
