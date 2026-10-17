@@ -149,6 +149,9 @@ def test_bound_panel_changes_execution_but_not_cohort_compatibility() -> None:
 
 
 def test_instability_compatibility_distinguishes_pon_protocol(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    from traceback_lab import platforms
+
+    monkeypatch.setattr(platforms, "for_input", lambda manifest, bam_path: "ont")
     source_id = "a" * 64
     copy = SimpleNamespace(id="copy-number", version="1", parameters={}, tools=[], upstream=())
     instability = SimpleNamespace(id="instability", version="1", parameters={"measure": "tmad"},
