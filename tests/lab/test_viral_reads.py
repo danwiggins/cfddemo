@@ -134,9 +134,20 @@ def test_paf_counts_unique_primary_virus_and_excludes_cross_virus(tmp_path: Path
     paf.write_text(
         row(1, "EBV") + row(1, "EBV") + row(2, "HPV") + row(2, "HBV")
         + row(3, "HBV", "tp:A:S") + row(4, "EBV") + row(4, "HPV", "tp:A:S")
+        + row(5, "EBV") + row(5, "HPV", "tp:A:I") + row(6, "HBV", "tp:A:I")
     )
-    counts = _count_hits(paf, inspect_viral_reference(store), 4, tmp_path / "hits.sqlite")
+    counts = _count_hits(paf, inspect_viral_reference(store), 6, tmp_path / "hits.sqlite")
     assert counts == {"EBV": 1, "HPV": 0, "HBV": 0}
+
+
+def test_paf_without_primary_type_tag_is_an_integrity_failure(tmp_path: Path) -> None:
+    store = LabStore(tmp_path / "root")
+    fasta, targets, _ = _sources(tmp_path)
+    _add(store, fasta, targets)
+    paf = tmp_path / "untagged.paf"
+    paf.write_text("q1\t500\t0\t500\t+\tEBV\t3000\t0\t500\t500\t500\t60\n")
+    with pytest.raises(RuntimeError, match="malformed PAF"):
+        _count_hits(paf, inspect_viral_reference(store), 1, tmp_path / "untagged.sqlite")
 
 
 def test_malformed_paf_closes_sqlite_connection(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:

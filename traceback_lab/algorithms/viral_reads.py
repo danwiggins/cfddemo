@@ -74,20 +74,24 @@ def _write_queries(ctx: InputContext, path: Path) -> tuple[int, int, bool]:
         for record in bam.fetch(until_eof=True):
             if record.is_secondary or record.is_supplementary or not record.is_unmapped:
                 continue
-            if not _derived_keep(ctx, record.query_name or ""):
+            if not record.query_name:
+                raise RuntimeError("viral input has an unnamed unmapped primary")
+            if not _derived_keep(ctx, record.query_name):
                 continue
             denominator += 1
             sequence = record.query_sequence
             if not sequence:
                 continue
             queries += 1
-            row_bytes = len(sequence) + len(str(queries)) + 4
+            if not complete:
+                continue
+            header = f">q{queries}\n"
+            row_bytes = len(header) + len(sequence) + 1
             if staged_bytes + row_bytes > MAX_QUERY_FASTA_BYTES:
                 complete = False
                 continue
-            if complete:
-                output.write(f">q{queries}\n{sequence}\n")
-                staged_bytes += row_bytes
+            output.write(f"{header}{sequence}\n")
+            staged_bytes += row_bytes
     return denominator, queries, complete
 
 
@@ -120,9 +124,10 @@ def _count_hits(paf: Path, reference: ViralReference, queries: int, db: Path) ->
                 virus = by_contig.get(columns[5])
                 if not 1 <= qid <= queries or virus is None:
                     raise RuntimeError("viral aligner returned an unexpected query or contig")
-                primary = "tp:A:P" in columns[12:]
-                if not primary and "tp:A:S" not in columns[12:]:
-                    continue
+                tp_tags = [tag for tag in columns[12:] if tag.startswith("tp:A:")]
+                if len(tp_tags) != 1 or len(tp_tags[0]) != 6:
+                    raise RuntimeError("viral aligner returned malformed PAF")
+                primary = tp_tags[0] == "tp:A:P"
                 connection.execute("INSERT OR IGNORE INTO hits VALUES (?, ?)", (qid, virus))
                 if primary:
                     connection.execute("INSERT OR IGNORE INTO primary_hits VALUES (?, ?)", (qid, virus))
