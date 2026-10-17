@@ -207,6 +207,7 @@ ROOT, home, login and chunk names redacted) is ever stored.
 | `long-tail` | shares of molecules > 300 bp, 1–4 kb (delayed processing) and > 7.5 kb (lysis); a supplementary-split read counts at its read length |
 | `sex-check` | chrY/chrX read density per Mb of non-N, non-PAR reference and a male / female / indeterminate call; needs 500,000 eligible reads |
 | `mtdna` | chrM reads (MAPQ ≥ 20) as a share of all primary reads, and the chrM fragment mode |
+| `viral-reads` | EBV, HPV and HBV reads per million human-unmapped primary reads from a separate minimap2 ≥ 2.28 alignment; needs an operator-registered viral FASTA and is exploratory for ONT cfDNA |
 | `cell-origin` | share of cfDNA from each of 40 Loyfer U250 cell types with bootstrap intervals, through the signed method's own `compute_measurement` (modkit, UXM, NNLS); needs 2.5M eligible reads, `traceback toolchain install modkit` and `traceback method-asset register --from-dir LOYFER_DIR --root R`; minor cell types are not interpretable below 5x. Downsample and split runs read a transient filtered BAM that is deleted after publish |
 | `end-motifs` | reference 4-mers at both ends of each molecule (5′ forward end and the reverse complement of the other end), motif diversity score and CCCA share; needs 500,000 eligible reads and the registered FASTA |
 | `delfi-ratio` | short (100–150 bp) / long (151–220 bp) ratio per 5 Mb bin on chr1–22, median-centred, and its SD; no GC correction, cohort-relative only; needs 1,000,000 eligible reads |
@@ -301,6 +302,53 @@ traceback lab asset inspect pmd --root R
 `inspect` rehashes the pinned file; absent or altered bytes block
 `pmd-score` with an asset-specific recovery command. Registering a PMD
 asset does not establish redistribution rights or make a skipped result zero.
+
+**Viral reference.** `viral-reads` leaves the registered hg38 human reference
+unchanged. It takes human-unmapped primary reads from the aligned BAM, including
+duplicate-flagged and QC-fail primaries but excluding secondary and
+supplementary records, then runs
+minimap2 separately against an operator-supplied viral FASTA, and reports
+EBV/HPV/HBV aligned reads per million human-unmapped primaries. The count is
+null if that denominator is zero. A read with reported primary or secondary
+alignments to more than one virus group is excluded from all groups; multiple
+primary alignments within one group count once. The side alignment explicitly
+retains up to 100 secondary alignments per read at minimap2's 0.8 score ratio;
+bundles with many near-identical contigs can still hide cross-group alternatives.
+If any human-unmapped primary lacks stored sequence, the anonymized query
+FASTA exceeds its 512 MiB staging budget, or the side-alignment process exits
+nonzero or exceeds its 3600-second or 1 GiB PAF budget, all three RPM values
+are null; the aggregate
+artifact records the reason and read counts, with `hits: null` when no complete
+alignment was counted. Donor sequences are staged in private temporary FASTA
+and removed after the step; an abrupt host failure may leave that scratch for
+operator cleanup. There is no MAPQ or aligned-length threshold, so
+weak or short matches can contribute. No detection threshold or clinical
+interpretation is established for this ONT cfDNA measurement; inspect the
+denominator `n` before using an exploratory RPM value. Malformed PAF or an
+unexpected query/contig is an integrity failure and stops the algorithm rather
+than publishing a possibly wrong count.
+
+The FASTA must contain at least one nonempty IUPAC sequence for each group.
+Provide a TSV with exactly `contig`, `virus`, `accession` columns, one row per
+FASTA contig in FASTA order; `virus` must be `EBV`, `HPV` or `HBV` and the
+accession should include its version. Registration pins the exact bytes of
+both files and the declared source terms. It neither downloads nor
+redistributes the sequences. Registrations are write-once under a Lab ROOT;
+to change accession coverage or recover a corrupted registration, create a new
+ROOT and register the corrected bundle there:
+
+```bash
+traceback lab asset add viral-fasta --file YOUR_LOCAL_viral.fasta \
+  --targets YOUR_LOCAL_targets.tsv --source-label your-reference-bundle \
+  --terms unknown --root R
+traceback lab asset inspect viral-fasta --root R
+```
+
+Choose accession versions and HPV type coverage for the intended evaluation
+before registering a bundle. Until one is registered under ROOT, the
+algorithm reports an explicit `missing_asset` skip. Registering a FASTA
+does not validate sensitivity, specificity, a reference choice, or rights
+to redistribute source sequences.
 
 
 Fragment length is the aligned reference span, the same definition as the
