@@ -102,6 +102,8 @@ two current, selected fingerprints; `--force` stores a new immutable attempt.
 The result is bound to the source, input, selected extraction attempt, sites,
 reference, tool version, and upstream read summary. When any of those change,
 rerun identity and the comparison. The local Trust/QC view shows current pairs.
+Its concordance value is Somalier's `hom_concordance` column, not a general
+sequence-concordance estimate.
 Fingerprints and relatedness can reveal family relationships (FLAG: PRIVACY).
 Keep the Lab ROOT private. There is no validated ONT duplicate or kinship
 threshold here, and this command makes no diagnostic claim. No real donor data

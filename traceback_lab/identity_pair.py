@@ -32,7 +32,7 @@ PAIR_SCHEMA = "traceback.lab.identity-pair.v1"
 MAX_PAIRS_SHOWN = 64
 MAX_PAIR_DIRECTORIES_SCANNED = 4096
 MAX_PAIR_PEERS_VERIFIED = 4  # each selected sketch can be up to 16 MiB
-_PAIR_HEADER = {"sample_a", "sample_b", "relatedness", "ibs0", "ibs2", "concordance", "n"}
+_PAIR_HEADER = {"sample_a", "sample_b", "relatedness", "ibs0", "ibs2", "hom_concordance", "n"}
 
 
 class IdentityPairError(ValueError):
@@ -129,7 +129,7 @@ def parse_pair_tsv(raw: bytes, input_a: str, input_b: str) -> dict[str, float | 
         raise IdentityPairError("Somalier pair names do not match the selected inputs")
     try:
         values: dict[str, float | int] = {
-            "relatedness": float(row["relatedness"]), "concordance": float(row["concordance"]),
+            "relatedness": float(row["relatedness"]), "concordance": float(row["hom_concordance"]),
             "ibs0": int(row["ibs0"]), "ibs2": int(row["ibs2"]), "n": int(row["n"]),
         }
     except (TypeError, ValueError) as exc:
