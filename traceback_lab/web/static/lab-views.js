@@ -904,7 +904,8 @@
     for (const pair of (report.pairs || [])) {
       const section = h("section", { class: "panel" }, h("h2", {}, pair.label), flagPill("FDA"));
       if (pair.state !== "ok") {
-        section.append(h("p", { class: "empty" }, reasons[pair.state] || "This pair is unavailable."));
+        const unavailable = pair.unavailable_reasons?.length ? pair.unavailable_reasons : [pair.state];
+        section.append(h("p", { class: "empty" }, unavailable.map(reason => reasons[reason] || "This pair is unavailable.").join(" ")));
       } else {
         if (pair.baseline_median !== null) {
           section.append(h("p", { class: "help" }, `Matched cohort median ${fmt(pair.baseline_median)} (n = ${pair.reference_n}); this plot shows the sample's difference from that median.`));

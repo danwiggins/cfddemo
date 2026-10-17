@@ -74,38 +74,42 @@ def report_tf_concordance(
 
     def pair(
         pair_id: str, label: str, x_label: str, x: float | None,
-        state: str, *, n: int | None = None, baseline: float | None = None,
+        x_reasons: list[str], *, n: int | None = None, baseline: float | None = None,
     ) -> dict[str, Any]:
+        reasons = ([cn_state] if cn_state != "ok" else []) + x_reasons
+        state = reasons[0] if reasons else "ok"
         return {
             "id": pair_id, "label": label, "x_label": x_label, "x": x if state == "ok" else None,
             "y_label": "PoN-qualified copy-number tumour fraction",
-            "y": cn if state == "ok" else None, "state": state, "reference_n": n,
+            "y": cn if state == "ok" else None, "state": state,
+            "unavailable_reasons": reasons, "reference_n": n,
             "baseline_median": baseline,
         }
 
-    meth_state = cn_state if cn_state != "ok" else (
-        "unidentifiable_meth_tf" if _metric(sample, "meth-tf", "identifiable") is False else
-        "missing_meth_tf" if meth is None else "unidentifiable_meth_tf" if not meth_identifiable else "ok"
+    meth_reasons = (
+        ["unidentifiable_meth_tf"] if _metric(sample, "meth-tf", "identifiable") is False else
+        ["missing_meth_tf"] if meth is None else
+        ["unidentifiable_meth_tf"] if not meth_identifiable else []
     )
-    size_state = cn_state if cn_state != "ok" else (
-        "missing_size" if size is None else "no_size_baseline" if size_baseline is None else "ok"
+    size_reasons = (["missing_size"] if size is None else []) + (
+        ["no_size_baseline"] if size_baseline is None else []
     )
-    mt_state = cn_state if cn_state != "ok" else (
-        "missing_mtdna" if mt is None else "no_mtdna_baseline" if mt_baseline is None else "ok"
+    mt_reasons = (["missing_mtdna"] if mt is None else []) + (
+        ["no_mtdna_baseline"] if mt_baseline is None else []
     )
     return {
         "caption": CAPTION, "wgd_caveat": WGD_CAVEAT,
         "pairs": [
             pair("cn-meth", "Methylation TF vs copy-number TF",
-                 "methylation tumour fraction", meth, meth_state),
+                 "methylation tumour fraction", meth, meth_reasons),
             pair("cn-size", "Size shift vs copy-number TF",
                  "fragment-size mode shift from cohort median (bp)",
                  size - size_baseline if size is not None and size_baseline is not None else None,
-                 size_state, n=size_n, baseline=size_baseline),
+                 size_reasons, n=size_n, baseline=size_baseline),
             pair("cn-mtdna", "mtDNA trend vs copy-number TF",
                  "chrM fraction shift from cohort median",
                  mt - mt_baseline if mt is not None and mt_baseline is not None else None,
-                 mt_state, n=mt_n, baseline=mt_baseline),
+                 mt_reasons, n=mt_n, baseline=mt_baseline),
         ],
     }
 

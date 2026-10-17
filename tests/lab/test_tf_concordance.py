@@ -60,6 +60,7 @@ def test_paired_signals_use_ten_source_excluded_compatible_controls() -> None:
     assert "score" not in report
     pairs = {pair["id"]: pair for pair in report["pairs"]}
     assert pairs["cn-meth"]["state"] == "ok"
+    assert pairs["cn-meth"]["unavailable_reasons"] == []
     assert (pairs["cn-meth"]["x"], pairs["cn-meth"]["y"]) == (0.25, 0.2)
     assert pairs["cn-size"]["state"] == "ok"
     assert pairs["cn-size"]["reference_n"] == 10
@@ -73,6 +74,7 @@ def test_no_pon_and_nine_controls_refuse_unqualified_pairs() -> None:
     generation = CohortGeneration(cohort_id="synthetic", version=1, members=members)
     no_pon = report_tf_concordance(_sample(members[0], pon_policy="none"), generation, members[0])
     assert all(pair["state"] == "no_pon" and pair["x"] is None for pair in no_pon["pairs"])
+    assert no_pon["pairs"][1]["unavailable_reasons"] == ["no_pon", "no_size_baseline"]
     qualified = report_tf_concordance(_sample(members[0]), generation, members[0])
     assert qualified["pairs"][0]["state"] == "ok"
     assert qualified["pairs"][1]["state"] == "no_size_baseline"
@@ -93,3 +95,17 @@ def test_missing_methylation_and_stale_target_are_named_unavailable() -> None:
     report = report_tf_concordance(sample, generation, stale)
     assert report["pairs"][1]["state"] == "no_size_baseline"
     assert report["pairs"][2]["state"] == "no_mtdna_baseline"
+
+
+def test_both_axes_report_their_unavailable_reasons() -> None:
+    target = _member(1)
+    sample = _sample(target)
+    del sample.full.results["copy-number"]
+    del sample.full.results["meth-tf"]
+    del sample.full.results["fragment-size"]
+    report = report_tf_concordance(sample)
+    assert report["pairs"][0]["state"] == "missing_cn"
+    assert report["pairs"][0]["unavailable_reasons"] == ["missing_cn", "missing_meth_tf"]
+    assert report["pairs"][1]["unavailable_reasons"] == [
+        "missing_cn", "missing_size", "no_size_baseline",
+    ]

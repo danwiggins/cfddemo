@@ -27,6 +27,21 @@ from ._meth import MethBase, load_calls
 MIN_ELIGIBLE_READS = 2_500_000
 
 
+def weighted_reference_condition_number(
+    healthy: np.ndarray, tumour: np.ndarray, counts: np.ndarray,
+) -> float | None:
+    """2-norm condition of the observed, count-weighted reference columns."""
+    selected = counts > 0
+    if np.count_nonzero(selected) < 2:
+        return None
+    weight = np.sqrt(counts[selected].astype(float))
+    matrix = np.column_stack((healthy[selected] * weight, tumour[selected] * weight))
+    if np.linalg.matrix_rank(matrix) < 2:
+        return None
+    condition = float(np.linalg.cond(matrix))
+    return condition if math.isfinite(condition) else None
+
+
 def solve_two_component(
     healthy: np.ndarray, tumour: np.ndarray, methylated: np.ndarray, counts: np.ndarray,
 ) -> tuple[float | None, float | None]:
@@ -104,12 +119,15 @@ def tally_markers(
 
 @dataclass
 class MethTF(MethBase):
+    version: str = "2"
+    cost: str = "slow"
     requires: Requirements = field(
         default_factory=lambda: Requirements(mm_tags=True, min_eligible_reads=MIN_ELIGIBLE_READS)
     )
     parameters: dict[str, Any] = field(default_factory=lambda: {
         "channel": "C+m", "call": CALL_DEFINITION,
         "solver": "two-component-active-set-nnls-v1", "row_scale": "sqrt_call_count",
+        "condition_diagnostic": "weighted_reference_2norm",
         "reported_fraction": "tumour_weight_over_sum", "minimum_covered_markers": 2,
     })
 
@@ -158,6 +176,10 @@ class MethTF(MethBase):
             np.asarray([marker.tumour for marker in markers]),
             methylated, counts,
         )
+        condition = weighted_reference_condition_number(
+            np.asarray([marker.healthy for marker in markers]),
+            np.asarray([marker.tumour for marker in markers]), counts,
+        )
         used = int(counts.sum())
         covered = int(np.count_nonzero(counts))
         receipt = {
@@ -169,6 +191,7 @@ class MethTF(MethBase):
             "markers_registered": len(markers), "markers_covered": covered,
             "cpg_calls_used": used, "identifiable": fraction is not None,
             "tumor_fraction": fraction, "fit_rms": residual,
+            "reference_condition_number": condition,
         }
         return AlgorithmOutput(
             metrics=[
@@ -177,6 +200,7 @@ class MethTF(MethBase):
                 metric("markers_covered", covered, unit="markers", n=len(markers)),
                 metric("cpg_calls_used", used, unit="calls", n=used),
                 metric("fit_rms", residual, unit="fraction", n=covered),
+                metric("reference_condition_number", condition, n=covered),
             ],
             artifacts={"meth_tf_fit.json": json.dumps(receipt, separators=(",", ":")).encode()},
         )
@@ -184,4 +208,4 @@ class MethTF(MethBase):
 
 METH_TF = MethTF("meth-tf")
 
-__all__ = ["METH_TF", "solve_two_component", "tally_markers"]
+__all__ = ["METH_TF", "solve_two_component", "tally_markers", "weighted_reference_condition_number"]

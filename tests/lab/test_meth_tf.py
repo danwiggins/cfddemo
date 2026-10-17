@@ -15,12 +15,17 @@ import pytest
 from traceback_lab.algorithms import cell_origin
 from traceback_lab.algorithms._meth import load_calls
 from traceback_lab.algorithms.meth_calls import METH_CALLS
-from traceback_lab.algorithms.meth_tf import METH_TF, solve_two_component, tally_markers
+from traceback_lab.algorithms.meth_tf import (
+    METH_TF,
+    solve_two_component,
+    tally_markers,
+    weighted_reference_condition_number,
+)
 from traceback_lab.assets import AssetError
 from traceback_lab.cli import main as lab_main
 from traceback_lab.meth_tf_reference import CALL_DEFINITION, add_reference, inspect_reference
 from traceback_lab.read_summary import SPLIT_SALT, ReadSummary, h64
-from traceback_lab.registry import Ready, Skip, context_to_json, load_registry
+from traceback_lab.registry import Ready, Skip, context_to_json, load_registry, plan
 from traceback_lab.store import LabStore, new_run_id
 
 from .bam_fixtures import Read, context_for
@@ -82,6 +87,7 @@ def test_analytic_nnls_recovers_known_mixture_and_rejects_rank_deficiency() -> N
     assert solve_two_component(
         healthy, healthy, np.asarray([3, 5]), np.asarray([8, 8]),
     ) == (None, None)
+    assert weighted_reference_condition_number(healthy, healthy, np.asarray([8, 8])) is None
     assert solve_two_component(
         healthy, tumour, np.asarray([3, 0]), np.asarray([8, 0]),
     ) == (None, None)
@@ -93,6 +99,17 @@ def test_analytic_nnls_recovers_known_mixture_and_rejects_rank_deficiency() -> N
         healthy, tumour, np.asarray([3, 0]), np.asarray([3, 7]),
     )
     assert boundary == pytest.approx(1)
+    nearly_same = np.asarray([0.250001, 0.750001])
+    condition = weighted_reference_condition_number(
+        healthy, nearly_same, np.asarray([3, 7]),
+    )
+    assert condition is not None and condition > 1_000_000
+    # Full rank can still be poorly conditioned; the diagnostic reports this
+    # without turning a numerical threshold into a biological cutoff.
+    fraction, _ = solve_two_component(
+        healthy, nearly_same, np.asarray([1, 5]), np.asarray([3, 7]),
+    )
+    assert fraction is not None
 
 
 def test_public_asset_add_and_inspect_pin_marker_reference(
@@ -150,6 +167,8 @@ def test_reference_model_genome_and_depth_must_match(
 def test_registered_worker_produces_exploratory_fraction_and_pinned_attempt(tmp_path: Path) -> None:
     ctx, registered = _fixture(tmp_path)
     assert "meth-tf" in [algorithm.id for algorithm in load_registry()]
+    assert METH_TF.cost == "slow"
+    assert "meth-tf" not in [item.algorithm.id for item in plan(load_registry(), profile="fast")]
     assert isinstance(METH_TF.preflight(ctx), Ready)
     output = METH_TF.run(ctx, tmp_path / "out")
     values = _metrics(output)
@@ -157,9 +176,11 @@ def test_registered_worker_produces_exploratory_fraction_and_pinned_attempt(tmp_
     assert values["identifiable"] is True
     assert values["markers_covered"] == 2 and values["cpg_calls_used"] == 16
     assert values["fit_rms"] == pytest.approx(0, abs=1e-12)
+    assert values["reference_condition_number"] == pytest.approx(2)
     receipt = json.loads(output.artifacts["meth_tf_fit.json"])
     assert receipt["asset_sha256"] == registered.sha256
     assert receipt["reference_sha256"] == ctx.reference_sha256
+    assert receipt["reference_condition_number"] == pytest.approx(2)
     ctx.extras["planned_asset_sha256s"] = ["0" * 64]
     with pytest.raises(ValueError, match="execution planning"):
         METH_TF.run(ctx, tmp_path / "out")
