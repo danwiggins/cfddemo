@@ -53,7 +53,7 @@ def test_documented_map_template_cannot_be_registered() -> None:
         _parse(template.encode(), "0" * 64)
 
 
-def test_array_probe_coordinate_cannot_substitute_for_paper_upstream_site() -> None:
+def test_array_probe_id_is_rejected_as_upstream_assay_site_label() -> None:
     data = json.loads(_map_bytes())
     data["sites"][2]["cpg_id"] = "cg17861230"
     with pytest.raises(ClockModelError, match="invalid assay site"):
