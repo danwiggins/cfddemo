@@ -268,7 +268,7 @@ def _declared_platform(chunkset: ChunkSet) -> str:
     if len(declared) != 1 or "unknown" in declared:
         raise LabProblem(
             "TBX-LAB-024", cause="BAM read groups have no unanimous supported platform declaration",
-            fix="Use input whose read groups all declare PL:ONT or PL:ILLUMINA",
+            fix="Verify instrument provenance and regenerate a BAM with truthful unanimous PL:ONT or PL:ILLUMINA read groups",
         )
     platform = next(iter(declared))
     if not chunkset.aligned and platform != "ont":

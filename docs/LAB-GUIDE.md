@@ -244,6 +244,7 @@ new measurement.
 | `end-motifs` | reference 4-mers at both ends of each molecule (5′ forward end and the reverse complement of the other end), motif diversity score and CCCA share; needs 500,000 eligible reads and the registered FASTA |
 | `griffin` | pinned Griffin GC-corrected TF-site nucleosome profile on a registered hg38 site list; needs an Illumina-declared paired-end BAM, at least 5 million eligible autosomal pairs, the registered reference assets, Snakemake 5.19.2 importable by the Lab Python interpreter, and bedtools, samtools, pyBigWig and pybedtools. Native ONT and derived inputs skip; site profiles are descriptive, not a tissue-origin or clinical call |
 | `delfi-ratio` | short (100–150 bp) / long (151–220 bp) ratio per 5 Mb bin on chr1–22, median-centred, and its SD; no GC correction, cohort-relative only; needs 1,000,000 eligible reads |
+| `wps` | long-fragment windowed protection score from D21-eligible 120–180 bp ONT aligned spans: spanning 120 bp windows minus molecules with either aligned-span endpoint inside them. Requires hg38 with `chr1`–`chr22` autosome names and known approximate depth ≥ 10x for each input, including derived controls. No minimum qualifying-fragment depth has been validated; its measured depth and fragment count are reported as support, not a biological WPS score. The full input also needs free lab-volume space for its exact track (four bytes per autosomal base, 10% overhead, plus 2 GiB margin); insufficient space yields a `disk` skip. The full result publishes exact per-base scores in compressed 1 Mb chunks indexed by `wps_exact_index.json`. Derived downsample and split controls that meet the 10x gate publish a separate mean-per-1 kb-bin preview in `wps_track.npz`, but do not retain another exact per-base track. The preview smooths away per-base detail and cannot recover the exact track. A genome-wide or 1 kb average of raw WPS is dominated by qualifying-fragment coverage and is not reported as an interpreted scalar. No nucleosome calls, validated stability tolerance, or clinical cutoff. |
 | `meth-calls` | intermediate: decodes MM/ML once into site-level CpG call chunks (read row, forward-strand C position, strand, 5mC/5hmC/canonical ML); derived inputs reuse it through their row mask |
 | `global-5mc` | share of CpG site calls whose most likely state is 5mC |
 | `global-5hmc` | share of CpG site calls (with a 5hmC channel) whose most likely state is 5hmC; skipped (`missing_channel`) when the MM tags carry no `C+h` |
@@ -504,7 +505,10 @@ serve as a history of every interrupted run.
   the 1 MiB / 4,096-line limit, the status banner reports an unavailable
   status without inferring whether the run ended normally or was interrupted.
 - **Stability**: one small multiple per metric: deviation from full depth at
-  each fraction, the stability band, and split halves A/B at 50%.
+  each fraction, the stability band, and split halves A/B at 50%. Each half
+  shows its own status when a result is skipped, failed, or lacks a numeric
+  metric; a split-half verdict appears only when both values are available
+  and the stability comparison is interpretable.
 
 ## Building a Lab cohort
 

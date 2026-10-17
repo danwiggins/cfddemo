@@ -31,6 +31,7 @@ Status = Literal["ok", "skipped", "failed"]
 SKIP_REASONS: tuple[str, ...] = (
     "depth",
     "derived_input",
+    "disk",
     "missing_toolchain",
     "missing_asset",
     "no_pon",

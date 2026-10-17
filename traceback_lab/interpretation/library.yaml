@@ -91,23 +91,23 @@ entries:
     value_kind: proportion
     tier: NEWER
     origin_tier: NEWER
-    origin_platform: "ONT"
+    origin_platform: "any"
     min_depth_x: null
     reference: {kind: none}
     performance: null
     performance_missing_reason: "none published"
-    meaning_high: "More supplementary alignments; on ONT this can indicate ligation chimeras, while short-read split alignments have other causes."
-    meaning_low: "Fewer supplementary alignments; this alone does not establish a low chimera rate."
-    confounders: ["sequencing platform and alignment method", "library prep chemistry", "input mass"]
+    meaning_high: "More alignments have supplementary records; inspect their mapping and library origin."
+    meaning_low: "Fewer alignments have supplementary records."
+    confounders: ["library prep chemistry", "read length", "aligner settings"]
     next_steps:
-      analytical: ["Compare only within a matched platform and alignment method", "On ONT, check the long-fragment tail"]
+      analytical: ["Compare only within one sequencing platform and aligner protocol"]
       clinical_setting: null
     license_ids: []
     flags: []
     headline: false
     stability: {kind: proportion}
     citations: []
-    citation_checked: {by: "lab build agent", date: "2026-10-15", note: "No citation displayed. V1 (partial run): the read-coverage chimera proxy is uninformative on ONT; this share is the proxy used."}
+    citation_checked: {by: "Lab S5 platform review", date: "2026-10-17", note: "No citation displayed. This is a raw supplementary-alignment QC share; no cross-platform chimera threshold is supplied."}
 
   - algorithm_id: bam-qc
     metric_id: mean_read_q
@@ -115,23 +115,23 @@ entries:
     value_kind: positive
     tier: PROVEN
     origin_tier: PROVEN
-    origin_platform: "ONT"
+    origin_platform: "any"
     min_depth_x: null
     reference: {kind: none}
     performance: null
     performance_missing_reason: "QC measure, not a diagnostic"
-    meaning_high: "Higher reported base quality within the same sequencing platform and quality pipeline."
-    meaning_low: "Lower reported base quality within the same sequencing platform and quality pipeline; ONT methylation calls and end motifs may be less reliable."
-    confounders: ["sequencing platform and quality-score calibration", "basecaller model", "flow-cell wear"]
+    meaning_high: "Higher average recorded base quality."
+    meaning_low: "Lower average recorded base quality; inspect the platform-specific quality distribution."
+    confounders: ["sequencing platform", "basecaller or sequencer model", "quality calibration"]
     next_steps:
-      analytical: ["Compare within one platform and quality pipeline", "For ONT, confirm the basecall model"]
+      analytical: ["Compare quality only within one sequencing platform and protocol"]
       clinical_setting: null
     license_ids: []
     flags: []
     headline: false
     stability: {kind: relative, tolerance: 0.05}
     citations: []
-    citation_checked: {by: "lab build agent", date: "2026-10-15", note: "No citation displayed; QC measure."}
+    citation_checked: {by: "Lab S5 platform review", date: "2026-10-17", note: "No citation displayed. This is raw recorded base quality; interpretation is restricted to platform- and protocol-matched QC."}
 
   - algorithm_id: bam-qc
     metric_id: genome_ge1x_fraction
@@ -3301,6 +3301,32 @@ entries:
     stability: {kind: relative, tolerance: 0.10}
     citations: []
 
+  # -------------------------------------------------------------------- wps
+  - algorithm_id: wps
+    metric_id: qualifying_fragment_depth_x
+    label: "WPS-eligible 120–180 bp aligned-fragment depth"
+    value_kind: positive
+    tier: SPECULATIVE
+    origin_tier: SPECULATIVE
+    origin_platform: "ONT aligned-span support for this Lab WPS implementation"
+    min_depth_x: null
+    reference: {kind: none}
+    performance: null
+    performance_missing_reason: "No validated support-depth threshold or biological interpretation is established"
+    meaning_high: "More eligible aligned-fragment span bases support the WPS calculation."
+    meaning_low: "Sparse eligible span depth can leave a WPS score with little molecular support."
+    confounders: ["ONT fragment-length distribution", "mapping and copy-number bias", "sequencing depth"]
+    next_steps:
+      analytical: ["Inspect qualifying fragment count and depth in the WPS summary"]
+      clinical_setting: null
+    license_ids: [method-patents]
+    flags: [LEGAL]
+    headline: true
+    stability: {kind: unvalidated}
+    citations: []
+    citation_checked: {by: "Lab S5 source review", date: "2026-10-17", note: "No citation displayed. This support-depth metric is a Lab-specific descriptive count, not a measure or threshold validated by Snyder et al."}
+
+  # -------------------------------------------------------------- epi-clock
   - algorithm_id: epi-clock
     metric_id: epigenetic_age_years
     label: "Exploratory Weidner three-CpG age estimate"

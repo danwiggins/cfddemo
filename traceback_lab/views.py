@@ -7,15 +7,16 @@ serves these structures; the CLI can print them too.
 Depth→utility curve (D24): one row per (non-hidden) algorithm, keyed by its
 ``headline: true`` metric.  Cells: one per measured fraction (downsample
 inputs plus the full input).  States: ``failed``, ``skipped``,
-``not_interpretable``, ``ok_unstable`` or ``ok_usable``.  "Usable" means not
+``not_interpretable``, ``ok_unvalidated``, ``ok_unstable`` or ``ok_usable``.  "Usable" means not
 skipped, not not-interpretable, and stable against the full-depth value under
-the metric's D32 stability function (the full-depth cell is usable by
+the metric's D32 stability function (a measured full-depth cell is usable by
 definition).  Above this run's depth there are no cells; the library's
 ``min_depth_x`` is drawn as a "literature, not measured" marker.
 """
 
 from __future__ import annotations
 
+import math
 import os
 from collections.abc import Mapping
 from dataclasses import dataclass, field
@@ -32,7 +33,7 @@ from .sample_metadata import sex_assertion, sex_concordance
 from .stability import Side, band_at, deviation, stable
 from .store import LabStore
 
-CELL_STATES = ("ok_usable", "ok_unstable", "not_interpretable", "skipped", "failed")
+CELL_STATES = ("ok_usable", "ok_unvalidated", "ok_unstable", "not_interpretable", "skipped", "failed")
 _ROW_ORDER = {state: index for index, state in enumerate(CELL_STATES)}
 _TIER_ORDER = {"PROVEN": 0, "NEWER": 1, "SPECULATIVE": 2, None: 3}
 
@@ -335,6 +336,29 @@ def _side(metric: Any, fraction: float) -> Side:
     return Side(metric.value, n=metric.n, ci=metric.ci, ci_level=metric.ci_level, fraction=fraction)
 
 
+def _split_half_status(view: InputView | None, algorithm_id: str, metric_id: str,
+                       full_value: Any, spec: Mapping[str, Any], *, other_half_recorded: bool = False) -> dict[str, Any]:
+    if view is None:
+        if other_half_recorded:
+            return {"state": "unavailable", "reason": "split half unavailable", "value": None, "deviation": None}
+        return {"state": "not_recorded", "reason": "no split-half input recorded", "value": None, "deviation": None}
+    envelope = view.results.get(algorithm_id)
+    if envelope is None:
+        if algorithm_id in getattr(view, "unreadable", ()):
+            return {"state": "unavailable", "reason": "result unreadable", "value": None, "deviation": None}
+        if algorithm_id in getattr(view, "ambiguous", ()):
+            return {"state": "unavailable", "reason": "result selection ambiguous", "value": None, "deviation": None}
+        return {"state": "unavailable", "reason": "selected result unavailable", "value": None, "deviation": None}
+    if envelope.status != "ok":
+        reason = envelope.skip_reason if envelope.status == "skipped" else "algorithm failed"
+        return {"state": envelope.status, "reason": reason, "value": None, "deviation": None}
+    current = _value(envelope, metric_id)
+    if current is None or not _numeric(current.value) or not math.isfinite(float(current.value)):
+        return {"state": "not_interpretable", "reason": "metric value unavailable", "value": None, "deviation": None}
+    difference, _ = deviation(spec, current.value, full_value, 0.5)
+    return {"state": "ok", "reason": None, "value": current.value, "deviation": difference}
+
+
 def cell_state(
     view: InputView, full: InputView, algorithm_id: str, metric_id: str, library: Library
 ) -> dict[str, Any]:
@@ -362,12 +386,17 @@ def cell_state(
     interpretation = classify(metric.value, entry, depth_x=view.depth_x(), not_interpretable=reason)
     if interpretation.state == "not_interpretable":
         return {"state": "not_interpretable", "reason": interpretation.reason, "value": metric.value}
+    if metric.value is None:
+        # A deliberately unpublished value may have no reference rather than
+        # a depth failure, but it still has no measured stability verdict.
+        return {"state": "not_interpretable", "reason": interpretation.reason or "metric_value_unavailable",
+                "value": None}
     if view is full:
         return {"state": "ok_usable", "value": metric.value}
     full_metric = _value(full.results.get(algorithm_id), metric_id)
     verdict = stable(entry.stability if entry else None, _side(metric, view.fraction), _side(full_metric, 1.0))
     return {
-        "state": "ok_usable" if verdict else "ok_unstable",
+        "state": "ok_usable" if verdict is True else "ok_unstable" if verdict is False else "ok_unvalidated",
         "value": metric.value,
         "verdict": verdict,
     }
@@ -461,9 +490,14 @@ def stability_panels(sample: SampleView, library: Library | None = None) -> list
                     }
                 )
             split = None
+            split_status = {
+                half: _split_half_status(halves.get(half), algorithm_id, metric.metric_id, metric.value, spec,
+                                         other_half_recorded=bool(halves))
+                for half in ("A", "B")
+            }
             a = _value(halves["A"].results.get(algorithm_id), metric.metric_id) if "A" in halves else None
             b = _value(halves["B"].results.get(algorithm_id), metric.metric_id) if "B" in halves else None
-            if a is not None and b is not None and _numeric(a.value) and _numeric(b.value):
+            if split_status["A"]["state"] == "ok" and split_status["B"]["state"] == "ok":
                 verdict = stable(spec, _side(a, 0.5), _side(b, 0.5))
                 da, unit = deviation(spec, a.value, metric.value, 0.5)
                 db, _ = deviation(spec, b.value, metric.value, 0.5)
@@ -486,6 +520,11 @@ def stability_panels(sample: SampleView, library: Library | None = None) -> list
                 if point["state"] != "ok_usable":
                     break
                 usable_to = point["fraction"]
+            unvalidated = any(point["state"] == "ok_unvalidated" for point in points)
+            measured_below_full = any(
+                point["fraction"] < 1.0 and point["state"] in {"ok_usable", "ok_unstable", "ok_unvalidated"}
+                for point in points
+            )
             panels.append(
                 {
                     "algorithm_id": algorithm_id,
@@ -495,7 +534,8 @@ def stability_panels(sample: SampleView, library: Library | None = None) -> list
                     "full_value": metric.value,
                     "points": points,
                     "split": split,
-                    "verdict": f"usable to {usable_to:g}" if usable_to is not None else "not measured below full depth" if not downs else "unstable below full depth",
+                    "split_status": split_status,
+                    "verdict": f"usable to {usable_to:g}" if usable_to is not None else "not measured below full depth" if not measured_below_full else "stability not validated" if unvalidated else "unstable below full depth",
                 }
             )
     panels.sort(key=lambda panel: (not panel["headline"], order.index(panel["algorithm_id"])))
@@ -520,6 +560,7 @@ def repeatability(panels: list[dict[str, Any]]) -> dict[str, Any] | None:
         "median_relative_abs_diff": median,
         "metrics": len(rows),
         "unstable": sum(1 for row in rows if row[2] is False),
+        "no_verdict": sum(1 for row in rows if row[2] is None),
         "worst": [{"label": label, "relative_abs_diff": diff, "stable": ok} for diff, label, ok in worst],
     }
 

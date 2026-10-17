@@ -18,6 +18,7 @@
   };
   const CELL = {
     ok_usable: ["●", "usable"],
+    ok_unvalidated: ["?", "stability not validated"],
     ok_unstable: ["◐", "unstable"],
     not_interpretable: ["▨", "not interpretable"],
     skipped: ["○", "skipped"],
@@ -187,7 +188,7 @@
     const run = curve.run_depth_x;
     const section = h("section", { class: "panel curve", "aria-labelledby": "curve-title" });
     const heading = h("div", { class: "curve-heading" }, h("h3", { id: "curve-title" }, "Depth → utility"),
-      h("span", { class: "legend", "aria-hidden": "true" }, "● usable ◐ unstable ▨ not interpretable ○ skipped ✕ failed ? unavailable ◇ literature"));
+      h("span", { class: "legend", "aria-hidden": "true" }, "● usable ? unavailable or stability not validated ◐ unstable ▨ not interpretable ○ skipped ✕ failed ◇ literature"));
     section.append(heading);
     if (!curve.downsampled) {
       section.append(h("p", { class: "empty" }, h("span", {}, "This run used "), h("code", {}, "--no-downsample"), `. Run `, h("code", {}, `traceback lab run ${sample.id12}`), " to draw the curve."));
@@ -273,8 +274,8 @@
     const rep = h("div", { class: "control-block" }, h("span", { class: "control-badge" }, "REPEATABILITY"), " sampling noise, not a known answer");
     if (sample.repeatability) {
       const r = sample.repeatability;
-      rep.append(h("p", {}, `Median split-half |A−B|: ${(r.median_relative_abs_diff * 100).toFixed(1)}% across ${r.metrics} metrics; ${r.unstable} outside their stability tolerance.`),
-        h("ul", {}, ...r.worst.map((w) => h("li", {}, `${w.label}: ${(w.relative_abs_diff * 100).toFixed(1)}%${w.stable === false ? " (unstable)" : ""}`))),
+      rep.append(h("p", {}, `Median split-half |A−B|: ${(r.median_relative_abs_diff * 100).toFixed(1)}% across ${r.metrics} metrics; ${r.unstable} outside their stability tolerance; ${r.no_verdict || 0} without a stability verdict.`),
+        h("ul", {}, ...r.worst.map((w) => h("li", {}, `${w.label}: ${(w.relative_abs_diff * 100).toFixed(1)}%${w.stable === false ? " (unstable)" : w.stable == null ? " (no stability verdict)" : ""}`))),
         h("a", { href: `#/sample/${sample.id12}/stability` }, "→ Stability"));
     } else {
       rep.append(h("p", { class: "empty" }, `Run traceback lab run ${sample.id12}.`));
@@ -591,7 +592,7 @@
   function stability(sample) {
     const out = [h("p", { class: "breadcrumb" }, `Lab › ${sample.id12} › Stability`), h("h1", { class: "view-title" }, "Stability")];
     if (!sample.curve.downsampled) out.push(h("p", { class: "empty" }, `This run used --no-downsample. Run traceback lab run ${sample.id12} to draw the curve.`));
-    if (!sample.repeatability) out.push(h("p", { class: "help" }, `Split-half markers absent: run traceback lab run ${sample.id12}.`));
+    if (!sample.repeatability) out.push(h("p", { class: "help" }, `No validated split-half repeatability summary is available. Individual split values appear below when measured; run traceback lab run ${sample.id12} if splits are absent.`));
     const grid = h("div", { class: "multiples" });
     const tableRows = [];
     for (const panel of sample.stability) {
@@ -600,35 +601,48 @@
       const x = (f) => pad + ((Math.log10(f) - Math.log10(0.08)) / (Math.log10(1.2) - Math.log10(0.08))) * (w - pad - 8);
       const unit = (panel.points.find((p) => p.unit) || {}).unit || "percent";
       const clip = 50;
-      const splitDevs = panel.split ? [Math.abs(panel.split.deviation_a || 0), Math.abs(panel.split.deviation_b || 0)] : [];
+      const splitDevs = panel.split ? [panel.split.deviation_a, panel.split.deviation_b].filter(Number.isFinite).map(Math.abs) : [];
       const maxAbs = unit === "unit" ? Math.max(1e-9, ...splitDevs, ...panel.points.map((p) => Math.abs(p.deviation || 0)), ...(panel.points.map((p) => p.band ? Math.max(Math.abs(p.band.lo), Math.abs(p.band.hi)) : 0).filter(Number.isFinite))) : clip;
       const y = (v) => { const c = Math.max(-maxAbs, Math.min(maxAbs, v)); return hgt / 2 - (c / maxAbs) * (hgt / 2 - 12); };
       const marks = [svg("line", { x1: pad, x2: w - 8, y1: y(0), y2: y(0), class: "zero" })];
       for (const p of panel.points) {
         if (p.band && Number.isFinite(p.band.lo) && Number.isFinite(p.band.hi)) marks.push(svg("rect", { x: x(p.fraction) - 6, width: 12, y: y(p.band.hi), height: Math.max(1, y(p.band.lo) - y(p.band.hi)), class: "band" }));
-        if (p.state === "ok_usable" || p.state === "ok_unstable") {
+        if ((p.state === "ok_usable" || p.state === "ok_unstable") && Number.isFinite(p.deviation)) {
           const clipped = unit !== "unit" && Math.abs(p.deviation) > clip;
           marks.push(svg("text", { x: x(p.fraction), y: y(p.deviation) + 4, "text-anchor": "middle", class: "pt" }, clipped ? (p.deviation > 0 ? "↑" : "↓") : "●"));
         } else {
           const description = (CELL[p.state] || ["", p.state || "gap"])[1];
           const gapLabel = p.reason === "result unreadable" ? "unreadable"
-            : p.reason === "result selection ambiguous" ? "ambiguous" : description.slice(0, 10);
+            : p.reason === "result selection ambiguous" ? "ambiguous"
+              : p.state === "ok_unvalidated" ? "no verdict" : description.slice(0, 10);
           marks.push(svg("text", { x: x(p.fraction), y: hgt - 6, "text-anchor": "middle", class: "gap" }, gapLabel));
         }
       }
       if (panel.split) {
         for (const [dx, d] of [[-9, panel.split.deviation_a], [9, panel.split.deviation_b]]) {
+          if (!Number.isFinite(d)) continue;
           const clipped = unit !== "unit" && Math.abs(d) > clip;
           marks.push(svg("text", { x: x(0.5) + dx, y: y(d) + 4, "text-anchor": "middle", class: "split" }, clipped ? (d > 0 ? "⇡" : "⇣") : "○"));
         }
       }
+      const halfStatus = (half) => {
+        const part = panel.split_status && panel.split_status[half];
+        if (!part) return "status unavailable";
+        if (part.state === "ok") return `ok (${fmt(part.value)})`;
+        return `${part.state.replace(/_/g, " ")}${part.reason ? ` (${part.reason.replace(/_/g, " ")})` : ""}`;
+      };
+      const splitSummary = `split A ${halfStatus("A")}; split B ${halfStatus("B")}`;
+      const splitVerdict = panel.split?.stable === true ? "stable" : panel.split?.stable === false ? "unstable" : "no split-half stability verdict";
       for (const f of fracs) marks.push(svg("text", { x: x(f), y: hgt - 18, "text-anchor": "middle", class: "axis" }, `${f * 100}%`));
-      const label = `${panel.label}: ${panel.verdict}. Deviation from full depth in ${unit === "unit" ? "the metric's unit" : "%"}${panel.split ? `; split halves ${panel.split.stable ? "stable" : "unstable"}` : ""}.`;
+      const deviationLabel = unit === "none" ? "No validated deviation scale" : `Deviation from full depth in ${unit === "unit" ? "the metric's unit" : "%"}`;
+      const label = `${panel.label}: ${panel.verdict}. ${deviationLabel}; ${splitSummary}; ${splitVerdict}.`;
       grid.append(h("figure", { class: "multiple" }, h("figcaption", {}, h("strong", {}, panel.label), ` — ${panel.verdict}`),
         svg("svg", { viewBox: `0 0 ${w} ${hgt}`, role: "img", "aria-label": label, class: "multiple-svg" }, svg("title", {}, label), ...marks),
-        h("p", { class: "help" }, unit === "unit" ? "y: difference from full depth (metric's unit)" : "y: relative deviation from full depth, % (clipped ±50%)")));
+        h("p", { class: "help" }, unit === "none" ? "No validated stability deviation scale; numeric values are in the table." : unit === "unit" ? "y: difference from full depth (metric's unit)" : "y: relative deviation from full depth, % (clipped ±50%)"),
+        splitVerdict !== "no split-half stability verdict" ? "" : h("p", { class: "help" }, `Split halves: ${splitSummary}. No split-half stability verdict.`)));
       for (const p of panel.points) tableRows.push([panel.label, `${p.fraction * 100}%`, p.value, p.deviation, stateReason(p.state, p.reason, p.state || "—")]);
-      if (panel.split) tableRows.push([panel.label, "split A / B", `${fmt(panel.split.a)} / ${fmt(panel.split.b)}`, `${(panel.split.relative_abs_diff * 100).toFixed(1)}% |A−B|`, panel.split.stable ? "stable" : "unstable"]);
+      if (panel.split) tableRows.push([panel.label, "split A / B", `${fmt(panel.split.a)} / ${fmt(panel.split.b)}`, `${(panel.split.relative_abs_diff * 100).toFixed(1)}% |A−B|`, splitVerdict]);
+      else tableRows.push([panel.label, "split A / B", `${fmt(panel.split_status?.A?.value)} / ${fmt(panel.split_status?.B?.value)}`, "—", splitSummary]);
     }
     out.push(grid, dataTable("Stability: every point", ["Metric", "Fraction", "Value", "Deviation", "State"], tableRows));
     const shown = new Set(sample.stability.map((p) => p.algorithm_id));
