@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+from dataclasses import replace
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -12,8 +13,10 @@ import pytest
 from traceback_lab.algorithms import fetal_fraction as fetal
 from traceback_lab.cli import main as lab_main
 from traceback_lab.fetal_contract import FetalContractError, inspect_contract, register_contract
-from traceback_lab.registry import InputContext, Ready, Skip
-from traceback_lab.store import LabStore
+from traceback_lab.registry import InputContext, PlanItem, Ready, Skip
+from traceback_lab.runner import RunTarget, run_plan
+from traceback_lab.scrub import Scrubber
+from traceback_lab.store import LabStore, new_run_id
 
 
 SOURCE = "a" * 64
@@ -121,6 +124,23 @@ def test_nipter_preflight_and_synthetic_adapter_output(tmp_path: Path, monkeypat
 def test_nipter_output_parser_refuses_incomplete_or_nonfinite_values(output: str) -> None:
     with pytest.raises(RuntimeError):
         fetal._parse_z_output(output)
+
+
+def test_derived_prenatal_skip_publishes_through_runner(tmp_path: Path) -> None:
+    store = LabStore(tmp_path / "root")
+    store.ensure()
+    run_id = new_run_id()
+    target = RunTarget(INPUT, SOURCE, tmp_path, "hg38", REFERENCE,
+                       eligible_reads=2_000_000, derived={"transform": "split", "half": "A"})
+    algorithm = replace(fetal.FETAL_FRACTION, upstream=())
+    results = run_plan(store, None, store.run_log(run_id), target,
+                       [PlanItem(algorithm, False)], {}, run_id=run_id,
+                       scrubber=Scrubber(root=store.root))
+    assert len(results) == 1 and results[0].status == "skipped"
+    assert results[0].skip_reason == "unsupported_input"
+    saved = store.read_result(INPUT, algorithm.id, results[0].parameters_sha256)
+    assert saved is not None and saved.status == "skipped"
+    assert saved.skip_reason == "unsupported_input"
 
 
 def test_installed_nipter_package_files_are_exactly_pinned(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:

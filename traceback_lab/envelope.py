@@ -36,6 +36,7 @@ SKIP_REASONS: tuple[str, ...] = (
     "missing_tags",
     "example_reference",
     "platform",
+    "unsupported_input",
     "reference",
     "upstream",
 )
