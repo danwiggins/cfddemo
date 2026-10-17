@@ -486,6 +486,7 @@ def test_synthetic_status_copy_in_live_region(state, copy_text, tmp_path) -> Non
         run = dom.split("<h2>Run</h2>", 1)[1].split("</table>", 1)[0]
         assert '<th scope="row">bam-qc</th><td>ok' in run
         assert 'latest run in progress' in run
+        assert '0.0 s (selected result)' in run
     if state == "interrupted":
         run = dom.split("<h2>Run</h2>", 1)[1].split("</table>", 1)[0]
         assert '<th scope="row">bam-qc</th><td>ok' in run

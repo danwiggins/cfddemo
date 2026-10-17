@@ -314,10 +314,12 @@
       const status = a.status === "skipped" ? `skipped (${a.skip_reason})` : a.status;
       const matches = (run) => run && run.step === a.algorithm_id && run.source_id === sample.source_id && run.input_id === a.provenance?.input_id;
       const runNote = matches(active) ? "latest run in progress" : matches(interrupted) ? interruptedLabel : null;
+      const duration = a.duration_s !== null && a.duration_s !== undefined ? `${a.duration_s.toFixed(1)} s` : "—";
       const cells = [h("th", { scope: "row" }, a.algorithm_id + (a.hidden ? " (intermediate)" : "")),
         h("td", { class: a.status === "failed" ? "problem" : null }, status, runNote ? " " : "",
           runNote ? h("span", { class: "state-chip run-note" }, runNote) : ""),
-        h("td", { class: "num" }, a.duration_s !== null && a.duration_s !== undefined ? `${a.duration_s.toFixed(1)} s` : "—")];
+        h("td", { class: "num" }, runNote === "latest run in progress" && duration !== "—"
+          ? `${duration} (selected result)` : duration)];
       const pin = a.provenance;
       const canPin = pin && /^[0-9a-f]{64}$/.test(pin.input_id) && /^[0-9a-f]{64}$/.test(pin.parameters_sha256) &&
         /^a-\d{8}T\d{12}-[0-9a-f]{8}$/.test(pin.attempt_id);
