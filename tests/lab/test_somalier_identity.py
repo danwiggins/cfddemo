@@ -134,6 +134,8 @@ def test_pair_tsv_requires_exact_opaque_names_and_finite_metrics() -> None:
         parse_pair_tsv(header + f"private-name\t{b}\t0.48\t1\t20\t0.99\t21\n".encode(), a, b)
     with pytest.raises(IdentityPairError, match="invalid"):
         parse_pair_tsv(header + f"{a}\t{b}\tnan\t1\t20\t0.99\t21\n".encode(), a, b)
+    with pytest.raises(IdentityPairError, match="no shared callable sites"):
+        parse_pair_tsv(header + f"{a}\t{b}\t0.000\t0\t0\t0.000\t0\n".encode(), a, b)
 
 
 def test_selected_sketch_requires_current_input_and_execution_identity(tmp_path, monkeypatch) -> None:
@@ -188,6 +190,8 @@ def test_pair_attempt_binds_both_selected_fingerprints_and_caches(tmp_path, monk
 
     def fake_run(argv, **kwargs):
         assert argv[1] == "relate" and kwargs["env"]["SOMALIER_REPORT_ALL_PAIRS"] == "1"
+        assert argv[argv.index("--min-depth") + 1] == "7"
+        assert argv[argv.index("--min-ab") + 1] == "0.3"
         prefix = argv[argv.index("--output-prefix") + 1]
         with open(prefix + ".pairs.tsv", "wb") as stream:
             stream.write(("#sample_a\tsample_b\trelatedness\tibs0\tibs2\tconcordance\tn\n"

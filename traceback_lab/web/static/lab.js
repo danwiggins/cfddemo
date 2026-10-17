@@ -339,7 +339,8 @@
             h("td", {}, fmt(pair.metrics.relatedness)),
             h("td", {}, fmt(pair.metrics.concordance)),
             h("td", {}, fmt(pair.metrics.n)))))))
-          : h("p", {}, "No current pair comparison. Prepare fingerprints with lab run --only identity, then use lab identity compare SAMPLE_A SAMPLE_B.")));
+          : h("p", { class: sample.identity_pairs_reason ? "problem" : "" },
+            sample.identity_pairs_reason || "No current pair comparison. Prepare fingerprints with lab run --only identity, then use lab identity compare SAMPLE_A SAMPLE_B.")));
     }
     const health = sample.library_health;
     out.push(h("section", { class: "panel" }, h("h2", {}, "Library health"),

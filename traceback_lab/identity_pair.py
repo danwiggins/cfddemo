@@ -133,6 +133,8 @@ def parse_pair_tsv(raw: bytes, input_a: str, input_b: str) -> dict[str, float | 
         raise IdentityPairError("Somalier pair metrics are malformed") from exc
     if not all(math.isfinite(value) for value in values.values()) or any(values[key] < 0 for key in ("ibs0", "ibs2", "n")):
         raise IdentityPairError("Somalier pair metrics are invalid")
+    if values["n"] == 0:
+        raise IdentityPairError("Somalier found no shared callable sites; the pair is unavailable")
     return values
 
 
@@ -233,7 +235,8 @@ def compare_pair(store: LabStore, sample_a: str, sample_b: str, *, force: bool =
         env["SOMALIER_REPORT_ALL_PAIRS"] = "1"
         try:
             process = subprocess.run(
-                [tool[0], "relate", "--sites", str(sites.file), "--output-prefix", str(prefix),
+                [tool[0], "relate", "--sites", str(sites.file),
+                 "--min-depth", "7", "--min-ab", "0.3", "--output-prefix", str(prefix),
                  str(paths[0]), str(paths[1])], env=env,
                 stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=600, check=False,
             )
