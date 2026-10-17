@@ -69,6 +69,15 @@ def test_end_motif_and_delfi_tracks_have_charts_and_complete_tables(tmp_path, mo
         ], profile, ok=lambda page: 'data-ready="1"' in page and
             "All 256 aligned-end 4-mers" in page and "DELFI-style 5 Mb bins" in page and
             page.count('data-rendered="1"') >= 2, timeout=60)
+        artifacts["end-motifs"]["freq"][0] = None
+        invalid_profile = tmp_path / "chrome-invalid-profile"
+        invalid_dom = _dom_cdp([
+            _chrome(), "--headless=new", "--disable-gpu", "--no-first-run",
+            f"--user-data-dir={invalid_profile}", "--window-size=1280,800",
+            server.issue_link() + f"&route=/sample/{id12}/signals",
+        ], invalid_profile, ok=lambda page: 'data-ready="1"' in page and
+            "End-motif chart unavailable (motif panel values invalid)" in page and
+            "DELFI-style 5 Mb bins" in page, timeout=60)
 
     assert "All 256 aligned-end 4-mers" in dom, dom[-3000:]
     assert "DELFI-style 5 Mb bins" in dom, dom[-3000:]
@@ -80,3 +89,6 @@ def test_end_motif_and_delfi_tracks_have_charts_and_complete_tables(tmp_path, mo
     assert dom.count('data-rendered="1"') >= 2
     assert dom.count('id="license-shared"') == 1
     assert "data-csp-violations=\"0\"" in dom
+    assert "End-motif chart unavailable (motif panel values invalid)" in invalid_dom
+    assert "DELFI-style 5 Mb bins" in invalid_dom
+    assert "data-csp-violations=\"0\"" in invalid_dom
