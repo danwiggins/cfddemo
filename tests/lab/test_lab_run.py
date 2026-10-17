@@ -67,6 +67,28 @@ def _no_staging(root: Path) -> bool:
     return not list((root / "lab").rglob(".staging-*"))
 
 
+def test_lab_run_missing_ichor_skips_with_install_command(lab_world, capsys, monkeypatch, shared_mmi) -> None:
+    from traceback_lab.algorithms import copy_number
+
+    monkeypatch.setattr(registry, "ALGORITHMS", ("read_summary:READ_SUMMARY", "copy_number:COPY_NUMBER"))
+    monkeypatch.setattr(copy_number, "toolchain_or_none", lambda: None)
+    code, payload = _json(capsys, "run", str(lab_world["chunks"]), "--root", str(lab_world["root"]),
+                          "--mmi", str(shared_mmi))
+    assert code == 0, payload
+    data = payload["data"]
+    copy_number_step = next(step for step in data["steps"] if step["algorithm_id"] == "copy-number")
+    assert (copy_number_step["status"], copy_number_step["skip_reason"]) == ("skipped", "missing_toolchain")
+    assert data["remediations"] == [{
+        "algorithm_id": "copy-number", "reason": "missing_toolchain", "asset": "ichor",
+        "command": "traceback toolchain install ichor",
+        "argv": ["traceback", "toolchain", "install", "ichor"],
+    }]
+    human_code, human, _ = _lab(capsys, "run", "latest", "--root", str(lab_world["root"]),
+                                "--mmi", str(shared_mmi))
+    assert human_code == 0
+    assert "SKIP    copy-number skipped (missing_toolchain): ichor: traceback toolchain install ichor" in human
+
+
 def test_run_aligns_publishes_and_reruns_from_cache(lab_world, capsys, monkeypatch) -> None:
     _registry(monkeypatch, "SUMMARY", "COUNTER")
     root, chunks = lab_world["root"], lab_world["chunks"]
