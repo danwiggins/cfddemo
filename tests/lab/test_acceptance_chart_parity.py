@@ -151,8 +151,15 @@ def test_genome_copy_number_points_match_unmasked_table_bins_in_genome_order(tmp
             [_chrome(), "--headless=new", "--disable-gpu", "--no-first-run",
              f"--user-data-dir={profile}", server.issue_link() + f"&route=/sample/{ID12}/signals"],
             profile,
-            ok=lambda dom: 'data-ready="1"' in dom and 'Copy-number bins' in dom and 'data-rendered="1"' in dom,
-            action="[...document.querySelectorAll('#main .subtab')].find((item) => item.textContent === 'Copy number').click()",
+            ok=lambda dom: 'data-ready="1"' in dom and 'Copy-number bins' in dom
+            and 'aria-label="Copy-number log2 ratio' in dom and 'data-rendered="1"' in dom,
+            action="""(() => {
+              const tab = [...document.querySelectorAll('#main .subtab')]
+                .find((item) => item.textContent === 'Copy number');
+              if (!tab) return false;
+              tab.click();
+              return true;
+            })()""",
             interact=inspect,
         )
     assert observed["adjacent"] and observed["visible"] and observed["animation"] is False
