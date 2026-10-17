@@ -113,7 +113,7 @@ class DonorDerivedChrY(Base):
             return Skip("reference", "transplant calibration is bound to a different reference")
         if contract.calibration_status != "operator_verified":
             return Skip("missing_asset", "synthetic calibration is for mechanics only")
-        if contract.manifest_sha256 not in ctx.extras.get("planned_asset_sha256s", ()):
+        if list(ctx.extras.get("planned_asset_sha256s", ())) != [contract.manifest_sha256]:
             return Skip("missing_asset", "transplant calibration changed after result identity was planned")
         if (ctx.approx_depth_x is None or not math.isfinite(ctx.approx_depth_x)
                 or ctx.approx_depth_x < contract.min_depth_x):
@@ -128,13 +128,15 @@ class DonorDerivedChrY(Base):
     def run(self, ctx: InputContext, out: Path) -> AlgorithmOutput:
         from ..store import LabStore
 
-        if not isinstance(self.preflight(ctx), Ready):
-            raise RuntimeError("donor calibration or input changed after preflight")
         store = LabStore(ctx.root)
         parent = calibrated_input_id(store, ctx.input_id, ctx.derived)
         if parent is None:
             raise RuntimeError("derived donor binding changed after preflight")
         contract = inspect_contract(store, parent)
+        if list(ctx.extras.get("planned_asset_sha256s", ())) != [contract.manifest_sha256]:
+            raise RuntimeError("consumed donor calibration differs from planned result identity")
+        if not isinstance(self.preflight(ctx), Ready):
+            raise RuntimeError("donor calibration or input changed after preflight")
         summary, mask = load_summary(ctx)
         y_reads, denominator = _count_reads(summary, mask)
         if ctx.derived is not None and denominator != ctx.eligible_reads:
