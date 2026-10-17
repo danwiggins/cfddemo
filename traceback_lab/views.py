@@ -162,6 +162,7 @@ class SampleView:
     derived: list[InputView] = field(default_factory=list)
     operator_metadata: dict[str, str] | None = None
     operator_metadata_problem: LabProblem | None = None
+    platform: str = "ont"
 
     def by_transform(self, transform: str) -> list[InputView]:
         return [item for item in self.derived if item.transform == transform]
@@ -294,7 +295,7 @@ def load_sample(store: LabStore, source_id: str) -> SampleView | None:
         metadata_problem = problem
     return SampleView(
         source_id, id12_for(store, source_id), bool(record.get("example")), full, derived,
-        assertion, metadata_problem,
+        assertion, metadata_problem, platform,
     )
 
 

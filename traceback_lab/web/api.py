@@ -721,6 +721,7 @@ class LabApi:
             "id12": self._id12s()[source_id],
             "source_id": source_id,
             "full_input_id": sample.full.input_id,
+            "platform": sample.platform,
             "example": sample.example,
             "run_utc": max((entry.get("used_utc", "") for entry in record.get("inputs", [])), default=""),
             "depth": next((env.depth.model_dump() for env in sample.full.results.values() if env.depth), None),

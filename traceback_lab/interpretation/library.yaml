@@ -3375,6 +3375,57 @@ entries:
     citations: []
     citation_checked: {by: "Lab S5 source review", date: "2026-10-17", note: "No citation displayed. This support-depth metric is a Lab-specific descriptive count, not a measure or threshold validated by Snyder et al."}
 
+  # ---------------------------------------------- finaletoolkit-xcheck
+  - algorithm_id: finaletoolkit-xcheck
+    metric_id: motif_pearson_r
+    label: "FinaleToolkit paired-end 4-mer frequency concordance"
+    value_kind: signed
+    tier: SPECULATIVE
+    origin_tier: NEWER
+    origin_platform: "paired-end Illumina"
+    min_depth_x: null
+    reference: {kind: none}
+    performance: null
+    performance_missing_reason: "Method parity is not biological or clinical validation"
+    missing_value_caption: "Correlation unavailable when paired-end motifs have insufficient variation."
+    meaning_high: "The pinned toolkit and independent paired-end counter have correlated 4-mer frequency patterns; inspect the artifact for absolute differences."
+    meaning_low: "The toolkit and independent counter disagree; inspect input filters and the paired-end artifact."
+    confounders: ["BAM pair flags", "MAPQ", "reference end coordinates", "sparse motifs"]
+    next_steps:
+      analytical: ["Inspect paired-end method settings and the 256-frequency artifact", "Do not transfer this concordance to single-end ONT"]
+      clinical_setting: null
+    license_ids: [method-patents]
+    flags: [LEGAL]
+    headline: true
+    stability: {kind: absolute, tolerance: 0.01}
+    citations: ["doi:10.1093/bioadv/vbaf236"]
+    citation_checked: {by: "Lab S5 cross-check audit", date: "2026-10-17", note: "Official FinaleToolkit 1.1.0 documentation and tagged source define paired-end 5-prime motifs; correlation is an engineering parity check only."}
+
+  - algorithm_id: finaletoolkit-xcheck
+    metric_id: delfi_ratio_pearson_r
+    label: "FinaleToolkit paired-end uncorrected DELFI-bin concordance"
+    value_kind: signed
+    tier: SPECULATIVE
+    origin_tier: NEWER
+    origin_platform: "paired-end Illumina"
+    min_depth_x: null
+    reference: {kind: none}
+    performance: null
+    performance_missing_reason: "Uncorrected 100-kb method parity is not the published GC-corrected classifier"
+    missing_value_caption: "Correlation unavailable without at least two variable bins containing long fragments."
+    meaning_high: "The toolkit and independent paired-end counter agree on comparable short/long bins."
+    meaning_low: "The toolkit and independent counter disagree on comparable short/long bins."
+    confounders: ["BAM pair flags", "MAPQ", "sparse bins", "GC correction intentionally disabled"]
+    next_steps:
+      analytical: ["Inspect per-bin counts and method settings", "Do not transfer this concordance to the Lab ONT track"]
+      clinical_setting: null
+    license_ids: [method-patents, no-license-not-adopted]
+    flags: [LEGAL]
+    headline: false
+    stability: {kind: absolute, tolerance: 0.01}
+    citations: ["doi:10.1093/bioadv/vbaf236", "doi:10.1038/s41586-019-1272-6"]
+    citation_checked: {by: "Lab S5 cross-check audit", date: "2026-10-17", note: "Official FinaleToolkit 1.1.0 DELFI API documents paired-end BAM, 100-kb input bins, optional GC correction and 5-Mb merging; both are disabled here for raw-count parity. The Cristiano classifier is not evaluated."}
+
   # -------------------------------------------------------------- epi-clock
   - algorithm_id: epi-clock
     metric_id: epigenetic_age_years
