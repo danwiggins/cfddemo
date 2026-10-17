@@ -367,6 +367,7 @@ def test_preflight_uses_measured_eligible_depth_not_classified_support(tmp_path,
         methylbert_min_classified_reads=100000,
     )
     monkeypatch.setattr(adapter, "_ont_header", lambda *_: True)
+    monkeypatch.setattr(adapter, "_has_canonical_contigs", lambda *_: True)
     monkeypatch.setattr(adapter, "header_model", lambda *_: "dorado-model")
     monkeypatch.setattr(adapter, "_eligible_tagged", lambda *_: (MIN_ELIGIBLE_READS, 100000))
     monkeypatch.setattr(adapter, "inspect_methylbert_bundle", lambda *_: SimpleNamespace(file=tmp_path / "model.tar"))
@@ -445,6 +446,27 @@ def test_eligible_bam_refuses_a_reference_without_chr_prefixed_nuclear_contigs(t
     with pytest.raises(ValueError, match="chr-prefixed canonical nuclear contigs"):
         adapter._write_eligible_bam(source, target, _context(tmp_path))
     assert not target.exists()
+
+
+def test_unprefixed_reference_skips_before_model_loading(tmp_path, monkeypatch):
+    input_dir = tmp_path / "input"
+    input_dir.mkdir()
+    source = input_dir / "aligned.bam"
+    with pysam.AlignmentFile(str(source), "wb", header={
+        "HD": {"VN": "1.6"}, "SQ": [{"SN": "1", "LN": 1000}],
+        "RG": [{"ID": "reads", "PL": "ONT"}],
+    }):
+        pass
+    monkeypatch.setattr(adapter, "header_model", lambda *_: "dorado-model")
+    monkeypatch.setattr(adapter, "inspect_methylbert_bundle", lambda *_: pytest.fail("no model load"))
+    ctx = _context(
+        tmp_path, reference_fasta=str(tmp_path / "reference.fa"),
+        methylbert_bundle_sha256="b" * 64, methylbert_code_sha256="c" * 64,
+        methylbert_min_classified_reads=100000,
+    )
+    assert adapter.METHYLBERT.preflight(ctx) == Skip(
+        "reference", "MethylBERT needs chr-prefixed canonical nuclear contigs",
+    )
 
 
 def test_private_worker_lifecycle_publishes_only_aggregate(tmp_path, monkeypatch):
