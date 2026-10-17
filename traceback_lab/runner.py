@@ -216,7 +216,8 @@ def run_plan(
         identity_parameters = getattr(algorithm, "identity_parameters", None)
         planned_parameters = (identity_parameters(identity_ctx)
                               if callable(identity_parameters) and not platform_rejected else algorithm.parameters)
-        planned_tools = [tool.identity() for tool in algorithm.tools]
+        tool_pins = tuple(algorithm.tools)
+        planned_tools = [tool.identity() for tool in tool_pins]
         identity = execution_identity(
             algorithm,
             reference_sha256=target.reference_sha256,
@@ -263,6 +264,8 @@ def run_plan(
             for name in algorithm.upstream
             if name in done and done[name].artifacts_dir
         }
+        target.extras["asset_sha256s"] = planned_assets
+        target.extras["tool_versions"] = {pin.name: pin.version for pin in tool_pins}
         target.extras["planned_asset_sha256s"] = planned_assets
         target.extras["planned_tool_pins"] = planned_tools
         target.extras["planned_parameters"] = planned_parameters
@@ -296,19 +299,21 @@ def run_plan(
                 and existing.skip_message == decision.message[:300]
             )
             if not same:
-                attempt = store.publish_result(
+                attempt_id = store.publish_result(
                     _envelope(algorithm, target, identity, status="skipped", skip=decision),
                     input_id=target.input_id,
                 )
             else:
                 selected = store.selected_attempt(target.input_id, algorithm.id, identity)
-                attempt = selected.name if selected is not None else None
+                attempt_id = selected.name if selected is not None else None
             log.append(
                 "step_end",
                 step=step,
                 status="skipped",
                 skip_reason=decision.reason_code,
                 parameters_sha256=identity,
+                input_id=target.input_id,
+                attempt_id=attempt_id,
             )
             result = StepResult(
                 algorithm.id,
@@ -319,7 +324,7 @@ def run_plan(
                 skip_message=decision.message,
                 input_label=target.label,
                 input_id=target.input_id,
-                attempt_id=attempt,
+                attempt_id=attempt_id,
             )
             results.append(result)
             done[algorithm.id] = result
@@ -380,7 +385,7 @@ def run_plan(
                         peak_disk=outcome.peak_disk_bytes,
                     )
                 else:
-                    attempt = store.publish_result(
+                    attempt_id = store.publish_result(
                         envelope,
                         input_id=target.input_id,
                         artifacts_dir=scratch / "artifacts",
@@ -396,6 +401,8 @@ def run_plan(
                         peak_tree_rss_bytes=outcome.sampled_tree_peak_rss_bytes,
                         peak_disk_bytes=outcome.peak_disk_bytes,
                         parameters_sha256=identity,
+                        input_id=target.input_id,
+                        attempt_id=attempt_id,
                         tool_versions={tool.name: tool.version for tool in algorithm.tools},
                     )
                     result = StepResult(
@@ -409,7 +416,7 @@ def run_plan(
                         peak_disk_bytes=outcome.peak_disk_bytes,
                         input_label=target.label,
                         input_id=target.input_id,
-                        attempt_id=attempt,
+                        attempt_id=attempt_id,
                     )
                     _after_ok(store, target, algorithm, identity, result, envelope)
             else:
@@ -493,7 +500,7 @@ def _publish_failure(
         exit_code=exit_code,
         timed_out=timed_out,
     )
-    attempt = store.publish_result(
+    attempt_id = store.publish_result(
         _envelope(algorithm, target, identity, status="failed", failure=failure, duration_s=duration_s),
         input_id=target.input_id,
     )
@@ -508,6 +515,8 @@ def _publish_failure(
         peak_disk_bytes=peak_disk,
         timed_out=timed_out,
         parameters_sha256=identity,
+        input_id=target.input_id,
+        attempt_id=attempt_id,
     )
     return StepResult(
         algorithm.id,
@@ -521,7 +530,7 @@ def _publish_failure(
         peak_disk_bytes=peak_disk,
         input_label=target.label,
         input_id=target.input_id,
-        attempt_id=attempt,
+        attempt_id=attempt_id,
     )
 
 
