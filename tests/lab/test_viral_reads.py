@@ -1,0 +1,170 @@
+"""Synthetic contract and real-process checks for exploratory viral side alignment."""
+
+from __future__ import annotations
+
+import argparse
+import hashlib
+import json
+import random
+from pathlib import Path
+
+import pysam
+import pytest
+
+from traceback_lab.asset_command import add_asset_parser
+from traceback_lab.assets import AssetError
+from traceback_lab.algorithms.viral_reads import VIRAL_READS, _count_hits, _derived_keep
+from traceback_lab.registry import InputContext, Ready, Skip
+from traceback_lab.store import LabStore
+from traceback_lab.tools import MIN_MINIMAP2, find_minimap2
+from traceback_lab.viral_assets import add_viral_reference, inspect_viral_reference
+
+
+def _sources(tmp_path: Path) -> tuple[Path, Path, dict[str, str]]:
+    randomizer = random.Random(87155)
+    sequences = {
+        virus: "".join(randomizer.choices("ACGT", k=3000))
+        for virus in ("EBV", "HPV", "HBV")
+    }
+    fasta = tmp_path / "reference.fasta"
+    targets = tmp_path / "targets.tsv"
+    fasta.write_text("".join(f">{virus}\n{sequence}\n" for virus, sequence in sequences.items()))
+    targets.write_text(
+        "contig\tvirus\taccession\n"
+        + "".join(f"{virus}\t{virus}\tSYNTH_{virus}.1\n" for virus in sequences)
+    )
+    return fasta, targets, sequences
+
+
+def _add(store: LabStore, fasta: Path, targets: Path) -> None:
+    with store.writer("asset add", "r-20261016-1200-0000", step="viral-fasta"):
+        add_viral_reference(
+            store, fasta, targets, source_label="synthetic-viral-reference",
+            terms="known", license_id="synthetic-test",
+        )
+
+
+def _context(root: Path, input_dir: Path, *, derived: dict | None = None) -> InputContext:
+    return InputContext(
+        root=root, source_id="synthetic", input_id="synthetic", reference_id="hg38",
+        reference_sha256="a" * 64, input_dir=input_dir, derived=derived,
+    )
+
+
+def test_registration_cli_identity_and_tamper(tmp_path: Path) -> None:
+    store = LabStore(tmp_path / "root")
+    fasta, targets, _ = _sources(tmp_path)
+    parser = argparse.ArgumentParser()
+    add_asset_parser(parser.add_subparsers(dest="command", required=True), lambda child: child.add_argument("--root"))
+    args = parser.parse_args([
+        "asset", "add", "viral-fasta", "--file", str(fasta), "--targets", str(targets),
+        "--source-label", "synthetic-viral-reference", "--terms", "known",
+        "--license-id", "synthetic-test",
+    ])
+    code, payload = args.handler(args, store)
+    assert code == 0
+    record = inspect_viral_reference(store)
+    assert payload["data"]["asset"]["asset_id"] == f"viral-fasta:{hashlib.sha256(fasta.read_bytes()).hexdigest()}"
+    assert len(record.targets) == 3
+    assert VIRAL_READS.asset_sha256s(store.root) == record.asset_sha256s
+    args = parser.parse_args(["asset", "inspect", "viral-fasta"])
+    assert args.handler(args, store)[0] == 0
+    with pytest.raises(AssetError, match="different viral reference"):
+        targets.write_text(targets.read_text().replace("SYNTH_EBV.1", "SYNTH_EBV.2"))
+        _add(store, fasta, targets)
+    assert len(record.asset_sha256s) == 2
+    (record.fasta.parent / "targets.tsv").write_text("tampered")
+    with pytest.raises(AssetError):
+        inspect_viral_reference(store)
+    assert VIRAL_READS.asset_sha256s(store.root) == ()
+
+
+@pytest.mark.parametrize("fasta_bytes,targets_bytes", [
+    (b">\nACGT\n", None),
+    (b">EBV\nACGT\n>HPV\nACGT\n>HBV\n", None),
+    (None, b"contig\tvirus\taccession\nEBV\tEBV\tSYNTH_EBV.1\n"),
+])
+def test_invalid_reference_does_not_publish(
+    tmp_path: Path, fasta_bytes: bytes | None, targets_bytes: bytes | None,
+) -> None:
+    store = LabStore(tmp_path / "root")
+    fasta, targets, _ = _sources(tmp_path)
+    if fasta_bytes is not None:
+        fasta.write_bytes(fasta_bytes)
+    if targets_bytes is not None:
+        targets.write_bytes(targets_bytes)
+    with pytest.raises(AssetError):
+        _add(store, fasta, targets)
+    assert not (store.lab / "assets" / "viral-fasta").exists()
+
+
+def test_absent_reference_is_explicitly_unavailable(tmp_path: Path) -> None:
+    status = VIRAL_READS.preflight(_context(tmp_path, tmp_path))
+    assert isinstance(status, Skip)
+    assert status.reason_code == "missing_asset"
+
+
+def test_paf_counts_unique_primary_virus_and_excludes_cross_virus(tmp_path: Path) -> None:
+    store = LabStore(tmp_path / "root")
+    fasta, targets, _ = _sources(tmp_path)
+    _add(store, fasta, targets)
+    paf = tmp_path / "hits.paf"
+    def row(qid: int, virus: str, tag: str = "tp:A:P") -> str:
+        return f"q{qid}\t500\t0\t500\t+\t{virus}\t3000\t0\t500\t500\t500\t60\t{tag}\n"
+    paf.write_text(row(1, "EBV") + row(1, "EBV") + row(2, "HPV") + row(2, "HBV") + row(3, "HBV", "tp:A:S"))
+    counts = _count_hits(paf, inspect_viral_reference(store), 3, tmp_path / "hits.sqlite")
+    assert counts == {"EBV": 1, "HPV": 0, "HBV": 0}
+
+
+def test_derived_membership_is_deterministic(tmp_path: Path) -> None:
+    parent = _context(tmp_path, tmp_path)
+    downsample = _context(tmp_path, tmp_path, derived={"transform": "downsample", "fraction": 0.5})
+    half_a = _context(tmp_path, tmp_path, derived={"transform": "split", "half": "A"})
+    half_b = _context(tmp_path, tmp_path, derived={"transform": "split", "half": "B"})
+    assert _derived_keep(parent, "read-1")
+    assert 0 < sum(_derived_keep(downsample, f"read-{i}") for i in range(100)) < 100
+    assert all(_derived_keep(half_a, f"read-{i}") != _derived_keep(half_b, f"read-{i}") for i in range(100))
+
+
+def test_real_minimap2_side_alignment_on_synthetic_bam(tmp_path: Path) -> None:
+    tool = find_minimap2()
+    if tool.path is None or tool.numeric is None or tool.numeric < MIN_MINIMAP2:
+        pytest.skip("minimap2 >= 2.28 unavailable")
+    store = LabStore(tmp_path / "root")
+    fasta, targets, sequences = _sources(tmp_path)
+    _add(store, fasta, targets)
+    input_dir = tmp_path / "input"
+    input_dir.mkdir()
+    with pysam.AlignmentFile(str(input_dir / "aligned.bam"), "wb", header={"HD": {"VN": "1.6"}, "SQ": [{"SN": "chr1", "LN": 10000}]}) as bam:
+        for name, sequence in [
+            ("donor-private-a", sequences["EBV"][200:1400]),
+            ("donor-private-b", sequences["HPV"][300:1500]),
+            ("donor-private-c", sequences["HBV"][400:1600]),
+            ("donor-private-d", sequences["EBV"][500:1700]),
+        ]:
+            record = pysam.AlignedSegment()
+            record.query_name = name
+            record.query_sequence = sequence
+            record.flag = 4
+            bam.write(record)
+        mapped = pysam.AlignedSegment()
+        mapped.query_name = "human-mapped"
+        mapped.query_sequence = "A" * 1200
+        mapped.flag = 0
+        mapped.reference_id = 0
+        mapped.reference_start = 1
+        mapped.cigarstring = "1200M"
+        bam.write(mapped)
+    output = tmp_path / "output"
+    output.mkdir()
+    ctx = _context(store.root, input_dir)
+    assert isinstance(VIRAL_READS.preflight(ctx), Ready)
+    result = VIRAL_READS.run(ctx, output)
+    assert {item["metric_id"]: item["value"] for item in result.metrics} == {
+        "ebv_rpm": 500000.0, "hpv_rpm": 250000.0, "hbv_rpm": 250000.0,
+    }
+    assert all(item["n"] == 4 for item in result.metrics)
+    summary = json.loads(result.artifacts["viral_reads.json"])
+    assert summary["denominator_unmapped_primaries"] == 4
+    assert summary["hits"] == {"EBV": 2, "HPV": 1, "HBV": 1}
+    assert "donor-private" not in str(result.artifacts)
