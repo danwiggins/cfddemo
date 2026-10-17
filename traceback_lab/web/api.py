@@ -18,7 +18,13 @@ from collections.abc import Iterable
 from pathlib import Path, PurePosixPath
 from typing import Any
 
-from ..cohort_contracts import CohortGeneration, CohortMember, MetricProjection, project_metric
+from .. import views
+from ..cohort_contracts import (
+    CohortGeneration,
+    CohortMember,
+    MetricProjection,
+    project_metric,
+)
 from ..cohorts import list_cohorts, member_from_store, read_current
 from ..identity import resolve_prefix, shortest_unique_prefixes
 from ..ingest import source_ids, source_record
@@ -37,7 +43,7 @@ from ..interpretation.engine import (
 )
 from ..problems import LabProblem
 from ..store import LabStore, summarize_run
-from .. import views
+from ..tf_concordance import report_tf_concordance
 
 
 def _recovery_problem(problem: LabProblem) -> dict[str, str]:
@@ -423,6 +429,7 @@ class LabApi:
             "stability": panels,
             "repeatability": views.repeatability(panels),
             "synthetic": synthetic,
+            "concordance": report_tf_concordance(sample, generation, target),
             "defended": defended_block,
             "headline": headline_block,
             "derived": [{"label": view.label, "transform": view.transform} for view in sample.derived],

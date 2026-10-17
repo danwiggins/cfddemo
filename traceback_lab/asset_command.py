@@ -11,6 +11,8 @@ from typing import Any
 from traceback_runner.cli import _local_envelope, _result, _with_human
 
 from .assets import AssetError, AssetPublishUncertain, add_asset, inspect_asset
+from .meth_tf_reference import KIND as METH_TF_KIND
+from .meth_tf_reference import add_reference, inspect_reference
 from .methylbert_assets import MethylbertPublishUncertain, inspect_methylbert_bundle, register_methylbert_bundle
 from .problems import EXIT_BLOCKED, EXIT_OK
 from .store import LabStore, new_run_id
@@ -21,7 +23,7 @@ def add_asset_parser(commands: Any, common: Callable[[argparse.ArgumentParser], 
     asset = commands.add_parser("asset", help="register or inspect local Lab assets")
     actions = asset.add_subparsers(dest="asset_action", required=True)
     add = actions.add_parser("add", help="register operator-supplied pinned bytes")
-    add.add_argument("kind", choices=("pmd", "tss-annotation", "methylbert-bundle", "viral-fasta"))
+    add.add_argument("kind", choices=("pmd", METH_TF_KIND, "tss-annotation", "methylbert-bundle", "viral-fasta"))
     add.add_argument("--file", type=Path, required=True, help="local pinned asset file")
     add.add_argument("--targets", type=Path, help="viral-fasta TSV: contig, virus, accession")
     add.add_argument(
@@ -33,7 +35,7 @@ def add_asset_parser(commands: Any, common: Callable[[argparse.ArgumentParser], 
     common(add)
     add.set_defaults(handler=_add)
     inspect = actions.add_parser("inspect", help="rehash and describe a local asset")
-    inspect.add_argument("kind", choices=("pmd", "tss-annotation", "methylbert-bundle", "viral-fasta"))
+    inspect.add_argument("kind", choices=("pmd", METH_TF_KIND, "tss-annotation", "methylbert-bundle", "viral-fasta"))
     inspect.add_argument("--sha256", help="registered MethylBERT bundle digest")
     common(inspect)
     inspect.set_defaults(handler=_inspect)
@@ -62,6 +64,13 @@ def _add(args: argparse.Namespace, store: LabStore) -> tuple[int, dict[str, Any]
                 record = add_viral_reference(
                     store, args.file, args.targets,
                     source_label=args.source_label, terms=args.terms, license_id=args.license_id,
+                )
+            elif args.kind == METH_TF_KIND:
+                if getattr(args, "targets", None) is not None:
+                    raise AssetError("only viral-fasta accepts --targets")
+                record = add_reference(
+                    store, args.file, source_label=args.source_label,
+                    terms=args.terms, license_id=args.license_id,
                 )
             else:
                 if getattr(args, "targets", None) is not None:
@@ -110,7 +119,9 @@ def _inspect(args: argparse.Namespace, store: LabStore) -> tuple[int, dict[str, 
         else:
             if args.sha256:
                 raise AssetError("--sha256 is only for methylbert-bundle")
-            record = inspect_viral_reference(store) if args.kind == "viral-fasta" else inspect_asset(store, args.kind)
+            record = (inspect_reference(store) if args.kind == METH_TF_KIND else
+                      inspect_viral_reference(store) if args.kind == "viral-fasta" else
+                      inspect_asset(store, args.kind))
     except AssetError as exc:
         payload = _result_payload(
             "lab asset inspect", "blocked", "Asset unavailable", store,

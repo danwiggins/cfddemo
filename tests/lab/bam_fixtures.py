@@ -30,8 +30,13 @@ class Read:
     tags: dict[str, object] = field(default_factory=dict)
 
 
-def write_bam(path: Path, contigs: Sequence[tuple[str, int]], reads: Iterable[Read]) -> Path:
+def write_bam(
+    path: Path, contigs: Sequence[tuple[str, int]], reads: Iterable[Read],
+    *, modbase_model: str | None = None,
+) -> Path:
     header = {"HD": {"VN": "1.6", "SO": "coordinate"}, "SQ": [{"SN": name, "LN": length} for name, length in contigs]}
+    if modbase_model is not None:
+        header["RG"] = [{"ID": "synthetic-rg", "DS": f"basecall_model=synthetic modbase_models={modbase_model}"}]
     names = [name for name, _ in contigs]
     unsorted = path.with_suffix(".unsorted.bam")
     with pysam.AlignmentFile(str(unsorted), "wb", header=header) as out:
@@ -50,6 +55,8 @@ def write_bam(path: Path, contigs: Sequence[tuple[str, int]], reads: Iterable[Re
                 record.mapping_quality = read.mapq
                 record.cigartuples = read.cigar or [(0, len(read.sequence))]
             record.query_qualities = pysam.qualitystring_to_array("5" * len(read.sequence))
+            if modbase_model is not None:
+                record.set_tag("RG", "synthetic-rg")
             if read.mm is not None:
                 record.set_tag("MM", read.mm, value_type="Z")
                 record.set_tag("ML", array.array("B", list(read.ml)))
@@ -71,6 +78,7 @@ def context_for(
     derived: dict[str, object] | None = None,
     fasta: Path | None = None,
     eligible_reads: int | None = None,
+    modbase_model: str | None = None,
 ) -> InputContext:
     """An InputContext over a fresh aligned BAM and its read summary."""
 
@@ -78,7 +86,7 @@ def context_for(
     input_dir.mkdir(parents=True, exist_ok=True)
     bam = input_dir / "aligned.bam"
     if not bam.exists():
-        write_bam(bam, contigs, reads)
+        write_bam(bam, contigs, reads, modbase_model=modbase_model)
         write_summary(bam, base / "read-summary" / "columns")
     extras: dict[str, object] = {"upstream": {"read-summary": str(base / "read-summary")}}
     if fasta is not None:

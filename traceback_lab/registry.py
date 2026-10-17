@@ -64,6 +64,7 @@ ALGORITHMS: tuple[str, ...] = (
     "pmd_score:PMD_SCORE",
     "hypometh_reads:HYPOMETH_READS",
     "frag_x_meth:FRAG_X_METH",
+    "meth_tf:METH_TF",
 )
 
 
@@ -293,7 +294,9 @@ def plan(
             name = unknown[0]
             close = difflib.get_close_matches(name, list(by_id), n=1, cutoff=0.6)
             hint = f"Did you mean {close[0]}? " if close else ""
-            from .problems import LabProblem  # lazy: keeps worker start-up off the signed CLI import
+            from .problems import (
+                LabProblem,  # lazy: keeps worker start-up off the signed CLI import
+            )
 
             raise LabProblem(
                 "TBX-LAB-001",
@@ -326,11 +329,11 @@ def plan(
 
 __all__ = [
     "ALGORITHMS",
-    "Algorithm",
-    "AlgorithmOutput",
     "CONSUMES",
     "COSTS",
     "FAMILIES",
+    "Algorithm",
+    "AlgorithmOutput",
     "InputContext",
     "PlanItem",
     "Ready",
@@ -343,7 +346,7 @@ __all__ = [
     "intermediate_ids",
     "load_entry",
     "load_registry",
-    "registry_entries",
     "plan",
+    "registry_entries",
     "validate_algorithm",
 ]

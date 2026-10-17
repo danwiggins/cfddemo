@@ -926,24 +926,49 @@
 
   // -- Agreement: paired signals only, no combined score (D29) ----------------------------------------
   function agreement(sample) {
+    const report = sample.concordance || { pairs: [] };
     const out = [h("p", { class: "breadcrumb" }, `Lab › ${sample.id12} › Agreement`), h("h1", { class: "view-title" }, "Agreement"),
-      h("p", { class: "status-line" }, "These signals share inputs and are not independent confirmation; agreement is not validation.")];
-    const tf = value(sample, "copy-number", "tumor_fraction");
-    const mode = value(sample, "fragment-size", "mode_bp");
-    const mt = value(sample, "mtdna", "chrm_fraction");
-    const pairs = [
-      ["Size mode vs copy-number TF", "fragment-size mode (bp)", mode, "tumour fraction", tf],
-      ["mtDNA fraction vs copy-number TF", "chrM fraction", mt, "tumour fraction", tf],
-    ];
-    for (const [title, xLabel, xValue, yLabel, yValue] of pairs) {
-      const section = h("section", { class: "panel" }, h("h2", {}, title), flagPill("FDA"));
-      if (xValue === null || yValue === null) {
-        section.append(h("p", { class: "empty" }, `Needs both signals at full depth (${xValue === null ? xLabel : yLabel} missing). Cohort samples are plotted once the kit cohort exists (n = ${sample.cohort_n}).`));
+      h("p", { class: "status-line" }, report.caption || "These signals share inputs and are not independent confirmation; agreement is not validation."),
+      h("p", { class: "help" }, report.wgd_caveat || "Copy-number tumour fraction can shift with whole-genome doubling.")];
+    const reasons = {
+      no_pon: "A verified panel of normals is needed before copy-number tumour fraction can be compared.",
+      missing_cn: "Copy-number tumour fraction is unavailable.",
+      unidentifiable_cn: "Copy-number tumour fraction was not identifiable.",
+      missing_meth_tf: "Methylation tumour fraction is unavailable; inspect the registered marker reference and method result.",
+      unidentifiable_meth_tf: "The observed markers did not identify a methylation tumour fraction.",
+      missing_size: "Fragment-size mode is unavailable.",
+      no_size_baseline: "A fragment-size baseline is unavailable. Comparison requires at least ten compatible, source-excluded cohort members with matching method settings.",
+      missing_mtdna: "Mitochondrial fraction is unavailable.",
+      no_mtdna_baseline: "An mtDNA baseline is unavailable. Comparison requires at least ten compatible, source-excluded cohort members with matching method settings.",
+    };
+    for (const pair of (report.pairs || [])) {
+      const section = h("section", { class: "panel" }, h("h2", {}, pair.label), flagPill("FDA"),
+        pair.id === "cn-meth" ? flagPill("CLIA") : "");
+      if (pair.id === "cn-meth" && pair.support && pair.support.markers_covered !== null) {
+        const support = pair.support;
+        const residual = support.fit_rms === null
+          ? "Fit residual unavailable."
+          : `Unnormalized weight-fit residual RMS ${fmt(support.fit_rms)}.`;
+        const exactFitCaveat = support.markers_covered === 2
+          ? " With two covered markers, an interior fit is exactly determined; zero residual does not establish fit quality." : "";
+        section.append(h("p", { class: "help" },
+          `Methylation numerical fit: ${String(support.markers_covered)} covered markers, ${String(support.cpg_calls_used)} CpG calls; condition number ${support.reference_condition_number === null ? "unavailable" : fmt(support.reference_condition_number)}. ${residual}${exactFitCaveat} These counts do not establish biological calibration.`));
+        if (support.markers_covered === 0)
+          section.append(h("p", { class: "problem" }, "No registered CpG marker has a usable C+m call on this input. Check zero-based CpG-C positions, the genome reference, and modification-call coverage."));
+      }
+      if (pair.state !== "ok") {
+        const unavailable = pair.unavailable_reasons?.length ? pair.unavailable_reasons : [pair.state];
+        section.append(h("p", { class: "empty" }, unavailable.map(reason => reasons[reason] || "This pair is unavailable.").join(" "),
+          unavailable.some(reason => reason === "no_size_baseline" || reason === "no_mtdna_baseline") && pair.reference_n > 0
+            ? ` Compatible cohort members after source exclusion: ${pair.reference_n}.` : ""));
       } else {
-        section.append(chart(`${title}: this sample at ${fmt(xValue)} and ${fmt(yValue)}; no cohort samples yet.`, {
-          grid: { left: 60, right: 20, top: 20, bottom: 40 }, xAxis: { type: "value", name: xLabel, scale: true }, yAxis: { type: "value", name: yLabel, min: 0 },
-          series: [{ type: "scatter", symbolSize: 12, data: [[xValue, yValue]], itemStyle: { color: "#8a4b08" } }],
-        }, dataTable(title, ["Sample", xLabel, yLabel], [[sample.id12, xValue, yValue]])));
+        if (pair.baseline_median !== null) {
+          section.append(h("p", { class: "help" }, `Matched cohort median ${fmt(pair.baseline_median)} (n = ${pair.reference_n}); this plot shows the sample's difference from that median.`));
+        }
+        section.append(chart(`${pair.label}: this sample at ${fmt(pair.x)} and ${fmt(pair.y)}.`, {
+          grid: { left: 60, right: 20, top: 20, bottom: 40 }, xAxis: { type: "value", name: pair.x_label, scale: true }, yAxis: { type: "value", name: pair.y_label, min: 0 },
+          series: [{ type: "scatter", symbolSize: 12, data: [[pair.x, pair.y]], itemStyle: { color: "#8a4b08" } }],
+        }, dataTable(pair.label, ["Sample", pair.x_label, pair.y_label], [[sample.id12, pair.x, pair.y]])));
       }
       out.push(section);
     }
