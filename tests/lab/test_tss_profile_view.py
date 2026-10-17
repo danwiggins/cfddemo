@@ -64,6 +64,8 @@ def test_tss_profile_chart_and_table(tmp_path, monkeypatch, ratio, rendered) -> 
                 points: option.series.filter((series) => series.type === 'line').flatMap((series) => series.data),
                 rows: [...table.querySelectorAll('tbody tr')].map((row) =>
                   [...row.querySelectorAll('td')].map((cell) => cell.textContent.trim())),
+                rawRows: [...table.querySelectorAll('tbody tr')].map((row) =>
+                  [...row.querySelectorAll('td')].map((cell) => cell.dataset.rawValue ?? null)),
               };
             })()"""))
         html = _dom_cdp([
@@ -83,8 +85,12 @@ def test_tss_profile_chart_and_table(tmp_path, monkeypatch, ratio, rendered) -> 
     assert 'data-csp-violations="0"' in html
     assert observed["adjacent"] and observed["animation"] is False
     assert len(observed["points"]) == len(observed["rows"]) == 40
-    for point, (interval, displayed) in zip(observed["points"], observed["rows"], strict=True):
+    assert len(observed["rawRows"]) == 40
+    for point, (interval, displayed), raw in zip(
+        observed["points"], observed["rows"], observed["rawRows"], strict=True,
+    ):
         match = re.fullmatch(r"\[(-?\d+), (-?\d+)\)", interval)
         assert match is not None
         assert point[0] == (int(match[1]) + int(match[2])) / 2
+        assert float(raw[1]) == point[1]
         assert math.isclose(float(displayed), point[1], rel_tol=0.05, abs_tol=1e-10)

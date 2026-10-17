@@ -46,6 +46,8 @@ def test_echarts_scatter_values_match_adjacent_table_without_animation(route, ex
                 points: option?.series.filter((series) => series.type === 'scatter').flatMap((series) => series.data),
                 rows: [...table.querySelectorAll('tbody tr')].map((row) =>
                   [...row.querySelectorAll('td')].map((cell) => cell.textContent.trim())),
+                rawRows: [...table.querySelectorAll('tbody tr')].map((row) =>
+                  [...row.querySelectorAll('td')].map((cell) => cell.dataset.rawValue ?? null)),
               };
             }))()"""))
 
@@ -63,6 +65,8 @@ def test_echarts_scatter_values_match_adjacent_table_without_animation(route, ex
         assert len(chart["points"]) == len(chart["rows"])
         # Home's first two table columns are the pair; Agreement has a sample-ID column.
         table_pairs = [row[:2] if route == "/" else row[1:3] for row in chart["rows"]]
+        raw_pairs = [row[:2] if route == "/" else row[1:3] for row in chart["rawRows"]]
+        assert [[float(value) for value in pair] for pair in raw_pairs] == chart["points"]
         for displayed, point in zip(table_pairs, chart["points"], strict=True):
             assert all(math.isclose(float(value.replace(",", "")), actual,
                                     rel_tol=0.05, abs_tol=1e-10)
@@ -94,6 +98,8 @@ def test_fragment_density_line_values_match_adjacent_table_without_animation(rou
                 points: option?.series.filter((series) => series.type === 'line').flatMap((series) => series.data),
                 rows: [...table.querySelectorAll('tbody tr')].map((row) =>
                   [...row.querySelectorAll('td')].map((cell) => cell.textContent.trim())),
+                rawRows: [...table.querySelectorAll('tbody tr')].map((row) =>
+                  [...row.querySelectorAll('td')].map((cell) => cell.dataset.rawValue ?? null)),
               };
             }))()"""))
 
@@ -108,6 +114,7 @@ def test_fragment_density_line_values_match_adjacent_table_without_animation(rou
     assert chart["adjacent"] and chart["animation"] is False
     assert chart["points"] == [[50, 2], [167, 10], [700, 3]]
     assert [[float(value) for value in row] for row in chart["rows"]] == chart["points"]
+    assert [[float(value) for value in row] for row in chart["rawRows"]] == chart["points"]
 
 
 @needs_chrome
@@ -139,6 +146,8 @@ def test_genome_copy_number_points_match_unmasked_table_bins_in_genome_order(tmp
                 points: option.series.filter((series) => series.type === 'scatter').flatMap((series) => series.data),
                 rows: [...table.querySelectorAll('tbody tr')].map((row) =>
                   [...row.querySelectorAll('td')].map((cell) => cell.textContent.trim())),
+                rawRows: [...table.querySelectorAll('tbody tr')].map((row) =>
+                  [...row.querySelectorAll('td')].map((cell) => cell.dataset.rawValue ?? null)),
               };
             })()"""))
 
@@ -152,10 +161,13 @@ def test_genome_copy_number_points_match_unmasked_table_bins_in_genome_order(tmp
         )
     assert observed["adjacent"] and observed["animation"] is False
     assert len(observed["rows"]) == len(bins)
+    assert len(observed["rawRows"]) == len(bins)
     offsets = {}
     cursor = 0
     expected = []
-    for chromosome, start, end, log2, _mask in observed["rows"]:
+    for (chromosome, start, end, log2, _mask), raw, source in zip(
+        observed["rows"], observed["rawRows"], bins, strict=True,
+    ):
         beginning = int(start.replace(",", ""))
         ending = int(end.replace(",", ""))
         if chromosome not in offsets:
@@ -163,6 +175,7 @@ def test_genome_copy_number_points_match_unmasked_table_bins_in_genome_order(tmp
         cursor = max(cursor, offsets[chromosome] + ending)
         if log2 != "—":
             expected.append([(offsets[chromosome] + beginning) / 1_000_000, float(log2)])
+            assert float(raw[3]) == source["log2"]
     assert observed["points"] == [
         [0.0, 0.123456789], [0.002, -1.23456789], [0.0025, 0.0000004321],
     ]
