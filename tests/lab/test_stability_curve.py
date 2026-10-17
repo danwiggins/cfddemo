@@ -117,8 +117,8 @@ def test_default_run_builds_the_curve_and_controls(default_run) -> None:
 
     halves = {view.parameters["half"]: view for view in sample.by_transform("split")}
     selected = "fragment-size"
-    original_a = halves["A"].results.pop(selected)
     original_b = halves["B"].results[selected]
+    original_a = halves["A"].results.pop(selected)
     try:
         def fragment_panel():
             return next(p for p in views.stability_panels(sample)
