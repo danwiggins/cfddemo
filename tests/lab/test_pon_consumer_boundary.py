@@ -474,6 +474,68 @@ def test_target_binding_carries_same_selection_into_derived_runs(tmp_path: Path,
         pon_consumer.selection_from_payload(target.extras["pon_selection"], tmp_path, "0" * 64)
 
 
+def test_bound_copy_number_run_consumes_selected_panel_bytes_and_grid(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    store = LabStore(tmp_path)
+    panel_bytes = b"verified synthetic panel"
+    digest = hashlib.sha256(panel_bytes).hexdigest()
+    panel = store.lab / "assets" / "pon" / f"{digest}.rds"
+    panel.parent.mkdir(parents=True)
+    panel.write_bytes(panel_bytes)
+    grid_sha256 = "d" * 64
+    selection = pon.PonSelection(
+        "healthy-v1", "healthy-v1:1", "lab_loo_v1", digest, panel, 10,
+        "b" * 64, "c" * 64, grid_sha256, "e" * 64, "f" * 64,
+        "1" * 64, "2" * 64, "3" * 64, (), False,
+    )
+    monkeypatch.setattr(pon_consumer, "selection_for_target", lambda *_, **__: selection)
+    target = RunTarget(
+        input_id="4" * 64, source_id="5" * 64, input_dir=tmp_path,
+        reference_id="hg38", reference_sha256="b" * 64,
+        extras={"counting_bam": str(tmp_path / "counting.bam"), "counted_reads": 2_000_000},
+    )
+    manifest = {
+        "kind": "aligned", "tools": {"minimap2": "2.28", "samtools": "1.20"},
+        "mmi_sha256": "6" * 64, "aligner_argv": ["minimap2", "-ax", "map-ont"],
+    }
+    items = pon_consumer.bind_target(
+        store, plan(load_registry(), only=["copy-number"]), target, manifest,
+        cohort_id="healthy-v1",
+    )
+    bound = next(item.algorithm for item in items if item.algorithm.id == "copy-number")
+    assert bound.parameters["pon_sha256"] == digest
+    seen: dict[str, object] = {}
+    actual_grid = grid_sha256
+
+    def measure(counting, counted, scanned, work, *, toolchain, assets, parameters, pon, validate_grid):
+        validate_grid(actual_grid)
+        stage_verified_pon(pon, work / "verified-panel.rds", parameters.pon_sha256)
+        seen.update(panel=pon, contract=parameters.contract(), counted=counted)
+        return SimpleNamespace(
+            bins=[], segments=[{"call": "NEUT", "n_bins": 1, "median_log2": 0.0}],
+            tumor_fraction=0.0, ploidy=2.0, identifiable=True,
+        )
+
+    monkeypatch.setattr(cn_module, "_toolchain", lambda: object())
+    monkeypatch.setattr(cn_module.ichor, "resolve_assets", lambda *_: object())
+    monkeypatch.setattr(cn_module.ichor, "measure", measure)
+    out = tmp_path / "attempt" / "artifacts"
+    out.mkdir(parents=True)
+    output = bound.run(target.context(store.root), out)
+    assert seen == {"panel": panel, "contract": bound.parameters, "counted": 2_000_000}
+    assert next(metric for metric in output.metrics if metric["metric_id"] == "pon_policy")["value"] == "lab_loo_v1"
+
+    actual_grid = "0" * 64
+    with pytest.raises(LabProblem) as mismatch:
+        bound.run(target.context(store.root), out)
+    assert "grid" in mismatch.value.cause
+    actual_grid = grid_sha256
+    panel.write_bytes(b"changed panel bytes")
+    with pytest.raises(CopyNumberError, match="digest verification"):
+        bound.run(target.context(store.root), out)
+
+
 @pytest.mark.parametrize("platform,example", [("illumina", False), ("ont", True)])
 def test_implicit_ont_panel_does_not_block_other_input_kinds(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, platform: str, example: bool,
