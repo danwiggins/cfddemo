@@ -154,34 +154,85 @@ def load_sample(store: LabStore, source_id: str) -> SampleView | None:
     platform_unverified = platform == "unknown"
     legacy_not_ont = (isinstance(manifest, Mapping) and manifest.get("kind") == "prealigned"
                       and "platform" not in manifest and platform == "illumina")
+    algorithms = load_registry()
     supported: set[str] | None = None
     if platform_unverified:
         supported = set()
     elif legacy_not_ont:
-        supported = {algorithm.id for algorithm in load_registry() if "illumina" in algorithm.requires.platforms}
+        supported = {algorithm.id for algorithm in algorithms if "illumina" in algorithm.requires.platforms}
     skip_message = (
         "Stored input platform cannot be verified against its BAM; restore the registered input before viewing results"
         if platform_unverified else
         "Legacy result lacks verified ONT provenance; rerun or repair this sample"
+    )
+    current_cn_version = next(
+        (algorithm.version for algorithm in algorithms if algorithm.id == "copy-number"), None,
     )
 
     def visible_results(
         input_id: str, identities: Mapping[str, str] | None = None,
     ) -> tuple[dict[str, ResultEnvelope], set[str], set[str], dict[str, str]]:
         selected, unreadable, ambiguous, attempts = _selected_results_with_unreadable(store, input_id, identities)
-        if supported is not None:
-            selected = {
-                algorithm_id: envelope if algorithm_id in supported else ResultEnvelope(
-                    algorithm_id=envelope.algorithm_id,
-                    algorithm_version=envelope.algorithm_version,
-                    status="skipped",
-                    skip_reason="platform",
-                    skip_message=skip_message,
-                    provenance=envelope.provenance,
-                )
-                for algorithm_id, envelope in selected.items()
-            }
-        return selected, unreadable, ambiguous, attempts
+        old_cn = selected.get("copy-number")
+        superseded_cn = (old_cn is not None and old_cn.status == "ok" and (current_cn_version is None
+                         or old_cn.algorithm_version != current_cn_version))
+        superseded_ids = {"copy-number"} if superseded_cn else set()
+        for algorithm in algorithms:
+            dependent = selected.get(algorithm.id)
+            if ("copy-number" not in algorithm.upstream or dependent is None
+                    or dependent.status != "ok" or superseded_cn):
+                continue
+            if old_cn is None or old_cn.status != "ok" or current_cn_version is None:
+                superseded_ids.add(algorithm.id)
+                continue
+            consumed = store.selected_upstream_selections(
+                input_id, algorithm.id, dependent.provenance.parameters_sha256,
+            )
+            copy_number = next((item for item in consumed or () if item["algorithm_id"] == "copy-number"), None)
+            if copy_number is None:
+                superseded_ids.add(algorithm.id)
+                continue
+            selected_cn_attempt = store.selected_attempt(
+                input_id, "copy-number", old_cn.provenance.parameters_sha256,
+            )
+            upstream = store.read_result(
+                copy_number["input_id"], "copy-number", copy_number["parameters_sha256"],
+            )
+            if (upstream is None or upstream.algorithm_version != current_cn_version
+                    or copy_number["input_id"] != input_id
+                    or copy_number["parameters_sha256"] != old_cn.provenance.parameters_sha256
+                    or selected_cn_attempt is None
+                    or copy_number["attempt_id"] != selected_cn_attempt.name):
+                superseded_ids.add(algorithm.id)
+        while True:
+            added = {
+                algorithm.id for algorithm in algorithms
+                if algorithm.id in selected and any(upstream in superseded_ids for upstream in algorithm.upstream)
+            } - superseded_ids
+            if not added:
+                break
+            superseded_ids.update(added)
+
+        def visible(algorithm_id: str, envelope: ResultEnvelope) -> ResultEnvelope:
+            if supported is not None and algorithm_id not in supported:
+                reason, message = "platform", skip_message
+            elif algorithm_id in superseded_ids and envelope.status == "ok":
+                reason = "superseded_method"
+                message = "Selected copy-number method or its consumed provenance is not current; rerun this input"
+            else:
+                return envelope
+            return ResultEnvelope(
+                algorithm_id=envelope.algorithm_id,
+                algorithm_version=envelope.algorithm_version,
+                status="skipped", skip_reason=reason, skip_message=message,
+                provenance=envelope.provenance,
+            )
+
+        visible_selected = {
+            algorithm_id: visible(algorithm_id, envelope)
+            for algorithm_id, envelope in selected.items()
+        }
+        return visible_selected, unreadable, ambiguous, attempts
 
     full_results, unreadable, ambiguous, attempts = visible_results(full_input)
     full = InputView("full", full_input, None, {}, full_results, unreadable=unreadable,
