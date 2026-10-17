@@ -184,6 +184,24 @@ def test_default_without_built_panel_stays_none_but_explicit_selection_fails(tmp
         pon_consumer.selection_for_target(cohort_id="healthy-v1", **common)
 
 
+def test_explicit_cohort_is_checked_even_when_copy_number_is_not_planned(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(cohorts, "read_current", lambda *_: None)
+    target = RunTarget(
+        input_id="a" * 64, source_id="b" * 64, input_dir=tmp_path,
+        reference_id="hg38", reference_sha256="c" * 64,
+    )
+    manifest = {
+        "kind": "aligned", "tools": {"minimap2": "2.28", "samtools": "1.20"},
+        "mmi_sha256": "d" * 64, "aligner_argv": ["minimap2", "-ax", "map-ont"],
+    }
+    items = plan(load_registry(), only=["bam-qc"])
+    assert pon_consumer.bind_target(LabStore(tmp_path), items, target, manifest, cohort_id=None) == list(items)
+    with pytest.raises(LabProblem, match="TBX-LAB-020"):
+        pon_consumer.bind_target(LabStore(tmp_path), items, target, manifest, cohort_id="healthy-v1")
+
+
 def test_binding_pins_source_and_all_protocol_hashes(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     generation = SimpleNamespace(cohort_id="healthy-v1", pon_asset_sha256="a" * 64, kind="internal_cohort")
     monkeypatch.setattr(cohorts, "read_current", lambda *_: generation)
@@ -241,6 +259,58 @@ def test_target_binding_carries_same_selection_into_derived_runs(tmp_path: Path,
     assert restored == selection
     with pytest.raises(CopyNumberError, match="path or reference"):
         pon_consumer.selection_from_payload(target.extras["pon_selection"], tmp_path, "0" * 64)
+
+
+def test_member_recompute_runs_pinned_loo_chain_and_requires_success(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from traceback_lab import runner
+
+    store = LabStore(tmp_path)
+    source_id, input_id = "a" * 64, "b" * 64
+    manifest = {
+        "reference_id": "hg38", "reference_sha256": "c" * 64, "kind": "aligned",
+        "tools": {"minimap2": "2.28", "samtools": "1.20"},
+        "mmi_sha256": "d" * 64, "aligner_argv": ["minimap2", "-ax", "map-ont"],
+    }
+    selection = pon.PonSelection(
+        "healthy-v1", "healthy-v1:2", "lab_loo_v1", "e" * 64,
+        tmp_path / "lab" / "assets" / "pon" / f"{'e' * 64}.rds", 10,
+        "c" * 64, "minimap2 2.28; samtools 1.20", "f" * 64,
+        "1" * 64, "2" * 64, "3" * 64, "4" * 64, "5" * 64, (), True,
+    )
+    monkeypatch.setattr(cohorts, "_checked_source_record", lambda *_: {})
+    monkeypatch.setattr(cohorts, "_full_input", lambda *_: (input_id, manifest))
+    monkeypatch.setattr(pon_consumer, "selection_for_generation", lambda *_, **__: selection)
+    expected = object()
+    monkeypatch.setattr(cohorts, "member_from_store", lambda *_, **kwargs: (
+        expected if kwargs["pon_selection"] is selection else None
+    ))
+    observed: dict[str, object] = {}
+
+    def fake_run_plan(store, lock, log, target, items, entries, **kwargs):
+        observed["ids"] = [item.algorithm.id for item in items]
+        observed["digest"] = next(item.algorithm.parameters["pon_sha256"] for item in items
+                                  if item.algorithm.id == "copy-number")
+        observed["target"] = target
+        return [SimpleNamespace(algorithm_id=item.algorithm.id, status="ok") for item in items]
+
+    monkeypatch.setattr(runner, "run_plan", fake_run_plan)
+    generation = SimpleNamespace(cohort_id="healthy-v1")
+    assert pon_consumer.recompute_member(
+        store, generation, source_id, lock=None, log=None, run_id="synthetic", timeout_s=1,
+    ) is expected
+    assert observed["ids"] == ["read-summary", "copy-number", "instability"]
+    assert observed["digest"] == selection.pon_sha256
+    assert observed["target"].extras["pon_selection"]["cohort_version"] == "healthy-v1:2"
+
+    monkeypatch.setattr(runner, "run_plan", lambda *_, **__: [
+        SimpleNamespace(algorithm_id="copy-number", status="failed")
+    ])
+    with pytest.raises(LabProblem, match="TBX-LAB-020"):
+        pon_consumer.recompute_member(
+            store, generation, source_id, lock=None, log=None, run_id="synthetic", timeout_s=1,
+        )
 
 
 def test_builder_recomputes_each_loo_before_selecting_generation(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:

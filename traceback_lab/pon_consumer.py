@@ -142,7 +142,8 @@ def bind_target(
 ) -> list[PlanItem]:
     """Pin a selection once for a full input and every derived control."""
 
-    if not any(item.algorithm.id == "copy-number" for item in items):
+    has_copy_number = any(item.algorithm.id == "copy-number" for item in items)
+    if not has_copy_number and cohort_id is None:
         return list(items)
     from .cohorts import _aligner
 
@@ -152,6 +153,8 @@ def bind_target(
         reference_sha256=target.reference_sha256, aligner_identity=aligner_label,
     )
     if selection is None:
+        return list(items)
+    if not has_copy_number:
         return list(items)
     target.extras["pon_selection"] = selection_payload(selection)
     return bind_copy_number(items, selection)
