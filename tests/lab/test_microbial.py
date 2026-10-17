@@ -7,6 +7,7 @@ import json
 import os
 import subprocess
 import sys
+import traceback
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -507,6 +508,27 @@ def test_classifier_timeout_hides_operator_database_path(tmp_path, monkeypatch, 
     with pytest.raises(RuntimeError, match="timed out or could not start") as failure:
         algorithm.MICROBIAL.run(ctx, _private_out(store))
     assert str(directory) not in str(failure.value)
+    assert failure.value.__suppress_context__
+
+
+def test_database_read_failure_traceback_hides_operator_path(tmp_path, monkeypatch) -> None:
+    from traceback_lab import microbial_db
+
+    store, directory = _database(tmp_path)
+    private_file = directory / "hash.k2d"
+    original_read = os.read
+
+    def fail_private_read(descriptor, size):
+        if os.fstat(descriptor).st_ino == private_file.stat().st_ino:
+            raise OSError(5, "private database read failed", str(private_file))
+        return original_read(descriptor, size)
+
+    with monkeypatch.context() as patch:
+        patch.setattr(microbial_db.os, "read", fail_private_read)
+        with pytest.raises(MicrobialDbError, match="could not be verified") as failure:
+            inspect_database(store)
+    rendered = "".join(traceback.format_exception(failure.value))
+    assert str(private_file) not in rendered
     assert failure.value.__suppress_context__
 
 

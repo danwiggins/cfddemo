@@ -350,7 +350,7 @@
               h("td", {}, row.cohort_p975 === null ? `unavailable (n=${row.cohort_n})` : `${fmt(row.cohort_p975)} (n=${row.cohort_n})`),
               h("td", {}, row.above_cohort_p975 === null ? "no cohort reference" : row.above_cohort_p975 ? "above cohort percentile" : "at or below cohort percentile"))))))
           : h("p", {}, microbial.microbial_rpm_primary === 0
-            ? "Measured zero candidate taxa among bacteria, archaea, viruses, and fungi under this database and read-length policy."
+            ? "No species-level microbial estimate was returned under this database and read-length policy. Reads classified above species rank do not establish absence."
             : "No candidate microbial taxa are displayed in this profile.")));
     }
     const identityPairs = sample.identity_pairs || [];
