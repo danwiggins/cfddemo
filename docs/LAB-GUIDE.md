@@ -184,8 +184,9 @@ plan. For a stored sample, a selected read-summary can show eligible depth and
 minimum-depth gates; cached reuse and other adapter checks remain decisions for
 the run.
 The stored-sample zero budget covers reused ingest and alignment only; it is
-not a sufficiency check for analysis scratch. Excluded stored chunks appear in
-both human and JSON output.
+not a sufficiency check for analysis scratch. Nonempty excluded-chunk lists
+appear in both human and JSON output. With `--force`, a prior read-summary does not supply
+depth predictions for the new run.
 
 **Interruption.** Ctrl-C (or SIGTERM) stops the current step, kills its tools
 and exits 6. Completed results are kept; rerun the same command.

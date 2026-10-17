@@ -282,7 +282,6 @@ def _dry_run(args: argparse.Namespace, store: LabStore, progress: Callable[[str]
                 "TBX-LAB-017",
                 cause="the stored aligned input has no valid reference binding",
                 fix="Rerun with the original BAM or chunk paths: `traceback lab run INPUT`",
-                data={"candidates": []},
             )
         data["sample"] = {"id12": id12_for(store, source_id), "input_id": aligned.input_id}
         data["reference_id"] = manifest["reference_id"]
@@ -333,6 +332,9 @@ def _dry_run(args: argparse.Namespace, store: LabStore, progress: Callable[[str]
             identity = execution_identity(summary, reference_sha256=manifest["reference_sha256"])
             selected = store.read_result(aligned.input_id, summary.id, identity)
             if selected is not None and selected.status == "ok":
+                plan_rows[next(index for index, item in enumerate(items) if item.algorithm.id == "read-summary")][
+                    "decision"
+                ] = "reused (selected result)"
                 values = {metric.metric_id: metric.value for metric in selected.metrics}
                 eligible = values.get("eligible_reads")
                 if isinstance(eligible, int) and not isinstance(eligible, bool) and eligible >= 0:
@@ -346,9 +348,6 @@ def _dry_run(args: argparse.Namespace, store: LabStore, progress: Callable[[str]
                             row["minimum_eligible_reads"] = minimum
                         elif minimum:
                             row["decision"] = "depth minimum met; other checks at run time"
-                    plan_rows[next(index for index, item in enumerate(items) if item.algorithm.id == "read-summary")][
-                        "decision"
-                    ] = "reused (selected result)"
         for row in plan_rows:
             if row["decision"] == "decided after alignment":
                 row["decision"] = "decided at run time"

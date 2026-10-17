@@ -360,8 +360,10 @@ def test_stored_dry_run_uses_selected_depth_without_writing(
 
     def snapshot() -> dict[str, str]:
         return {
-            str(path.relative_to(root)): hashlib.sha256(path.read_bytes()).hexdigest()
-            for path in root.rglob("*") if path.is_file()
+            str(path.relative_to(root)): (
+                "dir" if path.is_dir() else hashlib.sha256(path.read_bytes()).hexdigest()
+            )
+            for path in root.rglob("*") if path.is_dir() or path.is_file()
         }
 
     def selected_result_for(value):
@@ -375,7 +377,10 @@ def test_stored_dry_run_uses_selected_depth_without_writing(
 
     with store.writer("other", "r-20261017-1200-aaab"):
         before = snapshot()
-        monkeypatch.setattr(run_module.shutil, "disk_usage", lambda _root: SimpleNamespace(free=3 * 1024**3))
+        monkeypatch.setattr(
+            run_module, "shutil",
+            SimpleNamespace(disk_usage=lambda _root: SimpleNamespace(free=3 * 1024**3)),
+        )
         code, payload = _json(
             capsys, "run", "latest", "--root", str(root),
             "--only", "delfi-ratio", "--dry-run",
@@ -407,6 +412,12 @@ def test_stored_dry_run_uses_selected_depth_without_writing(
                 capsys, "run", "latest", "--root", str(root),
                 "--only", "delfi-ratio", "--dry-run",
             )
+        with monkeypatch.context() as patch:
+            patch.setattr(LabStore, "read_result", selected_result_for(SimpleNamespace(status="ok", metrics=[])))
+            no_depth_code, no_depth = _json(
+                capsys, "run", "latest", "--root", str(root),
+                "--only", "delfi-ratio", "--dry-run",
+            )
         for malformed in (
             {"reference_id": "synth"},
             {"reference_id": "synth", "reference_sha256": "invalid"},
@@ -427,7 +438,7 @@ def test_stored_dry_run_uses_selected_depth_without_writing(
                 capsys, "run", "latest", "--root", str(root), "--dry-run",
             )
         assert snapshot() == before
-    assert code == human_code == forced_code == met_code == incomplete_code == incomplete_human_code == 0
+    assert code == human_code == forced_code == met_code == no_depth_code == incomplete_code == incomplete_human_code == 0
     data = payload["data"]
     assert data["sample"]["id12"] == first["data"]["sample"]["id12"]
     assert data["sample"]["input_id"] == first["data"]["sample"]["input_id"]
@@ -459,6 +470,9 @@ def test_stored_dry_run_uses_selected_depth_without_writing(
         assert "eligible_reads" not in missing
         assert all(row["decision"] == "decided at run time" for row in missing["plan"])
     assert met["data"]["plan"][1]["decision"] == "depth minimum met; other checks at run time"
+    assert "eligible_reads" not in no_depth["data"]
+    assert no_depth["data"]["plan"][0]["decision"] == "reused (selected result)"
+    assert no_depth["data"]["plan"][1]["decision"] == "decided at run time"
     assert incomplete["data"]["chunks"] == {"count": None, "bytes": None, "excluded": [4]}
     assert "INPUT     unknown (stored chunk record incomplete) · excluded [4]" in incomplete_human
 
