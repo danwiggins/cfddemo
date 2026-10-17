@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 
+import pysam
 import pytest
 
 from tests.lab.test_landing import _dom, needs_chrome
@@ -12,9 +13,18 @@ from traceback_lab.store import LabStore
 from traceback_lab.web.api import LabApi
 from traceback_lab.web.server import RunningLabServer
 
-
 SOURCE = "b" * 64
 INPUT = "c" * 64
+
+
+def _aligned_ont_input(store: LabStore) -> None:
+    input_dir = store.inputs_dir / INPUT
+    input_dir.mkdir(parents=True)
+    (input_dir / "manifest.json").write_text('{"kind":"aligned","platform":"ont"}')
+    header = {"HD": {"VN": "1.6"}, "SQ": [{"SN": "chr1", "LN": 1000}],
+              "RG": [{"ID": "synthetic", "PL": "ONT"}]}
+    with pysam.AlignmentFile(str(input_dir / "aligned.bam"), "wb", header=header):
+        pass
 
 
 def _result(identity: str, value: int, input_id: str = INPUT) -> ResultEnvelope:
@@ -32,9 +42,7 @@ def _result(identity: str, value: int, input_id: str = INPUT) -> ResultEnvelope:
 def _malformed_store(tmp_path) -> LabStore:
     store = LabStore(tmp_path)
     store.ensure()
-    manifest = store.inputs_dir / INPUT / "manifest.json"
-    manifest.parent.mkdir(parents=True)
-    manifest.write_text('{"kind":"aligned"}')
+    _aligned_ont_input(store)
     store.sources_dir.mkdir(parents=True)
     (store.sources_dir / f"{SOURCE}.json").write_text(json.dumps({
         "source_id": SOURCE, "example": False, "excluded": [], "derived": [],
@@ -51,9 +59,7 @@ def _malformed_store(tmp_path) -> LabStore:
 def _ambiguous_store(tmp_path) -> LabStore:
     store = LabStore(tmp_path)
     store.ensure()
-    manifest = store.inputs_dir / INPUT / "manifest.json"
-    manifest.parent.mkdir(parents=True)
-    manifest.write_text('{"kind":"aligned"}')
+    _aligned_ont_input(store)
     store.sources_dir.mkdir(parents=True)
     (store.sources_dir / f"{SOURCE}.json").write_text(json.dumps({
         "source_id": SOURCE, "example": False, "excluded": [], "derived": [],
@@ -99,9 +105,7 @@ def test_unreadable_derived_result_is_named_in_stability(tmp_path) -> None:
     store = LabStore(tmp_path)
     store.ensure()
     derived_input = "d" * 64
-    manifest = store.inputs_dir / INPUT / "manifest.json"
-    manifest.parent.mkdir(parents=True)
-    manifest.write_text('{"kind":"aligned"}')
+    _aligned_ont_input(store)
     store.sources_dir.mkdir(parents=True)
     (store.sources_dir / f"{SOURCE}.json").write_text(json.dumps({
         "source_id": SOURCE, "example": False, "excluded": [],
