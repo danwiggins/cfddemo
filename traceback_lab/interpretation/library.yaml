@@ -1027,13 +1027,13 @@ entries:
     reference: {kind: internal_cohort}
     performance:
       kind: classes
-      value: "Single-cohort classes, no published cut-off: 1-4 kb fragments marked delayed blood processing (over 40% of samples stored 6-24 h showed it; rapidly processed samples did not); >7.5 kb marked cell lysis during plasma processing"
-      platform: "ONT MinION (median 4.7M reads)"
-      depth: "1-16M reads"
+      value: "Published ONT context, not a cutoff for >300 bp: 1-4 kb enrichment was associated with delayed processing in a neuroendocrine cohort (>40% of samples stored 6-24 h); >7.5 kb fragments were consistent with cell lysis in one cohort"
+      platform: "ONT MinION R9.4.1 (pan-cancer/healthy) and PromethION R10.4.1 (neuroendocrine)"
+      depth: "Pan-cancer/healthy MinION subset: 1-16M reads (median 4.7M); no validated depth for this Lab scalar"
       source: "Berman 2026, Genome Biol"
     performance_missing_reason: null
-    meaning_high: "More long molecules: delayed processing (white-cell DNA) or cell lysis, or library chimeras."
-    meaning_low: "Mostly mono- and di-nucleosomal cfDNA."
+    meaning_high: "More >300 bp molecules; inspect the 1-4 kb and >7.5 kb classes for processing artifacts and consider library chimeras."
+    meaning_low: "Few molecules above 300 bp."
     confounders: ["time to spin", "tube type", "ligation chimeras", "ONT size bias toward longer fragments"]
     next_steps:
       analytical: ["Check time to spin and tube type", "Compare with the supplementary (chimera) share"]
@@ -1056,13 +1056,13 @@ entries:
     reference: {kind: internal_cohort}
     performance:
       kind: classes
-      value: "Over 40% of samples stored 6-24 h before processing showed the 1-4 kb signature; rapidly processed samples did not. No published cut-off"
-      platform: "ONT MinION"
-      depth: "1-16M reads"
+      value: "In a neuroendocrine ONT cohort, over 40% of samples stored 6-24 h at room temperature showed 1-4 kb enrichment; rapidly processed samples did not. No validated fraction cutoff"
+      platform: "ONT PromethION R10.4.1 (neuroendocrine cohort)"
+      depth: "No validated depth for this Lab scalar"
       source: "Berman 2026, Genome Biol"
     performance_missing_reason: null
-    meaning_high: "Delayed blood processing released white-cell DNA (DNASE1L3-type fragmentation)."
-    meaning_low: "No sign of delayed processing."
+    meaning_high: "An elevated 1-4 kb share is consistent with delayed blood processing and blood-derived DNA; long molecules can also have biological causes."
+    meaning_low: "No elevation in this 1-4 kb share."
     confounders: ["time to spin", "tube type", "cancer with high cfDNA levels (the same paper reports 1-4 kb DNA in some cancers)"]
     next_steps:
       analytical: ["Check time to spin and tube type"]
@@ -1086,13 +1086,13 @@ entries:
     qc_band: {direction: lower_is_better, pass: 0.001, warn: 0.01}
     performance:
       kind: classes
-      value: "Ultra-long (>7.5 kb) fragments marked cell lysis during plasma processing; no published cut-off"
-      platform: "ONT MinION"
+      value: "In one ONT cohort, >7.5 kb fragments decreased after high-speed spin and were consistent with blood-cell lysis during plasma processing; no validated fraction cutoff"
+      platform: "ONT MinION R9.4.1 (pan-cancer/healthy cohort)"
       depth: "1-16M reads"
       source: "Berman 2026, Genome Biol"
     performance_missing_reason: null
-    meaning_high: "Cells lysed during plasma processing, releasing genomic DNA."
-    meaning_low: "No sign of lysis."
+    meaning_high: "An elevated >7.5 kb share is consistent with blood-cell lysis during processing, including plasma thawing."
+    meaning_low: "No elevation in this >7.5 kb share."
     confounders: ["centrifugation protocol", "freeze-thaw", "tube type"]
     next_steps:
       analytical: ["Check the plasma spin protocol"]
@@ -1190,13 +1190,13 @@ entries:
     min_depth_x: null
     reference:
       kind: published_mean
-      statistic: "median, cancer and healthy samples pooled (Illumina)"
+      statistic: "median, cancer and healthy samples pooled (Illumina WGS; different filters and denominator from this Lab metric)"
       value: 0.0032
       unit: "% of reads"
       source: "van der Pol 2023, Genome Biol"
     performance:
       kind: auc
-      value: "Adding mtDNA features to copy number raised AUC from 0.73 to 0.81 (abstract; the Results text says 0.82); 655 cancer and 200 healthy samples, random forest"
+      value: "Published Illumina random forest: ichorCNA tumour fraction alone AUC 0.73; adding mtDNA fraction AUC 0.81 in the abstract (0.82 in Results), n=655 cancer/200 healthy. Not validated for this ONT scalar"
       platform: Illumina
       depth: "0.1-30x"
       source: "van der Pol 2023, Genome Biol"
