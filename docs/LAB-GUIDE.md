@@ -197,8 +197,8 @@ ROOT, home, login and chunk names redacted) is ever stored.
 | id | What it reports |
 |---|---|
 | `read-summary` | intermediate: one pass over the aligned BAM into memmapped columns (no read names); every pysam algorithm and every downsample or split-half view reads it |
-| `bam-qc` | primaries, mapped and MAPQ ≥ 20 shares, supplementary share (chimera proxy), mean read Q, share of sampled genome covered ≥ 1x, GC-bias slope, duplicate share (only when marked) |
-| `depth` | eligible reads (primary, MAPQ ≥ 20, chr1–22/X/Y), mean span, approximate depth; the index count is shown only as an upper bound |
+| `bam-qc` | primaries, mapped and MAPQ ≥ 20 shares, supplementary share, mean read Q, share of sampled genome covered ≥ 1x, GC-bias slope, duplicate share (only when marked); supplementary share as a chimera proxy and mean read Q interpretation are ONT-specific |
+| `depth` | eligible reads (primary, MAPQ ≥ 20, chr1–22/X/Y), mean aligned span per eligible read, approximate aligned-base depth; the index count is shown only as an upper bound, and Illumina aligned span is not template length (`abs(TLEN)`) |
 | `fragment-size` | 1-bp aligned-span histogram, mode, short (< 150 bp) share, mono/di peaks, 10 bp periodicity |
 | `short-read-fragment-size` | separate exploratory paired-end Illumina histogram and size summaries from absolute BAM TLEN; requires a prealigned BAM with every `@RG PL:ILLUMINA` |
 | `copy-number` | tumour fraction, ploidy, genome log2 track and segments through the installed ichorCNA toolchain (no panel of normals yet, so read as not interpretable); needs 2M eligible reads, `traceback toolchain install ichor` and `traceback method-asset register --from-toolchain copy-number --root R` |
@@ -245,8 +245,9 @@ metrics are keyed to `short-read-fragment-size`; `fragment-size` remains the
 ONT aligned-span measurement. The normal Illumina run also reports read
 summary, aligned-base depth, and BAM QC, including downsample and split views.
 ONT-only algorithms skip with reason `platform`; the CNA spike is omitted for
-Illumina. Result and cohort compatibility identities include platform, so an
-Illumina measurement cannot reuse an ONT result or reference range. No clinical
+Illumina. Result and cohort compatibility identities distinguish platforms
+while retaining the historical ONT identity encoding, so an Illumina
+measurement cannot reuse an ONT result or reference range. No clinical
 cutoff, short-read healthy range, or cross-platform comparison is supplied.
 If an Illumina BAM was ingested by the earlier opt-in TLEN path, run it again
 from the original BAM to create its platform-specific input identity. The old
@@ -479,7 +480,7 @@ Chunks declare different `@RG` basecall models (exit 3). Run each model's chunks
 
 ### TBX-LAB-009
 
-An aligned BAM's `@SQ` lines differ from the registered reference, or the inputs mix aligned and unaligned BAMs (exit 3). The cause lists the first three differences. Pass the unaligned chunks and let the Lab align, or register the FASTA the BAM was aligned to.
+An aligned BAM's `@SQ` lines differ from the registered reference, the inputs mix aligned and unaligned BAMs, or more than one aligned BAM is supplied (exit 3). The cause lists the first three reference differences when applicable. Pass the unaligned chunks and let the Lab align, or register the FASTA the BAM was aligned to; supply one prealigned BAM at a time.
 
 ### TBX-LAB-010
 
