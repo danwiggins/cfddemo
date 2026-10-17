@@ -54,6 +54,7 @@ def test_other_sample_prevents_single_sample_ac4_claim(tmp_path):
     assert report["other_input_bytes"] == 10
     assert report["literal_ac4_single_sample_applicable"] is False
     assert report["literal_ac4_at_most_1_2"] is None
+    assert report["literal_lab_inputs_ratio"] is None
 
 
 @pytest.mark.parametrize("kind", ["empty_directory", "zero_byte_file"])
@@ -67,6 +68,7 @@ def test_other_input_presence_prevents_single_sample_claim(tmp_path, kind):
     assert report["other_input_bytes"] == 0
     assert report["literal_ac4_single_sample_applicable"] is False
     assert report["literal_ac4_at_most_1_2"] is None
+    assert report["literal_lab_inputs_ratio"] is None
 
 
 def test_ratio_over_limit_is_reported_false(tmp_path):
@@ -94,6 +96,21 @@ def test_refuses_malformed_full_input_record(tmp_path, entry):
     data["inputs"] = [entry]
     path.write_text(json.dumps(data))
     with pytest.raises(InventoryError, match="full input_id"):
+        account(tmp_path, source)
+
+
+def test_refuses_unknown_full_kind_and_malformed_derived_row(tmp_path):
+    source, _ = _fixture(tmp_path)
+    path = tmp_path / "lab" / "sources" / f"{source}.json"
+    data = json.loads(path.read_text())
+    data["inputs"].append({"input_id": "d" * 64, "kind": "aligned-v2"})
+    path.write_text(json.dumps(data))
+    with pytest.raises(InventoryError, match="full input row"):
+        account(tmp_path, source)
+    data["inputs"].pop()
+    data["derived"].append({"parent_input_id": "invalid", "input_id": "e" * 64})
+    path.write_text(json.dumps(data))
+    with pytest.raises(InventoryError, match="derived parent_input_id"):
         account(tmp_path, source)
 
 

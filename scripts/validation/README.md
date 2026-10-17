@@ -29,8 +29,9 @@ cross-cutting subsets of those buckets and must not be added a second time.
 `recorded_included_chunk_bytes` sums only chunk sizes
 preserved in the source record; excluded chunk bytes are unknown, so this is not
 automatically the complete original S required by D30.
-The inventory is capped at 100,000 entries by default and refuses links or
-unreadable entries rather than reporting an incomplete total. It is a best-effort
+The inventory is capped at 100,000 entries by default and refuses symlinks,
+special files or unreadable entries rather than reporting an incomplete total.
+Values are apparent file bytes, counting each hard-link path separately. It is a best-effort
 snapshot if a writer runs concurrently. This receipt does not establish full-FBB
 runtime, peak disk/RSS or cached-rerun acceptance.
 

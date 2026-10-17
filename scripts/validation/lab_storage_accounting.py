@@ -46,7 +46,7 @@ def _record(lab: Path, source_id: str) -> dict[str, Any]:
 
 
 def _inventory(lab: Path, max_entries: int) -> tuple[dict[str, int], int, set[str]]:
-    """Count each file once; reject links and capped/incomplete walks."""
+    """Count each path once; reject symlinks, special files and incomplete walks."""
     sizes: dict[str, int] = defaultdict(int)
     pending = [lab]
     seen = 0
@@ -101,15 +101,24 @@ def account(root: Path, source_id: str, input_id: str | None = None, *,
         recorded_chunk_bytes: int | None = sum(row["size"] for row in chunks)
     else:
         recorded_chunk_bytes = None
-    full_ids = [_sha(row.get("input_id"), "full input_id") for row in full
-                if isinstance(row, dict) and row.get("kind") in {"aligned", "prealigned"}]
+    full_ids = []
+    for row in full:
+        if not isinstance(row, dict) or row.get("kind") not in {"aligned", "prealigned"}:
+            raise InventoryError("source full input row is malformed")
+        full_ids.append(_sha(row.get("input_id"), "full input_id"))
     if not full_ids or (input_id is None and len(full_ids) != 1):
         raise InventoryError("select one full input_id from the source record")
     selected = input_id or full_ids[0]
     if selected not in full_ids:
         raise InventoryError("input_id is not a full input of this source")
-    derived_ids = [_sha(row.get("input_id"), "derived input_id") for row in derived
-                   if isinstance(row, dict) and row.get("parent_input_id") == selected]
+    derived_ids = []
+    for row in derived:
+        if not isinstance(row, dict):
+            raise InventoryError("source derived input row is malformed")
+        parent = _sha(row.get("parent_input_id"), "derived parent_input_id")
+        derived_id = _sha(row.get("input_id"), "derived input_id")
+        if parent == selected:
+            derived_ids.append(derived_id)
     sample_ids = {selected, *derived_ids}
     sizes, staging_entries, input_entries = _inventory(lab, max_entries)
     bam_bytes = sizes.get(f"inputs/{selected}/aligned.bam")
@@ -145,7 +154,7 @@ def account(root: Path, source_id: str, input_id: str | None = None, *,
         elif parts[0] == "results":
             if len(parts) > 2 and parts[1] in sample_ids:
                 sample_results += size
-                if len(parts) > 3:
+                if len(parts) > 2:
                     result_algorithms[parts[2]] += size
             else:
                 other_results += size
@@ -165,7 +174,7 @@ def account(root: Path, source_id: str, input_id: str | None = None, *,
         "ac4_numerator_scope": "all apparent file bytes under lab/inputs",
         "ac4_denominator_basis": "selected full aligned.bam plus aligned.bam.bai",
         "literal_lab_inputs_bytes": literal_inputs,
-        "literal_lab_inputs_ratio": literal_inputs / denominator,
+        "literal_lab_inputs_ratio": literal_inputs / denominator if not other_input_present else None,
         "literal_ac4_single_sample_applicable": not other_input_present,
         "literal_ac4_at_most_1_2": (literal_inputs * 5 <= denominator * 6)
         if not other_input_present else None,
@@ -180,6 +189,7 @@ def account(root: Path, source_id: str, input_id: str | None = None, *,
         "staging_bytes": staging, "staging_entry_count": staging_entries,
         "temporary_bytes": temporary,
         "complete_lab_persistent_bytes": complete_lab,
+        "accounting_basis": "apparent file bytes; each hard-link path is counted separately",
         "complete_lab_file_count": len(sizes),
         "inventory_consistency": "best-effort snapshot; stop Lab writers for a stable receipt",
     }
