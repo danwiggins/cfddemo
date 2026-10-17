@@ -203,8 +203,9 @@ def _stored_platform(aligned: AlignedInput) -> str:
         platform = for_input(aligned.manifest, aligned.directory / "aligned.bam")
     except (OSError, ValueError) as exc:
         raise LabProblem(
-            "TBX-LAB-024", cause="stored input platform disagrees with its BAM header",
-            fix="Inspect the stored input and rerun from the original BAM",
+            "TBX-LAB-024", cause=f"stored input {aligned.input_id[:12]} platform or BAM is invalid",
+            fix="Restore this stored input from a known-good backup, or re-ingest the original BAM under a fresh ROOT",
+            data={"input_id": aligned.input_id},
         ) from exc
     if platform == "unknown":
         raise LabProblem(

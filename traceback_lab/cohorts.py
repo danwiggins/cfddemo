@@ -309,21 +309,19 @@ def _selected_results(store: LabStore, input_id: str, manifest: dict[str, Any]) 
     from .platforms import for_input
 
     bam_path = store.inputs_dir / input_id / "aligned.bam"
-    # Older aligned metadata may have no BAM. A prealigned input cannot be
-    # assigned a platform without checking its original header.
     try:
-        platform = for_input(manifest, bam_path) if bam_path.is_file() else (
-            "ont" if manifest.get("kind") == "aligned" else "unknown"
-        )
+        platform = for_input(manifest, bam_path)
     except (OSError, ValueError) as exc:
         raise LabProblem(
-            "TBX-LAB-024", cause="cohort input platform disagrees with its BAM header",
-            fix="Inspect the stored input and rerun from the original BAM",
+            "TBX-LAB-024", cause=f"cohort input {input_id[:12]} platform or BAM is invalid",
+            fix="Restore this stored input from a known-good backup, or re-ingest the original BAM under a fresh ROOT",
+            data={"input_id": input_id},
         ) from exc
     if platform == "unknown":
         raise LabProblem(
-            "TBX-LAB-024", cause="cohort input has no verifiable platform declaration or BAM",
+            "TBX-LAB-024", cause=f"cohort input {input_id[:12]} has no verifiable platform declaration",
             fix="Restore the source BAM with unanimous PL:ONT or PL:ILLUMINA read groups",
+            data={"input_id": input_id},
         )
     found: list[CohortResult] = []
     identities: dict[str, str] = {}

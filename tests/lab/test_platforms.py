@@ -96,6 +96,20 @@ def test_unknown_prealigned_platform_is_blocked_in_normal_and_dry_runs(
     assert payload["data"]["code"] == "TBX-LAB-024"
 
 
+def test_prealigned_writer_refuses_unknown_platform_before_publishing(tmp_path: Path) -> None:
+    from traceback_lab.ingest import ingest_prealigned, inspect_chunks, resolve_reference
+    from traceback_lab.problems import LabProblem
+    from traceback_lab.store import LabStore
+
+    root, bam_path = _prealigned_world(tmp_path, (None,))
+    store = LabStore(root)
+    chunkset = inspect_chunks([bam_path], store, write_cache=False)
+    reference = resolve_reference(root, "hg38")
+    with pytest.raises(LabProblem, match="TBX-LAB-024"):
+        ingest_prealigned(store, chunkset, reference)
+    assert not store.inputs_dir.exists() or not list(store.inputs_dir.iterdir())
+
+
 @pytest.mark.parametrize("tamper", ["platform", "kind"])
 @pytest.mark.parametrize("dry_run", [False, True])
 def test_stored_platform_mismatch_is_same_typed_refusal(
@@ -122,6 +136,8 @@ def test_stored_platform_mismatch_is_same_typed_refusal(
     payload = json.loads(capsys.readouterr().out)
     assert code == 3
     assert payload["data"]["code"] == "TBX-LAB-024"
+    assert payload["data"]["input_id"] == input_id
+    assert "fresh ROOT" in payload["data"]["fix"]
 
 
 def test_cohort_refuses_mismatched_stored_platform(tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> None:
@@ -141,8 +157,9 @@ def test_cohort_refuses_mismatched_stored_platform(tmp_path: Path, capsys: pytes
     changed = json.loads(manifest.read_text())
     changed["platform"] = "ont"
     manifest.write_text(json.dumps(changed))
-    with pytest.raises(LabProblem, match="TBX-LAB-024"):
+    with pytest.raises(LabProblem, match="TBX-LAB-024") as error:
         member_from_store(LabStore(root), sample["source_id"])
+    assert error.value.data["input_id"] == sample["input_id"]
 
 
 def test_valid_dry_run_reports_platform_in_sample(tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> None:

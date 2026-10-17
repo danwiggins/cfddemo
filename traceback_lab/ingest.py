@@ -841,6 +841,11 @@ def ingest_prealigned(
     from .platforms import from_rg_lines
 
     platform = from_rg_lines(chunkset.rg_lines)
+    if platform == "unknown":
+        raise LabProblem(
+            "TBX-LAB-024", cause="prealigned BAM has no unanimous supported platform declaration",
+            fix="Use a BAM whose read groups all declare PL:ONT or PL:ILLUMINA",
+        )
     input_id = prealigned_input_id(source_id=source_id, reference_sha256=reference.sha256, platform=platform)
     existing = input_manifest(store, input_id)
     if existing is not None:
