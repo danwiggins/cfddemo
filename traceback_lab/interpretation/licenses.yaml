@@ -3,6 +3,10 @@
 # callout (>= 20px bold) once per route, pills elsewhere.
 version: 0.1.0
 licenses:
+  nipter-lgpl:
+    headline: "LGPL: NIPTeR prenatal analysis"
+    body: "The installed NIPTeR 1.0.2 DESCRIPTION says GNU Lesser General Public License without a version. NIPTeR runs as a separate R process; its license terms and the control cohort's data rights require independent review."
+    url: "https://github.com/molgenis/NIPTeR"
   lionheart-resources-research:
     headline: "RESEARCH-ONLY RESOURCES: LIONHEART cell-type scores"
     body: >-

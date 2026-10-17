@@ -86,6 +86,36 @@ class SessionHangs(_Base):
 
 
 @dataclass
+class InnerRTimeout(_Base):
+    """Exercise inner R timeout and the real worker-group cleanup path."""
+
+    def run(self, ctx: InputContext, out: Path) -> AlgorithmOutput:
+        from traceback_lab.algorithms.fetal_fraction import _run_bounded_r
+
+        ticker = (
+            "import pathlib, sys, time\n"
+            "path = pathlib.Path(sys.argv[1])\n"
+            "end = time.monotonic() + 30\n"
+            "while time.monotonic() < end:\n"
+            "    with path.open('a') as stream: stream.write('tick\\n')\n"
+            "    time.sleep(0.05)\n"
+        )
+        launcher = (
+            "import subprocess, sys\n"
+            "child = subprocess.Popen([sys.executable, '-c', sys.argv[1], sys.argv[2]])\n"
+            "child.wait()\n"
+        )
+        marker = os.environ["LAB_TEST_INNER_R_TICKS"]
+        result = _run_bounded_r(
+            [sys.executable, "-c", launcher, ticker, marker],
+            cwd=out, timeout_seconds=1,
+        )
+        if result.outcome not in ("timeout", "pipe_unclosed"):
+            raise AssertionError(f"expected inner R timeout, got {result.outcome}")
+        raise RuntimeError("synthetic inner R timeout")
+
+
+@dataclass
 class Waits(_Base):
     """Writes LAB_TEST_READY, then sleeps (for interrupt tests)."""
 
@@ -137,3 +167,4 @@ BAD_PANEL = BadPanel("mtdna")
 ASSET_PROBE = AssetProbe("asset-probe", tools=(ToolPin("probe", "2.2.0"),))
 DEPENDS_ON_FAILURE = Counter("tf-concordance", family="composite", upstream=("copy-number",))
 SESSION_HANGS = SessionHangs("cell-origin", cost="slow")
+INNER_R_TIMEOUT = InnerRTimeout("inner-r-timeout", cost="slow")
