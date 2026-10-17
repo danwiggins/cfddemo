@@ -22,6 +22,7 @@
     not_interpretable: ["▨", "not interpretable"],
     skipped: ["○", "skipped"],
     failed: ["✕", "failed"],
+    unavailable: ["?", "result unavailable"],
   };
   const FLAG_TEXT = {
     CLIA: "FLAG: CLIA — health-assessment labels on an individual sample",
@@ -53,6 +54,7 @@
 
   function flagPill(type, text) { return h("span", { class: "flag-pill" }, text || FLAG_TEXT[type] || `FLAG: ${type}`); }
   function tierBadge(tier) { return tier ? h("span", { class: `tier tier-${tier}` }, tier) : h("span", { class: "tier" }, "—"); }
+  function stateReason(state, reason, fallback) { return state === "failed" ? fallback : reason || fallback; }
   function stateChip(metric) {
     const [glyph, text] = STATE[metric.state] || ["", metric.state || "—"];
     const reason = metric.reason ? ` (${metric.reason.replace(/_/g, " ")})` : "";
@@ -93,9 +95,12 @@
       if (target) { target.setAttribute("tabindex", "-1"); target.scrollIntoView({ block: "center" }); target.focus({ preventScroll: true }); }
     } }, `${lic ? lic.headline : id} ↗`);
   }
-  function unverifiedBadge(metric) {
-    const entry = metric.entry || {};
-    return entry.citations && entry.citations.length && !entry.citation_checked ? h("span", { class: "unverified" }, "UNVERIFIED citation") : "";
+  function unverifiedBadge(entry) {
+    return entry && !entry.citation_checked ? h("span", { class: "unverified" }, "UNVERIFIED citation") : "";
+  }
+  function spacedUnverifiedBadge(entry) {
+    const badge = unverifiedBadge(entry);
+    return badge ? [" ", badge] : [];
   }
   function licenseCallouts(sample) {
     const used = sample.licenses || [];
@@ -174,7 +179,7 @@
     const run = curve.run_depth_x;
     const section = h("section", { class: "panel curve", "aria-labelledby": "curve-title" });
     const heading = h("div", { class: "curve-heading" }, h("h3", { id: "curve-title" }, "Depth → utility"),
-      h("span", { class: "legend", "aria-hidden": "true" }, "● usable ◐ unstable ▨ not interpretable ○ skipped ✕ failed ◇ literature"));
+      h("span", { class: "legend", "aria-hidden": "true" }, "● usable ◐ unstable ▨ not interpretable ○ skipped ✕ failed ? unavailable ◇ literature"));
     section.append(heading);
     if (!curve.downsampled) {
       section.append(h("p", { class: "empty" }, h("span", {}, "This run used "), h("code", {}, "--no-downsample"), `. Run `, h("code", {}, `traceback lab run ${sample.id12}`), " to draw the curve."));
@@ -201,7 +206,8 @@
       const cells = h("div", { class: "curve-track" });
       for (const cell of row.cells) {
         const [glyph, text] = CELL[cell.state] || ["·", "no result"];
-        const mark = h("span", { class: `curve-cell cell-${cell.state || "none"}`, title: `${cell.label}: ${text}` }, h("span", { "aria-hidden": "true" }, glyph), h("span", { class: "visually-hidden" }, `${cell.label} ${text}`));
+        const description = stateReason(cell.state, cell.reason, text);
+        const mark = h("span", { class: `curve-cell cell-${cell.state || "none"}`, title: `${cell.label}: ${description}` }, h("span", { "aria-hidden": "true" }, glyph), h("span", { class: "visually-hidden" }, `${cell.label} ${description}`));
         if (cell.depth_x) mark.style.left = pos(cell.depth_x);
         cells.append(mark);
       }
@@ -225,7 +231,7 @@
     }
     section.append(grid);
     section.append(dataTable("Depth curve cells (literature minimums are not measured)", ["Algorithm", ...curve.fractions.map((f) => `${f * 100}%`), "Literature minimum"],
-      curve.rows.map((row) => [row.label, ...row.cells.map((c) => (CELL[c.state] || ["", "—"])[1]), row.min_depth_x ? `${row.min_depth_x}x (literature, not measured)` : "—"])));
+      curve.rows.map((row) => [row.label, ...row.cells.map((c) => stateReason(c.state, c.reason, (CELL[c.state] || ["", "—"])[1])), row.min_depth_x ? `${row.min_depth_x}x (literature, not measured)` : "—"])));
     return section;
   }
 
@@ -276,7 +282,9 @@
     const table = h("table", {}, h("caption", {}, "All samples (by run date, newest first)"),
       h("thead", {}, h("tr", {}, ...["ID", "Run date", "Approx depth", "OK / skipped / failed", "Outside a reference", "Controls", ""].map((t) => h("th", { scope: "col" }, t)))),
       h("tbody", {}, ...rows.map((row) => h("tr", {},
-        h("th", { scope: "row" }, h("a", { href: `#/sample/${row.id12}/findings` }, row.id12), row.example ? h("span", { class: "flag-pill example-pill" }, " EXAMPLE (synthetic)") : ""),
+        h("th", { scope: "row" }, h("a", { href: `#/sample/${row.id12}/findings` }, row.id12), row.example ? h("span", { class: "flag-pill example-pill" }, " EXAMPLE (synthetic)") : "",
+          row.unreadable_results && row.unreadable_results.length ? h("span", { class: "problem" }, ` result unreadable (sample ${row.id12})`) : "",
+          row.ambiguous_results && row.ambiguous_results.length ? h("span", { class: "problem" }, ` result selection ambiguous (sample ${row.id12})`) : ""),
         h("td", {}, row.run_utc ? row.run_utc.slice(0, 10) : "—"),
         h("td", { class: "num" }, row.depth_x !== null ? `${row.depth_x.toPrecision(3)}x` : "—"),
         h("td", {}, `${row.counts.ok} / ${row.counts.skipped} / ${row.counts.failed}`),
@@ -410,7 +418,7 @@
       h("p", { class: "card-value" }, h("strong", {}, fmt(metric.value, metric.unit))),
       strip(metric),
       h("p", {}, "Performance: ", perf ? `${perf.value} (${perf.platform || ""}${perf.depth ? ", " + perf.depth : ""}; ${perf.source || ""})` : (entry.performance_missing_reason || "none published"),
-        entry.citation_checked ? "" : [" ", h("span", { class: "unverified" }, "UNVERIFIED citation")]),
+        spacedUnverifiedBadge(metric.entry)),
       meaning ? h("p", {}, meaning.split(". ")[0] + ".") : "",
       h("p", {}, ...(entry.flags || []).map((f) => flagPill(f)), ...licenses),
       toggle, details);
@@ -443,6 +451,14 @@
     ];
     if (cohortIssue) out.push(h("p", { class: "problem" }, `Cohort reference ${sample.cohort_state.replace(/_/g, " ")}. Cohort states are unavailable for this view; measurements and published references remain visible. ${sample.cohort_problem ? sample.cohort_problem.fix : "Check cohort build and reload."}`));
     if (sample.excluded_chunks && sample.excluded_chunks.length) out.push(h("p", { class: "status-line" }, `Provisional: this input excludes ${sample.excluded_chunks.length} truncated chunks; depth reflects the reads present.`));
+    for (const id of sample.unreadable_results || []) {
+      out.push(h("article", { class: "finding-card problem" },
+        h("h2", {}, `${id}: result unreadable (sample ${sample.id12})`)));
+    }
+    for (const id of sample.ambiguous_results || []) {
+      out.push(h("article", { class: "finding-card problem" },
+        h("h2", {}, `${id}: result selection ambiguous (sample ${sample.id12})`)));
+    }
     for (const a of sample.algorithms.filter((x) => x.status === "failed")) {
       out.push(h("div", { class: "problem" }, `${a.algorithm_id} failed: ${a.failure ? a.failure.first_line : ""}. `, h("a", { href: `#/sample/${sample.id12}/trust-qc` }, "Details in Trust/QC →")));
     }
@@ -461,7 +477,7 @@
       for (const m of groups[key]) { out.push(card(sample, m, seen, first)); first = false; }
     }
     const reasons = (list) => { const c = {}; for (const m of list) c[m.reason || "—"] = (c[m.reason || "—"] || 0) + 1; return Object.entries(c).map(([k, v]) => `${k.replace(/_/g, " ")} ${v}`).join(" · "); };
-    const extras = (m) => [h("span", {}, ...(m.entry && m.entry.license_ids || []).map((id) => seen.has(id) ? licenseRef(sample, id) : (seen.add(id), licenseRef(sample, id)))), unverifiedBadge(m)];
+    const extras = (m) => [h("span", {}, ...(m.entry && m.entry.license_ids || []).map((id) => seen.has(id) ? licenseRef(sample, id) : (seen.add(id), licenseRef(sample, id)))), unverifiedBadge(m.entry)];
     out.push(collapsed(`Not interpretable (${groups.not_interpretable.length})`, reasons(groups.not_interpretable), ["Metric", "Value", "Reason", "Needs", ""],
       groups.not_interpretable.map((m) => [m.label, fmt(m.value, m.unit), (m.reason || "").replace(/_/g, " "), m.entry && m.entry.min_depth_x ? `${m.entry.min_depth_x}x` : "—", extras(m)])));
     out.push(collapsed(`No reference (${groups.no_reference.length})`, reasons(groups.no_reference), ["Metric", "Value", "Reason", "Reference shown", ""],
@@ -546,7 +562,7 @@
           const clipped = unit !== "unit" && Math.abs(p.deviation) > clip;
           marks.push(svg("text", { x: x(p.fraction), y: y(p.deviation) + 4, "text-anchor": "middle", class: "pt" }, clipped ? (p.deviation > 0 ? "↑" : "↓") : "●"));
         } else {
-          marks.push(svg("text", { x: x(p.fraction), y: hgt - 6, "text-anchor": "middle", class: "gap" }, (p.reason || p.state || "gap").toString().slice(0, 10)));
+          marks.push(svg("text", { x: x(p.fraction), y: hgt - 6, "text-anchor": "middle", class: "gap" }, stateReason(p.state, p.reason, p.state || "gap").toString().slice(0, 10)));
         }
       }
       if (panel.split) {
@@ -560,7 +576,7 @@
       grid.append(h("figure", { class: "multiple" }, h("figcaption", {}, h("strong", {}, panel.label), ` — ${panel.verdict}`),
         svg("svg", { viewBox: `0 0 ${w} ${hgt}`, role: "img", "aria-label": label, class: "multiple-svg" }, svg("title", {}, label), ...marks),
         h("p", { class: "help" }, unit === "unit" ? "y: difference from full depth (metric's unit)" : "y: relative deviation from full depth, % (clipped ±50%)")));
-      for (const p of panel.points) tableRows.push([panel.label, `${p.fraction * 100}%`, p.value, p.deviation, p.state || "—"]);
+      for (const p of panel.points) tableRows.push([panel.label, `${p.fraction * 100}%`, p.value, p.deviation, stateReason(p.state, p.reason, p.state || "—")]);
       if (panel.split) tableRows.push([panel.label, "split A / B", `${fmt(panel.split.a)} / ${fmt(panel.split.b)}`, `${(panel.split.relative_abs_diff * 100).toFixed(1)}% |A−B|`, panel.split.stable ? "stable" : "unstable"]);
     }
     out.push(grid, dataTable("Stability: every point", ["Metric", "Fraction", "Value", "Deviation", "State"], tableRows));
@@ -594,7 +610,7 @@
           h("h3", {}, c.label), h("p", { class: "help" }, c.algorithm_id),
           h("p", {}, `Original evidence: ${c.origin_tier || "—"} (${c.origin_platform || "—"})`),
           h("p", {}, "Footnote: ", c.footnote || "none published", c.footnote_source ? ` (${c.footnote_source})` : "",
-            c.citation_checked ? "" : [" ", h("span", { class: "unverified" }, "UNVERIFIED citation")]),
+            spacedUnverifiedBadge(c.has_library_entry ? c : null)),
           h("p", {}, c.status === "skipped" ? `skipped (${(c.skip_reason || "").replace(/_/g, " ")})` : c.status === "ok" ? "ran" : c.status,
             c.min_depth_x ? ` · literature minimum ${c.min_depth_x}x` : ""),
           h("p", {}, ...c.license_ids.map((id) => licenseRef(sample, id)))))));
@@ -631,7 +647,7 @@
           h("td", {}, a.provenance.reference_id),
           h("td", {}, a.provenance.timestamp_utc),
           h("td", {}, ...(e.license_ids || []).map(firstUse)),
-          h("td", {}, (e.citations || []).join(", ") || "—", m.entry && !e.citation_checked ? [" ", h("span", { class: "unverified" }, "UNVERIFIED citation")] : ""),
+          h("td", {}, (e.citations || []).join(", ") || "—", spacedUnverifiedBadge(m.entry)),
           h("td", {}, ref.kind === "none" || !ref.kind ? "none" : `${ref.kind}${ref.source ? ": " + ref.source : ""}`)));
       }
     }
@@ -658,7 +674,7 @@
     const c = (sample.catalog || []).find((x) => x.algorithm_id === algorithmId);
     const out = [];
     if (c) out.push(h("p", { class: "help" }, tierBadge(c.tier), ` As run here (ONT). Original evidence: ${c.origin_tier || "—"}. Footnote: ${c.footnote || "none published"}`,
-      c.citation_checked ? "" : [" ", h("span", { class: "unverified" }, "UNVERIFIED citation")]));
+      spacedUnverifiedBadge(c.has_library_entry ? c : null)));
     for (const id of (c ? c.license_ids : [])) {
       if (seen.has(id)) { out.push(licenseRef(sample, id)); continue; }
       seen.add(id);
@@ -689,7 +705,7 @@
     };
     families.forEach(([, label], i) => tabs.append(h("button", { type: "button", class: "control subtab", "aria-pressed": "false", onclick: () => show(i) }, label)));
     out.push(tabs, body);
-    const initial = ["fragment-size", "end-motifs", "delfi-ratio", "long-tail", "mtdna", "breakpoint-motifs"].some((id) => algo(sample, id))
+    const initial = ["fragment-size", "end-motifs", "delfi-ratio", "tss-profile", "long-tail", "mtdna", "breakpoint-motifs", "lionheart"].some((id) => algo(sample, id))
       ? 0 : algo(sample, "copy-number") ? 1 : 2;
     show(initial);
     return out;
@@ -726,6 +742,33 @@
         details,
       );
     }).catch((error) => slot.replaceWith(h("p", { class: "problem" }, `4-mer table unavailable (${error.message}). The scalar result remains in Findings.`)));
+    return [section];
+  }
+
+  function lionheartSignals(sample) {
+    const a = algo(sample, "lionheart");
+    if (!a) return [];
+    const section = h("section", { class: "panel" }, h("h2", {}, "LIONHEART cell-type scores"), flagPill("LEGAL"),
+      h("p", {}, "Experimental ONT single-end extraction. Scores are sample-standardized correlations, not cell fractions or cancer predictions."),
+      ...context(sample, "lionheart", new Set()));
+    if (a.status !== "ok") return [section, absent(a, "lionheart")];
+    const slot = h("div", { "aria-live": "polite" }, h("p", {}, "Loading raw cell-type scores…"));
+    section.append(slot);
+    artifact(sample, "lionheart", "cell-type-scores").then((data) => {
+      if (data.kind !== "lionheart-scores.v1" || data.input_mode !== "experimental_single_end_ont" ||
+          data.score_kind !== "sample_standardized_pearson_r" || !Array.isArray(data.scores) ||
+          data.scores.length !== 898 || data.scores.some((row) =>
+            !["ATAC", "DNase"].includes(row.assay) || typeof row.cell_type !== "string" ||
+            (row.score !== null && (typeof row.score !== "number" || !Number.isFinite(row.score))))) {
+        throw new Error("score panel is malformed");
+      }
+      const table = h("table", { class: "data-table" },
+        h("caption", {}, "LIONHEART raw standardized correlation scores; 898 cell-type references"),
+        h("thead", {}, h("tr", {}, ...["Assay", "Cell type", "Score"].map((name) => h("th", { scope: "col" }, name)))),
+        h("tbody", {}, ...data.scores.map((row) => h("tr", {}, h("th", { scope: "row" }, row.assay),
+          h("td", {}, row.cell_type), h("td", { class: "num" }, fmt(row.score))))));
+      slot.replaceWith(h("details", {}, h("summary", {}, "All 898 raw scores"), h("div", { class: "table-wrap" }, table)));
+    }).catch((error) => slot.replaceWith(h("p", { class: "problem" }, `Cell-type scores unavailable (${error.message}).`)));
     return [section];
   }
 
@@ -813,7 +856,43 @@
       }
       more.push(panel);
     }
-    return [section, ...more, ...breakpointMotifSignals(sample, seen)];
+    return [section, ...more, ...tssProfileSignals(sample), ...breakpointMotifSignals(sample, seen), ...lionheartSignals(sample)];
+  }
+
+  function tssProfileSignals(sample) {
+    const a = algo(sample, "tss-profile");
+    if (!a) return [];
+    const section = h("section", { class: "panel" }, h("h2", {}, "TSS coverage profile"));
+    if (a.status !== "ok") return [section, absent(a, "tss-profile")];
+    const ratio = a.metrics.find((m) => m.metric_id === "central_flank_ratio");
+    const flags = ratio && ratio.entry ? ratio.entry.flags || [] : [];
+    section.append(h("p", { class: "help" }, "GENCODE v46 protein-coding gene TSSs; 50 bp strand-oriented bins across ±1 kb, plotted at bin centres. Central −150 to +50 bp coverage divided by outer-flank coverage. Descriptive gene-set profile only; no expression call or clinical cutoff."),
+      h("p", {}, `Central/flank ratio: ${ratio ? fmt(ratio.value, ratio.unit) : "—"}. ${ratio ? ratio.caption || "" : ""}`),
+      ...flags.map((flag) => flagPill(flag)),
+      ...context(sample, "tss-profile", new Set()));
+    const slot = h("div", { "aria-live": "polite" }, h("p", {}, "Loading TSS coverage…"));
+    section.append(slot);
+    artifact(sample, "tss-profile", "tss-coverage").then((data) => {
+      if (!Array.isArray(data.offset_bp) || !Array.isArray(data.coverage_x) ||
+          data.offset_bp.length !== 40 || data.coverage_x.length !== 40 ||
+          !data.offset_bp.every((offset, index) => offset === -1000 + index * 50) ||
+          !data.coverage_x.every((value) => Number.isFinite(value) && value >= 0) ||
+          !Number.isInteger(data.gene_n) || data.gene_n < 1 ||
+          !Number.isInteger(data.eligible_autosomal_reads) ||
+          !/^[0-9a-f]{64}$/.test(data.annotation_sha256 || "")) {
+        throw new Error("TSS panel dimensions or provenance invalid");
+      }
+      const points = data.offset_bp.map((offset, i) => [offset + 25, data.coverage_x[i]]);
+      const rows = data.offset_bp.map((offset, i) => [`[${offset}, ${offset + 50})`, data.coverage_x[i]]);
+      slot.replaceWith(h("p", { class: "help" }, `${data.gene_n.toLocaleString("en-US")} complete protein-coding gene windows; ${data.eligible_autosomal_reads.toLocaleString("en-US")} eligible autosomal reads. Annotation ${data.annotation_sha256.slice(0, 12)}.`),
+        chart("Mean aligned-fragment coverage across strand-oriented protein-coding TSS windows", {
+          grid: { left: 60, right: 20, top: 20, bottom: 40 },
+          xAxis: { type: "value", name: "bp from TSS (bin centre)", min: -1000, max: 1000 },
+          yAxis: { type: "value", name: "mean coverage ×" },
+          series: [{ type: "line", showSymbol: false, data: points, lineStyle: { color: "#1f5f8b" } }],
+        }, dataTable("TSS coverage in 50 bp bins", ["Bin interval (bp)", "Mean coverage ×"], rows)));
+    }).catch((error) => slot.replaceWith(h("div", { class: "problem" }, `TSS profile could not be drawn (${error.message}).`)));
+    return [section];
   }
 
   function copyNumberSignals(sample) {

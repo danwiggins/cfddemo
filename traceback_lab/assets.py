@@ -1,6 +1,7 @@
 """Local Lab assets with exact-byte resolution and atomic publication.
 
-PMD bytes are supplied by an operator. This module never downloads them,
+Pinned PMD and TSS annotation bytes are supplied by an operator. This module
+never downloads them,
 redistributes them, or infers rights from the presence of a file.
 """
 
@@ -30,6 +31,9 @@ REGISTRATION_SCHEMA = "traceback.lab.asset-registration.v1"
 PMD_KIND = "pmd"
 PMD_FILENAME = "PMD_coordinates_hg38.bed.gz"
 PMD_SHA256 = "e6be0642b7b8dd530247c0c43cbc63165092aa9b9ada632710cedfbdc9b8e3dc"
+TSS_KIND = "tss-annotation"
+TSS_FILENAME = "gencode.v46.basic.annotation.gtf.gz"
+TSS_SHA256 = "d620d548ad23dad6c2d67486b7679d12f00f02f66dd5787183d8e6678dceb9b4"
 _BLOCK = 16 << 20
 
 
@@ -65,9 +69,17 @@ class AssetRecord:
 
 
 def _directory(store: LabStore, kind: str) -> Path:
-    if kind != PMD_KIND:
+    if kind not in (PMD_KIND, TSS_KIND):
         raise AssetError(f"unknown Lab asset {kind!r}")
-    return store.lab / "assets" / PMD_KIND
+    return store.lab / "assets" / kind
+
+
+def _pinned(kind: str) -> tuple[str, str]:
+    if kind == PMD_KIND:
+        return PMD_FILENAME, PMD_SHA256
+    if kind == TSS_KIND:
+        return TSS_FILENAME, TSS_SHA256
+    raise AssetError(f"unknown Lab asset {kind!r}")
 
 
 def _check_contained(store: LabStore, path: Path) -> None:
@@ -152,7 +164,7 @@ def _digest(path: Path) -> tuple[str, int]:
 def open_verified_asset(store: LabStore, record: AssetRecord) -> Iterator[BinaryIO]:
     """Consume one pinned handle, rejecting changes before or during use."""
 
-    path = _directory(store, record.descriptor.kind) / PMD_FILENAME
+    path = _directory(store, record.descriptor.kind) / _pinned(record.descriptor.kind)[0]
     if record.file != path:
         raise AssetError("asset record points outside its registered location")
     _check_contained(store, path)
@@ -197,7 +209,7 @@ def open_verified_asset(store: LabStore, record: AssetRecord) -> Iterator[Binary
 
 def _descriptor(
     size_bytes: int, source_label: str, terms: str, license_id: str | None,
-    *, sha256: str | None = None,
+    *, kind: str = PMD_KIND, sha256: str | None = None,
 ) -> AssetDescriptor:
     if (
         source_label != source_label.strip()
@@ -207,8 +219,8 @@ def _descriptor(
         raise AssetError("source label must be a short description, not a path")
     try:
         return AssetDescriptor(
-            kind=PMD_KIND,
-            sha256=sha256 or PMD_SHA256,
+            kind=kind,
+            sha256=sha256 or _pinned(kind)[1],
             size_bytes=size_bytes,
             origin="user",
             source_label=source_label,
@@ -223,7 +235,7 @@ def _manifest(record: AssetRecord) -> dict[str, Any]:
     return {
         "schema": REGISTRATION_SCHEMA,
         "descriptor": record.descriptor.model_dump(by_alias=True),
-        "file": PMD_FILENAME,
+        "file": _pinned(record.descriptor.kind)[0],
         "registered_utc": datetime.now(UTC).isoformat(timespec="seconds"),
     }
 
@@ -237,16 +249,19 @@ def inspect_asset(
     _check_contained(store, directory)
     if directory.exists() and not directory.is_dir():
         raise AssetError("asset directory is not a directory; inspect it without replacing it")
-    path = directory / PMD_FILENAME
+    filename, pinned_sha256 = _pinned(kind)
+    path = directory / filename
     manifest_path = directory / "manifest.json"
     _check_contained(store, path)
     _check_contained(store, manifest_path)
     _regular_file(path)
     digest, size = _digest(path)
     _check_contained(store, path)
-    if digest != (expected_sha256 or PMD_SHA256):
-        raise AssetError("PMD file differs from the pinned SHA-256; it was not used")
+    if digest != pinned_sha256 or (expected_sha256 is not None and digest != expected_sha256):
+        raise AssetError(f"{kind} file differs from the pinned SHA-256; it was not used")
     if not manifest_path.exists():
+        if kind != PMD_KIND:
+            raise AssetError(f"{kind} registration manifest is missing")
         legacy = _descriptor(
             size, "Legacy pinned PMD; source unrecorded", "unknown", None, sha256=digest,
         )
@@ -279,7 +294,7 @@ def inspect_asset(
             not isinstance(manifest, dict)
             or set(manifest) != {"schema", "descriptor", "file", "registered_utc"}
             or manifest["schema"] != REGISTRATION_SCHEMA
-            or manifest["file"] != PMD_FILENAME
+            or manifest["file"] != filename
         ):
             raise ValueError("unexpected asset manifest fields")
         descriptor = AssetDescriptor.model_validate(manifest["descriptor"])
@@ -319,11 +334,14 @@ def add_asset(
     """
 
     directory = _directory(store, kind)
+    filename, pinned_sha256 = _pinned(kind)
+    label = "PMD" if kind == PMD_KIND else "TSS annotation"
     source = _regular_source(source)
     digest, source_size = _digest(source)
-    if digest != PMD_SHA256:
-        raise AssetError("source PMD file does not match the pinned SHA-256")
-    descriptor = _descriptor(source_size, source_label, terms, license_id)
+    if digest != pinned_sha256:
+        raise AssetError(f"source {kind} file does not match the pinned SHA-256")
+    descriptor = (_descriptor(source_size, source_label, terms, license_id) if kind == PMD_KIND else
+                  _descriptor(source_size, source_label, terms, license_id, kind=kind))
     parent = directory.parent
     _check_contained(store, parent)
     if directory.exists() or directory.is_symlink():
@@ -351,16 +369,16 @@ def add_asset(
         except OSError as exc:
             if linked:
                 raise AssetPublishUncertain(
-                    "PMD metadata is visible but durability is unconfirmed; inspect before retry"
+                    f"{label} metadata is visible but durability is unconfirmed; inspect before retry"
                 ) from exc
-            raise AssetError("could not publish PMD metadata safely") from exc
+            raise AssetError(f"could not publish {label} metadata safely") from exc
         finally:
             if staging is not None:
                 shutil.rmtree(staging, ignore_errors=True)
         return record
 
     def build(staging: Path) -> None:
-        target = staging / PMD_FILENAME
+        target = staging / filename
         copied = hashlib.sha256()
         try:
             with os.fdopen(_open_regular(source), "rb") as reader:
@@ -373,24 +391,24 @@ def add_asset(
                             try:
                                 block = reader.read(_BLOCK)
                             except OSError as exc:
-                                raise AssetError("source PMD file changed while being copied") from exc
+                                raise AssetError(f"source {label} file changed while being copied") from exc
                             if not block:
                                 break
                             writer.write(block)
                             copied.update(block)
                 except OSError as exc:
                     raise AssetError(
-                        "could not write staged PMD asset; check free space and storage health, then retry"
+                        f"could not write staged {label} asset; check free space and storage health, then retry"
                     ) from exc
                 after = os.fstat(reader.fileno())
             current = os.lstat(source)
         except OSError as exc:
-            raise AssetError("source PMD file changed while being copied") from exc
+            raise AssetError(f"source {label} file changed while being copied") from exc
         _regular_source(source)
         if _file_identity(before) != _file_identity(after) or _file_identity(after) != _file_identity(current):
-            raise AssetError("source PMD file changed while being copied")
-        if copied.hexdigest() != PMD_SHA256 or target.stat().st_size != descriptor.size_bytes:
-            raise AssetError("source PMD file changed while being copied")
+            raise AssetError(f"source {label} file changed while being copied")
+        if copied.hexdigest() != pinned_sha256 or target.stat().st_size != descriptor.size_bytes:
+            raise AssetError(f"source {label} file changed while being copied")
         (staging / "manifest.json").write_bytes(
             canonical_json_bytes(_manifest(AssetRecord(descriptor, target, False)))
         )

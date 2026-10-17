@@ -8,8 +8,11 @@ result's own attempt directory and no component is a symlink.
 
 from __future__ import annotations
 
-import os
+import json
+import heapq
 import math
+import os
+import re
 import shlex
 import stat
 import threading
@@ -20,6 +23,7 @@ from typing import Any
 
 from ..cohort_contracts import CohortGeneration, CohortMember, MetricProjection, project_metric
 from ..cohorts import list_cohorts, member_from_store, read_current
+from ..file_access import open_regular_no_follow
 from ..identity import resolve_prefix, shortest_unique_prefixes
 from ..ingest import source_ids, source_record
 from ..identity_pair import pairs_for_sample
@@ -38,6 +42,8 @@ from ..interpretation.engine import (
 from ..problems import LabProblem
 from ..store import LabStore, summarize_run
 from .. import views
+
+_LOGGED_SAMPLE_COMMANDS = frozenset({"run", "simulate cna", "simulate split"})
 
 
 def _recovery_problem(problem: LabProblem) -> dict[str, str]:
@@ -69,11 +75,18 @@ class LibraryHolder:
             if mtimes != self._mtimes:
                 self._mtimes = mtimes
                 try:
-                    self.library = parse_library(LIBRARY_FILE.read_text(), LICENSES_FILE.read_text())
+                    self.library = parse_library(
+                        LIBRARY_FILE.read_text(encoding="utf-8"),
+                        LICENSES_FILE.read_text(encoding="utf-8"),
+                    )
                     self.loaded_at = time.strftime("%H:%M", time.localtime())
                     self.error = None
                 except LibraryError as exc:
                     self.error = str(exc)[:300]  # names the entry or YAML line, never a path
+                    if self.library is None:
+                        raise
+                except UnicodeDecodeError:
+                    self.error = "the library file is not valid UTF-8"
                     if self.library is None:
                         raise
                 except OSError:
@@ -142,27 +155,200 @@ def _contained(attempt: Path, data_ref: str) -> Path | None:
     return attempt / data_ref if _read_contained(attempt, [], data_ref) is not None else None
 
 
+def _read_run_log(path: Path, *, limit: int = 1024 * 1024) -> bytes | None:
+    """Read one regular log, rejecting symlink ancestors and growth past limit."""
+
+    try:
+        descriptor = open_regular_no_follow(path)
+    except OSError:
+        return None
+    try:
+        info = os.fstat(descriptor)
+        if not stat.S_ISREG(info.st_mode) or info.st_nlink != 1 or info.st_size > limit:
+            return None
+        chunks = []
+        size = 0
+        while chunk := os.read(descriptor, min(64 * 1024, limit + 1 - size)):
+            size += len(chunk)
+            if size > limit:
+                return None
+            chunks.append(chunk)
+        return b"".join(chunks)
+    except OSError:
+        return None
+    finally:
+        os.close(descriptor)
+
+
+def _run_events(store: LabStore, run_id: str) -> tuple[list[tuple[int, dict[str, Any]]], str | None]:
+    if not isinstance(run_id, str) or not re.fullmatch(r"r-\d{8}-\d{4}-[0-9a-f]{4,8}", run_id):
+        return [], "invalid_run_id"
+    path = store.runs_dir / f"{run_id}.jsonl"
+    raw = _read_run_log(path)
+    if raw is None:
+        try:
+            os.lstat(path)
+        except FileNotFoundError:
+            return [], "missing"
+        except OSError:
+            pass
+        return [], "unreadable_or_over_1mib"
+    lines = raw.split(b"\n")
+    complete_tail = raw.endswith(b"\n")
+    if complete_tail:
+        lines.pop()
+    if len(lines) > 4096:
+        return [], "over_4096_lines"
+    events = []
+    for number, line in enumerate(lines, 1):
+        try:
+            event = json.loads(line)
+        except (ValueError, UnicodeDecodeError, RecursionError):
+            # One crash-torn append can leave an unterminated final fragment.
+            # Keep its validated prefix, but never skip a complete or middle line.
+            if number == len(lines) and not complete_tail:
+                if not events:
+                    return [], "pending_first_event"
+                break  # an interrupted append can leave only the final line torn
+            return [], "malformed_or_empty"
+        if not isinstance(event, dict):
+            return [], "malformed_or_empty"
+        if event.get("run_id") != run_id or not isinstance(event.get("event"), str):
+            return [], "malformed_or_empty"
+        events.append((number, event))
+    return (events, None) if events else ([], "malformed_or_empty")
+
+
+def _recent_run_ids(store: LabStore, *, limit: int = 64) -> list[str]:
+    """Keep only the newest regular run-log entries while scanning the directory."""
+
+    try:
+        if not stat.S_ISDIR(os.lstat(store.runs_dir).st_mode):
+            return []
+        with os.scandir(store.runs_dir) as entries:
+            def candidates() -> Iterable[tuple[int, str]]:
+                for entry in entries:
+                    if not re.fullmatch(r"r-\d{8}-\d{4}-[0-9a-f]{4,8}\.jsonl", entry.name):
+                        continue
+                    try:
+                        info = entry.stat(follow_symlinks=False)
+                    except OSError:
+                        continue
+                    if stat.S_ISREG(info.st_mode):
+                        yield info.st_mtime_ns, entry.name[:-6]
+
+            return [run_id for _, run_id in heapq.nlargest(limit, candidates())]
+    except OSError:
+        return []
+
+
+def _latest_analysis_run(store: LabStore) -> tuple[str | None, bool]:
+    """A small pointer read; other writer commands need not emit run logs."""
+
+    raw = _read_run_log(store.last_run_file, limit=4096)
+    if raw is None:
+        try:
+            os.lstat(store.last_run_file)
+        except FileNotFoundError:
+            return None, False
+        except OSError:
+            pass
+        return None, True
+    try:
+        pointer = json.loads(raw)
+    except (ValueError, RecursionError):
+        return None, True
+    if not isinstance(pointer, dict):
+        return None, True
+    command = pointer.get("command")
+    if not isinstance(command, str):
+        return None, True
+    if command not in _LOGGED_SAMPLE_COMMANDS:
+        return None, False
+    run_id = pointer.get("run_id")
+    if not isinstance(run_id, str) or not re.fullmatch(r"r-\d{8}-\d{4}-[0-9a-f]{4,8}", run_id):
+        return None, True
+    return run_id, False
+
+
+def _run_sample_identity(events: list[tuple[int, dict[str, Any]]]) -> dict[str, str]:
+    for _, event in reversed(events):
+        if event.get("event") != "sample":
+            continue
+        source_id, input_id = event.get("source_id"), event.get("input_id")
+        if (isinstance(source_id, str) and re.fullmatch(r"[0-9a-f]{64}", source_id)
+                and isinstance(input_id, str) and re.fullmatch(r"[0-9a-f]{64}", input_id)):
+            return {"source_id": source_id, "input_id": input_id}
+        return {}
+    return {}
+
+
 class LabApi:
     def __init__(self, store: LabStore) -> None:
         self.store = store
         self.libraries = LibraryHolder()
 
-    # -- status (D22): two small reads, never the lock ---------------------------
+    # -- status (D22): bounded reads, never the lock -----------------------------
     def status(self) -> dict[str, Any]:
         status = self.store.status()
         interrupted = None
-        if status["active"] is None:
+        run_log_unavailable = None
+        if status["active"] is not None and status["active"].get("command") in _LOGGED_SAMPLE_COMMANDS:
+            run_id = status["active"]["run_id"]
+            events, reason = _run_events(self.store, run_id)
+            if reason == "pending_first_event":
+                reason = None  # the first append is still in progress
+            if reason == "missing":
+                reason = None  # the writer may not have appended run_start yet
+            if reason in ("unreadable_or_over_1mib", "malformed_or_empty"):
+                # A writer publishes its heartbeat before appending run_start.
+                # An absent or empty log in that short window is pending, not damaged.
+                try:
+                    info = os.lstat(self.store.runs_dir / f"{run_id}.jsonl")
+                except FileNotFoundError:
+                    pass
+                except OSError:
+                    pass
+                else:
+                    if reason == "malformed_or_empty" and stat.S_ISREG(info.st_mode) and info.st_size == 0:
+                        reason = None
+            if not reason and events and events[0][1]["event"] != "run_start":
+                reason = "malformed_or_empty"
+                events = []
+            if reason:
+                run_log_unavailable = {"run_id": None if reason == "invalid_run_id" else run_id,
+                                       "reason": reason}
+            status["active"] = {**status["active"], **_run_sample_identity(events),
+                                "run_id": None if reason == "invalid_run_id" else run_id}
+        else:
+            if status["active"] is not None:
+                active_id = status["active"].get("run_id")
+                if not isinstance(active_id, str) or not re.fullmatch(r"r-\d{8}-\d{4}-[0-9a-f]{4,8}", active_id):
+                    status["active"] = {**status["active"], "run_id": None}
             # Bounded (D22): one pointer file and that one run's log, never a scan.
-            last = self.store.last_run_id()
+            last, pointer_unavailable = _latest_analysis_run(self.store)
+            if pointer_unavailable:
+                run_log_unavailable = {"run_id": None, "reason": "latest_run_pointer_unavailable"}
             if last is not None:
-                summary = summarize_run(self.store.run_log(last).events(), self.store)
-                if summary["status"] == "interrupted":
-                    interrupted = {"run_id": summary["run_id"], "step": summary["open_step"]}
+                events, reason = _run_events(self.store, last)
+                if reason == "pending_first_event":
+                    reason = "malformed_or_empty"  # no active writer can finish it
+                if not reason and events[0][1]["event"] != "run_start":
+                    reason = "malformed_or_empty"
+                    events = []
+                if reason:
+                    run_log_unavailable = {"run_id": last, "reason": reason}
+                else:
+                    summary = summarize_run([event for _, event in events], self.store)
+                    if summary["status"] == "interrupted":
+                        interrupted = {"run_id": last, "step": summary["open_step"],
+                                       **_run_sample_identity(events)}
         try:
             self.libraries.get()
         except (LibraryError, OSError):
             pass
-        return {**status, "interrupted": interrupted, "library": self.libraries.health()}
+        return {**status, "interrupted": interrupted, "run_log_unavailable": run_log_unavailable,
+                "library": self.libraries.health()}
 
     # -- samples -------------------------------------------------------------------
     def _id12s(self) -> dict[str, str]:
@@ -299,6 +485,8 @@ class LabApi:
                         "spike": None if not spikes else all(row["recovered"] for row in spikes if row["tf_expected"] >= 0.1),
                         "split": bool(sample.by_transform("split")),
                     },
+                    "unreadable_results": sorted(sample.full.unreadable),
+                    "ambiguous_results": sorted(sample.full.ambiguous),
                 }
             )
         rows.sort(key=lambda row: row["run_utc"], reverse=True)
@@ -336,7 +524,8 @@ class LabApi:
                 entry = row.entry
                 if entry is None and algorithm_id not in library.hidden_algorithms:
                     no_entry += 1
-                elif entry is not None and not entry.citation_verified and entry.get("citations"):
+                elif (entry is not None and algorithm_id not in library.hidden_algorithms
+                      and not entry.citation_verified):
                     unverified.add((row.algorithm_id, row.metric_id))
                 for license_id in (entry.get("license_ids") or []) if entry else []:
                     if license_id not in used_licenses:
@@ -373,6 +562,7 @@ class LabApi:
                         "tool": envelope.provenance.tool,
                         "tool_version": envelope.provenance.tool_version,
                         "parameters_sha256": envelope.provenance.parameters_sha256,
+                        "attempt_id": sample.full.attempt_ids.get(algorithm_id),
                         "input_id": envelope.provenance.input_id,
                         "source_id": envelope.provenance.source_id,
                         "reference_id": envelope.provenance.reference_id,
@@ -392,6 +582,7 @@ class LabApi:
             "found": True,
             "id12": self._id12s()[source_id],
             "source_id": source_id,
+            "full_input_id": sample.full.input_id,
             "example": sample.example,
             "run_utc": max((entry.get("used_utc", "") for entry in record.get("inputs", [])), default=""),
             "depth": next((env.depth.model_dump() for env in sample.full.results.values() if env.depth), None),
@@ -406,6 +597,8 @@ class LabApi:
             "cohort_state": cohort_state,
             "cohort_problem": cohort_problem,
             "algorithms": algorithms,
+            "unreadable_results": sorted(sample.full.unreadable),
+            "ambiguous_results": sorted(sample.full.ambiguous),
             "identity_pairs": identity_pairs,
             "identity_pairs_reason": (
                 "Somalier is unavailable; reinstall the pinned tool and rerun identity before comparing."
@@ -419,7 +612,7 @@ class LabApi:
             "headline": headline_block,
             "derived": [{"label": view.label, "transform": view.transform} for view in sample.derived],
             "licenses": [{"license_id": key, **library.licenses[key]} for key in _all_used(used_licenses, library, order)],
-            "catalog": _catalog(library, order, algorithms),
+            "catalog": _catalog(library, order, algorithms, sample.full.unreadable, sample.full.ambiguous),
             "excluded": EXCLUDED,
             "library_health": {
                 **self.libraries.health(),
@@ -427,6 +620,64 @@ class LabApi:
                 "unverified_citations": len(unverified),
             },
         }
+
+    def run_log_line(self, id12: str, algorithm_id: str,
+                     expected_input_id: str | None = None, expected_identity: str | None = None,
+                     expected_attempt_id: str | None = None) -> dict[str, Any]:
+        """Return a bounded, allowlisted step-end line for the selected full result."""
+
+        source_id, _ = self._resolve(id12)
+        if source_id is None:
+            return {"found": False}
+        sample = views.load_sample(self.store, source_id)
+        if sample is None:
+            return {"found": False}
+        result = sample.full.results.get(algorithm_id)
+        if result is None:
+            return {"found": False}
+        identity = result.provenance.parameters_sha256
+        if (expected_input_id is not None and expected_input_id != sample.full.input_id
+                or expected_identity is not None and expected_identity != identity):
+            return {"found": False}
+        selected = self.store.selected_attempt(sample.full.input_id, algorithm_id, identity)
+        if selected is None:
+            return {"found": False}
+        if expected_attempt_id is not None and expected_attempt_id != selected.name:
+            return {"found": False}
+        for run_id in _recent_run_ids(self.store):
+            events, reason = _run_events(self.store, run_id)
+            if reason or events[0][1]["event"] != "run_start":
+                continue
+            if not any(
+                event.get("event") == "sample"
+                and event.get("source_id") == source_id
+                and event.get("input_id") == sample.full.input_id
+                for _, event in events
+            ):
+                continue
+            for number, event in reversed(events):
+                if (event.get("event") != "step_end" or event.get("step") != algorithm_id
+                        or event.get("parameters_sha256") != identity
+                        or event.get("input_id") != sample.full.input_id
+                        or event.get("attempt_id") != selected.name
+                        or event.get("status") != result.status
+                        or event.get("status") not in ("ok", "skipped", "failed")):
+                    continue
+                utc = event.get("utc")
+                reason = event.get("skip_reason")
+                duration = event.get("duration_s")
+                return {
+                    "found": True,
+                    "run_id": run_id,
+                    "line": number,
+                    "step": algorithm_id,
+                    "utc": utc if isinstance(utc, str) and re.fullmatch(r"[0-9TZ:.+-]{1,40}", utc) else None,
+                    "status": event["status"],
+                    "skip_reason": reason if isinstance(reason, str) and re.fullmatch(r"[a-z0-9_-]{1,64}", reason) else None,
+                    "duration_s": duration if isinstance(duration, (int, float)) and not isinstance(duration, bool)
+                    and math.isfinite(duration) and 0 <= duration <= 1e9 else None,
+                }
+        return {"found": False}
 
     # -- Compare (L1.6): one pinned immutable cohort generation ----------------------
     def cohorts(self) -> dict[str, Any]:
@@ -799,10 +1050,15 @@ def _all_used(used: list[str], library: Library, order: list[str]) -> list[str]:
     return out
 
 
-def _catalog(library: Library, order: list[str], algorithms: list[dict[str, Any]]) -> list[dict[str, Any]]:
+def _catalog(
+    library: Library, order: list[str], algorithms: list[dict[str, Any]],
+    unreadable: set[str] | None = None, ambiguous: set[str] | None = None,
+) -> list[dict[str, Any]]:
     """Every registered (non-hidden) algorithm with its tier, footnote and status here."""
 
     by_id = {row["algorithm_id"]: row for row in algorithms}
+    unreadable = unreadable or set()
+    ambiguous = ambiguous or set()
     rows = []
     for algorithm_id in order:
         if algorithm_id in library.hidden_algorithms:
@@ -816,10 +1072,15 @@ def _catalog(library: Library, order: list[str], algorithms: list[dict[str, Any]
                         licenses.append(license_id)
         performance = entry.get("performance") if entry else None
         result = by_id.get(algorithm_id)
+        status = result["status"] if result else (
+            "unreadable" if algorithm_id in unreadable else
+            "ambiguous" if algorithm_id in ambiguous else "not run"
+        )
         rows.append(
             {
                 "algorithm_id": algorithm_id,
                 "label": entry["label"] if entry else algorithm_id,
+                "has_library_entry": entry is not None,
                 "tier": entry.tier if entry else None,
                 "origin_tier": entry.get("origin_tier") if entry else None,
                 "origin_platform": entry.get("origin_platform") if entry else None,
@@ -828,7 +1089,7 @@ def _catalog(library: Library, order: list[str], algorithms: list[dict[str, Any]
                 "min_depth_x": entry.get("min_depth_x") if entry else None,
                 "license_ids": licenses,
                 "citation_checked": bool(entry and entry.citation_verified),
-                "status": result["status"] if result else "not run",
+                "status": status,
                 "skip_reason": result["skip_reason"] if result else None,
             }
         )
