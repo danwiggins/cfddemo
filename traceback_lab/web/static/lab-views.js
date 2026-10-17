@@ -952,6 +952,7 @@
       }
       out.push(section);
     }
+    out.push(...context(sample, "copy-number", new Set()));
     return out;
   }
 

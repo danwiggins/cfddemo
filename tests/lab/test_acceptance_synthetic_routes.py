@@ -29,6 +29,11 @@ LICENSE_IDS = {
     for license_id in entry.get("license_ids") or []
 }
 DISCLOSURE_ROUTES = ("home", "findings", "stability", "evidence", "methods")
+CONTEXT_LICENSE_ROUTES = (
+    ("signals", {"gpl-copyleft"}),
+    ("body-map", {"loyfer-atlas-terms-unknown", "modkit-ont-public", "yissum-uxm"}),
+    ("agreement", {"gpl-copyleft"}),
+)
 SAMPLE_ROUTES = (
     "findings", "trust-qc", "stability", "signals", "compare",
     "body-map", "agreement", "evidence", "methods",
@@ -230,6 +235,30 @@ def test_every_registry_license_has_one_callout_on_disclosure_route(route, tmp_p
 
 
 @needs_chrome
+@pytest.mark.parametrize("route,expected", CONTEXT_LICENSE_ROUTES)
+def test_context_routes_show_full_license_callouts(route, expected, tmp_path) -> None:
+    sample = _sample()
+    with _server(tmp_path, sample) as server:
+        if route == "signals":
+            kind, source = server.app.assets["/assets/lab.js"]
+            server.app.assets["/assets/lab.js"] = (kind, source + b"""
+              (() => {
+                const timer = setInterval(() => {
+                  const tab = [...document.querySelectorAll('.subtab')]
+                    .find((item) => item.textContent === 'Copy number');
+                  if (tab) { tab.click(); clearInterval(timer); }
+                }, 25);
+              })();
+            """)
+        dom = _dom(server, tmp_path / "browser", route=f"/sample/{ID12}/{route}",
+                   want=lambda d: all(f'id="license-{identity}"' in d for identity in expected))
+    parsed = _license_nodes(dom)
+    assert expected <= set(parsed.callouts), (route, parsed.callouts)
+    assert len(parsed.callouts) == len(set(parsed.callouts)), route
+    assert set(parsed.refs) <= set(parsed.callouts), (route, parsed.refs)
+
+
+@needs_chrome
 def test_every_registered_metric_flag_is_on_its_finding_card(tmp_path) -> None:
     sample = _sample()
     with _server(tmp_path, sample) as server:
@@ -289,6 +318,23 @@ def test_full_callout_computed_type_and_border(tmp_path) -> None:
             document.body.dataset.licenseBorder = border.borderLeftWidth;
             document.body.dataset.licenseColor = border.borderLeftColor;
             document.body.dataset.licenseToken = getComputedStyle(document.documentElement).getPropertyValue('--license').trim();
+            const expectedColor = getComputedStyle(block).borderLeftColor;
+            const failures = [];
+            const blocks = [...document.querySelectorAll('.license-callout')];
+            for (const item of blocks) {
+              const heading = item.querySelector('h3');
+              const paragraph = item.querySelector('p');
+              if (!heading || !paragraph) { failures.push(item.id); continue; }
+              const headingStyle = getComputedStyle(heading);
+              const paragraphStyle = getComputedStyle(paragraph);
+              const itemStyle = getComputedStyle(item);
+              if (parseFloat(headingStyle.fontSize) < 20 || parseFloat(paragraphStyle.fontSize) < 20
+                  || parseInt(headingStyle.fontWeight, 10) < 700 || parseInt(paragraphStyle.fontWeight, 10) < 700
+                  || parseFloat(itemStyle.borderLeftWidth) < 3 || itemStyle.borderLeftColor !== expectedColor)
+                failures.push(item.id);
+            }
+            document.body.dataset.licenseCount = String(blocks.length);
+            document.body.dataset.licenseFailures = failures.join(',');
             clearInterval(timer);
           }, 20);
         })();
@@ -298,6 +344,8 @@ def test_full_callout_computed_type_and_border(tmp_path) -> None:
                    want=lambda d: "data-license-title-size" in d)
     body = re.search(r"<body([^>]*)>", dom).group(1)
     attrs = dict(re.findall(r'data-([a-z-]+)="([^"]*)"', body))
+    assert int(attrs["license-count"]) == len(LICENSE_IDS)
+    assert attrs["license-failures"] == ""
     assert float(attrs["license-title-size"].removesuffix("px")) >= 20
     assert float(attrs["license-body-size"].removesuffix("px")) >= 20
     assert int(attrs["license-title-weight"]) >= 700 and int(attrs["license-body-weight"]) >= 700

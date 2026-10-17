@@ -70,6 +70,8 @@ def test_all_routes_have_no_page_overflow_and_44px_targets(size, tmp_path) -> No
               }
               await new Promise((r) => requestAnimationFrame(() => requestAnimationFrame(r)));
               audited.push(route);
+              if (document.body.dataset.cspViolations !== '0')
+                failures.push(`${route}: CSP violations ${document.body.dataset.cspViolations} (${document.body.dataset.cspLast || 'unknown'})`);
               if (document.documentElement.scrollWidth > document.documentElement.clientWidth + 1)
                 failures.push(`${route}: page scroll ${document.documentElement.scrollWidth}/${document.documentElement.clientWidth}`);
               for (const el of document.querySelectorAll('a[href], button, select, summary, input')) {
@@ -190,4 +192,68 @@ def test_keyboard_focus_order_disclosures_dialog_and_route_focus(tmp_path) -> No
              f"--user-data-dir={profile}", server.issue_link() + f"&route=/sample/{ID12}/findings"],
             profile, ok=lambda d: 'data-ready="1"' in d and 'class="finding-card"' in d,
             interact=interact, timeout=180,
+        )
+
+
+@needs_chrome
+def test_keyboard_traversal_and_revealed_controls_on_every_sample_route(tmp_path) -> None:
+    routes = {
+        "home": f"Traceback Lab — {ID12}",
+        "findings": "Findings", "trust-qc": "Trust / QC", "stability": "Stability",
+        "signals": "Signals", "compare": "Compare", "body-map": "Body map",
+        "agreement": "Agreement", "evidence": "Evidence", "methods": "Methods",
+    }
+    with _server(tmp_path, _sample()) as server:
+        profile = Path(tmp_path / "browser-profile")
+
+        def interact(command, evaluate) -> None:
+            command("Page.bringToFront")
+            for route, heading in routes.items():
+                path = "/" if route == "home" else f"/sample/{ID12}/{route}"
+                evaluate(f"location.hash = '#{path}'")
+                for _ in range(60):
+                    current = evaluate("document.querySelector('#main h1')?.textContent.trim()")
+                    if current == heading and evaluate("document.activeElement === document.querySelector('#main h1')"):
+                        break
+                    time.sleep(0.05)
+                assert current == heading, route
+                assert evaluate("document.activeElement === document.querySelector('#main h1')"), route
+                time.sleep(0.1)
+                evaluate("document.querySelector('.skip-link').focus()")
+                expected = evaluate("""(() => [...document.querySelectorAll('a[href], button, select, summary, input')]
+                  .flatMap((el, index) => el.tabIndex >= 0 && !el.disabled && el.getClientRects().length
+                    && getComputedStyle(el).visibility !== 'hidden' ? [index] : []))()""")
+                assert len(expected) >= 2, route
+                for next_index in expected[1:]:
+                    _key(command, "Tab", "Tab", 9)
+                    state = evaluate("""(() => { const active = document.activeElement;
+                      return {index: [...document.querySelectorAll('a[href], button, select, summary, input')].indexOf(active),
+                        visible: active.matches(':focus-visible'), outline: getComputedStyle(active).outlineWidth}; })()""")
+                    assert state["index"] == next_index and state["visible"], (route, state)
+                    assert float(state["outline"].removesuffix("px")) >= 3, (route, state)
+                disclosure = evaluate("""(() => {
+                  const details = [...document.querySelectorAll('#main details')]
+                    .find((item) => item.querySelector('summary') && !item.open);
+                  if (!details) return null;
+                  details.querySelector('summary').focus();
+                  return true;
+                })()""")
+                if disclosure:
+                    _key(command, "Enter", "Enter", 13)
+                    revealed = evaluate("""(() => {
+                      const details = [...document.querySelectorAll('#main details')]
+                        .find((item) => item.open && item.contains(document.activeElement));
+                      return details && {open: details.open,
+                        hasControl: !!details.querySelector('a[href], button, select, input')};
+                    })()""")
+                    assert revealed and revealed["open"], route
+                    if revealed["hasControl"]:
+                        _key(command, "Tab", "Tab", 9)
+                        assert evaluate("document.activeElement.closest('details')?.open === true"), route
+
+        _dom_cdp(
+            [_chrome(), "--headless=new", "--disable-gpu", "--no-first-run",
+             f"--user-data-dir={profile}", server.issue_link() + f"&route=/sample/{ID12}/findings"],
+            profile, ok=lambda d: 'data-ready="1"' in d and 'class="finding-card"' in d,
+            interact=interact, timeout=240,
         )
