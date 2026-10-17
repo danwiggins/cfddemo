@@ -109,18 +109,22 @@ class AlignedEndStructure(Base):
         summary, mask = load_summary(ctx)
         names = summary.contigs
         lengths = summary.lengths
-        allowed = {
-            cid for cid, name in enumerate(names)
-            if (name if name.startswith("chr") else f"chr{name}") in AUTOSOME_NAMES
-        }
+        catalogue_names: dict[int, str] = {}
+        seen_autosomes: set[str] = set()
+        for cid, name in enumerate(names):
+            catalogue_name = name if name.startswith("chr") else f"chr{name}"
+            if catalogue_name not in AUTOSOME_NAMES:
+                continue
+            if catalogue_name in seen_autosomes:
+                raise ValueError("registered reference contains duplicate autosome aliases")
+            seen_autosomes.add(catalogue_name)
+            catalogue_names[cid] = catalogue_name
+        allowed = set(catalogue_names)
         centers_by_id: dict[int, np.ndarray] = {}
         preferred_u_by_id: dict[int, np.ndarray] = {}
         preferred_d_by_id: dict[int, np.ndarray] = {}
         valid_centers = valid_preferred_sites = 0
-        for cid, name in enumerate(names):
-            if cid not in allowed:
-                continue
-            catalogue_name = name if name.startswith("chr") else f"chr{name}"
+        for cid, catalogue_name in catalogue_names.items():
             centers = catalogues.centers.get(catalogue_name, np.empty(0, dtype=np.int64))
             bounded = centers[(centers >= RADIUS) & (centers + RADIUS < lengths[cid])]
             centers_by_id[cid] = bounded

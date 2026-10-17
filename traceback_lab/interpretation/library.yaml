@@ -2667,7 +2667,7 @@ entries:
     meaning_low: "A smaller fraction of eligible aligned-span ends coincides with pinned U/D site coordinates."
     confounders: ["site catalogue provenance", "alignment-end precision", "library preparation", "fragment-length distribution"]
     next_steps:
-      analytical: ["Inspect eligible end count and catalogue digest", "Do not treat a 10x sample as de novo preferred-site discovery"]
+      analytical: ["Inspect eligible end count and catalogue digest", "Compare only with the same pinned site catalogue and library protocol", "Do not treat a 10x sample as de novo preferred-site discovery"]
       clinical_setting: null
     license_ids: [method-patents]
     flags: [LEGAL]
