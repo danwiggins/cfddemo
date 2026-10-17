@@ -194,7 +194,7 @@ def main(argv: list[str]) -> int:
     if len(rows) != len(logits) or not {"name", "methyl_seq", "dmr_label", "dmr_ctype", "ctype_label"}.issubset(rows.columns):
         raise ValueError("MethylBERT classifier returned malformed per-read rows")
     if not rows["dmr_ctype"].eq("T").all() or not rows["ctype_label"].eq(0).all():
-        raise ValueError("MethylBERT inference rows violate the tumour-DMR class mapping")
+        raise ValueError("MethylBERT inference rows violate tumour-DMR or unlabeled-input conventions")
     if not set(rows["dmr_label"]).issubset(dmr_labels):
         raise ValueError("MethylBERT inference DMR labels differ from the registered bundle")
     rows = rows.drop(columns=["ctype_label"])
