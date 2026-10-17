@@ -12,6 +12,7 @@ from traceback_lab.envelope import Metric, ResultEnvelope, provenance
 from traceback_lab.identity import parameters_sha256
 from traceback_lab.ingest import resolve_sample
 from traceback_lab.problems import LabProblem
+from traceback_lab.registry import ToolPin, execution_identity
 from traceback_lab.store import LabStore
 
 
@@ -186,6 +187,27 @@ def test_changed_asset_digest_cannot_reuse_old_result(store: LabStore) -> None:
     add_sample(store, "healthy", source_id)
     assert len(build_cohort(store, "healthy").members[0].results) == 1
     algorithm.asset_sha256s = lambda root: (_sha(902),)
+    assert build_cohort(store, "healthy").members[0].results == ()
+
+
+def test_dynamic_runtime_identity_controls_cohort_selection(store: LabStore) -> None:
+    source_id = _sample(store, 1)
+    algorithm = cohorts.load_registry()[0]
+    algorithm.identity_tools = lambda *, worker_pythonpath: (ToolPin("runtime", "a" * 64),)
+    tools = [tool.identity() for tool in algorithm.identity_tools(worker_pythonpath="test")]
+    current_hash = execution_identity(
+        algorithm, reference_sha256=_sha(900), tool_identities=tools,
+    )
+    store.publish_result(ResultEnvelope(
+        algorithm_id="fragment-size", algorithm_version="1", status="ok",
+        provenance=provenance(tool="fixture", parameters_sha256=current_hash,
+                              source_id=source_id, input_id=_sha(101), reference_id="synthetic"),
+        metrics=[Metric(metric_id="mode_bp", value=100.0)],
+    ), input_id=_sha(101))
+    add_sample(store, "healthy", source_id)
+    selected = build_cohort(store, "healthy").members[0].results
+    assert len(selected) == 1 and selected[0].parameters_sha256 == current_hash
+    algorithm.identity_tools = lambda *, worker_pythonpath: (ToolPin("runtime", "b" * 64),)
     assert build_cohort(store, "healthy").members[0].results == ()
 
 

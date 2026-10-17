@@ -5,6 +5,7 @@ from __future__ import annotations
 import hashlib
 import json
 import subprocess
+import sys
 from argparse import Namespace
 from dataclasses import replace
 from pathlib import Path
@@ -526,10 +527,10 @@ def test_runtime_identity_changes_cache_key_and_run_refuses_planned_drift(
     import traceback_lab.algorithms.griffin as module
     from types import SimpleNamespace
 
-    monkeypatch.setattr(module, "planned_runtime_sha256", lambda: "a" * 64)
+    monkeypatch.setattr(module, "planned_runtime_sha256", lambda **_: "a" * 64)
     tools_a = [tool.identity() for tool in GRIFFIN.identity_tools()]
     key_a = execution_identity(GRIFFIN, reference_sha256="3" * 64, tool_identities=tools_a)
-    monkeypatch.setattr(module, "planned_runtime_sha256", lambda: "b" * 64)
+    monkeypatch.setattr(module, "planned_runtime_sha256", lambda **_: "b" * 64)
     tools_b = [tool.identity() for tool in GRIFFIN.identity_tools()]
     key_b = execution_identity(GRIFFIN, reference_sha256="3" * 64, tool_identities=tools_b)
     assert key_a != key_b
@@ -543,3 +544,17 @@ def test_runtime_identity_changes_cache_key_and_run_refuses_planned_drift(
     with pytest.raises(RuntimeError, match="runtime changed"):
         GRIFFIN.run(InputContext(**base, extras={"planned_asset_sha256s": ["c" * 64],
                                                  "planned_tool_identities": tools_a}), tmp_path)
+
+
+def test_planned_runtime_identity_matches_real_worker_environment(tmp_path: Path) -> None:
+    from traceback_lab.adapters.griffin_run import planned_runtime_sha256
+    from traceback_lab.runner import _worker_env
+
+    worker_env = _worker_env()
+    planned = planned_runtime_sha256(worker_pythonpath=worker_env["PYTHONPATH"])
+    child = subprocess.run(
+        [sys.executable, "-c", "from traceback_lab.adapters.griffin_run import planned_runtime_sha256; "
+         "print(planned_runtime_sha256())"],
+        cwd=tmp_path, env=worker_env, capture_output=True, text=True, check=True,
+    )
+    assert child.stdout.strip() == planned

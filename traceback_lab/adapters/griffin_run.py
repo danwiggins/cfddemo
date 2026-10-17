@@ -115,7 +115,7 @@ def _runtime_identity(snakemake: Path, python: Path, samtools: Path, bedtools: P
     }
 
 
-def planned_runtime_sha256() -> str:
+def planned_runtime_sha256(*, worker_pythonpath: str | None = None) -> str:
     """Stable pre-cache identity of the actual Griffin execution environment."""
 
     executables = {}
@@ -146,8 +146,10 @@ def planned_runtime_sha256() -> str:
         "executables": executables, "python": python_identity,
         "python_version": sys.version, "compat_sha256": compat_sha256,
         "packages": packages,
-        "environment": {key: os.environ.get(key, "") for key in
-                        ("PATH", "PYTHONPATH", "LD_LIBRARY_PATH", "CONDA_PREFIX")},
+        "environment": {
+            **{key: os.environ.get(key, "") for key in ("PATH", "LD_LIBRARY_PATH", "CONDA_PREFIX")},
+            "PYTHONPATH": os.environ.get("PYTHONPATH", "") if worker_pythonpath is None else worker_pythonpath,
+        },
     }
     return hashlib.sha256(json.dumps(payload, sort_keys=True, separators=(",", ":")).encode()).hexdigest()
 

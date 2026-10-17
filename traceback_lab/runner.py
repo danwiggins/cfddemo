@@ -200,8 +200,10 @@ def run_plan(
         ]
         assets_of = getattr(algorithm, "asset_sha256s", None)
         identity_tools = getattr(algorithm, "identity_tools", None)
+        worker_env = _worker_env()
         planned_tools = [tool.identity() for tool in
-                         (identity_tools() if callable(identity_tools) and not platform_rejected
+                         (identity_tools(worker_pythonpath=worker_env["PYTHONPATH"])
+                          if callable(identity_tools) and not platform_rejected
                           else algorithm.tools)]
         planned_assets = list(assets_of(store.root)) if callable(assets_of) and not platform_rejected else []
         identity = execution_identity(
@@ -321,7 +323,7 @@ def run_plan(
             outcome = run_pipeline(
                 [Stage("worker", [sys.executable, "-m", "traceback_lab.worker", str(request)])],
                 timeout_s=timeout_s,
-                env=_worker_env(),
+                env=worker_env,
                 cwd=scratch,
                 echo=echo,
             )
