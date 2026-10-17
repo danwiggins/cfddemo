@@ -86,7 +86,7 @@ def test_lock_refusal_identifies_holder_in_both_modes(
     assert holder["pid"] == os.getpid()
     assert holder["step"] == "align"
     assert isinstance(holder["age_min"], int)
-    for detail in (run_id, str(os.getpid()), "align"):
+    for detail in ("lab run", run_id, str(os.getpid()), "align", "min ago"):
         assert detail in human
 
 
@@ -179,6 +179,7 @@ def test_aligned_reference_mismatch_has_full_cli_fields(
     header = {
         "HD": {"VN": "1.6", "SO": "coordinate"},
         "SQ": [{"SN": name, "LN": length} for name, length in contigs],
+        "RG": [{"ID": "synthetic", "PL": "ONT"}],
     }
     with pysam.AlignmentFile(str(bam), "wb", header=header):
         pass
@@ -205,6 +206,8 @@ def test_short_disk_has_measured_fields_in_both_modes(
     assert data["free_bytes"] == 1024
     assert data["required_bytes"] > data["free_bytes"]
     assert "align" in human and "ROOT" in human
+    assert f"{data['required_bytes']:,} bytes" in human
+    assert f"{data['free_bytes']:,} bytes" in human
 
 
 def test_only_cell_origin_dry_run_labels_upstream_without_writing(
@@ -288,6 +291,7 @@ def test_interrupted_run_has_full_cli_fields_without_running_algorithms(
     header = {
         "HD": {"VN": "1.6", "SO": "coordinate"},
         "SQ": [{"SN": name, "LN": length} for name, length in reference.contigs],
+        "RG": [{"ID": "synthetic", "PL": "ONT"}],
     }
     with pysam.AlignmentFile(str(bam), "wb", header=header):
         pass

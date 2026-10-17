@@ -67,6 +67,28 @@ def _no_staging(root: Path) -> bool:
     return not list((root / "lab").rglob(".staging-*"))
 
 
+def test_lab_run_missing_ichor_skips_with_install_command(lab_world, capsys, monkeypatch, shared_mmi) -> None:
+    from traceback_lab.algorithms import copy_number
+
+    monkeypatch.setattr(registry, "ALGORITHMS", ("read_summary:READ_SUMMARY", "copy_number:COPY_NUMBER"))
+    monkeypatch.setattr(copy_number, "toolchain_or_none", lambda: None)
+    code, payload = _json(capsys, "run", str(lab_world["chunks"]), "--root", str(lab_world["root"]),
+                          "--mmi", str(shared_mmi))
+    assert code == 0, payload
+    data = payload["data"]
+    copy_number_step = next(step for step in data["steps"] if step["algorithm_id"] == "copy-number")
+    assert (copy_number_step["status"], copy_number_step["skip_reason"]) == ("skipped", "missing_toolchain")
+    assert data["remediations"] == [{
+        "algorithm_id": "copy-number", "reason": "missing_toolchain", "asset": "ichor",
+        "command": "traceback toolchain install ichor",
+        "argv": ["traceback", "toolchain", "install", "ichor"],
+    }]
+    human_code, human, _ = _lab(capsys, "run", "latest", "--root", str(lab_world["root"]),
+                                "--mmi", str(shared_mmi))
+    assert human_code == 0
+    assert "SKIP    copy-number skipped (missing_toolchain): ichor: traceback toolchain install ichor" in human
+
+
 def test_run_aligns_publishes_and_reruns_from_cache(lab_world, capsys, monkeypatch) -> None:
     _registry(monkeypatch, "SUMMARY", "COUNTER")
     root, chunks = lab_world["root"], lab_world["chunks"]
@@ -234,11 +256,16 @@ def test_failed_algorithm_exits_8_with_scrubbed_stderr_and_rerun_recomputes_only
     assert "FAILED  copy-number:" in out
     assert "details: traceback lab runs" in out
     assert "1 skipped (depth: instability)" in out and "1 skipped (upstream: tf-concordance)" in out
+    for label in ("CODE", "CAUSE", "FIX", "RETRYABLE", "DOCS"):
+        assert any(line.startswith(label) for line in out.splitlines()), label
+    assert "CODE       TBX-LAB-016" in out
     code, payload = _json(capsys, *argv)
     assert code == 8
     data = payload["data"]
     assert payload["status"] == "partial_failure"
     assert data["code"] == "TBX-LAB-016" and data["docs"].endswith("#tbx-lab-016")
+    assert "copy-number" in data["cause"] and data["fix"]
+    assert isinstance(data["retryable"], bool)
     assert data["counts"] == {"ok": 2, "skipped": {"depth": 1, "upstream": 1}, "failed": 1}
     steps = {step["algorithm_id"]: step for step in data["steps"]}
     assert steps["fragment-size"]["cached"] and not steps["copy-number"]["cached"]
@@ -250,6 +277,18 @@ def test_failed_algorithm_exits_8_with_scrubbed_stderr_and_rerun_recomputes_only
     persisted = json.dumps(envelope.model_dump())
     assert "DonorName" not in persisted and "/Users/someone" not in persisted
     assert "<path>" in persisted
+    step_events = [event for event in store.run_log(data["run_id"]).events()
+                   if event.get("event") == "step_end" and event.get("step") in steps]
+    assert {"failed", "skipped"} <= {event["status"] for event in step_events}
+    for event in step_events:
+        selected = store.selected_attempt(input_id, event["step"], event["parameters_sha256"])
+        assert selected is not None and event["attempt_id"] == selected.name
+        assert event["input_id"] == input_id
+    first_success = next(event for run_id in store.run_ids()
+                         for event in store.run_log(run_id).events()
+                         if event.get("event") == "step_end" and event.get("step") == "read-summary")
+    selected_success = store.selected_attempt(input_id, "read-summary", first_success["parameters_sha256"])
+    assert selected_success is not None and first_success["attempt_id"] == selected_success.name
 
 
 def test_algorithm_timeout_kills_its_grandchild(lab_world, capsys, monkeypatch, shared_mmi) -> None:
@@ -476,15 +515,34 @@ def test_aligner_version_change_warns_and_realigns(lab_world, capsys, monkeypatc
     argv = ("run", str(lab_world["chunks"]), "--root", str(root), "--mmi", str(shared_mmi))
     code, first = _json(capsys, *argv)
     assert code == 0
+    first_input = first["data"]["sample"]["input_id"]
+    before_inputs = {p.name for p in LabStore(root).inputs_dir.iterdir() if p.is_dir()}
     fakes = lab_world["tmp"] / "fakes"
     _fake_tool(fakes, "minimap2", f'if [ "$1" = "--version" ]; then echo "2.99-r9999"; exit 0; fi\nexec {MINIMAP2} "$@"\n')
     _path_with(monkeypatch, fakes)
+    code, human, _ = _lab(capsys, *argv)
+    assert code == 0
+    for label in ("CODE", "CAUSE", "FIX", "RETRYABLE", "DOCS"):
+        assert any(line.startswith(label) for line in human.splitlines()), label
+    assert "CODE       TBX-LAB-019" in human
+    assert "2.99-r9999" in human
+    progress_lines = human.splitlines()
+    warning_line = next(i for i, line in enumerate(progress_lines) if line.startswith("WARN TBX-LAB-019"))
+    aligned_line = next(i for i, line in enumerate(progress_lines) if line.startswith("align") and "done" in line)
+    assert warning_line < aligned_line
+    new_inputs = {p.name for p in LabStore(root).inputs_dir.iterdir() if p.is_dir()} - before_inputs
+    assert len(new_inputs) == 1
+    (second_input,) = new_inputs
+    _fake_tool(fakes, "minimap2", f'if [ "$1" = "--version" ]; then echo "2.98-r9998"; exit 0; fi\nexec {MINIMAP2} "$@"\n')
     code, second = _json(capsys, *argv)
     assert code == 0
     assert second["data"]["sample"]["source_id"] == first["data"]["sample"]["source_id"]
-    assert second["data"]["sample"]["input_id"] != first["data"]["sample"]["input_id"]
+    assert second["data"]["sample"]["input_id"] not in {first_input, second_input}
     (warning,) = second["data"]["warnings"]
-    assert warning["code"] == "TBX-LAB-019" and warning["new"]["minimap2"] == "2.99-r9999"
+    assert warning["code"] == "TBX-LAB-019" and warning["new"]["minimap2"] == "2.98-r9998"
+    assert warning["cause"] and warning["fix"]
+    assert isinstance(warning["retryable"], bool)
+    assert warning["docs"] == "docs/LAB-GUIDE.md#tbx-lab-019"
 
 
 def test_prealigned_bam_is_ingested(lab_world, capsys, monkeypatch, shared_mmi) -> None:
