@@ -1115,6 +1115,7 @@ def test_run_log_line_uses_only_the_selected_attempt(tmp_path, monkeypatch) -> N
                attempt_id=first, status="ok")
     second = store.publish_result(result, input_id=input_id)
     new = store.run_log("r-20261015-0101-0001")
+    new.append("run_start", command="run")
     new.append("sample", source_id=source_id, input_id=input_id)
     new.append("step_end", step="sex-check", parameters_sha256=identity, input_id=input_id,
                attempt_id=second, status="ok")
@@ -1128,6 +1129,7 @@ def test_run_log_line_uses_only_the_selected_attempt(tmp_path, monkeypatch) -> N
     assert api.run_log_line(source_id[:12], "sex-check", input_id, identity, first) == {"found": False}
     assert api.run_log_line(source_id[:12], "sex-check", input_id, identity, second)["run_id"] == new.run_id
     latest = store.run_log("r-20261015-0101-0000")
+    latest.append("run_start", command="run")
     latest.append("sample", source_id=source_id, input_id=input_id)
     latest.append("step_end", step="sex-check", parameters_sha256=identity, input_id=input_id,
                   attempt_id=second, status="ok")
@@ -1136,6 +1138,7 @@ def test_run_log_line_uses_only_the_selected_attempt(tmp_path, monkeypatch) -> N
     latest.path.unlink()
     new.path.unlink()
     legacy = store.run_log("r-20261015-0101-bbbb")
+    legacy.append("run_start", command="run")
     legacy.append("sample", source_id=source_id, input_id=input_id)
     legacy.append("step_end", step="sex-check", parameters_sha256=identity, input_id=input_id, status="ok")
     assert api.run_log_line(source_id[:12], "sex-check") == {"found": False}

@@ -175,9 +175,8 @@ def test_keyboard_focus_order_disclosures_dialog_and_route_focus(tmp_path) -> No
             assert evaluate("document.getElementById('key-dialog').open") is True
             _key(command, "Escape", "Escape", 27)
             assert evaluate("document.getElementById('key-dialog').open") is False
-            assert evaluate("document.activeElement?.id") == "key-button"
-
             time.sleep(0.1)  # Let the dialog's close event finish restoring focus.
+            assert evaluate("document.activeElement?.id") == "key-button"
             evaluate(f"location.hash = '#/sample/{ID12}/stability'")
             for _ in range(20):
                 if evaluate("document.activeElement?.tagName === 'H1' && document.activeElement?.textContent === 'Stability'"):

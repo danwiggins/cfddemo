@@ -624,7 +624,7 @@ class LabApi:
             return {"found": False}
         for run_id in _recent_run_ids(self.store):
             events, reason = _run_events(self.store, run_id)
-            if reason:
+            if reason or events[0][1]["event"] != "run_start":
                 continue
             if not any(
                 event.get("event") == "sample"

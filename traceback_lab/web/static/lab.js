@@ -337,7 +337,7 @@
           const line = await api(`/api/samples/${sample.id12}/run-log/${a.algorithm_id}/${pin.input_id}/${pin.parameters_sha256}/${pin.attempt_id}`);
           showLogLine(line.found
             ? `${line.run_id} · line ${line.line} · ${line.utc || "time unavailable"} · step_end ${line.step} status=${line.status}${line.skip_reason ? ` (${line.skip_reason})` : ""}${line.duration_s !== null ? ` · ${line.duration_s} s` : ""}`
-            : "Run log line unavailable (searched up to 64 recently updated runs; logs over 1 MiB or 4,096 lines are not shown).");
+            : "Run log line unavailable. Results may have changed; reload this sample. Only 64 recent, bounded logs are searched.");
         } catch (error) {
           showLogLine(error.session ? "Session expired; reopen Lab." : "Run log line unavailable.");
         }
