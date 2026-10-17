@@ -50,6 +50,8 @@ class Griffin(Base):
             return []
 
     def preflight(self, ctx: InputContext) -> Ready | Skip:
+        if ctx.platform != "illumina":
+            return Skip("platform", "Griffin requires an Illumina-declared paired-end BAM")
         decision = super().preflight(ctx)
         if isinstance(decision, Skip):
             return decision
@@ -87,6 +89,8 @@ class Griffin(Base):
         return Ready()
 
     def run(self, ctx: InputContext, out: Path) -> AlgorithmOutput:
+        if ctx.platform != "illumina":
+            raise RuntimeError("Griffin cannot run on a non-Illumina input")
         assets = inspect_griffin_assets(ctx.root)
         pairs = count_d21_pairs(ctx.input_dir / "aligned.bam")
         if pairs < MIN_ELIGIBLE_READS:

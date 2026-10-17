@@ -82,6 +82,7 @@ def test_griffin_asset_commands_register_and_inspect(tmp_path: Path, monkeypatch
 
 def test_griffin_preflight_depth_and_native_ont_skip(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     import pysam
+    import traceback_lab.algorithms.griffin as module
 
     input_dir = tmp_path / "input"
     input_dir.mkdir()
@@ -99,13 +100,21 @@ def test_griffin_preflight_depth_and_native_ont_skip(tmp_path: Path, monkeypatch
     base = dict(
         root=tmp_path, source_id="1" * 64, input_id="2" * 64,
         reference_id="hg38", reference_sha256="3" * 64,
-        input_dir=input_dir, extras={"reference_fasta": str(tmp_path / "hg38.fa")},
+        input_dir=input_dir, platform="illumina",
+        extras={"reference_fasta": str(tmp_path / "hg38.fa")},
     )
     depth = GRIFFIN.preflight(InputContext(**base, eligible_reads=4_999_999))
     assert isinstance(depth, Skip) and depth.reason_code == "depth"
     unsupported = GRIFFIN.preflight(InputContext(**base, eligible_reads=5_000_000))
     assert isinstance(unsupported, Skip) and unsupported.reason_code == "unsupported_platform"
     assert "single-end" in unsupported.message
+    platform = GRIFFIN.preflight(InputContext(**{**base, "platform": "ont"}, eligible_reads=5_000_000))
+    assert isinstance(platform, Skip) and platform.reason_code == "platform"
+    monkeypatch.setattr(module, "_require_paired_input", lambda _: None)
+    monkeypatch.setattr(module, "count_d21_pairs", lambda _: 4_999_999)
+    short_pairs = GRIFFIN.preflight(InputContext(**base, eligible_reads=10_000_000))
+    assert isinstance(short_pairs, Skip) and short_pairs.reason_code == "depth"
+    assert "4,999,999" in short_pairs.message
 
 
 def test_pair_gate_counts_molecules_once_and_requires_illumina_header(tmp_path: Path) -> None:
@@ -157,7 +166,7 @@ def test_algorithm_publishes_primary_profile_and_input_bound_provenance(
     ctx = InputContext(
         root=root, source_id="1" * 64, input_id="2" * 64,
         reference_id="hg38", reference_sha256=hashlib.sha256(reference.read_bytes()).hexdigest(),
-        input_dir=input_dir, eligible_reads=5_000_000,
+        input_dir=input_dir, platform="illumina", eligible_reads=5_000_000,
         extras={"reference_fasta": str(reference)},
     )
     sample = "lab_" + ctx.input_id

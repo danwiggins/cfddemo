@@ -48,7 +48,7 @@ traceback lab asset griffin-register --upstream-root GRIFFIN_CHECKOUT \
 
 `traceback lab asset griffin-inspect --root ROOT` rehashes the registered
 inputs. The registration digest enters the algorithm's execution identity,
-while the Lab's input ID keeps cached results sample-specific. The algorithm
+while the Lab's input ID and declared platform keep cached results sample-specific. The algorithm
 requires the 5M D21 paired-molecule gate and a paired-end hg38 BAM, runs the exact workflow,
 and saves the validated corrected TSV and input-bound provenance alongside
 the profile panel. The primary registered TF list supplies the scalar
