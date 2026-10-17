@@ -95,6 +95,8 @@ def test_realistic_paired_bams_keep_platform_results_and_cohorts_separate(
     ont_steps = {step["algorithm_id"]: step for step in ont["steps"]}
     for name in ("read-summary", "depth", "bam-qc", "short-read-fragment-size"):
         assert illumina_steps[name]["status"] == "ok"
+    for name in ("read-summary", "depth", "bam-qc", "fragment-size"):
+        assert ont_steps[name]["status"] == "ok"
     assert illumina_steps["fragment-size"]["status"] == "skipped"
     assert illumina_steps["fragment-size"]["skip_reason"] == "platform"
     assert ont_steps["fragment-size"]["status"] == "ok"
@@ -110,6 +112,17 @@ def test_realistic_paired_bams_keep_platform_results_and_cohorts_separate(
     metrics = {metric.metric_id: metric.value for metric in selected.metrics}
     assert metrics["mode_bp"] == 180
     assert metrics["short_fraction_lt150"] == pytest.approx(40 / 120)
+    assert {metric.metric_id: metric.n for metric in selected.metrics}["short_fraction_lt150"] == 120
+    ont_fragment = next(item for item in member_from_store(store, ont["sample"]["source_id"]).results
+                        if item.algorithm_id == "fragment-size")
+    ont_selected = store.read_result(ont["sample"]["input_id"], ont_fragment.algorithm_id,
+                                     ont_fragment.parameters_sha256)
+    assert ont_selected is not None
+    ont_metrics = {metric.metric_id: metric for metric in ont_selected.metrics}
+    assert ont_metrics["mode_bp"].value == 180
+    assert ont_metrics["mode_bp"].n == 120
+    assert ont_metrics["short_fraction_lt150"].value == pytest.approx(40 / 120)
+    assert ont_metrics["short_fraction_lt150"].n == 120
     illumina_depth = next(item for item in member_from_store(store, illumina["sample"]["source_id"]).results
                           if item.algorithm_id == "depth")
     ont_depth = next(item for item in member_from_store(store, ont["sample"]["source_id"]).results
