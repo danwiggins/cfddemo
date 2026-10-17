@@ -10,8 +10,8 @@ from traceback_lab.read_summary import ReadSummary, write_summary
 from traceback_lab.registry import InputContext
 
 
-def _bam(path: Path, rows: list[tuple[int, int, int, int, int | None]], length: int) -> ReadSummary:
-    """Rows are (start, length, flag, MAPQ, uniform Phred quality)."""
+def _bam(path: Path, rows: list[tuple[int, int, int, int, int | list[int] | None]], length: int) -> ReadSummary:
+    """Rows are (start, length, flag, MAPQ, uniform or per-base Phred quality)."""
     header = {"HD": {"VN": "1.6", "SO": "coordinate"}, "SQ": [{"SN": "chr1", "LN": length}]}
     with pysam.AlignmentFile(str(path), "wb", header=header) as bam:
         for index, (start, span, flag, mapq, quality) in enumerate(sorted(rows, key=lambda row: row[0])):
@@ -22,19 +22,20 @@ def _bam(path: Path, rows: list[tuple[int, int, int, int, int | None]], length: 
             record.reference_id = 0
             record.reference_start = start
             record.mapping_quality = mapq
-            record.cigarstring = f"{span}M"
-            record.query_qualities = None if quality is None else [quality] * span
+            record.cigarstring = None if flag & 0x4 else f"{span}M"
+            record.query_qualities = quality if isinstance(quality, list) or quality is None else [quality] * span
             bam.write(record)
     pysam.index(str(path))
     write_summary(path, path.parent / "columns")
     return ReadSummary.open(path.parent / "columns")
 
 
-def test_qc_primary_denominators_and_per_read_quality(tmp_path: Path) -> None:
+@pytest.mark.parametrize("marked_duplicate", [False, True])
+def test_qc_primary_denominators_and_per_read_quality(tmp_path: Path, marked_duplicate: bool) -> None:
     # Four primary records, three mapped, two mapped at MAPQ >=20.
     # Qualities average over reads (10,30,20), not their unequal lengths.
     _bam(tmp_path / "aligned.bam", [
-        (0, 10, 0, 60, 10), (20, 100, 0, 20, 30),
+        (0, 10, 0x400 if marked_duplicate else 0, 60, [1] * 9 + [91]), (5, 100, 0, 20, 30),
         (140, 20, 0, 19, None), (170, 10, 0x100, 60, 50),
         (190, 10, 0x800, 60, 40), (220, 30, 0x4, 0, 20),
     ], 1000)
@@ -47,12 +48,18 @@ def test_qc_primary_denominators_and_per_read_quality(tmp_path: Path) -> None:
     expected = {
         "total_reads": (4, 4), "mapped_fraction": (3 / 4, 4),
         "mapq_ge20_fraction": (2 / 3, 3), "supplementary_fraction": (1 / 3, 3),
-        "mean_read_q": (20, 3), "genome_ge1x_fraction": (110 / 1000, 1000),
+        "mean_read_q": (20, 3),
+        # The two eligible spans overlap: count their union, not their sum.
+        "genome_ge1x_fraction": ((100 if marked_duplicate else 105) / 1000, 1000),
     }
     for name, (value, denominator) in expected.items():
         assert metrics[name]["value"] == pytest.approx(value), name
         assert metrics[name]["n"] == denominator, name
-    assert metrics["duplicate_fraction"]["value"] is None  # unmarked is not a measured zero
+    duplicate = metrics["duplicate_fraction"]
+    if marked_duplicate:
+        assert (duplicate["value"], duplicate["n"]) == (1 / 4, 4)
+    else:
+        assert (duplicate["value"], duplicate["n"]) == (None, None)  # unmarked is not a measured zero
     assert metrics["gc_bias_slope"]["value"] is None  # no registered FASTA
 
 
