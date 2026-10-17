@@ -196,9 +196,11 @@ scratch-disk bytes separately in its step result and run log. The worker's
 `wait4` value can include descendants it waited for; the sampled sum can count
 shared pages more than once. Either memory number may be larger. Disk includes
 growth in temporary `lab/tmp/microbial-*` work when a microbial worker uses
-that location during the step. Sampling can
-miss brief peaks, and a short step may have no tree sample. Cached and skipped
-steps have no new measurement.
+that location during the step. The disk and process-tree numbers are sampled
+observations, not resource ceilings: sampling can miss brief peaks. A short
+step may have no tree sample, and disk is unavailable if its final scan cannot
+finish within the bounded reporting time. Cached and skipped steps have no new
+measurement.
 
 ## Algorithms
 

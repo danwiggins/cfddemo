@@ -37,6 +37,7 @@ GRACE_S = 5.0
 POLL_S = 0.02
 DISK_SAMPLE_S = 2.0
 RSS_SAMPLE_S = 0.5
+FINAL_DISK_SAMPLE_S = 1.0
 
 
 @dataclass(frozen=True)
@@ -406,6 +407,7 @@ def run_pipeline(
                     rss = rss_samples.get_nowait()
                     if rss is not None:
                         peak_tree_rss = rss if peak_tree_rss is None else max(peak_tree_rss, rss)
+                    next_rss = time.monotonic() + RSS_SAMPLE_S
             except Empty:
                 pass
             if now >= next_rss and (rss_thread is None or not rss_thread.is_alive()):
@@ -419,19 +421,18 @@ def run_pipeline(
 
                 rss_thread = threading.Thread(target=sample_rss, daemon=True)
                 rss_thread.start()
-                next_rss = time.monotonic() + RSS_SAMPLE_S
             try:
                 while True:
                     size = disk_samples.get_nowait()
                     if size is not None:
                         peak_disk = size if peak_disk is None else max(peak_disk, size)
+                    next_disk = time.monotonic() + DISK_SAMPLE_S
             except Empty:
                 pass
             if ((disk_path is not None or disk_usage is not None) and now >= next_disk
                     and (disk_thread is None or not disk_thread.is_alive())):
                 disk_thread = threading.Thread(target=sample_disk, daemon=True)
                 disk_thread.start()
-                next_disk = time.monotonic() + DISK_SAMPLE_S
             now = time.monotonic()
             if on_tick is not None:
                 on_tick(now - started)
@@ -466,7 +467,8 @@ def run_pipeline(
         if disk_thread is None or not disk_thread.is_alive():
             disk_thread = threading.Thread(target=sample_disk, daemon=True)
             disk_thread.start()
-        disk_thread.join(timeout=0.2)
+        disk_thread.join(timeout=FINAL_DISK_SAMPLE_S)
+        final_disk_complete = not disk_thread.is_alive()
         try:
             while True:
                 size = disk_samples.get_nowait()
@@ -474,6 +476,10 @@ def run_pipeline(
                     peak_disk = size if peak_disk is None else max(peak_disk, size)
         except Empty:
             pass
+        if not final_disk_complete:
+            # An early small sample is not a credible peak if the final scan
+            # cannot complete within the bounded reporting budget.
+            peak_disk = None
     try:
         while True:
             rss = rss_samples.get_nowait()

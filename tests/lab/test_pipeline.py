@@ -195,6 +195,34 @@ def test_slow_disk_sampler_does_not_delay_worker_polling() -> None:
     assert result.ok
     assert time.monotonic() - started < 3
     assert calls == 1
+    assert result.peak_disk_bytes is None
+
+
+def test_incomplete_final_disk_scan_does_not_report_early_small_sample() -> None:
+    release = threading.Event()
+    calls = 0
+
+    def disk_usage() -> int:
+        nonlocal calls
+        calls += 1
+        if calls == 1:
+            return 1
+        release.wait(4)
+        return 2_000_000
+
+    started = time.monotonic()
+    try:
+        result = run_pipeline(
+            [Stage("ok", [PY, "-c", "import time; time.sleep(0.2)"])],
+            timeout_s=10,
+            disk_usage=disk_usage,
+        )
+    finally:
+        release.set()
+    assert result.ok
+    assert calls == 2
+    assert result.peak_disk_bytes is None
+    assert time.monotonic() - started < 3
 
 
 def test_ps_sampler_does_not_report_zero_for_unmeasured_tree(monkeypatch: pytest.MonkeyPatch) -> None:
