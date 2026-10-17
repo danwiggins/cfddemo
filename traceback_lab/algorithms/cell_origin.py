@@ -137,6 +137,11 @@ class CellOrigin(Base):
     def preflight(self, ctx: InputContext) -> Ready | Skip:
         if ctx.example:
             return Skip("example_reference", "cell-origin needs the hg38 Loyfer atlas; not in the synthetic example")
+        if ctx.eligible_reads is None:
+            return Skip("depth", "eligible-read depth has not been measured")
+        decision = super().preflight(ctx)
+        if isinstance(decision, Skip):
+            return decision
         try:
             loyfer_assets(ctx.root)
         except Exception:  # noqa: BLE001
@@ -145,7 +150,7 @@ class CellOrigin(Base):
             return Skip("reference", "the registered reference FASTA is not available")
         if header_model(ctx.input_dir / "aligned.bam") is None:
             return Skip("missing_tags", "the BAM's @RG lines declare no single modified-base model")
-        return super().preflight(ctx)
+        return Ready()
 
     def run(self, ctx: InputContext, out: Path) -> AlgorithmOutput | Skip:
         import tempfile
