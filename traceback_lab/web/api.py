@@ -336,7 +336,7 @@ class LabApi:
                 entry = row.entry
                 if entry is None and algorithm_id not in library.hidden_algorithms:
                     no_entry += 1
-                elif entry is not None and not entry.citation_verified and entry.get("citations"):
+                elif entry is not None and not entry.citation_verified:
                     unverified.add((row.algorithm_id, row.metric_id))
                 for license_id in (entry.get("license_ids") or []) if entry else []:
                     if license_id not in used_licenses:

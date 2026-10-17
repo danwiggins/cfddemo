@@ -187,6 +187,52 @@ def test_navigation_order_with_compare(page_root, tmp_path) -> None:
 
 
 @needs_chrome
+def test_unchecked_library_entries_keep_their_badges_without_citations(page_root, tmp_path, monkeypatch) -> None:
+    from traceback_lab.web.api import LabApi
+
+    real_sample = LabApi.sample
+
+    def sample_with_citation_cases(api, id12):
+        payload = real_sample(api, id12)
+        metrics = [metric for algorithm in payload["algorithms"] if not algorithm["hidden"]
+                   for metric in algorithm["metrics"] if metric.get("entry")]
+        assert len(metrics) >= 3
+        for metric, label, checked in zip(metrics[:3],
+                                          ("Unchecked metric probe", "Checked metric probe", "Missing entry probe"),
+                                          (False, True, False)):
+            metric["label"] = label
+            metric["entry"]["citations"] = []
+            metric["entry"]["citation_checked"] = checked
+        metrics[2]["entry"] = None
+        catalog = [row for row in payload["catalog"] if row["tier"]]
+        assert len(catalog) >= 2
+        for row, label, checked in zip(catalog[:2],
+                                       ("Unchecked catalog probe", "Checked catalog probe"), (False, True)):
+            row["label"] = label
+            row["citation_checked"] = checked
+            row["footnote_source"] = "operator evidence source"
+        return payload
+
+    monkeypatch.setattr(LabApi, "sample", sample_with_citation_cases)
+    sample_id = _id12(page_root)
+    with RunningLabServer(LabStore(page_root)) as server:
+        methods = _dom(server, tmp_path / "methods", route=f"/sample/{sample_id}/methods",
+                       want=lambda dom: "Unchecked metric probe" in dom)
+        evidence = _dom(server, tmp_path / "evidence", route=f"/sample/{sample_id}/evidence",
+                        want=lambda dom: "Unchecked catalog probe" in dom)
+
+    rows = re.findall(r"<tr>(.*?)</tr>", methods, re.S)
+    cards = re.findall(r'<article class="evidence-card"[^>]*>(.*?)</article>', evidence, re.S)
+    for blocks, label, expected in (
+        (rows, "Unchecked metric probe", 1), (rows, "Checked metric probe", 0),
+        (rows, "Missing entry probe", 0), (cards, "Unchecked catalog probe", 1),
+        (cards, "Checked catalog probe", 0),
+    ):
+        block = next(block for block in blocks if label in block)
+        assert block.count("UNVERIFIED citation") == expected, label
+
+
+@needs_chrome
 def test_findings_grouping_and_flags(page_root, tmp_path) -> None:
     with RunningLabServer(LabStore(page_root)) as server:
         dom = _dom(server, tmp_path, route=f"/sample/{_id12(page_root)}/findings")
