@@ -44,8 +44,10 @@ default-config digests, disables bytecode writes during execution, and hashes
 all five generated workflow YAML files. It requires Snakemake 5.19.2, records
 the resolved Snakemake, Python, samtools, and bedtools executable digests and
 the numerical Python package versions, and checks the runtime again after
-execution. The workflow PATH uses the Lab Python environment so the upstream
-scripts' `#!/usr/bin/env python` resolves to that recorded interpreter. The generated config sets the pinned
+execution. The attempt contains a `bin/python` link to the recorded Lab interpreter
+and a hashed compatibility shim for Snakemake 5.19.2 on Python 3.11+. Its PATH
+and PYTHONPATH ensure the upstream scripts' `#!/usr/bin/env python` and the
+Snakemake launcher use that interpreter and shim. The generated config sets the pinned
 upstream default `mappability_correction: false`, so the accepted output is
 GC-corrected only. The attempt only marks its manifest complete after Griffin returns
 a valid corrected TSV with exactly the requested site-list names. Partial outputs remain

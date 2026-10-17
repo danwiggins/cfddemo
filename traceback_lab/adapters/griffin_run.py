@@ -92,7 +92,7 @@ def _tool_path(command: str, *, path: str | None = None) -> Path:
 
 
 def _runtime_identity(snakemake: Path, python: Path, samtools: Path, bedtools: Path,
-                      workflow_path: str) -> dict:
+                      workflow_path: str, workflow_pythonpath: str, compat: Path) -> dict:
     packages = {}
     for name in ("numpy", "pandas", "scipy", "pysam", "PyYAML", "pybedtools", "pyBigWig", "matplotlib"):
         try:
@@ -105,11 +105,12 @@ def _runtime_identity(snakemake: Path, python: Path, samtools: Path, bedtools: P
         "executables": {name: {"path": str(path), "sha256": _digest(path)}
                         for name, path in executables.items()},
         "python_version": sys.version.split()[0],
+        "compat_shim": {"path": str(compat), "sha256": _digest(compat)},
         "packages": packages,
         "pyyaml": yaml.__version__,
         "environment": {**{key: os.environ.get(key, "") for key in
                            ("PYTHONPATH", "LD_LIBRARY_PATH", "CONDA_PREFIX")},
-                        "PATH": workflow_path},
+                        "PATH": workflow_path, "PYTHONPATH": workflow_pythonpath},
     }
 
 
@@ -319,20 +320,31 @@ def run_upstream(config: GriffinRun) -> tuple[GriffinProfile, ...]:
         "gc_frequency_sha256": {path.name: _digest(path) for path in frequency_files},
     }
     snakemake = _tool_path(config.snakemake)
-    python = Path(sys.executable).parent / "python"
-    if not python.is_file() or not _SAFE_TOKEN.fullmatch(str(python.absolute())):
+    if not _SAFE_TOKEN.fullmatch(str(Path(sys.executable).absolute())):
         raise ValueError("Griffin shell scripts need a shell-safe Lab Python launcher")
-    workflow_path = str(python.parent) + os.pathsep + os.environ.get("PATH", "")
-    samtools = _tool_path("samtools", path=workflow_path)
-    bedtools = _tool_path("bedtools", path=workflow_path)
+    compat_source = Path(__file__).parent / "griffin_compat" / "sitecustomize.py"
+    probe_pythonpath = str(compat_source.parent) + os.pathsep + os.environ.get("PYTHONPATH", "")
     snakemake_version = subprocess.run(
         [str(snakemake), "--version"], check=True, capture_output=True, text=True, timeout=10,
+        env={**os.environ, "PYTHONPATH": probe_pythonpath},
     ).stdout.strip()
     if snakemake_version != SNAKEMAKE_VERSION:
         raise ValueError(f"Griffin requires pinned Snakemake {SNAKEMAKE_VERSION}")
-    runtime = _runtime_identity(snakemake, python, samtools, bedtools, workflow_path)
-    runtime.update({"snakemake_version": snakemake_version, "cores": config.cores})
     attempt.mkdir()
+    launcher_dir = attempt / "bin"
+    launcher_dir.mkdir()
+    python = launcher_dir / "python"
+    python.symlink_to(Path(sys.executable).absolute())
+    compat_dir = attempt / "compat"
+    compat_dir.mkdir()
+    compat = compat_dir / "sitecustomize.py"
+    shutil.copy2(compat_source, compat)
+    workflow_pythonpath = str(compat_dir) + os.pathsep + os.environ.get("PYTHONPATH", "")
+    workflow_path = str(launcher_dir) + os.pathsep + os.environ.get("PATH", "")
+    samtools = _tool_path("samtools", path=workflow_path)
+    bedtools = _tool_path("bedtools", path=workflow_path)
+    runtime = _runtime_identity(snakemake, python, samtools, bedtools, workflow_path, workflow_pythonpath, compat)
+    runtime.update({"snakemake_version": snakemake_version, "cores": config.cores})
     scripts = attempt / "upstream_scripts"
     shutil.copytree(scripts_source, scripts, ignore=shutil.ignore_patterns("__pycache__", "*.pyc"))
     scripts = _safe_path(scripts)
@@ -400,11 +412,12 @@ def run_upstream(config: GriffinRun) -> tuple[GriffinProfile, ...]:
                 [str(snakemake), "-s", snakefile, "--cores", str(config.cores)],
                 cwd=directory, stdout=log, stderr=subprocess.STDOUT, check=True,
                 env={**os.environ, "PATH": workflow_path,
+                     "PYTHONPATH": workflow_pythonpath,
                      "PYTHONDONTWRITEBYTECODE": "1"},
             )
     if (_tool_path("samtools", path=workflow_path) != samtools
             or _tool_path("bedtools", path=workflow_path) != bedtools
-            or _runtime_identity(snakemake, python, samtools, bedtools, workflow_path) != {
+            or _runtime_identity(snakemake, python, samtools, bedtools, workflow_path, workflow_pythonpath, compat) != {
         key: value for key, value in runtime.items() if key not in ("snakemake_version", "cores")
     }):
         raise RuntimeError("Griffin workflow runtime changed during computation")
