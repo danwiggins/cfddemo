@@ -20,8 +20,9 @@ checkout, rather than approximating the measurement. It runs Griffin's GC
 correction and nucleosome-profiling Snakemake workflows on one Lab aligned
 BAM **when the BAM is paired-end WGS**. Griffin's scripts require paired
 reads with positive template length in both GC counting and coverage. The
-adapter requires every BAM read group to declare `PL:ILLUMINA` and scans the
-full BAM for paired and usable records before creating an attempt. It does
+adapter requires at least one BAM read group and every group to declare
+`PL:ILLUMINA`; it scans all primary BAM records for pairing and the 100–200 bp
+profile-window gate before creating an attempt. It does
 not infer library type from an early coordinate-sorted slice. Native ONT
 single-end BAMs are rejected. It compares the BAM's `@SQ` names and lengths
 and the workflow chromosome sizes with the registered FASTA index; this checks
