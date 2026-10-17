@@ -831,7 +831,8 @@ def test_recent_run_candidates_are_bounded_and_do_not_use_unbounded_run_ids(tmp_
 
 
 @pytest.mark.skipif(_chrome() is None, reason="no Chrome/Chromium for the headless Trust/QC check")
-@pytest.mark.parametrize("kind", ("active", "active-before-sample", "interrupted"))
+@pytest.mark.parametrize("kind", ("active", "active-before-sample", "interrupted",
+                                  "active-unlogged-prior-badlog", "active-unlogged-prior-interrupted"))
 @pytest.mark.parametrize("selected", ("a", "c"))
 def test_trust_qc_run_note_is_scoped_without_replacing_result_status(tmp_path, kind, selected) -> None:
     source_a, input_a = "a" * 64, "b" * 64
@@ -854,11 +855,21 @@ def test_trust_qc_run_note_is_scoped_without_replacing_result_status(tmp_path, k
     marker = {"run_id": "r-20261015-0101-abcd", "step": "bam-qc",
               "source_id": source_a, "input_id": input_a}
     shown_marker = {key: value for key, value in marker.items()
-                    if kind != "active-before-sample" or key not in ("source_id", "input_id")}
+                    if kind not in ("active-before-sample", "active-unlogged-prior-badlog",
+                                    "active-unlogged-prior-interrupted") or key not in ("source_id", "input_id")}
+    if kind == "active-before-sample":
+        shown_marker["step"] = None
+    prior_run_id = "r-20261015-0101-eeee"
+    if kind.startswith("active-unlogged"):
+        shown_marker = {"run_id": "r-20261015-0101-dddd", "step": "cohort add"}
     with RunningLabServer(LabStore(tmp_path / "root")) as running:
         running.app.api.status = lambda: {
             "generation": 1, "active": {**shown_marker, "started_utc": "2026-10-16T00:00:00Z"} if kind.startswith("active") else None,
-            "interrupted": shown_marker if kind == "interrupted" else None,
+            "interrupted": shown_marker if kind == "interrupted" else (
+                {"run_id": prior_run_id, "step": "read-summary"}
+                if kind == "active-unlogged-prior-interrupted" else None),
+            "run_log_unavailable": {"run_id": prior_run_id, "reason": "malformed_or_empty"}
+            if kind == "active-unlogged-prior-badlog" else None,
             "library": samples[source_a[:12]]["library_health"],
         }
         running.app.api.samples = lambda: {"samples": [
@@ -870,12 +881,20 @@ def test_trust_qc_run_note_is_scoped_without_replacing_result_status(tmp_path, k
             [_chrome(), "--headless=new", "--disable-gpu", "--no-first-run", "--no-default-browser-check",
              f"--user-data-dir={tmp_path / 'profile'}", "--window-size=1280,800",
              running.issue_link() + f"&route=/sample/{id12}/trust-qc"], tmp_path / "profile",
-            ok=lambda page: 'data-ready="1"' in page and "<h2>Run</h2>" in page,
+            ok=lambda page: 'data-ready="1"' in page and "<h2>Run</h2>" in page and (
+                not kind.startswith("active-unlogged") or prior_run_id in page),
         )
     run_table = dom.split("<h2>Run</h2>", 1)[1].split("</table>", 1)[0]
     assert '<th scope="row">bam-qc</th><td>ok' in run_table
     note = "latest run " + ("interrupted" if kind == "interrupted" else "in progress")
-    assert (note in run_table) == (selected == "a" and kind != "active-before-sample")
+    assert (note in run_table) == (selected == "a" and kind in ("active", "interrupted"))
+    if kind == "active-before-sample":
+        assert "step: starting" in dom and "step: null" not in dom
+    if kind == "active-unlogged-prior-badlog":
+        assert f"Run log for {prior_run_id} is unavailable (log malformed or empty)" in dom
+        assert "Run log status unavailable" not in dom
+    if kind == "active-unlogged-prior-interrupted":
+        assert f"Earlier run ({prior_run_id}) stopped during read-summary" in dom
 
 
 @pytest.mark.skipif(_chrome() is None, reason="no Chrome/Chromium for the headless Trust/QC check")
