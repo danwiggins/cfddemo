@@ -91,6 +91,9 @@ def _agreement_pairs(
             for member_source, x_value in zip(x_projection.source_ids, x_projection.values, strict=True)
             if member_source in y_by_source
         ]
+        labels = shortest_unique_prefixes([source_id, *(point["source_id"] for point in points)])
+        for point in points:
+            point["display_id"] = labels[point["source_id"]]
         row.update({
             "state": "ready" if points else "no_paired_values",
             "eligible_n": len(points), "points": points,

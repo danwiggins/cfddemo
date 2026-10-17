@@ -23,7 +23,7 @@ def test_agreement_points_and_findings_cutoff_whisker(tmp_path, monkeypatch) -> 
         "metric_id": "mode_bp", "label": "Fragment mode", "value": 167, "unit": "bp",
         "state": "in_range", "reason": None, "reference_kind": "internal_cohort",
         "percentile": 50, "interval": [190, 200], "eligible_n": 30,
-        "cohort_values": list(range(150, 180)),
+        "cohort_values": list(range(150, 150150)),
         "caption": "p = 50.0 against n = 30. Whisker: 90% bootstrap interval of the 95th-percentile cut-off (1000 resamples).",
     }
     sample = {
@@ -38,10 +38,10 @@ def test_agreement_points_and_findings_cutoff_whisker(tmp_path, monkeypatch) -> 
         ],
         "agreement_pairs": [
             {"pair_id": "size-cn", "state": "ready", "cohort_version": "healthy-v1:8", "eligible_n": 2,
-             "points": [{"source_id": "b" * 64, "x": 160, "y": 0.03},
-                        {"source_id": "c" * 64, "x": 175, "y": 0.05}]},
+             "points": [{"source_id": f"{2:064x}", "display_id": f"{2:064x}", "x": 160, "y": 0.03},
+                        {"source_id": f"{4:064x}", "display_id": f"{4:064x}", "x": 175, "y": 0.05}]},
             {"pair_id": "mtdna-cn", "state": "ready", "cohort_version": "healthy-v1:8", "eligible_n": 1,
-             "points": [{"source_id": "b" * 64, "x": 0.002, "y": 0.03}]},
+             "points": [{"source_id": f"{2:064x}", "display_id": f"{2:064x}", "x": 0.002, "y": 0.03}]},
         ],
         "catalog": [], "licenses": [], "interpretation_version": "1.0.0",
     }
@@ -66,7 +66,7 @@ def test_agreement_points_and_findings_cutoff_whisker(tmp_path, monkeypatch) -> 
 
     assert "2 compatible paired cohort sources from healthy-v1:8" in agreement
     assert "1 compatible paired cohort source from healthy-v1:8" in agreement
-    assert "bbbbbbbbbbbb" in agreement and "cccccccccccc" in agreement
+    assert f"{2:064x}" in agreement and f"{4:064x}" in agreement
     assert "agreement is not validation" in agreement
     assert agreement.count('data-rendered="1"') >= 2
     assert 'class="strip-svg cutoff-whisker"' in findings

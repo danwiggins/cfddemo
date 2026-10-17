@@ -50,13 +50,15 @@ def test_pairs_join_by_source_after_compatibility_and_self_exclusion() -> None:
     assert size_cn["cohort_version"] == "healthy-v1:7"
     assert size_cn["state"] == "ready" and size_cn["eligible_n"] == 2
     assert size_cn["points"] == [
-        {"source_id": f"{2:064x}", "x": 200.0, "y": 0.2},
-        {"source_id": f"{4:064x}", "x": 400.0, "y": 0.4},
+        {"source_id": f"{2:064x}", "display_id": f"{2:064x}", "x": 200.0, "y": 0.2},
+        {"source_id": f"{4:064x}", "display_id": f"{4:064x}", "x": 400.0, "y": 0.4},
     ]
     assert size_cn["excluded"]["x"]["self"] == 1
     assert size_cn["excluded"]["unpaired_x"] == 1
     assert mtdna_cn["eligible_n"] == 1
-    assert mtdna_cn["points"] == [{"source_id": f"{2:064x}", "x": 0.02, "y": 0.2}]
+    assert mtdna_cn["points"] == [{"source_id": f"{2:064x}", "display_id": f"{2:064x}", "x": 0.02, "y": 0.2}]
+    assert len({point["source_id"][:12] for point in size_cn["points"]}) == 1
+    assert len({point["display_id"] for point in size_cn["points"]}) == 2
     assert mtdna_cn["excluded"]["x"]["incompatible"] == 1
 
 

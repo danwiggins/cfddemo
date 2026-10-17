@@ -389,8 +389,13 @@
       const x = (p) => 10 + (p / 100) * (width - 20);
       const interval = Array.isArray(metric.interval) && metric.interval.length === 2 &&
         metric.interval.every(Number.isFinite) ? metric.interval : null;
-      const values = [Number(metric.value), ...(metric.cohort_values || []), ...(interval || [])].filter(Number.isFinite);
-      const low = Math.min(...values), high = Math.max(...values);
+      let low = Infinity, high = -Infinity;
+      const expandRange = (value) => {
+        if (Number.isFinite(value)) { low = Math.min(low, value); high = Math.max(high, value); }
+      };
+      expandRange(Number(metric.value));
+      for (const value of (metric.cohort_values || [])) expandRange(value);
+      for (const value of (interval || [])) expandRange(value);
       const valueX = (v) => 110 + ((v - low) / (high - low || 1)) * 200;
       return h("figure", { class: "strip" }, svg("svg", { viewBox: `0 0 ${width} ${height}`, role: "img", "aria-label": metric.caption, class: "strip-svg" },
         svg("title", {}, metric.caption),
@@ -1021,7 +1026,7 @@
             { type: "scatter", name: "This sample", symbolSize: 12, data: [[xValue, yValue]], itemStyle: { color: "#8a4b08" } },
           ],
         }, dataTable(`${title}; ${cohortText}`, ["Sample", xLabel, yLabel],
-          [[`${sample.id12} (this sample)`, xValue, yValue], ...points.map((p) => [p.source_id.slice(0, 12), p.x, p.y])])));
+          [[`${sample.id12} (this sample)`, xValue, yValue], ...points.map((p) => [p.display_id || p.source_id, p.x, p.y])])));
       }
       out.push(section);
     }
