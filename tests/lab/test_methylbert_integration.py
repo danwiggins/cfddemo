@@ -209,6 +209,7 @@ def test_runner_plan_persists_methylbert_identity_for_cohort_read(tmp_path, monk
     attempt = store.selected_attempt(input_id, "methylbert", expected_hash)
     assert attempt is not None and attempt.name == results[0].attempt_id
     plan = json.loads((attempt / "execution_plan.json").read_bytes())
+    assert plan["platform"] == "ont"
     assert plan["parameters"]["numerical_runtime"] == {"fixture_runtime": "A"}
     assert plan["asset_sha256s"] == ["d" * 64, "c" * 64]
     assert plan["tools"] == [tool.identity() for tool in adapter.METHYLBERT.tools]
