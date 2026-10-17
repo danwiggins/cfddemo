@@ -338,8 +338,22 @@ def run_pipeline(
     peak_tree_rss: int | None = None
     rss_samples: SimpleQueue[int | None] = SimpleQueue()
     rss_thread: threading.Thread | None = None
+    rss_active = threading.Event()
+    rss_active.set()
+    disk_samples: SimpleQueue[int | None] = SimpleQueue()
+    disk_thread: threading.Thread | None = None
     sink: IO[bytes] | None = None
     leader: subprocess.Popen[bytes] | None = None
+
+    def sample_disk() -> None:
+        try:
+            size = disk_usage() if disk_usage is not None else (
+                directory_bytes(disk_path) if disk_path is not None else None
+            )
+        except Exception:  # noqa: BLE001 - optional telemetry cannot fail the worker
+            size = None
+        disk_samples.put(size)
+
     try:
         if stdout_path is not None:
             if not stdout_path.is_absolute():
@@ -373,6 +387,7 @@ def run_pipeline(
             thread.start()
             threads.append(thread)
         assert leader is not None
+        leader_pid = leader.pid
         deadline = started + timeout_s
         next_disk = 0.0
         next_rss = 0.0
@@ -396,20 +411,26 @@ def run_pipeline(
             if now >= next_rss and (rss_thread is None or not rss_thread.is_alive()):
                 def sample_rss() -> None:
                     try:
-                        rss_samples.put(_process_tree_rss_bytes(leader.pid))
+                        rss = _process_tree_rss_bytes(leader_pid) if rss_active.is_set() else None
                     except Exception:  # noqa: BLE001 - optional telemetry cannot fail the worker
-                        rss_samples.put(None)
+                        rss = None
+                    if rss_active.is_set():
+                        rss_samples.put(rss)
 
                 rss_thread = threading.Thread(target=sample_rss, daemon=True)
                 rss_thread.start()
                 next_rss = time.monotonic() + RSS_SAMPLE_S
-            if (disk_path is not None or disk_usage is not None) and now >= next_disk:
-                try:
-                    size = disk_usage() if disk_usage is not None else directory_bytes(disk_path)
-                except Exception:  # noqa: BLE001 - optional telemetry cannot fail the worker
-                    size = None
-                if size is not None:
-                    peak_disk = size if peak_disk is None else max(peak_disk, size)
+            try:
+                while True:
+                    size = disk_samples.get_nowait()
+                    if size is not None:
+                        peak_disk = size if peak_disk is None else max(peak_disk, size)
+            except Empty:
+                pass
+            if ((disk_path is not None or disk_usage is not None) and now >= next_disk
+                    and (disk_thread is None or not disk_thread.is_alive())):
+                disk_thread = threading.Thread(target=sample_disk, daemon=True)
+                disk_thread.start()
                 next_disk = time.monotonic() + DISK_SAMPLE_S
             now = time.monotonic()
             if on_tick is not None:
@@ -423,6 +444,9 @@ def run_pipeline(
         interrupted = True
         raise
     finally:
+        # A process-group number may be reused after its last member exits.
+        # Discard any sample still being enumerated as the group is reaped.
+        rss_active.clear()
         if leader is not None and any(process.returncode is None for process in processes):
             _terminate(leader, processes, outcomes)
         for position, process in enumerate(processes):
@@ -439,12 +463,17 @@ def run_pipeline(
         if sink is not None:
             sink.close()
     if disk_path is not None or disk_usage is not None:
+        if disk_thread is None or not disk_thread.is_alive():
+            disk_thread = threading.Thread(target=sample_disk, daemon=True)
+            disk_thread.start()
+        disk_thread.join(timeout=0.2)
         try:
-            size = disk_usage() if disk_usage is not None else directory_bytes(disk_path)
-        except Exception:  # noqa: BLE001 - optional telemetry cannot fail the worker
-            size = None
-        if size is not None:
-            peak_disk = size if peak_disk is None else max(peak_disk, size)
+            while True:
+                size = disk_samples.get_nowait()
+                if size is not None:
+                    peak_disk = size if peak_disk is None else max(peak_disk, size)
+        except Empty:
+            pass
     try:
         while True:
             rss = rss_samples.get_nowait()

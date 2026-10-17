@@ -174,11 +174,49 @@ def test_slow_rss_sampler_does_not_delay_worker_polling(monkeypatch: pytest.Monk
     assert time.monotonic() - started < 3
 
 
+def test_slow_disk_sampler_does_not_delay_worker_polling() -> None:
+    release = threading.Event()
+    calls = 0
+
+    def slow() -> int:
+        nonlocal calls
+        calls += 1
+        release.wait(4)
+        return 1
+
+    started = time.monotonic()
+    try:
+        result = run_pipeline(
+            [Stage("ok", [PY, "-c", "print('done')"])], timeout_s=10,
+            disk_usage=slow,
+        )
+    finally:
+        release.set()
+    assert result.ok
+    assert time.monotonic() - started < 3
+    assert calls == 1
+
+
 def test_ps_sampler_does_not_report_zero_for_unmeasured_tree(monkeypatch: pytest.MonkeyPatch) -> None:
     import traceback_lab.pipeline as pipeline
 
     monkeypatch.setattr(pipeline.subprocess, "run", lambda *_, **__: SimpleNamespace(returncode=0, stdout=""))
     assert pipeline._ps_tree_rss_bytes(12345) is None
+
+
+def test_tree_rss_keeps_sampling_after_pipeline_leader_exits() -> None:
+    first = "import time; print('ready', flush=True); time.sleep(0.2)"
+    second = (
+        "import sys, time; sys.stdin.read(); "
+        "blob = bytearray(40_000_000); blob[:] = b'x' * len(blob); time.sleep(2)"
+    )
+    result = run_pipeline(
+        [Stage("leader", [PY, "-c", first]), Stage("downstream", [PY, "-c", second])],
+        timeout_s=30,
+    )
+    assert result.ok
+    assert result.sampled_tree_peak_rss_bytes is not None
+    assert result.sampled_tree_peak_rss_bytes >= 40_000_000
 
 
 def test_direct_and_sampled_tree_memory_remain_distinct() -> None:
