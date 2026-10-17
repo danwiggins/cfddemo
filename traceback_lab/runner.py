@@ -200,7 +200,9 @@ def run_plan(
             if name in done
         ]
         assets_of = getattr(algorithm, "asset_sha256s", None)
-        planned_assets = list(assets_of(store.root) if callable(assets_of) and not platform_rejected else ())
+        planned_assets = list(
+            assets_of(store.root) if callable(assets_of) and not platform_rejected and not pon_unavailable else ()
+        )
         planned_tools = [tool.identity() for tool in algorithm.tools]
         identity = execution_identity(
             algorithm,

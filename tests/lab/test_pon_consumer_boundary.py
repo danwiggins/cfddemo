@@ -369,8 +369,9 @@ def test_implicit_unavailable_panel_marks_only_copy_number_for_skip(
         )
 
 
+@pytest.mark.parametrize("reason", ["missing_toolchain", "missing_asset"])
 def test_unavailable_panel_skip_cannot_reuse_uncorrected_cached_copy_number(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, reason: str,
 ) -> None:
     store = LabStore(tmp_path)
     store.ensure()
@@ -380,7 +381,7 @@ def test_unavailable_panel_skip_cannot_reuse_uncorrected_cached_copy_number(
         input_id="4" * 64, source_id="5" * 64, input_dir=tmp_path,
         reference_id="hg38", reference_sha256="b" * 64,
         extras={"pon_unavailable": {
-            "reason_code": "missing_toolchain", "message": "built panel unavailable",
+            "reason_code": reason, "message": "built panel unavailable",
         }},
     )
     identity = execution_identity(
@@ -397,6 +398,10 @@ def test_unavailable_panel_skip_cannot_reuse_uncorrected_cached_copy_number(
     )
     store.publish_result(cached, input_id=target.input_id)
     monkeypatch.setattr(
+        cn_module.CopyNumber, "asset_sha256s",
+        lambda *_: pytest.fail("unavailable panel must not hash method assets"),
+    )
+    monkeypatch.setattr(
         cn_module.CopyNumber, "preflight",
         lambda *_: pytest.fail("unavailable panel must skip before preflight"),
     )
@@ -406,7 +411,7 @@ def test_unavailable_panel_skip_cannot_reuse_uncorrected_cached_copy_number(
         [PlanItem(algorithm, False)], {"copy-number": "traceback_lab.algorithms.copy_number:COPY_NUMBER"},
         run_id=run_id, scrubber=Scrubber(root=store.root),
     )[0]
-    assert result.status == "skipped" and result.skip_reason == "missing_toolchain"
+    assert result.status == "skipped" and result.skip_reason == reason
     assert not result.cached
     assert store.read_result(target.input_id, "copy-number", identity).status == "skipped"
 
