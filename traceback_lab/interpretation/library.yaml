@@ -217,8 +217,8 @@ entries:
     reference: {kind: none}
     performance: null
     performance_missing_reason: "QC measure: sum of eligible spans / genome length"
-    meaning_high: "More algorithms clear their minimum depth."
-    meaning_low: "Most algorithms are skipped or not interpretable; see the depth curve."
+    meaning_high: "More measurements may clear their depth requirement; platform and other gates still apply."
+    meaning_low: "Fewer measurements clear their depth requirement; see the depth curve."
     confounders: ["flow-cell yield", "input cfDNA mass"]
     next_steps:
       analytical: ["Use the depth curve to see what more sequencing would add"]
@@ -241,8 +241,8 @@ entries:
     reference: {kind: none}
     performance: null
     performance_missing_reason: "QC count"
-    meaning_high: "More reads count toward every algorithm's minimum."
-    meaning_low: "Few reads count toward minimums."
+    meaning_high: "More reads pass the common eligibility filter; each algorithm still applies its own platform and input gates."
+    meaning_low: "Few reads pass the common eligibility filter; see platform-specific support requirements."
     confounders: ["mapping quality", "chimeras"]
     next_steps:
       analytical: ["Compare with the index count (an upper bound)"]
@@ -265,11 +265,11 @@ entries:
     reference: {kind: none}
     performance: null
     performance_missing_reason: "QC measure"
-    meaning_high: "Longer molecules (or chimeras)."
-    meaning_low: "Shorter molecules."
-    confounders: ["library prep size bias", "chimeras"]
+    meaning_high: "Longer aligned span per eligible read; paired-read span is not template length."
+    meaning_low: "Shorter aligned span per eligible read; paired-read span is not template length."
+    confounders: ["library prep size bias", "alignment and clipping", "chimeras"]
     next_steps:
-      analytical: ["See the fragment-size histogram"]
+      analytical: ["Use the platform-specific fragment-size measurement for molecule or template length"]
       clinical_setting: null
     license_ids: []
     flags: []
