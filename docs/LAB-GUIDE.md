@@ -399,8 +399,11 @@ per-read assignments remain transient and are not published.
 The headline microbial estimate includes accepted species beyond the 256
 displayed rows, so it need not equal the sum of the visible table.
 The worker briefly writes candidate unmapped sequence in a private Lab scratch
-directory. Normal completion removes it; a crash or abrupt power loss can leave
-scratch files for an operator to inspect and remove under the Lab root.
+directory, with a 512 MiB candidate FASTA limit per run. Larger candidate sets
+are sent in full to Kraken2 through a pipe; the partial staged file is removed
+first. Kraken's per-read assignments are suppressed, while its aggregate report feeds
+Bracken. Normal completion removes scratch; a crash or abrupt power loss can
+leave files for an operator to inspect and remove under the Lab root.
 An input with no primary QC-passing non-duplicate reads has no microbial rate
 or cohort comparison. If unmapped reads exist but all are too short or lack
 sequence, the rate and cohort comparison are also unavailable. An input with
