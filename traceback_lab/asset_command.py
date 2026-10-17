@@ -21,8 +21,8 @@ def add_asset_parser(commands: Any, common: Callable[[argparse.ArgumentParser], 
     asset = commands.add_parser("asset", help="register or inspect local Lab assets")
     actions = asset.add_subparsers(dest="asset_action", required=True)
     add = actions.add_parser("add", help="register operator-supplied pinned bytes")
-    add.add_argument("kind", choices=("pmd", METH_TF_KIND))
-    add.add_argument("--file", type=Path, required=True, help="local asset file")
+    add.add_argument("kind", choices=("pmd", METH_TF_KIND, "tss-annotation"))
+    add.add_argument("--file", type=Path, required=True, help="local pinned asset file")
     add.add_argument(
         "--source-label", "--provenance", dest="source_label", required=True,
         help="short public source description, never a donor path",
@@ -32,7 +32,7 @@ def add_asset_parser(commands: Any, common: Callable[[argparse.ArgumentParser], 
     common(add)
     add.set_defaults(handler=_add)
     inspect = actions.add_parser("inspect", help="rehash and describe a local asset")
-    inspect.add_argument("kind", choices=("pmd", METH_TF_KIND))
+    inspect.add_argument("kind", choices=("pmd", METH_TF_KIND, "tss-annotation"))
     common(inspect)
     inspect.set_defaults(handler=_inspect)
 
