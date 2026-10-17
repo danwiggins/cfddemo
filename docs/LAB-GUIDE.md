@@ -258,7 +258,11 @@ format only; these numbers are synthetic and are not a usable reference.
 Registration is immutable within one Lab root: a different panel needs a
 separate root. Missing, changed, mismatched, or insufficient marker data never
 become a zero tumour estimate. The result has no detection limit, calibrated
-interval, or clinical cutoff. `identifiable` means only that the observed,
+interval, or clinical cutoff. If an existing registration is damaged, `lab
+asset add` will not overwrite it: restore that registration's exact files from
+a known-good backup, or use a new ROOT. If planning could not pin a readable
+registration, retry the run after checking the asset's local storage.
+`identifiable` means only that the observed,
 count-weighted reference columns have numerical rank and a nonzero fit. The
 reported `reference_condition_number` describes how sensitive the numerical
 fit is to small changes; a large value warns of nearly collinear references,

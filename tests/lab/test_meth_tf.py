@@ -144,6 +144,9 @@ def test_missing_or_changed_reference_refuses_without_using_unpinned_bytes(
         record = add_reference(store, source, source_label="synthetic marker fixture", terms="unknown")
     assert inspect_reference(store, expected_sha256=record.sha256).reference.modbase_model == "synthetic-model"
     assert record.sha256 == hashlib.sha256(source.read_bytes()).hexdigest()
+    with store.writer("same bytes, different metadata refused", new_run_id()):
+        with pytest.raises(AssetError, match="different registration metadata"):
+            add_reference(store, source, source_label="changed label", terms="unknown")
     with pytest.raises(AssetError, match="different"):
         other = _reference(tmp_path / "other-source.json", ctx.reference_sha256, model="other-model")
         with store.writer("replacement refused", new_run_id()):
@@ -152,7 +155,7 @@ def test_missing_or_changed_reference_refuses_without_using_unpinned_bytes(
     with pytest.raises(AssetError, match="SHA-256"):
         inspect_reference(store)
     assert METH_TF.asset_sha256s(tmp_path) == []
-    assert METH_TF.preflight(ctx).reason_code == "missing_asset"
+    assert METH_TF.preflight(ctx).reason_code == "invalid_asset"
 
 
 def test_reference_model_genome_and_depth_must_match(
@@ -183,6 +186,7 @@ def test_registered_worker_produces_exploratory_fraction_and_pinned_attempt(tmp_
     assert receipt["reference_sha256"] == ctx.reference_sha256
     assert receipt["reference_condition_number"] == pytest.approx(2)
     ctx.extras["planned_asset_sha256s"] = ["0" * 64]
+    assert METH_TF.preflight(ctx).reason_code == "asset_unavailable"
     with pytest.raises(ValueError, match="execution planning"):
         METH_TF.run(ctx, tmp_path / "out")
     ctx.extras["planned_asset_sha256s"] = [registered.sha256]

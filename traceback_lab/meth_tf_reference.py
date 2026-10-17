@@ -184,6 +184,8 @@ def add_reference(
     if directory.exists() or directory.is_symlink():
         registered = inspect_reference(store)
         if registered.descriptor != descriptor:
+            if registered.sha256 == descriptor.sha256:
+                raise AssetError("the same meth-TF reference bytes have different registration metadata in this Lab root")
             raise AssetError("a different meth-TF reference is already registered in this Lab root")
         return registered
     manifest = {

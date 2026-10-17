@@ -17,7 +17,7 @@ from typing import Any
 import numpy as np
 
 from ..meth_calls import HAS_M, argmax_state
-from ..meth_tf_reference import CALL_DEFINITION, RegisteredReference, inspect_reference
+from ..meth_tf_reference import CALL_DEFINITION, KIND as REFERENCE_KIND, RegisteredReference, inspect_reference
 from ..read_summary import ReadSummary
 from ..registry import AlgorithmOutput, InputContext, Ready, Requirements, Skip
 from ._base import Base, metric
@@ -149,7 +149,12 @@ class MethTF(MethBase):
         try:
             reference = inspect_reference(LabStore(ctx.root))
         except (OSError, ValueError):
+            directory = ctx.root / "lab" / "assets" / REFERENCE_KIND
+            if directory.exists() or directory.is_symlink():
+                return Skip("invalid_asset", "the registered meth-TF reference is damaged; restore it from backup or use a new ROOT")
             return Skip("missing_asset", "register a compatible meth-TF marker reference with 'traceback lab asset add meth-tf-reference'")
+        if ctx.extras.get("planned_asset_sha256s") != [reference.sha256]:
+            return Skip("asset_unavailable", "meth-TF reference identity was unavailable during planning; retry the run")
         if reference.reference.reference_sha256 != ctx.reference_sha256:
             return Skip("reference", "the meth-TF marker reference does not match this genome reference")
         from .cell_origin import header_model
