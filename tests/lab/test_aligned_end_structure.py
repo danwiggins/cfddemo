@@ -258,7 +258,7 @@ def test_reregistered_catalogue_cannot_run_under_old_execution_identity(tmp_path
     _summary(summary_parent)
     ctx = _context(root, summary_parent, extras={
         "upstream": {"read-summary": str(summary_parent)},
-        "execution_asset_sha256s": [old_identity],
+        "planned_asset_sha256s": [old_identity],
     })
     with pytest.raises(EndCatalogueError, match="execution identity"):
         ALIGNED_END_STRUCTURE.run(ctx, tmp_path / "out")

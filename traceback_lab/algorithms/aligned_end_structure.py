@@ -84,7 +84,7 @@ class AlignedEndStructure(Base):
         # Only the native ONT aligner publishes kind=aligned; imported BAMs are prealigned.
         if ctx.approx_depth_x is None or not np.isfinite(ctx.approx_depth_x) or ctx.approx_depth_x < MIN_DEPTH_X:
             return Skip("depth", "aligned-end structure needs at least 10x observed eligible depth")
-        expected = ctx.extras.get("execution_asset_sha256s")
+        expected = ctx.extras.get("planned_asset_sha256s")
         if expected is not None:
             if not expected:
                 return Skip("missing_asset", "verified hg38 open-chromatin and preferred-end catalogues are required")
@@ -98,7 +98,7 @@ class AlignedEndStructure(Base):
     def run(self, ctx: InputContext, out: Path) -> AlgorithmOutput:
         del out
         catalogues = inspect_end_catalogues(ctx.root)
-        expected = ctx.extras.get("execution_asset_sha256s")
+        expected = ctx.extras.get("planned_asset_sha256s")
         if expected is not None and expected != [catalogues.identity]:
             raise EndCatalogueError("pinned end catalogues changed after execution identity was set")
         summary, mask = load_summary(ctx)

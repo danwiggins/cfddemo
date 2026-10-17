@@ -866,7 +866,7 @@
       h("div", { class: "findings-head" }, h("h1", { class: "view-title" }, "Body map"), flagPill("LEGAL", "FLAG: LEGAL — research-only licenses; atlas terms unknown."))];
     const a = algo(sample, "cell-origin");
     if (!a || a.status !== "ok") { out.push(absent(a, "cell-origin")); return out; }
-    out.push(h("p", { class: "help" }, `Reference cohort ${sample.cohort_version || "not built"} (${sample.cohort_n} members)${sample.cohort_kind === "provisional_external" ? "; protocol-mismatched external reference" : ""}. Tissue references use eligible comparable samples after leave-one-out: 10–29 show observed min–max; 30+ show the 90% bootstrap interval of the 95th-percentile cutoff. The diamond marks the eligible mean. Minor tissues are not interpretable below 5x; their estimate and interval stay visible.`));
+    out.push(h("p", { class: "help" }, `Reference cohort ${sample.cohort_version || "not built"} (${sample.cohort_n} members)${sample.cohort_kind === "provisional_external" ? "; protocol-mismatched external reference" : ""}. Tissue references use eligible comparable samples after leave-one-out: 10–29 show observed min–max; 30+ show the 90% bootstrap interval of the 95th-percentile cutoff. The diamond marks the eligible mean, which need not lie inside a cutoff interval. Minor tissues are not interpretable below 5x; their estimate and interval stay visible.`));
     out.push(...context(sample, "cell-origin", new Set()));
     const rows = a.metrics.filter((m) => m.metric_id.startsWith("fraction_"));
     const cohortSummary = (m) => m.eligible_n >= 10 && m.cohort_mean !== null && Array.isArray(m.interval)
@@ -899,13 +899,14 @@
         out2.push(svg("text", { x: x(m.value), y: y + 5, "text-anchor": "middle", class: m.state === "not_interpretable" ? "pt-open" : "pt" }, m.state === "not_interpretable" ? "▨" : "●"));
         return out2;
       });
-      const label = `${name}: ${members.length} cell types; dots are this sample, diamonds are eligible cohort means, upper lines are reference intervals, lower lines are sample intervals. Hatched dots are not interpretable at this depth.`;
+      const label = `${name}: ${members.length} cell types; dots are this sample, diamonds are eligible cohort means, upper lines are observed min–max for 10–29 eligible values or the 90% bootstrap interval of the 95th-percentile cutoff for 30 or more, lower lines are sample intervals. The mean may lie outside a cutoff interval. Hatched dots are not interpretable at this depth.`;
       out.push(h("section", { class: "panel" }, h("h2", {}, name),
         svg("svg", { viewBox: `0 0 ${w} ${hgt}`, role: "img", "aria-label": label, class: "composition-svg" }, svg("title", {}, label), ...marks,
           svg("line", { x1: left, x2: w - 20, y1: axisY, y2: axisY, class: "ci" }), ...ticks),
-        dataTable(`${name} (${intervalName})`, ["Cell type", "Share", "Interval low", "Interval high", "Cohort mean", "Reference low", "Reference high", "Eligible n", "State"],
+        dataTable(`${name} (${intervalName})`, ["Cell type", "Share", "Interval low", "Interval high", "Cohort mean", "Reference low", "Reference high", "Reference interval meaning", "Eligible n", "State"],
           members.map((m) => { const cohort = cohortSummary(m); return [m.contributor, m.value, m.ci ? m.ci[0] : null, m.ci ? m.ci[1] : null,
-            cohort ? cohort.mean : null, cohort ? cohort.low : null, cohort ? cohort.high : null, m.eligible_n,
+            cohort ? cohort.mean : null, cohort ? cohort.low : null, cohort ? cohort.high : null,
+            cohort ? (m.exploratory_n ? "Observed min–max" : "90% bootstrap interval of the 95th-percentile cutoff") : "—", m.eligible_n,
             (STATE[m.state] || ["", m.state])[1] + (m.reason ? ` (${m.reason})` : "")]; }))));
     }
     out.push(h("p", { class: "help" }, "Groups are an editorial arrangement of atlas cell types by organ system, not an inferred tissue of origin."));
@@ -1072,7 +1073,82 @@
       .catch((error) => {
         if (slot.isConnected) slot.replaceChildren(h("p", { class: "problem" }, `Cohorts could not be loaded (${error.message}). Check the Lab server, then reload.`));
       });
+    out.push(sampleCompare(sample));
     return out;
+  }
+
+  function sampleOverlay(metric) {
+    const a = metric.value_a, b = metric.value_b;
+    const low = Math.min(0, a, b), high = Math.max(0, a, b);
+    const span = high - low || 1;
+    const x = (value) => 10 + ((value - low) / span) * 160;
+    const label = `${metric.label}: sample A ${fmt(a, metric.unit)}, sample B ${fmt(b, metric.unit)}, B minus A ${fmt(metric.delta_b_minus_a, metric.unit)}. Local display scale only; no reference threshold.`;
+    return h("figure", { class: "sample-overlay" },
+      svg("svg", { viewBox: "0 0 180 30", role: "img", "aria-label": label },
+        svg("title", {}, label),
+        svg("line", { x1: 10, x2: 170, y1: 15, y2: 15, class: "strip-track" }),
+        svg("circle", { cx: x(a), cy: 15, r: 5, class: "sample-a" }),
+        svg("path", { d: `M${x(b)},9 l6,6 -6,6 -6,-6 z`, class: "sample-b" })),
+      h("figcaption", {}, "A ● · B ◆; local display scale"));
+  }
+
+  function sampleCompare(sample) {
+    const section = h("section", { class: "panel", "aria-labelledby": "compare-sample-title" },
+      h("h2", { id: "compare-sample-title" }, "Another sample"),
+      h("p", { class: "help" }, "Cross-sectional comparison of two distinct samples. Source IDs do not establish a shared donor or timepoint. Only compatible current full-input results are paired; B−A is an arithmetic difference in the displayed unit, not a clinical threshold."));
+    const others = (L.state.samples || []).filter((row) => row.id12 !== sample.id12 && !row.example);
+    if (!others.length) {
+      section.append(h("p", { class: "empty" }, "No other real sample is available under this ROOT."));
+      return section;
+    }
+    const picker = h("select", { id: "compare-other-sample" },
+      ...others.map((row) => h("option", { value: row.id12 }, row.id12)));
+    const result = h("div", { "aria-live": "polite" });
+    section.append(h("label", { for: "compare-other-sample" }, "Sample B "), picker, result);
+    let request = 0;
+    const show = () => {
+      const current = ++request;
+      result.replaceChildren(h("p", {}, "Loading sample comparison…"));
+      fetch(`/api/samples/${sample.id12}/compare/${encodeURIComponent(picker.value)}`, { credentials: "same-origin" })
+        .then((response) => { if (!response.ok) throw new Error(`HTTP ${response.status}`); return response.json(); })
+        .then((data) => {
+          if (!result.isConnected || current !== request) return;
+          if (data.state !== "ready") {
+            const messages = {
+              same_sample: "Choose a different sample.",
+              sample_unavailable: `Sample ${data.which === "b" ? "B" : "A"} is unavailable; reload the sample list after checking its current full input.`,
+              stale_sample: `Sample ${data.which === "b" ? "B" : "A"} changed while Compare loaded; reload before comparing.`,
+              example_unscorable: "Synthetic EXAMPLE samples are not paired with real kit samples.",
+            };
+            result.replaceChildren(h("p", { class: "problem" }, messages[data.state] || "The selected comparison is unavailable."));
+            return;
+          }
+          const nodes = [h("p", {}, `Sample A ${data.id12_a} · Sample B ${data.id12_b}. A: ${data.aligner_a}; B: ${data.aligner_b}. Only equal compatibility keys and exact selected results appear below.`)];
+          if (data.metrics.length) {
+            const rows = data.metrics.map((metric) => h("tr", {},
+              h("th", { scope: "row" }, metric.algorithm_id, " · ", metric.label),
+              h("td", {}, sampleOverlay(metric)),
+              h("td", { class: "num" }, fmt(metric.value_a, metric.unit)),
+              h("td", { class: "num" }, fmt(metric.value_b, metric.unit)),
+              h("td", { class: "num" }, fmt(metric.delta_b_minus_a, metric.unit))));
+            nodes.push(h("div", { class: "table-wrap", tabindex: "0", role: "region", "aria-label": "Sample A and B comparison" },
+              h("table", { class: "data-table" },
+                h("caption", {}, `Sample A ${data.id12_a} versus B ${data.id12_b}; exact values and B−A`),
+                h("thead", {}, h("tr", {}, ...["Metric", "Overlay", "Sample A", "Sample B", "B−A"].map((name) => h("th", { scope: "col" }, name)))),
+                h("tbody", {}, ...rows))));
+          } else nodes.push(h("p", { class: "empty" }, "No compatible scalar metric is available for this pair. Missing values are not zero."));
+          if (data.unscored.length) nodes.push(h("details", {}, h("summary", {}, `Not paired (${data.unscored.length})`),
+            dataTable("Unpaired metrics and reasons", ["Algorithm", "Metric", "Reason"],
+              data.unscored.map((row) => [row.algorithm_id, row.metric_id, row.reason.replace(/_/g, " ")]))));
+          result.replaceChildren(...nodes);
+        })
+        .catch((error) => {
+          if (result.isConnected && current === request) result.replaceChildren(h("p", { class: "problem" }, `Sample comparison could not be loaded (${error.message}). Reload Compare.`));
+        });
+    };
+    picker.addEventListener("change", show);
+    show();
+    return section;
   }
 
   window.TracebackLabViews = {

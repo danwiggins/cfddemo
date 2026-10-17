@@ -955,6 +955,33 @@ entries:
     citations: []
     citation_checked: {by: "lab build agent (Phase 1)", date: "2026-10-15", note: "No citation displayed."}
 
+  # --------------------------------------------------------------- identity
+  - algorithm_id: identity
+    metric_id: fingerprint_bytes
+    label: "Somalier fingerprint size"
+    value_kind: count
+    tier: SPECULATIVE
+    origin_tier: NEWER
+    origin_platform: "BAM/CRAM; this Lab use is ONT cfDNA"
+    min_depth_x: null
+    reference: {kind: none}
+    performance: null
+    performance_missing_reason: "No qualified ONT relatedness cutoff or duplicate classification"
+    meaning_high: "A fingerprint was prepared for an explicitly requested pair comparison; size does not measure relatedness."
+    meaning_low: "A fingerprint was prepared for an explicitly requested pair comparison; size does not measure relatedness."
+    confounders: ["informative-site depth", "reference and site-set compatibility", "cfDNA coverage"]
+    next_steps:
+      analytical: ["Use lab identity compare with two stored sample IDs", "Review raw pair metrics without a duplicate cutoff"]
+      clinical_setting: null
+    license_ids: [somalier-mit]
+    flags: [PRIVACY]
+    headline: true
+    citations: ["doi:10.1186/s13073-020-00761-2"]
+    citation_checked:
+      by: "Lab S4 implementation"
+      date: "2026-10-16"
+      note: "Somalier method citation; no ONT kit performance or relatedness cutoff is claimed."
+
   # ----------------------------------------------------------------- mtdna
   - algorithm_id: mtdna
     metric_id: chrm_fraction
