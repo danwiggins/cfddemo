@@ -37,7 +37,9 @@ def test_holds_an_assertion_tied_to_this_process_and_releases_it(
                 if observed == expected:
                     break
             time.sleep(0.01)
-        assert observed == expected
+        if observed != expected and argv.exists():
+            observed = argv.read_text().split()
+        assert observed == expected, f"caffeinate argv exists={argv.exists()}; observed={observed!r}"
     assert holder.poll() is not None
 
 
