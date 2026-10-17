@@ -196,6 +196,37 @@ def test_cohort_reads_recorded_parser_pin_after_reader_upgrade(tmp_path, monkeyp
     assert projected.exclusions == {"self": 1, "incompatible": 1}
 
 
+def test_cohort_keeps_recorded_result_after_reader_source_change(tmp_path, monkeypatch) -> None:
+    store = LabStore(tmp_path)
+    old_algorithm = co.CELL_ORIGIN
+    old_source, old_hash = _publish_cohort_cell_origin(store, index=31, algorithm=old_algorithm)
+    current_sources = old_algorithm.parameters["implementation_sha256s"]
+    changed_name = next(iter(current_sources))
+    new_algorithm = replace(old_algorithm, parameters={
+        **old_algorithm.parameters,
+        "implementation_sha256s": {**current_sources, changed_name: "0" * 64},
+    })
+    new_source, new_hash = _publish_cohort_cell_origin(store, index=32, algorithm=new_algorithm)
+    assert old_hash != new_hash
+    monkeypatch.setattr(cohorts, "load_registry", lambda: (READ_SUMMARY, new_algorithm))
+    for source in (old_source, new_source):
+        cohorts.add_sample(store, "source-cohort", source)
+    generation = cohorts.build_cohort(store, "source-cohort")
+    results = {
+        member.source_id: next(row for row in member.results if row.algorithm_id == "cell-origin")
+        for member in generation.members
+    }
+    assert results[old_source].parameters_sha256 == old_hash
+    assert results[new_source].parameters_sha256 == new_hash
+    assert results[old_source].cohort_compat_key != results[new_source].cohort_compat_key
+    projected = cohorts.project_sample_metric(
+        store, "source-cohort", target_source_id=old_source,
+        algorithm_id="cell-origin", metric_id="classified_fragments",
+    )
+    assert projected is not None and projected.percentile_n == 0
+    assert projected.exclusions == {"self": 1, "incompatible": 1}
+
+
 def test_runner_plan_persists_cell_origin_parser_pin_for_cohort_read(tmp_path, monkeypatch) -> None:
     store = LabStore(tmp_path)
     source_id, expected_hash = _publish_cohort_cell_origin(
