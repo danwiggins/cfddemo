@@ -215,9 +215,9 @@ def test_live_status_changes_keep_focus_and_open_disclosure(tmp_path) -> None:
         def status():
             if phase["state"] == "disconnected":
                 raise OSError("synthetic disconnect")
-            row = {"generation": 2 if phase["state"] == "stale" else 1,
+            row = {"generation": 2 if phase["state"] in ("stale", "active-after-stale") else 1,
                    "active": None, "interrupted": None, "library": sample["library_health"]}
-            if phase["state"] == "active":
+            if phase["state"] in ("active", "active-after-stale"):
                 row["active"] = {**_run_marker(), "started_utc": "2026-10-16T00:00:00Z"}
             elif phase["state"] == "interrupted":
                 row["interrupted"] = _run_marker()
@@ -250,6 +250,20 @@ def test_live_status_changes_keep_focus_and_open_disclosure(tmp_path) -> None:
             expect_status("stopped during bam-qc")
             phase["state"] = "stale"
             expect_status("Results changed on disk")
+            evaluate("""(() => {
+              window.pinnedReload = document.querySelector('#status button.reload');
+              window.pinnedReload.focus();
+            })()""")
+            phase["state"] = "active-after-stale"
+            for _ in range(30):
+                if evaluate("document.getElementById('status').textContent.includes('A Lab run is in progress')"):
+                    break
+                time.sleep(0.2)
+            else:
+                pytest.fail("active run after stale generation did not appear")
+            assert evaluate("document.querySelector('#status button.reload') === window.pinnedReload")
+            assert evaluate("document.activeElement === window.pinnedReload")
+            evaluate("window.pinnedSummary.focus()")
             phase["state"] = "disconnected"
             expect_status("Lab server not responding")
 

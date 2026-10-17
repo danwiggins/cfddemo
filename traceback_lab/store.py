@@ -996,9 +996,9 @@ class LabStore:
         order and must still block fallback to another selected result.
         """
 
-        directory = self.result_dir(input_id, algorithm_id, parameters_sha256)
-        selector = directory / "selected.json"
         try:
+            directory = self.result_dir(input_id, algorithm_id, parameters_sha256)
+            selector = directory / "selected.json"
             if directory.parent.is_symlink() or directory.is_symlink() or selector.is_symlink():
                 return None
             data = json.loads(selector.read_bytes())

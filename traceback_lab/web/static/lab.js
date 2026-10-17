@@ -517,9 +517,11 @@
           ? ` Earlier run (${status.interrupted.run_id}) stopped during ${status.interrupted.step || "a step"}.` : "";
         const logNotice = logIssue ? ` ${logIssue.run_id ? `Run log for ${logIssue.run_id}` : "Run status"} is unavailable (${logReason}).` : "";
         if (["run", "simulate cna", "simulate split"].includes(status.active.command)) {
-          setStatus(`A Lab run is in progress (step: ${status.active.step || "starting"}, ${minutes} min). Results below are from completed steps.${priorInterrupted}${logNotice}`);
+          setStatus(`A Lab run is in progress (step: ${status.active.step || "starting"}, ${minutes} min). Results below are from completed steps.${priorInterrupted}${logNotice}`,
+            status.generation > state.generationAtLoad ? "Reload" : null);
         } else {
-          setStatus(`Lab ${status.active.command || "work"} is in progress. Results below are from completed steps.${priorInterrupted}${logNotice}`);
+          setStatus(`Lab ${status.active.command || "work"} is in progress. Results below are from completed steps.${priorInterrupted}${logNotice}`,
+            status.generation > state.generationAtLoad ? "Reload" : null);
         }
       } else if (status.interrupted) {
         // A run that died (stale heartbeat, open log) is "interrupted", even

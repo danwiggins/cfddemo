@@ -246,6 +246,24 @@ def test_corrupt_selection_only_blocks_a_newer_or_unorderable_identity(tmp_path:
         assert selected == {}
 
 
+@pytest.mark.parametrize("bad_algorithm,bad_identity", (("bad.name", A), ("fragment-size", "bad-identity")))
+def test_malformed_result_directory_cannot_crash_selection(
+    tmp_path: Path, bad_algorithm: str, bad_identity: str,
+) -> None:
+    store = LabStore(tmp_path)
+    store.ensure()
+    store.publish_result(_envelope(1), input_id=C)
+    malformed = store.results_dir / C / bad_algorithm / bad_identity
+    malformed.mkdir(parents=True)
+    (malformed / "selected.json").write_text('{"attempt_id":"invalid"}')
+
+    selected = selected_results(store, C)
+    if bad_algorithm == "fragment-size":
+        assert selected == {}
+    else:
+        assert selected["fragment-size"].metrics[0].value == 1
+
+
 def test_higher_publication_order_resolves_tied_older_identities(tmp_path: Path) -> None:
     store = LabStore(tmp_path)
     store.ensure()
