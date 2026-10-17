@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import copy
 import json
 import math
 
@@ -183,6 +184,7 @@ def _assert_default_scalar_selection(store, sample, payload) -> None:
     api = LabApi(store).sample(sample.id12)
     assert api["found"] is True and api["source_id"] == sample.source_id
     algorithm_rows = {row["algorithm_id"]: row for row in api["algorithms"]}
+    assert len(algorithm_rows) == len(api["algorithms"])
     assert set(algorithm_rows) == full_ids
     for algorithm_id, row in algorithm_rows.items():
         result = sample.full.results[algorithm_id]
@@ -196,7 +198,9 @@ def _assert_default_scalar_selection(store, sample, payload) -> None:
         else:
             assert {metric["metric_id"] for metric in row["metrics"]} == {metric.metric_id for metric in result.metrics}
     catalog = {row["algorithm_id"]: row for row in api["catalog"]}
+    assert len(catalog) == len(api["catalog"])
     assert set(catalog) == full_ids - library.hidden_algorithms
+    assert {"bam-qc", "depth", "fragment-size"} <= set(catalog)
     assert all(row["status"] in {"ok", "skipped", "failed"} for row in catalog.values())
     expected_curve_ids = {
         algorithm_id for algorithm_id in full_ids - library.hidden_algorithms
@@ -204,6 +208,7 @@ def _assert_default_scalar_selection(store, sample, payload) -> None:
     }
     assert expected_curve_ids
     assert {"bam-qc", "depth", "fragment-size"} <= expected_curve_ids
+    assert len(api["curve"]["rows"]) == len(expected_curve_ids)
     assert {row["algorithm_id"] for row in api["curve"]["rows"]} == expected_curve_ids
     before_cells = {}
     for curve_row in api["curve"]["rows"]:
@@ -212,7 +217,7 @@ def _assert_default_scalar_selection(store, sample, payload) -> None:
         assert [cell["label"] for cell in curve_row["cells"]] == ["0.1", "0.25", "0.5", "full"]
         for cell in curve_row["cells"]:
             label = cell["label"]
-            before_cells[algorithm_id, label] = json.loads(json.dumps(cell))
+            before_cells[algorithm_id, label] = copy.deepcopy(cell)
             view = views_by_label[label]
             result = view.results[algorithm_id]
             assert cell["state"] in views.CELL_STATES, (algorithm_id, label)
@@ -230,10 +235,14 @@ def _assert_default_scalar_selection(store, sample, payload) -> None:
                 assert cell.get("value") == metric.value
             if algorithm_id in {"bam-qc", "depth", "fragment-size"}:
                 assert cell["state"] in {"ok_usable", "ok_unstable"}
-                assert isinstance(metric.value, (int, float)) and math.isfinite(metric.value)
+                assert isinstance(metric.value, (int, float)) and not isinstance(metric.value, bool)
+                assert math.isfinite(metric.value)
         if algorithm_id == "depth":
             xs = [cell["depth_x"] for cell in curve_row["cells"]]
             assert xs == sorted(set(xs)), xs
+            assert xs[-1] > 0
+            assert all(abs(value / xs[-1] - fraction) < min(0.08, max(0.02, 0.15 * fraction))
+                       for value, fraction in zip(xs[:-1], (0.1, 0.25, 0.5)))
 
     # A later selected failure or null value changes the API's measured cell;
     # it must not fall back to the previous successful attempt or disappear.
@@ -251,18 +260,29 @@ def _assert_default_scalar_selection(store, sample, payload) -> None:
     store.publish_result(failed, input_id=failure_view.input_id)
     selected_attempt = store.selected_attempt(failure_view.input_id, "bam-qc", prior.provenance.parameters_sha256)
     assert selected_attempt is not None and selected_attempt != previous_attempt
+    assert previous_attempt.exists(), "the earlier success must remain a real fallback candidate"
     null_view = views_by_label["0.25"]
     prior = null_view.results["fragment-size"]
     fragment_headline = library.headline("fragment-size")
     assert fragment_headline is not None
+    previous_null_attempt = store.selected_attempt(
+        null_view.input_id, "fragment-size", prior.provenance.parameters_sha256,
+    )
+    assert previous_null_attempt is not None
     null_result = ResultEnvelope.model_validate({
         **prior.model_dump(), "status": "ok",
         "metrics": [Metric(metric_id=fragment_headline.metric_id, value=None, unit="bp").model_dump()],
         "panels": [], "failure": None,
     })
     store.publish_result(null_result, input_id=null_view.input_id)
+    selected_null_attempt = store.selected_attempt(
+        null_view.input_id, "fragment-size", prior.provenance.parameters_sha256,
+    )
+    assert selected_null_attempt is not None and selected_null_attempt != previous_null_attempt
+    assert previous_null_attempt.exists(), "the earlier scalar must remain a real fallback candidate"
     updated = LabApi(store).sample(sample.id12)
     updated_rows = {row["algorithm_id"]: row for row in updated["curve"]["rows"]}
+    assert len(updated_rows) == len(updated["curve"]["rows"])
     assert set(updated_rows) == expected_curve_ids
     for algorithm_id, row in updated_rows.items():
         assert [cell["label"] for cell in row["cells"]] == ["0.1", "0.25", "0.5", "full"]
