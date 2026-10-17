@@ -49,6 +49,7 @@ ALGORITHMS: tuple[str, ...] = (
     "instability:INSTABILITY",
     "long_tail:LONG_TAIL",
     "sex_check:SEX_CHECK",
+    "identity:IDENTITY",
     "mtdna:MTDNA",
     "cell_origin:CELL_ORIGIN",
     "end_motifs:END_MOTIFS",
@@ -183,6 +184,7 @@ def execution_identity(
     asset_sha256s: Iterable[str] = (),
     upstream: Iterable[Mapping[str, str]] = (),
     platform: str | None = None,
+    tool_pins: Iterable[Mapping[str, str]] | None = None,
 ) -> str:
     """``parameters_sha256`` for one algorithm on one reference (D19)."""
 
@@ -190,7 +192,7 @@ def execution_identity(
         algorithm_id=algorithm.id,
         algorithm_version=algorithm.version,
         parameters=algorithm.parameters,
-        tools=[tool.identity() for tool in algorithm.tools],
+        tools=list(tool_pins) if tool_pins is not None else [tool.identity() for tool in algorithm.tools],
         reference_sha256=reference_sha256,
         asset_sha256s=asset_sha256s,
         upstream=upstream,
