@@ -34,7 +34,7 @@ def _context(tmp_path: Path, **extras: Any) -> InputContext:
 
 
 def _publish_cohort_methylbert(
-    store: LabStore, *, index: int, bundle_sha256: str, runtime_name: str,
+    store: LabStore, *, index: int, bundle_sha256: str,
 ) -> tuple[str, str]:
     source_id, input_id, reference_sha256 = f"{index:064x}", f"{index + 100:064x}", "a" * 64
     store.sources_dir.mkdir(parents=True, exist_ok=True)
@@ -44,6 +44,17 @@ def _publish_cohort_methylbert(
     }), encoding="utf-8")
     input_dir = store.inputs_dir / input_id
     input_dir.mkdir(parents=True, exist_ok=True)
+    with pysam.AlignmentFile(str(input_dir / "aligned.bam"), "wb", header={
+        "HD": {"VN": "1.6"}, "SQ": [{"SN": "chr1", "LN": 100}],
+        "RG": [{"ID": "ont", "PL": "ONT"}],
+    }) as bam:
+        read = pysam.AlignedSegment()
+        read.query_name = "fixture-read"
+        read.query_sequence = "A"
+        read.flag = 4
+        read.query_qualities = pysam.qualitystring_to_array("I")
+        read.set_tag("RG", "ont")
+        bam.write(read)
     (input_dir / "manifest.json").write_text(json.dumps({
         "kind": "aligned", "source_id": source_id, "input_id": input_id,
         "reference_sha256": reference_sha256,
@@ -51,11 +62,19 @@ def _publish_cohort_methylbert(
         "mmi_sha256": "b" * 64, "aligner_argv": ["minimap2", "-ax", "map-ont"],
     }), encoding="utf-8")
     read_hash = execution_identity(READ_SUMMARY, reference_sha256=reference_sha256)
+    read_plan = {
+        "schema": "traceback.lab.execution-plan.v1",
+        "algorithm_id": READ_SUMMARY.id, "algorithm_version": READ_SUMMARY.version,
+        "input_id": input_id, "reference_sha256": reference_sha256,
+        "platform": "ont", "parameters": READ_SUMMARY.parameters,
+        "tools": [tool.identity() for tool in READ_SUMMARY.tools],
+        "asset_sha256s": [], "upstream": [],
+    }
     store.publish_result(ResultEnvelope(
         algorithm_id=READ_SUMMARY.id, algorithm_version=READ_SUMMARY.version, status="ok",
         provenance=provenance(tool="fixture", parameters_sha256=read_hash,
                               source_id=source_id, input_id=input_id, reference_id="hg38"),
-    ), input_id=input_id)
+    ), input_id=input_id, execution_plan=read_plan)
     ctx = InputContext(
         root=store.root, source_id=source_id, input_id=input_id, reference_id="hg38",
         reference_sha256=reference_sha256, input_dir=input_dir, eligible_reads=MIN_ELIGIBLE_READS,
@@ -64,18 +83,27 @@ def _publish_cohort_methylbert(
                 "methylbert_min_classified_reads": 100_000},
     )
     parameters = adapter.METHYLBERT.identity_parameters(ctx)
-    parameters["numerical_runtime"] = {"fixture_runtime": runtime_name}
+    assets = adapter.METHYLBERT.identity_assets(ctx)
+    tools = [tool.identity() for tool in adapter.METHYLBERT.tools]
+    upstream = [{"algorithm_id": READ_SUMMARY.id, "parameters_sha256": read_hash}]
     methylbert_hash = execution_identity(
         adapter.METHYLBERT, reference_sha256=reference_sha256,
-        asset_sha256s=adapter.METHYLBERT.identity_assets(ctx), parameters=parameters,
-        upstream=[{"algorithm_id": READ_SUMMARY.id, "parameters_sha256": read_hash}],
+        asset_sha256s=assets, tool_pins=tools, parameters=parameters, upstream=upstream,
     )
+    plan = {
+        "schema": "traceback.lab.execution-plan.v1",
+        "algorithm_id": adapter.METHYLBERT.id,
+        "algorithm_version": adapter.METHYLBERT.version,
+        "input_id": input_id, "reference_sha256": reference_sha256,
+        "platform": "ont", "parameters": parameters, "tools": tools,
+        "asset_sha256s": assets, "upstream": upstream,
+    }
     store.publish_result(ResultEnvelope(
         algorithm_id="methylbert", algorithm_version=adapter.METHYLBERT.version, status="ok",
         provenance=provenance(tool="fixture", parameters_sha256=methylbert_hash,
                               source_id=source_id, input_id=input_id, reference_id="hg38"),
         metrics=[Metric(metric_id="tumour_fraction", value=0.25)],
-    ), input_id=input_id)
+    ), input_id=input_id, execution_plan=plan)
     return source_id, methylbert_hash
 
 
@@ -84,31 +112,45 @@ def test_cohort_reads_recorded_methylbert_identity_without_live_runtime(tmp_path
     store = LabStore(tmp_path)
     monkeypatch.setattr(cohorts, "load_registry", lambda: (READ_SUMMARY, adapter.METHYLBERT))
     monkeypatch.setattr(adapter, "header_model", lambda *_args: "dorado-model")
-    monkeypatch.setattr(adapter, "numerical_runtime_identity", lambda **_kwargs: {"fixture_runtime": "A"})
-    first, first_hash = _publish_cohort_methylbert(store, index=1, bundle_sha256="d" * 64, runtime_name="A")
-    second, second_hash = _publish_cohort_methylbert(store, index=2, bundle_sha256="e" * 64, runtime_name="B")
+    runtime = {"name": "A"}
+    monkeypatch.setattr(adapter, "numerical_runtime_identity", lambda **_kwargs: {"fixture_runtime": runtime["name"]})
+    first, first_hash = _publish_cohort_methylbert(store, index=1, bundle_sha256="d" * 64)
+    runtime["name"] = "B"
+    second, second_hash = _publish_cohort_methylbert(store, index=2, bundle_sha256="d" * 64)
+    runtime["name"] = "A"
+    third, third_hash = _publish_cohort_methylbert(store, index=3, bundle_sha256="e" * 64)
+    fourth, fourth_hash = _publish_cohort_methylbert(store, index=4, bundle_sha256="d" * 64)
     assert first_hash != second_hash
+    assert first_hash != third_hash
+    assert first_hash == fourth_hash
 
     def no_live_probe(*_args, **_kwargs):
         pytest.fail("cohort reading must use the recorded runtime, not probe this host")
 
     monkeypatch.setattr(adapter.METHYLBERT, "identity_parameters", no_live_probe)
+    monkeypatch.setattr(adapter, "numerical_runtime_identity", no_live_probe)
     member = cohorts.member_from_store(store, first)
     selected = {row.algorithm_id: row for row in member.results}
     assert selected["methylbert"].parameters_sha256 == first_hash
     cohorts.add_sample(store, "model-cohort", first)
     cohorts.add_sample(store, "model-cohort", second)
+    cohorts.add_sample(store, "model-cohort", third)
+    cohorts.add_sample(store, "model-cohort", fourth)
     generation = cohorts.build_cohort(store, "model-cohort")
     by_source = {row.source_id: row for row in generation.members}
     first_result = next(row for row in by_source[first].results if row.algorithm_id == "methylbert")
     second_result = next(row for row in by_source[second].results if row.algorithm_id == "methylbert")
+    third_result = next(row for row in by_source[third].results if row.algorithm_id == "methylbert")
+    fourth_result = next(row for row in by_source[fourth].results if row.algorithm_id == "methylbert")
     assert first_result.cohort_compat_key != second_result.cohort_compat_key
+    assert first_result.cohort_compat_key != third_result.cohort_compat_key
+    assert first_result.cohort_compat_key == fourth_result.cohort_compat_key
     projected = cohorts.project_sample_metric(
         store, "model-cohort", target_source_id=first,
         algorithm_id="methylbert", metric_id="tumour_fraction",
     )
-    assert projected is not None and projected.percentile_n == 0
-    assert projected.exclusions == {"self": 1, "incompatible": 1}
+    assert projected is not None and projected.percentile_n == 1
+    assert projected.exclusions == {"self": 1, "incompatible": 2}
 
 
 def test_derived_plan_keeps_model_pins_and_absolute_support_floor(tmp_path, monkeypatch):
