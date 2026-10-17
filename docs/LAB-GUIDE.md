@@ -75,7 +75,7 @@ traceback lab run (<BAM|uBAM|chunk dir>... | <id12> | latest | --example)
     [--reference ID] [--profile all|fast] [--only a,b]
     [--downsample 0.5,0.25,0.1 | --no-downsample]
     [--controls | --no-controls] [--tf 0.03,0.10,0.30]
-    [--skip-bad-chunks] [--force] [--timeout-s 3600]
+    [--skip-bad-chunks] [--sex M|F] [--force] [--timeout-s 3600]
     [--threads N] [--sort-mem 1G] [--mmi PATH]
     [--dry-run] [--verbose] [--json] [--root R]
 traceback lab simulate cna <id12|latest> [--tf 0.03,0.10,0.30]   synthetic CNA spike, copy-number recovery
@@ -87,6 +87,19 @@ traceback lab runs [RUN_ID] [--step S]     the run log, or one run's steps
 ```
 
 ## Running on a kit
+
+`--sex M|F` records an operator assertion in versioned local sample metadata.
+It does not change the measured `sex-check` ratio, source or input identity, or
+cached results. Recording a new assertion advances the local page's change counter,
+including on a fully cached run; repeating the same assertion does not. Trust/QC
+compares a definite male/female call with the assertion
+at read time as a pre-analytic check. An absent assertion or indeterminate call
+has no mismatch verdict. The page marks the check as privacy-sensitive and does
+not present it as a diagnostic sex or gender determination. A later conflicting
+assertion is refused, not silently substituted. If the stored assertion metadata
+is malformed, measurements remain visible, while Trust/QC shows an explicit
+no-verdict repair notice (TBX-LAB-023). Reruns without `--sex` preserve that
+metadata and can continue; an explicit `--sex` write is refused until repaired.
 
 `traceback lab run <chunk dir>` takes one file, several files or a directory
 of MinKNOW chunks (`*.bam`, not recursive). It:
@@ -159,6 +172,7 @@ ROOT, home, login and chunk names redacted) is ever stored.
 | `depth` | eligible reads (primary, MAPQ ≥ 20, chr1–22/X/Y), mean span, approximate depth; the index count is shown only as an upper bound |
 | `fragment-size` | 1-bp aligned-span histogram, mode, short (< 150 bp) share, mono/di peaks, 10 bp periodicity |
 | `copy-number` | tumour fraction, ploidy, genome log2 track and segments through the installed ichorCNA toolchain (no panel of normals yet, so read as not interpretable); needs 2M eligible reads, `traceback toolchain install ichor` and `traceback method-asset register --from-toolchain copy-number --root R` |
+| `instability` | bin-weighted median absolute deviation of the selected copy-number result's segment log2 values (`tmad`), with used-bin and null-estimate coverage counts; needs 2M eligible reads and a successful copy-number result for the same input; exploratory and cohort-relative, with no ONT cutoff |
 | `modbase-qc` | mod codes in the MM tags, MM-tagged share, mean ML at aligned CpG calls (read from `meth-calls`), share of those calls below 0.7 confidence, tagged reads with unusable MM/ML; skipped (`missing_tags`) when no read carries MM |
 | `long-tail` | shares of molecules > 300 bp, 1–4 kb (delayed processing) and > 7.5 kb (lysis); a supplementary-split read counts at its read length |
 | `sex-check` | chrY/chrX read density per Mb of non-N, non-PAR reference and a male / female / indeterminate call; needs 500,000 eligible reads |
@@ -415,6 +429,13 @@ must be inspected and moved aside manually after preserving them. If only the
 current pointer is missing and the member roster is intact, `lab cohort build`
 publishes a fresh generation from that roster while retaining earlier
 generation directories.
+
+### TBX-LAB-023
+
+An operator-supplied `--sex` conflicts with an assertion already recorded for
+the same sample, or the local sex metadata is malformed (exit 3). Reuse the
+recorded assertion or omit the flag. Inspect and restore malformed metadata
+from a known-good local backup before rerunning; no measured result is changed.
 
 ## Adding an algorithm
 
