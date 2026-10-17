@@ -3,6 +3,14 @@
 # callout (>= 20px bold) once per route, pills elsewhere.
 version: 0.1.0
 licenses:
+  kraken2-mit:
+    headline: "MIT: Kraken2 classifier"
+    body: "Kraken2 runs as an external process; the operator provides and licenses the database separately."
+    url: "https://github.com/DerrickWood/kraken2/blob/master/LICENSE"
+  bracken-gpl3:
+    headline: "GPL-3: Bracken abundance estimator"
+    body: "Bracken runs as a separate process; its GPL-3 terms and database data terms require independent review."
+    url: "https://github.com/jenniferlu717/Bracken"
   lionheart-resources-research:
     headline: "RESEARCH-ONLY RESOURCES: LIONHEART cell-type scores"
     body: >-

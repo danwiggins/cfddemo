@@ -8,6 +8,7 @@ cannot mix old and new members in one response.
 from __future__ import annotations
 
 import json
+import math
 import os
 import re
 import stat
@@ -20,7 +21,7 @@ from pydantic import ValidationError
 from traceback_runner.serialization import canonical_json_bytes
 
 from .cohort_contracts import CohortGeneration, CohortMember, CohortResult, MetricProjection, project_metric
-from .identity import SHA256_PATTERN, cohort_compat_key
+from .identity import SHA256_PATTERN, canonical_sha256, cohort_compat_key
 from .ingest import resolve_sample, source_ids
 from .problems import LabProblem
 from .registry import execution_identity, load_registry
@@ -306,6 +307,23 @@ def _selected_results(store: LabStore, input_id: str, manifest: dict[str, Any]) 
 
     label, aligner = _aligner(manifest, input_id)
     del label
+    from .platforms import for_input
+
+    bam_path = store.inputs_dir / input_id / "aligned.bam"
+    try:
+        platform = for_input(manifest, bam_path)
+    except (OSError, ValueError) as exc:
+        raise LabProblem(
+            "TBX-LAB-024", cause=f"cohort input {input_id[:12]} platform or BAM is invalid",
+            fix="Restore this stored input from a known-good backup, or re-ingest the original BAM under a fresh ROOT",
+            data={"input_id": input_id},
+        ) from exc
+    if platform == "unknown":
+        raise LabProblem(
+            "TBX-LAB-024", cause=f"cohort input {input_id[:12]} has no verifiable platform declaration",
+            fix="Restore the source BAM with unanimous PL:ONT or PL:ILLUMINA read groups",
+            data={"input_id": input_id},
+        )
     found: list[CohortResult] = []
     identities: dict[str, str] = {}
     for algorithm in load_registry():
@@ -320,6 +338,8 @@ def _selected_results(store: LabStore, input_id: str, manifest: dict[str, Any]) 
             identity = execution_identity(
                 algorithm, reference_sha256=manifest["reference_sha256"], upstream=upstream,
                 asset_sha256s=assets_of(store.root) if callable(assets_of) else (),
+                tool_pins=[tool.identity() for tool in algorithm.tools],
+                platform=platform if platform != "ont" else None,
             )
         except (OSError, ValueError, KeyError, LabProblem):
             # An unresolved asset cannot make an old result current-compatible.
@@ -335,13 +355,32 @@ def _selected_results(store: LabStore, input_id: str, manifest: dict[str, Any]) 
             for metric in chosen.metrics
             if metric.value is None or (isinstance(metric.value, (int, float)) and not isinstance(metric.value, bool))
         }
+        if algorithm.id == "microbial":
+            primary = metrics.get("primary_reads")
+            candidates = metrics.get("candidate_unmapped_reads")
+            too_short = metrics.get("too_short_unmapped_reads")
+            missing_sequence = metrics.get("missing_sequence_unmapped_reads")
+            if (any(isinstance(value, bool) or not isinstance(value, (int, float))
+                    or not math.isfinite(value) or value < 0
+                    for value in (primary, candidates, too_short, missing_sequence))
+                    or primary == 0 or (candidates == 0 and too_short + missing_sequence > 0)
+                    or metrics.get("microbial_rpm_primary") is None):
+                # Missing counters in older snapshots cannot distinguish an
+                # assayed zero from unassayable unmapped molecules.
+                continue
         compat = cohort_compat_key(
             algorithm_id=algorithm.id, algorithm_version=algorithm.version,
             parameters=algorithm.parameters, tools=[tool.identity() for tool in algorithm.tools],
             reference_sha256=manifest["reference_sha256"], aligner_identity=aligner,
             pon_policy=str(algorithm.parameters.get("pon_policy", "none")),
             per_sample_asset_keys=("pon_asset_sha256",),
+            platform=platform if platform != "ont" else None,
         )
+        if algorithm.id == "microbial":
+            # Preserve the aligner match in the generic key and also pin the
+            # exact DB/tool/upstream execution identity for this method.
+            compat = canonical_sha256({"cohort": compat,
+                                       "execution": chosen.provenance.parameters_sha256})
         found.append(CohortResult(
             algorithm_id=algorithm.id, parameters_sha256=chosen.provenance.parameters_sha256,
             cohort_compat_key=compat, metrics=metrics,

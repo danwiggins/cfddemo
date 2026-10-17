@@ -210,8 +210,8 @@ new measurement.
 | id | What it reports |
 |---|---|
 | `read-summary` | intermediate: one pass over the aligned BAM into memmapped columns (no read names); every pysam algorithm and every downsample or split-half view reads it |
-| `bam-qc` | primaries, mapped and MAPQ ≥ 20 shares, supplementary share (chimera proxy), mean read Q, share of sampled genome covered ≥ 1x, GC-bias slope, duplicate share (only when marked) |
-| `depth` | eligible reads (primary, MAPQ ≥ 20, chr1–22/X/Y), mean span, approximate depth; the index count is shown only as an upper bound |
+| `bam-qc` | primaries, mapped and MAPQ ≥ 20 shares, supplementary share, mean read Q, share of sampled genome covered ≥ 1x, GC-bias slope, duplicate share (only when marked); supplementary share as a chimera proxy and mean read Q interpretation are ONT-specific |
+| `depth` | eligible reads (primary, MAPQ ≥ 20, chr1–22/X/Y), mean aligned span per eligible read, approximate aligned-base depth; the index count is shown only as an upper bound, and Illumina aligned span is not template length (`abs(TLEN)`) |
 | `fragment-size` | 1-bp aligned-span histogram, mode, short (< 150 bp) share, mono/di peaks, 10 bp periodicity |
 | `lionheart` | opt-in upstream LIONHEART v2.2.0 extraction of 898 raw sample-standardized chromatin-accessibility correlation scores from the selected hg38 BAM; needs ≥5M eligible reads, the modified mosdepth and Zenodo v003 resources; ONT single-end mode is experimental, and no cancer prediction is run |
 | `short-read-fragment-size` | separate exploratory paired-end Illumina histogram and size summaries from absolute BAM TLEN; requires a prealigned BAM with every `@RG PL:ILLUMINA` |
@@ -221,6 +221,7 @@ new measurement.
 | `long-tail` | shares of molecules > 300 bp, 1–4 kb (delayed processing) and > 7.5 kb (lysis); a supplementary-split read counts at its read length |
 | `sex-check` | chrY/chrX read density per Mb of non-N, non-PAR reference and a male / female / indeterminate call; needs 500,000 eligible reads |
 | `mtdna` | chrM reads (MAPQ ≥ 20) as a share of all primary reads, and the chrM fragment mode |
+| `microbial` | exploratory Kraken2/Bracken species profile from primary, QC-passing, non-duplicate human-unmapped ONT reads; needs operator-pinned tools and database; no infection diagnosis |
 | `viral-reads` | EBV, HPV and HBV reads per million human-unmapped primary reads from a separate minimap2 ≥ 2.28 alignment; needs an operator-registered viral FASTA and is exploratory for ONT cfDNA |
 | `cell-origin` | share of cfDNA from each of 40 Loyfer U250 cell types with bootstrap intervals, through the signed method's own `compute_measurement` (modkit, UXM, NNLS); needs 2.5M eligible reads, `traceback toolchain install modkit` and `traceback method-asset register --from-dir LOYFER_DIR --root R`; minor cell types are not interpretable below 5x. Downsample and split runs read a transient filtered BAM that is deleted after publish |
 | `end-motifs` | reference 4-mers at both ends of each molecule (5′ forward end and the reverse complement of the other end), motif diversity score and CCCA share; needs 500,000 eligible reads and the registered FASTA |
@@ -276,26 +277,57 @@ their ATAC/DNase labels and a research-only callout. The upstream single-end
 mode is experimental and its paired-end-trained cancer model is **not** run;
 these values are neither cell fractions nor a validated diagnostic.
 
-**Short-read TLEN slice.** For a prealigned paired-end Illumina BAM against
-the registered hg38 reference, run the separate measurement explicitly:
+**Short-read support.** For a prealigned paired-end Illumina BAM against the
+registered hg38 reference, run the normal Lab command:
 
 ```bash
 traceback lab run YOUR_LOCAL_aligned_illumina.bam \
-  --reference hg38 --only short-read-fragment-size \
-  --no-downsample --no-controls --root R
+  --reference hg38 --root R
 ```
 
-Every BAM read group must declare `PL:ILLUMINA`; a BAM aligned by the Lab's
-ONT minimap2 path is skipped. Each qualifying proper first mate counts one
+Every BAM read group must declare `PL:ILLUMINA`. This declaration is recorded
+in the input manifest and run summary; it describes the BAM header, not
+instrument attestation. A prealigned BAM with missing, mixed, or unrecognized
+platform declarations is refused with TBX-LAB-024. Unaligned input must
+unanimously declare `PL:ONT` to use the Lab's
+`map-ont` alignment path. For short reads, align externally and supply a
+prealigned BAM. Each qualifying proper first mate counts one
 template: it must pass the common primary, mapped, nonduplicate, QC-pass,
-MAPQ ≥ 20 and canonical-contig filter, have a mapped mate on the same contig,
+MAPQ ≥ 20 and canonical nuclear contig filter (names with or without `chr`),
+have a mapped mate on the same contig,
 and carry nonzero TLEN. The reported length is `abs(TLEN)`, even when the
 first mate's TLEN is negative. Downsample and split selections use the same
 read-name predicate as other Lab full-BAM algorithms. The histogram and
 metrics are keyed to `short-read-fragment-size`; `fragment-size` remains the
-ONT aligned-span measurement. No clinical cutoff, short-read healthy range,
-or cross-platform comparison is supplied by this slice. Other Lab algorithms
-are still designed around the ONT run, so use `--only` for this opt-in path.
+ONT aligned-span measurement. The normal Illumina run also reports read
+summary, aligned-base depth, and BAM QC, including downsample and split views.
+Split halves are read-name pseudo-replicates, not independent molecules. On
+Illumina, unmarked PCR duplicates can place copies of one molecule in both
+halves and make agreement look stronger; inspect duplicate marking and do not
+treat split agreement as independent validation.
+ONT-only algorithms skip with reason `platform`; the CNA spike is omitted for
+Illumina. Result and cohort compatibility identities distinguish platforms
+while retaining the historical ONT identity encoding, so an Illumina
+measurement cannot reuse an ONT result or reference range. No clinical
+cutoff, short-read healthy range, or cross-platform comparison is supplied.
+If an Illumina BAM was ingested by the earlier opt-in TLEN path, run it again
+from the original BAM to create its platform-specific input identity. The old
+stored result remains available but does not enter new platform-aware cohorts.
+For a legacy prealigned BAM without a platform declaration, verify its
+instrument provenance and regenerate a BAM with the correct `@RG PL` value
+from the trusted source before ingesting it. The Lab does not infer ONT from
+an absent value. Previously stored Lab-aligned inputs with absent or
+unrecognized platform tags remain readable only when their manifest exactly
+pins the historical `map-ont` recipe for the BAM's read groups and no read
+group explicitly declares Illumina. A new input still needs an explicit
+platform declaration.
+Stored prealigned manifests without a platform field still read the BAM's
+unanimous platform declaration. Re-ingest short reads to record an Illumina
+input identity for new results and cohorts. Before rerun, historical ONT-only
+results on such an Illumina input remain stored but appear as platform skips
+in sample views and the local API; rerun records those skips in the store.
+The same read-side mask applies when an old prealigned input cannot verify ONT
+provenance from its BAM.
 
 **PMD asset.** `pmd-score` needs an operator-supplied Zhou 2018 hg38
 common-PMD BED.gz file. The repository does not ship or download it; its
@@ -313,14 +345,85 @@ traceback lab asset inspect pmd --root R
 `pmd-score` with an asset-specific recovery command. Registering a PMD
 asset does not establish redistribution rights or make a skipped result zero.
 
+**Microbial profile.** Install Kraken2 and Bracken from their upstream source
+layouts through your approved local process: the Kraken2 launcher must sit
+beside `classify` and `kraken2lib.pm`, and the Bracken launcher must sit beside
+`src/est_abundance.py`. The Lab pins those executed helpers and the Python
+interpreter used by Bracken. A packaged layout without those files reports
+`missing_toolchain` with an unsupported-layout explanation rather than silently
+omitting helper hashes. Build
+a Kraken2 database and its Bracken read-length distribution, and
+register its exact bytes under the run ROOT. The database remains in its
+operator-owned directory; the Lab stores its path only in a local manifest and
+publishes the bundle SHA-256 and source label. The registration requires
+`hash.k2d`, `opts.k2d`, `taxo.k2d`, and
+`database<READ_LENGTH>mers.kmer_distrib`. The Bracken read length must be
+75–500 bases. An altered or missing file makes the measurement unavailable.
+Registration records a bounded file-stat receipt for the sample page. The page
+and execution planning check that receipt without streaming the large database;
+the worker verifies complete file bytes before and after classification.
+If the database is moved, register it as a new Lab root; this registration
+will not silently switch to another directory with identical bytes.
+An older registration without a page receipt can be refreshed in place with
+the same `lab microbial db add` command: it verifies all bytes before adding
+the receipt. The sample page reports that legacy registration as unavailable
+until refreshed.
+
+```bash
+traceback lab microbial db add --directory KRAKEN_DB --read-length 75 \
+  --source-label operator-built-kraken-bracken --root R
+traceback lab microbial db inspect --root R
+traceback lab run ID12 --only microbial --root R
+```
+
+Only human-unmapped primary reads that pass QC and are not marked duplicate
+are classified. Reads shorter than the registered Bracken length are counted
+as excluded; longer reads are clipped to that exact length before Kraken2.
+The rate denominator is **all** primary QC-passing non-duplicate reads,
+including aligned and short unmapped reads. Bracken species estimates under
+Bacteria, Archaea, Viruses, and Fungi are shown as estimated reads per million
+denominator reads; human and other non-microbial taxa are excluded. At most
+256 species are displayed, with an omitted-taxon count. Read names and Kraken
+per-read assignments remain transient and are not published.
+The headline microbial estimate includes accepted species beyond the 256
+displayed rows, so it need not equal the sum of the visible table.
+The worker briefly writes candidate unmapped sequence in a private Lab scratch
+directory. Normal completion removes it; a crash or abrupt power loss can leave
+scratch files for an operator to inspect and remove under the Lab root.
+An input with no primary QC-passing non-duplicate reads has no microbial rate
+or cohort comparison. If unmapped reads exist but all are too short or lack
+sequence, the rate and cohort comparison are also unavailable. An input with
+only confidently human-mapped reads has a measured zero candidate burden.
+Kraken classifications above species level without any species row yield a zero
+Bracken species estimate; that does not mean the candidate read is biologically
+non-microbial. The QC panel keeps the classified-read count visible.
+The QC panel counts missing-sequence unmapped reads separately from short reads.
+
+The profile is speculative and marked **PRIVACY**. A compatible healthy-v1
+cohort of at least ten *other* samples supplies a per-taxon and overall 97.5th
+percentile only when the aligner, exact tool and database identities, analysis
+parameters, and selected inputs match. Build that cohort as below. Missing
+taxon counts are treated as zero only when the cohort profile was complete;
+otherwise they are excluded. An absent or incompatible cohort leaves the
+percentile explicitly unavailable. A high candidate signal can reflect
+contamination, residual human sequence, database content, or misclassification;
+it is not an infection diagnosis or an ONT clinical threshold.
+
 **Viral reference.** `viral-reads` leaves the registered hg38 human reference
 unchanged. It takes human-unmapped primary reads from the aligned BAM, including
 duplicate-flagged and QC-fail primaries but excluding secondary and
 supplementary records, then runs
 minimap2 separately against an operator-supplied viral FASTA, and reports
 EBV/HPV/HBV aligned reads per million human-unmapped primaries. The count is
-null if that denominator is zero. A read with reported primary or secondary
-alignments to more than one virus group is excluded from all groups; multiple
+null if that denominator is zero.
+The microbial panel's viral taxa use Bracken estimates from QC-passing,
+non-duplicate unmapped reads long enough for its registered read length and
+divide by all QC-passing, non-duplicate primaries. `viral-reads` instead uses
+the side-reference alignments and divides by human-unmapped primaries,
+including QC-fail and duplicate-flagged reads. Their rates can differ or one
+can be zero while the other is nonzero; do not compare them as matching assays.
+A read with reported primary or secondary alignments to more than one virus
+group is excluded from all groups; multiple
 primary alignments within one group count once. The side alignment explicitly
 retains up to 100 secondary alignments per read at minimap2's 0.8 score ratio;
 bundles with many near-identical contigs can still hide cross-group alternatives.
@@ -525,7 +628,7 @@ Chunks declare different `@RG` basecall models (exit 3). Run each model's chunks
 
 ### TBX-LAB-009
 
-An aligned BAM's `@SQ` lines differ from the registered reference, or the inputs mix aligned and unaligned BAMs (exit 3). The cause lists the first three differences. Pass the unaligned chunks and let the Lab align, or register the FASTA the BAM was aligned to.
+An aligned BAM's `@SQ` lines differ from the registered reference, the inputs mix aligned and unaligned BAMs, or more than one aligned BAM is supplied (exit 3). The cause lists the first three reference differences when applicable. Pass the unaligned chunks and let the Lab align, or register the FASTA the BAM was aligned to; supply one prealigned BAM at a time.
 
 ### TBX-LAB-010
 
@@ -606,6 +709,18 @@ An operator-supplied `--sex` conflicts with an assertion already recorded for
 the same sample, or the local sex metadata is malformed (exit 3). Reuse the
 recorded assertion or omit the flag. Inspect and restore malformed metadata
 from a known-good local backup before rerunning; no measured result is changed.
+
+### TBX-LAB-024
+
+An input has missing, mixed, or unrecognized platform declarations, an
+unaligned Illumina input would need the ONT-only aligner, or a stored input's
+platform disagrees with its BAM header (exit 3). Use a BAM whose read groups
+unanimously declare `PL:ONT` or `PL:ILLUMINA`; align Illumina reads externally
+before supplying the BAM. For a damaged or mismatched stored input, restore
+that input from a known-good backup or re-ingest the original BAM under a fresh
+ROOT. Reusing the same ROOT does not replace an existing input manifest.
+Rewriting a BAM header changes its source identity; remove an unrecoverable
+member from its cohort before rebuilding that cohort.
 
 ## Adding an algorithm
 

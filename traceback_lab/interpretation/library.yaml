@@ -87,7 +87,7 @@ entries:
 
   - algorithm_id: bam-qc
     metric_id: supplementary_fraction
-    label: "Supplementary alignments per mapped read (chimera proxy)"
+    label: "Supplementary alignments per mapped read"
     value_kind: proportion
     tier: NEWER
     origin_tier: NEWER
@@ -96,11 +96,11 @@ entries:
     reference: {kind: none}
     performance: null
     performance_missing_reason: "none published"
-    meaning_high: "Ligation chimeras: two cfDNA molecules joined during library prep, which inflates apparent fragment lengths."
-    meaning_low: "Few chimeras."
-    confounders: ["library prep chemistry", "input mass"]
+    meaning_high: "More supplementary alignments; on ONT this can indicate ligation chimeras, while short-read split alignments have other causes."
+    meaning_low: "Fewer supplementary alignments; this alone does not establish a low chimera rate."
+    confounders: ["sequencing platform and alignment method", "library prep chemistry", "input mass"]
     next_steps:
-      analytical: ["Compare across kit batches", "Check the long-fragment tail"]
+      analytical: ["Compare only within a matched platform and alignment method", "On ONT, check the long-fragment tail"]
       clinical_setting: null
     license_ids: []
     flags: []
@@ -120,11 +120,11 @@ entries:
     reference: {kind: none}
     performance: null
     performance_missing_reason: "QC measure, not a diagnostic"
-    meaning_high: "Accurate basecalls."
-    meaning_low: "Noisy basecalls: methylation calls and end motifs are less reliable."
-    confounders: ["basecaller model", "flow-cell wear"]
+    meaning_high: "Higher reported base quality within the same sequencing platform and quality pipeline."
+    meaning_low: "Lower reported base quality within the same sequencing platform and quality pipeline; ONT methylation calls and end motifs may be less reliable."
+    confounders: ["sequencing platform and quality-score calibration", "basecaller model", "flow-cell wear"]
     next_steps:
-      analytical: ["Confirm the basecall model in the @RG line"]
+      analytical: ["Compare within one platform and quality pipeline", "For ONT, confirm the basecall model"]
       clinical_setting: null
     license_ids: []
     flags: []
@@ -170,7 +170,7 @@ entries:
     performance_missing_reason: "QC measure, not a diagnostic"
     meaning_high: "GC-rich regions over-represented: copy-number calls need GC correction."
     meaning_low: "GC-rich regions under-represented."
-    confounders: ["library amplification", "extraction kit"]
+    confounders: ["library amplification, especially for short-read libraries", "extraction kit", "sequencing platform"]
     next_steps:
       analytical: ["Confirm copy-number GC correction is applied"]
       clinical_setting: null
@@ -208,7 +208,7 @@ entries:
   # ----------------------------------------------------------------- depth
   - algorithm_id: depth
     metric_id: approx_depth_x
-    label: "Approximate depth (eligible reads)"
+    label: "Approximate aligned-base depth (eligible reads)"
     value_kind: positive
     tier: PROVEN
     origin_tier: PROVEN
@@ -216,10 +216,10 @@ entries:
     min_depth_x: null
     reference: {kind: none}
     performance: null
-    performance_missing_reason: "QC measure: sum of eligible spans / genome length"
-    meaning_high: "More algorithms clear their minimum depth."
-    meaning_low: "Most algorithms are skipped or not interpretable; see the depth curve."
-    confounders: ["flow-cell yield", "input cfDNA mass"]
+    performance_missing_reason: "QC measure: sum of eligible read spans / genome length; duplicate-marked reads are excluded, but overlapping paired mates each contribute"
+    meaning_high: "More measurements may clear their depth requirement; platform and other gates still apply."
+    meaning_low: "Fewer measurements clear their depth requirement; see the depth curve."
+    confounders: ["flow-cell yield", "input cfDNA mass", "overlapping paired mates inflate short-read aligned-base depth relative to physical coverage"]
     next_steps:
       analytical: ["Use the depth curve to see what more sequencing would add"]
       clinical_setting: null
@@ -241,9 +241,9 @@ entries:
     reference: {kind: none}
     performance: null
     performance_missing_reason: "QC count"
-    meaning_high: "More reads count toward every algorithm's minimum."
-    meaning_low: "Few reads count toward minimums."
-    confounders: ["mapping quality", "chimeras"]
+    meaning_high: "More reads pass the common eligibility filter; duplicate-marked reads are excluded, paired mates each count, and algorithms still apply their own platform and input gates."
+    meaning_low: "Few reads pass the common eligibility filter; see platform-specific support requirements."
+    confounders: ["mapping quality", "chimeras", "paired mates count separately when both are eligible"]
     next_steps:
       analytical: ["Compare with the index count (an upper bound)"]
       clinical_setting: null
@@ -265,11 +265,11 @@ entries:
     reference: {kind: none}
     performance: null
     performance_missing_reason: "QC measure"
-    meaning_high: "Longer molecules (or chimeras)."
-    meaning_low: "Shorter molecules."
-    confounders: ["library prep size bias", "chimeras"]
+    meaning_high: "Longer aligned span per eligible read; paired-read span is not template length."
+    meaning_low: "Shorter aligned span per eligible read; paired-read span is not template length."
+    confounders: ["library prep size bias", "alignment and clipping", "chimeras"]
     next_steps:
-      analytical: ["See the fragment-size histogram"]
+      analytical: ["Use the platform-specific fragment-size measurement for molecule or template length"]
       clinical_setting: null
     license_ids: []
     flags: []
@@ -2627,6 +2627,96 @@ entries:
       date: "2026-10-16"
       note: "No scientific citation or reference interval displayed. Engineering formula: D21 eligible molecules supply aligned-span start and end-1, not claimed physical cleavage sites. Each valid end contributes once to the denominator, including both ends of one read even if they select the same CpG. A reference CG C coordinate within 10 bp inclusive is near; equal-distance ties select the lower C. Endpoint motifs are separate panels and require complete A/C/G/T contexts. LEGAL is a caution flag, not a rights clearance."
 
+  # --------------------------------------------------------------- microbial
+  - &microbial_base
+    algorithm_id: microbial
+    metric_id: microbial_rpm_primary
+    label: "Candidate microbial estimated reads per million primary reads"
+    value_kind: positive
+    tier: SPECULATIVE
+    origin_tier: NEWER
+    origin_platform: "Kraken2/Bracken metagenomics; ONT cfDNA use unvalidated"
+    min_depth_x: null
+    reference: {kind: none}
+    performance: null
+    performance_missing_reason: "Only a protocol-matched cohort 97.5th percentile is shown when available; no infection threshold"
+    meaning_high: "More candidate microbial sequence among human-unmapped reads; contamination and misclassification remain possible."
+    meaning_low: "Fewer candidate microbial sequences detected under this database and read-length policy."
+    confounders: ["database content", "human alignment and residual human DNA", "reagent contamination", "read length", "cohort protocol"]
+    next_steps:
+      analytical: ["Review taxid-level counts and a protocol-matched cohort", "Confirm any biological interpretation independently"]
+      clinical_setting: null
+    license_ids: [kraken2-mit, bracken-gpl3]
+    flags: [PRIVACY]
+    headline: true
+    stability: {kind: relative, tolerance: 0.10}
+    citations: []
+    citation_checked: {by: "Lab S4 build", date: "2026-10-16", note: "No diagnostic performance or ONT reference interval claimed."}
+
+  - <<: *microbial_base
+    metric_id: primary_reads
+    label: "Primary QC-passing non-duplicate reads"
+    value_kind: count
+    meaning_high: "More reads in the denominator for the reported candidate rate."
+    meaning_low: "Fewer reads in the denominator; candidate rates are noisier."
+    headline: false
+    stability: {kind: scales_with_depth, tolerance: 0.10}
+  - <<: *microbial_base
+    metric_id: candidate_unmapped_reads
+    label: "Human-unmapped reads submitted to Kraken2"
+    value_kind: count
+    meaning_high: "More reads failed human alignment and met the registered clipping length."
+    meaning_low: "Fewer reads were available for microbial classification."
+    headline: false
+    stability: {kind: scales_with_depth, tolerance: 0.10}
+  - <<: *microbial_base
+    metric_id: too_short_unmapped_reads
+    label: "Human-unmapped reads below Bracken length"
+    value_kind: count
+    meaning_high: "More unmapped reads were excluded to keep the Bracken length model exact."
+    meaning_low: "Few reads were excluded by the registered length."
+    headline: false
+    stability: {kind: scales_with_depth, tolerance: 0.10}
+  - <<: *microbial_base
+    metric_id: missing_sequence_unmapped_reads
+    label: "Human-unmapped reads without sequence"
+    value_kind: count
+    meaning_high: "More unmapped reads lacked bases and could not be classified."
+    meaning_low: "Few unmapped reads lacked sequence."
+    headline: false
+    stability: {kind: scales_with_depth, tolerance: 0.10}
+  - <<: *microbial_base
+    metric_id: classified_candidate_reads
+    label: "Kraken2 classified candidate reads"
+    value_kind: count
+    meaning_high: "More submitted reads received a taxonomy assignment, including non-microbial taxa."
+    meaning_low: "More submitted reads remained unclassified."
+    headline: false
+    stability: {kind: scales_with_depth, tolerance: 0.10}
+  - <<: *microbial_base
+    metric_id: unclassified_candidate_reads
+    label: "Kraken2 unclassified candidate reads"
+    value_kind: count
+    meaning_high: "More submitted reads were not assigned within this database."
+    meaning_low: "Fewer submitted reads remained unclassified."
+    headline: false
+    stability: {kind: scales_with_depth, tolerance: 0.10}
+  - <<: *microbial_base
+    metric_id: microbial_estimated_reads
+    label: "Bracken estimated microbial reads"
+    value_kind: positive
+    meaning_high: "More estimated reads fall under explicitly microbial taxonomy roots."
+    meaning_low: "Fewer estimated reads fall under those roots."
+    headline: false
+    stability: {kind: scales_with_depth, tolerance: 0.10}
+  - <<: *microbial_base
+    metric_id: omitted_taxa
+    label: "Microbial taxa omitted from the bounded display"
+    value_kind: count
+    meaning_high: "The displayed top taxa do not include every candidate species; missing taxa cannot be assumed zero."
+    meaning_low: "All candidate microbial taxa fit in the displayed profile."
+    headline: false
+    stability: {kind: absolute, tolerance: 1}
   # ------------------------------------------------------------- viral-reads
   - algorithm_id: viral-reads
     metric_id: ebv_rpm

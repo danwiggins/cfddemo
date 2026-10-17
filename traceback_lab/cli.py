@@ -97,6 +97,10 @@ def build_parser() -> argparse.ArgumentParser:
 
     add_cohort_parser(commands, _common)
 
+    from .microbial_command import add_microbial_parser
+
+    add_microbial_parser(commands, _common)
+
     from .identity_command import add_identity_parser
 
     add_identity_parser(commands, _common)
