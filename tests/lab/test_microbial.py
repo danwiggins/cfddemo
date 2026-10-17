@@ -402,7 +402,7 @@ def microbial_dom_root(tmp_path_factory, synthetic_world):
     with pysam.FastaFile(str(synthetic_world["fasta"])) as fasta:
         contigs = list(zip(fasta.references, fasta.lengths))
     bam = write_bam(base / "aligned.bam", contigs,
-                    [Read("anonymous-synthetic", "chr1", 100, "A" * 75)])
+                    [Read("anonymous-synthetic", "chr1", 100, "A" * 75)], platform="ONT")
     assert signed_cli.main(["lab", "run", str(bam), "--root", str(root),
                             "--only", "read-summary", "--no-downsample", "--no-controls", "--json"]) == 0
     return root
