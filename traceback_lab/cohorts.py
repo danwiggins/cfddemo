@@ -424,6 +424,14 @@ def _selected_results(store: LabStore, input_id: str, manifest: dict[str, Any]) 
                 tool_identities = plan["tools"]
                 effective_parameters = plan["parameters"]
             else:
+                # A present but invalid producer plan must not be reinterpreted
+                # as a legacy result using today's algorithm definition.
+                try:
+                    (attempt / "execution_plan.json").lstat()
+                except FileNotFoundError:
+                    pass
+                else:
+                    continue
                 if (callable(identity_tools) or callable(identity_assets)
                         or callable(getattr(algorithm, "identity_parameters", None))):
                     # Dynamic identities need a producer-recorded plan. A
