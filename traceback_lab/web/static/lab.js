@@ -291,7 +291,8 @@
     const active = state.lastStatus && state.lastStatus.active;
     const interrupted = state.lastStatus && state.lastStatus.interrupted;
     const pending = [active, interrupted].find((run) => run && run.step && run.source_id === sample.source_id &&
-      run.input_id === sample.full_input_id && !sample.algorithms.some((a) => a.algorithm_id === run.step));
+      run.input_id === sample.full_input_id && !sample.algorithms.some((a) =>
+        a.algorithm_id === run.step && a.provenance.input_id === run.input_id));
     const runRows = sample.algorithms.map((a) => {
       const status = a.status === "skipped" ? `skipped (${a.skip_reason})` : a.status;
       const matches = (run) => run && run.step === a.algorithm_id && run.source_id === sample.source_id && run.input_id === a.provenance.input_id;

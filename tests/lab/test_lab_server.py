@@ -490,9 +490,9 @@ def _dom_cdp(argv: list[str], profile: Path, *, ok, timeout: float = 90, action:
                 nonlocal dom, action_done
                 dom = evaluate("document.documentElement?.outerHTML ?? ''")
                 if action and not action_done and 'data-ready="1"' in dom:
-                    evaluate(action)
-                    action_done = True
-                    dom = evaluate("document.documentElement?.outerHTML ?? ''")
+                    action_done = evaluate(action) is True
+                    if action_done:
+                        dom = evaluate("document.documentElement?.outerHTML ?? ''")
                 return {
                     "matched": bool(ok(dom)), "ready": _body_attr(dom, "ready"),
                     "rendered": 'data-rendered="1"' in dom,
@@ -638,7 +638,7 @@ def test_headless_page_renders_a_chart_with_zero_csp_violations(server, tmp_path
          server.issue_link() + f"&route=/sample/{id12}/trust-qc"], tmp_path / "profile",
         ok=lambda page: 'data-ready="1"' in page and 'class="echart"' in page and 'data-rendered="1"' in page
             and "step_end read-summary status=ok" in page,
-        action="[...document.querySelectorAll('#main a')].find(a => a.textContent === 'Run log line →')?.click()",
+        action="(() => { const link = [...document.querySelectorAll('#main a')].find(a => a.textContent === 'Run log line →'); if (!link) return false; link.click(); return true; })()",
     )
     assert 'data-ready="1"' in dom, dom[:500]
     assert 'data-csp-violations="0"' in dom
@@ -827,7 +827,10 @@ def test_status_reports_unavailable_latest_log_without_claiming_interruption(tmp
     elif damage == "malformed":
         path.write_bytes(b'{"event":"run_start"}\n{broken\n')
     elif damage == "deeply_nested":
-        path.write_bytes(b"[" * 1200 + b"0" + b"]" * 1200 + b"\n")
+        payload = b"[" * 4000 + b"0" + b"]" * 4000
+        with pytest.raises(RecursionError):
+            json.loads(payload)
+        path.write_bytes(payload + b"\n")
     elif damage == "wrong_run":
         path.write_bytes(b'{"event":"run_start","run_id":"r-20261015-0101-eeee"}\n')
     else:
@@ -865,6 +868,15 @@ def test_status_reports_malformed_latest_run_pointer_without_echoing_it(tmp_path
     status = api_module.LabApi(store).status()
     assert status["active"] is None and status["interrupted"] is None
     assert status["run_log_unavailable"] == {"run_id": None, "reason": "latest_run_pointer_unavailable"}
+
+
+def test_status_does_not_echo_malformed_active_run_id(tmp_path, monkeypatch) -> None:
+    store = LabStore(tmp_path)
+    monkeypatch.setattr(store, "status", lambda: {"generation": 0, "active": {
+        "command": "run", "run_id": "invalid/secret", "step": "bam-qc",
+    }})
+    status = api_module.LabApi(store).status()
+    assert status["run_log_unavailable"] == {"run_id": None, "reason": "invalid_run_id"}
 
 
 def test_status_reports_deeply_nested_latest_run_pointer_without_crashing(tmp_path) -> None:
