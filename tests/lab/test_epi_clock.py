@@ -91,6 +91,25 @@ def test_clock_requires_all_three_sites_and_uses_published_coefficients(monkeypa
     assert output.metrics[0]["value"] is None
 
 
+def test_clock_preflight_hides_reference_path_on_fasta_error(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    model = _parse(_map_bytes(), "a" * 64)
+    secret = tmp_path / "private" / "participant-reference.fa"
+    monkeypatch.setattr(epi_clock.MethBase, "preflight", lambda self, ctx: Ready())
+    monkeypatch.setattr(epi_clock, "inspect_map", lambda store: model)
+    monkeypatch.setattr(epi_clock, "load_summary", lambda ctx: (
+        SimpleNamespace(contigs=["chr1"], lengths=[epi_clock.HG38_CHR1_LENGTH]), None))
+    def fail_fasta(path):
+        raise OSError(f"cannot open {path}")
+    monkeypatch.setattr(epi_clock.pysam, "FastaFile", fail_fasta)
+    ctx = InputContext(tmp_path, "s", "i", "hg38", "a" * 64, tmp_path,
+                       eligible_reads=5_000_000,
+                       extras={"planned_asset_sha256s": [model.sha256],
+                               "reference_fasta": str(secret)})
+    decision = epi_clock.EPI_CLOCK.preflight(ctx)
+    assert isinstance(decision, Skip)
+    assert str(secret) not in decision.message
+
+
 def test_clock_preflight_and_worker_with_real_call_store(tmp_path: Path) -> None:
     """Synthetic coordinates and depth exercise plumbing, not biological qualification."""
 

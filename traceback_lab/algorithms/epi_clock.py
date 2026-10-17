@@ -65,8 +65,8 @@ class EpiClock(MethBase):
                 for _, chrom, pos0 in model.sites:
                     if pos0 + 2 > fasta.get_reference_length(chrom) or fasta.fetch(chrom, pos0, pos0 + 2).upper() != "CG":
                         return Skip("missing_asset", "registered Weidner position is not an hg38 CpG")
-        except (ClockModelError, OSError, ValueError, KeyError) as exc:
-            return Skip("missing_asset", f"verified hg38 Weidner coordinate map unavailable: {exc}")
+        except (ClockModelError, OSError, ValueError, KeyError):
+            return Skip("missing_asset", "verified hg38 Weidner coordinate map or reference unavailable")
         return Ready()
 
     def run(self, ctx: InputContext, out: Path) -> AlgorithmOutput:
