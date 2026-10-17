@@ -90,16 +90,18 @@ traceback lab runs [RUN_ID] [--step S]     the run log, or one run's steps
 
 `--sex M|F` records an operator assertion in versioned local sample metadata.
 It does not change the measured `sex-check` ratio, source or input identity, or
-cached results. Recording a new assertion advances the local page's change counter,
-including on a fully cached run; repeating the same assertion does not. Trust/QC
-compares a definite male/female call with the assertion
-at read time as a pre-analytic check. An absent assertion or indeterminate call
-has no mismatch verdict. The page marks the check as privacy-sensitive and does
-not present it as a diagnostic sex or gender determination. A later conflicting
+cached results. Recording a new assertion advances the local page's change
+counter, including on a fully cached run; repeating the same assertion does
+not. Trust/QC compares a definite male/female call with the assertion at read
+time as a pre-analytic check. An absent assertion, unavailable measured call
+(including a skipped or failed check), and a measured indeterminate call have
+distinct no-verdict explanations. The page marks the check as privacy-sensitive
+and does not present it as a diagnostic sex or gender determination. A conflicting
 assertion is refused, not silently substituted. If the stored assertion metadata
 is malformed, measurements remain visible, while Trust/QC shows an explicit
 no-verdict repair notice (TBX-LAB-023). Reruns without `--sex` preserve that
 metadata and can continue; an explicit `--sex` write is refused until repaired.
+The assertion timestamp must be a valid UTC second, in `Z` or `+00:00` form.
 
 `traceback lab run <chunk dir>` takes one file, several files or a directory
 of MinKNOW chunks (`*.bam`, not recursive). It:
@@ -437,8 +439,9 @@ generation directories.
 
 An operator-supplied `--sex` conflicts with an assertion already recorded for
 the same sample, or the local sex metadata is malformed (exit 3). Reuse the
-recorded assertion or omit the flag. Inspect and restore malformed metadata
-from a known-good local backup before rerunning; no measured result is changed.
+recorded assertion or omit the flag. A rerun without `--sex` can continue and
+preserves malformed metadata; inspect and restore it from a known-good local
+backup before setting `--sex` again. No measured result is changed.
 
 ## Adding an algorithm
 

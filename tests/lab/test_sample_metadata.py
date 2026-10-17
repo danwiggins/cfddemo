@@ -34,14 +34,20 @@ def test_versioned_assertion_is_immutable_and_refuses_conflicts() -> None:
         with_sex_assertion({"operator_metadata": {"sex": "M"}}, "M")
     malformed = {"operator_metadata": {"sex": "M"}}
     assert with_sex_assertion(malformed, None) is malformed
+    for timestamp in ("2026-02-30T00:00:00+00:00", "2026-10-16T00:00:00+01:00", "yesterday"):
+        with pytest.raises(LabProblem, match="TBX-LAB-023"):
+            sex_assertion({"operator_metadata": {**recorded["operator_metadata"], "recorded_utc": timestamp}})
+    assert sex_assertion({"operator_metadata": {**recorded["operator_metadata"],
+                                           "recorded_utc": "2026-10-16T00:00:00Z"}}) is not None
 
 
 @pytest.mark.parametrize(
     ("declared", "observed", "state", "reason"),
     [
         (None, "male", "no_verdict", "no_assertion"),
-        ("M", None, "no_verdict", "no_definite_call"),
-        ("F", "indeterminate", "no_verdict", "no_definite_call"),
+        ("M", None, "no_verdict", "no_measurement"),
+        ("F", "indeterminate", "no_verdict", "indeterminate_call"),
+        ("M", "unexpected", "no_verdict", "invalid_call"),
         ("M", "male", "concordant", None),
         ("F", "female", "concordant", None),
         ("M", "female", "mismatch", None),
@@ -63,7 +69,7 @@ def test_sample_view_uses_full_measured_call_without_changing_it() -> None:
     assert sex_check_view(sample)["state"] == "mismatch"
     assert measurement.metrics[0].value == "female"
     measurement.status = "skipped"
-    assert sex_check_view(sample)["state"] == "no_verdict"
+    assert sex_check_view(sample)["reason"] == "no_measurement"
 
 
 def test_real_sex_check_call_vocabulary_is_compared_without_reinterpreting_it() -> None:
@@ -71,7 +77,8 @@ def test_real_sex_check_call_vocabulary_is_compared_without_reinterpreting_it() 
     assert sex_concordance("M", call_sex(0.31))["state"] == "concordant"
     assert sex_concordance("M", call_sex(0.0))["state"] == "mismatch"
     for ratio in (None, 0.05, 0.3):
-        assert sex_concordance("M", call_sex(ratio))["reason"] == "no_definite_call"
+        expected = "no_measurement" if ratio is None else "indeterminate_call"
+        assert sex_concordance("M", call_sex(ratio))["reason"] == expected
 
     measured = ResultEnvelope(
         algorithm_id="sex-check", algorithm_version="1", status="ok",
