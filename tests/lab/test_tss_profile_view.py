@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import json
-import math
 import re
 
 import pytest
@@ -56,16 +55,17 @@ def test_tss_profile_chart_and_table(tmp_path, monkeypatch, ratio, rendered) -> 
               const wrap = [...document.querySelectorAll('#main .chart-wrap')].find((item) =>
                 item.querySelector('.echart[aria-label*="Mean aligned-fragment coverage"]'));
               const chart = wrap.querySelector('.echart');
-              const table = wrap.querySelector(':scope > details.chart-table table');
+              const details = wrap.querySelector(':scope > details.chart-table');
+              details.open = true;
+              const table = details.querySelector('table');
               const option = window.echarts.getInstanceByDom(chart).getOption();
               return {
                 adjacent: wrap.children[0] === chart && wrap.children[1].contains(table),
+                visible: table.getClientRects().length > 0,
                 animation: option.animation,
                 points: option.series.filter((series) => series.type === 'line').flatMap((series) => series.data),
                 rows: [...table.querySelectorAll('tbody tr')].map((row) =>
                   [...row.querySelectorAll('td')].map((cell) => cell.textContent.trim())),
-                rawRows: [...table.querySelectorAll('tbody tr')].map((row) =>
-                  [...row.querySelectorAll('td')].map((cell) => cell.dataset.rawValue ?? null)),
               };
             })()"""))
         html = _dom_cdp([
@@ -83,14 +83,13 @@ def test_tss_profile_chart_and_table(tmp_path, monkeypatch, ratio, rendered) -> 
     assert "FLAG: LEGAL" in html
     assert "NON-COMMERCIAL: Zhao-lab code (not adopted)" in html
     assert 'data-csp-violations="0"' in html
-    assert observed["adjacent"] and observed["animation"] is False
+    assert observed["adjacent"] and observed["visible"] and observed["animation"] is False
     assert len(observed["points"]) == len(observed["rows"]) == 40
-    assert len(observed["rawRows"]) == 40
-    for point, (interval, displayed), raw in zip(
-        observed["points"], observed["rows"], observed["rawRows"], strict=True,
-    ):
+    for index, (point, (interval, displayed)) in enumerate(zip(
+        observed["points"], observed["rows"], strict=True,
+    )):
         match = re.fullmatch(r"\[(-?\d+), (-?\d+)\)", interval)
         assert match is not None
         assert point[0] == (int(match[1]) + int(match[2])) / 2
-        assert float(raw[1]) == point[1]
-        assert math.isclose(float(displayed), point[1], rel_tol=0.05, abs_tol=1e-10)
+        assert point[0] == panel["offset_bp"][index] + 25
+        assert float(displayed) == point[1] == panel["coverage_x"][index]
