@@ -143,15 +143,21 @@ def load_sample(store: LabStore, source_id: str) -> SampleView | None:
     if full_input is None:
         return None
     manifest = input_manifest(store, full_input) or {}
-    legacy_not_ont = False
-    if manifest.get("kind") == "prealigned" and "platform" not in manifest:
-        try:
-            legacy_not_ont = for_input(manifest, store.inputs_dir / full_input / "aligned.bam") != "ont"
-        except (OSError, ValueError):
-            legacy_not_ont = True
-    supported = (
-        {algorithm.id for algorithm in load_registry() if "illumina" in algorithm.requires.platforms}
-        if legacy_not_ont else None
+    try:
+        platform = for_input(manifest, store.inputs_dir / full_input / "aligned.bam")
+    except (OSError, ValueError):
+        platform = "unknown"
+    platform_unverified = platform == "unknown"
+    legacy_not_ont = manifest.get("kind") == "prealigned" and "platform" not in manifest and platform == "illumina"
+    supported: set[str] | None = None
+    if platform_unverified:
+        supported = set()
+    elif legacy_not_ont:
+        supported = {algorithm.id for algorithm in load_registry() if "illumina" in algorithm.requires.platforms}
+    skip_message = (
+        "Stored input platform cannot be verified against its BAM; restore the registered input before viewing results"
+        if platform_unverified else
+        "Legacy result lacks verified ONT provenance; rerun or repair this sample"
     )
 
     def visible_results(input_id: str, identities: Mapping[str, str] | None = None) -> dict[str, ResultEnvelope]:
@@ -164,7 +170,7 @@ def load_sample(store: LabStore, source_id: str) -> SampleView | None:
                 algorithm_version=envelope.algorithm_version,
                 status="skipped",
                 skip_reason="platform",
-                skip_message="Legacy result lacks verified ONT provenance; rerun or repair this sample",
+                skip_message=skip_message,
                 provenance=envelope.provenance,
             )
             for algorithm_id, envelope in selected.items()
