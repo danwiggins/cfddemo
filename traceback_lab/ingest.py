@@ -507,7 +507,10 @@ def require_budget(budget: Budget, step: str) -> None:
     have = budget.free / GIB
     raise LabProblem(
         "TBX-LAB-010",
-        cause=f"{step} needs {need:.1f} GB on ROOT's volume, has {have:.1f} GB",
+        cause=(
+            f"{step} needs {budget.required:,} bytes ({need:.1f} GiB) on ROOT's volume; "
+            f"{budget.free:,} bytes ({have:.1f} GiB) are free"
+        ),
         fix="Free space, or use --root on a larger volume; --dry-run shows the budget",
         data={"step": step, "volume": "ROOT", **budget.public()},
     )

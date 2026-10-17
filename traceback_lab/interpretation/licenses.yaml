@@ -3,6 +3,12 @@
 # callout (>= 20px bold) once per route, pills elsewhere.
 version: 0.1.0
 licenses:
+  somalier-mit:
+    headline: "MIT: Somalier"
+    body: >-
+      Somalier is MIT-licensed. Its fingerprint and relatedness output can
+      reveal family relationships; use it only for explicitly selected pairs.
+    url: "https://github.com/brentp/somalier/blob/master/LICENSE"
   modkit-ont-public:
     headline: "RESEARCH-ONLY: modkit"
     body: >-
@@ -58,3 +64,11 @@ licenses:
       in the repo: the operator places it under ROOT/lab/assets/pmd/, and the
       Lab pins its sha256.
     url: "https://zwdzwd.github.io/pmd"
+  viral-reference-terms-vary:
+    headline: "VIRAL REFERENCE TERMS: operator-supplied FASTA"
+    body: >-
+      The Lab does not ship viral sequence data. Each local viral FASTA records
+      its exact bytes, target accessions and declared terms. NCBI places no
+      restrictions of its own on molecular data, but submitters may assert
+      intellectual-property rights; the operator must review the chosen source.
+    url: "https://www.ncbi.nlm.nih.gov/home/about/policies/"
