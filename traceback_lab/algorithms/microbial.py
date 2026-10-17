@@ -171,11 +171,17 @@ def _write_candidates(bam: Path, fasta: Path, read_length: int) -> tuple[int, in
                 encoded = row.encode("ascii")
                 row_bytes = len(encoded)
                 if staged_bytes + row_bytes > MAX_CANDIDATE_FASTA_BYTES:
-                    raise RuntimeError("microbial candidate FASTA exceeds the local staging budget")
+                    raise RuntimeError(
+                        "microbial candidate FASTA exceeds the local staging budget: "
+                        f"read {candidate} needs {staged_bytes + row_bytes} bytes, "
+                        f"limit {MAX_CANDIDATE_FASTA_BYTES} bytes")
                 out.write(encoded)
                 staged_bytes += row_bytes
     except BaseException:
-        fasta.unlink(missing_ok=True)
+        try:
+            fasta.unlink(missing_ok=True)
+        except OSError:
+            pass  # Preserve the original error; the worker scratch is still removed.
         raise
     return denominator, candidate, too_short, missing_sequence
 

@@ -658,7 +658,7 @@ def test_run_clips_only_unmapped_eligible_reads_and_uses_primary_denominator(tmp
     assert b"private-id" not in artifact and b"candidate-private-id" not in artifact
 
 
-def test_candidate_staging_refuses_budget_without_partial_second_read(tmp_path, monkeypatch) -> None:
+def test_candidate_staging_refuses_budget_and_removes_partial_file(tmp_path, monkeypatch) -> None:
     input_dir = tmp_path / "input"
     input_dir.mkdir()
     bam = input_dir / "aligned.bam"
@@ -674,7 +674,7 @@ def test_candidate_staging_refuses_budget_without_partial_second_read(tmp_path, 
             read.reference_start = -1
             stream.write(read)
     monkeypatch.setattr(algorithm, "MAX_CANDIDATE_FASTA_BYTES", 80)
-    with pytest.raises(RuntimeError, match="candidate FASTA exceeds.*staging budget"):
+    with pytest.raises(RuntimeError, match="read 2 needs 160 bytes, limit 80 bytes"):
         algorithm._write_candidates(bam, fasta, 75)
     assert not fasta.exists()
     store, _ = _database(tmp_path)
