@@ -269,9 +269,11 @@ traceback lab asset end-catalogues-inspect --root R
 ```
 
 The result measures raw `D−U` end counts at integer offsets [−70, −50] bp
-and `U−D` at [50, 70] bp around pinned centers. Each inclusive window contains
-21 discrete positions; the published OCF method described 20-bp windows, so
-this is an explicit one-position-wider exploratory proxy. It also reports the
+and `U−D` at [50, 70] bp around pinned centers. These bounds follow the
+published OCF summation at peaks −60 and +60 with a ±10 offset. The paper
+calls them 20-bp windows, while summing both integer endpoints includes 21
+positions. This implementation follows the displayed summation literally;
+the paper does not resolve that counting convention. It also reports the
 fraction of valid aligned ends exactly matching the pinned U/D site catalogue;
 this is a support count, not de novo site discovery or enrichment against a calibrated
 background. The raw count difference scales with depth, eligible-region count
