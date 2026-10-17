@@ -27,7 +27,7 @@ from traceback_lab.scrub import Scrubber
 from traceback_lab.store import LabStore, new_run_id
 
 from .bam_fixtures import Read, context_for
-from .test_dd_cfdna_chry import INPUT, REFERENCE, SOURCE, _file as donor_file
+from .test_dd_cfdna_chry import INPUT, REFERENCE, SOURCE, _file as donor_file, _stored_input
 from .test_fetal_chry import _file as fetal_file
 
 
@@ -57,6 +57,7 @@ def test_derived_worker_uses_selected_depth_and_pinned_parent_calibration(
     reads = [Read(f"auto-{i}", "chr1", 1_000 + i * 2_000, "A" * 1_500) for i in range(80)]
     reads += [Read(f"y-{i}", "chrY", 3_000_000 + i * 2_000, "A" * 1_500) for i in range(20)]
     fixture = context_for(store.root, contigs, reads)
+    _stored_input(store)
 
     parent = RunTarget(INPUT, SOURCE, fixture.input_dir, "hg38", REFERENCE)
     run_id = new_run_id()
