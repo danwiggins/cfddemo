@@ -444,6 +444,20 @@ def test_stored_dry_run_uses_selected_depth_without_writing(
                 assert bad["data"]["input_id"] == input_id
                 if expected == "TBX-LAB-017":
                     assert "fresh ROOT" in bad["data"]["fix"]
+        from traceback_lab.sample_metadata import SCHEMA as SEX_METADATA_SCHEMA
+
+        with monkeypatch.context() as patch:
+            patch.setattr(run_module, "input_manifest", lambda _store, _input_id: ["invalid"])
+            patch.setattr(run_module, "source_record", lambda _store, _source_id: {
+                **record,
+                "operator_metadata": {
+                    "schema": SEX_METADATA_SCHEMA, "sex": "M", "recorded_utc": "2026-10-17T00:00:00Z",
+                },
+            })
+            conflict_code, conflict = _json(
+                capsys, "run", "latest", "--root", str(root), "--sex", "F", "--dry-run",
+            )
+            assert conflict_code == 3 and conflict["data"]["code"] == "TBX-LAB-024"
         with monkeypatch.context() as patch:
             patch.setattr(run_module, "source_record", lambda _store, _source_id: {
                 **record, "chunks": [{"size": "invalid"}],

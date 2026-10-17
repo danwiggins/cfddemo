@@ -323,10 +323,10 @@ def _dry_run(args: argparse.Namespace, store: LabStore, progress: Callable[[str]
     lines = [f"ROOT      {store.root}"]
     if len(args.inputs) == 1 and _is_stored(args.inputs[0]):
         source_id = resolve_sample(store, args.inputs[0])
-        with_sex_assertion(source_record(store, source_id) or {}, args.sex)
         aligned, record = _stored_input(store, source_id)
         platform = _stored_platform(aligned)
         reference_id, reference_sha256 = _stored_reference_binding(aligned)
+        with_sex_assertion(record, args.sex)
         data["sample"] = {
             "id12": id12_for(store, source_id), "input_id": aligned.input_id, "platform": platform,
         }
