@@ -176,8 +176,15 @@ def _read_run_log(path: Path, *, limit: int = 1024 * 1024) -> bytes | None:
 def _run_events(store: LabStore, run_id: str) -> tuple[list[tuple[int, dict[str, Any]]], str | None]:
     if not isinstance(run_id, str) or not re.fullmatch(r"r-\d{8}-\d{4}-[0-9a-f]{4,8}", run_id):
         return [], "invalid_run_id"
-    raw = _read_run_log(store.runs_dir / f"{run_id}.jsonl")
+    path = store.runs_dir / f"{run_id}.jsonl"
+    raw = _read_run_log(path)
     if raw is None:
+        try:
+            os.lstat(path)
+        except FileNotFoundError:
+            return [], "missing"
+        except OSError:
+            pass
         return [], "unreadable_or_over_1mib"
     lines = raw.split(b"\n")
     complete_tail = raw.endswith(b"\n")
@@ -284,14 +291,15 @@ class LabApi:
             events, reason = _run_events(self.store, run_id)
             if reason == "pending_first_event":
                 reason = None  # the first append is still in progress
+            if reason == "missing":
+                reason = None  # the writer may not have appended run_start yet
             if reason in ("unreadable_or_over_1mib", "malformed_or_empty"):
                 # A writer publishes its heartbeat before appending run_start.
                 # An absent or empty log in that short window is pending, not damaged.
                 try:
                     info = os.lstat(self.store.runs_dir / f"{run_id}.jsonl")
                 except FileNotFoundError:
-                    if reason == "unreadable_or_over_1mib":
-                        reason = None
+                    pass
                 except OSError:
                     pass
                 else:

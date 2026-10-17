@@ -836,6 +836,7 @@ def test_run_log_reader_only_ignores_an_unterminated_final_fragment(tmp_path) ->
 
 
 @pytest.mark.parametrize(("damage", "reason"), (
+    ("missing", "missing"),
     ("oversized", "unreadable_or_over_1mib"),
     ("too_many_lines", "over_4096_lines"),
     ("malformed", "malformed_or_empty"),
@@ -851,7 +852,9 @@ def test_status_reports_unavailable_latest_log_without_claiming_interruption(tmp
         log.append("run_start", command=command)
         log.append("step_start", step="bam-qc")
     path = store.runs_dir / f"{run_id}.jsonl"
-    if damage == "oversized":
+    if damage == "missing":
+        path.unlink()
+    elif damage == "oversized":
         path.write_bytes(b"x" * (1024 * 1024 + 1))
     elif damage == "too_many_lines":
         path.write_bytes(b"{}\n" * 4097)
