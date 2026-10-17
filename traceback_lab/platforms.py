@@ -63,7 +63,9 @@ def for_input(manifest: Mapping[str, Any], bam_path: Path) -> Platform:
     if kind != "prealigned":
         raise ValueError("unknown Lab input kind")
     actual = from_bam(bam_path)
-    declared = manifest.get("platform", actual)
+    # An old prealigned manifest had no platform field. It used the ONT
+    # identity, so its BAM may confirm ONT but may not redefine that identity.
+    declared = manifest.get("platform", "ont")
     if declared not in PLATFORMS or declared != actual:
         raise ValueError("prealigned platform declaration differs from BAM read groups")
     return actual
