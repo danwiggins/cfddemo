@@ -216,6 +216,7 @@ def test_runner_plan_persists_cell_origin_parser_pin_for_cohort_read(tmp_path, m
     attempt = store.selected_attempt(input_id, "cell-origin", expected_hash)
     assert attempt is not None and attempt.name == results[0].attempt_id
     plan = json.loads((attempt / "execution_plan.json").read_bytes())
+    assert plan["platform"] == "ont"
     assert plan["parameters"] == co.CELL_ORIGIN.parameters
     assert plan["tools"] == [tool.identity() for tool in co.CELL_ORIGIN.tools]
     assert plan["asset_sha256s"] == co.CELL_ORIGIN.asset_sha256s(store.root)
