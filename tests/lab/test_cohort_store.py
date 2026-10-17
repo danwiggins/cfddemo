@@ -602,6 +602,16 @@ def test_latest_cohort_add_matches_well_formed_sample_resolution(
     assert read_roster(store, "healthy") == (expected,)
 
 
+def test_pon_input_selection_uses_only_verified_full_aligned_inputs(store: LabStore) -> None:
+    aligned = _sample(store, 1)
+    prealigned = _sample(store, 2, aligned=False)
+    members = (cohorts.member_from_store(store, prealigned), cohorts.member_from_store(store, aligned))
+    selected = cohorts.pon_inputs_for_members(store, members)
+    assert tuple(item.source_id for item in selected) == (aligned,)
+    assert selected[0].bam_path == store.inputs_dir / _sha(101) / "aligned.bam"
+    assert selected[0].reference_sha256 == _sha(900)
+
+
 @pytest.mark.parametrize("location", ["sources_dir", "input_dir"])
 def test_cohort_add_refuses_symlinked_metadata_directory(store: LabStore, location: str) -> None:
     source_id = _sample(store, 1)
