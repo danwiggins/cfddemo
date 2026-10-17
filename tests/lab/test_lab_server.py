@@ -1020,12 +1020,13 @@ def test_status_reports_unavailable_latest_log_without_claiming_interruption(tmp
     assert status["run_log_unavailable"] == {"run_id": run_id, "reason": reason}
 
 
-def test_status_does_not_require_run_logs_from_other_writer_commands(tmp_path) -> None:
+@pytest.mark.parametrize("command", ("cohort add", "cohort remove"))
+def test_status_does_not_require_run_logs_from_other_writer_commands(tmp_path, command) -> None:
     store = LabStore(tmp_path)
     run_id = "r-20261015-0101-abcd"
-    with store.writer("cohort add", run_id):
+    with store.writer(command, run_id):
         active = api_module.LabApi(store).status()
-        assert active["active"]["command"] == "cohort add"
+        assert active["active"]["command"] == command
         assert active["run_log_unavailable"] is None
     ended = api_module.LabApi(store).status()
     assert ended["active"] is None and ended["interrupted"] is None
