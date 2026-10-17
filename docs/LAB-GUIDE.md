@@ -84,9 +84,32 @@ traceback lab algorithms [--json]          registered algorithms (id, tier, min 
 traceback lab doctor [--json]              setup checks, each with a fix command
 traceback lab serve [--open]               the local page (loopback only)
 traceback lab runs [RUN_ID] [--step S]     the run log, or one run's steps
+traceback lab identity sites add --file SITES.vcf.gz --sha256 SHA256 --source-label LABEL [--root R]
+traceback lab identity sites inspect [--root R]
+traceback lab identity compare SAMPLE_A SAMPLE_B [--force] [--json] [--root R]
 ```
 
 ## Running on a kit
+
+Identity is an opt-in, exploratory Somalier measurement for full aligned hg38
+inputs with at least 10 million eligible reads. An operator must first register
+the exact local gzip VCF of hg38 fingerprint sites and its independently
+obtained SHA-256 using `lab identity sites add`. The file is copied into the
+Lab ROOT and checked against its pinned bytes each time it is used. Install
+Somalier separately, then run `traceback lab run ID12 --only identity --root R`
+for each of two chosen samples. `lab identity compare A B` relates only those
+two current, selected fingerprints; `--force` stores a new immutable attempt.
+The result is bound to the source, input, selected extraction attempt, sites,
+reference, tool version, and upstream read summary. When any of those change,
+rerun identity and the comparison. The local Trust/QC view shows current pairs.
+Fingerprints and relatedness can reveal family relationships (FLAG: PRIVACY).
+Keep the Lab ROOT private. There is no validated ONT duplicate or kinship
+threshold here, and this command makes no diagnostic claim. No real donor data
+is required for the synthetic checks in this repository.
+An altered or unreadable sites registration is blocked, not silently replaced.
+Preserve the affected ROOT for review; the safe repeat path is a fresh ROOT,
+the verified original VCF and SHA-256, and new extraction/comparison runs.
+Any in-place repair requires an offline backup and operator review first.
 
 `--sex M|F` records an operator assertion in versioned local sample metadata.
 It does not change the measured `sex-check` ratio, source or input identity, or
@@ -187,7 +210,7 @@ ROOT, home, login and chunk names redacted) is ever stored.
 | `cell-origin` | share of cfDNA from each of 40 Loyfer U250 cell types with bootstrap intervals, through the signed method's own `compute_measurement` (modkit, UXM, NNLS); needs 2.5M eligible reads, `traceback toolchain install modkit` and `traceback method-asset register --from-dir LOYFER_DIR --root R`; minor cell types are not interpretable below 5x. Downsample and split runs read a transient filtered BAM that is deleted after publish |
 | `end-motifs` | reference 4-mers at both ends of each molecule (5′ forward end and the reverse complement of the other end), motif diversity score and CCCA share; needs 500,000 eligible reads and the registered FASTA |
 | `delfi-ratio` | short (100–150 bp) / long (151–220 bp) ratio per 5 Mb bin on chr1–22, median-centred, and its SD; no GC correction, cohort-relative only; needs 1,000,000 eligible reads |
-| `wps` | long-fragment windowed protection score from D21-eligible 120–180 bp ONT aligned spans: spanning 120 bp windows minus molecules ending inside them. Requires hg38 with `chr1`–`chr22` autosome names, known approximate depth ≥ 10x, and free lab-volume space for the full exact track (four bytes per autosomal base, 10% overhead, plus 2 GiB margin); insufficient space yields a `disk` skip. Publishes exact per-base scores in compressed 1 Mb chunks indexed by `wps_exact_index.json`, a 1 kb mean preview in `wps_track.npz`, exact-center mean WPS and positive-bin share. No nucleosome calls or clinical cutoff. |
+| `wps` | long-fragment windowed protection score from D21-eligible 120–180 bp ONT aligned spans: spanning 120 bp windows minus molecules ending inside them. Requires hg38 with `chr1`–`chr22` autosome names, known approximate depth ≥ 10x, and free lab-volume space for the full exact track (four bytes per autosomal base, 10% overhead, plus 2 GiB margin); insufficient space yields a `disk` skip. Publishes exact per-base scores in compressed 1 Mb chunks indexed by `wps_exact_index.json`, plus a separate mean-per-1 kb-bin preview in `wps_track.npz`. The preview smooths away per-base detail and cannot recover the exact track. Reports exact-center mean WPS and positive-bin share. No nucleosome calls or clinical cutoff. |
 | `meth-calls` | intermediate: decodes MM/ML once into site-level CpG call chunks (read row, forward-strand C position, strand, 5mC/5hmC/canonical ML); derived inputs reuse it through their row mask |
 | `global-5mc` | share of CpG site calls whose most likely state is 5mC |
 | `global-5hmc` | share of CpG site calls (with a 5hmC channel) whose most likely state is 5hmC; skipped (`missing_channel`) when the MM tags carry no `C+h` |
