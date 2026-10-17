@@ -26,6 +26,7 @@ from ..methylbert_runtime import (
     MIN_ELIGIBLE_READS, PINNED_UPSTREAM_COMMIT, RuntimeRefusal, numerical_runtime_identity,
     require_ready, run_worker,
 )
+from ..platforms import from_bam
 from ..registry import AlgorithmOutput, InputContext, Ready, Requirements, Skip, ToolPin
 from ._base import Base, load_summary, metric
 from ._records import eligible_record, name_predicate
@@ -57,9 +58,7 @@ def _sha(text: object) -> str | None:
 
 
 def _ont_header(path: Path) -> bool:
-    with pysam.AlignmentFile(str(path), "rb") as bam:
-        groups = bam.header.to_dict().get("RG", [])
-        return bool(groups) and all(str(group.get("PL", "")).upper() in {"ONT", "OXFORDNANOPORE"} for group in groups)
+    return from_bam(path) == "ont"
 
 
 def _eligible_tagged(ctx: InputContext) -> tuple[int, int]:
@@ -78,7 +77,7 @@ def _write_eligible_bam(source: Path, destination: Path, ctx: InputContext) -> i
     with pysam.AlignmentFile(str(source), "rb") as reader:
         canonical = {name for name in reader.references if _CANONICAL.fullmatch(name)}
         if not canonical:
-            canonical = set(reader.references)
+            raise ValueError("MethylBERT requires chr-prefixed canonical nuclear contigs")
         with pysam.AlignmentFile(str(destination), "wb", template=reader) as writer:
             for record in reader.fetch(until_eof=True):
                 if not eligible_record(record, canonical):

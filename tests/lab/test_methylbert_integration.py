@@ -396,6 +396,17 @@ def test_preflight_uses_measured_eligible_depth_not_classified_support(tmp_path,
     assert observed["expected_code_sha256"] == "c" * 64
 
 
+@pytest.mark.parametrize("platform", ["ONT", "OXFORD_NANOPORE"])
+def test_ont_header_uses_the_shared_platform_vocabulary(tmp_path, platform):
+    source = tmp_path / "ont.bam"
+    with pysam.AlignmentFile(str(source), "wb", header={
+        "HD": {"VN": "1.6"}, "SQ": [{"SN": "chr1", "LN": 1000}],
+        "RG": [{"ID": "reads", "PL": platform}],
+    }):
+        pass
+    assert adapter._ont_header(source)
+
+
 def test_eligible_bam_excludes_duplicates_low_mapq_and_noncanonical(tmp_path):
     source = tmp_path / "source.bam"
     header = {"HD": {"VN": "1.6", "SO": "coordinate"}, "SQ": [
@@ -421,6 +432,19 @@ def test_eligible_bam_excludes_duplicates_low_mapq_and_noncanonical(tmp_path):
     with pysam.AlignmentFile(str(target), "rb") as bam:
         assert [row.query_name for row in bam.fetch(until_eof=True)] == ["keep"]
     assert Path(str(target) + ".bai").exists()
+
+
+def test_eligible_bam_refuses_a_reference_without_chr_prefixed_nuclear_contigs(tmp_path):
+    source = tmp_path / "source.bam"
+    with pysam.AlignmentFile(str(source), "wb", header={
+        "HD": {"VN": "1.6"},
+        "SQ": [{"SN": "1", "LN": 1000}, {"SN": "MT", "LN": 1000}],
+    }):
+        pass
+    target = tmp_path / "eligible.bam"
+    with pytest.raises(ValueError, match="chr-prefixed canonical nuclear contigs"):
+        adapter._write_eligible_bam(source, target, _context(tmp_path))
+    assert not target.exists()
 
 
 def test_private_worker_lifecycle_publishes_only_aggregate(tmp_path, monkeypatch):
