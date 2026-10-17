@@ -100,7 +100,9 @@ def test_stability_svg_table_exposes_band_endpoints_and_split_values(tmp_path) -
     assert first["headers"][3] == "Deviation (%)"
     assert first["headers"][4:6] == ["Band low (%)", "Band high (%)"]
     assert first["bands"] and first["bands"][0]["height"] > 0
-    y = lambda value: 70 - (value / 50) * 58
+    def y(value):
+        return 70 - (value / 50) * 58
+
     assert first["bands"][0]["y"] == pytest.approx(y(-8.23456789))
     assert first["bands"][0]["height"] == pytest.approx(y(-17.1234567) - y(-8.23456789))
     assert first["points"][0] == {"y": pytest.approx(y(-12.3456789) + 4), "glyph": "●"}
