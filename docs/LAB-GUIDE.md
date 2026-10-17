@@ -355,11 +355,15 @@ script or style, no outside requests.
   shows its own status when a result is skipped, failed, or lacks a numeric
   metric; a split-half verdict appears only when both values are available
   and the stability comparison is interpretable. When both halves have numeric
-  values, their raw values and relative difference remain visible without a
+  usable values, their raw values and relative difference remain visible without a
   verdict. When a half is unavailable, its status remains visible. REPEATABILITY's
   median and worst-three list include every numeric split comparison; only
   metrics with a validated verdict enter its stability count. Home separately
-  counts unavailable comparisons, even when no pair is comparable. If a
+  counts unavailable metric comparisons, even when no pair is comparable.
+  Home also names unavailable full-depth algorithm results. Damaged downsample
+  selections carry their unavailable reason into the depth points. A measurement
+  usable only at an isolated lower depth is labelled as such rather than claiming
+  stability through missing higher-depth evidence. If a
   full-depth selected result is unreadable or ambiguous, Stability names that
   algorithm without inventing a metric-level panel from damaged data.
 

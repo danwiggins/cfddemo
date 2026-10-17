@@ -247,6 +247,10 @@ def cell_state(
 ) -> dict[str, Any]:
     envelope = view.results.get(algorithm_id)
     if envelope is None:
+        if algorithm_id in view.unreadable:
+            return {"state": "unavailable", "reason": "result unreadable"}
+        if algorithm_id in view.ambiguous:
+            return {"state": "unavailable", "reason": "result selection ambiguous"}
         return {"state": None}
     if envelope.status == "failed":
         return {"state": "failed", "reason": envelope.failure.first_line if envelope.failure else None}

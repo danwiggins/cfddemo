@@ -286,7 +286,10 @@ def test_damaged_full_selection_is_named_on_stability_page(tmp_path) -> None:
         id12 = web_api.LabApi(store)._id12s()[source_id]
         dom = _dom(server, tmp_path / "browser", route=f"/sample/{id12}/stability",
                    want=lambda page: "full-depth result unreadable" in page)
+        home = _dom(server, tmp_path / "browser-home", route="/",
+                    want=lambda page: "full-depth algorithm result unavailable" in page)
     assert "fragment-size: full-depth result unreadable; no metric-level Stability panel can be shown." in dom
+    assert "1 full-depth algorithm result unavailable" in home
 
 
 def test_usable_to_agrees_with_the_curve(default_run) -> None:
@@ -358,9 +361,15 @@ def test_missing_downsample_does_not_claim_instability() -> None:
     })
     down = views.InputView("0.5", "b" * 64, "downsample", {"fraction": 0.5}, {}, 0.5)
     sample = views.SampleView("c" * 64, "c" * 12, False, full, [down])
+    down.unreadable = {"fragment-size"}
+    assert views.cell_state(down, full, "fragment-size", "mode_bp", views.load_library()) == {
+        "state": "unavailable", "reason": "result unreadable",
+    }
     panel = next(panel for panel in views.stability_panels(sample)
                  if panel["algorithm_id"] == "fragment-size" and panel["metric_id"] == "mode_bp")
     assert panel["verdict"] == "no usable measurement below full depth"
+    assert panel["points"][0]["reason"] == "result unreadable"
+    down.unreadable = set()
     sample.derived.append(views.InputView("split-X", "d" * 64, "split", {"half": "X"}, {}, 0.5))
     panel = next(panel for panel in views.stability_panels(sample)
                  if panel["algorithm_id"] == "fragment-size" and panel["metric_id"] == "mode_bp")

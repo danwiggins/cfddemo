@@ -259,17 +259,21 @@
     const rep = h("div", { class: "control-block" }, h("span", { class: "control-badge" }, "REPEATABILITY"), " sampling noise, not a known answer");
     if (sample.repeatability) {
       const r = sample.repeatability;
-      rep.append(h("p", {}, `Median split-half |A−B|: ${(r.median_relative_abs_diff * 100).toFixed(1)}% across ${r.metrics} comparable metrics; ${r.incomparable_metrics || 0} comparison${r.incomparable_metrics === 1 ? "" : "s"} unavailable; ${r.unstable} outside tolerance among ${r.verdict_metrics} with a validated verdict; ${r.no_verdict_metrics} without a validated verdict.`),
+      rep.append(h("p", {}, `Median split-half |A−B|: ${(r.median_relative_abs_diff * 100).toFixed(1)}% across ${r.metrics} comparable metrics; ${r.incomparable_metrics || 0} metric comparison${r.incomparable_metrics === 1 ? "" : "s"} unavailable; ${r.unstable} outside tolerance among ${r.verdict_metrics} with a validated verdict; ${r.no_verdict_metrics} without a validated verdict.`),
         h("ul", {}, ...r.worst.map((w) => h("li", {}, `${w.label}: ${(w.relative_abs_diff * 100).toFixed(1)}%${w.stable === false ? " (unstable)" : w.stable === null ? " (no validated verdict)" : ""}`))),
         h("a", { href: `#/sample/${sample.id12}/stability` }, "→ Stability"));
     } else {
       const unavailable = (sample.stability || []).filter((panel) => !panel.split &&
         [panel.split_status?.A?.state, panel.split_status?.B?.state].some((state) => state && state !== "not_recorded")).length;
       rep.append(unavailable
-        ? h("p", { class: "empty" }, `${unavailable} split comparison${unavailable === 1 ? "" : "s"} unavailable; no comparable pair is available. `,
+        ? h("p", { class: "empty" }, `${unavailable} split metric comparison${unavailable === 1 ? "" : "s"} unavailable; no comparable pair is available. `,
           h("a", { href: `#/sample/${sample.id12}/stability` }, "See Stability"))
         : h("p", { class: "empty" }, `Run traceback lab run ${sample.id12}.`));
     }
+    const fullUnavailable = (sample.stability_unavailable || []).length;
+    if (fullUnavailable) rep.append(h("p", { class: "problem" },
+      `${fullUnavailable} full-depth algorithm result${fullUnavailable === 1 ? "" : "s"} unavailable; `,
+      h("a", { href: `#/sample/${sample.id12}/stability` }, "See Stability")));
     const known = h("div", { class: "control-block" }, h("span", { class: "control-badge" }, "KNOWN-STATUS"), " public sample",
       h("p", { class: "empty" }, "Not loaded. Needs public data access. ", flagPill("LEGAL", "FLAG: LEGAL — public data-use terms (EGA controlled access).")));
     section.append(syn, rep, known);
