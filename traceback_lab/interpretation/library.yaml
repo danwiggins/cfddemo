@@ -743,6 +743,7 @@ entries:
     metric_id: chr1p_log2
     label: "Chromosome 1 p-arm median corrected log2"
     value_kind: signed
+    stability: {kind: unvalidated}
     tier: SPECULATIVE
     origin_tier: SPECULATIVE
     origin_platform: "ONT Lab PoN-corrected ichorCNA bins"

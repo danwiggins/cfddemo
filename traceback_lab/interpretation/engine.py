@@ -163,11 +163,7 @@ def _validate_entry(raw: Mapping[str, Any], licenses: Mapping[str, Any]) -> Entr
         if raw["value_kind"] in _DEFAULT_STABILITY:
             stability = dict(_DEFAULT_STABILITY[raw["value_kind"]])
         else:
-            _require(
-                raw["value_kind"] == "signed" and raw["tier"] == "SPECULATIVE" and reference["kind"] == "none",
-                where,
-                "a signed metric needs an explicit stability unless it is speculative with no reference",
-            )
+            _require(False, where, "a signed metric needs an explicit stability")
     if stability is not None:
         _require(stability.get("kind") in STABILITY_KINDS, where, f"stability kind in {STABILITY_KINDS}")
         if stability["kind"] in ("absolute", "relative", "scales_with_depth"):

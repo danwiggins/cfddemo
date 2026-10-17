@@ -233,15 +233,25 @@ def test_default_stability_by_value_kind() -> None:
     assert library.entry("bam-qc", "mean_read_q").stability == {"kind": "relative", "tolerance": 0.10}
 
 
-def test_signed_metric_without_stability_requires_speculative_no_reference() -> None:
+def test_signed_metric_requires_explicit_stability_at_every_tier() -> None:
     def arm_entry(data):
         return next(entry for entry in data["entries"]
                     if entry["algorithm_id"] == "arm-summary" and entry["metric_id"] == "chr1p_log2")
 
-    assert LIB.entry("arm-summary", "chr1p_log2").stability is None
-    for change in ({"tier": "NEWER"}, {"reference": {"kind": "internal_cohort"}}):
+    signed = [entry for entry in LIB.entries.values() if entry["value_kind"] == "signed"]
+    arm_log2 = [entry for entry in signed if entry.algorithm_id == "arm-summary"
+                and entry.metric_id.endswith("_log2")]
+    assert len(arm_log2) == 44
+    assert all(entry.stability == {"kind": "unvalidated"} for entry in arm_log2)
+    assert all(entry.stability is not None for entry in signed)
+
+    for change in ({}, {"tier": "NEWER"}, {"reference": {"kind": "internal_cohort"}}):
+        def remove_declaration(data):
+            arm_entry(data).pop("stability")
+            arm_entry(data).update(change)
+
         with pytest.raises(LibraryError, match="explicit stability"):
-            parse_library(_mutate(lambda data, change=change: arm_entry(data).update(change)), LICENSES)
+            parse_library(_mutate(remove_declaration), LICENSES)
 
 
 def _envelope(metrics):
