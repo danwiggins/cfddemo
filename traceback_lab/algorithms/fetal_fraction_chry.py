@@ -130,7 +130,7 @@ class FetalFractionChrY(Base):
             return _UNAVAILABLE
         if (ctx.approx_depth_x is None or not math.isfinite(ctx.approx_depth_x)
                 or ctx.approx_depth_x < contract.min_depth_x):
-            return _UNAVAILABLE
+            return Skip("depth", f"calibrated minimum is {contract.min_depth_x:g}x")
         return Ready()
 
     def run(self, ctx: InputContext, out: Path) -> AlgorithmOutput:
