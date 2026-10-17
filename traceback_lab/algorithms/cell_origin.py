@@ -15,6 +15,8 @@ import json
 from pathlib import Path
 from typing import Any
 
+import pysam
+
 from ..adapters.mmml_extract import EXTRACTOR_VERSION
 from ..identity import canonical_sha256
 from ..registry import AlgorithmOutput, InputContext, Ready, Requirements, Skip, ToolPin
@@ -214,7 +216,9 @@ CELL_ORIGIN = CellOrigin(
     consumes="full_bam",
     cost="slow",
     requires=Requirements(mm_tags=True, min_eligible_reads=MIN_ELIGIBLE_READS),
-    tools=(ToolPin("lab-mmml", EXTRACTOR_VERSION),),
+    tools=(ToolPin("lab-mmml", EXTRACTOR_VERSION),
+           ToolPin("pysam", pysam.__version__),
+           ToolPin("htslib", pysam.__samtools_version__)),
     parameters={"method": "lab-mmml-loyfer-uxm-v1", "atlas": "loyfer-u250",
                 "downstream_parameters_sha256": _downstream_parameters_sha256()},
 )

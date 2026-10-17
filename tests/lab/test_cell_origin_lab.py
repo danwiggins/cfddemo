@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import os
+from dataclasses import replace
 from pathlib import Path
 
 import pysam
@@ -12,7 +13,7 @@ import pytest
 import traceback_runner.cell_origin_method as method_module
 from tests.test_cell_origin_stage import _test_parameters
 from traceback_lab.algorithms import cell_origin as co
-from traceback_lab.registry import InputContext, Ready
+from traceback_lab.registry import InputContext, Ready, ToolPin, execution_identity
 from traceback_runner.fixtures import create_cell_origin_inputs
 from traceback_runner.references import register_loyfer_directory, register_reference
 
@@ -46,6 +47,19 @@ def test_preflight_skips_until_the_atlas_is_registered(world) -> None:
     assert co.CELL_ORIGIN.preflight(InputContext(**{**ctx.__dict__, "eligible_reads": 10})).reason_code == "depth"
     assert co.CELL_ORIGIN.preflight(InputContext(**{**ctx.__dict__, "example": True})).reason_code == "example_reference"
     assert len(co.CELL_ORIGIN.asset_sha256s(world["root"])) == 3
+
+
+def test_execution_identity_pins_the_mmml_parser_versions() -> None:
+    pins = {tool.name: tool.version for tool in co.CELL_ORIGIN.tools}
+    assert pins["pysam"] == pysam.__version__
+    assert pins["htslib"] == pysam.__samtools_version__
+    original = execution_identity(co.CELL_ORIGIN, reference_sha256="a" * 64)
+    for parser in ("pysam", "htslib"):
+        changed = replace(co.CELL_ORIGIN, tools=tuple(
+            ToolPin(tool.name, "next-version" if tool.name == parser else tool.version)
+            for tool in co.CELL_ORIGIN.tools
+        ))
+        assert execution_identity(changed, reference_sha256="a" * 64) != original
 
 
 def test_run_recovers_the_planted_mixture_with_intervals(world) -> None:
