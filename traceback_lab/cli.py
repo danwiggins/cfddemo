@@ -97,6 +97,9 @@ def build_parser() -> argparse.ArgumentParser:
 
     add_cohort_parser(commands, _common)
 
+    from .arm_zscore_command import add_arm_zscore_parser
+
+    add_arm_zscore_parser(commands, _common)
     from .identity_command import add_identity_parser
 
     add_identity_parser(commands, _common)

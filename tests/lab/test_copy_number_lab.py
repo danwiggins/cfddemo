@@ -90,6 +90,53 @@ def test_lab_contract_carries_pon_policy() -> None:
     assert contract["signed"]["pon_mode"] == "none_development"
 
 
+def test_no_pon_run_uses_the_counted_read_floor_in_its_identity(tmp_path: Path, monkeypatch) -> None:
+    from traceback_lab.algorithms import copy_number as cn_module
+    from traceback_lab.registry import InputContext
+
+    ctx = InputContext(root=tmp_path, source_id="a" * 64, input_id="b" * 64,
+                       reference_id="ref", reference_sha256="c" * 64, input_dir=tmp_path)
+    seen = []
+
+    def capture(_self, _ctx, _out, *, parameters, **_kwargs):
+        seen.append(parameters)
+        return None
+
+    monkeypatch.setattr(cn_module.CopyNumber, "run_configured", capture)
+    cn_module.COPY_NUMBER.run(ctx, tmp_path)
+    assert seen[0].contract() == cn_module.COPY_NUMBER.parameters
+    assert seen[0].signed.min_counted_reads == 1_000_000
+    changed = InputContext(**{**ctx.__dict__, "extras": {"min_counted_reads": 1}})
+    with pytest.raises(ichor.CopyNumberError, match="execution identity"):
+        cn_module.COPY_NUMBER.run(changed, tmp_path)
+    assert len(seen) == 1
+
+
+def test_old_no_pon_result_cannot_satisfy_the_corrected_identity(tmp_path: Path, monkeypatch) -> None:
+    from traceback_lab.algorithms import copy_number as cn_module
+    from traceback_lab.envelope import ResultEnvelope, provenance
+    from traceback_lab.registry import execution_identity
+
+    algorithm = cn_module.COPY_NUMBER
+    current = execution_identity(algorithm, reference_sha256="c" * 64)
+    monkeypatch.setattr(algorithm, "version", "1")
+    old = execution_identity(algorithm, reference_sha256="c" * 64)
+    monkeypatch.setattr(algorithm, "version", "2")
+    assert old != current
+
+    store = LabStore(tmp_path)
+    store.ensure()
+    store.publish_result(ResultEnvelope(
+        algorithm_id="copy-number", algorithm_version="1", status="ok",
+        provenance=provenance(tool="fixture", parameters_sha256=old,
+                              source_id="a" * 64, input_id="b" * 64,
+                              reference_id="ref", timestamp_utc="2026-10-15T00:00:00Z"),
+        metrics=[],
+    ), input_id="b" * 64)
+    assert store.read_result("b" * 64, "copy-number", old) is not None
+    assert store.read_result("b" * 64, "copy-number", current) is None
+
+
 # ------------------------------------------------------------ derived inputs
 LENGTH = 2_000_000
 
@@ -255,14 +302,15 @@ def test_copy_number_algorithm_run_in_process(tmp_path, monkeypatch) -> None:
     assert type(cn_module.COPY_NUMBER.preflight(ctx)).__name__ == "Ready"
     out = tmp_path / "attempt" / "artifacts"
     out.mkdir(parents=True)
-    output = cn_module.COPY_NUMBER.run(ctx, out)
+    # This adapter parity fixture is intentionally below the production floor.
+    output = cn_module.COPY_NUMBER.run_configured(ctx, out, parameters=ichor.default_parameters(min_counted_reads=10))
     values = {m["metric_id"]: m["value"] for m in output.metrics}
     assert values["pon_policy"] == "none" and values["counted_reads"] == _eligible()
     assert json.loads(output.artifacts["cn_bins.json"])["bins"]
     from traceback_lab.envelope import ResultEnvelope, provenance
 
     envelope = ResultEnvelope.model_validate({
-        "algorithm_id": "copy-number", "algorithm_version": "1", "status": "ok",
+        "algorithm_id": "copy-number", "algorithm_version": cn_module.COPY_NUMBER.version, "status": "ok",
         "provenance": provenance(tool="t", parameters_sha256="d" * 64, source_id="a" * 64, input_id="b" * 64,
                                  reference_id="ref", timestamp_utc="2026-10-15T00:00:00Z"),
         "metrics": output.metrics,

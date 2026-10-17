@@ -11,9 +11,10 @@ import json
 import os
 import re
 import stat
+from contextlib import contextmanager
 from dataclasses import dataclass
 from pathlib import Path
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, Iterator
 
 from pydantic import ValidationError
 
@@ -24,12 +25,13 @@ from .identity import SHA256_PATTERN, cohort_compat_key
 from .ingest import resolve_sample, source_ids
 from .problems import LabProblem
 from .registry import execution_identity, load_registry
-from .store import LabStore, new_run_id, open_regular_no_follow, write_atomic
+from .store import LabStore, _fsync_dir, new_run_id, open_regular_no_follow, write_atomic
 
 if TYPE_CHECKING:
     from .pon import PonInput
 
 _COHORT_ID = re.compile(r"^[a-z][a-z0-9-]{0,39}$")
+_SOURCE_REF = re.compile(r"^[0-9a-f]{12,64}$")
 _ROSTER_SCHEMA = "traceback.lab.cohort-roster.v1"
 _VERSION_NAME = re.compile(r"^[1-9][0-9]*$")
 
@@ -223,6 +225,44 @@ def add_sample(store: LabStore, cohort_id: str, sample_ref: str) -> bool:
         return True
 
 
+def remove_sample(store: LabStore, cohort_id: str, source_ref: str) -> str:
+    """Remove one pending member without changing any published generation or sample data.
+
+    Resolve the ID against the roster itself: an unrecoverable source record must
+    not prevent the operator from removing that member before rebuilding.
+    """
+
+    if not _SOURCE_REF.fullmatch(source_ref):
+        raise LabProblem(
+            "TBX-LAB-017", cause="cohort removal needs a lowercase source ID or ID12",
+            fix="Use the member's printed ID12 or full source ID",
+            data={"cohort_id": cohort_id, "field": "source ID"},
+        )
+    with store.writer("cohort remove", new_run_id()):
+        directory = _cohort_dir(store, cohort_id)
+        roster_path = directory / "members.json"
+        if not roster_path.is_file() or roster_path.is_symlink():
+            raise _storage_problem(cohort_id, "members.json")
+        if (directory / "current.json").exists() or (directory / "current.json").is_symlink():
+            read_current(store, cohort_id)
+        roster = read_roster(store, cohort_id)
+        matches = [source_id for source_id in roster if source_id.startswith(source_ref)]
+        if len(matches) != 1:
+            cause = ("source prefix matches several cohort members" if matches
+                     else "source is not in this cohort's pending roster")
+            raise LabProblem(
+                "TBX-LAB-017", cause=cause,
+                fix="Use one member's unique ID12 or full source ID from the roster",
+                data={"cohort_id": cohort_id, "field": "source ID"},
+            )
+        source_id = matches[0]
+        write_atomic(roster_path, canonical_json_bytes({
+            "schema": _ROSTER_SCHEMA, "source_ids": [item for item in roster if item != source_id],
+        }))
+        store.bump_generation()
+        return source_id
+
+
 def _invalid_input(input_id: str, field: str) -> LabProblem:
     return LabProblem(
         "TBX-LAB-020",
@@ -301,14 +341,37 @@ def _aligner(manifest: dict[str, Any], input_id: str) -> tuple[str, dict[str, An
     }
 
 
-def _selected_results(store: LabStore, input_id: str, manifest: dict[str, Any]) -> tuple[CohortResult, ...]:
+def _selected_results(
+    store: LabStore, input_id: str, manifest: dict[str, Any], *, pon_selection: Any | None = None,
+) -> tuple[CohortResult, ...]:
     """Snapshot only selected status-ok results on the full input."""
 
     label, aligner = _aligner(manifest, input_id)
     del label
+    from .platforms import for_input
+
+    bam_path = store.inputs_dir / input_id / "aligned.bam"
+    try:
+        platform = for_input(manifest, bam_path)
+    except (OSError, ValueError) as exc:
+        raise LabProblem(
+            "TBX-LAB-024", cause=f"cohort input {input_id[:12]} platform or BAM is invalid",
+            fix="Restore this stored input from a known-good backup, or re-ingest the original BAM under a fresh ROOT",
+            data={"input_id": input_id},
+        ) from exc
+    if platform == "unknown":
+        raise LabProblem(
+            "TBX-LAB-024", cause=f"cohort input {input_id[:12]} has no verifiable platform declaration",
+            fix="Restore the source BAM with unanimous PL:ONT or PL:ILLUMINA read groups",
+            data={"input_id": input_id},
+        )
     found: list[CohortResult] = []
     identities: dict[str, str] = {}
     for algorithm in load_registry():
+        if algorithm.id == "copy-number" and pon_selection is not None:
+            from .pon_consumer import bind_copy_number_algorithm
+
+            algorithm = bind_copy_number_algorithm(algorithm, pon_selection)
         upstream = [
             {"algorithm_id": name, "parameters_sha256": identities[name]}
             for name in algorithm.upstream if name in identities
@@ -317,9 +380,11 @@ def _selected_results(store: LabStore, input_id: str, manifest: dict[str, Any]) 
             continue
         assets_of = getattr(algorithm, "asset_sha256s", None)
         try:
+            asset_digests = assets_of(store.root) if callable(assets_of) else ()
             identity = execution_identity(
                 algorithm, reference_sha256=manifest["reference_sha256"], upstream=upstream,
-                asset_sha256s=assets_of(store.root) if callable(assets_of) else (),
+                asset_sha256s=asset_digests,
+                platform=platform if platform != "ont" else None,
             )
         except (OSError, ValueError, KeyError, LabProblem):
             # An unresolved asset cannot make an old result current-compatible.
@@ -335,21 +400,30 @@ def _selected_results(store: LabStore, input_id: str, manifest: dict[str, Any]) 
             for metric in chosen.metrics
             if metric.value is None or (isinstance(metric.value, (int, float)) and not isinstance(metric.value, bool))
         }
+        compat_tools = [tool.identity() for tool in algorithm.tools]
+        if algorithm.id == "arm-summary":
+            # Unlike member-specific PoNs, the arm-definition bytes are shared
+            # by controls and must participate in cohort compatibility.
+            compat_tools.extend({"name": "arm-centromere-sha256", "version": digest} for digest in asset_digests)
         compat = cohort_compat_key(
             algorithm_id=algorithm.id, algorithm_version=algorithm.version,
-            parameters=algorithm.parameters, tools=[tool.identity() for tool in algorithm.tools],
+            parameters=algorithm.parameters, tools=compat_tools,
             reference_sha256=manifest["reference_sha256"], aligner_identity=aligner,
-            pon_policy=str(algorithm.parameters.get("pon_policy", "none")),
-            per_sample_asset_keys=("pon_asset_sha256",),
+            pon_policy=("lab_loo_v1" if pon_selection is not None
+                        and algorithm.id in ("copy-number", "instability", "arm-summary") else "none"),
+            per_sample_asset_keys=("pon_sha256",) if algorithm.parameters.get("pon_policy") == "lab_loo_v1" else (),
+            platform=platform if platform != "ont" else None,
         )
         found.append(CohortResult(
             algorithm_id=algorithm.id, parameters_sha256=chosen.provenance.parameters_sha256,
             cohort_compat_key=compat, metrics=metrics,
+            metric_n={metric.metric_id: metric.n for metric in chosen.metrics
+                      if metric.metric_id in metrics and metric.n is not None},
         ))
     return tuple(found)
 
 
-def member_from_store(store: LabStore, source_id: str) -> CohortMember:
+def member_from_store(store: LabStore, source_id: str, *, pon_selection: Any | None = None) -> CohortMember:
     """Pin current full-input result attempts for one admitted source."""
 
     record = _checked_source_record(store, source_id)
@@ -362,7 +436,28 @@ def member_from_store(store: LabStore, source_id: str) -> CohortMember:
     input_id, manifest = selected
     label, _ = _aligner(manifest, input_id)
     return CohortMember(source_id=source_id, input_id=input_id, aligner_identity=label,
-                        results=_selected_results(store, input_id, manifest))
+                        results=_selected_results(store, input_id, manifest, pon_selection=pon_selection),
+                        pon_asset_sha256=(pon_selection.pon_sha256 if pon_selection is not None
+                                          and pon_selection.target_excluded else None))
+
+
+def member_for_generation(store: LabStore, generation: CohortGeneration, source_id: str) -> CohortMember:
+    """Read a target under one pinned generation's PoN protocol."""
+
+    if generation.pon_asset_sha256 is None:
+        return member_from_store(store, source_id)
+    from .pon_consumer import selection_for_generation
+
+    selected = _full_input(store, _checked_source_record(store, source_id))
+    if selected is None:
+        raise ValueError("admitted source has no full aligned input")
+    input_id, manifest = selected
+    label, _ = _aligner(manifest, input_id)
+    selection = selection_for_generation(
+        store, generation, source_id=source_id,
+        reference_sha256=manifest["reference_sha256"], aligner_identity=label,
+    )
+    return member_from_store(store, source_id, pon_selection=selection)
 
 
 def pon_inputs_for_members(store: LabStore, members: tuple[CohortMember, ...]) -> tuple[PonInput, ...]:
@@ -391,6 +486,66 @@ def pon_inputs_for_members(store: LabStore, members: tuple[CohortMember, ...]) -
             bam_path=store.inputs_dir / input_id / "aligned.bam",
         ))
     return tuple(eligible)
+
+
+def _member_selection_paths(
+    store: LabStore, input_ids: tuple[str, ...], algorithm_ids: tuple[str, ...],
+) -> set[Path]:
+    """Find mutable selectors that a member recomputation can change."""
+
+    paths: set[Path] = set()
+    for input_id in input_ids:
+        for algorithm_id in algorithm_ids:
+            directory = store.results_dir / input_id / algorithm_id
+            if directory.is_symlink():
+                raise ValueError("member result directory is a symlink")
+            try:
+                with os.scandir(directory) as entries:
+                    for entry in entries:
+                        if not entry.is_dir(follow_symlinks=False):
+                            continue
+                        selector = Path(entry.path) / "selected.json"
+                        try:
+                            mode = selector.lstat().st_mode
+                        except FileNotFoundError:
+                            continue
+                        if not stat.S_ISREG(mode):
+                            raise ValueError("member result selection is not a regular file")
+                        paths.add(selector)
+            except FileNotFoundError:
+                continue
+    return paths
+
+
+def _snapshot_member_selections(
+    store: LabStore, input_ids: tuple[str, ...], algorithm_ids: tuple[str, ...],
+) -> dict[Path, bytes]:
+    before: dict[Path, bytes] = {}
+    for selector in _member_selection_paths(store, input_ids, algorithm_ids):
+        with os.fdopen(open_regular_no_follow(selector), "rb") as stream:
+            content = stream.read(16 * 1024 + 1)
+        if len(content) > 16 * 1024:
+            raise ValueError("member result selection is too large")
+        before[selector] = content
+    return before
+
+
+def _restore_member_selections(
+    store: LabStore, input_ids: tuple[str, ...], algorithm_ids: tuple[str, ...], before: dict[Path, bytes],
+) -> None:
+    """Keep immutable attempts, but undo selectors from an unpublished build."""
+
+    changed_dirs: set[Path] = set()
+    for selector in _member_selection_paths(store, input_ids, algorithm_ids) - before.keys():
+        selector.unlink()
+        changed_dirs.add(selector.parent)
+    for selector, content in before.items():
+        write_atomic(selector, content)
+        changed_dirs.add(selector.parent)
+    for directory in changed_dirs:
+        _fsync_dir(directory)
+    if changed_dirs:
+        store.bump_generation()
 
 
 def read_current(store: LabStore, cohort_id: str) -> CohortGeneration | None:
@@ -462,10 +617,32 @@ def list_cohorts(store: LabStore) -> tuple[CohortListing, ...]:
     return tuple(rows)
 
 
+@contextmanager
+def _cohort_run_log(store: LabStore, run_id: str, cohort_id: str, kind: str) -> Iterator[Any]:
+    """Give a cohort build one complete run lifecycle, including failures."""
+
+    log = store.run_log(run_id)
+    log.append("run_start", command="cohort build", cohort_id=cohort_id, kind=kind)
+    try:
+        yield log
+    except KeyboardInterrupt:
+        log.append("run_end", status="interrupted", exit_code=6)
+        raise
+    except LabProblem as problem:
+        log.append("run_end", status="blocked", exit_code=problem.exit_code, code=problem.code)
+        raise
+    except Exception as exc:
+        log.append("run_end", status="internal_error", exit_code=7, error=type(exc).__name__)
+        raise
+    else:
+        log.append("run_end", status="ok", exit_code=0)
+
+
 def build_cohort(store: LabStore, cohort_id: str, *, kind: str = "internal_cohort") -> CohortGeneration:
     """Publish a full snapshot atomically, preserving every older generation."""
 
-    with store.writer("cohort build", new_run_id()):
+    run_id = new_run_id()
+    with store.writer("cohort build", run_id) as lock, _cohort_run_log(store, run_id, cohort_id, kind) as log:
         directory = _cohort_dir(store, cohort_id)
         if _read_cohort_json(directory / "current.json", cohort_id) is not None:
             read_current(store, cohort_id)
@@ -476,12 +653,67 @@ def build_cohort(store: LabStore, cohort_id: str, *, kind: str = "internal_cohor
         members = tuple(member_from_store(store, source_id) for source_id in read_roster(store, cohort_id))
         version = max(versions, default=0) + 1
         snapshot = CohortGeneration(cohort_id=cohort_id, version=version, kind=kind, members=members)
+        selected_input_ids: tuple[str, ...] = ()
+        selected_algorithm_ids: tuple[str, ...] = ()
+        selections_before: dict[Path, bytes] | None = None
+        if kind == "internal_cohort":
+            inputs = pon_inputs_for_members(store, members)
+            if len(inputs) >= 10:
+                from .pon import build_panels
+                from .pon_consumer import member_recompute_plan, recompute_member
+                from .registry import registry_entries
+                from .runner import DEFAULT_TIMEOUT_S
+
+                built = build_panels(store, inputs)
+                annotated = tuple(member.model_copy(update={
+                    "pon_asset_sha256": built.loo_asset_sha256s.get(member.source_id),
+                }) for member in members)
+                pending = CohortGeneration(
+                    cohort_id=cohort_id, version=version, kind=kind, members=annotated,
+                    pon_n=built.pon_n, pon_asset_sha256=built.full_asset_sha256,
+                    pon_build=built.provenance(),
+                )
+                selected_input_ids = tuple(
+                    member.input_id for member in members if member.source_id in built.source_ids
+                )
+                selected_algorithm_ids = tuple(
+                    item.algorithm.id for item in member_recompute_plan(registry_entries())
+                )
+                selections_before = _snapshot_member_selections(
+                    store, selected_input_ids, selected_algorithm_ids,
+                )
+                try:
+                    updated = {
+                        source_id: recompute_member(
+                            store, pending, source_id, lock=lock, log=log, run_id=run_id,
+                            timeout_s=DEFAULT_TIMEOUT_S,
+                        )
+                        for source_id in built.source_ids
+                    }
+                    snapshot = CohortGeneration(
+                        cohort_id=cohort_id, version=version, kind=kind,
+                        members=tuple(updated.get(member.source_id, member) for member in annotated),
+                        pon_n=built.pon_n, pon_asset_sha256=built.full_asset_sha256,
+                        pon_build=built.provenance(),
+                    )
+                except BaseException:
+                    _restore_member_selections(
+                        store, selected_input_ids, selected_algorithm_ids, selections_before,
+                    )
+                    raise
 
         def write(staging: Path) -> None:
             (staging / "generation.json").write_bytes(canonical_json_bytes(snapshot.model_dump(mode="json", by_alias=True)))
 
-        store.publish_directory(generations, str(version), write)
-        write_atomic(directory / "current.json", canonical_json_bytes({"version": version}))
+        try:
+            store.publish_directory(generations, str(version), write)
+            write_atomic(directory / "current.json", canonical_json_bytes({"version": version}))
+        except BaseException:
+            if selections_before is not None:
+                _restore_member_selections(
+                    store, selected_input_ids, selected_algorithm_ids, selections_before,
+                )
+            raise
         store.bump_generation()
         return snapshot
 
@@ -513,7 +745,7 @@ def project_sample_metric(
     generation = read_current(store, cohort_id)
     if generation is None:
         return None
-    target = member_from_store(store, target_source_id)
+    target = member_for_generation(store, generation, target_source_id)
     result = next((item for item in target.results if item.algorithm_id == algorithm_id), None)
     if result is None:
         return None
@@ -524,6 +756,6 @@ def project_sample_metric(
 
 
 __all__ = [
-    "CohortListing", "add_sample", "build_cohort", "list_cohorts", "member_from_store", "pon_inputs_for_members",
-    "project_current_metric", "project_sample_metric", "read_current", "read_roster",
+    "CohortListing", "add_sample", "build_cohort", "list_cohorts", "member_for_generation", "member_from_store", "pon_inputs_for_members",
+    "project_current_metric", "project_sample_metric", "read_current", "read_roster", "remove_sample",
 ]

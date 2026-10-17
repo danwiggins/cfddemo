@@ -194,6 +194,17 @@ def test_default_stability_by_value_kind() -> None:
     assert library.entry("bam-qc", "mean_read_q").stability == {"kind": "relative", "tolerance": 0.10}
 
 
+def test_signed_metric_without_stability_requires_speculative_no_reference() -> None:
+    def arm_entry(data):
+        return next(entry for entry in data["entries"]
+                    if entry["algorithm_id"] == "arm-summary" and entry["metric_id"] == "chr1p_log2")
+
+    assert LIB.entry("arm-summary", "chr1p_log2").stability is None
+    for change in ({"tier": "NEWER"}, {"reference": {"kind": "internal_cohort"}}):
+        with pytest.raises(LibraryError, match="explicit stability"):
+            parse_library(_mutate(lambda data, change=change: arm_entry(data).update(change)), LICENSES)
+
+
 def _envelope(metrics):
     return ResultEnvelope.model_validate(
         {

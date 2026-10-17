@@ -87,7 +87,7 @@ entries:
 
   - algorithm_id: bam-qc
     metric_id: supplementary_fraction
-    label: "Supplementary alignments per mapped read (chimera proxy)"
+    label: "Supplementary alignments per mapped read"
     value_kind: proportion
     tier: NEWER
     origin_tier: NEWER
@@ -96,11 +96,11 @@ entries:
     reference: {kind: none}
     performance: null
     performance_missing_reason: "none published"
-    meaning_high: "Ligation chimeras: two cfDNA molecules joined during library prep, which inflates apparent fragment lengths."
-    meaning_low: "Few chimeras."
-    confounders: ["library prep chemistry", "input mass"]
+    meaning_high: "More supplementary alignments; on ONT this can indicate ligation chimeras, while short-read split alignments have other causes."
+    meaning_low: "Fewer supplementary alignments; this alone does not establish a low chimera rate."
+    confounders: ["sequencing platform and alignment method", "library prep chemistry", "input mass"]
     next_steps:
-      analytical: ["Compare across kit batches", "Check the long-fragment tail"]
+      analytical: ["Compare only within a matched platform and alignment method", "On ONT, check the long-fragment tail"]
       clinical_setting: null
     license_ids: []
     flags: []
@@ -120,11 +120,11 @@ entries:
     reference: {kind: none}
     performance: null
     performance_missing_reason: "QC measure, not a diagnostic"
-    meaning_high: "Accurate basecalls."
-    meaning_low: "Noisy basecalls: methylation calls and end motifs are less reliable."
-    confounders: ["basecaller model", "flow-cell wear"]
+    meaning_high: "Higher reported base quality within the same sequencing platform and quality pipeline."
+    meaning_low: "Lower reported base quality within the same sequencing platform and quality pipeline; ONT methylation calls and end motifs may be less reliable."
+    confounders: ["sequencing platform and quality-score calibration", "basecaller model", "flow-cell wear"]
     next_steps:
-      analytical: ["Confirm the basecall model in the @RG line"]
+      analytical: ["Compare within one platform and quality pipeline", "For ONT, confirm the basecall model"]
       clinical_setting: null
     license_ids: []
     flags: []
@@ -170,7 +170,7 @@ entries:
     performance_missing_reason: "QC measure, not a diagnostic"
     meaning_high: "GC-rich regions over-represented: copy-number calls need GC correction."
     meaning_low: "GC-rich regions under-represented."
-    confounders: ["library amplification", "extraction kit"]
+    confounders: ["library amplification, especially for short-read libraries", "extraction kit", "sequencing platform"]
     next_steps:
       analytical: ["Confirm copy-number GC correction is applied"]
       clinical_setting: null
@@ -208,7 +208,7 @@ entries:
   # ----------------------------------------------------------------- depth
   - algorithm_id: depth
     metric_id: approx_depth_x
-    label: "Approximate depth (eligible reads)"
+    label: "Approximate aligned-base depth (eligible reads)"
     value_kind: positive
     tier: PROVEN
     origin_tier: PROVEN
@@ -216,10 +216,10 @@ entries:
     min_depth_x: null
     reference: {kind: none}
     performance: null
-    performance_missing_reason: "QC measure: sum of eligible spans / genome length"
-    meaning_high: "More algorithms clear their minimum depth."
-    meaning_low: "Most algorithms are skipped or not interpretable; see the depth curve."
-    confounders: ["flow-cell yield", "input cfDNA mass"]
+    performance_missing_reason: "QC measure: sum of eligible read spans / genome length; duplicate-marked reads are excluded, but overlapping paired mates each contribute"
+    meaning_high: "More measurements may clear their depth requirement; platform and other gates still apply."
+    meaning_low: "Fewer measurements clear their depth requirement; see the depth curve."
+    confounders: ["flow-cell yield", "input cfDNA mass", "overlapping paired mates inflate short-read aligned-base depth relative to physical coverage"]
     next_steps:
       analytical: ["Use the depth curve to see what more sequencing would add"]
       clinical_setting: null
@@ -241,9 +241,9 @@ entries:
     reference: {kind: none}
     performance: null
     performance_missing_reason: "QC count"
-    meaning_high: "More reads count toward every algorithm's minimum."
-    meaning_low: "Few reads count toward minimums."
-    confounders: ["mapping quality", "chimeras"]
+    meaning_high: "More reads pass the common eligibility filter; duplicate-marked reads are excluded, paired mates each count, and algorithms still apply their own platform and input gates."
+    meaning_low: "Few reads pass the common eligibility filter; see platform-specific support requirements."
+    confounders: ["mapping quality", "chimeras", "paired mates count separately when both are eligible"]
     next_steps:
       analytical: ["Compare with the index count (an upper bound)"]
       clinical_setting: null
@@ -265,11 +265,11 @@ entries:
     reference: {kind: none}
     performance: null
     performance_missing_reason: "QC measure"
-    meaning_high: "Longer molecules (or chimeras)."
-    meaning_low: "Shorter molecules."
-    confounders: ["library prep size bias", "chimeras"]
+    meaning_high: "Longer aligned span per eligible read; paired-read span is not template length."
+    meaning_low: "Shorter aligned span per eligible read; paired-read span is not template length."
+    confounders: ["library prep size bias", "alignment and clipping", "chimeras"]
     next_steps:
-      analytical: ["See the fragment-size histogram"]
+      analytical: ["Use the platform-specific fragment-size measurement for molecule or template length"]
       clinical_setting: null
     license_ids: []
     flags: []
@@ -714,6 +714,179 @@ entries:
     headline: false
     citations: []
     citation_checked: {by: "lab build agent", date: "2026-10-16", note: "No citation displayed; missing-estimate bin count."}
+
+  # ------------------------------------------------------------ arm-summary
+  - algorithm_id: arm-summary
+    metric_id: arms_with_value
+    label: "Autosomal arms with an estimable corrected log2"
+    value_kind: count
+    tier: SPECULATIVE
+    origin_tier: SPECULATIVE
+    origin_platform: "ONT Lab PoN-corrected ichorCNA bins"
+    min_depth_x: null
+    reference: {kind: none}
+    performance: null
+    performance_missing_reason: "Exploratory coverage count; no validated ONT arm-z performance or cutoff"
+    meaning_high: "More arms had finite, unmasked copy-number bins for cohort comparison."
+    meaning_low: "Few arms could be summarized; inspect the copy-number track and masks."
+    confounders: ["low depth", "masked bins", "centromere geometry", "copy-number noise"]
+    next_steps: {analytical: ["Use arm-zscores only with a compatible published cohort and at least ten controls after source exclusion"], clinical_setting: null}
+    license_ids: [gpl-copyleft]
+    flags: []
+    headline: true
+    citations: []
+    citation_checked: {by: "lab build agent", date: "2026-10-16", note: "No citation displayed; a descriptive Lab bin-coverage count, not a biological threshold."}
+
+  - &arm_log2
+    algorithm_id: arm-summary
+    metric_id: chr1p_log2
+    label: "Chromosome 1 p-arm median corrected log2"
+    value_kind: signed
+    tier: SPECULATIVE
+    origin_tier: SPECULATIVE
+    origin_platform: "ONT Lab PoN-corrected ichorCNA bins"
+    min_depth_x: null
+    reference: {kind: none, missing_note: "No published arm reference; use arm-zscores only with a compatible ten-control cohort."}
+    performance: null
+    performance_missing_reason: "Exploratory arm value; no validated ONT arm-z performance or cutoff"
+    meaning_high: "Higher corrected arm copy-number estimate relative to the selected PoN; inspect the copy-number track."
+    meaning_low: "Lower corrected arm copy-number estimate relative to the selected PoN; inspect the copy-number track."
+    confounders: ["low depth", "masked bins", "centromere geometry", "copy-number noise", "PoN mismatch"]
+    next_steps: {analytical: ["Review arm-zscores against a compatible published cohort with at least ten controls after source exclusion"], clinical_setting: null}
+    license_ids: [gpl-copyleft]
+    flags: []
+    headline: false
+    citations: []
+    citation_checked: {by: "lab build agent", date: "2026-10-16", note: "Descriptive arm median from the selected copy-number track; no diagnostic cutoff."}
+  - <<: *arm_log2
+    metric_id: chr1q_log2
+    label: "Chromosome 1 q-arm median corrected log2"
+  - <<: *arm_log2
+    metric_id: chr2p_log2
+    label: "Chromosome 2 p-arm median corrected log2"
+  - <<: *arm_log2
+    metric_id: chr2q_log2
+    label: "Chromosome 2 q-arm median corrected log2"
+  - <<: *arm_log2
+    metric_id: chr3p_log2
+    label: "Chromosome 3 p-arm median corrected log2"
+  - <<: *arm_log2
+    metric_id: chr3q_log2
+    label: "Chromosome 3 q-arm median corrected log2"
+  - <<: *arm_log2
+    metric_id: chr4p_log2
+    label: "Chromosome 4 p-arm median corrected log2"
+  - <<: *arm_log2
+    metric_id: chr4q_log2
+    label: "Chromosome 4 q-arm median corrected log2"
+  - <<: *arm_log2
+    metric_id: chr5p_log2
+    label: "Chromosome 5 p-arm median corrected log2"
+  - <<: *arm_log2
+    metric_id: chr5q_log2
+    label: "Chromosome 5 q-arm median corrected log2"
+  - <<: *arm_log2
+    metric_id: chr6p_log2
+    label: "Chromosome 6 p-arm median corrected log2"
+  - <<: *arm_log2
+    metric_id: chr6q_log2
+    label: "Chromosome 6 q-arm median corrected log2"
+  - <<: *arm_log2
+    metric_id: chr7p_log2
+    label: "Chromosome 7 p-arm median corrected log2"
+  - <<: *arm_log2
+    metric_id: chr7q_log2
+    label: "Chromosome 7 q-arm median corrected log2"
+  - <<: *arm_log2
+    metric_id: chr8p_log2
+    label: "Chromosome 8 p-arm median corrected log2"
+  - <<: *arm_log2
+    metric_id: chr8q_log2
+    label: "Chromosome 8 q-arm median corrected log2"
+  - <<: *arm_log2
+    metric_id: chr9p_log2
+    label: "Chromosome 9 p-arm median corrected log2"
+  - <<: *arm_log2
+    metric_id: chr9q_log2
+    label: "Chromosome 9 q-arm median corrected log2"
+  - <<: *arm_log2
+    metric_id: chr10p_log2
+    label: "Chromosome 10 p-arm median corrected log2"
+  - <<: *arm_log2
+    metric_id: chr10q_log2
+    label: "Chromosome 10 q-arm median corrected log2"
+  - <<: *arm_log2
+    metric_id: chr11p_log2
+    label: "Chromosome 11 p-arm median corrected log2"
+  - <<: *arm_log2
+    metric_id: chr11q_log2
+    label: "Chromosome 11 q-arm median corrected log2"
+  - <<: *arm_log2
+    metric_id: chr12p_log2
+    label: "Chromosome 12 p-arm median corrected log2"
+  - <<: *arm_log2
+    metric_id: chr12q_log2
+    label: "Chromosome 12 q-arm median corrected log2"
+  - <<: *arm_log2
+    metric_id: chr13p_log2
+    label: "Chromosome 13 p-arm median corrected log2"
+  - <<: *arm_log2
+    metric_id: chr13q_log2
+    label: "Chromosome 13 q-arm median corrected log2"
+  - <<: *arm_log2
+    metric_id: chr14p_log2
+    label: "Chromosome 14 p-arm median corrected log2"
+  - <<: *arm_log2
+    metric_id: chr14q_log2
+    label: "Chromosome 14 q-arm median corrected log2"
+  - <<: *arm_log2
+    metric_id: chr15p_log2
+    label: "Chromosome 15 p-arm median corrected log2"
+  - <<: *arm_log2
+    metric_id: chr15q_log2
+    label: "Chromosome 15 q-arm median corrected log2"
+  - <<: *arm_log2
+    metric_id: chr16p_log2
+    label: "Chromosome 16 p-arm median corrected log2"
+  - <<: *arm_log2
+    metric_id: chr16q_log2
+    label: "Chromosome 16 q-arm median corrected log2"
+  - <<: *arm_log2
+    metric_id: chr17p_log2
+    label: "Chromosome 17 p-arm median corrected log2"
+  - <<: *arm_log2
+    metric_id: chr17q_log2
+    label: "Chromosome 17 q-arm median corrected log2"
+  - <<: *arm_log2
+    metric_id: chr18p_log2
+    label: "Chromosome 18 p-arm median corrected log2"
+  - <<: *arm_log2
+    metric_id: chr18q_log2
+    label: "Chromosome 18 q-arm median corrected log2"
+  - <<: *arm_log2
+    metric_id: chr19p_log2
+    label: "Chromosome 19 p-arm median corrected log2"
+  - <<: *arm_log2
+    metric_id: chr19q_log2
+    label: "Chromosome 19 q-arm median corrected log2"
+  - <<: *arm_log2
+    metric_id: chr20p_log2
+    label: "Chromosome 20 p-arm median corrected log2"
+  - <<: *arm_log2
+    metric_id: chr20q_log2
+    label: "Chromosome 20 q-arm median corrected log2"
+  - <<: *arm_log2
+    metric_id: chr21p_log2
+    label: "Chromosome 21 p-arm median corrected log2"
+  - <<: *arm_log2
+    metric_id: chr21q_log2
+    label: "Chromosome 21 q-arm median corrected log2"
+  - <<: *arm_log2
+    metric_id: chr22p_log2
+    label: "Chromosome 22 p-arm median corrected log2"
+  - <<: *arm_log2
+    metric_id: chr22q_log2
+    label: "Chromosome 22 q-arm median corrected log2"
 
   # ------------------------------------------------------------ modbase-qc
   - algorithm_id: modbase-qc

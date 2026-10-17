@@ -14,7 +14,7 @@ from traceback_lab.envelope import ResultEnvelope, provenance
 from traceback_lab.registry import AlgorithmOutput, InputContext, PlanItem, Ready, Skip
 from traceback_lab.runner import RunTarget, StepResult, run_plan
 from traceback_lab.scrub import Scrubber
-from traceback_lab.store import LabStore, MAX_UPSTREAM_SELECTIONS_BYTES, new_run_id
+from traceback_lab.store import MAX_UPSTREAM_SELECTIONS_BYTES, LabStore, new_run_id
 from traceback_runner.serialization import canonical_json_bytes
 
 
