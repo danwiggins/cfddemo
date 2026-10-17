@@ -338,6 +338,7 @@ def _recorded_selection(
         recorded_identity = execution_identity(
             algorithm, reference_sha256=manifest["reference_sha256"],
             upstream=plan["upstream"], asset_sha256s=plan["asset_sha256s"],
+            platform=platform if platform != "ont" else None,
             tool_pins=plan["tools"], parameters=plan["parameters"],
         )
     except (OSError, ValueError, TypeError, AttributeError, KeyError, RecursionError):
@@ -376,7 +377,23 @@ def _selected_results(store: LabStore, input_id: str, manifest: dict[str, Any]) 
 
     label, aligner = _aligner(manifest, input_id)
     del label
-    platform = "ont"
+    from .platforms import for_input
+
+    bam_path = store.inputs_dir / input_id / "aligned.bam"
+    try:
+        platform = for_input(manifest, bam_path)
+    except (OSError, ValueError) as exc:
+        raise LabProblem(
+            "TBX-LAB-024", cause=f"cohort input {input_id[:12]} platform or BAM is invalid",
+            fix="Restore this stored input from a known-good backup, or re-ingest the original BAM under a fresh ROOT",
+            data={"input_id": input_id},
+        ) from exc
+    if platform == "unknown":
+        raise LabProblem(
+            "TBX-LAB-024", cause=f"cohort input {input_id[:12]} has no verifiable platform declaration",
+            fix="Restore the source BAM with unanimous PL:ONT or PL:ILLUMINA read groups",
+            data={"input_id": input_id},
+        )
     found: list[CohortResult] = []
     identities: dict[str, str] = {}
     latest_results = selected_result_snapshots(store, input_id)
@@ -416,6 +433,7 @@ def _selected_results(store: LabStore, input_id: str, manifest: dict[str, Any]) 
                 identity = execution_identity(
                     algorithm, reference_sha256=manifest["reference_sha256"], upstream=upstream,
                     asset_sha256s=assets or (),
+                    platform=platform if platform != "ont" else None,
                     tool_pins=tool_identities,
                 )
                 if identity != latest.provenance.parameters_sha256:
@@ -445,6 +463,7 @@ def _selected_results(store: LabStore, input_id: str, manifest: dict[str, Any]) 
             reference_sha256=manifest["reference_sha256"], aligner_identity=aligner,
             pon_policy=str(effective_parameters.get("pon_policy", "none")),
             per_sample_asset_keys=("pon_asset_sha256",),
+            platform=platform if platform != "ont" else None,
         )
         found.append(CohortResult(
             algorithm_id=algorithm.id, parameters_sha256=chosen.provenance.parameters_sha256,

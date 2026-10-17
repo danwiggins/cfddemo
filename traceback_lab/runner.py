@@ -79,6 +79,7 @@ class RunTarget:
     input_dir: Path
     reference_id: str
     reference_sha256: str
+    platform: str = "ont"
     label: str = "full"
     eligible_reads: int | None = None
     approx_depth_x: float | None = None
@@ -95,6 +96,7 @@ class RunTarget:
             reference_id=self.reference_id,
             reference_sha256=self.reference_sha256,
             input_dir=self.input_dir,
+            platform=self.platform,
             eligible_reads=self.eligible_reads,
             approx_depth_x=self.approx_depth_x,
             derived=self.derived,
@@ -190,6 +192,7 @@ def run_plan(
     scratch_root = store.lab / "tmp" / run_id
     for item in items:
         algorithm = item.algorithm
+        platform_rejected = target.platform not in algorithm.requires.platforms
         upstream = [
             {"algorithm_id": name, "parameters_sha256": done[name].parameters_sha256}
             for name in algorithm.upstream
@@ -198,14 +201,17 @@ def run_plan(
         identity_ctx = target.context(store.root)
         identity_assets = getattr(algorithm, "identity_assets", None)
         assets_of = getattr(algorithm, "asset_sha256s", None)
-        if callable(identity_assets):
+        if platform_rejected:
+            planned_assets = []
+        elif callable(identity_assets):
             planned_assets = list(identity_assets(identity_ctx))
         elif callable(assets_of):
             planned_assets = list(assets_of(store.root))
         else:
             planned_assets = []
         identity_parameters = getattr(algorithm, "identity_parameters", None)
-        planned_parameters = identity_parameters(identity_ctx) if callable(identity_parameters) else algorithm.parameters
+        planned_parameters = (identity_parameters(identity_ctx)
+                              if callable(identity_parameters) and not platform_rejected else algorithm.parameters)
         planned_tools = [tool.identity() for tool in algorithm.tools]
         identity = execution_identity(
             algorithm,
@@ -214,6 +220,7 @@ def run_plan(
             # Consumed assets enter the execution identity (D19), so a
             # re-registered asset never reuses an older result.
             asset_sha256s=planned_assets,
+            platform=target.platform if target.platform != "ont" else None,
             tool_pins=planned_tools,
             parameters=planned_parameters,
         )
@@ -221,7 +228,7 @@ def run_plan(
             "schema": "traceback.lab.execution-plan.v1",
             "algorithm_id": algorithm.id, "algorithm_version": algorithm.version,
             "input_id": target.input_id, "reference_sha256": target.reference_sha256,
-            "platform": "ont", "parameters": planned_parameters,
+            "platform": target.platform, "parameters": planned_parameters,
             "tools": planned_tools, "asset_sha256s": planned_assets,
             "upstream": upstream,
         }
@@ -233,7 +240,8 @@ def run_plan(
             consumed is not None
             and store.selected_upstream_selections(target.input_id, algorithm.id, identity) == consumed
         )
-        if existing is not None and existing.status == "ok" and not force and not blocked and cache_valid:
+        if (existing is not None and existing.status == "ok" and not force
+                and not platform_rejected and not blocked and cache_valid):
             store.reselect_cached_result(target.input_id, algorithm.id, identity)
             selected = store.selected_attempt(target.input_id, algorithm.id, identity)
             result = StepResult(
@@ -256,7 +264,10 @@ def run_plan(
         target.extras["planned_parameters"] = planned_parameters
         ctx = target.context(store.root)
         decision: Ready | Skip
-        if blocked:
+        if platform_rejected:
+            supported = ", ".join(sorted(algorithm.requires.platforms))
+            decision = Skip("platform", f"{algorithm.id} supports {supported}; this input declares {target.platform}")
+        elif blocked:
             decision = Skip("upstream", f"upstream not ok: {', '.join(blocked)}")
         else:
             try:
