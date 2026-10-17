@@ -92,6 +92,35 @@ def test_outer_lab_timeout_kills_r_descendant(tmp_path: Path) -> None:
     assert marker.stat().st_size == stopped_at
 
 
+@pytest.mark.skipif(os.name == "nt", reason="Lab process-group cleanup uses POSIX groups")
+def test_inner_r_timeout_reaps_descendant_after_worker_failure(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from .fake_algorithms import INNER_R_TIMEOUT
+
+    marker = tmp_path / "inner-r-ticks.txt"
+    monkeypatch.setenv("LAB_TEST_INNER_R_TICKS", str(marker))
+    store = LabStore(tmp_path / "root")
+    store.ensure()
+    run_id = new_run_id()
+    target = RunTarget(INPUT, SOURCE, tmp_path, "hg38", REFERENCE)
+    results = run_plan(
+        store, None, store.run_log(run_id), target,
+        [PlanItem(INNER_R_TIMEOUT, False)],
+        {INNER_R_TIMEOUT.id: "tests.lab.fake_algorithms:INNER_R_TIMEOUT"},
+        run_id=run_id, timeout_s=20, scrubber=Scrubber(root=store.root),
+    )
+    assert len(results) == 1 and results[0].status == "failed"
+    saved = store.read_result(INPUT, INNER_R_TIMEOUT.id, results[0].parameters_sha256)
+    assert saved is not None and saved.failure is not None
+    assert not saved.failure.timed_out, "the inner timeout must finish before the outer deadline"
+    assert marker.is_file(), "the R descendant must run before the inner timeout"
+    stopped_at = marker.stat().st_size
+    time.sleep(0.5)
+    assert marker.stat().st_size == stopped_at
+    assert not (store.lab / "tmp" / run_id).exists()
+
+
 @pytest.mark.skipif(os.name == "nt", reason="planning probe process groups use POSIX cleanup")
 def test_planning_and_preflight_package_probes_kill_launcher_descendants(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch,

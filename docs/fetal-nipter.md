@@ -65,6 +65,16 @@ reference range or clinical cutoff. Input-scoped prenatal control identities
 are not pooled into a generic healthy-cohort reference. A separate, validated fetal-fraction
 model is still required before that metric can be reported.
 
+The adapter's `bin_bam_sample` arguments, `calculate_z_score` arguments and
+`sample_Zscore` result field match the published
+[NIPTeR 1.0.2 binning reference](https://search.r-project.org/CRAN/refmans/NIPTeR/html/bin_bam_sample.html)
+and [Z-score reference](https://search.r-project.org/CRAN/refmans/NIPTeR/html/calculate_z_score.html).
+The package's [control-group description](https://rdrr.io/cran/NIPTeR/f/vignettes/NIPTeR.Rmd)
+also documents `samples` and `correction_status_autosomal_chromosomes`.
+The repository tests use a synthetic R process; they do not execute NIPTeR
+1.0.2 against a real matched control RDS. That runtime qualification remains
+necessary before relying on the reported z-scores.
+
 The control RDS must come from a trusted operator: a matching SHA-256 proves
 which bytes were supplied, not that deserializing them is safe. The R 4.4.0
 minimum addresses the [known RDS deserialization vulnerability](https://blog.r-project.org/2024/05/10/statement-on-cve-2024-27322/),
