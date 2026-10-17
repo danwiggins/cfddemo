@@ -4,11 +4,15 @@ from __future__ import annotations
 
 import hashlib
 import json
+import os
+import stat
+import threading
 from types import SimpleNamespace
 
 import pytest
 
 from traceback_lab.cohort_contracts import CohortGeneration, CohortMember, CohortResult, SizeDensityVector
+from traceback_lab import cohort_density
 from traceback_lab.cohort_density import capture_density_vectors, project_density_band
 from traceback_lab import cohorts
 from traceback_lab.cohorts import add_sample, build_cohort, read_current
@@ -104,6 +108,47 @@ def test_size_density_contract_rejects_bad_denominator_and_dimension() -> None:
         SizeDensityVector(attempt_id=ATTEMPT, artifact_sha256="c" * 64, count=(0,) * 1000)
     with pytest.raises(ValueError):
         SizeDensityVector(attempt_id=ATTEMPT, artifact_sha256="c" * 64, count=(1,) * 999)
+
+
+@pytest.mark.skipif(not hasattr(os, "mkfifo"), reason="FIFO regression requires POSIX")
+def test_artifact_fifo_is_rejected_without_blocking(tmp_path) -> None:
+    fifo = tmp_path / "size_hist.json"
+    os.mkfifo(fifo)
+    outcomes: list[BaseException] = []
+
+    def read() -> None:
+        try:
+            cohort_density._read_attempt_file(tmp_path, (fifo.name,), f"{1:064x}")
+        except BaseException as exc:
+            outcomes.append(exc)
+
+    thread = threading.Thread(target=read, daemon=True)
+    thread.start()
+    thread.join(timeout=2)
+    assert not thread.is_alive(), "a FIFO replacement blocked cohort publication"
+    assert len(outcomes) == 1 and isinstance(outcomes[0], LabProblem)
+
+
+def test_artifact_read_rejects_symlinked_ancestor(tmp_path) -> None:
+    real = tmp_path / "real"
+    real.mkdir()
+    (real / "size_hist.json").write_text("{}")
+    alias = tmp_path / "alias"
+    alias.symlink_to(real, target_is_directory=True)
+    with pytest.raises(LabProblem) as error:
+        cohort_density._read_attempt_file(alias, ("size_hist.json",), f"{1:064x}")
+    assert "unreadable or unsafe" in error.value.cause
+
+
+def test_artifact_read_checks_bytes_after_a_file_grows(tmp_path, monkeypatch) -> None:
+    (tmp_path / "size_hist.json").write_bytes(b"x" * 65)
+    monkeypatch.setattr(cohort_density, "_MAX_ARTIFACT_BYTES", 64)
+    monkeypatch.setattr(cohort_density.os, "fstat", lambda fd: SimpleNamespace(
+        st_mode=stat.S_IFREG, st_nlink=1, st_size=10,
+    ))
+    with pytest.raises(LabProblem) as error:
+        cohort_density._read_attempt_file(tmp_path, ("size_hist.json",), f"{1:064x}")
+    assert "larger than the artifact limit" in error.value.cause
 
 
 def test_build_pins_vector_before_selected_attempt_changes(tmp_path, monkeypatch) -> None:
