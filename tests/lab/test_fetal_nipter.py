@@ -145,6 +145,8 @@ def test_nipter_preflight_and_synthetic_adapter_output(tmp_path: Path, monkeypat
         **{**ctx.__dict__, "derived": {"transform": "split", "half": "A"}})).reason_code == "unsupported_input"
     assert fetal.FETAL_FRACTION.preflight(ctx.__class__(
         **{**ctx.__dict__, "extras": {"planned_asset_sha256s": []}})).reason_code == "missing_asset"
+    with pytest.raises(RuntimeError, match="reference changed"):
+        fetal.FETAL_FRACTION.run(replace(ctx, reference_sha256="f" * 64), tmp_path / "out")
     def fake_r_process(argv, **kwargs):
         assert Path(argv[2]).read_bytes() == fetal.R_CODE.encode("utf-8")
         assert Path(argv[4]).read_bytes() == control.read_bytes()
