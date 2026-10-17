@@ -866,6 +866,15 @@ def test_status_reports_malformed_latest_run_pointer_without_echoing_it(tmp_path
     assert status["run_log_unavailable"] == {"run_id": None, "reason": "latest_run_pointer_unavailable"}
 
 
+def test_status_does_not_echo_malformed_active_run_id(tmp_path, monkeypatch) -> None:
+    store = LabStore(tmp_path)
+    monkeypatch.setattr(store, "status", lambda: {"generation": 0, "active": {
+        "command": "run", "run_id": "invalid/secret", "step": "bam-qc",
+    }})
+    status = api_module.LabApi(store).status()
+    assert status["run_log_unavailable"] == {"run_id": None, "reason": "invalid_run_id"}
+
+
 def test_status_reports_deeply_nested_latest_run_pointer_without_crashing(tmp_path) -> None:
     store = LabStore(tmp_path)
     store.ensure()
