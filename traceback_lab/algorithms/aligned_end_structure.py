@@ -24,6 +24,22 @@ RADIUS = 100
 MIN_DEPTH_X = 10.0
 
 
+def _selection(derived: Mapping[str, Any]) -> dict[str, Any]:
+    """Canonical single-step control; derived IDs bind it to the parent input."""
+
+    if not isinstance(derived, Mapping):
+        raise ValueError("invalid derived selection")
+    transform = derived.get("transform")
+    if transform == "downsample" and set(derived) == {"transform", "fraction"}:
+        fraction = derived["fraction"]
+        if isinstance(fraction, bool) or not isinstance(fraction, (int, float)):
+            raise ValueError("invalid downsample fraction")
+        return {"transform": "downsample", "fraction": validate_fraction(float(fraction))}
+    if transform == "split" and set(derived) == {"transform", "half"} and derived["half"] in {"A", "B"}:
+        return {"transform": "split", "half": derived["half"]}
+    raise ValueError("unsupported derived selection")
+
+
 def _relative_counts(positions: np.ndarray, centers: np.ndarray) -> np.ndarray:
     counts = np.zeros(2 * RADIUS + 1, dtype=np.int64)
     if not len(positions) or not len(centers):
@@ -74,16 +90,8 @@ class AlignedEndStructure(Base):
             return Skip("example_reference", "aligned-end structure requires a genuine hg38 ONT input")
         if ctx.derived is not None:
             # DerivedSpec is one transform of a full parent, never a chained lineage.
-            if not isinstance(ctx.derived, Mapping):
-                return Skip("derived_input", "aligned-end structure requires a valid derived row mask")
-            transform = ctx.derived.get("transform")
-            if transform not in {"downsample", "split"}:
-                return Skip("derived_input", "aligned-end structure supports only downsample and split row masks")
             try:
-                if transform == "downsample":
-                    validate_fraction(float(ctx.derived["fraction"]))
-                elif ctx.derived["half"] not in {"A", "B"}:
-                    raise ValueError("invalid split half")
+                _selection(ctx.derived)
             except (ValueError, KeyError, TypeError):
                 return Skip("derived_input", "aligned-end structure requires a valid derived row mask")
         if ctx.reference_id != "hg38":
@@ -122,7 +130,10 @@ class AlignedEndStructure(Base):
         if expected is not None and expected != [catalogues.identity]:
             raise EndCatalogueError("pinned end catalogues changed after execution identity was set")
         summary, mask = load_summary(ctx)
-        observed_depth_x = depth_stamp(summary, mask)["approx_depth_x"] if mask is not None else ctx.approx_depth_x
+        selection = _selection(ctx.derived) if ctx.derived is not None else None
+        observed_depth_x = depth_stamp(summary, mask)["approx_depth_x"] if selection is not None else ctx.approx_depth_x
+        if selection is not None and observed_depth_x < MIN_DEPTH_X:
+            raise RuntimeError("derived aligned-end depth fell below 10x after preflight")
         names = summary.contigs
         lengths = summary.lengths
         allowed = set(int(cid) for cid in summary.autosome_ids())
@@ -191,8 +202,8 @@ class AlignedEndStructure(Base):
             "preferred_source": catalogues.preferred_source,
             "terms": catalogues.terms,
             "observed_depth_x": observed_depth_x,
-            "depth_basis": "selected_read_summary" if ctx.derived is not None else "run_target",
-            "derived_selection": dict(ctx.derived) if ctx.derived is not None else None,
+            "depth_basis": "selected_read_summary" if selection is not None else "run_target",
+            "derived_selection": selection,
             "interpretation": "ONT aligned-span proxy; exploratory; no tissue-origin calibration",
             "offset_bp": list(range(-RADIUS, RADIUS + 1)),
             "u_count": u_counts.tolist(), "d_count": d_counts.tolist(),

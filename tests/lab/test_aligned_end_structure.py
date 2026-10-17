@@ -190,7 +190,7 @@ def test_downsample_and_split_use_selected_depth_and_rows(tmp_path: Path) -> Non
     values = {
         "contig": [0] * rows, "start": [440] * rows, "end": [561] * rows,
         "flag": [0] * rows, "mapq": [60] * rows,
-        "h_ds": [0, 2**62, 2**63, 3 * 2**62] * (rows // 4),
+        "h_ds": [0, 2**62, 2**62, 3 * 2**62] * (rows // 4),
         "h_split": [0, 2**63] * (rows // 2),
     }
     for name, dtype in COLUMNS.items():
@@ -204,11 +204,12 @@ def test_downsample_and_split_use_selected_depth_and_rows(tmp_path: Path) -> Non
         ctx = _context(root, parent, derived=derived, depth=99.0)
         assert isinstance(ALIGNED_END_STRUCTURE.preflight(ctx), Ready)
         artifact = json.loads(ALIGNED_END_STRUCTURE.run(ctx, tmp_path / "out").artifacts["aligned_end_structure.json"])
-        assert artifact["valid_molecules"] == 100
-        assert artifact["observed_depth_x"] == 12.1
+        selected = 150 if derived["transform"] == "downsample" else 100
+        assert artifact["valid_molecules"] == selected
+        assert artifact["observed_depth_x"] == (18.15 if selected == 150 else 12.1)
         assert artifact["depth_basis"] == "selected_read_summary"
         assert artifact["derived_selection"] == derived
-        assert artifact["preferred_u_hits"] == artifact["preferred_d_hits"] == 100
+        assert artifact["preferred_u_hits"] == artifact["preferred_d_hits"] == selected
 
     # Excluded selected rows cannot supply the subset's 10x eligibility.
     flags = np.zeros(rows, dtype=COLUMNS["flag"])
@@ -217,6 +218,10 @@ def test_downsample_and_split_use_selected_depth_and_rows(tmp_path: Path) -> Non
     assert ALIGNED_END_STRUCTURE.preflight(_context(
         root, parent, derived={"transform": "split", "half": "A"}, depth=99.0,
     )).reason_code == "depth"
+    with pytest.raises(RuntimeError, match="below 10x"):
+        ALIGNED_END_STRUCTURE.run(_context(
+            root, parent, derived={"transform": "split", "half": "A"}, depth=99.0,
+        ), tmp_path / "out")
 
     # An untrusted depth hint cannot make a low-depth subset eligible.
     assert ALIGNED_END_STRUCTURE.preflight(_context(
@@ -227,6 +232,9 @@ def test_downsample_and_split_use_selected_depth_and_rows(tmp_path: Path) -> Non
     )).reason_code == "derived_input"
     assert ALIGNED_END_STRUCTURE.preflight(_context(
         root, parent, derived={"transform": "split", "half": "invalid"}, depth=99.0,
+    )).reason_code == "derived_input"
+    assert ALIGNED_END_STRUCTURE.preflight(_context(
+        root, parent, derived={"transform": "split", "half": "A", "unexpected": True}, depth=99.0,
     )).reason_code == "derived_input"
 
 
