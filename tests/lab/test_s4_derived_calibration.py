@@ -90,6 +90,11 @@ def test_calibrated_derived_counts_only_selected_reads(tmp_path: Path, kind: str
         assert derived_id != INPUT
         if kind == "donor":
             assert algorithm.preflight(replace(derived, eligible_reads=None)).reason_code == "depth"
+            extra_asset = replace(derived, extras={**derived.extras,
+                "planned_asset_sha256s": [contract.manifest_sha256, "f" * 64]})
+            assert algorithm.preflight(extra_asset).reason_code == "missing_asset"
+            with pytest.raises(RuntimeError, match="planned result identity"):
+                algorithm.run(extra_asset, tmp_path)
         assert isinstance(algorithm.preflight(replace(derived, source_id="f" * 64)), Skip)
         assert isinstance(algorithm.preflight(replace(derived, reference_sha256="f" * 64)), Skip)
         assert algorithm.preflight(replace(derived, approx_depth_x=0.0001)).reason_code in (
