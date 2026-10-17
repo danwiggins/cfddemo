@@ -285,11 +285,12 @@ repeat `lab microbial db add` with the original absolute directory, read
 length, and source label recorded locally in
 `ROOT/lab/assets/microbial-db/manifest.json`. It rehashes the required files
 and refreshes the receipt only when the bundle (file hashes and read length),
-directory, and source label match the existing registration. If the read
+directory, and source label match the existing registration. A refresh reads
+the required files twice, so allow time for a large database. If the read
 length or label was mistyped, retry with its original value. If the bytes or
-directory changed, restore the original bytes at the registered path and retry.
-Use a new Lab root only when a replacement database, source label, or new
-directory must remain.
+directory changed unintentionally, restore the original bytes at the registered
+path and retry. To keep different database bytes, Bracken read length, source
+label, or directory, use a new Lab root.
 
 ```bash
 traceback lab microbial db add --directory KRAKEN_DB --read-length 75 \
