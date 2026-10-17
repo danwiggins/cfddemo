@@ -13,6 +13,8 @@ import importlib.util
 import os
 import shutil
 import subprocess
+import tempfile
+from contextlib import nullcontext
 import sys
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -25,6 +27,7 @@ from ..adapters.griffin_run import (
 from ..griffin_assets import GriffinAssetError, inspect_griffin_assets, registration_available
 from ..registry import AlgorithmOutput, InputContext, Ready, Requirements, Skip, ToolPin
 from ._base import Base, metric
+from .cell_origin import derived_name_predicate, write_transient_bam
 
 
 _SAFE_BAM_VALIDATION_MESSAGES = frozenset({
@@ -88,8 +91,8 @@ class Griffin(Base):
             return decision
         if ctx.example:
             return Skip("example_reference", "Griffin requires a genuine hg38 WGS reference and TF-site assets")
-        if ctx.derived is not None:
-            return Skip("derived_input", "Griffin requires the full aligned input; derived BAM support is not validated")
+        if ctx.derived is not None and ctx.derived.get("transform") not in {"downsample", "split"}:
+            return Skip("derived_input", "Griffin supports only downsample and split selections")
         if ctx.eligible_reads is None:
             return Skip("depth", "Griffin needs a D21 eligible-read count to enforce the 5M gate")
         if ctx.eligible_reads < MIN_ELIGIBLE_AUTOSOMAL_PAIRS:
@@ -116,9 +119,22 @@ class Griffin(Base):
             return Skip("missing_toolchain", "Griffin requires tested Snakemake 5.19.2")
         if not registration_available(ctx.root):
             return Skip("missing_asset", "Griffin assets are not registered or registration is unsafe")
+        keep_name = None
+        if ctx.derived is not None:
+            try:
+                keep_name = derived_name_predicate(dict(ctx.derived))
+            except (ValueError, KeyError, TypeError):
+                return Skip("derived_input", "Griffin requires a valid downsample or split read-name selection")
         try:
-            profile_reads = _require_paired_input(ctx.input_dir / "aligned.bam")
-            pairs = count_d21_pairs(ctx.input_dir / "aligned.bam")
+            bam = ctx.input_dir / "aligned.bam"
+            if keep_name is not None:
+                pairs = count_d21_pairs(bam, keep_name)
+                if pairs < MIN_ELIGIBLE_AUTOSOMAL_PAIRS:
+                    return Skip("depth", f"Griffin needs {MIN_ELIGIBLE_AUTOSOMAL_PAIRS:,} eligible autosomal pairs; this selection has {pairs:,}")
+                profile_reads = _require_paired_input(bam, keep_name)
+            else:
+                profile_reads = _require_paired_input(bam)
+                pairs = count_d21_pairs(bam)
         except OSError:
             return Skip("input_unavailable", "Griffin could not read aligned BAM; inspect the Lab input and retry")
         except ValueError as exc:
@@ -148,18 +164,27 @@ class Griffin(Base):
         actual_tools = [tool.identity() for tool in self.identity_tools()]
         if planned_tools is not None and planned_tools != actual_tools:
             raise RuntimeError("Griffin runtime changed after execution identity was set")
-        pairs = count_d21_pairs(ctx.input_dir / "aligned.bam")
-        if pairs < MIN_ELIGIBLE_AUTOSOMAL_PAIRS:
-            raise RuntimeError("Griffin pair count fell below the required 5M after preflight")
-        profiles = run_upstream(GriffinRun(
-            input_id=ctx.input_id, bam=ctx.input_dir / "aligned.bam",
-            reference_fasta=Path(ctx.extras["reference_fasta"]),
-            reference_id=ctx.reference_id, reference_sha256=ctx.reference_sha256,
-            eligible_autosomal_pairs=pairs, upstream_root=assets.upstream_root,
-            ref_assets=assets.ref_assets, site_lists=assets.site_lists,
-            attempt_dir=out.parent / "griffin-attempt",
-            registration_sha256=assets.sha256,
-        ))
+        scratch = (tempfile.TemporaryDirectory(prefix="griffin-derived-", dir=out.parent)
+                   if ctx.derived is not None else nullcontext(None))
+        with scratch as directory:
+            bam = ctx.input_dir / "aligned.bam"
+            if ctx.derived is not None:
+                bam = Path(directory) / "selected.bam"
+                write_transient_bam(ctx.input_dir / "aligned.bam", bam, dict(ctx.derived))
+                if _require_paired_input(bam) == 0:
+                    raise RuntimeError("selected Griffin BAM has no qualifying 100–200 bp fragments")
+            pairs = count_d21_pairs(bam)
+            if pairs < MIN_ELIGIBLE_AUTOSOMAL_PAIRS:
+                raise RuntimeError("Griffin pair count fell below the required 5M after preflight")
+            profiles = run_upstream(GriffinRun(
+                input_id=ctx.input_id, bam=bam,
+                reference_fasta=Path(ctx.extras["reference_fasta"]),
+                reference_id=ctx.reference_id, reference_sha256=ctx.reference_sha256,
+                eligible_autosomal_pairs=pairs, upstream_root=assets.upstream_root,
+                ref_assets=assets.ref_assets, site_lists=assets.site_lists,
+                attempt_dir=out.parent / "griffin-attempt",
+                registration_sha256=assets.sha256,
+            ))
         primary = next((profile for profile in profiles if profile.site_name == assets.primary_site), None)
         if primary is None:
             raise RuntimeError("registered primary TF site list is absent from Griffin output")
