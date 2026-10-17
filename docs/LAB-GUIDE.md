@@ -180,6 +180,9 @@ Artifact sizes check completeness, not byte-level integrity.
 **Dry run.** `--dry-run` writes nothing and takes no lock. It prints the
 resolved ROOT and reference, chunk count and bytes, whether alignment is
 needed or reused, the disk budget against free space and the plan.
+With an explicit `--cohort`, it also checks that a built internal panel exists.
+Protocol and asset compatibility are checked during the run, after alignment
+when alignment is needed; the preview labels that decision as deferred.
 
 **Interruption.** Ctrl-C (or SIGTERM) stops the current step, kills its tools
 and exits 6. Completed results are kept; rerun the same command.
