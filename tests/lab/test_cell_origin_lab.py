@@ -324,6 +324,14 @@ def test_low_marker_support_publishes_a_skip_without_a_composition(
     assert "<ROOT>/donor.tsv" in result.skip_message
     assert result.parameters_sha256 == expected_hash
     assert result.attempt_id is not None
+    attempt = store.selected_attempt(input_id, "cell-origin", expected_hash)
+    assert attempt is not None
+    assert store.upstream_selections_at(attempt) == ({
+        "algorithm_id": READ_SUMMARY.id,
+        "input_id": input_id,
+        "parameters_sha256": read_hash,
+        "attempt_id": read_attempt.name,
+    },)
     envelope = store.read_result(input_id, "cell-origin", expected_hash)
     assert envelope.status == "skipped" and envelope.skip_reason == "low_support"
     assert not envelope.metrics and not envelope.panels

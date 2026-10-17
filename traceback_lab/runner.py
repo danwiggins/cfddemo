@@ -400,7 +400,7 @@ def run_plan(
                         envelope,
                         input_id=target.input_id,
                         artifacts_dir=scratch / "artifacts" if run_skip is None else None,
-                        upstream_selections=consumed if run_skip is None else None,
+                        upstream_selections=consumed,
                         execution_plan=execution_plan,
                     )
                     log.append(
