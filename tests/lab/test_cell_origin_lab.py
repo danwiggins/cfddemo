@@ -299,10 +299,12 @@ def test_low_marker_support_publishes_a_skip_without_a_composition(
 
     monkeypatch.setattr(lab_runner, "run_pipeline", fake_pipeline)
     run_id = new_run_id()
+    progress = []
     results = run_plan(
         store, None, store.run_log(run_id), target,
         [PlanItem(co.CELL_ORIGIN, False)], {"cell-origin": "cell_origin:CELL_ORIGIN"},
         run_id=run_id, scrubber=Scrubber(root=store.root),
+        progress=progress.append,
         upstream_results={READ_SUMMARY.id: StepResult(
             READ_SUMMARY.id, "ok", True, read_hash, input_id=input_id,
             attempt_id=read_attempt.name,
@@ -313,9 +315,11 @@ def test_low_marker_support_publishes_a_skip_without_a_composition(
     if tamper_output:
         assert result.status == "failed"
         assert result.first_line is not None and "skipped worker output" in result.first_line
+        assert "failed:" in progress[-1]
         assert not list((store.results_dir / input_id / "cell-origin").rglob("composition.json"))
         return
     assert result.status == "skipped" and result.skip_reason == "low_support"
+    assert "skipped (low_support):" in progress[-1]
     assert result.parameters_sha256 == expected_hash
     assert result.attempt_id is not None
     envelope = store.read_result(input_id, "cell-origin", expected_hash)

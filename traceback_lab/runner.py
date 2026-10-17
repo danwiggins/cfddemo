@@ -449,6 +449,8 @@ def run_plan(
         if progress:
             if result.status == "ok":
                 progress(f"{step:<24} ok ({result.duration_s or 0:.1f}s)")
+            elif result.status == "skipped":
+                progress(f"{step:<24} skipped ({result.skip_reason}): {result.skip_message}")
             else:
                 progress(f"{step:<24} failed: {result.first_line}")
     shutil.rmtree(scratch_root, ignore_errors=True)
