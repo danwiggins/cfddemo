@@ -259,6 +259,7 @@ class Microbial(Base):
                                    unit="estimated reads/million", n=denominator) for row in taxa)
         profile = {"schema": "traceback.lab.microbial-profile.v1", "source_id": ctx.source_id,
                    "input_id": ctx.input_id, "database_sha256": database.sha256,
+                   "database_source_label": database.source_label,
                    "read_length": database.read_length, "denominator": denominator,
                    "candidate_unmapped_reads": candidates, "omitted_taxa": omitted,
                    "taxa": taxa, "interpretation": "exploratory; not an infection diagnosis"}

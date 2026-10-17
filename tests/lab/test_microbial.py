@@ -198,13 +198,15 @@ def test_cohort_975_zero_fills_complete_absent_taxa_and_refuses_missing_referenc
     artifacts.mkdir()
     (artifacts / "microbial_profile.json").write_text(json.dumps({
         "schema": "traceback.lab.microbial-profile.v1", "source_id": source, "input_id": input_id,
-        "database_sha256": "d" * 64, "read_length": 75, "denominator": 100,
+        "database_sha256": "d" * 64, "database_source_label": "synthetic database",
+        "read_length": 75, "denominator": 100,
         "candidate_unmapped_reads": 5, "omitted_taxa": 0,
         "taxa": [{"taxid": 123, "name": "Candidate species", "category": "bacteria",
                   "estimated_reads": 1.0, "rpm_primary": 4.0}],
     }))
     monkeypatch.setattr(view, "_tool", lambda name: (name, "e" * 64))
-    monkeypatch.setattr(view, "inspect_database", lambda _store: SimpleNamespace(sha256="d" * 64, read_length=75))
+    monkeypatch.setattr(view, "inspect_database", lambda _store: SimpleNamespace(
+        sha256="d" * 64, source_label="synthetic database", read_length=75))
     monkeypatch.setattr(view, "resolve_reference", lambda *_args, **_kwargs: SimpleNamespace(sha256="f" * 64))
     monkeypatch.setattr(view, "execution_identity", lambda *_args, **_kwargs: identity)
     monkeypatch.setattr(store, "selected_artifacts", lambda *_args: artifacts)

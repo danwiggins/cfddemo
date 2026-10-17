@@ -110,6 +110,7 @@ def profile_for_sample(store: LabStore, sample: SampleView, generation: CohortGe
     if (profile is None or profile.get("source_id") != sample.source_id
             or profile.get("input_id") != sample.full.input_id
             or profile.get("database_sha256") != database.sha256
+            or profile.get("database_source_label") != database.source_label
             or profile.get("read_length") != database.read_length):
         return {"state": "stored_profile_unavailable", "reason": "Selected microbial profile is incomplete",
                 "taxa": []}
@@ -148,6 +149,7 @@ def profile_for_sample(store: LabStore, sample: SampleView, generation: CohortGe
     return {"state": "ready" if total_threshold is not None else "cohort_unavailable",
             "reason": None if total_threshold is not None else cohort_reason,
             "database_sha256": database.sha256, "read_length": database.read_length,
+            "database_source_label": database.source_label,
             "denominator": profile.get("denominator"), "candidate_unmapped_reads": profile.get("candidate_unmapped_reads"),
             "omitted_taxa": profile.get("omitted_taxa"),
             "microbial_rpm_primary": float(static["microbial_rpm_primary"]),

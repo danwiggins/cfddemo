@@ -331,6 +331,7 @@
       out.push(h("section", { class: "panel" }, h("h2", {}, "Microbial candidates"),
         h("p", {}, h("span", { class: "flag-pill" }, "FLAG: PRIVACY — infection status is sensitive health data.")),
         h("p", { class: "help" }, "Exploratory Kraken2/Bracken assignments from human-unmapped reads. Not an infection diagnosis; residual human DNA and contamination may affect assignments."),
+        microbial.database_source_label ? h("p", { class: "help" }, `Database: ${microbial.database_source_label} (SHA-256 ${microbial.database_sha256}). Fixed Bracken read length: ${microbial.read_length} bases.`) : "",
         microbial.reason ? h("p", { class: "problem" }, microbial.reason) : "",
         microbial.microbial_rpm_primary !== undefined
           ? h("p", {}, `Candidate microbial estimate: ${fmt(microbial.microbial_rpm_primary)} per million primary QC-passing reads; ${fmt(microbial.candidate_unmapped_reads)} unmapped reads submitted. Cohort 97.5th percentile: ${microbial.cohort_p975 === null ? "unavailable" : fmt(microbial.cohort_p975)}${microbial.cohort_p975 === null ? "" : ` (n=${microbial.cohort_n}, ${microbial.cohort_version})`}.`)
