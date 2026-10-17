@@ -352,9 +352,12 @@ def stability_panels(sample: SampleView, library: Library | None = None) -> list
             split = None
             split_status = {
                 half: _split_half_status(halves.get(half), algorithm_id, metric.metric_id, metric.value, spec,
-                                         other_half_recorded=any(other in halves for other in ("A", "B") if other != half))
+                                         other_half_recorded=bool(halves))
                 for half in ("A", "B")
             }
+            if halves and not any(half in halves for half in ("A", "B")):
+                for status in split_status.values():
+                    status["reason"] = "split input has an unrecognized half label"
             a = _value(halves["A"].results.get(algorithm_id), metric.metric_id) if "A" in halves else None
             b = _value(halves["B"].results.get(algorithm_id), metric.metric_id) if "B" in halves else None
             if split_status["A"]["state"] == "ok" and split_status["B"]["state"] == "ok":
@@ -425,6 +428,10 @@ def repeatability(panels: list[dict[str, Any]]) -> dict[str, Any] | None:
         "verdict_metrics": sum(1 for row in rows if row[2] is not None),
         "no_verdict_metrics": sum(1 for row in rows if row[2] is None),
         "unstable": sum(1 for row in rows if row[2] is False),
+        "incomparable_metrics": sum(
+            1 for panel in panels if panel.get("split") is None
+            and any(status.get("state") != "not_recorded" for status in panel.get("split_status", {}).values())
+        ),
         "worst": [{"label": label, "relative_abs_diff": diff, "stable": ok} for diff, label, ok in worst],
     }
 

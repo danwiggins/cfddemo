@@ -259,7 +259,7 @@
     const rep = h("div", { class: "control-block" }, h("span", { class: "control-badge" }, "REPEATABILITY"), " sampling noise, not a known answer");
     if (sample.repeatability) {
       const r = sample.repeatability;
-      rep.append(h("p", {}, `Median split-half |A−B|: ${(r.median_relative_abs_diff * 100).toFixed(1)}% across ${r.metrics} metrics; ${r.unstable} outside tolerance among ${r.verdict_metrics} with a validated verdict; ${r.no_verdict_metrics} without a validated verdict.`),
+      rep.append(h("p", {}, `Median split-half |A−B|: ${(r.median_relative_abs_diff * 100).toFixed(1)}% across ${r.metrics} comparable metrics; ${r.incomparable_metrics || 0} comparisons unavailable; ${r.unstable} outside tolerance among ${r.verdict_metrics} with a validated verdict; ${r.no_verdict_metrics} without a validated verdict.`),
         h("ul", {}, ...r.worst.map((w) => h("li", {}, `${w.label}: ${(w.relative_abs_diff * 100).toFixed(1)}%${w.stable === false ? " (unstable)" : w.stable === null ? " (no validated verdict)" : ""}`))),
         h("a", { href: `#/sample/${sample.id12}/stability` }, "→ Stability"));
     } else {
@@ -579,7 +579,8 @@
         h("p", { class: "help" }, unit === "none" ? "No validated stability deviation scale" : unit === "unit" ? "y: difference from full depth (metric's unit)" : "y: relative deviation from full depth, % (clipped ±50%)"),
         hasSplitHalf ? h("p", { class: "help" }, `Split halves: ${splitSummary}. `,
           splitVerdict === "no split-half stability verdict" ? "No split-half stability verdict." : `Split-half verdict: ${splitVerdict}.`) : ""));
-      for (const p of panel.points) tableRows.push([panel.label, `${p.fraction * 100}%`, p.value, p.deviation, p.state || "—"]);
+      for (const p of panel.points) tableRows.push([panel.label, `${p.fraction * 100}%`, p.value, p.deviation,
+        p.reason ? `${p.state || "—"}: ${p.reason.replace(/_/g, " ")}` : p.state || "—"]);
       if (panel.split) tableRows.push([panel.label, "split A / B", `${fmt(panel.split.a)} / ${fmt(panel.split.b)}`, `${(panel.split.relative_abs_diff * 100).toFixed(1)}% |A−B|`, splitVerdict]);
       else if (hasSplitHalf) {
         const halfDeviation = (half) => {

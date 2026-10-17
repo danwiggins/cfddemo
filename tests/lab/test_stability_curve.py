@@ -320,8 +320,10 @@ def test_missing_downsample_does_not_claim_instability() -> None:
     panel = next(panel for panel in views.stability_panels(sample)
                  if panel["algorithm_id"] == "fragment-size" and panel["metric_id"] == "mode_bp")
     assert {half: item["state"] for half, item in panel["split_status"].items()} == {
-        "A": "not_recorded", "B": "not_recorded",
+        "A": "unavailable", "B": "unavailable",
     }
+    assert all(item["reason"] == "split input has an unrecognized half label"
+               for item in panel["split_status"].values())
     down.results["fragment-size"] = SimpleNamespace(
         status="ok", metrics=[SimpleNamespace(metric_id="mode_bp", value=190.0,
                                                n=None, ci=None, ci_level=None)],
@@ -345,11 +347,17 @@ def test_repeatability_preserves_raw_splits_without_inventing_a_verdict() -> Non
     assert raw_only["metrics"] == 1
     assert raw_only["verdict_metrics"] == 0
     assert raw_only["no_verdict_metrics"] == 1
+    assert raw_only["incomparable_metrics"] == 0
     assert raw_only["worst"][0]["stable"] is None
     report = views.repeatability([no_verdict, validated])
     assert report is not None
     assert report["metrics"] == 2
     assert report["verdict_metrics"] == 1
     assert report["no_verdict_metrics"] == 1
+    assert report["incomparable_metrics"] == 0
     assert report["median_relative_abs_diff"] == ((5 / 102.5) + (10 / 105)) / 2
     assert report["unstable"] == 0
+    missing = {"label": "Copy number", "split": None, "split_status": {
+        "A": {"state": "ok"}, "B": {"state": "unavailable"},
+    }}
+    assert views.repeatability([no_verdict, validated, missing])["incomparable_metrics"] == 1

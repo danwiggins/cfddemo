@@ -354,8 +354,9 @@ script or style, no outside requests.
   each fraction, the stability band, and split halves A/B at 50%. Each half
   shows its own status when a result is skipped, failed, or lacks a numeric
   metric; a split-half verdict appears only when both values are available
-  and the stability comparison is interpretable. Raw A/B values and their
-  relative difference remain visible without a verdict. REPEATABILITY's
+  and the stability comparison is interpretable. When both halves have numeric
+  values, their raw values and relative difference remain visible without a
+  verdict. When a half is unavailable, its status remains visible. REPEATABILITY's
   median and worst-three list include every numeric split comparison; only
   metrics with a validated verdict enter its stability count.
 
