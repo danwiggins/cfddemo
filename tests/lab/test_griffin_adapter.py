@@ -239,4 +239,28 @@ def test_late_positive_tlen_is_considered_after_first_ten_thousand(tmp_path: Pat
             read.template_length = 150 if index == 10_000 else 500
             read.set_tag("RG", "library-1")
             out.write(read)
-    _require_paired_input(bam)
+    assert _require_paired_input(bam) == 1
+
+
+def test_declared_illumina_single_end_bam_is_refused(tmp_path: Path) -> None:
+    import pysam
+
+    from traceback_lab.adapters.griffin_run import _require_paired_input
+
+    bam = tmp_path / "single-end.bam"
+    header = {"HD": {"VN": "1.6"}, "SQ": [{"SN": "chr1", "LN": 10000}],
+              "RG": [{"ID": "rg1", "PL": "ILLUMINA"}]}
+    with pysam.AlignmentFile(str(bam), "wb", header=header) as out:
+        for index in range(100):
+            read = pysam.AlignedSegment()
+            read.query_name = f"single{index}"
+            read.query_sequence = "A" * 150
+            read.flag = 0
+            read.reference_id = 0
+            read.reference_start = index * 10
+            read.mapping_quality = 60
+            read.cigarstring = "150M"
+            read.set_tag("RG", "rg1")
+            out.write(read)
+    with pytest.raises(ValueError, match="paired-end positive-TLEN"):
+        _require_paired_input(bam)

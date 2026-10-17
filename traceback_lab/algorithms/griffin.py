@@ -63,19 +63,6 @@ class Griffin(Base):
             return Skip("depth", "Griffin needs a D21 eligible-read count to enforce the 5M gate")
         if ctx.reference_id != "hg38" or not ctx.extras.get("reference_fasta"):
             return Skip("reference", "Griffin requires the registered hg38 FASTA")
-        try:
-            profile_reads = _require_paired_input(ctx.input_dir / "aligned.bam")
-            pairs = count_d21_pairs(ctx.input_dir / "aligned.bam")
-        except (OSError, ValueError) as exc:
-            return Skip("unsupported_platform", str(exc))
-        if profile_reads == 0:
-            return Skip("depth", "Griffin's pinned 100–200 bp profile window has no qualifying fragments")
-        if pairs < MIN_ELIGIBLE_READS:
-            return Skip("depth", f"Griffin needs {MIN_ELIGIBLE_READS:,} eligible autosomal pairs; this input has {pairs:,}")
-        try:
-            inspect_griffin_assets(ctx.root)
-        except GriffinAssetError as exc:
-            return Skip("missing_asset", str(exc))
         if shutil.which("snakemake") is None or shutil.which("bedtools") is None or shutil.which("samtools") is None:
             return Skip("missing_toolchain", "Griffin needs Snakemake, bedtools and samtools in PATH")
         if importlib.util.find_spec("pyBigWig") is None or importlib.util.find_spec("pybedtools") is None:
@@ -88,6 +75,19 @@ class Griffin(Base):
             return Skip("missing_toolchain", "Griffin's Snakemake version could not be checked")
         if version != "5.19.2":
             return Skip("missing_toolchain", "Griffin requires tested Snakemake 5.19.2")
+        try:
+            profile_reads = _require_paired_input(ctx.input_dir / "aligned.bam")
+            pairs = count_d21_pairs(ctx.input_dir / "aligned.bam")
+        except (OSError, ValueError) as exc:
+            return Skip("platform", str(exc))
+        if profile_reads == 0:
+            return Skip("depth", "Griffin's pinned 100–200 bp profile window has no qualifying fragments")
+        if pairs < MIN_ELIGIBLE_READS:
+            return Skip("depth", f"Griffin needs {MIN_ELIGIBLE_READS:,} eligible autosomal pairs; this input has {pairs:,}")
+        try:
+            inspect_griffin_assets(ctx.root)
+        except GriffinAssetError as exc:
+            return Skip("missing_asset", str(exc))
         return Ready()
 
     def run(self, ctx: InputContext, out: Path) -> AlgorithmOutput:

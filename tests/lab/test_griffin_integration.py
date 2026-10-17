@@ -20,6 +20,15 @@ from traceback_lab.store import LabStore
 from traceback_lab.asset_command import _griffin_inspect, _griffin_register
 
 
+def _available_toolchain(monkeypatch: pytest.MonkeyPatch) -> None:
+    import traceback_lab.algorithms.griffin as module
+
+    monkeypatch.setattr(module.shutil, "which", lambda name: f"/tools/{name}")
+    monkeypatch.setattr(module.importlib.util, "find_spec", lambda name: object())
+    monkeypatch.setattr(module.subprocess, "run", lambda *args, **kwargs:
+                        subprocess.CompletedProcess(args[0], 0, "5.19.2\n"))
+
+
 def _registered(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> tuple[Path, Path]:
     import traceback_lab.griffin_assets as asset_module
 
@@ -105,8 +114,9 @@ def test_griffin_preflight_depth_and_native_ont_skip(tmp_path: Path, monkeypatch
     )
     depth = GRIFFIN.preflight(InputContext(**base, eligible_reads=4_999_999))
     assert isinstance(depth, Skip) and depth.reason_code == "depth"
+    _available_toolchain(monkeypatch)
     unsupported = GRIFFIN.preflight(InputContext(**base, eligible_reads=5_000_000))
-    assert isinstance(unsupported, Skip) and unsupported.reason_code == "unsupported_platform"
+    assert isinstance(unsupported, Skip) and unsupported.reason_code == "platform"
     assert "single-end" in unsupported.message
     platform = GRIFFIN.preflight(InputContext(**{**base, "platform": "ont"}, eligible_reads=5_000_000))
     assert isinstance(platform, Skip) and platform.reason_code == "platform"
@@ -142,12 +152,27 @@ def test_paired_350_bp_fragments_are_depth_skip_not_platform_skip(tmp_path: Path
                 read.template_length = 350 if first else -350
                 out.write(read)
     monkeypatch.setattr(module, "count_d21_pairs", lambda _: 5_000_000)
+    _available_toolchain(monkeypatch)
     ctx = InputContext(root=tmp_path, source_id="1" * 64, input_id="2" * 64,
                        reference_id="hg38", reference_sha256="3" * 64,
                        input_dir=input_dir, platform="illumina", eligible_reads=10_000_000,
                        extras={"reference_fasta": str(tmp_path / "hg38.fa")})
     decision = GRIFFIN.preflight(ctx)
     assert decision == Skip("depth", "Griffin's pinned 100–200 bp profile window has no qualifying fragments")
+
+
+def test_missing_toolchain_skips_before_scanning_bam(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    import traceback_lab.algorithms.griffin as module
+
+    monkeypatch.setattr(module.shutil, "which", lambda name: None)
+    monkeypatch.setattr(module, "_require_paired_input", lambda bam:
+                        pytest.fail("BAM must not be scanned before toolchain check"))
+    ctx = InputContext(root=tmp_path, source_id="1" * 64, input_id="2" * 64,
+                       reference_id="hg38", reference_sha256="3" * 64,
+                       input_dir=tmp_path, platform="illumina", eligible_reads=5_000_000,
+                       extras={"reference_fasta": str(tmp_path / "hg38.fa")})
+    decision = GRIFFIN.preflight(ctx)
+    assert isinstance(decision, Skip) and decision.reason_code == "missing_toolchain"
 
 
 def test_pair_gate_counts_molecules_once_and_requires_illumina_header(tmp_path: Path) -> None:
