@@ -759,6 +759,46 @@ def test_trust_qc_run_note_is_scoped_without_replacing_result_status(tmp_path, k
     assert (note in run_table) == (selected == "a" and kind != "active-before-sample")
 
 
+@pytest.mark.skipif(_chrome() is None, reason="no Chrome/Chromium for the headless Trust/QC check")
+@pytest.mark.parametrize("selected", ("a", "c"))
+def test_interrupted_first_step_without_result_is_sample_scoped(tmp_path, selected) -> None:
+    store = LabStore(tmp_path / "root")
+    store.ensure()
+    source_a, input_a = "a" * 64, "b" * 64
+    source_b, input_b = "c" * 64, "d" * 64
+    store.sources_dir.mkdir(parents=True, exist_ok=True)
+    for source_id, input_id in ((source_a, input_a), (source_b, input_b)):
+        (store.sources_dir / f"{source_id}.json").write_text(json.dumps({
+            "source_id": source_id, "example": True,
+            "inputs": [{"input_id": input_id, "used_utc": "2026-10-16T00:00:00Z"}],
+        }))
+        manifest = store.inputs_dir / input_id / "manifest.json"
+        manifest.parent.mkdir(parents=True, exist_ok=True)
+        manifest.write_text(json.dumps({"input_id": input_id}))
+    run_id = "r-20261015-0101-abcd"
+    with store.writer("run", run_id, step="bam-qc"):
+        log = store.run_log(run_id)
+        log.append("run_start", command="run")
+        log.append("sample", source_id=source_a, input_id=input_a)
+        log.append("step_start", step="bam-qc")
+    api = api_module.LabApi(store)
+    for source_id, input_id in ((source_a, input_a), (source_b, input_b)):
+        payload = api.sample(source_id[:12])
+        assert payload["found"] and payload["full_input_id"] == input_id
+        assert payload["algorithms"] == []
+    with RunningLabServer(store) as running:
+        id12 = (source_a if selected == "a" else source_b)[:12]
+        dom = _dom_cdp(
+            [_chrome(), "--headless=new", "--disable-gpu", "--no-first-run", "--no-default-browser-check",
+             f"--user-data-dir={tmp_path / 'profile'}", "--window-size=1280,800",
+             running.issue_link() + f"&route=/sample/{id12}/trust-qc"], tmp_path / "profile",
+            ok=lambda page: 'data-ready="1"' in page and "<h2>Run</h2>" in page,
+        )
+    run_panel = dom.split("<h2>Run</h2>", 1)[1].split("</section>", 1)[0]
+    assert ("Latest run interrupted during bam-qc; no result was published for this step." in run_panel) == (selected == "a")
+    assert "Run log line →" not in run_panel
+
+
 def _selected_sex_result(source_id: str, input_id: str, identity: str) -> ResultEnvelope:
     return ResultEnvelope(
         algorithm_id="sex-check", algorithm_version="1", status="ok",
