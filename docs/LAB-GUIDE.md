@@ -385,6 +385,9 @@ gate, not a validated adequacy threshold.
 The raw count score changes with retained depth, so a downsampled score should
 not be read as a biological difference from the full-input score; split halves
 are descriptive repeatability checks only.
+The 201-position raw U/D profiles and exact preferred-site support are
+sample-level derivatives. Treat the artifact as sample-identifiable data,
+especially when registering a small or targeted catalogue.
 The score has no validated stability tolerance or biological acceptance
 interval. Its headline placement is for Lab navigation and does not imply
 clinical or tissue-origin validity. Both are ONT aligned-span proxies, not confirmed physical
