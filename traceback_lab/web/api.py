@@ -261,7 +261,20 @@ class LabApi:
         if status["active"] is not None and status["active"].get("command") in _LOGGED_SAMPLE_COMMANDS:
             run_id = status["active"]["run_id"]
             events, reason = _run_events(self.store, run_id)
-            if not reason and events[0][1]["event"] != "run_start":
+            if reason in ("unreadable_or_over_1mib", "malformed_or_empty"):
+                # A writer publishes its heartbeat before appending run_start.
+                # An absent or empty log in that short window is pending, not damaged.
+                try:
+                    info = os.lstat(self.store.runs_dir / f"{run_id}.jsonl")
+                except FileNotFoundError:
+                    if reason == "unreadable_or_over_1mib":
+                        reason = None
+                except OSError:
+                    pass
+                else:
+                    if reason == "malformed_or_empty" and stat.S_ISREG(info.st_mode) and info.st_size == 0:
+                        reason = None
+            if not reason and events and events[0][1]["event"] != "run_start":
                 reason = "malformed_or_empty"
                 events = []
             if reason:
