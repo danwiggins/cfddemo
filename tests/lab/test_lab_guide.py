@@ -18,6 +18,7 @@ from traceback_runner import cli as signed_cli
 REPO = Path(__file__).resolve().parents[2]
 GUIDE = REPO / "docs" / "LAB-GUIDE.md"
 EXAMPLE_BUDGET_S = 180  # CI fails above 3 minutes on the Ubuntu runner
+SERVE_BANNER_TIMEOUT_S = 120
 
 
 def journey() -> list[list[str]]:
@@ -25,6 +26,44 @@ def journey() -> list[list[str]]:
     block = re.search(r"<!-- lab-journey -->\s*```bash\n(.*?)```", text, re.S)
     assert block, "the guide's journey block is missing"
     return [shlex.split(line) for line in block.group(1).strip().splitlines()]
+
+
+def _serve_banner(process, stdout_path: Path, stderr_path: Path, *, timeout: float) -> list[str]:
+    """Read the two serve banner lines without blocking past the startup budget."""
+
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        with stdout_path.open("rb") as output:
+            lines = output.read(8192).decode("utf-8", errors="replace").splitlines()
+        if len(lines) >= 2:
+            return lines[:2]
+        if process.poll() is not None:
+            break
+        time.sleep(0.1)
+    raise AssertionError(
+        f"serve banner unavailable within {timeout:g}s (exit={process.poll()}): "
+        f"stdout={stdout_path.read_text(errors='replace')[-2000:]!r}; "
+        f"stderr={stderr_path.read_text(errors='replace')[-2000:]!r}"
+    )
+
+
+def test_serve_banner_deadline_reaches_cleanup_for_a_silent_process(tmp_path) -> None:
+    import subprocess
+    import sys
+
+    stdout_path = tmp_path / "silent-stdout.log"
+    stderr_path = tmp_path / "silent-stderr.log"
+    with stdout_path.open("w") as stdout, stderr_path.open("w") as stderr:
+        process = subprocess.Popen(
+            [sys.executable, "-c", "import time; time.sleep(30)"], stdout=stdout, stderr=stderr,
+            stdin=subprocess.DEVNULL,
+        )
+        try:
+            with pytest.raises(AssertionError, match="serve banner unavailable within"):
+                _serve_banner(process, stdout_path, stderr_path, timeout=0.2)
+        finally:
+            process.terminate()
+            process.wait(timeout=5)
 
 
 def test_journey_block_is_the_documented_four_steps() -> None:
@@ -124,15 +163,22 @@ def test_serve_step_reaches_the_landing_with_curve_repeatability_and_example_pil
 
     argv = next(a for a in journey() if a[-2:] == ["serve", "--open"])
     env = {**os.environ, "TRACEBACK_ROOT": str(journey_root["root"]), "BROWSER": "true", "PYTHONPATH": str(REPO)}
+    stdout_path = tmp_path / "serve-stdout.log"
     stderr_path = tmp_path / "serve-stderr.log"
-    stderr = stderr_path.open("w+")
-    process = subprocess.Popen(
-        argv,
-        cwd=REPO, env=env, stdout=subprocess.PIPE, stderr=stderr, stdin=subprocess.DEVNULL, text=True,
-        start_new_session=os.name != "nt",
-    )
+    stdout = stdout_path.open("w")
+    stderr = stderr_path.open("w")
     try:
-        lines = [process.stdout.readline().strip() for _ in range(2)]
+        process = subprocess.Popen(
+            argv,
+            cwd=REPO, env=env, stdout=stdout, stderr=stderr, stdin=subprocess.DEVNULL,
+            start_new_session=os.name != "nt",
+        )
+    except BaseException:
+        stdout.close()
+        stderr.close()
+        raise
+    try:
+        lines = _serve_banner(process, stdout_path, stderr_path, timeout=SERVE_BANNER_TIMEOUT_S)
         assert lines[0] == f"ROOT  {journey_root['root']}", (lines, stderr_path.read_text()[-2000:])
         link = lines[1]
         assert re.match(r"^http://127\.0\.0\.1:\d+/#bootstrap=[A-Za-z0-9_-]{43,}$", link), lines
@@ -145,32 +191,39 @@ def test_serve_step_reaches_the_landing_with_curve_repeatability_and_example_pil
             ok=lambda d: 'data-ready="1"' in d and "Depth → utility" in d,
         )
     finally:
-        if os.name == "nt":
-            if process.poll() is None:
+        try:
+            if os.name == "nt":
                 try:
                     subprocess.run(["taskkill", "/PID", str(process.pid), "/T", "/F"],
                                    stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, check=False, timeout=10)
                 except subprocess.TimeoutExpired:
                     pass
-        else:
-            try:
-                os.killpg(process.pid, signal.SIGTERM)
-            except ProcessLookupError:
-                pass
-        try:
-            process.wait(timeout=20)
-        except subprocess.TimeoutExpired:
-            if os.name == "nt":
-                subprocess.run(["taskkill", "/PID", str(process.pid), "/T", "/F"],
-                               stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, check=False, timeout=10)
             else:
                 try:
-                    os.killpg(process.pid, signal.SIGKILL)
-                except ProcessLookupError:
+                    os.killpg(process.pid, signal.SIGTERM)
+                except (ProcessLookupError, PermissionError):
                     pass
-            process.wait(timeout=5)
-        process.stdout.close()
-        stderr.close()
+            try:
+                process.wait(timeout=20)
+            except subprocess.TimeoutExpired:
+                if os.name == "nt":
+                    try:
+                        subprocess.run(["taskkill", "/PID", str(process.pid), "/T", "/F"],
+                                       stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, check=False, timeout=10)
+                    except subprocess.TimeoutExpired:
+                        pass
+                else:
+                    try:
+                        os.killpg(process.pid, signal.SIGKILL)
+                    except (ProcessLookupError, PermissionError):
+                        pass
+                try:
+                    process.wait(timeout=5)
+                except subprocess.TimeoutExpired:
+                    pass
+        finally:
+            stdout.close()
+            stderr.close()
     body = _body(dom)
     assert body["csp-violations"] == "0"
     assert "Depth → utility" in dom and 'class="curve-grid"' in dom
