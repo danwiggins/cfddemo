@@ -279,12 +279,13 @@ will not silently switch to another directory with identical bytes.
 An older registration without a page receipt can be refreshed in place with
 the same `lab microbial db add` command: it verifies all bytes before adding
 the receipt. The sample page reports that legacy registration as unavailable
-until refreshed. If the registered files were restored at the same path with
-identical bytes, or their file stats changed while their bytes stayed identical,
-repeat `lab microbial db add` with the original directory, read length, and
-source label. It rehashes the required files and refreshes the receipt only
-when their bundle matches the existing registration. Different bytes or a
-different directory are refused; use a new Lab root for a different database.
+until refreshed. If the sample page or execution planning reports changed
+registered files after a byte-identical restore or a file-stat-only change,
+repeat `lab microbial db add` with the original absolute directory, read
+length, and source label. It rehashes the required files and refreshes the
+receipt only when their bundle, directory, and source label match the existing
+registration. If the label was mistyped, retry with the original label; changed
+database bytes or a moved directory require a new Lab root.
 
 ```bash
 traceback lab microbial db add --directory KRAKEN_DB --read-length 75 \
