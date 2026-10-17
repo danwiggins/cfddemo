@@ -62,6 +62,7 @@ def test_run_recovers_the_planted_mixture_with_intervals(world) -> None:
     assert sorted(round(v["value"], 1) for v in fractions.values()) == [0.3, 0.7]
     assert values["classified_fragments"]["value"] > 0
     composition = json.loads(output.artifacts["composition.json"])
+    assert composition["modbase_model"] == "model-h"
     assert composition["solver_converged"] is True
     assert {row["contributor_id"] for row in composition["contributors"]} == set(
         name for name in (row["contributor_id"] for row in composition["contributors"])

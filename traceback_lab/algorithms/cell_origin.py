@@ -187,6 +187,7 @@ class CellOrigin(Base):
             )
         metrics.append(metric("classified_fragments", classified, unit="fragments", n=classified))
         composition = {
+            "modbase_model": model_id,
             "confidence_level": level, "contributors": rows,
             "solver_converged": bool(measurement.fit.diagnostics.converged),
             "extraction_qc": {
