@@ -195,6 +195,19 @@ def test_boundary_fit_keeps_nonzero_residual_with_two_markers(
     assert receipt["fit_rms"] == pytest.approx(values["fit_rms"])
 
 
+def test_unidentifiable_worker_preserves_coverage_without_a_fraction(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    ctx, _ = _fixture(tmp_path)
+    monkeypatch.setattr(meth_tf, "tally_markers", lambda *_: (np.asarray([0, 0]), np.asarray([1, 0])))
+    output = METH_TF.run(ctx, tmp_path / "unidentifiable-out")
+    values = _metrics(output)
+    assert values["identifiable"] is False
+    assert values["tumor_fraction"] is None and values["fit_rms"] is None
+    assert values["markers_covered"] == 1 and values["cpg_calls_used"] == 1
+    assert json.loads(output.artifacts["meth_tf_fit.json"])["identifiable"] is False
+
+
 def test_registered_worker_produces_exploratory_fraction_and_pinned_attempt(tmp_path: Path) -> None:
     ctx, registered = _fixture(tmp_path)
     assert "meth-tf" in [algorithm.id for algorithm in load_registry()]
@@ -216,6 +229,8 @@ def test_registered_worker_produces_exploratory_fraction_and_pinned_attempt(tmp_
     assert METH_TF.preflight(ctx).reason_code == "asset_unavailable"
     assert "asset_unavailable" in SKIP_REASONS
     assert "changed since planning" in METH_TF.preflight(ctx).message
+    ctx.extras["planned_asset_sha256s"] = []
+    assert "unavailable during planning" in METH_TF.preflight(ctx).message
     with pytest.raises(ValueError, match="execution planning"):
         METH_TF.run(ctx, tmp_path / "out")
     ctx.extras["planned_asset_sha256s"] = [registered.sha256]

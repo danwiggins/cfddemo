@@ -156,7 +156,7 @@ class MethTF(MethBase):
         planned = ctx.extras.get("planned_asset_sha256s")
         if planned != [reference.sha256]:
             message = ("meth-TF reference identity was unavailable during planning; retry the run"
-                       if planned is None else
+                       if not planned else
                        "the registered meth-TF reference changed since planning; restore the planned asset or start a new run")
             return Skip("asset_unavailable", message)
         if reference.reference.reference_sha256 != ctx.reference_sha256:
