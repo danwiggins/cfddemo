@@ -84,9 +84,32 @@ traceback lab algorithms [--json]          registered algorithms (id, tier, min 
 traceback lab doctor [--json]              setup checks, each with a fix command
 traceback lab serve [--open]               the local page (loopback only)
 traceback lab runs [RUN_ID] [--step S]     the run log, or one run's steps
+traceback lab identity sites add --file SITES.vcf.gz --sha256 SHA256 --source-label LABEL [--root R]
+traceback lab identity sites inspect [--root R]
+traceback lab identity compare SAMPLE_A SAMPLE_B [--force] [--json] [--root R]
 ```
 
 ## Running on a kit
+
+Identity is an opt-in, exploratory Somalier measurement for full aligned hg38
+inputs with at least 10 million eligible reads. An operator must first register
+the exact local gzip VCF of hg38 fingerprint sites and its independently
+obtained SHA-256 using `lab identity sites add`. The file is copied into the
+Lab ROOT and checked against its pinned bytes each time it is used. Install
+Somalier separately, then run `traceback lab run ID12 --only identity --root R`
+for each of two chosen samples. `lab identity compare A B` relates only those
+two current, selected fingerprints; `--force` stores a new immutable attempt.
+The result is bound to the source, input, selected extraction attempt, sites,
+reference, tool version, and upstream read summary. When any of those change,
+rerun identity and the comparison. The local Trust/QC view shows current pairs.
+Fingerprints and relatedness can reveal family relationships (FLAG: PRIVACY).
+Keep the Lab ROOT private. There is no validated ONT duplicate or kinship
+threshold here, and this command makes no diagnostic claim. No real donor data
+is required for the synthetic checks in this repository.
+An altered or unreadable sites registration is blocked, not silently replaced.
+Preserve the affected ROOT for review; the safe repeat path is a fresh ROOT,
+the verified original VCF and SHA-256, and new extraction/comparison runs.
+Any in-place repair requires an offline backup and operator review first.
 
 `--sex M|F` records an operator assertion in versioned local sample metadata.
 It does not change the measured `sex-check` ratio, source or input identity, or
@@ -134,18 +157,24 @@ uBAM.
 The reference is the one registered under ROOT (`traceback reference
 register`); with several, pass `--reference ID`.
 
-**Reruns.** Rerunning the same command recomputes only missing or failed
-results; unchanged chunks are not re-hashed and the alignment is reused.
+**Reruns.** Rerunning the same command recomputes missing or failed results
+and a dependent result when a selected upstream attempt has changed;
+unchanged chunks are not re-hashed and the alignment is reused.
 `traceback lab run latest` or `traceback lab run <id12>` reruns on the stored
 sample without the chunk paths. `--force` recomputes every result.
 `--only a,b` runs just those algorithms (overriding `--profile`), plus the
 intermediates they need, labelled "(upstream)".
 
 A result is reused only when its selected attempt matches the input, algorithm,
-and execution identity. New attempts record artifact file sizes; older attempts
+and execution identity. Dependents also record the exact upstream attempts
+they consumed, including a parent-input summary reused by a derived control.
+An older dependent attempt without that record is recomputed once; leaf results
+remain cacheable. New attempts record artifact file sizes; older attempts
 remain readable, with known upstream layouts checked against their metadata.
 Missing or truncated required artifacts are recomputed. A completed failed
 forced rerun is shown as failed; the prior successful attempt remains on disk.
+If the current upstream step fails or skips, its dependent step also skips;
+an older successful dependent result is not reused for that run.
 Artifact sizes check completeness, not byte-level integrity.
 
 **Dry run.** `--dry-run` writes nothing and takes no lock. It prints the
