@@ -2913,3 +2913,47 @@ entries:
     stability: {kind: absolute, tolerance: 0.1}
     citations: ["doi:10.1186/s12859-018-2557-8"]
     citation_checked: {by: "Lab NIPTeR method review", date: "2026-10-17", note: "Package workflow and paper reviewed; ONT transfer lacks matched validation."}
+
+  - &fetal_chry_base
+    algorithm_id: fetal-fraction-chry
+    metric_id: fetal_fraction
+    label: "Male-fetus chrY calibrated fetal fraction"
+    value_kind: proportion
+    tier: SPECULATIVE
+    origin_tier: PROVEN
+    origin_platform: "short-read maternal plasma sequencing; ONT transfer unvalidated"
+    min_depth_x: null
+    reference: {kind: none}
+    performance: null
+    performance_missing_reason: "No independently verified, ONT-matched accuracy or detection limit"
+    missing_value_caption: "The chrY rate is outside the operator's validated calibration bounds or the method was gated."
+    meaning_high: "More chrY signal under an asserted male-fetus pregnancy and matched calibration."
+    meaning_low: "Less chrY signal; background and assay limits may dominate."
+    confounders: ["fetal-sex assertion", "other male DNA sources", "sex-chromosome variation", "mapping bias", "protocol mismatch"]
+    next_steps: {analytical: ["Review the operator calibration and chrY read count"], clinical_setting: null}
+    license_ids: []
+    flags: [FDA, PRIVACY, LEGAL]
+    headline: true
+    stability: {kind: proportion}
+    citations: ["doi:10.1371/journal.pone.0146997"]
+    citation_checked: {by: "Lab S4 fetal-fraction method review", date: "2026-10-17", note: "Primary method reviewed; no ONT calibration supplied or assumed."}
+
+  - <<: *fetal_chry_base
+    metric_id: fetal_chry_nonpar_reads
+    label: "Male-fetus chrY non-PAR reads"
+    value_kind: count
+    missing_value_caption: "Not measured because the chrY method was gated."
+    meaning_high: "More eligible chrY starts outside pseudoautosomal regions."
+    meaning_low: "Fewer eligible chrY starts; the calibrated fraction may be unavailable."
+    headline: false
+    stability: {kind: scales_with_depth, tolerance: 0.1}
+
+  - <<: *fetal_chry_base
+    metric_id: fetal_chry_reads_per_million
+    label: "Male-fetus chrY non-PAR reads per million eligible"
+    value_kind: positive
+    missing_value_caption: "Not measured because the chrY method was gated."
+    meaning_high: "Higher observed chrY rate before calibration."
+    meaning_low: "Lower observed chrY rate before calibration."
+    headline: false
+    stability: {kind: relative, tolerance: 0.1}
