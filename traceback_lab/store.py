@@ -12,7 +12,8 @@ Layout (D11, D19, D22, D35)::
     ROOT/lab/inputs/index.json    hash cache (realpath, size, mtime_ns) -> digest
     ROOT/lab/inputs/<input_id>/   aligned or derived input (published as a unit)
     ROOT/lab/results/<input_id>/<algorithm_id>/<parameters_sha256>/
-        attempts/<attempt_id>/{result.json, artifacts/, artifacts.json}
+        attempts/<attempt_id>/{result.json, artifacts/, artifacts.json,
+                               upstream_selections.json?}
         selected.json             {attempt_id, publication_order,
                                    last_success_attempt_id?}, switched by os.replace
 
@@ -32,7 +33,7 @@ import shutil
 import stat
 import threading
 import time
-from collections.abc import Callable, Iterator, Mapping
+from collections.abc import Callable, Iterator, Mapping, Sequence
 from contextlib import contextmanager
 from dataclasses import dataclass
 from datetime import UTC, datetime
@@ -53,8 +54,33 @@ HEARTBEAT_FRESH_S = 30.0
 KEEP_FAILED_ATTEMPTS = 3
 STAGING_PREFIX = ".staging-"
 ARTIFACT_INDEX_SCHEMA = "traceback.lab.artifact-index.v1"
+UPSTREAM_SELECTIONS_SCHEMA = "traceback.lab.upstream-selections.v1"
 _RUN_ID = r"^r-\d{8}-\d{4}-[0-9a-f]{4,8}$"
 _ATTEMPT_ID = r"^a-\d{8}T\d{12}-[0-9a-f]{8}$"
+
+
+def _validated_upstream_selections(value: Any) -> tuple[dict[str, str], ...] | None:
+    if not isinstance(value, (list, tuple)) or len(value) > 64:
+        return None
+    rows: list[dict[str, str]] = []
+    for item in value:
+        if not isinstance(item, dict) or set(item) != {
+            "algorithm_id", "input_id", "parameters_sha256", "attempt_id",
+        }:
+            return None
+        algorithm_id = item["algorithm_id"]
+        input_id = item["input_id"]
+        parameters_sha256 = item["parameters_sha256"]
+        attempt_id = item["attempt_id"]
+        if (not isinstance(algorithm_id, str) or not ALGORITHM_ID_PATTERN.fullmatch(algorithm_id)
+                or not isinstance(input_id, str) or not SHA256_PATTERN.fullmatch(input_id)
+                or not isinstance(parameters_sha256, str) or not SHA256_PATTERN.fullmatch(parameters_sha256)
+                or not isinstance(attempt_id, str) or not re.fullmatch(_ATTEMPT_ID, attempt_id)):
+            return None
+        rows.append(dict(item))
+    if [row["algorithm_id"] for row in rows] != sorted({row["algorithm_id"] for row in rows}):
+        return None
+    return tuple(rows)
 
 
 class ResultOrderUnavailable(OSError):
@@ -632,6 +658,7 @@ class LabStore:
         artifacts: Mapping[str, bytes] | None = None,
         artifacts_dir: Path | None = None,
         attempt_id: str | None = None,
+        upstream_selections: Sequence[Mapping[str, str]] | None = None,
     ) -> str:
         """Publish one immutable attempt, then select it (callers hold the lock).
 
@@ -650,6 +677,9 @@ class LabStore:
         ordinal = self._next_attempt_order(attempts)
         publication_order = self._next_result_order(input_id, envelope.algorithm_id)
         files = dict(artifacts or {})
+        selected_upstream = _validated_upstream_selections(upstream_selections) if upstream_selections is not None else None
+        if upstream_selections is not None and selected_upstream is None:
+            raise ValueError("upstream selections must name distinct verified attempts")
         for relative in files:
             parts = Path(relative).parts
             if Path(relative).is_absolute() or ".." in parts or not parts:
@@ -657,6 +687,10 @@ class LabStore:
 
         def build(staging: Path) -> None:
             (staging / "result.json").write_bytes(envelope.to_bytes())
+            if selected_upstream is not None:
+                (staging / "upstream_selections.json").write_bytes(canonical_json_bytes({
+                    "schema": UPSTREAM_SELECTIONS_SCHEMA, "selections": selected_upstream,
+                }))
             if artifacts_dir is not None:
                 for path in artifacts_dir.rglob("*"):
                     if path.is_symlink():
@@ -771,6 +805,31 @@ class LabStore:
 
         selected = self._selected_result(input_id, algorithm_id, parameters_sha256)
         return selected[0] if selected is not None else None
+
+    def selected_upstream_selections(
+        self, input_id: str, algorithm_id: str, parameters_sha256: str,
+    ) -> tuple[dict[str, str], ...] | None:
+        """Read the consumed attempts of one selected result; None is unsafe/legacy."""
+
+        attempt = self.selected_attempt(input_id, algorithm_id, parameters_sha256)
+        if attempt is None:
+            return None
+        path = attempt / "upstream_selections.json"
+        try:
+            descriptor = open_regular_no_follow(path)
+            with os.fdopen(descriptor, "rb") as stream:
+                info = os.fstat(stream.fileno())
+                if not stat.S_ISREG(info.st_mode) or info.st_nlink != 1 or info.st_size > 16 * 1024:
+                    return None
+                raw = stream.read(16 * 1024 + 1)
+                if len(raw) > 16 * 1024:
+                    return None
+                data = json.loads(raw)
+        except (OSError, ValueError, TypeError):
+            return None
+        if not isinstance(data, dict) or data.get("schema") != UPSTREAM_SELECTIONS_SCHEMA:
+            return None
+        return _validated_upstream_selections(data.get("selections"))
 
     @staticmethod
     def _artifact_matches(root: Path, relative: str, size: int) -> bool:
