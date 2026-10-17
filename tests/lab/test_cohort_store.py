@@ -184,9 +184,14 @@ def test_failed_publish_keeps_previous_pointer(store: LabStore, monkeypatch) -> 
 
 def test_second_writer_is_refused(store: LabStore) -> None:
     source_id = _sample(store, 1)
+    add_sample(store, "healthy", source_id)
+    before = read_roster(store, "healthy")
     with store.writer("run", "r-20261016-0000-abcd"):
         with pytest.raises(LabProblem, match="TBX-LAB-012"):
             add_sample(store, "healthy", source_id[:12])
+        with pytest.raises(LabProblem, match="TBX-LAB-012"):
+            remove_sample(store, "healthy", source_id[:12])
+    assert read_roster(store, "healthy") == before
 
 
 def test_stale_execution_is_not_relabelled_as_current_compatible(store: LabStore) -> None:
