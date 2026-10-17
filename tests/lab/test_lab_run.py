@@ -404,7 +404,11 @@ def test_stored_dry_run_uses_selected_depth_without_writing(
                 capsys, "run", "latest", "--root", str(root),
                 "--only", "delfi-ratio", "--dry-run",
             )
-        for malformed in ({"reference_id": "synth"}, ["invalid"]):
+        for malformed in (
+            {"reference_id": "synth"},
+            {"reference_id": "synth", "reference_sha256": "invalid"},
+            ["invalid"],
+        ):
             with monkeypatch.context() as patch:
                 patch.setattr(run_module, "input_manifest", lambda _store, _input_id: malformed)
                 bad_code, bad = _json(capsys, "run", "latest", "--root", str(root), "--dry-run")

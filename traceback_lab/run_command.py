@@ -41,7 +41,7 @@ from .ingest import (
     GIB,
     EXAMPLE_REFERENCE_ID,
 )
-from .identity import aligned_input_id, prealigned_input_id
+from .identity import SHA256_PATTERN, aligned_input_id, prealigned_input_id
 from .problems import (
     EXIT_OK, EXIT_PARTIAL, EXIT_USAGE, LabProblem, problem_lines, problem_payload,
 )
@@ -276,7 +276,7 @@ def _dry_run(args: argparse.Namespace, store: LabStore, progress: Callable[[str]
             or not isinstance(manifest.get("reference_id"), str)
             or not manifest["reference_id"]
             or not isinstance(manifest.get("reference_sha256"), str)
-            or not manifest["reference_sha256"]
+            or not SHA256_PATTERN.fullmatch(manifest["reference_sha256"])
         ):
             raise LabProblem(
                 "TBX-LAB-017",
