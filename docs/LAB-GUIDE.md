@@ -259,7 +259,11 @@ when their manifest pins the historical `map-ont` alignment recipe; a new
 input still needs an explicit platform declaration.
 Stored prealigned manifests without a platform field still read the BAM's
 unanimous platform declaration. Re-ingest short reads to record an Illumina
-input identity for new results and cohorts.
+input identity for new results and cohorts. Before rerun, historical ONT-only
+results on such an Illumina input remain stored but appear as platform skips
+in sample views and the local API; rerun records those skips in the store.
+The same read-side mask applies when an old prealigned input cannot verify ONT
+provenance from its BAM.
 
 **PMD asset.** `pmd-score` needs an operator-supplied Zhou 2018 hg38
 common-PMD BED.gz file. The repository does not ship or download it; its

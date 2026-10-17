@@ -78,6 +78,61 @@ def test_legacy_illumina_source_record_keeps_header_platform(tmp_path: Path) -> 
     assert record["inputs"][0]["platform"] == "illumina"
 
 
+@pytest.mark.parametrize("platforms,expected", [
+    (("ILLUMINA",), "skipped"), ((None,), "skipped"), (("ONT",), "ok"),
+])
+def test_legacy_prealigned_view_qualifies_old_ont_only_selection_before_rerun(
+    tmp_path: Path, platforms: tuple[str | None, ...], expected: str,
+) -> None:
+    import shutil
+
+    from traceback_lab.envelope import ResultEnvelope, provenance
+    from traceback_lab.store import LabStore
+    from traceback_lab.interpretation.engine import load_library
+    from traceback_lab.views import InputView, cell_state, load_sample, selected_results
+    from traceback_lab.web.api import LabApi
+
+    root, bam_path = _prealigned_world(tmp_path, platforms)
+    store = LabStore(root)
+    store.ensure()
+    source_id, input_id = "b" * 64, "c" * 64
+    input_dir = store.inputs_dir / input_id
+    input_dir.mkdir(parents=True)
+    shutil.copyfile(bam_path, input_dir / "aligned.bam")
+    (input_dir / "manifest.json").write_text(json.dumps({"kind": "prealigned", "reference_id": "hg38"}))
+    store.sources_dir.mkdir(parents=True)
+    (store.sources_dir / f"{source_id}.json").write_text(json.dumps({
+        "schema": "traceback.lab.source.v1", "source_id": source_id,
+        "inputs": [{"input_id": input_id, "kind": "prealigned", "used_utc": "2026-10-16T00:00:00Z"}],
+        "derived": [],
+    }))
+    old = ResultEnvelope.model_validate({
+        "algorithm_id": "fragment-size", "algorithm_version": "1", "status": "ok",
+        "provenance": provenance(
+            tool="legacy", parameters_sha256="a" * 64, source_id=source_id,
+            input_id=input_id, reference_id="hg38",
+        ),
+        "metrics": [{"metric_id": "mode_bp", "value": 100}],
+    })
+    store.publish_result(old, input_id=input_id)
+    raw = selected_results(store, input_id)
+    assert raw["fragment-size"].status == "ok"
+    old_view = InputView("full", input_id, None, {}, raw)
+    assert cell_state(old_view, old_view, "fragment-size", "mode_bp", load_library())["state"] == "ok_usable"
+
+    sample = load_sample(store, source_id)
+    assert sample is not None
+    assert sample.full.results["fragment-size"].status == expected
+    if expected == "skipped":
+        assert sample.full.results["fragment-size"].skip_reason == "platform"
+    response = LabApi(store).sample(source_id[:12])
+    visible = next(item for item in response["algorithms"] if item["algorithm_id"] == "fragment-size")
+    assert visible["status"] == expected
+    if expected == "skipped":
+        assert visible["skip_reason"] == "platform"
+    assert store.read_result(input_id, "fragment-size", "a" * 64) == old
+
+
 def test_legacy_lab_aligned_without_read_groups_uses_pinned_map_ont(tmp_path: Path) -> None:
     from traceback_lab.ingest import ALIGNER_IDENTITY_ARGV
 
