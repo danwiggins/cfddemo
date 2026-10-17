@@ -8,6 +8,7 @@ from typing import Any
 from .algorithms.arm_summary import ARMS, ARM_SUMMARY
 from .arm_zscore_core import ArmObservation, ArmScore, score_arm
 from .cohorts import member_for_generation, read_current
+from .problems import LabProblem
 from .store import LabStore
 
 
@@ -37,15 +38,20 @@ def report_arm_zscores(store: LabStore, cohort_id: str, source_id: str) -> ArmZR
     """
 
     generation = read_current(store, cohort_id)
+    if generation is None:
+        raise LabProblem(
+            "TBX-LAB-017", cause=f"cohort {cohort_id} has no published generation",
+            fix="Build that cohort, then rerun arm-zscores with the same --cohort and --root",
+            data={"cohort_id": cohort_id},
+        )
+    if generation.pon_build is None or generation.pon_asset_sha256 is None:
+        raise LabProblem(
+            "TBX-LAB-020", cause=f"cohort {cohort_id} has no verified panel of normals",
+            fix="Build an internal protocol-matched cohort before running arm-zscores",
+            data={"cohort_id": cohort_id, "field": "panel of normals"},
+        )
     asset_digests = ARM_SUMMARY.asset_sha256s(store.root)
     asset_sha256 = asset_digests[0] if len(asset_digests) == 1 else None
-    if generation is None:
-        scores = {arm: score_arm(
-            target_source_id=source_id, arm_id=arm, target_log2=None,
-            target_protocol_key=None, eligible_reads=None,
-            arm_asset_sha256=asset_sha256, observations=(),
-        ) for arm in ARMS}
-        return ArmZReport(source_id, cohort_id, None, asset_sha256, scores)
 
     target = member_for_generation(store, generation, source_id)
     selected = {result.algorithm_id: result for result in target.results}

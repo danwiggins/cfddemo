@@ -12,8 +12,10 @@ import pytest
 from traceback_lab import arm_zscores
 from traceback_lab.algorithms import arm_summary
 from traceback_lab.arm_zscores import report_arm_zscores
+from traceback_lab.cli import main as lab_main
 from traceback_lab.cohort_contracts import CohortGeneration, CohortMember, CohortResult
 from traceback_lab.registry import InputContext, Skip, load_registry
+from traceback_lab.problems import LabProblem
 from traceback_lab.store import LabStore
 
 
@@ -90,6 +92,25 @@ def test_arm_summary_run_uses_pinned_centromere_and_selected_track(
     artifact = json.loads(result.artifacts["arm_summaries.json"])
     assert artifact["arm_asset_sha256"] == digest
     assert artifact["policy"] == arm_summary.POLICY
+
+
+def test_unbuilt_cohort_is_a_cli_refusal_not_a_depth_result(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str],
+) -> None:
+    store = LabStore(tmp_path)
+    store.sources_dir.mkdir(parents=True)
+    (store.sources_dir / f"{_source(1)}.json").write_text("{}")
+    with pytest.raises(LabProblem) as caught:
+        report_arm_zscores(store, "unbuilt", _source(1))
+    assert caught.value.code == "TBX-LAB-017"
+    assert "no published generation" in caught.value.cause
+
+    code = lab_main(["arm-zscores", _source(1)[:12], "--cohort", "unbuilt",
+                     "--root", str(tmp_path), "--json"])
+    payload = json.loads(capsys.readouterr().out)
+    assert code == 4
+    assert payload["status"] == "not_found"
+    assert payload["errors"][0]["code"] == "TBX-LAB-017"
 
 
 def _member(index: int, value: float, *, protocol: str = "a" * 64) -> CohortMember:
