@@ -256,6 +256,18 @@ def test_home_names_unavailable_split_comparisons(page_root, tmp_path, comparabl
 
 
 @needs_chrome
+def test_stability_intro_does_not_call_recorded_halves_absent(page_root, tmp_path, monkeypatch) -> None:
+    from traceback_lab import views
+
+    monkeypatch.setattr(views, "repeatability", lambda panels: None)
+    with RunningLabServer(LabStore(page_root)) as server:
+        dom = _dom(server, tmp_path, route=f"/sample/{_id12(page_root)}/stability",
+                   want=lambda page: "Split halves were recorded, but no comparable pair is available." in page)
+    assert "Split halves were recorded, but no comparable pair is available." in dom
+    assert "Split-half markers absent" not in dom
+
+
+@needs_chrome
 def test_findings_grouping_and_flags(page_root, tmp_path) -> None:
     with RunningLabServer(LabStore(page_root)) as server:
         dom = _dom(server, tmp_path, route=f"/sample/{_id12(page_root)}/findings")

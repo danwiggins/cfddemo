@@ -531,7 +531,13 @@
   function stability(sample) {
     const out = [h("p", { class: "breadcrumb" }, `Lab › ${sample.id12} › Stability`), h("h1", { class: "view-title" }, "Stability")];
     if (!sample.curve.downsampled) out.push(h("p", { class: "empty" }, `This run used --no-downsample. Run traceback lab run ${sample.id12} to draw the curve.`));
-    if (!sample.repeatability) out.push(h("p", { class: "help" }, `Split-half markers absent: run traceback lab run ${sample.id12}.`));
+    if (!sample.repeatability) {
+      const recorded = (sample.stability || []).some((panel) =>
+        [panel.split_status?.A?.state, panel.split_status?.B?.state].some((state) => state && state !== "not_recorded"));
+      out.push(h("p", { class: "help" }, recorded
+        ? "Split halves were recorded, but no comparable pair is available."
+        : `Split-half markers absent: run traceback lab run ${sample.id12}.`));
+    }
     const grid = h("div", { class: "multiples" });
     const tableRows = [];
     for (const panel of sample.stability) {
