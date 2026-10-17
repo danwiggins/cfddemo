@@ -79,7 +79,7 @@ def add_run_parser(commands: Any, common: Callable[[argparse.ArgumentParser], No
     run.add_argument("--no-controls", dest="controls", action="store_false", help="skip the CNA spike and split halves")
     run.add_argument("--tf", default="0.03,0.10,0.30", metavar="TF,TF", help="synthetic CNA spike tumour fractions")
     run.add_argument("--skip-bad-chunks", action="store_true", help="exclude truncated chunks (provisional)")
-    run.add_argument("--sex", choices=("M", "F"), help="operator-declared sample sex for a read-time pre-analytic check")
+    run.add_argument("--sex", choices=("M", "F"), help="operator assertion for a pre-analytic comparison; not a diagnostic sex or gender determination")
     run.add_argument("--force", action="store_true", help="recompute every result")
     run.add_argument("--timeout-s", type=float, default=DEFAULT_TIMEOUT_S, metavar="S")
     run.add_argument("--threads", type=_threads, metavar="N", help="alignment threads (default min(8, cores-2))")

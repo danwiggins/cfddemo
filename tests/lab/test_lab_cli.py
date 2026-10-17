@@ -122,6 +122,14 @@ def test_signed_help_lists_lab(capsys) -> None:
     assert "lab" in capsys.readouterr().out
 
 
+def test_sex_flag_help_states_its_preanalytic_limit(capsys) -> None:
+    with pytest.raises(SystemExit):
+        signed_cli.main(["lab", "run", "--help"])
+    help_text = " ".join(capsys.readouterr().out.split())
+    assert "--sex {M,F}" in help_text
+    assert "not a diagnostic sex or gender determination" in help_text
+
+
 def _raised_codes() -> set[str]:
     codes: set[str] = set()
     for path in (REPO / "traceback_lab").rglob("*.py"):
