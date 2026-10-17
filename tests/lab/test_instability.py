@@ -222,3 +222,63 @@ def test_non_ok_copy_number_propagates_as_upstream_skip(tmp_path: Path) -> None:
     assert [(result.status, result.skip_reason) for result in results] == [
         ("skipped", "missing_asset"), ("skipped", "upstream"),
     ]
+
+
+def test_derived_copy_number_skip_overrides_seeded_parent_result(tmp_path: Path) -> None:
+    @dataclass
+    class SkippingCopyNumber(FakeCopyNumber):
+        def preflight(self, ctx: InputContext) -> Skip:
+            return Skip("missing_asset", "synthetic derived copy-number unavailable")
+
+    store = LabStore(tmp_path / "store")
+    store.ensure()
+    parent = StepResult("copy-number", "ok", True, "e" * 64, artifacts_dir=str(tmp_path))
+    target = RunTarget(
+        input_id="d" * 64, source_id="b" * 64, input_dir=tmp_path,
+        reference_id="hg38", reference_sha256="c" * 64, label="0.5",
+        eligible_reads=2_000_000, derived={"transform": "downsample", "fraction": 0.5},
+    )
+    results = run_plan(
+        store, None, store.run_log("r-20261016-1202-aaac"), target,
+        [PlanItem(SkippingCopyNumber("copy-number"), True), PlanItem(INSTABILITY, False)],
+        {"copy-number": "tests.lab.test_instability:FAKE_CN", "instability": "instability:INSTABILITY"},
+        run_id="r-20261016-1202-aaac", scrubber=Scrubber(root=store.root),
+        upstream_results={"copy-number": parent},
+    )
+    assert [(result.status, result.skip_reason) for result in results] == [
+        ("skipped", "missing_asset"), ("skipped", "upstream"),
+    ]
+    assert results[1].parameters_sha256 == execution_identity(
+        INSTABILITY, reference_sha256=target.reference_sha256,
+        upstream=[{"algorithm_id": "copy-number", "parameters_sha256": results[0].parameters_sha256}],
+    )
+    assert results[1].parameters_sha256 != execution_identity(
+        INSTABILITY, reference_sha256=target.reference_sha256,
+        upstream=[{"algorithm_id": "copy-number", "parameters_sha256": parent.parameters_sha256}],
+    )
+
+
+def test_null_instability_output_remains_uninterpretable_with_coverage_counts(tmp_path: Path) -> None:
+    selected = tmp_path / "copy-number" / "artifacts"
+    selected.mkdir(parents=True)
+    (selected / "cn_segments.json").write_text(json.dumps({"segments": [_segment(None, 2)]}))
+    ctx = InputContext(
+        root=tmp_path, source_id="a" * 64, input_id="b" * 64,
+        reference_id="hg38", reference_sha256="c" * 64, input_dir=tmp_path,
+        eligible_reads=2_000_000, extras={"upstream": {"copy-number": str(selected)}},
+    )
+    produced = INSTABILITY.run(ctx, tmp_path)
+    envelope = ResultEnvelope(
+        algorithm_id="instability", algorithm_version=INSTABILITY.version, status="ok",
+        provenance=provenance(tool="fixture", parameters_sha256="d" * 64,
+                              source_id=ctx.source_id, input_id=ctx.input_id, reference_id="hg38"),
+        metrics=produced.metrics,
+    )
+    interpreted = interpret_result(
+        envelope, load_library(), cohorts={"tmad": Cohort(values=[0.1] * 10)},
+    )
+    by_id = {item.metric_id: item for item in interpreted}
+    assert by_id["tmad"].value is None and by_id["tmad"].n == 0
+    assert by_id["tmad"].interpretation.state == "not_interpretable"
+    assert by_id["tmad"].interpretation.percentile is None
+    assert by_id["bins_missing_estimate"].value == 2
