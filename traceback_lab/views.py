@@ -216,8 +216,15 @@ def _split_half_status(view: InputView | None, algorithm_id: str, metric_id: str
         reason = envelope.skip_reason if envelope.status == "skipped" else "algorithm failed"
         return {"state": envelope.status, "reason": reason, "value": None, "deviation": None}
     current = _value(envelope, metric_id)
-    if current is None or not _numeric(current.value) or not math.isfinite(float(current.value)):
+    try:
+        current_finite = current is not None and _numeric(current.value) and math.isfinite(current.value)
+        full_finite = _numeric(full_value) and math.isfinite(full_value)
+    except OverflowError:
+        current_finite = full_finite = False
+    if not current_finite:
         return {"state": "not_interpretable", "reason": "metric value unavailable", "value": None, "deviation": None}
+    if not full_finite:
+        return {"state": "not_interpretable", "reason": "full-depth metric unavailable", "value": None, "deviation": None}
     difference, _ = deviation(spec, current.value, full_value, 0.5)
     return {"state": "ok", "reason": None, "value": current.value, "deviation": difference}
 

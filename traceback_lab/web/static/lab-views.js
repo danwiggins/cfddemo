@@ -548,8 +548,8 @@
           marks.push(svg("text", { x: x(p.fraction), y: hgt - 6, "text-anchor": "middle", class: "gap" }, (p.reason || p.state || "gap").toString().slice(0, 10)));
         }
       }
-      if (panel.split) {
-        for (const [dx, d] of [[-9, panel.split.deviation_a], [9, panel.split.deviation_b]]) {
+      if (unit !== "none") {
+        for (const [dx, d] of [[-9, panel.split_status?.A?.deviation], [9, panel.split_status?.B?.deviation]]) {
           if (!Number.isFinite(d)) continue;
           const clipped = unit !== "unit" && Math.abs(d) > clip;
           marks.push(svg("text", { x: x(0.5) + dx, y: y(d) + 4, "text-anchor": "middle", class: "split" }, clipped ? (d > 0 ? "⇡" : "⇣") : "○"));
@@ -562,17 +562,20 @@
         return `${part.state.replace(/_/g, " ")}${part.reason ? ` (${part.reason.replace(/_/g, " ")})` : ""}`;
       };
       const splitSummary = `split A ${halfStatus("A")}; split B ${halfStatus("B")}`;
+      const hasSplitHalf = Boolean(panel.split_status) &&
+        (panel.split_status.A?.state !== "not_recorded" || panel.split_status.B?.state !== "not_recorded");
       const splitVerdict = panel.split?.stable === true ? "stable" : panel.split?.stable === false ? "unstable" : "no split-half stability verdict";
       for (const f of fracs) marks.push(svg("text", { x: x(f), y: hgt - 18, "text-anchor": "middle", class: "axis" }, `${f * 100}%`));
       const scaleLabel = unit === "none" ? "no validated stability deviation scale" : unit === "unit" ? "the metric's unit" : "%";
-      const label = `${panel.label}: ${panel.verdict}. Deviation from full depth: ${scaleLabel}; ${splitSummary}; ${splitVerdict}.`;
+      const label = `${panel.label}: ${panel.verdict}. Deviation from full depth: ${scaleLabel}${hasSplitHalf ? `; ${splitSummary}; ${splitVerdict}` : ""}.`;
       grid.append(h("figure", { class: "multiple" }, h("figcaption", {}, h("strong", {}, panel.label), ` — ${panel.verdict}`),
-        svg("svg", { viewBox: `0 0 ${w} ${hgt}`, role: "img", "aria-label": label, class: "multiple-svg" }, svg("title", {}, label), ...marks),
+        unit === "none" ? "" : svg("svg", { viewBox: `0 0 ${w} ${hgt}`, role: "img", "aria-label": label, class: "multiple-svg" }, svg("title", {}, label), ...marks),
         h("p", { class: "help" }, unit === "none" ? "No validated stability deviation scale" : unit === "unit" ? "y: difference from full depth (metric's unit)" : "y: relative deviation from full depth, % (clipped ±50%)"),
-        splitVerdict !== "no split-half stability verdict" ? "" : h("p", { class: "help" }, `Split halves: ${splitSummary}. No split-half stability verdict.`)));
+        hasSplitHalf && splitVerdict === "no split-half stability verdict" ? h("p", { class: "help" }, `Split halves: ${splitSummary}. No split-half stability verdict.`) : ""));
       for (const p of panel.points) tableRows.push([panel.label, `${p.fraction * 100}%`, p.value, p.deviation, p.state || "—"]);
       if (panel.split) tableRows.push([panel.label, "split A / B", `${fmt(panel.split.a)} / ${fmt(panel.split.b)}`, `${(panel.split.relative_abs_diff * 100).toFixed(1)}% |A−B|`, splitVerdict]);
-      else tableRows.push([panel.label, "split A / B", `${fmt(panel.split_status?.A?.value)} / ${fmt(panel.split_status?.B?.value)}`, "—", splitSummary]);
+      else if (hasSplitHalf) tableRows.push([panel.label, "split A / B", `${fmt(panel.split_status?.A?.value)} / ${fmt(panel.split_status?.B?.value)}`,
+        `${fmt(panel.split_status?.A?.deviation)} / ${fmt(panel.split_status?.B?.deviation)}${unit === "percent" ? "%" : ""}`, splitSummary]);
     }
     out.push(grid, dataTable("Stability: every point", ["Metric", "Fraction", "Value", "Deviation", "State"], tableRows));
     const shown = new Set(sample.stability.map((p) => p.algorithm_id));
