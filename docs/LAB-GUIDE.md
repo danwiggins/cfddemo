@@ -267,16 +267,17 @@ traceback lab asset end-catalogues-register \
 traceback lab asset end-catalogues-inspect --root R
 ```
 
-The result measures raw `D−U` end counts in [−70, −50) bp and `U−D` in
-[50, 70) bp around pinned centers. It also reports the fraction of valid
+The result measures raw `D−U` end counts at integer offsets [−70, −50] bp
+and `U−D` at [50, 70] bp around pinned centers, using mirrored 21-position
+windows that span 20 bp on each side. It also reports the fraction of valid
 aligned ends exactly matching the pinned U/D site catalogue; this is a
 support count, not de novo site discovery or enrichment against a calibrated
 background. The raw count difference scales with depth, eligible-region count
 and end coverage; it is null when no aligned ends fall in its measurement
 windows or when either side of the center lacks window observations. The
 reported 10x minimum is an input gate, not a validated adequacy threshold.
-The stability setting is a provisional depth-scaled engineering comparison,
-not a biological acceptance interval. Both are ONT aligned-span proxies, not confirmed physical
+The score has no validated stability tolerance or biological acceptance
+interval. Both are ONT aligned-span proxies, not confirmed physical
 cleavage positions. The [OCF study](https://pubmed.ncbi.nlm.nih.gov/30808726/)
 used tissue-specific short-read open-chromatin signals, while the
 [size-tagged preferred-end study](https://www.pnas.org/doi/10.1073/pnas.1804134115)

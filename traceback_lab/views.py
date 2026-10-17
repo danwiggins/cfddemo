@@ -221,6 +221,8 @@ def cell_state(
         return {"state": "ok_usable", "value": metric.value}
     full_metric = _value(full.results.get(algorithm_id), metric_id)
     verdict = stable(entry.stability if entry else None, _side(metric, view.fraction), _side(full_metric, 1.0))
+    if verdict is None:
+        return {"state": "not_interpretable", "reason": "no_stability_verdict", "value": metric.value}
     return {
         "state": "ok_usable" if verdict else "ok_unstable",
         "value": metric.value,
@@ -291,7 +293,7 @@ def stability_panels(sample: SampleView, library: Library | None = None) -> list
         for metric in full_envelope.metrics:
             entry = library.entry(algorithm_id, metric.metric_id)
             spec = entry.stability if entry else None
-            if spec is None or not isinstance(metric.value, (int, float)) or isinstance(metric.value, bool):
+            if spec is None or spec.get("kind") == "unvalidated" or not isinstance(metric.value, (int, float)) or isinstance(metric.value, bool):
                 continue
             points = []
             for view in [*downs, sample.full]:

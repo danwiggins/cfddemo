@@ -10,6 +10,7 @@ import stat
 import tempfile
 from dataclasses import dataclass
 from pathlib import Path
+from urllib.parse import urlsplit
 
 import numpy as np
 
@@ -127,10 +128,22 @@ def _canonical(data: dict) -> bytes:
     return json.dumps(data, sort_keys=True, separators=(",", ":")).encode("utf-8")
 
 
-def _valid_source_label(label: object) -> bool:
-    return (isinstance(label, str) and bool(label) and len(label) <= 160
-            and label == label.strip() and not any(char in label for char in ("/", "\\"))
-            and all(ord(char) >= 32 for char in label))
+def _valid_source_label(label: object, *, identifier: bool = False) -> bool:
+    if (not isinstance(label, str) or not label or len(label) > 160 or label != label.strip()
+            or "\\" in label or any(ord(char) < 32 or 0x202a <= ord(char) <= 0x202e for char in label)):
+        return False
+    if "/" not in label:
+        return True
+    if not identifier:
+        return False
+    doi = label.removeprefix("doi:")
+    if re.fullmatch(r"10\.\d{4,9}/[^\s\\]+", doi):
+        return True
+    try:
+        parsed = urlsplit(label)
+        return parsed.scheme == "https" and bool(parsed.hostname) and not parsed.username and not parsed.password
+    except ValueError:
+        return False
 
 
 def _verified_bytes(data: dict) -> tuple[bytes, bytes]:
@@ -171,7 +184,7 @@ def _read_registration(root: Path) -> dict:
             raise ValueError
         if (any(not isinstance(data[key], str) or not Path(data[key]).is_absolute()
                 for key in ("centers_path", "preferred_path"))
-                or any(not _valid_source_label(data[key])
+                or any(not _valid_source_label(data[key], identifier=key != "source_label")
                        for key in ("source_label", "centers_source", "preferred_source"))
                 or not isinstance(data["terms"], str)
                 or data["terms"] not in {"known", "restricted", "unknown"}
@@ -203,8 +216,8 @@ def register_end_catalogues(
     root: Path, *, centers: Path, preferred: Path, source_label: str,
     centers_source: str, preferred_source: str, terms: str, license_id: str | None,
 ) -> EndCatalogues:
-    for label in (source_label, centers_source, preferred_source):
-        if not _valid_source_label(label):
+    for label, identifier in ((source_label, False), (centers_source, True), (preferred_source, True)):
+        if not _valid_source_label(label, identifier=identifier):
             raise EndCatalogueError("source labels must be short descriptions, not paths")
     if terms not in {"known", "restricted", "unknown"} or (terms == "known" and not license_id):
         raise EndCatalogueError("valid terms and license ID are required")

@@ -10,15 +10,17 @@ from pathlib import Path
 import numpy as np
 import pytest
 
-from traceback_lab.algorithms.aligned_end_structure import ALIGNED_END_STRUCTURE
+from traceback_lab.algorithms.aligned_end_structure import ALIGNED_END_STRUCTURE, _relative_counts
 from traceback_lab.cli import build_parser
 from traceback_lab import end_catalog_assets
 from traceback_lab.end_catalog_assets import EndCatalogueError, inspect_end_catalogues, register_end_catalogues
+from traceback_lab.interpretation.engine import load_library
 from traceback_lab.read_summary import COLUMNS, SCHEMA
 from traceback_lab.registry import InputContext, PlanItem, Ready, registry_entries
 from traceback_lab.runner import RunTarget, run_plan
 from traceback_lab.scrub import Scrubber
 from traceback_lab.store import LabStore, new_run_id
+from traceback_lab.stability import Side, band_at, stable
 
 
 def _catalogues(tmp_path: Path) -> tuple[Path, Path, Path]:
@@ -90,6 +92,25 @@ def test_exact_ocf_like_sign_and_preferred_end_support(tmp_path: Path) -> None:
     assert artifact["preferred_source"] == "synthetic-sites-v1"
     assert artifact["terms"] == "unknown"
     assert "no tissue-origin calibration" in artifact["interpretation"]
+
+
+def test_positive_direction_and_mirrored_window_boundaries(tmp_path: Path) -> None:
+    root, _, _ = _catalogues(tmp_path)
+    summary_parent = tmp_path / "read-summary"
+    _summary(summary_parent)
+    columns = summary_parent / "columns"
+    np.asarray([300, 560, 0], dtype=COLUMNS["start"]).tofile(columns / "start.bin")
+    np.asarray([441, 700, 121], dtype=COLUMNS["end"]).tofile(columns / "end.bin")
+    np.asarray([0, 0, 0x400], dtype=COLUMNS["flag"]).tofile(columns / "flag.bin")
+    output = ALIGNED_END_STRUCTURE.run(_context(root, summary_parent), tmp_path / "out")
+    metric = next(item for item in output.metrics if item["metric_id"] == "ocf_like_end_asymmetry")
+    assert metric["value"] == 2 and metric["n"] == 2
+    artifact = json.loads(output.artifacts["aligned_end_structure.json"])
+    assert artifact["ocf_like_left"] == artifact["ocf_like_right"] == 1
+
+    mirrored = _relative_counts(np.asarray([430, 450, 550, 570]), np.asarray([500]))
+    assert mirrored[30] == mirrored[50] == mirrored[150] == mirrored[170] == 1
+    assert mirrored[30:51].sum() == mirrored[150:171].sum() == 2
 
 
 def test_no_usable_catalogue_coordinates_are_unscorable_not_zero(tmp_path: Path) -> None:
@@ -244,6 +265,35 @@ def test_inspection_rejects_path_like_source_label_even_with_valid_self_hash(tmp
     registration.write_text(json.dumps(data), encoding="utf-8")
     with pytest.raises(EndCatalogueError, match="registration is invalid"):
         inspect_end_catalogues(root)
+
+
+def test_source_identifiers_accept_doi_and_https_without_local_paths(tmp_path: Path) -> None:
+    root, centers, preferred = _catalogues(tmp_path)
+    registered = register_end_catalogues(
+        root, centers=centers, preferred=preferred,
+        source_label="synthetic hg38 end catalogues",
+        centers_source="https://www.encodeproject.org/files/ENCFF123ABC/",
+        preferred_source="doi:10.1073/pnas.1804134115",
+        terms="unknown", license_id=None,
+    )
+    inspected = inspect_end_catalogues(root)
+    assert inspected.identity == registered.identity
+    assert inspected.centers_source.startswith("https://")
+    assert inspected.preferred_source == "doi:10.1073/pnas.1804134115"
+    with pytest.raises(EndCatalogueError, match="source labels"):
+        register_end_catalogues(
+            root, centers=centers, preferred=preferred,
+            source_label="synthetic hg38 end catalogues",
+            centers_source="/home/operator/peaks.bed", preferred_source="doi:10.1073/pnas.1804134115",
+            terms="unknown", license_id=None,
+        )
+
+
+def test_raw_ocf_proxy_has_no_unvalidated_stability_verdict() -> None:
+    entry = load_library().entry("aligned-end-structure", "ocf_like_end_asymmetry")
+    assert entry is not None and entry.stability == {"kind": "unvalidated"}
+    assert stable(entry.stability, Side(2, 100), Side(-2, 100)) is None
+    assert band_at(entry.stability, Side(2, 100), Side(-2, 100)) is None
 
 
 def test_reregistered_catalogue_cannot_run_under_old_execution_identity(tmp_path: Path) -> None:

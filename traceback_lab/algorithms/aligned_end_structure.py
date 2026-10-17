@@ -55,7 +55,7 @@ class AlignedEndStructure(Base):
     parameters: dict[str, Any] = field(default_factory=lambda: {
         "measurement": "ONT aligned-span end structure; exploratory",
         "min_observed_depth_x": MIN_DEPTH_X,
-        "ocf_like_windows": {"left": [-70, -50], "right": [50, 70], "coordinates": "half_open_offsets"},
+        "ocf_like_windows": {"left": [-70, -50], "right": [50, 70], "coordinates": "inclusive_integer_offsets"},
         "profile_offsets": [-RADIUS, RADIUS],
         "end_coordinates": "start_and_end_minus_one_0_based",
         "preferred_support": "exact_U_or_D_catalogue_coordinate_per_valid_end",
@@ -153,10 +153,10 @@ class AlignedEndStructure(Base):
                 u_hits += _site_hits(u, preferred_u_by_id.get(cid, np.empty(0, dtype=np.int64)))
                 d_hits += _site_hits(d, preferred_d_by_id.get(cid, np.empty(0, dtype=np.int64)))
         # Original OCF direction; these are ONT aligned-end proxies, so use an explicit OCF-like name.
-        left = int((d_counts[30:50] - u_counts[30:50]).sum())
-        right = int((u_counts[150:170] - d_counts[150:170]).sum())
-        left_ends = int(u_counts[30:50].sum() + d_counts[30:50].sum())
-        right_ends = int(u_counts[150:170].sum() + d_counts[150:170].sum())
+        left = int((d_counts[30:51] - u_counts[30:51]).sum())
+        right = int((u_counts[150:171] - d_counts[150:171]).sum())
+        left_ends = int(u_counts[30:51].sum() + d_counts[30:51].sum())
+        right_ends = int(u_counts[150:171].sum() + d_counts[150:171].sum())
         measurement_ends = left_ends + right_ends
         ocf_like = left + right if valid_centers and left_ends and right_ends else None
         ends_total = 2 * valid_molecules
@@ -186,7 +186,7 @@ class AlignedEndStructure(Base):
             metrics=[
                 metric("ocf_like_end_asymmetry", ocf_like, unit="end-count difference", n=measurement_ends),
                 metric("preferred_end_support_fraction", ratio(u_hits + d_hits, ends_total)
-                       if valid_preferred_sites else None,
+                       if valid_preferred_sites and ends_total else None,
                        unit="fraction", n=ends_total),
             ],
             panels=[{"panel_id": "aligned-end-structure", "kind": "density",
