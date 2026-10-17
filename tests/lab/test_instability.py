@@ -201,6 +201,28 @@ def test_derived_runs_use_their_own_copy_number_artifacts(tmp_path: Path, monkey
         assert run.results[0].artifacts_dir != full[0].artifacts_dir
 
 
+def test_algorithm_run_records_resource_measurements(tmp_path: Path) -> None:
+    store = LabStore(tmp_path / "store")
+    store.ensure()
+    log = store.run_log("r-20261016-1200-aaab")
+    target = RunTarget(
+        input_id="a" * 64, source_id="b" * 64, input_dir=tmp_path,
+        reference_id="hg38", reference_sha256="c" * 64, eligible_reads=2_000_000,
+    )
+    result = run_plan(
+        store, None, log, target, [PlanItem(FAKE_CN, False)],
+        {"copy-number": "tests.lab.test_instability:FAKE_CN"},
+        run_id=log.run_id, scrubber=Scrubber(root=store.root),
+    )[0]
+    assert result.status == "ok"
+    assert result.peak_rss_bytes is not None and result.peak_rss_bytes > 0
+    assert result.peak_disk_bytes is not None and result.peak_disk_bytes > 0
+    assert result.public()["peak_disk_bytes"] == result.peak_disk_bytes
+    step = next(event for event in log.events() if event["event"] == "step_end")
+    assert step["peak_rss_bytes"] == result.peak_rss_bytes
+    assert step["peak_disk_bytes"] == result.peak_disk_bytes
+
+
 def test_non_ok_copy_number_propagates_as_upstream_skip(tmp_path: Path) -> None:
     @dataclass
     class SkippingCopyNumber(FakeCopyNumber):

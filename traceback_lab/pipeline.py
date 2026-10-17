@@ -35,6 +35,7 @@ from .scrub import BoundedStderr, Scrubber
 GRACE_S = 5.0
 POLL_S = 0.02
 DISK_SAMPLE_S = 2.0
+RSS_SAMPLE_S = 0.2
 
 
 @dataclass(frozen=True)
@@ -63,6 +64,7 @@ class PipelineResult:
     stages: list[StageOutcome]
     duration_s: float
     peak_disk_bytes: int | None
+    sampled_tree_peak_rss_bytes: int | None = None
     timed_out: bool = False
     interrupted: bool = False
 
@@ -98,6 +100,8 @@ class PipelineResult:
     @property
     def peak_rss_bytes(self) -> int | None:
         values = [stage.peak_rss_bytes for stage in self.stages if stage.peak_rss_bytes]
+        if self.sampled_tree_peak_rss_bytes:
+            values.append(self.sampled_tree_peak_rss_bytes)
         return max(values) if values else None
 
     def first_line(self, scrubber: Scrubber) -> str:
@@ -142,6 +146,44 @@ def directory_bytes(path: Path) -> int:
         except OSError:
             continue
     return total
+
+
+def _process_tree_rss_bytes(root_pid: int) -> int | None:
+    """Sample worker memory plus its descendants, including new sessions.
+
+    wait4 covers direct children only; signed native tools can leave the
+    worker's process group. /proc is Linux-specific, so other hosts retain
+    the direct-child wait4 measurement.
+    """
+
+    proc = Path("/proc")
+    if not proc.is_dir():
+        return None
+    processes: dict[int, tuple[int, int]] = {}
+    for entry in proc.iterdir():
+        if not entry.name.isdecimal():
+            continue
+        try:
+            stat = (entry / "stat").read_text()
+            fields = stat[stat.rfind(")") + 2 :].split()
+            processes[int(entry.name)] = (int(fields[1]), int(fields[2]))
+        except (OSError, ValueError, IndexError):
+            continue
+    included = {root_pid}
+    while True:
+        children = {pid for pid, (ppid, _pgid) in processes.items() if ppid in included}
+        expanded = included | children
+        if expanded == included:
+            break
+        included = expanded
+    included.update(pid for pid, (_ppid, pgid) in processes.items() if pgid == root_pid)
+    resident_pages = 0
+    for pid in included:
+        try:
+            resident_pages += int((proc / str(pid) / "statm").read_text().split()[1])
+        except (OSError, ValueError, IndexError):
+            continue
+    return resident_pages * os.sysconf("SC_PAGE_SIZE")
 
 
 def _pump(stream: IO[bytes], buffer: BoundedStderr, echo: Callable[[str], None] | None) -> None:
@@ -224,6 +266,7 @@ def run_pipeline(
     stdout_path: Path | None = None,
     echo: Callable[[str], None] | None = None,
     disk_path: Path | None = None,
+    disk_usage: Callable[[], int] | None = None,
     on_tick: Callable[[float], None] | None = None,
 ) -> PipelineResult:
     """Run ``stages`` as one pipeline in one process group.
@@ -244,6 +287,7 @@ def run_pipeline(
     timed_out = False
     interrupted = False
     peak_disk: int | None = None
+    peak_tree_rss: int | None = None
     sink: IO[bytes] | None = None
     leader: subprocess.Popen[bytes] | None = None
     try:
@@ -281,6 +325,7 @@ def run_pipeline(
         assert leader is not None
         deadline = started + timeout_s
         next_disk = 0.0
+        next_rss = 0.0
         while any(process.returncode is None for process in processes):
             failed = False
             for position in range(len(processes)):
@@ -291,8 +336,13 @@ def run_pipeline(
                 _terminate(leader, processes, outcomes)
                 break
             now = time.monotonic()
-            if disk_path is not None and now >= next_disk:
-                size = directory_bytes(disk_path)
+            if now >= next_rss:
+                rss = _process_tree_rss_bytes(leader.pid)
+                if rss is not None:
+                    peak_tree_rss = rss if peak_tree_rss is None else max(peak_tree_rss, rss)
+                next_rss = now + RSS_SAMPLE_S
+            if (disk_path is not None or disk_usage is not None) and now >= next_disk:
+                size = disk_usage() if disk_usage is not None else directory_bytes(disk_path)
                 peak_disk = size if peak_disk is None else max(peak_disk, size)
                 next_disk = now + DISK_SAMPLE_S
             if on_tick is not None:
@@ -321,13 +371,14 @@ def run_pipeline(
             thread.join(timeout=5)
         if sink is not None:
             sink.close()
-    if disk_path is not None:
-        size = directory_bytes(disk_path)
+    if disk_path is not None or disk_usage is not None:
+        size = disk_usage() if disk_usage is not None else directory_bytes(disk_path)
         peak_disk = size if peak_disk is None else max(peak_disk, size)
     return PipelineResult(
         stages=outcomes,
         duration_s=time.monotonic() - started,
         peak_disk_bytes=peak_disk,
+        sampled_tree_peak_rss_bytes=peak_tree_rss,
         timed_out=timed_out,
         interrupted=interrupted,
     )

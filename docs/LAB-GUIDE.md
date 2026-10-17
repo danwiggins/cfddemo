@@ -78,8 +78,8 @@ traceback lab run (<BAM|uBAM|chunk dir>... | <id12> | latest | --example)
     [--skip-bad-chunks] [--sex M|F] [--force] [--timeout-s 3600]
     [--threads N] [--sort-mem 1G] [--mmi PATH]
     [--dry-run] [--verbose] [--json] [--root R]
-traceback lab simulate cna <id12|latest> [--tf 0.03,0.10,0.30]   synthetic CNA spike, copy-number recovery
-traceback lab simulate split <id12|latest>                         split-half pseudo-replicate
+  traceback lab simulate cna <id12|latest> [--tf 0.03,0.10,0.30] [--verbose]   synthetic CNA spike, copy-number recovery
+  traceback lab simulate split <id12|latest> [--verbose]                         split-half pseudo-replicate
 traceback lab algorithms [--json]          registered algorithms (id, tier, min depth, licenses, footnote)
 traceback lab doctor [--json]              setup checks, each with a fix command
 traceback lab serve [--open]               the local page (loopback only)
@@ -189,6 +189,11 @@ and exits 6. Completed results are kept; rerun the same command.
 `traceback.cli-result.v2` object and progress goes to stderr. `--verbose`
 streams each tool's raw stderr to your terminal; only scrubbed stderr (paths,
 ROOT, home, login and chunk names redacted) is ever stored.
+
+  Each executed algorithm reports peak resident memory and sampled peak
+  scratch-disk bytes in its step result and run log. Disk includes temporary
+  `lab/tmp/microbial-*` work created during that step. These sampled values
+  can miss brief peaks; cached and skipped steps have no new measurement.
 
 ## Algorithms
 

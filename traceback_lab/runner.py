@@ -23,7 +23,7 @@ from typing import Any
 from traceback_runner.serialization import canonical_json_bytes
 
 from .envelope import Depth, Failure, ResultEnvelope, provenance
-from .pipeline import Stage, run_pipeline
+from .pipeline import Stage, directory_bytes, run_pipeline
 from .registry import (
     Algorithm,
     InputContext,
@@ -50,6 +50,7 @@ class StepResult:
     first_line: str | None = None
     duration_s: float | None = None
     peak_rss_bytes: int | None = None
+    peak_disk_bytes: int | None = None
     cached: bool = False
     input_label: str = "full"
     artifacts_dir: str | None = None
@@ -65,6 +66,7 @@ class StepResult:
             "first_line": self.first_line,
             "duration_s": self.duration_s,
             "peak_rss_bytes": self.peak_rss_bytes,
+            "peak_disk_bytes": self.peak_disk_bytes,
             "cached": self.cached,
             "input": self.input_label,
         }
@@ -306,6 +308,18 @@ def run_plan(
                 {"entry": entries[algorithm.id], "context": context_to_json(ctx), "out_dir": str(scratch)}
             )
         )
+        microbial_root = store.lab / "tmp"
+
+        def microbial_bytes() -> int:
+            return sum(directory_bytes(path) for path in microbial_root.glob("microbial-*") if path.is_dir())
+
+        microbial_before = microbial_bytes()
+
+        def step_disk_bytes() -> int:
+            # Microbial workers may use a sibling of this algorithm's scratch.
+            # Only growth during this step is attributed to it.
+            return directory_bytes(scratch) + max(0, microbial_bytes() - microbial_before)
+
         try:
             outcome = run_pipeline(
                 [Stage("worker", [sys.executable, "-m", "traceback_lab.worker", str(request)])],
@@ -313,6 +327,7 @@ def run_plan(
                 env=_worker_env(),
                 cwd=scratch,
                 echo=echo,
+                disk_usage=step_disk_bytes,
             )
             if outcome.ok:
                 try:
@@ -340,6 +355,7 @@ def run_plan(
                         first_line=scrubber.line(f"invalid output: {type(exc).__name__}: {exc}"),
                         tail=[], exit_code=0, timed_out=False,
                         duration_s=outcome.duration_s, peak_rss=outcome.peak_rss_bytes,
+                        peak_disk=outcome.peak_disk_bytes,
                     )
                 else:
                     attempt = store.publish_result(
@@ -354,6 +370,7 @@ def run_plan(
                         status="ok",
                         duration_s=round(outcome.duration_s, 3),
                         peak_rss_bytes=outcome.peak_rss_bytes,
+                        peak_disk_bytes=outcome.peak_disk_bytes,
                         parameters_sha256=identity,
                         tool_versions={tool.name: tool.version for tool in algorithm.tools},
                     )
@@ -364,6 +381,7 @@ def run_plan(
                         identity,
                         duration_s=outcome.duration_s,
                         peak_rss_bytes=outcome.peak_rss_bytes,
+                        peak_disk_bytes=outcome.peak_disk_bytes,
                         input_label=target.label,
                         input_id=target.input_id,
                         attempt_id=attempt,
@@ -379,6 +397,7 @@ def run_plan(
                     first_line=scrubber.line(first), tail=tail, exit_code=stage.returncode,
                     timed_out=outcome.timed_out, duration_s=outcome.duration_s,
                     peak_rss=outcome.peak_rss_bytes,
+                    peak_disk=outcome.peak_disk_bytes,
                 )
         finally:
             shutil.rmtree(scratch, ignore_errors=True)
@@ -439,6 +458,7 @@ def _publish_failure(
     timed_out: bool,
     duration_s: float,
     peak_rss: int | None,
+    peak_disk: int | None = None,
 ) -> StepResult:
     failure = Failure(
         first_line=first_line[:300] or "failed",
@@ -457,6 +477,7 @@ def _publish_failure(
         first_line=failure.first_line,
         duration_s=round(duration_s, 3),
         peak_rss_bytes=peak_rss,
+        peak_disk_bytes=peak_disk,
         timed_out=timed_out,
         parameters_sha256=identity,
     )
@@ -468,6 +489,7 @@ def _publish_failure(
         first_line=failure.first_line,
         duration_s=duration_s,
         peak_rss_bytes=peak_rss,
+        peak_disk_bytes=peak_disk,
         input_label=target.label,
         input_id=target.input_id,
         attempt_id=attempt,

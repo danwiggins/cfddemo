@@ -111,6 +111,44 @@ def test_disk_sampling(tmp_path: Path) -> None:
     result = run_pipeline([Stage("write", [PY, "-c", script])], timeout_s=30, disk_path=target)
     assert result.peak_disk_bytes is not None and result.peak_disk_bytes >= 2_000_000
 
+
+def test_disk_sampler_includes_sibling_scratch(tmp_path: Path) -> None:
+    scratch = tmp_path / "algorithm"
+    sibling = tmp_path / "microbial-run"
+    scratch.mkdir()
+    sibling.mkdir()
+    script = f"open({str(sibling / 'blob')!r}, 'wb').write(b'x' * 2_000_000)"
+    from traceback_lab.pipeline import directory_bytes
+
+    result = run_pipeline(
+        [Stage("write", [PY, "-c", script])], timeout_s=30,
+        disk_usage=lambda: directory_bytes(scratch) + directory_bytes(sibling),
+    )
+    assert result.peak_disk_bytes is not None and result.peak_disk_bytes >= 2_000_000
+
+
+def test_simulate_commands_accept_verbose() -> None:
+    from traceback_lab.cli import build_parser
+
+    for kind in ("cna", "split"):
+        args = build_parser().parse_args(["simulate", kind, "latest", "--verbose"])
+        assert args.verbose is True
+
+
+@pytest.mark.skipif(not Path("/proc").is_dir(), reason="Linux process-group RSS sampler")
+def test_group_rss_includes_grandchild(tmp_path: Path) -> None:
+    script = (
+        "import subprocess, sys, time\n"
+        "child = subprocess.Popen([sys.executable, '-c', "
+        "'import time; blob = bytearray(40_000_000); "
+        "blob[:] = b\"x\" * len(blob); time.sleep(1)'], start_new_session=True)\n"
+        "child.wait()\n"
+    )
+    result = run_pipeline([Stage("parent", [PY, "-c", script])], timeout_s=30)
+    assert result.ok
+    assert result.sampled_tree_peak_rss_bytes is not None
+    assert result.sampled_tree_peak_rss_bytes >= 40_000_000
+
 def test_upstream_independent_failure_wins_despite_reversed_reap_times() -> None:
     """Observed reap times cannot prove which stage exited first."""
 
