@@ -16,6 +16,7 @@ import sys
 import textwrap
 import time
 from pathlib import Path
+from types import SimpleNamespace
 
 import pysam
 import pytest
@@ -354,6 +355,7 @@ def test_stored_dry_run_uses_selected_depth_without_writing(
 
     with store.writer("other", "r-20261017-1200-aaab"):
         before = snapshot()
+        monkeypatch.setattr(run_module.shutil, "disk_usage", lambda _root: SimpleNamespace(free=3 * 1024**3))
         code, payload = _json(
             capsys, "run", "latest", "--root", str(root),
             "--only", "delfi-ratio", "--dry-run",
@@ -366,8 +368,27 @@ def test_stored_dry_run_uses_selected_depth_without_writing(
             capsys, "run", "latest", "--root", str(root),
             "--only", "delfi-ratio", "--dry-run", "--force",
         )
+        unavailable = []
+        for selected in (None, SimpleNamespace(status="failed", metrics=[])):
+            with monkeypatch.context() as patch:
+                patch.setattr(LabStore, "read_result", lambda _store, *_args: selected)
+                missing_code, missing = _json(
+                    capsys, "run", "latest", "--root", str(root),
+                    "--only", "delfi-ratio", "--dry-run",
+                )
+                assert missing_code == 0
+                unavailable.append(missing["data"])
+        with monkeypatch.context() as patch:
+            selected = SimpleNamespace(
+                status="ok", metrics=[SimpleNamespace(metric_id="eligible_reads", value=2_000_000)],
+            )
+            patch.setattr(LabStore, "read_result", lambda _store, *_args: selected)
+            met_code, met = _json(
+                capsys, "run", "latest", "--root", str(root),
+                "--only", "delfi-ratio", "--dry-run",
+            )
         assert snapshot() == before
-    assert code == human_code == forced_code == 0
+    assert code == human_code == forced_code == met_code == 0
     data = payload["data"]
     assert data["sample"]["id12"] == first["data"]["sample"]["id12"]
     assert data["sample"]["input_id"] == first["data"]["sample"]["input_id"]
@@ -375,6 +396,8 @@ def test_stored_dry_run_uses_selected_depth_without_writing(
     assert data["chunks"]["count"] == 3 and data["chunks"]["bytes"] > 0
     assert data["alignment"] == "reused (stored sample)"
     assert data["budget"]["required_bytes"] == 0
+    assert data["budget"]["free_bytes"] == 3 * 1024**3
+    assert data["budget"]["analysis_scratch"] == "not predicted"
     assert data["eligible_reads"] < 1_000_000
     assert data["plan"] == [
         {"algorithm_id": "read-summary", "upstream": True, "decision": "reused (selected result)"},
@@ -387,8 +410,14 @@ def test_stored_dry_run_uses_selected_depth_without_writing(
     assert "REFERENCE synth" in human
     assert "3 stored chunk(s)" in human
     assert "will skip (below eligible-read minimum)" in human
+    assert "has 3.0 GB (reused)" in human
+    assert "ANALYSIS  scratch disk not predicted" in human
     assert "eligible_reads" not in forced["data"]
     assert all(row["decision"] == "decided at run time" for row in forced["data"]["plan"])
+    for missing in unavailable:
+        assert "eligible_reads" not in missing
+        assert all(row["decision"] == "decided at run time" for row in missing["plan"])
+    assert met["data"]["plan"][1]["decision"] == "depth minimum met; other checks at run time"
 
 
 def test_second_writer_is_refused(lab_world, capsys, monkeypatch) -> None:

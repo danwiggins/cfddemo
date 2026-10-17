@@ -182,6 +182,8 @@ resolved ROOT and reference, chunk count and bytes, whether alignment is
 needed or reused, the ingest/alignment disk budget against free space and the
 plan. For a stored sample, a selected read-summary can show eligible depth and
 known minimum-depth skips; other adapter checks remain decisions for the run.
+The stored-sample zero budget covers reused ingest and alignment only; dry run
+does not predict analysis scratch requirements.
 
 **Interruption.** Ctrl-C (or SIGTERM) stops the current step, kills its tools
 and exits 6. Completed results are kept; rerun the same command.

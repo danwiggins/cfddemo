@@ -287,6 +287,7 @@ def _dry_run(args: argparse.Namespace, store: LabStore, progress: Callable[[str]
             "free_bytes": shutil.disk_usage(store.root).free,
             "parts": {},
             "scope": "ingest and alignment (reused)",
+            "analysis_scratch": "not predicted",
         }
         lines.append(f"SAMPLE    {id12_for(store, source_id)} (stored)")
         lines.append(f"REFERENCE {data['reference_id']}")
@@ -294,6 +295,7 @@ def _dry_run(args: argparse.Namespace, store: LabStore, progress: Callable[[str]
             lines.append(f"INPUT     {data['chunks']['count']} stored chunk(s) · {data['chunks']['bytes'] / GIB:.2f} GB")
         lines.append("ALIGN     reused (stored sample)")
         lines.append(f"DISK      ingest/align needs 0 GB, has {data['budget']['free_bytes'] / GIB:.1f} GB (reused)")
+        lines.append("ANALYSIS  scratch disk not predicted")
         summary = next((item.algorithm for item in items if item.algorithm.id == "read-summary"), None)
         if summary is not None and not args.force:
             identity = execution_identity(summary, reference_sha256=aligned.manifest["reference_sha256"])
