@@ -31,6 +31,7 @@ class EpiClock(MethBase):
     requires: Requirements = field(default_factory=lambda: Requirements(mm_tags=True, min_eligible_reads=5_000_000))
     parameters: dict[str, Any] = field(default_factory=lambda: {
         "model": "Weidner-3", "coefficient_asset_sha256": COEFFICIENTS_SHA256,
+        "intercept": WEIDNER_INTERCEPT, "weights": WEIDNER_WEIGHTS,
         "call": "argmax_5mc_plus_5hmc", "min_calls_per_site": MIN_SITE_CALLS,
     })
 
@@ -54,6 +55,8 @@ class EpiClock(MethBase):
 
         try:
             model = inspect_map(LabStore(ctx.root))
+            if any(chrom not in lengths for _, chrom, _ in model.sites):
+                return Skip("reference", "Weidner probe chromosome is absent from the aligned input")
             if model.sha256 not in ctx.extras.get("planned_asset_sha256s", ()):
                 return Skip("missing_asset", "Weidner map changed after execution identity was planned")
             reference = ctx.extras.get("reference_fasta")
@@ -77,6 +80,10 @@ class EpiClock(MethBase):
             raise RuntimeError("Weidner map changed after execution identity was planned")
         calls, mask = load_calls(ctx)
         summary, _ = load_summary(ctx)
+        lengths = dict(zip(summary.contigs, summary.lengths))
+        if lengths.get("chr1") != HG38_CHR1_LENGTH or any(
+                chrom not in lengths for _, chrom, _ in model.sites):
+            raise RuntimeError("Weidner BAM reference layout changed after preflight")
         counts = np.zeros(3, dtype=np.int64)
         modified = np.zeros(3, dtype=np.int64)
         positions = [(summary.contigs.index(chrom), pos0) for _, chrom, pos0 in model.sites]

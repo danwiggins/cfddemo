@@ -19,9 +19,22 @@ from traceback_lab.epi_clock_model import ClockModelError, WEIDNER_SITES, _parse
 from traceback_lab.meth_calls import DTYPE, HAS_H, HAS_M
 from traceback_lab.registry import InputContext
 from traceback_lab.registry import Ready, Skip, context_to_json
+from traceback_lab.registry import execution_identity
 from traceback_lab.store import LabStore
 
 from .bam_fixtures import Read, context_for
+
+
+def test_clock_identity_pins_literal_coefficients() -> None:
+    from traceback_lab.interpretation.engine import load_library
+
+    algorithm = epi_clock.EPI_CLOCK
+    assert algorithm.parameters["weights"] == epi_clock.WEIDNER_WEIGHTS
+    original = execution_identity(algorithm, reference_sha256="a" * 64)
+    changed = replace(algorithm, parameters={**algorithm.parameters, "weights": (0.0, 0.0, 0.0)})
+    assert execution_identity(changed, reference_sha256="a" * 64) != original
+    assert load_library().entry("epi-clock", "epigenetic_age_years").stability == {
+        "kind": "absolute", "tolerance": 1.0}
 
 
 def _map_bytes() -> bytes:
@@ -64,7 +77,8 @@ def test_clock_map_rejects_incompatible_coordinates(change: dict) -> None:
 def test_clock_requires_all_three_sites_and_uses_published_coefficients(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
     model = _parse(_map_bytes(), "a" * 64)
     monkeypatch.setattr(epi_clock, "inspect_map", lambda store: model)
-    monkeypatch.setattr(epi_clock, "load_summary", lambda ctx: (SimpleNamespace(contigs=["chr1"]), None))
+    monkeypatch.setattr(epi_clock, "load_summary", lambda ctx: (
+        SimpleNamespace(contigs=["chr1"], lengths=[epi_clock.HG38_CHR1_LENGTH]), None))
     rows = np.zeros(15, dtype=DTYPE)
     rows["channels"] = HAS_M
     rows["ref_pos0"] = np.repeat([100, 110, 120], 5)
@@ -108,6 +122,23 @@ def test_clock_preflight_hides_reference_path_on_fasta_error(monkeypatch: pytest
     decision = epi_clock.EPI_CLOCK.preflight(ctx)
     assert isinstance(decision, Skip)
     assert str(secret) not in decision.message
+
+
+def test_clock_skips_when_probe_chromosome_is_absent_from_bam(monkeypatch, tmp_path: Path) -> None:
+    model = _parse(_map_bytes(), "a" * 64)
+    model = replace(model, sites=(model.sites[0], model.sites[1],
+                                  (model.sites[2][0], "chr19", model.sites[2][2])))
+    monkeypatch.setattr(epi_clock.MethBase, "preflight", lambda self, ctx: Ready())
+    monkeypatch.setattr(epi_clock, "inspect_map", lambda store: model)
+    monkeypatch.setattr(epi_clock, "load_summary", lambda ctx: (
+        SimpleNamespace(contigs=["chr1"], lengths=[epi_clock.HG38_CHR1_LENGTH]), None))
+    ctx = InputContext(tmp_path, "s", "i", "hg38", "a" * 64, tmp_path,
+                       eligible_reads=5_000_000,
+                       extras={"planned_asset_sha256s": [model.sha256]})
+    assert epi_clock.EPI_CLOCK.preflight(ctx).reason_code == "reference"
+    monkeypatch.setattr(epi_clock, "load_calls", lambda ctx: (SimpleNamespace(chunks=lambda mask: iter(())), None))
+    with pytest.raises(RuntimeError, match="BAM reference layout"):
+        epi_clock.EPI_CLOCK.run(ctx, tmp_path)
 
 
 def test_clock_preflight_and_worker_with_real_call_store(tmp_path: Path) -> None:

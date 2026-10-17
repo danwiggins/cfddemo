@@ -2685,6 +2685,7 @@ entries:
     reference: {kind: none}
     performance: null
     performance_missing_reason: "No matched cfDNA ONT reference"
+    missing_value_caption: "Fewer than five eligible calls at this CpG."
     headline: false
     citations: []
 
@@ -2696,6 +2697,7 @@ entries:
     reference: {kind: none}
     performance: null
     performance_missing_reason: "No matched cfDNA ONT reference"
+    missing_value_caption: "Fewer than five eligible calls at this CpG."
     headline: false
     citations: []
 
@@ -2707,5 +2709,6 @@ entries:
     reference: {kind: none}
     performance: null
     performance_missing_reason: "No matched cfDNA ONT reference"
+    missing_value_caption: "Fewer than five eligible calls at this CpG."
     headline: false
     citations: []

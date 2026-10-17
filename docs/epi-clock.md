@@ -26,8 +26,9 @@ liftover. The JSON file must be at most 8 KiB, with exactly these fields:
 }
 ```
 
-The zero values above are **placeholders, not probe coordinates**. Supply the
-actual zero-based position of the forward-reference C for each probe. Only
+The chromosome names and zero positions above are **placeholders, not probe
+coordinates**. Supply the actual chromosome and zero-based position of the
+forward-reference C for each probe. Only
 autosomes are accepted. The registration checks structure, unique positions,
 and exact bytes; at run time the adapter checks the registered reference FASTA
 for `CG` at all three positions. Those checks cannot establish that a probe ID
