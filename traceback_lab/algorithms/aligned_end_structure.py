@@ -207,6 +207,7 @@ class AlignedEndStructure(Base):
             "depth_basis": "selected_read_summary" if selection is not None else "run_target",
             "derived_selection": selection,
             "interpretation": "ONT aligned-span proxy; exploratory; no tissue-origin calibration",
+            "ocf_like_windows": self.parameters["ocf_like_windows"],
             "offset_bp": list(range(-RADIUS, RADIUS + 1)),
             "u_count": u_counts.tolist(), "d_count": d_counts.tolist(),
             "ocf_like_left": left, "ocf_like_right": right,

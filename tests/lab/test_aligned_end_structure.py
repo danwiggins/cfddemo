@@ -82,6 +82,9 @@ def test_exact_ocf_like_sign_and_preferred_end_support(tmp_path: Path) -> None:
     artifact = json.loads(output.artifacts["aligned_end_structure.json"])
     assert artifact["u_count"][40] == 1 and artifact["d_count"][160] == 1
     assert artifact["ocf_like_left"] == -1 and artifact["ocf_like_right"] == -1
+    assert artifact["ocf_like_windows"] == {
+        "left": [-70, -50], "right": [50, 70], "coordinates": "inclusive_integer_offsets",
+    }
     assert artifact["ocf_like_measurement_ends"] == 2
     assert artifact["ocf_like_left_ends"] == artifact["ocf_like_right_ends"] == 1
     assert artifact["valid_molecules"] == 1 and artifact["preferred_u_hits"] == 1
