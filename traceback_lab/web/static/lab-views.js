@@ -753,13 +753,46 @@
     } else {
       const slot = h("div", {}, h("p", {}, "Loading…"));
       const short = a.metrics.find((m) => m.metric_id === "short_fraction_lt150");
-      section.append(h("p", { class: "help" }, `No size-density cohort band yet; 167 bp marked. Short-fragment reference: ${cohortReadiness(sample, short ? [short] : [])}.`), ...context(sample, "fragment-size", seen), slot);
+      const band = sample.size_density_band || { state: "no_pinned_band", eligible_n: 0, excluded: {} };
+      const exclusions = Object.entries(band.excluded || {}).map(([reason, n]) => `${reason.replace(/_/g, " ")} ${n}`).join(" · ");
+      const bandStatus = band.state === "ready"
+        ? `Observed cohort density min–max (n=${band.eligible_n}); descriptive, not a reference interval.`
+        : band.state === "no_eligible_vectors"
+            ? "No cohort density band: no eligible pinned size histograms. Inspect the exclusions and source histograms."
+          : band.state === "cohort_too_small"
+            ? `No cohort density band: ${band.eligible_n} eligible vectors of 10 needed.`
+            : `No cohort density band (${String(band.state).replace(/_/g, " ")}).`;
+      section.append(h("p", { class: "help" }, `${bandStatus} ${exclusions ? `Exclusions: ${exclusions}. ` : ""}167 bp marked. Short-fragment reference: ${cohortReadiness(sample, short ? [short] : [])}.`), ...context(sample, "fragment-size", seen), slot);
       artifact(sample, "fragment-size", "size-density").then((data) => {
-        const points = data.span_bp.map((x, i) => [x, data.count[i]]).filter((p) => p[0] >= 50 && p[0] <= 700);
-        slot.replaceWith(chart("Aligned-span density, 50 to 700 bp, with 167 bp marked.", {
-          grid: { left: 60, right: 20, top: 20, bottom: 40 }, xAxis: { type: "value", name: "bp", min: 50, max: 700 }, yAxis: { type: "value", name: "molecules" },
-          series: [{ type: "line", showSymbol: false, data: points, lineStyle: { color: "#1f5f8b" }, markLine: { symbol: "none", data: [{ xAxis: 167, label: { formatter: "167 bp" } }] } }],
-        }, dataTable("Molecules by aligned span (bp)", ["Span (bp)", "Molecules"], points)));
+        if (!Array.isArray(data.span_bp) || !Array.isArray(data.count) || data.span_bp.length !== 1000 ||
+            data.count.length !== 1000 || data.span_bp.some((bp, i) => bp !== i + 1) ||
+            data.count.some((count) => !Number.isSafeInteger(count) || count < 0)) throw new Error("size histogram invalid");
+        const denominator = data.count.slice(49).reduce((total, count) => total + count, 0);
+        if (!Number.isSafeInteger(denominator) || denominator === 0) throw new Error("no eligible 50–1000 bp molecules");
+        const spans = data.span_bp.slice(49, 700);
+        const sampleDensity = data.count.slice(49, 700).map((count) => count / denominator);
+        const ready = band.state === "ready" && Array.isArray(band.span_bp) &&
+          band.span_bp.length === spans.length && band.span_bp.every((bp, i) => bp === spans[i]) &&
+          Array.isArray(band.low) && Array.isArray(band.high) &&
+          band.low.length === spans.length && band.high.length === spans.length &&
+          band.low.every((v, i) => Number.isFinite(v) && v >= 0 && Number.isFinite(band.high[i]) && band.high[i] >= v);
+        if (band.state === "ready" && !ready) throw new Error("cohort density band invalid");
+        const series = ready ? [
+          { type: "line", name: "Observed minimum", stack: "band", showSymbol: false, data: band.low,
+            lineStyle: { opacity: 0 }, areaStyle: { opacity: 0 } },
+          { type: "line", name: "Observed min–max", stack: "band", showSymbol: false,
+            data: band.high.map((high, i) => high - band.low[i]),
+            lineStyle: { opacity: 0 }, areaStyle: { color: "#9eb9c9", opacity: 0.55 } },
+        ] : [];
+        series.push({ type: "line", name: "This sample", showSymbol: false, data: sampleDensity,
+          lineStyle: { color: "#1f5f8b" }, markLine: { symbol: "none", data: [{ xAxis: "167", label: { formatter: "167 bp" } }] } });
+        slot.replaceWith(chart(`Aligned-span density, 50 to 700 bp; ${bandStatus} 167 bp marked.`, {
+          grid: { left: 60, right: 20, top: 20, bottom: 40 },
+          xAxis: { type: "category", name: "bp", data: spans.map(String), axisLabel: { interval: 99 } },
+          yAxis: { type: "value", name: "fraction" }, series,
+        }, dataTable("Normalized aligned-span density (fraction of 50–1000 bp molecules)",
+          ["Span (bp)", "This sample", "Cohort observed min", "Cohort observed max"],
+          spans.map((bp, i) => [bp, sampleDensity[i], ready ? band.low[i] : null, ready ? band.high[i] : null]))));
       }).catch((e) => slot.replaceWith(h("div", { class: "problem" }, `Chart could not be drawn (${e.message}).`)));
     }
     const more = [];

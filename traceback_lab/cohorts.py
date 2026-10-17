@@ -20,6 +20,7 @@ from pydantic import ValidationError
 from traceback_runner.serialization import canonical_json_bytes
 
 from .cohort_contracts import CohortGeneration, CohortMember, CohortResult, MetricProjection, project_metric
+from .cohort_density import capture_density_vectors
 from .identity import SHA256_PATTERN, cohort_compat_key
 from .ingest import resolve_sample, source_ids
 from .problems import LabProblem
@@ -473,7 +474,9 @@ def build_cohort(store: LabStore, cohort_id: str, *, kind: str = "internal_cohor
         versions = _generation_versions(directory, cohort_id)
         if (versions or (directory / "current.json").exists()) and not (directory / "members.json").is_file():
             raise _storage_problem(cohort_id, "members.json")
-        members = tuple(member_from_store(store, source_id) for source_id in read_roster(store, cohort_id))
+        members = capture_density_vectors(
+            store, tuple(member_from_store(store, source_id) for source_id in read_roster(store, cohort_id))
+        )
         version = max(versions, default=0) + 1
         snapshot = CohortGeneration(cohort_id=cohort_id, version=version, kind=kind, members=members)
 
