@@ -201,7 +201,19 @@ def test_derived_runs_use_their_own_copy_number_artifacts(tmp_path: Path, monkey
         assert run.results[0].artifacts_dir != full[0].artifacts_dir
 
 
-def test_algorithm_run_records_resource_measurements(tmp_path: Path) -> None:
+def test_algorithm_run_records_resource_measurements(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from traceback_lab import runner
+
+    actual_run_pipeline = runner.run_pipeline
+
+    def known_tree_sample(*args, **kwargs):
+        outcome = actual_run_pipeline(*args, **kwargs)
+        outcome.sampled_tree_peak_rss_bytes = 7_654_321
+        return outcome
+
+    monkeypatch.setattr(runner, "run_pipeline", known_tree_sample)
     store = LabStore(tmp_path / "store")
     store.ensure()
     log = store.run_log("r-20261016-1200-aaab")
@@ -216,9 +228,10 @@ def test_algorithm_run_records_resource_measurements(tmp_path: Path) -> None:
     )[0]
     assert result.status == "ok"
     assert result.peak_rss_bytes is not None and result.peak_rss_bytes > 0
-    assert result.peak_tree_rss_bytes is None or result.peak_tree_rss_bytes > 0
+    assert result.peak_tree_rss_bytes == 7_654_321
     assert result.peak_disk_bytes is not None and result.peak_disk_bytes > 0
     assert result.public()["peak_disk_bytes"] == result.peak_disk_bytes
+    assert result.public()["peak_tree_rss_bytes"] == 7_654_321
     step = next(event for event in log.events() if event["event"] == "step_end")
     assert step["peak_rss_bytes"] == result.peak_rss_bytes
     assert step["peak_tree_rss_bytes"] == result.peak_tree_rss_bytes
@@ -236,6 +249,38 @@ def test_algorithm_run_records_resource_measurements(tmp_path: Path) -> None:
     assert cached.attempt_id == result.attempt_id
     assert (cached.peak_rss_bytes, cached.peak_tree_rss_bytes, cached.peak_disk_bytes) == (None, None, None)
     assert cached.public()["cached"] is True
+
+
+def test_failed_algorithm_records_sampled_tree_memory(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from traceback_lab import runner
+
+    actual_run_pipeline = runner.run_pipeline
+
+    def known_tree_sample(*args, **kwargs):
+        outcome = actual_run_pipeline(*args, **kwargs)
+        outcome.sampled_tree_peak_rss_bytes = 8_765_432
+        outcome.stages[0].returncode = 1
+        return outcome
+
+    monkeypatch.setattr(runner, "run_pipeline", known_tree_sample)
+    store = LabStore(tmp_path / "store")
+    store.ensure()
+    log = store.run_log(new_run_id())
+    target = RunTarget(
+        input_id="a" * 64, source_id="b" * 64, input_dir=tmp_path,
+        reference_id="hg38", reference_sha256="c" * 64, eligible_reads=2_000_000,
+    )
+    result = run_plan(
+        store, None, log, target, [PlanItem(FAKE_CN, False)],
+        {"copy-number": "tests.lab.test_instability:FAKE_CN"},
+        run_id=log.run_id, scrubber=Scrubber(root=store.root),
+    )[0]
+    assert result.status == "failed"
+    assert result.public()["peak_tree_rss_bytes"] == 8_765_432
+    step = next(event for event in log.events() if event["event"] == "step_end")
+    assert step["peak_tree_rss_bytes"] == 8_765_432
 
 
 def test_disk_sampling_only_walks_the_current_step_scratch(

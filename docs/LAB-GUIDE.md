@@ -198,9 +198,10 @@ shared pages more than once. Either memory number may be larger. Disk includes
 temporary worker files under that step's scratch directory. The disk and
 process-tree numbers are sampled observations, not resource ceilings: sampling
 can miss brief peaks. A short step may have no tree sample. A disk scan that
-cannot finish within the bounded
-reporting time leaves only earlier observations, if any. Cached and skipped
-steps have no new measurement.
+cannot finish within the bounded reporting time leaves only earlier observations,
+if any. Step duration ends when direct workers are reaped; group cleanup and
+telemetry reporting can continue afterward. Cached and skipped steps have no
+new measurement.
 
 ## Algorithms
 
