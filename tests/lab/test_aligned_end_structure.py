@@ -457,7 +457,14 @@ def test_preflight_skip_publishes_through_runner(
     assert envelope is not None and envelope.status == "skipped" and envelope.skip_reason == expected
 
 
-def test_ten_x_synthetic_ont_bam_runs_read_summary_and_end_worker(tmp_path: Path) -> None:
+@pytest.mark.parametrize("derived", [
+    None,
+    {"transform": "downsample", "fraction": 0.75},
+    {"transform": "split", "half": "A"},
+])
+def test_ten_x_synthetic_ont_bam_runs_read_summary_and_end_worker(
+    tmp_path: Path, derived: dict[str, object] | None,
+) -> None:
     import pysam
 
     root, _, _ = _catalogues(tmp_path)
@@ -465,7 +472,7 @@ def test_ten_x_synthetic_ont_bam_runs_read_summary_and_end_worker(tmp_path: Path
     with pysam.AlignmentFile(str(bam), "wb", header={
         "HD": {"VN": "1.6"}, "SQ": [{"SN": "chr1", "LN": 1000}],
     }) as stream:
-        for index in range(100):
+        for index in range(100 if derived is None else 250):
             record = pysam.AlignedSegment()
             record.query_name = f"synthetic-{index}"
             record.query_sequence = "A" * 121
@@ -480,6 +487,7 @@ def test_ten_x_synthetic_ont_bam_runs_read_summary_and_end_worker(tmp_path: Path
     target = RunTarget(
         input_id="2" * 64, source_id="1" * 64, input_dir=bam.parent,
         reference_id="hg38", reference_sha256="3" * 64,
+        derived=derived,
     )
     registered = registry_entries(["read_summary:READ_SUMMARY", "aligned_end_structure:ALIGNED_END_STRUCTURE"])
     entries = {algorithm.id: entry for entry, algorithm in registered}
@@ -490,13 +498,22 @@ def test_ten_x_synthetic_ont_bam_runs_read_summary_and_end_worker(tmp_path: Path
         run_id=run_id, scrubber=Scrubber(root=root), timeout_s=60,
     )
     assert [result.status for result in results] == ["ok", "ok"], results
-    assert target.approx_depth_x == 12.1
+    assert target.approx_depth_x == (12.1 if derived is None else None)
     envelope = store.read_result(target.input_id, ALIGNED_END_STRUCTURE.id, results[1].parameters_sha256)
     assert envelope is not None and envelope.status == "ok"
     metrics = {item.metric_id: item.value for item in envelope.metrics}
-    assert metrics["ocf_like_end_asymmetry"] == -2
-    assert metrics["preferred_end_support_fraction"] == 0.01
+    if derived is None:
+        assert metrics["ocf_like_end_asymmetry"] == -2
+        assert metrics["preferred_end_support_fraction"] == 0.01
     attempt = store.selected_attempt(target.input_id, ALIGNED_END_STRUCTURE.id, results[1].parameters_sha256)
     assert attempt is not None
     artifact = json.loads((attempt / "artifacts" / "aligned_end_structure.json").read_bytes())
-    assert artifact["valid_molecules"] == 100 and artifact["eligible_centers"] == 1
+    assert artifact["eligible_centers"] == 1
+    if derived is None:
+        assert artifact["valid_molecules"] == 100
+        assert artifact["depth_basis"] == "run_target"
+    else:
+        assert 83 <= artifact["valid_molecules"] < 250
+        assert artifact["observed_depth_x"] >= 10.0
+        assert artifact["depth_basis"] == "selected_read_summary"
+        assert artifact["derived_selection"] == derived
