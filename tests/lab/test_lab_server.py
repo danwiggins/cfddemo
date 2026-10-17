@@ -490,9 +490,9 @@ def _dom_cdp(argv: list[str], profile: Path, *, ok, timeout: float = 90, action:
                 nonlocal dom, action_done
                 dom = evaluate("document.documentElement?.outerHTML ?? ''")
                 if action and not action_done and 'data-ready="1"' in dom:
-                    evaluate(action)
-                    action_done = True
-                    dom = evaluate("document.documentElement?.outerHTML ?? ''")
+                    action_done = evaluate(action) is True
+                    if action_done:
+                        dom = evaluate("document.documentElement?.outerHTML ?? ''")
                 return {
                     "matched": bool(ok(dom)), "ready": _body_attr(dom, "ready"),
                     "rendered": 'data-rendered="1"' in dom,
@@ -638,7 +638,7 @@ def test_headless_page_renders_a_chart_with_zero_csp_violations(server, tmp_path
          server.issue_link() + f"&route=/sample/{id12}/trust-qc"], tmp_path / "profile",
         ok=lambda page: 'data-ready="1"' in page and 'class="echart"' in page and 'data-rendered="1"' in page
             and "step_end read-summary status=ok" in page,
-        action="[...document.querySelectorAll('#main a')].find(a => a.textContent === 'Run log line →')?.click()",
+        action="(() => { const link = [...document.querySelectorAll('#main a')].find(a => a.textContent === 'Run log line →'); if (!link) return false; link.click(); return true; })()",
     )
     assert 'data-ready="1"' in dom, dom[:500]
     assert 'data-csp-violations="0"' in dom
@@ -716,6 +716,40 @@ def test_status_finds_an_interrupted_run_through_the_pointer(tmp_path) -> None:
     assert status["interrupted"] == {"run_id": run_id, "step": "align"}
 
 
+def test_status_keeps_sample_identity_before_first_step(tmp_path) -> None:
+    store = LabStore(tmp_path)
+    run_id = "r-20261015-0101-abcd"
+    source_id, input_id = "a" * 64, "b" * 64
+    with store.writer("run", run_id):
+        log = store.run_log(run_id)
+        log.append("run_start", command="run")
+        log.append("sample", source_id=source_id, input_id=input_id)
+    assert api_module.LabApi(store).status()["interrupted"] == {
+        "run_id": run_id, "step": None, "source_id": source_id, "input_id": input_id,
+    }
+
+
+@pytest.mark.parametrize("partial", (b'{"event":', b'{"event":"step_start","step":"caf\xc3'))
+def test_status_keeps_complete_events_before_torn_final_line(tmp_path, partial) -> None:
+    store = LabStore(tmp_path)
+    run_id = "r-20261015-0101-abcd"
+    with store.writer("run", run_id, step="align"):
+        log = store.run_log(run_id)
+        log.append("run_start", command="run")
+        log.append("step_start", step="align")
+        with log.path.open("ab") as stream:
+            stream.write(partial)
+        events, reason = api_module._run_events(store, run_id)
+        assert reason is None
+        assert [number for number, _ in events] == [1, 2]
+        active = api_module.LabApi(store).status()
+        assert active["active"]["step"] == "align"
+        assert active["run_log_unavailable"] is None
+    interrupted = api_module.LabApi(store).status()
+    assert interrupted["interrupted"] == {"run_id": run_id, "step": "align"}
+    assert interrupted["run_log_unavailable"] is None
+
+
 @pytest.mark.parametrize("command", ("run", "simulate cna", "simulate split"))
 def test_status_identifies_sample_only_after_run_sample_event(tmp_path, command) -> None:
     store = LabStore(tmp_path)
@@ -746,12 +780,30 @@ def test_active_writer_waiting_for_first_log_event_is_not_unavailable(tmp_path, 
         store.runs_dir.mkdir()
         (store.runs_dir / f"{run_id}.jsonl").touch()
         assert api_module.LabApi(store).status()["run_log_unavailable"] is None
+        (store.runs_dir / f"{run_id}.jsonl").write_bytes(b'{"event":"run_start","run_id":')
+        assert api_module.LabApi(store).status()["run_log_unavailable"] is None
+        (store.runs_dir / f"{run_id}.jsonl").write_bytes(b'{broken\n')
+        assert api_module.LabApi(store).status()["run_log_unavailable"] == {
+            "run_id": run_id, "reason": "malformed_or_empty",
+        }
+
+
+def test_torn_first_event_without_active_writer_is_unavailable(tmp_path) -> None:
+    store = LabStore(tmp_path)
+    run_id = "r-20261015-0101-abcd"
+    with store.writer("run", run_id):
+        store.runs_dir.mkdir(exist_ok=True)
+        (store.runs_dir / f"{run_id}.jsonl").write_bytes(b'{"event":"run_start","run_id":')
+    status = api_module.LabApi(store).status()
+    assert status["active"] is None and status["interrupted"] is None
+    assert status["run_log_unavailable"] == {"run_id": run_id, "reason": "malformed_or_empty"}
 
 
 @pytest.mark.parametrize(("damage", "reason"), (
     ("oversized", "unreadable_or_over_1mib"),
     ("too_many_lines", "over_4096_lines"),
     ("malformed", "malformed_or_empty"),
+    ("deeply_nested", "malformed_or_empty"),
     ("wrong_run", "malformed_or_empty"),
     ("unsafe", "unreadable_or_over_1mib"),
 ))
@@ -770,6 +822,11 @@ def test_status_reports_unavailable_latest_log_without_claiming_interruption(tmp
         path.write_bytes(b"{}\n" * 4097)
     elif damage == "malformed":
         path.write_bytes(b'{"event":"run_start"}\n{broken\n')
+    elif damage == "deeply_nested":
+        payload = b"[" * 4000 + b"0" + b"]" * 4000
+        with pytest.raises(RecursionError):
+            json.loads(payload)
+        path.write_bytes(payload + b"\n")
     elif damage == "wrong_run":
         path.write_bytes(b'{"event":"run_start","run_id":"r-20261015-0101-eeee"}\n')
     else:
@@ -800,13 +857,52 @@ def test_status_does_not_require_run_logs_from_other_writer_commands(tmp_path) -
     {"command": "run", "run_id": []},
     {"command": "run", "run_id": "invalid"},
 ))
-def test_status_ignores_malformed_latest_run_pointer(tmp_path, pointer) -> None:
+def test_status_reports_malformed_latest_run_pointer_without_echoing_it(tmp_path, pointer) -> None:
     store = LabStore(tmp_path)
     store.ensure()
     store.last_run_file.write_text(json.dumps(pointer))
     status = api_module.LabApi(store).status()
     assert status["active"] is None and status["interrupted"] is None
-    assert status["run_log_unavailable"] is None
+    assert status["run_log_unavailable"] == {"run_id": None, "reason": "latest_run_pointer_unavailable"}
+
+
+def test_status_does_not_echo_malformed_active_run_id(tmp_path, monkeypatch) -> None:
+    store = LabStore(tmp_path)
+    monkeypatch.setattr(store, "status", lambda: {"generation": 0, "active": {
+        "command": "run", "run_id": "invalid/secret", "step": "bam-qc",
+    }})
+    status = api_module.LabApi(store).status()
+    assert status["run_log_unavailable"] == {"run_id": None, "reason": "invalid_run_id"}
+    assert status["active"]["run_id"] is None
+    assert "invalid/secret" not in json.dumps(status)
+
+
+def test_status_does_not_echo_malformed_nonanalysis_run_id(tmp_path, monkeypatch) -> None:
+    store = LabStore(tmp_path)
+    monkeypatch.setattr(store, "status", lambda: {"generation": 0, "active": {
+        "command": "cohort add", "run_id": "invalid/secret", "step": "start",
+    }})
+    status = api_module.LabApi(store).status()
+    assert status["active"]["run_id"] is None
+    assert "invalid/secret" not in json.dumps(status)
+
+
+def test_status_reports_deeply_nested_latest_run_pointer_without_crashing(tmp_path) -> None:
+    store = LabStore(tmp_path)
+    store.ensure()
+    store.last_run_file.write_bytes(b"[" * 1200 + b"0" + b"]" * 1200)
+    status = api_module.LabApi(store).status()
+    assert status["active"] is None and status["interrupted"] is None
+    assert status["run_log_unavailable"] == {"run_id": None, "reason": "latest_run_pointer_unavailable"}
+
+
+def test_active_nonanalysis_writer_does_not_echo_malformed_pointer(tmp_path) -> None:
+    store = LabStore(tmp_path)
+    with store.writer("cohort add", "r-20261015-0101-abcd"):
+        store.last_run_file.write_text('{"run_id":"untrusted"}')
+        status = api_module.LabApi(store).status()
+    assert status["active"]["command"] == "cohort add"
+    assert status["run_log_unavailable"] == {"run_id": None, "reason": "latest_run_pointer_unavailable"}
 
 
 def test_recent_run_candidates_are_bounded_and_do_not_use_unbounded_run_ids(tmp_path, monkeypatch) -> None:
@@ -824,7 +920,8 @@ def test_recent_run_candidates_are_bounded_and_do_not_use_unbounded_run_ids(tmp_
 
 
 @pytest.mark.skipif(_chrome() is None, reason="no Chrome/Chromium for the headless Trust/QC check")
-@pytest.mark.parametrize("kind", ("active", "active-before-sample", "interrupted"))
+@pytest.mark.parametrize("kind", ("active", "active-pending", "active-before-sample", "interrupted",
+                                  "active-unlogged-prior-badlog", "active-unlogged-prior-interrupted"))
 @pytest.mark.parametrize("selected", ("a", "c"))
 def test_trust_qc_run_note_is_scoped_without_replacing_result_status(tmp_path, kind, selected) -> None:
     source_a, input_a = "a" * 64, "b" * 64
@@ -833,7 +930,7 @@ def test_trust_qc_run_note_is_scoped_without_replacing_result_status(tmp_path, k
     for source_id, input_id in ((source_a, input_a), (source_b, input_b)):
         id12 = source_id[:12]
         samples[id12] = {
-            "found": True, "id12": id12, "source_id": source_id, "example": False,
+            "found": True, "id12": id12, "source_id": source_id, "full_input_id": input_id, "example": False,
             "run_utc": "2026-10-16T00:00:00Z", "depth": {"approx_depth_x": 1.0},
             "excluded_chunks": [], "preanalytic_sex": {"state": "no_verdict", "reason": "no_assertion"},
             "cohort_n": 0,
@@ -846,12 +943,24 @@ def test_trust_qc_run_note_is_scoped_without_replacing_result_status(tmp_path, k
         }
     marker = {"run_id": "r-20261015-0101-abcd", "step": "bam-qc",
               "source_id": source_a, "input_id": input_a}
+    if kind == "active-pending":
+        marker["step"] = "read-summary"
     shown_marker = {key: value for key, value in marker.items()
-                    if kind != "active-before-sample" or key not in ("source_id", "input_id")}
+                    if kind not in ("active-before-sample", "active-unlogged-prior-badlog",
+                                    "active-unlogged-prior-interrupted") or key not in ("source_id", "input_id")}
+    if kind == "active-before-sample":
+        shown_marker["step"] = None
+    prior_run_id = "r-20261015-0101-eeee"
+    if kind.startswith("active-unlogged"):
+        shown_marker = {"run_id": "r-20261015-0101-dddd", "step": "cohort add"}
     with RunningLabServer(LabStore(tmp_path / "root")) as running:
         running.app.api.status = lambda: {
             "generation": 1, "active": {**shown_marker, "started_utc": "2026-10-16T00:00:00Z"} if kind.startswith("active") else None,
-            "interrupted": shown_marker if kind == "interrupted" else None,
+            "interrupted": shown_marker if kind == "interrupted" else (
+                {"run_id": prior_run_id, "step": "read-summary"}
+                if kind == "active-unlogged-prior-interrupted" else None),
+            "run_log_unavailable": {"run_id": prior_run_id, "reason": "malformed_or_empty"}
+            if kind == "active-unlogged-prior-badlog" else None,
             "library": samples[source_a[:12]]["library_health"],
         }
         running.app.api.samples = lambda: {"samples": [
@@ -863,17 +972,27 @@ def test_trust_qc_run_note_is_scoped_without_replacing_result_status(tmp_path, k
             [_chrome(), "--headless=new", "--disable-gpu", "--no-first-run", "--no-default-browser-check",
              f"--user-data-dir={tmp_path / 'profile'}", "--window-size=1280,800",
              running.issue_link() + f"&route=/sample/{id12}/trust-qc"], tmp_path / "profile",
-            ok=lambda page: 'data-ready="1"' in page and "<h2>Run</h2>" in page,
+            ok=lambda page: 'data-ready="1"' in page and "<h2>Run</h2>" in page and (
+                not kind.startswith("active-unlogged") or prior_run_id in page),
         )
     run_table = dom.split("<h2>Run</h2>", 1)[1].split("</table>", 1)[0]
     assert '<th scope="row">bam-qc</th><td>ok' in run_table
+    if kind == "active-pending":
+        assert ("Latest run in progress during read-summary; no result was published for this step." in dom) == (selected == "a")
     note = "latest run " + ("interrupted" if kind == "interrupted" else "in progress")
-    assert (note in run_table) == (selected == "a" and kind != "active-before-sample")
+    assert (note in run_table) == (selected == "a" and kind in ("active", "interrupted"))
+    if kind == "active-before-sample":
+        assert "step: starting" in dom and "step: null" not in dom
+    if kind == "active-unlogged-prior-badlog":
+        assert f"Run log for {prior_run_id} is unavailable (log malformed or empty)" in dom
+        assert "Run log status unavailable" not in dom
+    if kind == "active-unlogged-prior-interrupted":
+        assert f"Earlier run ({prior_run_id}) stopped during read-summary" in dom
 
 
 @pytest.mark.skipif(_chrome() is None, reason="no Chrome/Chromium for the headless Trust/QC check")
 @pytest.mark.parametrize("selected", ("a", "c"))
-@pytest.mark.parametrize("log_state", ("interrupted", "unavailable"))
+@pytest.mark.parametrize("log_state", ("interrupted", "before-step", "unavailable"))
 def test_interrupted_first_step_without_result_is_sample_scoped(tmp_path, selected, log_state) -> None:
     store = LabStore(tmp_path / "root")
     store.ensure()
@@ -893,7 +1012,8 @@ def test_interrupted_first_step_without_result_is_sample_scoped(tmp_path, select
         log = store.run_log(run_id)
         log.append("run_start", command="run")
         log.append("sample", source_id=source_a, input_id=input_a)
-        log.append("step_start", step="bam-qc")
+        if log_state != "before-step":
+            log.append("step_start", step="bam-qc")
     if log_state == "unavailable":
         (store.runs_dir / f"{run_id}.jsonl").write_bytes(b"x" * (1024 * 1024 + 1))
     api = api_module.LabApi(store)
@@ -911,6 +1031,12 @@ def test_interrupted_first_step_without_result_is_sample_scoped(tmp_path, select
         )
     run_panel = dom.split("<h2>Run</h2>", 1)[1].split("</section>", 1)[0]
     assert ("Latest run interrupted during bam-qc; no result was published for this step." in run_panel) == (selected == "a" and log_state == "interrupted")
+    if log_state == "before-step":
+        assert api.status()["interrupted"] == {"run_id": run_id, "step": None,
+                                               "source_id": source_a, "input_id": input_a}
+        assert "The last run (" in dom and "stopped during a step" in dom
+        assert "no result was published for this step" not in run_panel
+        assert "during null" not in dom
     assert ("status is unavailable (log unreadable, unsafe, or over 1 MiB)" in dom) == (log_state == "unavailable")
     assert "Run log line →" not in run_panel
 

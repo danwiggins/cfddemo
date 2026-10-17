@@ -221,14 +221,21 @@ def _run_events(store: LabStore, run_id: str) -> tuple[list[tuple[int, dict[str,
     raw = _read_run_log(store.runs_dir / f"{run_id}.jsonl")
     if raw is None:
         return [], "unreadable_or_over_1mib"
-    lines = raw.splitlines()
+    lines = raw.split(b"\n")
+    complete_tail = raw.endswith(b"\n")
+    if complete_tail:
+        lines.pop()
     if len(lines) > 4096:
         return [], "over_4096_lines"
     events = []
     for number, line in enumerate(lines, 1):
         try:
             event = json.loads(line)
-        except (ValueError, UnicodeDecodeError):
+        except (ValueError, UnicodeDecodeError, RecursionError):
+            if number == len(lines) and not complete_tail:
+                if not events:
+                    return [], "pending_first_event"
+                break  # an interrupted append can leave only the final line torn
             return [], "malformed_or_empty"
         if not isinstance(event, dict):
             return [], "malformed_or_empty"
@@ -261,23 +268,33 @@ def _recent_run_ids(store: LabStore, *, limit: int = 64) -> list[str]:
         return []
 
 
-def _latest_analysis_run(store: LabStore) -> str | None:
+def _latest_analysis_run(store: LabStore) -> tuple[str | None, bool]:
     """A small pointer read; other writer commands need not emit run logs."""
 
     raw = _read_run_log(store.last_run_file, limit=4096)
     if raw is None:
-        return None
+        try:
+            os.lstat(store.last_run_file)
+        except FileNotFoundError:
+            return None, False
+        except OSError:
+            pass
+        return None, True
     try:
         pointer = json.loads(raw)
-    except ValueError:
-        return None
+    except (ValueError, RecursionError):
+        return None, True
     if not isinstance(pointer, dict):
-        return None
+        return None, True
     command = pointer.get("command")
-    if not isinstance(command, str) or command not in _LOGGED_SAMPLE_COMMANDS:
-        return None
+    if not isinstance(command, str):
+        return None, True
+    if command not in _LOGGED_SAMPLE_COMMANDS:
+        return None, False
     run_id = pointer.get("run_id")
-    return run_id if isinstance(run_id, str) and re.fullmatch(r"r-\d{8}-\d{4}-[0-9a-f]{4,8}", run_id) else None
+    if not isinstance(run_id, str) or not re.fullmatch(r"r-\d{8}-\d{4}-[0-9a-f]{4,8}", run_id):
+        return None, True
+    return run_id, False
 
 
 def _run_sample_identity(events: list[tuple[int, dict[str, Any]]]) -> dict[str, str]:
@@ -305,6 +322,8 @@ class LabApi:
         if status["active"] is not None and status["active"].get("command") in _LOGGED_SAMPLE_COMMANDS:
             run_id = status["active"]["run_id"]
             events, reason = _run_events(self.store, run_id)
+            if reason == "pending_first_event":
+                reason = None  # the first append is still in progress
             if reason in ("unreadable_or_over_1mib", "malformed_or_empty"):
                 # A writer publishes its heartbeat before appending run_start.
                 # An absent or empty log in that short window is pending, not damaged.
@@ -322,13 +341,23 @@ class LabApi:
                 reason = "malformed_or_empty"
                 events = []
             if reason:
-                run_log_unavailable = {"run_id": run_id, "reason": reason}
-            status["active"] = {**status["active"], **_run_sample_identity(events)}
+                run_log_unavailable = {"run_id": None if reason == "invalid_run_id" else run_id,
+                                       "reason": reason}
+            status["active"] = {**status["active"], **_run_sample_identity(events),
+                                "run_id": None if reason == "invalid_run_id" else run_id}
         else:
+            if status["active"] is not None:
+                active_id = status["active"].get("run_id")
+                if not isinstance(active_id, str) or not re.fullmatch(r"r-\d{8}-\d{4}-[0-9a-f]{4,8}", active_id):
+                    status["active"] = {**status["active"], "run_id": None}
             # Bounded (D22): one pointer file and that one run's log, never a scan.
-            last = _latest_analysis_run(self.store)
+            last, pointer_unavailable = _latest_analysis_run(self.store)
+            if pointer_unavailable:
+                run_log_unavailable = {"run_id": None, "reason": "latest_run_pointer_unavailable"}
             if last is not None:
                 events, reason = _run_events(self.store, last)
+                if reason == "pending_first_event":
+                    reason = "malformed_or_empty"  # no active writer can finish it
                 if not reason and events[0][1]["event"] != "run_start":
                     reason = "malformed_or_empty"
                     events = []
