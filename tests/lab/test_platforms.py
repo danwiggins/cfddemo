@@ -24,6 +24,20 @@ def test_read_group_platform(lines: list[str], expected: str) -> None:
     assert from_rg_lines(lines) == expected
 
 
+@pytest.mark.parametrize("platform", [None, "unknown", "pacbio"])
+def test_worker_context_refuses_missing_or_unsupported_platform(platform: str | None) -> None:
+    from traceback_lab.registry import context_from_json
+
+    payload = {
+        "root": "/tmp/lab", "source_id": "s", "input_id": "i",
+        "reference_id": "hg38", "reference_sha256": "r", "input_dir": "/tmp/lab/input",
+    }
+    if platform is not None:
+        payload["platform"] = platform
+    with pytest.raises(ValueError, match="no supported platform"):
+        context_from_json(payload)
+
+
 def test_derived_platform_skip_is_persisted_and_shown_in_depth_curve(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -308,7 +322,7 @@ def test_prealigned_writer_requires_one_bam_even_when_one_declares_ont(tmp_path:
         ingest_prealigned(store, chunks, resolve_reference(root, "hg38"))
 
 
-@pytest.mark.parametrize("tamper", ["platform", "kind"])
+@pytest.mark.parametrize("tamper", ["platform", "kind", "list"])
 @pytest.mark.parametrize("dry_run", [False, True])
 def test_stored_platform_mismatch_is_same_typed_refusal(
     tmp_path: Path, capsys: pytest.CaptureFixture[str], dry_run: bool, tamper: str,
@@ -321,11 +335,15 @@ def test_stored_platform_mismatch_is_same_typed_refusal(
     payload = json.loads(capsys.readouterr().out)
     assert code == 0, payload
     input_id = payload["data"]["sample"]["input_id"]
+    source_id = payload["data"]["sample"]["source_id"]
     manifest = root / "lab" / "inputs" / input_id / "manifest.json"
     changed = json.loads(manifest.read_text())
-    changed["platform"] = "ont"
-    if tamper == "kind":
-        changed["kind"] = "aligned"
+    if tamper == "list":
+        changed = ["malformed stored manifest"]
+    else:
+        changed["platform"] = "ont"
+        if tamper == "kind":
+            changed["kind"] = "aligned"
     manifest.write_text(json.dumps(changed))
     argv = ["lab", "run", "latest", "--root", str(root), "--json"]
     if dry_run:
@@ -336,6 +354,14 @@ def test_stored_platform_mismatch_is_same_typed_refusal(
     assert payload["data"]["code"] == "TBX-LAB-024"
     assert payload["data"]["input_id"] == input_id
     assert "fresh ROOT" in payload["data"]["fix"]
+    if tamper == "list":
+        from traceback_lab.store import LabStore
+        from traceback_lab.views import load_sample
+
+        sample = load_sample(LabStore(root), source_id)
+        assert sample is not None
+        assert sample.full.results
+        assert all(result.status == "skipped" for result in sample.full.results.values())
 
 
 def test_cohort_refuses_mismatched_stored_platform(tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> None:
