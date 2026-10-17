@@ -35,7 +35,7 @@ from .scrub import BoundedStderr, Scrubber
 GRACE_S = 5.0
 POLL_S = 0.02
 DISK_SAMPLE_S = 2.0
-RSS_SAMPLE_S = 0.2
+RSS_SAMPLE_S = 0.5
 
 
 @dataclass(frozen=True)
@@ -148,27 +148,9 @@ def directory_bytes(path: Path) -> int:
     return total
 
 
-def _process_tree_rss_bytes(root_pid: int) -> int | None:
-    """Sample worker memory plus its descendants, including new sessions.
+def _tree_members(root_pid: int, processes: Mapping[int, tuple[int, int]]) -> set[int]:
+    """Include descendants in new sessions and children still in the group."""
 
-    wait4 covers direct children only; signed native tools can leave the
-    worker's process group. /proc is Linux-specific, so other hosts retain
-    the direct-child wait4 measurement.
-    """
-
-    proc = Path("/proc")
-    if not proc.is_dir():
-        return None
-    processes: dict[int, tuple[int, int]] = {}
-    for entry in proc.iterdir():
-        if not entry.name.isdecimal():
-            continue
-        try:
-            stat = (entry / "stat").read_text()
-            fields = stat[stat.rfind(")") + 2 :].split()
-            processes[int(entry.name)] = (int(fields[1]), int(fields[2]))
-        except (OSError, ValueError, IndexError):
-            continue
     included = {root_pid}
     while True:
         children = {pid for pid, (ppid, _pgid) in processes.items() if ppid in included}
@@ -177,13 +159,71 @@ def _process_tree_rss_bytes(root_pid: int) -> int | None:
             break
         included = expanded
     included.update(pid for pid, (_ppid, pgid) in processes.items() if pgid == root_pid)
+    return included
+
+
+def _proc_tree_rss_bytes(root_pid: int) -> int | None:
+    proc = Path("/proc")
+    if not proc.is_dir():
+        return None
+    processes: dict[int, tuple[int, int]] = {}
+    try:
+        for entry in proc.iterdir():
+            if not entry.name.isdecimal():
+                continue
+            try:
+                stat = (entry / "stat").read_text()
+                fields = stat[stat.rfind(")") + 2 :].split()
+                processes[int(entry.name)] = (int(fields[1]), int(fields[2]))
+            except (OSError, ValueError, IndexError):
+                continue
+    except OSError:
+        return None
     resident_pages = 0
-    for pid in included:
+    for pid in _tree_members(root_pid, processes):
         try:
             resident_pages += int((proc / str(pid) / "statm").read_text().split()[1])
         except (OSError, ValueError, IndexError):
             continue
     return resident_pages * os.sysconf("SC_PAGE_SIZE")
+
+
+def _ps_tree_rss_bytes(root_pid: int) -> int | None:
+    """macOS fallback: ps RSS is KiB; cap command time and parsed output."""
+
+    try:
+        listing = subprocess.run(
+            ["/bin/ps", "-A", "-o", "pid=,ppid=,pgid=,rss="],
+            capture_output=True, text=True, timeout=2, check=False,
+        )
+    except (OSError, subprocess.SubprocessError):
+        return None
+    if listing.returncode != 0 or len(listing.stdout) > 4_000_000:
+        return None
+    processes: dict[int, tuple[int, int]] = {}
+    rss_kib: dict[int, int] = {}
+    for line in listing.stdout.splitlines():
+        fields = line.split()
+        if len(fields) != 4:
+            continue
+        try:
+            pid, ppid, pgid, rss = map(int, fields)
+        except ValueError:
+            continue
+        processes[pid] = (ppid, pgid)
+        rss_kib[pid] = rss
+    return sum(rss_kib.get(pid, 0) for pid in _tree_members(root_pid, processes)) * 1024
+
+
+def _process_tree_rss_bytes(root_pid: int) -> int | None:
+    """Sample the worker and native descendants, including new sessions.
+
+    wait4 covers direct children only. Linux uses /proc resident pages;
+    macOS uses bounded ps RSS (KiB). A sampler failure leaves wait4 intact.
+    """
+
+    sampled = _proc_tree_rss_bytes(root_pid)
+    return sampled if sampled is not None else _ps_tree_rss_bytes(root_pid)
 
 
 def _pump(stream: IO[bytes], buffer: BoundedStderr, echo: Callable[[str], None] | None) -> None:
@@ -340,11 +380,11 @@ def run_pipeline(
                 rss = _process_tree_rss_bytes(leader.pid)
                 if rss is not None:
                     peak_tree_rss = rss if peak_tree_rss is None else max(peak_tree_rss, rss)
-                next_rss = now + RSS_SAMPLE_S
+                next_rss = time.monotonic() + RSS_SAMPLE_S
             if (disk_path is not None or disk_usage is not None) and now >= next_disk:
                 size = disk_usage() if disk_usage is not None else directory_bytes(disk_path)
                 peak_disk = size if peak_disk is None else max(peak_disk, size)
-                next_disk = now + DISK_SAMPLE_S
+                next_disk = time.monotonic() + DISK_SAMPLE_S
             if on_tick is not None:
                 on_tick(now - started)
             if any(process.returncode is None for process in processes) and now > deadline:

@@ -191,9 +191,11 @@ streams each tool's raw stderr to your terminal; only scrubbed stderr (paths,
 ROOT, home, login and chunk names redacted) is ever stored.
 
   Each executed algorithm reports peak resident memory and sampled peak
-  scratch-disk bytes in its step result and run log. Disk includes temporary
-  `lab/tmp/microbial-*` work created during that step. These sampled values
-  can miss brief peaks; cached and skipped steps have no new measurement.
+  scratch-disk bytes in its step result and run log. Memory is the sampled
+  sum of the worker and native descendants' RSS, or the direct worker's
+  `wait4` peak if higher; shared pages may be counted more than once. Disk
+  includes temporary `lab/tmp/microbial-*` work created during that step.
+  Sampling can miss brief peaks; cached and skipped steps have no new measurement.
 
 ## Algorithms
 

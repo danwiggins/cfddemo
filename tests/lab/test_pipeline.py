@@ -135,19 +135,37 @@ def test_simulate_commands_accept_verbose() -> None:
         assert args.verbose is True
 
 
-@pytest.mark.skipif(not Path("/proc").is_dir(), reason="Linux process-group RSS sampler")
-def test_group_rss_includes_grandchild(tmp_path: Path) -> None:
+@pytest.mark.parametrize("force_ps", [False, True])
+def test_tree_rss_includes_new_session_child(monkeypatch: pytest.MonkeyPatch, force_ps: bool) -> None:
+    if force_ps:
+        from traceback_lab import pipeline
+
+        monkeypatch.setattr(pipeline, "_proc_tree_rss_bytes", lambda _pid: None)
     script = (
         "import subprocess, sys, time\n"
         "child = subprocess.Popen([sys.executable, '-c', "
         "'import time; blob = bytearray(40_000_000); "
-        "blob[:] = b\"x\" * len(blob); time.sleep(1)'], start_new_session=True)\n"
+        "blob[:] = b\"x\" * len(blob); time.sleep(3)'], start_new_session=True)\n"
         "child.wait()\n"
     )
-    result = run_pipeline([Stage("parent", [PY, "-c", script])], timeout_s=30)
+    result = run_pipeline([Stage("parent", [PY, "-c", script])], timeout_s=120)
     assert result.ok
     assert result.sampled_tree_peak_rss_bytes is not None
     assert result.sampled_tree_peak_rss_bytes >= 40_000_000
+
+
+def test_proc_enumeration_failure_uses_ps(monkeypatch: pytest.MonkeyPatch) -> None:
+    from traceback_lab.pipeline import _process_tree_rss_bytes
+
+    original = Path.iterdir
+
+    def scan(path: Path):
+        if path == Path("/proc"):
+            raise OSError("synthetic proc failure")
+        return original(path)
+
+    monkeypatch.setattr(Path, "iterdir", scan)
+    assert (_process_tree_rss_bytes(os.getpid()) or 0) > 0
 
 def test_upstream_independent_failure_wins_despite_reversed_reap_times() -> None:
     """Observed reap times cannot prove which stage exited first."""
