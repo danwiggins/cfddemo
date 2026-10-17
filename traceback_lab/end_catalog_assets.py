@@ -127,6 +127,12 @@ def _canonical(data: dict) -> bytes:
     return json.dumps(data, sort_keys=True, separators=(",", ":")).encode("utf-8")
 
 
+def _valid_source_label(label: object) -> bool:
+    return (isinstance(label, str) and bool(label) and len(label) <= 160
+            and label == label.strip() and not any(char in label for char in ("/", "\\"))
+            and all(ord(char) >= 32 for char in label))
+
+
 def _load_catalogues(data: dict) -> EndCatalogues:
     center_raw = _read_regular(Path(data["centers_path"]), MAX_CATALOGUE_BYTES)
     preferred_raw = _read_regular(Path(data["preferred_path"]), MAX_CATALOGUE_BYTES)
@@ -161,7 +167,7 @@ def inspect_end_catalogues(root: Path) -> EndCatalogues:
             raise ValueError
         if (any(not isinstance(data[key], str) or not Path(data[key]).is_absolute()
                 for key in ("centers_path", "preferred_path"))
-                or any(not isinstance(data[key], str) or not data[key] or len(data[key]) > 160
+                or any(not _valid_source_label(data[key])
                        for key in ("source_label", "centers_source", "preferred_source"))
                 or not isinstance(data["terms"], str)
                 or data["terms"] not in {"known", "restricted", "unknown"}
@@ -181,9 +187,7 @@ def register_end_catalogues(
     centers_source: str, preferred_source: str, terms: str, license_id: str | None,
 ) -> EndCatalogues:
     for label in (source_label, centers_source, preferred_source):
-        if (not label or len(label) > 160 or label != label.strip()
-                or any(char in label for char in ("/", "\\"))
-                or any(ord(char) < 32 for char in label)):
+        if not _valid_source_label(label):
             raise EndCatalogueError("source labels must be short descriptions, not paths")
     if terms not in {"known", "restricted", "unknown"} or (terms == "known" and not license_id):
         raise EndCatalogueError("valid terms and license ID are required")

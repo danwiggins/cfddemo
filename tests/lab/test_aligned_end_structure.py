@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import hashlib
 import json
 from dataclasses import replace
 from pathlib import Path
@@ -83,6 +84,10 @@ def test_exact_ocf_like_sign_and_preferred_end_support(tmp_path: Path) -> None:
     assert artifact["preferred_d_hits"] == 1
     assert artifact["observed_depth_x"] == 10.0
     assert len(artifact["centers_sha256"]) == 64 and len(artifact["preferred_sha256"]) == 64
+    assert artifact["source_label"] == "synthetic hg38 end catalogues"
+    assert artifact["centers_source"] == "synthetic-centers-v1"
+    assert artifact["preferred_source"] == "synthetic-sites-v1"
+    assert artifact["terms"] == "unknown"
     assert "no tissue-origin calibration" in artifact["interpretation"]
 
 
@@ -186,6 +191,18 @@ def test_same_coordinate_can_have_distinct_preferred_end_directions(tmp_path: Pa
                                 terms="unknown", license_id=None)
 
 
+def test_inspection_rejects_path_like_source_label_even_with_valid_self_hash(tmp_path: Path) -> None:
+    root, _, _ = _catalogues(tmp_path)
+    registration = root / "lab" / "assets" / "aligned-ends" / "registration.json"
+    data = json.loads(registration.read_bytes())
+    data["source_label"] = "C:\\Users\\operator\\peaks.bed"
+    data.pop("identity")
+    data["identity"] = hashlib.sha256(json.dumps(data, sort_keys=True, separators=(",", ":")).encode()).hexdigest()
+    registration.write_text(json.dumps(data), encoding="utf-8")
+    with pytest.raises(EndCatalogueError, match="registration is invalid"):
+        inspect_end_catalogues(root)
+
+
 def test_reregistered_catalogue_cannot_run_under_old_execution_identity(tmp_path: Path) -> None:
     root, centers, preferred = _catalogues(tmp_path)
     old_identity = inspect_end_catalogues(root).identity
@@ -238,6 +255,7 @@ def test_cli_registration_and_inspection_return_path_free_results(tmp_path: Path
 
 @pytest.mark.parametrize("condition,expected", [
     ("depth", "depth"), ("derived", "derived_input"), ("missing_manifest", "input_kind"),
+    ("reference", "reference"), ("example", "example_reference"),
 ])
 def test_preflight_skip_publishes_through_runner(
     tmp_path: Path, condition: str, expected: str,
@@ -249,9 +267,10 @@ def test_preflight_skip_publishes_through_runner(
         (root / "input" / "manifest.json").unlink()
     target = RunTarget(
         input_id="2" * 64, source_id="1" * 64, input_dir=root / "input",
-        reference_id="hg38", reference_sha256="3" * 64,
+        reference_id="hg19" if condition == "reference" else "hg38", reference_sha256="3" * 64,
         approx_depth_x=9.99 if condition == "depth" else 10.0,
         derived={"transform": "split", "half": "A"} if condition == "derived" else None,
+        example=condition == "example",
     )
     # The real read-summary upstream supplies observed depth. Isolate the
     # publication boundary after that value is already on the RunTarget.
