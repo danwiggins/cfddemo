@@ -691,7 +691,7 @@
     };
     families.forEach(([, label], i) => tabs.append(h("button", { type: "button", class: "control subtab", "aria-pressed": "false", onclick: () => show(i) }, label)));
     out.push(tabs, body);
-    const initial = ["fragment-size", "end-motifs", "delfi-ratio", "tss-profile", "long-tail", "mtdna", "breakpoint-motifs", "aligned-end-structure"].some((id) => algo(sample, id))
+    const initial = ["fragment-size", "end-motifs", "delfi-ratio", "tss-profile", "long-tail", "mtdna", "breakpoint-motifs", "aligned-end-structure", "lionheart"].some((id) => algo(sample, id))
       ? 0 : algo(sample, "copy-number") ? 1 : 2;
     show(initial);
     return out;
@@ -759,10 +759,37 @@
     return [section];
   }
 
+  function lionheartSignals(sample) {
+    const a = algo(sample, "lionheart");
+    if (!a) return [];
+    const section = h("section", { class: "panel" }, h("h2", {}, "LIONHEART cell-type scores"), flagPill("LEGAL"),
+      h("p", {}, "Experimental ONT single-end extraction. Scores are sample-standardized correlations, not cell fractions or cancer predictions."),
+      ...context(sample, "lionheart", new Set()));
+    if (a.status !== "ok") return [section, absent(a, "lionheart")];
+    const slot = h("div", { "aria-live": "polite" }, h("p", {}, "Loading raw cell-type scores…"));
+    section.append(slot);
+    artifact(sample, "lionheart", "cell-type-scores").then((data) => {
+      if (data.kind !== "lionheart-scores.v1" || data.input_mode !== "experimental_single_end_ont" ||
+          data.score_kind !== "sample_standardized_pearson_r" || !Array.isArray(data.scores) ||
+          data.scores.length !== 898 || data.scores.some((row) =>
+            !["ATAC", "DNase"].includes(row.assay) || typeof row.cell_type !== "string" ||
+            (row.score !== null && (typeof row.score !== "number" || !Number.isFinite(row.score))))) {
+        throw new Error("score panel is malformed");
+      }
+      const table = h("table", { class: "data-table" },
+        h("caption", {}, "LIONHEART raw standardized correlation scores; 898 cell-type references"),
+        h("thead", {}, h("tr", {}, ...["Assay", "Cell type", "Score"].map((name) => h("th", { scope: "col" }, name)))),
+        h("tbody", {}, ...data.scores.map((row) => h("tr", {}, h("th", { scope: "row" }, row.assay),
+          h("td", {}, row.cell_type), h("td", { class: "num" }, fmt(row.score))))));
+      slot.replaceWith(h("details", {}, h("summary", {}, "All 898 raw scores"), h("div", { class: "table-wrap" }, table)));
+    }).catch((error) => slot.replaceWith(h("p", { class: "problem" }, `Cell-type scores unavailable (${error.message}).`)));
+    return [section];
+  }
+
   function fragmentSignals(sample) {
     const a = algo(sample, "fragment-size");
     const section = h("section", { class: "panel" }, h("h2", {}, "Size density"));
-    if (!a || a.status !== "ok") return [section, absent(a, "fragment-size"), ...tssProfileSignals(sample), ...breakpointMotifSignals(sample), ...alignedEndSignals(sample)];
+    if (!a || a.status !== "ok") return [section, absent(a, "fragment-size"), ...tssProfileSignals(sample), ...breakpointMotifSignals(sample), ...alignedEndSignals(sample), ...lionheartSignals(sample)];
     const slot = h("div", {}, h("p", {}, "Loading…"));
     const short = a.metrics.find((m) => m.metric_id === "short_fraction_lt150");
     section.append(h("p", { class: "help" }, `No size-density cohort band yet; 167 bp marked. Short-fragment reference: ${cohortReadiness(sample, short ? [short] : [])}.`), ...context(sample, "fragment-size", new Set()), slot);
@@ -780,7 +807,7 @@
         ? h("table", { class: "data-table" }, h("tbody", {}, ...other.metrics.filter((m) => m.value === null || typeof m.value !== "object").map((m) => h("tr", {}, h("th", { scope: "row" }, m.label), h("td", {}, fmt(m.value, m.unit))))))
         : absent(other, id), id === "end-motifs" || id === "delfi-ratio" ? flagPill("LEGAL") : ""));
     }
-    return [section, ...more, ...tssProfileSignals(sample), ...breakpointMotifSignals(sample), ...alignedEndSignals(sample)];
+    return [section, ...more, ...tssProfileSignals(sample), ...breakpointMotifSignals(sample), ...alignedEndSignals(sample), ...lionheartSignals(sample)];
   }
 
   function tssProfileSignals(sample) {
