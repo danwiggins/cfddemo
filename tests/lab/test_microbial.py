@@ -774,17 +774,32 @@ def test_cohort_975_zero_fills_complete_absent_taxa_and_refuses_missing_referenc
                                        "microbial_rpm_primary": 0.0, "omitted_taxa": 0}),),
     ))
     generation = CohortGeneration(cohort_id="healthy-v1", version=1, members=tuple(members))
-    target = CohortMember(source_id=source, input_id=input_id, aligner_identity="same aligner", results=())
+    target = CohortMember(
+        source_id=source, input_id=input_id, aligner_identity="same aligner",
+        results=(CohortResult(algorithm_id="microbial", parameters_sha256=identity,
+                              cohort_compat_key=identity, metrics={"primary_reads": 100,
+                                                                  "microbial_rpm_primary": 4.0}),),
+    )
     projected = profile_for_sample(store, sample, generation, target, "ready")
     assert projected["state"] == "ready"
     assert projected["taxa"][0]["cohort_n"] == 10
     assert projected["cohort_n"] == 10
     assert projected["taxa"][0]["cohort_p975"] == pytest.approx(3.875)
     assert projected["taxa"][0]["above_cohort_p975"] is True
+    incompatible = list(members)
+    first = members[0]
+    incompatible[0] = CohortMember(
+        source_id=first.source_id, input_id=first.input_id,
+        aligner_identity=first.aligner_identity,
+        results=(CohortResult(algorithm_id="microbial", parameters_sha256=identity,
+                              cohort_compat_key="0" * 64, metrics=first.results[0].metrics),),
+    )
+    mismatched_generation = CohortGeneration(cohort_id="healthy-v1", version=2,
+                                             members=tuple(incompatible))
+    assert profile_for_sample(store, sample, mismatched_generation, target, "ready")["cohort_n"] == 9
     # An omitted taxon cannot be interpreted as a measured zero in that
     # member; a tenth compatible value is then unavailable for this species.
     limited_members = list(members)
-    first = members[0]
     result = first.results[0]
     limited_members[0] = CohortMember(
         source_id=first.source_id, input_id=first.input_id,

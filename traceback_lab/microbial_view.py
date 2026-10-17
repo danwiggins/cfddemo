@@ -75,10 +75,15 @@ def _cohort_results(generation: CohortGeneration | None, target: CohortMember | 
                     source_id: str, identity: str) -> list[CohortResult]:
     if generation is None or target is None:
         return []
+    target_result = next((result for result in target.results
+                          if result.algorithm_id == "microbial" and result.parameters_sha256 == identity), None)
+    if target_result is None:
+        return []
     return [result for member in generation.members
             if member.source_id != source_id and member.aligner_identity == target.aligner_identity
             for result in member.results
             if (result.algorithm_id == "microbial" and result.parameters_sha256 == identity
+                and result.cohort_compat_key == target_result.cohort_compat_key
                 and isinstance(result.metrics.get("primary_reads"), (int, float))
                 and not isinstance(result.metrics["primary_reads"], bool)
                 and math.isfinite(result.metrics["primary_reads"])
