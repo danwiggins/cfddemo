@@ -68,6 +68,8 @@ def _reference_sites(record: pysam.AlignedSegment) -> tuple[list[tuple[int, int,
         strand = int(record.is_reverse) ^ int(code[1] == "-")
         for position in positions:
             sites.setdefault((position, strand), {}).setdefault(code[2:], 0)
+    if any(sum(channels.values()) > 255 for channels in sites.values()):
+        raise InvalidMM("MM/ML channel probabilities exceed one")
     cigar = record.cigartuples or []
     if len(cigar) == 1 and cigar[0][0] in {0, 7, 8} and not record.is_unmapped:
         start, span = record.reference_start, cigar[0][1]
@@ -142,7 +144,9 @@ def extract_cpg_calls(
                 if candidates > maximum_calls:
                     raise ValueError("cell-origin MM/ML calls exceed the locked cap")
                 p_c = max(0, 255 - sum(channels.values()))
-                confidence = max((p_c, *channels.values())) / 255.0
+                # ML stores the midpoint of a 1/256 probability bin; modkit
+                # applies its filter to that midpoint, including at the edge.
+                confidence = (max((p_c, *channels.values())) + 0.5) / 256.0
                 if confidence < filter_threshold:
                     low_confidence += 1
                     continue
