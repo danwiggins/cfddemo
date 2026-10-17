@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import hashlib
+import io
 import json
 import os
 import sys
@@ -36,9 +37,9 @@ def _setup(tmp_path: Path, monkeypatch) -> tuple[InputContext, Path]:
         path = directory / relative
         path.mkdir(parents=True, exist_ok=True)
         (path / "fixture.bin").write_bytes(b"synthetic mask")
-    for assay in ("ATAC", "DNase"):
+    for assay, count in (("ATAC", 544), ("DNase", 354)):
         (directory / f"{assay}.idx_to_cell_type.csv").write_text(
-            "idx,cell_type\n" + "".join(f"{index},{assay} type {index}\n" for index in range(449))
+            "idx,cell_type\n" + "".join(f"{index},{assay} type {index}\n" for index in range(count))
         )
     archive = directory.parent / "inference_resources_v003.tar.gz"
     with tarfile.open(archive, "w:gz") as bundle:
@@ -121,7 +122,8 @@ def test_lionheart_invokes_upstream_extraction_on_selected_bam_and_emits_raw_sco
     assert payload["score_kind"] == "sample_standardized_pearson_r"
     assert len(payload["scores"]) == 898
     assert payload["scores"][0] == {"assay": "ATAC", "cell_type": "ATAC type 0", "score": -1.0}
-    assert payload["scores"][449]["assay"] == "DNase"
+    assert payload["scores"][543]["assay"] == "ATAC"
+    assert payload["scores"][544]["assay"] == "DNase"
     assert payload["scores"][-1]["score"] == 1.0
     before = execution_identity(lionheart.LIONHEART, reference_sha256=ctx.reference_sha256,
                                 asset_sha256s=lionheart.LIONHEART.asset_sha256s(ctx.root))
@@ -179,6 +181,32 @@ def test_good_archive_does_not_authorize_modified_extracted_resources(tmp_path, 
     out.mkdir(parents=True)
     with pytest.raises(ValueError, match="differ from the verified archive"):
         lionheart.LIONHEART.run(ctx, out)
+
+
+def test_archive_digest_must_match_published_record(tmp_path, monkeypatch) -> None:
+    ctx, directory = _setup(tmp_path, monkeypatch)
+    archive = directory.parent / "inference_resources_v003.tar.gz"
+    with archive.open("ab") as stream:
+        stream.write(b"changed archive")
+    assert lionheart.LIONHEART.asset_sha256s(ctx.root) == []
+    assert lionheart.LIONHEART.preflight(ctx).reason_code == "missing_asset"
+    with pytest.raises(ValueError, match="does not match Zenodo record"):
+        lionheart.validated_resource_digest(directory, archive)
+
+
+def test_verified_archive_still_rejects_unsafe_member(tmp_path, monkeypatch) -> None:
+    ctx, directory = _setup(tmp_path, monkeypatch)
+    archive = directory.parent / "inference_resources_v003.tar.gz"
+    with tarfile.open(archive, "w:gz") as bundle:
+        bundle.add(directory, arcname="inference_resources_v003")
+        member = tarfile.TarInfo("../escape.txt")
+        data = b"unsafe"
+        member.size = len(data)
+        bundle.addfile(member, io.BytesIO(data))
+    monkeypatch.setattr(lionheart, "RESOURCE_ARCHIVE_MD5", hashlib.md5(archive.read_bytes()).hexdigest())
+    assert lionheart.LIONHEART.preflight(ctx).reason_code == "missing_asset"
+    with pytest.raises(ValueError, match="unsafe path"):
+        lionheart.validated_resource_digest(directory, archive)
 
 
 def test_toolchain_change_after_planning_is_refused(tmp_path, monkeypatch) -> None:
@@ -259,7 +287,7 @@ def test_lionheart_scores_are_labeled_research_only_in_signals(tmp_path) -> None
         "licenses": [{"license_id": license_id, **library.licenses[license_id]}],
         "library_health": {"version": library.version, "error": None},
     }
-    rows = [{"assay": "ATAC" if index < 449 else "DNase", "cell_type": f"synthetic {index}",
+    rows = [{"assay": "ATAC" if index < 544 else "DNase", "cell_type": f"synthetic {index}",
              "score": round(index / 1000, 3)} for index in range(898)]
     payload = json.dumps({"kind": "lionheart-scores.v1", "input_mode": "experimental_single_end_ont",
                           "score_kind": "sample_standardized_pearson_r", "scores": rows}).encode()
