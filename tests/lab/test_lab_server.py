@@ -753,6 +753,23 @@ def test_active_writer_waiting_for_first_log_event_is_not_unavailable(tmp_path, 
         store.runs_dir.mkdir()
         (store.runs_dir / f"{run_id}.jsonl").touch()
         assert api_module.LabApi(store).status()["run_log_unavailable"] is None
+        (store.runs_dir / f"{run_id}.jsonl").write_bytes(b'{"event":"run_start","run_id":')
+        assert api_module.LabApi(store).status()["run_log_unavailable"] is None
+        (store.runs_dir / f"{run_id}.jsonl").write_bytes(b'{broken\n')
+        assert api_module.LabApi(store).status()["run_log_unavailable"] == {
+            "run_id": run_id, "reason": "malformed_or_empty",
+        }
+
+
+def test_torn_first_event_without_active_writer_is_unavailable(tmp_path) -> None:
+    store = LabStore(tmp_path)
+    run_id = "r-20261015-0101-abcd"
+    with store.writer("run", run_id):
+        store.runs_dir.mkdir(exist_ok=True)
+        (store.runs_dir / f"{run_id}.jsonl").write_bytes(b'{"event":"run_start","run_id":')
+    status = api_module.LabApi(store).status()
+    assert status["active"] is None and status["interrupted"] is None
+    assert status["run_log_unavailable"] == {"run_id": run_id, "reason": "malformed_or_empty"}
 
 
 @pytest.mark.parametrize(("damage", "reason"), (
