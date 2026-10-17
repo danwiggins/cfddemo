@@ -58,6 +58,23 @@ def test_rejects_non_finite_coverage(tmp_path: Path) -> None:
         read_corrected_profiles(path)
 
 
+def test_rejects_mixed_samples_without_an_expected_sample(tmp_path: Path) -> None:
+    path = _write(tmp_path / "S1.GC_corrected.coverage.tsv")
+    path.write_text(path.read_text(encoding="utf-8") +
+                    "0.8\t0.5\t0.9\t0.5\t2.1\tGC_corrected\t1000\tOTHER\tTrue\tFalse\tS2\n",
+                    encoding="utf-8")
+    with pytest.raises(GriffinFormatError, match="mixed sample"):
+        read_corrected_profiles(path)
+
+
+def test_rejects_non_ascii_coordinate_header(tmp_path: Path) -> None:
+    path = _write(tmp_path / "S1.GC_corrected.coverage.tsv")
+    path.write_text(path.read_text(encoding="utf-8").replace("-15\t0\t15", "-15\t٠\t15"),
+                    encoding="utf-8")
+    with pytest.raises(GriffinFormatError, match="ASCII digits"):
+        read_corrected_profiles(path)
+
+
 def test_pinned_upstream_attempt_binds_input_and_assets(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     """Exercise orchestration with a fake process, not the scientific computation."""
 
@@ -94,6 +111,7 @@ def test_pinned_upstream_attempt_binds_input_and_assets(tmp_path: Path, monkeypa
     input_id = "abcdef012345"
     sample = f"lab_{input_id}"
     calls: list[Path] = []
+    mutate_index = False
 
     def fake_run(argv: list[str], **kwargs: object) -> subprocess.CompletedProcess[str]:
         if argv[:2] == ["git", "-C"]:
@@ -108,6 +126,8 @@ def test_pinned_upstream_attempt_binds_input_and_assets(tmp_path: Path, monkeypa
             output = directory / "results" / sample / f"{sample}.GC_corrected.coverage.tsv"
             output.parent.mkdir(parents=True)
             _write(output, sample=sample)
+            if mutate_index:
+                bam.with_suffix(".bam.bai").write_bytes(b"changed index")
         return subprocess.CompletedProcess(argv, 0)
 
     monkeypatch.setattr(subprocess, "run", fake_run)
@@ -124,13 +144,26 @@ def test_pinned_upstream_attempt_binds_input_and_assets(tmp_path: Path, monkeypa
     manifest = json.loads((attempt / "provenance.json").read_text(encoding="utf-8"))
     assert manifest["status"] == "complete"
     assert manifest["input_id"] == input_id
+    assert manifest["sample"] == sample
+    assert manifest["eligible_reads"] == 5_000_000
+    assert manifest["minimum_eligible_reads"] == 5_000_000
     assert manifest["fingerprints"]["bam_sha256"] == hashlib.sha256(b"bam").hexdigest()
+    assert manifest["fingerprints"]["bam_indexes_sha256"]["aligned.bam.bai"] == hashlib.sha256(b"index").hexdigest()
+    assert manifest["fingerprints"]["reference_index_sha256"] == hashlib.sha256(b"index").hexdigest()
     with pytest.raises(FileExistsError):
         run_upstream(GriffinRun(
             input_id=input_id, bam=bam, reference_fasta=reference,
             reference_id="hg38", reference_sha256=hashlib.sha256(reference.read_bytes()).hexdigest(),
             eligible_reads=5_000_000, upstream_root=upstream, ref_assets=assets,
             site_lists={"CTCF": sites}, attempt_dir=attempt,
+        ))
+    mutate_index = True
+    with pytest.raises(RuntimeError, match="index changed"):
+        run_upstream(GriffinRun(
+            input_id=input_id, bam=bam, reference_fasta=reference,
+            reference_id="hg38", reference_sha256=hashlib.sha256(reference.read_bytes()).hexdigest(),
+            eligible_reads=5_000_000, upstream_root=upstream, ref_assets=assets,
+            site_lists={"CTCF": sites}, attempt_dir=tmp_path / "changed-index-attempt",
         ))
 
 

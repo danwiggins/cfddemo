@@ -27,18 +27,20 @@ the registered hg38 FASTA and its SHA-256, Griffin's
 reference assets (including mappability BigWig, exclusion BEDs and all
 15–500 bp genome GC-frequency tables), and high-mappability TF-site lists.
 It requires the 5M D21 gate, a clean upstream checkout at the pinned commit,
-and a fresh per-input attempt directory. The attempt stores hashes for BAM,
-reference, site lists and reference assets, and only marks its manifest
+and a fresh per-input attempt directory. The attempt records the sample ID,
+eligible-read count, gate, and hashes for BAM, BAM index, reference, reference
+index, site lists and reference assets. It only marks its manifest
 complete after Griffin returns a valid corrected TSV. Partial outputs remain
 inspectable after failure. Griffin's upstream shell rules interpolate paths
 without quoting, so the adapter refuses paths containing shell-special
 characters. The runner is POSIX-only, matching upstream's environment.
 
 The current Lab does **not** register or display Griffin as an available
-algorithm. The adapter is an invocation boundary, and an end-to-end run has
-not been completed: this environment lacks the upstream Snakemake and
-pyBigWig dependencies and the required mappability BigWig. Native ONT input
-is incompatible with the exact upstream code. There is no
+algorithm. The adapter is an invocation boundary. A toy paired-end run through
+both pinned upstream Snakemake workflows completed on a 30 kb synthetic
+reference; this checks orchestration, not the biological signal or production
+resource needs. No real-sample end-to-end run has been completed. Native ONT
+input is incompatible with the exact upstream code. There is no
 registered TF-site set yet. Before publication, the Lab must bind the
 per-input attempt manifest, verified corrected TSV, asset digests and
 upstream commit to its execution identity and result cache. Runner identity

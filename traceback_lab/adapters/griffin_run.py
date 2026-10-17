@@ -154,10 +154,14 @@ def run_upstream(config: GriffinRun) -> tuple[GriffinProfile, ...]:
     scripts = _safe_path(upstream / "scripts")
     if _digest(reference) != config.reference_sha256:
         raise ValueError("reference FASTA differs from the registered Lab reference")
-    if not bam.with_suffix(bam.suffix + ".bai").is_file() and not bam.with_suffix(".bai").is_file():
+    bam_index_candidates = (bam.with_suffix(bam.suffix + ".bai"), bam.with_suffix(".bai"))
+    bam_indexes = tuple(_safe_path(path) for path in bam_index_candidates if path.is_file())
+    if not bam_indexes:
         raise ValueError("the aligned BAM needs an index for Griffin")
-    if not reference.with_suffix(reference.suffix + ".fai").is_file():
+    reference_index = reference.with_suffix(reference.suffix + ".fai")
+    if not reference_index.is_file():
         raise ValueError("the registered reference FASTA needs an index for Griffin")
+    reference_index = _safe_path(reference_index)
     _require_paired_input(bam)
     for filename in _REF_FILES:
         _safe_path(assets / filename)
@@ -184,7 +188,9 @@ def run_upstream(config: GriffinRun) -> tuple[GriffinProfile, ...]:
         raise ValueError("Griffin attempt needs a shell-safe POSIX path")
     fingerprints = {
         "bam_sha256": _digest(bam),
+        "bam_indexes_sha256": {path.name: _digest(path) for path in bam_indexes},
         "reference_sha256": config.reference_sha256,
+        "reference_index_sha256": _digest(reference_index),
         "site_lists_sha256": {name: _digest(Path(path)) for name, path in site_paths.items()},
         "assets_sha256": {name: _digest(assets / name) for name in _REF_FILES},
         "gc_frequency_sha256": {path.name: _digest(path) for path in frequency_files},
@@ -218,6 +224,8 @@ def run_upstream(config: GriffinRun) -> tuple[GriffinProfile, ...]:
     (attempt / "provenance.json").write_text(json.dumps({
         "status": "attempt", "input_id": config.input_id,
         "upstream_commit": commit, "reference_id": config.reference_id,
+        "sample": sample, "eligible_reads": config.eligible_reads,
+        "minimum_eligible_reads": MIN_ELIGIBLE_READS,
         "fingerprints": fingerprints,
     }, sort_keys=True), encoding="utf-8")
     for directory, snakefile in (
@@ -231,6 +239,12 @@ def run_upstream(config: GriffinRun) -> tuple[GriffinProfile, ...]:
             )
     if _digest(bam) != fingerprints["bam_sha256"] or _digest(reference) != config.reference_sha256:
         raise RuntimeError("BAM or reference changed during Griffin computation")
+    if (tuple(_safe_path(path) for path in bam_index_candidates if path.is_file()) != bam_indexes
+            or {path.name: _digest(path) for path in bam_indexes} != fingerprints["bam_indexes_sha256"]
+            or not reference_index.is_file()
+            or _safe_path(reference.with_suffix(reference.suffix + ".fai")) != reference_index
+            or _digest(reference_index) != fingerprints["reference_index_sha256"]):
+        raise RuntimeError("BAM or reference index changed during Griffin computation")
     if any(_digest(Path(path)) != fingerprints["site_lists_sha256"][name] for name, path in site_paths.items()):
         raise RuntimeError("TF-site list changed during Griffin computation")
     if any(_digest(assets / name) != fingerprints["assets_sha256"][name] for name in _REF_FILES):
@@ -242,6 +256,8 @@ def run_upstream(config: GriffinRun) -> tuple[GriffinProfile, ...]:
     manifest = {
         "status": "complete", "input_id": config.input_id,
         "upstream_commit": commit, "reference_id": config.reference_id,
+        "sample": sample, "eligible_reads": config.eligible_reads,
+        "minimum_eligible_reads": MIN_ELIGIBLE_READS,
         "fingerprints": fingerprints,
         "gc_bias_sha256": _digest(gc_bias), "output_sha256": _digest(output),
         "profile_count": len(profiles),
