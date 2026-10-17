@@ -288,6 +288,8 @@
     // Run table.
     const active = state.lastStatus && state.lastStatus.active;
     const interrupted = state.lastStatus && state.lastStatus.interrupted;
+    const pending = [active, interrupted].find((run) => run && run.source_id === sample.source_id &&
+      run.input_id === sample.full_input_id && !sample.algorithms.some((a) => a.algorithm_id === run.step));
     const runRows = sample.algorithms.map((a) => {
       const status = a.status === "skipped" ? `skipped (${a.skip_reason})` : a.status;
       const matches = (run) => run && run.step === a.algorithm_id && run.source_id === sample.source_id && run.input_id === a.provenance.input_id;
@@ -317,6 +319,7 @@
       return h("tr", {}, ...cells);
     });
     out.push(h("section", { class: "panel" }, h("h2", {}, "Run"),
+      pending ? h("p", { class: "status-line" }, `Latest run ${pending === active ? "in progress" : "interrupted"} during ${pending.step}; no result was published for this step.`) : "",
       h("div", { class: "table-wrap" }, h("table", {}, h("thead", {}, h("tr", {}, ...["Algorithm", "Status", "Duration", "Run log", "Detail"].map((t) => h("th", { scope: "col" }, t)))), h("tbody", {}, ...runRows)))));
     // QC bands.
     const banded = [];
