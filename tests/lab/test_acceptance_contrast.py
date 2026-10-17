@@ -35,12 +35,13 @@ def test_lab_text_token_pairs_meet_4_5_to_1(foreground, background) -> None:
     assert _contrast(fg, bg) >= 4.5, (foreground, background)
 
 
+@pytest.mark.parametrize("background", ("#ffffff", "#f3f1ec"))
 @pytest.mark.parametrize("token", (
     "--chart-a", "--chart-b", "--chart-hatch", "--neutral", "--focus", "--license",
 ))
-def test_lab_nontext_mark_tokens_meet_3_to_1(token) -> None:
+def test_lab_nontext_mark_tokens_meet_3_to_1(token, background) -> None:
     color = _token(token, LAB if token == "--license" else BASE)
-    assert _contrast(color, "#ffffff") >= 3, token
+    assert _contrast(color, background) >= 3, (token, background)
 
 
 def test_lab_badge_text_pairs_meet_4_5_to_1() -> None:

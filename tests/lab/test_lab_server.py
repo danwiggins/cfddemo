@@ -642,13 +642,14 @@ def test_headless_page_renders_a_chart_with_zero_csp_violations(server, tmp_path
          server.issue_link() + f"&route=/sample/{id12}/trust-qc"], tmp_path / "profile",
         ok=lambda page: 'data-ready="1"' in page and 'class="echart"' in page and 'data-rendered="1"' in page
             and "step_end read-summary status=ok" in page,
-        action="(() => { const button = [...document.querySelectorAll('#main button')].find(a => a.textContent === 'Run log line →'); if (!button) return false; button.click(); return true; })()",
+        action="(() => { const button = document.querySelector('#main button[aria-label=\"Run log line for read-summary\"]'); if (!button) return false; button.click(); return true; })()",
     )
     assert 'data-ready="1"' in dom, dom[:500]
     assert 'data-csp-violations="0"' in dom
     assert 'data-rendered="1"' in dom  # the ECharts density panel drew under the CSP
     assert "Data table" in dom
     assert "Run log line →" in dom
+    assert 'aria-label="Run log line for read-summary"' in dom
     assert "step_end read-summary status=ok" in dom
     assert "Research use only. Not CLIA-validated. Not a diagnosis." in dom
     assert "FLAG: PII" in dom

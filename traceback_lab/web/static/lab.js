@@ -328,7 +328,8 @@
       const showLogLine = (message) => {
         state.runLogLines.set(logKey, message);
         if (logLine.isConnected) logLine.replaceChildren(message);
-        else if (state.route.name === "lens" && state.sample && state.sample.id12 === sample.id12) render();
+        else if (state.route.name === "lens" && state.route.lens === "trust-qc" &&
+                 state.sample && state.sample.id12 === sample.id12) render();
       };
       const logLink = canPin ? h("button", { type: "button", class: "control",
         "aria-label": `Run log line for ${a.algorithm_id}`, onclick: async () => {
