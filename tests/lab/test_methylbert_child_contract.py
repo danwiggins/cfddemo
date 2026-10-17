@@ -109,6 +109,8 @@ def test_child_main_checks_private_paths_support_and_aggregate(
 
     request["min_classified_reads"] = 1
     request_path.write_text(json.dumps(request), encoding="utf-8")
+    (weights / "dmr_encoder.pickle").write_bytes(b"private encoder")
+    (weights / "read_classification_model.pickle").write_bytes(b"private classifier")
     assert child.main([str(request_path)]) == 0
     aggregate = json.loads((scratch / "aggregate.json").read_text())
     assert aggregate["model_id"] == "fixture-model"
