@@ -28,25 +28,29 @@ def _context(input_dir: Path, *, derived: dict | None = None) -> InputContext:
 def _write_bam(
     input_dir: Path, *, kind: str = "prealigned", platforms: tuple[str, ...] = ("ILLUMINA",),
     pairs: tuple[tuple[str, int, int, int], ...] = (),
+    references: tuple[str, ...] = ("chr1", "chr2"),
 ) -> None:
     input_dir.mkdir()
     (input_dir / "manifest.json").write_text(json.dumps({"kind": kind}))
     header = {
         "HD": {"VN": "1.6"},
-        "SQ": [{"SN": "chr1", "LN": 10000}, {"SN": "chr2", "LN": 10000}],
+        "SQ": [{"SN": name, "LN": 10000} for name in references],
         "RG": [{"ID": f"group-{i}", "PL": platform} for i, platform in enumerate(platforms)],
     }
     with pysam.AlignmentFile(str(input_dir / "aligned.bam"), "wb", header=header) as bam:
         for name, length, flags, mapq in pairs:
+            contig = references.index("MT") if name == "mito" else (
+                references.index("decoy") if name == "decoy" else 0
+            )
             first = pysam.AlignedSegment()
             first.query_name = name
             first.query_sequence = "A" * 100
             first.flag = flags | 0x40
             first.mapping_quality = mapq
-            first.reference_id = 0
+            first.reference_id = contig
             first.reference_start = 100
             first.cigarstring = "100M"
-            first.next_reference_id = 1 if name == "other-contig" else 0
+            first.next_reference_id = 1 if name == "other-contig" else contig
             first.next_reference_start = 200
             first.template_length = length
             if platforms:
@@ -57,10 +61,10 @@ def _write_bam(
             second.query_sequence = "A" * 100
             second.flag = flags | 0x80
             second.mapping_quality = mapq
-            second.reference_id = 0
+            second.reference_id = contig
             second.reference_start = 200
             second.cigarstring = "100M"
-            second.next_reference_id = 0
+            second.next_reference_id = contig
             second.next_reference_start = 100
             second.template_length = -length
             if platforms:
@@ -140,6 +144,31 @@ def test_derived_pair_selection_uses_read_name_predicate(tmp_path: Path) -> None
     assert full == {180: 50}
     assert a[180] + b[180] == 50
     assert a[180] == sum(name_predicate(half_a)(name) for name in names)
+
+
+def test_unprefixed_nuclear_contigs_exclude_mt_and_decoy(tmp_path: Path) -> None:
+    input_dir = tmp_path / "input"
+    proper = 0x1 | 0x2
+    _write_bam(
+        input_dir,
+        references=("1", "MT", "decoy"),
+        pairs=(("nuclear", 180, proper, 60), ("mito", 120, proper, 60),
+               ("decoy", 300, proper, 60)),
+    )
+    ctx = _context(input_dir)
+    assert isinstance(SHORT_READ_FRAGMENT_SIZE.preflight(ctx), Ready)
+    assert _tlen_counts(ctx) == {180: 1}
+
+
+def test_no_canonical_nuclear_contigs_skips_explicitly(tmp_path: Path) -> None:
+    input_dir = tmp_path / "input"
+    _write_bam(
+        input_dir, references=("MT", "decoy"),
+        pairs=(("mito", 120, 0x1 | 0x2, 60),),
+    )
+    decision = SHORT_READ_FRAGMENT_SIZE.preflight(_context(input_dir))
+    assert isinstance(decision, Skip)
+    assert decision.reason_code == "reference"
 
 
 def test_short_read_library_has_no_borrowed_ont_range() -> None:
