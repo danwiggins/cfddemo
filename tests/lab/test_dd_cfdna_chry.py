@@ -176,6 +176,24 @@ def test_synthetic_calibration_skips_and_verified_mechanics_use_nonpar_y(tmp_pat
     assert donor.DD_CFDNA_CHRY.preflight(verified_ctx).reason_code == "reference"
 
 
+def test_run_rejects_consumed_contract_outside_planned_identity(tmp_path: Path, monkeypatch) -> None:
+    store = LabStore(tmp_path / "root")
+    path, digest = _file(tmp_path)
+    contract_a = register_contract(store, path, digest)
+    contract_b = replace(contract_a, manifest_sha256="b" * 64)
+    inspections = iter((contract_a, contract_b, contract_a))
+    monkeypatch.setattr(donor, "inspect_contract", lambda *_args: next(inspections))
+    contigs = [f"chr{i}" for i in range(1, 23)] + ["chrX", "chrY"]
+    lengths = [248_956_422] + [1_000_000] * 22 + [57_227_415]
+    monkeypatch.setattr(donor, "load_summary", lambda _ctx: (SimpleNamespace(
+        contigs=contigs, lengths=lengths), None))
+    monkeypatch.setattr(donor, "_count_reads", lambda _summary: (2, 1000))
+    ctx = InputContext(store.root, SOURCE, INPUT, "hg38", REFERENCE, tmp_path,
+                       approx_depth_x=5, extras={"planned_asset_sha256s": [contract_b.manifest_sha256]})
+    with pytest.raises(RuntimeError, match="consumed donor calibration differs"):
+        donor.DD_CFDNA_CHRY.run(ctx, tmp_path)
+
+
 def test_chry_counter_uses_bounded_slices_and_half_open_par_boundaries(monkeypatch) -> None:
     monkeypatch.setattr(donor, "CHUNK_ROWS", 3)
     starts = np.array([9_999, 10_000, 2_781_478, 2_781_479,
