@@ -63,10 +63,12 @@ def _ont_bam(path: Path, count: int = 120) -> None:
             bam.write(read)
 
 
-def _run(path: Path, root: Path, capsys: pytest.CaptureFixture[str]) -> dict:
+def _run(path: Path, root: Path, capsys: pytest.CaptureFixture[str],
+         *, downsample: bool = False) -> dict:
     code = signed_cli.main([
         "lab", "run", str(path), "--root", str(root), "--reference", "hg38",
-        "--no-downsample", "--no-controls", "--json",
+        *(("--downsample", "0.5") if downsample else ("--no-downsample",)),
+        "--no-controls", "--json",
     ])
     payload = json.loads(capsys.readouterr().out)
     assert code == 0, payload
@@ -87,12 +89,14 @@ def test_realistic_paired_bams_keep_platform_results_and_cohorts_separate(
     _paired_bam(illumina_bam)
     _ont_bam(ont_bam)
 
-    illumina = _run(illumina_bam, root, capsys)
+    illumina = _run(illumina_bam, root, capsys, downsample=True)
     ont = _run(ont_bam, root, capsys)
     assert illumina["sample"]["platform"] == "illumina"
     assert ont["sample"]["platform"] == "ont"
-    illumina_steps = {step["algorithm_id"]: step for step in illumina["steps"]}
-    ont_steps = {step["algorithm_id"]: step for step in ont["steps"]}
+    illumina_steps = {step["algorithm_id"]: step for step in illumina["steps"]
+                      if step["input"] == "full"}
+    ont_steps = {step["algorithm_id"]: step for step in ont["steps"]
+                 if step["input"] == "full"}
     for name in ("read-summary", "depth", "bam-qc", "short-read-fragment-size"):
         assert illumina_steps[name]["status"] == "ok"
     for name in ("read-summary", "depth", "bam-qc", "fragment-size"):
@@ -102,6 +106,12 @@ def test_realistic_paired_bams_keep_platform_results_and_cohorts_separate(
     assert ont_steps["fragment-size"]["status"] == "ok"
     assert ont_steps["short-read-fragment-size"]["status"] == "skipped"
     assert ont_steps["short-read-fragment-size"]["skip_reason"] == "platform"
+    assert illumina["controls"]["downsample"] == [0.5]
+    downsample_steps = {step["algorithm_id"]: step for step in illumina["steps"]
+                        if step["input"] == "0.5"}
+    assert downsample_steps["short-read-fragment-size"]["status"] == "ok"
+    assert downsample_steps["depth"]["status"] == "ok"
+    assert "fragment-size" not in downsample_steps
 
     store = LabStore(root)
     short = next(item for item in member_from_store(store, illumina["sample"]["source_id"]).results
