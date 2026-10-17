@@ -438,6 +438,7 @@ def test_stored_dry_run_uses_selected_depth_without_writing(
                 patch.setattr(run_module, "input_manifest", lambda _store, _input_id: malformed)
                 bad_code, bad = _json(capsys, "run", "latest", "--root", str(root), "--dry-run")
                 assert bad_code == 4 and bad["data"]["code"] == "TBX-LAB-017"
+                assert "fresh ROOT" in bad["data"]["fix"]
         with monkeypatch.context() as patch:
             patch.setattr(run_module, "source_record", lambda _store, _source_id: {
                 **record, "chunks": [{"size": "invalid"}],
@@ -524,6 +525,24 @@ def test_stored_illumina_dry_run_uses_platform_bound_read_summary(
         {"algorithm_id": "read-summary", "upstream": True, "decision": "reused (selected result)"},
         {"algorithm_id": "delfi-ratio", "upstream": False, "decision": "skip expected (platform)"},
     ]
+    with monkeypatch.context() as patch:
+        original_read_result = LabStore.read_result
+
+        def high_depth_result(current_store, selected_id, algorithm_id, parameters_sha256):
+            if algorithm_id == "read-summary":
+                assert selected_id == input_id and parameters_sha256 == identity
+                return SimpleNamespace(status="ok", metrics=[
+                    SimpleNamespace(metric_id="eligible_reads", value=2_000_000),
+                    SimpleNamespace(metric_id="approx_depth_x", value=1.0),
+                ])
+            return original_read_result(current_store, selected_id, algorithm_id, parameters_sha256)
+
+        patch.setattr(LabStore, "read_result", high_depth_result)
+        met_code, met = _json(capsys, "run", "latest", "--root", str(root),
+                              "--only", "delfi-ratio", "--dry-run")
+    assert met_code == 0, met
+    assert met["data"]["eligible_reads"] == 2_000_000
+    assert met["data"]["plan"][1]["decision"] == "skip expected (platform)"
 
 
 def test_second_writer_is_refused(lab_world, capsys, monkeypatch) -> None:

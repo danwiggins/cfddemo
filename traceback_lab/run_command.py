@@ -318,7 +318,7 @@ def _dry_run(args: argparse.Namespace, store: LabStore, progress: Callable[[str]
             raise LabProblem(
                 "TBX-LAB-017",
                 cause="the stored aligned input has no valid reference binding",
-                fix="Rerun with the original BAM or chunk paths: `traceback lab run INPUT`",
+                fix="Restore the stored input from a known-good backup, or re-ingest under a fresh ROOT",
             )
         platform = _stored_platform(aligned)
         data["sample"] = {
