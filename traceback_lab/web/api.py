@@ -168,22 +168,60 @@ def _read_run_log(path: Path, *, limit: int = 1024 * 1024) -> bytes | None:
         os.close(descriptor)
 
 
+def _run_events(store: LabStore, run_id: str) -> list[tuple[int, dict[str, Any]]]:
+    if not isinstance(run_id, str) or not re.fullmatch(r"r-\d{8}-\d{4}-[0-9a-f]{4,8}", run_id):
+        return []
+    raw = _read_run_log(store.runs_dir / f"{run_id}.jsonl")
+    if raw is None:
+        return []
+    lines = raw.splitlines()
+    if len(lines) > 4096:
+        return []
+    events = []
+    for number, line in enumerate(lines, 1):
+        try:
+            event = json.loads(line)
+        except (ValueError, UnicodeDecodeError):
+            continue
+        if isinstance(event, dict):
+            events.append((number, event))
+    return events
+
+
+def _run_sample_identity(events: list[tuple[int, dict[str, Any]]]) -> dict[str, str]:
+    for _, event in reversed(events):
+        if event.get("event") != "sample":
+            continue
+        source_id, input_id = event.get("source_id"), event.get("input_id")
+        if (isinstance(source_id, str) and re.fullmatch(r"[0-9a-f]{64}", source_id)
+                and isinstance(input_id, str) and re.fullmatch(r"[0-9a-f]{64}", input_id)):
+            return {"source_id": source_id, "input_id": input_id}
+        return {}
+    return {}
+
+
 class LabApi:
     def __init__(self, store: LabStore) -> None:
         self.store = store
         self.libraries = LibraryHolder()
 
-    # -- status (D22): two small reads, never the lock ---------------------------
+    # -- status (D22): bounded reads, never the lock -----------------------------
     def status(self) -> dict[str, Any]:
         status = self.store.status()
         interrupted = None
-        if status["active"] is None:
+        if status["active"] is not None:
+            events = _run_events(self.store, status["active"]["run_id"])
+            status["active"] = {**status["active"], **_run_sample_identity(events)}
+        else:
             # Bounded (D22): one pointer file and that one run's log, never a scan.
             last = self.store.last_run_id()
             if last is not None:
-                summary = summarize_run(self.store.run_log(last).events(), self.store)
-                if summary["status"] == "interrupted":
-                    interrupted = {"run_id": summary["run_id"], "step": summary["open_step"]}
+                events = _run_events(self.store, last)
+                if events:
+                    summary = summarize_run([event for _, event in events], self.store)
+                    if summary["status"] == "interrupted":
+                        interrupted = {"run_id": last, "step": summary["open_step"],
+                                       **_run_sample_identity(events)}
         try:
             self.libraries.get()
         except (LibraryError, OSError):
@@ -472,20 +510,7 @@ class LabApi:
             if stat.S_ISREG(info.st_mode):
                 recent.append((info.st_mtime_ns, run_id))
         for _, run_id in sorted(recent, reverse=True)[:64]:
-            raw = _read_run_log(self.store.runs_dir / f"{run_id}.jsonl")
-            if raw is None:
-                continue
-            lines = raw.splitlines()
-            if len(lines) > 4096:
-                continue
-            events = []
-            for number, line in enumerate(lines, 1):
-                try:
-                    event = json.loads(line)
-                except (ValueError, UnicodeDecodeError):
-                    continue
-                if isinstance(event, dict):
-                    events.append((number, event))
+            events = _run_events(self.store, run_id)
             if not any(
                 event.get("event") == "sample"
                 and event.get("source_id") == source_id
@@ -496,6 +521,7 @@ class LabApi:
             for number, event in reversed(events):
                 if (event.get("event") != "step_end" or event.get("step") != algorithm_id
                         or event.get("parameters_sha256") != identity
+                        or event.get("input_id") != sample.full.input_id
                         or event.get("attempt_id") != selected.name
                         or event.get("status") != result.status
                         or event.get("status") not in ("ok", "skipped", "failed")):

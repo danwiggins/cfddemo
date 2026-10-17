@@ -261,6 +261,7 @@ def test_failed_algorithm_exits_8_with_scrubbed_stderr_and_rerun_recomputes_only
     for event in step_events:
         selected = store.selected_attempt(input_id, event["step"], event["parameters_sha256"])
         assert selected is not None and event["attempt_id"] == selected.name
+        assert event["input_id"] == input_id
     first_success = next(event for run_id in store.run_ids()
                          for event in store.run_log(run_id).events()
                          if event.get("event") == "step_end" and event.get("step") == "read-summary")

@@ -255,7 +255,9 @@ script or style, no outside requests.
   provisional QC bands, library health. The link checks the 64 recently updated
   runs and reveals only allowlisted status fields. A line must name the selected
   immutable result attempt; legacy logs without that ID, older runs, or cached
-  steps may have no matching line.
+  steps may have no matching line. A latest-run in-progress or interrupted note
+  appears only when that run names the same source and full input; the selected
+  result status remains visible beside it.
 - **Stability**: one small multiple per metric: deviation from full depth at
   each fraction, the stability band, and split halves A/B at 50%.
 

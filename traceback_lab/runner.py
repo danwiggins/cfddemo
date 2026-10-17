@@ -238,6 +238,7 @@ def run_plan(
                 status="skipped",
                 skip_reason=decision.reason_code,
                 parameters_sha256=identity,
+                input_id=target.input_id,
                 attempt_id=attempt_id,
             )
             result = StepResult(
@@ -317,6 +318,7 @@ def run_plan(
                         duration_s=round(outcome.duration_s, 3),
                         peak_rss_bytes=outcome.peak_rss_bytes,
                         parameters_sha256=identity,
+                        input_id=target.input_id,
                         attempt_id=attempt_id,
                         tool_versions={tool.name: tool.version for tool in algorithm.tools},
                     )
@@ -420,6 +422,7 @@ def _publish_failure(
         peak_rss_bytes=peak_rss,
         timed_out=timed_out,
         parameters_sha256=identity,
+        input_id=target.input_id,
         attempt_id=attempt_id,
     )
     return StepResult(

@@ -286,11 +286,16 @@
     out.push(h("section", { class: "panel" }, h("h2", {}, "Depth against each algorithm's minimum"),
       h("div", { class: "table-wrap" }, h("table", {}, h("thead", {}, h("tr", {}, h("th", {}, "Algorithm"), h("th", {}, "Depth"), h("th", {}, "Verdict"))), h("tbody", {}, ...rows)))));
     // Run table.
-    const running = state.lastStatus && state.lastStatus.active ? state.lastStatus.active.step : null;
-    const interrupted = state.lastStatus && state.lastStatus.interrupted ? state.lastStatus.interrupted.step : null;
+    const active = state.lastStatus && state.lastStatus.active;
+    const interrupted = state.lastStatus && state.lastStatus.interrupted;
     const runRows = sample.algorithms.map((a) => {
-      const status = running === a.algorithm_id ? "running" : interrupted === a.algorithm_id ? "interrupted" : a.status === "skipped" ? `skipped (${a.skip_reason})` : a.status;
-      const cells = [h("th", { scope: "row" }, a.algorithm_id + (a.hidden ? " (intermediate)" : "")), h("td", { class: a.status === "failed" ? "problem" : null }, status), h("td", { class: "num" }, a.duration_s !== null && a.duration_s !== undefined ? `${a.duration_s.toFixed(1)} s` : "—")];
+      const status = a.status === "skipped" ? `skipped (${a.skip_reason})` : a.status;
+      const matches = (run) => run && run.step === a.algorithm_id && run.source_id === sample.source_id && run.input_id === a.provenance.input_id;
+      const runNote = matches(active) ? "latest run in progress" : matches(interrupted) ? "latest run interrupted" : null;
+      const cells = [h("th", { scope: "row" }, a.algorithm_id + (a.hidden ? " (intermediate)" : "")),
+        h("td", { class: a.status === "failed" ? "problem" : null }, status,
+          runNote ? h("span", { class: "state-chip run-note" }, runNote) : ""),
+        h("td", { class: "num" }, a.duration_s !== null && a.duration_s !== undefined ? `${a.duration_s.toFixed(1)} s` : "—")];
       const logLine = h("span", { class: "help", "aria-live": "polite" });
       const logLink = h("a", { href: `#/sample/${sample.id12}/trust-qc`, onclick: async (event) => {
         event.preventDefault();
@@ -299,7 +304,7 @@
           const line = await api(`/api/samples/${sample.id12}/run-log/${a.algorithm_id}`);
           logLine.replaceChildren(line.found
             ? `${line.run_id} · line ${line.line} · ${line.utc || "time unavailable"} · step_end ${line.step} status=${line.status}${line.skip_reason ? ` (${line.skip_reason})` : ""}${line.duration_s !== null ? ` · ${line.duration_s} s` : ""}`
-            : "No matching line in the 64 recently updated runs.");
+            : "Run log line unavailable (checked 64 recently updated runs; logs over 1 MiB or 4,096 lines are not shown).");
         } catch (error) {
           logLine.replaceChildren(error.session ? "Session expired; reopen Lab." : "Run log line unavailable.");
         }
@@ -402,11 +407,10 @@
           ` Interpretation library on disk is invalid (${status.library.error}). Showing v${status.library.version}, loaded at ${status.library.loaded_at}.`));
       }
       setControlsEnabled(true);
-      const wasRunning = previous && previous.active ? previous.active.step : null;
-      const nowRunning = status.active ? status.active.step : null;
-      const wasInterrupted = previous && previous.interrupted ? previous.interrupted.step : null;
-      const nowInterrupted = status.interrupted ? status.interrupted.step : null;
-      if ((wasRunning !== nowRunning || wasInterrupted !== nowInterrupted) && state.route.name === "lens") render();
+      const runMarker = (row) => row ? [row.run_id, row.step, row.source_id, row.input_id].join(":") : null;
+      if (state.route.name === "lens" &&
+          (runMarker(previous && previous.active) !== runMarker(status.active) ||
+           runMarker(previous && previous.interrupted) !== runMarker(status.interrupted))) render();
     } catch (error) {
       if (error.session) { setStatus("Session expired. Restart `traceback lab serve --open`; it opens a fresh page."); return; }
       state.missed += 1;

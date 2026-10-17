@@ -693,6 +693,72 @@ def test_status_finds_an_interrupted_run_through_the_pointer(tmp_path) -> None:
     assert status["interrupted"] == {"run_id": run_id, "step": "align"}
 
 
+def test_status_identifies_sample_only_after_run_sample_event(tmp_path) -> None:
+    store = LabStore(tmp_path)
+    run_id = "r-20261015-0101-abcd"
+    source_id, input_id = "a" * 64, "b" * 64
+    with store.writer("run", run_id, step="bam-qc"):
+        log = store.run_log(run_id)
+        log.append("run_start", command="run")
+        before = api_module.LabApi(store).status()["active"]
+        assert "source_id" not in before and "input_id" not in before
+        log.append("sample", source_id=source_id, input_id=input_id)
+        log.append("step_start", step="bam-qc")
+        active = api_module.LabApi(store).status()["active"]
+        assert active["source_id"] == source_id and active["input_id"] == input_id
+    interrupted = api_module.LabApi(store).status()["interrupted"]
+    assert interrupted == {"run_id": run_id, "step": "bam-qc",
+                           "source_id": source_id, "input_id": input_id}
+
+
+@pytest.mark.skipif(_chrome() is None, reason="no Chrome/Chromium for the headless Trust/QC check")
+@pytest.mark.parametrize("kind", ("active", "active-before-sample", "interrupted"))
+@pytest.mark.parametrize("selected", ("a", "c"))
+def test_trust_qc_run_note_is_scoped_without_replacing_result_status(tmp_path, kind, selected) -> None:
+    source_a, input_a = "a" * 64, "b" * 64
+    source_b, input_b = "c" * 64, "d" * 64
+    samples = {}
+    for source_id, input_id in ((source_a, input_a), (source_b, input_b)):
+        id12 = source_id[:12]
+        samples[id12] = {
+            "found": True, "id12": id12, "source_id": source_id, "example": False,
+            "run_utc": "2026-10-16T00:00:00Z", "depth": {"approx_depth_x": 1.0},
+            "excluded_chunks": [], "preanalytic_sex": {"state": "no_verdict", "reason": "no_assertion"},
+            "cohort_n": 0,
+            "algorithms": [{"algorithm_id": "bam-qc", "hidden": False, "status": "ok",
+                            "skip_reason": None, "skip_message": None, "failure": None,
+                            "duration_s": 1.0, "min_depth_x": None, "metrics": [],
+                            "provenance": {"input_id": input_id}}],
+            "library_health": {"no_library_entry": 0, "unverified_citations": 0,
+                               "version": "fixture", "error": None},
+        }
+    marker = {"run_id": "r-20261015-0101-abcd", "step": "bam-qc",
+              "source_id": source_a, "input_id": input_a}
+    shown_marker = {key: value for key, value in marker.items()
+                    if kind != "active-before-sample" or key not in ("source_id", "input_id")}
+    with RunningLabServer(LabStore(tmp_path / "root")) as running:
+        running.app.api.status = lambda: {
+            "generation": 1, "active": {**shown_marker, "started_utc": "2026-10-16T00:00:00Z"} if kind.startswith("active") else None,
+            "interrupted": shown_marker if kind == "interrupted" else None,
+            "library": samples[source_a[:12]]["library_health"],
+        }
+        running.app.api.samples = lambda: {"samples": [
+            {"id12": row["id12"], "run_utc": row["run_utc"], "depth_x": 1.0, "example": False}
+            for row in samples.values()], "root_has_runs": True}
+        running.app.api.sample = lambda id12: samples.get(id12, {"found": False, "candidates": []})
+        id12 = (source_a if selected == "a" else source_b)[:12]
+        dom = _dom_cdp(
+            [_chrome(), "--headless=new", "--disable-gpu", "--no-first-run", "--no-default-browser-check",
+             f"--user-data-dir={tmp_path / 'profile'}", "--window-size=1280,800",
+             running.issue_link() + f"&route=/sample/{id12}/trust-qc"], tmp_path / "profile",
+            ok=lambda page: 'data-ready="1"' in page and "<h2>Run</h2>" in page,
+        )
+    run_table = dom.split("<h2>Run</h2>", 1)[1].split("</table>", 1)[0]
+    assert '<th scope="row">bam-qc</th><td>ok' in run_table
+    note = "latest run " + ("interrupted" if kind == "interrupted" else "in progress")
+    assert (note in run_table) == (selected == "a" and kind != "active-before-sample")
+
+
 def _selected_sex_result(source_id: str, input_id: str, identity: str) -> ResultEnvelope:
     return ResultEnvelope(
         algorithm_id="sex-check", algorithm_version="1", status="ok",
@@ -715,7 +781,7 @@ def test_run_log_line_is_authenticated_matched_and_allowlisted(tmp_path, monkeyp
     log = store.run_log(run_id)
     log.append("run_start", command="run", flags={"private": "/secret/path"})
     log.append("sample", source_id=source_id, input_id=input_id, sample=id12)
-    log.append("step_end", step="sex-check", parameters_sha256=identity,
+    log.append("step_end", step="sex-check", parameters_sha256=identity, input_id=input_id,
                attempt_id=attempt_id, status="ok", duration_s=1.25, first_line="/secret/path")
     sample = SimpleNamespace(full=SimpleNamespace(
         input_id=input_id,
@@ -750,12 +816,12 @@ def test_run_log_line_uses_only_the_selected_attempt(tmp_path, monkeypatch) -> N
     first = store.publish_result(result, input_id=input_id)
     old = store.run_log("r-20261015-0101-ffff")
     old.append("sample", source_id=source_id, input_id=input_id)
-    old.append("step_end", step="sex-check", parameters_sha256=identity,
+    old.append("step_end", step="sex-check", parameters_sha256=identity, input_id=input_id,
                attempt_id=first, status="ok")
     second = store.publish_result(result, input_id=input_id)
     new = store.run_log("r-20261015-0101-0001")
     new.append("sample", source_id=source_id, input_id=input_id)
-    new.append("step_end", step="sex-check", parameters_sha256=identity,
+    new.append("step_end", step="sex-check", parameters_sha256=identity, input_id=input_id,
                attempt_id=second, status="ok")
     os.utime(old.path, ns=(200_000_000_000, 200_000_000_000))
     os.utime(new.path, ns=(100_000_000_000, 100_000_000_000))
@@ -766,7 +832,7 @@ def test_run_log_line_uses_only_the_selected_attempt(tmp_path, monkeypatch) -> N
     assert api.run_log_line(source_id[:12], "sex-check")["run_id"] == new.run_id
     latest = store.run_log("r-20261015-0101-0000")
     latest.append("sample", source_id=source_id, input_id=input_id)
-    latest.append("step_end", step="sex-check", parameters_sha256=identity,
+    latest.append("step_end", step="sex-check", parameters_sha256=identity, input_id=input_id,
                   attempt_id=second, status="ok")
     os.utime(latest.path, ns=(300_000_000_000, 300_000_000_000))
     assert api.run_log_line(source_id[:12], "sex-check")["run_id"] == latest.run_id
@@ -774,7 +840,7 @@ def test_run_log_line_uses_only_the_selected_attempt(tmp_path, monkeypatch) -> N
     new.path.unlink()
     legacy = store.run_log("r-20261015-0101-bbbb")
     legacy.append("sample", source_id=source_id, input_id=input_id)
-    legacy.append("step_end", step="sex-check", parameters_sha256=identity, status="ok")
+    legacy.append("step_end", step="sex-check", parameters_sha256=identity, input_id=input_id, status="ok")
     assert api.run_log_line(source_id[:12], "sex-check") == {"found": False}
 
 
