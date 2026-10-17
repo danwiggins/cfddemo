@@ -263,6 +263,10 @@ read-name predicate as other Lab full-BAM algorithms. The histogram and
 metrics are keyed to `short-read-fragment-size`; `fragment-size` remains the
 ONT aligned-span measurement. The normal Illumina run also reports read
 summary, aligned-base depth, and BAM QC, including downsample and split views.
+Split halves are read-name pseudo-replicates, not independent molecules. On
+Illumina, unmarked PCR duplicates can place copies of one molecule in both
+halves and make agreement look stronger; inspect duplicate marking and do not
+treat split agreement as independent validation.
 ONT-only algorithms skip with reason `platform`; the CNA spike is omitted for
 Illumina. Result and cohort compatibility identities distinguish platforms
 while retaining the historical ONT identity encoding, so an Illumina
