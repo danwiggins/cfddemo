@@ -146,6 +146,62 @@ def test_outer_timeout_removes_private_candidate_files(
     assert not list(scratch.rglob("kraken.output"))
 
 
+def test_streamed_outer_timeout_kills_nonreading_classifier_and_cleans_scratch(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, synthetic_world,
+) -> None:
+    """The real runner must kill a stalled streamed classifier and remove its worker tree."""
+    from traceback_runner import cli as signed_cli
+    from traceback_runner.references import register_reference
+    from traceback_lab.ingest import source_ids
+    from traceback_lab.views import load_sample
+    from tests.lab.bam_fixtures import Read, write_bam
+
+    store, _ = _database(tmp_path)
+    register_reference(store.root, synthetic_world["fasta"], "synth")
+    tools_dir = tmp_path / "tools"
+    tools_dir.mkdir()
+    kraken = tools_dir / "kraken2"
+    kraken.write_text('#!/bin/sh\nprintf "%s" "$$" > "$(dirname "$0")/classifier.pid"\n'
+                      'touch "$(dirname "$0")/started"\nsleep 90\n')
+    bracken = tools_dir / "bracken"
+    bracken.write_text("#!/bin/sh\nexit 99\n")
+    for launcher in (kraken, bracken):
+        launcher.chmod(0o755)
+    (tools_dir / "classify").write_bytes(b"pinned synthetic helper")
+    (tools_dir / "kraken2lib.pm").write_bytes(b"pinned synthetic library")
+    (tools_dir / "src").mkdir()
+    (tools_dir / "src" / "est_abundance.py").write_bytes(b"pinned synthetic Bracken helper")
+    (tools_dir / "python").symlink_to(sys.executable)
+    monkeypatch.setenv("PATH", f"{tools_dir}{os.pathsep}{os.environ['PATH']}")
+    with pysam.FastaFile(str(synthetic_world["fasta"])) as fasta:
+        contigs = list(zip(fasta.references, fasta.lengths))
+    bam = write_bam(tmp_path / "aligned.bam", contigs, [
+        Read(f"candidate-{index}", "chr1", 0, "A" * 75, flag=4) for index in range(2500)
+    ])
+    common = [str(bam), "--root", str(store.root), "--no-downsample", "--no-controls", "--json"]
+    assert signed_cli.main(["lab", "run", *common, "--only", "read-summary"]) == 0
+
+    injection = tmp_path / "injection"
+    injection.mkdir()
+    marker = tmp_path / "streamed-worker-imported"
+    (injection / "sitecustomize.py").write_text(
+        "from traceback_lab.algorithms import microbial\n"
+        "microbial.MAX_CANDIDATE_FASTA_BYTES = 80\n"
+        f"from pathlib import Path\nPath({str(marker)!r}).touch()\n")
+    monkeypatch.syspath_prepend(str(injection))
+    signed_cli.main(["lab", "run", *common, "--only", "microbial", "--timeout-s", "15"])
+    assert marker.exists() and (tools_dir / "started").exists(), "the streamed worker must reach Kraken"
+    pid = int((tools_dir / "classifier.pid").read_text())
+    proc = Path(f"/proc/{pid}/stat")
+    if Path("/proc").is_dir() and proc.exists():
+        assert proc.read_text().split()[2] in ("Z", "X"), "classifier must not survive the worker timeout"
+    sample = load_sample(store, source_ids(store)[0])
+    assert sample is not None and sample.full.results["microbial"].status == "failed"
+    scratch = store.lab / "tmp"
+    assert not list(scratch.rglob("candidate.fa"))
+    assert not list(scratch.rglob("microbial-*"))
+
+
 def test_production_cohort_snapshot_excludes_unassayable_and_changed_db(tmp_path, monkeypatch) -> None:
     """The production selector must preserve microbial DB identity and zero semantics."""
 
