@@ -24,6 +24,81 @@ def test_read_group_platform(lines: list[str], expected: str) -> None:
     assert from_rg_lines(lines) == expected
 
 
+@pytest.mark.parametrize("platform", [None, "unknown", "pacbio"])
+def test_worker_context_refuses_missing_or_unsupported_platform(platform: str | None) -> None:
+    from traceback_lab.registry import context_from_json
+
+    payload = {
+        "root": "/tmp/lab", "source_id": "s", "input_id": "i",
+        "reference_id": "hg38", "reference_sha256": "r", "input_dir": "/tmp/lab/input",
+    }
+    if platform is not None:
+        payload["platform"] = platform
+    with pytest.raises(ValueError, match="no supported platform"):
+        context_from_json(payload)
+
+
+def test_derived_platform_skip_is_persisted_and_shown_in_depth_curve(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from traceback_lab import controls, views
+    from traceback_lab.algorithms.short_read_fragment_size import SHORT_READ_FRAGMENT_SIZE
+    from traceback_lab.derived import DerivedInput, downsample
+    from traceback_lab.registry import PlanItem
+    from traceback_lab.runner import RunTarget, StepResult, run_plan
+    from traceback_lab.scrub import Scrubber
+    from traceback_lab.store import LabStore
+
+    store = LabStore(tmp_path / "store")
+    store.ensure()
+    log = store.run_log("r-20261017-1200-aaaa")
+    parent = RunTarget(input_id="a" * 64, source_id="b" * 64, input_dir=tmp_path,
+                       reference_id="hg38", reference_sha256="c" * 64,
+                       platform="ont", eligible_reads=5_000_000, approx_depth_x=10.0)
+    algorithm = SHORT_READ_FRAGMENT_SIZE
+    monkeypatch.setattr(algorithm, "preflight", lambda _: pytest.fail("platform skip must precede preflight"))
+    monkeypatch.setattr(algorithm, "run", lambda *_: pytest.fail("platform skip must not run worker"))
+    items = [PlanItem(algorithm, False)]
+    entries = {algorithm.id: "traceback_lab.algorithms.short_read_fragment_size:SHORT_READ_FRAGMENT_SIZE"}
+    scrubber = Scrubber(root=store.root)
+    full, = run_plan(store, None, log, parent, items, entries, run_id=log.run_id, scrubber=scrubber)
+    assert (full.status, full.skip_reason) == ("skipped", "platform")
+    from traceback_lab.registry import execution_identity
+    assert full.parameters_sha256 == execution_identity(
+        algorithm, reference_sha256=parent.reference_sha256,
+    )
+
+    monkeypatch.setattr(controls.ReadSummary, "open", lambda *_: object())
+    monkeypatch.setattr(controls, "derived_mask", lambda *_: None)
+    monkeypatch.setattr(controls, "depth_stamp", lambda *_: {
+        "eligible_reads": 2_500_000, "mean_span_bp": 150.0, "approx_depth_x": 5.0,
+    })
+    monkeypatch.setattr(controls, "record_derived", lambda *_: None)
+
+    def materialize(_store, parent_id, _bam, specs, **_kwargs):
+        return {spec.label(): DerivedInput(spec, spec.input_id(parent_id), parent_id, tmp_path)
+                for spec in specs}
+
+    monkeypatch.setattr(controls, "materialize", materialize)
+    summary = StepResult("read-summary", "ok", True, "d" * 64, artifacts_dir=str(tmp_path))
+    derived, = controls.run_derived(
+        store, None, log, parent, [downsample(0.5)], items, entries,
+        run_id=log.run_id, read_summary=summary, scrubber=scrubber, timeout_s=30,
+    )
+    result, = derived.results
+    assert (result.status, result.skip_reason) == ("skipped", "platform")
+    persisted = store.read_result(derived.derived.input_id, algorithm.id, result.parameters_sha256)
+    assert persisted is not None and persisted.status == "skipped" and persisted.skip_reason == "platform"
+    sample = views.SampleView(
+        source_id=parent.source_id, id12=parent.source_id[:12], example=False,
+        full=views.InputView("full", parent.input_id, None, {}, views.selected_results(store, parent.input_id)),
+        derived=[views.InputView("0.5", derived.derived.input_id, "downsample", {"fraction": 0.5},
+                                 views.selected_results(store, derived.derived.input_id), 0.5)],
+    )
+    row = next(row for row in views.depth_curve(sample)["rows"] if row["algorithm_id"] == algorithm.id)
+    assert row["cells"][0]["state"] == "skipped" and row["cells"][0]["reason"] == "platform"
+
+
 def test_each_unaligned_chunk_must_declare_the_platform() -> None:
     from traceback_lab.ingest import Chunk, ChunkSet, _refuse_mixed_models
     from traceback_lab.problems import LabProblem
@@ -159,6 +234,43 @@ def test_legacy_lab_aligned_without_read_groups_uses_pinned_map_ont(tmp_path: Pa
         for_input({"kind": "aligned", "aligner_argv": ["other"]}, bam_path)
 
 
+@pytest.mark.parametrize("groups", [
+    [{"ID": "one", "PL": "PROMETHION"}],
+    [{"ID": "one"}, {"ID": "two", "PL": "nanopore"}],
+])
+def test_legacy_lab_aligned_with_unknown_read_group_platform_uses_exact_recipe(
+    tmp_path: Path, groups: list[dict[str, str]],
+) -> None:
+    from traceback_lab.ingest import aligner_argv_identity
+
+    bam_path = tmp_path / "legacy-rg.bam"
+    header = {"HD": {"VN": "1.6"}, "SQ": [{"SN": "chr1", "LN": 1000}], "RG": groups}
+    with pysam.AlignmentFile(str(bam_path), "wb", header=header):
+        pass
+    with pysam.AlignmentFile(str(bam_path), "rb") as bam:
+        rg_lines = [line for line in str(bam.header).splitlines() if line.startswith("@RG\t")]
+    old_manifest = {"kind": "aligned", "aligner_argv": aligner_argv_identity(rg_lines)}
+    assert for_input(old_manifest, bam_path) == "ont"
+    with pytest.raises(ValueError, match="does not declare ONT"):
+        for_input({**old_manifest, "platform": "ont"}, bam_path)
+    with pytest.raises(ValueError, match="does not declare ONT"):
+        for_input({**old_manifest, "aligner_argv": ["other"]}, bam_path)
+
+
+def test_legacy_lab_aligned_rejects_explicit_illumina_in_mixed_unknown_read_groups(tmp_path: Path) -> None:
+    from traceback_lab.ingest import aligner_argv_identity
+
+    bam_path = tmp_path / "mixed-rg.bam"
+    header = {"HD": {"VN": "1.6"}, "SQ": [{"SN": "chr1", "LN": 1000}],
+              "RG": [{"ID": "one", "PL": "ILLUMINA"}, {"ID": "two"}]}
+    with pysam.AlignmentFile(str(bam_path), "wb", header=header):
+        pass
+    with pysam.AlignmentFile(str(bam_path), "rb") as bam:
+        rg_lines = [line for line in str(bam.header).splitlines() if line.startswith("@RG\t")]
+    with pytest.raises(ValueError, match="does not declare ONT"):
+        for_input({"kind": "aligned", "aligner_argv": aligner_argv_identity(rg_lines)}, bam_path)
+
+
 @pytest.mark.parametrize("platform", ["ILLUMINA", None])
 def test_unaligned_non_ont_is_refused_before_alignment(
     tmp_path: Path, capsys: pytest.CaptureFixture[str], platform: str | None,
@@ -247,12 +359,11 @@ def test_prealigned_writer_requires_one_bam_even_when_one_declares_ont(tmp_path:
         ingest_prealigned(store, chunks, resolve_reference(root, "hg38"))
 
 
-@pytest.mark.parametrize("tamper", ["platform", "kind"])
+@pytest.mark.parametrize("tamper", ["platform", "kind", "list"])
 @pytest.mark.parametrize("dry_run", [False, True])
 def test_stored_platform_mismatch_is_same_typed_refusal(
     tmp_path: Path, capsys: pytest.CaptureFixture[str], dry_run: bool, tamper: str,
 ) -> None:
-    from traceback_lab.ingest import source_ids
     from traceback_lab.store import LabStore
     from traceback_lab.views import load_sample
 
@@ -264,11 +375,15 @@ def test_stored_platform_mismatch_is_same_typed_refusal(
     payload = json.loads(capsys.readouterr().out)
     assert code == 0, payload
     input_id = payload["data"]["sample"]["input_id"]
+    source_id = payload["data"]["sample"]["source_id"]
     manifest = root / "lab" / "inputs" / input_id / "manifest.json"
     changed = json.loads(manifest.read_text())
-    changed["platform"] = "ont"
-    if tamper == "kind":
-        changed["kind"] = "aligned"
+    if tamper == "list":
+        changed = ["malformed stored manifest"]
+    else:
+        changed["platform"] = "ont"
+        if tamper == "kind":
+            changed["kind"] = "aligned"
     manifest.write_text(json.dumps(changed))
     argv = ["lab", "run", "latest", "--root", str(root), "--json"]
     if dry_run:
@@ -279,8 +394,7 @@ def test_stored_platform_mismatch_is_same_typed_refusal(
     assert payload["data"]["code"] == "TBX-LAB-024"
     assert payload["data"]["input_id"] == input_id
     assert "fresh ROOT" in payload["data"]["fix"]
-    store = LabStore(root)
-    sample = load_sample(store, source_ids(store)[0])
+    sample = load_sample(LabStore(root), source_id)
     assert sample is not None and sample.full.results
     assert all(result.status == "skipped" and result.skip_reason == "platform"
                for result in sample.full.results.values())

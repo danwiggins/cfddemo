@@ -138,7 +138,12 @@ def load_sample(store: LabStore, source_id: str) -> SampleView | None:
     except (OSError, ValueError):
         platform = "unknown"
     platform_unverified = platform == "unknown"
-    legacy_not_ont = manifest.get("kind") == "prealigned" and "platform" not in manifest and platform == "illumina"
+    legacy_not_ont = (
+        isinstance(manifest, Mapping)
+        and manifest.get("kind") == "prealigned"
+        and "platform" not in manifest
+        and platform == "illumina"
+    )
     supported: set[str] | None = None
     if platform_unverified:
         supported = set()

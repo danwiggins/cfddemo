@@ -212,8 +212,8 @@ new measurement.
 | id | What it reports |
 |---|---|
 | `read-summary` | intermediate: one pass over the aligned BAM into memmapped columns (no read names); every pysam algorithm and every downsample or split-half view reads it |
-| `bam-qc` | primaries, mapped and MAPQ ≥ 20 shares, supplementary share (chimera proxy), mean read Q, share of sampled genome covered ≥ 1x, GC-bias slope, duplicate share (only when marked) |
-| `depth` | eligible reads (primary, MAPQ ≥ 20, chr1–22/X/Y), mean span, approximate depth; the index count is shown only as an upper bound |
+| `bam-qc` | primaries, mapped and MAPQ ≥ 20 shares, supplementary share, mean read Q, share of sampled genome covered ≥ 1x, GC-bias slope, duplicate share (only when marked); supplementary share as a chimera proxy and mean read Q interpretation are ONT-specific |
+| `depth` | eligible reads (primary, MAPQ ≥ 20, chr1–22/X/Y), mean aligned span per eligible read, approximate aligned-base depth; the index count is shown only as an upper bound, and Illumina aligned span is not template length (`abs(TLEN)`) |
 | `fragment-size` | 1-bp aligned-span histogram, mode, short (< 150 bp) share, mono/di peaks, 10 bp periodicity |
 | `lionheart` | opt-in upstream LIONHEART v2.2.0 extraction of 898 raw sample-standardized chromatin-accessibility correlation scores from the selected hg38 BAM; needs ≥5M eligible reads, the modified mosdepth and Zenodo v003 resources; ONT single-end mode is experimental, and no cancer prediction is run |
 | `short-read-fragment-size` | separate exploratory paired-end Illumina histogram and size summaries from absolute BAM TLEN; requires a prealigned BAM with every `@RG PL:ILLUMINA` |
@@ -302,19 +302,26 @@ read-name predicate as other Lab full-BAM algorithms. The histogram and
 metrics are keyed to `short-read-fragment-size`; `fragment-size` remains the
 ONT aligned-span measurement. The normal Illumina run also reports read
 summary, aligned-base depth, and BAM QC, including downsample and split views.
+Split halves are read-name pseudo-replicates, not independent molecules. On
+Illumina, unmarked PCR duplicates can place copies of one molecule in both
+halves and make agreement look stronger; inspect duplicate marking and do not
+treat split agreement as independent validation.
 ONT-only algorithms skip with reason `platform`; the CNA spike is omitted for
-Illumina. Result and cohort compatibility identities include platform, so an
-Illumina measurement cannot reuse an ONT result or reference range. No clinical
+Illumina. Result and cohort compatibility identities distinguish platforms
+while retaining the historical ONT identity encoding, so an Illumina
+measurement cannot reuse an ONT result or reference range. No clinical
 cutoff, short-read healthy range, or cross-platform comparison is supplied.
 If an Illumina BAM was ingested by the earlier opt-in TLEN path, run it again
 from the original BAM to create its platform-specific input identity. The old
 stored result remains available but does not enter new platform-aware cohorts.
-For a legacy BAM without a platform declaration, verify its instrument
-provenance and regenerate a BAM with the correct `@RG PL` value from the trusted
-source before ingesting it. The Lab does not infer ONT from an absent value.
-Previously stored Lab-aligned inputs without read groups remain readable only
-when their manifest pins the historical `map-ont` alignment recipe; a new
-input still needs an explicit platform declaration.
+For a legacy prealigned BAM without a platform declaration, verify its
+instrument provenance and regenerate a BAM with the correct `@RG PL` value
+from the trusted source before ingesting it. The Lab does not infer ONT from
+an absent value. Previously stored Lab-aligned inputs with absent or
+unrecognized platform tags remain readable only when their manifest exactly
+pins the historical `map-ont` recipe for the BAM's read groups and no read
+group explicitly declares Illumina. A new input still needs an explicit
+platform declaration.
 Stored prealigned manifests without a platform field still read the BAM's
 unanimous platform declaration. Re-ingest short reads to record an Illumina
 input identity for new results and cohorts. Before rerun, historical ONT-only
@@ -551,7 +558,7 @@ Chunks declare different `@RG` basecall models (exit 3). Run each model's chunks
 
 ### TBX-LAB-009
 
-An aligned BAM's `@SQ` lines differ from the registered reference, or the inputs mix aligned and unaligned BAMs (exit 3). The cause lists the first three differences. Pass the unaligned chunks and let the Lab align, or register the FASTA the BAM was aligned to.
+An aligned BAM's `@SQ` lines differ from the registered reference, the inputs mix aligned and unaligned BAMs, or more than one aligned BAM is supplied (exit 3). The cause lists the first three reference differences when applicable. Pass the unaligned chunks and let the Lab align, or register the FASTA the BAM was aligned to; supply one prealigned BAM at a time.
 
 ### TBX-LAB-010
 
