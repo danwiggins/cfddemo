@@ -54,6 +54,7 @@
 
   function flagPill(type, text) { return h("span", { class: "flag-pill" }, text || FLAG_TEXT[type] || `FLAG: ${type}`); }
   function tierBadge(tier) { return tier ? h("span", { class: `tier tier-${tier}` }, tier) : h("span", { class: "tier" }, "—"); }
+  function stateReason(state, reason, fallback) { return state === "failed" ? fallback : reason || fallback; }
   function stateChip(metric) {
     const [glyph, text] = STATE[metric.state] || ["", metric.state || "—"];
     const reason = metric.reason ? ` (${metric.reason.replace(/_/g, " ")})` : "";
@@ -202,7 +203,7 @@
       const cells = h("div", { class: "curve-track" });
       for (const cell of row.cells) {
         const [glyph, text] = CELL[cell.state] || ["·", "no result"];
-        const description = cell.reason || text;
+        const description = stateReason(cell.state, cell.reason, text);
         const mark = h("span", { class: `curve-cell cell-${cell.state || "none"}`, title: `${cell.label}: ${description}` }, h("span", { "aria-hidden": "true" }, glyph), h("span", { class: "visually-hidden" }, `${cell.label} ${description}`));
         if (cell.depth_x) mark.style.left = pos(cell.depth_x);
         cells.append(mark);
@@ -227,7 +228,7 @@
     }
     section.append(grid);
     section.append(dataTable("Depth curve cells (literature minimums are not measured)", ["Algorithm", ...curve.fractions.map((f) => `${f * 100}%`), "Literature minimum"],
-      curve.rows.map((row) => [row.label, ...row.cells.map((c) => c.reason || (CELL[c.state] || ["", "—"])[1]), row.min_depth_x ? `${row.min_depth_x}x (literature, not measured)` : "—"])));
+      curve.rows.map((row) => [row.label, ...row.cells.map((c) => stateReason(c.state, c.reason, (CELL[c.state] || ["", "—"])[1])), row.min_depth_x ? `${row.min_depth_x}x (literature, not measured)` : "—"])));
     return section;
   }
 
@@ -557,7 +558,7 @@
           const clipped = unit !== "unit" && Math.abs(p.deviation) > clip;
           marks.push(svg("text", { x: x(p.fraction), y: y(p.deviation) + 4, "text-anchor": "middle", class: "pt" }, clipped ? (p.deviation > 0 ? "↑" : "↓") : "●"));
         } else {
-          marks.push(svg("text", { x: x(p.fraction), y: hgt - 6, "text-anchor": "middle", class: "gap" }, (p.reason || p.state || "gap").toString().slice(0, 10)));
+          marks.push(svg("text", { x: x(p.fraction), y: hgt - 6, "text-anchor": "middle", class: "gap" }, stateReason(p.state, p.reason, p.state || "gap").toString().slice(0, 10)));
         }
       }
       if (panel.split) {
@@ -571,7 +572,7 @@
       grid.append(h("figure", { class: "multiple" }, h("figcaption", {}, h("strong", {}, panel.label), ` — ${panel.verdict}`),
         svg("svg", { viewBox: `0 0 ${w} ${hgt}`, role: "img", "aria-label": label, class: "multiple-svg" }, svg("title", {}, label), ...marks),
         h("p", { class: "help" }, unit === "unit" ? "y: difference from full depth (metric's unit)" : "y: relative deviation from full depth, % (clipped ±50%)")));
-      for (const p of panel.points) tableRows.push([panel.label, `${p.fraction * 100}%`, p.value, p.deviation, p.reason || p.state || "—"]);
+      for (const p of panel.points) tableRows.push([panel.label, `${p.fraction * 100}%`, p.value, p.deviation, stateReason(p.state, p.reason, p.state || "—")]);
       if (panel.split) tableRows.push([panel.label, "split A / B", `${fmt(panel.split.a)} / ${fmt(panel.split.b)}`, `${(panel.split.relative_abs_diff * 100).toFixed(1)}% |A−B|`, panel.split.stable ? "stable" : "unstable"]);
     }
     out.push(grid, dataTable("Stability: every point", ["Metric", "Fraction", "Value", "Deviation", "State"], tableRows));

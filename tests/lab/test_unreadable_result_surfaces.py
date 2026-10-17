@@ -141,6 +141,30 @@ def test_unreadable_derived_result_is_visible_on_stability_page(tmp_path) -> Non
 
 
 @needs_chrome
+@pytest.mark.parametrize("route", ("home", "stability"))
+def test_failure_detail_stays_out_of_curve_and_stability_labels(route, tmp_path) -> None:
+    from tests.lab.test_acceptance_synthetic_routes import _sample, _server
+
+    sample = _sample()
+    sample["curve"]["rows"] = [{
+        "algorithm_id": "fragment-size", "metric_id": "mode_bp", "label": "Fragment mode",
+        "tier": "NEWER", "min_depth_x": None, "full_state": "failed",
+        "cells": [{"fraction": 1.0, "label": "full", "state": "failed",
+                   "reason": "PRIVATE_FAILURE_DETAIL", "depth_x": 1.0}],
+    }]
+    sample["stability"][0]["points"] = [{
+        "fraction": 0.5, "label": "0.5", "state": "failed",
+        "reason": "PRIVATE_FAILURE_DETAIL", "value": None, "deviation": None,
+        "unit": "percent", "band": None,
+    }]
+    path = "/" if route == "home" else f"/sample/{sample['id12']}/stability"
+    with _server(tmp_path, sample) as server:
+        dom = _dom(server, tmp_path / "browser", route=path)
+    assert "PRIVATE_FAILURE_DETAIL" not in dom
+    assert "failed" in dom
+
+
+@needs_chrome
 @pytest.mark.parametrize("route,copy_text", [
     ("home", "result unreadable"),
     ("findings", "fragment-size: result unreadable"),
