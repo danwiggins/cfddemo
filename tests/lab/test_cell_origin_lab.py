@@ -472,12 +472,18 @@ def test_pinned_modkit_and_inhouse_marker_classes_match(world) -> None:
     from traceback_lab.adapters.cell_origin_inhouse import compute_inhouse
     from traceback_runner.cell_origin import ModbaseModel, compute_measurement
     from traceback_runner.cell_origin_method import default_parameters
-    from traceback_runner.toolchain import MODKIT_PINS, PinnedTool, ToolIdentity
+    from traceback_runner.toolchain import (
+        MODKIT_PINS, PinnedTool, ToolIdentity, _check_binary, _read_lock,
+        current_platform, sha256_file,
+    )
 
     path = Path(binary)
-    digest = __import__("hashlib").sha256(path.read_bytes()).hexdigest()
-    pin = MODKIT_PINS["linux-64"]
-    assert digest == pin.package_binary_sha256
+    platform_name = current_platform()
+    assert platform_name in MODKIT_PINS
+    pin = MODKIT_PINS[platform_name]
+    digest = sha256_file(path)
+    _read_lock(pin)
+    assert _check_binary(pin, path.parent.parent, digest) == path
     tool = PinnedTool(path=path, identity=ToolIdentity(
         tool_id="modkit", version=pin.version, platform=pin.platform,
         lock_sha256=pin.lock_sha256, lock_line=pin.lock_line,
