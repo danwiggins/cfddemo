@@ -9,12 +9,15 @@ import re
 import stat
 from dataclasses import dataclass
 from pathlib import Path
+from typing import TYPE_CHECKING
 
 from traceback_runner.serialization import canonical_json_bytes
 
 from .assets import AssetError, _check_contained, _regular_source
 from .file_access import open_regular_no_follow
-from .store import LabStore
+
+if TYPE_CHECKING:
+    from .store import LabStore
 
 SCHEMA = "traceback.lab.microbial-db.v1"
 CORE = ("hash.k2d", "opts.k2d", "taxo.k2d")

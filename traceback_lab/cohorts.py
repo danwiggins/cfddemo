@@ -8,6 +8,7 @@ cannot mix old and new members in one response.
 from __future__ import annotations
 
 import json
+import math
 import os
 import re
 import stat
@@ -335,12 +336,19 @@ def _selected_results(store: LabStore, input_id: str, manifest: dict[str, Any]) 
             for metric in chosen.metrics
             if metric.value is None or (isinstance(metric.value, (int, float)) and not isinstance(metric.value, bool))
         }
-        if (algorithm.id == "microbial"
-                and (isinstance(metrics.get("primary_reads"), bool)
-                     or not isinstance(metrics.get("primary_reads"), (int, float))
-                     or metrics["primary_reads"] <= 0)):
-            # No denominator means no measurement, even in older snapshots.
-            continue
+        if algorithm.id == "microbial":
+            primary = metrics.get("primary_reads")
+            candidates = metrics.get("candidate_unmapped_reads")
+            too_short = metrics.get("too_short_unmapped_reads")
+            missing_sequence = metrics.get("missing_sequence_unmapped_reads")
+            if (any(isinstance(value, bool) or not isinstance(value, (int, float))
+                    or not math.isfinite(value) or value < 0
+                    for value in (primary, candidates, too_short, missing_sequence))
+                    or primary == 0 or (candidates == 0 and too_short + missing_sequence > 0)
+                    or metrics.get("microbial_rpm_primary") is None):
+                # Missing counters in older snapshots cannot distinguish an
+                # assayed zero from unassayable unmapped molecules.
+                continue
         compat = cohort_compat_key(
             algorithm_id=algorithm.id, algorithm_version=algorithm.version,
             parameters=algorithm.parameters, tools=[tool.identity() for tool in algorithm.tools],

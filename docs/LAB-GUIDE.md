@@ -205,8 +205,14 @@ traceback lab asset inspect pmd --root R
 `pmd-score` with an asset-specific recovery command. Registering a PMD
 asset does not establish redistribution rights or make a skipped result zero.
 
-**Microbial profile.** Install Kraken2 and Bracken through your approved local
-process, build a Kraken2 database and its Bracken read-length distribution, and
+**Microbial profile.** Install Kraken2 and Bracken from their upstream source
+layouts through your approved local process: the Kraken2 launcher must sit
+beside `classify` and `kraken2lib.pm`, and the Bracken launcher must sit beside
+`src/est_abundance.py`. The Lab pins those executed helpers and the Python
+interpreter used by Bracken. A packaged layout without those files reports
+`missing_toolchain` with an unsupported-layout explanation rather than silently
+omitting helper hashes. Build
+a Kraken2 database and its Bracken read-length distribution, and
 register its exact bytes under the run ROOT. The database remains in its
 operator-owned directory; the Lab stores its path only in a local manifest and
 publishes the bundle SHA-256 and source label. The registration requires
@@ -231,7 +237,9 @@ denominator reads; human and other non-microbial taxa are excluded. At most
 256 species are displayed, with an omitted-taxon count. Read names and Kraken
 per-read assignments remain transient and are not published.
 An input with no primary QC-passing non-duplicate reads has no microbial rate
-or cohort comparison; it is never treated as a measured zero.
+or cohort comparison. If unmapped reads exist but all are too short or lack
+sequence, the rate and cohort comparison are also unavailable. An input with
+only confidently human-mapped reads has a measured zero candidate burden.
 
 The profile is speculative and marked **PRIVACY**. A compatible healthy-v1
 cohort of at least ten *other* samples supplies a per-taxon and overall 97.5th

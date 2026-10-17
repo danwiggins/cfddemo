@@ -35,11 +35,13 @@ def _read_profile(path: Path) -> dict[str, Any] | None:
         return None
     if not isinstance(value, dict) or value.get("schema") != PROFILE_SCHEMA:
         return None
-    for key in ("denominator", "candidate_unmapped_reads", "omitted_taxa"):
+    for key in ("denominator", "candidate_unmapped_reads", "too_short_unmapped_reads",
+                "missing_sequence_unmapped_reads", "omitted_taxa"):
         number = value.get(key)
         if not isinstance(number, int) or isinstance(number, bool) or number < 0:
             return None
-    if value["candidate_unmapped_reads"] > value["denominator"]:
+    if (value["candidate_unmapped_reads"] + value["too_short_unmapped_reads"]
+            + value["missing_sequence_unmapped_reads"] > value["denominator"]):
         return None
     rows = value.get("taxa")
     if not isinstance(rows, list) or len(rows) > 256:
@@ -81,6 +83,14 @@ def _cohort_results(generation: CohortGeneration | None, target: CohortMember | 
                 and not isinstance(result.metrics["primary_reads"], bool)
                 and math.isfinite(result.metrics["primary_reads"])
                 and result.metrics["primary_reads"] > 0
+                and all(isinstance(result.metrics.get(key), (int, float))
+                        and not isinstance(result.metrics[key], bool)
+                        and math.isfinite(result.metrics[key]) and result.metrics[key] >= 0
+                        for key in ("candidate_unmapped_reads", "too_short_unmapped_reads",
+                                    "missing_sequence_unmapped_reads"))
+                and not (result.metrics["candidate_unmapped_reads"] == 0
+                         and (result.metrics["too_short_unmapped_reads"]
+                              + result.metrics["missing_sequence_unmapped_reads"]) > 0)
                 and isinstance(result.metrics.get("microbial_rpm_primary"), (int, float))
                 and not isinstance(result.metrics["microbial_rpm_primary"], bool)
                 and math.isfinite(result.metrics["microbial_rpm_primary"])
@@ -96,7 +106,7 @@ def profile_for_sample(store: LabStore, sample: SampleView, generation: CohortGe
         return {"state": "measurement_unavailable", "reason": envelope.skip_message or "Microbial measurement unavailable",
                 "taxa": []}
     if _tool("kraken2") is None or _tool("bracken") is None:
-        return {"state": "tool_unavailable", "reason": "Kraken2 or Bracken is unavailable; restore the pinned tools",
+        return {"state": "tool_unavailable", "reason": "Kraken2/Bracken tools or required upstream source-install helpers are unavailable; restore the pinned toolchain",
                 "taxa": []}
     try:
         database = inspect_database(store)
@@ -127,6 +137,11 @@ def profile_for_sample(store: LabStore, sample: SampleView, generation: CohortGe
         return {"state": "measurement_unavailable",
                 "reason": "No primary QC-passing non-duplicate reads; microbial rate and cohort comparison are unavailable",
                 "taxa": []}
+    if (profile["candidate_unmapped_reads"] == 0
+            and profile["too_short_unmapped_reads"] + profile["missing_sequence_unmapped_reads"] > 0):
+        return {"state": "measurement_unavailable",
+                "reason": "Unmapped reads lacked enough sequence for the registered read length; microbial rate and cohort comparison are unavailable",
+                "taxa": []}
     rate = static.get("microbial_rpm_primary")
     if (isinstance(rate, bool) or not isinstance(rate, (int, float))
             or not math.isfinite(rate) or rate < 0):
@@ -135,7 +150,7 @@ def profile_for_sample(store: LabStore, sample: SampleView, generation: CohortGe
     compatible = _cohort_results(generation, target, sample.source_id, expected)
     cohort_reason = ("Build the healthy-v1 cohort to obtain a protocol-matched reference"
                      if generation is None else
-                     "Cohort target is unavailable or changed" if cohort_state != "ready" else
+                     "Cohort target is unavailable or changed" if cohort_state != "ready" or target is None else
                      "Fewer than 10 compatible independent cohort samples")
     available = cohort_state == "ready" and len(compatible) >= COHORT_MIN
     total_values = [float(value) for result in compatible

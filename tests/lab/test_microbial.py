@@ -75,6 +75,16 @@ def test_tool_identity_changes_when_executed_helper_changes(tmp_path, monkeypatc
     assert algorithm._tool("kraken2")[1] != first[1]
 
 
+def test_installed_launcher_without_required_helpers_has_actionable_skip(tmp_path, monkeypatch) -> None:
+    launcher = tmp_path / "kraken2"
+    launcher.write_bytes(b"launcher")
+    monkeypatch.setattr(algorithm.shutil, "which", lambda _name: str(launcher))
+    ctx = InputContext(tmp_path, "a" * 64, "b" * 64, "ref", "c" * 64, tmp_path)
+    result = algorithm.MICROBIAL.preflight(ctx)
+    assert result.reason_code == "missing_toolchain"
+    assert "upstream source-install helpers" in result.message
+
+
 def test_report_lineage_excludes_human_and_unknown_taxa(tmp_path) -> None:
     report = tmp_path / "report"
     report.write_text(
@@ -210,6 +220,54 @@ def test_zero_primary_reads_are_unavailable_not_a_measured_zero(tmp_path, monkey
     assert metrics["microbial_rpm_primary"] is None
 
 
+@pytest.mark.parametrize("sequence,missing,short", [("A" * 50, 0, 1), (None, 1, 0)])
+def test_unassayable_unmapped_reads_are_unavailable(tmp_path, monkeypatch, sequence, missing, short) -> None:
+    store, _ = _database(tmp_path)
+    input_dir = tmp_path / "input"
+    input_dir.mkdir()
+    read = pysam.AlignedSegment()
+    read.query_name = "private-name"
+    read.query_sequence = sequence
+    read.flag = 4
+    read.reference_id = -1
+    read.reference_start = -1
+    with pysam.AlignmentFile(input_dir / "aligned.bam", "wb", header={"HD": {"VN": "1.6"}}) as bam:
+        bam.write(read)
+    monkeypatch.setattr(algorithm, "_tool", lambda name: (name, "a" * 64))
+    ctx = InputContext(store.root, "a" * 64, "b" * 64, "ref", "c" * 64, input_dir)
+    output = algorithm.MICROBIAL.run(ctx, tmp_path / "out")
+    metrics = {row["metric_id"]: row["value"] for row in output.metrics}
+    assert metrics["primary_reads"] == 1
+    assert metrics["candidate_unmapped_reads"] == 0
+    assert metrics["too_short_unmapped_reads"] == short
+    assert metrics["missing_sequence_unmapped_reads"] == missing
+    assert metrics["microbial_estimated_reads"] is None
+    assert metrics["microbial_rpm_primary"] is None
+    assert b"private-name" not in output.artifacts["microbial_profile.json"]
+
+
+def test_all_human_mapped_reads_are_measured_zero(tmp_path, monkeypatch) -> None:
+    store, _ = _database(tmp_path)
+    input_dir = tmp_path / "input"
+    input_dir.mkdir()
+    read = pysam.AlignedSegment()
+    read.query_name = "private-name"
+    read.query_sequence = "A" * 75
+    read.flag = 0
+    read.reference_id = 0
+    read.reference_start = 0
+    read.cigar = ((0, 75),)
+    header = {"HD": {"VN": "1.6"}, "SQ": [{"SN": "chr1", "LN": 1000}]}
+    with pysam.AlignmentFile(input_dir / "aligned.bam", "wb", header=header) as bam:
+        bam.write(read)
+    monkeypatch.setattr(algorithm, "_tool", lambda name: (name, "a" * 64))
+    ctx = InputContext(store.root, "a" * 64, "b" * 64, "ref", "c" * 64, input_dir)
+    output = algorithm.MICROBIAL.run(ctx, tmp_path / "out")
+    metrics = {row["metric_id"]: row["value"] for row in output.metrics}
+    assert metrics["candidate_unmapped_reads"] == 0
+    assert metrics["microbial_rpm_primary"] == 0
+
+
 def test_run_refuses_symlinked_lab_temporary_directory(tmp_path, monkeypatch) -> None:
     store, _ = _database(tmp_path)
     outside = tmp_path / "outside"
@@ -243,7 +301,8 @@ def test_cohort_975_zero_fills_complete_absent_taxa_and_refuses_missing_referenc
         "schema": "traceback.lab.microbial-profile.v1", "source_id": source, "input_id": input_id,
         "database_sha256": "d" * 64, "database_source_label": "synthetic database",
         "read_length": 75, "denominator": 100,
-        "candidate_unmapped_reads": 5, "omitted_taxa": 0,
+        "candidate_unmapped_reads": 5, "too_short_unmapped_reads": 0,
+        "missing_sequence_unmapped_reads": 0, "omitted_taxa": 0,
         "taxa": [{"taxid": 123, "name": "Candidate species", "category": "bacteria",
                   "estimated_reads": 1.0, "rpm_primary": 4.0}],
     }))
@@ -257,7 +316,9 @@ def test_cohort_975_zero_fills_complete_absent_taxa_and_refuses_missing_referenc
     for index in range(10):
         result = CohortResult(
             algorithm_id="microbial", parameters_sha256=identity, cohort_compat_key=identity,
-            metrics={"primary_reads": 100, "microbial_rpm_primary": 5.0, "omitted_taxa": 0,
+            metrics={"primary_reads": 100, "candidate_unmapped_reads": 5,
+                     "too_short_unmapped_reads": 0, "missing_sequence_unmapped_reads": 0,
+                     "microbial_rpm_primary": 5.0, "omitted_taxa": 0,
                      **({"taxon_123_rpm": 5.0} if index == 9 else {})},
         )
         members.append(CohortMember(source_id=f"{index + 1:064x}", input_id=f"{index + 101:064x}",
@@ -269,6 +330,15 @@ def test_cohort_975_zero_fills_complete_absent_taxa_and_refuses_missing_referenc
                               metrics={"primary_reads": 0, "microbial_rpm_primary": 0.0,
                                        "omitted_taxa": 0}),),
     ))
+    members.append(CohortMember(
+        source_id="d" * 64, input_id="e" * 64, aligner_identity="same aligner",
+        results=(CohortResult(algorithm_id="microbial", parameters_sha256=identity,
+                              cohort_compat_key=identity,
+                              metrics={"primary_reads": 100, "candidate_unmapped_reads": 0,
+                                       "too_short_unmapped_reads": 2,
+                                       "missing_sequence_unmapped_reads": 0,
+                                       "microbial_rpm_primary": 0.0, "omitted_taxa": 0}),),
+    ))
     generation = CohortGeneration(cohort_id="healthy-v1", version=1, members=tuple(members))
     target = CohortMember(source_id=source, input_id=input_id, aligner_identity="same aligner", results=())
     projected = profile_for_sample(store, sample, generation, target, "ready")
@@ -277,6 +347,9 @@ def test_cohort_975_zero_fills_complete_absent_taxa_and_refuses_missing_referenc
     assert projected["cohort_n"] == 10
     assert projected["taxa"][0]["cohort_p975"] == pytest.approx(3.875)
     assert projected["taxa"][0]["above_cohort_p975"] is True
+    missing_target = profile_for_sample(store, sample, generation, None, "ready")
+    assert missing_target["state"] == "cohort_unavailable"
+    assert "target" in missing_target["reason"].lower()
     unavailable = profile_for_sample(store, sample, None, None, "not_built")
     assert unavailable["state"] == "cohort_unavailable" and unavailable["cohort_p975"] is None
     bad_profile = json.loads((artifacts / "microbial_profile.json").read_text())
@@ -288,3 +361,8 @@ def test_cohort_975_zero_fills_complete_absent_taxa_and_refuses_missing_referenc
     (artifacts / "microbial_profile.json").write_text(json.dumps(bad_profile))
     absent = profile_for_sample(store, sample, generation, target, "ready")
     assert absent["state"] == "measurement_unavailable" and absent["taxa"] == []
+    bad_profile["denominator"] = 100
+    bad_profile["too_short_unmapped_reads"] = 1
+    (artifacts / "microbial_profile.json").write_text(json.dumps(bad_profile))
+    unassayable = profile_for_sample(store, sample, generation, target, "ready")
+    assert unassayable["state"] == "measurement_unavailable" and unassayable["taxa"] == []

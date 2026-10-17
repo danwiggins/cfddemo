@@ -26,7 +26,6 @@ from traceback_runner.serialization import canonical_json_bytes
 from ..assets import AssetError, _check_contained
 from ..microbial_db import MicrobialDbError, inspect_database
 from ..registry import AlgorithmOutput, InputContext, Ready, Skip, ToolPin
-from ..store import LabStore
 from ._base import Base, metric
 
 MAX_TAXA = 256
@@ -140,8 +139,8 @@ def _bracken_species(path: Path, lineages: dict[int, str], denominator: int) -> 
     return rows[:MAX_TAXA], total, max(0, accepted - MAX_TAXA)
 
 
-def _write_candidates(bam: Path, fasta: Path, read_length: int) -> tuple[int, int, int]:
-    denominator = candidate = too_short = 0
+def _write_candidates(bam: Path, fasta: Path, read_length: int) -> tuple[int, int, int, int]:
+    denominator = candidate = too_short = missing_sequence = 0
     with pysam.AlignmentFile(bam, "rb", check_sq=False) as stream, fasta.open("wt", encoding="ascii") as out:
         for read in stream.fetch(until_eof=True):
             if read.is_secondary or read.is_supplementary or read.is_qcfail or read.is_duplicate:
@@ -150,17 +149,20 @@ def _write_candidates(bam: Path, fasta: Path, read_length: int) -> tuple[int, in
             if not read.is_unmapped:
                 continue
             sequence = read.query_sequence
-            if sequence is None or len(sequence) < read_length:
+            if sequence is None:
+                missing_sequence += 1
+                continue
+            if len(sequence) < read_length:
                 too_short += 1
                 continue
             candidate += 1
             out.write(f">r{candidate}\n{sequence[:read_length]}\n")
-    return denominator, candidate, too_short
+    return denominator, candidate, too_short, missing_sequence
 
 
 @dataclass
 class Microbial(Base):
-    version: str = "2"
+    version: str = "3"
     family: str = "non-human"
     consumes: str = "full_bam"
     cost: str = "slow"
@@ -184,16 +186,22 @@ class Microbial(Base):
         pass
 
     def asset_sha256s(self, root: Path) -> list[str]:
+        from ..store import LabStore
+
         try:
             return [inspect_database(LabStore(root)).sha256]
         except MicrobialDbError:
             return []
 
     def preflight(self, ctx: InputContext) -> Ready | Skip:
+        from ..store import LabStore
+
         if ctx.example:
             return Skip("example_reference", "microbial profiling requires a real registered database")
-        if _tool("kraken2") is None or _tool("bracken") is None:
+        if shutil.which("kraken2") is None or shutil.which("bracken") is None:
             return Skip("missing_toolchain", "Kraken2 and Bracken must be installed")
+        if _tool("kraken2") is None or _tool("bracken") is None:
+            return Skip("missing_toolchain", "Kraken2/Bracken launchers lack the upstream source-install helpers required for reproducible execution")
         try:
             inspect_database(LabStore(ctx.root))
         except MicrobialDbError:
@@ -203,6 +211,8 @@ class Microbial(Base):
         return Ready()
 
     def run(self, ctx: InputContext, out: Path) -> AlgorithmOutput:
+        from ..store import LabStore
+
         kraken, bracken = _tool("kraken2"), _tool("bracken")
         if kraken is None or bracken is None:
             raise RuntimeError("microbial tools changed after preflight")
@@ -233,7 +243,7 @@ class Microbial(Base):
                 bam = work / "derived.bam"
                 write_transient_bam(ctx.input_dir / "aligned.bam", bam, dict(ctx.derived))
             reads = work / "candidate.fa"
-            denominator, candidates, too_short = _write_candidates(bam, reads, database.read_length)
+            denominator, candidates, too_short, missing_sequence = _write_candidates(bam, reads, database.read_length)
             taxa: list[dict[str, Any]] = []
             microbial_estimate = 0.0
             omitted = classified = unclassified = 0
@@ -260,14 +270,17 @@ class Microbial(Base):
                 raise RuntimeError("microbial database changed during classification")
             if _tool("kraken2") != kraken or _tool("bracken") != bracken:
                 raise RuntimeError("microbial toolchain changed during classification")
-        rpm = microbial_estimate * 1_000_000 / denominator if denominator else None
+        assay_unavailable = candidates == 0 and (too_short + missing_sequence) > 0
+        rpm = microbial_estimate * 1_000_000 / denominator if denominator and not assay_unavailable else None
         measurements = [
             metric("primary_reads", denominator, unit="reads"),
             metric("candidate_unmapped_reads", candidates, unit="reads", n=denominator),
             metric("too_short_unmapped_reads", too_short, unit="reads", n=denominator),
+            metric("missing_sequence_unmapped_reads", missing_sequence, unit="reads", n=denominator),
             metric("classified_candidate_reads", classified, unit="reads", n=candidates),
             metric("unclassified_candidate_reads", unclassified, unit="reads", n=candidates),
-            metric("microbial_estimated_reads", microbial_estimate, unit="estimated reads", n=candidates),
+            metric("microbial_estimated_reads", None if assay_unavailable or denominator == 0 else microbial_estimate,
+                   unit="estimated reads", n=candidates),
             metric("microbial_rpm_primary", rpm, unit="estimated reads/million", n=denominator),
             metric("omitted_taxa", omitted, unit="taxa"),
         ]
@@ -277,7 +290,8 @@ class Microbial(Base):
                    "input_id": ctx.input_id, "database_sha256": database.sha256,
                    "database_source_label": database.source_label,
                    "read_length": database.read_length, "denominator": denominator,
-                   "candidate_unmapped_reads": candidates, "omitted_taxa": omitted,
+                   "candidate_unmapped_reads": candidates, "too_short_unmapped_reads": too_short,
+                   "missing_sequence_unmapped_reads": missing_sequence, "omitted_taxa": omitted,
                    "taxa": taxa, "interpretation": "exploratory; not an infection diagnosis"}
         return AlgorithmOutput(metrics=measurements,
                                artifacts={"microbial_profile.json": canonical_json_bytes(profile)})
