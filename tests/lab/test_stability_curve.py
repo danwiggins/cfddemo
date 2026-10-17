@@ -365,6 +365,8 @@ def test_missing_downsample_does_not_claim_instability() -> None:
     assert views.cell_state(down, full, "fragment-size", "mode_bp", views.load_library()) == {
         "state": "unavailable", "reason": "result unreadable",
     }
+    curve_row = next(row for row in views.depth_curve(sample)["rows"] if row["algorithm_id"] == "fragment-size")
+    assert curve_row["cells"][0]["reason"] == "result unreadable"
     panel = next(panel for panel in views.stability_panels(sample)
                  if panel["algorithm_id"] == "fragment-size" and panel["metric_id"] == "mode_bp")
     assert panel["verdict"] == "no usable measurement below full depth"

@@ -360,7 +360,8 @@ script or style, no outside requests.
   median and worst-three list include every numeric split comparison; only
   metrics with a validated verdict enter its stability count. Home separately
   counts unavailable metric comparisons, even when no pair is comparable.
-  Home also names unavailable full-depth algorithm results. Damaged downsample
+  Home also counts unavailable full-depth algorithm results, with their names
+  and reasons on Stability. Damaged downsample
   selections carry their unavailable reason into the depth points. A measurement
   usable only at an isolated lower depth is labelled as such rather than claiming
   stability through missing higher-depth evidence. If a

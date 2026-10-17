@@ -31,7 +31,7 @@ from .sample_metadata import sex_assertion, sex_concordance
 from .stability import Side, band_at, deviation, stable
 from .store import LabStore
 
-CELL_STATES = ("ok_usable", "ok_unstable", "not_interpretable", "skipped", "failed")
+CELL_STATES = ("ok_usable", "ok_unstable", "not_interpretable", "unavailable", "skipped", "failed")
 _ROW_ORDER = {state: index for index, state in enumerate(CELL_STATES)}
 _TIER_ORDER = {"PROVEN": 0, "NEWER": 1, "SPECULATIVE": 2, None: 3}
 

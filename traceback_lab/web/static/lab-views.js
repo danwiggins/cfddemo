@@ -20,8 +20,13 @@
     ok_usable: ["●", "usable"],
     ok_unstable: ["◐", "unstable"],
     not_interpretable: ["▨", "not interpretable"],
+    unavailable: ["✕", "unavailable"],
     skipped: ["○", "skipped"],
     failed: ["✕", "failed"],
+  };
+  const cellText = (state, reason, fallback = "no result") => {
+    const text = (CELL[state] || ["", fallback])[1];
+    return reason ? `${text} (${reason})` : text;
   };
   const FLAG_TEXT = {
     CLIA: "FLAG: CLIA — health-assessment labels on an individual sample",
@@ -200,8 +205,9 @@
       const name = h("button", { type: "button", class: "curve-label", "aria-expanded": "false", title: row.label }, row.label);
       const cells = h("div", { class: "curve-track" });
       for (const cell of row.cells) {
-        const [glyph, text] = CELL[cell.state] || ["·", "no result"];
-        const mark = h("span", { class: `curve-cell cell-${cell.state || "none"}`, title: `${cell.label}: ${text}` }, h("span", { "aria-hidden": "true" }, glyph), h("span", { class: "visually-hidden" }, `${cell.label} ${text}`));
+        const [glyph] = CELL[cell.state] || ["·", "no result"];
+        const caption = cellText(cell.state, cell.reason);
+        const mark = h("span", { class: `curve-cell cell-${cell.state || "none"}`, title: `${cell.label}: ${caption}` }, h("span", { "aria-hidden": "true" }, glyph), h("span", { class: "visually-hidden" }, `${cell.label} ${caption}`));
         if (cell.depth_x) mark.style.left = pos(cell.depth_x);
         cells.append(mark);
       }
@@ -217,7 +223,7 @@
           h("thead", {}, h("tr", {}, h("th", { scope: "col" }, "Metric"), ...curve.fractions.map((f) => h("th", { scope: "col" }, `${f * 100}%`)))),
           h("tbody", {}, ...secondary.map((p) => h("tr", {}, h("th", { scope: "row" }, p.label), ...curve.fractions.map((f) => {
             const pt = p.points.find((q) => q.fraction === f);
-            return h("td", {}, pt ? (CELL[pt.state] || ["", pt.state || "—"])[1] : "—");
+            return h("td", {}, pt ? cellText(pt.state, pt.reason, "—") : "—");
           }))))) : "");
       name.addEventListener("click", () => { const open = name.getAttribute("aria-expanded") !== "true"; name.setAttribute("aria-expanded", String(open)); detail.hidden = !open; });
       line.append(name, cells);
@@ -225,7 +231,7 @@
     }
     section.append(grid);
     section.append(dataTable("Depth curve cells (literature minimums are not measured)", ["Algorithm", ...curve.fractions.map((f) => `${f * 100}%`), "Literature minimum"],
-      curve.rows.map((row) => [row.label, ...row.cells.map((c) => (CELL[c.state] || ["", "—"])[1]), row.min_depth_x ? `${row.min_depth_x}x (literature, not measured)` : "—"])));
+      curve.rows.map((row) => [row.label, ...row.cells.map((c) => cellText(c.state, c.reason, "—")), row.min_depth_x ? `${row.min_depth_x}x (literature, not measured)` : "—"])));
     return section;
   }
 
