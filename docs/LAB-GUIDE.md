@@ -274,19 +274,22 @@ publishes the bundle SHA-256 and source label. The registration requires
 Registration records a bounded file-stat receipt for the sample page. The page
 and execution planning check that receipt without streaming the large database;
 the worker verifies complete file bytes before and after classification.
-If the database is moved, register it as a new Lab root; this registration
-will not silently switch to another directory with identical bytes.
+If the database must remain at a new path, register it as a new Lab root; this
+registration will not silently switch to another directory with identical bytes.
 An older registration without a page receipt can be refreshed in place with
 the same `lab microbial db add` command: it verifies all bytes before adding
 the receipt. The sample page reports that legacy registration as unavailable
 until refreshed. If the sample page or execution planning reports changed
 registered files after a byte-identical restore or a file-stat-only change,
 repeat `lab microbial db add` with the original absolute directory, read
-length, and source label. It rehashes the required files and refreshes the
-receipt only when the bundle (file hashes and read length), directory, and
-source label match the existing registration. If the read length or label was
-mistyped, retry with its original value; changed database bytes or a moved
-directory require a new Lab root.
+length, and source label recorded locally in
+`ROOT/lab/assets/microbial-db/manifest.json`. It rehashes the required files
+and refreshes the receipt only when the bundle (file hashes and read length),
+directory, and source label match the existing registration. If the read
+length or label was mistyped, retry with its original value. If the bytes or
+directory changed, restore the original bytes at the registered path and retry.
+Use a new Lab root only when a replacement database, source label, or new
+directory must remain.
 
 ```bash
 traceback lab microbial db add --directory KRAKEN_DB --read-length 75 \
