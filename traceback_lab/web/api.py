@@ -227,7 +227,10 @@ def _latest_analysis_run(store: LabStore) -> str | None:
         pointer = json.loads(raw)
     except ValueError:
         return None
-    if not isinstance(pointer, dict) or pointer.get("command") not in _LOGGED_SAMPLE_COMMANDS:
+    if not isinstance(pointer, dict):
+        return None
+    command = pointer.get("command")
+    if not isinstance(command, str) or command not in _LOGGED_SAMPLE_COMMANDS:
         return None
     run_id = pointer.get("run_id")
     return run_id if isinstance(run_id, str) and re.fullmatch(r"r-\d{8}-\d{4}-[0-9a-f]{4,8}", run_id) else None
