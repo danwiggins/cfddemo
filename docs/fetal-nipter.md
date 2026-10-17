@@ -51,6 +51,10 @@ the exact manifest with `traceback lab fetal register --file CONTRACT.json
 --root ROOT` rehashes the contract and RDS without displaying the external
 path. Registration checks the stored input ID, source ID, and reference SHA-256
 before reserving the immutable slot. Registration for an input is immutable.
+An absent, unreadable, or mismatched stored input manifest is refused before
+the slot is published; the contract must match that manifest's input ID,
+source ID, and reference SHA-256. This provenance check does not verify the
+control group's biological suitability.
 
 The adapter requires at least two million eligible reads, an aligned parent
 input, matching source/input/reference IDs, a coordinate-sorted canonical

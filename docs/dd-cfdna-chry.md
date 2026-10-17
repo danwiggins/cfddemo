@@ -12,6 +12,11 @@ exact bytes, calculate their SHA-256, and run `traceback lab donor register
 --file CALIBRATION.json --sha256 HEX_SHA256 --root ROOT`. `traceback lab donor
 inspect INPUT_ID --root ROOT` verifies the registration. The schema is:
 
+If the stored input manifest is absent, unreadable, or has a different input,
+source, or reference identity, registration fails before publishing the slot.
+Correct the input or contract provenance and retry; an invalid first attempt
+does not consume the input's one immutable calibration slot.
+
 ```json
 {
   "schema": "traceback.lab.dd-cfdna-contract.v1",

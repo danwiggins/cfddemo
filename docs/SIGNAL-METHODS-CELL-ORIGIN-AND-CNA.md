@@ -3,6 +3,13 @@
 Status: draft spec, 2026-10-04. Verified against `origin/main` at `149799e`
 (includes PR #109, the record view). Line numbers are from that commit.
 
+**Historical design record.** The "current state," commands, paths, line
+numbers, build plan, and open questions below describe that dated snapshot;
+they are not instructions for the current `traceback lab` workflow. The Lab
+registry and [Algorithms and evidence design](ALGORITHMS.md) describe today's
+research methods. Keep the signed local-record proposal below distinct from
+Lab result attempts and read-time interpretation.
+
 This is a research prototype at a pre-seed company. Nothing here qualifies a
 method, validates an assay or makes a record fit for clinical use. Every output
 added here is **unqualified, local, not for clinical use and descriptive

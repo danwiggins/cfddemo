@@ -22,7 +22,10 @@ calibration was supplied. Protect the whole Lab root as sensitive storage.
 Save a JSON file with these exact fields, calculate its SHA-256, and run
 `traceback lab fetal chry-register --file CALIBRATION.json --sha256 HEX --root R`.
 Use `traceback lab fetal chry-inspect INPUT_ID --root R` to verify it. Registration
-is immutable for the input. The example numbers below demonstrate file shape
+first requires a readable stored input manifest whose input ID, source ID, and
+reference SHA-256 match the calibration. A missing or mismatched manifest is
+refused before the immutable slot is published. Registration is immutable for
+the input. The example numbers below demonstrate file shape
 only; they are **not** validated thresholds or recommended calibration values.
 
 ```json
