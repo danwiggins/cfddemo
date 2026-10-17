@@ -78,12 +78,17 @@ def test_execution_identity_pins_the_mmml_parser_versions() -> None:
         digest == hashlib.sha256((root / name).read_bytes().replace(b"\r\n", b"\n")).hexdigest()
         for name, digest in sources.items()
     )
-    name = "evidence_inspector/deconvolution.py"
-    changed = replace(co.CELL_ORIGIN, parameters={
-        **co.CELL_ORIGIN.parameters,
-        "implementation_sha256s": {**sources, name: "0" * 64},
-    })
-    assert execution_identity(changed, reference_sha256="a" * 64) != original
+    for name in (
+        "evidence_inspector/deconvolution.py",
+        "evidence_inspector/cell_origin_inputs.py",
+        "traceback_lab/algorithms/_base.py",
+        "traceback_lab/read_summary.py",
+    ):
+        changed = replace(co.CELL_ORIGIN, parameters={
+            **co.CELL_ORIGIN.parameters,
+            "implementation_sha256s": {**sources, name: "0" * 64},
+        })
+        assert execution_identity(changed, reference_sha256="a" * 64) != original
 
 
 def _publish_cohort_cell_origin(
