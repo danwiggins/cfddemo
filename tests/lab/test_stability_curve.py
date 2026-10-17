@@ -130,7 +130,8 @@ def test_default_run_builds_the_curve_and_controls(default_run) -> None:
 
         missing = fragment_panel()
         assert missing["split"] is None
-        assert missing["split_status"]["A"]["state"] == "unavailable"
+        assert missing["split_status"]["A"]["state"] == "not_recorded"
+        assert missing["split_status"]["A"]["reason"] == "no selected result recorded"
         halves["A"].results[selected] = original_a
 
         halves["B"].results[selected] = original_b.model_copy(
@@ -275,7 +276,9 @@ def test_split_half_missingness_keeps_each_status_visible() -> None:
 
     assert status(None, "fragment-size", "mode_bp", 100, spec)["state"] == "not_recorded"
     assert status(None, "fragment-size", "mode_bp", 100, spec, other_half_recorded=True)["state"] == "unavailable"
-    assert status(view, "fragment-size", "mode_bp", 100, spec)["state"] == "unavailable"
+    assert status(view, "fragment-size", "mode_bp", 100, spec) == {
+        "state": "not_recorded", "reason": "no selected result recorded", "value": None, "deviation": None,
+    }
     view.unreadable = {"fragment-size"}
     assert status(view, "fragment-size", "mode_bp", 100, spec)["reason"] == "result unreadable"
     view.unreadable = set()
@@ -376,4 +379,7 @@ def test_repeatability_preserves_raw_splits_without_inventing_a_verdict() -> Non
     missing = {"label": "Copy number", "split": None, "split_status": {
         "A": {"state": "ok"}, "B": {"state": "unavailable"},
     }}
-    assert views.repeatability([no_verdict, validated, missing])["incomparable_metrics"] == 1
+    unrecorded = {"label": "Unrun algorithm", "split": None, "split_status": {
+        "A": {"state": "not_recorded"}, "B": {"state": "not_recorded"},
+    }}
+    assert views.repeatability([no_verdict, validated, missing, unrecorded])["incomparable_metrics"] == 1

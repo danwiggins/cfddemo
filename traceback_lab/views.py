@@ -220,7 +220,7 @@ def _split_half_status(view: InputView | None, algorithm_id: str, metric_id: str
             return {"state": "unavailable", "reason": "result unreadable", "value": None, "deviation": None}
         if algorithm_id in getattr(view, "ambiguous", ()):
             return {"state": "unavailable", "reason": "result selection ambiguous", "value": None, "deviation": None}
-        return {"state": "unavailable", "reason": "selected result unavailable", "value": None, "deviation": None}
+        return {"state": "not_recorded", "reason": "no selected result recorded", "value": None, "deviation": None}
     if envelope.status != "ok":
         reason = envelope.skip_reason if envelope.status == "skipped" else "algorithm failed"
         return {"state": envelope.status, "reason": reason, "value": None, "deviation": None}
