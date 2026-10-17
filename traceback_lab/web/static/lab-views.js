@@ -757,8 +757,8 @@
       const exclusions = Object.entries(band.excluded || {}).map(([reason, n]) => `${reason.replace(/_/g, " ")} ${n}`).join(" · ");
       const bandStatus = band.state === "ready"
         ? `Observed cohort density min–max (n=${band.eligible_n}); descriptive, not a reference interval.`
-        : band.state === "no_eligible_vectors"
-            ? "No cohort density band: no eligible pinned size histograms. Inspect the exclusions and source histograms."
+        : band.state === "no_usable_pinned_vectors"
+          ? "No cohort density band: no usable pinned size histograms (missing vectors or zero eligible 50–1000 bp molecules). Check member histograms and eligibility."
           : band.state === "cohort_too_small"
             ? `No cohort density band: ${band.eligible_n} eligible vectors of 10 needed.`
             : `No cohort density band (${String(band.state).replace(/_/g, " ")}).`;
