@@ -275,12 +275,16 @@ class _Handler(BaseHTTPRequestHandler):
     do_PATCH = do_PUT
 
 
+class _LabHTTPServer(ThreadingHTTPServer):
+    daemon_threads = True
+    request_queue_size = 16  # Accommodate the initial burst of CSS, scripts, and API requests.
+
+
 class RunningLabServer:
     """A started server: ``base_url``, ``issue_link()``, ``close()``."""
 
     def __init__(self, store: LabStore, *, port: int = 0) -> None:
-        self.httpd = ThreadingHTTPServer(("127.0.0.1", port), _Handler)
-        self.httpd.daemon_threads = True
+        self.httpd = _LabHTTPServer(("127.0.0.1", port), _Handler)
         actual = self.httpd.server_address[1]
         boundary = LocalWebBoundary(build_loopback_config(port=actual), BootstrapBroker())
         app = LabWebApp(store=store, boundary=boundary, assets=_assets(), api=api.LabApi(store))

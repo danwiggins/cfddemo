@@ -91,6 +91,35 @@ def test_binds_loopback_and_sends_the_narrow_csp(server) -> None:
     assert b"<script>" not in body and b"style=" not in body
 
 
+def test_asset_connections_fit_the_listen_queue_when_accept_is_delayed(tmp_path) -> None:
+    """A browser's burst of asset connections must survive a busy accept loop."""
+
+    with RunningLabServer(LabStore(tmp_path)) as running:
+        original_accept = running.httpd.get_request
+        accepting = threading.Event()
+        release = threading.Event()
+
+        def delayed_accept():
+            accepting.set()
+            assert release.wait(10), "asset burst did not release the accept loop"
+            return original_accept()
+
+        running.httpd.get_request = delayed_accept
+        sockets = []
+        try:
+            sockets.append(socket.create_connection(("127.0.0.1", running.port), timeout=1))
+            assert accepting.wait(2), "server did not enter accept"
+            # The first connection is held at accept; further requests queue at
+            # the kernel listen socket, just as CSS and script requests do.
+            for _ in range(12):
+                sockets.append(socket.create_connection(("127.0.0.1", running.port), timeout=0.5))
+            assert len(sockets) == 13
+        finally:
+            for connection in sockets:
+                connection.close()
+            release.set()
+
+
 def test_foreign_host_and_forwarded_headers_are_403(server) -> None:
     response, _ = _request(server, "GET", "/", headers={"Host": "evil.example:80"})
     assert response.status == 403
