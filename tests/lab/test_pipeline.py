@@ -118,13 +118,45 @@ def test_disk_sampler_includes_sibling_scratch(tmp_path: Path) -> None:
     scratch.mkdir()
     sibling.mkdir()
     script = f"open({str(sibling / 'blob')!r}, 'wb').write(b'x' * 2_000_000)"
-    from traceback_lab.pipeline import directory_bytes
+    from traceback_lab.runner import _microbial_tmp_bytes, _step_disk_bytes
+
+    before = _microbial_tmp_bytes(tmp_path)
 
     result = run_pipeline(
         [Stage("write", [PY, "-c", script])], timeout_s=30,
-        disk_usage=lambda: directory_bytes(scratch) + directory_bytes(sibling),
+        disk_usage=lambda: _step_disk_bytes(scratch, tmp_path, before),
     )
     assert result.peak_disk_bytes is not None and result.peak_disk_bytes >= 2_000_000
+
+
+def test_disk_sampler_failure_does_not_discard_successful_step() -> None:
+    def unavailable() -> int:
+        raise OSError("scratch changed during sampling")
+
+    result = run_pipeline(
+        [Stage("ok", [PY, "-c", "print('done')"])], timeout_s=30,
+        disk_usage=unavailable,
+    )
+    assert result.ok
+    assert result.peak_disk_bytes is None
+
+
+def test_direct_and_sampled_tree_memory_remain_distinct() -> None:
+    result = PipelineResult(
+        stages=[StageOutcome("worker", peak_rss_bytes=100)],
+        duration_s=1.0, peak_disk_bytes=None,
+        sampled_tree_peak_rss_bytes=200,
+    )
+    assert result.peak_rss_bytes == 100
+    assert result.sampled_tree_peak_rss_bytes == 200
+
+
+def test_process_group_seed_includes_orphan_descendants() -> None:
+    from traceback_lab.pipeline import _tree_members
+
+    # The intermediate process was reparented, but still has the worker's
+    # process group. Its own child must also be counted.
+    assert _tree_members(1, {1: (0, 1), 2: (0, 1), 3: (2, 3)}) == {1, 2, 3}
 
 
 def test_simulate_commands_accept_verbose() -> None:

@@ -64,9 +64,9 @@ class PipelineResult:
     stages: list[StageOutcome]
     duration_s: float
     peak_disk_bytes: int | None
-    sampled_tree_peak_rss_bytes: int | None = None
     timed_out: bool = False
     interrupted: bool = False
+    sampled_tree_peak_rss_bytes: int | None = None
 
     @property
     def ok(self) -> bool:
@@ -100,8 +100,6 @@ class PipelineResult:
     @property
     def peak_rss_bytes(self) -> int | None:
         values = [stage.peak_rss_bytes for stage in self.stages if stage.peak_rss_bytes]
-        if self.sampled_tree_peak_rss_bytes:
-            values.append(self.sampled_tree_peak_rss_bytes)
         return max(values) if values else None
 
     def first_line(self, scrubber: Scrubber) -> str:
@@ -151,14 +149,15 @@ def directory_bytes(path: Path) -> int:
 def _tree_members(root_pid: int, processes: Mapping[int, tuple[int, int]]) -> set[int]:
     """Include descendants in new sessions and children still in the group."""
 
-    included = {root_pid}
+    included = {root_pid} | {
+        pid for pid, (_ppid, pgid) in processes.items() if pgid == root_pid
+    }
     while True:
         children = {pid for pid, (ppid, _pgid) in processes.items() if ppid in included}
         expanded = included | children
         if expanded == included:
             break
         included = expanded
-    included.update(pid for pid, (_ppid, pgid) in processes.items() if pgid == root_pid)
     return included
 
 
@@ -179,12 +178,18 @@ def _proc_tree_rss_bytes(root_pid: int) -> int | None:
                 continue
     except OSError:
         return None
+    if not processes:
+        return None
     resident_pages = 0
+    measured = False
     for pid in _tree_members(root_pid, processes):
         try:
             resident_pages += int((proc / str(pid) / "statm").read_text().split()[1])
+            measured = True
         except (OSError, ValueError, IndexError):
             continue
+    if not measured:
+        return None
     return resident_pages * os.sysconf("SC_PAGE_SIZE")
 
 
@@ -377,14 +382,22 @@ def run_pipeline(
                 break
             now = time.monotonic()
             if now >= next_rss:
-                rss = _process_tree_rss_bytes(leader.pid)
+                try:
+                    rss = _process_tree_rss_bytes(leader.pid)
+                except OSError:
+                    rss = None
                 if rss is not None:
                     peak_tree_rss = rss if peak_tree_rss is None else max(peak_tree_rss, rss)
                 next_rss = time.monotonic() + RSS_SAMPLE_S
             if (disk_path is not None or disk_usage is not None) and now >= next_disk:
-                size = disk_usage() if disk_usage is not None else directory_bytes(disk_path)
-                peak_disk = size if peak_disk is None else max(peak_disk, size)
+                try:
+                    size = disk_usage() if disk_usage is not None else directory_bytes(disk_path)
+                except OSError:
+                    size = None
+                if size is not None:
+                    peak_disk = size if peak_disk is None else max(peak_disk, size)
                 next_disk = time.monotonic() + DISK_SAMPLE_S
+            now = time.monotonic()
             if on_tick is not None:
                 on_tick(now - started)
             if any(process.returncode is None for process in processes) and now > deadline:
@@ -412,8 +425,12 @@ def run_pipeline(
         if sink is not None:
             sink.close()
     if disk_path is not None or disk_usage is not None:
-        size = disk_usage() if disk_usage is not None else directory_bytes(disk_path)
-        peak_disk = size if peak_disk is None else max(peak_disk, size)
+        try:
+            size = disk_usage() if disk_usage is not None else directory_bytes(disk_path)
+        except OSError:
+            size = None
+        if size is not None:
+            peak_disk = size if peak_disk is None else max(peak_disk, size)
     return PipelineResult(
         stages=outcomes,
         duration_s=time.monotonic() - started,

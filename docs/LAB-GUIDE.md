@@ -190,10 +190,10 @@ and exits 6. Completed results are kept; rerun the same command.
 streams each tool's raw stderr to your terminal; only scrubbed stderr (paths,
 ROOT, home, login and chunk names redacted) is ever stored.
 
-  Each executed algorithm reports peak resident memory and sampled peak
-  scratch-disk bytes in its step result and run log. Memory is the sampled
-  sum of the worker and native descendants' RSS, or the direct worker's
-  `wait4` peak if higher; shared pages may be counted more than once. Disk
+  Each executed algorithm reports the direct worker's `wait4` peak RSS,
+  the sampled peak sum of worker and descendant RSS, and sampled peak
+  scratch-disk bytes separately in its step result and run log. The tree
+  sample may count shared pages more than once. Disk
   includes temporary `lab/tmp/microbial-*` work created during that step.
   Sampling can miss brief peaks; cached and skipped steps have no new measurement.
 

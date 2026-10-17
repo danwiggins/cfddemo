@@ -39,6 +39,17 @@ from .store import LabStore, RunLog, WriterLock
 DEFAULT_TIMEOUT_S = 3600.0
 
 
+def _microbial_tmp_bytes(root: Path) -> int:
+    return sum(directory_bytes(path) for path in root.glob("microbial-*") if path.is_dir())
+
+
+def _step_disk_bytes(scratch: Path, microbial_root: Path, microbial_before: int) -> int:
+    # Microbial workers may use a sibling of this algorithm's scratch.
+    return directory_bytes(scratch) + max(
+        0, _microbial_tmp_bytes(microbial_root) - microbial_before,
+    )
+
+
 @dataclass
 class StepResult:
     algorithm_id: str
@@ -50,6 +61,7 @@ class StepResult:
     first_line: str | None = None
     duration_s: float | None = None
     peak_rss_bytes: int | None = None
+    peak_tree_rss_bytes: int | None = None
     peak_disk_bytes: int | None = None
     cached: bool = False
     input_label: str = "full"
@@ -66,6 +78,7 @@ class StepResult:
             "first_line": self.first_line,
             "duration_s": self.duration_s,
             "peak_rss_bytes": self.peak_rss_bytes,
+            "peak_tree_rss_bytes": self.peak_tree_rss_bytes,
             "peak_disk_bytes": self.peak_disk_bytes,
             "cached": self.cached,
             "input": self.input_label,
@@ -248,7 +261,8 @@ def run_plan(
                 result = _publish_failure(
                     store, algorithm, target, identity, item, log, step,
                     first_line=scrubber.line(f"preflight raised {type(exc).__name__}: {exc}"),
-                    tail=[], exit_code=None, timed_out=False, duration_s=0.0, peak_rss=None,
+                    tail=[], exit_code=None, timed_out=False, duration_s=0.0,
+                    peak_rss=None, peak_disk=None,
                 )
                 results.append(result)
                 done[algorithm.id] = result
@@ -310,15 +324,10 @@ def run_plan(
         )
         microbial_root = store.lab / "tmp"
 
-        def microbial_bytes() -> int:
-            return sum(directory_bytes(path) for path in microbial_root.glob("microbial-*") if path.is_dir())
-
-        microbial_before = microbial_bytes()
+        microbial_before = _microbial_tmp_bytes(microbial_root)
 
         def step_disk_bytes() -> int:
-            # Microbial workers may use a sibling of this algorithm's scratch.
-            # Only growth during this step is attributed to it.
-            return directory_bytes(scratch) + max(0, microbial_bytes() - microbial_before)
+            return _step_disk_bytes(scratch, microbial_root, microbial_before)
 
         try:
             outcome = run_pipeline(
@@ -355,6 +364,7 @@ def run_plan(
                         first_line=scrubber.line(f"invalid output: {type(exc).__name__}: {exc}"),
                         tail=[], exit_code=0, timed_out=False,
                         duration_s=outcome.duration_s, peak_rss=outcome.peak_rss_bytes,
+                        peak_tree_rss=outcome.sampled_tree_peak_rss_bytes,
                         peak_disk=outcome.peak_disk_bytes,
                     )
                 else:
@@ -370,6 +380,7 @@ def run_plan(
                         status="ok",
                         duration_s=round(outcome.duration_s, 3),
                         peak_rss_bytes=outcome.peak_rss_bytes,
+                        peak_tree_rss_bytes=outcome.sampled_tree_peak_rss_bytes,
                         peak_disk_bytes=outcome.peak_disk_bytes,
                         parameters_sha256=identity,
                         tool_versions={tool.name: tool.version for tool in algorithm.tools},
@@ -381,6 +392,7 @@ def run_plan(
                         identity,
                         duration_s=outcome.duration_s,
                         peak_rss_bytes=outcome.peak_rss_bytes,
+                        peak_tree_rss_bytes=outcome.sampled_tree_peak_rss_bytes,
                         peak_disk_bytes=outcome.peak_disk_bytes,
                         input_label=target.label,
                         input_id=target.input_id,
@@ -397,6 +409,7 @@ def run_plan(
                     first_line=scrubber.line(first), tail=tail, exit_code=stage.returncode,
                     timed_out=outcome.timed_out, duration_s=outcome.duration_s,
                     peak_rss=outcome.peak_rss_bytes,
+                    peak_tree_rss=outcome.sampled_tree_peak_rss_bytes,
                     peak_disk=outcome.peak_disk_bytes,
                 )
         finally:
@@ -458,7 +471,8 @@ def _publish_failure(
     timed_out: bool,
     duration_s: float,
     peak_rss: int | None,
-    peak_disk: int | None = None,
+    peak_disk: int | None,
+    peak_tree_rss: int | None = None,
 ) -> StepResult:
     failure = Failure(
         first_line=first_line[:300] or "failed",
@@ -477,6 +491,7 @@ def _publish_failure(
         first_line=failure.first_line,
         duration_s=round(duration_s, 3),
         peak_rss_bytes=peak_rss,
+        peak_tree_rss_bytes=peak_tree_rss,
         peak_disk_bytes=peak_disk,
         timed_out=timed_out,
         parameters_sha256=identity,
@@ -489,6 +504,7 @@ def _publish_failure(
         first_line=failure.first_line,
         duration_s=duration_s,
         peak_rss_bytes=peak_rss,
+        peak_tree_rss_bytes=peak_tree_rss,
         peak_disk_bytes=peak_disk,
         input_label=target.label,
         input_id=target.input_id,
