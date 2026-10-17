@@ -13,7 +13,8 @@ name/count, smoothing and CNA-normalization state. It rejects uncorrected,
 non-finite, malformed, or wrong-sample files. The parser was checked against
 the vendored upstream `Healthy_demo.GC_corrected.coverage.tsv` fixture (one CTCF list, 132
 15-bp bins) from upstream commit
-`b624c7a2ea7b8758b6eebd424066c815bfeece61`.
+`b624c7a2ea7b8758b6eebd424066c815bfeece61`; its exact-byte SHA-256 is
+`4e7b430bc98d67d704e506ee41d2650b76bad3cc0a55be919f7884d0137ecc88`.
 
 `traceback_lab.adapters.griffin_run.run_upstream` drives that pinned upstream
 checkout, rather than approximating the measurement. It runs Griffin's GC
@@ -43,10 +44,11 @@ BAM, BAM index, reference, reference index, site lists and reference assets.
 It copies the pinned scripts and two Snakefiles into the attempt without
 cached outputs or Python bytecode, records their digests and the upstream
 default-config digests, disables bytecode writes during execution, and hashes
-all five generated workflow YAML files. It requires Snakemake 5.19.2, records
+all seven generated workflow YAML files, including capped cluster settings.
+It requires Snakemake 5.19.2, records
 the resolved Snakemake, Python, samtools, and bedtools executable digests and
 the numerical Python package versions, and checks the runtime again after
-execution. The attempt contains a `bin/python` link to the recorded Lab interpreter
+execution. The attempt contains a `bin/python` launcher for the recorded Lab interpreter
 and a hashed compatibility shim for Snakemake 5.19.2 on Python 3.11+. The
 adapter invokes Snakemake through that interpreter; PATH and PYTHONPATH make
 upstream scripts' `#!/usr/bin/env python` resolve to it too. The generated config sets the pinned
@@ -81,13 +83,14 @@ the profile panel. The primary registered TF list supplies the scalar
 ONT, example, and derived inputs skip explicitly. No arbitrary TF activity or
 diagnostic threshold is asserted.
 
-Both complete pinned Snakemake workflows have run in an isolated synthetic
-toolchain on 500 toy paired-end fragments, with a generated reference, site
-list, and mappability track. The corrected output passed the Lab parser. That
-proof exercised upstream orchestration, not the `run_upstream` adapter or the
-biological signal. It used a compatibility shim for Snakemake 5.19.2 under Python 3.11 and
-does not satisfy the Lab's 5M eligible-pair gate or validate a production hg38
-sample. The commands, fixture generators, and output digest are in
+Both complete pinned Snakemake workflows ran on a 30 kb synthetic reference
+and 500 toy paired-end fragments. A second bounded run called the production
+`run_upstream` adapter with its own seven generated YAML files and accepted
+the corrected TSV through the strict parser. The proof lowered only the
+in-process five-million-pair gate to 500 and used one synthetic chr1 site;
+the production gate is unchanged. It does not establish biological signal,
+full-depth resource needs, or a production hg38 sample. The commands,
+fixture generators, and output digests are in
 [`docs/proofs/griffin/README.md`](proofs/griffin/README.md). A production run still needs registered hg38 assets and a compatible
 toolchain. Native ONT input is incompatible with the exact upstream code; a
 scientifically reviewed ONT fragment adapter would be needed for the Lab's
