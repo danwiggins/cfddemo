@@ -13,7 +13,7 @@ import numpy as np
 import pysam
 import pytest
 
-from traceback_lab.algorithms import cell_origin
+from traceback_lab.algorithms import cell_origin, meth_tf
 from traceback_lab.algorithms._meth import load_calls
 from traceback_lab.algorithms.meth_calls import METH_CALLS
 from traceback_lab.algorithms.meth_tf import (
@@ -92,14 +92,14 @@ def test_analytic_nnls_recovers_known_mixture_and_rejects_rank_deficiency() -> N
     assert solve_two_component(
         healthy, tumour, np.asarray([3, 0]), np.asarray([8, 0]),
     ) == (None, None)
-    boundary, _ = solve_two_component(
+    boundary, boundary_residual = solve_two_component(
         healthy, tumour, np.asarray([0, 7]), np.asarray([3, 7]),
     )
-    assert boundary == pytest.approx(0)
-    boundary, _ = solve_two_component(
+    assert boundary == pytest.approx(0) and boundary_residual > 0
+    boundary, boundary_residual = solve_two_component(
         healthy, tumour, np.asarray([3, 0]), np.asarray([3, 7]),
     )
-    assert boundary == pytest.approx(1)
+    assert boundary == pytest.approx(1) and boundary_residual > 0
     nearly_same = np.asarray([0.250001, 0.750001])
     condition = weighted_reference_condition_number(
         healthy, nearly_same, np.asarray([3, 7]),
@@ -168,6 +168,20 @@ def test_reference_model_genome_and_depth_must_match(
     assert METH_TF.preflight(ctx).reason_code == "missing_tags"
 
 
+def test_boundary_fit_keeps_nonzero_residual_with_two_markers(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    ctx, _ = _fixture(tmp_path)
+    monkeypatch.setattr(meth_tf, "tally_markers", lambda *_: (np.asarray([0, 7]), np.asarray([3, 7])))
+    output = METH_TF.run(ctx, tmp_path / "boundary-out")
+    values = _metrics(output)
+    assert values["tumor_fraction"] == pytest.approx(0)
+    assert values["markers_covered"] == 2
+    assert values["fit_rms"] > 0
+    receipt = json.loads(output.artifacts["meth_tf_fit.json"])
+    assert receipt["fit_rms"] == pytest.approx(values["fit_rms"])
+
+
 def test_registered_worker_produces_exploratory_fraction_and_pinned_attempt(tmp_path: Path) -> None:
     ctx, registered = _fixture(tmp_path)
     assert "meth-tf" in [algorithm.id for algorithm in load_registry()]
@@ -179,7 +193,7 @@ def test_registered_worker_produces_exploratory_fraction_and_pinned_attempt(tmp_
     assert values["tumor_fraction"] == pytest.approx(0.25, abs=1e-12)
     assert values["identifiable"] is True
     assert values["markers_covered"] == 2 and values["cpg_calls_used"] == 16
-    assert values["fit_rms"] is None  # exactly two observed markers have no residual degrees of freedom
+    assert values["fit_rms"] == pytest.approx(0, abs=1e-12)
     assert values["reference_condition_number"] == pytest.approx(2)
     receipt = json.loads(output.artifacts["meth_tf_fit.json"])
     assert receipt["asset_sha256"] == registered.sha256
@@ -275,7 +289,7 @@ def test_real_modification_bam_flows_through_call_store_worker_and_derived_mask(
     fit = json.loads((out / "artifacts" / "meth_tf_fit.json").read_text())
     assert fit["markers_registered"] == 3 and fit["markers_covered"] == 2
     assert fit["cpg_calls_used"] == 16 and fit["call_definition"] == CALL_DEFINITION
-    assert fit["fit_rms"] is None
+    assert fit["fit_rms"] == pytest.approx(0, abs=1e-12)
 
     derived_ctx = replace(ctx, derived={"transform": "split", "half": "A"})
     derived_calls, derived_mask = load_calls(derived_ctx)

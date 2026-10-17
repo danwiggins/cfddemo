@@ -943,7 +943,7 @@
       if (pair.id === "cn-meth" && pair.support && pair.support.markers_covered !== null) {
         const support = pair.support;
         const residual = support.fit_rms === null
-          ? (support.markers_covered === 2 ? "Fit residual unavailable with exactly two covered markers." : "Fit residual unavailable.")
+          ? "Fit residual unavailable."
           : `Fit residual RMS ${String(support.fit_rms)}.`;
         section.append(h("p", { class: "help" },
           `Methylation numerical fit: ${String(support.markers_covered)} covered markers, ${String(support.cpg_calls_used)} CpG calls; condition number ${support.reference_condition_number === null ? "unavailable" : String(support.reference_condition_number)}. ${residual} These counts do not establish biological calibration.`));

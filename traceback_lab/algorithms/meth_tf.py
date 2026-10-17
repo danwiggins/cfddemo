@@ -201,8 +201,6 @@ class MethTF(MethBase):
         )
         used = int(counts.sum())
         covered = int(np.count_nonzero(counts))
-        if covered <= 2:
-            residual = None  # two fitted weights leave no overdetermined residual
         receipt = {
             "schema": "traceback.lab.meth-tf-fit.v1", "asset_sha256": reference.sha256,
             "reference_sha256": reference.reference.reference_sha256,
