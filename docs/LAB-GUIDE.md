@@ -364,7 +364,24 @@ script or style, no outside requests.
 - **Trust/QC**: depth against each algorithm's minimum, the run table with
   scrubbed stderr for failures, provisional QC bands, library health.
 - **Stability**: one small multiple per metric: deviation from full depth at
-  each fraction, the stability band, and split halves A/B at 50%.
+  each fraction, the stability band, and split halves A/B at 50%. Each half
+  shows its own status when a result is skipped, failed, or lacks a numeric
+  metric; a split-half verdict appears only when both values are available
+  and the stability comparison is interpretable. When both halves have numeric
+  usable values, their raw values and relative difference remain visible without a
+  verdict. When a half is unavailable, its status remains visible. A selected
+  half with parameters that differ from the current full-depth result
+  is named unavailable and excluded from the comparison. An extra
+  unrecognized split label is disclosed even when A and B are both usable. REPEATABILITY's
+  median and worst-three list include every numeric split comparison; only
+  metrics with a validated verdict enter its stability count. Home separately
+  counts unavailable metric comparisons, even when no pair is comparable.
+  Home also counts unavailable full-depth algorithm results, with their names
+  and reasons on Stability. Damaged downsample selections carry their reason
+  into the depth points. A measurement usable only at an isolated lower depth
+  is labelled as such rather than claiming stability through missing higher-depth
+  evidence. If a full-depth selected result is unreadable or ambiguous, Stability names that
+  algorithm without inventing a metric-level panel from damaged data.
 
 ## Building a Lab cohort
 
