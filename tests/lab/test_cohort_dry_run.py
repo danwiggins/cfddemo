@@ -69,6 +69,12 @@ def test_explicit_cohort_preview_checks_built_status_without_writes_or_lock(
 ) -> None:
     store = LabStore(tmp_path)
     source_id = _sample(store, 20)
+    # Stored dry-runs validate the same complete reference binding as real runs.
+    source = json.loads((store.sources_dir / f"{source_id}.json").read_text())
+    manifest_path = store.inputs_dir / source["inputs"][0]["input_id"] / "manifest.json"
+    manifest = json.loads(manifest_path.read_text())
+    manifest["reference_id"] = "synthetic"
+    manifest_path.write_text(json.dumps(manifest))
     if state == "unbuilt":
         add_sample(store, "healthy", source_id)
         build_cohort(store, "healthy")
