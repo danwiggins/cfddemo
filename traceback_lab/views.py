@@ -280,7 +280,9 @@ def cell_state(
 
 def depth_curve(sample: SampleView, library: Library | None = None) -> dict[str, Any]:
     library = library or load_library()
-    registry_order = [algorithm.id for algorithm in load_registry()]
+    registry = load_registry()
+    registry_order = [algorithm.id for algorithm in registry]
+    input_gates = {algorithm.id: getattr(algorithm, "input_gate", None) for algorithm in registry}
     columns = sorted(sample.by_transform("downsample"), key=lambda view: view.fraction) + [sample.full]
     run_depth = sample.full.depth_x()
     rows = []
@@ -302,6 +304,7 @@ def depth_curve(sample: SampleView, library: Library | None = None) -> dict[str,
                 "metric_id": headline.metric_id,
                 "label": headline["label"],
                 "tier": headline.tier,
+                "input_gate": input_gates[algorithm_id],
                 "min_depth_x": headline.get("min_depth_x"),
                 "literature_marker": "literature, not measured" if headline.get("min_depth_x") else None,
                 "cells": cells,

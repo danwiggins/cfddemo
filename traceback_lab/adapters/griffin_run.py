@@ -1,8 +1,8 @@
 """Run the pinned upstream Griffin workflows for one Lab aligned BAM.
 
-The output belongs to a fresh per-input attempt directory. This module does
-not publish a Lab algorithm result: runner identity and registered TF-site
-asset support must be added before that is safe.
+The output belongs to a fresh per-input attempt directory. This adapter does
+not publish the Lab result itself; the registered Griffin algorithm validates
+and publishes its output through the normal Lab worker.
 """
 
 from __future__ import annotations
@@ -332,10 +332,10 @@ def run_upstream(config: GriffinRun) -> tuple[GriffinProfile, ...]:
     """Execute upstream GC correction and profiling, then validate its TSV.
 
     Caller supplies the exact filtered site lists and hg38 assets. No files
-    are downloaded or inferred. A fresh attempt directory is mandatory; on
-    a standalone caller retains its partial attempt directory on failure.
-    The normal Lab worker places that directory under scratch, which the
-    runner removes after a failed attempt.
+    are downloaded or inferred. A fresh attempt directory is mandatory. A
+    standalone caller retains its partial attempt directory on failure. The
+    normal Lab worker places that directory under scratch and removes it after
+    the run.
     """
 
     if config.eligible_autosomal_pairs < MIN_ELIGIBLE_AUTOSOMAL_PAIRS:

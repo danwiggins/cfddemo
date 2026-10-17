@@ -200,7 +200,7 @@
     for (const row of curve.rows) {
       const line = h("div", { class: "curve-row" });
       // One line per row (a fixed 44 px target) so the fold budget holds with any font; full label in title + data table.
-      const name = h("button", { type: "button", class: "curve-label", "aria-expanded": "false", title: row.label }, row.label);
+      const name = h("button", { type: "button", class: "curve-label", "aria-expanded": "false", title: row.input_gate ? `${row.label}: ${row.input_gate}` : row.label }, row.label);
       const cells = h("div", { class: "curve-track" });
       for (const cell of row.cells) {
         const [glyph, text] = CELL[cell.state] || ["·", "no result"];
@@ -215,7 +215,7 @@
       }
       const secondary = (sample.stability || []).filter((p) => p.algorithm_id === row.algorithm_id && p.metric_id !== row.metric_id);
       const detail = h("div", { class: "curve-detail", hidden: true },
-        h("p", {}, `${row.label}: full-depth state ${(CELL[row.full_state] || ["", row.full_state])[1]}; tier ${row.tier}; literature minimum ${row.min_depth_x ? row.min_depth_x + "x (literature, not measured)" : "none"}.`),
+        h("p", {}, `${row.label}: full-depth state ${(CELL[row.full_state] || ["", row.full_state])[1]}; tier ${row.tier}; literature minimum ${row.min_depth_x ? row.min_depth_x + "x (literature, not measured)" : "none"}; input gate ${row.input_gate || "none"}.`),
         secondary.length ? h("table", { class: "data-table" }, h("caption", {}, "Secondary metrics by fraction"),
           h("thead", {}, h("tr", {}, h("th", { scope: "col" }, "Metric"), ...curve.fractions.map((f) => h("th", { scope: "col" }, `${f * 100}%`)))),
           h("tbody", {}, ...secondary.map((p) => h("tr", {}, h("th", { scope: "row" }, p.label), ...curve.fractions.map((f) => {
@@ -227,8 +227,8 @@
       grid.append(line, detail);
     }
     section.append(grid);
-    section.append(dataTable("Depth curve cells (literature minimums are not measured)", ["Algorithm", ...curve.fractions.map((f) => `${f * 100}%`), "Literature minimum"],
-      curve.rows.map((row) => [row.label, ...row.cells.map((c) => (CELL[c.state] || ["", "—"])[1]), row.min_depth_x ? `${row.min_depth_x}x (literature, not measured)` : "—"])));
+    section.append(dataTable("Depth curve cells (literature minimums are not measured)", ["Algorithm", ...curve.fractions.map((f) => `${f * 100}%`), "Literature minimum", "Input gate"],
+      curve.rows.map((row) => [row.label, ...row.cells.map((c) => (CELL[c.state] || ["", "—"])[1]), row.min_depth_x ? `${row.min_depth_x}x (literature, not measured)` : "—", row.input_gate || "—"])));
     return section;
   }
 
