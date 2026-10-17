@@ -49,6 +49,8 @@ def _file(tmp_path: Path, *, status: str = "operator_verified", **changes) -> tu
 def test_registration_is_immutable_and_cli_keeps_labels_private(tmp_path: Path, capsys) -> None:
     path, digest = _file(tmp_path, calibration_source="private study label")
     store = LabStore(tmp_path / "root")
+    with pytest.raises(FetalChrYContractError, match="differs from expected"):
+        register_contract(store, path, "0" * 64)
     assert lab_main(["fetal", "chry-register", "--file", str(path), "--sha256", digest,
                      "--root", str(store.root), "--json"]) == 0
     response = json.loads(capsys.readouterr().out)
@@ -98,6 +100,16 @@ def test_deeply_nested_calibration_is_structured_failure(tmp_path: Path, capsys)
     response = json.loads(capsys.readouterr().out)
     assert response["status"] == "blocked"
     assert str(path) not in json.dumps(response)
+
+
+def test_deeply_nested_receipt_is_structured_failure(tmp_path: Path) -> None:
+    path, digest = _file(tmp_path)
+    store = LabStore(tmp_path / "root")
+    register_contract(store, path, digest)
+    receipt = store.lab / "assets" / "fetal-fraction-chry" / INPUT / "receipt.json"
+    receipt.write_bytes(b"[" * 2048 + b"]" * 2048)
+    with pytest.raises(FetalChrYContractError, match="missing or unsafe"):
+        inspect_contract(store, INPUT)
 
 
 def test_synthetic_registration_needs_opt_in_and_cannot_run(tmp_path: Path) -> None:
