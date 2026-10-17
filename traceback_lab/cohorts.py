@@ -306,12 +306,8 @@ def _selected_results(store: LabStore, input_id: str, manifest: dict[str, Any]) 
     from .platforms import for_input
 
     bam_path = store.inputs_dir / input_id / "aligned.bam"
-    # Older aligned metadata may have no BAM. A prealigned input cannot be
-    # assigned a platform without checking its original header.
     try:
-        platform = for_input(manifest, bam_path) if bam_path.is_file() else (
-            "ont" if manifest.get("kind") == "aligned" else "unknown"
-        )
+        platform = for_input(manifest, bam_path)
     except (OSError, ValueError) as exc:
         raise LabProblem(
             "TBX-LAB-024", cause="cohort input platform disagrees with its BAM header",

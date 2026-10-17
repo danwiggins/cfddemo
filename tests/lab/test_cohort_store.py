@@ -47,11 +47,10 @@ def _sample(store: LabStore, index: int, *, example: bool = False, value: float 
         "mmi_sha256": _sha(901) if aligned else None,
         "aligner_argv": ["minimap2", "-ax", "map-ont"] if aligned else None,
     }))
-    if not aligned:
-        header = {"HD": {"VN": "1.6"}, "SQ": [{"SN": "chr1", "LN": 1000}],
-                  "RG": [{"ID": "one", "PL": "ONT"}]}
-        with pysam.AlignmentFile(str(input_dir / "aligned.bam"), "wb", header=header):
-            pass
+    header = {"HD": {"VN": "1.6"}, "SQ": [{"SN": "chr1", "LN": 1000}],
+              "RG": [{"ID": "one", "PL": "ONT"}]}
+    with pysam.AlignmentFile(str(input_dir / "aligned.bam"), "wb", header=header):
+        pass
     result = ResultEnvelope(
         algorithm_id="fragment-size", algorithm_version="1", status="ok",
         provenance=provenance(tool="fixture", parameters_sha256=parameters,
@@ -250,10 +249,11 @@ def test_unknown_prealigned_provenance_never_pools_distinct_inputs(store: LabSto
 
 
 @pytest.mark.parametrize("damage", ["missing", "unreadable", "mismatched", "unknown"])
-def test_prealigned_bam_platform_damage_preserves_current_generation(
-    store: LabStore, damage: str,
+@pytest.mark.parametrize("aligned", [False, True])
+def test_bam_platform_damage_preserves_current_generation(
+    store: LabStore, damage: str, aligned: bool,
 ) -> None:
-    source_id = _sample(store, 1, aligned=False)
+    source_id = _sample(store, 1, aligned=aligned)
     add_sample(store, "healthy", source_id)
     old = build_cohort(store, "healthy")
     before = store.generation()
