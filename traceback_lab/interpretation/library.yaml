@@ -2773,9 +2773,9 @@ entries:
     min_depth_x: null
     reference: {kind: internal_cohort}
     performance: null
-    performance_missing_reason: "none published for a genome-wide read share; the thresholds come from the UXM fragment classes"
-    meaning_high: "Many fully unmethylated molecules: more DNA from cell types unmethylated at random sites, or a global hypomethylation signal."
-    meaning_low: "Few unmethylated molecules."
+    performance_missing_reason: "No published performance for this Lab genome-wide share using <25%; Loyfer's UXM U class includes reads at exactly 25%"
+    meaning_high: "Many reads with less than 25% methylated CpGs: more DNA from cell types unmethylated at sampled sites, or a global hypomethylation signal."
+    meaning_low: "Few reads meet the strict <25% CpG-methylation rule."
     confounders: ["CpG density of the regions reads fall in", "call confidence", "depth (noise)"]
     next_steps:
       analytical: ["Exploratory only", "Read with global-5mc"]
@@ -2785,7 +2785,7 @@ entries:
     headline: true
     stability: {kind: proportion}
     citations: ["doi:10.1038/s41586-022-05580-6"]
-    citation_checked: {by: "lab build agent (Phase 1)", date: "2026-10-15", note: "PMC9811898 (Loyfer 2023): 'we used k = 4 and thresholds of less than or equal to 25% methylated CpGs for U reads, and more than or equal to 75% methylated CpGs for M reads' (>= 3 CpGs for cfDNA mixtures). Only the published thresholds are reused; no UXM/wgbs_tools code."}
+    citation_checked: {by: "S1 primary-source audit", date: "2026-10-17", note: "Loyfer 2023 Methods: UXM uses k=4, U <=25% and M >=75%; in silico cfDNA mixtures use at least 3 CpGs. This Lab scalar uses strict <25%, so reads at exactly 25% contribute to U counts but not this scalar. No UXM/wgbs_tools code is invoked."}
 
   - algorithm_id: hypometh-reads
     metric_id: u_x_m_counts
