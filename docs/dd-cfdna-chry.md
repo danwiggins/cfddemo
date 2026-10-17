@@ -38,6 +38,12 @@ not from this example. A file marked `synthetic` supports test arithmetic but
 cannot run on an input. `operator_verified` is an assertion, not independent
 verification by the software. The Lab binds the exact calibration bytes to the
 input and reference SHA-256 and refuses changes to a registered input.
+Deterministic downsample and split inputs may inherit the parent calibration
+only when their stored derived identity verifies against that parent. The
+method recounts the selected chrY and eligible reads and reapplies the
+calibration's measured-depth gate; each subset has its own result identity.
+Synthetic CNA spikes and other transforms are unsupported because they alter
+copy counts rather than measure ordinary sampling noise.
 Keep patient identifiers out of free-text labels; the Lab stores those labels
 in the private contract and does not echo them in CLI output. The registration
 directory itself is sensitive transplant-related metadata, so protect the Lab

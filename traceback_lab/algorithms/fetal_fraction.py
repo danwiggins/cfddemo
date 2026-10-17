@@ -313,7 +313,7 @@ class FetalFraction(Base):
         if isinstance(decision, Skip):
             return decision
         if ctx.derived is not None:
-            return Skip("unsupported_input", "NIPTeR requires the full aligned prenatal input")
+            return Skip("unsupported_input", "NIPTeR controls are matched to the full input, not this selected subset")
         from ..store import LabStore
 
         try:

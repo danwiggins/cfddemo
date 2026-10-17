@@ -57,8 +57,15 @@ eligible reads, including chrY PAR reads. Rates are per million denominator
 reads. The linear estimate is `(observed chrY rate - female background) /
 (full male response - female background)`. The Lab reports null outside the
 calibrated rate or validated fraction interval; it never extrapolates or clips.
-It requires a full input with at least two million eligible reads, canonical
+It requires an aligned parent with at least two million eligible reads, canonical
 hg38 chromosome layout, and the calibration's minimum depth.
+Deterministic downsample and split controls may reuse that same input-scoped
+calibration only when the derived manifest proves its parent input identity
+and the selected reads still meet the method and calibrated depth gates. The
+chrY numerator and eligible-read denominator are recomputed from the selected
+row mask; the derived input gets its own result identity. Synthetic CNA spikes
+and other transforms remain unsupported because their changed counts are not
+a sampling-noise control for this calibration.
 
 The software will not run a `synthetic` calibration. `--allow-synthetic` must
 be supplied to register one for mechanics testing. Synthetic registrations use

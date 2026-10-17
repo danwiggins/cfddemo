@@ -10,6 +10,7 @@ from typing import Any
 import numpy as np
 
 from ..dd_contract import COUNTING_PROTOCOL, DonorContract, DonorContractError, inspect_contract
+from ..derived_calibration import calibrated_input_id
 from ..read_summary import CHUNK_ROWS, FLAG_EXCLUDE, MIN_MAPQ
 from ..registry import AlgorithmOutput, InputContext, Ready, Requirements, Skip
 from ._base import Base, load_summary, metric
@@ -42,7 +43,7 @@ def _fraction(y_reads: int, eligible_reads: int, contract: DonorContract) -> flo
     return (observed - baseline) / (full - baseline)
 
 
-def _count_reads(summary: Any) -> tuple[int, int]:
+def _count_reads(summary: Any, mask: np.ndarray | None = None) -> tuple[int, int]:
     """Count D21 reads in bounded slices of the memmapped summary columns."""
 
     flags = summary.column("flag")
@@ -56,6 +57,8 @@ def _count_reads(summary: Any) -> tuple[int, int]:
         eligible = (((flags[offset:end] & FLAG_EXCLUDE) == 0)
                     & (mapqs[offset:end] >= MIN_MAPQ)
                     & (chunk_contigs >= 0) & (chunk_contigs < 24))
+        if mask is not None:
+            eligible &= mask[offset:end]
         eligible_count += int(np.count_nonzero(eligible))
         y_rows = eligible & (chunk_contigs == 23)
         chunk_starts = starts[offset:end]
@@ -78,7 +81,9 @@ class DonorDerivedChrY(Base):
         from ..store import LabStore
 
         try:
-            return [inspect_contract(LabStore(root), input_id).manifest_sha256]
+            store = LabStore(root)
+            parent = calibrated_input_id(store, input_id)
+            return [inspect_contract(store, parent).manifest_sha256] if parent is not None else []
         except (DonorContractError, OSError):
             return []
 
@@ -86,14 +91,18 @@ class DonorDerivedChrY(Base):
         decision = super().preflight(ctx)
         if isinstance(decision, Skip):
             return decision
-        if ctx.derived is not None:
-            return Skip("unsupported_input", "donor calibration applies to the full input")
+        if ctx.derived is not None and ctx.derived.get("transform") not in ("downsample", "split"):
+            return Skip("unsupported_input", "donor calibration supports only selected read subsets")
         if not _protocol_matches():
             return Skip("unsupported_input", "donor chrY counting protocol has changed")
         from ..store import LabStore
 
+        store = LabStore(ctx.root)
+        parent = calibrated_input_id(store, ctx.input_id, ctx.derived)
+        if parent is None or (ctx.derived is None) != (parent == ctx.input_id):
+            return Skip("unsupported_input", "derived donor input has no verified calibrated parent")
         try:
-            contract = inspect_contract(LabStore(ctx.root), ctx.input_id)
+            contract = inspect_contract(store, parent)
         except DonorContractError as exc:
             return Skip("missing_asset", f"verified transplant calibration unavailable: {exc}")
         if contract.source_id != ctx.source_id:
@@ -117,11 +126,17 @@ class DonorDerivedChrY(Base):
     def run(self, ctx: InputContext, out: Path) -> AlgorithmOutput:
         from ..store import LabStore
 
-        contract = inspect_contract(LabStore(ctx.root), ctx.input_id)
         if not isinstance(self.preflight(ctx), Ready):
             raise RuntimeError("donor calibration or input changed after preflight")
-        summary, _ = load_summary(ctx)
-        y_reads, denominator = _count_reads(summary)
+        store = LabStore(ctx.root)
+        parent = calibrated_input_id(store, ctx.input_id, ctx.derived)
+        if parent is None:
+            raise RuntimeError("derived donor binding changed after preflight")
+        contract = inspect_contract(store, parent)
+        summary, mask = load_summary(ctx)
+        y_reads, denominator = _count_reads(summary, mask)
+        if ctx.derived is not None and denominator != ctx.eligible_reads:
+            raise RuntimeError("derived donor read selection changed after preflight")
         fraction = _fraction(y_reads, denominator, contract)
         if self.asset_sha256s_for_input(ctx.root, ctx.input_id) != [contract.manifest_sha256]:
             raise RuntimeError("donor calibration changed during execution")

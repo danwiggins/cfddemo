@@ -53,6 +53,12 @@ path. Registration for an input is immutable.
 The adapter requires at least two million eligible reads, the full aligned
 input, matching source/input/reference IDs, a coordinate-sorted canonical
 hg38 BAM, the verified control RDS, and R 4.4.0 or newer with NIPTeR 1.0.2.
+Downsample and split inputs receive an explicit `unsupported_input` result:
+the registered `NIPTControlGroup` is a pre-binned RDS matched to the full
+sample protocol, and this adapter cannot select the corresponding control
+reads or prove that a lower-depth subset remains comparable. Reusing the
+full-input controls for a selected subset would make its z-score calibration
+unverified; the worker therefore never runs the parent BAM under a derived ID.
 The resolved Rscript executable file (which may be a launcher), the installed `NIPTeR`, `sets`, `Rsamtools`, and `S4Vectors`
 package files, R adapter code, contract, and RDS digests enter the execution
 identity. The underlying R runtime and other R dependencies are not byte-pinned;
