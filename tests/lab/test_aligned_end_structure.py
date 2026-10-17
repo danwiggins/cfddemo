@@ -159,6 +159,20 @@ def test_unprefixed_hg38_excludes_mt_and_decoys_from_end_denominator(tmp_path: P
     assert artifact["preferred_u_hits"] == artifact["preferred_d_hits"] == 1
 
 
+def test_duplicate_autosome_aliases_refuse_ambiguous_catalogue_mapping(tmp_path: Path) -> None:
+    root, _, _ = _catalogues(tmp_path)
+    summary_parent = tmp_path / "read-summary"
+    _summary(summary_parent, contig_name="1")
+    meta_path = summary_parent / "columns" / "meta.json"
+    meta = json.loads(meta_path.read_text(encoding="utf-8"))
+    meta["contigs"] = ["1", "chr1"]
+    meta["lengths"] = [1000, 1000]
+    meta_path.write_text(json.dumps(meta), encoding="utf-8")
+
+    with pytest.raises(ValueError, match="duplicate autosome aliases"):
+        ALIGNED_END_STRUCTURE.run(_context(root, summary_parent), tmp_path / "out")
+
+
 def test_positive_direction_and_mirrored_window_boundaries(tmp_path: Path) -> None:
     root, _, _ = _catalogues(tmp_path)
     summary_parent = tmp_path / "read-summary"
