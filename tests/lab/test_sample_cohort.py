@@ -7,11 +7,12 @@ from types import SimpleNamespace
 import pytest
 
 from traceback_lab.cohort_contracts import CohortGeneration, CohortMember, CohortResult
-from traceback_lab.envelope import Metric, ResultEnvelope, provenance
+from traceback_lab.envelope import Depth, Metric, ResultEnvelope, provenance
 from traceback_lab.interpretation import engine as interpretation_engine
 from traceback_lab.interpretation.engine import Cohort, classify, load_library
 from traceback_lab.problems import LabProblem
 from traceback_lab.store import LabStore
+from traceback_lab.views import InputView, SampleView
 from traceback_lab.web import api as web_api
 
 
@@ -67,12 +68,13 @@ def test_sample_lenses_pin_eligible_loo_reference(
         algorithm_id="fragment-size", algorithm_version="1", status="ok",
         provenance=provenance(tool="fixture", parameters_sha256=PARAMETERS,
                               source_id=SOURCE, input_id=INPUT, reference_id="synthetic"),
+        depth=Depth(eligible_reads=1_000_000, approx_depth_x=1.0),
         metrics=[Metric(metric_id="short_fraction_lt150", value=0.95)],
     )
-    sample = SimpleNamespace(example=False, operator_metadata=None, operator_metadata_problem=None,
-                             full=SimpleNamespace(
-        input_id=INPUT, results={"fragment-size": envelope}, depth_x=lambda: 1.0,
-    ), derived=[], by_transform=lambda transform: [])
+    sample = SampleView(
+        source_id=SOURCE, id12=SOURCE[:12], example=False,
+        full=InputView("full", INPUT, None, {}, {"fragment-size": envelope}),
+    )
     monkeypatch.setattr(web_api.views, "load_sample", lambda store, source_id: sample)
     monkeypatch.setattr(web_api.views, "stability_panels", lambda sample, library: [])
     monkeypatch.setattr(web_api.views, "depth_curve", lambda sample, library: {"rows": [], "downsampled": False})
