@@ -12,7 +12,7 @@ from pathlib import Path
 import pysam
 import pytest
 
-from evidence_inspector.cell_origin_prefilter import read_bed_regions
+from evidence_inspector.cell_origin_prefilter import read_bed_regions, write_prefiltered_bam
 from traceback_lab.adapters.mmml_extract import extract_cpg_calls
 from traceback_lab.adapters import mmml_extract
 
@@ -111,7 +111,7 @@ def test_c_minus_dot_sites_follow_pysam_query_coordinates_on_both_orientations()
         assert [(position, strand, channels["m"]) for position, strand, channels in sites] == expected
 
 
-def test_reference_cpg_survives_terminal_and_deleted_query_partner(tmp_path: Path) -> None:
+def _write_terminal_input(tmp_path: Path) -> tuple[Path, Path]:
     fasta = tmp_path / "reference.fa"
     fasta.write_text(">chr1\n" + "A" * 100 + "ACGA" + "A" * 100 + "\n")
     pysam.faidx(str(fasta))
@@ -129,6 +129,11 @@ def test_reference_cpg_survives_terminal_and_deleted_query_partner(tmp_path: Pat
             read.set_tag("MM", "C+m?,0;")
             read.set_tag("ML", array.array("B", [250]))
             writer.write(read)
+    return bam, fasta
+
+
+def test_reference_cpg_survives_terminal_and_deleted_query_partner(tmp_path: Path) -> None:
+    bam, fasta = _write_terminal_input(tmp_path)
     result = extract_cpg_calls(bam, fasta, maximum_calls=2, filter_threshold=0.9)
     assert len(result.calls) == 2
     assert all(call.position0 == 101 and call.state.value == "methylated" for call in result.calls)
@@ -148,6 +153,39 @@ def test_reference_cpg_survives_terminal_and_deleted_query_partner(tmp_path: Pat
                 for row in rows if row["fail"] == "false"} == {
                     ("terminal", 101, "m"), ("deletion", 101, "m"),
                 }
+
+
+def test_composed_terminal_prefilter_and_cap_match_pinned_modkit(tmp_path: Path) -> None:
+    binary = os.environ.get("LAB_MODKIT_PARITY_BINARY")
+    if not binary:
+        pytest.skip("set LAB_MODKIT_PARITY_BINARY to the pinned modkit 0.6.4 binary")
+    bam, fasta = _write_terminal_input(tmp_path)
+    bed = tmp_path / "marker.bed"
+    bed.write_text("chr1\t101\t102\n", encoding="ascii")
+    regions = read_bed_regions(bed)
+    filtered = tmp_path / "prefiltered.bam"
+    counts = write_prefiltered_bam(bam, filtered, regions, min_mapq=20)
+    assert counts.written == 2
+    output = tmp_path / "modkit.tsv"
+    subprocess.run(
+        [binary, "extract", "calls", "--reference", str(fasta), "--cpg",
+         "--include-bed", str(bed), "--mapped-only", "--filter-threshold", "0.9",
+         "--suppress-progress", str(filtered), str(output)],
+        check=True, capture_output=True, text=True, timeout=60,
+    )
+    with output.open(newline="") as stream:
+        rows = list(csv.DictReader(stream, delimiter="\t"))
+    assert len(rows) == 2  # raw modkit rows, including failed calls when present
+    assert {(row["read_id"], int(row["ref_position"]), row["call_code"])
+            for row in rows if row["fail"] == "false"} == {
+                ("terminal", 101, "m"), ("deletion", 101, "m"),
+            }
+    ours = extract_cpg_calls(filtered, fasta, maximum_calls=len(rows),
+                             filter_threshold=0.9, include_regions=regions)
+    assert len(ours.calls) == 2
+    with pytest.raises(ValueError, match="locked cap"):
+        extract_cpg_calls(filtered, fasta, maximum_calls=len(rows) - 1,
+                          filter_threshold=0.9, include_regions=regions)
 
 
 def test_g_minus_cpg_and_flagless_implicit_calls_match_modkit(tmp_path: Path) -> None:
@@ -439,3 +477,30 @@ def test_matches_pinned_modkit_on_synthetic_calls(
             expected.add((digest, position0, row["ref_mod_strand"], state))
     assert len(ours.calls) == len(expected)
     assert observed == expected
+
+
+def test_pinned_modkit_raw_row_cap_includes_failed_probability_calls(tmp_path: Path) -> None:
+    binary = os.environ.get("LAB_MODKIT_PARITY_BINARY")
+    if not binary:
+        pytest.skip("set LAB_MODKIT_PARITY_BINARY to the pinned modkit 0.6.4 binary")
+    bam, fasta = _write_boundary_input(tmp_path)
+    bed = tmp_path / "marker.bed"
+    bed.write_text("chr1\t101\t102\n", encoding="ascii")
+    regions = read_bed_regions(bed)
+    filtered = tmp_path / "prefiltered.bam"
+    assert write_prefiltered_bam(bam, filtered, regions, min_mapq=20).written == 14
+    output = tmp_path / "modkit.tsv"
+    subprocess.run(
+        [binary, "extract", "calls", "--reference", str(fasta), "--cpg",
+         "--include-bed", str(bed), "--mapped-only", "--filter-threshold", "0.9",
+         "--suppress-progress", str(filtered), str(output)],
+        check=True, capture_output=True, text=True, timeout=60,
+    )
+    with output.open(newline="") as stream:
+        rows = list(csv.DictReader(stream, delimiter="\t"))
+    assert len(rows) > sum(row["fail"] == "false" for row in rows)
+    extract_cpg_calls(filtered, fasta, maximum_calls=len(rows),
+                      filter_threshold=0.9, include_regions=regions)
+    with pytest.raises(ValueError, match="locked cap"):
+        extract_cpg_calls(filtered, fasta, maximum_calls=len(rows) - 1,
+                          filter_threshold=0.9, include_regions=regions)
