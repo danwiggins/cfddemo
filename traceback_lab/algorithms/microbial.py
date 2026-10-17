@@ -30,6 +30,7 @@ from ._base import Base, metric
 
 MAX_TAXA = 256
 MAX_REPORT_ROWS = 100_000
+MAX_CANDIDATE_FASTA_BYTES = 512 << 20
 _BRACKEN_COLUMNS = ("name", "taxonomy_id", "taxonomy_lvl", "kraken_assigned_reads",
                     "added_reads", "new_est_reads", "fraction_total_reads")
 _ROOTS = {2: "bacteria", 2157: "archaea", 10239: "viruses", 4751: "fungi"}
@@ -149,6 +150,7 @@ def _bracken_species(path: Path, lineages: dict[int, str], denominator: int) -> 
 
 def _write_candidates(bam: Path, fasta: Path, read_length: int) -> tuple[int, int, int, int]:
     denominator = candidate = too_short = missing_sequence = 0
+    staged_bytes = 0
     with pysam.AlignmentFile(bam, "rb", check_sq=False) as stream, fasta.open("wt", encoding="ascii") as out:
         for read in stream.fetch(until_eof=True):
             if read.is_secondary or read.is_supplementary or read.is_qcfail or read.is_duplicate:
@@ -164,13 +166,18 @@ def _write_candidates(bam: Path, fasta: Path, read_length: int) -> tuple[int, in
                 too_short += 1
                 continue
             candidate += 1
-            out.write(f">r{candidate}\n{sequence[:read_length]}\n")
+            row = f">r{candidate}\n{sequence[:read_length]}\n"
+            row_bytes = len(row)
+            if staged_bytes + row_bytes > MAX_CANDIDATE_FASTA_BYTES:
+                raise RuntimeError("microbial candidate FASTA exceeds the local 512 MiB staging budget")
+            out.write(row)
+            staged_bytes += row_bytes
     return denominator, candidate, too_short, missing_sequence
 
 
 @dataclass
 class Microbial(Base):
-    version: str = "3"
+    version: str = "4"
     family: str = "non-human"
     consumes: str = "full_bam"
     cost: str = "slow"
@@ -180,6 +187,7 @@ class Microbial(Base):
         "clipping": "first registered Bracken read-length bases",
         "bracken_level": "S", "bracken_threshold": 1,
         "microbial_roots": _ROOTS, "max_taxa": MAX_TAXA,
+        "candidate_fasta_budget_bytes": MAX_CANDIDATE_FASTA_BYTES,
     })
 
     @property  # type: ignore[override]

@@ -298,8 +298,10 @@ denominator reads; human and other non-microbial taxa are excluded. At most
 256 species are displayed, with an omitted-taxon count. Read names and Kraken
 per-read assignments remain transient and are not published.
 The worker briefly writes candidate unmapped sequence in a private Lab scratch
-directory. Normal completion removes it; a crash or abrupt power loss can leave
-scratch files for an operator to inspect and remove under the Lab root.
+directory. Staging is capped at 512 MiB; exceeding it fails the step before
+classification, so a partial candidate file cannot publish a profile. Normal
+completion removes scratch; a crash or abrupt power loss can leave files for
+an operator to inspect and remove under the Lab root.
 An input with no primary QC-passing non-duplicate reads has no microbial rate
 or cohort comparison. If unmapped reads exist but all are too short or lack
 sequence, the rate and cohort comparison are also unavailable. An input with
