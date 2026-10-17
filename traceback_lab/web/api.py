@@ -8,8 +8,8 @@ result's own attempt directory and no component is a symlink.
 
 from __future__ import annotations
 
-import json
 import heapq
+import json
 import math
 import os
 import re
@@ -22,7 +22,7 @@ from pathlib import Path, PurePosixPath
 from typing import Any
 
 from ..cohort_contracts import CohortGeneration, CohortMember, MetricProjection, project_metric
-from ..cohorts import list_cohorts, member_from_store, read_current
+from ..cohorts import list_cohorts, member_for_generation_or_independent, member_from_store, pon_dependent_algorithms, read_current
 from ..file_access import open_regular_no_follow
 from ..identity import resolve_prefix, shortest_unique_prefixes
 from ..ingest import source_ids, source_record
@@ -43,7 +43,38 @@ from ..problems import LabProblem
 from ..store import LabStore, summarize_run
 from .. import views
 
-_LOGGED_SAMPLE_COMMANDS = frozenset({"run", "simulate cna", "simulate split"})
+_LOGGED_SAMPLE_COMMANDS = frozenset({"run", "simulate cna", "simulate split", "cohort build"})
+_STATUS_COMMANDS = _LOGGED_SAMPLE_COMMANDS | frozenset({
+    "asset add", "cohort add", "cohort build", "identity sites add", "identity compare",
+})
+_STATUS_STEPS = frozenset({
+    "start", "sites", "relate", "ingest", "align", "derive", "read-summary",
+    "pmd", "tss-annotation", "viral-fasta", "methylbert-bundle", "meth-tf-reference",
+})
+
+
+def _safe_status_step(value: Any) -> str | None:
+    if not isinstance(value, str):
+        return None
+    if value in _STATUS_STEPS:
+        return value
+    algorithm, _, derived = value.partition("@")
+    if algorithm not in {item.id for item in _registry()}:
+        return None
+    if not derived:
+        return algorithm if "@" not in value else None
+    return value if re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9.-]{0,39}", derived) else None
+
+
+def _safe_result_selections(sample: Any, order: list[str]) -> dict[str, Any]:
+    known = set(order)
+    unreadable = sample.full.unreadable
+    ambiguous = sample.full.ambiguous
+    return {
+        "unreadable_results": sorted(unreadable & known),
+        "ambiguous_results": sorted(ambiguous & known),
+        "malformed_result_selections": bool((unreadable | ambiguous) - known),
+    }
 
 
 def _recovery_problem(problem: LabProblem) -> dict[str, str]:
@@ -51,6 +82,18 @@ def _recovery_problem(problem: LabProblem) -> dict[str, str]:
 
     return {"code": problem.code, "summary": problem.summary,
             "cause": problem.cause, "fix": problem.fix, "docs": problem.docs}
+
+
+def _pon_dependent_algorithms() -> set[str]:
+    return pon_dependent_algorithms()
+
+
+def _cohort_target(
+    store: LabStore, generation: CohortGeneration, source_id: str,
+) -> tuple[CohortMember, LabProblem | None]:
+    """Keep independent cohort metrics when only the PoN tools are missing."""
+
+    return member_for_generation_or_independent(store, generation, source_id)
 
 
 class LibraryHolder:
@@ -183,8 +226,15 @@ def _read_run_log(path: Path, *, limit: int = 1024 * 1024) -> bytes | None:
 def _run_events(store: LabStore, run_id: str) -> tuple[list[tuple[int, dict[str, Any]]], str | None]:
     if not isinstance(run_id, str) or not re.fullmatch(r"r-\d{8}-\d{4}-[0-9a-f]{4,8}", run_id):
         return [], "invalid_run_id"
-    raw = _read_run_log(store.runs_dir / f"{run_id}.jsonl")
+    path = store.runs_dir / f"{run_id}.jsonl"
+    raw = _read_run_log(path)
     if raw is None:
+        try:
+            os.lstat(path)
+        except FileNotFoundError:
+            return [], "missing"
+        except OSError:
+            pass
         return [], "unreadable_or_over_1mib"
     lines = raw.split(b"\n")
     complete_tail = raw.endswith(b"\n")
@@ -197,6 +247,8 @@ def _run_events(store: LabStore, run_id: str) -> tuple[list[tuple[int, dict[str,
         try:
             event = json.loads(line)
         except (ValueError, UnicodeDecodeError, RecursionError):
+            # One crash-torn append can leave an unterminated final fragment.
+            # Keep its validated prefix, but never skip a complete or middle line.
             if number == len(lines) and not complete_tail:
                 if not events:
                     return [], "pending_first_event"
@@ -289,14 +341,15 @@ class LabApi:
             events, reason = _run_events(self.store, run_id)
             if reason == "pending_first_event":
                 reason = None  # the first append is still in progress
+            if reason == "missing":
+                reason = None  # the writer may not have appended run_start yet
             if reason in ("unreadable_or_over_1mib", "malformed_or_empty"):
                 # A writer publishes its heartbeat before appending run_start.
                 # An absent or empty log in that short window is pending, not damaged.
                 try:
                     info = os.lstat(self.store.runs_dir / f"{run_id}.jsonl")
                 except FileNotFoundError:
-                    if reason == "unreadable_or_over_1mib":
-                        reason = None
+                    pass
                 except OSError:
                     pass
                 else:
@@ -331,8 +384,15 @@ class LabApi:
                 else:
                     summary = summarize_run([event for _, event in events], self.store)
                     if summary["status"] == "interrupted":
-                        interrupted = {"run_id": last, "step": summary["open_step"],
+                        interrupted = {"run_id": last, "step": _safe_status_step(summary["open_step"]),
                                        **_run_sample_identity(events)}
+        if status["active"] is not None:
+            command = status["active"].get("command")
+            status["active"] = {
+                **status["active"],
+                "command": command if isinstance(command, str) and command in _STATUS_COMMANDS else None,
+                "step": _safe_status_step(status["active"].get("step")),
+            }
         try:
             self.libraries.get()
         except (LibraryError, OSError):
@@ -371,7 +431,7 @@ class LabApi:
         if generation is None:
             return None, None, "not_built", None
         try:
-            target = member_from_store(self.store, source_id)
+            target, pon_problem = _cohort_target(self.store, generation, source_id)
         except LabProblem as error:
             return generation, None, "target_unavailable", _recovery_problem(error)
         except ValueError:
@@ -382,7 +442,7 @@ class LabApi:
             error = LabProblem("TBX-LAB-017", cause="sample results changed while its cohort reference was loading",
                                fix="Reload the sample to pin its current full input")
             return generation, None, "stale_target", _recovery_problem(error)
-        return generation, target, "ready", None
+        return generation, target, "ready", _recovery_problem(pon_problem) if pon_problem else None
 
     @staticmethod
     def _interpret_sample_envelope(
@@ -475,6 +535,7 @@ class LabApi:
                         "spike": None if not spikes else all(row["recovered"] for row in spikes if row["tf_expected"] >= 0.1),
                         "split": bool(sample.by_transform("split")),
                     },
+                    **_safe_result_selections(sample, [a.id for a in _registry()]),
                 }
             )
         rows.sort(key=lambda row: row["run_utc"], reverse=True)
@@ -550,6 +611,7 @@ class LabApi:
                         "tool": envelope.provenance.tool,
                         "tool_version": envelope.provenance.tool_version,
                         "parameters_sha256": envelope.provenance.parameters_sha256,
+                        "attempt_id": sample.full.attempt_ids.get(algorithm_id),
                         "input_id": envelope.provenance.input_id,
                         "source_id": envelope.provenance.source_id,
                         "reference_id": envelope.provenance.reference_id,
@@ -584,6 +646,7 @@ class LabApi:
             "cohort_state": cohort_state,
             "cohort_problem": cohort_problem,
             "algorithms": algorithms,
+            **_safe_result_selections(sample, order),
             "identity_pairs": identity_pairs,
             "identity_pairs_reason": (
                 "Somalier is unavailable; reinstall the pinned tool and rerun identity before comparing."
@@ -597,7 +660,7 @@ class LabApi:
             "headline": headline_block,
             "derived": [{"label": view.label, "transform": view.transform} for view in sample.derived],
             "licenses": [{"license_id": key, **library.licenses[key]} for key in _all_used(used_licenses, library, order)],
-            "catalog": _catalog(library, order, algorithms),
+            "catalog": _catalog(library, order, algorithms, sample.full.unreadable, sample.full.ambiguous),
             "excluded": EXCLUDED,
             "library_health": {
                 **self.libraries.health(),
@@ -606,7 +669,9 @@ class LabApi:
             },
         }
 
-    def run_log_line(self, id12: str, algorithm_id: str) -> dict[str, Any]:
+    def run_log_line(self, id12: str, algorithm_id: str,
+                     expected_input_id: str | None = None, expected_identity: str | None = None,
+                     expected_attempt_id: str | None = None) -> dict[str, Any]:
         """Return a bounded, allowlisted step-end line for the selected full result."""
 
         source_id, _ = self._resolve(id12)
@@ -619,12 +684,17 @@ class LabApi:
         if result is None:
             return {"found": False}
         identity = result.provenance.parameters_sha256
+        if (expected_input_id is not None and expected_input_id != sample.full.input_id
+                or expected_identity is not None and expected_identity != identity):
+            return {"found": False}
         selected = self.store.selected_attempt(sample.full.input_id, algorithm_id, identity)
         if selected is None:
             return {"found": False}
+        if expected_attempt_id is not None and expected_attempt_id != selected.name:
+            return {"found": False}
         for run_id in _recent_run_ids(self.store):
             events, reason = _run_events(self.store, run_id)
-            if reason:
+            if reason or events[0][1]["event"] != "run_start":
                 continue
             if not any(
                 event.get("event") == "sample"
@@ -724,7 +794,7 @@ class LabApi:
         if sample.example:
             return {**base, "state": "example_unscorable", "metrics": [], "unscored": []}
         try:
-            target = member_from_store(self.store, source_id)
+            target, pon_problem = _cohort_target(self.store, generation, source_id)
         except LabProblem as problem:
             if problem.code == "TBX-LAB-021":
                 return {**base, "state": "example_unscorable", "metrics": [], "unscored": []}
@@ -741,12 +811,13 @@ class LabApi:
             return {**base, "state": "target_unavailable", "metrics": [], "unscored": [],
                     "problem": _recovery_problem(problem)}
         # Both reads must describe the same full input. A newer run may become
-        # current between load_sample and member_from_store while retaining the
+        # current between load_sample and member_for_generation while retaining the
         # same algorithm parameter hash; comparing its compatibility key with
         # the older envelope would mix two sample snapshots.
         if target.source_id != source_id or target.input_id != sample.full.input_id:
             return {**base, "state": "stale_target", "metrics": [], "unscored": []}
         current = {result.algorithm_id: result for result in target.results}
+        pon_dependent = _pon_dependent_algorithms() if pon_problem else set()
         library = self.libraries.get()
         rows = []
         unscored = []
@@ -771,7 +842,8 @@ class LabApi:
             target_result = current.get(algorithm_id)
             if target_result is None or target_result.parameters_sha256 != envelope.provenance.parameters_sha256:
                 unscored.append({"algorithm_id": algorithm_id, "status": "incompatible",
-                                 "reason": "current target result unavailable"})
+                                 "reason": ("panel of normals unavailable" if algorithm_id in pon_dependent
+                                            else "current target result unavailable")})
                 continue
             projections = {}
             comparison_entries = dict(library.entries)
@@ -820,6 +892,7 @@ class LabApi:
         for member in generation.members:
             aligners[member.aligner_identity] = aligners.get(member.aligner_identity, 0) + 1
         return {**base, "state": "ready", "target_aligner": target.aligner_identity,
+                "pon_problem": _recovery_problem(pon_problem) if pon_problem else None,
                 "aligner_counts": dict(sorted(aligners.items())),
                 "metrics": rows, "unscored": unscored}
 
@@ -857,6 +930,17 @@ class LabApi:
             selected_b = member_from_store(self.store, source_b)
         except (LabProblem, ValueError):
             return {**base, "state": "sample_unavailable", "which": "b", "metrics": [], "unscored": []}
+        pon_dependent = _pon_dependent_algorithms()
+        # Pair Compare has no shared cohort-generation pin. Its independent
+        # member projection must never pool a selected PoN-bound CN or consumer.
+        selected_pon = any(
+            cn is not None and cn.status == "ok" and any(
+                metric.metric_id == "pon_policy" and metric.value not in (None, "none")
+                for metric in cn.metrics
+            )
+            for sample in samples for cn in (sample.full.results.get("copy-number"),)
+        )
+        unpaired_dependent = set(pon_dependent) if selected_pon else set()
         for source, sample, selected, which in (
             (source_a, sample_a, selected_a, "a"), (source_b, sample_b, selected_b, "b"),
         ):
@@ -866,8 +950,13 @@ class LabApi:
             for algorithm_id, envelope in sample.full.results.items():
                 if envelope.status != "ok":
                     continue
+                if algorithm_id in unpaired_dependent:
+                    continue
                 pinned = current.get(algorithm_id)
                 if pinned is None or pinned.parameters_sha256 != envelope.provenance.parameters_sha256:
+                    if algorithm_id in pon_dependent:
+                        unpaired_dependent.update(pon_dependent)
+                        continue
                     return {**base, "state": "stale_sample", "which": which, "metrics": [], "unscored": []}
                 for metric in envelope.metrics:
                     value = metric.value
@@ -881,6 +970,10 @@ class LabApi:
         unscored: list[dict[str, str]] = []
         for algorithm_id, envelope_a in sample_a.full.results.items():
             if algorithm_id in library.hidden_algorithms:
+                continue
+            if algorithm_id in unpaired_dependent:
+                unscored.append({"algorithm_id": algorithm_id, "metric_id": "*",
+                                 "reason": "selected_pon_not_paired" if selected_pon else "selected_method_not_paired"})
                 continue
             envelope_b = sample_b.full.results.get(algorithm_id)
             if envelope_b is None or envelope_a.status != "ok" or envelope_b.status != "ok":
@@ -923,7 +1016,8 @@ class LabApi:
                 })
         for algorithm_id in sample_b.full.results.keys() - sample_a.full.results.keys():
             if algorithm_id not in library.hidden_algorithms:
-                unscored.append({"algorithm_id": algorithm_id, "metric_id": "*", "reason": "missing_or_not_ok"})
+                reason = ("selected_pon_not_paired" if selected_pon else "selected_method_not_paired") if algorithm_id in unpaired_dependent else "missing_or_not_ok"
+                unscored.append({"algorithm_id": algorithm_id, "metric_id": "*", "reason": reason})
         return {**base, "state": "ready", "input_id_a": selected_a.input_id,
                 "input_id_b": selected_b.input_id, "aligner_a": selected_a.aligner_identity,
                 "aligner_b": selected_b.aligner_identity, "metrics": rows, "unscored": unscored}
@@ -1028,10 +1122,15 @@ def _all_used(used: list[str], library: Library, order: list[str]) -> list[str]:
     return out
 
 
-def _catalog(library: Library, order: list[str], algorithms: list[dict[str, Any]]) -> list[dict[str, Any]]:
+def _catalog(
+    library: Library, order: list[str], algorithms: list[dict[str, Any]],
+    unreadable: set[str] | None = None, ambiguous: set[str] | None = None,
+) -> list[dict[str, Any]]:
     """Every registered (non-hidden) algorithm with its tier, footnote and status here."""
 
     by_id = {row["algorithm_id"]: row for row in algorithms}
+    unreadable = unreadable or set()
+    ambiguous = ambiguous or set()
     rows = []
     for algorithm_id in order:
         if algorithm_id in library.hidden_algorithms:
@@ -1045,6 +1144,10 @@ def _catalog(library: Library, order: list[str], algorithms: list[dict[str, Any]
                         licenses.append(license_id)
         performance = entry.get("performance") if entry else None
         result = by_id.get(algorithm_id)
+        status = result["status"] if result else (
+            "unreadable" if algorithm_id in unreadable else
+            "ambiguous" if algorithm_id in ambiguous else "not run"
+        )
         rows.append(
             {
                 "algorithm_id": algorithm_id,
@@ -1058,7 +1161,7 @@ def _catalog(library: Library, order: list[str], algorithms: list[dict[str, Any]
                 "min_depth_x": entry.get("min_depth_x") if entry else None,
                 "license_ids": licenses,
                 "citation_checked": bool(entry and entry.citation_verified),
-                "status": result["status"] if result else "not run",
+                "status": status,
                 "skip_reason": result["skip_reason"] if result else None,
             }
         )

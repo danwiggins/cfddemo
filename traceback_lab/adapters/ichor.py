@@ -21,8 +21,9 @@ A parity test keeps ``map_result`` equal to the signed ``build_measurement``
 from __future__ import annotations
 
 import hashlib
+import re
 import shutil
-from collections.abc import Mapping
+from collections.abc import Callable, Mapping
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Literal
@@ -50,6 +51,16 @@ class LabCopyNumberParameters:
     signed: Any  # CopyNumberParametersV1
     pon_policy: PonPolicy = "none"
     pon_sha256: str | None = None
+
+    def __post_init__(self) -> None:
+        if self.pon_policy == "none":
+            if self.pon_sha256 is not None:
+                raise ValueError("no-PoN parameters cannot carry a PoN digest")
+        elif self.pon_policy == "lab_loo_v1":
+            if not isinstance(self.pon_sha256, str) or re.fullmatch(r"[0-9a-f]{64}", self.pon_sha256) is None:
+                raise ValueError("lab_loo_v1 requires a lowercase PoN sha256")
+        else:
+            raise ValueError("unknown PoN policy")
 
     def contract(self) -> dict[str, Any]:
         return {
@@ -79,6 +90,21 @@ def _sha256_file(path: Path) -> str:
         while block := stream.read(1 << 20):
             digest.update(block)
     return digest.hexdigest()
+
+
+def stage_verified_pon(source: Path, destination: Path, expected_sha256: str) -> None:
+    """Copy a selected PoN into contained scratch and verify the bytes R will read."""
+
+    if not re.fullmatch(r"[0-9a-f]{64}", expected_sha256):
+        raise CopyNumberError("selected PoN digest is invalid")
+    try:
+        if source.is_symlink() or not source.is_file():
+            raise CopyNumberError("selected PoN asset is not a regular file")
+        shutil.copyfile(source, destination)
+        if _sha256_file(destination) != expected_sha256:
+            raise CopyNumberError("selected PoN asset failed digest verification")
+    except OSError as exc:
+        raise CopyNumberError("selected PoN asset could not be read") from exc
 
 
 def write_counting(source_bam: Path, destination: Path, parameters: LabCopyNumberParameters) -> tuple[int, Any, int]:
@@ -222,7 +248,7 @@ def run_ichor(
     staged_pon = None
     if pon is not None:
         staged_pon = staging / "pon.rds"
-        shutil.copyfile(pon, staged_pon)
+        stage_verified_pon(pon, staged_pon, parameters.pon_sha256 or "")
     out_dir = staging / "out"
     arguments = ichor_driver_arguments(
         signed.ichor,
@@ -337,6 +363,7 @@ def measure(
     assets: IchorAssets,
     parameters: LabCopyNumberParameters,
     pon: Path | None = None,
+    validate_grid: Callable[[str], None] | None = None,
 ) -> CopyNumberResult:
     """readCounter → grid → ichorCNA → validated → mapped.  ``work`` is scratch."""
 
@@ -347,6 +374,8 @@ def measure(
     counts_wig = work / "counts.wig"
     read_counter(toolchain, parameters, counting_bam, counts_wig)
     grid, run_sha256 = analysis_grid(parameters, assets, counts_wig, counted_reads)
+    if validate_grid is not None:
+        validate_grid(grid.bin_definition_sha256)
     result = run_ichor(toolchain, parameters, assets, counts_wig, grid, run_sha256, work, pon=pon)
     return map_result(result, counted_reads=counted_reads, records_scanned=records_scanned)
 
