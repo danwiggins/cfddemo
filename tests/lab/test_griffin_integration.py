@@ -236,6 +236,30 @@ def test_missing_registration_skips_before_scanning_bam(tmp_path: Path, monkeypa
     assert isinstance(decision, Skip) and decision.reason_code == "missing_asset"
 
 
+@pytest.mark.parametrize("error", [OSError, ValueError])
+def test_bam_scan_failure_omits_private_path_from_skip(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, error: type[Exception],
+) -> None:
+    import traceback_lab.algorithms.griffin as module
+
+    _available_toolchain(monkeypatch)
+    private_path = tmp_path / "private-donor" / "aligned.bam"
+
+    def fail_scan(_: Path) -> None:
+        raise error(f"could not read {private_path}")
+
+    monkeypatch.setattr(module, "_require_paired_input", fail_scan)
+    ctx = InputContext(root=tmp_path, source_id="1" * 64, input_id="2" * 64,
+                       reference_id="hg38", reference_sha256="3" * 64,
+                       input_dir=private_path.parent, platform="illumina", eligible_reads=5_000_000,
+                       extras={"reference_fasta": str(tmp_path / "hg38.fa")})
+    decision = GRIFFIN.preflight(ctx)
+    assert isinstance(decision, Skip)
+    assert decision.reason_code == ("input_unavailable" if error is OSError else "platform")
+    assert str(tmp_path) not in decision.message
+    assert "aligned BAM" in decision.message
+
+
 def test_pair_gate_counts_molecules_once_and_requires_illumina_header(tmp_path: Path) -> None:
     import pysam
 

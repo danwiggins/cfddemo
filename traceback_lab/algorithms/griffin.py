@@ -25,6 +25,14 @@ from ..registry import AlgorithmOutput, InputContext, Ready, Requirements, Skip,
 from ._base import Base, metric
 
 
+_SAFE_BAM_VALIDATION_MESSAGES = frozenset({
+    "pinned Griffin requires unanimous @RG PL:ILLUMINA; native ONT single-end BAM is incompatible",
+    "pinned Griffin requires paired-end positive-TLEN WGS reads; native ONT single-end BAM is incompatible",
+    "Griffin requires unanimously Illumina-declared read groups",
+    "Griffin requires canonical hg38 autosomes",
+})
+
+
 @dataclass
 class Griffin(Base):
     family: str = "fragmentomics"
@@ -80,8 +88,12 @@ class Griffin(Base):
         try:
             profile_reads = _require_paired_input(ctx.input_dir / "aligned.bam")
             pairs = count_d21_pairs(ctx.input_dir / "aligned.bam")
-        except (OSError, ValueError) as exc:
-            return Skip("platform", str(exc))
+        except OSError:
+            return Skip("input_unavailable", "Griffin could not read aligned BAM; inspect the Lab input and retry")
+        except ValueError as exc:
+            message = str(exc)
+            return Skip("platform", message if message in _SAFE_BAM_VALIDATION_MESSAGES else
+                        "Griffin could not validate the aligned BAM for paired-end Illumina input")
         if profile_reads == 0:
             return Skip("depth", "Griffin's pinned 100–200 bp profile window has no qualifying fragments")
         if pairs < MIN_ELIGIBLE_READS:
