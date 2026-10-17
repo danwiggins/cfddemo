@@ -93,9 +93,12 @@
       if (target) { target.setAttribute("tabindex", "-1"); target.scrollIntoView({ block: "center" }); target.focus({ preventScroll: true }); }
     } }, `${lic ? lic.headline : id} ↗`);
   }
-  function unverifiedBadge(metric) {
-    const entry = metric.entry || {};
-    return entry.citations && entry.citations.length && !entry.citation_checked ? h("span", { class: "unverified" }, "UNVERIFIED citation") : "";
+  function unverifiedBadge(entry) {
+    return entry && !entry.citation_checked ? h("span", { class: "unverified" }, "UNVERIFIED citation") : "";
+  }
+  function spacedUnverifiedBadge(entry) {
+    const badge = unverifiedBadge(entry);
+    return badge ? [" ", badge] : [];
   }
   function licenseCallouts(sample) {
     const used = sample.licenses || [];
@@ -410,7 +413,7 @@
       h("p", { class: "card-value" }, h("strong", {}, fmt(metric.value, metric.unit))),
       strip(metric),
       h("p", {}, "Performance: ", perf ? `${perf.value} (${perf.platform || ""}${perf.depth ? ", " + perf.depth : ""}; ${perf.source || ""})` : (entry.performance_missing_reason || "none published"),
-        entry.citation_checked ? "" : [" ", h("span", { class: "unverified" }, "UNVERIFIED citation")]),
+        spacedUnverifiedBadge(metric.entry)),
       meaning ? h("p", {}, meaning.split(". ")[0] + ".") : "",
       h("p", {}, ...(entry.flags || []).map((f) => flagPill(f)), ...licenses),
       toggle, details);
@@ -461,7 +464,7 @@
       for (const m of groups[key]) { out.push(card(sample, m, seen, first)); first = false; }
     }
     const reasons = (list) => { const c = {}; for (const m of list) c[m.reason || "—"] = (c[m.reason || "—"] || 0) + 1; return Object.entries(c).map(([k, v]) => `${k.replace(/_/g, " ")} ${v}`).join(" · "); };
-    const extras = (m) => [h("span", {}, ...(m.entry && m.entry.license_ids || []).map((id) => seen.has(id) ? licenseRef(sample, id) : (seen.add(id), licenseRef(sample, id)))), unverifiedBadge(m)];
+    const extras = (m) => [h("span", {}, ...(m.entry && m.entry.license_ids || []).map((id) => seen.has(id) ? licenseRef(sample, id) : (seen.add(id), licenseRef(sample, id)))), unverifiedBadge(m.entry)];
     out.push(collapsed(`Not interpretable (${groups.not_interpretable.length})`, reasons(groups.not_interpretable), ["Metric", "Value", "Reason", "Needs", ""],
       groups.not_interpretable.map((m) => [m.label, fmt(m.value, m.unit), (m.reason || "").replace(/_/g, " "), m.entry && m.entry.min_depth_x ? `${m.entry.min_depth_x}x` : "—", extras(m)])));
     out.push(collapsed(`No reference (${groups.no_reference.length})`, reasons(groups.no_reference), ["Metric", "Value", "Reason", "Reference shown", ""],
@@ -594,7 +597,7 @@
           h("h3", {}, c.label), h("p", { class: "help" }, c.algorithm_id),
           h("p", {}, `Original evidence: ${c.origin_tier || "—"} (${c.origin_platform || "—"})`),
           h("p", {}, "Footnote: ", c.footnote || "none published", c.footnote_source ? ` (${c.footnote_source})` : "",
-            c.citation_checked ? "" : [" ", h("span", { class: "unverified" }, "UNVERIFIED citation")]),
+            spacedUnverifiedBadge(c.has_library_entry ? c : null)),
           h("p", {}, c.status === "skipped" ? `skipped (${(c.skip_reason || "").replace(/_/g, " ")})` : c.status === "ok" ? "ran" : c.status,
             c.min_depth_x ? ` · literature minimum ${c.min_depth_x}x` : ""),
           h("p", {}, ...c.license_ids.map((id) => licenseRef(sample, id)))))));
@@ -631,7 +634,7 @@
           h("td", {}, a.provenance.reference_id),
           h("td", {}, a.provenance.timestamp_utc),
           h("td", {}, ...(e.license_ids || []).map(firstUse)),
-          h("td", {}, (e.citations || []).join(", ") || "—", m.entry && !e.citation_checked ? [" ", h("span", { class: "unverified" }, "UNVERIFIED citation")] : ""),
+          h("td", {}, (e.citations || []).join(", ") || "—", spacedUnverifiedBadge(m.entry)),
           h("td", {}, ref.kind === "none" || !ref.kind ? "none" : `${ref.kind}${ref.source ? ": " + ref.source : ""}`)));
       }
     }
@@ -658,7 +661,7 @@
     const c = (sample.catalog || []).find((x) => x.algorithm_id === algorithmId);
     const out = [];
     if (c) out.push(h("p", { class: "help" }, tierBadge(c.tier), ` As run here (ONT). Original evidence: ${c.origin_tier || "—"}. Footnote: ${c.footnote || "none published"}`,
-      c.citation_checked ? "" : [" ", h("span", { class: "unverified" }, "UNVERIFIED citation")]));
+      spacedUnverifiedBadge(c.has_library_entry ? c : null)));
     for (const id of (c ? c.license_ids : [])) {
       if (seen.has(id)) { out.push(licenseRef(sample, id)); continue; }
       seen.add(id);
