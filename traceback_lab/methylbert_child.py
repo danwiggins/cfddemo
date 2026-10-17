@@ -118,9 +118,12 @@ def main(argv: list[str]) -> int:
     if _file_sha256(Path(str(request["reference"]))) != request["reference_sha256"]:
         raise ValueError("MethylBERT child reference changed after registration")
 
-    # -I excludes the source checkout and environment PYTHONPATH. Insert only
-    # the Lab source that owns this script; the model package stays site-local.
-    sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
+    # Keep installed numerical packages ahead of the Lab source checkout.
+    sys.path.append(str(Path(__file__).resolve().parent.parent))
+    import traceback_lab
+
+    if Path(traceback_lab.__file__).resolve() != Path(__file__).resolve().parent / "__init__.py":
+        raise ValueError("MethylBERT child loaded a different Lab source tree")
     from traceback_lab.methylbert_runtime import (
         PINNED_UPSTREAM_COMMIT, apply_precision_flags, installed_identity, require_numerical_runtime,
     )
@@ -191,7 +194,7 @@ def main(argv: list[str]) -> int:
     if len(rows) != len(logits) or not {"name", "methyl_seq", "dmr_label", "dmr_ctype", "ctype_label"}.issubset(rows.columns):
         raise ValueError("MethylBERT classifier returned malformed per-read rows")
     if not rows["dmr_ctype"].eq("T").all() or not rows["ctype_label"].eq(0).all():
-        raise ValueError("MethylBERT inference rows violate the tumour-DMR class mapping")
+        raise ValueError("MethylBERT inference rows violate tumour-DMR or unlabeled-input conventions")
     if not set(rows["dmr_label"]).issubset(dmr_labels):
         raise ValueError("MethylBERT inference DMR labels differ from the registered bundle")
     rows = rows.drop(columns=["ctype_label"])
