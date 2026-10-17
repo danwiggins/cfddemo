@@ -20,6 +20,7 @@ import pysam
 import pytest
 
 from traceback_lab import registry
+from traceback_lab import doctor
 from traceback_lab import run_command as run_module
 from traceback_lab.store import LabStore
 from traceback_runner import cli as signed_cli
@@ -65,6 +66,29 @@ def _path_with(monkeypatch, directory: Path) -> None:
 
 def _no_staging(root: Path) -> bool:
     return not list((root / "lab").rglob(".staging-*"))
+
+
+def test_low_memory_warning_is_advisory_in_run_and_dry_run(lab_world, capsys, monkeypatch, shared_mmi) -> None:
+    _registry(monkeypatch)
+    monkeypatch.setattr(doctor, "_ram", lambda: 8 * doctor.GIB)
+    argv = ("run", str(lab_world["chunks"]), "--root", str(lab_world["root"]), "--mmi", str(shared_mmi))
+    code, human, _ = _lab(capsys, *argv, "--dry-run")
+    assert code == 0 and "Less than 16 GiB" in human
+    code, dry = _json(capsys, *argv, "--dry-run")
+    assert code == 0 and dry["data"]["warnings"][0]["kind"] == "low_memory"
+    code, human, _ = _lab(capsys, *argv)
+    assert code == 0 and "Less than 16 GiB" in human
+    code, payload = _json(capsys, *argv)
+    assert code == 0
+    (warning,) = payload["data"]["warnings"]
+    assert warning["kind"] == "low_memory"
+    assert warning["physical_ram_bytes"] == 8 * doctor.GIB
+    assert warning["recommended_bytes"] == doctor.MIN_RAM
+    assert warning["fix"]
+    for detected in (doctor.MIN_RAM, None):
+        monkeypatch.setattr(doctor, "_ram", lambda detected=detected: detected)
+        code, dry = _json(capsys, *argv, "--dry-run")
+        assert code == 0 and dry["data"]["warnings"] == []
 
 
 def test_run_aligns_publishes_and_reruns_from_cache(lab_world, capsys, monkeypatch) -> None:

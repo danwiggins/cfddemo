@@ -157,6 +157,9 @@ Artifact sizes check completeness, not byte-level integrity.
 **Dry run.** `--dry-run` writes nothing and takes no lock. It prints the
 resolved ROOT and reference, chunk count and bytes, whether alignment is
 needed or reused, the disk budget against free space and the plan.
+When detected physical RAM is below 16 GiB, both dry run and execution show
+an advisory warning in human and JSON output. This does not block a run; a
+full hg38 alignment may be slow or fail for lack of memory.
 
 **Interruption.** Ctrl-C (or SIGTERM) stops the current step, kills its tools
 and exits 6. Completed results are kept; rerun the same command.
