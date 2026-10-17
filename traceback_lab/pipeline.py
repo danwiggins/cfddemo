@@ -151,9 +151,9 @@ def directory_bytes(path: Path) -> int:
 def _tree_members(root_pid: int, processes: Mapping[int, tuple[int, int]]) -> set[int]:
     """Include descendants in new sessions and children still in the group."""
 
-    included = {root_pid} | {
-        pid for pid, (_ppid, pgid) in processes.items() if pgid == root_pid
-    }
+    # A reaped leader PID may be reused while another stage keeps the group
+    # alive. Only the still-reserved process-group id is an authoritative seed.
+    included = {pid for pid, (_ppid, pgid) in processes.items() if pgid == root_pid}
     while True:
         children = {pid for pid, (ppid, _pgid) in processes.items() if ppid in included}
         expanded = included | children
@@ -166,7 +166,7 @@ def _tree_members(root_pid: int, processes: Mapping[int, tuple[int, int]]) -> se
 def _proc_tree_rss_bytes(root_pid: int) -> int | None:
     proc = Path("/proc")
     if not proc.is_dir():
-        return None
+        raise OSError("/proc unavailable")
     processes: dict[int, tuple[int, int]] = {}
     try:
         for entry in proc.iterdir():
@@ -178,8 +178,8 @@ def _proc_tree_rss_bytes(root_pid: int) -> int | None:
                 processes[int(entry.name)] = (int(fields[1]), int(fields[2]))
             except (OSError, ValueError, IndexError):
                 continue
-    except OSError:
-        return None
+    except OSError as exc:
+        raise OSError("/proc enumeration unavailable") from exc
     if not processes:
         return None
     resident_pages = 0
@@ -231,8 +231,10 @@ def _process_tree_rss_bytes(root_pid: int) -> int | None:
     pages; macOS uses ps RSS (KiB). A sampler failure leaves wait4 intact.
     """
 
-    sampled = _proc_tree_rss_bytes(root_pid)
-    return sampled if sampled is not None else _ps_tree_rss_bytes(root_pid)
+    try:
+        return _proc_tree_rss_bytes(root_pid)
+    except OSError:
+        return _ps_tree_rss_bytes(root_pid)
 
 
 def _pump(stream: IO[bytes], buffer: BoundedStderr, echo: Callable[[str], None] | None) -> None:
@@ -458,6 +460,7 @@ def run_pipeline(
             _terminate(leader, processes, outcomes)
         for position, process in enumerate(processes):
             _reap(process, outcomes[position], block=True)
+        worker_ended = time.monotonic()
         if leader is not None:
             # Every direct child is reaped; end the group so no grandchild
             # outlives the step (toolchain.kill_process_group: SIGKILL + reap).
@@ -495,7 +498,7 @@ def run_pipeline(
         pass
     return PipelineResult(
         stages=outcomes,
-        duration_s=time.monotonic() - started,
+        duration_s=worker_ended - started,
         peak_disk_bytes=peak_disk,
         sampled_tree_peak_rss_bytes=peak_tree_rss,
         timed_out=timed_out,

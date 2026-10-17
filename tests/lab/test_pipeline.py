@@ -280,6 +280,35 @@ def test_final_disk_scan_starts_after_worker_exit(monkeypatch: pytest.MonkeyPatc
     assert result.peak_disk_bytes == 2_000_000
 
 
+def test_final_disk_reporting_wait_is_not_worker_duration(monkeypatch: pytest.MonkeyPatch) -> None:
+    import traceback_lab.pipeline as pipeline
+
+    monkeypatch.setattr(pipeline, "DISK_SAMPLE_S", 1000.0)
+    release = threading.Event()
+    calls = 0
+
+    def disk_usage() -> int:
+        nonlocal calls
+        calls += 1
+        if calls == 1:
+            return 1
+        release.wait(30)
+        return 2
+
+    started = time.monotonic()
+    try:
+        result = run_pipeline(
+            [Stage("ok", [PY, "-c", "import time; time.sleep(0.2)"])],
+            timeout_s=10, disk_usage=disk_usage,
+        )
+        elapsed = time.monotonic() - started
+    finally:
+        release.set()
+    assert result.ok
+    assert calls == 2
+    assert elapsed - result.duration_s >= 0.8
+
+
 def test_ps_sampler_does_not_report_zero_for_unmeasured_tree(monkeypatch: pytest.MonkeyPatch) -> None:
     import traceback_lab.pipeline as pipeline
 
@@ -320,6 +349,12 @@ def test_process_group_seed_includes_orphan_descendants() -> None:
     assert _tree_members(1, {1: (0, 1), 2: (0, 1), 3: (2, 3)}) == {1, 2, 3}
 
 
+def test_reused_leader_pid_does_not_seed_an_unrelated_tree() -> None:
+    from traceback_lab.pipeline import _tree_members
+
+    assert _tree_members(1, {1: (0, 9), 2: (0, 1), 3: (1, 9)}) == {2}
+
+
 def test_simulate_commands_accept_verbose() -> None:
     from traceback_lab.cli import build_parser
 
@@ -333,7 +368,10 @@ def test_tree_rss_includes_new_session_child(monkeypatch: pytest.MonkeyPatch, fo
     if force_ps:
         from traceback_lab import pipeline
 
-        monkeypatch.setattr(pipeline, "_proc_tree_rss_bytes", lambda _pid: None)
+        def no_proc(_pid: int) -> int:
+            raise OSError("/proc unavailable")
+
+        monkeypatch.setattr(pipeline, "_proc_tree_rss_bytes", no_proc)
     script = (
         "import subprocess, sys, time\n"
         "child = subprocess.Popen([sys.executable, '-c', "
@@ -359,6 +397,18 @@ def test_proc_enumeration_failure_uses_ps(monkeypatch: pytest.MonkeyPatch) -> No
 
     monkeypatch.setattr(Path, "iterdir", scan)
     assert (_process_tree_rss_bytes(os.getpid()) or 0) > 0
+
+
+def test_empty_proc_sample_does_not_spawn_ps(monkeypatch: pytest.MonkeyPatch) -> None:
+    from traceback_lab import pipeline
+
+    monkeypatch.setattr(pipeline, "_proc_tree_rss_bytes", lambda _pid: None)
+
+    def unexpected_ps(_pid: int) -> int:
+        raise AssertionError("ps fallback is only for unavailable /proc")
+
+    monkeypatch.setattr(pipeline, "_ps_tree_rss_bytes", unexpected_ps)
+    assert pipeline._process_tree_rss_bytes(os.getpid()) is None
 
 def test_upstream_independent_failure_wins_despite_reversed_reap_times() -> None:
     """Observed reap times cannot prove which stage exited first."""
