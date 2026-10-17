@@ -459,7 +459,7 @@ def test_paired_input_gate_scans_past_first_10000_records(tmp_path: Path) -> Non
     _require_paired_input(bam)
 
 
-def test_paired_input_gate_requires_a_profile_window_fragment(tmp_path: Path) -> None:
+def test_paired_input_gate_counts_only_profile_window_fragments(tmp_path: Path) -> None:
     pysam = pytest.importorskip("pysam")
 
     from traceback_lab.adapters.griffin_run import _require_paired_input
@@ -479,8 +479,7 @@ def test_paired_input_gate_requires_a_profile_window_fragment(tmp_path: Path) ->
             read.cigarstring = "150M"
             read.template_length = 500
             out.write(read)
-    with pytest.raises(ValueError, match="positive-TLEN"):
-        _require_paired_input(bam)
+    assert _require_paired_input(bam) == 0
 
 
 def test_griffin_bam_header_must_match_reference(tmp_path: Path) -> None:
