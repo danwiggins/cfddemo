@@ -82,14 +82,19 @@ def test_clock_map_requires_exact_model_and_immutable_sha(tmp_path: Path) -> Non
 def test_clock_registration_publish_failure_is_blocked(tmp_path: Path, monkeypatch, capsys) -> None:
     source = tmp_path / "map.json"
     source.write_bytes(_map_bytes())
+    published = False
     def fail_publish(*_args, **_kwargs):
+        nonlocal published
+        published = True
         raise OSError(f"private staging path: {source}")
     monkeypatch.setattr(LabStore, "publish_directory", fail_publish)
     assert lab_main(["asset", "register-clock-map", "--file", str(source),
                      "--sha256", hashlib.sha256(source.read_bytes()).hexdigest(),
                      "--root", str(tmp_path / "root"), "--json"]) != 0
     result = json.loads(capsys.readouterr().out)
+    assert published
     assert result["status"] == "blocked"
+    assert result["summary"] == "Clock map publication uncertain"
     assert str(source) not in json.dumps(result)
 
 

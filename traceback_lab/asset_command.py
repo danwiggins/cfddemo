@@ -11,7 +11,7 @@ from typing import Any
 from traceback_runner.cli import _local_envelope, _result, _with_human
 
 from .assets import AssetError, AssetPublishUncertain, add_asset, inspect_asset
-from .epi_clock_model import ClockModelError, inspect_map, register_map
+from .epi_clock_model import ClockMapPublishUncertain, ClockModelError, inspect_map, register_map
 from .methylbert_assets import MethylbertPublishUncertain, inspect_methylbert_bundle, register_methylbert_bundle
 from .problems import EXIT_BLOCKED, EXIT_OK
 from .store import LabStore, new_run_id
@@ -61,6 +61,10 @@ def _register_clock_map(args: argparse.Namespace, store: LabStore) -> tuple[int,
     try:
         with store.writer("asset register-clock-map", new_run_id(), step="epi-clock-map"):
             model = register_map(store, args.file, args.sha256)
+    except ClockMapPublishUncertain as exc:
+        payload = _result_payload("lab asset register-clock-map", "blocked", "Clock map publication uncertain", store,
+                                  {"cause": str(exc)})
+        return EXIT_BLOCKED, _with_human(payload, [f"BLOCKED {exc}"])
     except ClockModelError as exc:
         payload = _result_payload("lab asset register-clock-map", "blocked", "Clock map not registered", store,
                                   {"cause": str(exc)})

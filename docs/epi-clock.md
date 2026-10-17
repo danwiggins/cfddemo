@@ -54,6 +54,10 @@ available.
 Register with `traceback lab asset register-clock-map --file MAP.json --sha256
 HEX_SHA256 --root ROOT`, then inspect with `traceback lab asset
 inspect-clock-map --root ROOT`. Registration is immutable within a Lab root.
+If a registered coordinate is wrong, use a new Lab root with a corrected,
+independently verified map; the existing registration cannot be replaced.
+If registration reports an uncertain publication outcome, inspect the map in
+that root before retrying.
 
 The array model's ordinary bisulfite beta value cannot separate 5mC from
 5hmC. To approximate that input, each ONT CpG fraction counts an argmax 5mC

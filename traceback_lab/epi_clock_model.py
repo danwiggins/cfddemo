@@ -41,6 +41,10 @@ class ClockModelError(ValueError):
     """The coordinate asset is absent, changed, or incompatible."""
 
 
+class ClockMapPublishUncertain(ClockModelError):
+    """Publication may have completed despite an I/O failure."""
+
+
 @dataclass(frozen=True)
 class ClockMap:
     sha256: str
@@ -151,6 +155,6 @@ def register_map(store: LabStore, source: Path, expected_sha256: str) -> ClockMa
 
     try:
         store.publish_directory(destination.parent, destination.name, build)
-    except OSError as exc:
-        raise ClockModelError("clock map could not be published; inspect registration before retrying") from exc
+    except OSError:
+        raise ClockMapPublishUncertain("clock map publication outcome is uncertain; inspect registration before retrying") from None
     return inspect_map(store)
