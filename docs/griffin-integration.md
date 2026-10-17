@@ -24,9 +24,10 @@ BAM **when the BAM is paired-end WGS**. Griffin's scripts require paired
 reads with positive template length in both GC counting and coverage. The
 adapter requires at least one BAM read group and every group to declare
 `PL:ILLUMINA`; it scans all primary BAM records for pairing and the 100–200 bp
-profile-window gate before creating an attempt. It does
-not infer library type from an early coordinate-sorted slice. Native ONT
-single-end BAMs are rejected. It compares the BAM's `@SQ` names and lengths
+profile-window gate before creating an attempt. It does not infer library type
+from an early coordinate-sorted slice. Read-group platform labels are
+declarations, not independent instrument attestation. Native ONT single-end
+BAMs lack the required paired records. It compares the BAM's `@SQ` names and lengths
 and the workflow chromosome sizes with the registered FASTA index. Every
 autosome in that index must appear in the workflow sizes, so the coverage
 space cannot omit autosomes included in the depth count. This checks
@@ -43,6 +44,11 @@ recounts first mates of proper, primary, mapped, same-contig, nonduplicate,
 non-QC-failed autosomal pairs at MAPQ ≥ 20. This is the paired subset of the
 Lab's D21 eligible-record rule; the proper-pair bit depends on the aligner.
 The adapter refuses a mismatch before creating an attempt. The attempt
+also requires at least one eligible 100–200 bp fragment, a compatibility
+check rather than proof of a usable profile-window distribution. Read-group
+platform labels are declarations, not independent instrument attestation.
+Full site-level fragment support and biological qualification remain open.
+The attempt
 records the verified count, exact counting predicate, sample ID, gate, and hashes for
 BAM, BAM index, reference, reference index, site lists and reference assets.
 It copies the pinned scripts and two Snakefiles into the attempt without
