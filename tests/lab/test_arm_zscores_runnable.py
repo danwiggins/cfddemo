@@ -19,6 +19,7 @@ from traceback_lab.envelope import ResultEnvelope, provenance
 from traceback_lab.interpretation.engine import classify, load_library
 from traceback_lab.problems import LabProblem
 from traceback_lab.registry import InputContext, Skip, load_registry
+from traceback_lab.stability import Side, band_at, stable
 from traceback_lab.store import LabStore
 from traceback_runner.references import ReferenceProblem
 
@@ -188,7 +189,9 @@ def test_each_arm_value_has_an_exploratory_library_label() -> None:
     assert len(arm_entries) == 44
     for entry in arm_entries:
         assert entry["tier"] == "SPECULATIVE"
-        assert entry.stability is None
+        assert entry.stability == {"kind": "unvalidated"}
+        assert stable(entry.stability, Side(0.01), Side(0.01)) is None
+        assert band_at(entry.stability, Side(0.01), Side(0.01)) is None
         assert entry["headline"] is False
         result = classify(0.01, entry)
         assert result.state == "no_reference"
