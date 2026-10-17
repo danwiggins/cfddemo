@@ -1,0 +1,70 @@
+"""D30 inventory separates literal AC4 input bytes from the full footprint."""
+
+import json
+
+import pytest
+
+from scripts.validation.lab_storage_accounting import InventoryError, account
+
+
+def _write(root, name, size):
+    path = root / "lab" / name
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_bytes(b"x" * size)
+
+
+def _fixture(root):
+    source = "a" * 64
+    full = "b" * 64
+    derived = "c" * 64
+    record = {"source_id": source, "inputs": [{"input_id": full, "kind": "aligned"}],
+              "derived": [{"input_id": derived, "parent_input_id": full}]}
+    path = root / "lab" / "sources" / f"{source}.json"
+    path.parent.mkdir(parents=True)
+    path.write_text(json.dumps(record))
+    _write(root, f"inputs/{full}/aligned.bam", 100)
+    _write(root, f"inputs/{full}/aligned.bam.bai", 10)
+    _write(root, f"inputs/{derived}/manifest.json", 2)
+    _write(root, "inputs/index.json", 3)
+    _write(root, f"results/{full}/read-summary/p/attempts/a/artifacts/summary", 80)
+    _write(root, "refs/reference.mmi", 20)
+    return source, full
+
+
+def test_reports_literal_and_complete_bytes_separately(tmp_path):
+    source, full = _fixture(tmp_path)
+    report = account(tmp_path, source)
+    assert report["full_input_id"] == full
+    assert report["aligned_bam_plus_index_bytes"] == 110
+    assert report["literal_lab_inputs_bytes"] == 115
+    assert report["literal_ac4_at_most_1_2"] is True
+    assert report["sample_result_bytes"] == 80
+    assert report["shared_mmi_bytes"] == 20
+    assert report["complete_lab_persistent_bytes"] > report["literal_lab_inputs_bytes"]
+
+
+def test_other_sample_prevents_single_sample_ac4_claim(tmp_path):
+    source, _ = _fixture(tmp_path)
+    _write(tmp_path, f"inputs/{'d' * 64}/aligned.bam", 10)
+    report = account(tmp_path, source)
+    assert report["other_input_bytes"] == 10
+    assert report["literal_ac4_single_sample_applicable"] is False
+    assert report["literal_ac4_at_most_1_2"] is None
+
+
+def test_refuses_incomplete_or_unsafe_inventory(tmp_path):
+    source, full = _fixture(tmp_path)
+    with pytest.raises(InventoryError, match="entry limit"):
+        account(tmp_path, source, max_entries=2)
+    (tmp_path / "lab" / "inputs" / full / "aligned.bam.bai").unlink()
+    with pytest.raises(InventoryError, match="unavailable"):
+        account(tmp_path, source)
+
+
+def test_prealigned_source_is_accepted(tmp_path):
+    source, full = _fixture(tmp_path)
+    path = tmp_path / "lab" / "sources" / f"{source}.json"
+    data = json.loads(path.read_text())
+    data["inputs"][0]["kind"] = "prealigned"
+    path.write_text(json.dumps(data))
+    assert account(tmp_path, source)["full_input_id"] == full
