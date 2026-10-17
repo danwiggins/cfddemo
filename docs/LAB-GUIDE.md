@@ -383,6 +383,10 @@ selectable. Follow that action, then reload the page; an unavailable cohort or
 target sample has no comparison values, and the Lab does not fall back to an
 older generation. A cohort with members but no published generation needs
 `traceback lab cohort build --cohort ID --root R` before it can be selected.
+If only the selected panel's ichor toolchain or registered method assets are
+missing, Compare keeps independent metric comparisons from the pinned
+generation. It withholds copy-number and every dependent metric, names the
+missing panel dependency, and never substitutes an uncorrected result.
 
 ## Positive controls
 
