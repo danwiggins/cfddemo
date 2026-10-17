@@ -210,12 +210,17 @@ def test_uxm_thresholds_are_inclusive_as_published() -> None:
     assert classify_reads(totals, methylated) == {"reads": 5, "hypo": 1, "U": 2, "M": 2, "X": 1}
 
 
-def test_pmd_score_inside_vs_outside(tmp_path: Path) -> None:
+def test_pmd_score_inside_vs_outside(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    from traceback_lab import assets
+
     bed = tmp_path / "root-assets" / ASSET_NAME
     bed.parent.mkdir(parents=True)
     with gzip.open(bed, "wt") as stream:
         stream.write("chr1\t0\t100\t0.3\tPMD\tcommonPMD\nchr1\t100\t200\tNA\tNA\tNeither\nchr1\t200\t300\t0.2\tPMD\tcommonPMD\n")
     sha = hashlib.sha256(bed.read_bytes()).hexdigest()
+    # This test's tiny annotation has its own exact-byte pin. Production PMD
+    # registration still enforces the real Zhou digest.
+    monkeypatch.setattr(assets, "PMD_SHA256", sha)
     algorithm = PmdScore("pmd-score", parameters={"asset": ASSET_NAME, "asset_sha256": sha, "label": "commonPMD", "call": "argmax"})
     rows = [_row(0, 50, 5), _row(0, 60, 230), _row(1, 150, 230), _row(1, 160, 230), _row(2, 250, 5)]
     toy = _consumer_ctx(tmp_path / "toy", rows)
