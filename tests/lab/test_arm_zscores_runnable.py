@@ -15,6 +15,7 @@ from traceback_lab.algorithms import arm_summary
 from traceback_lab.arm_zscores import report_arm_zscores
 from traceback_lab.cli import main as lab_main
 from traceback_lab.cohort_contracts import CohortGeneration, CohortMember, CohortResult
+from traceback_lab.envelope import ResultEnvelope, provenance
 from traceback_lab.interpretation.engine import classify, load_library
 from traceback_lab.problems import LabProblem
 from traceback_lab.registry import InputContext, Skip, load_registry
@@ -67,6 +68,15 @@ def test_arm_summary_preflight_fails_closed_without_selected_pon(tmp_path: Path)
     )
     decision = arm_summary.ARM_SUMMARY.preflight(ctx)
     assert isinstance(decision, Skip) and decision.reason_code == "no_pon"
+    envelope = ResultEnvelope(
+        algorithm_id="arm-summary", algorithm_version=arm_summary.ARM_SUMMARY.version,
+        status="skipped", skip_reason=decision.reason_code, skip_message=decision.message,
+        provenance=provenance(
+            tool="fixture", parameters_sha256="a" * 64,
+            source_id=ctx.source_id, input_id=ctx.input_id, reference_id=ctx.reference_id,
+        ),
+    )
+    assert envelope.skip_reason == "no_pon"
 
 
 def test_arm_summary_missing_registered_asset_is_an_advisory_skip(
@@ -102,9 +112,12 @@ def test_arm_summary_run_uses_pinned_centromere_and_selected_track(
     ]}))
     digest = hashlib.sha256(centromere.read_bytes()).hexdigest()
     monkeypatch.setattr(arm_summary, "_registered_centromere", lambda root: (centromere, digest))
-    monkeypatch.setattr(arm_summary, "centromeres_from_table", lambda path: {
-        f"chr{index}": (4, 6) for index in range(1, 23)
-    })
+    def read_private_centromere(path: Path) -> dict[str, tuple[int, int]]:
+        assert path.read_bytes() == centromere.read_bytes()
+        assert path.parent != tmp_path
+        return {f"chr{index}": (4, 6) for index in range(1, 23)}
+
+    monkeypatch.setattr(arm_summary, "centromeres_from_table", read_private_centromere)
     monkeypatch.setattr(arm_summary.ReadSummary, "open", lambda path: SimpleNamespace(
         contigs=[f"chr{index}" for index in range(1, 23)], lengths=[10] * 22,
     ))
@@ -124,7 +137,7 @@ def test_arm_summary_run_uses_pinned_centromere_and_selected_track(
     artifact = json.loads(result.artifacts["arm_summaries.json"])
     assert artifact["arm_asset_sha256"] == digest
     assert artifact["policy"] == arm_summary.POLICY
-    assert (tmp_path / "arm-centromere.tsv").read_bytes() == centromere.read_bytes()
+    assert not (tmp_path / "arm-centromere.tsv").exists()
 
     centromere.write_text("changed after planning")
     with pytest.raises(ValueError, match="before worker consumption"):

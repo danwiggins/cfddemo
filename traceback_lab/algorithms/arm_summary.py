@@ -14,6 +14,7 @@ import hashlib
 import json
 import math
 import statistics
+import tempfile
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Mapping, Sequence
@@ -140,15 +141,18 @@ class ArmSummary(Base):
         centromere_bytes = centromere_path.read_bytes()
         if hashlib.sha256(centromere_bytes).hexdigest() != planned:
             raise ValueError("the arm-definition asset changed before worker consumption")
-        private_centromere = out / "arm-centromere.tsv"
-        private_centromere.write_bytes(centromere_bytes)
         source = ctx.extras.get("upstream", {})
         summary_dir, cn_dir = source.get("read-summary"), source.get("copy-number")
         if not summary_dir or not cn_dir:
             raise ValueError("arm summary needs selected read-summary and copy-number artifacts")
         summary = ReadSummary.open(Path(summary_dir) / "columns")
         lengths = dict(zip(summary.contigs, summary.lengths))
-        intervals = arm_intervals(centromeres_from_table(private_centromere), lengths)
+        with tempfile.TemporaryDirectory(prefix="arm-centromere-", dir=out.parent) as scratch:
+            private_centromere = Path(scratch) / "arm-centromere.tsv"
+            private_centromere.write_bytes(centromere_bytes)
+            if hashlib.sha256(private_centromere.read_bytes()).hexdigest() != planned:
+                raise ValueError("the private arm-definition copy changed before parsing")
+            intervals = arm_intervals(centromeres_from_table(private_centromere), lengths)
         payload = json.loads((Path(cn_dir) / "cn_bins.json").read_bytes())
         if not isinstance(payload, dict) or not isinstance(payload.get("bins"), list):
             raise ValueError("selected copy-number result has no bin track")
