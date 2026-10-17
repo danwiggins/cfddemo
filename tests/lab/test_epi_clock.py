@@ -46,6 +46,13 @@ def _map_bytes() -> bytes:
     }).encode()
 
 
+def test_documented_map_template_cannot_be_registered() -> None:
+    docs = (Path(__file__).parents[2] / "docs" / "epi-clock.md").read_text()
+    template = docs.split("```json\n", 1)[1].split("\n```", 1)[0]
+    with pytest.raises(ClockModelError, match="invalid probe or hg38 C coordinate"):
+        _parse(template.encode(), "0" * 64)
+
+
 def test_clock_map_requires_exact_model_and_immutable_sha(tmp_path: Path) -> None:
     raw = _map_bytes()
     digest = hashlib.sha256(raw).hexdigest()

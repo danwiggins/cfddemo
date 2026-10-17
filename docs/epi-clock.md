@@ -19,15 +19,15 @@ liftover. The JSON file must be at most 8 KiB, with exactly these fields:
   "genome_build": "hg38",
   "source_label": "name of verified annotation and version",
   "sites": [
-    {"cpg_id": "cg02228185", "chrom": "chr1", "pos0": 0},
-    {"cpg_id": "cg25809905", "chrom": "chr2", "pos0": 0},
-    {"cpg_id": "cg17861230", "chrom": "chr3", "pos0": 0}
+    {"cpg_id": "cg02228185", "chrom": null, "pos0": null},
+    {"cpg_id": "cg25809905", "chrom": null, "pos0": null},
+    {"cpg_id": "cg17861230", "chrom": null, "pos0": null}
   ]
 }
 ```
 
-The chromosome names and zero positions above are **placeholders, not probe
-coordinates**. Supply the actual chromosome and zero-based position of the
+The null values above make this template **unregisterable** until the real
+probe coordinates have been verified. Supply the actual chromosome and zero-based position of the
 forward-reference C for each probe. Only
 autosomes are accepted. The registration checks structure, unique positions,
 and exact bytes; at run time the adapter checks the registered reference FASTA
