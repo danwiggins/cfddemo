@@ -245,13 +245,18 @@ are still designed around the ONT run, so use `--only` for this opt-in path.
 operator-supplied hg38 files. The center file is sorted BED3
 (`chrN<TAB>start<TAB>end`, 0-based half-open); the center is the integer
 midpoint, and centers must be more than 200 bp apart so ±100 bp profiles do
-not overlap. The preferred-end file is sorted BED4 with one-base intervals
+not overlap. The preferred-end file is sorted BED4 with 0-based half-open
+one-base intervals
 and `U` or `D` in column four. `U` means the lower-coordinate aligned end;
 `D` means the higher-coordinate aligned end. Both files use chr1–chr22 and
 numeric chromosome order, contain no header or extra columns, and must each
 be at most 64 MiB. Filter raw peak files to these columns and autosomes,
-then sort and thin centers before registration; the Lab does not silently
-discard overlapping peaks or convert genome builds. A U and D site may share
+then sort numerically by chromosome and position (for example,
+`sort -k1.4,1n -k2,2n`) and thin centers before registration; the Lab does
+not silently discard overlapping peaks or convert genome builds. Confirm the
+source build and convert any 1-based source positions before registration:
+a wrong build or one-base shift can produce a plausible but incorrect score.
+A U and D site may share
 one coordinate, but duplicate sites in the same direction are rejected. Both files
 must identify their provenance outside the file, including source accession,
 release, assembly, coordinate convention and terms. The Lab validates and
@@ -279,6 +284,9 @@ this is a support count, not de novo site discovery or enrichment against a cali
 background. The raw count difference scales with depth, eligible-region count
 and end coverage; it is null when no aligned ends fall in its measurement
 windows or when either side of the center lacks window observations.
+The proxy does not impose the short-fragment length constraint of the
+published cfDNA method. Its artifact reports aggregate aligned-span counts
+in five length bins so that this difference can be assessed for each run.
 Downsample and split results use the same selected read-summary rows as other
 Lab measurements. The 10x gate is recalculated from those selected rows;
 CNA-derived inputs remain unsupported. The reported 10x minimum is an input
@@ -287,7 +295,8 @@ The raw count score changes with retained depth, so a downsampled score should
 not be read as a biological difference from the full-input score; split halves
 are descriptive repeatability checks only.
 The score has no validated stability tolerance or biological acceptance
-interval. Both are ONT aligned-span proxies, not confirmed physical
+interval. Its headline placement is for Lab navigation and does not imply
+clinical or tissue-origin validity. Both are ONT aligned-span proxies, not confirmed physical
 cleavage positions. The [OCF study](https://pubmed.ncbi.nlm.nih.gov/30808726/)
 used tissue-specific short-read open-chromatin signals, while the
 [size-tagged preferred-end study](https://www.pnas.org/doi/10.1073/pnas.1804134115)
@@ -407,7 +416,9 @@ script or style, no outside requests.
 - **Trust/QC**: depth against each algorithm's minimum, the run table with
   scrubbed stderr for failures, provisional QC bands, library health.
 - **Stability**: one small multiple per metric: deviation from full depth at
-  each fraction, the stability band, and split halves A/B at 50%.
+  each fraction, the stability band, and split halves A/B at 50%. When a metric
+  lacks a stability rule or numeric values, the downsample cell says no
+  stability verdict instead of calling it unstable.
 
 ## Building a Lab cohort
 

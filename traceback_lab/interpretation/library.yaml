@@ -2618,7 +2618,7 @@ entries:
     performance_missing_reason: "No calibrated reference range or tissue-origin performance for this ONT estimator"
     meaning_high: "More D−U ends left of catalogued centers and U−D ends right of them; no tissue fraction is inferred."
     meaning_low: "More negative values indicate the opposite directional end-count pattern in the pinned regions; no tissue fraction is inferred."
-    confounders: ["catalogue tissue and assay", "alignment clipping", "ONT library preparation", "depth and region coverage"]
+    confounders: ["catalogue tissue and assay", "alignment clipping", "aligned-span length distribution", "ONT library preparation", "depth and region coverage"]
     next_steps:
       analytical: ["Inspect eligible centers and raw U/D end counts", "Compare only with the same pinned catalogue and protocol"]
       clinical_setting: null

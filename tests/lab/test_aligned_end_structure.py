@@ -88,6 +88,9 @@ def test_exact_ocf_like_sign_and_preferred_end_support(tmp_path: Path) -> None:
     assert artifact["ocf_like_measurement_ends"] == 2
     assert artifact["ocf_like_left_ends"] == artifact["ocf_like_right_ends"] == 1
     assert artifact["valid_molecules"] == 1 and artifact["preferred_u_hits"] == 1
+    assert artifact["aligned_span_length_bins_bp"] == {
+        "lt100": 0, "100_200": 1, "201_500": 0, "501_2000": 0, "gt2000": 0,
+    }
     assert artifact["preferred_d_hits"] == 1
     assert artifact["observed_depth_x"] == 10.0
     assert artifact["depth_basis"] == "run_target" and artifact["derived_selection"] is None
@@ -368,6 +371,9 @@ def test_source_identifiers_accept_doi_and_https_without_local_paths(tmp_path: P
     for identifier in (
         "https://example.org/peaks.bed?X-Amz-Signature=secret",
         "https://example.org/peaks.bed#access-token",
+        "doi:10.1073/pnas.1804134115?X-Amz-Signature=secret",
+        "doi:10.1073/pnas.1804134115#access-token",
+        "doi:10.1073/pnas.1804134115@access-token",
     ):
         with pytest.raises(EndCatalogueError, match="source labels"):
             register_end_catalogues(
@@ -376,6 +382,14 @@ def test_source_identifiers_accept_doi_and_https_without_local_paths(tmp_path: P
                 centers_source=identifier, preferred_source="doi:10.1073/pnas.1804134115",
                 terms="unknown", license_id=None,
             )
+    with pytest.raises(EndCatalogueError, match="source labels"):
+        register_end_catalogues(
+            root, centers=centers, preferred=preferred,
+            source_label="synthetic \u2066hidden\u2069 catalogue",
+            centers_source="https://www.encodeproject.org/files/ENCFF123ABC/",
+            preferred_source="doi:10.1073/pnas.1804134115",
+            terms="unknown", license_id=None,
+        )
 
 
 def test_raw_ocf_proxy_has_no_unvalidated_stability_verdict() -> None:
