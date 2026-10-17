@@ -45,15 +45,26 @@ def test_every_registered_algorithm_has_catalog_disclosures(algorithm_id: str) -
     assert expected <= LIBRARY.licenses.keys()
 
 
-@pytest.mark.parametrize("route", ROUTES)
+@pytest.mark.parametrize("route,subtab", [(route, None) for route in ROUTES] + [
+    ("signals", "Fragmentomics"), ("signals", "Methylation"),
+])
 @needs_chrome
-def test_route_license_references_resolve_to_one_full_callout(route, tmp_path) -> None:
+def test_route_license_references_resolve_to_one_full_callout(route, subtab, tmp_path) -> None:
     """The expected library licenses are visible, complete, and referenced once per route."""
     sample = _sample()
     path = None if route == "home" else f"/sample/{ID12}/{route}"
-    context_algorithm = {"signals": "copy-number", "body-map": "cell-origin", "agreement": "copy-number"}.get(route)
+    signal_algorithms = {
+        None: ("copy-number",),
+        "Fragmentomics": ("fragment-size", "end-motifs", "delfi-ratio", "long-tail", "mtdna",
+                           "tss-profile", "breakpoint-motifs"),
+        "Methylation": ("frag-x-meth", "global-5mc", "global-5hmc", "pmd-score",
+                        "hypometh-reads", "modbase-qc"),
+    }
+    context_algorithms = signal_algorithms[subtab] if route == "signals" else {
+        "body-map": ("cell-origin",), "agreement": ("copy-number",),
+    }.get(route, ())
     expected = set(LICENSE_IDS) if route in {"home", "findings", "stability", "evidence", "methods"} else {
-        license_id for row in sample["catalog"] if row["algorithm_id"] == context_algorithm
+        license_id for row in sample["catalog"] if row["algorithm_id"] in context_algorithms
         for license_id in row["license_ids"]
     }
     if route not in {"trust-qc", "compare"}:
@@ -66,9 +77,10 @@ def test_route_license_references_resolve_to_one_full_callout(route, tmp_path) -
           (() => {
             const timer = setInterval(() => {
               if (document.body.dataset.ready !== '1') return;
-              if (__SIGNALS__) {
+              const tabName = __TAB__;
+              if (tabName) {
                 const tab = [...document.querySelectorAll('.subtab')]
-                  .find((item) => item.textContent === 'Copy number');
+                  .find((item) => item.textContent === tabName);
                 if (!tab) return;
                 tab.click();
               }
@@ -93,7 +105,7 @@ def test_route_license_references_resolve_to_one_full_callout(route, tmp_path) -
               clearInterval(timer);
             }, 25);
           })();
-        """.replace(b"__SIGNALS__", b"true" if route == "signals" else b"false").replace(
+        """.replace(b"__TAB__", json.dumps(subtab or ("Copy number" if route == "signals" else None)).encode()).replace(
             b"__LICENSES__", json.dumps(licenses).encode(),
         )
         server.app.assets["/assets/lab.js"] = (kind, source + probe)

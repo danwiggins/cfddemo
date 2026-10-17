@@ -739,24 +739,28 @@
 
   function fragmentSignals(sample) {
     const a = algo(sample, "fragment-size");
+    const seen = new Set();
     const section = h("section", { class: "panel" }, h("h2", {}, "Size density"));
-    if (!a || a.status !== "ok") return [section, absent(a, "fragment-size"), ...tssProfileSignals(sample), ...breakpointMotifSignals(sample)];
-    const slot = h("div", {}, h("p", {}, "Loading…"));
-    const short = a.metrics.find((m) => m.metric_id === "short_fraction_lt150");
-    section.append(h("p", { class: "help" }, `No size-density cohort band yet; 167 bp marked. Short-fragment reference: ${cohortReadiness(sample, short ? [short] : [])}.`), ...context(sample, "fragment-size", new Set()), slot);
-    artifact(sample, "fragment-size", "size-density").then((data) => {
-      const points = data.span_bp.map((x, i) => [x, data.count[i]]).filter((p) => p[0] >= 50 && p[0] <= 700);
-      slot.replaceWith(chart("Aligned-span density, 50 to 700 bp, with 167 bp marked.", {
-        grid: { left: 60, right: 20, top: 20, bottom: 40 }, xAxis: { type: "value", name: "bp", min: 50, max: 700 }, yAxis: { type: "value", name: "molecules" },
-        series: [{ type: "line", showSymbol: false, data: points, lineStyle: { color: "#1f5f8b" }, markLine: { symbol: "none", data: [{ xAxis: 167, label: { formatter: "167 bp" } }] } }],
-      }, dataTable("Molecules by aligned span (bp)", ["Span (bp)", "Molecules"], points)));
-    }).catch((e) => slot.replaceWith(h("div", { class: "problem" }, `Chart could not be drawn (${e.message}).`)));
+    if (!a || a.status !== "ok") section.append(absent(a, "fragment-size"), ...(a ? context(sample, "fragment-size", seen) : []));
+    else {
+      const slot = h("div", {}, h("p", {}, "Loading…"));
+      const short = a.metrics.find((m) => m.metric_id === "short_fraction_lt150");
+      section.append(h("p", { class: "help" }, `No size-density cohort band yet; 167 bp marked. Short-fragment reference: ${cohortReadiness(sample, short ? [short] : [])}.`), ...context(sample, "fragment-size", seen), slot);
+      artifact(sample, "fragment-size", "size-density").then((data) => {
+        const points = data.span_bp.map((x, i) => [x, data.count[i]]).filter((p) => p[0] >= 50 && p[0] <= 700);
+        slot.replaceWith(chart("Aligned-span density, 50 to 700 bp, with 167 bp marked.", {
+          grid: { left: 60, right: 20, top: 20, bottom: 40 }, xAxis: { type: "value", name: "bp", min: 50, max: 700 }, yAxis: { type: "value", name: "molecules" },
+          series: [{ type: "line", showSymbol: false, data: points, lineStyle: { color: "#1f5f8b" }, markLine: { symbol: "none", data: [{ xAxis: 167, label: { formatter: "167 bp" } }] } }],
+        }, dataTable("Molecules by aligned span (bp)", ["Span (bp)", "Molecules"], points)));
+      }).catch((e) => slot.replaceWith(h("div", { class: "problem" }, `Chart could not be drawn (${e.message}).`)));
+    }
     const more = [];
     for (const id of ["end-motifs", "delfi-ratio", "long-tail", "mtdna"]) {
       const other = algo(sample, id);
       if (other) more.push(h("section", { class: "panel" }, h("h2", {}, id), other.status === "ok"
         ? h("table", { class: "data-table" }, h("tbody", {}, ...other.metrics.filter((m) => m.value === null || typeof m.value !== "object").map((m) => h("tr", {}, h("th", { scope: "row" }, m.label), h("td", {}, fmt(m.value, m.unit))))))
-        : absent(other, id), id === "end-motifs" || id === "delfi-ratio" ? flagPill("LEGAL") : ""));
+        : absent(other, id), id === "end-motifs" || id === "delfi-ratio" ? flagPill("LEGAL") : "",
+        ...context(sample, id, seen)));
     }
     return [section, ...more, ...tssProfileSignals(sample), ...breakpointMotifSignals(sample)];
   }
@@ -864,10 +868,11 @@
     const ids = ["global-5mc", "global-5hmc", "pmd-score", "hypometh-reads", "modbase-qc"];
     const present = ids.map((id) => algo(sample, id)).filter(Boolean);
     const joint = fragXMethSignals(sample);
+    const seen = new Set();
     if (!present.length && !joint.length) return [h("p", { class: "empty" }, "No methylation summary algorithm has run on this sample yet (Phase 1). Cell-type composition is in Body map.")];
     return [...joint, ...present.map((a) => h("section", { class: "panel" }, h("h2", {}, a.algorithm_id), a.status === "ok"
       ? h("table", { class: "data-table" }, h("tbody", {}, ...a.metrics.filter((m) => m.value === null || typeof m.value !== "object").map((m) => h("tr", {}, h("th", { scope: "row" }, m.label), h("td", {}, fmt(m.value, m.unit)), h("td", {}, stateChip(m))))))
-      : absent(a, a.algorithm_id)))];
+      : absent(a, a.algorithm_id), ...context(sample, a.algorithm_id, seen)))];
   }
 
 
