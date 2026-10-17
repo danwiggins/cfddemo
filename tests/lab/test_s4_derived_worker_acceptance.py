@@ -57,7 +57,18 @@ def test_derived_worker_uses_selected_depth_and_pinned_parent_calibration(
     reads = [Read(f"auto-{i}", "chr1", 1_000 + i * 2_000, "A" * 1_500) for i in range(80)]
     reads += [Read(f"y-{i}", "chrY", 3_000_000 + i * 2_000, "A" * 1_500) for i in range(20)]
     fixture = context_for(store.root, contigs, reads)
-    summary = ReadSummary.open(store.root / "read-summary" / "columns")
+
+    parent = RunTarget(INPUT, SOURCE, fixture.input_dir, "hg38", REFERENCE)
+    run_id = new_run_id()
+    log = store.run_log(run_id)
+    scrubber = Scrubber(root=store.root)
+    summary_result, = run_plan(
+        store, None, log, parent, [PlanItem(READ_SUMMARY, True)],
+        {"read-summary": "read_summary:READ_SUMMARY"},
+        run_id=run_id, scrubber=scrubber, timeout_s=60,
+    )
+    assert summary_result.status == "ok" and summary_result.artifacts_dir
+    summary = ReadSummary.open(Path(summary_result.artifacts_dir) / "columns")
     specs = [downsample(0.75), downsample(0.25), split("A"), split("B")]
     stamps = {spec.label(): depth_stamp(summary, derived_mask(summary, spec.mask_spec())) for spec in specs}
     for spec in specs:
@@ -68,8 +79,11 @@ def test_derived_worker_uses_selected_depth_and_pinned_parent_calibration(
     assert full_stamp["eligible_reads"] == len(reads)
     assert full_stamp["approx_depth_x"] > high > low > 0
     floor = (high + low) / 2
+    assert parent.eligible_reads == full_stamp["eligible_reads"]
+    assert parent.approx_depth_x == full_stamp["approx_depth_x"]
 
     if kind == "donor":
+        assert DD_CFDNA_CHRY.requires.min_eligible_reads == 0
         path, digest = donor_file(
             tmp_path, min_depth_x=floor, female_background_y_per_million=0,
             male_full_donor_y_per_million=1_000_000,
@@ -91,19 +105,6 @@ def test_derived_worker_uses_selected_depth_and_pinned_parent_calibration(
 
     # The parent registration is the only calibration. Derived IDs must resolve
     # it through their published manifests, never through a copied contract.
-    parent = RunTarget(INPUT, SOURCE, fixture.input_dir, "hg38", REFERENCE)
-    run_id = new_run_id()
-    log = store.run_log(run_id)
-    scrubber = Scrubber(root=store.root)
-    summary_result, = run_plan(
-        store, None, log, parent, [PlanItem(READ_SUMMARY, True)],
-        {"read-summary": "read_summary:READ_SUMMARY"},
-        run_id=run_id, scrubber=scrubber, timeout_s=60,
-    )
-    assert summary_result.status == "ok" and summary_result.artifacts_dir
-    assert parent.eligible_reads == full_stamp["eligible_reads"]
-    assert parent.approx_depth_x == full_stamp["approx_depth_x"]
-
     full_result, = run_plan(
         store, None, log, parent, [PlanItem(algorithm, False)],
         {algorithm.id: entry}, run_id=run_id, scrubber=scrubber, timeout_s=60,
@@ -121,6 +122,7 @@ def test_derived_worker_uses_selected_depth_and_pinned_parent_calibration(
     )
     assert [run.derived.spec.label() for run in runs] == [spec.label() for spec in specs]
     for run in runs:
+        assert len(run.results) == 1, run.derived.spec.label()
         result, = run.results
         stamp = stamps[run.derived.spec.label()]
         assert algorithm.asset_sha256s_for_input(store.root, run.derived.input_id) == [contract.manifest_sha256]
@@ -136,6 +138,7 @@ def test_derived_worker_uses_selected_depth_and_pinned_parent_calibration(
         at_parent_depth = InputContext(
             root=store.root, source_id=SOURCE, input_id=run.derived.input_id,
             reference_id="hg38", reference_sha256=REFERENCE, input_dir=fixture.input_dir,
+            platform=parent.platform,
             eligible_reads=stamp["eligible_reads"], approx_depth_x=full_stamp["approx_depth_x"],
             derived=run.derived.spec.mask_spec(),
             extras={"upstream": {"read-summary": summary_result.artifacts_dir},
