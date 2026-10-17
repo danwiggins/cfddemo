@@ -278,7 +278,8 @@
       h("tbody", {}, ...rows.map((row) => h("tr", {},
         h("th", { scope: "row" }, h("a", { href: `#/sample/${row.id12}/findings` }, row.id12), row.example ? h("span", { class: "flag-pill example-pill" }, " EXAMPLE (synthetic)") : "",
           row.unreadable_results && row.unreadable_results.length ? h("span", { class: "problem" }, ` result unreadable (sample ${row.id12})`) : "",
-          row.ambiguous_results && row.ambiguous_results.length ? h("span", { class: "problem" }, ` result selection ambiguous (sample ${row.id12})`) : ""),
+          row.ambiguous_results && row.ambiguous_results.length ? h("span", { class: "problem" }, ` result selection ambiguous (sample ${row.id12})`) : "",
+          row.malformed_result_selections ? h("span", { class: "problem" }, ` malformed result selection (sample ${row.id12})`) : ""),
         h("td", {}, row.run_utc ? row.run_utc.slice(0, 10) : "—"),
         h("td", { class: "num" }, row.depth_x !== null ? `${row.depth_x.toPrecision(3)}x` : "—"),
         h("td", {}, `${row.counts.ok} / ${row.counts.skipped} / ${row.counts.failed}`),
@@ -444,6 +445,8 @@
       h("p", { class: "findings-summary" }, `${outside} outside a reference · ${groups.not_interpretable.length} not interpretable · ${groups.no_reference.length} without a reference (${cohortContext}) · ${groups.in_range.length} in range`),
     ];
     if (cohortIssue) out.push(h("p", { class: "problem" }, `Cohort reference ${sample.cohort_state.replace(/_/g, " ")}. Cohort states are unavailable for this view; measurements and published references remain visible. ${sample.cohort_problem ? sample.cohort_problem.fix : "Check cohort build and reload."}`));
+    if (sample.malformed_result_selections) out.push(h("article", { class: "finding-card problem" },
+      h("h2", {}, `Malformed result selection (sample ${sample.id12})`)));
     for (const id of sample.unreadable_results || []) {
       out.push(h("article", { class: "finding-card problem" },
         h("h2", {}, `${id}: result unreadable (sample ${sample.id12})`)));

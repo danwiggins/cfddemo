@@ -8,6 +8,7 @@ import http.client
 import io
 import json
 import os
+import re
 import signal
 import shutil
 import socket
@@ -928,6 +929,60 @@ def test_status_does_not_echo_malformed_nonanalysis_run_id(tmp_path, monkeypatch
     assert "invalid/secret" not in json.dumps(status)
 
 
+def test_status_keeps_derived_step_and_hides_malformed_heartbeat_labels(tmp_path, monkeypatch) -> None:
+    store = LabStore(tmp_path)
+    run_id = "r-20261015-0101-abcd"
+    monkeypatch.setattr(store, "status", lambda: {"generation": 0, "active": {
+        "command": "run", "run_id": run_id, "step": "bam-qc@split-A",
+    }})
+    assert api_module.LabApi(store).status()["active"]["step"] == "bam-qc@split-A"
+    monkeypatch.setattr(store, "status", lambda: {"generation": 0, "active": {
+        "command": "private/sentinel", "run_id": run_id, "step": "private/sentinel",
+    }})
+    status = api_module.LabApi(store).status()
+    assert status["active"]["command"] is None and status["active"]["step"] is None
+    assert "private/sentinel" not in json.dumps(status)
+
+
+def test_status_hides_malformed_interrupted_step(tmp_path) -> None:
+    store = LabStore(tmp_path)
+    run_id = "r-20261015-0101-abcd"
+    with store.writer("run", run_id):
+        log = store.run_log(run_id)
+        log.append("run_start", command="run")
+        log.append("step_start", step="private/sentinel")
+    status = api_module.LabApi(store).status()
+    assert status["interrupted"]["step"] is None
+    assert "private/sentinel" not in json.dumps(status)
+
+
+def test_sample_api_hides_malformed_result_name_but_reports_damage(tmp_path) -> None:
+    store = LabStore(tmp_path)
+    store.ensure()
+    source_id, input_id = "a" * 64, "b" * 64
+    store.sources_dir.mkdir(parents=True, exist_ok=True)
+    (store.sources_dir / f"{source_id}.json").write_text(json.dumps({
+        "source_id": source_id, "example": True,
+        "inputs": [{"input_id": input_id, "used_utc": "2026-10-16T00:00:00Z"}],
+    }))
+    manifest = store.inputs_dir / input_id / "manifest.json"
+    manifest.parent.mkdir(parents=True, exist_ok=True)
+    manifest.write_text(json.dumps({"input_id": input_id}))
+    malformed = store.results_dir / input_id / "private.sentinel" / ("c" * 64)
+    malformed.mkdir(parents=True)
+    (malformed / "selected.json").write_text('{"attempt_id":"invalid"}')
+    known = store.results_dir / input_id / "fragment-size" / ("d" * 64)
+    known.mkdir(parents=True)
+    (known / "selected.json").write_text('{"attempt_id":"invalid"}')
+    api = api_module.LabApi(store)
+    sample = api.sample(source_id[:12])
+    row = api.samples()["samples"][0]
+    assert sample["malformed_result_selections"] and row["malformed_result_selections"]
+    assert sample["unreadable_results"] == row["unreadable_results"] == ["fragment-size"]
+    assert "private.sentinel" not in json.dumps(sample)
+    assert "private.sentinel" not in json.dumps(row)
+
+
 def test_status_reports_deeply_nested_latest_run_pointer_without_crashing(tmp_path) -> None:
     store = LabStore(tmp_path)
     store.ensure()
@@ -1017,7 +1072,7 @@ def test_trust_qc_run_note_is_scoped_without_replacing_result_status(tmp_path, k
                 not kind.startswith("active-unlogged") or prior_run_id in page),
         )
     run_table = dom.split("<h2>Run</h2>", 1)[1].split("</table>", 1)[0]
-    assert '<th scope="row">bam-qc</th><td>ok' in run_table
+    assert re.search(r'<th scope="row">bam-qc</th><td[^>]*>ok(?:\s|<)', run_table)
     if kind == "active-pending":
         assert ("Latest run in progress during read-summary; no result was published for this step." in dom) == (selected == "a")
     note = "latest run " + ("interrupted" if kind == "interrupted" else "in progress")

@@ -484,16 +484,16 @@ def test_synthetic_status_copy_in_live_region(state, copy_text, tmp_path) -> Non
     assert status_region is not None and copy_text in status_region.group(1)
     if state == "run-in-progress":
         run = dom.split("<h2>Run</h2>", 1)[1].split("</table>", 1)[0]
-        assert '<th scope="row">bam-qc</th><td>ok' in run
+        assert re.search(r'<th scope="row">bam-qc</th><td[^>]*>ok(?:\s|<)', run)
         assert 'latest run in progress' in run
         assert '0.0 s (selected result)' in run
     if state == "interrupted":
         run = dom.split("<h2>Run</h2>", 1)[1].split("</table>", 1)[0]
-        assert '<th scope="row">bam-qc</th><td>ok' in run
+        assert re.search(r'<th scope="row">bam-qc</th><td[^>]*>ok(?:\s|<)', run)
         assert 'latest run interrupted' in run
     if state == "status-unavailable":
         run = dom.split("<h2>Run</h2>", 1)[1].split("</table>", 1)[0]
-        assert '<th scope="row">bam-qc</th><td>ok' in run
+        assert re.search(r'<th scope="row">bam-qc</th><td[^>]*>ok(?:\s|<)', run)
         assert 'latest run interrupted' not in run
         assert 'stopped during bam-qc' not in dom
     if state in ("run-finished", "results-changed"):
@@ -606,5 +606,5 @@ def test_interrupted_note_is_scoped_and_preserves_selected_result(tmp_path, scop
         }
         dom = _dom(server, tmp_path / "browser", route=f"/sample/{ID12}/trust-qc")
     run = dom.split("<h2>Run</h2>", 1)[1].split("</table>", 1)[0]
-    assert '<th scope="row">bam-qc</th><td>ok' in run
+    assert re.search(r'<th scope="row">bam-qc</th><td[^>]*>ok(?:\s|<)', run)
     assert ("latest run interrupted" in run) == (scope == "matching")

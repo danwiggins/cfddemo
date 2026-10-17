@@ -380,9 +380,13 @@
       runRows.push(h("tr", {}, h("th", { scope: "row" }, id), h("td", { class: "problem" }, "result selection ambiguous"),
         h("td", {}, "—"), h("td", {}, "—"), h("td", {}, "More than one selected result was found.")));
     }
+    if (sample.malformed_result_selections) {
+      runRows.push(h("tr", {}, h("th", { scope: "row" }, "Result"), h("td", { class: "problem" }, "malformed result selection"),
+        h("td", {}, "—"), h("td", {}, "—"), h("td", {}, "A stored result selection could not be identified.")));
+    }
     out.push(h("section", { class: "panel" }, h("h2", {}, "Run"),
       h("p", { class: "status-line", "data-run-pending": "", hidden: !pending }, pending
-        ? `${pending === active ? "Latest run in progress" : interruptedLabel.replace(/^./, (letter) => letter.toUpperCase())} during ${pending.step}; no result was published for this step.` : ""),
+        ? `${pending === active ? "Latest run in progress" : interruptedLabel.replace(/^./, (letter) => letter.toUpperCase())} during ${pending.step || "a step"}; no result was published for this step.` : ""),
       h("div", { class: "table-wrap" }, h("table", {}, h("thead", {}, h("tr", {}, ...["Algorithm", "Status", "Duration", "Run log", "Detail"].map((t) => h("th", { scope: "col" }, t)))), h("tbody", {}, ...runRows)))));
     // QC bands.
     const banded = [];
@@ -488,7 +492,7 @@
     const pendingLine = document.querySelector("#main [data-run-pending]");
     if (pendingLine) {
       pendingLine.textContent = pending
-        ? `${pending === active ? "Latest run in progress" : interruptedLabel.replace(/^./, (letter) => letter.toUpperCase())} during ${pending.step}; no result was published for this step.` : "";
+        ? `${pending === active ? "Latest run in progress" : interruptedLabel.replace(/^./, (letter) => letter.toUpperCase())} during ${pending.step || "a step"}; no result was published for this step.` : "";
       pendingLine.hidden = !pending;
     }
   }
