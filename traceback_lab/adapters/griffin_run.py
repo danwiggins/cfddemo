@@ -104,6 +104,8 @@ def _runtime_identity(snakemake: Path, python: Path, samtools: Path, bedtools: P
     return {
         "executables": {name: {"path": str(path), "sha256": _digest(path)}
                         for name, path in executables.items()},
+        "python_interpreter": {"path": str(Path(sys.executable).absolute()),
+                               "sha256": _digest(Path(sys.executable))},
         "python_version": sys.version.split()[0],
         "compat_shim": {"path": str(compat), "sha256": _digest(compat)},
         "packages": packages,
@@ -183,7 +185,7 @@ def _require_reference_header(bam: Path, reference: Path) -> None:
         raise ValueError("BAM @SQ does not match the registered reference FASTA")
 
 
-def _require_chrom_sizes(reference: Path, chrom_sizes: Path) -> None:
+def _require_chrom_sizes(reference: Path, chrom_sizes: Path) -> tuple[str, ...]:
     """Every coverage-space contig must match the registered FASTA index."""
 
     import pysam
@@ -191,6 +193,7 @@ def _require_chrom_sizes(reference: Path, chrom_sizes: Path) -> None:
     with pysam.FastaFile(str(reference)) as fasta:
         expected = dict(zip(fasta.references, fasta.lengths))
     seen: set[str] = set()
+    autosomes: list[str] = []
     with chrom_sizes.open("r", encoding="ascii") as stream:
         for line in stream:
             fields = line.rstrip("\n").split("\t")
@@ -203,8 +206,13 @@ def _require_chrom_sizes(reference: Path, chrom_sizes: Path) -> None:
             if length <= 0 or expected.get(fields[0]) != length:
                 raise ValueError("Griffin chromosome sizes differ from the registered FASTA")
             seen.add(fields[0])
+            if re.fullmatch(r"(?:chr)?(?:[1-9]|1[0-9]|2[0-2])", fields[0]):
+                autosomes.append(fields[0])
     if not seen:
         raise ValueError("Griffin chromosome sizes are empty")
+    if not autosomes:
+        raise ValueError("Griffin chromosome sizes have no canonical autosomes")
+    return tuple(autosomes)
 
 
 def count_d21_pairs(bam: Path) -> int:
@@ -288,7 +296,7 @@ def run_upstream(config: GriffinRun) -> tuple[GriffinProfile, ...]:
         raise ValueError("caller-supplied eligible autosomal pair count differs from the BAM")
     for filename in _REF_FILES:
         _safe_path(assets / filename)
-    _require_chrom_sizes(reference, assets / "hg38.standard.chrom.sizes")
+    chromosomes = _require_chrom_sizes(reference, assets / "hg38.standard.chrom.sizes")
     frequency = _safe_path(assets / "genome_GC_frequency")
     if not frequency.is_dir():
         raise ValueError("Griffin genome GC-frequency reference is absent")
@@ -335,7 +343,10 @@ def run_upstream(config: GriffinRun) -> tuple[GriffinProfile, ...]:
     launcher_dir = attempt / "bin"
     launcher_dir.mkdir()
     python = launcher_dir / "python"
-    python.symlink_to(Path(sys.executable).absolute())
+    # A symlink under attempt/bin loses a virtualenv's pyvenv.cfg lookup.
+    # Execute the actual environment launcher so Snakemake sees its packages.
+    python.write_text(f'#!/bin/sh\nexec {Path(sys.executable).absolute()} "$@"\n', encoding="ascii")
+    python.chmod(0o755)
     compat_dir = attempt / "compat"
     compat_dir.mkdir()
     compat = compat_dir / "sitecustomize.py"
@@ -362,6 +373,11 @@ def run_upstream(config: GriffinRun) -> tuple[GriffinProfile, ...]:
         snakefile = destination / f"{workflow}.snakefile"
         shutil.copy2(source / snakefile.name, snakefile)
         snakefiles.append(snakefile)
+        cluster = yaml.safe_load((source / "config" / "cluster_slurm.yaml").read_text(encoding="utf-8"))
+        for rule in cluster.values():
+            if isinstance(rule, dict) and "ncpus" in rule:
+                rule["ncpus"] = min(max(1, int(rule["ncpus"])), config.cores)
+        _write_yaml(destination / "config" / "cluster_slurm.yaml", cluster)
         upstream_configs[workflow] = _digest(source / "config" / "config.yaml")
     fingerprints["upstream_configs_sha256"] = upstream_configs
     fingerprints["snakefiles_sha256"] = {
@@ -379,6 +395,7 @@ def run_upstream(config: GriffinRun) -> tuple[GriffinProfile, ...]:
     profile_config.update({
         "tmp_dir": "tmp", "results_dir": "results", "mappability_correction": False,
         "sites_yaml": "config/sites.yaml", "samples_yaml": "config/samples.GC.yaml",
+        "chroms": " ".join(chromosomes),
     })
     _write_yaml(profile_dir / "config" / "config.yaml", profile_config)
     _write_yaml(profile_dir / "config" / "sites.yaml", {"site_lists": site_paths})
@@ -389,8 +406,9 @@ def run_upstream(config: GriffinRun) -> tuple[GriffinProfile, ...]:
     })
     generated_configs = (
         gc_dir / "config" / "config.yaml", gc_dir / "config" / "samples.yaml",
+        gc_dir / "config" / "cluster_slurm.yaml",
         profile_dir / "config" / "config.yaml", profile_dir / "config" / "sites.yaml",
-        profile_dir / "config" / "samples.GC.yaml",
+        profile_dir / "config" / "samples.GC.yaml", profile_dir / "config" / "cluster_slurm.yaml",
     )
     fingerprints["generated_configs_sha256"] = {
         str(path.relative_to(attempt)): _digest(path) for path in generated_configs

@@ -37,6 +37,9 @@ def test_reads_minimal_corrected_profile_contract(tmp_path: Path) -> None:
 
 def test_reads_pinned_upstream_healthy_demo_fixture() -> None:
     path = Path(__file__).parent / "fixtures" / "griffin" / "Healthy_demo.GC_corrected.coverage.tsv"
+    assert hashlib.sha256(path.read_bytes()).hexdigest() == (
+        "4e7b430bc98d67d704e506ee41d2650b76bad3cc0a55be919f7884d0137ecc88"
+    )
     profile, = read_corrected_profiles(path, expected_sample="Healthy_demo")
     assert profile.site_name == "CTCF_demo"
     assert profile.site_count == 1000
@@ -117,6 +120,7 @@ def test_pinned_upstream_attempt_binds_input_and_assets(tmp_path: Path, monkeypa
         config = upstream / "snakemakes" / workflow / "config"
         config.mkdir(parents=True)
         (config / "config.yaml").write_text("{}\n", encoding="utf-8")
+        (config / "cluster_slurm.yaml").write_text("GC_counts:\n  ncpus: 8\n", encoding="utf-8")
         (upstream / "snakemakes" / workflow / (workflow + ".snakefile")).write_text(
             "# test fixture\n", encoding="utf-8"
         )
@@ -164,7 +168,9 @@ def test_pinned_upstream_attempt_binds_input_and_assets(tmp_path: Path, monkeypa
             assert argv[:2] == [sys.executable, str(tool_dir / "snakemake")]
             return subprocess.CompletedProcess(argv, 0, snakemake_version + "\n")
         assert Path(argv[0]).name == "python" and Path(argv[0]).parent.name == "bin"
-        assert Path(argv[0]).resolve() == Path(sys.executable).resolve()
+        assert Path(argv[0]).read_text(encoding="ascii") == (
+            f'#!/bin/sh\nexec {Path(sys.executable).absolute()} "$@"\n'
+        )
         assert argv[1] == str(tool_dir / "snakemake")
         assert kwargs["env"]["PYTHONDONTWRITEBYTECODE"] == "1"
         directory = Path(kwargs["cwd"])
@@ -192,7 +198,7 @@ def test_pinned_upstream_attempt_binds_input_and_assets(tmp_path: Path, monkeypa
     monkeypatch.setattr(griffin_run, "_tool_path", lambda command, **_: tool_dir / command)
     monkeypatch.setattr(griffin_run, "_require_paired_input", lambda _: None)
     monkeypatch.setattr(griffin_run, "_require_reference_header", lambda *_: None)
-    monkeypatch.setattr(griffin_run, "_require_chrom_sizes", lambda *_: None)
+    monkeypatch.setattr(griffin_run, "_require_chrom_sizes", lambda *_: ("chr1",))
     monkeypatch.setattr(griffin_run, "count_d21_pairs", lambda _: 5_000_000)
     attempt = tmp_path / "attempt"
     result = run_upstream(GriffinRun(
@@ -212,13 +218,17 @@ def test_pinned_upstream_attempt_binds_input_and_assets(tmp_path: Path, monkeypa
     assert manifest["eligibility_source"] == "bam_verified"
     assert manifest["snakemake_version"] == "5.19.2"
     assert manifest["runtime"]["packages"]["pysam"]
-    assert (attempt / "bin" / "python").is_symlink()
-    assert (attempt / "bin" / "python").resolve() == Path(sys.executable).resolve()
+    assert (attempt / "bin" / "python").is_file()
+    assert not (attempt / "bin" / "python").is_symlink()
+    assert manifest["runtime"]["python_interpreter"]["path"] == str(Path(sys.executable).absolute())
     assert manifest["runtime"]["compat_shim"]["sha256"] == hashlib.sha256(
         (attempt / "compat" / "sitecustomize.py").read_bytes()
     ).hexdigest()
     assert manifest["runtime"]["environment"]["PYTHONPATH"].startswith(str(attempt / "compat"))
     assert "mappability_correction: false" in (
+        attempt / "griffin_nucleosome_profiling" / "config" / "config.yaml"
+    ).read_text(encoding="utf-8")
+    assert "chroms: chr1" in (
         attempt / "griffin_nucleosome_profiling" / "config" / "config.yaml"
     ).read_text(encoding="utf-8")
     for name in ("snakemake", "samtools", "bedtools"):
@@ -227,9 +237,12 @@ def test_pinned_upstream_attempt_binds_input_and_assets(tmp_path: Path, monkeypa
     assert manifest["fingerprints"]["bam_sha256"] == hashlib.sha256(b"bam").hexdigest()
     assert manifest["fingerprints"]["bam_indexes_sha256"]["aligned.bam.bai"] == hashlib.sha256(b"index").hexdigest()
     assert manifest["fingerprints"]["reference_index_sha256"] == hashlib.sha256(b"index").hexdigest()
-    assert len(manifest["fingerprints"]["generated_configs_sha256"]) == 5
+    assert len(manifest["fingerprints"]["generated_configs_sha256"]) == 7
     assert len(manifest["fingerprints"]["snakefiles_sha256"]) == 2
     assert len(manifest["fingerprints"]["upstream_configs_sha256"]) == 2
+    assert "ncpus: 1" in (
+        attempt / "griffin_GC_and_mappability_correction" / "config" / "cluster_slurm.yaml"
+    ).read_text(encoding="utf-8")
     assert manifest["fingerprints"]["upstream_scripts_sha256"] != hashlib.sha256().hexdigest()
     assert not (attempt / "upstream_scripts" / "__pycache__").exists()
     assert not (attempt / "griffin_nucleosome_profiling" / "results" / "old.txt").exists()
