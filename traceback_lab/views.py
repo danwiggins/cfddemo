@@ -133,25 +133,19 @@ def load_sample(store: LabStore, source_id: str) -> SampleView | None:
     if full_input is None:
         return None
     manifest = input_manifest(store, full_input) or {}
-    legacy_not_ont = False
-    platform_unverified = False
-    if manifest.get("kind") == "prealigned" and "platform" not in manifest:
-        try:
-            legacy_not_ont = for_input(manifest, store.inputs_dir / full_input / "aligned.bam") != "ont"
-        except (OSError, ValueError):
-            legacy_not_ont = True
-    elif "platform" in manifest:
-        try:
-            for_input(manifest, store.inputs_dir / full_input / "aligned.bam")
-        except (OSError, ValueError):
-            platform_unverified = True
+    try:
+        platform = for_input(manifest, store.inputs_dir / full_input / "aligned.bam")
+    except (OSError, ValueError):
+        platform = "unknown"
+    platform_unverified = platform == "unknown"
+    legacy_not_ont = manifest.get("kind") == "prealigned" and "platform" not in manifest and platform == "illumina"
     supported: set[str] | None = None
     if platform_unverified:
         supported = set()
     elif legacy_not_ont:
         supported = {algorithm.id for algorithm in load_registry() if "illumina" in algorithm.requires.platforms}
     skip_message = (
-        "Stored input platform does not match its BAM; restore the registered input before viewing results"
+        "Stored input platform cannot be verified against its BAM; restore the registered input before viewing results"
         if platform_unverified else
         "Legacy result lacks verified ONT provenance; rerun or repair this sample"
     )
