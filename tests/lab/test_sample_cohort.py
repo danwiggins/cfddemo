@@ -168,11 +168,13 @@ def test_sample_list_pins_one_generation_for_all_rows(tmp_path, monkeypatch) -> 
             algorithm_id="fragment-size", algorithm_version="1", status="ok",
             provenance=provenance(tool="fixture", parameters_sha256=PARAMETERS,
                                   source_id=source, input_id=input_id, reference_id="synthetic"),
+            depth=Depth(eligible_reads=1_000_000, approx_depth_x=1.0),
             metrics=[Metric(metric_id="short_fraction_lt150", value=0.95)],
         )
-        samples[source] = SimpleNamespace(example=False, full=SimpleNamespace(
-            input_id=input_id, results={"fragment-size": envelope}, depth_x=lambda: 1.0,
-        ), by_transform=lambda transform: [])
+        samples[source] = SampleView(
+            source_id=source, id12=source[:12], example=False,
+            full=InputView("full", input_id, None, {}, {"fragment-size": envelope}),
+        )
     monkeypatch.setattr(web_api.views, "load_sample", lambda store, source_id: samples[source_id])
     monkeypatch.setattr(web_api.views, "synthetic", lambda sample: [])
     monkeypatch.setattr(web_api, "source_record", lambda store, source_id: {})
@@ -196,11 +198,13 @@ def test_unavailable_cohort_is_explicit_not_an_empty_healthy_reference(tmp_path,
         algorithm_id="fragment-size", algorithm_version="1", status="ok",
         provenance=provenance(tool="fixture", parameters_sha256=PARAMETERS,
                               source_id=SOURCE, input_id=INPUT, reference_id="synthetic"),
+        depth=Depth(eligible_reads=1_000_000, approx_depth_x=1.0),
         metrics=[Metric(metric_id="short_fraction_lt150", value=0.95)],
     )
-    sample = SimpleNamespace(example=False, full=SimpleNamespace(
-        input_id=INPUT, results={"fragment-size": envelope}, depth_x=lambda: 1.0,
-    ), by_transform=lambda transform: [])
+    sample = SampleView(
+        source_id=SOURCE, id12=SOURCE[:12], example=False,
+        full=InputView("full", INPUT, None, {}, {"fragment-size": envelope}),
+    )
     problem = LabProblem(
         "TBX-LAB-022", cause="stored cohort generation is invalid",
         fix="Restore the generation or rebuild the cohort",
