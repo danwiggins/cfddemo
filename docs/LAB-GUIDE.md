@@ -292,8 +292,10 @@ fit is to small changes; a large value warns of nearly collinear references,
 without implying a validated reliability cutoff.
 The `markers_covered` and `cpg_calls_used` diagnostics show the support for
 the numerical fit, not biological confidence. With exactly two covered
-markers, two weights can fit both observations without residual degrees of
-freedom, so `fit_rms` is unavailable rather than reported as a reassuring zero.
+markers, an unconstrained two-weight fit can have zero numerical residual by
+construction; a boundary-clamped fit can have a nonzero residual. `fit_rms`
+reports that descriptive mismatch in either case, without a goodness-of-fit
+threshold or biological confidence claim.
 
 The Agreement lens pairs PoN-qualified copy-number tumour fraction with the
 methylation estimate, a cohort-relative fragment-size mode shift, and a
