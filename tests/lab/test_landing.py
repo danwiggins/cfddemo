@@ -245,8 +245,9 @@ def test_home_names_unavailable_split_comparisons(page_root, tmp_path, comparabl
             return payload
 
         server.app.api.sample = sample
-        dom = _dom(server, tmp_path, want=lambda page: "1 comparison unavailable" in page)
-    assert "1 comparison unavailable" in dom
+        expected = "1 comparison unavailable" if comparable else "1 split comparison unavailable"
+        dom = _dom(server, tmp_path, want=lambda page: expected in page)
+    assert expected in dom
     if comparable:
         assert "Median split-half |A−B|: 5.0%" in dom
     else:
