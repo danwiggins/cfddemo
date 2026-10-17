@@ -979,6 +979,14 @@ class LabStore:
         selected = self._selected_result(input_id, algorithm_id, parameters_sha256)
         return (selected[1], selected[2]) if selected is not None else None
 
+    def selected_result_with_attempt_and_order(
+        self, input_id: str, algorithm_id: str, parameters_sha256: str
+    ) -> tuple[str, ResultEnvelope, int | None] | None:
+        """Read an immutable attempt ID alongside the selected result."""
+
+        selected = self._selected_result(input_id, algorithm_id, parameters_sha256)
+        return (selected[0].name, selected[1], selected[2]) if selected is not None else None
+
     def read_result(
         self, input_id: str, algorithm_id: str, parameters_sha256: str
     ) -> ResultEnvelope | None:
