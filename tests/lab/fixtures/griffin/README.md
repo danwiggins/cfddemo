@@ -14,3 +14,6 @@ fixture's exact bytes, full coordinate grid, metadata, and rejection of a
 renamed coordinate column. The separate synthetic workflow proof under
 `docs/proofs/griffin/` exercises the pinned upstream code without committed
 real-sample output.
+It tests the corrected-profile parser only. The Lab's paired-end, 100–200 bp
+window and five-million D21 pair gates run on the full or selected BAM in a
+timed worker; this TSV fixture does not exercise those gates.

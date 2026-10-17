@@ -27,3 +27,10 @@ live-tool test is optional because CI does not install FinaleToolkit; it checks
 the comparator against a separate run of the pinned package. These synthetic
 checks do not establish real hg38 runtime, whole-genome agreement, or clinical
 performance.
+
+The Lab method accepts declared Illumina inputs for this paired-end cross-check.
+An ONT input receives a platform skip before the Lab probes or hashes an
+installed FinaleToolkit executable; that skip uses a fixed `not-applicable`
+tool pin. An eligible Illumina run still records the resolved tool runtime in
+its execution identity. This fixture establishes replay parity, not platform
+compatibility beyond that declared input gate.

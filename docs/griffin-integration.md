@@ -27,8 +27,13 @@ BAM **when the BAM is paired-end WGS**. Griffin's scripts require paired
 reads with positive template length in both GC counting and coverage. The
 adapter requires at least one BAM read group and every group to declare
 `PL:ILLUMINA`; it scans all primary BAM records for pairing and the 100–200 bp
-profile-window gate before creating an attempt. It does not infer library type
-from an early coordinate-sorted slice. Read-group platform labels are
+profile-window gate before creating an upstream attempt. Lab preflight checks
+the declared platform, read-summary depth, toolchain and registration without
+scanning the full BAM. The timed worker materializes any downsample or split
+selection, then performs the full BAM pairing, profile-window and D21 pair
+checks. A slow scan is subject to the same process-group timeout as Griffin's
+upstream workflow. It does not infer library type from an early
+coordinate-sorted slice. Read-group platform labels are
 declarations, not independent instrument attestation. Native ONT single-end
 BAMs lack the required paired records. It compares the BAM's `@SQ` names and lengths
 and the workflow chromosome sizes with the registered FASTA index. Every
@@ -109,7 +114,8 @@ the profile panel. The primary registered TF list supplies the scalar
 `central_coverage`; all registered lists remain visible in the panel. Downsample
 and split controls use the shared read-name selection to create a temporary
 paired BAM; the selected records must still contain at least 5M D21 eligible
-autosomal pairs, and the temporary BAM is removed after the workflow. Native
+autosomal pairs, and the temporary BAM is removed after the worker finishes
+or skips. A below-gate selection is published as a depth skip. Native
 ONT, example, and other derived transforms (including CNA) skip explicitly. No arbitrary TF activity
 or diagnostic threshold is asserted.
 

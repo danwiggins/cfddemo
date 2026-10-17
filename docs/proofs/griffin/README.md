@@ -95,3 +95,8 @@ proof; no human hg38 or full-depth result is implied.
 
 The complete human hg38 asset registration and 5-million-pair normal Lab
 run remain open qualification steps.
+In a normal Lab run, Griffin's full BAM pairing, window and D21 pair gates
+execute in the timed worker after the lightweight preflight. A derived
+downsample or split selection is counted from its temporary selected BAM;
+insufficient pairs yield a depth skip. This synthetic proof does not measure
+the runtime or memory of a full-depth gate.
