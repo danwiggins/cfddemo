@@ -332,6 +332,7 @@
         h("p", {}, h("span", { class: "flag-pill" }, "FLAG: PRIVACY — infection status is sensitive health data.")),
         h("p", { class: "help" }, "Exploratory Kraken2/Bracken assignments from human-unmapped reads. Not an infection diagnosis; residual human DNA and contamination may affect assignments."),
         microbial.database_source_label ? h("p", { class: "help" }, `Database: ${microbial.database_source_label} (SHA-256 ${microbial.database_sha256}). Fixed Bracken read length: ${microbial.read_length} bases.`) : "",
+        h("p", { class: "help" }, "Viral taxa here are Bracken estimates per million QC-passing, non-duplicate primary reads. The separate viral-reference panel counts side-reference alignments per million human-unmapped primaries, including QC-fail and duplicate-flagged reads; the rates are not directly comparable."),
         microbial.reason ? h("p", { class: "problem" }, microbial.reason) : "",
         microbial.microbial_rpm_primary !== undefined
           ? h("p", {}, `Candidate microbial estimate: ${fmt(microbial.microbial_rpm_primary)} per million primary QC-passing reads; ${fmt(microbial.candidate_unmapped_reads)} unmapped reads submitted. Cohort 97.5th percentile: ${microbial.cohort_p975 === null ? "unavailable" : fmt(microbial.cohort_p975)}${microbial.cohort_p975 === null ? "" : ` (n=${microbial.cohort_n}, ${microbial.cohort_version})`}.`)
@@ -346,7 +347,7 @@
             h("tbody", {}, ...microbial.taxa.map((row) => h("tr", {},
               h("th", { scope: "row" }, `${row.name} (taxid ${row.taxid})`),
               h("td", {}, row.category), h("td", {}, fmt(row.rpm_primary)),
-              h("td", {}, row.cohort_p975 === null ? `unavailable (n=${row.cohort_n})` : fmt(row.cohort_p975)),
+              h("td", {}, row.cohort_p975 === null ? `unavailable (n=${row.cohort_n})` : `${fmt(row.cohort_p975)} (n=${row.cohort_n})`),
               h("td", {}, row.above_cohort_p975 === null ? "no cohort reference" : row.above_cohort_p975 ? "above cohort percentile" : "at or below cohort percentile"))))))
           : h("p", {}, microbial.microbial_rpm_primary === 0
             ? "Measured zero candidate taxa among bacteria, archaea, viruses, and fungi under this database and read-length policy."

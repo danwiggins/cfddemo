@@ -53,6 +53,7 @@ def _read_profile(path: Path) -> dict[str, Any] | None:
         taxid, name = row["taxid"], row["name"]
         if (not isinstance(taxid, int) or isinstance(taxid, bool) or taxid <= 0 or taxid in seen
                 or not isinstance(name, str) or not 1 <= len(name) <= 160
+                or any(ord(char) < 32 for char in name)
                 or row["category"] not in ("bacteria", "archaea", "viruses", "fungi")):
             return None
         seen.add(taxid)
@@ -61,6 +62,44 @@ def _read_profile(path: Path) -> dict[str, Any] | None:
             if isinstance(number, bool) or not isinstance(number, (int, float)) or not math.isfinite(number) or number < 0:
                 return None
     return value
+
+
+def _profile_matches_metrics(profile: dict[str, Any], static: dict[str, Any]) -> bool:
+    """Reject an artifact that disagrees with its selected result envelope."""
+    for artifact_key, metric_id in (("denominator", "primary_reads"),
+                                    ("candidate_unmapped_reads", "candidate_unmapped_reads"),
+                                    ("too_short_unmapped_reads", "too_short_unmapped_reads"),
+                                    ("missing_sequence_unmapped_reads", "missing_sequence_unmapped_reads"),
+                                    ("omitted_taxa", "omitted_taxa")):
+        value = static.get(metric_id)
+        if isinstance(value, bool) or not isinstance(value, (int, float)) or value != profile[artifact_key]:
+            return False
+    denominator = profile["denominator"]
+    taxon_ids = {f"taxon_{row['taxid']}_rpm" for row in profile["taxa"]}
+    if taxon_ids != {key for key in static if _METRIC.fullmatch(key)}:
+        return False
+    for row in profile["taxa"]:
+        value = static.get(f"taxon_{row['taxid']}_rpm")
+        if (denominator == 0 or isinstance(value, bool) or not isinstance(value, (int, float))
+                or not math.isfinite(value) or value < 0
+                or not math.isclose(value, row["rpm_primary"], rel_tol=1e-12, abs_tol=1e-12)
+                or not math.isclose(row["rpm_primary"], row["estimated_reads"] * 1_000_000 / denominator,
+                                    rel_tol=1e-12, abs_tol=1e-12)):
+            return False
+    estimate, rate = static.get("microbial_estimated_reads"), static.get("microbial_rpm_primary")
+    assay_unavailable = not profile["candidate_unmapped_reads"] and (
+        profile["too_short_unmapped_reads"] + profile["missing_sequence_unmapped_reads"] > 0)
+    if denominator and not assay_unavailable:
+        if (isinstance(estimate, bool) or not isinstance(estimate, (int, float))
+                or not math.isfinite(estimate)
+                or (estimate < sum(row["estimated_reads"] for row in profile["taxa"])
+                    and not math.isclose(estimate, sum(row["estimated_reads"] for row in profile["taxa"]),
+                                         rel_tol=1e-12, abs_tol=1e-12))
+                or isinstance(rate, bool) or not isinstance(rate, (int, float)) or not math.isfinite(rate)
+                or not math.isclose(rate, estimate * 1_000_000 / denominator,
+                                    rel_tol=1e-12, abs_tol=1e-12)):
+            return False
+    return True
 
 
 def _p975(values: list[float]) -> float:
@@ -146,6 +185,9 @@ def profile_for_sample(store: LabStore, sample: SampleView, generation: CohortGe
         return {"state": "stored_profile_unavailable", "reason": "Selected microbial profile is incomplete",
                 "taxa": []}
     static = {metric.metric_id: metric.value for metric in envelope.metrics}
+    if not _profile_matches_metrics(profile, static):
+        return {"state": "stored_profile_unavailable", "reason": "Selected microbial profile disagrees with its result metrics",
+                "taxa": []}
     if profile["denominator"] == 0:
         return {"state": "measurement_unavailable",
                 "reason": "No primary QC-passing non-duplicate reads; microbial rate and cohort comparison are unavailable",
