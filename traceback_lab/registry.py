@@ -49,6 +49,7 @@ ALGORITHMS: tuple[str, ...] = (
     "instability:INSTABILITY",
     "long_tail:LONG_TAIL",
     "sex_check:SEX_CHECK",
+    "dd_cfdna_chry:DD_CFDNA_CHRY",
     "identity:IDENTITY",
     "mtdna:MTDNA",
     "cell_origin:CELL_ORIGIN",

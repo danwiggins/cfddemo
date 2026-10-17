@@ -2862,3 +2862,53 @@ entries:
     meaning_low: "Lower observed chrY rate before calibration."
     headline: false
     stability: {kind: relative, tolerance: 0.1}
+  - algorithm_id: dd-cfdna-chry
+    metric_id: dd_cfdna_fraction
+    label: "Exploratory male-donor chrY fraction"
+    value_kind: proportion
+    tier: SPECULATIVE
+    origin_tier: SPECULATIVE
+    origin_platform: "male donor, female recipient, matched ONT transplant cfDNA calibration"
+    min_depth_x: null
+    reference: {kind: none}
+    performance: null
+    performance_missing_reason: "No qualified ONT donor-fraction accuracy or clinical reference interval"
+    missing_value_caption: "No operator-verified matched calibration, insufficient calibrated depth, or chrY rate outside calibration bounds."
+    meaning_high: "More non-PAR chrY reads relative to the registered female background and full male-donor response."
+    meaning_low: "Fewer non-PAR chrY reads relative to that calibration."
+    confounders: ["pregnancy", "sex chromosome variation", "alignment bias", "control mismatch", "low depth"]
+    next_steps: {analytical: ["Verify transplant assertions and calibration provenance", "Validate on matched mixtures before interpretation"], clinical_setting: null}
+    license_ids: []
+    flags: [FDA, PRIVACY]
+    headline: true
+    stability: {kind: absolute, tolerance: 0.10}
+    citations: []
+    citation_checked: {by: "Lab donor calibration review", date: "2026-10-17", note: "Linear response is an explicit operator-supplied engineering calibration, not a published clinical estimator."}
+
+  - algorithm_id: dd-cfdna-chry
+    metric_id: chry_nonpar_reads
+    label: "Eligible chrY non-PAR reads"
+    value_kind: count
+    tier: SPECULATIVE
+    reference: {kind: none}
+    performance: null
+    performance_missing_reason: "Raw supporting count, not a clinical cutoff"
+    license_ids: []
+    flags: [FDA, PRIVACY]
+    headline: false
+    stability: {kind: scales_with_depth, tolerance: 0.10}
+    citations: []
+
+  - algorithm_id: dd-cfdna-chry
+    metric_id: chry_reads_per_million
+    label: "Eligible chrY non-PAR reads per million"
+    value_kind: positive
+    tier: SPECULATIVE
+    reference: {kind: none}
+    performance: null
+    performance_missing_reason: "A matched female background is required for interpretation"
+    license_ids: []
+    flags: [FDA, PRIVACY]
+    headline: false
+    stability: {kind: relative, tolerance: 0.10}
+    citations: []
