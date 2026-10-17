@@ -58,6 +58,7 @@ ALGORITHMS: tuple[str, ...] = (
     "cell_origin:CELL_ORIGIN",
     "end_motifs:END_MOTIFS",
     "breakpoint_motifs:BREAKPOINT_MOTIFS",
+    "aligned_end_structure:ALIGNED_END_STRUCTURE",
     "delfi_ratio:DELFI_RATIO",
     "wps:WPS",
     "tss_profile:TSS_PROFILE",

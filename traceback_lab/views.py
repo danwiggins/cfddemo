@@ -394,7 +394,14 @@ def cell_state(
     if view is full:
         return {"state": "ok_usable", "value": metric.value}
     full_metric = _value(full.results.get(algorithm_id), metric_id)
-    verdict = stable(entry.stability if entry else None, _side(metric, view.fraction), _side(full_metric, 1.0))
+    spec = entry.stability if entry else None
+    if spec is None:
+        return {"state": "not_interpretable", "reason": "no_stability_verdict", "value": metric.value}
+    if spec.get("kind") == "unvalidated":
+        return {"state": "ok_unvalidated", "value": metric.value, "verdict": None}
+    verdict = stable(spec, _side(metric, view.fraction), _side(full_metric, 1.0))
+    if verdict is None:
+        return {"state": "not_interpretable", "reason": "comparison_unavailable", "value": metric.value}
     return {
         "state": "ok_usable" if verdict is True else "ok_unstable" if verdict is False else "ok_unvalidated",
         "value": metric.value,

@@ -770,7 +770,7 @@
     };
     families.forEach(([, label], i) => tabs.append(h("button", { type: "button", class: "control subtab", "aria-pressed": "false", onclick: () => show(i) }, label)));
     out.push(tabs, body);
-    const initial = ["fragment-size", "end-motifs", "delfi-ratio", "tss-profile", "long-tail", "mtdna", "breakpoint-motifs", "griffin", "lionheart"].some((id) => algo(sample, id))
+    const initial = ["fragment-size", "end-motifs", "delfi-ratio", "tss-profile", "long-tail", "mtdna", "breakpoint-motifs", "griffin", "aligned-end-structure", "lionheart"].some((id) => algo(sample, id))
       ? 0 : algo(sample, "copy-number") ? 1 : 2;
     show(initial);
     return out;
@@ -807,6 +807,42 @@
         details,
       );
     }).catch((error) => slot.replaceWith(h("p", { class: "problem" }, `4-mer table unavailable (${error.message}). The scalar result remains in Findings.`)));
+    return [section];
+  }
+
+  function alignedEndSignals(sample) {
+    const a = algo(sample, "aligned-end-structure");
+    if (!a) return [];
+    const section = h("section", { class: "panel" }, h("h2", {}, "Open-chromatin aligned ends"), flagPill("LEGAL"));
+    if (a.status !== "ok") return [section, absent(a, "aligned-end-structure")];
+    section.append(h("p", { class: "help" },
+      "Exploratory ONT aligned-span proxies, not physical cleavage validation, tissue-origin inference, or a clinical cutoff. The catalogues are pinned to hg38; published OCF and preferred-end studies used paired-end short reads."));
+    const slot = h("div", {}, h("p", {}, "Loading pinned end counts…"));
+    section.append(...context(sample, "aligned-end-structure", new Set()), slot);
+    artifact(sample, "aligned-end-structure", "aligned-end-structure").then((data) => {
+      const rows = data.offset_bp.map((bp, i) => [bp, data.u_count[i], data.d_count[i]]);
+      const spans = data.aligned_span_length_bins_bp;
+      const spanRows = spans ? [
+        ["Under 100", spans.lt100], ["100–200", spans["100_200"]], ["201–500", spans["201_500"]],
+        ["501–2000", spans["501_2000"]], ["Over 2000", spans.gt2000],
+      ] : null;
+      slot.replaceWith(h("div", {},
+        h("p", { class: "help" }, `Pinned catalogue: ${data.source_label}; centers: ${data.centers_source}; end sites: ${data.preferred_source}; terms: ${data.terms}. These operator labels identify the declared source, not independent assembly or tissue validation.`),
+        h("p", {}, `Observed eligible depth: ${fmt(data.observed_depth_x)}x; valid molecules: ${fmt(data.valid_molecules)}; eligible centers: ${fmt(data.eligible_centers)} of ${fmt(data.catalogue_centers)}; eligible pinned sites: ${fmt(data.eligible_preferred_sites)} of ${fmt(data.catalogue_preferred_sites)}.`),
+        h("p", {}, `OCF-like left/right contributions: ${fmt(data.ocf_like_left)} / ${fmt(data.ocf_like_right)} end-count differences from ${fmt(data.ocf_like_left_ends)} / ${fmt(data.ocf_like_right_ends)} ends in the two measurement windows. The score is unavailable if either window has no ends. Exact preferred-site U/D hits: ${fmt(data.preferred_u_hits)} / ${fmt(data.preferred_d_hits)} of ${fmt(data.valid_ends)} valid ends.`),
+        spanRows ? dataTable("Aligned spans by length (bp)", ["Aligned span (bp)", "Molecules"], spanRows)
+          : h("p", { class: "help" }, "Aligned-span length diagnostic was not recorded."),
+        h("p", { class: "help" }, `Left D peak offset: ${fmt(data.left_d_peak_offset_bp)} bp; right U peak offset: ${fmt(data.right_u_peak_offset_bp)} bp. These observed endpoint peaks do not measure soft clipping or validate physical cleavage.`),
+        chart("Upstream and downstream aligned-end counts around pinned hg38 centers.", {
+          grid: { left: 55, right: 20, top: 20, bottom: 40 },
+          xAxis: { type: "value", name: "bp from center", min: -100, max: 100 },
+          yAxis: { type: "value", name: "raw ends (not depth-normalized)" },
+          series: [
+            { type: "line", name: "U", showSymbol: false, data: rows.map((row) => [row[0], row[1]]) },
+            { type: "line", name: "D", showSymbol: false, data: rows.map((row) => [row[0], row[2]]) },
+          ],
+        }, dataTable("Aligned-end counts by offset", ["Offset (bp)", "U ends", "D ends"], rows))));
+    }).catch(() => slot.replaceWith(h("p", { class: "problem" }, "Pinned end-count panel could not be loaded.")));
     return [section];
   }
 
@@ -954,7 +990,7 @@
       }
       more.push(panel);
     }
-    return [section, ...more, ...tssProfileSignals(sample), ...breakpointMotifSignals(sample, seen), ...griffinSignals(sample), ...lionheartSignals(sample)];
+    return [section, ...more, ...tssProfileSignals(sample), ...breakpointMotifSignals(sample, seen), ...griffinSignals(sample), ...alignedEndSignals(sample), ...lionheartSignals(sample)];
   }
 
   function griffinSignals(sample) {

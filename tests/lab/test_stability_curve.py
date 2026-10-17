@@ -13,7 +13,7 @@ import pytest
 from traceback_lab import views
 from traceback_lab.controls import derived_plan_items
 from traceback_lab.envelope import Depth, Failure, Metric, Provenance, ResultEnvelope
-from traceback_lab.interpretation.engine import load_library
+from traceback_lab.interpretation.engine import Entry, NOT_INTERPRETABLE_REASONS, load_library
 from traceback_lab.read_summary import ReadSummary, depth_stamp, derived_mask
 from traceback_lab.registry import load_registry, plan
 from traceback_lab.stability import Side, band_at, deviation, stable
@@ -147,6 +147,31 @@ def test_all_skipped_wps_controls_are_not_called_unstable() -> None:
                  if p["algorithm_id"] == "wps" and p["metric_id"] == "qualifying_fragment_depth_x")
     assert panel["points"][0]["state"] == "skipped"
     assert panel["verdict"] == "not measured below full depth"
+def test_downsample_without_a_stability_rule_has_no_verdict() -> None:
+    metric = SimpleNamespace(metric_id="unlisted_metric", value=3, n=None, ci=None, ci_level=None)
+    result = SimpleNamespace(status="ok", metrics=[metric], depth=None)
+    full = views.InputView("full", "a" * 64, None, {}, {"unknown-algorithm": result})
+    half = views.InputView("0.5", "b" * 64, "downsample", {},
+                           {"unknown-algorithm": result}, fraction=0.5)
+    assert views.cell_state(half, full, "unknown-algorithm", "unlisted_metric", load_library()) == {
+        "state": "not_interpretable", "reason": "no_stability_verdict", "value": 3,
+    }
+    assert "no_stability_verdict" in NOT_INTERPRETABLE_REASONS
+
+
+def test_known_stability_rule_with_unavailable_full_value_is_not_comparable() -> None:
+    half_metric = SimpleNamespace(metric_id="score", value=3, n=None, ci=None, ci_level=None)
+    full_metric = SimpleNamespace(metric_id="score", value=None, n=None, ci=None, ci_level=None)
+    half = views.InputView("0.5", "b" * 64, "downsample", {},
+                           {"fixture": SimpleNamespace(status="ok", metrics=[half_metric], depth=None)}, 0.5)
+    full = views.InputView("full", "a" * 64, None, {},
+                           {"fixture": SimpleNamespace(status="ok", metrics=[full_metric], depth=None)})
+    entry = Entry("fixture", "score", {"reference": {"kind": "none"}, "value_kind": "scalar", "stability": R})
+    library = SimpleNamespace(entry=lambda algorithm_id, metric_id: entry)
+    assert views.cell_state(half, full, "fixture", "score", library) == {
+        "state": "not_interpretable", "reason": "comparison_unavailable", "value": 3,
+    }
+    assert "comparison_unavailable" in NOT_INTERPRETABLE_REASONS
 
 
 def test_deviation_and_band_units() -> None:

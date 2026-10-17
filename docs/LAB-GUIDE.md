@@ -253,6 +253,7 @@ new measurement.
 | `hypometh-reads` | among reads with ≥ 4 CpG calls, the share under 25% methylated, and U/X/M counts (≤ 25% / between / ≥ 75%); needs 500,000 eligible reads |
 | `frag-x-meth` | descriptive molecule-count matrix of aligned-size bins by per-read 5mC fraction (at least four distinct CpG sites/read); the scalar is long (151–220 bp) mean minus short (100–150 bp) mean, null if either group is empty; no normal range |
 | `breakpoint-motifs` | 4-mer counts at aligned-reference-span start and end−1, stratified by CpG proximity; the scalar is the fraction of ends near a CpG. These are not proven physical cleavage positions, and the methylation link is unavailable without a supported joint input |
+| `aligned-end-structure` | exploratory ONT aligned-span U/D end asymmetry around operator-pinned hg38 open-chromatin centers and exact support for separately pinned U/D preferred-end coordinates; needs a full native ONT input at ≥10x observed eligible depth and both catalogues registered below. No tissue-origin or clinical calibration |
 
 The Lab's cell-origin v2 execution identity pins normalized source digests of
 its MM/ML decoder and reused UXM, NNLS, bootstrap, model, and prefilter code,
@@ -374,6 +375,70 @@ results on such an Illumina input remain stored but appear as platform skips
 in sample views and the local API; rerun records those skips in the store.
 The same read-side mask applies when an old prealigned input cannot verify ONT
 provenance from its BAM.
+
+**Aligned-end catalogues.** `aligned-end-structure` requires two local,
+operator-supplied hg38 files. The center file is sorted BED3
+(`chrN<TAB>start<TAB>end`, 0-based half-open); the center is the integer
+midpoint, and centers must be more than 200 bp apart so ±100 bp profiles do
+not overlap. The preferred-end file is sorted BED4 with 0-based half-open
+one-base intervals
+and `U` or `D` in column four. `U` means the lower-coordinate aligned end;
+`D` means the higher-coordinate aligned end. Both files use chr1–chr22 and
+numeric chromosome order, contain no header or extra columns, and must each
+be at most 64 MiB. Filter raw peak files to these columns and autosomes,
+then sort numerically by chromosome and position (for example,
+`sort -k1.4,1n -k2,2n`) and thin centers before registration; the Lab does
+not silently discard overlapping peaks or convert genome builds. Confirm the
+source build and convert any 1-based source positions before registration:
+a wrong build or one-base shift can produce a plausible but incorrect score.
+A U and D site may share
+one coordinate, but duplicate sites in the same direction are rejected. Both files
+must identify their provenance outside the file, including source accession,
+release, assembly, coordinate convention and terms. The Lab validates and
+rehashes their exact bytes. It neither downloads nor redistributes them.
+
+```bash
+traceback lab asset end-catalogues-register \
+  --centers YOUR_SORTED_hg38_centers.bed \
+  --preferred YOUR_SORTED_hg38_preferred_U_D_sites.bed \
+  --source-label YOUR_SHORT_DESCRIPTION \
+  --centers-source YOUR_CENTER_ACCESSION_AND_RELEASE \
+  --preferred-source YOUR_END_SITE_ACCESSION_AND_RELEASE \
+  --terms unknown --root R
+traceback lab asset end-catalogues-inspect --root R
+```
+
+The result measures raw `D−U` end counts at integer offsets [−70, −50] bp
+and `U−D` at [50, 70] bp around pinned centers. These bounds follow the
+published OCF summation at peaks −60 and +60 with a ±10 offset. The paper
+calls them 20-bp windows, while summing both integer endpoints includes 21
+positions. This implementation follows the displayed summation literally;
+the paper does not resolve that counting convention. It also reports the
+fraction of valid aligned ends exactly matching the pinned U/D site catalogue;
+this is a support count, not de novo site discovery or enrichment against a calibrated
+background. The raw count difference scales with depth, eligible-region count
+and end coverage; it is null when no aligned ends fall in its measurement
+windows or when either side of the center lacks window observations. The
+proxy does not impose the short-fragment length constraint of the published
+cfDNA method. Its artifact reports aggregate aligned-span counts in five
+length bins so that this difference can be assessed for each run.
+The artifact also records the strongest left-side D and right-side U peak
+offsets as clipping diagnostics; these are descriptive and do not validate
+the score's biological origin.
+The 201-position raw U/D profiles and exact preferred-site support are
+sample-level derivatives. Treat the artifact as sample-identifiable data,
+especially when registering a small or targeted catalogue.
+The reported 10x minimum is an input gate, not a validated adequacy threshold.
+The score has no validated stability tolerance or biological acceptance
+interval. Its headline placement is for Lab navigation and does not imply
+clinical or tissue-origin validity. Both are ONT aligned-span proxies, not confirmed physical
+cleavage positions. The [OCF study](https://pubmed.ncbi.nlm.nih.gov/30808726/)
+used tissue-specific short-read open-chromatin signals, while the
+[size-tagged preferred-end study](https://www.pnas.org/doi/10.1073/pnas.1804134115)
+mined sites from roughly 470x pooled paired-end data. A substituted hg38
+ATAC peak set is not the original tissue-specific DNase-seq catalogue.
+Neither a 10x ONT result nor an unverified site set supports a tissue-origin,
+fetal-fraction, cancer or clinical call.
 
 **PMD asset.** `pmd-score` needs an operator-supplied Zhou 2018 hg38
 common-PMD BED.gz file. The repository does not ship or download it; its
@@ -508,7 +573,9 @@ serve as a history of every interrupted run.
   each fraction, the stability band, and split halves A/B at 50%. Each half
   shows its own status when a result is skipped, failed, or lacks a numeric
   metric; a split-half verdict appears only when both values are available
-  and the stability comparison is interpretable.
+  and the stability comparison is interpretable. When a metric lacks a
+  stability rule or numeric values, the downsample cell says no stability
+  verdict instead of calling it unstable.
 
 ## Building a Lab cohort
 
