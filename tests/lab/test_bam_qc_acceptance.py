@@ -1,0 +1,96 @@
+"""Appendix A QC formulas against small synthetic, hand-calculated cases."""
+
+from pathlib import Path
+
+import pysam
+import pytest
+
+from traceback_lab.algorithms.bam_qc import BAM_QC, gc_bias_slope
+from traceback_lab.read_summary import ReadSummary, write_summary
+from traceback_lab.registry import InputContext
+
+
+def _bam(path: Path, rows: list[tuple[int, int, int, int, int | list[int] | None]], length: int) -> ReadSummary:
+    """Rows are (start, length, flag, MAPQ, uniform or per-base Phred quality)."""
+    header = {"HD": {"VN": "1.6", "SO": "coordinate"}, "SQ": [{"SN": "chr1", "LN": length}]}
+    with pysam.AlignmentFile(str(path), "wb", header=header) as bam:
+        for index, (start, span, flag, mapq, quality) in enumerate(sorted(rows, key=lambda row: row[0])):
+            record = pysam.AlignedSegment(bam.header)
+            record.query_name = f"synthetic-qc-{index}"
+            record.query_sequence = "A" * span
+            record.flag = flag
+            record.reference_id = 0
+            record.reference_start = start
+            record.mapping_quality = mapq
+            record.cigarstring = None if flag & 0x4 else f"{span}M"
+            record.query_qualities = quality if isinstance(quality, list) or quality is None else [quality] * span
+            bam.write(record)
+    pysam.index(str(path))
+    write_summary(path, path.parent / "columns")
+    return ReadSummary.open(path.parent / "columns")
+
+
+@pytest.mark.parametrize("marked_duplicate", [False, True])
+def test_qc_primary_denominators_and_per_read_quality(tmp_path: Path, marked_duplicate: bool) -> None:
+    # Four primary records, three mapped, two mapped at MAPQ >=20.
+    # Qualities average over reads (10,30,20), not their unequal lengths.
+    _bam(tmp_path / "aligned.bam", [
+        (0, 10, 0x400 if marked_duplicate else 0, 60, [1] * 9 + [91]), (5, 100, 0, 20, 30),
+        (140, 20, 0, 19, None), (170, 10, 0x100, 60, 50),
+        (190, 10, 0x800, 60, 40), (220, 30, 0x4, 0, 20),
+    ], 1000)
+    context = InputContext(
+        root=tmp_path, source_id="a" * 64, input_id="b" * 64,
+        reference_id="toy", reference_sha256="c" * 64, input_dir=tmp_path,
+        extras={"upstream": {"read-summary": str(tmp_path)}},
+    )
+    metrics = {row["metric_id"]: row for row in BAM_QC.run(context, tmp_path).metrics}
+    expected = {
+        "total_reads": (4, 4), "mapped_fraction": (3 / 4, 4),
+        "mapq_ge20_fraction": (2 / 3, 3), "supplementary_fraction": (1 / 3, 3),
+        "mean_read_q": (20, 3),
+        # The two eligible spans overlap: count their union, not their sum.
+        "genome_ge1x_fraction": ((100 if marked_duplicate else 105) / 1000, 1000),
+    }
+    for name, (value, denominator) in expected.items():
+        assert metrics[name]["value"] == pytest.approx(value), name
+        assert metrics[name]["n"] == denominator, name
+    duplicate = metrics["duplicate_fraction"]
+    if marked_duplicate:
+        assert (duplicate["value"], duplicate["n"]) == (1 / 4, 4)
+    else:
+        assert (duplicate["value"], duplicate["n"]) == (None, None)  # unmarked is not a measured zero
+    assert metrics["gc_bias_slope"]["value"] is None  # no registered FASTA
+
+
+def test_gc_slope_uses_eligible_positive_bins_and_acgt_fraction(tmp_path: Path) -> None:
+    # GC = .3,.5,.7 with counts = 1,2,4: log2(count/median)=-1,0,1;
+    # therefore the hand-calculated OLS slope is 5 log2/GC.
+    # Other bins isolate out-of-range GC, mostly N, zero coverage, and an
+    # eligible N-containing bin whose GC must use only the ACGT denominator.
+    sequences = [
+        "G" * 300_000 + "A" * 700_000,
+        "C" * 500_000 + "T" * 500_000,
+        "G" * 700_000 + "A" * 300_000,
+        "G" * 200_000 + "A" * 800_000,
+        "G" * 300_000 + "A" * 150_000 + "N" * 550_000,
+        "G" * 400_000 + "A" * 600_000,
+        "G" * 250_000 + "A" * 350_000 + "N" * 400_000,
+    ]
+    fasta = tmp_path / "reference.fa"
+    fasta.write_text(">chr1\n" + "\n".join(sequences) + "\n", encoding="ascii")
+    pysam.faidx(str(fasta))
+    rows = [(window * 1_000_000 + index * 20, 10, 0, 60, 30)
+            for window, count in enumerate([1, 2, 4, 16, 16, 0, 2]) for index in range(count)]
+    rows.extend([(500, 10, 0x400, 60, 30), (600, 10, 0, 19, 30)])
+    summary = _bam(tmp_path / "aligned.bam", rows, 7_000_000)
+    eligible = summary.eligible()
+    slope, bins = gc_bias_slope(summary, eligible & (summary.column("start") < 6_000_000), str(fasta))
+    assert bins == 3
+    assert slope == pytest.approx(5.0)
+    # Add x=5/12, y=0. Centered cross-product is 2/5; x sum of squares
+    # is 2/25 + 1/192 = 409/4800, giving slope 1920/409.
+    slope, bins = gc_bias_slope(summary, eligible, str(fasta))
+    assert bins == 4
+    assert slope == pytest.approx(1920 / 409)
+
