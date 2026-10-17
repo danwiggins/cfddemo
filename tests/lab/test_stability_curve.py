@@ -2,13 +2,21 @@
 
 from __future__ import annotations
 
+import copy
 import json
+import math
 
 import pytest
 
 from traceback_lab import views
+from traceback_lab.controls import derived_plan_items
+from traceback_lab.envelope import Failure, Metric, ResultEnvelope
+from traceback_lab.interpretation.engine import load_library
+from traceback_lab.read_summary import ReadSummary, depth_stamp, derived_mask
+from traceback_lab.registry import load_registry, plan
 from traceback_lab.stability import Side, band_at, deviation, stable
 from traceback_lab.store import LabStore
+from traceback_lab.web.api import LabApi
 from traceback_runner import cli as signed_cli
 
 P = {"kind": "proportion"}
@@ -102,6 +110,193 @@ def test_default_run_builds_the_curve_and_controls(default_run) -> None:
     assert {panel["algorithm_id"] for panel in with_split} >= {"bam-qc", "depth", "fragment-size"}
     block = views.repeatability(panels)
     assert block["metrics"] == len([p for p in panels if p["split"]])
+    _assert_default_scalar_selection(store, sample, payload)
+
+
+def _assert_default_scalar_selection(store, sample, payload) -> None:
+    """The default selection must leave a status at every measured depth."""
+
+    library = load_library()
+    chosen = plan(load_registry())
+    full_ids = {item.algorithm.id for item in chosen}
+    assert {"read-summary", "meth-calls", "bam-qc", "depth", "fragment-size"} <= full_ids
+    derived_ids = full_ids - {"read-summary", "meth-calls"}
+    for transform in ("downsample", "split"):
+        assert {item.algorithm.id for item in derived_plan_items(chosen, transform)} == derived_ids
+    steps = {(step["input"], step["algorithm_id"]): step for step in payload["data"]["steps"]}
+    assert len(steps) == len(payload["data"]["steps"]), "a selected step was duplicated"
+    labels = {"full", "0.5", "0.25", "0.1", "split-A", "split-B"}
+    assert {label for label, _ in steps} == labels
+    assert set(sample.full.results) == full_ids
+    for algorithm_id in ("bam-qc", "depth", "fragment-size"):
+        result = sample.full.results[algorithm_id]
+        assert result.status == "ok", algorithm_id
+        headline = library.headline(algorithm_id)
+        assert headline is not None
+        assert any(metric.metric_id == headline.metric_id and metric.value is not None
+                   for metric in result.metrics)
+
+    summary_result = sample.full.results["read-summary"]
+    attempt = store.selected_attempt(sample.full.input_id, "read-summary", summary_result.provenance.parameters_sha256)
+    assert attempt is not None
+    summary = ReadSummary.open(attempt / "artifacts" / "columns")
+    all_views = [sample.full, *sample.derived]
+    assert len(all_views) == len(labels)
+    views_by_label = {view.label: view for view in all_views}
+    assert set(views_by_label) == labels
+    assert len({view.input_id for view in views_by_label.values()}) == len(labels)
+    for label, view in views_by_label.items():
+        expected_ids = full_ids if label == "full" else derived_ids
+        assert {algorithm_id for step_label, algorithm_id in steps if step_label == label} == expected_ids
+        assert set(view.results) == expected_ids, f"selected results omitted from {label}"
+        mask = derived_mask(summary, {"transform": view.transform, **view.parameters}) if label != "full" else None
+        stamp = depth_stamp(summary, mask)
+        for algorithm_id, result in view.results.items():
+            assert result.status in {"ok", "skipped", "failed"}
+            if algorithm_id in {"bam-qc", "depth", "fragment-size"}:
+                assert result.status == "ok", (label, algorithm_id, result.status)
+            assert result.status == steps[label, algorithm_id]["status"]
+            assert result.provenance.input_id == view.input_id
+            assert result.provenance.source_id == sample.source_id
+            if algorithm_id == "read-summary":
+                assert label == "full" and result.depth is None
+            else:
+                assert result.depth is not None and result.depth.eligible_reads == stamp["eligible_reads"]
+                assert result.depth.approx_depth_x == pytest.approx(stamp["approx_depth_x"])
+            if result.status == "skipped":
+                assert result.skip_reason == steps[label, algorithm_id]["skip_reason"]
+            elif result.status == "failed":
+                assert result.failure is not None
+            else:
+                headline = library.headline(algorithm_id)
+                if headline is not None and algorithm_id not in library.hidden_algorithms:
+                    assert headline.metric_id in {metric.metric_id for metric in result.metrics}
+
+    full_count = sample.full.results["bam-qc"].depth.eligible_reads
+    halves = sample.by_transform("split")
+    assert sum(view.results["bam-qc"].depth.eligible_reads for view in halves) == full_count
+    downs = sorted(sample.by_transform("downsample"), key=lambda view: view.fraction)
+    counts = [view.results["bam-qc"].depth.eligible_reads for view in downs]
+    assert counts[0] < counts[1] < counts[2] < full_count
+    assert all(abs(count / full_count - view.fraction) < min(0.08, max(0.02, 0.15 * view.fraction))
+               for count, view in zip(counts, downs))
+
+    api = LabApi(store).sample(sample.id12)
+    assert api["found"] is True and api["source_id"] == sample.source_id
+    algorithm_rows = {row["algorithm_id"]: row for row in api["algorithms"]}
+    assert len(algorithm_rows) == len(api["algorithms"])
+    assert set(algorithm_rows) == full_ids
+    for algorithm_id, row in algorithm_rows.items():
+        result = sample.full.results[algorithm_id]
+        assert row["status"] == result.status
+        assert row["provenance"]["parameters_sha256"] == result.provenance.parameters_sha256
+        assert row["provenance"]["input_id"] == sample.full.input_id
+        if result.status == "skipped":
+            assert row["skip_reason"] == result.skip_reason and row["metrics"] == []
+        elif result.status == "failed":
+            assert row["failure"] is not None and row["metrics"] == []
+        else:
+            assert {metric["metric_id"] for metric in row["metrics"]} == {metric.metric_id for metric in result.metrics}
+    catalog = {row["algorithm_id"]: row for row in api["catalog"]}
+    assert len(catalog) == len(api["catalog"])
+    assert set(catalog) == full_ids - library.hidden_algorithms
+    assert {"bam-qc", "depth", "fragment-size"} <= set(catalog)
+    assert all(row["status"] in {"ok", "skipped", "failed"} for row in catalog.values())
+    expected_curve_ids = {
+        algorithm_id for algorithm_id in full_ids - library.hidden_algorithms
+        if library.headline(algorithm_id) is not None
+    }
+    assert expected_curve_ids
+    assert {"bam-qc", "depth", "fragment-size"} <= expected_curve_ids
+    assert len(api["curve"]["rows"]) == len(expected_curve_ids)
+    assert {row["algorithm_id"] for row in api["curve"]["rows"]} == expected_curve_ids
+    before_cells = {}
+    for curve_row in api["curve"]["rows"]:
+        algorithm_id = curve_row["algorithm_id"]
+        assert curve_row["metric_id"] == library.headline(algorithm_id).metric_id
+        assert [cell["label"] for cell in curve_row["cells"]] == ["0.1", "0.25", "0.5", "full"]
+        for cell in curve_row["cells"]:
+            label = cell["label"]
+            before_cells[algorithm_id, label] = copy.deepcopy(cell)
+            view = views_by_label[label]
+            result = view.results[algorithm_id]
+            assert cell["state"] in views.CELL_STATES, (algorithm_id, label)
+            assert cell["depth_x"] == pytest.approx(view.depth_x())
+            assert result.depth is not None
+            assert cell["depth_x"] == pytest.approx(result.depth.approx_depth_x)
+            if result.status != "ok":
+                assert cell["state"] == result.status
+                assert cell.get("value") is None
+                continue
+            metric = next(metric for metric in result.metrics if metric.metric_id == curve_row["metric_id"])
+            if isinstance(metric.value, (int, float)) and not isinstance(metric.value, bool):
+                assert cell["value"] == pytest.approx(metric.value)
+            else:
+                assert cell.get("value") == metric.value
+            if algorithm_id in {"bam-qc", "depth", "fragment-size"}:
+                assert cell["state"] in {"ok_usable", "ok_unstable"}
+                assert isinstance(metric.value, (int, float)) and not isinstance(metric.value, bool)
+                assert math.isfinite(metric.value)
+        if algorithm_id == "depth":
+            xs = [cell["depth_x"] for cell in curve_row["cells"]]
+            assert xs == sorted(set(xs)), xs
+            assert xs[-1] > 0
+            assert all(abs(value / xs[-1] - fraction) < min(0.08, max(0.02, 0.15 * fraction))
+                       for value, fraction in zip(xs[:-1], (0.1, 0.25, 0.5)))
+
+    # A later selected failure or null value changes the API's measured cell;
+    # it must not fall back to the previous successful attempt or disappear.
+    for key in (("bam-qc", "0.1"), ("fragment-size", "0.25")):
+        assert before_cells[key]["state"] in {"ok_usable", "ok_unstable"}
+        assert before_cells[key]["value"] is not None
+    failure_view = views_by_label["0.1"]
+    prior = failure_view.results["bam-qc"]
+    previous_attempt = store.selected_attempt(failure_view.input_id, "bam-qc", prior.provenance.parameters_sha256)
+    assert previous_attempt is not None
+    failed = ResultEnvelope.model_validate({
+        **prior.model_dump(), "status": "failed", "metrics": [], "panels": [],
+        "failure": Failure(first_line="fixture worker failed", stderr_tail=[]).model_dump(),
+    })
+    store.publish_result(failed, input_id=failure_view.input_id)
+    selected_attempt = store.selected_attempt(failure_view.input_id, "bam-qc", prior.provenance.parameters_sha256)
+    assert selected_attempt is not None and selected_attempt != previous_attempt
+    assert previous_attempt.exists(), "the earlier success must remain a real fallback candidate"
+    null_view = views_by_label["0.25"]
+    prior = null_view.results["fragment-size"]
+    fragment_headline = library.headline("fragment-size")
+    assert fragment_headline is not None
+    previous_null_attempt = store.selected_attempt(
+        null_view.input_id, "fragment-size", prior.provenance.parameters_sha256,
+    )
+    assert previous_null_attempt is not None
+    null_result = ResultEnvelope.model_validate({
+        **prior.model_dump(), "status": "ok",
+        "metrics": [Metric(metric_id=fragment_headline.metric_id, value=None, unit="bp").model_dump()],
+        "panels": [], "failure": None,
+    })
+    store.publish_result(null_result, input_id=null_view.input_id)
+    selected_null_attempt = store.selected_attempt(
+        null_view.input_id, "fragment-size", prior.provenance.parameters_sha256,
+    )
+    assert selected_null_attempt is not None and selected_null_attempt != previous_null_attempt
+    assert previous_null_attempt.exists(), "the earlier scalar must remain a real fallback candidate"
+    updated = LabApi(store).sample(sample.id12)
+    updated_rows = {row["algorithm_id"]: row for row in updated["curve"]["rows"]}
+    assert len(updated_rows) == len(updated["curve"]["rows"])
+    assert set(updated_rows) == expected_curve_ids
+    for algorithm_id, row in updated_rows.items():
+        assert [cell["label"] for cell in row["cells"]] == ["0.1", "0.25", "0.5", "full"]
+        for cell in row["cells"]:
+            if (algorithm_id, cell["label"]) not in {("bam-qc", "0.1"), ("fragment-size", "0.25")}:
+                assert cell == before_cells[algorithm_id, cell["label"]]
+    failed_cells = {cell["label"]: cell for cell in updated_rows["bam-qc"]["cells"]}
+    null_cells = {cell["label"]: cell for cell in updated_rows["fragment-size"]["cells"]}
+    assert set(failed_cells) == set(null_cells) == {"0.1", "0.25", "0.5", "full"}
+    assert failed_cells["0.1"]["state"] == "failed"
+    assert failed_cells["0.1"]["reason"] == "fixture worker failed"
+    assert failed_cells["0.1"].get("value") is None
+    assert null_cells["0.25"]["state"] == "not_interpretable"
+    assert null_cells["0.25"]["value"] is None
 
 
 def test_rerun_is_cached_and_no_downsample_leaves_only_full(default_run, lab_world, capsys, shared_mmi) -> None:
