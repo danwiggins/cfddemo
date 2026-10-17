@@ -20,7 +20,7 @@ from ._base import Base, metric
 from ._records import eligible_record, name_predicate
 from .fragment_size import HIST_MAX, summarize
 
-_CANONICAL = re.compile(r"^chr([1-9]|1[0-9]|2[0-2]|X|Y)$")
+_CANONICAL = re.compile(r"^(?:chr)?([1-9]|1[0-9]|2[0-2]|X|Y)$")
 
 
 def _declared_illumina(bam: pysam.AlignmentFile) -> bool:
@@ -29,8 +29,7 @@ def _declared_illumina(bam: pysam.AlignmentFile) -> bool:
 
 
 def _contigs(bam: pysam.AlignmentFile) -> set[str]:
-    canonical = {name for name in bam.references if _CANONICAL.fullmatch(name)}
-    return canonical or set(bam.references)  # toy-reference parity with D21
+    return {name for name in bam.references if _CANONICAL.fullmatch(name)}
 
 
 def _tlen_counts(ctx: InputContext) -> dict[int, int]:
@@ -40,6 +39,8 @@ def _tlen_counts(ctx: InputContext) -> dict[int, int]:
         if not _declared_illumina(bam):
             raise RuntimeError("short-read BAM no longer declares one Illumina platform")
         contigs = _contigs(bam)
+        if not contigs:
+            raise RuntimeError("short-read BAM has no canonical nuclear contigs")
         for record in bam.fetch(until_eof=True):
             if not (
                 record.is_paired and record.is_proper_pair and record.is_read1
@@ -86,6 +87,8 @@ class ShortReadFragmentSize(Base):
             with pysam.AlignmentFile(str(ctx.input_dir / "aligned.bam"), "rb") as bam:
                 if not _declared_illumina(bam):
                     return Skip("platform", "all BAM read groups must declare PL:ILLUMINA")
+                if not _contigs(bam):
+                    return Skip("reference", "short-read TLEN needs canonical hg38 nuclear contigs")
         except (OSError, ValueError):
             return Skip("platform", "short-read TLEN needs a readable prealigned BAM")
         return Ready()
