@@ -104,3 +104,58 @@ def test_fragment_density_line_values_match_adjacent_table_without_animation(rou
     assert chart["adjacent"] and chart["animation"] is False
     assert chart["points"] == [[50, 2], [167, 10], [700, 3]]
     assert [[float(value) for value in row] for row in chart["rows"]] == chart["points"]
+
+
+@needs_chrome
+def test_genome_copy_number_points_match_unmasked_table_bins_in_genome_order(tmp_path) -> None:
+    bins = [
+        {"chr": "chr1", "start": 0, "end": 1000, "log2": 0.25, "mask": None},
+        {"chr": "chr1", "start": 1000, "end": 2000, "log2": None, "mask": "low_mappability"},
+        {"chr": "chr2", "start": 0, "end": 500, "log2": -0.5, "mask": None},
+    ]
+    observed = {}
+    with _server(tmp_path, _sample()) as server:
+        server.app.api.artifact = lambda id12, label, algorithm_id, panel_id: (
+            json.dumps({"bins": bins}).encode() if (id12, label, algorithm_id, panel_id) ==
+            (ID12, "full", "copy-number", "genome-track") else None
+        )
+        profile = Path(tmp_path / "browser-profile")
+
+        def inspect(_command, evaluate) -> None:
+            observed.update(evaluate("""(() => {
+              const wrap = [...document.querySelectorAll('#main .chart-wrap')].find((item) =>
+                item.querySelector('.echart[aria-label*="Copy-number log2 ratio"]'));
+              const chart = wrap.querySelector('.echart');
+              const table = wrap.querySelector(':scope > details.chart-table table');
+              const option = window.echarts.getInstanceByDom(chart).getOption();
+              return {
+                adjacent: wrap.children[0] === chart && wrap.children[1].contains(table),
+                animation: option.animation,
+                points: option.series.filter((series) => series.type === 'scatter').flatMap((series) => series.data),
+                rows: [...table.querySelectorAll('tbody tr')].map((row) =>
+                  [...row.querySelectorAll('td')].map((cell) => cell.textContent.trim())),
+              };
+            })()"""))
+
+        _dom_cdp(
+            [_chrome(), "--headless=new", "--disable-gpu", "--no-first-run",
+             f"--user-data-dir={profile}", server.issue_link() + f"&route=/sample/{ID12}/signals"],
+            profile,
+            ok=lambda dom: 'data-ready="1"' in dom and 'Copy-number bins' in dom and 'data-rendered="1"' in dom,
+            action="[...document.querySelectorAll('#main .subtab')].find((item) => item.textContent === 'Copy number').click()",
+            interact=inspect,
+        )
+    assert observed["adjacent"] and observed["animation"] is False
+    assert len(observed["rows"]) == len(bins)
+    offsets = {}
+    cursor = 0
+    expected = []
+    for chromosome, start, end, log2, _mask in observed["rows"]:
+        beginning = int(start.replace(",", ""))
+        ending = int(end.replace(",", ""))
+        if chromosome not in offsets:
+            offsets[chromosome] = cursor
+        cursor = max(cursor, offsets[chromosome] + ending)
+        if log2 != "—":
+            expected.append([(offsets[chromosome] + beginning) / 1_000_000, float(log2)])
+    assert observed["points"] == expected == [[0.0, 0.25], [0.002, -0.5]]

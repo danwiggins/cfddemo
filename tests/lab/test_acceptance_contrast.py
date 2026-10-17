@@ -7,11 +7,10 @@ from pathlib import Path
 
 import pytest
 
-from tests.web.longitudinal_env import _contrast
 from tests.lab.test_acceptance_synthetic_routes import ID12, _sample, _server
 from tests.lab.test_lab_server import _chrome, _dom_cdp
 from tests.lab.test_landing import needs_chrome
-
+from tests.web.longitudinal_env import _contrast
 
 ROOT = Path(__file__).resolve().parents[2]
 BASE = (ROOT / "traceback_runner/web/static/styles.css").read_text()
@@ -67,21 +66,40 @@ def _rgb_hex(value: str) -> str:
 @needs_chrome
 def test_rendered_lab_badge_text_has_computed_4_5_to_1_contrast(tmp_path) -> None:
     rendered = []
+    translucent_probe = []
     with _server(tmp_path, _sample()) as server:
         profile = tmp_path / "browser-profile"
 
         def inspect(_command, evaluate) -> None:
-            rendered.extend(evaluate("""(() => [...document.querySelectorAll('#main .flag-pill, #main .state-chip, #main .tier, #main .unverified')].map((node) => {
+            expression = """(() => [...document.querySelectorAll('#main .flag-pill, #main .state-chip, #main .tier, #main .unverified')].map((node) => {
               const style = getComputedStyle(node);
-              const opaque = (color) => /^rgb\\(/.test(color) || /^rgba\\([^)]*,\\s*1(?:\\.0+)?\\)$/.test(color);
+              const alpha = (color) => {
+                if (/^rgb\\(/.test(color)) return 1;
+                const match = color.match(/^rgba\\([^)]*,\\s*([0-9.]+)\\)$/);
+                return match ? Number(match[1]) : NaN;
+              };
               let ancestor = node;
               let background = 'transparent';
-              while (ancestor && !opaque(background)) {
-                background = getComputedStyle(ancestor).backgroundColor;
+              let partial = false;
+              let unknown = false;
+              while (ancestor) {
+                const layer = getComputedStyle(ancestor).backgroundColor;
+                const opacity = alpha(layer);
+                if (!Number.isFinite(opacity)) unknown = true;
+                if (opacity > 0 && opacity < 1) partial = true;
+                if (opacity === 1) { background = layer; break; }
                 ancestor = ancestor.parentElement;
               }
-              return {kind: node.className, foreground: style.color, background, opaque: opaque(background)};
-            }))()"""))
+              return {kind: node.className, foreground: style.color, background,
+                opaque: alpha(background) === 1, partial, unknown};
+            }))()"""
+            rendered.extend(evaluate(expression))
+            evaluate("""(() => {
+              const chip = document.querySelector('#main .state-chip');
+              chip.style.backgroundColor = 'rgba(0, 0, 0, 0.5)';
+              chip.style.color = 'rgb(118, 118, 118)';
+            })()""")
+            translucent_probe.extend(evaluate(expression))
 
         _dom_cdp(
             [_chrome(), "--headless=new", "--disable-gpu", "--no-first-run",
@@ -93,8 +111,11 @@ def test_rendered_lab_badge_text_has_computed_4_5_to_1_contrast(tmp_path) -> Non
     assert any("flag-pill" in kind for kind in kinds)
     assert any("state-chip" in kind for kind in kinds)
     assert any("tier" in kind for kind in kinds)
+    assert _contrast("#767676", "#ffffff") >= 4.5
+    assert any(item["partial"] and item["foreground"] == "rgb(118, 118, 118)"
+               for item in translucent_probe if "state-chip" in item["kind"])
     for item in rendered:
-        assert item["opaque"], item
+        assert item["opaque"] and not item["partial"] and not item["unknown"], item
         assert _contrast(_rgb_hex(item["foreground"]), _rgb_hex(item["background"])) >= 4.5, item
 
 

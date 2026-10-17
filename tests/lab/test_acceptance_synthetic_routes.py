@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import copy
+import json
 import re
 import time
 from html.parser import HTMLParser
@@ -17,7 +18,6 @@ from traceback_lab.registry import load_registry
 from traceback_lab.store import LabStore
 from traceback_lab.web.api import _catalog
 from traceback_lab.web.server import RunningLabServer
-
 
 ID12 = "3f9a1c2b7e04"
 LIBRARY = load_library()
@@ -189,7 +189,7 @@ def test_every_registry_license_has_one_callout_on_disclosure_route(route, tmp_p
     if route == "home":
         assert dom.index("License callouts") < dom.index('id="license-')
     if route == "findings":
-        cards = re.findall(r'<article class="finding-card">(.*?)</article>', dom, re.S)
+        cards = re.findall(r'<article class="finding-card">(.*?)</article>', dom, re.DOTALL)
         assert len(cards) == sum(len(a["metrics"]) for a in sample["algorithms"])
         for card in cards:
             assert card.count('class="tier ') == 1
@@ -204,7 +204,7 @@ def test_every_registered_metric_flag_is_on_its_finding_card(tmp_path) -> None:
     sample = _sample()
     with _server(tmp_path, sample) as server:
         dom = _dom(server, tmp_path / "browser", route=f"/sample/{ID12}/findings")
-    cards = re.findall(r'<article class="finding-card">(.*?)</article>', dom, re.S)
+    cards = re.findall(r'<article class="finding-card">(.*?)</article>', dom, re.DOTALL)
     assert len(cards) == sum(len(a["metrics"]) for a in sample["algorithms"])
     for algorithm in sample["algorithms"]:
         for metric in algorithm["metrics"]:
@@ -292,7 +292,7 @@ STATE_CASES = [
     ("pre-cohort", "findings", "eligible cohort n = 0 of 10 needed"),
     ("invalid-library", "trust-qc", "Interpretation library on disk is invalid"),
     ("unknown-sample", "findings", "No Lab sample matches aaaaaaaaaaaa."),
-    ("chart-failed", "signals", "Chart could not be drawn"),
+    ("chart-failed", "signals", "Chart could not be drawn (synthetic renderer failure)"),
 ]
 
 
@@ -319,9 +319,21 @@ def test_synthetic_state_copy_on_surface(state, route, copy_text, tmp_path) -> N
     target = "aaaaaaaaaaaa" if state == "unknown-sample" else ID12
     path = None if route == "home" else f"/sample/{target}/{route}"
     with _server(tmp_path, sample) as server:
+        if state == "chart-failed":
+            density = json.dumps({"span_bp": [49, 50, 167, 700, 701], "count": [1, 2, 3, 4, 5]}).encode()
+            server.app.api.artifact = lambda id12, label, algorithm_id, panel_id: (
+                density if (id12, label, algorithm_id, panel_id) ==
+                (ID12, "full", "fragment-size", "size-density") else None
+            )
+            kind, _ = server.app.assets["/assets/vendor/echarts.min.js"]
+            server.app.assets["/assets/vendor/echarts.min.js"] = (
+                kind, b"window.echarts={init(){throw new Error('synthetic renderer failure')}};",
+            )
         dom = _dom(server, tmp_path / "browser", route=path,
                    want=lambda d: copy_text in d if state == "chart-failed" else 'data-ready="1"' in d)
     assert copy_text in dom, (state, route)
+    if state == "chart-failed":
+        assert "Data table" in dom and "167" in dom
     if state == "partial-exit-8" and route == "findings":
         assert "Details in Trust/QC" in dom
 
