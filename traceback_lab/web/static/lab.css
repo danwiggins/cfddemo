@@ -91,6 +91,7 @@ pre.stderr { white-space: pre-wrap; overflow-wrap: anywhere; font-size: .85rem; 
 .strip-tick { stroke: var(--chart-hatch); }
 .strip-mark { fill: var(--this-run); font-size: 16px; }
 .strip-member { fill: var(--chart-a); }
+.cutoff-whisker .cohort-band { stroke: var(--chart-b); stroke-width: 2; }
 .multiples { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: .75rem; }
 .multiple { margin: 0; padding: .5rem; background: #ffffff; border: 1px solid var(--rule); border-radius: .35rem; }
 .multiple-svg { width: 100%; height: auto; }

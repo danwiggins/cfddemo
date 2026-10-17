@@ -375,11 +375,26 @@
     }
     if (metric.percentile !== null && metric.percentile !== undefined) {
       const x = (p) => 10 + (p / 100) * (width - 20);
+      const interval = Array.isArray(metric.interval) && metric.interval.length === 2 &&
+        metric.interval.every(Number.isFinite) ? metric.interval : null;
+      const values = [Number(metric.value), ...(metric.cohort_values || []), ...(interval || [])].filter(Number.isFinite);
+      const low = Math.min(...values), high = Math.max(...values);
+      const valueX = (v) => 110 + ((v - low) / (high - low || 1)) * 200;
       return h("figure", { class: "strip" }, svg("svg", { viewBox: `0 0 ${width} ${height}`, role: "img", "aria-label": metric.caption, class: "strip-svg" },
         svg("title", {}, metric.caption),
         svg("rect", { x: x(5), y: 10, width: x(95) - x(5), height: 14, class: "strip-band" }),
         ...[1, 5, 95, 99].map((p) => svg("line", { x1: x(p), x2: x(p), y1: 6, y2: 28, class: "strip-tick" })),
-        svg("text", { x: x(metric.percentile), y: 22, class: "strip-mark", "text-anchor": "middle" }, "◆")), h("figcaption", {}, metric.caption));
+        svg("text", { x: x(metric.percentile), y: 22, class: "strip-mark", "text-anchor": "middle" }, "◆")),
+        interval ? svg("svg", { viewBox: "0 0 320 52", role: "img",
+          "aria-label": `95th-percentile cutoff: 90% bootstrap interval ${fmt(interval[0], metric.unit)} to ${fmt(interval[1], metric.unit)}; separate value scale`, class: "strip-svg cutoff-whisker" },
+          svg("title", {}, "95th-percentile cutoff bootstrap interval on the metric value scale"),
+          svg("text", { x: 6, y: 17, class: "axis" }, "Cutoff CI"),
+          svg("line", { x1: valueX(interval[0]), x2: valueX(interval[1]), y1: 14, y2: 14, class: "cohort-band" }),
+          ...interval.map((end) => svg("line", { x1: valueX(end), x2: valueX(end), y1: 8, y2: 20, class: "cohort-band" })),
+          svg("text", { x: 6, y: 43, class: "axis" }, "This sample"),
+          svg("text", { x: valueX(Number(metric.value)), y: 43, "text-anchor": "middle", class: "strip-mark" }, "◆")) : "",
+        h("figcaption", {}, metric.caption, interval
+          ? ` Cutoff CI: ${fmt(interval[0], metric.unit)}–${fmt(interval[1], metric.unit)} on a separate value scale.` : ""));
     }
     return h("p", { class: "help" }, metric.caption || (ref.kind === "none" ? "No published reference." : ""));
   }
@@ -941,18 +956,27 @@
     const mode = value(sample, "fragment-size", "mode_bp");
     const mt = value(sample, "mtdna", "chrm_fraction");
     const pairs = [
-      ["Size mode vs copy-number TF", "fragment-size mode (bp)", mode, "tumour fraction", tf],
-      ["mtDNA fraction vs copy-number TF", "chrM fraction", mt, "tumour fraction", tf],
+      ["size-cn", "Size mode vs copy-number TF", "fragment-size mode (bp)", mode, "tumour fraction", tf],
+      ["mtdna-cn", "mtDNA fraction vs copy-number TF", "chrM fraction", mt, "tumour fraction", tf],
     ];
-    for (const [title, xLabel, xValue, yLabel, yValue] of pairs) {
+    for (const [pairId, title, xLabel, xValue, yLabel, yValue] of pairs) {
       const section = h("section", { class: "panel" }, h("h2", {}, title), flagPill("FDA"));
+      const cohort = (sample.agreement_pairs || []).find((row) => row.pair_id === pairId);
+      const points = cohort && cohort.state === "ready" ? cohort.points : [];
+      const cohortText = points.length
+        ? `${points.length} compatible paired cohort ${points.length === 1 ? "source" : "sources"} from ${cohort.cohort_version}; this source is excluded. Descriptive points, not a reference interval.`
+        : `Cohort points unavailable (${cohort ? cohort.state.replace(/_/g, " ") : "no pinned pair data"}).`;
       if (xValue === null || yValue === null) {
-        section.append(h("p", { class: "empty" }, `Needs both signals at full depth (${xValue === null ? xLabel : yLabel} missing). Cohort samples are plotted once the kit cohort exists (n = ${sample.cohort_n}).`));
+        section.append(h("p", { class: "empty" }, `Needs both signals at full depth (${xValue === null ? xLabel : yLabel} missing). ${cohortText}`));
       } else {
-        section.append(chart(`${title}: this sample at ${fmt(xValue)} and ${fmt(yValue)}; no cohort samples yet.`, {
+        section.append(h("p", { class: "help" }, cohortText), chart(`${title}: this sample at ${fmt(xValue)} and ${fmt(yValue)}; ${cohortText}`, {
           grid: { left: 60, right: 20, top: 20, bottom: 40 }, xAxis: { type: "value", name: xLabel, scale: true }, yAxis: { type: "value", name: yLabel, min: 0 },
-          series: [{ type: "scatter", symbolSize: 12, data: [[xValue, yValue]], itemStyle: { color: "#8a4b08" } }],
-        }, dataTable(title, ["Sample", xLabel, yLabel], [[sample.id12, xValue, yValue]])));
+          series: [
+            { type: "scatter", name: "Paired cohort", symbolSize: 6, data: points.map((p) => [p.x, p.y]), itemStyle: { color: "#7892a1" } },
+            { type: "scatter", name: "This sample", symbolSize: 12, data: [[xValue, yValue]], itemStyle: { color: "#8a4b08" } },
+          ],
+        }, dataTable(`${title}; ${cohortText}`, ["Sample", xLabel, yLabel],
+          [[`${sample.id12} (this sample)`, xValue, yValue], ...points.map((p) => [p.source_id.slice(0, 12), p.x, p.y])])));
       }
       out.push(section);
     }
