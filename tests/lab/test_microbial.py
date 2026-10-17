@@ -88,6 +88,25 @@ def test_production_cohort_snapshot_excludes_unassayable_and_changed_db(tmp_path
 
     db_digest[0] = "e" * 64
     assert [result.algorithm_id for result in cohorts._selected_results(store, input_id, manifest)] == ["read-summary"]
+    new_identity = execution_identity(
+        microbial, reference_sha256=reference_sha, asset_sha256s=db_digest,
+        upstream=[{"algorithm_id": "read-summary", "parameters_sha256": summary_identity}],
+    )
+    store.publish_result(ResultEnvelope(
+        algorithm_id="microbial", algorithm_version="3", status="ok",
+        provenance=provenance(tool="fixture", parameters_sha256=new_identity, source_id=source_id,
+                              input_id=input_id, reference_id="synthetic"),
+        metrics=[Metric(metric_id="primary_reads", value=100),
+                 Metric(metric_id="candidate_unmapped_reads", value=0),
+                 Metric(metric_id="too_short_unmapped_reads", value=0),
+                 Metric(metric_id="missing_sequence_unmapped_reads", value=0),
+                 Metric(metric_id="microbial_rpm_primary", value=0.0)],
+    ), input_id=input_id)
+    changed = cohorts._selected_results(store, input_id, manifest)[1]
+    assert changed.parameters_sha256 == new_identity
+    assert changed.cohort_compat_key != selected[1].cohort_compat_key
+    assert (cohorts._selected_results(store, input_id, aligned)[1].cohort_compat_key
+            != changed.cohort_compat_key)
 
     db_digest[0] = "d" * 64
     store.publish_result(ResultEnvelope(
@@ -134,13 +153,27 @@ def test_sample_page_uses_bounded_receipt_and_reports_changed_database(tmp_path,
         "too_short_unmapped_reads": 0, "missing_sequence_unmapped_reads": 0,
         "omitted_taxa": 0, "taxa": [],
     }))
-    monkeypatch.setattr(view, "_tool", lambda name: (name, "e" * 64))
+    tool_calls = []
+    def pinned_tool(name):
+        tool_calls.append(name)
+        return name, "e" * 64
+    monkeypatch.setattr(view, "_tool", pinned_tool)
     monkeypatch.setattr(view, "resolve_reference", lambda *_args, **_kwargs: SimpleNamespace(sha256="f" * 64))
-    monkeypatch.setattr(view, "execution_identity", lambda *_args, **_kwargs: identity)
+    def pinned_identity(*_args, **kwargs):
+        assert kwargs["tool_pins"] == [
+            view.ToolPin("kraken2", "e" * 64, "kraken2-mit").identity(),
+            view.ToolPin("bracken", "e" * 64, "bracken-gpl3").identity(),
+        ]
+        return identity
+    monkeypatch.setattr(view, "execution_identity", pinned_identity)
     monkeypatch.setattr(store, "selected_artifacts", lambda *_args: artifacts)
     monkeypatch.setattr(db, "_digest_file", lambda _path: pytest.fail("page streamed database bytes"))
 
     assert profile_for_sample(store, sample, None, None, "not_built")["state"] == "cohort_unavailable"
+    assert tool_calls == ["kraken2", "bracken"]
+    missing_summary = SampleView(source, source[:12], False,
+                                 InputView("full", input_id, None, {}, {"microbial": measured}))
+    assert profile_for_sample(store, missing_summary, None, None, "not_built")["state"] == "upstream_unavailable"
     (directory / "hash.k2d").write_bytes(b"changed and different sized bytes")
     assert profile_for_sample(store, sample, None, None, "not_built")["state"] == "asset_unavailable"
     (directory / "hash.k2d").unlink()

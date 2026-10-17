@@ -16,7 +16,7 @@ from .ingest import resolve_reference
 from .interpretation.engine import COHORT_MIN
 from .microbial_db import MicrobialDbError, inspect_database
 from .problems import LabProblem
-from .registry import execution_identity
+from .registry import ToolPin, execution_identity
 from .store import LabStore
 from .views import SampleView
 
@@ -105,18 +105,26 @@ def profile_for_sample(store: LabStore, sample: SampleView, generation: CohortGe
     if envelope.status != "ok":
         return {"state": "measurement_unavailable", "reason": envelope.skip_message or "Microbial measurement unavailable",
                 "taxa": []}
-    if _tool("kraken2") is None or _tool("bracken") is None:
+    kraken = _tool("kraken2")
+    bracken = _tool("bracken")
+    if kraken is None or bracken is None:
         return {"state": "tool_unavailable", "reason": "Kraken2/Bracken tools or required upstream source-install helpers are unavailable; restore the pinned toolchain",
+                "taxa": []}
+    summary = sample.full.results.get("read-summary")
+    if summary is None or summary.status != "ok":
+        return {"state": "upstream_unavailable", "reason": "Selected read summary is unavailable; rerun it before viewing this microbial profile",
                 "taxa": []}
     try:
         database = inspect_database(store, verify_bytes=False)
         reference = resolve_reference(store.root, envelope.provenance.reference_id, example=True)
-        upstream = sample.full.results["read-summary"].provenance.parameters_sha256
+        upstream = summary.provenance.parameters_sha256
         expected = execution_identity(
             MICROBIAL, reference_sha256=reference.sha256, asset_sha256s=[database.sha256],
             upstream=[{"algorithm_id": "read-summary", "parameters_sha256": upstream}],
+            tool_pins=[ToolPin("kraken2", kraken[1], "kraken2-mit").identity(),
+                       ToolPin("bracken", bracken[1], "bracken-gpl3").identity()],
         )
-    except (MicrobialDbError, LabProblem, OSError, ValueError, KeyError):
+    except (MicrobialDbError, LabProblem, OSError, ValueError):
         return {"state": "asset_unavailable", "reason": "Pinned microbial database or reference is unavailable",
                 "taxa": []}
     if (envelope.provenance.source_id != sample.source_id or envelope.provenance.input_id != sample.full.input_id
