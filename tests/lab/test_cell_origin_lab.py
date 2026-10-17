@@ -75,6 +75,17 @@ def _publish_cohort_cell_origin(store: LabStore, *, index: int, algorithm: co.Ce
     }), encoding="utf-8")
     input_dir = store.inputs_dir / input_id
     input_dir.mkdir(parents=True, exist_ok=True)
+    with pysam.AlignmentFile(str(input_dir / "aligned.bam"), "wb", header={
+        "HD": {"VN": "1.6"}, "SQ": [{"SN": "chr1", "LN": 100}],
+        "RG": [{"ID": "ont", "PL": "ONT"}],
+    }) as bam:
+        read = pysam.AlignedSegment()
+        read.query_name = "fixture-read"
+        read.query_sequence = "A"
+        read.flag = 4
+        read.query_qualities = pysam.qualitystring_to_array("I")
+        read.set_tag("RG", "ont")
+        bam.write(read)
     (input_dir / "manifest.json").write_text(json.dumps({
         "kind": "aligned", "source_id": source_id, "input_id": input_id,
         "reference_sha256": reference_sha256,
@@ -82,22 +93,39 @@ def _publish_cohort_cell_origin(store: LabStore, *, index: int, algorithm: co.Ce
         "mmi_sha256": "b" * 64, "aligner_argv": ["minimap2", "-ax", "map-ont"],
     }), encoding="utf-8")
     read_hash = execution_identity(READ_SUMMARY, reference_sha256=reference_sha256)
+    read_plan = {
+        "schema": "traceback.lab.execution-plan.v1",
+        "algorithm_id": READ_SUMMARY.id, "algorithm_version": READ_SUMMARY.version,
+        "input_id": input_id, "reference_sha256": reference_sha256,
+        "platform": "ont", "parameters": READ_SUMMARY.parameters,
+        "tools": [tool.identity() for tool in READ_SUMMARY.tools],
+        "asset_sha256s": [], "upstream": [],
+    }
     store.publish_result(ResultEnvelope(
         algorithm_id=READ_SUMMARY.id, algorithm_version=READ_SUMMARY.version, status="ok",
         provenance=provenance(tool="fixture", parameters_sha256=read_hash,
                               source_id=source_id, input_id=input_id, reference_id="hg38"),
-    ), input_id=input_id)
+    ), input_id=input_id, execution_plan=read_plan)
+    tools = [tool.identity() for tool in algorithm.tools]
+    assets = algorithm.asset_sha256s(store.root)
+    upstream = [{"algorithm_id": READ_SUMMARY.id, "parameters_sha256": read_hash}]
     cell_hash = execution_identity(
         algorithm, reference_sha256=reference_sha256,
-        upstream=[{"algorithm_id": READ_SUMMARY.id, "parameters_sha256": read_hash}],
-        asset_sha256s=algorithm.asset_sha256s(store.root),
+        upstream=upstream, asset_sha256s=assets, tool_pins=tools,
     )
+    plan = {
+        "schema": "traceback.lab.execution-plan.v1",
+        "algorithm_id": algorithm.id, "algorithm_version": algorithm.version,
+        "input_id": input_id, "reference_sha256": reference_sha256,
+        "platform": "ont", "parameters": algorithm.parameters,
+        "tools": tools, "asset_sha256s": assets, "upstream": upstream,
+    }
     store.publish_result(ResultEnvelope(
         algorithm_id="cell-origin", algorithm_version=algorithm.version, status="ok",
         provenance=provenance(tool="fixture", parameters_sha256=cell_hash,
                               source_id=source_id, input_id=input_id, reference_id="hg38"),
         metrics=[Metric(metric_id="classified_fragments", value=100)],
-    ), input_id=input_id)
+    ), input_id=input_id, execution_plan=plan)
     return source_id, cell_hash
 
 
@@ -110,23 +138,28 @@ def test_cohort_reads_recorded_parser_pin_after_reader_upgrade(tmp_path, monkeyp
     ))
     first, first_hash = _publish_cohort_cell_origin(store, index=1, algorithm=co.CELL_ORIGIN)
     second, second_hash = _publish_cohort_cell_origin(store, index=2, algorithm=reader_b)
+    third, third_hash = _publish_cohort_cell_origin(store, index=3, algorithm=co.CELL_ORIGIN)
     assert first_hash != second_hash
+    assert first_hash == third_hash
     monkeypatch.setattr(cohorts, "load_registry", lambda: (READ_SUMMARY, reader_b))
     member = cohorts.member_from_store(store, first)
     selected = {row.algorithm_id: row for row in member.results}
     assert selected["cell-origin"].parameters_sha256 == first_hash
     cohorts.add_sample(store, "parser-cohort", first)
     cohorts.add_sample(store, "parser-cohort", second)
+    cohorts.add_sample(store, "parser-cohort", third)
     generation = cohorts.build_cohort(store, "parser-cohort")
     by_source = {row.source_id: row for row in generation.members}
     first_result = next(row for row in by_source[first].results if row.algorithm_id == "cell-origin")
     second_result = next(row for row in by_source[second].results if row.algorithm_id == "cell-origin")
+    third_result = next(row for row in by_source[third].results if row.algorithm_id == "cell-origin")
     assert first_result.cohort_compat_key != second_result.cohort_compat_key
+    assert first_result.cohort_compat_key == third_result.cohort_compat_key
     projected = cohorts.project_sample_metric(
         store, "parser-cohort", target_source_id=first,
         algorithm_id="cell-origin", metric_id="classified_fragments",
     )
-    assert projected is not None and projected.percentile_n == 0
+    assert projected is not None and projected.percentile_n == 1
     assert projected.exclusions == {"self": 1, "incompatible": 1}
 
 
