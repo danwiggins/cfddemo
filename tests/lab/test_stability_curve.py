@@ -9,6 +9,7 @@ from unittest.mock import patch
 import pytest
 
 from traceback_lab import views
+from traceback_lab.envelope import ResultEnvelope, provenance
 from traceback_lab.stability import Side, band_at, deviation, stable
 from traceback_lab.store import LabStore
 from traceback_runner import cli as signed_cli
@@ -201,6 +202,48 @@ def test_stale_derived_results_are_not_compared(default_run) -> None:
             assert view.results["fragment-size"].provenance.parameters_sha256 == full_identity
     rows = views.selected_results(store, sample.derived[0].input_id, {"fragment-size": "0" * 64})
     assert rows == {}
+
+
+def test_damaged_split_selection_is_explained_by_loaded_sample(tmp_path) -> None:
+    store = LabStore(tmp_path)
+    store.ensure()
+    source_id, full_id, split_id, identity = (character * 64 for character in "abcd")
+    manifest = store.inputs_dir / full_id / "manifest.json"
+    manifest.parent.mkdir(parents=True)
+    manifest.write_text('{"kind":"prealigned"}')
+    store.sources_dir.mkdir(parents=True, exist_ok=True)
+    (store.sources_dir / f"{source_id}.json").write_text(json.dumps({
+        "source_id": source_id,
+        "inputs": [{"input_id": full_id, "used_utc": "2026-10-16T00:00:00Z"}],
+        "derived": [{"input_id": split_id, "parent_input_id": full_id,
+                     "transform": "split", "label": "split-A", "parameters": {"half": "A"}}],
+    }))
+    for input_id in (full_id, split_id):
+        envelope = ResultEnvelope.model_validate({
+            "algorithm_id": "fragment-size", "algorithm_version": "1", "status": "ok",
+            "provenance": provenance(
+                tool="test", parameters_sha256=identity, source_id=source_id,
+                input_id=input_id, reference_id="ref", timestamp_utc="2026-10-16T00:00:00Z",
+            ),
+            "metrics": [{"metric_id": "mode_bp", "value": 167.0}],
+        })
+        store.publish_result(envelope, input_id=input_id)
+    sample = views.load_sample(store, source_id)
+    assert sample is not None
+    split = next(item for item in sample.derived if item.transform == "split")
+    selector = store.result_dir(split.input_id, "fragment-size", identity) / "selected.json"
+    selection = json.loads(selector.read_bytes())
+    selection["attempt_id"] = "../../invalid"
+    selector.write_text(json.dumps(selection))
+
+    reloaded = views.load_sample(store, source_id)
+    assert reloaded is not None
+    damaged = next(item for item in reloaded.derived if item.input_id == split.input_id)
+    assert "fragment-size" in damaged.unreadable
+    status = views._split_half_status(damaged, "fragment-size", "mode_bp", 167.0,
+                                      {"kind": "relative", "tolerance": 0.1})
+    assert status["state"] == "unavailable"
+    assert status["reason"] == "result unreadable"
 
 
 def test_usable_to_agrees_with_the_curve(default_run) -> None:

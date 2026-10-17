@@ -37,7 +37,8 @@ _TIER_ORDER = {"PROVEN": 0, "NEWER": 1, "SPECULATIVE": 2, None: 3}
 
 
 def selected_results(
-    store: LabStore, input_id: str, identities: Mapping[str, str] | None = None
+    store: LabStore, input_id: str, identities: Mapping[str, str] | None = None,
+    *, issues: dict[str, set[str]] | None = None,
 ) -> dict[str, ResultEnvelope]:
     """The selected result per algorithm for one input.
 
@@ -88,6 +89,9 @@ def selected_results(
                 ambiguous.discard(algorithm_dir.name)
             elif order == current[0]:
                 ambiguous.add(algorithm_dir.name)
+    if issues is not None:
+        issues["unreadable"] = unreadable
+        issues["ambiguous"] = ambiguous - unreadable
     return {
         key: value for key, (_, value) in out.items()
         if key not in ambiguous and key not in unreadable
@@ -102,6 +106,8 @@ class InputView:
     parameters: Mapping[str, Any]
     results: dict[str, ResultEnvelope]
     fraction: float = 1.0
+    unreadable: set[str] = field(default_factory=set)
+    ambiguous: set[str] = field(default_factory=set)
 
     def depth_x(self) -> float | None:
         for envelope in self.results.values():
@@ -139,14 +145,17 @@ def load_sample(store: LabStore, source_id: str) -> SampleView | None:
         if entry.get("parent_input_id") != full_input:
             continue
         fraction = 0.5 if entry["transform"] == "split" else float(entry["parameters"].get("fraction", 1.0))
+        issues: dict[str, set[str]] = {}
         derived.append(
             InputView(
                 entry["label"],
                 entry["input_id"],
                 entry["transform"],
                 entry.get("parameters", {}),
-                selected_results(store, entry["input_id"], identities),
+                selected_results(store, entry["input_id"], identities, issues=issues),
                 fraction=fraction if entry["transform"] in ("downsample", "split") else 1.0,
+                unreadable=issues.get("unreadable", set()),
+                ambiguous=issues.get("ambiguous", set()),
             )
         )
     try:
