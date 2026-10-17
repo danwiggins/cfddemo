@@ -7,7 +7,7 @@
 # original evidence (D4).  citation_checked records who confirmed that every
 # DOI resolves and every displayed number matches the source (D27); an entry
 # without it renders an "UNVERIFIED citation" badge.
-version: 0.6.3
+version: 0.6.4
 hidden_algorithms: [read-summary, meth-calls]
 entries:
   # ---------------------------------------------------------------- bam-qc
@@ -450,6 +450,29 @@ entries:
     stability: {kind: absolute, tolerance: 0.01}
     citations: ["doi:10.1101/gr.279144.124"]
     citation_checked: {by: "lab build agent", date: "2026-10-15", note: "PubMed full text PMC12047234: ctDNA fragments 'exhibit a prominent ~10 bp periodicity'."}
+
+  # -------------------------------------------------------------- lionheart
+  - algorithm_id: lionheart
+    metric_id: cell_types_scored
+    label: "LIONHEART chromatin-accessibility reference profiles scored"
+    value_kind: count
+    tier: SPECULATIVE
+    origin_tier: NEWER
+    origin_platform: "paired-end short-read WGS cfDNA; ONT single-end unverified"
+    min_depth_x: null
+    reference: {kind: none}
+    performance: null
+    performance_missing_reason: "No validated ONT performance or cell-fraction interpretation"
+    meaning_high: "Raw sample-standardized correlation scores are available in the Signals table; the count is not a cell fraction or cancer prediction."
+    meaning_low: "Some reference profiles could not be scored; inspect the full table."
+    confounders: ["single-end ONT input", "fragment length selection", "GC and insert-size correction", "reference build"]
+    next_steps:
+      analytical: ["Inspect individual raw scores without treating them as proportions", "Compare only within a matched ONT protocol after validation"]
+      clinical_setting: null
+    license_ids: [lionheart-resources-research]
+    flags: [LEGAL]
+    headline: true
+    citations: ["doi:10.1038/s41467-025-66503-3"]
 
   # ----------------------------------------------------------- copy-number
   - algorithm_id: copy-number

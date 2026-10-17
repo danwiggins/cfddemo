@@ -3,6 +3,14 @@
 # callout (>= 20px bold) once per route, pills elsewhere.
 version: 0.1.0
 licenses:
+  lionheart-resources-research:
+    headline: "RESEARCH-ONLY RESOURCES: LIONHEART cell-type scores"
+    body: >-
+      LIONHEART code is MIT, but Zenodo record 15747531 says its shared scores
+      and models derive from data restricted to non-commercial research use.
+      The resource pack is operator-supplied and is never bundled here.
+      ONT single-end extraction is experimental and is not a validated cancer test.
+    url: "https://zenodo.org/records/15747531"
   modkit-ont-public:
     headline: "RESEARCH-ONLY: modkit"
     body: >-

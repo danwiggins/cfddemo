@@ -44,6 +44,7 @@ ALGORITHMS: tuple[str, ...] = (
     "bam_qc:BAM_QC",
     "depth:DEPTH",
     "fragment_size:FRAGMENT_SIZE",
+    "lionheart:LIONHEART",
     "copy_number:COPY_NUMBER",
     "instability:INSTABILITY",
     "long_tail:LONG_TAIL",
