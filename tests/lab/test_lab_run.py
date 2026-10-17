@@ -181,7 +181,7 @@ def test_sex_assertion_is_local_metadata_and_does_not_rekey_results(
         assert code == 3 and refused["data"]["code"] == "TBX-LAB-023"
 
 
-def test_missing_cached_upstream_artifact_recomputes_only_that_step(
+def test_missing_cached_upstream_artifact_recomputes_its_dependent(
     lab_world, capsys, monkeypatch, shared_mmi,
 ) -> None:
     _registry(monkeypatch, "SUMMARY", "COUNTER")
@@ -195,16 +195,20 @@ def test_missing_cached_upstream_artifact_recomputes_only_that_step(
     identity_dir = next((store.results_dir / input_id / "read-summary").iterdir())
     attempt = store.selected_attempt(input_id, "read-summary", identity_dir.name)
     assert attempt is not None
+    dependent_identity = next((store.results_dir / input_id / "fragment-size").iterdir()).name
+    prior_dependent = store.selected_attempt(input_id, "fragment-size", dependent_identity)
+    assert prior_dependent is not None
     (attempt / "artifacts" / "counts.json").unlink()
 
     code, retry = _json(capsys, "run", "latest", "--root", str(root))
     assert code == 0
     steps = {step["algorithm_id"]: step for step in retry["data"]["steps"]}
     assert not steps["read-summary"]["cached"]
-    assert steps["fragment-size"]["cached"]
+    assert not steps["fragment-size"]["cached"]
     replacement = store.selected_attempt(input_id, "read-summary", identity_dir.name)
     assert replacement is not None and replacement != attempt
     assert (replacement / "artifacts" / "counts.json").is_file()
+    assert store.selected_attempt(input_id, "fragment-size", dependent_identity) != prior_dependent
 
 def test_json_stdout_is_one_object_and_progress_goes_to_stderr(lab_world, capsys, monkeypatch, shared_mmi) -> None:
     _registry(monkeypatch)
