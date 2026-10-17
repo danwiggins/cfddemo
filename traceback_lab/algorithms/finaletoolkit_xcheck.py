@@ -293,7 +293,9 @@ class FinaleToolkitXcheck(Base):
     def run(self, ctx: InputContext, out: Path) -> AlgorithmOutput:
         try:
             return self._run(ctx, out)
-        except OSError:
+        except subprocess.TimeoutExpired:
+            raise RuntimeError("FinaleToolkit execution timed out") from None
+        except (OSError, subprocess.SubprocessError):
             # Workers scrub stderr, but direct callers must not receive local
             # sample paths in an exception either.
             raise RuntimeError("FinaleToolkit input or output became unreadable") from None
@@ -339,8 +341,10 @@ class FinaleToolkitXcheck(Base):
         total = sum(reference_motifs.values())
         if total <= 0:
             raise ValueError("paired-end input yielded no comparable 4-mer ends")
+        reference_frequencies = {k: reference_motifs[k] / total for k in MOTIFS}
         motif_r = _pearson([upstream_motifs[k] for k in MOTIFS],
-                           [reference_motifs[k] / total for k in MOTIFS])
+                           [reference_frequencies[k] for k in MOTIFS])
+        motif_max_abs_difference = max(abs(upstream_motifs[k] - reference_frequencies[k]) for k in MOTIFS)
         delfi_keys = [key for key in sorted(expected) if upstream_delfi[key][1] and reference_delfi.get(key, (0, 0))[1]]
         delfi_r = _pearson([upstream_delfi[key][0] / upstream_delfi[key][1] for key in delfi_keys],
                            [reference_delfi[key][0] / reference_delfi[key][1] for key in delfi_keys])
@@ -356,11 +360,12 @@ class FinaleToolkitXcheck(Base):
             "runtime_pin_sha256": tool[1],
             "input": "verified paired-end Illumina hg38 full BAM", "mapq": MAPQ,
             "motif": {"k": 4, "min_length": MOTIF_MIN, "r": motif_r, "threshold": 0.95,
+                      "max_abs_frequency_difference": motif_max_abs_difference,
                       "length_filter_effective": False,
                       "upstream_mds": motif_diversity(np.asarray([upstream_motifs[k] for k in MOTIFS])),
                       "reference_mds": motif_diversity(np.asarray([reference_motifs[k] for k in MOTIFS])),
                       "upstream": upstream_motifs,
-                      "reference": {k: reference_motifs[k] / total for k in MOTIFS}},
+                      "reference": reference_frequencies},
             "delfi": {"bin_bp": BIN, "gc_correct": False, "merged": False,
                       "remove_hg19_nocov": False, "r": delfi_r, "threshold": 0.90,
                       "comparable_bins": len(delfi_keys),

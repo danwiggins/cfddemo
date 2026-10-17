@@ -234,6 +234,12 @@ new measurement.
 | `frag-x-meth` | descriptive molecule-count matrix of aligned-size bins by per-read 5mC fraction (at least four distinct CpG sites/read); the scalar is long (151–220 bp) mean minus short (100–150 bp) mean, null if either group is empty; no normal range |
 | `breakpoint-motifs` | 4-mer counts at aligned-reference-span start and end−1, stratified by CpG proximity; the scalar is the fraction of ends near a CpG. These are not proven physical cleavage positions, and the methylation link is unavailable without a supported joint input |
 
+The FinaleToolkit verdict uses the D13 Pearson correlation thresholds and
+exact DELFI counts. Pearson compares 4-mer frequency patterns: even a value
+of 1 can coexist with different absolute frequencies. The artifact and Signals
+show their maximum absolute frequency difference as a diagnostic, without an
+additional acceptance cutoff.
+
 **Experimental LIONHEART scores.** The [upstream v2.2.0 source](https://github.com/BesenbacherLab/lionheart/tree/v2.2.0)
 is pinned at commit `f49de07ce0d9a72ee3c883429085cfacfc54c1d2` (MIT code).
 Its `extract_features` command needs the

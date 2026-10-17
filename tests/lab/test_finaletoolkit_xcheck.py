@@ -6,6 +6,7 @@ import json
 import os
 import random
 import shutil
+import subprocess
 from types import SimpleNamespace
 from pathlib import Path
 
@@ -177,6 +178,22 @@ def test_run_error_does_not_publish_an_input_path(tmp_path: Path, monkeypatch: p
     assert "DonorName_2026" not in str(error.value)
 
 
+def test_tool_timeout_does_not_publish_an_input_path(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    import traceback_lab.algorithms.finaletoolkit_xcheck as module
+
+    ctx = _fixture(tmp_path / "DonorName_2026")
+    monkeypatch.setattr(module, "_tool", lambda: ("pinned-fixture", "e" * 64))
+    ctx.extras["planned_tool_pins"] = [pin.identity() for pin in FINALETOOLKIT_XCHECK.tools]
+
+    def timed_out(command: list[str], **_kwargs: object) -> None:
+        raise subprocess.TimeoutExpired(command, 7200)
+
+    monkeypatch.setattr(module.subprocess, "run", timed_out)
+    with pytest.raises(RuntimeError, match="execution timed out") as error:
+        FINALETOOLKIT_XCHECK.run(ctx, tmp_path / "out")
+    assert "DonorName_2026" not in str(error.value)
+
+
 def test_python_override_runs_the_attested_package() -> None:
     launcher = Path("/operator/bin/finaletoolkit")
     interpreter = Path("/operator/venv/bin/python")
@@ -206,6 +223,7 @@ def test_pinned_tool_outputs_exercise_run_without_external_install(
     panel = json.loads(result.artifacts["finaletoolkit_xcheck.json"])
     assert panel["pairs"] == 45 and panel["motif_ends"] == 89
     assert panel["motif"]["r"] == pytest.approx(1.0)
+    assert panel["motif"]["max_abs_frequency_difference"] < 1e-12
     assert panel["delfi"]["r"] == pytest.approx(1.0)
     assert panel["delfi"]["upstream_counts_equal"]
     assert panel["verdict"] == "concordant"
@@ -229,6 +247,25 @@ def test_pinned_tool_outputs_exercise_run_without_external_install(
     assert changed["delfi"]["r"] == pytest.approx(1.0)
     assert changed["delfi"]["upstream_counts_equal"] is False
     assert changed["verdict"] == "discordant"
+
+    # Pearson stays at one under affine smoothing, so the correlation-only
+    # D13 verdict stays concordant even while absolute frequencies differ.
+    def replay_smoothed_motifs(command: list[str], **kwargs: object) -> SimpleNamespace:
+        completed = replay(command, **kwargs)
+        if "end-motifs" in command:
+            path = Path(command[command.index("-o") + 1])
+            rows = [line.split("\t") for line in path.read_text().splitlines()]
+            path.write_text("".join(f"{name}\t{0.5 * float(value) + 0.5 / 256}\n" for name, value in rows))
+        return completed
+
+    monkeypatch.setattr(module.subprocess, "run", replay_smoothed_motifs)
+    smoothed = tmp_path / "smoothed"
+    smoothed.mkdir()
+    changed = json.loads(FINALETOOLKIT_XCHECK.run(ctx, smoothed / "out").artifacts["finaletoolkit_xcheck.json"])
+    assert changed["motif"]["r"] == pytest.approx(1.0)
+    assert changed["motif"]["max_abs_frequency_difference"] > 0.001
+    assert changed["delfi"]["upstream_counts_equal"] is True
+    assert changed["verdict"] == "concordant"
 
 
 @pytest.mark.skipif(not os.environ.get("TRACEBACK_FINALETOOLKIT_BIN"),

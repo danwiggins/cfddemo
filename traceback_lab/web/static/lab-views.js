@@ -793,9 +793,11 @@
     section.append(slot);
     artifact(sample, "finaletoolkit-xcheck", "finaletoolkit-xcheck").then((data) => {
       const correlation = (value) => value === null || (typeof value === "number" && Number.isFinite(value) && value >= -1 && value <= 1);
+      const motifDifference = data.motif?.max_abs_frequency_difference;
       if (data.schema !== "traceback.lab.finaletoolkit-xcheck.v1" || data.version !== "1.1.0" ||
           !/^[0-9a-f]{64}$/.test(data.runtime_pin_sha256 || "") ||
           !correlation(data.motif?.r) || !correlation(data.delfi?.r) ||
+          (motifDifference !== undefined && (typeof motifDifference !== "number" || !Number.isFinite(motifDifference) || motifDifference < 0 || motifDifference > 1)) ||
           !Number.isInteger(data.delfi?.comparable_bins) || data.delfi.comparable_bins < 0 ||
           !Number.isInteger(data.pairs) || data.pairs < 0 ||
           !["concordant", "discordant", "insufficient_variation"].includes(data.verdict)) {
@@ -807,7 +809,7 @@
           ["4-mer end frequencies", fmt(data.motif.r), "≥0.95", "256 motifs"],
           ["Uncorrected 100-kb short/long ratios", fmt(data.delfi.r), "≥0.90", `${data.delfi.comparable_bins} bins with long fragments`],
         ]),
-        h("p", { class: "help" }, `Exact short/long count agreement: ${data.delfi.upstream_counts_equal ? "yes" : "no"}. ${data.note}`),
+        h("p", { class: "help" }, `Maximum absolute 4-mer frequency difference: ${motifDifference === undefined ? "not recorded" : motifDifference.toExponential(2)}. Pearson compares patterns and does not establish absolute frequency equality. Exact short/long count agreement: ${data.delfi.upstream_counts_equal ? "yes" : "no"}. ${data.note}`),
       );
     }).catch((error) => slot.replaceWith(h("p", { class: "problem" }, `Paired-end cross-check unavailable (${error.message}).`)));
     return [section];

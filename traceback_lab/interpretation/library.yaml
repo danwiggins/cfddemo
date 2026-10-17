@@ -2835,7 +2835,7 @@ entries:
     performance: null
     performance_missing_reason: "Method parity is not biological or clinical validation"
     missing_value_caption: "Correlation unavailable when paired-end motifs have insufficient variation."
-    meaning_high: "The pinned toolkit and independent paired-end counter agree on this sample's 4-mer frequencies."
+    meaning_high: "The pinned toolkit and independent paired-end counter have correlated 4-mer frequency patterns; inspect the artifact for absolute differences."
     meaning_low: "The toolkit and independent counter disagree; inspect input filters and the paired-end artifact."
     confounders: ["BAM pair flags", "MAPQ", "reference end coordinates", "sparse motifs"]
     next_steps:
