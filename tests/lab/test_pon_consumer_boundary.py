@@ -124,6 +124,56 @@ def test_bound_panel_changes_execution_but_not_cohort_compatibility() -> None:
     )
 
 
+def test_instability_compatibility_distinguishes_pon_protocol(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    source_id = "a" * 64
+    copy = SimpleNamespace(id="copy-number", version="1", parameters={}, tools=[], upstream=())
+    instability = SimpleNamespace(id="instability", version="1", parameters={"measure": "tmad"},
+                                  tools=[], upstream=("copy-number",))
+    monkeypatch.setattr(cohorts, "load_registry", lambda: (copy, instability))
+    monkeypatch.setattr(cohorts, "execution_identity", lambda algorithm, **_: algorithm.id)
+    monkeypatch.setattr(pon_consumer, "bind_copy_number_algorithm", lambda algorithm, selection: SimpleNamespace(
+        id=algorithm.id, version=algorithm.version, tools=algorithm.tools, upstream=algorithm.upstream,
+        parameters={"pon_policy": "lab_loo_v1", "pon_sha256": selection.pon_sha256},
+    ))
+    store = LabStore(tmp_path)
+    monkeypatch.setattr(store, "read_result", lambda _input, algorithm_id, _identity: SimpleNamespace(
+        status="ok", algorithm_version="1",
+        provenance=SimpleNamespace(source_id=source_id, parameters_sha256="f" * 64), metrics=[],
+    ) if algorithm_id in ("copy-number", "instability") else None)
+    manifest = {
+        "kind": "aligned", "source_id": source_id, "reference_sha256": "b" * 64,
+        "tools": {"minimap2": "2.28", "samtools": "1.20"},
+        "mmi_sha256": "c" * 64, "aligner_argv": ["minimap2", "-ax", "map-ont"],
+    }
+    baseline = cohorts._selected_results(store, "d" * 64, manifest)
+    selected = cohorts._selected_results(
+        store, "d" * 64, manifest,
+        pon_selection=SimpleNamespace(pon_policy="lab_loo_v1", pon_sha256="e" * 64),
+    )
+    assert baseline[1].cohort_compat_key != selected[1].cohort_compat_key
+
+
+def test_projection_target_uses_pinned_generation_selection(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    store = LabStore(tmp_path)
+    generation = SimpleNamespace(pon_asset_sha256="a" * 64)
+    source_id = "b" * 64
+    manifest = {"reference_sha256": "c" * 64, "kind": "aligned",
+                "tools": {"minimap2": "2.28", "samtools": "1.20"},
+                "mmi_sha256": "d" * 64, "aligner_argv": ["minimap2", "-ax", "map-ont"]}
+    monkeypatch.setattr(cohorts, "_checked_source_record", lambda *_: {})
+    monkeypatch.setattr(cohorts, "_full_input", lambda *_: ("e" * 64, manifest))
+    selected = object()
+    calls = []
+    monkeypatch.setattr(pon_consumer, "selection_for_generation", lambda *args, **kwargs: (
+        calls.append((args, kwargs)) or selected
+    ))
+    monkeypatch.setattr(cohorts, "member_from_store", lambda _store, _source, *, pon_selection=None: pon_selection)
+    assert cohorts.member_for_generation(store, generation, source_id) is selected
+    assert calls[0][0] == (store, generation)
+    assert calls[0][1]["source_id"] == source_id
+    assert calls[0][1]["reference_sha256"] == "c" * 64
+
+
 def test_default_without_built_panel_stays_none_but_explicit_selection_fails(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     store = LabStore(tmp_path)
     monkeypatch.setattr(cohorts, "read_current", lambda *_: None)

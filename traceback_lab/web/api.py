@@ -18,7 +18,7 @@ from pathlib import Path, PurePosixPath
 from typing import Any
 
 from ..cohort_contracts import project_metric
-from ..cohorts import list_cohorts, member_from_store, read_current
+from ..cohorts import list_cohorts, member_for_generation, read_current
 from ..identity import resolve_prefix, shortest_unique_prefixes
 from ..ingest import source_ids, source_record
 from ..interpretation.engine import (
@@ -366,7 +366,7 @@ class LabApi:
         if sample.example:
             return {**base, "state": "example_unscorable", "metrics": [], "unscored": []}
         try:
-            target = member_from_store(self.store, source_id)
+            target = member_for_generation(self.store, generation, source_id)
         except LabProblem as problem:
             if problem.code == "TBX-LAB-021":
                 return {**base, "state": "example_unscorable", "metrics": [], "unscored": []}
@@ -383,7 +383,7 @@ class LabApi:
             return {**base, "state": "target_unavailable", "metrics": [], "unscored": [],
                     "problem": _recovery_problem(problem)}
         # Both reads must describe the same full input. A newer run may become
-        # current between load_sample and member_from_store while retaining the
+        # current between load_sample and member_for_generation while retaining the
         # same algorithm parameter hash; comparing its compatibility key with
         # the older envelope would mix two sample snapshots.
         if target.source_id != source_id or target.input_id != sample.full.input_id:

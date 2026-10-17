@@ -345,7 +345,8 @@ def _selected_results(
             algorithm_id=algorithm.id, algorithm_version=algorithm.version,
             parameters=algorithm.parameters, tools=[tool.identity() for tool in algorithm.tools],
             reference_sha256=manifest["reference_sha256"], aligner_identity=aligner,
-            pon_policy=str(algorithm.parameters.get("pon_policy", "none")),
+            pon_policy=("lab_loo_v1" if pon_selection is not None
+                        and algorithm.id in ("copy-number", "instability") else "none"),
             per_sample_asset_keys=("pon_sha256",) if algorithm.parameters.get("pon_policy") == "lab_loo_v1" else (),
         )
         found.append(CohortResult(
@@ -371,6 +372,25 @@ def member_from_store(store: LabStore, source_id: str, *, pon_selection: Any | N
                         results=_selected_results(store, input_id, manifest, pon_selection=pon_selection),
                         pon_asset_sha256=(pon_selection.pon_sha256 if pon_selection is not None
                                           and pon_selection.target_excluded else None))
+
+
+def member_for_generation(store: LabStore, generation: CohortGeneration, source_id: str) -> CohortMember:
+    """Read a target under one pinned generation's PoN protocol."""
+
+    if generation.pon_asset_sha256 is None:
+        return member_from_store(store, source_id)
+    from .pon_consumer import selection_for_generation
+
+    selected = _full_input(store, _checked_source_record(store, source_id))
+    if selected is None:
+        raise ValueError("admitted source has no full aligned input")
+    input_id, manifest = selected
+    label, _ = _aligner(manifest, input_id)
+    selection = selection_for_generation(
+        store, generation, source_id=source_id,
+        reference_sha256=manifest["reference_sha256"], aligner_identity=label,
+    )
+    return member_from_store(store, source_id, pon_selection=selection)
 
 
 def pon_inputs_for_members(store: LabStore, members: tuple[CohortMember, ...]) -> tuple[PonInput, ...]:
@@ -552,7 +572,7 @@ def project_sample_metric(
     generation = read_current(store, cohort_id)
     if generation is None:
         return None
-    target = member_from_store(store, target_source_id)
+    target = member_for_generation(store, generation, target_source_id)
     result = next((item for item in target.results if item.algorithm_id == algorithm_id), None)
     if result is None:
         return None
@@ -563,6 +583,6 @@ def project_sample_metric(
 
 
 __all__ = [
-    "CohortListing", "add_sample", "build_cohort", "list_cohorts", "member_from_store", "pon_inputs_for_members",
+    "CohortListing", "add_sample", "build_cohort", "list_cohorts", "member_for_generation", "member_from_store", "pon_inputs_for_members",
     "project_current_metric", "project_sample_metric", "read_current", "read_roster",
 ]
