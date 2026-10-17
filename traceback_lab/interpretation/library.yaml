@@ -715,6 +715,179 @@ entries:
     citations: []
     citation_checked: {by: "lab build agent", date: "2026-10-16", note: "No citation displayed; missing-estimate bin count."}
 
+  # ------------------------------------------------------------ arm-summary
+  - algorithm_id: arm-summary
+    metric_id: arms_with_value
+    label: "Autosomal arms with an estimable corrected log2"
+    value_kind: count
+    tier: SPECULATIVE
+    origin_tier: SPECULATIVE
+    origin_platform: "ONT Lab PoN-corrected ichorCNA bins"
+    min_depth_x: null
+    reference: {kind: none}
+    performance: null
+    performance_missing_reason: "Exploratory coverage count; no validated ONT arm-z performance or cutoff"
+    meaning_high: "More arms had finite, unmasked copy-number bins for cohort comparison."
+    meaning_low: "Few arms could be summarized; inspect the copy-number track and masks."
+    confounders: ["low depth", "masked bins", "centromere geometry", "copy-number noise"]
+    next_steps: {analytical: ["Use arm-zscores only with a compatible published cohort and at least ten controls after source exclusion"], clinical_setting: null}
+    license_ids: [gpl-copyleft]
+    flags: []
+    headline: true
+    citations: []
+    citation_checked: {by: "lab build agent", date: "2026-10-16", note: "No citation displayed; a descriptive Lab bin-coverage count, not a biological threshold."}
+
+  - &arm_log2
+    algorithm_id: arm-summary
+    metric_id: chr1p_log2
+    label: "Chromosome 1 p-arm median corrected log2"
+    value_kind: signed
+    tier: SPECULATIVE
+    origin_tier: SPECULATIVE
+    origin_platform: "ONT Lab PoN-corrected ichorCNA bins"
+    min_depth_x: null
+    reference: {kind: none, missing_note: "No published arm reference; use arm-zscores only with a compatible ten-control cohort."}
+    performance: null
+    performance_missing_reason: "Exploratory arm value; no validated ONT arm-z performance or cutoff"
+    meaning_high: "Higher corrected arm copy-number estimate relative to the selected PoN; inspect the copy-number track."
+    meaning_low: "Lower corrected arm copy-number estimate relative to the selected PoN; inspect the copy-number track."
+    confounders: ["low depth", "masked bins", "centromere geometry", "copy-number noise", "PoN mismatch"]
+    next_steps: {analytical: ["Review arm-zscores against a compatible published cohort with at least ten controls after source exclusion"], clinical_setting: null}
+    license_ids: [gpl-copyleft]
+    flags: []
+    headline: false
+    citations: []
+    citation_checked: {by: "lab build agent", date: "2026-10-16", note: "Descriptive arm median from the selected copy-number track; no diagnostic cutoff."}
+  - <<: *arm_log2
+    metric_id: chr1q_log2
+    label: "Chromosome 1 q-arm median corrected log2"
+  - <<: *arm_log2
+    metric_id: chr2p_log2
+    label: "Chromosome 2 p-arm median corrected log2"
+  - <<: *arm_log2
+    metric_id: chr2q_log2
+    label: "Chromosome 2 q-arm median corrected log2"
+  - <<: *arm_log2
+    metric_id: chr3p_log2
+    label: "Chromosome 3 p-arm median corrected log2"
+  - <<: *arm_log2
+    metric_id: chr3q_log2
+    label: "Chromosome 3 q-arm median corrected log2"
+  - <<: *arm_log2
+    metric_id: chr4p_log2
+    label: "Chromosome 4 p-arm median corrected log2"
+  - <<: *arm_log2
+    metric_id: chr4q_log2
+    label: "Chromosome 4 q-arm median corrected log2"
+  - <<: *arm_log2
+    metric_id: chr5p_log2
+    label: "Chromosome 5 p-arm median corrected log2"
+  - <<: *arm_log2
+    metric_id: chr5q_log2
+    label: "Chromosome 5 q-arm median corrected log2"
+  - <<: *arm_log2
+    metric_id: chr6p_log2
+    label: "Chromosome 6 p-arm median corrected log2"
+  - <<: *arm_log2
+    metric_id: chr6q_log2
+    label: "Chromosome 6 q-arm median corrected log2"
+  - <<: *arm_log2
+    metric_id: chr7p_log2
+    label: "Chromosome 7 p-arm median corrected log2"
+  - <<: *arm_log2
+    metric_id: chr7q_log2
+    label: "Chromosome 7 q-arm median corrected log2"
+  - <<: *arm_log2
+    metric_id: chr8p_log2
+    label: "Chromosome 8 p-arm median corrected log2"
+  - <<: *arm_log2
+    metric_id: chr8q_log2
+    label: "Chromosome 8 q-arm median corrected log2"
+  - <<: *arm_log2
+    metric_id: chr9p_log2
+    label: "Chromosome 9 p-arm median corrected log2"
+  - <<: *arm_log2
+    metric_id: chr9q_log2
+    label: "Chromosome 9 q-arm median corrected log2"
+  - <<: *arm_log2
+    metric_id: chr10p_log2
+    label: "Chromosome 10 p-arm median corrected log2"
+  - <<: *arm_log2
+    metric_id: chr10q_log2
+    label: "Chromosome 10 q-arm median corrected log2"
+  - <<: *arm_log2
+    metric_id: chr11p_log2
+    label: "Chromosome 11 p-arm median corrected log2"
+  - <<: *arm_log2
+    metric_id: chr11q_log2
+    label: "Chromosome 11 q-arm median corrected log2"
+  - <<: *arm_log2
+    metric_id: chr12p_log2
+    label: "Chromosome 12 p-arm median corrected log2"
+  - <<: *arm_log2
+    metric_id: chr12q_log2
+    label: "Chromosome 12 q-arm median corrected log2"
+  - <<: *arm_log2
+    metric_id: chr13p_log2
+    label: "Chromosome 13 p-arm median corrected log2"
+  - <<: *arm_log2
+    metric_id: chr13q_log2
+    label: "Chromosome 13 q-arm median corrected log2"
+  - <<: *arm_log2
+    metric_id: chr14p_log2
+    label: "Chromosome 14 p-arm median corrected log2"
+  - <<: *arm_log2
+    metric_id: chr14q_log2
+    label: "Chromosome 14 q-arm median corrected log2"
+  - <<: *arm_log2
+    metric_id: chr15p_log2
+    label: "Chromosome 15 p-arm median corrected log2"
+  - <<: *arm_log2
+    metric_id: chr15q_log2
+    label: "Chromosome 15 q-arm median corrected log2"
+  - <<: *arm_log2
+    metric_id: chr16p_log2
+    label: "Chromosome 16 p-arm median corrected log2"
+  - <<: *arm_log2
+    metric_id: chr16q_log2
+    label: "Chromosome 16 q-arm median corrected log2"
+  - <<: *arm_log2
+    metric_id: chr17p_log2
+    label: "Chromosome 17 p-arm median corrected log2"
+  - <<: *arm_log2
+    metric_id: chr17q_log2
+    label: "Chromosome 17 q-arm median corrected log2"
+  - <<: *arm_log2
+    metric_id: chr18p_log2
+    label: "Chromosome 18 p-arm median corrected log2"
+  - <<: *arm_log2
+    metric_id: chr18q_log2
+    label: "Chromosome 18 q-arm median corrected log2"
+  - <<: *arm_log2
+    metric_id: chr19p_log2
+    label: "Chromosome 19 p-arm median corrected log2"
+  - <<: *arm_log2
+    metric_id: chr19q_log2
+    label: "Chromosome 19 q-arm median corrected log2"
+  - <<: *arm_log2
+    metric_id: chr20p_log2
+    label: "Chromosome 20 p-arm median corrected log2"
+  - <<: *arm_log2
+    metric_id: chr20q_log2
+    label: "Chromosome 20 q-arm median corrected log2"
+  - <<: *arm_log2
+    metric_id: chr21p_log2
+    label: "Chromosome 21 p-arm median corrected log2"
+  - <<: *arm_log2
+    metric_id: chr21q_log2
+    label: "Chromosome 21 q-arm median corrected log2"
+  - <<: *arm_log2
+    metric_id: chr22p_log2
+    label: "Chromosome 22 p-arm median corrected log2"
+  - <<: *arm_log2
+    metric_id: chr22q_log2
+    label: "Chromosome 22 q-arm median corrected log2"
+
   # ------------------------------------------------------------ modbase-qc
   - algorithm_id: modbase-qc
     metric_id: mm_tagged_fraction

@@ -502,7 +502,7 @@ percentile denominator.
 
 For a verified internal cohort with at least ten eligible aligned members,
 `cohort build` creates one full panel and one leave-one-out panel per member.
-It recomputes each member's copy-number and instability results against that
+It recomputes each member's copy-number, instability, and arm-summary results against that
 member's panel before publishing the generation. `pon_n` counts all panel
 sources; a selected member panel uses `pon_n - 1` sources. A nonmember uses
 the full panel. Both copy-number and instability still require 2M eligible
@@ -513,6 +513,31 @@ dependent instability attempts. Rerun affected inputs and rebuild existing
 cohorts to restore current-version comparisons. The sample view marks selected
 older copy-number and dependent instability results as `superseded_method`
 until rerun; their immutable attempts remain available for inspection.
+
+`arm-summary` summarizes PoN-corrected copy-number bins on autosomal p/q arms.
+It derives boundaries from the locally registered ichorCNA GRCh38 centromere
+asset and input reference lengths. A bin contributes only if finite, unmasked,
+and wholly inside an arm; the arm value is the median of contributing bins.
+It requires at least 2 million eligible reads and a selected PoN. The pinned
+arm-definition bytes enter both result identity and cohort compatibility.
+
+`traceback lab arm-zscores ID12 --cohort ID --root R` compares the selected
+arm summaries against one published cohort generation. It excludes the target
+source and requires ten remaining controls with the same protocol and arm
+definition. A member of an exactly-ten-source cohort has nine controls and
+receives `no_reference`. The JSON reports n, the cohort mean and population
+SD, z, or a named unavailable state. Each arm also reports the target's bin
+count and the smallest bin count among matched controls when the pinned
+generation recorded them; older generations show `null` (or `?` in the human
+view). The human view labels the control count separately from bin support.
+This is exploratory: no abnormality
+cutoff, donor-independence claim, or clinical reference is assigned.
+The JSON response names the target panel binding and source count, whether
+the target was excluded, and whether a selected arm result exists under that
+binding. A missing result leaves the panel binding visible for rerun planning;
+it does not claim the target was measured with that panel. A nonmember uses the full panel while cohort members
+use leave-one-out panels, so their correction baselines differ; the z score
+is a descriptive cohort comparison, not a calibrated test statistic.
 
 `lab run` and `lab simulate` use a built `healthy-v1` cohort by default when
 one exists for a real ONT input. Illumina and EXAMPLE inputs do not select

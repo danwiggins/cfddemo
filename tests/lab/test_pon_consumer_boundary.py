@@ -42,11 +42,13 @@ def test_sample_view_marks_old_copy_number_and_instability_as_superseded(tmp_pat
     }]
     source_path.write_text(json.dumps(record))
     for selected_input in (input_id, derived_id):
-        for algorithm_id in ("copy-number", "instability"):
+        for algorithm_id in ("copy-number", "instability", "arm-summary"):
             store.publish_result(ResultEnvelope(
                 algorithm_id=algorithm_id, algorithm_version="1", status="ok",
                 provenance=provenance(
-                    tool="fixture", parameters_sha256=("8" if algorithm_id == "copy-number" else "9") * 64,
+                    tool="fixture", parameters_sha256={
+                        "copy-number": "8", "instability": "9", "arm-summary": "a",
+                    }[algorithm_id] * 64,
                     source_id=source_id, input_id=selected_input, reference_id="hg38",
                 ),
             ), input_id=selected_input)
@@ -54,7 +56,7 @@ def test_sample_view_marks_old_copy_number_and_instability_as_superseded(tmp_pat
     assert view is not None
     assert len(view.derived) == 1
     for visible_input, selected_input in ((view.full, input_id), (view.derived[0], derived_id)):
-        for algorithm_id in ("copy-number", "instability"):
+        for algorithm_id in ("copy-number", "instability", "arm-summary"):
             shown = visible_input.results[algorithm_id]
             assert shown.status == "skipped" and shown.skip_reason == "superseded_method"
             assert selected_results(store, selected_input)[algorithm_id].status == "ok"
@@ -87,12 +89,20 @@ def test_sample_view_hides_instability_consuming_old_copy_number_identity(
             "parameters_sha256": old_identity, "attempt_id": old_attempt,
         }] if record_upstream else None,
     )
+    store.publish_result(
+        result("arm-summary", "1", "b" * 64), input_id=input_id,
+        upstream_selections=[{
+            "algorithm_id": "copy-number", "input_id": input_id,
+            "parameters_sha256": old_identity, "attempt_id": old_attempt,
+        }] if record_upstream else None,
+    )
     store.publish_result(result("copy-number", "2", current_identity), input_id=input_id)
     view = load_sample(store, source_id)
     assert view is not None
     assert view.full.results["copy-number"].status == "ok"
     assert view.full.results["copy-number"].algorithm_version == "2"
     assert view.full.results["instability"].skip_reason == "superseded_method"
+    assert view.full.results["arm-summary"].skip_reason == "superseded_method"
     assert store.read_result(input_id, "copy-number", old_identity).status == "ok"
     assert store.read_result(input_id, "instability", instability_identity).status == "ok"
 
@@ -718,9 +728,18 @@ def test_member_recompute_runs_pinned_loo_chain_and_requires_success(
     assert len(sample_events) == 1
     assert sample_events[0]["source_id"] == source_id
     assert sample_events[0]["input_id"] == input_id
-    assert observed["ids"] == ["read-summary", "copy-number", "instability"]
+    assert observed["ids"] == ["read-summary", "copy-number", "instability", "arm-summary"]
     assert observed["digest"] == selection.pon_sha256
     assert observed["target"].extras["pon_selection"]["cohort_version"] == "healthy-v1:2"
+
+    monkeypatch.setattr(runner, "run_plan", lambda *_, **__: [
+        SimpleNamespace(algorithm_id="copy-number", status="ok"),
+        SimpleNamespace(algorithm_id="instability", status="ok"),
+        SimpleNamespace(algorithm_id="arm-summary", status="skipped"),
+    ])
+    assert pon_consumer.recompute_member(
+        store, generation, source_id, lock=None, log=None, run_id="synthetic", timeout_s=1,
+    ) is expected
 
     monkeypatch.setattr(runner, "run_plan", lambda *_, **__: [
         SimpleNamespace(algorithm_id="copy-number", status="failed")
@@ -866,18 +885,23 @@ def test_failed_generation_publish_restores_member_selections(
     old_identity, pending_identity = "8" * 64, "9" * 64
     first, second = previous.members[:2]
 
-    def cn_result(source_id: str, input_id: str, identity: str) -> ResultEnvelope:
+    def result_for(algorithm_id: str, source_id: str, input_id: str, identity: str) -> ResultEnvelope:
         return ResultEnvelope(
-            algorithm_id="copy-number", algorithm_version="2", status="ok",
+            algorithm_id=algorithm_id, algorithm_version="2" if algorithm_id == "copy-number" else "1",
+            status="ok",
             provenance=provenance(
                 tool="fixture", parameters_sha256=identity,
                 source_id=source_id, input_id=input_id, reference_id="hg38",
             ),
         )
 
-    store.publish_result(cn_result(first.source_id, first.input_id, old_identity), input_id=first.input_id)
+    store.publish_result(result_for("copy-number", first.source_id, first.input_id, old_identity), input_id=first.input_id)
     original_selected = store.selected_attempt(first.input_id, "copy-number", old_identity)
     assert original_selected is not None
+    old_arm_identity, pending_arm_identity = "c" * 64, "d" * 64
+    store.publish_result(result_for("arm-summary", first.source_id, first.input_id, old_arm_identity), input_id=first.input_id)
+    original_arm_selected = store.selected_attempt(first.input_id, "arm-summary", old_arm_identity)
+    assert original_arm_selected is not None
     attempted: list[str] = []
 
     def fake_recompute(store, pending, source_id, **kwargs):
@@ -886,7 +910,9 @@ def test_failed_generation_publish_restores_member_selections(
         kwargs["log"].append("sample", sample=source_id[:12], source_id=source_id, input_id=member.input_id)
         if source_id in (first.source_id, second.source_id):
             identity = old_identity if source_id == first.source_id else pending_identity
-            store.publish_result(cn_result(source_id, member.input_id, identity), input_id=member.input_id)
+            store.publish_result(result_for("copy-number", source_id, member.input_id, identity), input_id=member.input_id)
+            arm_identity = old_arm_identity if source_id == first.source_id else pending_arm_identity
+            store.publish_result(result_for("arm-summary", source_id, member.input_id, arm_identity), input_id=member.input_id)
         return member
 
     monkeypatch.setattr(pon_consumer, "recompute_member", fake_recompute)
@@ -914,9 +940,17 @@ def test_failed_generation_publish_restores_member_selections(
     assert read_current(store, "healthy-v1") == previous
     assert selected_results(store, first.input_id)["copy-number"].provenance.parameters_sha256 == old_identity
     assert store.selected_attempt(first.input_id, "copy-number", old_identity) == original_selected
+    assert selected_results(store, first.input_id)["arm-summary"].provenance.parameters_sha256 == old_arm_identity
+    assert store.selected_attempt(first.input_id, "arm-summary", old_arm_identity) == original_arm_selected
     assert "copy-number" not in selected_results(store, second.input_id)
+    assert "arm-summary" not in selected_results(store, second.input_id)
     assert store.selected_attempt(second.input_id, "copy-number", pending_identity) is None
+    assert store.selected_attempt(second.input_id, "arm-summary", pending_arm_identity) is None
     for member, identity in ((first, old_identity), (second, pending_identity)):
         attempts = store.result_dir(member.input_id, "copy-number", identity) / "attempts"
         assert any((path / "result.json").is_file() for path in attempts.iterdir())
     assert len(list((store.result_dir(first.input_id, "copy-number", old_identity) / "attempts").iterdir())) >= 2
+    for member, identity in ((first, old_arm_identity), (second, pending_arm_identity)):
+        attempts = store.result_dir(member.input_id, "arm-summary", identity) / "attempts"
+        assert any((path / "result.json").is_file() for path in attempts.iterdir())
+    assert len(list((store.result_dir(first.input_id, "arm-summary", old_arm_identity) / "attempts").iterdir())) >= 2

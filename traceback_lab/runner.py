@@ -246,6 +246,11 @@ def run_plan(
             for name in algorithm.upstream
             if name in done and done[name].artifacts_dir
         }
+        if algorithm.id == "arm-summary":
+            # Bind the worker's arm-definition bytes to the digest used above.
+            target.extras["planned_arm_centromere_sha256"] = (
+                planned_assets[0] if len(planned_assets) == 1 else None
+            )
         target.extras["asset_sha256s"] = planned_assets
         target.extras["tool_versions"] = {pin.name: pin.version for pin in tool_pins}
         target.extras["planned_asset_sha256s"] = planned_assets
