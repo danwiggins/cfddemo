@@ -902,7 +902,7 @@
       no_mtdna_baseline: "A compatible cohort with at least ten controls after source exclusion is needed for an mtDNA trend.",
     };
     for (const pair of (report.pairs || [])) {
-      const section = h("section", { class: "panel" }, h("h2", {}, pair.label), flagPill("FDA"));
+      const section = h("section", { class: "panel" }, h("h2", {}, pair.label), flagPill(pair.id === "cn-meth" ? "CLIA" : "FDA"));
       if (pair.id === "cn-meth" && pair.support && pair.support.markers_covered !== null) {
         const support = pair.support;
         const residual = support.fit_rms === null

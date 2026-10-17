@@ -61,7 +61,7 @@ def report_tf_concordance(
     cn_identifiable = _metric(sample, "copy-number", "identifiable") is True
     cn_state = (
         "missing_cn" if cn_envelope is None or cn_envelope.status != "ok" else
-        "no_pon" if policy in (None, "none") else
+        "no_pon" if policy != "lab_loo_v1" else
         "unidentifiable_cn" if not cn_identifiable else
         "missing_cn" if cn is None else "ok"
     )

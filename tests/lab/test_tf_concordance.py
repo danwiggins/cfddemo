@@ -35,7 +35,7 @@ def _member(index: int) -> CohortMember:
     )
 
 
-def _sample(target: CohortMember, *, pon_policy: str = "lab_full_v1"):
+def _sample(target: CohortMember, *, pon_policy: str = "lab_loo_v1"):
     return SimpleNamespace(full=SimpleNamespace(
         input_id=target.input_id,
         results={
@@ -86,6 +86,12 @@ def test_no_pon_and_nine_controls_refuse_unqualified_pairs() -> None:
     assert qualified["pairs"][1]["state"] == "no_size_baseline"
     assert qualified["pairs"][1]["reference_n"] == 9
     assert qualified["pairs"][2]["state"] == "no_mtdna_baseline"
+
+
+@pytest.mark.parametrize("policy", ["none", "pending", "unverified", "", "lab_full_v1"])
+def test_unrecognized_pon_policy_never_claims_qualified_copy_number(policy: str) -> None:
+    report = report_tf_concordance(_sample(_member(1), pon_policy=policy))
+    assert all(pair["state"] == "no_pon" and pair["y"] is None for pair in report["pairs"])
 
 
 def test_missing_methylation_and_stale_target_are_named_unavailable() -> None:
