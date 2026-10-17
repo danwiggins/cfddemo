@@ -60,6 +60,8 @@ class EpiClock(MethBase):
             if not reference:
                 return Skip("reference", "reference FASTA is unavailable")
             with pysam.FastaFile(str(reference)) as fasta:
+                if fasta.get_reference_length("chr1") != HG38_CHR1_LENGTH:
+                    return Skip("reference", "clock coordinate map requires an hg38-length FASTA")
                 for _, chrom, pos0 in model.sites:
                     if pos0 + 2 > fasta.get_reference_length(chrom) or fasta.fetch(chrom, pos0, pos0 + 2).upper() != "CG":
                         return Skip("missing_asset", "registered Weidner position is not an hg38 CpG")

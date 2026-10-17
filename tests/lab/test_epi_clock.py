@@ -92,7 +92,16 @@ def test_clock_preflight_and_worker_with_real_call_store(tmp_path: Path) -> None
     for pos0 in (100, 110, 120):
         sequence[pos0:pos0 + 2] = list("CG")
     fasta = tmp_path / "synthetic.fa"
-    fasta.write_text(">chr1\n" + "".join(sequence) + "\n")
+    # Stream a full-length synthetic chr1 without allocating 249 MB in memory.
+    with fasta.open("w") as stream:
+        stream.write(">chr1\n" + "".join(sequence))
+        remaining = epi_clock.HG38_CHR1_LENGTH - len(sequence)
+        block = "A" * (1 << 20)
+        while remaining:
+            size = min(remaining, len(block))
+            stream.write(block[:size])
+            remaining -= size
+        stream.write("\n")
     pysam.faidx(str(fasta))
     reads = [Read(f"r-{site}-{i}", "chr1", pos0, "CGAAAAAAAA", mm="C+m?,0;", ml=[255 if site != 1 else 0])
              for site, pos0 in enumerate((100, 110, 120)) for i in range(5)]
