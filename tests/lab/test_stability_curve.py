@@ -333,6 +333,15 @@ def test_missing_downsample_does_not_claim_instability() -> None:
                  if panel["algorithm_id"] == "fragment-size" and panel["metric_id"] == "mode_bp")
     assert panel["points"][0]["state"] == "ok_unstable"
     assert panel["verdict"] == "unstable below full depth"
+    down.results.clear()
+    lower = views.InputView("0.25", "e" * 64, "downsample", {"fraction": 0.25}, {
+        "fragment-size": SimpleNamespace(status="ok", metrics=[metric], depth=None),
+    }, 0.25)
+    sample.derived.append(lower)
+    panel = next(panel for panel in views.stability_panels(sample)
+                 if panel["algorithm_id"] == "fragment-size" and panel["metric_id"] == "mode_bp")
+    assert [point["state"] for point in panel["points"]] == ["ok_usable", None, "ok_usable"]
+    assert panel["verdict"] == "usable only at isolated lower depths"
 
 
 def test_repeatability_preserves_raw_splits_without_inventing_a_verdict() -> None:

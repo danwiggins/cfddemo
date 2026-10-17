@@ -387,6 +387,8 @@ def stability_panels(sample: SampleView, library: Library | None = None) -> list
                 verdict_text = "not measured below full depth"
             elif any(point["state"] == "ok_unstable" for point in points if point["fraction"] < 1.0):
                 verdict_text = "unstable below full depth"
+            elif any(point["state"] == "ok_usable" for point in points if point["fraction"] < 1.0):
+                verdict_text = "usable only at isolated lower depths"
             else:
                 verdict_text = "no usable measurement below full depth"
             panels.append(

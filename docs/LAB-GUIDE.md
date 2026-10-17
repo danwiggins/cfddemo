@@ -358,7 +358,8 @@ script or style, no outside requests.
   values, their raw values and relative difference remain visible without a
   verdict. When a half is unavailable, its status remains visible. REPEATABILITY's
   median and worst-three list include every numeric split comparison; only
-  metrics with a validated verdict enter its stability count.
+  metrics with a validated verdict enter its stability count. Home separately
+  counts unavailable comparisons, even when no pair is comparable.
 
 ## Building a Lab cohort
 

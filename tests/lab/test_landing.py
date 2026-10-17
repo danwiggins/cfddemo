@@ -227,6 +227,34 @@ def test_stability_names_both_halves_without_a_numeric_verdict(page_root, tmp_pa
 
 
 @needs_chrome
+@pytest.mark.parametrize("comparable", [False, True])
+def test_home_names_unavailable_split_comparisons(page_root, tmp_path, comparable) -> None:
+    with RunningLabServer(LabStore(page_root)) as server:
+        original = server.app.api.sample
+
+        def sample(id12):
+            payload = original(id12)
+            payload["stability"] = [{"split": None, "split_status": {
+                "A": {"state": "skipped"}, "B": {"state": "unavailable"},
+            }}]
+            payload["repeatability"] = {
+                "median_relative_abs_diff": 0.05, "metrics": 1, "unstable": 0,
+                "verdict_metrics": 1, "no_verdict_metrics": 0,
+                "incomparable_metrics": 1, "worst": [],
+            } if comparable else None
+            return payload
+
+        server.app.api.sample = sample
+        dom = _dom(server, tmp_path, want=lambda page: "1 comparison unavailable" in page)
+    assert "1 comparison unavailable" in dom
+    if comparable:
+        assert "Median split-half |A−B|: 5.0%" in dom
+    else:
+        assert "no comparable pair is available" in dom
+        assert "See Stability" in dom
+
+
+@needs_chrome
 def test_findings_grouping_and_flags(page_root, tmp_path) -> None:
     with RunningLabServer(LabStore(page_root)) as server:
         dom = _dom(server, tmp_path, route=f"/sample/{_id12(page_root)}/findings")
