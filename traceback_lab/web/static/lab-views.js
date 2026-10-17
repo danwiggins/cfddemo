@@ -327,20 +327,32 @@
   function outOfRange(sample) { return allMetrics(sample).filter((m) => ["above_typical", "markedly_above", "below_typical", "markedly_below"].includes(m.state)); }
 
   function cohortReadiness(sample, metrics) {
+    if (sample.example || sample.cohort_state === "example")
+      return "EXAMPLE sample; no kit cohort reference. Run a real sample for cohort comparison";
     if (["cohort_unavailable", "target_unavailable", "stale_target"].includes(sample.cohort_state))
-      return `cohort ${sample.cohort_state.replace(/_/g, " ")}`;
+      return `cohort ${sample.cohort_state.replace(/_/g, " ")}; ${sample.cohort_problem?.fix || "reload the sample and check the cohort"}`;
     const cohort = metrics.filter((m) => ["internal_cohort", "provisional_external"].includes(m.reference_kind));
     const eligible = cohort.filter((m) => Number.isInteger(m.eligible_n)).map((m) => m.eligible_n);
-    if (!eligible.length) return sample.cohort_state === "not_built" ? "cohort not built" : "no comparable cohort values for these metrics";
+    const stale = cohort.some((m) => m.cohort_target_state === "stale_parameters" || m.cohort_target_state === "missing_selected_result");
+    const excluded = {};
+    for (const metric of cohort) for (const [reason, count] of Object.entries(metric.cohort_excluded || {})) {
+      if (Number.isInteger(count) && count > 0) excluded[reason] = Math.max(excluded[reason] || 0, count);
+    }
+    const reasons = Object.entries(excluded).map(([reason, count]) =>
+      `${reason === "incompatible" ? "protocol incompatible" : reason.replace(/_/g, " ")} ${cohort.length > 1 ? `up to ${count} per metric` : count}`);
+    const detail = reasons.length ? `; exclusions: ${reasons.join(" · ")}` : "";
+    const remedy = stale ? "; selected result identity changed—reload or recompute this sample, then rebuild the cohort if needed"
+      : excluded.incompatible ? "; recompute members with matching reference, aligner and counting protocol, then rebuild the cohort"
+        : excluded.missing_result || excluded.missing_metric ? "; recompute missing member results, then rebuild the cohort" : "";
+    if (!eligible.length) return (sample.cohort_state === "not_built" ? "cohort not built" : "no comparable cohort values for these metrics") + detail + remedy;
     const low = Math.min(...eligible), high = Math.max(...eligible);
     const n = low === high ? String(low) : `${low}–${high} by metric`;
-    const self = cohort.some((m) => m.cohort_excluded && m.cohort_excluded.self);
     const minimum = sample.cohort_min || 10;
     const phase = high < minimum ? ` of ${minimum} needed` : low < minimum ? `; some metrics need ${minimum}`
       : cohort.some((m) => m.percentile !== null && m.percentile !== undefined) ? "; percentile reference"
         : cohort.some((m) => m.exploratory_n !== null && m.exploratory_n !== undefined) ? "; exploratory reference"
           : "; metric not interpretable at this depth or QC";
-    return `eligible cohort n = ${n}${phase}${self ? " after leave-one-out" : ""}`;
+    return `eligible cohort n = ${n}${phase}${detail}${remedy}`;
   }
 
   function strip(metric) {

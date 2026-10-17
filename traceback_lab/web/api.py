@@ -389,6 +389,11 @@ class LabApi:
             interpreted, projections = self._interpret_sample_envelope(
                 envelope, library, depth_x, source_id, generation, target,
             )
+            selected_target = next((result for result in target.results if result.algorithm_id == algorithm_id), None) if target else None
+            target_result_state = (
+                "missing_selected_result" if selected_target is None else
+                "stale_parameters" if selected_target.parameters_sha256 != envelope.provenance.parameters_sha256 else None
+            ) if generation is not None and target is not None and envelope.status == "ok" else None
             for row in interpreted:
                 entry = row.entry
                 if entry is None and algorithm_id not in library.hidden_algorithms:
@@ -399,6 +404,10 @@ class LabApi:
                     if license_id not in used_licenses:
                         used_licenses.append(license_id)
                 payload = _metric_payload(row, entry, qc_band(row.value, entry))
+                payload["cohort_target_state"] = (
+                    target_result_state if entry is not None and
+                    entry["reference"]["kind"] in ("internal_cohort", "provisional_external") else None
+                )
                 projection = projections.get(row.metric_id)
                 payload["eligible_n"] = projection.percentile_n if projection else None
                 payload["cohort_values"] = list(projection.values) if projection else []
