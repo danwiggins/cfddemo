@@ -13,6 +13,7 @@ import re
 import shutil
 import stat
 import subprocess
+import tempfile
 from dataclasses import dataclass, field
 from functools import lru_cache
 from pathlib import Path
@@ -69,6 +70,7 @@ def _digest(path: Path) -> str:
 
 @dataclass
 class Identity(Base):
+    version: str = "2"
     consumes: str = "full_bam"
     cost: str = "slow"
     requires: Requirements = field(default_factory=lambda: Requirements(min_eligible_reads=MIN_ELIGIBLE))
@@ -119,42 +121,52 @@ class Identity(Base):
             sites = inspect_sites(LabStore(ctx.root))
         except IdentitySitesError as exc:
             raise RuntimeError("identity sites changed after preflight") from exc
+        planned_assets = ctx.extras.get("planned_asset_sha256s")
+        planned_tools = ctx.extras.get("planned_tool_pins")
+        if planned_assets is not None and planned_assets != [sites.sha256]:
+            raise RuntimeError("identity sites changed after execution planning")
+        if planned_tools is not None and planned_tools != [pin.identity() for pin in self.tools]:
+            raise RuntimeError("Somalier changed after execution planning")
         fasta = Path(ctx.extras["reference_fasta"])
         if _digest(fasta) != ctx.reference_sha256:
             raise RuntimeError("the registered reference FASTA changed")
-        bam = ctx.input_dir / "aligned.bam"
-        if ctx.derived:
-            from .cell_origin import write_transient_bam
+        with tempfile.TemporaryDirectory(prefix="identity-", dir=out.parent) as scratch:
+            work = Path(scratch)
+            bam = ctx.input_dir / "aligned.bam"
+            if ctx.derived:
+                from .cell_origin import write_transient_bam
 
-            bam = out / "derived.bam"
-            write_transient_bam(ctx.input_dir / "aligned.bam", bam, dict(ctx.derived))
-        destination = out / "somalier"
-        destination.mkdir()
-        process = subprocess.run(
-            [tool[0], "extract", "--sites", str(sites.file), "--fasta", str(fasta),
-             "--out-dir", str(destination), str(bam)],
-            env=_somalier_env(ctx.input_id), stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
-            timeout=1800, check=False,
-        )
-        if process.returncode != 0:
-            raise RuntimeError("Somalier extraction failed")
-        sketch = destination / f"{ctx.input_id}.somalier"
-        try:
-            descriptor = open_regular_no_follow(sketch)
-        except OSError as exc:
-            raise RuntimeError("Somalier produced no fingerprint") from exc
-        try:
-            info = os.fstat(descriptor)
-            if not stat.S_ISREG(info.st_mode) or info.st_nlink != 1 or not 0 < info.st_size <= MAX_SKETCH_BYTES:
-                raise RuntimeError("Somalier fingerprint is unsafe or outside the size limit")
-            data = os.read(descriptor, MAX_SKETCH_BYTES + 1)
-            after = os.fstat(descriptor)
-            if len(data) != info.st_size or (info.st_dev, info.st_ino, info.st_mtime_ns) != (
-                after.st_dev, after.st_ino, after.st_mtime_ns
-            ):
-                raise RuntimeError("Somalier fingerprint changed while being read")
-        finally:
-            os.close(descriptor)
+                bam = work / "derived.bam"
+                write_transient_bam(ctx.input_dir / "aligned.bam", bam, dict(ctx.derived))
+            destination = work / "somalier"
+            destination.mkdir()
+            process = subprocess.run(
+                [tool[0], "extract", "--sites", str(sites.file), "--fasta", str(fasta),
+                 "--out-dir", str(destination), str(bam)],
+                env=_somalier_env(ctx.input_id), stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+                timeout=1800, check=False,
+            )
+            if process.returncode != 0:
+                raise RuntimeError("Somalier extraction failed")
+            sketch = destination / f"{ctx.input_id}.somalier"
+            try:
+                descriptor = open_regular_no_follow(sketch)
+            except OSError as exc:
+                raise RuntimeError("Somalier produced no fingerprint") from exc
+            try:
+                info = os.fstat(descriptor)
+                if not stat.S_ISREG(info.st_mode) or info.st_nlink != 1 or not 0 < info.st_size <= MAX_SKETCH_BYTES:
+                    raise RuntimeError("Somalier fingerprint is unsafe or outside the size limit")
+                data = os.read(descriptor, MAX_SKETCH_BYTES + 1)
+                after = os.fstat(descriptor)
+                if len(data) != info.st_size or (info.st_dev, info.st_ino, info.st_mtime_ns) != (
+                    after.st_dev, after.st_ino, after.st_mtime_ns
+                ):
+                    raise RuntimeError("Somalier fingerprint changed while being read")
+            finally:
+                os.close(descriptor)
+            if inspect_sites(LabStore(ctx.root)).sha256 != sites.sha256 or somalier_tool() != tool:
+                raise RuntimeError("Somalier sites or tool changed during extraction")
         return AlgorithmOutput(
             metrics=[metric("fingerprint_bytes", len(data), unit="bytes")],
             artifacts={"fingerprint.somalier": data},

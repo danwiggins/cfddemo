@@ -6,6 +6,7 @@ import gzip
 import hashlib
 import json
 import subprocess
+from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
@@ -113,7 +114,7 @@ def test_extract_uses_registered_sites_and_opaque_input_name(tmp_path, monkeypat
     def fake_run(argv, **kwargs):
         assert argv[1] == "extract" and argv[argv.index("--sites") + 1] == str(sites.file)
         assert kwargs["env"]["SOMALIER_SAMPLE_NAME"] == input_id
-        out_dir = tmp_path / "output" / "somalier"
+        out_dir = Path(argv[argv.index("--out-dir") + 1])
         (out_dir / f"{input_id}.somalier").write_bytes(b"synthetic sketch")
         return subprocess.CompletedProcess(argv, 0)
 
@@ -123,6 +124,98 @@ def test_extract_uses_registered_sites_and_opaque_input_name(tmp_path, monkeypat
     output_dir.mkdir()
     output = algorithm.IDENTITY.run(ctx, output_dir)
     assert output.artifacts == {"fingerprint.somalier": b"synthetic sketch"}
+
+
+@pytest.mark.parametrize("derived", [False, True])
+def test_worker_publishes_only_fingerprint_for_full_and_derived_inputs(tmp_path, monkeypatch, derived) -> None:
+    import signal
+
+    from traceback_runner.serialization import canonical_json_bytes
+    from traceback_lab import worker
+    from traceback_lab.algorithms import cell_origin, identity as algorithm
+    from traceback_lab.envelope import Metric, ResultEnvelope, provenance
+    from traceback_lab.registry import context_to_json
+
+    store = LabStore(tmp_path / "root")
+    source = tmp_path / "sites.vcf.gz"
+    with gzip.open(source, "wb") as stream:
+        stream.write(b"##fileformat=VCFv4.2\n#CHROM\tPOS\tID\tREF\tALT\tQUAL\tFILTER\tINFO\n")
+    with store.writer("identity sites add", "r-20261016-0000-aabb", step="sites"):
+        sites = register_sites(store, source, hashlib.sha256(source.read_bytes()).hexdigest(), "synthetic sites")
+    fasta = tmp_path / "reference.fa"
+    fasta.write_bytes(b">chr1\nACGT\n")
+    input_dir = tmp_path / "input"
+    input_dir.mkdir()
+    (input_dir / "aligned.bam").write_bytes(b"PRIVATE-INPUT-BAM")
+    input_id, source_id = "a" * 64, "b" * 64
+    monkeypatch.setattr(algorithm, "somalier_tool", lambda: ("somalier", "0.3.5"))
+    if derived:
+        monkeypatch.setattr(cell_origin, "write_transient_bam",
+                            lambda _source, destination, _derived: destination.write_bytes(b"PRIVATE-DERIVED-BAM"))
+    ctx = InputContext(store.root, source_id, input_id, "ref",
+                       hashlib.sha256(fasta.read_bytes()).hexdigest(), input_dir,
+                       derived={"transform": "split", "half": "A"} if derived else None,
+                       extras={"reference_fasta": str(fasta), "planned_asset_sha256s": [sites.sha256],
+                               "planned_tool_pins": [pin.identity() for pin in algorithm.IDENTITY.tools]})
+
+    def fake_run(argv, **kwargs):
+        bam = Path(argv[-1])
+        assert bam.read_bytes() == (b"PRIVATE-DERIVED-BAM" if derived else b"PRIVATE-INPUT-BAM")
+        destination = Path(argv[argv.index("--out-dir") + 1])
+        (destination / f"{input_id}.somalier").write_bytes(b"anonymous fingerprint")
+        (destination / "somalier-private-report.html").write_bytes(b"PRIVATE-REPORT")
+        return subprocess.CompletedProcess(argv, 0)
+
+    monkeypatch.setattr(algorithm.subprocess, "run", fake_run)
+    scratch = tmp_path / "worker"
+    scratch.mkdir()
+    request = scratch / "request.json"
+    request.write_bytes(canonical_json_bytes({"entry": "identity:IDENTITY", "context": context_to_json(ctx),
+                                             "out_dir": str(scratch)}))
+    previous_handler = signal.getsignal(signal.SIGTERM)
+    try:
+        assert worker.main([str(request)]) == 0
+    finally:
+        signal.signal(signal.SIGTERM, previous_handler)
+    artifacts = scratch / "artifacts"
+    assert [path.relative_to(artifacts).as_posix() for path in artifacts.rglob("*") if path.is_file()] == [
+        "fingerprint.somalier"
+    ]
+    assert not list(scratch.glob("identity-*"))
+    envelope = ResultEnvelope(
+        algorithm_id="identity", algorithm_version=algorithm.IDENTITY.version, status="ok",
+        provenance=provenance(tool="fixture", parameters_sha256="e" * 64,
+                              source_id=source_id, input_id=input_id, reference_id="ref"),
+        metrics=[Metric(metric_id="fingerprint_bytes", value=len(b"anonymous fingerprint"))],
+    )
+    with store.writer("identity publication", "r-20261016-0001-aabb", step="identity"):
+        store.publish_result(envelope, input_id=input_id, artifacts_dir=artifacts)
+    published = store.selected_artifacts(input_id, "identity", "e" * 64)
+    assert published is not None
+    assert [path.relative_to(published).as_posix() for path in published.rglob("*") if path.is_file()] == [
+        "fingerprint.somalier"
+    ]
+
+
+def test_extract_refuses_changed_planned_sites_or_tool(tmp_path, monkeypatch) -> None:
+    from traceback_lab.algorithms import identity as algorithm
+
+    store = LabStore(tmp_path / "root")
+    source = tmp_path / "sites.vcf.gz"
+    with gzip.open(source, "wb") as stream:
+        stream.write(b"##fileformat=VCFv4.2\n#CHROM\tPOS\tID\tREF\tALT\tQUAL\tFILTER\tINFO\n")
+    with store.writer("identity sites add", "r-20261016-0000-aabb", step="sites"):
+        sites = register_sites(store, source, hashlib.sha256(source.read_bytes()).hexdigest(), "synthetic sites")
+    monkeypatch.setattr(algorithm, "somalier_tool", lambda: ("somalier", "0.3.5"))
+    common = (store.root, "a" * 64, "b" * 64, "ref", "c" * 64, tmp_path / "input")
+    with pytest.raises(RuntimeError, match="sites changed after execution planning"):
+        algorithm.IDENTITY.run(InputContext(*common, extras={"planned_asset_sha256s": ["0" * 64]}),
+                               tmp_path / "out")
+    with pytest.raises(RuntimeError, match="Somalier changed after execution planning"):
+        algorithm.IDENTITY.run(InputContext(*common, extras={
+            "planned_asset_sha256s": [sites.sha256],
+            "planned_tool_pins": [{"name": "somalier", "version": "0.2.0"}],
+        }), tmp_path / "out")
 
 
 def test_pair_tsv_requires_exact_opaque_names_and_finite_metrics() -> None:
