@@ -106,7 +106,7 @@ def test_derived_worker_uses_selected_depth_and_pinned_parent_calibration(
         contract = register_fetal(store, path, digest)
         algorithm = FETAL_SMALL_BAM
         entry = "tests.lab.test_s4_derived_worker_acceptance:FETAL_SMALL_BAM"
-        fraction_metric, count_metric, refusal = "fetal_fraction", "fetal_chry_nonpar_reads", "missing_asset"
+        fraction_metric, count_metric, refusal = "fetal_fraction", "fetal_chry_nonpar_reads", "depth"
 
     # The parent registration is the only calibration. Derived IDs must resolve
     # it through their published manifests, never through a copied contract.
@@ -143,10 +143,8 @@ def test_derived_worker_uses_selected_depth_and_pinned_parent_calibration(
         assert saved.depth.eligible_reads == stamp["eligible_reads"]
         assert saved.depth.approx_depth_x == stamp["approx_depth_x"]
         assert saved.provenance.input_id == run.derived.input_id
-        # The fetal adapter uses missing_asset for both an invalid contract
-        # and a low calibrated depth. At the parent's depth the exact same
-        # derived input and planned digest must pass preflight, leaving subset
-        # depth as the reason for its published refusal below.
+        # At the parent's depth the same derived input and planned digest
+        # must pass preflight, leaving subset depth as the published refusal.
         at_parent_depth = InputContext(
             root=store.root, source_id=SOURCE, input_id=run.derived.input_id,
             reference_id="hg38", reference_sha256=REFERENCE, input_dir=fixture.input_dir,
