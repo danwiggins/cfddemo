@@ -239,6 +239,7 @@ new measurement.
 | `sex-check` | chrY/chrX read density per Mb of non-N, non-PAR reference and a male / female / indeterminate call; needs 500,000 eligible reads |
 | `dd-cfdna-chry` | exploratory male-donor/female-recipient transplant fraction from chrY non-PAR reads and an input-scoped, operator-verified female-background/full-male calibration; depth minimum comes from that calibration ([registration and limits](dd-cfdna-chry.md)) |
 | `mtdna` | chrM reads (MAPQ ≥ 20) as a share of all primary reads, and the chrM fragment mode |
+| `microbial` | exploratory Kraken2/Bracken species profile from primary, QC-passing, non-duplicate human-unmapped ONT reads; needs operator-pinned tools and database; no infection diagnosis |
 | `viral-reads` | EBV, HPV and HBV reads per million human-unmapped primary reads from a separate minimap2 ≥ 2.28 alignment; needs an operator-registered viral FASTA and is exploratory for ONT cfDNA |
 | `cell-origin` | share of cfDNA from each of 40 Loyfer U250 cell types with bootstrap intervals; the Lab decodes MM/ML CpG calls in-house and uses the registered Loyfer atlas with UXM and NNLS. It needs 2.5M eligible reads and `traceback method-asset register --from-dir LOYFER_DIR --root R`; minor cell types are not interpretable below 5x. Missing or uncertain calls stay unknown; confident 5hmC and 5mC both enter the UXM methylated (M) state. Every run writes a private prefiltered BAM in worker scratch; downsample and split runs first select their reads into a second transient BAM. Both are deleted after normal run completion, and neither is published. The signed cell-origin method retains its separate modkit path |
 | `end-motifs` | reference 4-mers at both ends of each molecule (5′ forward end and the reverse complement of the other end), motif diversity score and CCCA share; needs 500,000 eligible reads and the registered FASTA |
@@ -389,14 +390,99 @@ traceback lab asset inspect pmd --root R
 `pmd-score` with an asset-specific recovery command. Registering a PMD
 asset does not establish redistribution rights or make a skipped result zero.
 
+**Microbial profile.** Install Kraken2 and Bracken from their upstream source
+layouts through your approved local process: the Kraken2 launcher must sit
+beside `classify` and `kraken2lib.pm`, and the Bracken launcher must sit beside
+`src/est_abundance.py`. The Lab pins those executed helpers and the Python
+interpreter used by Bracken. A packaged layout without those files reports
+`missing_toolchain` with an unsupported-layout explanation rather than silently
+omitting helper hashes. Build
+a Kraken2 database and its Bracken read-length distribution, and
+register its exact bytes under the run ROOT. The database remains in its
+operator-owned directory; the Lab stores its path only in a local manifest and
+publishes the bundle SHA-256 and source label. The registration requires
+`hash.k2d`, `opts.k2d`, `taxo.k2d`, and
+`database<READ_LENGTH>mers.kmer_distrib`. The Bracken read length must be
+75–500 bases. An altered or missing file makes the measurement unavailable.
+Registration records a bounded file-stat receipt for the sample page. The page
+and execution planning check that receipt without streaming the large database;
+the worker verifies complete file bytes before and after classification.
+If the database must remain at a new path, register it as a new Lab root; this
+registration will not silently switch to another directory with identical bytes.
+An older registration without a page receipt can be refreshed in place with
+the same `lab microbial db add` command: it verifies all bytes before adding
+the receipt. The sample page reports that legacy registration as unavailable
+until refreshed. If the sample page or execution planning reports changed
+registered files after a byte-identical restore or a file-stat-only change,
+repeat `lab microbial db add` with the original absolute directory, read
+length, and source label recorded locally in
+`ROOT/lab/assets/microbial-db/manifest.json`. It rehashes the required files
+and refreshes the receipt only when the bundle (file hashes and read length),
+directory, and source label match the existing registration. A refresh reads
+the required files twice, so allow time for a large database. If the read
+length or label was mistyped, retry with its original value. If the bytes or
+directory changed unintentionally, restore the original bytes at the registered
+path and retry. To keep different database bytes, Bracken read length, source
+label, or directory, use a new Lab root.
+
+```bash
+traceback lab microbial db add --directory KRAKEN_DB --read-length 75 \
+  --source-label operator-built-kraken-bracken --root R
+traceback lab microbial db inspect --root R
+traceback lab run ID12 --only microbial --root R
+```
+
+Only human-unmapped primary reads that pass QC and are not marked duplicate
+are classified. Reads shorter than the registered Bracken length are counted
+as excluded; longer reads are clipped to that exact length before Kraken2.
+The rate denominator is **all** primary QC-passing non-duplicate reads,
+including aligned and short unmapped reads. Bracken species estimates under
+Bacteria, Archaea, Viruses, and Fungi are shown as estimated reads per million
+denominator reads; human and other non-microbial taxa are excluded. At most
+256 species are displayed, with an omitted-taxon count. Read names and Kraken
+per-read assignments remain transient and are not published.
+The headline microbial estimate includes accepted species beyond the 256
+displayed rows, so it need not equal the sum of the visible table.
+The worker briefly writes candidate unmapped sequence in a private Lab scratch
+directory, with a 512 MiB candidate FASTA limit per run. Larger candidate sets
+are sent in full to Kraken2 through a pipe; the partial staged file is removed
+first. Kraken's per-read assignments are suppressed, while its aggregate report feeds
+Bracken. Normal completion removes scratch; a crash or abrupt power loss can
+leave files for an operator to inspect and remove under the Lab root.
+An input with no primary QC-passing non-duplicate reads has no microbial rate
+or cohort comparison. If unmapped reads exist but all are too short or lack
+sequence, the rate and cohort comparison are also unavailable. An input with
+only confidently human-mapped reads has a measured zero candidate burden.
+Kraken classifications above species level without any species row yield a zero
+Bracken species estimate; that does not mean the candidate read is biologically
+non-microbial. The QC panel keeps the classified-read count visible.
+The QC panel counts missing-sequence unmapped reads separately from short reads.
+
+The profile is speculative and marked **PRIVACY**. A compatible healthy-v1
+cohort of at least ten *other* samples supplies a per-taxon and overall 97.5th
+percentile only when the aligner, exact tool and database identities, analysis
+parameters, and selected inputs match. Build that cohort as below. Missing
+taxon counts are treated as zero only when the cohort profile was complete;
+otherwise they are excluded. An absent or incompatible cohort leaves the
+percentile explicitly unavailable. A high candidate signal can reflect
+contamination, residual human sequence, database content, or misclassification;
+it is not an infection diagnosis or an ONT clinical threshold.
+
 **Viral reference.** `viral-reads` leaves the registered hg38 human reference
 unchanged. It takes human-unmapped primary reads from the aligned BAM, including
 duplicate-flagged and QC-fail primaries but excluding secondary and
 supplementary records, then runs
 minimap2 separately against an operator-supplied viral FASTA, and reports
 EBV/HPV/HBV aligned reads per million human-unmapped primaries. The count is
-null if that denominator is zero. A read with reported primary or secondary
-alignments to more than one virus group is excluded from all groups; multiple
+null if that denominator is zero.
+The microbial panel's viral taxa use Bracken estimates from QC-passing,
+non-duplicate unmapped reads long enough for its registered read length and
+divide by all QC-passing, non-duplicate primaries. `viral-reads` instead uses
+the side-reference alignments and divides by human-unmapped primaries,
+including QC-fail and duplicate-flagged reads. Their rates can differ or one
+can be zero while the other is nonzero; do not compare them as matching assays.
+A read with reported primary or secondary alignments to more than one virus
+group is excluded from all groups; multiple
 primary alignments within one group count once. The side alignment explicitly
 retains up to 100 secondary alignments per read at minimap2's 0.8 score ratio;
 bundles with many near-identical contigs can still hide cross-group alternatives.
