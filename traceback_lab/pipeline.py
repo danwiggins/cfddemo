@@ -464,11 +464,11 @@ def run_pipeline(
         if sink is not None:
             sink.close()
     if disk_path is not None or disk_usage is not None:
-        if disk_thread is None or not disk_thread.is_alive():
-            disk_thread = threading.Thread(target=sample_disk, daemon=True)
-            disk_thread.start()
-        disk_thread.join(timeout=FINAL_DISK_SAMPLE_S)
-        final_disk_complete = not disk_thread.is_alive()
+        # A periodic scan may have started before the worker's last write.
+        # Only a fresh post-exit scan can serve as the final reading.
+        final_disk_thread = threading.Thread(target=sample_disk, daemon=True)
+        final_disk_thread.start()
+        final_disk_thread.join(timeout=FINAL_DISK_SAMPLE_S)
         try:
             while True:
                 size = disk_samples.get_nowait()
@@ -476,10 +476,6 @@ def run_pipeline(
                     peak_disk = size if peak_disk is None else max(peak_disk, size)
         except Empty:
             pass
-        if not final_disk_complete:
-            # An early small sample is not a credible peak if the final scan
-            # cannot complete within the bounded reporting budget.
-            peak_disk = None
     try:
         while True:
             rss = rss_samples.get_nowait()

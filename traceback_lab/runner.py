@@ -329,7 +329,11 @@ def run_plan(
         except Exception:  # noqa: BLE001 - optional telemetry cannot fail the worker
             microbial_before = None
 
-        def step_disk_bytes() -> int:
+        def step_disk_bytes(
+            scratch: Path = scratch,
+            microbial_root: Path = microbial_root,
+            microbial_before: int | None = microbial_before,
+        ) -> int:
             return (directory_bytes(scratch) if microbial_before is None
                     else _step_disk_bytes(scratch, microbial_root, microbial_before))
 
