@@ -52,6 +52,7 @@ ALGORITHMS: tuple[str, ...] = (
     "identity:IDENTITY",
     "mtdna:MTDNA",
     "microbial:MICROBIAL",
+    "viral_reads:VIRAL_READS",
     "cell_origin:CELL_ORIGIN",
     "end_motifs:END_MOTIFS",
     "breakpoint_motifs:BREAKPOINT_MOTIFS",
