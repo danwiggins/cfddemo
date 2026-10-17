@@ -70,6 +70,7 @@ def add_run_parser(commands: Any, common: Callable[[argparse.ArgumentParser], No
     run.add_argument("--reference", dest="reference_id", metavar="ID", help="registered reference id")
     run.add_argument("--profile", choices=("all", "fast"), default="all")
     run.add_argument("--only", metavar="A,B", help="only these algorithms (overrides --profile)")
+    run.add_argument("--cohort", metavar="ID", help="use this built protocol-matched cohort's panel of normals")
     run.add_argument("--downsample", default="0.5,0.25,0.1", metavar="F,F,F", help="depth-curve fractions (default 0.5,0.25,0.1)")
     run.add_argument("--no-downsample", action="store_true", help="skip the depth curve")
     run.add_argument("--controls", dest="controls", action="store_true", default=True, help="run the positive controls (default)")
@@ -160,6 +161,7 @@ def _flags(args: argparse.Namespace) -> dict[str, Any]:
     return {
         "profile": args.profile,
         "only": args.only,
+        "cohort": args.cohort,
         "skip_bad_chunks": args.skip_bad_chunks,
         "force": args.force,
         "timeout_s": args.timeout_s,
@@ -550,6 +552,9 @@ def run_command(args: argparse.Namespace, store: LabStore) -> tuple[int, dict[st
                 target = _target_from_input(aligned, reference_id, reference_sha256, example, store)
                 log.append("sample", sample=id12, source_id=aligned.source_id, input_id=aligned.input_id,
                            platform=target.platform)
+                from .pon_consumer import bind_target
+
+                items = bind_target(store, items, target, aligned.manifest, cohort_id=args.cohort)
                 results = run_plan(
                     store,
                     lock,
