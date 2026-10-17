@@ -6,6 +6,7 @@ from types import SimpleNamespace
 
 import pytest
 
+from traceback_lab import cohorts
 from traceback_lab.cohort_contracts import CohortGeneration, CohortMember, CohortResult
 from traceback_lab.envelope import Depth, Metric, ResultEnvelope, provenance
 from traceback_lab.interpretation import engine as interpretation_engine
@@ -66,7 +67,7 @@ def test_sample_lenses_pin_eligible_loo_reference(
     generation = CohortGeneration(cohort_id="healthy-v1", version=7, kind=kind, members=members)
     reads: list[str] = []
     monkeypatch.setattr(web_api, "read_current", lambda store, cohort_id: (reads.append(cohort_id), generation)[1])
-    monkeypatch.setattr(web_api, "member_for_generation", lambda store, generation, source_id: member(1, value=target_value))
+    monkeypatch.setattr(cohorts, "member_for_generation", lambda store, generation, source_id: member(1, value=target_value))
     envelope = ResultEnvelope(
         algorithm_id="fragment-size", algorithm_version="1", status="ok",
         provenance=provenance(tool="fixture", parameters_sha256=PARAMETERS,
@@ -124,7 +125,7 @@ def test_incompatible_or_stale_target_never_scores_against_cohort(tmp_path, monk
     monkeypatch.setattr(web_api, "read_current", lambda store, cohort_id: generation)
     api = web_api.LabApi(LabStore(tmp_path))
     sample = SimpleNamespace(example=False, full=SimpleNamespace(input_id=INPUT))
-    monkeypatch.setattr(web_api, "member_for_generation", lambda store, generation, source_id: member(1))
+    monkeypatch.setattr(cohorts, "member_for_generation", lambda store, generation, source_id: member(1))
     pinned, target, state, problem = api._sample_cohort(SOURCE, sample)
     assert pinned is generation and target is not None and state == "ready" and problem is None
 
@@ -165,14 +166,14 @@ def test_missing_pon_tools_keep_independent_comparison_but_refuse_copy_number(
         fix="Restore the matching ichor toolchain", data={"field": field},
     )
     monkeypatch.setattr(web_api, "read_current", lambda store, cohort_id: generation)
-    monkeypatch.setattr(web_api, "member_for_generation", lambda *args: (_ for _ in ()).throw(problem))
+    monkeypatch.setattr(cohorts, "member_for_generation", lambda *args: (_ for _ in ()).throw(problem))
     independent = member(1, value=0.95)
     uncorrected = CohortResult(
         algorithm_id="copy-number", parameters_sha256=PARAMETERS,
         cohort_compat_key=COMPAT, metrics={"tumor_fraction": 0.1},
     )
     monkeypatch.setattr(
-        web_api, "member_from_store", lambda *args: independent.model_copy(
+        cohorts, "member_from_store", lambda *args: independent.model_copy(
             update={"results": independent.results + (uncorrected,)}
         ),
     )
@@ -228,7 +229,7 @@ def test_sample_list_pins_one_generation_for_all_rows(tmp_path, monkeypatch) -> 
         reads.append(cohort_id)
         return generations[len(reads) - 1]
     monkeypatch.setattr(web_api, "read_current", current)
-    monkeypatch.setattr(web_api, "member_for_generation", lambda store, generation, source_id: member(int(source_id, 16)))
+    monkeypatch.setattr(cohorts, "member_for_generation", lambda store, generation, source_id: member(int(source_id, 16)))
     samples = {}
     for index, source in enumerate(sources, start=1):
         input_id = f"{index + 100:064x}"
@@ -298,7 +299,7 @@ def test_target_unavailable_preserves_recovery_state(tmp_path, monkeypatch, fail
     api = web_api.LabApi(LabStore(tmp_path))
     generation = CohortGeneration(cohort_id="healthy-v1", version=2, members=())
     monkeypatch.setattr(web_api, "read_current", lambda store, cohort_id: generation)
-    monkeypatch.setattr(web_api, "member_for_generation", lambda store, generation, source_id: (
+    monkeypatch.setattr(cohorts, "member_for_generation", lambda store, generation, source_id: (
         _ for _ in ()
     ).throw(failure))
     sample = SimpleNamespace(example=False, full=SimpleNamespace(input_id=INPUT))
