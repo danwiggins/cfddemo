@@ -42,7 +42,7 @@ inspect-clock-map --root ROOT`. Registration is immutable within a Lab root.
 The adapter requires 5 million eligible reads, an MM-tagged methylation
 stream, hg38, and at least five eligible C+m calls at **each** CpG. The
 five-call rule is an engineering completeness gate, not a published or clinical
-performance threshold. If any site misses the gate, the age metric is absent;
+performance threshold. If any site misses the gate, the age metric is null;
 the adapter does not impute. Site fractions and counts remain visible. Even a
 numerical output needs matched-platform validation before biological use.
 

@@ -4,6 +4,9 @@ from __future__ import annotations
 
 import hashlib
 import json
+import subprocess
+import sys
+from dataclasses import replace
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -11,10 +14,14 @@ import numpy as np
 import pytest
 
 from traceback_lab.algorithms import epi_clock
+from traceback_lab.algorithms.meth_calls import METH_CALLS
 from traceback_lab.epi_clock_model import ClockModelError, WEIDNER_SITES, _parse, inspect_map, register_map
 from traceback_lab.meth_calls import DTYPE, HAS_M
 from traceback_lab.registry import InputContext
+from traceback_lab.registry import Ready, Skip, context_to_json
 from traceback_lab.store import LabStore
+
+from .bam_fixtures import Read, context_for
 
 
 def _map_bytes() -> bytes:
@@ -74,3 +81,48 @@ def test_clock_requires_all_three_sites_and_uses_published_coefficients(monkeypa
     rows = rows[:-1]
     output = epi_clock.EPI_CLOCK.run(ctx, tmp_path)
     assert output.metrics[0]["value"] is None
+
+
+def test_clock_preflight_and_worker_with_real_call_store(tmp_path: Path) -> None:
+    """Synthetic coordinates and depth exercise plumbing, not biological qualification."""
+
+    import pysam
+
+    sequence = list("A" * 200)
+    for pos0 in (100, 110, 120):
+        sequence[pos0:pos0 + 2] = list("CG")
+    fasta = tmp_path / "synthetic.fa"
+    fasta.write_text(">chr1\n" + "".join(sequence) + "\n")
+    pysam.faidx(str(fasta))
+    reads = [Read(f"r-{site}-{i}", "chr1", pos0, "CGAAAAAAAA", mm="C+m?,0;", ml=[255 if site != 1 else 0])
+             for site, pos0 in enumerate((100, 110, 120)) for i in range(5)]
+    ctx = context_for(tmp_path, [("chr1", epi_clock.HG38_CHR1_LENGTH)], reads,
+                      fasta=fasta, eligible_reads=5_000_000)
+    source = tmp_path / "clock-map.json"
+    raw = _map_bytes()
+    source.write_bytes(raw)
+    model = register_map(LabStore(tmp_path), source, hashlib.sha256(raw).hexdigest())
+    intermediate = tmp_path / "meth-calls"
+    METH_CALLS.run(ctx, intermediate)
+    extras = dict(ctx.extras)
+    extras["upstream"] = {**extras["upstream"], "meth-calls": str(intermediate)}
+    extras["planned_asset_sha256s"] = [model.sha256]
+    ctx = replace(ctx, extras=extras)
+    assert isinstance(epi_clock.EPI_CLOCK.preflight(ctx), Ready)
+    assert isinstance(epi_clock.EPI_CLOCK.preflight(replace(ctx, eligible_reads=4_999_999)), Skip)
+    assert isinstance(epi_clock.EPI_CLOCK.preflight(replace(ctx, extras={**extras, "planned_asset_sha256s": []})), Skip)
+    scratch = tmp_path / "worker"
+    scratch.mkdir()
+    request = scratch / "request.json"
+    request.write_text(json.dumps({"entry": "epi_clock:EPI_CLOCK", "context": context_to_json(ctx),
+                                   "out_dir": str(scratch)}))
+    subprocess.run([sys.executable, "-m", "traceback_lab.worker", str(request)], check=True)
+    metrics = {item["metric_id"]: item for item in json.loads((scratch / "output.json").read_text())["metrics"]}
+    assert metrics["epigenetic_age_years"]["value"] == pytest.approx(38 - 26.4 + 164.7)
+    assert metrics["epigenetic_age_years"]["n"] == 5
+    derived = replace(ctx, derived={"transform": "split", "half": "A"})
+    assert epi_clock.EPI_CLOCK.run(derived, scratch).metrics[0]["value"] is None
+    (LabStore(tmp_path).lab / "assets" / "epi-clock-map" / "coordinates.json").write_bytes(b"{}")
+    assert isinstance(epi_clock.EPI_CLOCK.preflight(ctx), Skip)
+    with pytest.raises(ClockModelError):
+        epi_clock.EPI_CLOCK.run(ctx, scratch)
