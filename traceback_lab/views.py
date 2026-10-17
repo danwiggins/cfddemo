@@ -60,7 +60,7 @@ def _selected_results_with_unreadable(
     base = store.results_dir / input_id
     out: dict[str, tuple[int | None, ResultEnvelope, str]] = {}
     ambiguous: set[str] = set()
-    unreadable_orders: dict[str, list[int | None]] = {}
+    invalid_orders: dict[str, int | None] = {}
     if not base.is_dir():
         return {}, set(), set(), {}
     for algorithm_dir in sorted(base.iterdir()):
@@ -87,9 +87,13 @@ def _selected_results_with_unreadable(
                     continue
                 except OSError:
                     pass
-                unreadable_orders.setdefault(algorithm_dir.name, []).append(
-                    store.selected_order_from_selector(input_id, algorithm_dir.name, identity_dir.name)
-                )
+                order = store.selection_order_hint(input_id, algorithm_dir.name, identity_dir.name)
+                if algorithm_dir.name not in invalid_orders:
+                    invalid_orders[algorithm_dir.name] = order
+                elif order is None or invalid_orders[algorithm_dir.name] is None:
+                    invalid_orders[algorithm_dir.name] = None
+                else:
+                    invalid_orders[algorithm_dir.name] = max(invalid_orders[algorithm_dir.name], order)
                 continue
             attempt_id, envelope, order = selected
             current = out.get(algorithm_dir.name)
@@ -99,9 +103,9 @@ def _selected_results_with_unreadable(
             elif order == current[0]:
                 ambiguous.add(algorithm_dir.name)
     unreadable = {
-        algorithm_id for algorithm_id, orders in unreadable_orders.items()
-        if any(order is None or algorithm_id not in out or out[algorithm_id][0] is None
-               or order >= out[algorithm_id][0] for order in orders)
+        algorithm_id for algorithm_id, order in invalid_orders.items()
+        if (order is None or algorithm_id not in out or out[algorithm_id][0] is None
+            or order >= out[algorithm_id][0])
     }
     return {
         key: value for key, (_, value, _) in out.items()
