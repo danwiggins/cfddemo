@@ -76,9 +76,13 @@ class PonSelection:
     path: Path
     pon_n: int
     reference_sha256: str
+    aligner_identity: str
     grid_sha256: str
     counting_parameters_sha256: str
     toolchain_lock_sha256: str
+    gc_sha256: str
+    map_sha256: str
+    centromere_sha256: str
     panel_source_ids: tuple[str, ...]
     target_excluded: bool
 
@@ -185,6 +189,7 @@ def _publish_panel(parent: Path, source: Path) -> str:
             if not stat.S_ISREG(os.fstat(stream.fileno()).st_mode):
                 raise OSError("panel output is not a regular file")
             digest = hashlib.file_digest(stream, "sha256").hexdigest()
+            os.fsync(stream.fileno())
     except OSError as exc:
         raise _problem("the PoN output is missing or unsafe", "Retry the cohort build") from exc
     destination = parent / f"{digest}.rds"
@@ -303,7 +308,8 @@ def build_panels(store: LabStore, inputs: tuple[PonInput, ...]) -> PonBuild:
 
 def binding_for(
     store: LabStore, generation: CohortGeneration, source_id: str, *,
-    reference_sha256: str, toolchain_lock_sha256: str, counting_parameters_sha256: str,
+    reference_sha256: str, aligner_identity: str, toolchain_lock_sha256: str,
+    counting_parameters_sha256: str, gc_sha256: str, map_sha256: str, centromere_sha256: str,
     grid_sha256: str | None = None,
 ) -> PonSelection:
     """Select from one pinned generation, checking protocol and immutable bytes.
@@ -319,8 +325,12 @@ def binding_for(
     if provenance is None or generation.pon_n < MIN_PON_N:
         raise _problem("the selected cohort has no qualified PoN build record", "Rebuild the cohort with a verified panel")
     if (provenance.reference_sha256 != reference_sha256
+            or provenance.aligner_identity != aligner_identity
             or provenance.toolchain_lock_sha256 != toolchain_lock_sha256
             or provenance.counting_parameters_sha256 != counting_parameters_sha256
+            or provenance.gc_sha256 != gc_sha256
+            or provenance.map_sha256 != map_sha256
+            or provenance.centromere_sha256 != centromere_sha256
             or (grid_sha256 is not None and provenance.grid_sha256 != grid_sha256)):
         raise _problem("the selected PoN does not match this copy-number protocol", "Use the matching reference and toolchain or rebuild the cohort")
     member = next((item for item in generation.members if item.source_id == source_id), None)
@@ -340,8 +350,10 @@ def binding_for(
         raise _problem("the selected PoN asset changed", "Restore the immutable panel asset")
     return PonSelection(
         generation.cohort_id, generation.version_id, "lab_loo_v1", digest, path,
-        generation.pon_n, provenance.reference_sha256, provenance.grid_sha256,
+        generation.pon_n, provenance.reference_sha256, provenance.aligner_identity,
+        provenance.grid_sha256,
         provenance.counting_parameters_sha256, provenance.toolchain_lock_sha256,
+        provenance.gc_sha256, provenance.map_sha256, provenance.centromere_sha256,
         tuple(item for item in provenance.source_ids if item != source_id), target_excluded,
     )
 
