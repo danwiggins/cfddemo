@@ -86,6 +86,8 @@ class AlignedEndStructure(Base):
             return []
 
     def preflight(self, ctx: InputContext) -> Ready | Skip:
+        if ctx.platform != "ont":
+            return Skip("platform", "aligned-end structure requires an ONT-declared input")
         if ctx.example:
             return Skip("example_reference", "aligned-end structure requires a genuine hg38 ONT input")
         if ctx.derived is not None:
@@ -125,6 +127,8 @@ class AlignedEndStructure(Base):
 
     def run(self, ctx: InputContext, out: Path) -> AlgorithmOutput:
         del out
+        if ctx.platform != "ont":
+            raise ValueError("aligned-end structure requires an ONT-declared input")
         catalogues = inspect_end_catalogues(ctx.root)
         expected = ctx.extras.get("planned_asset_sha256s")
         if expected is not None and expected != [catalogues.identity]:

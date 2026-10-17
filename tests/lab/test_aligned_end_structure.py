@@ -34,6 +34,22 @@ def test_missing_catalogue_traceback_does_not_expose_external_path(tmp_path: Pat
     assert "catalogue is absent, unreadable or changed" in rendered
 
 
+def test_illumina_platform_is_refused_before_catalogue_access(tmp_path: Path, monkeypatch) -> None:
+    import traceback_lab.algorithms.aligned_end_structure as module
+
+    monkeypatch.setattr(module, "inspect_end_catalogues", lambda root:
+                        pytest.fail("catalogues must not be opened for Illumina"))
+    monkeypatch.setattr(module, "end_catalogue_identity", lambda root:
+                        pytest.fail("catalogue identity must not be read for Illumina"))
+    ctx = InputContext(root=tmp_path, source_id="a" * 64, input_id="b" * 64,
+                       reference_id="hg38", reference_sha256="c" * 64,
+                       input_dir=tmp_path, platform="illumina")
+    decision = ALIGNED_END_STRUCTURE.preflight(ctx)
+    assert decision.reason_code == "platform"
+    with pytest.raises(ValueError, match="ONT-declared"):
+        ALIGNED_END_STRUCTURE.run(ctx, tmp_path)
+
+
 def _catalogues(tmp_path: Path) -> tuple[Path, Path, Path]:
     root = tmp_path / "root"
     centers = tmp_path / "centers.bed"
