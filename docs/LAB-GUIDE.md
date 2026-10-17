@@ -253,7 +253,7 @@ new measurement.
 | `hypometh-reads` | among reads with ≥ 4 CpG calls, the share under 25% methylated, and U/X/M counts (≤ 25% / between / ≥ 75%); needs 500,000 eligible reads |
 | `frag-x-meth` | descriptive molecule-count matrix of aligned-size bins by per-read 5mC fraction (at least four distinct CpG sites/read); the scalar is long (151–220 bp) mean minus short (100–150 bp) mean, null if either group is empty; no normal range |
 | `breakpoint-motifs` | 4-mer counts at aligned-reference-span start and end−1, stratified by CpG proximity; the scalar is the fraction of ends near a CpG. These are not proven physical cleavage positions, and the methylation link is unavailable without a supported joint input |
-| `aligned-end-structure` | exploratory ONT aligned-span U/D end asymmetry around operator-pinned hg38 open-chromatin centers and exact support for separately pinned U/D preferred-end coordinates; needs a full native ONT input at ≥10x observed eligible depth and both catalogues registered below. No tissue-origin or clinical calibration |
+| `aligned-end-structure` | exploratory ONT aligned-span U/D end asymmetry around operator-pinned hg38 open-chromatin centers and exact support for separately pinned U/D preferred-end coordinates; needs a native ONT input or its downsample/split subset at ≥10x observed eligible depth and both catalogues registered below. No tissue-origin or clinical calibration |
 
 The Lab's cell-origin v2 execution identity pins normalized source digests of
 its MM/ML decoder and reused UXM, NNLS, bootstrap, model, and prefilter code,
@@ -418,17 +418,23 @@ fraction of valid aligned ends exactly matching the pinned U/D site catalogue;
 this is a support count, not de novo site discovery or enrichment against a calibrated
 background. The raw count difference scales with depth, eligible-region count
 and end coverage; it is null when no aligned ends fall in its measurement
-windows or when either side of the center lacks window observations. The
-proxy does not impose the short-fragment length constraint of the published
-cfDNA method. Its artifact reports aggregate aligned-span counts in five
-length bins so that this difference can be assessed for each run.
+windows or when either side of the center lacks window observations.
+The proxy does not impose the short-fragment length constraint of the
+published cfDNA method. Its artifact reports aggregate aligned-span counts
+in five length bins so that this difference can be assessed for each run.
 The artifact also records the strongest left-side D and right-side U peak
 offsets as clipping diagnostics; these are descriptive and do not validate
 the score's biological origin.
+Downsample and split results use the same selected read-summary rows as other
+Lab measurements. The 10x gate is recalculated from those selected rows;
+CNA-derived inputs remain unsupported. The reported 10x minimum is an input
+gate, not a validated adequacy threshold.
+The raw count score changes with retained depth, so a downsampled score should
+not be read as a biological difference from the full-input score; split halves
+are descriptive repeatability checks only.
 The 201-position raw U/D profiles and exact preferred-site support are
 sample-level derivatives. Treat the artifact as sample-identifiable data,
 especially when registering a small or targeted catalogue.
-The reported 10x minimum is an input gate, not a validated adequacy threshold.
 The score has no validated stability tolerance or biological acceptance
 interval. Its headline placement is for Lab navigation and does not imply
 clinical or tissue-origin validity. Both are ONT aligned-span proxies, not confirmed physical

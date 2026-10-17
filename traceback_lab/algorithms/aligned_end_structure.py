@@ -7,6 +7,7 @@ tissue-origin inference or a reimplementation of paired-end short-read OCF.
 from __future__ import annotations
 
 import json
+from collections.abc import Mapping
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
@@ -14,7 +15,7 @@ from typing import Any
 import numpy as np
 
 from ..end_catalog_assets import EndCatalogueError, end_catalogue_identity, inspect_end_catalogues
-from ..read_summary import CHUNK_ROWS, FLAG_EXCLUDE, MIN_MAPQ
+from ..read_summary import CHUNK_ROWS, FLAG_EXCLUDE, MIN_MAPQ, depth_stamp, validate_fraction
 from ..registry import AlgorithmOutput, InputContext, Ready, Requirements, Skip
 from ._base import Base, load_summary, metric, ratio
 
@@ -22,6 +23,22 @@ from ._base import Base, load_summary, metric, ratio
 RADIUS = 100
 MIN_DEPTH_X = 10.0
 AUTOSOME_NAMES = frozenset(f"chr{chrom}" for chrom in range(1, 23))
+
+
+def _selection(derived: Mapping[str, Any]) -> dict[str, Any]:
+    """Canonical single-step control; derived IDs bind it to the parent input."""
+
+    if not isinstance(derived, Mapping):
+        raise ValueError("invalid derived selection")
+    transform = derived.get("transform")
+    if transform == "downsample" and set(derived) == {"transform", "fraction"}:
+        fraction = derived["fraction"]
+        if isinstance(fraction, bool) or not isinstance(fraction, (int, float)):
+            raise ValueError("invalid downsample fraction")
+        return {"transform": "downsample", "fraction": validate_fraction(float(fraction))}
+    if transform == "split" and set(derived) == {"transform", "half"} and derived["half"] in {"A", "B"}:
+        return {"transform": "split", "half": derived["half"]}
+    raise ValueError("unsupported derived selection")
 
 
 def _relative_counts(positions: np.ndarray, centers: np.ndarray) -> np.ndarray:
@@ -75,7 +92,11 @@ class AlignedEndStructure(Base):
         if ctx.example:
             return Skip("example_reference", "aligned-end structure requires a genuine hg38 ONT input")
         if ctx.derived is not None:
-            return Skip("derived_input", "aligned-end structure requires the full aligned ONT input")
+            # DerivedSpec is one transform of a full parent, never a chained lineage.
+            try:
+                _selection(ctx.derived)
+            except (ValueError, KeyError, TypeError):
+                return Skip("derived_input", "aligned-end structure requires a valid derived row mask")
         if ctx.reference_id != "hg38":
             return Skip("reference", "aligned-end structure requires a full, genuine hg38 ONT input")
         try:
@@ -85,7 +106,14 @@ class AlignedEndStructure(Base):
         if not isinstance(manifest, dict) or manifest.get("kind") != "aligned":
             return Skip("input_kind", "aligned-end structure requires a native ONT alignment")
         # Only the native ONT aligner publishes kind=aligned; imported BAMs are prealigned.
-        if ctx.approx_depth_x is None or not np.isfinite(ctx.approx_depth_x) or ctx.approx_depth_x < MIN_DEPTH_X:
+        depth = ctx.approx_depth_x
+        if ctx.derived is not None:
+            try:
+                summary, mask = load_summary(ctx)
+                depth = depth_stamp(summary, mask)["approx_depth_x"]
+            except (OSError, RuntimeError):
+                return Skip("upstream", "aligned-end structure could not read the derived read summary")
+        if depth is None or not np.isfinite(depth) or depth < MIN_DEPTH_X:
             return Skip("depth", "aligned-end structure needs at least 10x observed eligible depth")
         expected = ctx.extras.get("planned_asset_sha256s")
         if expected is not None:
@@ -108,6 +136,12 @@ class AlignedEndStructure(Base):
         if expected is not None and expected != [catalogues.identity]:
             raise EndCatalogueError("pinned end catalogues changed after execution identity was set")
         summary, mask = load_summary(ctx)
+        selection = _selection(ctx.derived) if ctx.derived is not None else None
+        observed_depth_x = depth_stamp(summary, mask)["approx_depth_x"] if selection is not None else ctx.approx_depth_x
+        if selection is not None and (
+            observed_depth_x is None or not np.isfinite(observed_depth_x) or observed_depth_x < MIN_DEPTH_X
+        ):
+            raise RuntimeError("derived aligned-end depth fell below 10x after preflight")
         names = summary.contigs
         lengths = summary.lengths
         catalogue_names: dict[int, str] = {}
@@ -195,7 +229,9 @@ class AlignedEndStructure(Base):
             "centers_source": catalogues.centers_source,
             "preferred_source": catalogues.preferred_source,
             "terms": catalogues.terms,
-            "observed_depth_x": ctx.approx_depth_x,
+            "observed_depth_x": observed_depth_x,
+            "depth_basis": "selected_read_summary" if selection is not None else "run_target",
+            "derived_selection": selection,
             "interpretation": "ONT aligned-span proxy; exploratory; no tissue-origin calibration",
             "ocf_like_windows": self.parameters["ocf_like_windows"],
             "offset_bp": list(range(-RADIUS, RADIUS + 1)),
