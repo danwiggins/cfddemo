@@ -87,6 +87,7 @@ def test_every_sample_surface_has_loading_copy_while_listing_is_pending(route, t
         server.app.api.samples = delayed_listing
         profile = tmp_path / "browser-profile"
         path = "/" if route == "home" else f"/sample/{ID12}/{route}"
+        placeholder = "loading-clia" if route == "home" else "loading-lens"
 
         def inspect(_command, evaluate) -> None:
             observed.update(evaluate("""(() => ({
@@ -102,7 +103,8 @@ def test_every_sample_surface_has_loading_copy_while_listing_is_pending(route, t
             dom = _dom_cdp(
                 [_chrome(), "--headless=new", "--disable-gpu", "--no-first-run", "--window-size=1280,800",
                  f"--user-data-dir={profile}", server.issue_link() + f"&route={path}"],
-                profile, ok=lambda page: "Loading Lab results…" in page, interact=inspect, timeout=60,
+                profile, ok=lambda page: "Loading Lab results…" in page and placeholder in page,
+                interact=inspect, timeout=60,
             )
         finally:
             release_listing.set()

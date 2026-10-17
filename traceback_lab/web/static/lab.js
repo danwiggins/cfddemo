@@ -594,6 +594,8 @@
     render();
     try {
       await exchangeBootstrap();
+      state.route = parseRoute();
+      render();
       const listing = await api("/api/samples");
       state.samples = listing.samples;
       state.loading = false;
