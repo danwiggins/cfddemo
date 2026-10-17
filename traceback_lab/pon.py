@@ -14,7 +14,8 @@ import stat
 import tempfile
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any
+from types import MappingProxyType
+from typing import Any, Mapping
 
 from .adapters import ichor
 from .cohort_contracts import CohortGeneration, CohortPon
@@ -26,6 +27,7 @@ BUILDER_SOURCE_SHA256 = "64d67f0c6526d5de1fe914c83a5ab5dccf63140f23b0ad9f4260f9a
 BUILDER_SOURCE_SCRIPT = Path(__file__).parent / "pon_scripts" / "createPanelOfNormals.R"
 BUILDER_SHA256 = "785e48ab18c15bb4c1168d8ac941843ea31e9cc1ba93c6437280b00671dffb5b"
 BUILDER_SCRIPT = Path(__file__).parent / "pon_scripts" / "buildPanelLab.R"
+VALIDATOR_SHA256 = "66efb7f0e140ae474798903f16edf9691760dd15efd1d336578e44baa79b55c4"
 VALIDATOR_SCRIPT = Path(__file__).parent / "pon_scripts" / "validatePanelOfNormals.R"
 MIN_PON_N = 10
 
@@ -43,7 +45,7 @@ class PonInput:
 class PonBuild:
     source_ids: tuple[str, ...]
     full_asset_sha256: str
-    loo_asset_sha256s: dict[str, str]
+    loo_asset_sha256s: Mapping[str, str]
     reference_sha256: str
     aligner_identity: str
     grid_sha256: str
@@ -51,9 +53,19 @@ class PonBuild:
     toolchain_lock_sha256: str
     builder_source_sha256: str
     builder_sha256: str
+    validator_sha256: str
     gc_sha256: str
     map_sha256: str
     centromere_sha256: str
+
+    def __post_init__(self) -> None:
+        if set(self.loo_asset_sha256s) != set(self.source_ids):
+            raise ValueError("leave-one-out assets must match PoN sources")
+        if self.full_asset_sha256 in self.loo_asset_sha256s.values():
+            raise ValueError("full panel cannot be a leave-one-out asset")
+        object.__setattr__(self, "loo_asset_sha256s", MappingProxyType({
+            source_id: self.loo_asset_sha256s[source_id] for source_id in self.source_ids
+        }))
 
     @property
     def pon_n(self) -> int:
@@ -61,11 +73,14 @@ class PonBuild:
 
     def provenance(self) -> CohortPon:
         return CohortPon(
-            source_ids=self.source_ids, reference_sha256=self.reference_sha256,
+            source_ids=self.source_ids,
+            loo_asset_sha256s=tuple(self.loo_asset_sha256s.items()),
+            reference_sha256=self.reference_sha256,
             aligner_identity=self.aligner_identity, grid_sha256=self.grid_sha256,
             counting_parameters_sha256=self.counting_parameters_sha256,
             toolchain_lock_sha256=self.toolchain_lock_sha256,
             builder_source_sha256=self.builder_source_sha256, builder_sha256=self.builder_sha256,
+            validator_sha256=self.validator_sha256,
             gc_sha256=self.gc_sha256, map_sha256=self.map_sha256,
             centromere_sha256=self.centromere_sha256,
         )
@@ -89,6 +104,10 @@ class PonSelection:
     centromere_sha256: str
     panel_source_ids: tuple[str, ...]
     target_excluded: bool
+
+    @property
+    def panel_n(self) -> int:
+        return len(self.panel_source_ids)
 
 
 def _problem(cause: str, fix: str) -> LabProblem:
@@ -180,7 +199,7 @@ def _create_panel(
 
 def _validate_panel(toolchain: Any, panel: Path, source_ids: tuple[str, ...], full: Path | None) -> None:
     _run_r(
-        toolchain, VALIDATOR_SCRIPT, _sha256(VALIDATOR_SCRIPT),
+        toolchain, VALIDATOR_SCRIPT, VALIDATOR_SHA256,
         (str(panel), str(full) if full is not None else "-", *source_ids),
         panel.parent,
     )
@@ -239,8 +258,9 @@ def build_panels(store: LabStore, inputs: tuple[PonInput, ...]) -> PonBuild:
     if len(references) != 1 or len(aligners) != 1:
         raise _problem("the PoN inputs do not share reference and aligner identity", "Use one protocol-matched cohort")
     if (_sha256(BUILDER_SOURCE_SCRIPT) != BUILDER_SOURCE_SHA256
-            or _sha256(BUILDER_SCRIPT) != BUILDER_SHA256):
-        raise _problem("a pinned PoN builder script changed", "Restore the packaged builder scripts")
+            or _sha256(BUILDER_SCRIPT) != BUILDER_SHA256
+            or _sha256(VALIDATOR_SCRIPT) != VALIDATOR_SHA256):
+        raise _problem("a pinned PoN script changed", "Restore the packaged builder and validator scripts")
     from traceback_runner.references import ReferenceProblem
     from traceback_runner.toolchain import ToolchainProblem, resolve_copy_number_toolchain
 
@@ -305,6 +325,7 @@ def build_panels(store: LabStore, inputs: tuple[PonInput, ...]) -> PonBuild:
         grid_sha256=grid_sha256, counting_parameters_sha256=counting_parameters_sha256,
         toolchain_lock_sha256=toolchain.identity.lock_sha256,
         builder_source_sha256=BUILDER_SOURCE_SHA256, builder_sha256=BUILDER_SHA256,
+        validator_sha256=VALIDATOR_SHA256,
         gc_sha256=asset_hashes["gc_wig"], map_sha256=asset_hashes["map_wig"],
         centromere_sha256=asset_hashes["centromere"],
     )
@@ -332,6 +353,7 @@ def binding_for(
             or provenance.aligner_identity != aligner_identity
             or provenance.builder_source_sha256 != BUILDER_SOURCE_SHA256
             or provenance.builder_sha256 != BUILDER_SHA256
+            or provenance.validator_sha256 != VALIDATOR_SHA256
             or provenance.toolchain_lock_sha256 != toolchain_lock_sha256
             or provenance.counting_parameters_sha256 != counting_parameters_sha256
             or provenance.gc_sha256 != gc_sha256
@@ -340,10 +362,15 @@ def binding_for(
             or (grid_sha256 is not None and provenance.grid_sha256 != grid_sha256)):
         raise _problem("the selected PoN does not match this copy-number protocol", "Use the matching reference and toolchain or rebuild the cohort")
     member = next((item for item in generation.members if item.source_id == source_id), None)
-    digest = member.pon_asset_sha256 if member and member.pon_asset_sha256 else full
     target_excluded = source_id in provenance.source_ids
-    if target_excluded and (member is None or member.pon_asset_sha256 is None):
-        raise _problem("the selected cohort is missing a member's leave-one-out panel", "Restore the immutable cohort generation")
+    loo_by_source = dict(provenance.loo_asset_sha256s)
+    if target_excluded:
+        expected_loo = loo_by_source.get(source_id)
+        if member is None or member.pon_asset_sha256 != expected_loo or expected_loo == full:
+            raise _problem("the selected cohort has the wrong member leave-one-out panel", "Restore the immutable cohort generation")
+        digest = expected_loo
+    else:
+        digest = full
     path = store.lab / "assets" / "pon" / f"{digest}.rds"
     try:
         with os.fdopen(open_regular_no_follow(path), "rb") as stream:
@@ -371,4 +398,4 @@ def require_grid(selection: PonSelection, actual_grid_sha256: str) -> None:
         raise _problem("the selected PoN grid differs from the current readCounter grid", "Use the matching inputs or rebuild the cohort")
 
 
-__all__ = ["BUILDER_SOURCE_SHA256", "BUILDER_SHA256", "MIN_PON_N", "PonBuild", "PonInput", "PonSelection", "binding_for", "build_panels", "require_grid"]
+__all__ = ["BUILDER_SOURCE_SHA256", "BUILDER_SHA256", "VALIDATOR_SHA256", "MIN_PON_N", "PonBuild", "PonInput", "PonSelection", "binding_for", "build_panels", "require_grid"]
