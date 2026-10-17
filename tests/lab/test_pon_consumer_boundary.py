@@ -586,3 +586,66 @@ def test_failed_member_recompute_keeps_previous_generation(
         assert LabApi(store).status()["interrupted"] is None
     else:
         assert LabApi(store).status()["interrupted"]["run_id"] == log.run_id
+
+
+def test_failed_generation_publish_restores_member_selections(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    store = LabStore(tmp_path)
+    sources = tuple(_sample(store, index) for index in range(1, 11))
+    for source_id in sources[:9]:
+        add_sample(store, "healthy-v1", source_id)
+    previous = build_cohort(store, "healthy-v1")
+    add_sample(store, "healthy-v1", sources[9])
+    build = pon.PonBuild(
+        source_ids=sources, full_asset_sha256="a" * 64,
+        loo_asset_sha256s={source_id: f"{index:064x}" for index, source_id in enumerate(sources, 101)},
+        reference_sha256=f"{900:064x}", aligner_identity="minimap2 2.28; samtools 1.20",
+        grid_sha256="b" * 64, counting_parameters_sha256="c" * 64,
+        toolchain_lock_sha256="d" * 64, builder_source_sha256="e" * 64,
+        builder_sha256="3" * 64, validator_sha256="4" * 64,
+        gc_sha256="f" * 64, map_sha256="1" * 64, centromere_sha256="2" * 64,
+    )
+    monkeypatch.setattr(pon, "build_panels", lambda *_: build)
+    old_identity, pending_identity = "8" * 64, "9" * 64
+    first, second = previous.members[:2]
+
+    def cn_result(source_id: str, input_id: str, identity: str) -> ResultEnvelope:
+        return ResultEnvelope(
+            algorithm_id="copy-number", algorithm_version="2", status="ok",
+            provenance=provenance(
+                tool="fixture", parameters_sha256=identity,
+                source_id=source_id, input_id=input_id, reference_id="hg38",
+            ),
+        )
+
+    store.publish_result(cn_result(first.source_id, first.input_id, old_identity), input_id=first.input_id)
+    attempted: list[str] = []
+
+    def fake_recompute(store, pending, source_id, **kwargs):
+        member = next(item for item in pending.members if item.source_id == source_id)
+        attempted.append(source_id)
+        kwargs["log"].append("sample", sample=source_id[:12], source_id=source_id, input_id=member.input_id)
+        if source_id in (first.source_id, second.source_id):
+            store.publish_result(cn_result(source_id, member.input_id, pending_identity), input_id=member.input_id)
+        return member
+
+    monkeypatch.setattr(pon_consumer, "recompute_member", fake_recompute)
+    original_publish = store.publish_directory
+
+    def fail_generation_publish(parent, name, write):
+        if parent == store.lab / "cohorts" / "healthy-v1" / "generations":
+            raise OSError("synthetic generation publish failure")
+        return original_publish(parent, name, write)
+
+    monkeypatch.setattr(store, "publish_directory", fail_generation_publish)
+    with pytest.raises(OSError, match="synthetic generation publish failure"):
+        build_cohort(store, "healthy-v1")
+    assert attempted == list(sources)
+    assert read_current(store, "healthy-v1") == previous
+    assert selected_results(store, first.input_id)["copy-number"].provenance.parameters_sha256 == old_identity
+    assert "copy-number" not in selected_results(store, second.input_id)
+    for member in (first, second):
+        assert store.selected_attempt(member.input_id, "copy-number", pending_identity) is None
+        attempts = store.result_dir(member.input_id, "copy-number", pending_identity) / "attempts"
+        assert any((path / "result.json").is_file() for path in attempts.iterdir())
