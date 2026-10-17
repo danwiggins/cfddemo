@@ -7,8 +7,14 @@ import json
 import pytest
 
 from traceback_lab import views
+from traceback_lab.controls import derived_plan_items
+from traceback_lab.envelope import Failure, Metric, ResultEnvelope
+from traceback_lab.interpretation.engine import load_library
+from traceback_lab.read_summary import ReadSummary, depth_stamp, derived_mask
+from traceback_lab.registry import load_registry, plan
 from traceback_lab.stability import Side, band_at, deviation, stable
 from traceback_lab.store import LabStore
+from traceback_lab.web.api import LabApi
 from traceback_runner import cli as signed_cli
 
 P = {"kind": "proportion"}
@@ -102,6 +108,106 @@ def test_default_run_builds_the_curve_and_controls(default_run) -> None:
     assert {panel["algorithm_id"] for panel in with_split} >= {"bam-qc", "depth", "fragment-size"}
     block = views.repeatability(panels)
     assert block["metrics"] == len([p for p in panels if p["split"]])
+    _assert_default_scalar_selection(store, sample, payload)
+
+
+def _assert_default_scalar_selection(store, sample, payload) -> None:
+    """The default selection must leave a status at every measured depth."""
+
+    library = load_library()
+    chosen = plan(load_registry())
+    full_ids = {item.algorithm.id for item in chosen}
+    derived_ids = {item.algorithm.id for item in derived_plan_items(chosen, "downsample")}
+    steps = {(step["input"], step["algorithm_id"]): step for step in payload["data"]["steps"]}
+    labels = {"full", "0.5", "0.25", "0.1", "split-A", "split-B"}
+    assert {label for label, _ in steps} == labels
+    assert set(sample.full.results) == full_ids
+
+    summary_result = sample.full.results["read-summary"]
+    attempt = store.selected_attempt(sample.full.input_id, "read-summary", summary_result.provenance.parameters_sha256)
+    assert attempt is not None
+    summary = ReadSummary.open(attempt / "artifacts" / "columns")
+    views_by_label = {view.label: view for view in [sample.full, *sample.derived] if view.label in labels}
+    assert set(views_by_label) == labels
+    for label, view in views_by_label.items():
+        expected_ids = full_ids if label == "full" else derived_ids
+        assert {algorithm_id for step_label, algorithm_id in steps if step_label == label} == expected_ids
+        assert set(view.results) == expected_ids, f"selected results omitted from {label}"
+        mask = derived_mask(summary, {"transform": view.transform, **view.parameters}) if label != "full" else None
+        stamp = depth_stamp(summary, mask)
+        for algorithm_id, result in view.results.items():
+            assert result.status == steps[label, algorithm_id]["status"]
+            assert result.provenance.input_id == view.input_id
+            assert result.provenance.source_id == sample.source_id
+            if algorithm_id == "read-summary":
+                assert label == "full" and result.depth is None
+            else:
+                assert result.depth is not None and result.depth.eligible_reads == stamp["eligible_reads"]
+                assert result.depth.approx_depth_x == pytest.approx(stamp["approx_depth_x"])
+            if result.status == "skipped":
+                assert result.skip_reason == steps[label, algorithm_id]["skip_reason"]
+            elif result.status == "failed":
+                assert result.failure is not None
+            else:
+                headline = library.headline(algorithm_id)
+                if headline is not None and algorithm_id not in library.hidden_algorithms:
+                    assert headline.metric_id in {metric.metric_id for metric in result.metrics}
+
+    full_count = sample.full.results["bam-qc"].depth.eligible_reads
+    halves = sample.by_transform("split")
+    assert sum(view.results["bam-qc"].depth.eligible_reads for view in halves) == full_count
+    downs = sorted(sample.by_transform("downsample"), key=lambda view: view.fraction)
+    assert [view.results["bam-qc"].depth.eligible_reads for view in downs] == sorted(
+        view.results["bam-qc"].depth.eligible_reads for view in downs
+    )
+
+    api = LabApi(store).sample(sample.id12)
+    assert api["found"] is True and api["source_id"] == sample.source_id
+    algorithm_rows = {row["algorithm_id"]: row for row in api["algorithms"]}
+    assert set(algorithm_rows) == full_ids
+    for algorithm_id, row in algorithm_rows.items():
+        result = sample.full.results[algorithm_id]
+        assert row["status"] == result.status
+        assert row["provenance"]["parameters_sha256"] == result.provenance.parameters_sha256
+        assert row["provenance"]["input_id"] == sample.full.input_id
+        if result.status == "skipped":
+            assert row["skip_reason"] == result.skip_reason and row["metrics"] == []
+        elif result.status == "failed":
+            assert row["failure"] is not None and row["metrics"] == []
+        else:
+            assert {metric["metric_id"] for metric in row["metrics"]} == {metric.metric_id for metric in result.metrics}
+    catalog = {row["algorithm_id"]: row for row in api["catalog"]}
+    assert set(catalog) == full_ids - library.hidden_algorithms
+    assert all(row["status"] != "not run" for row in catalog.values())
+    for curve_row in api["curve"]["rows"]:
+        assert curve_row["metric_id"] == library.headline(curve_row["algorithm_id"]).metric_id
+        assert [cell["label"] for cell in curve_row["cells"]] == ["0.1", "0.25", "0.5", "full"]
+        for cell in curve_row["cells"]:
+            assert cell["state"] in views.CELL_STATES, (curve_row["algorithm_id"], cell["label"])
+            assert cell["depth_x"] == pytest.approx(views_by_label[cell["label"]].depth_x())
+
+    # A later selected failure or null value changes the API's measured cell;
+    # it must not fall back to the previous successful attempt or disappear.
+    failure_view = views_by_label["0.1"]
+    prior = failure_view.results["bam-qc"]
+    failed = ResultEnvelope.model_validate({
+        **prior.model_dump(), "status": "failed", "metrics": [], "panels": [],
+        "failure": Failure(first_line="fixture worker failed", stderr_tail=[]).model_dump(),
+    })
+    store.publish_result(failed, input_id=failure_view.input_id)
+    null_view = views_by_label["0.25"]
+    prior = null_view.results["fragment-size"]
+    null_result = ResultEnvelope.model_validate({
+        **prior.model_dump(), "status": "ok", "metrics": [Metric(metric_id="mode_bp", value=None, unit="bp").model_dump()],
+        "panels": [], "failure": None,
+    })
+    store.publish_result(null_result, input_id=null_view.input_id)
+    updated = LabApi(store).sample(sample.id12)
+    updated_rows = {row["algorithm_id"]: row for row in updated["curve"]["rows"]}
+    assert updated_rows["bam-qc"]["cells"][0]["state"] == "failed"
+    assert updated_rows["bam-qc"]["cells"][0]["reason"] == "fixture worker failed"
+    assert updated_rows["fragment-size"]["cells"][1]["state"] == "not_interpretable"
+    assert updated_rows["fragment-size"]["cells"][1]["value"] is None
 
 
 def test_rerun_is_cached_and_no_downsample_leaves_only_full(default_run, lab_world, capsys, shared_mmi) -> None:
