@@ -59,7 +59,7 @@ It copies the pinned scripts and two Snakefiles into the attempt without
 cached outputs or Python bytecode, records their digests and the upstream
 default-config digests, disables bytecode writes during execution, and hashes
 all seven generated workflow YAML files, including capped cluster settings.
-It requires Snakemake 5.19.2, records
+It requires Snakemake 5.19.2 installed in the Lab Python environment, records
 the resolved Snakemake, Python, samtools, and bedtools executable digests and
 the numerical Python package versions, and checks the runtime again after
 execution. The attempt contains a `bin/python` launcher for the recorded Lab interpreter

@@ -158,6 +158,9 @@ def test_griffin_cohort_reads_recorded_runtime_after_environment_change(
         pon_policy="none", per_sample_asset_keys=("pon_asset_sha256",),
         platform="illumina",
     )
+    algorithm.tools = [ToolPin("Griffin", "new-method"), pins[1]]
+    assert build_cohort(store, "healthy").members[0].results == ()
+    algorithm.tools = pins
     algorithm.asset_sha256s = lambda _: [_sha(801)]
     assert build_cohort(store, "healthy").members[0].results == ()
     algorithm.asset_sha256s = lambda _: [_sha(800)]

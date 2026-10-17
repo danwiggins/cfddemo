@@ -10,8 +10,10 @@ from __future__ import annotations
 import json
 import hashlib
 import importlib.util
+import os
 import shutil
 import subprocess
+import sys
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
@@ -91,16 +93,20 @@ class Griffin(Base):
             return Skip("depth", "Griffin needs a D21 eligible-read count to enforce the 5M gate")
         if ctx.reference_id != "hg38" or not ctx.extras.get("reference_fasta"):
             return Skip("reference", "Griffin requires the registered hg38 FASTA")
-        if shutil.which("snakemake") is None or shutil.which("bedtools") is None or shutil.which("samtools") is None:
+        snakemake = shutil.which("snakemake")
+        if snakemake is None or shutil.which("bedtools") is None or shutil.which("samtools") is None:
             return Skip("missing_toolchain", "Griffin needs Snakemake, bedtools and samtools in PATH")
         if importlib.util.find_spec("pyBigWig") is None or importlib.util.find_spec("pybedtools") is None:
             return Skip("missing_toolchain", "Griffin needs pyBigWig and pybedtools in the Lab Python environment")
         try:
+            compat_dir = Path(__file__).parents[1] / "adapters" / "griffin_compat"
             version = subprocess.run(
-                ["snakemake", "--version"], capture_output=True, text=True, check=True, timeout=10,
+                [sys.executable, snakemake, "--version"], capture_output=True, text=True,
+                check=True, timeout=10,
+                env={**os.environ, "PYTHONPATH": str(compat_dir) + os.pathsep + os.environ.get("PYTHONPATH", "")},
             ).stdout.strip()
         except (OSError, subprocess.SubprocessError):
-            return Skip("missing_toolchain", "Griffin's Snakemake version could not be checked")
+            return Skip("missing_toolchain", "Griffin's Snakemake is unavailable to the Lab Python interpreter")
         if version != "5.19.2":
             return Skip("missing_toolchain", "Griffin requires tested Snakemake 5.19.2")
         if not registration_available(ctx.root):
