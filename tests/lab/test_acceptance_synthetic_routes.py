@@ -289,7 +289,7 @@ STATE_CASES = [
     ("no-simulate", "home", f"No synthetic control yet. Run traceback lab run {ID12}."),
     ("no-simulate", "stability", "Split-half markers absent"),
     ("none-defended", "home", "No result is defended at"),
-    ("pre-cohort", "findings", "awaiting a reference (cohort n = 0 of 10)"),
+    ("pre-cohort", "findings", "eligible cohort n = 0 of 10 needed"),
     ("invalid-library", "trust-qc", "Interpretation library on disk is invalid"),
     ("unknown-sample", "findings", "No Lab sample matches aaaaaaaaaaaa."),
     ("chart-failed", "signals", "Chart could not be drawn"),
@@ -312,6 +312,8 @@ def test_synthetic_state_copy_on_surface(state, route, copy_text, tmp_path) -> N
         sample["defended"]["rows"] = []
     elif state == "pre-cohort":
         sample["algorithms"][0]["metrics"][0]["state"] = "no_reference"
+        sample["algorithms"][0]["metrics"][0]["reference_kind"] = "internal_cohort"
+        sample["algorithms"][0]["metrics"][0]["eligible_n"] = 0
     elif state == "invalid-library":
         sample["library_health"]["error"] = "line 212"
     target = "aaaaaaaaaaaa" if state == "unknown-sample" else ID12
@@ -336,6 +338,7 @@ def test_unknown_sample_copy_on_every_sample_route(route, tmp_path) -> None:
 STATUS_CASES = [
     ("run-in-progress", "A Lab run is in progress (step: bam-qc"),
     ("interrupted", "The last run (r-20261015-0101-abcd) stopped during bam-qc."),
+    ("status-unavailable", "The last run (r-20261015-0101-abcd) status is unavailable (log unreadable, unsafe, or over 1 MiB)."),
     ("run-finished", "New results are available."),
     ("results-changed", "Results changed on disk since this page loaded."),
     ("disconnected", "Lab server not responding since"),
@@ -366,6 +369,9 @@ def test_synthetic_status_copy_in_live_region(state, copy_text, tmp_path) -> Non
                 baseline["active"] = {**_run_marker(), "started_utc": "2026-10-16T00:00:00Z"}
             elif state == "interrupted":
                 baseline["interrupted"] = _run_marker()
+            elif state == "status-unavailable":
+                baseline["run_log_unavailable"] = {"run_id": _run_marker()["run_id"],
+                                                   "reason": "unreadable_or_over_1mib"}
             elif state == "run-finished":
                 if calls == 1:
                     baseline["active"] = {**_run_marker(), "started_utc": "2026-10-16T00:00:00Z"}
@@ -391,6 +397,11 @@ def test_synthetic_status_copy_in_live_region(state, copy_text, tmp_path) -> Non
         run = dom.split("<h2>Run</h2>", 1)[1].split("</table>", 1)[0]
         assert '<th scope="row">bam-qc</th><td>ok' in run
         assert 'latest run interrupted' in run
+    if state == "status-unavailable":
+        run = dom.split("<h2>Run</h2>", 1)[1].split("</table>", 1)[0]
+        assert '<th scope="row">bam-qc</th><td>ok' in run
+        assert 'latest run interrupted' not in run
+        assert 'stopped during bam-qc' not in dom
     if state in ("run-finished", "results-changed"):
         assert ">Reload</button>" in dom
     if state == "results-changed":
