@@ -484,9 +484,16 @@ def member_for_generation_or_independent(
     try:
         return member_for_generation(store, generation, source_id), None
     except LabProblem as problem:
+        protocol_drift = (
+            problem.data.get("field") == "panel of normals"
+            and problem.cause == "the selected PoN does not match this copy-number protocol"
+        )
         if (generation.pon_asset_sha256 is None or problem.code != "TBX-LAB-020"
-                or problem.data.get("field") not in ("toolchain", "method assets")):
+                or (problem.data.get("field") not in ("toolchain", "method assets")
+                    and not protocol_drift)):
             raise
+        # PoN binding remains unavailable. Retain only results whose methods
+        # do not consume copy-number; their own cohort keys still gate comparison.
         dependent = pon_dependent_algorithms()
         target = member_from_store(store, source_id)
         return target.model_copy(update={

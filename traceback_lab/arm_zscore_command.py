@@ -11,7 +11,7 @@ from traceback_runner.cli import _local_envelope, _result, _with_human
 from .arm_zscores import report_arm_zscores
 from .cohort_command import _cohort_id
 from .ingest import resolve_sample
-from .problems import EXIT_OK
+from .problems import EXIT_OK, LabProblem
 from .store import LabStore
 
 
@@ -26,7 +26,16 @@ def add_arm_zscore_parser(commands: Any, common: Callable[[argparse.ArgumentPars
 
 def _show(args: argparse.Namespace, store: LabStore) -> tuple[int, dict[str, Any]]:
     source_id = resolve_sample(store, args.sample)
-    report = report_arm_zscores(store, args.cohort, source_id)
+    try:
+        report = report_arm_zscores(store, args.cohort, source_id)
+    except ValueError as exc:
+        if str(exc) != "admitted source has no full aligned input":
+            raise
+        raise LabProblem(
+            "TBX-LAB-017", cause=f"sample {source_id[:12]} has no stored full aligned input",
+            fix="Inspect Lab runs, restore the sample's full input if needed, then rerun from its original input",
+            data={"id12": source_id[:12]},
+        ) from exc
     data = {"root": str(store.root), **report.public()}
     payload = _local_envelope(_result(
         "lab arm-zscores", "ok", "exploratory arm z scores; no abnormality cutoff", data=data,

@@ -165,16 +165,20 @@ def test_incompatible_or_stale_target_never_scores_against_cohort(tmp_path, monk
     assert projections == {}
 
 
-@pytest.mark.parametrize("field", ["toolchain", "method assets"])
-def test_missing_pon_tools_keep_independent_comparison_but_refuse_copy_number(
-    tmp_path, monkeypatch, field: str,
+@pytest.mark.parametrize("field,cause", [
+    ("toolchain", "the selected PoN's ichor toolchain is unavailable"),
+    ("method assets", "the selected PoN's registered ichor assets are unavailable"),
+    ("panel of normals", "the selected PoN does not match this copy-number protocol"),
+])
+def test_unavailable_pon_keeps_independent_comparison_but_refuses_copy_number(
+    tmp_path, monkeypatch, field: str, cause: str,
 ) -> None:
     generation = CohortGeneration(
         cohort_id="healthy-v1", version=7,
         members=tuple(member(index) for index in range(2, 12)),
     ).model_copy(update={"pon_asset_sha256": "d" * 64})
     problem = LabProblem(
-        "TBX-LAB-020", cause="the selected PoN's ichor toolchain is unavailable",
+        "TBX-LAB-020", cause=cause,
         fix="Restore the matching ichor toolchain", data={"field": field},
     )
     monkeypatch.setattr(web_api, "read_current", lambda store, cohort_id: generation)
@@ -228,6 +232,20 @@ def test_missing_pon_tools_keep_independent_comparison_but_refuse_copy_number(
     assert any(row["algorithm_id"] == "fragment-size" for row in compared["metrics"])
     assert any(row["algorithm_id"] == "copy-number" and row["reason"] == "panel of normals unavailable"
                for row in compared["unscored"])
+
+
+def test_damaged_pon_does_not_use_independent_fallback(tmp_path, monkeypatch) -> None:
+    generation = CohortGeneration(cohort_id="healthy-v1", version=7, members=()).model_copy(
+        update={"pon_asset_sha256": "d" * 64}
+    )
+    problem = LabProblem(
+        "TBX-LAB-020", cause="the selected PoN asset changed",
+        fix="Restore the immutable panel asset", data={"field": "panel of normals"},
+    )
+    monkeypatch.setattr(cohorts, "member_for_generation", lambda *args: (_ for _ in ()).throw(problem))
+    monkeypatch.setattr(cohorts, "member_from_store", lambda *args: pytest.fail("damaged PoN must not fall back"))
+    with pytest.raises(LabProblem, match="TBX-LAB-020"):
+        cohorts.member_for_generation_or_independent(LabStore(tmp_path), generation, SOURCE)
 
 
 def test_sample_list_pins_one_generation_for_all_rows(tmp_path, monkeypatch) -> None:

@@ -163,6 +163,32 @@ def test_unbuilt_cohort_is_a_cli_refusal_not_a_depth_result(
     assert payload["data"]["code"] == "TBX-LAB-017"
 
 
+def test_missing_full_input_is_a_recoverable_arm_zscore_cli_error(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str], monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    store = LabStore(tmp_path)
+    store.sources_dir.mkdir(parents=True)
+    source_id = _source(1)
+    (store.sources_dir / f"{source_id}.json").write_text(json.dumps({
+        "source_id": source_id, "example": False, "inputs": [],
+    }))
+    generation = CohortGeneration(cohort_id="healthy", version=1, members=()).model_copy(update={
+        "pon_asset_sha256": "a" * 64, "pon_build": object(),
+    })
+    monkeypatch.setattr(arm_zscores, "read_current", lambda *_: generation)
+    monkeypatch.setattr(arm_zscores, "member_for_generation", lambda *_: (
+        _ for _ in ()
+    ).throw(ValueError("admitted source has no full aligned input")))
+
+    code = lab_main(["arm-zscores", source_id[:12], "--cohort", "healthy",
+                     "--root", str(tmp_path), "--json"])
+    payload = json.loads(capsys.readouterr().out)
+    assert code == 4
+    assert payload["data"]["code"] == "TBX-LAB-017"
+    assert "full aligned input" in payload["data"]["cause"]
+    assert "original input" in payload["data"]["fix"]
+
+
 def _member(index: int, value: float, *, protocol: str = "a" * 64) -> CohortMember:
     return CohortMember(
         source_id=_source(index), input_id=_source(index + 1000),
