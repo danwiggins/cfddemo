@@ -30,8 +30,12 @@ class Read:
     tags: dict[str, object] = field(default_factory=dict)
 
 
-def write_bam(path: Path, contigs: Sequence[tuple[str, int]], reads: Iterable[Read]) -> Path:
+def write_bam(
+    path: Path, contigs: Sequence[tuple[str, int]], reads: Iterable[Read], *, platform: str | None = None,
+) -> Path:
     header = {"HD": {"VN": "1.6", "SO": "coordinate"}, "SQ": [{"SN": name, "LN": length} for name, length in contigs]}
+    if platform is not None:
+        header["RG"] = [{"ID": "synthetic", "PL": platform}]
     names = [name for name, _ in contigs]
     unsorted = path.with_suffix(".unsorted.bam")
     with pysam.AlignmentFile(str(unsorted), "wb", header=header) as out:
@@ -56,6 +60,8 @@ def write_bam(path: Path, contigs: Sequence[tuple[str, int]], reads: Iterable[Re
                 record.set_tag("MN", read.mn if read.mn is not None else len(read.sequence), value_type="i")
             for key, value in read.tags.items():
                 record.set_tag(key, value)
+            if platform is not None and "RG" not in read.tags:
+                record.set_tag("RG", "synthetic")
             out.write(record)
     pysam.sort("-o", str(path), str(unsorted))
     pysam.index(str(path))
