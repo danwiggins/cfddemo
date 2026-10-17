@@ -51,6 +51,7 @@ from .identity import (
 from .pipeline import Stage, run_pipeline
 from .problems import EXIT_USAGE, LabProblem
 from .scrub import Scrubber
+from .sample_metadata import with_sex_assertion
 from .store import LabStore, write_atomic
 from .tools import Tool
 
@@ -895,10 +896,13 @@ def write_source(
     aligned: AlignedInput,
     *,
     example: bool = False,
+    declared_sex: str | None = None,
 ) -> dict[str, Any]:
     """Hashes only, never paths: chunk list, exclusions and inputs by aligner."""
 
-    previous = source_record(store, aligned.source_id) or {}
+    stored = source_record(store, aligned.source_id) or {}
+    previous = with_sex_assertion(stored, declared_sex)
+    assertion_added = previous is not stored
     inputs = [entry for entry in previous.get("inputs", []) if entry.get("input_id") != aligned.input_id]
     inputs.append(
         {
@@ -923,8 +927,28 @@ def write_source(
         "inputs": inputs,
         "derived": previous.get("derived", []),
     }
+    if "operator_metadata" in previous:
+        record["operator_metadata"] = previous["operator_metadata"]
     write_atomic(store.sources_dir / f"{aligned.source_id}.json", canonical_json_bytes(record))
+    if assertion_added:
+        store.bump_generation()
     return record
+
+
+def record_source_sex(store: LabStore, source_id: str, declared_sex: str | None) -> dict[str, Any]:
+    """Attach a new assertion to a stored sample under the caller's writer lock."""
+
+    record = source_record(store, source_id)
+    if record is None:
+        raise LabProblem(
+            "TBX-LAB-017", cause="stored sample record is missing",
+            fix="Rerun with the chunk paths to restore the sample record",
+        )
+    updated = with_sex_assertion(record, declared_sex)
+    if updated is not record:
+        write_atomic(store.sources_dir / f"{source_id}.json", canonical_json_bytes(updated))
+        store.bump_generation()
+    return updated
 
 
 def source_ids(store: LabStore) -> list[str]:
