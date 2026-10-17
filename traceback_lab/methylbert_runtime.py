@@ -7,6 +7,7 @@ tumour/normal checkpoint and an orientation-validated ONT smoke test first.
 from __future__ import annotations
 
 import json
+import hashlib
 import math
 import os
 import stat
@@ -26,6 +27,8 @@ MIN_ELIGIBLE_READS = 2_500_000
 MAX_WALL_SECONDS = 2 * 60 * 60
 MAX_LOG_BYTES = 64 * 1024
 MAX_AGGREGATE_BYTES = 16 * 1024
+MAX_CODE_FILE_BYTES = 8 * 1024 * 1024
+MAX_CODE_TOTAL_BYTES = 64 * 1024 * 1024
 AGGREGATE_SCHEMA = "traceback.methylbert-aggregate.v1"
 
 
@@ -41,8 +44,14 @@ class Aggregate:
     classified_reads: int
 
 
-def installed_commit() -> str:
-    """Read the Git commit of the installed upstream package, not its version label."""
+@dataclass(frozen=True)
+class InstalledCodeIdentity:
+    commit: str
+    sha256: str
+
+
+def installed_identity() -> InstalledCodeIdentity:
+    """Capture both the package's Git provenance and its actual Python bytes."""
 
     try:
         distribution = metadata.distribution("methylbert")
@@ -61,18 +70,53 @@ def installed_commit() -> str:
             or not isinstance(commit, str) or len(commit) != 40
             or any(char not in "0123456789abcdef" for char in commit)):
         raise RuntimeRefusal("MethylBERT is not installed from the pinned upstream repository")
-    return commit
+    files = distribution.files or ()
+    names = sorted({str(item).replace("\\", "/") for item in files
+                    if str(item).replace("\\", "/").startswith("methylbert/")
+                    and str(item).endswith(".py")})
+    if not names or len(names) > 1000:
+        raise RuntimeRefusal("MethylBERT installed code files are missing or excessive")
+    digest = hashlib.sha256()
+    total = 0
+    for name in names:
+        if ".." in Path(name).parts:
+            raise RuntimeRefusal("MethylBERT installed code path is invalid")
+        path = Path(distribution.locate_file(name))
+        try:
+            descriptor = os.open(path, os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0))
+            with os.fdopen(descriptor, "rb") as stream:
+                info = os.fstat(stream.fileno())
+                if not stat.S_ISREG(info.st_mode) or not 1 <= info.st_size <= MAX_CODE_FILE_BYTES:
+                    raise RuntimeRefusal("MethylBERT installed code file is invalid")
+                total += info.st_size
+                if total > MAX_CODE_TOTAL_BYTES:
+                    raise RuntimeRefusal("MethylBERT installed code exceeds the size cap")
+                digest.update(name.encode("utf-8") + b"\0" + info.st_size.to_bytes(8, "big"))
+                remaining = info.st_size
+                while remaining:
+                    chunk = stream.read(min(1 << 20, remaining))
+                    if not chunk:
+                        raise RuntimeRefusal("MethylBERT installed code changed while hashing")
+                    digest.update(chunk)
+                    remaining -= len(chunk)
+                if stream.read(1):
+                    raise RuntimeRefusal("MethylBERT installed code grew while hashing")
+        except OSError as exc:
+            raise RuntimeRefusal("MethylBERT installed code cannot be read") from exc
+    return InstalledCodeIdentity(commit, digest.hexdigest())
 
 
 def require_ready(
     bundle: Bundle, *, reference_sha256: str, eligible_reads: int | None,
-    platform: str, gpu_available: bool, installed_commit_sha: str | None = None,
-) -> None:
+    platform: str, gpu_available: bool, installed: InstalledCodeIdentity | None = None,
+) -> InstalledCodeIdentity:
     """Gate the exact registered model, reference, ONT depth and CUDA runtime."""
 
-    commit = installed_commit() if installed_commit_sha is None else installed_commit_sha
-    if bundle.upstream_commit != PINNED_UPSTREAM_COMMIT or commit != PINNED_UPSTREAM_COMMIT:
+    code = installed_identity() if installed is None else installed
+    if bundle.upstream_commit != PINNED_UPSTREAM_COMMIT or code.commit != PINNED_UPSTREAM_COMMIT:
         raise RuntimeRefusal("MethylBERT source or model was not built at the pinned commit")
+    if len(code.sha256) != 64 or any(char not in "0123456789abcdef" for char in code.sha256):
+        raise RuntimeRefusal("MethylBERT installed code has no valid byte digest")
     if bundle.reference_sha256 != reference_sha256:
         raise RuntimeRefusal("MethylBERT model reference differs from the input reference")
     if platform != "ont":
@@ -81,6 +125,7 @@ def require_ready(
         raise RuntimeRefusal("MethylBERT needs at least 2,500,000 eligible ONT reads")
     if not gpu_available:
         raise RuntimeRefusal("MethylBERT needs a usable CUDA GPU")
+    return code
 
 
 def read_aggregate(path: Path, *, model_id: str) -> Aggregate:
@@ -105,7 +150,7 @@ def read_aggregate(path: Path, *, model_id: str) -> Aggregate:
     } or raw["schema"] != AGGREGATE_SCHEMA or raw["model_id"] != model_id:
         raise RuntimeRefusal("MethylBERT aggregate has unexpected fields or model identity")
     fractions = (raw["tumour_fraction"], raw["normal_fraction"])
-    if any(type(value) not in (int, float) or not math.isfinite(value) or not 0 <= value <= 1
+    if any(type(value) not in (int, float) or not 0 <= value <= 1 or not math.isfinite(value)
            for value in fractions) or not math.isclose(sum(fractions), 1.0, rel_tol=0, abs_tol=1e-6):
         raise RuntimeRefusal("MethylBERT aggregate fractions are invalid")
     count = raw["classified_reads"]

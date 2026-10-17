@@ -24,13 +24,17 @@ def _ready(**changes):
     values = {
         "reference_sha256": "a" * 64, "eligible_reads": 2_500_000,
         "platform": "ont", "gpu_available": True,
-        "installed_commit_sha": runtime.PINNED_UPSTREAM_COMMIT,
+        "installed": runtime.InstalledCodeIdentity(runtime.PINNED_UPSTREAM_COMMIT, "a" * 64),
     }
     values.update(changes)
     return runtime.require_ready(_bundle(), **values)
 
 
-def test_install_identity_requires_pinned_upstream_git_url_and_sha(monkeypatch):
+def test_install_identity_requires_pinned_git_source_and_hashes_actual_code(tmp_path, monkeypatch):
+    code = tmp_path / "methylbert" / "data" / "bam.py"
+    code.parent.mkdir(parents=True)
+    code.write_text("original source\n")
+
     class Distribution:
         def __init__(self, direct):
             self.direct = direct
@@ -38,21 +42,30 @@ def test_install_identity_requires_pinned_upstream_git_url_and_sha(monkeypatch):
         def read_text(self, _name):
             return json.dumps(self.direct)
 
+        files = ["methylbert/data/bam.py"]
+
+        def locate_file(self, name):
+            return tmp_path / name
+
     valid = {
         "url": "https://github.com/CompEpigen/methylbert.git",
         "vcs_info": {"vcs": "git", "commit_id": runtime.PINNED_UPSTREAM_COMMIT},
     }
     monkeypatch.setattr(runtime.metadata, "distribution", lambda _name: Distribution(valid))
-    assert runtime.installed_commit() == runtime.PINNED_UPSTREAM_COMMIT
+    original = runtime.installed_identity()
+    assert original.commit == runtime.PINNED_UPSTREAM_COMMIT
+    assert len(original.sha256) == 64
+    code.write_text("changed source\n")
+    assert runtime.installed_identity().sha256 != original.sha256
     monkeypatch.setattr(runtime.metadata, "distribution", lambda _name: Distribution({**valid, "url": "https://example.org/model.git"}))
     with pytest.raises(runtime.RuntimeRefusal, match="pinned upstream repository"):
-        runtime.installed_commit()
+        runtime.installed_identity()
 
 
 def test_readiness_requires_pinned_model_reference_depth_ont_and_gpu():
-    assert _ready() is None
+    assert _ready().sha256 == "a" * 64
     for change, message in (
-        ({"installed_commit_sha": "b" * 40}, "pinned commit"),
+        ({"installed": runtime.InstalledCodeIdentity("b" * 40, "a" * 64)}, "pinned commit"),
         ({"reference_sha256": "b" * 64}, "reference differs"),
         ({"eligible_reads": 2_499_999}, "2,500,000"),
         ({"eligible_reads": True}, "2,500,000"),
@@ -81,6 +94,7 @@ def test_only_small_finite_aggregate_without_per_read_fields_is_publishable(tmp_
         ({"read_name": "private"}, "unexpected fields"),
         ({"normal_fraction": 0.7}, "fractions"),
         ({"tumour_fraction": float("nan")}, "fractions"),
+        ({"tumour_fraction": 10**1000}, "fractions"),
         ({"classified_reads": 0}, "no classified reads"),
     ):
         _aggregate(path, **change)
