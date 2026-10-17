@@ -117,6 +117,39 @@ def test_griffin_preflight_depth_and_native_ont_skip(tmp_path: Path, monkeypatch
     assert "4,999,999" in short_pairs.message
 
 
+def test_paired_350_bp_fragments_are_depth_skip_not_platform_skip(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    import pysam
+    import traceback_lab.algorithms.griffin as module
+
+    input_dir = tmp_path / "input"
+    input_dir.mkdir()
+    bam = input_dir / "aligned.bam"
+    header = {"HD": {"VN": "1.6"}, "SQ": [{"SN": "chr1", "LN": 10000}],
+              "RG": [{"ID": "rg1", "PL": "ILLUMINA"}]}
+    with pysam.AlignmentFile(str(bam), "wb", header=header) as out:
+        for index in range(100):
+            for first in (True, False):
+                read = pysam.AlignedSegment()
+                read.query_name = f"pair{index}"
+                read.query_sequence = "A" * 75
+                read.flag = 99 if first else 147
+                read.reference_id = 0
+                read.reference_start = index * 20 + (0 if first else 275)
+                read.mapping_quality = 60
+                read.cigarstring = "75M"
+                read.next_reference_id = 0
+                read.next_reference_start = index * 20 + (275 if first else 0)
+                read.template_length = 350 if first else -350
+                out.write(read)
+    monkeypatch.setattr(module, "count_d21_pairs", lambda _: 5_000_000)
+    ctx = InputContext(root=tmp_path, source_id="1" * 64, input_id="2" * 64,
+                       reference_id="hg38", reference_sha256="3" * 64,
+                       input_dir=input_dir, platform="illumina", eligible_reads=10_000_000,
+                       extras={"reference_fasta": str(tmp_path / "hg38.fa")})
+    decision = GRIFFIN.preflight(ctx)
+    assert decision == Skip("depth", "Griffin's pinned 100–200 bp profile window has no qualifying fragments")
+
+
 def test_pair_gate_counts_molecules_once_and_requires_illumina_header(tmp_path: Path) -> None:
     import pysam
 
@@ -183,6 +216,7 @@ def test_algorithm_publishes_primary_profile_and_input_bound_provenance(
                 "status": "complete", "input_id": ctx.input_id,
                 "upstream_commit": GRIFFIN_COMMIT,
                 "platform": "illumina", "registration_sha256": registered_sha,
+                "eligible_autosomal_pairs": 5_000_000, "snakemake_version": "5.19.2",
                 "output_sha256": hashlib.sha256(b"official corrected TSV").hexdigest(),
             }), encoding="utf-8"
         )

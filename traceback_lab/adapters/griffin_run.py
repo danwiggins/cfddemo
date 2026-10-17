@@ -92,12 +92,12 @@ def _ref_options(reference: Path, assets: Path, scripts: Path) -> dict:
     }
 
 
-def _require_paired_input(bam: Path) -> None:
-    """Upstream needs Illumina pairs with positive TLEN across the full BAM."""
+def _require_paired_input(bam: Path) -> int:
+    """Validate paired Illumina input; return reads in Griffin's 100–200 bp window."""
 
     import pysam
 
-    primary = paired = usable = 0
+    primary = paired = positive = usable = 0
     with pysam.AlignmentFile(str(bam), "rb") as alignments:
         groups = alignments.header.to_dict().get("RG", [])
         if not groups or any(group.get("PL", "").upper() != "ILLUMINA" for group in groups):
@@ -110,15 +110,17 @@ def _require_paired_input(bam: Path) -> None:
                 continue
             primary += 1
             paired += bool(read.is_paired)
+            positive += bool(read.is_paired and not read.is_reverse and read.template_length > 0)
             usable += bool(
                 read.is_paired and not read.is_reverse and 100 <= read.template_length <= 200
                 and read.mapping_quality >= 20 and not read.is_duplicate and not read.is_qcfail
             )
-    if primary < 100 or paired / primary < 0.95 or usable == 0:
+    if primary < 100 or paired / primary < 0.95 or positive == 0:
         raise ValueError(
             "pinned Griffin requires paired-end positive-TLEN WGS reads; "
             "native ONT single-end BAM is incompatible"
         )
+    return usable
 
 
 def count_d21_pairs(bam: Path) -> int:
@@ -154,8 +156,9 @@ def run_upstream(config: GriffinRun) -> tuple[GriffinProfile, ...]:
 
     Caller supplies the exact filtered site lists and hg38 assets. No files
     are downloaded or inferred. A fresh attempt directory is mandatory; on
-    any failure its partial outputs remain for inspection without becoming a
-    successful Lab result.
+    a standalone caller retains its partial attempt directory on failure.
+    The normal Lab worker places that directory under scratch, which the
+    runner removes after a failed attempt.
     """
 
     if config.eligible_reads < MIN_ELIGIBLE_READS:
@@ -193,7 +196,8 @@ def run_upstream(config: GriffinRun) -> tuple[GriffinProfile, ...]:
         raise ValueError("the aligned BAM needs an index for Griffin")
     if not reference.with_suffix(reference.suffix + ".fai").is_file():
         raise ValueError("the registered reference FASTA needs an index for Griffin")
-    _require_paired_input(bam)
+    if _require_paired_input(bam) == 0:
+        raise ValueError("Griffin's pinned 100–200 bp profile window has no qualifying fragments")
     for filename in _REF_FILES:
         _safe_path(assets / filename)
     frequency = _safe_path(assets / "genome_GC_frequency")
@@ -224,6 +228,11 @@ def run_upstream(config: GriffinRun) -> tuple[GriffinProfile, ...]:
         "assets_sha256": {name: _digest(assets / name) for name in _REF_FILES},
         "gc_frequency_sha256": {path.name: _digest(path) for path in frequency_files},
     }
+    snakemake_version = subprocess.run(
+        [config.snakemake, "--version"], check=True, capture_output=True, text=True, timeout=10,
+    ).stdout.strip()
+    if snakemake_version != "5.19.2":
+        raise ValueError("Griffin requires pinned Snakemake 5.19.2")
     attempt.mkdir()
     workflows = (
         "griffin_GC_and_mappability_correction", "griffin_nucleosome_profiling"
@@ -254,6 +263,7 @@ def run_upstream(config: GriffinRun) -> tuple[GriffinProfile, ...]:
         "status": "attempt", "input_id": config.input_id,
         "upstream_commit": commit, "reference_id": config.reference_id,
         "platform": "illumina", "registration_sha256": config.registration_sha256,
+        "eligible_autosomal_pairs": config.eligible_reads, "snakemake_version": snakemake_version,
         "fingerprints": fingerprints,
     }, sort_keys=True), encoding="utf-8")
     for directory, snakefile in (
@@ -279,6 +289,7 @@ def run_upstream(config: GriffinRun) -> tuple[GriffinProfile, ...]:
         "status": "complete", "input_id": config.input_id,
         "upstream_commit": commit, "reference_id": config.reference_id,
         "platform": "illumina", "registration_sha256": config.registration_sha256,
+        "eligible_autosomal_pairs": config.eligible_reads, "snakemake_version": snakemake_version,
         "fingerprints": fingerprints,
         "gc_bias_sha256": _digest(gc_bias), "output_sha256": _digest(output),
         "profile_count": len(profiles),

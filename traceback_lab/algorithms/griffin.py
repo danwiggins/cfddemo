@@ -64,10 +64,12 @@ class Griffin(Base):
         if ctx.reference_id != "hg38" or not ctx.extras.get("reference_fasta"):
             return Skip("reference", "Griffin requires the registered hg38 FASTA")
         try:
-            _require_paired_input(ctx.input_dir / "aligned.bam")
+            profile_reads = _require_paired_input(ctx.input_dir / "aligned.bam")
             pairs = count_d21_pairs(ctx.input_dir / "aligned.bam")
         except (OSError, ValueError) as exc:
             return Skip("unsupported_platform", str(exc))
+        if profile_reads == 0:
+            return Skip("depth", "Griffin's pinned 100–200 bp profile window has no qualifying fragments")
         if pairs < MIN_ELIGIBLE_READS:
             return Skip("depth", f"Griffin needs {MIN_ELIGIBLE_READS:,} eligible autosomal pairs; this input has {pairs:,}")
         try:
@@ -115,6 +117,8 @@ class Griffin(Base):
         if (provenance.get("status") != "complete" or provenance.get("input_id") != ctx.input_id or
                 provenance.get("upstream_commit") != GRIFFIN_COMMIT or
                 provenance.get("platform") != "illumina" or
+                provenance.get("eligible_autosomal_pairs") != pairs or
+                provenance.get("snakemake_version") != "5.19.2" or
                 provenance.get("registration_sha256") != assets.sha256 or
                 provenance.get("output_sha256") != hashlib.sha256(corrected_bytes).hexdigest()):
             raise RuntimeError("Griffin output is not bound to this input and the pinned upstream run")

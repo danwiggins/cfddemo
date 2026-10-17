@@ -58,6 +58,15 @@ def test_rejects_non_finite_coverage(tmp_path: Path) -> None:
         read_corrected_profiles(path)
 
 
+@pytest.mark.parametrize("header", ["015", "-0", "+15"])
+def test_rejects_noncanonical_numeric_coordinate_header(tmp_path: Path, header: str) -> None:
+    path = _write(tmp_path / "S1.GC_corrected.coverage.tsv")
+    source = path.read_text(encoding="utf-8")
+    path.write_text(source.replace("-15\t0\t15\t", f"-15\t0\t{header}\t", 1), encoding="utf-8")
+    with pytest.raises(GriffinFormatError, match="canonical integers"):
+        read_corrected_profiles(path)
+
+
 def test_pinned_upstream_attempt_binds_input_and_assets(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     """Exercise orchestration with a fake process, not the scientific computation."""
 
@@ -98,6 +107,8 @@ def test_pinned_upstream_attempt_binds_input_and_assets(tmp_path: Path, monkeypa
     def fake_run(argv: list[str], **kwargs: object) -> subprocess.CompletedProcess[str]:
         if argv[:2] == ["git", "-C"]:
             return subprocess.CompletedProcess(argv, 0, GRIFFIN_COMMIT + "\n" if argv[-2:] == ["rev-parse", "HEAD"] else "")
+        if argv[-1] == "--version":
+            return subprocess.CompletedProcess(argv, 0, "5.19.2\n")
         directory = Path(kwargs["cwd"])
         calls.append(directory)
         if directory.name.startswith("griffin_GC_and"):
@@ -124,6 +135,8 @@ def test_pinned_upstream_attempt_binds_input_and_assets(tmp_path: Path, monkeypa
     manifest = json.loads((attempt / "provenance.json").read_text(encoding="utf-8"))
     assert manifest["status"] == "complete"
     assert manifest["input_id"] == input_id
+    assert manifest["eligible_autosomal_pairs"] == 5_000_000
+    assert manifest["snakemake_version"] == "5.19.2"
     assert manifest["fingerprints"]["bam_sha256"] == hashlib.sha256(b"bam").hexdigest()
     with pytest.raises(FileExistsError):
         run_upstream(GriffinRun(

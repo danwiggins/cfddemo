@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import csv
 import math
+import re
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -69,10 +70,10 @@ def read_corrected_profiles(path: Path, *, expected_sample: str | None = None) -
         fields = reader.fieldnames
         if fields is None or len(fields) != len(set(fields)) or not _FIELDS.issubset(fields):
             raise GriffinFormatError("missing or duplicate Griffin output columns")
-        try:
-            offsets = tuple(int(field) for field in fields if field.lstrip("-").isdigit())
-        except ValueError as exc:
-            raise GriffinFormatError("invalid coverage coordinate") from exc
+        coordinate_fields = [field for field in fields if re.fullmatch(r"[+-]?\d+", field.strip())]
+        if any(str(int(field)) != field for field in coordinate_fields):
+            raise GriffinFormatError("coverage coordinate headers must be canonical integers")
+        offsets = tuple(int(field) for field in coordinate_fields)
         if len(offsets) < 3 or sorted(offsets) != list(offsets):
             raise GriffinFormatError("coverage coordinates must increase")
         step = offsets[1] - offsets[0]
@@ -98,7 +99,7 @@ def read_corrected_profiles(path: Path, *, expected_sample: str | None = None) -
                 raise GriffinFormatError("number_of_sites must be an integer") from exc
             if count <= 0:
                 raise GriffinFormatError("number_of_sites must be positive")
-            coverage = tuple(_finite(row[str(offset)], str(offset)) for offset in offsets)
+            coverage = tuple(_finite(row[field], field) for field in coordinate_fields)
             if any(value < 0 for value in coverage):
                 raise GriffinFormatError("coverage must be nonnegative")
             central = _finite(row["central_coverage"], "central_coverage")
