@@ -21,7 +21,7 @@ from traceback_lab.registry import Ready, Requirements, Skip
 from traceback_lab.store import LabStore
 
 from .bam_fixtures import Read, context_for
-from .test_dd_cfdna_chry import INPUT, REFERENCE, SOURCE, _file as donor_file
+from .test_dd_cfdna_chry import INPUT, REFERENCE, SOURCE, _file as donor_file, _stored_input
 from .test_fetal_chry import _file as fetal_file
 
 
@@ -42,6 +42,7 @@ def test_calibrated_derived_counts_only_selected_reads(tmp_path: Path, kind: str
     context = context_for(tmp_path, contigs, reads, eligible_reads=len(reads))
     store = LabStore(tmp_path)
     if kind == "donor":
+        _stored_input(store)
         path, digest = donor_file(tmp_path, min_depth_x=0.001,
                                   female_background_y_per_million=0,
                                   male_full_donor_y_per_million=1_000_000)
