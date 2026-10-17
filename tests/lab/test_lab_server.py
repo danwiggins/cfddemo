@@ -906,6 +906,8 @@ def test_status_does_not_echo_malformed_active_run_id(tmp_path, monkeypatch) -> 
     }})
     status = api_module.LabApi(store).status()
     assert status["run_log_unavailable"] == {"run_id": None, "reason": "invalid_run_id"}
+    assert status["active"]["run_id"] is None
+    assert "invalid/secret" not in json.dumps(status)
 
 
 def test_active_nonanalysis_writer_does_not_echo_malformed_pointer(tmp_path) -> None:
