@@ -49,25 +49,29 @@ def _location(root: Path) -> Path:
 
 
 def _read_regular(path: Path, limit: int) -> bytes:
-    """Read one bounded regular inode, rejecting symlink ancestors or replacement."""
+    """Read one bounded regular inode; canonicalize platform symlink parents."""
 
     absolute = Path(os.path.abspath(path))
-    if any(parent.is_symlink() for parent in (absolute, *absolute.parents)):
-        raise EndCatalogueError("catalogue path contains a symlink")
+    if absolute.is_symlink():
+        raise EndCatalogueError("catalogue file is a symlink")
     try:
-        with os.fdopen(open_regular_no_follow(absolute), "rb") as stream:
+        canonical = absolute.resolve(strict=True)
+        with os.fdopen(open_regular_no_follow(canonical), "rb") as stream:
             before = os.fstat(stream.fileno())
             if not stat.S_ISREG(before.st_mode) or before.st_size > limit:
                 raise EndCatalogueError("catalogue is not a bounded regular file")
             raw = stream.read(limit + 1)
             after = os.fstat(stream.fileno())
-        current = os.lstat(absolute)
-    except OSError as exc:
+        current = os.lstat(canonical)
+        current_alias = os.lstat(absolute)
+    except (OSError, RuntimeError) as exc:
         raise EndCatalogueError("catalogue is absent, unreadable or changed") from exc
     def identity(info: os.stat_result) -> tuple[int, int, int, int, int]:
         return (info.st_dev, info.st_ino, info.st_size, info.st_mtime_ns, info.st_ctime_ns)
     if (len(raw) > limit or not stat.S_ISREG(current.st_mode)
-            or identity(before) != identity(after) or identity(after) != identity(current)):
+            or not stat.S_ISREG(current_alias.st_mode)
+            or identity(before) != identity(after) or identity(after) != identity(current)
+            or identity(current) != identity(current_alias)):
         raise EndCatalogueError("catalogue changed or exceeds its size limit")
     return raw
 
@@ -225,10 +229,15 @@ def register_end_catalogues(
         raise EndCatalogueError("invalid license ID")
     center_raw = _read_regular(centers, MAX_CATALOGUE_BYTES)
     preferred_raw = _read_regular(preferred, MAX_CATALOGUE_BYTES)
+    try:
+        center_path = centers.resolve(strict=True)
+        preferred_path = preferred.resolve(strict=True)
+    except (OSError, RuntimeError) as exc:
+        raise EndCatalogueError("catalogue is absent, unreadable or changed") from exc
     data = {
-        "schema": SCHEMA, "assembly": "hg38", "centers_path": str(Path(os.path.abspath(centers))),
+        "schema": SCHEMA, "assembly": "hg38", "centers_path": str(center_path),
         "centers_sha256": hashlib.sha256(center_raw).hexdigest(),
-        "preferred_path": str(Path(os.path.abspath(preferred))),
+        "preferred_path": str(preferred_path),
         "preferred_sha256": hashlib.sha256(preferred_raw).hexdigest(),
         "source_label": source_label, "centers_source": centers_source,
         "preferred_source": preferred_source, "terms": terms, "license_id": license_id,

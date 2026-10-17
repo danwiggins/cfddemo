@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import os
 from dataclasses import replace
 from pathlib import Path
 
@@ -326,6 +327,26 @@ def test_registration_rejects_symlink_and_path_label(tmp_path: Path) -> None:
         register_end_catalogues(root, centers=centers, preferred=preferred,
                                 source_label=str(centers), centers_source="synthetic-centers-v1",
                                 preferred_source="synthetic-sites-v1", terms="unknown", license_id=None)
+
+
+@pytest.mark.skipif(os.name != "posix", reason="directory symlink fixture requires POSIX")
+def test_registration_canonicalizes_symlinked_parent_directory(tmp_path: Path) -> None:
+    actual = tmp_path / "actual"
+    actual.mkdir()
+    centers = actual / "centers.bed"
+    preferred = actual / "preferred.bed"
+    centers.write_text("chr1\t490\t510\n", encoding="ascii")
+    preferred.write_text("chr1\t440\t441\tU\nchr1\t560\t561\tD\n", encoding="ascii")
+    alias = tmp_path / "alias"
+    alias.symlink_to(actual, target_is_directory=True)
+    root = tmp_path / "root"
+    register_end_catalogues(root, centers=alias / centers.name, preferred=alias / preferred.name,
+                            source_label="synthetic", centers_source="synthetic-centers-v1",
+                            preferred_source="synthetic-sites-v1", terms="unknown", license_id=None)
+    registration = json.loads((root / "lab" / "assets" / "aligned-ends" / "registration.json").read_text())
+    assert registration["centers_path"] == str(centers)
+    assert registration["preferred_path"] == str(preferred)
+    assert inspect_end_catalogues(root).identity == registration["identity"]
 
 
 def test_cli_registration_and_inspection_return_path_free_results(tmp_path: Path) -> None:
