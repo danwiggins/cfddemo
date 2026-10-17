@@ -191,7 +191,10 @@ def test_runner_plan_persists_methylbert_identity_for_cohort_read(tmp_path, monk
             "metrics": [{"metric_id": "tumour_fraction", "value": 0.25}], "panels": [],
         }))
         ran.append(request)
-        return SimpleNamespace(ok=True, duration_s=0.01, peak_rss_bytes=0)
+        return SimpleNamespace(
+            ok=True, duration_s=0.01, peak_rss_bytes=0,
+            sampled_tree_peak_rss_bytes=0, peak_disk_bytes=0,
+        )
 
     monkeypatch.setattr(lab_runner, "run_pipeline", fake_pipeline)
     run_id = new_run_id()
