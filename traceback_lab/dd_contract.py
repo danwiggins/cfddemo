@@ -172,6 +172,21 @@ def register_contract(store: LabStore, source: Path, expected_sha256: str, *,
             )
         return current
 
+    # A new immutable slot must describe an input that is already stored.
+    # Otherwise a typo in source or reference provenance can occupy the
+    # correct input's slot permanently, while every later run refuses it.
+    from .ingest import input_manifest
+
+    try:
+        manifest = input_manifest(store, contract.input_id)
+    except OSError as exc:
+        raise DonorContractError("stored input manifest is unreadable") from exc
+    if not isinstance(manifest, dict) or manifest.get("input_id") != contract.input_id:
+        raise DonorContractError("stored input manifest is missing or mismatched")
+    if (manifest.get("source_id") != contract.source_id
+            or manifest.get("reference_sha256") != contract.reference_sha256):
+        raise DonorContractError("donor calibration does not match stored input provenance")
+
     def build(staging: Path) -> None:
         (staging / "contract.json").write_bytes(raw)
         (staging / "receipt.json").write_bytes(canonical_json_bytes(
