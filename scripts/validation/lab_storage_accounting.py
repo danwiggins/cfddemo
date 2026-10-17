@@ -25,7 +25,17 @@ def _sha(value: Any, label: str) -> str:
     return value
 
 
+def _require_directory(path: Path, label: str) -> None:
+    try:
+        mode = path.lstat().st_mode
+    except OSError as exc:
+        raise InventoryError(f"{label} is unavailable") from exc
+    if not stat.S_ISDIR(mode):
+        raise InventoryError(f"{label} is not a regular directory")
+
+
 def _record(lab: Path, source_id: str) -> dict[str, Any]:
+    _require_directory(lab / "sources", "source directory")
     path = lab / "sources" / f"{source_id}.json"
     try:
         if not stat.S_ISREG(path.lstat().st_mode):
@@ -89,6 +99,7 @@ def account(root: Path, source_id: str, input_id: str | None = None, *,
     if max_entries < 1:
         raise InventoryError("max_entries must be positive")
     lab = root / "lab"
+    _require_directory(lab, "Lab directory")
     record = _record(lab, source_id)
     full = record.get("inputs")
     derived = record.get("derived")

@@ -13,7 +13,8 @@ The command reads metadata and apparent file sizes only; it does not run analysi
 the store. `literal_lab_inputs_bytes` is the apparent-byte total beneath `lab/inputs`,
 including the shared hash cache. The AC4 ratio divides that value by the chosen
 full input's aligned BAM plus index. The AC4 verdict is `null` if other samples'
-input directories or leftover input files are present; use an isolated validation
+input directories or leftover input files are present, including a second full
+input for the same source; use an isolated validation
 root for that ratio claim. The JSON repeats the numerator and denominator scope;
 the boolean alone is not a full D30 or AC4 acceptance verdict because staging
 cleanup and other required conditions are reported separately.

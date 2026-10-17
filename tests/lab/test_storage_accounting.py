@@ -88,6 +88,26 @@ def test_refuses_incomplete_or_unsafe_inventory(tmp_path):
         account(tmp_path, source)
 
 
+@pytest.mark.parametrize("where", ["lab", "inside"])
+def test_refuses_symlinked_lab_root_or_internal_entry(tmp_path, where):
+    source, _ = _fixture(tmp_path)
+    if where == "lab":
+        linked_root = tmp_path / "linked"
+        linked_root.mkdir()
+        link = linked_root / "lab"
+        target = tmp_path / "lab"
+    else:
+        linked_root = tmp_path
+        link = tmp_path / "lab" / "inputs" / "linked"
+        target = tmp_path / "lab" / "refs" / "reference.mmi"
+    try:
+        link.symlink_to(target, target_is_directory=(where == "lab"))
+    except (OSError, NotImplementedError) as exc:
+        pytest.skip(f"symlinks unavailable: {exc}")
+    with pytest.raises(InventoryError, match="regular directory|link or special file"):
+        account(linked_root, source)
+
+
 def test_refuses_empty_bam_even_with_nonempty_index(tmp_path):
     source, full = _fixture(tmp_path)
     _write(tmp_path, f"inputs/{full}/aligned.bam", 0)
