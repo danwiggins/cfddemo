@@ -62,6 +62,7 @@ def test_prealigned_differs_from_lab_aligned() -> None:
 def test_platform_separates_input_result_and_cohort_identities() -> None:
     old = identity.prealigned_input_id(source_id=A, reference_sha256=B)
     assert old == identity.prealigned_input_id(source_id=A, reference_sha256=B, platform="unknown")
+    assert old == identity.prealigned_input_id(source_id=A, reference_sha256=B, platform="ont")
     assert old != identity.prealigned_input_id(source_id=A, reference_sha256=B, platform="illumina")
     assert identity.parameters_sha256(**_params()) != identity.parameters_sha256(
         **_params(), platform="illumina",

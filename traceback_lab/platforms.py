@@ -46,6 +46,8 @@ def for_input(manifest: Mapping[str, Any], bam_path: Path) -> Platform:
     if kind == "aligned":
         if manifest.get("platform", "ont") != "ont":
             raise ValueError("Lab-aligned input platform must be ONT")
+        if from_bam(bam_path) != "ont":
+            raise ValueError("Lab-aligned BAM does not declare ONT")
         return "ont"
     if kind != "prealigned":
         raise ValueError("unknown Lab input kind")

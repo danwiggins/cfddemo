@@ -101,7 +101,9 @@ def prealigned_input_id(*, source_id: str, reference_sha256: str, platform: str 
         "reference_sha256": _sha(reference_sha256, "reference_sha256"),
         "aligner": PRE_ALIGNED,
     }
-    if platform != "unknown":
+    # Legacy prealigned inputs omitted the platform and were ONT. Keep their
+    # input IDs stable; only Illumina adds a new disambiguating key.
+    if platform == "illumina":
         identity["platform"] = platform
     return canonical_sha256(identity)
 
