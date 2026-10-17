@@ -8,10 +8,13 @@ from unittest.mock import patch
 
 import pytest
 
+from tests.lab.test_landing import _dom, needs_chrome
 from traceback_lab import views
 from traceback_lab.envelope import ResultEnvelope, provenance
 from traceback_lab.stability import Side, band_at, deviation, stable
 from traceback_lab.store import LabStore
+from traceback_lab.web import api as web_api
+from traceback_lab.web.server import RunningLabServer
 from traceback_runner import cli as signed_cli
 
 P = {"kind": "proportion"}
@@ -206,7 +209,7 @@ def test_stale_derived_results_are_not_compared(default_run) -> None:
     assert rows == {}
 
 
-def test_damaged_split_selection_is_explained_by_loaded_sample(tmp_path) -> None:
+def _published_split_store(tmp_path):
     store = LabStore(tmp_path)
     store.ensure()
     source_id, full_id, split_id, identity = (character * 64 for character in "abcd")
@@ -230,6 +233,11 @@ def test_damaged_split_selection_is_explained_by_loaded_sample(tmp_path) -> None
             "metrics": [{"metric_id": "mode_bp", "value": 167.0}],
         })
         store.publish_result(envelope, input_id=input_id)
+    return store, source_id, full_id, split_id, identity
+
+
+def test_damaged_split_selection_is_explained_by_loaded_sample(tmp_path) -> None:
+    store, source_id, _, split_id, identity = _published_split_store(tmp_path)
     sample = views.load_sample(store, source_id)
     assert sample is not None
     split = next(item for item in sample.derived if item.transform == "split")
@@ -246,6 +254,39 @@ def test_damaged_split_selection_is_explained_by_loaded_sample(tmp_path) -> None
                                       {"kind": "relative", "tolerance": 0.1})
     assert status["state"] == "unavailable"
     assert status["reason"] == "result unreadable"
+
+
+def _damage_full_selection(store: LabStore, full_id: str, identity: str) -> None:
+    selector = store.result_dir(full_id, "fragment-size", identity) / "selected.json"
+    selection = json.loads(selector.read_bytes())
+    selection["attempt_id"] = "../../invalid"
+    selector.write_text(json.dumps(selection))
+
+
+def test_damaged_full_selection_is_disclosed_without_a_metric_panel(tmp_path) -> None:
+    store, source_id, full_id, _, identity = _published_split_store(tmp_path)
+    _damage_full_selection(store, full_id, identity)
+    sample = views.load_sample(store, source_id)
+    assert sample is not None and sample.full.unreadable == {"fragment-size"}
+    assert "fragment-size" not in sample.full.results
+    assert all(panel["algorithm_id"] != "fragment-size" for panel in views.stability_panels(sample))
+
+    payload = web_api.LabApi(store).sample(sample.id12)
+    assert payload["stability_unavailable"] == [
+        {"algorithm_id": "fragment-size", "reason": "full-depth result unreadable"},
+    ]
+    assert all(panel["algorithm_id"] != "fragment-size" for panel in payload["stability"])
+
+
+@needs_chrome
+def test_damaged_full_selection_is_named_on_stability_page(tmp_path) -> None:
+    store, source_id, full_id, _, identity = _published_split_store(tmp_path)
+    _damage_full_selection(store, full_id, identity)
+    with RunningLabServer(store) as server:
+        id12 = web_api.LabApi(store)._id12s()[source_id]
+        dom = _dom(server, tmp_path / "browser", route=f"/sample/{id12}/stability",
+                   want=lambda page: "full-depth result unreadable" in page)
+    assert "fragment-size: full-depth result unreadable; no metric-level Stability panel can be shown." in dom
 
 
 def test_usable_to_agrees_with_the_curve(default_run) -> None:

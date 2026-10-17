@@ -530,6 +530,8 @@
   // -- Stability ------------------------------------------------------------------------------
   function stability(sample) {
     const out = [h("p", { class: "breadcrumb" }, `Lab › ${sample.id12} › Stability`), h("h1", { class: "view-title" }, "Stability")];
+    for (const issue of (sample.stability_unavailable || []))
+      out.push(h("p", { class: "problem" }, `${issue.algorithm_id}: ${issue.reason}; no metric-level Stability panel can be shown.`));
     if (!sample.curve.downsampled) out.push(h("p", { class: "empty" }, `This run used --no-downsample. Run traceback lab run ${sample.id12} to draw the curve.`));
     if (!sample.repeatability) {
       const recorded = (sample.stability || []).some((panel) =>

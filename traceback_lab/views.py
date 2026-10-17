@@ -138,7 +138,12 @@ def load_sample(store: LabStore, source_id: str) -> SampleView | None:
     full_input = next((entry["input_id"] for entry in inputs if input_manifest(store, entry["input_id"])), None)
     if full_input is None:
         return None
-    full = InputView("full", full_input, None, {}, selected_results(store, full_input))
+    full_issues: dict[str, set[str]] = {}
+    full = InputView(
+        "full", full_input, None, {}, selected_results(store, full_input, issues=full_issues),
+        unreadable=full_issues.get("unreadable", set()),
+        ambiguous=full_issues.get("ambiguous", set()),
+    )
     identities = {alg: envelope.provenance.parameters_sha256 for alg, envelope in full.results.items()}
     derived = []
     for entry in record.get("derived", []):

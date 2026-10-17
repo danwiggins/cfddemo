@@ -359,7 +359,9 @@ script or style, no outside requests.
   verdict. When a half is unavailable, its status remains visible. REPEATABILITY's
   median and worst-three list include every numeric split comparison; only
   metrics with a validated verdict enter its stability count. Home separately
-  counts unavailable comparisons, even when no pair is comparable.
+  counts unavailable comparisons, even when no pair is comparable. If a
+  full-depth selected result is unreadable or ambiguous, Stability names that
+  algorithm without inventing a metric-level panel from damaged data.
 
 ## Building a Lab cohort
 

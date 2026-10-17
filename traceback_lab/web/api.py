@@ -420,6 +420,13 @@ class LabApi:
             ),
             "curve": curve,
             "stability": panels,
+            "stability_unavailable": [
+                {"algorithm_id": algorithm_id, "reason": "full-depth result unreadable"}
+                for algorithm_id in sorted(sample.full.unreadable)
+            ] + [
+                {"algorithm_id": algorithm_id, "reason": "full-depth result selection ambiguous"}
+                for algorithm_id in sorted(sample.full.ambiguous)
+            ],
             "repeatability": views.repeatability(panels),
             "synthetic": synthetic,
             "defended": defended_block,
