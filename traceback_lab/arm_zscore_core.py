@@ -26,6 +26,7 @@ class ArmObservation:
     source_id: str
     arm_id: str
     protocol_key: str
+    arm_asset_sha256: str
     log2: float | None
 
 
@@ -60,7 +61,8 @@ def score_arm(
 
     The empirical reference SD uses the cohort distribution (denominator n).
     There is no abnormality threshold. Every source is counted at most once;
-    incompatible protocols and missing arm values cannot enter the reference.
+    incompatible protocols, arm definitions, and missing arm values cannot
+    enter the reference.
     """
 
     if not SHA256_PATTERN.fullmatch(target_source_id):
@@ -89,9 +91,12 @@ def score_arm(
         if item.source_id in seen:
             raise ValueError("reference sources must be distinct")
         seen.add(item.source_id)
+        if not SHA256_PATTERN.fullmatch(item.arm_asset_sha256):
+            raise ValueError("reference arm_asset_sha256 must be a SHA-256 digest")
         value = _finite(item.log2, "reference log2")
         if (item.source_id != target_source_id and item.arm_id == arm_id
-                and item.protocol_key == target_protocol_key and value is not None):
+                and item.protocol_key == target_protocol_key
+                and item.arm_asset_sha256 == arm_asset_sha256 and value is not None):
             values.append(value)
     if len(values) < MIN_REFERENCE_N:
         return ArmScore("no_reference", None, len(values))

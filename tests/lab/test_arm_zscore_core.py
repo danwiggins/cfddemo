@@ -12,7 +12,7 @@ ASSET = "b" * 64
 
 
 def _controls(n: int = 10) -> list[ArmObservation]:
-    return [ArmObservation(f"{index + 1:064x}", "chr1p", PROTOCOL, float(index)) for index in range(n)]
+    return [ArmObservation(f"{index + 1:064x}", "chr1p", PROTOCOL, ASSET, float(index)) for index in range(n)]
 
 
 def _score(observations: list[ArmObservation], **overrides):
@@ -27,9 +27,10 @@ def _score(observations: list[ArmObservation], **overrides):
 
 def test_arm_score_uses_only_matched_independent_values() -> None:
     controls = _controls() + [
-        ArmObservation(TARGET, "chr1p", PROTOCOL, 1_000.0),
-        ArmObservation("c" * 64, "chr1p", "d" * 64, 1_000.0),
-        ArmObservation("e" * 64, "chr2q", PROTOCOL, 1_000.0),
+        ArmObservation(TARGET, "chr1p", PROTOCOL, ASSET, 1_000.0),
+        ArmObservation("c" * 64, "chr1p", "d" * 64, ASSET, 1_000.0),
+        ArmObservation("e" * 64, "chr2q", PROTOCOL, ASSET, 1_000.0),
+        ArmObservation("d" * 64, "chr1p", PROTOCOL, "c" * 64, 1_000.0),
     ]
     result = _score(controls)
     assert result.state == "ok" and result.reference_n == 10
@@ -51,12 +52,13 @@ def test_arm_score_exposes_unavailable_state(change, state) -> None:
 
 
 def test_reference_gate_applies_after_source_exclusion() -> None:
-    result = _score(_controls(9) + [ArmObservation(TARGET, "chr1p", PROTOCOL, 9.0)])
+    result = _score(_controls(9) + [ArmObservation(TARGET, "chr1p", PROTOCOL, ASSET, 9.0)])
     assert result.state == "no_reference" and result.reference_n == 9
 
 
 def test_zero_variance_has_no_numeric_z_or_cutoff() -> None:
-    controls = [ArmObservation(item.source_id, item.arm_id, item.protocol_key, 0.25) for item in _controls()]
+    controls = [ArmObservation(item.source_id, item.arm_id, item.protocol_key, item.arm_asset_sha256, 0.25)
+                for item in _controls()]
     result = _score(controls)
     assert result.state == "zero_variance" and result.z is None and result.reference_sd == 0
 
