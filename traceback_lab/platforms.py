@@ -23,8 +23,11 @@ def from_rg_lines(lines: Iterable[str]) -> Platform:
         if not line.startswith("@RG\t"):
             continue
         seen = True
-        fields = dict(part.split(":", 1) for part in line.split("\t")[1:] if ":" in part)
-        value = fields.get("PL", "").upper()
+        platform_tags = [part[3:] for part in line.split("\t")[1:] if part.startswith("PL:")]
+        if len(platform_tags) != 1:
+            declared.add("unknown")
+            continue
+        value = platform_tags[0].upper()
         if value in {"ONT", "OXFORD_NANOPORE"}:
             declared.add("ont")
         elif value == "ILLUMINA":
@@ -46,12 +49,25 @@ def for_input(manifest: Mapping[str, Any], bam_path: Path) -> Platform:
     if kind == "aligned":
         if manifest.get("platform", "ont") != "ont":
             raise ValueError("Lab-aligned input platform must be ONT")
-        if from_bam(bam_path) != "ont":
-            raise ValueError("Lab-aligned BAM does not declare ONT")
+        actual = from_bam(bam_path)
+        if actual != "ont":
+            # Earlier Lab versions could align an unaligned BAM without @RG.
+            # Accept only that exact old map-ont recipe and an absent RG;
+            # ambiguous or contrary declarations still fail closed.
+            from .ingest import ALIGNER_IDENTITY_ARGV
+
+            legacy = "platform" not in manifest and manifest.get("aligner_argv") == list(ALIGNER_IDENTITY_ARGV)
+            if not legacy or actual != "unknown":
+                raise ValueError("Lab-aligned BAM does not declare ONT")
+            with pysam.AlignmentFile(str(bam_path), "rb", check_sq=False) as bam:
+                if bam.header.get("RG"):
+                    raise ValueError("Lab-aligned BAM does not declare ONT")
         return "ont"
     if kind != "prealigned":
         raise ValueError("unknown Lab input kind")
     actual = from_bam(bam_path)
+    # Old prealigned manifests have no platform field. Their unanimous BAM
+    # declaration remains readable; new manifests pin it explicitly.
     declared = manifest.get("platform", actual)
     if declared not in PLATFORMS or declared != actual:
         raise ValueError("prealigned platform declaration differs from BAM read groups")
