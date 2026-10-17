@@ -434,12 +434,14 @@ it is not the residual of a sum-to-one mixture fit. It has no goodness-of-fit
 threshold or biological confidence claim.
 
 The Agreement lens pairs PoN-qualified copy-number tumour fraction with the
-methylation estimate, a cohort-relative fragment-size mode shift, and a
-cohort-relative mtDNA fraction trend. The latter two need at least ten compatible
-cohort members after excluding the target source. The lens computes no combined
-score, warns that the signals are not independent, and notes the
-whole-genome-doubling caveat for copy-number tumour fraction. When both sides
-of a pair are unavailable, it shows both reasons.
+methylation estimate. Its other plots show raw fragment-size mode and mtDNA
+fraction against copy-number tumour fraction, with compatible paired cohort
+points from one pinned generation when available. The target source is excluded
+from those points; they are descriptive and have no minimum-size gate or
+reference-interval claim. The lens computes no combined score, warns that the
+signals are not independent, and notes the whole-genome-doubling caveat for
+copy-number tumour fraction. The methylation pair shows its fit support and
+explicit unavailability reasons.
 
 **Viral reference.** `viral-reads` leaves the registered hg38 human reference
 unchanged. It takes human-unmapped primary reads from the aligned BAM, including
