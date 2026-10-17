@@ -204,6 +204,13 @@ def test_stability_names_both_halves_without_a_numeric_verdict(page_root, tmp_pa
                 half: {"state": state, "reason": reason, "value": None, "deviation": None}
                 for half, (state, reason) in zip(("A", "B"), (a, b))
             }
+        assert len(panels) >= 3
+        panels[2]["split"] = {"a": 100, "b": 105, "deviation_a": 0, "deviation_b": 5,
+                               "relative_abs_diff": 5 / 102.5, "stable": None}
+        panels[2]["split_status"] = {
+            half: {"state": "ok", "reason": None, "value": value, "deviation": difference}
+            for half, value, difference in (("A", 100, 0), ("B", 105, 5))
+        }
         return panels
 
     monkeypatch.setattr(views, "stability_panels", panels_with_missing_halves)
@@ -213,6 +220,7 @@ def test_stability_names_both_halves_without_a_numeric_verdict(page_root, tmp_pa
     assert "split A skipped (depth); split B failed (algorithm failed)" in dom
     assert "split A unavailable (selected result unavailable); split B not interpretable (metric value unavailable)" in dom
     assert "No split-half stability verdict." in dom
+    assert "100 / 105" in dom and "4.9% |A−B|" in dom
 
 
 @needs_chrome

@@ -109,7 +109,7 @@ def test_default_run_builds_the_curve_and_controls(default_run) -> None:
     with patch.object(views, "stable", return_value=None):
         no_verdict = next(p for p in views.stability_panels(sample)
                           if p["algorithm_id"] == "fragment-size" and p["metric_id"] == "mode_bp")
-    assert no_verdict["split"] is None
+    assert no_verdict["split"]["stable"] is None
     assert all(no_verdict["split_status"][half]["state"] == "ok" for half in ("A", "B"))
     assert all(no_verdict["split_status"][half]["value"] is not None for half in ("A", "B"))
 
@@ -125,11 +125,13 @@ def test_default_run_builds_the_curve_and_controls(default_run) -> None:
         missing = fragment_panel()
         assert missing["split"] is None
         assert missing["split_status"]["A"]["state"] == "unavailable"
+        halves["A"].results[selected] = original_a
 
         halves["B"].results[selected] = original_b.model_copy(
             update={"status": "skipped", "skip_reason": "depth", "metrics": []})
         skipped = fragment_panel()
         assert skipped["split"] is None
+        assert skipped["split_status"]["A"]["state"] == "ok"
         assert skipped["split_status"]["B"]["state"] == "skipped"
         assert skipped["split_status"]["B"]["reason"] == "depth"
 
@@ -142,6 +144,7 @@ def test_default_run_builds_the_curve_and_controls(default_run) -> None:
         halves["B"].results[selected] = original_b.model_copy(update={"metrics": null_metrics})
         null = fragment_panel()
         assert null["split"] is None
+        assert null["split_status"]["A"]["state"] == "ok"
         assert null["split_status"]["B"]["state"] == "not_interpretable"
     finally:
         halves["A"].results[selected] = original_a
@@ -222,8 +225,8 @@ def test_split_half_missingness_keeps_each_status_visible() -> None:
     view = views.InputView("split-A", "a" * 64, "split", {"half": "A"}, {}, 0.5)
     status = views._split_half_status
 
-    assert status(None, "fragment-size", "mode_bp", 100, spec)["state"] == "not_requested"
-    assert status(None, "fragment-size", "mode_bp", 100, spec, requested=True)["state"] == "unavailable"
+    assert status(None, "fragment-size", "mode_bp", 100, spec)["state"] == "not_recorded"
+    assert status(None, "fragment-size", "mode_bp", 100, spec, other_half_recorded=True)["state"] == "unavailable"
     assert status(view, "fragment-size", "mode_bp", 100, spec)["state"] == "unavailable"
 
     view.results["fragment-size"] = SimpleNamespace(status="skipped", skip_reason="depth")

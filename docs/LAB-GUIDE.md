@@ -305,7 +305,8 @@ script or style, no outside requests.
 - **Stability**: one small multiple per metric: deviation from full depth at
   each fraction, the stability band, and split halves A/B at 50%. Each half
   shows its own status when a result is skipped, failed, or lacks a numeric
-  metric; a split-half verdict appears only when both values are available.
+  metric; a split-half verdict appears only when both values are available
+  and the stability comparison is interpretable.
 
 ## Building a Lab cohort
 

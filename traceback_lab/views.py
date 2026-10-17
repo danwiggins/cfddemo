@@ -200,11 +200,11 @@ def _side(metric: Any, fraction: float) -> Side:
 
 
 def _split_half_status(view: InputView | None, algorithm_id: str, metric_id: str,
-                       full_value: Any, spec: Mapping[str, Any], *, requested: bool = False) -> dict[str, Any]:
+                       full_value: Any, spec: Mapping[str, Any], *, other_half_recorded: bool = False) -> dict[str, Any]:
     if view is None:
-        if requested:
+        if other_half_recorded:
             return {"state": "unavailable", "reason": "split half unavailable", "value": None, "deviation": None}
-        return {"state": "not_requested", "reason": "split control not requested", "value": None, "deviation": None}
+        return {"state": "not_recorded", "reason": "no split-half input recorded", "value": None, "deviation": None}
     envelope = view.results.get(algorithm_id)
     if envelope is None:
         return {"state": "unavailable", "reason": "selected result unavailable", "value": None, "deviation": None}
@@ -334,7 +334,8 @@ def stability_panels(sample: SampleView, library: Library | None = None) -> list
                 )
             split = None
             split_status = {
-                half: _split_half_status(halves.get(half), algorithm_id, metric.metric_id, metric.value, spec, requested=bool(halves))
+                half: _split_half_status(halves.get(half), algorithm_id, metric.metric_id, metric.value, spec,
+                                         other_half_recorded=bool(halves))
                 for half in ("A", "B")
             }
             a = _value(halves["A"].results.get(algorithm_id), metric.metric_id) if "A" in halves else None
@@ -343,7 +344,7 @@ def stability_panels(sample: SampleView, library: Library | None = None) -> list
                 verdict = stable(spec, _side(a, 0.5), _side(b, 0.5))
                 da, unit = deviation(spec, a.value, metric.value, 0.5)
                 db, _ = deviation(spec, b.value, metric.value, 0.5)
-                if verdict is not None and da is not None and db is not None:
+                if da is not None and db is not None:
                     mean = (abs(a.value) + abs(b.value)) / 2
                     split = {
                         "a": a.value,
