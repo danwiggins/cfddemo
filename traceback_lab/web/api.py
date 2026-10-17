@@ -438,6 +438,7 @@ class LabApi:
                         "split": bool(sample.by_transform("split")),
                     },
                     "unreadable_results": sorted(sample.full.unreadable),
+                    "ambiguous_results": sorted(sample.full.ambiguous),
                 }
             )
         rows.sort(key=lambda row: row["run_utc"], reverse=True)
@@ -545,6 +546,7 @@ class LabApi:
             "cohort_problem": cohort_problem,
             "algorithms": algorithms,
             "unreadable_results": sorted(sample.full.unreadable),
+            "ambiguous_results": sorted(sample.full.ambiguous),
             "curve": curve,
             "stability": panels,
             "repeatability": views.repeatability(panels),
@@ -553,7 +555,7 @@ class LabApi:
             "headline": headline_block,
             "derived": [{"label": view.label, "transform": view.transform} for view in sample.derived],
             "licenses": [{"license_id": key, **library.licenses[key]} for key in _all_used(used_licenses, library, order)],
-            "catalog": _catalog(library, order, algorithms, sample.full.unreadable),
+            "catalog": _catalog(library, order, algorithms, sample.full.unreadable, sample.full.ambiguous),
             "excluded": EXCLUDED,
             "library_health": {
                 **self.libraries.health(),
@@ -881,12 +883,13 @@ def _all_used(used: list[str], library: Library, order: list[str]) -> list[str]:
 
 def _catalog(
     library: Library, order: list[str], algorithms: list[dict[str, Any]],
-    unreadable: set[str] | None = None,
+    unreadable: set[str] | None = None, ambiguous: set[str] | None = None,
 ) -> list[dict[str, Any]]:
     """Every registered (non-hidden) algorithm with its tier, footnote and status here."""
 
     by_id = {row["algorithm_id"]: row for row in algorithms}
     unreadable = unreadable or set()
+    ambiguous = ambiguous or set()
     rows = []
     for algorithm_id in order:
         if algorithm_id in library.hidden_algorithms:
@@ -900,7 +903,10 @@ def _catalog(
                         licenses.append(license_id)
         performance = entry.get("performance") if entry else None
         result = by_id.get(algorithm_id)
-        status = result["status"] if result else ("unreadable" if algorithm_id in unreadable else "not run")
+        status = result["status"] if result else (
+            "unreadable" if algorithm_id in unreadable else
+            "ambiguous" if algorithm_id in ambiguous else "not run"
+        )
         rows.append(
             {
                 "algorithm_id": algorithm_id,
