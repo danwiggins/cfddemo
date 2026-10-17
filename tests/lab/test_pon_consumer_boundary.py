@@ -61,6 +61,39 @@ def test_sample_view_marks_old_copy_number_and_instability_as_superseded(tmp_pat
             assert selected_results(store, selected_input)[algorithm_id].status == "ok"
 
 
+def test_sample_view_follows_instability_consumed_v1_after_copy_number_v2(tmp_path: Path) -> None:
+    store = LabStore(tmp_path)
+    source_id = _sample(store, 1)
+    input_id = f"{101:064x}"
+    old_identity, current_identity, instability_identity = "8" * 64, "9" * 64, "a" * 64
+
+    def result(algorithm_id: str, version: str, identity: str) -> ResultEnvelope:
+        return ResultEnvelope(
+            algorithm_id=algorithm_id, algorithm_version=version, status="ok",
+            provenance=provenance(
+                tool="fixture", parameters_sha256=identity,
+                source_id=source_id, input_id=input_id, reference_id="hg38",
+            ),
+        )
+
+    old_attempt = store.publish_result(result("copy-number", "1", old_identity), input_id=input_id)
+    store.publish_result(
+        result("instability", "1", instability_identity), input_id=input_id,
+        upstream_selections=[{
+            "algorithm_id": "copy-number", "input_id": input_id,
+            "parameters_sha256": old_identity, "attempt_id": old_attempt,
+        }],
+    )
+    store.publish_result(result("copy-number", "2", current_identity), input_id=input_id)
+    view = load_sample(store, source_id)
+    assert view is not None
+    assert view.full.results["copy-number"].status == "ok"
+    assert view.full.results["copy-number"].algorithm_version == "2"
+    assert view.full.results["instability"].skip_reason == "superseded_method"
+    assert store.read_result(input_id, "copy-number", old_identity).status == "ok"
+    assert store.read_result(input_id, "instability", instability_identity).status == "ok"
+
+
 def test_pon_contract_requires_policy_and_digest_together() -> None:
     digest = "a" * 64
     assert LabCopyNumberParameters(signed=object()).pon_policy == "none"
