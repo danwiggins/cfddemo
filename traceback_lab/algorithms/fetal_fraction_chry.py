@@ -29,7 +29,7 @@ def _protocol_matches() -> bool:
     """Refuse old calibrations if shared D21 or hg38 counting policy changes."""
 
     return (MIN_MAPQ == _F1_MIN_MAPQ and FLAG_EXCLUDE == _F1_FLAG_EXCLUDE
-            and HG38_CHRY_PARS == _F1_PARS)
+            and HG38_CHRY_PARS == _F1_PARS and HG38_CHRY_LENGTH == 57_227_415)
 
 
 def _counts(summary: Any) -> tuple[int, int]:
