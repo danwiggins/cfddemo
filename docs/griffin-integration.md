@@ -82,8 +82,10 @@ planned values; a changed runtime or registration cannot reuse or publish under
 the earlier key.
 The published `griffin_provenance.json` is a path-free receipt with selected
 run facts, output hashes, and a SHA-256 of the full attempt manifest. The full
-manifest stays in the operator's attempt directory because it records local
-executable paths and environment variables.
+manifest records local executable paths and environment variables. A standalone
+adapter call retains it in the operator's attempt directory. A normal Lab run
+places it in disposable worker scratch, which is removed after the run; its
+published digest cannot be independently checked after that cleanup.
 
 The Lab now registers the exact upstream checkout, Griffin reference inputs,
 and operator-supplied TF-site lists with:
