@@ -72,6 +72,7 @@ def test_cohort_findings_counts_and_readiness_are_explicit(tmp_path, monkeypatch
     assert re.findall(r"<summary>(Not interpretable|No reference|In range) \((\d+)\)", dom) == [
         ("Not interpretable", "0"), ("No reference", "1"), ("In range", "1")]
     assert dom.count('class="finding-card"') == int(outside)
+    assert "1 metric has no reference" in dom
     if outside:
         assert "Above typical (1)" in dom and "High mono peak" in dom
     else:

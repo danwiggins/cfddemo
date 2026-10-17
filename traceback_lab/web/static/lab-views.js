@@ -481,7 +481,8 @@
     let first = true;
     if (!outside) {
       const withReference = metrics.filter((m) => m.state !== "no_reference" && m.state !== "not_interpretable").length;
-      out.push(h("p", { class: "empty" }, `No metric is outside a reference. ${withReference} ${withReference === 1 ? "metric has" : "metrics have"} a reference; ${groups.no_reference.length} have no reference (${cohortContext}). `,
+      const withoutReference = groups.no_reference.length;
+      out.push(h("p", { class: "empty" }, `No metric is outside a reference. ${withReference} ${withReference === 1 ? "metric has" : "metrics have"} a reference; ${withoutReference} ${withoutReference === 1 ? "metric has" : "metrics have"} no reference (${cohortContext}). `,
         h("a", { href: `#/sample/${sample.id12}/trust-qc` }, "Trust/QC"), " · ", h("a", { href: `#/sample/${sample.id12}/stability` }, "Stability")));
     }
     const titles = { markedly_above: "Markedly above", markedly_below: "Markedly below", above_typical: "Above typical", below_typical: "Below typical" };
@@ -829,6 +830,12 @@
             if (!Array.isArray(data.motif) || data.motif.length !== 256 ||
                 !Array.isArray(data.count) || data.count.length !== 256 ||
                 !Array.isArray(data.freq) || data.freq.length !== 256) throw new Error("motif panel dimensions invalid");
+            if (new Set(data.motif).size !== 256 ||
+                data.motif.some((motif) => typeof motif !== "string" || !/^[ACGT]{4}$/.test(motif)) ||
+                data.count.some((count) => !Number.isSafeInteger(count) || count < 0) ||
+                data.freq.some((freq) => !Number.isFinite(freq) || freq < 0 || freq > 1)) {
+              throw new Error("motif panel values invalid");
+            }
             const rows = data.motif.map((motif, i) => [motif, data.count[i], data.freq[i]]);
             const top = [...rows].sort((a, b) => b[2] - a[2] || a[0].localeCompare(b[0])).slice(0, 16);
             slot.replaceWith(chart("Sixteen most frequent aligned-end 4-mers; fraction of counted ends.", {
@@ -845,6 +852,16 @@
           artifact(sample, id, "ratio-track").then((data) => {
             if (!Array.isArray(data.bins) || data.bin_bp !== 5000000 || data.median_ratio_removed !== true) {
               throw new Error("ratio track contract invalid");
+            }
+            if (data.bins.length > 1024 || data.bins.some((bin) =>
+              !bin || typeof bin.contig !== "string" || !/^(?:chr)?(?:[1-9]|1[0-9]|2[0-2])$/.test(bin.contig) ||
+              !Number.isSafeInteger(bin.start) || bin.start < 0 || bin.start % data.bin_bp !== 0 ||
+              !Number.isSafeInteger(bin.short) || bin.short < 0 ||
+              !Number.isSafeInteger(bin.long) || bin.long < 0 ||
+              (bin.long === 0
+                ? bin.ratio !== null || bin.centred !== null
+                : !Number.isFinite(bin.ratio) || bin.ratio < 0 || !Number.isFinite(bin.centred)))) {
+              throw new Error("ratio track bin values invalid");
             }
             const labels = data.bins.map((b) => `${b.contig}:${(b.start / 1e6).toFixed(0)} Mb`);
             const values = data.bins.map((b) => b.centred);
