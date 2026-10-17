@@ -80,7 +80,8 @@ def read_corrected_profiles(path: Path, *, expected_sample: str | None = None) -
                for field in fields):
             raise GriffinFormatError("coverage coordinates must use canonical integer spelling")
         try:
-            offsets = tuple(int(field) for field in fields if re.fullmatch(r"(?:0|-[1-9][0-9]*|[1-9][0-9]*)", field))
+            coordinate_fields = [field for field in fields if re.fullmatch(r"(?:0|-[1-9][0-9]*|[1-9][0-9]*)", field)]
+            offsets = tuple(int(field) for field in coordinate_fields)
         except ValueError as exc:
             raise GriffinFormatError("invalid coverage coordinate") from exc
         if set(fields) - _META_FIELDS - {str(offset) for offset in offsets}:
@@ -117,7 +118,7 @@ def read_corrected_profiles(path: Path, *, expected_sample: str | None = None) -
                 raise GriffinFormatError("number_of_sites must be an integer") from exc
             if count <= 0:
                 raise GriffinFormatError("number_of_sites must be positive")
-            coverage = tuple(_finite(row[str(offset)], str(offset)) for offset in offsets)
+            coverage = tuple(_finite(row[field], field) for field in coordinate_fields)
             if any(value < 0 for value in coverage):
                 raise GriffinFormatError("coverage must be nonnegative")
             central = _finite(row["central_coverage"], "central_coverage")

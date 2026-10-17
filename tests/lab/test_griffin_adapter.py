@@ -24,6 +24,15 @@ def test_shell_unsafe_upstream_paths_are_rejected(tmp_path: Path, unsafe: str) -
         _safe_path(candidate)
 
 
+def test_missing_upstream_path_does_not_disclose_operator_path(tmp_path: Path) -> None:
+    from traceback_lab.adapters.griffin_run import _safe_path
+
+    candidate = tmp_path / "DonorName_2026" / "missing.bam"
+    with pytest.raises(ValueError, match="unavailable or unsafe") as error:
+        _safe_path(candidate)
+    assert "DonorName_2026" not in str(error.value)
+
+
 def _write(path: Path, *, correction: str = "GC_corrected", sample: str = "S1",
            site_count: int = 1000) -> Path:
     path.write_text(
@@ -153,7 +162,7 @@ def test_pinned_upstream_attempt_binds_input_and_assets(tmp_path: Path, monkeypa
         config = upstream / "snakemakes" / workflow / "config"
         config.mkdir(parents=True)
         (config / "config.yaml").write_text("{}\n", encoding="utf-8")
-        (config / "cluster_slurm.yaml").write_text("GC_counts:\n  ncpus: 8\n", encoding="utf-8")
+        (config / "cluster_slurm.yaml").write_text("GC_counts: {ncpus: 8}\ncalc_cov: {ncpus: 8}\n", encoding="utf-8")
         (upstream / "snakemakes" / workflow / (workflow + ".snakefile")).write_text(
             "# test fixture\n", encoding="utf-8"
         )
@@ -212,6 +221,7 @@ def test_pinned_upstream_attempt_binds_input_and_assets(tmp_path: Path, monkeypa
         assert argv[1] == str(tool_dir / "snakemake")
         assert kwargs["env"]["PYTHONDONTWRITEBYTECODE"] == "1"
         directory = Path(kwargs["cwd"])
+        assert kwargs["env"]["PYTHONDONTWRITEBYTECODE"] == "1"
         calls.append(directory)
         if directory.name.startswith("griffin_GC_and"):
             output = directory / "results" / "GC_bias" / f"{sample}.GC_bias.txt"
@@ -428,6 +438,86 @@ def test_native_ont_bam_fails_closed(tmp_path: Path, read_groups: list[dict[str,
         _require_paired_input(bam)
 
 
+@pytest.mark.parametrize("platforms", [("ONT",), ("ILLUMINA", "ONT"), ()])
+def test_paired_bam_without_unanimous_illumina_declaration_is_refused(
+    tmp_path: Path, platforms: tuple[str, ...],
+) -> None:
+    pysam = pytest.importorskip("pysam")
+
+    from traceback_lab.adapters.griffin_run import _require_paired_input
+
+    bam = tmp_path / "paired.bam"
+    header = {"HD": {"VN": "1.6"}, "SQ": [{"SN": "chr1", "LN": 10000}],
+              "RG": [{"ID": f"group-{index}", "PL": platform}
+                     for index, platform in enumerate(platforms)]}
+    with pysam.AlignmentFile(str(bam), "wb", header=header) as out:
+        for index in range(100):
+            read = pysam.AlignedSegment()
+            read.query_name = f"pair{index}"
+            read.query_sequence = "A" * 100
+            read.flag = 0x1 | 0x2 | 0x40
+            read.reference_id = 0
+            read.reference_start = index * 10
+            read.next_reference_id = 0
+            read.next_reference_start = index * 10 + 50
+            read.mapping_quality = 60
+            read.cigarstring = "100M"
+            read.template_length = 150
+            out.write(read)
+    with pytest.raises(ValueError, match="PL:ILLUMINA"):
+        _require_paired_input(bam)
+
+
+def test_late_positive_tlen_is_considered_after_first_ten_thousand(tmp_path: Path) -> None:
+    pysam = pytest.importorskip("pysam")
+
+    from traceback_lab.adapters.griffin_run import _require_paired_input
+
+    bam = tmp_path / "late-pairs.bam"
+    header = {"HD": {"VN": "1.6"}, "SQ": [{"SN": "chr1", "LN": 20000}],
+              "RG": [{"ID": "library-1", "PL": "ILLUMINA"}]}
+    with pysam.AlignmentFile(str(bam), "wb", header=header) as out:
+        for index in range(10_001):
+            read = pysam.AlignedSegment()
+            read.query_name = f"pair{index}"
+            read.query_sequence = "A" * 100
+            read.flag = 0x1 | 0x2 | 0x40
+            read.reference_id = 0
+            read.reference_start = index
+            read.next_reference_id = 0
+            read.next_reference_start = index + (50 if index == 10_000 else 0)
+            read.mapping_quality = 60
+            read.cigarstring = "100M"
+            read.template_length = 150 if index == 10_000 else 0
+            read.set_tag("RG", "library-1")
+            out.write(read)
+    assert _require_paired_input(bam) == 1
+
+
+def test_declared_illumina_single_end_bam_is_refused(tmp_path: Path) -> None:
+    import pysam
+
+    from traceback_lab.adapters.griffin_run import _require_paired_input
+
+    bam = tmp_path / "single-end.bam"
+    header = {"HD": {"VN": "1.6"}, "SQ": [{"SN": "chr1", "LN": 10000}],
+              "RG": [{"ID": "rg1", "PL": "ILLUMINA"}]}
+    with pysam.AlignmentFile(str(bam), "wb", header=header) as out:
+        for index in range(100):
+            read = pysam.AlignedSegment()
+            read.query_name = f"single{index}"
+            read.query_sequence = "A" * 150
+            read.flag = 0
+            read.reference_id = 0
+            read.reference_start = index * 10
+            read.mapping_quality = 60
+            read.cigarstring = "150M"
+            read.set_tag("RG", "rg1")
+            out.write(read)
+    with pytest.raises(ValueError, match="paired-end positive-TLEN"):
+        _require_paired_input(bam)
+
+
 def test_paired_input_gate_scans_past_first_10000_records(tmp_path: Path) -> None:
     pysam = pytest.importorskip("pysam")
 
@@ -451,7 +541,7 @@ def test_paired_input_gate_scans_past_first_10000_records(tmp_path: Path) -> Non
     _require_paired_input(bam)
 
 
-def test_paired_input_gate_requires_a_profile_window_fragment(tmp_path: Path) -> None:
+def test_paired_input_gate_counts_only_profile_window_fragments(tmp_path: Path) -> None:
     pysam = pytest.importorskip("pysam")
 
     from traceback_lab.adapters.griffin_run import _require_paired_input
@@ -471,8 +561,7 @@ def test_paired_input_gate_requires_a_profile_window_fragment(tmp_path: Path) ->
             read.cigarstring = "150M"
             read.template_length = 500
             out.write(read)
-    with pytest.raises(ValueError, match="positive-TLEN"):
-        _require_paired_input(bam)
+    assert _require_paired_input(bam) == 0
 
 
 def test_griffin_bam_header_must_match_reference(tmp_path: Path) -> None:

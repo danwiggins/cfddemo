@@ -1,6 +1,7 @@
 """Synthetic Lab cohort storage and publication checks."""
 
 import json
+from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
@@ -8,12 +9,12 @@ import pysam
 
 from traceback_lab import cohorts
 from traceback_lab.cohorts import add_sample, build_cohort, project_current_metric, project_sample_metric, read_current, read_roster, remove_sample
-from traceback_lab.envelope import Metric, ResultEnvelope, provenance
-from traceback_lab.identity import parameters_sha256
+from traceback_lab.envelope import Failure, Metric, ResultEnvelope, provenance
+from traceback_lab.identity import cohort_compat_key, parameters_sha256
 from traceback_lab.ingest import resolve_sample
 from traceback_lab.problems import LabProblem
 from traceback_lab.registry import ToolPin, execution_identity
-from traceback_lab.store import LabStore
+from traceback_lab.store import MAX_EXECUTION_PLAN_BYTES, LabStore
 from traceback_runner import cli as signed_cli
 
 
@@ -94,6 +95,90 @@ def test_add_is_idempotent_and_build_publishes_immutable_generations(store: LabS
     assert read_current(store, "healthy") == two
 
 
+def test_griffin_cohort_reads_recorded_runtime_after_environment_change(
+    store: LabStore, monkeypatch,
+) -> None:
+    source_id = _sample(store, 31, aligned=False)
+    input_id = _sha(131)
+    bam = store.inputs_dir / input_id / "aligned.bam"
+    with pysam.AlignmentFile(str(bam), "wb", header={
+        "HD": {"VN": "1.6"}, "SQ": [{"SN": "chr1", "LN": 1000}],
+        "RG": [{"ID": "short", "PL": "ILLUMINA"}],
+    }):
+        pass
+    pins = [ToolPin("Griffin", "pinned"), ToolPin("Snakemake", "5.19.2")]
+    algorithm = SimpleNamespace(
+        id="griffin", version="1", parameters={}, tools=pins, upstream=(),
+        requires=SimpleNamespace(platforms=frozenset({"illumina"})),
+        asset_sha256s=lambda _: [_sha(800)],
+        identity_tools=lambda **_: (*pins, ToolPin("Griffin runtime", _sha(700))),
+    )
+    monkeypatch.setattr(cohorts, "load_registry", lambda: (algorithm,))
+    produced_tools = [pin.identity() for pin in algorithm.identity_tools()]
+    identity = execution_identity(
+        algorithm, reference_sha256=_sha(900), asset_sha256s=[_sha(800)],
+        platform="illumina", tool_pins=produced_tools,
+    )
+    plan = {
+        "schema": "traceback.lab.execution-plan.v1",
+        "algorithm_id": "griffin", "algorithm_version": "1", "input_id": input_id,
+        "reference_sha256": _sha(900), "platform": "illumina",
+        "parameters": {}, "tools": produced_tools,
+        "asset_sha256s": [_sha(800)], "upstream": [],
+    }
+    store.publish_result(ResultEnvelope(
+        algorithm_id="griffin", algorithm_version="1", status="ok",
+        provenance=provenance(tool="fixture", parameters_sha256=identity,
+                              source_id=source_id, input_id=input_id, reference_id="synthetic"),
+        metrics=[Metric(metric_id="central_coverage", value=1.25)],
+    ), input_id=input_id, execution_plan=plan, artifacts={"griffin_provenance.json": json.dumps({
+        "status": "complete", "input_id": input_id,
+        "runtime_identity_sha256": _sha(700),
+    }).encode()})
+    # The reader now runs with a different runtime; stored bytes stay fixed.
+    algorithm.identity_tools = lambda **_: (*pins, ToolPin("Griffin runtime", _sha(701)))
+    add_sample(store, "healthy", source_id)
+    generation = build_cohort(store, "healthy")
+    assert len(generation.members[0].results) == 1
+    selected = generation.members[0].results[0]
+    assert selected.parameters_sha256 == identity
+    assert selected.metrics["central_coverage"] == 1.25
+    expected_compat = cohort_compat_key(
+        algorithm_id="griffin", algorithm_version="1", parameters={},
+        tools=produced_tools, reference_sha256=_sha(900),
+        aligner_identity={"kind": "pre-aligned", "input_id": input_id},
+        pon_policy="none", per_sample_asset_keys=("pon_asset_sha256",),
+        platform="illumina",
+    )
+    assert selected.cohort_compat_key == expected_compat
+    assert selected.cohort_compat_key != cohort_compat_key(
+        algorithm_id="griffin", algorithm_version="1", parameters={},
+        tools=[pin.identity() for pin in algorithm.identity_tools()],
+        reference_sha256=_sha(900),
+        aligner_identity={"kind": "pre-aligned", "input_id": input_id},
+        pon_policy="none", per_sample_asset_keys=("pon_asset_sha256",),
+        platform="illumina",
+    )
+    algorithm.tools = [ToolPin("Griffin", "new-method"), pins[1]]
+    assert build_cohort(store, "healthy").members[0].results == ()
+    algorithm.tools = pins
+    algorithm.asset_sha256s = lambda _: [_sha(801)]
+    assert build_cohort(store, "healthy").members[0].results == ()
+    algorithm.asset_sha256s = lambda _: [_sha(800)]
+    failed_tools = [pin.identity() for pin in algorithm.identity_tools()]
+    failed_identity = execution_identity(
+        algorithm, reference_sha256=_sha(900), asset_sha256s=[_sha(800)],
+        platform="illumina", tool_pins=failed_tools,
+    )
+    store.publish_result(ResultEnvelope(
+        algorithm_id="griffin", algorithm_version="1", status="failed",
+        provenance=provenance(tool="fixture", parameters_sha256=failed_identity,
+                              source_id=source_id, input_id=input_id, reference_id="synthetic"),
+        failure=Failure(first_line="newer runtime failed", stderr_tail=[]),
+    ), input_id=input_id)
+    assert build_cohort(store, "healthy").members[0].results == ()
+
+
 @pytest.mark.parametrize("name", ["cell-origin", "methylbert"])
 def test_cohort_reads_recorded_effective_identity_without_runtime_probe(
     store: LabStore, monkeypatch, name: str,
@@ -134,16 +219,15 @@ def test_cohort_reads_recorded_effective_identity_without_runtime_probe(
     add_sample(store, "healthy", source_id)
     generation = build_cohort(store, "healthy")
     assert [result.parameters_sha256 for result in generation.members[0].results] == [identity]
-    if name == "cell-origin":
-        attempt = store.selected_attempt(input_id, name, identity)
-        assert attempt is not None
-        (attempt / "execution_plan.json").write_text(json.dumps({**plan, "platform": "illumina"}))
-        assert build_cohort(store, "healthy").members[0].results == ()
-    if name == "methylbert":
-        attempt = store.selected_attempt(input_id, name, identity)
-        assert attempt is not None
-        (attempt / "execution_plan.json").write_bytes(b"[" * 1500 + b"0" + b"]" * 1500)
-        assert build_cohort(store, "healthy").members[0].results == ()
+    attempt = store.selected_attempt(input_id, name, identity)
+    assert attempt is not None
+    plan_path = attempt / "execution_plan.json"
+    plan_path.write_text(json.dumps({**plan, "platform": "illumina"}))
+    assert build_cohort(store, "healthy").members[0].results == ()
+    plan_path.write_bytes(b"[" * 1500 + b"0" + b"]" * 1500)
+    assert build_cohort(store, "healthy").members[0].results == ()
+    plan_path.write_bytes(b" " * (MAX_EXECUTION_PLAN_BYTES + 1))
+    assert build_cohort(store, "healthy").members[0].results == ()
 
 
 def test_cohort_omits_dependent_after_same_identity_upstream_reselection(
@@ -184,6 +268,28 @@ def test_cohort_omits_dependent_after_same_identity_upstream_reselection(
     assert [result.algorithm_id for result in build_cohort(store, "healthy").members[0].results] == [
         "fragment-size",
     ]
+
+
+def test_consumed_attempts_use_sorted_selection_order() -> None:
+    input_id = _sha(143)
+    rows = [
+        {"algorithm_id": name, "input_id": input_id,
+         "parameters_sha256": _sha(index), "attempt_id": f"attempt-{name}"}
+        for index, name in ((2, "meth-calls"), (1, "read-summary"))
+    ]
+    snapshots = {
+        row["algorithm_id"]: (Path(row["attempt_id"]), SimpleNamespace(
+            provenance=SimpleNamespace(parameters_sha256=row["parameters_sha256"])))
+        for row in rows
+    }
+    fake_store = SimpleNamespace(upstream_selections_at=lambda _attempt: rows)
+    upstream = [
+        {"algorithm_id": row["algorithm_id"], "parameters_sha256": row["parameters_sha256"]}
+        for row in reversed(rows)
+    ]
+    assert cohorts._consumed_attempts_current(
+        fake_store, Path("dependent"), upstream, snapshots, input_id,
+    )
 
 
 def test_cohort_cli_reports_distinct_aligner_versions(store: LabStore, capsys) -> None:
@@ -335,10 +441,10 @@ def test_reader_sees_complete_old_or_new_generation(store: LabStore, monkeypatch
     assert read_current(store, "healthy") == built[0]
 
 
-def test_changed_asset_digest_cannot_reuse_old_result(store: LabStore) -> None:
+def test_changed_asset_digest_cannot_reuse_old_result(store: LabStore, monkeypatch: pytest.MonkeyPatch) -> None:
     source_id = _sample(store, 1)
     algorithm = cohorts.load_registry()[0]
-    algorithm.asset_sha256s = lambda root: (_sha(901),)
+    monkeypatch.setattr(algorithm, "asset_sha256s", lambda root: (_sha(901),), raising=False)
     current_hash = parameters_sha256(
         algorithm_id="fragment-size", algorithm_version="1", parameters={}, tools=[],
         reference_sha256=_sha(900), asset_sha256s=(_sha(901),),
@@ -353,7 +459,46 @@ def test_changed_asset_digest_cannot_reuse_old_result(store: LabStore) -> None:
     store.publish_result(result, input_id=input_id)
     add_sample(store, "healthy", source_id)
     assert len(build_cohort(store, "healthy").members[0].results) == 1
-    algorithm.asset_sha256s = lambda root: (_sha(902),)
+    monkeypatch.setattr(algorithm, "asset_sha256s", lambda root: (_sha(902),))
+    assert build_cohort(store, "healthy").members[0].results == ()
+
+
+def test_dynamic_runtime_identity_controls_cohort_selection(store: LabStore, monkeypatch: pytest.MonkeyPatch) -> None:
+    source_id = _sample(store, 1)
+    algorithm = cohorts.load_registry()[0]
+    monkeypatch.setattr(algorithm, "identity_tools", lambda *, worker_pythonpath: (ToolPin("runtime", "a" * 64),), raising=False)
+    tools = [tool.identity() for tool in algorithm.identity_tools(worker_pythonpath="test")]
+    current_hash = execution_identity(
+        algorithm, reference_sha256=_sha(900), tool_identities=tools,
+    )
+    plan = {
+        "schema": "traceback.lab.execution-plan.v1",
+        "algorithm_id": "fragment-size", "algorithm_version": "1", "input_id": _sha(101),
+        "reference_sha256": _sha(900), "platform": "ont",
+        "parameters": dict(algorithm.parameters), "tools": tools,
+        "asset_sha256s": [], "upstream": [],
+    }
+    store.publish_result(ResultEnvelope(
+        algorithm_id="fragment-size", algorithm_version="1", status="ok",
+        provenance=provenance(tool="fixture", parameters_sha256=current_hash,
+                              source_id=source_id, input_id=_sha(101), reference_id="synthetic"),
+        metrics=[Metric(metric_id="mode_bp", value=100.0)],
+    ), input_id=_sha(101), execution_plan=plan)
+    add_sample(store, "healthy", source_id)
+    selected = build_cohort(store, "healthy").members[0].results
+    assert len(selected) == 1 and selected[0].parameters_sha256 == current_hash
+    monkeypatch.setattr(algorithm, "identity_tools", lambda *, worker_pythonpath: (ToolPin("runtime", "b" * 64),))
+    # Cohort reads use the producer-recorded runtime, not this reader's PATH.
+    selected_again = build_cohort(store, "healthy").members[0].results
+    assert len(selected_again) == 1 and selected_again[0].parameters_sha256 == current_hash
+
+
+def test_unsupported_platform_skips_asset_hashing_during_cohort_build(store: LabStore, monkeypatch: pytest.MonkeyPatch) -> None:
+    source_id = _sample(store, 1)
+    algorithm = cohorts.load_registry()[0]
+    monkeypatch.setattr(algorithm, "requires", SimpleNamespace(platforms=frozenset({"illumina"})), raising=False)
+    monkeypatch.setattr(algorithm, "asset_sha256s", lambda root: pytest.fail("unsupported algorithm must not hash assets"), raising=False)
+    add_sample(store, "healthy", source_id)
     assert build_cohort(store, "healthy").members[0].results == ()
 
 

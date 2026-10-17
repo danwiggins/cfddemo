@@ -371,10 +371,16 @@ def _recorded_selection(
                 or not isinstance(plan.get("tools"), list)
                 or not isinstance(plan.get("asset_sha256s"), list)):
             return None
+        if any(plan["parameters"].get(key) != value
+               for key, value in algorithm.parameters.items()):
+            return None
+        # Griffin's fixed method and Snakemake pins must still match the
+        # producer plan even when its dynamic runtime pin changes.
+        if algorithm.id == "griffin" and any(tool.identity() not in plan["tools"] for tool in algorithm.tools):
+            return None
         if current_assets is not None and plan["asset_sha256s"] != current_assets:
             return None
-        # Historical producer parameters remain authoritative, but an explicit
-        # panel request must never be replaced by a self-consistent old plan.
+        # An explicit panel request cannot be replaced by an old PoN plan.
         if algorithm.id == "copy-number" and (
             plan["parameters"].get("pon_policy") != algorithm.parameters.get("pon_policy")
             or plan["parameters"].get("pon_sha256") != algorithm.parameters.get("pon_sha256")

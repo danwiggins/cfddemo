@@ -151,6 +151,7 @@ def _algorithms(args: argparse.Namespace, store: LabStore) -> tuple[int, dict[st
             "cost": algorithm.cost,
             "consumes": algorithm.consumes,
             "min_eligible_reads": algorithm.requires.min_eligible_reads,
+            "input_gate": getattr(algorithm, "input_gate", None),
             "upstream": list(algorithm.upstream),
             "hidden": algorithm.id in library.hidden_algorithms,
             **catalog(algorithm.id),
@@ -169,7 +170,7 @@ def _algorithms(args: argparse.Namespace, store: LabStore) -> tuple[int, dict[st
     lines = [f"ROOT  {store.root}"]
     if rows:
         lines.append(_table(
-            ("ID", "TIER", "FAMILY", "COST", "MIN DEPTH", "LICENSES", "FOOTNOTE"),
+            ("ID", "TIER", "FAMILY", "COST", "MIN DEPTH", "INPUT GATE", "LICENSES", "FOOTNOTE"),
             [
                 (
                     row["id"] + (" (intermediate)" if row["hidden"] else ""),
@@ -177,6 +178,7 @@ def _algorithms(args: argparse.Namespace, store: LabStore) -> tuple[int, dict[st
                     row["family"],
                     row["cost"],
                     f"{row['min_depth_x']:g}x" if row["min_depth_x"] else "any",
+                    row["input_gate"] or "-",
                     ", ".join(row["license_ids"]) or "-",
                     (row["footnote"] or "-")[:70],
                 )
