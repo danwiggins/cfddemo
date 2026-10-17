@@ -37,37 +37,40 @@ def test_state_only_interpretation_matches_full_state_without_bootstrap(monkeypa
     assert state_only.interval is None
 
 
-def member(index: int, *, compat: str = COMPAT) -> CohortMember:
+def member(index: int, *, compat: str = COMPAT, value: float | None = None) -> CohortMember:
     source = f"{index:064x}"
     return CohortMember(
         source_id=source, input_id=f"{index + 100:064x}", aligner_identity="fixture aligner",
         results=(CohortResult(
             algorithm_id="fragment-size", parameters_sha256=PARAMETERS,
-            cohort_compat_key=compat, metrics={"short_fraction_lt150": index / 100},
+            cohort_compat_key=compat, metrics={"short_fraction_lt150": index / 100 if value is None else value},
         ),),
     )
 
 
-@pytest.mark.parametrize("member_n,kind,expected_state,eligible_n,is_member", [
-    (10, "internal_cohort", "no_reference", 9, True),
-    (10, "internal_cohort", "above_typical", 10, False),
-    (11, "internal_cohort", "above_typical", 10, True),
-    (11, "provisional_external", "above_typical", 10, True),
-    (31, "internal_cohort", "markedly_above", 30, True),
+@pytest.mark.parametrize("member_n,kind,expected_state,eligible_n,is_member,target_value,outside_count", [
+    (10, "internal_cohort", "no_reference", 9, True, 0.95, 0),
+    (10, "internal_cohort", "above_typical", 10, False, 0.95, 1),
+    (10, "internal_cohort", "in_range", 10, False, 0.05, 0),
+    (11, "internal_cohort", "above_typical", 10, True, 0.95, 1),
+    (11, "provisional_external", "above_typical", 10, True, 0.95, 1),
+    (31, "internal_cohort", "markedly_above", 30, True, 0.95, 1),
 ])
 def test_sample_lenses_pin_eligible_loo_reference(
-    tmp_path, monkeypatch, member_n: int, kind: str, expected_state: str, eligible_n: int, is_member: bool,
+    tmp_path, monkeypatch, member_n: int, kind: str, expected_state: str, eligible_n: int,
+    is_member: bool, target_value: float, outside_count: int,
 ) -> None:
-    members = tuple(member(index) for index in range(1 if is_member else 2, member_n + (1 if is_member else 2)))
+    members = tuple(member(index, value=target_value if index == 1 and is_member else None)
+                    for index in range(1 if is_member else 2, member_n + (1 if is_member else 2)))
     generation = CohortGeneration(cohort_id="healthy-v1", version=7, kind=kind, members=members)
     reads: list[str] = []
     monkeypatch.setattr(web_api, "read_current", lambda store, cohort_id: (reads.append(cohort_id), generation)[1])
-    monkeypatch.setattr(web_api, "member_from_store", lambda store, source_id: member(1))
+    monkeypatch.setattr(web_api, "member_from_store", lambda store, source_id: member(1, value=target_value))
     envelope = ResultEnvelope(
         algorithm_id="fragment-size", algorithm_version="1", status="ok",
         provenance=provenance(tool="fixture", parameters_sha256=PARAMETERS,
                               source_id=SOURCE, input_id=INPUT, reference_id="synthetic"),
-        metrics=[Metric(metric_id="short_fraction_lt150", value=0.95)],
+        metrics=[Metric(metric_id="short_fraction_lt150", value=target_value)],
     )
     sample = SimpleNamespace(example=False, full=SimpleNamespace(
         input_id=INPUT, results={"fragment-size": envelope}, depth_x=lambda: 1.0,
@@ -106,7 +109,7 @@ def test_sample_lenses_pin_eligible_loo_reference(
         assert metric["percentile"] is not None
         assert metric["interval"] is not None
     summary = api.samples()["samples"][0]
-    assert summary["outside_reference"] == int(expected_state != "no_reference")
+    assert summary["outside_reference"] == outside_count
     assert reads == ["healthy-v1", "healthy-v1"]
 
 

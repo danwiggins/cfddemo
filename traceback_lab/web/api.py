@@ -9,6 +9,7 @@ result's own attempt directory and no component is a symlink.
 from __future__ import annotations
 
 import os
+import math
 import shlex
 import stat
 import threading
@@ -582,6 +583,111 @@ class LabApi:
         return {**base, "state": "ready", "target_aligner": target.aligner_identity,
                 "aligner_counts": dict(sorted(aligners.items())),
                 "metrics": rows, "unscored": unscored}
+
+    def compare_samples(self, id12_a: str, id12_b: str) -> dict[str, Any]:
+        """Compare two distinct current full-input snapshots, B minus A.
+
+        This is cross-sectional: source IDs identify samples, not visits or
+        donors.  Each metric needs both exact selected executions and the same
+        D31 compatibility key; no numeric threshold is inferred.
+        """
+
+        mapping = self._id12s()
+        a_match = resolve_prefix(id12_a, mapping)
+        b_match = resolve_prefix(id12_b, mapping)
+        if a_match.state != "found" or b_match.state != "found":
+            return {"found": False, "which": "a" if a_match.state != "found" else "b",
+                    "candidates": [mapping[key] for key in (a_match.candidates if a_match.state != "found" else b_match.candidates)]}
+        source_a, source_b = a_match.value, b_match.value
+        base = {"found": True, "id12_a": mapping[source_a], "id12_b": mapping[source_b],
+                "source_id_a": source_a, "source_id_b": source_b}
+        if source_a == source_b:
+            return {**base, "state": "same_sample", "metrics": [], "unscored": []}
+        samples = [views.load_sample(self.store, source) for source in (source_a, source_b)]
+        if any(sample is None for sample in samples):
+            return {**base, "state": "sample_unavailable", "which": "a" if samples[0] is None else "b",
+                    "metrics": [], "unscored": []}
+        sample_a, sample_b = samples
+        if sample_a.example or sample_b.example:
+            return {**base, "state": "example_unscorable", "metrics": [], "unscored": []}
+        try:
+            selected_a = member_from_store(self.store, source_a)
+        except (LabProblem, ValueError):
+            return {**base, "state": "sample_unavailable", "which": "a", "metrics": [], "unscored": []}
+        try:
+            selected_b = member_from_store(self.store, source_b)
+        except (LabProblem, ValueError):
+            return {**base, "state": "sample_unavailable", "which": "b", "metrics": [], "unscored": []}
+        for source, sample, selected, which in (
+            (source_a, sample_a, selected_a, "a"), (source_b, sample_b, selected_b, "b"),
+        ):
+            if selected.source_id != source or selected.input_id != sample.full.input_id:
+                return {**base, "state": "stale_sample", "which": which, "metrics": [], "unscored": []}
+            current = {result.algorithm_id: result for result in selected.results}
+            for algorithm_id, envelope in sample.full.results.items():
+                if envelope.status != "ok":
+                    continue
+                pinned = current.get(algorithm_id)
+                if pinned is None or pinned.parameters_sha256 != envelope.provenance.parameters_sha256:
+                    return {**base, "state": "stale_sample", "which": which, "metrics": [], "unscored": []}
+                for metric in envelope.metrics:
+                    value = metric.value
+                    if value is None or (isinstance(value, (int, float)) and not isinstance(value, bool)):
+                        if metric.metric_id not in pinned.metrics or pinned.metrics[metric.metric_id] != value:
+                            return {**base, "state": "stale_sample", "which": which, "metrics": [], "unscored": []}
+        library = self.libraries.get()
+        selected_results_a = {result.algorithm_id: result for result in selected_a.results}
+        selected_results_b = {result.algorithm_id: result for result in selected_b.results}
+        rows: list[dict[str, Any]] = []
+        unscored: list[dict[str, str]] = []
+        for algorithm_id, envelope_a in sample_a.full.results.items():
+            if algorithm_id in library.hidden_algorithms:
+                continue
+            envelope_b = sample_b.full.results.get(algorithm_id)
+            if envelope_b is None or envelope_a.status != "ok" or envelope_b.status != "ok":
+                unscored.append({"algorithm_id": algorithm_id, "metric_id": "*", "reason": "missing_or_not_ok"})
+                continue
+            result_a, result_b = selected_results_a[algorithm_id], selected_results_b[algorithm_id]
+            if result_a.cohort_compat_key != result_b.cohort_compat_key:
+                unscored.append({"algorithm_id": algorithm_id, "metric_id": "*", "reason": "incompatible_protocol"})
+                continue
+            metrics_a = {metric.metric_id: metric for metric in envelope_a.metrics}
+            metrics_b = {metric.metric_id: metric for metric in envelope_b.metrics}
+            interpreted_a = {row.metric_id: row for row in interpret_result(envelope_a, library, depth_x=sample_a.full.depth_x(), include_interval=False)}
+            interpreted_b = {row.metric_id: row for row in interpret_result(envelope_b, library, depth_x=sample_b.full.depth_x(), include_interval=False)}
+            for metric_id in sorted(metrics_a.keys() | metrics_b.keys()):
+                metric_a, metric_b = metrics_a.get(metric_id), metrics_b.get(metric_id)
+                entry = library.entry(algorithm_id, metric_id)
+                if metric_a is None or metric_b is None:
+                    reason = "missing_metric"
+                elif entry is not None and entry["value_kind"] in ("vector", "categorical"):
+                    reason = "non_scalar"
+                elif any(not isinstance(metric.value, (int, float)) or isinstance(metric.value, bool)
+                         or not math.isfinite(metric.value) for metric in (metric_a, metric_b)):
+                    reason = "missing_or_non_numeric"
+                elif metric_a.unit != metric_b.unit:
+                    reason = "unit_mismatch"
+                elif interpreted_a[metric_id].interpretation.state == "not_interpretable" or interpreted_b[metric_id].interpretation.state == "not_interpretable":
+                    reason = "not_interpretable"
+                else:
+                    reason = None
+                if reason is not None:
+                    unscored.append({"algorithm_id": algorithm_id, "metric_id": metric_id, "reason": reason})
+                    continue
+                rows.append({
+                    "algorithm_id": algorithm_id, "metric_id": metric_id,
+                    "label": entry["label"] if entry is not None else metric_id,
+                    "unit": metric_a.unit, "value_a": metric_a.value, "value_b": metric_b.value,
+                    "delta_b_minus_a": metric_b.value - metric_a.value,
+                    "parameters_sha256_a": result_a.parameters_sha256,
+                    "parameters_sha256_b": result_b.parameters_sha256,
+                })
+        for algorithm_id in sample_b.full.results.keys() - sample_a.full.results.keys():
+            if algorithm_id not in library.hidden_algorithms:
+                unscored.append({"algorithm_id": algorithm_id, "metric_id": "*", "reason": "missing_or_not_ok"})
+        return {**base, "state": "ready", "input_id_a": selected_a.input_id,
+                "input_id_b": selected_b.input_id, "aligner_a": selected_a.aligner_identity,
+                "aligner_b": selected_b.aligner_identity, "metrics": rows, "unscored": unscored}
 
     # -- artifacts (D34 containment) -------------------------------------------------
     def artifact(self, id12: str, label: str, algorithm_id: str, panel_id: str) -> bytes | None:
