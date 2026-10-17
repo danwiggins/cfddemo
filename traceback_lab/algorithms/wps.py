@@ -125,12 +125,14 @@ class Wps(Base):
             lengths = metadata["lengths"]
             if len(contigs) != len(lengths):
                 raise ValueError("contig lengths do not match")
-            autosomal_bp = sum(int(length) for name, length in zip(contigs, lengths)
-                               if name in AUTOSOMES)
-            if autosomal_bp <= 0 or any(int(length) <= 0 for length in lengths):
+            if any(int(length) <= 0 for length in lengths):
                 raise ValueError("invalid contig length")
         except (OSError, ValueError, KeyError, TypeError):
             return Skip("upstream", "long-fragment WPS needs valid read-summary contig lengths")
+        autosomal_bp = sum(int(length) for name, length in zip(contigs, lengths)
+                           if name in AUTOSOMES)
+        if autosomal_bp == 0:
+            return Skip("reference", "long-fragment WPS needs chr1–chr22 autosome names in the hg38 summary")
         # int32 exact scores occupy four bytes per valid centre before compression.
         # Allow 10% for chunk/preview overhead and 2 GiB for other scratch use.
         required = (4 * autosomal_bp * 11 + 9) // 10 + DISK_MARGIN_BYTES
@@ -144,8 +146,9 @@ class Wps(Base):
         return Ready()
 
     def run(self, ctx: InputContext, out: Path) -> AlgorithmOutput:
-        if not isinstance(self.preflight(ctx), Ready):
-            raise ValueError("long-fragment WPS needs at least 10x approximate autosomal depth")
+        decision = self.preflight(ctx)
+        if isinstance(decision, Skip):
+            raise ValueError(decision.message)
         summary, mask = load_summary(ctx)
         ids = np.asarray([index for index, name in enumerate(summary.contigs)
                           if name in AUTOSOMES], dtype=np.int16)
@@ -159,7 +162,7 @@ class Wps(Base):
         ends = summary.column("end")
         tracks: dict[str, np.ndarray] = {}
         metadata: list[dict[str, Any]] = []
-        total_score = 0.0
+        total_score = 0
         total_centres = 0
         positive = 0
         valid_bins = 0
@@ -174,8 +177,10 @@ class Wps(Base):
             qualifying_fragments += int(((on_starts >= 0) & (on_ends <= summary.lengths[int(cid)])
                                          & (span >= FRAGMENT_RANGE[0]) & (span <= FRAGMENT_RANGE[1])).sum())
             def emit(start: int, score: np.ndarray) -> None:
+                nonlocal total_score
                 if np.any((score < np.iinfo(np.int32).min) | (score > np.iinfo(np.int32).max)):
                     raise OverflowError("WPS per-base score exceeds int32")
+                total_score += int(score.sum(dtype=np.int64))
                 relative = Path("wps_exact") / name / f"{start:010d}.npz"
                 target = out / relative
                 target.parent.mkdir(parents=True, exist_ok=True)
@@ -189,7 +194,6 @@ class Wps(Base):
             valid = counts > 0
             positive += int((mean[valid] > 0).sum())
             valid_bins += int(valid.sum())
-            total_score += float(np.sum(mean.astype(np.float64) * counts))
             total_centres += int(counts.sum())
             metadata.append({"contig": name, "length_bp": summary.lengths[int(cid)], "bins": len(mean)})
         buffer = io.BytesIO()
@@ -205,7 +209,7 @@ class Wps(Base):
                        "chunks": exact_chunks}
         return AlgorithmOutput(
             metrics=[metric("mean_wps", total_score / total_centres if total_centres and qualifying_fragments else None,
-                            unit="fragments", n=qualifying_fragments),
+                            unit="fragments", n=total_centres),
                      metric("positive_bin_fraction", positive / valid_bins if valid_bins and qualifying_fragments else None,
                             unit="fraction", n=valid_bins)],
             artifacts={"wps_track.npz": buffer.getvalue(),

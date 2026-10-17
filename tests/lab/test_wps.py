@@ -89,6 +89,16 @@ def test_wps_disk_gate_uses_summary_contig_lengths(tmp_path, monkeypatch) -> Non
     assert isinstance(WPS.preflight(ctx), Ready)
 
 
+def test_wps_reference_gate_explains_unprefixed_contigs_and_direct_worker_error(tmp_path) -> None:
+    ctx = _summary_context(tmp_path)
+    summary = tmp_path / "summary" / "columns" / "meta.json"
+    summary.write_text(json.dumps({"contigs": ["1"], "lengths": [1200]}))
+    decision = WPS.preflight(ctx)
+    assert isinstance(decision, Skip) and decision.reason_code == "reference"
+    with pytest.raises(ValueError, match="chr1–chr22"):
+        WPS.run(ctx, tmp_path)
+
+
 @pytest.mark.parametrize("valid_fragments", [True, False])
 def test_wps_registry_and_algorithm_output(tmp_path, monkeypatch, valid_fragments: bool) -> None:
     class Summary:
@@ -135,6 +145,11 @@ def test_wps_registry_and_algorithm_output(tmp_path, monkeypatch, valid_fragment
     source_starts = Summary.data["start"] if valid_fragments else np.asarray([], dtype=np.int64)
     source_ends = Summary.data["end"] if valid_fragments else np.asarray([], dtype=np.int64)
     assert exact == _naive(source_starts, source_ends, HALF, 1200 - HALF + 1)
+    assert result.metrics[0]["n"] == len(exact)
+    if valid_fragments:
+        assert result.metrics[0]["value"] == sum(exact) / len(exact)
+    else:
+        assert result.metrics[0]["value"] is None
     assert any(algorithm.id == "wps" for algorithm in load_registry())
     assert load_library().entry("wps", "mean_wps") is not None
 
