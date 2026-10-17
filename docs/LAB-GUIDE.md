@@ -172,6 +172,7 @@ ROOT, home, login and chunk names redacted) is ever stored.
 | `depth` | eligible reads (primary, MAPQ ≥ 20, chr1–22/X/Y), mean span, approximate depth; the index count is shown only as an upper bound |
 | `fragment-size` | 1-bp aligned-span histogram, mode, short (< 150 bp) share, mono/di peaks, 10 bp periodicity |
 | `lionheart` | opt-in upstream LIONHEART v2.2.0 extraction of 898 raw sample-standardized chromatin-accessibility correlation scores from the selected hg38 BAM; needs ≥5M eligible reads, the modified mosdepth and Zenodo v003 resources; ONT single-end mode is experimental, and no cancer prediction is run |
+| `short-read-fragment-size` | separate exploratory paired-end Illumina histogram and size summaries from absolute BAM TLEN; requires a prealigned BAM with every `@RG PL:ILLUMINA` |
 | `copy-number` | tumour fraction, ploidy, genome log2 track and segments through the installed ichorCNA toolchain (no panel of normals yet, so read as not interpretable); needs 2M eligible reads, `traceback toolchain install ichor` and `traceback method-asset register --from-toolchain copy-number --root R` |
 | `instability` | bin-weighted median absolute deviation of the selected copy-number result's segment log2 values (`tmad`), with used-bin and null-estimate coverage counts; needs 2M eligible reads and a successful copy-number result for the same input; exploratory and cohort-relative, with no ONT cutoff |
 | `modbase-qc` | mod codes in the MM tags, MM-tagged share, mean ML at aligned CpG calls (read from `meth-calls`), share of those calls below 0.7 confidence, tagged reads with unusable MM/ML; skipped (`missing_tags`) when no read carries MM |
@@ -231,6 +232,27 @@ leaves other Lab results available. Signals shows the 898 raw scores with
 their ATAC/DNase labels and a research-only callout. The upstream single-end
 mode is experimental and its paired-end-trained cancer model is **not** run;
 these values are neither cell fractions nor a validated diagnostic.
+
+**Short-read TLEN slice.** For a prealigned paired-end Illumina BAM against
+the registered hg38 reference, run the separate measurement explicitly:
+
+```bash
+traceback lab run YOUR_LOCAL_aligned_illumina.bam \
+  --reference hg38 --only short-read-fragment-size \
+  --no-downsample --no-controls --root R
+```
+
+Every BAM read group must declare `PL:ILLUMINA`; a BAM aligned by the Lab's
+ONT minimap2 path is skipped. Each qualifying proper first mate counts one
+template: it must pass the common primary, mapped, nonduplicate, QC-pass,
+MAPQ ≥ 20 and canonical-contig filter, have a mapped mate on the same contig,
+and carry nonzero TLEN. The reported length is `abs(TLEN)`, even when the
+first mate's TLEN is negative. Downsample and split selections use the same
+read-name predicate as other Lab full-BAM algorithms. The histogram and
+metrics are keyed to `short-read-fragment-size`; `fragment-size` remains the
+ONT aligned-span measurement. No clinical cutoff, short-read healthy range,
+or cross-platform comparison is supplied by this slice. Other Lab algorithms
+are still designed around the ONT run, so use `--only` for this opt-in path.
 
 **PMD asset.** `pmd-score` needs an operator-supplied Zhou 2018 hg38
 common-PMD BED.gz file. The repository does not ship or download it; its
