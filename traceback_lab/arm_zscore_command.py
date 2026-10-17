@@ -9,6 +9,7 @@ from typing import Any
 from traceback_runner.cli import _local_envelope, _result, _with_human
 
 from .arm_zscores import report_arm_zscores
+from .cohort_command import _cohort_id
 from .ingest import resolve_sample
 from .problems import EXIT_OK
 from .store import LabStore
@@ -17,7 +18,8 @@ from .store import LabStore
 def add_arm_zscore_parser(commands: Any, common: Callable[[argparse.ArgumentParser], None]) -> None:
     parser = commands.add_parser("arm-zscores", help="show exploratory cohort-relative arm z scores")
     parser.add_argument("sample", metavar="ID12|latest")
-    parser.add_argument("--cohort", required=True, help="published protocol-matched cohort id")
+    parser.add_argument("--cohort", required=True, type=_cohort_id,
+                        help="published protocol-matched cohort id")
     common(parser)
     parser.set_defaults(handler=_show)
 
