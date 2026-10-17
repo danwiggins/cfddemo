@@ -823,7 +823,10 @@ def test_status_reports_unavailable_latest_log_without_claiming_interruption(tmp
     elif damage == "malformed":
         path.write_bytes(b'{"event":"run_start"}\n{broken\n')
     elif damage == "deeply_nested":
-        path.write_bytes(b"[" * 1200 + b"0" + b"]" * 1200 + b"\n")
+        payload = b"[" * 4000 + b"0" + b"]" * 4000
+        with pytest.raises(RecursionError):
+            json.loads(payload)
+        path.write_bytes(payload + b"\n")
     elif damage == "wrong_run":
         path.write_bytes(b'{"event":"run_start","run_id":"r-20261015-0101-eeee"}\n')
     else:
