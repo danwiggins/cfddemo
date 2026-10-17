@@ -43,7 +43,7 @@ def test_registered_arm_summary_and_whole_bin_mask_policy() -> None:
     ]
     result = arm_summary.summarize_arms(bins, intervals)
     assert result["chr1p"] == (0.0, 3)
-    assert result["chr1q"] == (None, 1)
+    assert result["chr1q"] == (2.0, 1)
     assert result["chr2p"] == (None, 0)
     bare_intervals = arm_summary.arm_intervals(
         centromeres, {str(index): 10 for index in range(1, 23)},

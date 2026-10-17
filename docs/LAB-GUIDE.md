@@ -500,7 +500,7 @@ until rerun; their immutable attempts remain available for inspection.
 `arm-summary` summarizes PoN-corrected copy-number bins on autosomal p/q arms.
 It derives boundaries from the locally registered ichorCNA GRCh38 centromere
 asset and input reference lengths. A bin contributes only if finite, unmasked,
-and wholly inside an arm; the arm value is the median only when at least three bins contribute.
+and wholly inside an arm; the arm value is the median of contributing bins.
 It requires at least 2 million eligible reads and a selected PoN. The pinned
 arm-definition bytes enter both result identity and cohort compatibility.
 

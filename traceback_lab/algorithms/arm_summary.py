@@ -25,8 +25,7 @@ from ._base import Base, metric
 from .copy_number import toolchain_or_none
 
 ARMS = tuple(f"chr{chrom}{side}" for chrom in range(1, 23) for side in ("p", "q"))
-POLICY = "finite-unmasked-whole-bin-median-min3-v2"
-MIN_ARM_BINS = 3
+POLICY = "finite-unmasked-whole-bin-median-v1"
 
 
 def centromeres_from_table(path: Path) -> dict[str, tuple[int, int]]:
@@ -85,7 +84,7 @@ def summarize_arms(
                 selected[arm].append(float(value))
                 break
     return {
-        arm: (float(statistics.median(values)) if len(values) >= MIN_ARM_BINS else None, len(values))
+        arm: (float(statistics.median(values)) if values else None, len(values))
         for arm, values in selected.items()
     }
 
@@ -168,4 +167,4 @@ class ArmSummary(Base):
 
 ARM_SUMMARY = ArmSummary("arm-summary")
 
-__all__ = ["ARM_SUMMARY", "ARMS", "MIN_ARM_BINS", "POLICY", "arm_intervals", "summarize_arms"]
+__all__ = ["ARM_SUMMARY", "ARMS", "POLICY", "arm_intervals", "summarize_arms"]
