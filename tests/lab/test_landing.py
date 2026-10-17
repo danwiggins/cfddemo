@@ -217,7 +217,8 @@ def test_findings_grouping_and_flags(page_root, tmp_path) -> None:
 @needs_chrome
 def test_about_clia_renders_the_full_copy(page_root, tmp_path) -> None:
     with RunningLabServer(LabStore(page_root)) as server:
-        dom = _dom(server, tmp_path, route="/about/clia")
+        dom = _dom(server, tmp_path, route="/about/clia",
+                   want=lambda d: "What CLIA is." in d and d.count("FLAG: LEGAL — verify") >= 2)
     assert "What CLIA is." in dom and "42 CFR 493.3(b)(2)" in dom
     assert dom.count("FLAG: LEGAL — verify") >= 2
     assert "Back to Lab home" in dom
