@@ -106,7 +106,7 @@ def test_malformed_stored_result_is_visible_without_alignment(route, copy_text, 
     path = None if route == "home" else f"/sample/{id12}/{route}"
     with RunningLabServer(store) as server:
         dom = _dom(server, tmp_path / "browser", route=path)
-    assert f"{copy_text} (run {id12})" in dom
+    assert f"{copy_text} (sample {id12})" in dom
 
 
 @needs_chrome
