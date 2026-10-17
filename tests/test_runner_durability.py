@@ -1316,29 +1316,32 @@ def test_store_pins_no_sidecar_before_its_anchor_exists(
     # recreates them with new inodes.  B must not have pinned A's sidecars.
     first, job_id = _submitted_store(tmp_path)
     wal = Path(f"{first.path}-wal")
-    before = wal.stat().st_ino
-    other: list[sqlite3.Connection] = []
-    real_connect = JobStore._connect
+    # Keep the old inode allocated after SQLite unlinks the WAL; otherwise the
+    # filesystem may immediately reuse its number for the replacement file.
+    with wal.open("rb") as original_wal:
+        before = os.fstat(original_wal.fileno()).st_ino
+        other: list[sqlite3.Connection] = []
+        real_connect = JobStore._connect
 
-    def connect(self, *, anchor: bool = False):
-        if anchor and not other:
-            first.close()
-            gc.collect()
-            assert not wal.exists()
-            recreated = sqlite3.connect(first.path, check_same_thread=False)
-            recreated.execute("SELECT count(*) FROM jobs").fetchall()
-            other.append(recreated)
-            assert wal.exists() and wal.stat().st_ino != before
-        return real_connect(self, anchor=anchor)
+        def connect(self, *, anchor: bool = False):
+            if anchor and not other:
+                first.close()
+                gc.collect()
+                assert not wal.exists()
+                recreated = sqlite3.connect(first.path, check_same_thread=False)
+                recreated.execute("SELECT count(*) FROM jobs").fetchall()
+                other.append(recreated)
+                assert wal.exists() and wal.stat().st_ino != before
+            return real_connect(self, anchor=anchor)
 
-    monkeypatch.setattr(JobStore, "_connect", connect)
-    second = JobStore(first.path)
-    monkeypatch.setattr(JobStore, "_connect", real_connect)
-    try:
-        assert second.get(job_id).job_id == job_id
-    finally:
-        second.close()
-        other[0].close()
+        monkeypatch.setattr(JobStore, "_connect", connect)
+        second = JobStore(first.path)
+        monkeypatch.setattr(JobStore, "_connect", real_connect)
+        try:
+            assert second.get(job_id).job_id == job_id
+        finally:
+            second.close()
+            other[0].close()
 
 
 def test_close_waits_for_admitted_operations_and_refuses_new_ones(

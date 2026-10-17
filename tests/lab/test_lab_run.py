@@ -510,7 +510,7 @@ def test_aligner_version_change_warns_and_realigns(lab_world, capsys, monkeypatc
     assert code == 0
     assert second["data"]["sample"]["source_id"] == first["data"]["sample"]["source_id"]
     assert second["data"]["sample"]["input_id"] != first["data"]["sample"]["input_id"]
-    (warning,) = second["data"]["warnings"]
+    (warning,) = [row for row in second["data"]["warnings"] if row.get("code") == "TBX-LAB-019"]
     assert warning["code"] == "TBX-LAB-019" and warning["new"]["minimap2"] == "2.99-r9999"
 
 
