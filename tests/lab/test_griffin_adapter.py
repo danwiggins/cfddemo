@@ -124,6 +124,7 @@ def test_pinned_upstream_attempt_binds_input_and_assets(tmp_path: Path, monkeypa
     calls: list[Path] = []
     mutate_index = False
     mutate_script = False
+    wrong_site = False
 
     def fake_run(argv: list[str], **kwargs: object) -> subprocess.CompletedProcess[str]:
         if argv[:2] == ["git", "-C"]:
@@ -139,6 +140,9 @@ def test_pinned_upstream_attempt_binds_input_and_assets(tmp_path: Path, monkeypa
             output = directory / "results" / sample / f"{sample}.GC_corrected.coverage.tsv"
             output.parent.mkdir(parents=True)
             _write(output, sample=sample)
+            if wrong_site:
+                output.write_text(output.read_text(encoding="utf-8").replace("\tCTCF\t", "\tOTHER\t"),
+                                  encoding="utf-8")
             if mutate_index:
                 bam.with_suffix(".bam.bai").write_bytes(b"changed index")
             if mutate_script:
@@ -149,6 +153,7 @@ def test_pinned_upstream_attempt_binds_input_and_assets(tmp_path: Path, monkeypa
 
     monkeypatch.setattr(subprocess, "run", fake_run)
     monkeypatch.setattr(griffin_run, "_require_paired_input", lambda _: None)
+    monkeypatch.setattr(griffin_run, "_require_reference_header", lambda *_: None)
     attempt = tmp_path / "attempt"
     result = run_upstream(GriffinRun(
         input_id=input_id, bam=bam, reference_fasta=reference,
@@ -197,6 +202,15 @@ def test_pinned_upstream_attempt_binds_input_and_assets(tmp_path: Path, monkeypa
             reference_id="hg38", reference_sha256=hashlib.sha256(reference.read_bytes()).hexdigest(),
             eligible_reads=5_000_000, upstream_root=upstream, ref_assets=assets,
             site_lists={"CTCF": sites}, attempt_dir=tmp_path / "changed-script-attempt",
+        ))
+    mutate_script = False
+    wrong_site = True
+    with pytest.raises(GriffinFormatError, match="site lists do not match"):
+        run_upstream(GriffinRun(
+            input_id=input_id, bam=bam, reference_fasta=reference,
+            reference_id="hg38", reference_sha256=hashlib.sha256(reference.read_bytes()).hexdigest(),
+            eligible_reads=5_000_000, upstream_root=upstream, ref_assets=assets,
+            site_lists={"CTCF": sites}, attempt_dir=tmp_path / "wrong-site-attempt",
         ))
 
 
@@ -281,3 +295,24 @@ def test_paired_input_gate_scans_past_first_10000_records(tmp_path: Path) -> Non
             read.template_length = 150
             out.write(read)
     _require_paired_input(bam)
+
+
+def test_griffin_bam_header_must_match_reference(tmp_path: Path) -> None:
+    import pysam
+
+    from traceback_lab.adapters.griffin_run import _require_reference_header
+
+    fasta = tmp_path / "hg38.fa"
+    fasta.write_text(">chr1\n" + "A" * 100 + "\n", encoding="ascii")
+    pysam.faidx(str(fasta))
+    for length, accepted in ((100, True), (101, False)):
+        bam = tmp_path / f"length-{length}.bam"
+        with pysam.AlignmentFile(str(bam), "wb", header={
+            "HD": {"VN": "1.6"}, "SQ": [{"SN": "chr1", "LN": length}],
+        }):
+            pass
+        if accepted:
+            _require_reference_header(bam, fasta)
+        else:
+            with pytest.raises(ValueError, match="@SQ does not match"):
+                _require_reference_header(bam, fasta)

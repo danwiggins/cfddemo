@@ -22,7 +22,9 @@ BAM **when the BAM is paired-end WGS**. Griffin's scripts require paired
 reads with positive template length in both GC counting and coverage. Native
 ONT single-end BAMs have no such records; the adapter checks all primary
 records and unanimous `@RG PL:ILLUMINA`, then rejects incompatible input
-before creating an attempt. A scientifically reviewed ONT fragment
+before creating an attempt. It compares the BAM's `@SQ` names and lengths
+with the registered FASTA index; this checks coordinate-space compatibility,
+not exact sequence identity. A scientifically reviewed ONT fragment
 adapter remains necessary for the Lab's primary input. The caller supplies
 the registered hg38 FASTA and its SHA-256, Griffin's
 reference assets (including mappability BigWig, exclusion BEDs and all
@@ -38,8 +40,8 @@ disables Python bytecode writes during execution, and hashes all five generated
 workflow YAML files. The generated config sets
 `mappability_correction: false`, so the accepted output is GC-corrected only;
 this is an explicit deviation from a workflow that also applies mappability
-correction. The attempt only marks its manifest
-complete after Griffin returns a valid corrected TSV. Partial outputs remain
+correction. The attempt only marks its manifest complete after Griffin returns
+a valid corrected TSV with exactly the requested site-list names. Partial outputs remain
 inspectable after failure. Griffin's upstream shell rules interpolate paths
 without quoting, so the adapter refuses paths containing shell-special
 characters. The runner is POSIX-only, matching upstream's environment.

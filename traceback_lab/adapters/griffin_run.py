@@ -19,7 +19,7 @@ from typing import Mapping
 
 import yaml
 
-from .griffin import GriffinProfile, read_corrected_profiles
+from .griffin import GriffinFormatError, GriffinProfile, read_corrected_profiles
 
 GRIFFIN_COMMIT = "b624c7a2ea7b8758b6eebd424066c815bfeece61"
 MIN_ELIGIBLE_READS = 5_000_000
@@ -129,6 +129,20 @@ def _require_paired_input(bam: Path) -> None:
         )
 
 
+def _require_reference_header(bam: Path, reference: Path) -> None:
+    """Require the BAM coordinate space to match the registered FASTA index."""
+
+    import pysam
+
+    with pysam.FastaFile(str(reference)) as fasta:
+        expected = dict(zip(fasta.references, fasta.lengths))
+    with pysam.AlignmentFile(str(bam), "rb") as alignments:
+        sq = alignments.header.to_dict().get("SQ", [])
+    observed = {entry["SN"]: entry["LN"] for entry in sq}
+    if not expected or len(observed) != len(sq) or observed != expected:
+        raise ValueError("BAM @SQ does not match the registered reference FASTA")
+
+
 def run_upstream(config: GriffinRun) -> tuple[GriffinProfile, ...]:
     """Execute upstream GC correction and profiling, then validate its TSV.
 
@@ -176,6 +190,7 @@ def run_upstream(config: GriffinRun) -> tuple[GriffinProfile, ...]:
         raise ValueError("the registered reference FASTA needs an index for Griffin")
     reference_index = _safe_path(reference_index)
     _require_paired_input(bam)
+    _require_reference_header(bam, reference)
     for filename in _REF_FILES:
         _safe_path(assets / filename)
     frequency = _safe_path(assets / "genome_GC_frequency")
@@ -289,6 +304,8 @@ def run_upstream(config: GriffinRun) -> tuple[GriffinProfile, ...]:
         raise RuntimeError("Griffin genome GC frequencies changed during computation")
     output = profile_dir / "results" / sample / f"{sample}.GC_corrected.coverage.tsv"
     profiles = read_corrected_profiles(output, expected_sample=sample)
+    if {profile.site_name for profile in profiles} != set(site_paths):
+        raise GriffinFormatError("Griffin output site lists do not match the requested site lists")
     manifest = {
         "status": "complete", "input_id": config.input_id,
         "upstream_commit": commit, "reference_id": config.reference_id,
