@@ -98,7 +98,8 @@ has no mismatch verdict. The page marks the check as privacy-sensitive and does
 not present it as a diagnostic sex or gender determination. A later conflicting
 assertion is refused, not silently substituted. If the stored assertion metadata
 is malformed, measurements remain visible, while Trust/QC shows an explicit
-no-verdict repair notice (TBX-LAB-023); writes still refuse the malformed record.
+no-verdict repair notice (TBX-LAB-023). Reruns without `--sex` preserve that
+metadata and can continue; an explicit `--sex` write is refused until repaired.
 
 `traceback lab run <chunk dir>` takes one file, several files or a directory
 of MinKNOW chunks (`*.bam`, not recursive). It:

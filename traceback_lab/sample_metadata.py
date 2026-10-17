@@ -35,9 +35,9 @@ def sex_assertion(record: dict[str, Any]) -> dict[str, str] | None:
 def with_sex_assertion(record: dict[str, Any], requested: str | None) -> dict[str, Any]:
     """Add one assertion without changing a prior one or any measurement key."""
 
-    existing = sex_assertion(record)
     if requested is None:
         return record
+    existing = sex_assertion(record)
     if requested not in ("M", "F"):
         raise ValueError("sex assertion must be M or F")
     if existing is not None:

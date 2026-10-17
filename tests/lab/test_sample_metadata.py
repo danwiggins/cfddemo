@@ -9,6 +9,7 @@ from types import SimpleNamespace
 import pytest
 
 from traceback_lab.algorithms.sex_check import call_sex
+from traceback_lab.envelope import Metric, Provenance, ResultEnvelope
 from traceback_lab.ingest import write_source
 from traceback_lab.problems import LabProblem
 from traceback_lab.sample_metadata import SCHEMA, sex_assertion, sex_concordance, with_sex_assertion
@@ -31,6 +32,8 @@ def test_versioned_assertion_is_immutable_and_refuses_conflicts() -> None:
         sex_assertion({"operator_metadata": {"sex": "M"}})
     with pytest.raises(LabProblem, match="TBX-LAB-023"):
         with_sex_assertion({"operator_metadata": {"sex": "M"}}, "M")
+    malformed = {"operator_metadata": {"sex": "M"}}
+    assert with_sex_assertion(malformed, None) is malformed
 
 
 @pytest.mark.parametrize(
@@ -69,6 +72,22 @@ def test_real_sex_check_call_vocabulary_is_compared_without_reinterpreting_it() 
     assert sex_concordance("M", call_sex(0.0))["state"] == "mismatch"
     for ratio in (None, 0.05, 0.3):
         assert sex_concordance("M", call_sex(ratio))["reason"] == "no_definite_call"
+
+    measured = ResultEnvelope(
+        algorithm_id="sex-check", algorithm_version="1", status="ok",
+        provenance=Provenance(
+            tool="test", tool_version="1", parameters_sha256="c" * 64,
+            source_id="a" * 64, input_id="b" * 64, reference_id="synth",
+            timestamp_utc="2026-10-16T00:00:00Z",
+        ),
+        metrics=[Metric(metric_id="call", value=call_sex(0.31))],
+    )
+    full = InputView("full", "b" * 64, None, {}, {"sex-check": measured})
+    metadata = with_sex_assertion({}, "F")["operator_metadata"]
+    sample = SampleView("a" * 64, "a" * 12, False, full, operator_metadata=metadata)
+    assert sex_check_view(sample) == {
+        "state": "mismatch", "reason": None, "declared": "F", "observed": "male",
+    }
 
 
 def test_malformed_optional_metadata_keeps_sample_list_and_measurements_available(tmp_path: Path) -> None:

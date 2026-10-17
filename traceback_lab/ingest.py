@@ -51,7 +51,7 @@ from .identity import (
 from .pipeline import Stage, run_pipeline
 from .problems import EXIT_USAGE, LabProblem
 from .scrub import Scrubber
-from .sample_metadata import sex_assertion, with_sex_assertion
+from .sample_metadata import with_sex_assertion
 from .store import LabStore, write_atomic
 from .tools import Tool
 
@@ -927,9 +927,8 @@ def write_source(
         "inputs": inputs,
         "derived": previous.get("derived", []),
     }
-    assertion = sex_assertion(previous)
-    if assertion is not None:
-        record["operator_metadata"] = assertion
+    if "operator_metadata" in previous:
+        record["operator_metadata"] = previous["operator_metadata"]
     write_atomic(store.sources_dir / f"{aligned.source_id}.json", canonical_json_bytes(record))
     if assertion_added:
         store.bump_generation()

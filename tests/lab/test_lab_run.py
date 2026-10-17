@@ -165,6 +165,21 @@ def test_sex_assertion_is_local_metadata_and_does_not_rekey_results(
     assert code == 3 and conflict["data"]["code"] == "TBX-LAB-023"
     assert source_record(LabStore(root), original["source_id"])["operator_metadata"] == record["operator_metadata"]
 
+    # Optional metadata corruption blocks a new assertion, but must not block
+    # unrelated measurement work or disappear during source-record refresh.
+    malformed = {"schema": "invalid", "sex": "M", "recorded_utc": "invalid"}
+    source_file = store.sources_dir / f"{original['source_id']}.json"
+    source_file.write_text(json.dumps({**record, "operator_metadata": malformed}))
+    for target in ("latest", str(lab_world["chunks"])):
+        extra = () if target == "latest" else ("--mmi", str(shared_mmi))
+        code, dry = _json(capsys, "run", target, "--root", str(root), *extra, "--dry-run")
+        assert code == 0 and dry["data"]["dry_run"]
+        code, rerun = _json(capsys, "run", target, "--root", str(root), *extra)
+        assert code == 0 and rerun["data"]["sample"] == original
+        assert source_record(store, original["source_id"])["operator_metadata"] == malformed
+        code, refused = _json(capsys, "run", target, "--root", str(root), *extra, "--sex", "M")
+        assert code == 3 and refused["data"]["code"] == "TBX-LAB-023"
+
 
 def test_missing_cached_upstream_artifact_recomputes_only_that_step(
     lab_world, capsys, monkeypatch, shared_mmi,

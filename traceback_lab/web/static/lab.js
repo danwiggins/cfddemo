@@ -331,8 +331,10 @@
         : "No operator sex assertion was supplied; no comparison was made.";
     } else if (sex.state === "mismatch") {
       sexMessage = `Pre-analytic mismatch: operator-declared ${sex.declared} differs from the measured chrX/chrY call (${sex.observed}). Review sample metadata and processing.`;
-    } else {
+    } else if (sex.state === "concordant") {
       sexMessage = `Operator assertion (${sex.declared}) and measured chrX/chrY call (${sex.observed}) agree.`;
+    } else {
+      sexMessage = "Comparison state is unavailable; no comparison verdict.";
     }
     out.push(h("section", { class: "panel" }, h("h2", {}, "Pre-analytic sex assertion check"),
       h("p", {}, h("span", { class: "flag-pill" }, "FLAG: PRIVACY — can reveal pregnancy or transplant status.")),
