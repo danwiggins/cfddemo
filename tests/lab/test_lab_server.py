@@ -490,9 +490,9 @@ def _dom_cdp(argv: list[str], profile: Path, *, ok, timeout: float = 90, action:
                 nonlocal dom, action_done
                 dom = evaluate("document.documentElement?.outerHTML ?? ''")
                 if action and not action_done and 'data-ready="1"' in dom:
-                    evaluate(action)
-                    action_done = True
-                    dom = evaluate("document.documentElement?.outerHTML ?? ''")
+                    action_done = evaluate(action) is True
+                    if action_done:
+                        dom = evaluate("document.documentElement?.outerHTML ?? ''")
                 return {
                     "matched": bool(ok(dom)), "ready": _body_attr(dom, "ready"),
                     "rendered": 'data-rendered="1"' in dom,
@@ -638,7 +638,7 @@ def test_headless_page_renders_a_chart_with_zero_csp_violations(server, tmp_path
          server.issue_link() + f"&route=/sample/{id12}/trust-qc"], tmp_path / "profile",
         ok=lambda page: 'data-ready="1"' in page and 'class="echart"' in page and 'data-rendered="1"' in page
             and "step_end read-summary status=ok" in page,
-        action="[...document.querySelectorAll('#main a')].find(a => a.textContent === 'Run log line →')?.click()",
+        action="(() => { const link = [...document.querySelectorAll('#main a')].find(a => a.textContent === 'Run log line →'); if (!link) return false; link.click(); return true; })()",
     )
     assert 'data-ready="1"' in dom, dom[:500]
     assert 'data-csp-violations="0"' in dom
