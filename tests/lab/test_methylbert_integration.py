@@ -12,6 +12,8 @@ import pysam
 import pytest
 
 import traceback_lab.algorithms.methylbert as adapter
+import traceback_lab.controls as controls
+from traceback_lab.derived import DerivedInput, downsample
 from traceback_lab.methylbert_bundle import Bundle
 from traceback_lab.methylbert_child import _training_counts, _tumour_dmrs
 from traceback_lab.methylbert_runtime import Aggregate, MIN_ELIGIBLE_READS, NUMERICAL_PACKAGES, RuntimeRefusal
@@ -26,6 +28,50 @@ def _context(tmp_path: Path, **extras: Any) -> InputContext:
         reference_sha256="a" * 64, input_dir=tmp_path / "input",
         eligible_reads=MIN_ELIGIBLE_READS, extras=extras,
     )
+
+
+def test_derived_plan_keeps_model_pins_and_absolute_support_floor(tmp_path, monkeypatch):
+    spec = downsample(0.5)
+    parent = RunTarget(
+        input_id="a" * 64, source_id="b" * 64, input_dir=tmp_path,
+        reference_id="hg38", reference_sha256="c" * 64,
+        eligible_reads=6_000_000,
+        extras={"methylbert_bundle_sha256": "d" * 64, "methylbert_code_sha256": "e" * 64,
+                "methylbert_min_classified_reads": 100_000, "upstream": {"old": "parent"}},
+    )
+    derived = DerivedInput(spec, spec.input_id(parent.input_id), parent.input_id, tmp_path / "derived")
+    chosen = SimpleNamespace(algorithm=adapter.METHYLBERT)
+    monkeypatch.setattr(controls, "derived_plan_items", lambda _items, _transform: [chosen])
+    monkeypatch.setattr(controls, "materialize", lambda *_args, **_kwargs: {spec.label(): derived})
+    monkeypatch.setattr(controls, "record_derived", lambda *_args: None)
+    monkeypatch.setattr(controls.ReadSummary, "open", lambda *_args: SimpleNamespace())
+    monkeypatch.setattr(controls, "derived_mask", lambda *_args: None)
+    monkeypatch.setattr(controls, "depth_stamp", lambda *_args: {
+        "eligible_reads": 3_000_000, "approx_depth_x": 0.5, "mean_span_bp": 150.0,
+    })
+    seen = []
+
+    def run_plan(_store, _lock, _log, target, items, _entries, **kwargs):
+        assert items == [chosen]
+        seen.append((target, kwargs["upstream_results"]))
+        return []
+
+    monkeypatch.setattr(controls, "run_plan", run_plan)
+    summary = SimpleNamespace(artifacts_dir=str(tmp_path))
+    results = controls.run_derived(
+        SimpleNamespace(), None, None, parent, [spec], [chosen], {}, run_id="test",
+        read_summary=summary, timeout_s=1,
+        scrubber=SimpleNamespace(), parent_upstream={"read-summary": "current"},
+    )
+    assert len(results) == 1 and len(seen) == 1
+    target, upstream = seen[0]
+    assert target.derived == spec.mask_spec()
+    assert target.eligible_reads == 3_000_000
+    assert target.extras["methylbert_bundle_sha256"] == "d" * 64
+    assert target.extras["methylbert_code_sha256"] == "e" * 64
+    assert target.extras["methylbert_min_classified_reads"] == 100_000
+    assert "upstream" not in target.extras
+    assert upstream == {"read-summary": summary}
 
 
 def test_registry_and_absent_checkpoint_skip_without_gpu_probe(tmp_path, monkeypatch):
