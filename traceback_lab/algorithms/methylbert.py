@@ -26,7 +26,6 @@ from ..methylbert_runtime import (
     MIN_ELIGIBLE_READS, PINNED_UPSTREAM_COMMIT, RuntimeRefusal, require_ready, run_worker,
 )
 from ..registry import AlgorithmOutput, InputContext, Ready, Requirements, Skip, ToolPin
-from ..store import LabStore
 from ._base import Base, load_summary, metric
 from ._records import eligible_record, name_predicate
 from .cell_origin import header_model
@@ -152,6 +151,9 @@ class Methylbert(Base):
             raise RuntimeError("eligible depth differs from the verified read summary")
         if tagged == 0:
             return Skip("missing_tags", "no eligible read carries MM/Mm methylation tags")
+        # Store imports the CLI problem contract; keep it out of worker startup.
+        from ..store import LabStore
+
         try:
             record = inspect_methylbert_bundle(LabStore(ctx.root), bundle_sha)
             bundle = verify_bundle(record.file)
@@ -177,6 +179,8 @@ class Methylbert(Base):
         return Ready()
 
     def run(self, ctx: InputContext, out: Path) -> AlgorithmOutput:
+        from ..store import LabStore
+
         decision = self.preflight(ctx)
         if isinstance(decision, Skip):
             raise RuntimeError(f"MethylBERT readiness changed after preflight: {decision.reason_code}")

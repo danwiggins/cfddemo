@@ -38,6 +38,10 @@ SKIP_REASONS: tuple[str, ...] = (
     "platform",
     "reference",
     "upstream",
+    "input_kind",
+    "unqualified_support",
+    "missing_gpu",
+    "model_not_ready",
 )
 
 Sha256 = Annotated[str, Field(pattern=SHA256_PATTERN.pattern)]

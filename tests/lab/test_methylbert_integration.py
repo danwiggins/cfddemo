@@ -16,6 +16,8 @@ from traceback_lab.methylbert_bundle import Bundle
 from traceback_lab.methylbert_child import _training_counts, _tumour_dmrs
 from traceback_lab.methylbert_runtime import Aggregate, MIN_ELIGIBLE_READS, RuntimeRefusal
 from traceback_lab.registry import InputContext, Ready, Skip, execution_identity, load_registry
+from traceback_lab.runner import RunTarget, _envelope
+from traceback_lab.store import LabStore
 
 
 def _context(tmp_path: Path, **extras: Any) -> InputContext:
@@ -35,6 +37,21 @@ def test_registry_and_absent_checkpoint_skip_without_gpu_probe(tmp_path, monkeyp
     shallow = _context(tmp_path)
     object.__setattr__(shallow, "eligible_reads", MIN_ELIGIBLE_READS - 1)
     assert adapter.METHYLBERT.preflight(shallow).reason_code == "depth"
+
+
+@pytest.mark.parametrize("reason", ["input_kind", "unqualified_support", "missing_gpu", "model_not_ready"])
+def test_methylbert_specific_skips_publish_and_select(tmp_path, reason):
+    target = RunTarget(
+        input_id="1" * 64, source_id="2" * 64, input_dir=tmp_path,
+        reference_id="hg38", reference_sha256="3" * 64,
+    )
+    identity = "4" * 64
+    envelope = _envelope(adapter.METHYLBERT, target, identity, status="skipped", skip=Skip(reason, "fixture prerequisite"))
+    store = LabStore(tmp_path)
+    store.publish_result(envelope, input_id=target.input_id)
+    selected = store.read_result(target.input_id, adapter.METHYLBERT.id, identity)
+    assert selected is not None and selected.status == "skipped"
+    assert selected.skip_reason == reason and selected.metrics == []
 
 
 def test_bundle_code_and_basecaller_each_change_execution_identity(tmp_path, monkeypatch):
