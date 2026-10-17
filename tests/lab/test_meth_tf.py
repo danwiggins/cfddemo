@@ -23,6 +23,7 @@ from traceback_lab.algorithms.meth_tf import (
     weighted_reference_condition_number,
 )
 from traceback_lab.assets import AssetError
+from traceback_lab.envelope import SKIP_REASONS
 from traceback_lab.cli import main as lab_main
 from traceback_lab.meth_tf_reference import CALL_DEFINITION, add_reference, inspect_reference
 from traceback_lab.read_summary import SPLIT_SALT, ReadSummary, h64
@@ -165,6 +166,7 @@ def test_missing_or_changed_reference_refuses_without_using_unpinned_bytes(
         inspect_reference(store)
     assert METH_TF.asset_sha256s(tmp_path) == []
     assert METH_TF.preflight(ctx).reason_code == "invalid_asset"
+    assert "invalid_asset" in SKIP_REASONS
 
 
 def test_reference_model_genome_and_depth_must_match(
@@ -174,6 +176,8 @@ def test_reference_model_genome_and_depth_must_match(
     assert METH_TF.preflight(replace(ctx, eligible_reads=2_499_999)).reason_code == "depth"
     assert METH_TF.preflight(replace(ctx, reference_sha256="f" * 64)).reason_code == "reference"
     monkeypatch.setattr(cell_origin, "header_model", lambda *_: "different-model")
+    assert METH_TF.preflight(ctx).reason_code == "reference"
+    monkeypatch.setattr(cell_origin, "header_model", lambda *_: None)
     assert METH_TF.preflight(ctx).reason_code == "missing_tags"
 
 
@@ -210,6 +214,8 @@ def test_registered_worker_produces_exploratory_fraction_and_pinned_attempt(tmp_
     assert receipt["reference_condition_number"] == pytest.approx(2)
     ctx.extras["planned_asset_sha256s"] = ["0" * 64]
     assert METH_TF.preflight(ctx).reason_code == "asset_unavailable"
+    assert "asset_unavailable" in SKIP_REASONS
+    assert "changed since planning" in METH_TF.preflight(ctx).message
     with pytest.raises(ValueError, match="execution planning"):
         METH_TF.run(ctx, tmp_path / "out")
     ctx.extras["planned_asset_sha256s"] = [registered.sha256]

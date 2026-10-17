@@ -153,15 +153,21 @@ class MethTF(MethBase):
             if directory.exists() or directory.is_symlink():
                 return Skip("invalid_asset", "the registered meth-TF reference is damaged; restore it from backup or use a new ROOT")
             return Skip("missing_asset", "register a compatible meth-TF marker reference with 'traceback lab asset add meth-tf-reference'")
-        if ctx.extras.get("planned_asset_sha256s") != [reference.sha256]:
-            return Skip("asset_unavailable", "meth-TF reference identity was unavailable during planning; retry the run")
+        planned = ctx.extras.get("planned_asset_sha256s")
+        if planned != [reference.sha256]:
+            message = ("meth-TF reference identity was unavailable during planning; retry the run"
+                       if planned is None else
+                       "the registered meth-TF reference changed since planning; restore the planned asset or start a new run")
+            return Skip("asset_unavailable", message)
         if reference.reference.reference_sha256 != ctx.reference_sha256:
             return Skip("reference", "the meth-TF marker reference does not match this genome reference")
         from .cell_origin import header_model
 
         model = header_model(ctx.input_dir / "aligned.bam")
-        if model is None or model != reference.reference.modbase_model:
-            return Skip("missing_tags", "the BAM's declared modified-base model does not match the meth-TF reference")
+        if model is None:
+            return Skip("missing_tags", "the BAM has no declared modified-base model")
+        if model != reference.reference.modbase_model:
+            return Skip("reference", "the BAM's declared modified-base model does not match the meth-TF reference")
         summary = ReadSummary.open(Path(ctx.extras["upstream"]["read-summary"]) / "columns")
         lengths = dict(zip(summary.contigs, summary.lengths))
         if any(marker.chrom not in lengths or marker.pos0 >= lengths[marker.chrom]
