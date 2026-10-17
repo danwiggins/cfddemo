@@ -306,6 +306,9 @@ def _selected_results(store: LabStore, input_id: str, manifest: dict[str, Any]) 
 
     label, aligner = _aligner(manifest, input_id)
     del label
+    from .platforms import for_input
+
+    platform = for_input(manifest, store.inputs_dir / input_id / "aligned.bam")
     found: list[CohortResult] = []
     identities: dict[str, str] = {}
     for algorithm in load_registry():
@@ -320,6 +323,7 @@ def _selected_results(store: LabStore, input_id: str, manifest: dict[str, Any]) 
             identity = execution_identity(
                 algorithm, reference_sha256=manifest["reference_sha256"], upstream=upstream,
                 asset_sha256s=assets_of(store.root) if callable(assets_of) else (),
+                platform=platform if platform != "ont" else None,
             )
         except (OSError, ValueError, KeyError, LabProblem):
             # An unresolved asset cannot make an old result current-compatible.
@@ -341,6 +345,7 @@ def _selected_results(store: LabStore, input_id: str, manifest: dict[str, Any]) 
             reference_sha256=manifest["reference_sha256"], aligner_identity=aligner,
             pon_policy=str(algorithm.parameters.get("pon_policy", "none")),
             per_sample_asset_keys=("pon_asset_sha256",),
+            platform=platform if platform != "ont" else None,
         )
         found.append(CohortResult(
             algorithm_id=algorithm.id, parameters_sha256=chosen.provenance.parameters_sha256,
