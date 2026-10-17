@@ -11,6 +11,8 @@ from typing import Any
 from traceback_runner.cli import _local_envelope, _result, _with_human
 
 from .assets import AssetError, AssetPublishUncertain, add_asset, inspect_asset
+from .meth_tf_reference import KIND as METH_TF_KIND
+from .meth_tf_reference import add_reference, inspect_reference
 from .problems import EXIT_BLOCKED, EXIT_OK
 from .store import LabStore, new_run_id
 
@@ -19,8 +21,8 @@ def add_asset_parser(commands: Any, common: Callable[[argparse.ArgumentParser], 
     asset = commands.add_parser("asset", help="register or inspect local Lab assets")
     actions = asset.add_subparsers(dest="asset_action", required=True)
     add = actions.add_parser("add", help="register operator-supplied pinned bytes")
-    add.add_argument("kind", choices=("pmd",))
-    add.add_argument("--file", type=Path, required=True, help="local PMD BED.gz file")
+    add.add_argument("kind", choices=("pmd", METH_TF_KIND))
+    add.add_argument("--file", type=Path, required=True, help="local asset file")
     add.add_argument(
         "--source-label", "--provenance", dest="source_label", required=True,
         help="short public source description, never a donor path",
@@ -30,7 +32,7 @@ def add_asset_parser(commands: Any, common: Callable[[argparse.ArgumentParser], 
     common(add)
     add.set_defaults(handler=_add)
     inspect = actions.add_parser("inspect", help="rehash and describe a local asset")
-    inspect.add_argument("kind", choices=("pmd",))
+    inspect.add_argument("kind", choices=("pmd", METH_TF_KIND))
     common(inspect)
     inspect.set_defaults(handler=_inspect)
 
@@ -45,10 +47,16 @@ def _add(args: argparse.Namespace, store: LabStore) -> tuple[int, dict[str, Any]
     store.check_version()
     try:
         with store.writer("asset add", new_run_id(), step=args.kind):
-            record = add_asset(
-                store, args.kind, args.file,
-                source_label=args.source_label, terms=args.terms, license_id=args.license_id,
-            )
+            if args.kind == METH_TF_KIND:
+                record = add_reference(
+                    store, args.file, source_label=args.source_label,
+                    terms=args.terms, license_id=args.license_id,
+                )
+            else:
+                record = add_asset(
+                    store, args.kind, args.file, source_label=args.source_label,
+                    terms=args.terms, license_id=args.license_id,
+                )
     except AssetPublishUncertain as exc:
         payload = _result_payload(
             "lab asset add", "blocked", "Asset registration incomplete; inspect before retry", store,
@@ -79,7 +87,7 @@ def _add(args: argparse.Namespace, store: LabStore) -> tuple[int, dict[str, Any]
 def _inspect(args: argparse.Namespace, store: LabStore) -> tuple[int, dict[str, Any]]:
     store.check_version()
     try:
-        record = inspect_asset(store, args.kind)
+        record = inspect_reference(store) if args.kind == METH_TF_KIND else inspect_asset(store, args.kind)
     except AssetError as exc:
         payload = _result_payload(
             "lab asset inspect", "blocked", "Asset unavailable", store,

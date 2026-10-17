@@ -58,3 +58,9 @@ licenses:
       in the repo: the operator places it under ROOT/lab/assets/pmd/, and the
       Lab pins its sha256.
     url: "https://zwdzwd.github.io/pmd"
+  meth-tf-reference-operator:
+    headline: "OPERATOR-SUPPLIED METHYLATION REFERENCE: check data terms"
+    body: >-
+      The tumour/healthy CpG marker fractions are not bundled. The operator
+      registers exact local bytes and records their source and terms. Registration
+      does not establish redistribution rights or clinical validity.

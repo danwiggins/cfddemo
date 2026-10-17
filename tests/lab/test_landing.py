@@ -15,11 +15,11 @@ from traceback_runner import cli as signed_cli
 
 
 def _c(algorithm_id="bam-qc", **overrides) -> Candidate:
-    base = dict(
-        algorithm_id=algorithm_id, label=algorithm_id, value=1.0, unit=None, tier="NEWER", status="ok",
-        state="no_reference", usable_at_half=True, split_stable=True, split_relative_diff=0.01,
-        citation_verified=True, control_recovered=None, order=0,
-    )
+    base = {
+        "algorithm_id": algorithm_id, "label": algorithm_id, "value": 1.0, "unit": None, "tier": "NEWER", "status": "ok",
+        "state": "no_reference", "usable_at_half": True, "split_stable": True, "split_relative_diff": 0.01,
+        "citation_verified": True, "control_recovered": None, "order": 0,
+    }
     base.update(overrides)
     return Candidate(**base)
 
@@ -115,7 +115,7 @@ def _dom(server, tmp_path, *, size="1280,800", route=None, want=None) -> str:
 
     if want is None:
         want = (lambda d: True) if route else (lambda d: "data-measured" in d)
-    good = lambda d: 'data-ready="1"' in d and want(d)  # noqa: E731
+    good = lambda d: 'data-ready="1"' in d and want(d)
     link = server.issue_link() + (f"&route={route}" if route else "")
     tmp_path.mkdir(parents=True, exist_ok=True)
     profile = tmp_path / "profile"
@@ -176,7 +176,7 @@ def test_no_horizontal_page_scroll(page_root, tmp_path, size) -> None:
 def test_navigation_order_with_compare(page_root, tmp_path) -> None:
     with RunningLabServer(LabStore(page_root)) as server:
         dom = _dom(server, tmp_path, route=f"/sample/{_id12(page_root)}/stability")
-    nav = re.search(r'<nav aria-label="Lenses"[^>]*>(.*?)</nav>', dom, re.S).group(1)
+    nav = re.search(r'<nav aria-label="Lenses"[^>]*>(.*?)</nav>', dom, re.DOTALL).group(1)
     labels = re.findall(r">([A-Za-z/ ]+?)(?: \(\d+[^)]*\))?</a>", nav)
     assert labels == ["Findings", "Trust/QC", "Stability", "Signals", "Compare", "Body map", "Agreement", "Evidence", "Methods"]
     assert 'aria-current="page">Stability' in nav
@@ -237,6 +237,17 @@ def _id12(root: Path) -> str:
     return LabApi(LabStore(root)).samples()["samples"][0]["id12"]
 
 
+def test_agreement_api_refuses_unqualified_copy_number_without_a_pon(page_root: Path) -> None:
+    from traceback_lab.web.api import LabApi
+
+    payload = LabApi(LabStore(page_root)).sample(_id12(page_root))
+    concordance = payload["concordance"]
+    assert "not independent confirmation" in concordance["caption"]
+    assert "whole-genome doubling" in concordance["wgd_caveat"]
+    assert len(concordance["pairs"]) == 3
+    assert all(pair["state"] == "no_pon" and pair["x"] is None for pair in concordance["pairs"])
+
+
 @needs_chrome
 def test_evidence_lists_every_algorithm_by_tier_with_exclusions(page_root, tmp_path) -> None:
     with RunningLabServer(LabStore(page_root)) as server:
@@ -271,6 +282,7 @@ def test_deep_link_waits_for_deferred_lens_script(page_root, tmp_path, monkeypat
     """Fast API responses must not outrun the later deferred views script."""
 
     import time
+
     from traceback_lab.web.server import _Handler
 
     original = _Handler.do_GET
