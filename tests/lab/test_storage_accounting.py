@@ -135,6 +135,16 @@ def test_multi_full_input_selection_withholds_ratio_until_isolated(tmp_path):
         account(tmp_path, source, input_id="e" * 64)
 
 
+def test_recorded_derived_input_file_refuses_single_sample_claim(tmp_path):
+    source, _ = _fixture(tmp_path)
+    derived = tmp_path / "lab" / "inputs" / ("c" * 64)
+    (derived / "manifest.json").unlink()
+    derived.rmdir()
+    derived.write_bytes(b"leftover")
+    with pytest.raises(InventoryError, match="source input entry is not a directory"):
+        account(tmp_path, source)
+
+
 def test_refuses_incomplete_or_unsafe_inventory(tmp_path):
     source, full = _fixture(tmp_path)
     with pytest.raises(InventoryError, match="entry limit"):

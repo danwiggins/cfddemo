@@ -62,13 +62,14 @@ def _record(lab: Path, source_id: str) -> dict[str, Any]:
     return record
 
 
-def _inventory(lab: Path, max_entries: int) -> tuple[dict[str, int], int, set[str]]:
+def _inventory(lab: Path, max_entries: int) -> tuple[dict[str, int], int, set[str], set[str]]:
     """Count each path once; reject symlinks, special files and incomplete walks."""
     sizes: dict[str, int] = defaultdict(int)
     pending = [lab]
     seen = 0
     staging_entries = 0
     input_entries: set[str] = set()
+    non_directory_inputs: set[str] = set()
     while pending:
         directory = pending.pop()
         try:
@@ -83,6 +84,8 @@ def _inventory(lab: Path, max_entries: int) -> tuple[dict[str, int], int, set[st
                         raise InventoryError("inventory entry became unreadable") from exc
                     if directory == lab / "inputs":
                         input_entries.add(entry.name)
+                        if not stat.S_ISDIR(info.st_mode):
+                            non_directory_inputs.add(entry.name)
                     if entry.name.startswith(".staging-"):
                         staging_entries += 1
                     if _is_reparse(info):
@@ -98,7 +101,7 @@ def _inventory(lab: Path, max_entries: int) -> tuple[dict[str, int], int, set[st
                         raise InventoryError("inventory contains a link or special file")
         except OSError as exc:
             raise InventoryError("inventory directory is unreadable") from exc
-    return dict(sizes), staging_entries, input_entries
+    return dict(sizes), staging_entries, input_entries, non_directory_inputs
 
 
 def account(root: Path, source_id: str, input_id: str | None = None, *,
@@ -144,7 +147,9 @@ def account(root: Path, source_id: str, input_id: str | None = None, *,
         if parent == selected:
             derived_ids.append(derived_id)
     sample_ids = {selected, *derived_ids}
-    sizes, staging_entries, input_entries = _inventory(lab, max_entries)
+    sizes, staging_entries, input_entries, non_directory_inputs = _inventory(lab, max_entries)
+    if non_directory_inputs & sample_ids:
+        raise InventoryError("source input entry is not a directory")
     bam_bytes = sizes.get(f"inputs/{selected}/aligned.bam")
     bai_bytes = sizes.get(f"inputs/{selected}/aligned.bam.bai")
     if bam_bytes is None or bai_bytes is None:
