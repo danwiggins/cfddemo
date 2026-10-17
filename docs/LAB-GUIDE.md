@@ -72,14 +72,14 @@ Lab data lives under `ROOT/lab/` and never touches signed records:
 
 ```
 traceback lab run (<BAM|uBAM|chunk dir>... | <id12> | latest | --example)
-    [--reference ID] [--profile all|fast] [--only a,b]
+    [--reference ID] [--profile all|fast] [--only a,b] [--cohort ID]
     [--downsample 0.5,0.25,0.1 | --no-downsample]
     [--controls | --no-controls] [--tf 0.03,0.10,0.30]
     [--skip-bad-chunks] [--sex M|F] [--force] [--timeout-s 3600]
     [--threads N] [--sort-mem 1G] [--mmi PATH]
     [--dry-run] [--verbose] [--json] [--root R]
-traceback lab simulate cna <id12|latest> [--tf 0.03,0.10,0.30]   synthetic CNA spike, copy-number recovery
-traceback lab simulate split <id12|latest>                         split-half pseudo-replicate
+traceback lab simulate cna <id12|latest> [--tf 0.03,0.10,0.30] [--cohort ID]   synthetic CNA spike, copy-number recovery
+traceback lab simulate split <id12|latest> [--cohort ID]                         split-half pseudo-replicate
 traceback lab algorithms [--json]          registered algorithms (id, tier, min depth, licenses, footnote)
 traceback lab doctor [--json]              setup checks, each with a fix command
 traceback lab serve [--open]               the local page (loopback only)
@@ -171,7 +171,7 @@ ROOT, home, login and chunk names redacted) is ever stored.
 | `bam-qc` | primaries, mapped and MAPQ ≥ 20 shares, supplementary share (chimera proxy), mean read Q, share of sampled genome covered ≥ 1x, GC-bias slope, duplicate share (only when marked) |
 | `depth` | eligible reads (primary, MAPQ ≥ 20, chr1–22/X/Y), mean span, approximate depth; the index count is shown only as an upper bound |
 | `fragment-size` | 1-bp aligned-span histogram, mode, short (< 150 bp) share, mono/di peaks, 10 bp periodicity |
-| `copy-number` | tumour fraction, ploidy, genome log2 track and segments through the installed ichorCNA toolchain (no panel of normals yet, so read as not interpretable); needs 2M eligible reads, `traceback toolchain install ichor` and `traceback method-asset register --from-toolchain copy-number --root R` |
+| `copy-number` | tumour fraction, ploidy, genome log2 track and segments through the installed ichorCNA toolchain; a built protocol-matched cohort supplies a verified panel of normals, while the unbuilt default runs without one and remains not interpretable; needs 2M eligible reads, `traceback toolchain install ichor` and `traceback method-asset register --from-toolchain copy-number --root R` |
 | `instability` | bin-weighted median absolute deviation of the selected copy-number result's segment log2 values (`tmad`), with used-bin and null-estimate coverage counts; needs 2M eligible reads and a successful copy-number result for the same input; exploratory and cohort-relative, with no ONT cutoff |
 | `modbase-qc` | mod codes in the MM tags, MM-tagged share, mean ML at aligned CpG calls (read from `meth-calls`), share of those calls below 0.7 confidence, tagged reads with unusable MM/ML; skipped (`missing_tags`) when no read carries MM |
 | `long-tail` | shares of molecules > 300 bp, 1–4 kb (delayed processing) and > 7.5 kb (lysis); a supplementary-split read counts at its read length |
@@ -250,7 +250,17 @@ script or style, no outside requests.
   generation is labelled as such. Missing or failed metrics are never zero.
   The synthetic EXAMPLE cannot be scored against a real kit cohort.
 - **Trust/QC**: depth against each algorithm's minimum, the run table with
-  scrubbed stderr for failures, provisional QC bands, library health.
+  scrubbed stderr for failures and a link to a matching numbered run-log line,
+  provisional QC bands, library health. The link searches up to 64 recently updated
+  runs and reveals only allowlisted status fields. A line must name the selected
+  immutable result attempt; legacy logs without that ID, older runs, or cached
+  steps may have no matching line. A latest-run in-progress or interrupted note
+  appears only when that run names the same source and full input; the selected
+  result status remains visible beside it. If the step published no result yet,
+  a sample-scoped run notice appears instead of a result row. If the latest
+  analysis or simulation run log is unreadable, unsafe, malformed, or outside
+  the 1 MiB / 4,096-line limit, the status banner reports an unavailable
+  status without inferring whether the run ended normally or was interrupted.
 - **Stability**: one small multiple per metric: deviation from full depth at
   each fraction, the stability band, and split halves A/B at 50%.
 
@@ -276,6 +286,20 @@ provenance is unknown are isolated by their input identity; they are not
 pooled as protocol-matched references. Distinct source IDs are not proof of
 independent donors. The separate PoN denominator does not become a
 percentile denominator.
+
+For a verified internal cohort with at least ten eligible aligned members,
+`cohort build` creates one full panel and one leave-one-out panel per member.
+It recomputes each member's copy-number and instability results against that
+member's panel before publishing the generation. `pon_n` counts all panel
+sources; a selected member panel uses `pon_n - 1` sources. A nonmember uses
+the full panel. Both copy-number and instability still require 2M eligible
+reads on the target input.
+
+`lab run` and `lab simulate` use a built `healthy-v1` cohort by default when
+one exists. Pass `--cohort ID` to pin another built cohort; an explicit cohort
+with no compatible verified panel fails rather than falling back. If the
+implicit `healthy-v1` is unbuilt, copy-number keeps its no-PoN baseline.
+An explicit `--cohort` is checked even when `--only` omits copy-number.
 
 If a selected cohort cannot be verified, **Compare** lists it as unavailable
 with a problem code and a next action. Other verified generations remain

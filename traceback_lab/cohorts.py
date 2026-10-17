@@ -11,9 +11,10 @@ import json
 import os
 import re
 import stat
+from contextlib import contextmanager
 from dataclasses import dataclass
 from pathlib import Path
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, Iterator
 
 from pydantic import ValidationError
 
@@ -301,7 +302,9 @@ def _aligner(manifest: dict[str, Any], input_id: str) -> tuple[str, dict[str, An
     }
 
 
-def _selected_results(store: LabStore, input_id: str, manifest: dict[str, Any]) -> tuple[CohortResult, ...]:
+def _selected_results(
+    store: LabStore, input_id: str, manifest: dict[str, Any], *, pon_selection: Any | None = None,
+) -> tuple[CohortResult, ...]:
     """Snapshot only selected status-ok results on the full input."""
 
     label, aligner = _aligner(manifest, input_id)
@@ -309,6 +312,10 @@ def _selected_results(store: LabStore, input_id: str, manifest: dict[str, Any]) 
     found: list[CohortResult] = []
     identities: dict[str, str] = {}
     for algorithm in load_registry():
+        if algorithm.id == "copy-number" and pon_selection is not None:
+            from .pon_consumer import bind_copy_number_algorithm
+
+            algorithm = bind_copy_number_algorithm(algorithm, pon_selection)
         upstream = [
             {"algorithm_id": name, "parameters_sha256": identities[name]}
             for name in algorithm.upstream if name in identities
@@ -339,8 +346,9 @@ def _selected_results(store: LabStore, input_id: str, manifest: dict[str, Any]) 
             algorithm_id=algorithm.id, algorithm_version=algorithm.version,
             parameters=algorithm.parameters, tools=[tool.identity() for tool in algorithm.tools],
             reference_sha256=manifest["reference_sha256"], aligner_identity=aligner,
-            pon_policy=str(algorithm.parameters.get("pon_policy", "none")),
-            per_sample_asset_keys=("pon_asset_sha256",),
+            pon_policy=("lab_loo_v1" if pon_selection is not None
+                        and algorithm.id in ("copy-number", "instability") else "none"),
+            per_sample_asset_keys=("pon_sha256",) if algorithm.parameters.get("pon_policy") == "lab_loo_v1" else (),
         )
         found.append(CohortResult(
             algorithm_id=algorithm.id, parameters_sha256=chosen.provenance.parameters_sha256,
@@ -349,7 +357,7 @@ def _selected_results(store: LabStore, input_id: str, manifest: dict[str, Any]) 
     return tuple(found)
 
 
-def member_from_store(store: LabStore, source_id: str) -> CohortMember:
+def member_from_store(store: LabStore, source_id: str, *, pon_selection: Any | None = None) -> CohortMember:
     """Pin current full-input result attempts for one admitted source."""
 
     record = _checked_source_record(store, source_id)
@@ -362,7 +370,28 @@ def member_from_store(store: LabStore, source_id: str) -> CohortMember:
     input_id, manifest = selected
     label, _ = _aligner(manifest, input_id)
     return CohortMember(source_id=source_id, input_id=input_id, aligner_identity=label,
-                        results=_selected_results(store, input_id, manifest))
+                        results=_selected_results(store, input_id, manifest, pon_selection=pon_selection),
+                        pon_asset_sha256=(pon_selection.pon_sha256 if pon_selection is not None
+                                          and pon_selection.target_excluded else None))
+
+
+def member_for_generation(store: LabStore, generation: CohortGeneration, source_id: str) -> CohortMember:
+    """Read a target under one pinned generation's PoN protocol."""
+
+    if generation.pon_asset_sha256 is None:
+        return member_from_store(store, source_id)
+    from .pon_consumer import selection_for_generation
+
+    selected = _full_input(store, _checked_source_record(store, source_id))
+    if selected is None:
+        raise ValueError("admitted source has no full aligned input")
+    input_id, manifest = selected
+    label, _ = _aligner(manifest, input_id)
+    selection = selection_for_generation(
+        store, generation, source_id=source_id,
+        reference_sha256=manifest["reference_sha256"], aligner_identity=label,
+    )
+    return member_from_store(store, source_id, pon_selection=selection)
 
 
 def pon_inputs_for_members(store: LabStore, members: tuple[CohortMember, ...]) -> tuple[PonInput, ...]:
@@ -462,10 +491,32 @@ def list_cohorts(store: LabStore) -> tuple[CohortListing, ...]:
     return tuple(rows)
 
 
+@contextmanager
+def _cohort_run_log(store: LabStore, run_id: str, cohort_id: str, kind: str) -> Iterator[Any]:
+    """Give a cohort build one complete run lifecycle, including failures."""
+
+    log = store.run_log(run_id)
+    log.append("run_start", command="cohort build", cohort_id=cohort_id, kind=kind)
+    try:
+        yield log
+    except KeyboardInterrupt:
+        log.append("run_end", status="interrupted", exit_code=6)
+        raise
+    except LabProblem as problem:
+        log.append("run_end", status="blocked", exit_code=problem.exit_code, code=problem.code)
+        raise
+    except Exception as exc:
+        log.append("run_end", status="internal_error", exit_code=7, error=type(exc).__name__)
+        raise
+    else:
+        log.append("run_end", status="ok", exit_code=0)
+
+
 def build_cohort(store: LabStore, cohort_id: str, *, kind: str = "internal_cohort") -> CohortGeneration:
     """Publish a full snapshot atomically, preserving every older generation."""
 
-    with store.writer("cohort build", new_run_id()):
+    run_id = new_run_id()
+    with store.writer("cohort build", run_id) as lock, _cohort_run_log(store, run_id, cohort_id, kind) as log:
         directory = _cohort_dir(store, cohort_id)
         if _read_cohort_json(directory / "current.json", cohort_id) is not None:
             read_current(store, cohort_id)
@@ -476,6 +527,35 @@ def build_cohort(store: LabStore, cohort_id: str, *, kind: str = "internal_cohor
         members = tuple(member_from_store(store, source_id) for source_id in read_roster(store, cohort_id))
         version = max(versions, default=0) + 1
         snapshot = CohortGeneration(cohort_id=cohort_id, version=version, kind=kind, members=members)
+        if kind == "internal_cohort":
+            inputs = pon_inputs_for_members(store, members)
+            if len(inputs) >= 10:
+                from .pon import build_panels
+                from .pon_consumer import recompute_member
+                from .runner import DEFAULT_TIMEOUT_S
+
+                built = build_panels(store, inputs)
+                annotated = tuple(member.model_copy(update={
+                    "pon_asset_sha256": built.loo_asset_sha256s.get(member.source_id),
+                }) for member in members)
+                pending = CohortGeneration(
+                    cohort_id=cohort_id, version=version, kind=kind, members=annotated,
+                    pon_n=built.pon_n, pon_asset_sha256=built.full_asset_sha256,
+                    pon_build=built.provenance(),
+                )
+                updated = {
+                    source_id: recompute_member(
+                        store, pending, source_id, lock=lock, log=log, run_id=run_id,
+                        timeout_s=DEFAULT_TIMEOUT_S,
+                    )
+                    for source_id in built.source_ids
+                }
+                snapshot = CohortGeneration(
+                    cohort_id=cohort_id, version=version, kind=kind,
+                    members=tuple(updated.get(member.source_id, member) for member in annotated),
+                    pon_n=built.pon_n, pon_asset_sha256=built.full_asset_sha256,
+                    pon_build=built.provenance(),
+                )
 
         def write(staging: Path) -> None:
             (staging / "generation.json").write_bytes(canonical_json_bytes(snapshot.model_dump(mode="json", by_alias=True)))
@@ -513,7 +593,7 @@ def project_sample_metric(
     generation = read_current(store, cohort_id)
     if generation is None:
         return None
-    target = member_from_store(store, target_source_id)
+    target = member_for_generation(store, generation, target_source_id)
     result = next((item for item in target.results if item.algorithm_id == algorithm_id), None)
     if result is None:
         return None
@@ -524,6 +604,6 @@ def project_sample_metric(
 
 
 __all__ = [
-    "CohortListing", "add_sample", "build_cohort", "list_cohorts", "member_from_store", "pon_inputs_for_members",
+    "CohortListing", "add_sample", "build_cohort", "list_cohorts", "member_for_generation", "member_from_store", "pon_inputs_for_members",
     "project_current_metric", "project_sample_metric", "read_current", "read_roster",
 ]

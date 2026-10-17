@@ -57,12 +57,14 @@ def add_simulate_parser(commands: Any, common: Callable[[argparse.ArgumentParser
     cna.add_argument("sample", metavar="ID12|latest")
     cna.add_argument("--tf", default=",".join(str(tf) for tf in DEFAULT_TFS), metavar="0.03,0.10,0.30")
     cna.add_argument("--force", action="store_true")
+    cna.add_argument("--cohort", metavar="ID", help="use this built protocol-matched cohort's panel of normals")
     cna.add_argument("--timeout-s", type=float, default=DEFAULT_TIMEOUT_S, metavar="S")
     common(cna)
     cna.set_defaults(handler=simulate_command)
     halves = kinds.add_parser("split", help="split-half pseudo-replicate (sampling noise)")
     halves.add_argument("sample", metavar="ID12|latest")
     halves.add_argument("--force", action="store_true")
+    halves.add_argument("--cohort", metavar="ID", help="use this built protocol-matched cohort's panel of normals")
     halves.add_argument("--timeout-s", type=float, default=DEFAULT_TIMEOUT_S, metavar="S")
     common(halves)
     halves.set_defaults(handler=simulate_command)
@@ -95,6 +97,9 @@ def simulate_command(args: argparse.Namespace, store: LabStore) -> tuple[int, di
                 bool(record.get("example")),
                 store,
             )
+            from .pon_consumer import bind_target
+
+            items = bind_target(store, items, parent, aligned.manifest, cohort_id=args.cohort)
             scrubber = Scrubber(root=store.root)
             try:
                 # Intermediates (read-summary, meth-calls) on the parent; derived

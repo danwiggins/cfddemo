@@ -62,14 +62,15 @@ def test_sample_lenses_pin_eligible_loo_reference(
     generation = CohortGeneration(cohort_id="healthy-v1", version=7, kind=kind, members=members)
     reads: list[str] = []
     monkeypatch.setattr(web_api, "read_current", lambda store, cohort_id: (reads.append(cohort_id), generation)[1])
-    monkeypatch.setattr(web_api, "member_from_store", lambda store, source_id: member(1))
+    monkeypatch.setattr(web_api, "member_for_generation", lambda store, generation, source_id: member(1))
     envelope = ResultEnvelope(
         algorithm_id="fragment-size", algorithm_version="1", status="ok",
         provenance=provenance(tool="fixture", parameters_sha256=PARAMETERS,
                               source_id=SOURCE, input_id=INPUT, reference_id="synthetic"),
         metrics=[Metric(metric_id="short_fraction_lt150", value=0.95)],
     )
-    sample = SimpleNamespace(example=False, full=SimpleNamespace(
+    sample = SimpleNamespace(example=False, operator_metadata=None, operator_metadata_problem=None,
+                             full=SimpleNamespace(
         input_id=INPUT, results={"fragment-size": envelope}, depth_x=lambda: 1.0,
     ), derived=[], by_transform=lambda transform: [])
     monkeypatch.setattr(web_api.views, "load_sample", lambda store, source_id: sample)
@@ -118,7 +119,7 @@ def test_incompatible_or_stale_target_never_scores_against_cohort(tmp_path, monk
     monkeypatch.setattr(web_api, "read_current", lambda store, cohort_id: generation)
     api = web_api.LabApi(LabStore(tmp_path))
     sample = SimpleNamespace(example=False, full=SimpleNamespace(input_id=INPUT))
-    monkeypatch.setattr(web_api, "member_from_store", lambda store, source_id: member(1))
+    monkeypatch.setattr(web_api, "member_for_generation", lambda store, generation, source_id: member(1))
     pinned, target, state, problem = api._sample_cohort(SOURCE, sample)
     assert pinned is generation and target is not None and state == "ready" and problem is None
 
@@ -157,7 +158,7 @@ def test_sample_list_pins_one_generation_for_all_rows(tmp_path, monkeypatch) -> 
         reads.append(cohort_id)
         return generations[len(reads) - 1]
     monkeypatch.setattr(web_api, "read_current", current)
-    monkeypatch.setattr(web_api, "member_from_store", lambda store, source_id: member(int(source_id, 16)))
+    monkeypatch.setattr(web_api, "member_for_generation", lambda store, generation, source_id: member(int(source_id, 16)))
     samples = {}
     for index, source in enumerate(sources, start=1):
         input_id = f"{index + 100:064x}"
@@ -227,7 +228,9 @@ def test_target_unavailable_preserves_recovery_state(tmp_path, monkeypatch, fail
     api = web_api.LabApi(LabStore(tmp_path))
     generation = CohortGeneration(cohort_id="healthy-v1", version=2, members=())
     monkeypatch.setattr(web_api, "read_current", lambda store, cohort_id: generation)
-    monkeypatch.setattr(web_api, "member_from_store", lambda store, source_id: (_ for _ in ()).throw(failure))
+    monkeypatch.setattr(web_api, "member_for_generation", lambda store, generation, source_id: (
+        _ for _ in ()
+    ).throw(failure))
     sample = SimpleNamespace(example=False, full=SimpleNamespace(input_id=INPUT))
 
     pinned, target, state, detail = api._sample_cohort(SOURCE, sample)
