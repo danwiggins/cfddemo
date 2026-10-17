@@ -112,6 +112,15 @@ def test_analytic_nnls_recovers_known_mixture_and_rejects_rank_deficiency() -> N
     )
     assert fraction is not None
 
+    # A third covered marker can expose lack of fit that a two-marker interior
+    # solution cannot: its observed 5/8 differs from both reference columns.
+    fraction, residual = solve_two_component(
+        np.asarray([0.25, 0.75, 0.5]), np.asarray([0.75, 0.25, 0.5]),
+        np.asarray([3, 5, 5]), np.asarray([8, 8, 8]),
+    )
+    assert fraction == pytest.approx(7 / 26, abs=1e-12)
+    assert residual == pytest.approx(np.sqrt(1 / 288), abs=1e-12)
+
 
 def test_public_asset_add_and_inspect_pin_marker_reference(
     tmp_path: Path, capsys: pytest.CaptureFixture[str],

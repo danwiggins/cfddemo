@@ -939,18 +939,21 @@
       no_mtdna_baseline: "A compatible cohort with at least ten members after source exclusion is needed for an mtDNA trend.",
     };
     for (const pair of (report.pairs || [])) {
-      const section = h("section", { class: "panel" }, h("h2", {}, pair.label), flagPill(pair.id === "cn-meth" ? "CLIA" : "FDA"));
+      const section = h("section", { class: "panel" }, h("h2", {}, pair.label), flagPill("FDA"),
+        pair.id === "cn-meth" ? flagPill("CLIA") : "");
       if (pair.id === "cn-meth" && pair.support && pair.support.markers_covered !== null) {
         const support = pair.support;
         const residual = support.fit_rms === null
           ? "Fit residual unavailable."
-          : `Fit residual RMS ${String(support.fit_rms)}.`;
+          : `Fit residual RMS ${fmt(support.fit_rms)}.`;
         section.append(h("p", { class: "help" },
-          `Methylation numerical fit: ${String(support.markers_covered)} covered markers, ${String(support.cpg_calls_used)} CpG calls; condition number ${support.reference_condition_number === null ? "unavailable" : String(support.reference_condition_number)}. ${residual} These counts do not establish biological calibration.`));
+          `Methylation numerical fit: ${String(support.markers_covered)} covered markers, ${String(support.cpg_calls_used)} CpG calls; condition number ${support.reference_condition_number === null ? "unavailable" : fmt(support.reference_condition_number)}. ${residual} These counts do not establish biological calibration.`));
       }
       if (pair.state !== "ok") {
         const unavailable = pair.unavailable_reasons?.length ? pair.unavailable_reasons : [pair.state];
-        section.append(h("p", { class: "empty" }, unavailable.map(reason => reasons[reason] || "This pair is unavailable.").join(" ")));
+        section.append(h("p", { class: "empty" }, unavailable.map(reason => reasons[reason] || "This pair is unavailable.").join(" "),
+          unavailable.some(reason => reason === "no_size_baseline" || reason === "no_mtdna_baseline") && pair.reference_n !== null
+            ? ` Compatible cohort members after source exclusion: ${pair.reference_n}.` : ""));
       } else {
         if (pair.baseline_median !== null) {
           section.append(h("p", { class: "help" }, `Matched cohort median ${fmt(pair.baseline_median)} (n = ${pair.reference_n}); this plot shows the sample's difference from that median.`));
