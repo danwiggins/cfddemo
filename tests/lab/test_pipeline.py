@@ -142,10 +142,12 @@ def test_rss_sampler_failure_preserves_worker_result(monkeypatch: pytest.MonkeyP
 
 def test_sampler_thread_start_failure_preserves_worker_result(monkeypatch: pytest.MonkeyPatch) -> None:
     original_start = threading.Thread.start
+    rejected: set[str] = set()
 
     def reject_sampler(self: threading.Thread) -> None:
         name = getattr(getattr(self, "_target", None), "__name__", "")
         if name in {"sample_rss", "sample_disk"}:
+            rejected.add(name)
             raise RuntimeError("cannot start another telemetry thread")
         original_start(self)
 
@@ -156,6 +158,7 @@ def test_sampler_thread_start_failure_preserves_worker_result(monkeypatch: pytes
     )
     assert result.ok
     assert result.peak_rss_bytes is not None and result.peak_rss_bytes > 0
+    assert rejected == {"sample_rss", "sample_disk"}
     assert result.sampled_tree_peak_rss_bytes is None
     assert result.peak_disk_bytes is None
 
@@ -396,7 +399,7 @@ def test_proc_enumeration_failure_uses_ps(monkeypatch: pytest.MonkeyPatch) -> No
         return original(path)
 
     monkeypatch.setattr(Path, "iterdir", scan)
-    assert (_process_tree_rss_bytes(os.getpid()) or 0) > 0
+    assert (_process_tree_rss_bytes(os.getpgrp()) or 0) > 0
 
 
 def test_empty_proc_sample_does_not_spawn_ps(monkeypatch: pytest.MonkeyPatch) -> None:
