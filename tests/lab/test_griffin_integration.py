@@ -392,6 +392,8 @@ def test_algorithm_publishes_primary_profile_and_input_bound_provenance(
                 "platform": "illumina", "registration_sha256": registered_sha,
                 "eligible_autosomal_pairs": 5_000_000, "snakemake_version": "5.19.2",
                 "output_sha256": hashlib.sha256(b"official corrected TSV").hexdigest(),
+                "runtime": {"environment": {"PATH": "/private/operator/bin"}},
+                "fingerprints": {"bam_indexes_sha256": {"patient.bam.bai": "a" * 64}},
             }), encoding="utf-8"
         )
         return (GriffinProfile(sample, "CTCF", 1000, (-15, 0, 15), (0.9, 0.5, 0.8), 0.5, 2.1, True, False),)
@@ -409,7 +411,12 @@ def test_algorithm_publishes_primary_profile_and_input_bound_provenance(
     assert panel["primary_site"] == "CTCF"
     assert panel["profiles"][0]["bin_start_bp"] == [-15, 0, 15]
     assert result.artifacts["griffin_corrected_coverage.tsv"] == b"official corrected TSV"
-    assert json.loads(result.artifacts["griffin_provenance.json"])["input_id"] == ctx.input_id
+    public_provenance = json.loads(result.artifacts["griffin_provenance.json"])
+    assert public_provenance["input_id"] == ctx.input_id
+    assert public_provenance["output_sha256"] == hashlib.sha256(b"official corrected TSV").hexdigest()
+    assert len(public_provenance["full_provenance_sha256"]) == 64
+    assert b"/private/operator" not in result.artifacts["griffin_provenance.json"]
+    assert b"patient.bam.bai" not in result.artifacts["griffin_provenance.json"]
 
 
 def test_runtime_identity_changes_cache_key_and_run_refuses_planned_drift(
