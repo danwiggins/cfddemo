@@ -16,7 +16,7 @@ definition).  Above this run's depth there are no cells; the library's
 
 from __future__ import annotations
 
-import json
+import os
 from collections.abc import Mapping
 from dataclasses import dataclass, field
 from typing import Any
@@ -38,14 +38,18 @@ def selected_results(
 ) -> dict[str, ResultEnvelope]:
     """The selected result per algorithm for one input.
 
-    Without ``identities`` the newest execution identity wins; with them (a
+    Without ``identities`` the latest published execution identity wins; with them (a
     derived input compared to its full input) only the result computed under
     the full input's own ``parameters_sha256`` is used, so a stale derived
     result from older parameters is never compared to a newer full result.
+    Multiple legacy identities with no recorded publication order are ambiguous
+    and omitted instead of guessing from timestamp-shaped attempt ids.
     """
 
     base = store.results_dir / input_id
-    out: dict[str, tuple[str, ResultEnvelope]] = {}
+    out: dict[str, tuple[int | None, ResultEnvelope]] = {}
+    ambiguous: set[str] = set()
+    unreadable: set[str] = set()
     if not base.is_dir():
         return {}
     for algorithm_dir in sorted(base.iterdir()):
@@ -58,17 +62,33 @@ def selected_results(
             if wanted is not None and identity_dir.name != wanted:
                 continue
             try:
-                attempt_id = json.loads((identity_dir / "selected.json").read_bytes())["attempt_id"]
-                attempt = store.selected_attempt(input_id, algorithm_dir.name, identity_dir.name)
-                if attempt is None:
+                selected = store.selected_result_with_order(
+                    input_id, algorithm_dir.name, identity_dir.name,
+                )
+            except (OSError, ValueError):
+                selected = None
+            if selected is None:
+                # A present but invalid selector may be the newest identity.
+                # Showing another identity would silently return stale data.
+                try:
+                    os.lstat(identity_dir / "selected.json")
+                except FileNotFoundError:
                     continue
-                envelope = ResultEnvelope.from_bytes((attempt / "result.json").read_bytes())
-            except (OSError, ValueError, KeyError):
+                except OSError:
+                    pass
+                unreadable.add(algorithm_dir.name)
                 continue
+            envelope, order = selected
             current = out.get(algorithm_dir.name)
-            if current is None or attempt_id > current[0]:
-                out[algorithm_dir.name] = (attempt_id, envelope)
-    return {key: value for key, (_, value) in out.items()}
+            if current is None or (order is not None and (current[0] is None or order > current[0])):
+                out[algorithm_dir.name] = (order, envelope)
+                ambiguous.discard(algorithm_dir.name)
+            elif order == current[0]:
+                ambiguous.add(algorithm_dir.name)
+    return {
+        key: value for key, (_, value) in out.items()
+        if key not in ambiguous and key not in unreadable
+    }
 
 
 @dataclass
