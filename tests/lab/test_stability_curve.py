@@ -112,6 +112,7 @@ def test_default_run_builds_the_curve_and_controls(default_run) -> None:
     assert no_verdict["split"]["stable"] is None
     assert no_verdict["split"]["deviation_a"] is None
     assert no_verdict["split"]["relative_abs_diff"] >= 0
+    assert views.repeatability([no_verdict]) is None
     assert all(no_verdict["split_status"][half]["state"] == "ok" for half in ("A", "B"))
     assert all(no_verdict["split_status"][half]["value"] is not None for half in ("A", "B"))
 
@@ -252,3 +253,18 @@ def test_split_half_missingness_keeps_each_status_visible() -> None:
     assert status(view, "fragment-size", "mode_bp", 100, spec) == {
         "state": "ok", "reason": None, "value": 105, "deviation": 5.0,
     }
+
+
+def test_repeatability_excludes_raw_splits_without_a_validated_verdict() -> None:
+    no_verdict = {"label": "WPS mean", "split": {
+        "a": 100, "b": 105, "relative_abs_diff": 5 / 102.5, "stable": None,
+    }}
+    validated = {"label": "Fragment mode", "split": {
+        "a": 100, "b": 110, "relative_abs_diff": 10 / 105, "stable": True,
+    }}
+    assert views.repeatability([no_verdict]) is None
+    report = views.repeatability([no_verdict, validated])
+    assert report is not None
+    assert report["metrics"] == 1
+    assert report["median_relative_abs_diff"] == 10 / 105
+    assert report["unstable"] == 0

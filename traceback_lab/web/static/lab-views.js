@@ -262,6 +262,9 @@
       rep.append(h("p", {}, `Median split-half |A−B|: ${(r.median_relative_abs_diff * 100).toFixed(1)}% across ${r.metrics} metrics; ${r.unstable} outside their stability tolerance.`),
         h("ul", {}, ...r.worst.map((w) => h("li", {}, `${w.label}: ${(w.relative_abs_diff * 100).toFixed(1)}%${w.stable === false ? " (unstable)" : ""}`))),
         h("a", { href: `#/sample/${sample.id12}/stability` }, "→ Stability"));
+    } else if ((sample.stability || []).some((panel) => panel.split)) {
+      rep.append(h("p", { class: "help" }, "Raw split-half values are available, but no validated repeatability verdict applies."),
+        h("a", { href: `#/sample/${sample.id12}/stability` }, "→ Stability"));
     } else {
       rep.append(h("p", { class: "empty" }, `Run traceback lab run ${sample.id12}.`));
     }
@@ -526,7 +529,9 @@
   function stability(sample) {
     const out = [h("p", { class: "breadcrumb" }, `Lab › ${sample.id12} › Stability`), h("h1", { class: "view-title" }, "Stability")];
     if (!sample.curve.downsampled) out.push(h("p", { class: "empty" }, `This run used --no-downsample. Run traceback lab run ${sample.id12} to draw the curve.`));
-    if (!sample.repeatability) out.push(h("p", { class: "help" }, `Split-half markers absent: run traceback lab run ${sample.id12}.`));
+    if (!sample.repeatability) out.push(h("p", { class: "help" }, (sample.stability || []).some((panel) => panel.split)
+      ? "Raw split-half values are available below; no validated repeatability verdict applies."
+      : `Split-half markers absent: run traceback lab run ${sample.id12}.`));
     const grid = h("div", { class: "multiples" });
     const tableRows = [];
     for (const panel of sample.stability) {
