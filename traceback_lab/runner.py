@@ -207,7 +207,8 @@ def run_plan(
         planned_assets = list(
             assets_of(store.root) if callable(assets_of) and not platform_rejected and not pon_unavailable else ()
         )
-        planned_tools = [tool.identity() for tool in algorithm.tools]
+        tool_pins = tuple(algorithm.tools)
+        planned_tools = [tool.identity() for tool in tool_pins]
         identity = execution_identity(
             algorithm,
             reference_sha256=target.reference_sha256,
@@ -250,6 +251,8 @@ def run_plan(
             target.extras["planned_arm_centromere_sha256"] = (
                 planned_assets[0] if len(planned_assets) == 1 else None
             )
+        target.extras["asset_sha256s"] = planned_assets
+        target.extras["tool_versions"] = {pin.name: pin.version for pin in tool_pins}
         target.extras["planned_asset_sha256s"] = planned_assets
         target.extras["planned_tool_pins"] = planned_tools
         ctx = target.context(store.root)
