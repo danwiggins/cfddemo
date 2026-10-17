@@ -257,9 +257,9 @@ script or style, no outside requests.
   appears only when that run names the same source and full input; the selected
   result status remains visible beside it. If the step published no result yet,
   a sample-scoped run notice appears instead of a result row. If the latest
-  run log is unreadable, unsafe, malformed, or outside the 1 MiB / 4,096-line
-  limit, the status banner says the run status is unavailable rather than
-  asserting that the run ended normally or was interrupted.
+  analysis or simulation run log is unreadable, unsafe, malformed, or outside
+  the 1 MiB / 4,096-line limit, the status banner reports an unavailable
+  status without inferring whether the run ended normally or was interrupted.
 - **Stability**: one small multiple per metric: deviation from full depth at
   each fraction, the stability band, and split halves A/B at 50%.
 
