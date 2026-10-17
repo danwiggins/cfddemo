@@ -219,10 +219,13 @@ def test_extract_refuses_changed_planned_sites_or_tool(tmp_path, monkeypatch) ->
 
 
 def test_pair_tsv_requires_exact_opaque_names_and_finite_metrics() -> None:
-    header = b"#sample_a\tsample_b\trelatedness\tibs0\tibs2\tconcordance\tn\n"
+    header = b"#sample_a\tsample_b\trelatedness\tibs0\tibs2\thom_concordance\tn\n"
     a, b = "a" * 64, "b" * 64
     values = parse_pair_tsv(header + f"{a}\t{b}\t0.48\t1\t20\t0.99\t21\n".encode(), a, b)
     assert values == {"relatedness": 0.48, "concordance": 0.99, "ibs0": 1, "ibs2": 20, "n": 21}
+    with pytest.raises(IdentityPairError, match="complete pair"):
+        parse_pair_tsv(header.replace(b"hom_concordance", b"concordance") +
+                       f"{a}\t{b}\t0.48\t1\t20\t0.99\t21\n".encode(), a, b)
     with pytest.raises(IdentityPairError, match="names"):
         parse_pair_tsv(header + f"private-name\t{b}\t0.48\t1\t20\t0.99\t21\n".encode(), a, b)
     with pytest.raises(IdentityPairError, match="invalid"):
@@ -287,7 +290,7 @@ def test_pair_attempt_binds_both_selected_fingerprints_and_caches(tmp_path, monk
         assert argv[argv.index("--min-ab") + 1] == "0.3"
         prefix = argv[argv.index("--output-prefix") + 1]
         with open(prefix + ".pairs.tsv", "wb") as stream:
-            stream.write(("#sample_a\tsample_b\trelatedness\tibs0\tibs2\tconcordance\tn\n"
+            stream.write(("#sample_a\tsample_b\trelatedness\tibs0\tibs2\thom_concordance\tn\n"
                           f"{sketches[a].input_id}\t{sketches[b].input_id}\t0.5\t0\t10\t0.95\t10\n").encode())
         calls.append(argv)
         return subprocess.CompletedProcess(argv, 0)

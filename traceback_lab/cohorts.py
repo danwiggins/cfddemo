@@ -21,6 +21,7 @@ from pydantic import ValidationError
 from traceback_runner.serialization import canonical_json_bytes
 
 from .cohort_contracts import CohortGeneration, CohortMember, CohortResult, MetricProjection, project_metric
+from .cohort_density import capture_density_vectors
 from .identity import SHA256_PATTERN, cohort_compat_key
 from .ingest import resolve_sample, source_ids
 from .problems import LabProblem
@@ -740,6 +741,11 @@ def build_cohort(store: LabStore, cohort_id: str, *, kind: str = "internal_cohor
             (staging / "generation.json").write_bytes(canonical_json_bytes(snapshot.model_dump(mode="json", by_alias=True)))
 
         try:
+            # PoN recomputation returns fresh members. Capture the exact final
+            # selected histograms only after those replacements are known.
+            snapshot = snapshot.model_copy(update={
+                "members": capture_density_vectors(store, snapshot.members),
+            })
             store.publish_directory(generations, str(version), write)
             write_atomic(directory / "current.json", canonical_json_bytes({"version": version}))
         except BaseException:

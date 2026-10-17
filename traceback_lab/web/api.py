@@ -22,6 +22,7 @@ from pathlib import Path, PurePosixPath
 from typing import Any
 
 from ..cohort_contracts import CohortGeneration, CohortMember, MetricProjection, project_metric
+from ..cohort_density import project_density_band
 from ..cohorts import list_cohorts, member_for_generation_or_independent, member_from_store, pon_dependent_algorithms, read_current
 from ..file_access import open_regular_no_follow
 from ..identity import resolve_prefix, shortest_unique_prefixes
@@ -84,6 +85,70 @@ def _recovery_problem(problem: LabProblem) -> dict[str, str]:
             "cause": problem.cause, "fix": problem.fix, "docs": problem.docs}
 
 
+_AGREEMENT_AXES = (
+    ("size-cn", ("fragment-size", "mode_bp"), ("copy-number", "tumor_fraction")),
+    ("mtdna-cn", ("mtdna", "chrm_fraction"), ("copy-number", "tumor_fraction")),
+)
+
+
+def _agreement_pairs(
+    sample: Any, generation: CohortGeneration | None, target: CohortMember | None,
+    source_id: str, cohort_state: str,
+) -> list[dict[str, Any]]:
+    """Pair only compatible scalar values from one pinned generation by source ID."""
+
+    rows = []
+    # One generation-wide map keeps a source's label stable even when the
+    # eligible sets differ between agreement charts.
+    labels = shortest_unique_prefixes(
+        [source_id, *(member.source_id for member in generation.members)]
+    ) if generation is not None else {}
+    for pair_id, (x_algorithm, x_metric), (y_algorithm, y_metric) in _AGREEMENT_AXES:
+        row: dict[str, Any] = {
+            "pair_id": pair_id, "state": cohort_state if cohort_state != "ready" else "unavailable",
+            "cohort_version": generation.version_id if generation else None,
+            "eligible_n": 0, "points": [], "excluded": {},
+            "target_display_id": labels.get(source_id, source_id[:12]),
+        }
+        if generation is None or target is None or cohort_state != "ready":
+            rows.append(row)
+            continue
+        projections: list[MetricProjection] = []
+        for algorithm_id, metric_id in ((x_algorithm, x_metric), (y_algorithm, y_metric)):
+            envelope = sample.full.results.get(algorithm_id)
+            selected = next((result for result in target.results if result.algorithm_id == algorithm_id), None)
+            if (envelope is None or envelope.status != "ok" or selected is None or
+                    selected.parameters_sha256 != envelope.provenance.parameters_sha256 or
+                    selected.metrics.get(metric_id) is None):
+                break
+            projections.append(project_metric(
+                generation, algorithm_id=algorithm_id, metric_id=metric_id,
+                cohort_compat_key=selected.cohort_compat_key, target_source_id=source_id,
+            ))
+        if len(projections) != 2:
+            row["state"] = "target_metric_unavailable"
+            rows.append(row)
+            continue
+        x_projection, y_projection = projections
+        y_by_source = dict(zip(y_projection.source_ids, y_projection.values, strict=True))
+        points = [
+            {"source_id": member_source, "x": x_value, "y": y_by_source[member_source]}
+            for member_source, x_value in zip(x_projection.source_ids, x_projection.values, strict=True)
+            if member_source in y_by_source
+        ]
+        for point in points:
+            point["display_id"] = labels[point["source_id"]]
+        row.update({
+            "state": "ready" if points else "no_paired_values",
+            "eligible_n": len(points), "points": points,
+            "excluded": {
+                "x": dict(x_projection.exclusions), "y": dict(y_projection.exclusions),
+                "unpaired_x": x_projection.percentile_n - len(points),
+                "unpaired_y": y_projection.percentile_n - len(points),
+            },
+        })
+        rows.append(row)
+    return rows
 def _pon_dependent_algorithms() -> set[str]:
     return pon_dependent_algorithms()
 
@@ -569,6 +634,11 @@ class LabApi:
             interpreted, projections = self._interpret_sample_envelope(
                 envelope, library, depth_x, source_id, generation, target,
             )
+            selected_target = next((result for result in target.results if result.algorithm_id == algorithm_id), None) if target else None
+            target_result_state = (
+                "missing_selected_result" if selected_target is None else
+                "stale_parameters" if selected_target.parameters_sha256 != envelope.provenance.parameters_sha256 else None
+            ) if generation is not None and target is not None and envelope.status == "ok" else None
             for row in interpreted:
                 entry = row.entry
                 if entry is None and algorithm_id not in library.hidden_algorithms:
@@ -580,6 +650,10 @@ class LabApi:
                     if license_id not in used_licenses:
                         used_licenses.append(license_id)
                 payload = _metric_payload(row, entry, qc_band(row.value, entry))
+                payload["cohort_target_state"] = (
+                    target_result_state if entry is not None and
+                    entry["reference"]["kind"] in ("internal_cohort", "provisional_external") else None
+                )
                 projection = projections.get(row.metric_id)
                 payload["eligible_n"] = projection.percentile_n if projection else None
                 payload["cohort_values"] = list(projection.values) if projection else []
@@ -625,6 +699,12 @@ class LabApi:
         curve = views.depth_curve(sample, library)
         synthetic = views.synthetic(sample)
         defended_block, headline_block = _defended(algorithms, curve, panels, synthetic, library, order, depth_x)
+        fragment = sample.full.results.get("fragment-size")
+        density_band = project_density_band(
+            generation, target, source_id,
+            fragment.provenance.parameters_sha256 if fragment is not None and fragment.status == "ok" else None,
+            cohort_state,
+        )
         identity_tool_unavailable = ("identity" in sample.full.results and somalier_tool() is None)
         identity_pairs = [] if identity_tool_unavailable else pairs_for_sample(self.store, source_id)
         return {
@@ -645,6 +725,8 @@ class LabApi:
             "cohort_id": generation.cohort_id if generation else "healthy-v1",
             "cohort_state": cohort_state,
             "cohort_problem": cohort_problem,
+            "agreement_pairs": _agreement_pairs(sample, generation, target, source_id, cohort_state),
+            "size_density_band": density_band,
             "algorithms": algorithms,
             **_safe_result_selections(sample, order),
             "identity_pairs": identity_pairs,
@@ -930,6 +1012,10 @@ class LabApi:
             selected_b = member_from_store(self.store, source_b)
         except (LabProblem, ValueError):
             return {**base, "state": "sample_unavailable", "which": "b", "metrics": [], "unscored": []}
+        library = self.libraries.get()
+        public_algorithms = {algorithm.id for algorithm in _registry()}
+        public_algorithms.update(algorithm_id for algorithm_id, _ in library.entries)
+        not_current: set[str] = set()
         pon_dependent = _pon_dependent_algorithms()
         # Pair Compare has no shared cohort-generation pin. Its independent
         # member projection must never pool a selected PoN-bound CN or consumer.
@@ -948,12 +1034,21 @@ class LabApi:
                 return {**base, "state": "stale_sample", "which": which, "metrics": [], "unscored": []}
             current = {result.algorithm_id: result for result in selected.results}
             for algorithm_id, envelope in sample.full.results.items():
+                if algorithm_id not in public_algorithms:
+                    continue
                 if envelope.status != "ok":
                     continue
                 if algorithm_id in unpaired_dependent:
                     continue
                 pinned = current.get(algorithm_id)
-                if pinned is None or pinned.parameters_sha256 != envelope.provenance.parameters_sha256:
+                if pinned is None:
+                    if algorithm_id in pon_dependent:
+                        unpaired_dependent.update(pon_dependent)
+                        continue
+                    # The stored view can outlive a registry version change or removal.
+                    not_current.add(algorithm_id)
+                    continue
+                if pinned.parameters_sha256 != envelope.provenance.parameters_sha256:
                     if algorithm_id in pon_dependent:
                         unpaired_dependent.update(pon_dependent)
                         continue
@@ -963,13 +1058,12 @@ class LabApi:
                     if value is None or (isinstance(value, (int, float)) and not isinstance(value, bool)):
                         if metric.metric_id not in pinned.metrics or pinned.metrics[metric.metric_id] != value:
                             return {**base, "state": "stale_sample", "which": which, "metrics": [], "unscored": []}
-        library = self.libraries.get()
         selected_results_a = {result.algorithm_id: result for result in selected_a.results}
         selected_results_b = {result.algorithm_id: result for result in selected_b.results}
         rows: list[dict[str, Any]] = []
         unscored: list[dict[str, str]] = []
         for algorithm_id, envelope_a in sample_a.full.results.items():
-            if algorithm_id in library.hidden_algorithms:
+            if algorithm_id not in public_algorithms or algorithm_id in library.hidden_algorithms:
                 continue
             if algorithm_id in unpaired_dependent:
                 unscored.append({"algorithm_id": algorithm_id, "metric_id": "*",
@@ -978,6 +1072,9 @@ class LabApi:
             envelope_b = sample_b.full.results.get(algorithm_id)
             if envelope_b is None or envelope_a.status != "ok" or envelope_b.status != "ok":
                 unscored.append({"algorithm_id": algorithm_id, "metric_id": "*", "reason": "missing_or_not_ok"})
+                continue
+            if algorithm_id in not_current or algorithm_id not in selected_results_a or algorithm_id not in selected_results_b:
+                unscored.append({"algorithm_id": algorithm_id, "metric_id": "*", "reason": "not_current_result"})
                 continue
             result_a, result_b = selected_results_a[algorithm_id], selected_results_b[algorithm_id]
             if result_a.cohort_compat_key != result_b.cohort_compat_key:
@@ -1015,7 +1112,7 @@ class LabApi:
                     "parameters_sha256_b": result_b.parameters_sha256,
                 })
         for algorithm_id in sample_b.full.results.keys() - sample_a.full.results.keys():
-            if algorithm_id not in library.hidden_algorithms:
+            if algorithm_id in public_algorithms and algorithm_id not in library.hidden_algorithms:
                 reason = ("selected_pon_not_paired" if selected_pon else "selected_method_not_paired") if algorithm_id in unpaired_dependent else "missing_or_not_ok"
                 unscored.append({"algorithm_id": algorithm_id, "metric_id": "*", "reason": reason})
         return {**base, "state": "ready", "input_id_a": selected_a.input_id,

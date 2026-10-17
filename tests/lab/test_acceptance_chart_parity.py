@@ -80,7 +80,10 @@ def test_echarts_scatter_values_match_adjacent_table_without_animation(route, ex
 @pytest.mark.parametrize("route", (f"/sample/{ID12}/trust-qc", f"/sample/{ID12}/signals"))
 def test_fragment_density_line_values_match_adjacent_table_without_animation(route, tmp_path) -> None:
     sample = _sample()
-    data = json.dumps({"span_bp": [49, 50, 167, 700, 701], "count": [9, 2, 10, 3, 7]}).encode()
+    counts = [0] * 1000
+    for bp, count in ((49, 9), (50, 2), (167, 10), (700, 3), (701, 7)):
+        counts[bp - 1] = count
+    data = json.dumps({"span_bp": list(range(1, 1001)), "count": counts}).encode()
     observed = []
     with _server(tmp_path, sample) as server:
         server.app.api.artifact = lambda id12, label, algorithm_id, panel_id: (
@@ -102,6 +105,7 @@ def test_fragment_density_line_values_match_adjacent_table_without_animation(rou
                 visible: table.getClientRects().length > 0,
                 animation: option?.animation,
                 points: option?.series.filter((series) => series.type === 'line').flatMap((series) => series.data),
+                labels: option?.xAxis[0].data,
                 rows: [...table.querySelectorAll('tbody tr')].map((row) =>
                   [...row.querySelectorAll('td')].map((cell) => cell.textContent.trim())),
               };
@@ -116,8 +120,18 @@ def test_fragment_density_line_values_match_adjacent_table_without_animation(rou
     assert len(observed) == 1
     chart = observed[0]
     assert chart["adjacent"] and chart["visible"] and chart["animation"] is False
-    assert chart["points"] == [[50, 2], [167, 10], [700, 3]]
-    assert [[float(value) for value in row] for row in chart["rows"]] == chart["points"]
+    spans = list(range(50, 701))
+    if route.endswith("/trust-qc"):
+        expected_pairs = [[bp, counts[bp - 1]] for bp in spans]
+        assert chart["points"] == expected_pairs
+        assert [[int(value) for value in row] for row in chart["rows"]] == expected_pairs
+    else:
+        denominator = sum(counts[49:])
+        expected = [counts[bp - 1] / denominator for bp in spans]
+        assert chart["labels"] == [str(bp) for bp in spans]
+        assert chart["points"] == expected
+        assert [int(row[0]) for row in chart["rows"]] == spans
+        assert [float(row[1]) for row in chart["rows"]] == expected
 
 
 @needs_chrome
