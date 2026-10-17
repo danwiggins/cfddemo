@@ -97,6 +97,7 @@ def run_derived(
     timeout_s: float,
     scrubber: Scrubber,
     progress: Callable[[str], None] | None = None,
+    echo: Callable[[str], None] | None = None,
     parent_upstream: Mapping[str, StepResult] | None = None,
 ) -> list[DerivedRun]:
     if not specs:
@@ -207,6 +208,7 @@ def run_derived(
             timeout_s=timeout_s,
             scrubber=scrubber,
             progress=progress,
+            echo=echo,
             upstream_results=upstream,
         )
         runs.append(DerivedRun(item, results))
