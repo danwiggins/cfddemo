@@ -2662,7 +2662,7 @@ entries:
     reference: {kind: none}
     performance: null
     performance_missing_reason: "No cfDNA ONT calibration, clinical reference, or matched validation"
-    missing_value_caption: "Fewer than five eligible 5mC calls at one or more of the three CpGs."
+    missing_value_caption: "Fewer than five eligible cytosine modification calls at one or more of the three CpGs."
     meaning_high: "The transferred model yields a higher exploratory age estimate."
     meaning_low: "The transferred model yields a lower exploratory age estimate."
     confounders: ["cell mixture", "cfDNA tissue origin", "array-to-ONT transfer", "low site coverage"]
@@ -2678,8 +2678,8 @@ entries:
     citation_checked: {by: "Lab published-model review", date: "2026-10-17", note: "Coefficient asset methylclockData coefWeidner.rda SHA-256 9a3feb7d0c500f9ccdb61ffe243775587fa21b082536142bb1260c566cd39645; ONT cfDNA transfer unvalidated."}
 
   - algorithm_id: epi-clock
-    metric_id: cg02228185_5mc_fraction
-    label: "cg02228185 5mC fraction"
+    metric_id: cg02228185_modified_fraction
+    label: "cg02228185 5mC+5hmC fraction"
     value_kind: proportion
     tier: SPECULATIVE
     reference: {kind: none}
@@ -2689,8 +2689,8 @@ entries:
     citations: []
 
   - algorithm_id: epi-clock
-    metric_id: cg25809905_5mc_fraction
-    label: "cg25809905 5mC fraction"
+    metric_id: cg25809905_modified_fraction
+    label: "cg25809905 5mC+5hmC fraction"
     value_kind: proportion
     tier: SPECULATIVE
     reference: {kind: none}
@@ -2700,8 +2700,8 @@ entries:
     citations: []
 
   - algorithm_id: epi-clock
-    metric_id: cg17861230_5mc_fraction
-    label: "cg17861230 5mC fraction"
+    metric_id: cg17861230_modified_fraction
+    label: "cg17861230 5mC+5hmC fraction"
     value_kind: proportion
     tier: SPECULATIVE
     reference: {kind: none}

@@ -39,8 +39,13 @@ Register with `traceback lab asset register-clock-map --file MAP.json --sha256
 HEX_SHA256 --root ROOT`, then inspect with `traceback lab asset
 inspect-clock-map --root ROOT`. Registration is immutable within a Lab root.
 
-The adapter requires 5 million eligible reads, an MM-tagged methylation
-stream, hg38, and at least five eligible C+m calls at **each** CpG. The
+The array model's ordinary bisulfite beta value cannot separate 5mC from
+5hmC. To approximate that input, each ONT CpG fraction counts an argmax 5mC
+or 5hmC state as modified and an argmax canonical C state as unmodified;
+rows with either modification channel are eligible. This is a categorical
+ONT-to-array transfer, not a calibrated equivalence. The adapter requires
+5 million eligible reads, an MM-tagged methylation stream, hg38, and at
+least five eligible C+m or C+h calls at **each** CpG. The
 five-call rule is an engineering completeness gate, not a published or clinical
 performance threshold. If any site misses the gate, the age metric is null;
 the adapter does not impute. Site fractions and counts remain visible. Even a
@@ -48,4 +53,5 @@ numerical output needs matched-platform validation before biological use.
 
 Sources: [Weidner et al. 2014](https://doi.org/10.1186/gb-2014-15-2-r24),
 [methylclock package](https://github.com/isglobal-brge/methylclock),
-[methylclockData record](https://zenodo.org/records/22069904).
+[methylclockData record](https://zenodo.org/records/22069904),
+[Illumina methylation methods guide](https://emea.illumina.com/content/dam/illumina-marketing/documents/products/other/field_guide_methylation.pdf).

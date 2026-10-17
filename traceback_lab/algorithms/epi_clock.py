@@ -17,7 +17,7 @@ from ..epi_clock_model import (
     COEFFICIENTS_SHA256, WEIDNER_INTERCEPT, WEIDNER_WEIGHTS,
     ClockModelError, inspect_map,
 )
-from ..meth_calls import HAS_M, argmax_state
+from ..meth_calls import HAS_H, HAS_M, argmax_state
 from ..registry import AlgorithmOutput, InputContext, Ready, Requirements, Skip
 from ._base import load_summary, metric
 from ._meth import MethBase, load_calls
@@ -31,7 +31,7 @@ class EpiClock(MethBase):
     requires: Requirements = field(default_factory=lambda: Requirements(mm_tags=True, min_eligible_reads=5_000_000))
     parameters: dict[str, Any] = field(default_factory=lambda: {
         "model": "Weidner-3", "coefficient_asset_sha256": COEFFICIENTS_SHA256,
-        "call": "argmax", "min_calls_per_site": MIN_SITE_CALLS,
+        "call": "argmax_5mc_plus_5hmc", "min_calls_per_site": MIN_SITE_CALLS,
     })
 
     def asset_sha256s(self, root: Path) -> list[str]:
@@ -78,21 +78,22 @@ class EpiClock(MethBase):
         calls, mask = load_calls(ctx)
         summary, _ = load_summary(ctx)
         counts = np.zeros(3, dtype=np.int64)
-        methylated = np.zeros(3, dtype=np.int64)
+        modified = np.zeros(3, dtype=np.int64)
         positions = [(summary.contigs.index(chrom), pos0) for _, chrom, pos0 in model.sites]
         for chunk in calls.chunks(mask):
             for index, (contig, pos0) in enumerate(positions):
-                rows = chunk[(chunk["contig"] == contig) & (chunk["ref_pos0"] == pos0) & ((chunk["channels"] & HAS_M) != 0)]
+                rows = chunk[(chunk["contig"] == contig) & (chunk["ref_pos0"] == pos0)
+                             & ((chunk["channels"] & (HAS_M | HAS_H)) != 0)]
                 counts[index] += rows.size
-                methylated[index] += (argmax_state(rows) == 1).sum()
-        fractions = [float(methylated[i] / counts[i]) if counts[i] >= MIN_SITE_CALLS else None for i in range(3)]
+                modified[index] += (argmax_state(rows) != 0).sum()
+        fractions = [float(modified[i] / counts[i]) if counts[i] >= MIN_SITE_CALLS else None for i in range(3)]
         age = (WEIDNER_INTERCEPT + sum(weight * fraction for weight, fraction in zip(WEIDNER_WEIGHTS, fractions))) if all(fraction is not None for fraction in fractions) else None
         # A registration changed after planning must never produce a result under an older identity.
         if inspect_map(LabStore(ctx.root)).sha256 != model.sha256:
             raise RuntimeError("Weidner coordinate map changed during execution")
         return AlgorithmOutput(metrics=[
             metric("epigenetic_age_years", age, unit="years", n=int(counts.min())),
-            *[metric(f"{site}_5mc_fraction", fraction, unit="fraction", n=int(counts[i]))
+            *[metric(f"{site}_modified_fraction", fraction, unit="fraction", n=int(counts[i]))
               for i, ((site, _, _), fraction) in enumerate(zip(model.sites, fractions))],
         ])
 

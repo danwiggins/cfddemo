@@ -16,7 +16,7 @@ import pytest
 from traceback_lab.algorithms import epi_clock
 from traceback_lab.algorithms.meth_calls import METH_CALLS
 from traceback_lab.epi_clock_model import ClockModelError, WEIDNER_SITES, _parse, inspect_map, register_map
-from traceback_lab.meth_calls import DTYPE, HAS_M
+from traceback_lab.meth_calls import DTYPE, HAS_H, HAS_M
 from traceback_lab.registry import InputContext
 from traceback_lab.registry import Ready, Skip, context_to_json
 from traceback_lab.store import LabStore
@@ -78,6 +78,14 @@ def test_clock_requires_all_three_sites_and_uses_published_coefficients(monkeypa
     metrics = {item["metric_id"]: item for item in output.metrics}
     assert metrics["epigenetic_age_years"]["value"] == pytest.approx(38 - 26.4 + 164.7)
     assert metrics["epigenetic_age_years"]["n"] == 5
+    rows["channels"][5:7] = HAS_H
+    rows["p_h"][5:7] = 255
+    rows["p_canonical"][5:7] = 0
+    output = epi_clock.EPI_CLOCK.run(ctx, tmp_path)
+    metrics = {item["metric_id"]: item for item in output.metrics}
+    assert metrics["cg25809905_modified_fraction"]["value"] == pytest.approx(0.4)
+    assert metrics["cg25809905_modified_fraction"]["n"] == 5
+    assert metrics["epigenetic_age_years"]["value"] == pytest.approx(38 - 26.4 - 23.7 * 0.4 + 164.7)
     rows = rows[:-1]
     output = epi_clock.EPI_CLOCK.run(ctx, tmp_path)
     assert output.metrics[0]["value"] is None
