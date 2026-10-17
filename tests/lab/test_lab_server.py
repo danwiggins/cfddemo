@@ -641,7 +641,7 @@ def test_headless_page_renders_a_chart_with_zero_csp_violations(server, tmp_path
          server.issue_link() + f"&route=/sample/{id12}/trust-qc"], tmp_path / "profile",
         ok=lambda page: 'data-ready="1"' in page and 'class="echart"' in page and 'data-rendered="1"' in page
             and "step_end read-summary status=ok" in page,
-        action="(() => { const link = [...document.querySelectorAll('#main a')].find(a => a.textContent === 'Run log line →'); if (!link) return false; link.click(); return true; })()",
+        action="(() => { const button = [...document.querySelectorAll('#main button')].find(a => a.textContent === 'Run log line →'); if (!button) return false; button.click(); return true; })()",
     )
     assert 'data-ready="1"' in dom, dom[:500]
     assert 'data-csp-violations="0"' in dom

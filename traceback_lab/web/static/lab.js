@@ -315,8 +315,7 @@
         if (logLine.isConnected) logLine.replaceChildren(message);
         else if (state.route.name === "lens" && state.sample && state.sample.id12 === sample.id12) render();
       };
-      const logLink = canPin ? h("a", { href: `#/sample/${sample.id12}/trust-qc`, onclick: async (event) => {
-        event.preventDefault();
+      const logLink = canPin ? h("button", { type: "button", class: "control", onclick: async () => {
         if (state.lastStatus && state.generationAtLoad !== null && state.lastStatus.generation > state.generationAtLoad) {
           showLogLine("Results changed on disk; reload before viewing this run log line.");
           return;
