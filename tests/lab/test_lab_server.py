@@ -416,8 +416,9 @@ def _read_debug_port(path: Path) -> str | None:
     return lines[0]
 
 
-def _dom_cdp(argv: list[str], profile: Path, *, ok, timeout: float = 90, action: str | None = None) -> str:
-    """Wait for one Chrome page's caller-defined DOM state through DevTools."""
+def _dom_cdp(argv: list[str], profile: Path, *, ok, timeout: float = 90,
+             action: str | None = None, interact=None) -> str:
+    """Wait for one Chrome page, optionally exercising it through DevTools."""
 
     deadline = time.monotonic() + timeout
     events: deque[str] = deque(maxlen=8)
@@ -502,6 +503,9 @@ def _dom_cdp(argv: list[str], profile: Path, *, ok, timeout: float = 90, action:
                 }
 
             _wait_for_dom(read_state, timeout=max(0, deadline - time.monotonic()))
+            if interact is not None:
+                interact(command, evaluate)
+                dom = evaluate("document.documentElement?.outerHTML ?? ''")
         except Exception as exc:
             failure = exc
             if connection is not None:
@@ -638,7 +642,7 @@ def test_headless_page_renders_a_chart_with_zero_csp_violations(server, tmp_path
          server.issue_link() + f"&route=/sample/{id12}/trust-qc"], tmp_path / "profile",
         ok=lambda page: 'data-ready="1"' in page and 'class="echart"' in page and 'data-rendered="1"' in page
             and "step_end read-summary status=ok" in page,
-        action="(() => { const link = [...document.querySelectorAll('#main a')].find(a => a.textContent === 'Run log line →'); if (!link) return false; link.click(); return true; })()",
+        action="(() => { const button = [...document.querySelectorAll('#main button')].find(a => a.textContent === 'Run log line →'); if (!button) return false; button.click(); return true; })()",
     )
     assert 'data-ready="1"' in dom, dom[:500]
     assert 'data-csp-violations="0"' in dom
@@ -799,7 +803,41 @@ def test_torn_first_event_without_active_writer_is_unavailable(tmp_path) -> None
     assert status["run_log_unavailable"] == {"run_id": run_id, "reason": "malformed_or_empty"}
 
 
+def test_torn_final_log_append_preserves_interrupted_status(tmp_path) -> None:
+    store = LabStore(tmp_path)
+    run_id = "r-20261015-0101-abcd"
+    with store.writer("run", run_id, step="bam-qc"):
+        log = store.run_log(run_id)
+        log.append("run_start", command="run")
+        log.append("sample", source_id="a" * 64, input_id="b" * 64)
+        log.append("step_start", step="bam-qc")
+    with log.path.open("ab") as stream:
+        stream.write(b'{"event":"step_end"')
+    status = api_module.LabApi(store).status()
+    assert status["run_log_unavailable"] is None
+    assert status["interrupted"] == {"run_id": run_id, "step": "bam-qc",
+                                     "source_id": "a" * 64, "input_id": "b" * 64}
+
+
+def test_run_log_reader_only_ignores_an_unterminated_final_fragment(tmp_path) -> None:
+    store = LabStore(tmp_path)
+    store.ensure()
+    run_id = "r-20261015-0101-abcd"
+    log = store.run_log(run_id)
+    log.append("run_start", command="run")
+    prefix = log.path.read_bytes()
+    log.path.write_bytes(prefix + b'{"event":')
+    assert api_module._run_events(store, run_id)[1] is None
+    log.path.write_bytes(prefix + b'{"event":\n')
+    assert api_module._run_events(store, run_id) == ([], "malformed_or_empty")
+    log.path.write_bytes(prefix + b'{"event":\n' + prefix)
+    assert api_module._run_events(store, run_id) == ([], "malformed_or_empty")
+    log.path.write_bytes(prefix + b'{"event":"step_end","run_id":"' + b"e" * 25 + b'"}')
+    assert api_module._run_events(store, run_id) == ([], "malformed_or_empty")
+
+
 @pytest.mark.parametrize(("damage", "reason"), (
+    ("missing", "missing"),
     ("oversized", "unreadable_or_over_1mib"),
     ("too_many_lines", "over_4096_lines"),
     ("malformed", "malformed_or_empty"),
@@ -816,7 +854,9 @@ def test_status_reports_unavailable_latest_log_without_claiming_interruption(tmp
         log.append("run_start", command=command)
         log.append("step_start", step="bam-qc")
     path = store.runs_dir / f"{run_id}.jsonl"
-    if damage == "oversized":
+    if damage == "missing":
+        path.unlink()
+    elif damage == "oversized":
         path.write_bytes(b"x" * (1024 * 1024 + 1))
     elif damage == "too_many_lines":
         path.write_bytes(b"{}\n" * 4097)
@@ -941,7 +981,7 @@ def test_trust_qc_run_note_is_scoped_without_replacing_result_status(tmp_path, k
             "library_health": {"no_library_entry": 0, "unverified_citations": 0,
                                "version": "fixture", "error": None},
         }
-    marker = {"run_id": "r-20261015-0101-abcd", "step": "bam-qc",
+    marker = {"run_id": "r-20261015-0101-abcd", "command": "run", "step": "bam-qc",
               "source_id": source_a, "input_id": input_a}
     if kind == "active-pending":
         marker["step"] = "read-summary"
@@ -952,12 +992,12 @@ def test_trust_qc_run_note_is_scoped_without_replacing_result_status(tmp_path, k
         shown_marker["step"] = None
     prior_run_id = "r-20261015-0101-eeee"
     if kind.startswith("active-unlogged"):
-        shown_marker = {"run_id": "r-20261015-0101-dddd", "step": "cohort add"}
+        shown_marker = {"run_id": "r-20261015-0101-dddd", "command": "cohort add", "step": "cohort add"}
     with RunningLabServer(LabStore(tmp_path / "root")) as running:
         running.app.api.status = lambda: {
             "generation": 1, "active": {**shown_marker, "started_utc": "2026-10-16T00:00:00Z"} if kind.startswith("active") else None,
             "interrupted": shown_marker if kind == "interrupted" else (
-                {"run_id": prior_run_id, "step": "read-summary"}
+                {"run_id": prior_run_id, "step": "read-summary", "source_id": source_a, "input_id": input_a}
                 if kind == "active-unlogged-prior-interrupted" else None),
             "run_log_unavailable": {"run_id": prior_run_id, "reason": "malformed_or_empty"}
             if kind == "active-unlogged-prior-badlog" else None,
@@ -983,11 +1023,15 @@ def test_trust_qc_run_note_is_scoped_without_replacing_result_status(tmp_path, k
     assert (note in run_table) == (selected == "a" and kind in ("active", "interrupted"))
     if kind == "active-before-sample":
         assert "step: starting" in dom and "step: null" not in dom
+    if kind.startswith("active-unlogged"):
+        assert "Lab cohort add is in progress" in dom
+        assert "A Lab run is in progress" not in dom
     if kind == "active-unlogged-prior-badlog":
         assert f"Run log for {prior_run_id} is unavailable (log malformed or empty)" in dom
         assert "Run log status unavailable" not in dom
     if kind == "active-unlogged-prior-interrupted":
         assert f"Earlier run ({prior_run_id}) stopped during read-summary" in dom
+        assert ("Earlier run interrupted during read-summary; no result was published for this step." in dom) == (selected == "a")
 
 
 @pytest.mark.skipif(_chrome() is None, reason="no Chrome/Chromium for the headless Trust/QC check")
@@ -1081,9 +1125,18 @@ def test_run_log_line_is_authenticated_matched_and_allowlisted(tmp_path, monkeyp
         assert payload == {"found": True, "run_id": run_id, "line": 3, "step": "sex-check",
                            "utc": payload["utc"], "status": "ok", "skip_reason": None,
                            "duration_s": 1.25}
+        pinned = f"{path}/{input_id}/{identity}/{attempt_id}"
+        assert json.loads(_get(running, pinned, cookie)[1])["run_id"] == run_id
+        assert _get(running, f"{path}/{'e' * 64}/{identity}/{attempt_id}", cookie)[0].status == 404
+        assert _get(running, f"{path}/{input_id}/{'d' * 64}/{attempt_id}", cookie)[0].status == 404
+        assert _get(running, f"{path}/{input_id}/{identity}/a-20261015T010100000000-deadbeef", cookie)[0].status == 404
+        with log.path.open("ab") as stream:
+            stream.write(b'{"event":"step_end"')
+        assert json.loads(_get(running, path, cookie)[1])["line"] == 3
         assert "/secret/path" not in data.decode()
         sample.full.results["sex-check"] = _selected_sex_result(source_id, input_id, "d" * 64)
         assert _get(running, path, cookie)[0].status == 404
+        assert _get(running, pinned, cookie)[0].status == 404
         sample.full.results["sex-check"] = result
         sample.full.input_id = "e" * 64
         assert _get(running, path, cookie)[0].status == 404
@@ -1102,6 +1155,7 @@ def test_run_log_line_uses_only_the_selected_attempt(tmp_path, monkeypatch) -> N
                attempt_id=first, status="ok")
     second = store.publish_result(result, input_id=input_id)
     new = store.run_log("r-20261015-0101-0001")
+    new.append("run_start", command="run")
     new.append("sample", source_id=source_id, input_id=input_id)
     new.append("step_end", step="sex-check", parameters_sha256=identity, input_id=input_id,
                attempt_id=second, status="ok")
@@ -1112,7 +1166,10 @@ def test_run_log_line_uses_only_the_selected_attempt(tmp_path, monkeypatch) -> N
     monkeypatch.setattr(api_module.views, "load_sample", lambda _store, _source: sample)
     api = api_module.LabApi(store)
     assert api.run_log_line(source_id[:12], "sex-check")["run_id"] == new.run_id
+    assert api.run_log_line(source_id[:12], "sex-check", input_id, identity, first) == {"found": False}
+    assert api.run_log_line(source_id[:12], "sex-check", input_id, identity, second)["run_id"] == new.run_id
     latest = store.run_log("r-20261015-0101-0000")
+    latest.append("run_start", command="run")
     latest.append("sample", source_id=source_id, input_id=input_id)
     latest.append("step_end", step="sex-check", parameters_sha256=identity, input_id=input_id,
                   attempt_id=second, status="ok")
@@ -1121,6 +1178,7 @@ def test_run_log_line_uses_only_the_selected_attempt(tmp_path, monkeypatch) -> N
     latest.path.unlink()
     new.path.unlink()
     legacy = store.run_log("r-20261015-0101-bbbb")
+    legacy.append("run_start", command="run")
     legacy.append("sample", source_id=source_id, input_id=input_id)
     legacy.append("step_end", step="sex-check", parameters_sha256=identity, input_id=input_id, status="ok")
     assert api.run_log_line(source_id[:12], "sex-check") == {"found": False}

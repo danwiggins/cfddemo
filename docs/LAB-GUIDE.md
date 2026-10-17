@@ -416,7 +416,8 @@ serve as a history of every interrupted run.
   immutable result attempt; legacy logs without that ID, older runs, or cached
   steps may have no matching line. A latest-run in-progress or interrupted note
   appears only when that run names the same source and full input; the selected
-  result status remains visible beside it. If the step published no result yet,
+  result status remains visible beside it. Unreadable or ambiguous selections
+  appear as separate run-table rows without a fabricated duration. If the step published no result yet,
   a sample-scoped run notice appears instead of a result row. If the latest
   analysis or simulation run log is unreadable, unsafe, malformed, or outside
   the 1 MiB / 4,096-line limit, the status banner reports an unavailable

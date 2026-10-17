@@ -1,0 +1,193 @@
+"""Malformed selected results remain visible as faults without exposing stale results."""
+
+from __future__ import annotations
+
+import json
+
+import pytest
+
+from tests.lab.test_landing import _dom, needs_chrome
+from traceback_lab.envelope import ResultEnvelope, provenance
+from traceback_lab.store import LabStore
+from traceback_lab.web.api import LabApi
+from traceback_lab.web.server import RunningLabServer
+
+
+SOURCE = "b" * 64
+INPUT = "c" * 64
+
+
+def _result(identity: str, value: int, input_id: str = INPUT) -> ResultEnvelope:
+    return ResultEnvelope.model_validate({
+        "algorithm_id": "fragment-size", "algorithm_version": "1", "status": "ok",
+        "provenance": provenance(
+            tool="synthetic-fixture", parameters_sha256=identity,
+            source_id=SOURCE, input_id=input_id, reference_id="synthetic",
+            timestamp_utc="2026-10-16T00:00:00Z",
+        ),
+        "metrics": [{"metric_id": "mode_bp", "value": value}],
+    })
+
+
+def _malformed_store(tmp_path) -> LabStore:
+    store = LabStore(tmp_path)
+    store.ensure()
+    manifest = store.inputs_dir / INPUT / "manifest.json"
+    manifest.parent.mkdir(parents=True)
+    manifest.write_text('{"kind":"aligned"}')
+    store.sources_dir.mkdir(parents=True)
+    (store.sources_dir / f"{SOURCE}.json").write_text(json.dumps({
+        "source_id": SOURCE, "example": False, "excluded": [], "derived": [],
+        "inputs": [{"input_id": INPUT, "used_utc": "2026-10-16T00:00:00Z"}],
+    }))
+    store.publish_result(_result("a" * 64, 167), input_id=INPUT)
+    store.publish_result(_result("d" * 64, 168), input_id=INPUT)
+    directory = store.result_dir(INPUT, "fragment-size", "d" * 64)
+    attempt = json.loads((directory / "selected.json").read_bytes())["attempt_id"]
+    (directory / "attempts" / attempt / "result.json").write_bytes(b"{ malformed")
+    return store
+
+
+def _ambiguous_store(tmp_path) -> LabStore:
+    store = LabStore(tmp_path)
+    store.ensure()
+    manifest = store.inputs_dir / INPUT / "manifest.json"
+    manifest.parent.mkdir(parents=True)
+    manifest.write_text('{"kind":"aligned"}')
+    store.sources_dir.mkdir(parents=True)
+    (store.sources_dir / f"{SOURCE}.json").write_text(json.dumps({
+        "source_id": SOURCE, "example": False, "excluded": [], "derived": [],
+        "inputs": [{"input_id": INPUT, "used_utc": "2026-10-16T00:00:00Z"}],
+    }))
+    for identity, value in (("a" * 64, 167), ("d" * 64, 168)):
+        store.publish_result(_result(identity, value), input_id=INPUT)
+    for identity in ("a" * 64, "d" * 64):
+        selector = store.result_dir(INPUT, "fragment-size", identity) / "selected.json"
+        selection = json.loads(selector.read_bytes())
+        selection.pop("publication_order")
+        selector.write_text(json.dumps(selection))
+    return store
+
+
+def test_malformed_newest_result_is_disclosed_without_stale_fallback(tmp_path) -> None:
+    store = _malformed_store(tmp_path)
+
+    api = LabApi(store)
+    listing = api.samples()["samples"]
+    assert len(listing) == 1 and listing[0]["unreadable_results"] == ["fragment-size"]
+    id12 = listing[0]["id12"]
+    sample = api.sample(id12)
+    assert sample["found"] and sample["unreadable_results"] == ["fragment-size"]
+    assert all(row["algorithm_id"] != "fragment-size" for row in sample["algorithms"])
+    assert next(row for row in sample["catalog"] if row["algorithm_id"] == "fragment-size")["status"] == "unreadable"
+    assert sample["defended"]["rows"] == []
+
+
+def test_ambiguous_legacy_results_are_disclosed_without_guessing(tmp_path) -> None:
+    store = _ambiguous_store(tmp_path)
+    api = LabApi(store)
+    listing = api.samples()["samples"]
+    assert len(listing) == 1 and listing[0]["ambiguous_results"] == ["fragment-size"]
+    sample = api.sample(listing[0]["id12"])
+    assert sample["ambiguous_results"] == ["fragment-size"]
+    assert all(row["algorithm_id"] != "fragment-size" for row in sample["algorithms"])
+    assert next(row for row in sample["catalog"] if row["algorithm_id"] == "fragment-size")["status"] == "ambiguous"
+    assert sample["defended"]["rows"] == []
+
+
+def test_unreadable_derived_result_is_named_in_stability(tmp_path) -> None:
+    store = LabStore(tmp_path)
+    store.ensure()
+    derived_input = "d" * 64
+    manifest = store.inputs_dir / INPUT / "manifest.json"
+    manifest.parent.mkdir(parents=True)
+    manifest.write_text('{"kind":"aligned"}')
+    store.sources_dir.mkdir(parents=True)
+    (store.sources_dir / f"{SOURCE}.json").write_text(json.dumps({
+        "source_id": SOURCE, "example": False, "excluded": [],
+        "inputs": [{"input_id": INPUT, "used_utc": "2026-10-16T00:00:00Z"}],
+        "derived": [{"input_id": derived_input, "parent_input_id": INPUT, "label": "0.5",
+                     "transform": "downsample", "parameters": {"fraction": 0.5}}],
+    }))
+    identity = "a" * 64
+    store.publish_result(_result(identity, 167), input_id=INPUT)
+    store.publish_result(_result(identity, 170, derived_input), input_id=derived_input)
+    selected = store.result_dir(derived_input, "fragment-size", identity)
+    attempt = json.loads((selected / "selected.json").read_bytes())["attempt_id"]
+    (selected / "attempts" / attempt / "result.json").write_bytes(b"{ malformed")
+
+    sample = LabApi(store).sample(SOURCE[:12])
+    panel = next(panel for panel in sample["stability"] if panel["algorithm_id"] == "fragment-size"
+                 and panel["metric_id"] == "mode_bp")
+    point = next(point for point in panel["points"] if point["fraction"] == 0.5)
+    assert point["state"] == "unavailable" and point["reason"] == "result unreadable"
+    row = next(row for row in sample["curve"]["rows"] if row["algorithm_id"] == "fragment-size")
+    assert row["cells"][0]["reason"] == "result unreadable"
+
+
+@needs_chrome
+def test_unreadable_derived_result_is_visible_on_stability_page(tmp_path) -> None:
+    # The API case above owns the malformed-store setup; this checks the
+    # renderer's explicit state copy with a lightweight synthetic response.
+    from tests.lab.test_acceptance_synthetic_routes import _sample, _server
+
+    sample = _sample()
+    sample["stability"][0]["points"] = [{"fraction": 0.5, "label": "0.5", "state": "unavailable",
+                                           "reason": "result unreadable", "value": None, "deviation": None,
+                                           "unit": "percent", "band": None}]
+    with _server(tmp_path, sample) as server:
+        dom = _dom(server, tmp_path / "browser", route=f"/sample/{sample['id12']}/stability")
+    assert "result unreadable" in dom
+
+
+@needs_chrome
+@pytest.mark.parametrize("route", ("home", "stability"))
+def test_failure_detail_stays_out_of_curve_and_stability_labels(route, tmp_path) -> None:
+    from tests.lab.test_acceptance_synthetic_routes import _sample, _server
+
+    sample = _sample()
+    sample["curve"]["rows"] = [{
+        "algorithm_id": "fragment-size", "metric_id": "mode_bp", "label": "Fragment mode",
+        "tier": "NEWER", "min_depth_x": None, "full_state": "failed",
+        "cells": [{"fraction": 1.0, "label": "full", "state": "failed",
+                   "reason": "PRIVATE_FAILURE_DETAIL", "depth_x": 1.0}],
+    }]
+    sample["stability"][0]["points"] = [{
+        "fraction": 0.5, "label": "0.5", "state": "failed",
+        "reason": "PRIVATE_FAILURE_DETAIL", "value": None, "deviation": None,
+        "unit": "percent", "band": None,
+    }]
+    path = "/" if route == "home" else f"/sample/{sample['id12']}/stability"
+    with _server(tmp_path, sample) as server:
+        dom = _dom(server, tmp_path / "browser", route=path)
+    assert "PRIVATE_FAILURE_DETAIL" not in dom
+    assert "failed" in dom
+
+
+@needs_chrome
+@pytest.mark.parametrize("route,copy_text", [
+    ("home", "result unreadable"),
+    ("findings", "fragment-size: result unreadable"),
+])
+def test_malformed_stored_result_is_visible_without_alignment(route, copy_text, tmp_path) -> None:
+    store = _malformed_store(tmp_path)
+    id12 = LabApi(store).samples()["samples"][0]["id12"]
+    path = None if route == "home" else f"/sample/{id12}/{route}"
+    with RunningLabServer(store) as server:
+        dom = _dom(server, tmp_path / "browser", route=path)
+    assert f"{copy_text} (sample {id12})" in dom
+
+
+@needs_chrome
+@pytest.mark.parametrize("route,copy_text", [
+    ("home", "result selection ambiguous"),
+    ("findings", "fragment-size: result selection ambiguous"),
+    ("evidence", "ambiguous"),
+])
+def test_ambiguous_legacy_result_is_visible_across_surfaces(route, copy_text, tmp_path) -> None:
+    store = _ambiguous_store(tmp_path)
+    id12 = LabApi(store).samples()["samples"][0]["id12"]
+    path = None if route == "home" else f"/sample/{id12}/{route}"
+    with RunningLabServer(store) as server:
+        dom = _dom(server, tmp_path / "browser", route=path)
+    assert copy_text in dom
