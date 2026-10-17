@@ -145,7 +145,9 @@ def _valid_source_label(label: object, *, identifier: bool = False) -> bool:
         return True
     try:
         parsed = urlsplit(label)
-        return parsed.scheme == "https" and bool(parsed.hostname) and not parsed.username and not parsed.password
+        return (parsed.scheme == "https" and bool(parsed.hostname)
+                and not parsed.username and not parsed.password
+                and not parsed.query and not parsed.fragment)
     except ValueError:
         return False
 

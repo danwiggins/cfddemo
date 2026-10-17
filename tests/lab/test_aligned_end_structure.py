@@ -365,6 +365,17 @@ def test_source_identifiers_accept_doi_and_https_without_local_paths(tmp_path: P
             centers_source="/home/operator/peaks.bed", preferred_source="doi:10.1073/pnas.1804134115",
             terms="unknown", license_id=None,
         )
+    for identifier in (
+        "https://example.org/peaks.bed?X-Amz-Signature=secret",
+        "https://example.org/peaks.bed#access-token",
+    ):
+        with pytest.raises(EndCatalogueError, match="source labels"):
+            register_end_catalogues(
+                root, centers=centers, preferred=preferred,
+                source_label="synthetic hg38 end catalogues",
+                centers_source=identifier, preferred_source="doi:10.1073/pnas.1804134115",
+                terms="unknown", license_id=None,
+            )
 
 
 def test_raw_ocf_proxy_has_no_unvalidated_stability_verdict() -> None:
