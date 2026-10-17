@@ -339,7 +339,7 @@
     });
     for (const id of sample.unreadable_results || []) {
       runRows.push(h("tr", {}, h("th", { scope: "row" }, id), h("td", { class: "problem" }, "result unreadable"),
-        h("td", {}, "—"), h("td", {}, "A stored result could not be read; selection cannot be determined.")));
+        h("td", {}, "—"), h("td", {}, "—"), h("td", {}, "A stored result could not be read; selection cannot be determined.")));
     }
     for (const id of sample.ambiguous_results || []) {
       runRows.push(h("tr", {}, h("th", { scope: "row" }, id), h("td", { class: "problem" }, "result selection ambiguous"),
