@@ -2649,7 +2649,7 @@ entries:
     license_ids: [method-patents]
     flags: [LEGAL]
     headline: false
-    stability: {kind: proportion}
+    stability: {kind: unvalidated}
     citations: ["doi:10.1073/pnas.1804134115"]
     citation_checked: {by: "Lab S5 evidence audit", date: "2026-10-17", note: "Sun 2018 PNAS (PMID 29760053) mined size-tagged preferred ends from approximately 470x pooled paired-end plasma sequencing. This Lab metric only counts exact matches to an operator-pinned catalogue; it does not discover or validate tissue-specific sites."}
 

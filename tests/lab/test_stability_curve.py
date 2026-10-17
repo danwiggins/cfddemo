@@ -8,7 +8,7 @@ from types import SimpleNamespace
 import pytest
 
 from traceback_lab import views
-from traceback_lab.interpretation.engine import load_library
+from traceback_lab.interpretation.engine import NOT_INTERPRETABLE_REASONS, load_library
 from traceback_lab.stability import Side, band_at, deviation, stable
 from traceback_lab.store import LabStore
 from traceback_runner import cli as signed_cli
@@ -64,6 +64,7 @@ def test_downsample_without_a_stability_rule_has_no_verdict() -> None:
     assert views.cell_state(half, full, "unknown-algorithm", "unlisted_metric", load_library()) == {
         "state": "not_interpretable", "reason": "no_stability_verdict", "value": 3,
     }
+    assert "no_stability_verdict" in NOT_INTERPRETABLE_REASONS
 
 
 def test_deviation_and_band_units() -> None:

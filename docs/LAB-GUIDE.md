@@ -287,6 +287,9 @@ windows or when either side of the center lacks window observations.
 The proxy does not impose the short-fragment length constraint of the
 published cfDNA method. Its artifact reports aggregate aligned-span counts
 in five length bins so that this difference can be assessed for each run.
+The artifact also records the strongest left-side D and right-side U peak
+offsets as clipping diagnostics; these are descriptive and do not validate
+the score's biological origin.
 Downsample and split results use the same selected read-summary rows as other
 Lab measurements. The 10x gate is recalculated from those selected rows;
 CNA-derived inputs remain unsupported. The reported 10x minimum is an input

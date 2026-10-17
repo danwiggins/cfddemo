@@ -115,6 +115,8 @@ def test_positive_direction_and_mirrored_window_boundaries(tmp_path: Path) -> No
     assert metric["value"] == 2 and metric["n"] == 2
     artifact = json.loads(output.artifacts["aligned_end_structure.json"])
     assert artifact["ocf_like_left"] == artifact["ocf_like_right"] == 1
+    assert artifact["left_d_peak_offset_bp"] == -60
+    assert artifact["right_u_peak_offset_bp"] == 60
 
     mirrored = _relative_counts(np.asarray([430, 450, 550, 570]), np.asarray([500]))
     assert mirrored[30] == mirrored[50] == mirrored[150] == mirrored[170] == 1

@@ -201,6 +201,8 @@ class AlignedEndStructure(Base):
         right_ends = int(u_counts[150:171].sum() + d_counts[150:171].sum())
         measurement_ends = left_ends + right_ends
         ocf_like = left + right if valid_centers and left_ends and right_ends else None
+        left_d_peak = int(np.argmax(d_counts[:RADIUS + 1])) - RADIUS if np.any(d_counts[:RADIUS + 1]) else None
+        right_u_peak = int(np.argmax(u_counts[RADIUS:])) if np.any(u_counts[RADIUS:]) else None
         ends_total = 2 * valid_molecules
         artifact = {
             "schema": "traceback.lab.aligned-end-structure.v1",
@@ -221,6 +223,8 @@ class AlignedEndStructure(Base):
             "ocf_like_left": left, "ocf_like_right": right,
             "ocf_like_left_ends": left_ends, "ocf_like_right_ends": right_ends,
             "ocf_like_measurement_ends": measurement_ends,
+            "left_d_peak_offset_bp": left_d_peak,
+            "right_u_peak_offset_bp": right_u_peak,
             "catalogue_centers": catalogues.center_count, "eligible_centers": valid_centers,
             "catalogue_preferred_sites": catalogues.preferred_count,
             "eligible_preferred_sites": valid_preferred_sites,
