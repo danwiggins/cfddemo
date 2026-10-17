@@ -369,7 +369,8 @@ def stability_panels(sample: SampleView, library: Library | None = None) -> list
                                          other_half_recorded=bool(halves), half_label=half)
                 for half in ("A", "B")
             }
-            if any(half not in ("A", "B") for half in halves):
+            unknown_split_label = any(half not in ("A", "B") for half in halves)
+            if unknown_split_label:
                 for half, status in split_status.items():
                     if half not in halves:
                         status["reason"] += "; an unrecognized split label is present"
@@ -416,6 +417,8 @@ def stability_panels(sample: SampleView, library: Library | None = None) -> list
                     "points": points,
                     "split": split,
                     "split_status": split_status,
+                    "split_warning": "an unrecognized split label is present"
+                    if unknown_split_label and all(half in halves for half in ("A", "B")) else None,
                     "verdict": verdict_text,
                 }
             )

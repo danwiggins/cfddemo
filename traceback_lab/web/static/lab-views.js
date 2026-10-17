@@ -20,12 +20,12 @@
     ok_usable: ["●", "usable"],
     ok_unstable: ["◐", "unstable"],
     not_interpretable: ["▨", "not interpretable"],
-    unavailable: ["✕", "unavailable"],
+    unavailable: ["?", "unavailable"],
     skipped: ["○", "skipped"],
     failed: ["✕", "failed"],
   };
   const cellText = (state, reason, fallback = "no result") => {
-    const text = (CELL[state] || ["", fallback])[1];
+    const text = (CELL[state] || ["", state || fallback])[1];
     return reason ? `${text} (${reason})` : text;
   };
   const FLAG_TEXT = {
@@ -588,7 +588,8 @@
         if (part.state === "ok") return `ok (${fmt(part.value)})`;
         return `${part.state.replace(/_/g, " ")}${part.reason ? ` (${part.reason.replace(/_/g, " ")})` : ""}`;
       };
-      const splitSummary = `split A ${halfStatus("A")}; split B ${halfStatus("B")}`;
+      const splitSummary = `split A ${halfStatus("A")}; split B ${halfStatus("B")}` +
+        (panel.split_warning ? `; ${panel.split_warning}` : "");
       const hasSplitHalf = Boolean(panel.split_status) &&
         (panel.split_status.A?.state !== "not_recorded" || panel.split_status.B?.state !== "not_recorded");
       const splitVerdict = panel.split?.stable === true ? "stable" : panel.split?.stable === false ? "unstable" : "no split-half stability verdict";
@@ -602,7 +603,8 @@
           splitVerdict === "no split-half stability verdict" ? "No split-half stability verdict." : `Split-half verdict: ${splitVerdict}.`) : ""));
       for (const p of panel.points) tableRows.push([panel.label, `${p.fraction * 100}%`, p.value, p.deviation,
         p.reason ? `${p.state || "—"}: ${p.reason.replace(/_/g, " ")}` : p.state || "—"]);
-      if (panel.split) tableRows.push([panel.label, "split A / B", `${fmt(panel.split.a)} / ${fmt(panel.split.b)}`, `${(panel.split.relative_abs_diff * 100).toFixed(1)}% |A−B|`, splitVerdict]);
+      if (panel.split) tableRows.push([panel.label, "split A / B", `${fmt(panel.split.a)} / ${fmt(panel.split.b)}`, `${(panel.split.relative_abs_diff * 100).toFixed(1)}% |A−B|`,
+        panel.split_warning ? `${splitVerdict}; ${panel.split_warning}` : splitVerdict]);
       else if (hasSplitHalf) {
         const halfDeviation = (half) => {
           const value = panel.split_status?.[half]?.deviation;

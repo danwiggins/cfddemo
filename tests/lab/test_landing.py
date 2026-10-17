@@ -220,6 +220,7 @@ def test_stability_names_both_halves_without_a_numeric_verdict(page_root, tmp_pa
             half: {"state": "ok", "reason": None, "value": value, "deviation": None}
             for half, value in (("A", 100), ("B", 105))
         }
+        panels[2]["split_warning"] = "an unrecognized split label is present"
         for point in panels[2]["points"]:
             point.update({"state": "not_interpretable", "unit": "none", "deviation": None, "band": None})
         return panels
@@ -232,6 +233,7 @@ def test_stability_names_both_halves_without_a_numeric_verdict(page_root, tmp_pa
     assert "split A unavailable (selected result unavailable); split B not interpretable (metric value unavailable)" in dom
     assert "No split-half stability verdict." in dom
     assert "100 / 105" in dom and "4.9% |A−B|" in dom
+    assert "no split-half stability verdict; an unrecognized split label is present" in dom
     assert "No validated stability deviation scale" in dom
 
 
