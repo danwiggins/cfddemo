@@ -481,6 +481,8 @@ def test_aligner_version_change_warns_and_realigns(lab_world, capsys, monkeypatc
     argv = ("run", str(lab_world["chunks"]), "--root", str(root), "--mmi", str(shared_mmi))
     code, first = _json(capsys, *argv)
     assert code == 0
+    first_input = first["data"]["sample"]["input_id"]
+    before_inputs = {p.name for p in LabStore(root).inputs_dir.iterdir() if p.is_dir()}
     fakes = lab_world["tmp"] / "fakes"
     _fake_tool(fakes, "minimap2", f'if [ "$1" = "--version" ]; then echo "2.99-r9999"; exit 0; fi\nexec {MINIMAP2} "$@"\n')
     _path_with(monkeypatch, fakes)
@@ -490,9 +492,13 @@ def test_aligner_version_change_warns_and_realigns(lab_world, capsys, monkeypatc
         assert any(line.startswith(label) for line in human.splitlines()), label
     assert "CODE       TBX-LAB-019" in human
     assert "2.99-r9999" in human
-    assert human.index("WARN TBX-LAB-019") < human.index("align                    done")
-    first_input = first["data"]["sample"]["input_id"]
-    second_input = next(p.name for p in LabStore(root).inputs_dir.iterdir() if p.is_dir() and p.name != first_input)
+    progress_lines = human.splitlines()
+    warning_line = next(i for i, line in enumerate(progress_lines) if line.startswith("WARN TBX-LAB-019"))
+    aligned_line = next(i for i, line in enumerate(progress_lines) if line.startswith("align") and "done" in line)
+    assert warning_line < aligned_line
+    new_inputs = {p.name for p in LabStore(root).inputs_dir.iterdir() if p.is_dir()} - before_inputs
+    assert len(new_inputs) == 1
+    (second_input,) = new_inputs
     _fake_tool(fakes, "minimap2", f'if [ "$1" = "--version" ]; then echo "2.98-r9998"; exit 0; fi\nexec {MINIMAP2} "$@"\n')
     code, second = _json(capsys, *argv)
     assert code == 0

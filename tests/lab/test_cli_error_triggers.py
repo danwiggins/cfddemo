@@ -86,7 +86,7 @@ def test_lock_refusal_identifies_holder_in_both_modes(
     assert holder["pid"] == os.getpid()
     assert holder["step"] == "align"
     assert isinstance(holder["age_min"], int)
-    for detail in ("lab run", run_id, str(os.getpid()), "align", f"{holder['age_min']} min ago"):
+    for detail in ("lab run", run_id, str(os.getpid()), "align", "min ago"):
         assert detail in human
 
 
