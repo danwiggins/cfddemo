@@ -1,9 +1,9 @@
 # Pinned-anchor longitudinal compatibility
 
 `evidence_inspector.longitudinal_compatibility` is the additive D02 boundary
-used by future E12 views. It does not change E05's pairwise API, execute a
-bridge, run reanalysis, create cohort membership, or authorize provider
-identity.
+used by the D08 workspace and synthetic E12 browser views. It does not change
+E05's pairwise API, execute a bridge, run reanalysis, create cohort membership,
+or authorize provider identity.
 
 ## Complete identity
 
