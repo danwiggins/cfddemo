@@ -87,7 +87,7 @@ entries:
 
   - algorithm_id: bam-qc
     metric_id: supplementary_fraction
-    label: "Supplementary alignments per mapped read (chimera proxy)"
+    label: "Supplementary alignments per mapped read"
     value_kind: proportion
     tier: NEWER
     origin_tier: NEWER
@@ -96,11 +96,11 @@ entries:
     reference: {kind: none}
     performance: null
     performance_missing_reason: "none published"
-    meaning_high: "Ligation chimeras: two cfDNA molecules joined during library prep, which inflates apparent fragment lengths."
-    meaning_low: "Few chimeras."
-    confounders: ["library prep chemistry", "input mass"]
+    meaning_high: "More supplementary alignments; on ONT this can indicate ligation chimeras, while short-read split alignments have other causes."
+    meaning_low: "Fewer supplementary alignments; this alone does not establish a low chimera rate."
+    confounders: ["sequencing platform and alignment method", "library prep chemistry", "input mass"]
     next_steps:
-      analytical: ["Compare across kit batches", "Check the long-fragment tail"]
+      analytical: ["Compare only within a matched platform and alignment method", "On ONT, check the long-fragment tail"]
       clinical_setting: null
     license_ids: []
     flags: []
@@ -120,11 +120,11 @@ entries:
     reference: {kind: none}
     performance: null
     performance_missing_reason: "QC measure, not a diagnostic"
-    meaning_high: "Accurate basecalls."
-    meaning_low: "Noisy basecalls: methylation calls and end motifs are less reliable."
-    confounders: ["basecaller model", "flow-cell wear"]
+    meaning_high: "Higher reported base quality within the same sequencing platform and quality pipeline."
+    meaning_low: "Lower reported base quality within the same sequencing platform and quality pipeline; ONT methylation calls and end motifs may be less reliable."
+    confounders: ["sequencing platform and quality-score calibration", "basecaller model", "flow-cell wear"]
     next_steps:
-      analytical: ["Confirm the basecall model in the @RG line"]
+      analytical: ["Compare within one platform and quality pipeline", "For ONT, confirm the basecall model"]
       clinical_setting: null
     license_ids: []
     flags: []
@@ -170,7 +170,7 @@ entries:
     performance_missing_reason: "QC measure, not a diagnostic"
     meaning_high: "GC-rich regions over-represented: copy-number calls need GC correction."
     meaning_low: "GC-rich regions under-represented."
-    confounders: ["library amplification", "extraction kit"]
+    confounders: ["library amplification, especially for short-read libraries", "extraction kit", "sequencing platform"]
     next_steps:
       analytical: ["Confirm copy-number GC correction is applied"]
       clinical_setting: null
@@ -208,7 +208,7 @@ entries:
   # ----------------------------------------------------------------- depth
   - algorithm_id: depth
     metric_id: approx_depth_x
-    label: "Approximate depth (eligible reads)"
+    label: "Approximate aligned-base depth (eligible reads)"
     value_kind: positive
     tier: PROVEN
     origin_tier: PROVEN
@@ -216,10 +216,10 @@ entries:
     min_depth_x: null
     reference: {kind: none}
     performance: null
-    performance_missing_reason: "QC measure: sum of eligible spans / genome length"
-    meaning_high: "More algorithms clear their minimum depth."
-    meaning_low: "Most algorithms are skipped or not interpretable; see the depth curve."
-    confounders: ["flow-cell yield", "input cfDNA mass"]
+    performance_missing_reason: "QC measure: sum of eligible read spans / genome length; duplicate-marked reads are excluded, but overlapping paired mates each contribute"
+    meaning_high: "More measurements may clear their depth requirement; platform and other gates still apply."
+    meaning_low: "Fewer measurements clear their depth requirement; see the depth curve."
+    confounders: ["flow-cell yield", "input cfDNA mass", "overlapping paired mates inflate short-read aligned-base depth relative to physical coverage"]
     next_steps:
       analytical: ["Use the depth curve to see what more sequencing would add"]
       clinical_setting: null
@@ -241,9 +241,9 @@ entries:
     reference: {kind: none}
     performance: null
     performance_missing_reason: "QC count"
-    meaning_high: "More reads count toward every algorithm's minimum."
-    meaning_low: "Few reads count toward minimums."
-    confounders: ["mapping quality", "chimeras"]
+    meaning_high: "More reads pass the common eligibility filter; duplicate-marked reads are excluded, paired mates each count, and algorithms still apply their own platform and input gates."
+    meaning_low: "Few reads pass the common eligibility filter; see platform-specific support requirements."
+    confounders: ["mapping quality", "chimeras", "paired mates count separately when both are eligible"]
     next_steps:
       analytical: ["Compare with the index count (an upper bound)"]
       clinical_setting: null
@@ -265,11 +265,11 @@ entries:
     reference: {kind: none}
     performance: null
     performance_missing_reason: "QC measure"
-    meaning_high: "Longer molecules (or chimeras)."
-    meaning_low: "Shorter molecules."
-    confounders: ["library prep size bias", "chimeras"]
+    meaning_high: "Longer aligned span per eligible read; paired-read span is not template length."
+    meaning_low: "Shorter aligned span per eligible read; paired-read span is not template length."
+    confounders: ["library prep size bias", "alignment and clipping", "chimeras"]
     next_steps:
-      analytical: ["See the fragment-size histogram"]
+      analytical: ["Use the platform-specific fragment-size measurement for molecule or template length"]
       clinical_setting: null
     license_ids: []
     flags: []
@@ -2626,6 +2626,55 @@ entries:
       by: "Lab S4 evidence audit"
       date: "2026-10-16"
       note: "No scientific citation or reference interval displayed. Engineering formula: D21 eligible molecules supply aligned-span start and end-1, not claimed physical cleavage sites. Each valid end contributes once to the denominator, including both ends of one read even if they select the same CpG. A reference CG C coordinate within 10 bp inclusive is near; equal-distance ties select the lower C. Endpoint motifs are separate panels and require complete A/C/G/T contexts. LEGAL is a caution flag, not a rights clearance."
+
+  # ----------------------------------------------- aligned-end-structure
+  - algorithm_id: aligned-end-structure
+    metric_id: ocf_like_end_asymmetry
+    label: "Open-chromatin aligned-end asymmetry (OCF-like)"
+    value_kind: signed
+    tier: SPECULATIVE
+    origin_tier: NEWER
+    origin_platform: "ONT aligned-span proxy; published OCF used paired-end short reads"
+    min_depth_x: 10
+    reference: {kind: none}
+    performance: null
+    performance_missing_reason: "No calibrated reference range or tissue-origin performance for this ONT estimator"
+    meaning_high: "More D−U ends left of catalogued centers and U−D ends right of them; no tissue fraction is inferred."
+    meaning_low: "More negative values indicate the opposite directional end-count pattern in the pinned regions; no tissue fraction is inferred."
+    confounders: ["catalogue tissue and assay", "alignment clipping", "aligned-span length distribution", "ONT library preparation", "depth and region coverage"]
+    next_steps:
+      analytical: ["Inspect eligible centers and raw U/D end counts", "Compare only with the same pinned catalogue and protocol"]
+      clinical_setting: null
+    license_ids: [method-patents]
+    flags: [LEGAL]
+    headline: true
+    stability: {kind: unvalidated}
+    citations: ["doi:10.1101/gr.242719.118"]
+    citation_checked: {by: "Lab S5 evidence audit", date: "2026-10-17", note: "Sun 2019 Genome Research (PMID 30808726) displays D−U summed from −60−10 to −60+10 and U−D from +60−10 to +60+10, while calling these 20-bp windows. This Lab measurement follows the displayed inclusive integer bounds (21 positions each); the paper does not resolve the counting convention. It uses ONT aligned-span ends and operator-pinned hg38 regions, and does not reproduce short-read tissue calibration."}
+
+  - algorithm_id: aligned-end-structure
+    metric_id: preferred_end_support_fraction
+    label: "Pinned preferred-end site support"
+    value_kind: proportion
+    tier: SPECULATIVE
+    origin_tier: NEWER
+    origin_platform: "ONT aligned-span proxy; published site discovery used deep paired-end short reads"
+    min_depth_x: 10
+    reference: {kind: none}
+    performance: null
+    performance_missing_reason: "No validated background, diagnostic performance or tissue-specific calibration for this ONT support fraction"
+    meaning_high: "A larger fraction of eligible aligned-span ends coincides with pinned U/D site coordinates."
+    meaning_low: "A smaller fraction of eligible aligned-span ends coincides with pinned U/D site coordinates."
+    confounders: ["site catalogue provenance", "alignment-end precision", "library preparation", "fragment-length distribution"]
+    next_steps:
+      analytical: ["Inspect eligible end count and catalogue digest", "Compare only with the same pinned site catalogue and library protocol", "Do not treat a 10x sample as de novo preferred-site discovery"]
+      clinical_setting: null
+    license_ids: [method-patents]
+    flags: [LEGAL]
+    headline: false
+    stability: {kind: unvalidated}
+    citations: ["doi:10.1073/pnas.1804134115"]
+    citation_checked: {by: "Lab S5 evidence audit", date: "2026-10-17", note: "Sun 2018 PNAS (PMID 29760053) mined size-tagged preferred ends from approximately 470x pooled paired-end plasma sequencing. This Lab metric only counts exact matches to an operator-pinned catalogue; it does not discover or validate tissue-specific sites."}
 
   # ------------------------------------------------------------- viral-reads
   - algorithm_id: viral-reads
