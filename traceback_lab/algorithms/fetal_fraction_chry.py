@@ -12,6 +12,7 @@ import numpy as np
 from ..fetal_chry_contract import (
     COUNTING_PROTOCOL, FetalChrYContract, FetalChrYContractError, inspect_contract,
 )
+from ..derived_calibration import calibrated_input_id
 from ..read_summary import CHUNK_ROWS, FLAG_EXCLUDE, MIN_MAPQ
 from ..registry import AlgorithmOutput, InputContext, Ready, Requirements, Skip
 from ._base import Base, load_summary, metric
@@ -38,7 +39,7 @@ def _canonical_layout(summary: Any) -> bool:
             and summary.lengths[23] == HG38_CHRY_LENGTH)
 
 
-def _counts(summary: Any) -> tuple[int, int]:
+def _counts(summary: Any, mask: np.ndarray | None = None) -> tuple[int, int]:
     """D21 denominator and non-PAR chrY numerator in bounded summary slices."""
 
     flags = summary.column("flag")
@@ -52,6 +53,8 @@ def _counts(summary: Any) -> tuple[int, int]:
         eligible = (((flags[offset:end] & FLAG_EXCLUDE) == 0)
                     & (mapqs[offset:end] >= MIN_MAPQ)
                     & (chrom >= 0) & (chrom < 24))
+        if mask is not None:
+            eligible &= mask[offset:end]
         eligible_count += int(np.count_nonzero(eligible))
         y_rows = eligible & (chrom == 23)
         position = starts[offset:end]
@@ -88,7 +91,9 @@ class FetalFractionChrY(Base):
         from ..store import LabStore
 
         try:
-            return [inspect_contract(LabStore(root), input_id).manifest_sha256]
+            store = LabStore(root)
+            parent = calibrated_input_id(store, input_id)
+            return [inspect_contract(store, parent).manifest_sha256] if parent is not None else []
         except (FetalChrYContractError, OSError):
             return []
 
@@ -98,17 +103,21 @@ class FetalFractionChrY(Base):
             return decision
         if ctx.eligible_reads is None:
             return Skip("depth", "fetal chrY fraction needs at least 2,000,000 eligible reads")
-        if ctx.derived is not None:
-            return Skip("unsupported_input", "fetal chrY calibration applies to the full input")
+        if ctx.derived is not None and ctx.derived.get("transform") not in ("downsample", "split"):
+            return Skip("unsupported_input", "fetal chrY calibration supports only selected read subsets")
         if not _protocol_matches():
             return Skip("unsupported_input", "fetal chrY counting protocol has changed")
+        from ..store import LabStore
+
+        store = LabStore(ctx.root)
+        parent = calibrated_input_id(store, ctx.input_id, ctx.derived)
+        if parent is None or (ctx.derived is None) != (parent == ctx.input_id):
+            return Skip("unsupported_input", "derived fetal input has no verified calibrated parent")
         summary, _ = load_summary(ctx)
         if not _canonical_layout(summary):
             return Skip("reference", "fetal calibration requires canonical hg38 chr1-22,X,Y layout")
-        from ..store import LabStore
-
         try:
-            contract = inspect_contract(LabStore(ctx.root), ctx.input_id)
+            contract = inspect_contract(store, parent)
         except FetalChrYContractError:
             return _UNAVAILABLE
         if contract.source_id != ctx.source_id:
@@ -129,17 +138,21 @@ class FetalFractionChrY(Base):
 
         if not isinstance(self.preflight(ctx), Ready):
             raise RuntimeError("fetal calibration or input changed after preflight")
-        contract = inspect_contract(LabStore(ctx.root), ctx.input_id)
+        store = LabStore(ctx.root)
+        parent = calibrated_input_id(store, ctx.input_id, ctx.derived)
+        if parent is None:
+            raise RuntimeError("derived fetal binding changed after preflight")
+        contract = inspect_contract(store, parent)
         planned_assets = list(ctx.extras.get("planned_asset_sha256s", ()))
         if (planned_assets != [contract.manifest_sha256]
                 or contract.source_id != ctx.source_id
                 or contract.reference_sha256 != ctx.reference_sha256
                 or contract.calibration_status != "operator_verified"):
             raise RuntimeError("fetal calibration changed after execution planning")
-        summary, _ = load_summary(ctx)
+        summary, mask = load_summary(ctx)
         if not _canonical_layout(summary):
             raise RuntimeError("fetal BAM reference layout changed after preflight")
-        y_count, denominator = _counts(summary)
+        y_count, denominator = _counts(summary, mask)
         if denominator != ctx.eligible_reads:
             raise RuntimeError("fetal read count changed after preflight")
         estimate = _fraction(y_count, denominator, contract)
