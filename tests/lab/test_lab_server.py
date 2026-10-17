@@ -803,6 +803,7 @@ def test_torn_first_event_without_active_writer_is_unavailable(tmp_path) -> None
     ("oversized", "unreadable_or_over_1mib"),
     ("too_many_lines", "over_4096_lines"),
     ("malformed", "malformed_or_empty"),
+    ("deeply_nested", "malformed_or_empty"),
     ("wrong_run", "malformed_or_empty"),
     ("unsafe", "unreadable_or_over_1mib"),
 ))
@@ -821,6 +822,8 @@ def test_status_reports_unavailable_latest_log_without_claiming_interruption(tmp
         path.write_bytes(b"{}\n" * 4097)
     elif damage == "malformed":
         path.write_bytes(b'{"event":"run_start"}\n{broken\n')
+    elif damage == "deeply_nested":
+        path.write_bytes(b"[" * 1200 + b"0" + b"]" * 1200 + b"\n")
     elif damage == "wrong_run":
         path.write_bytes(b'{"event":"run_start","run_id":"r-20261015-0101-eeee"}\n')
     else:
@@ -855,6 +858,15 @@ def test_status_reports_malformed_latest_run_pointer_without_echoing_it(tmp_path
     store = LabStore(tmp_path)
     store.ensure()
     store.last_run_file.write_text(json.dumps(pointer))
+    status = api_module.LabApi(store).status()
+    assert status["active"] is None and status["interrupted"] is None
+    assert status["run_log_unavailable"] == {"run_id": None, "reason": "latest_run_pointer_unavailable"}
+
+
+def test_status_reports_deeply_nested_latest_run_pointer_without_crashing(tmp_path) -> None:
+    store = LabStore(tmp_path)
+    store.ensure()
+    store.last_run_file.write_bytes(b"[" * 1200 + b"0" + b"]" * 1200)
     status = api_module.LabApi(store).status()
     assert status["active"] is None and status["interrupted"] is None
     assert status["run_log_unavailable"] == {"run_id": None, "reason": "latest_run_pointer_unavailable"}

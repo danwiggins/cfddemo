@@ -189,7 +189,7 @@ def _run_events(store: LabStore, run_id: str) -> tuple[list[tuple[int, dict[str,
     for number, line in enumerate(lines, 1):
         try:
             event = json.loads(line)
-        except (ValueError, UnicodeDecodeError):
+        except (ValueError, UnicodeDecodeError, RecursionError):
             if number == len(lines) and not complete_tail:
                 if not events:
                     return [], "pending_first_event"
@@ -240,7 +240,7 @@ def _latest_analysis_run(store: LabStore) -> tuple[str | None, bool]:
         return None, True
     try:
         pointer = json.loads(raw)
-    except ValueError:
+    except (ValueError, RecursionError):
         return None, True
     if not isinstance(pointer, dict):
         return None, True
