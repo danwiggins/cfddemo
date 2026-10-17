@@ -12,13 +12,13 @@ import math
 import os
 import stat
 import shutil
+import subprocess
+import threading
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
 import pysam
-
-from traceback_runner.contained_process import ContainedProcessError, run_contained
 
 from ..fetal_contract import FetalContractError, inspect_contract
 from ..registry import AlgorithmOutput, InputContext, Ready, Requirements, Skip, ToolPin
@@ -47,6 +47,62 @@ for (chrom in c(13L, 18L, 21L)) {
 '''
 SCRIPT_SHA256 = hashlib.sha256(R_CODE.encode()).hexdigest()
 _CONTIGS = tuple(f"chr{chrom}" for chrom in range(1, 23)) + ("chrX", "chrY")
+
+
+@dataclass(frozen=True)
+class _RResult:
+    outcome: str
+    returncode: int | None
+    stdout: bytes
+    stdout_truncated: bool
+
+
+def _run_bounded_r(argv: list[str], *, cwd: Path, timeout_seconds: int,
+                   log_limit_bytes: int = 4096) -> _RResult:
+    """Bound both pipes while keeping R in the enclosing worker process group.
+
+    The Lab pipeline kills that group on outer timeout or interruption. A nested
+    contained process would start a new session and escape that group kill.
+    """
+
+    def drain(stream: Any, output: bytearray, truncated: list[bool]) -> None:
+        try:
+            while block := stream.read(8192):
+                room = log_limit_bytes - len(output)
+                output.extend(block[:room])
+                if len(block) > room:
+                    truncated[0] = True
+        finally:
+            stream.close()
+
+    try:
+        process = subprocess.Popen(
+            argv, cwd=cwd, env=dict(os.environ), stdin=subprocess.DEVNULL,
+            stdout=subprocess.PIPE, stderr=subprocess.PIPE, close_fds=True,
+        )
+    except OSError as exc:
+        raise RuntimeError("R process could not start") from exc
+    stdout, stderr = bytearray(), bytearray()
+    stdout_truncated, stderr_truncated = [False], [False]
+    assert process.stdout is not None and process.stderr is not None
+    readers = [threading.Thread(target=drain, args=(process.stdout, stdout, stdout_truncated), daemon=True),
+               threading.Thread(target=drain, args=(process.stderr, stderr, stderr_truncated), daemon=True)]
+    try:
+        for reader in readers:
+            reader.start()
+        try:
+            process.wait(timeout=timeout_seconds)
+            outcome = "exited"
+        except subprocess.TimeoutExpired:
+            outcome = "timeout"
+    finally:
+        if process.poll() is None:
+            process.kill()
+            process.wait()
+        for reader in readers:
+            reader.join(timeout=5)
+    return _RResult(outcome, process.returncode if outcome == "exited" else None,
+                    bytes(stdout), stdout_truncated[0])
 
 
 def _compatible_bam_layout(path: Path) -> bool:
@@ -78,15 +134,15 @@ def _rscript() -> tuple[Path, str] | None:
 def _nipter_package_sha(rscript: Path) -> str | None:
     packages = ("NIPTeR", "sets", "Rsamtools", "S4Vectors")
     try:
-        result = run_contained(
+        result = _run_bounded_r(
             [str(rscript), "--vanilla", "-e",
              "for (p in c('NIPTeR','sets','Rsamtools','S4Vectors')) { "
              "cat(as.character(packageVersion(p)), system.file(package=p), sep='\\t'); "
              "cat('\\n') }"],
-            env=os.environ, cwd=Path.cwd().resolve(), timeout_seconds=20,
+            cwd=Path.cwd().resolve(), timeout_seconds=20,
             log_limit_bytes=4096,
         )
-    except (OSError, ContainedProcessError):
+    except RuntimeError:
         return None
     if result.outcome != "exited" or result.stdout_truncated:
         return None
@@ -214,12 +270,12 @@ class FetalFraction(Base):
         script = out / "nipter-z.R"
         script.write_bytes(R_CODE.encode("utf-8"))
         try:
-            completed = run_contained(
+            completed = _run_bounded_r(
                 [str(runtime[0]), "--vanilla", str(script), str(ctx.input_dir / "aligned.bam"),
                  str(contract.control_path), str(contract.control_n)],
-                env=os.environ, cwd=out, timeout_seconds=900, log_limit_bytes=4096,
+                cwd=out, timeout_seconds=900, log_limit_bytes=4096,
             )
-        except (OSError, ContainedProcessError) as exc:
+        except RuntimeError as exc:
             raise RuntimeError("NIPTeR process could not start; inspect the registered toolchain") from exc
         finally:
             script.unlink(missing_ok=True)

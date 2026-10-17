@@ -4,6 +4,9 @@ from __future__ import annotations
 
 import hashlib
 import json
+import os
+import sys
+import time
 from dataclasses import replace
 from pathlib import Path
 from types import SimpleNamespace
@@ -13,6 +16,7 @@ import pytest
 from traceback_lab.algorithms import fetal_fraction as fetal
 from traceback_lab.cli import main as lab_main
 from traceback_lab.fetal_contract import FetalContractError, inspect_contract, register_contract
+from traceback_lab.pipeline import Stage, run_pipeline
 from traceback_lab.registry import InputContext, PlanItem, Ready, Skip
 from traceback_lab.runner import RunTarget, run_plan
 from traceback_lab.scrub import Scrubber
@@ -22,6 +26,39 @@ from traceback_lab.store import LabStore, new_run_id
 SOURCE = "a" * 64
 INPUT = "b" * 64
 REFERENCE = "c" * 64
+
+
+def test_r_process_output_is_bounded(tmp_path: Path) -> None:
+    result = fetal._run_bounded_r(
+        [sys.executable, "-c", "import sys; sys.stdout.write('x' * 100000); sys.stderr.write('y' * 100000)"],
+        cwd=tmp_path, timeout_seconds=10, log_limit_bytes=4096)
+    assert result.outcome == "exited" and result.returncode == 0
+    assert result.stdout_truncated and len(result.stdout) == 4096
+
+
+@pytest.mark.skipif(os.name == "nt", reason="Lab process-group cancellation uses POSIX groups")
+def test_outer_lab_timeout_kills_r_descendant(tmp_path: Path) -> None:
+    marker = tmp_path / "r-ticks.txt"
+    child = tmp_path / "r-child.py"
+    child.write_text(
+        "import sys, time\n"
+        "with open(sys.argv[1], 'a') as out:\n"
+        "    while True:\n"
+        "        out.write('tick\\n'); out.flush(); time.sleep(0.05)\n")
+    worker = tmp_path / "lab-worker.py"
+    worker.write_text(
+        "import sys\nfrom pathlib import Path\n"
+        "sys.path.insert(0, str(Path.cwd()))\n"
+        "from traceback_lab.algorithms.fetal_fraction import _run_bounded_r\n"
+        f"_run_bounded_r([sys.executable, {str(child)!r}, {str(marker)!r}], "
+        f"cwd=Path({str(tmp_path)!r}), timeout_seconds=30)\n")
+    result = run_pipeline([Stage("prenatal-worker", [sys.executable, str(worker)])],
+                          timeout_s=2, cwd=Path.cwd())
+    assert result.timed_out
+    assert marker.is_file()
+    stopped_at = marker.stat().st_size
+    time.sleep(0.3)
+    assert marker.stat().st_size == stopped_at
 
 
 def _contract(tmp_path: Path, *, control_n: int = 20, sex: str = "unknown") -> tuple[Path, str, Path]:
@@ -114,7 +151,7 @@ def test_nipter_preflight_and_synthetic_adapter_output(tmp_path: Path, monkeypat
         assert kwargs["timeout_seconds"] == 900
         return SimpleNamespace(outcome="exited", returncode=0,
                                stdout=b"13\t0.5\n18\t-0.25\n21\t1.75\n", stdout_truncated=False)
-    monkeypatch.setattr(fetal, "run_contained", fake_r_process)
+    monkeypatch.setattr(fetal, "_run_bounded_r", fake_r_process)
     output = fetal.FETAL_FRACTION.run(ctx, tmp_path / "out")
     values = {item["metric_id"]: item["value"] for item in output.metrics}
     assert values == {"fetal_fraction": None, "trisomy_13_z": 0.5,
@@ -158,7 +195,7 @@ def test_installed_nipter_package_files_are_exactly_pinned(tmp_path: Path, monke
     helper.write_bytes(b"first")
     lines = "\n".join(f"{version}\t{package}" for version, package in
                       zip(("1.0.2", "1.0-25", "2.22.0", "0.44.0"), packages))
-    monkeypatch.setattr(fetal, "run_contained", lambda *args, **kwargs: SimpleNamespace(
+    monkeypatch.setattr(fetal, "_run_bounded_r", lambda *args, **kwargs: SimpleNamespace(
         outcome="exited", returncode=0, stdout=lines.encode(), stdout_truncated=False))
     original = fetal._nipter_package_sha(tmp_path / "Rscript")
     assert original is not None
