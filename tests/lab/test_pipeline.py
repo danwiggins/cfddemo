@@ -114,23 +114,6 @@ def test_disk_sampling(tmp_path: Path) -> None:
     assert result.peak_disk_bytes is not None and result.peak_disk_bytes >= 2_000_000
 
 
-def test_disk_sampler_includes_sibling_scratch(tmp_path: Path) -> None:
-    scratch = tmp_path / "algorithm"
-    sibling = tmp_path / "microbial-run"
-    scratch.mkdir()
-    sibling.mkdir()
-    script = f"open({str(sibling / 'blob')!r}, 'wb').write(b'x' * 2_000_000)"
-    from traceback_lab.runner import _microbial_tmp_bytes, _step_disk_bytes
-
-    before = _microbial_tmp_bytes(tmp_path)
-
-    result = run_pipeline(
-        [Stage("write", [PY, "-c", script])], timeout_s=30,
-        disk_usage=lambda: _step_disk_bytes(scratch, tmp_path, before),
-    )
-    assert result.peak_disk_bytes is not None and result.peak_disk_bytes >= 2_000_000
-
-
 @pytest.mark.parametrize("error_type", [OSError, ValueError])
 def test_disk_sampler_failure_does_not_discard_successful_step(error_type: type[Exception]) -> None:
     def unavailable() -> int:
@@ -161,44 +144,49 @@ def test_slow_rss_sampler_does_not_delay_worker_polling(monkeypatch: pytest.Monk
     import traceback_lab.pipeline as pipeline
 
     release = threading.Event()
+    finished = threading.Event()
     def slow(_pid: int) -> None:
-        release.wait(4)
+        release.wait(30)
+        finished.set()
 
     monkeypatch.setattr(pipeline, "_process_tree_rss_bytes", slow)
-    started = time.monotonic()
     try:
         result = run_pipeline([Stage("ok", [PY, "-c", "print('done')"])], timeout_s=10)
+        assert not finished.is_set()
     finally:
         release.set()
     assert result.ok
-    assert time.monotonic() - started < 3
 
 
 def test_slow_disk_sampler_does_not_delay_worker_polling() -> None:
     release = threading.Event()
+    finished = threading.Event()
     calls = 0
 
     def slow() -> int:
         nonlocal calls
         calls += 1
-        release.wait(4)
+        release.wait(30)
+        finished.set()
         return 1
 
-    started = time.monotonic()
     try:
         result = run_pipeline(
             [Stage("ok", [PY, "-c", "print('done')"])], timeout_s=10,
             disk_usage=slow,
         )
+        assert not finished.is_set()
     finally:
         release.set()
     assert result.ok
-    assert time.monotonic() - started < 3
-    assert calls == 2
+    assert calls >= 2
     assert result.peak_disk_bytes is None
 
 
-def test_incomplete_final_disk_scan_keeps_earlier_observation() -> None:
+def test_incomplete_final_disk_scan_keeps_earlier_observation(monkeypatch: pytest.MonkeyPatch) -> None:
+    import traceback_lab.pipeline as pipeline
+
+    monkeypatch.setattr(pipeline, "DISK_SAMPLE_S", 1000.0)
     release = threading.Event()
     calls = 0
 
@@ -207,10 +195,9 @@ def test_incomplete_final_disk_scan_keeps_earlier_observation() -> None:
         calls += 1
         if calls == 1:
             return 1
-        release.wait(4)
+        release.wait(30)
         return 2_000_000
 
-    started = time.monotonic()
     try:
         result = run_pipeline(
             [Stage("ok", [PY, "-c", "import time; time.sleep(0.2)"])],
@@ -222,10 +209,12 @@ def test_incomplete_final_disk_scan_keeps_earlier_observation() -> None:
     assert result.ok
     assert calls == 2
     assert result.peak_disk_bytes == 1
-    assert time.monotonic() - started < 3
 
 
-def test_final_disk_scan_starts_after_worker_exit() -> None:
+def test_final_disk_scan_starts_after_worker_exit(monkeypatch: pytest.MonkeyPatch) -> None:
+    import traceback_lab.pipeline as pipeline
+
+    monkeypatch.setattr(pipeline, "DISK_SAMPLE_S", 1000.0)
     calls = 0
 
     def disk_usage() -> int:

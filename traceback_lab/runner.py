@@ -23,7 +23,7 @@ from typing import Any
 from traceback_runner.serialization import canonical_json_bytes
 
 from .envelope import Depth, Failure, ResultEnvelope, provenance
-from .pipeline import Stage, directory_bytes, run_pipeline
+from .pipeline import Stage, run_pipeline
 from .registry import (
     Algorithm,
     InputContext,
@@ -37,17 +37,6 @@ from .scrub import Scrubber
 from .store import LabStore, RunLog, WriterLock
 
 DEFAULT_TIMEOUT_S = 3600.0
-
-
-def _microbial_tmp_bytes(root: Path) -> int:
-    return sum(directory_bytes(path) for path in root.glob("microbial-*") if path.is_dir())
-
-
-def _step_disk_bytes(scratch: Path, microbial_root: Path, microbial_before: int) -> int:
-    # Microbial workers may use a sibling of this algorithm's scratch.
-    return directory_bytes(scratch) + max(
-        0, _microbial_tmp_bytes(microbial_root) - microbial_before,
-    )
 
 
 @dataclass
@@ -322,21 +311,6 @@ def run_plan(
                 {"entry": entries[algorithm.id], "context": context_to_json(ctx), "out_dir": str(scratch)}
             )
         )
-        microbial_root = store.lab / "tmp"
-
-        try:
-            microbial_before = _microbial_tmp_bytes(microbial_root)
-        except Exception:  # noqa: BLE001 - optional telemetry cannot fail the worker
-            microbial_before = None
-
-        def step_disk_bytes(
-            scratch: Path = scratch,
-            microbial_root: Path = microbial_root,
-            microbial_before: int | None = microbial_before,
-        ) -> int:
-            return (directory_bytes(scratch) if microbial_before is None
-                    else _step_disk_bytes(scratch, microbial_root, microbial_before))
-
         try:
             outcome = run_pipeline(
                 [Stage("worker", [sys.executable, "-m", "traceback_lab.worker", str(request)])],
@@ -344,7 +318,7 @@ def run_plan(
                 env=_worker_env(),
                 cwd=scratch,
                 echo=echo,
-                disk_usage=step_disk_bytes,
+                disk_path=scratch,
             )
             if outcome.ok:
                 try:
