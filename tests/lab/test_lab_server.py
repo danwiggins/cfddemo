@@ -725,6 +725,39 @@ def test_active_writer_waiting_for_first_log_event_is_not_unavailable(tmp_path, 
         assert api_module.LabApi(store).status()["run_log_unavailable"] is None
 
 
+def test_torn_final_log_append_preserves_interrupted_status(tmp_path) -> None:
+    store = LabStore(tmp_path)
+    run_id = "r-20261015-0101-abcd"
+    with store.writer("run", run_id, step="bam-qc"):
+        log = store.run_log(run_id)
+        log.append("run_start", command="run")
+        log.append("sample", source_id="a" * 64, input_id="b" * 64)
+        log.append("step_start", step="bam-qc")
+    with log.path.open("ab") as stream:
+        stream.write(b'{"event":"step_end"')
+    status = api_module.LabApi(store).status()
+    assert status["run_log_unavailable"] is None
+    assert status["interrupted"] == {"run_id": run_id, "step": "bam-qc",
+                                     "source_id": "a" * 64, "input_id": "b" * 64}
+
+
+def test_run_log_reader_only_ignores_an_unterminated_final_fragment(tmp_path) -> None:
+    store = LabStore(tmp_path)
+    store.ensure()
+    run_id = "r-20261015-0101-abcd"
+    log = store.run_log(run_id)
+    log.append("run_start", command="run")
+    prefix = log.path.read_bytes()
+    log.path.write_bytes(prefix + b'{"event":')
+    assert api_module._run_events(store, run_id)[1] is None
+    log.path.write_bytes(prefix + b'{"event":\n')
+    assert api_module._run_events(store, run_id) == ([], "malformed_or_empty")
+    log.path.write_bytes(prefix + b'{"event":\n' + prefix)
+    assert api_module._run_events(store, run_id) == ([], "malformed_or_empty")
+    log.path.write_bytes(prefix + b'{"event":"step_end","run_id":"' + b"e" * 25 + b'"}')
+    assert api_module._run_events(store, run_id) == ([], "malformed_or_empty")
+
+
 @pytest.mark.parametrize(("damage", "reason"), (
     ("oversized", "unreadable_or_over_1mib"),
     ("too_many_lines", "over_4096_lines"),
@@ -932,6 +965,9 @@ def test_run_log_line_is_authenticated_matched_and_allowlisted(tmp_path, monkeyp
         assert payload == {"found": True, "run_id": run_id, "line": 3, "step": "sex-check",
                            "utc": payload["utc"], "status": "ok", "skip_reason": None,
                            "duration_s": 1.25}
+        with log.path.open("ab") as stream:
+            stream.write(b'{"event":"step_end"')
+        assert json.loads(_get(running, path, cookie)[1])["line"] == 3
         assert "/secret/path" not in data.decode()
         sample.full.results["sex-check"] = _selected_sex_result(source_id, input_id, "d" * 64)
         assert _get(running, path, cookie)[0].status == 404

@@ -185,6 +185,10 @@ def _run_events(store: LabStore, run_id: str) -> tuple[list[tuple[int, dict[str,
         try:
             event = json.loads(line)
         except (ValueError, UnicodeDecodeError):
+            # One crash-torn append can leave an unterminated final fragment.
+            # Keep its validated prefix, but never skip a complete or middle line.
+            if events and number == len(lines) and not raw.endswith(b"\n"):
+                break
             return [], "malformed_or_empty"
         if not isinstance(event, dict):
             return [], "malformed_or_empty"
