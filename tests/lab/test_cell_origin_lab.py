@@ -215,7 +215,10 @@ def test_runner_plan_persists_cell_origin_parser_pin_for_cohort_read(tmp_path, m
             "metrics": [{"metric_id": "classified_fragments", "value": 100}], "panels": [],
         }))
         ran.append(request)
-        return SimpleNamespace(ok=True, duration_s=0.01, peak_rss_bytes=0)
+        return SimpleNamespace(
+            ok=True, duration_s=0.01, peak_rss_bytes=0,
+            sampled_tree_peak_rss_bytes=0, peak_disk_bytes=0,
+        )
 
     monkeypatch.setattr(lab_runner, "run_pipeline", fake_pipeline)
     run_id = new_run_id()
