@@ -121,7 +121,7 @@ def test_sample_lenses_pin_eligible_loo_reference(
     if member_n == 10 and not is_member and target_value == 0.95:
         stale = member(1, value=target_value)
         stale_result = stale.results[0].model_copy(update={"parameters_sha256": "d" * 64})
-        monkeypatch.setattr(web_api, "member_from_store", lambda store, source_id: stale.model_copy(
+        monkeypatch.setattr(cohorts, "member_for_generation", lambda store, generation, source_id: stale.model_copy(
             update={"results": (stale_result,)}
         ))
         changed = api.sample(SOURCE[:12])["algorithms"][0]["metrics"][0]
