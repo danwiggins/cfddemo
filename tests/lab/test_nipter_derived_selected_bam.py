@@ -10,6 +10,7 @@ from pathlib import Path
 from types import SimpleNamespace
 
 import pysam
+import pytest
 
 from traceback_lab.algorithms import fetal_fraction as fetal
 from traceback_lab.derived import cna, downsample, materialize, split
@@ -53,8 +54,11 @@ def test_nipter_derived_bins_selected_bam_with_parent_controls(tmp_path: Path, m
                 counting_contigs=list(fetal._CONTIGS), min_mapq=20, counting=False)
     summary = ReadSummary.open(tmp_path / "read-summary" / "columns")
     expected_names: set[str] = set()
+    r_invocations = 0
 
     def fake_r_process(argv, **kwargs):
+        nonlocal r_invocations
+        r_invocations += 1
         sample_bam = Path(argv[3])
         assert sample_bam != context.input_dir / "aligned.bam"
         assert sample_bam.parent != tmp_path / "worker" / "artifacts"
@@ -87,6 +91,22 @@ def test_nipter_derived_bins_selected_bam_with_parent_controls(tmp_path: Path, m
             "trisomy_18_z": -0.25, "trisomy_21_z": 1.75,
         }
         assert not list((tmp_path / "worker").glob("nipter-private-*"))
+        if spec == specs[0]:
+            completed_invocations = r_invocations
+            refused = (
+                (replace(derived, derived=split("A").mask_spec()),
+                 "unsupported_input", "verified calibrated parent"),
+                (replace(derived, source_id="f" * 64),
+                 "reference", "assertion or reference changed"),
+                (replace(derived, reference_sha256="f" * 64),
+                 "reference", "assertion or reference changed"),
+            )
+            for changed, reason, error in refused:
+                assert algorithm.preflight(changed).reason_code == reason
+                with pytest.raises(RuntimeError, match=error):
+                    algorithm.run(changed, out)
+                assert r_invocations == completed_invocations
+                assert not list((tmp_path / "worker").glob("nipter-private-*"))
 
     spike = cna(0.1, [])
     materialize(store, INPUT, context.input_dir / "aligned.bam", [spike],
