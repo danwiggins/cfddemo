@@ -190,7 +190,7 @@
       } else main.append(h("section", { class: "panel loading-lens" }, h("p", {}, "Loading…")));
       return;
     }
-    if (!state.samples.length && route.name !== "clia") {
+    if (!state.samples.length && route.name === "home") {
       main.append(...emptyState());
       return;
     }
@@ -227,6 +227,7 @@
     const copy = (text) => h("p", {}, h("code", {}, text), " ", h("button", { type: "button", class: "control", onclick: () => navigator.clipboard && navigator.clipboard.writeText(text) }, "Copy"));
     return [
       h("h1", { class: "view-title" }, "Traceback Lab"),
+      window.TracebackLabViews.landingCliaPanel(),
       h("p", { class: "empty" }, "No Lab runs under this server's ROOT (printed in the terminal where `lab serve` started). Check setup, try the synthetic example, or run your own chunk directory with the same ROOT, then reload."),
       copy("traceback lab doctor"),
       copy("traceback lab run --example"),

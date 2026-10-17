@@ -531,10 +531,27 @@ def test_loading_copy_while_synthetic_listing_is_in_flight(tmp_path) -> None:
 def test_empty_copy_and_complete_example_commands(tmp_path) -> None:
     with _server(tmp_path, _sample()) as server:
         server.app.api.samples = lambda: {"samples": [], "root_has_runs": False}
-        dom = _dom(server, tmp_path / "browser", route="/")
+        server.app.api.sample = lambda _id12: {"found": False, "candidates": []}
+        dom = _dom(server, tmp_path / "home", route="/",
+                   want=lambda page: page.count("FLAG: LEGAL — verify") == 4)
+        unknown = _dom(server, tmp_path / "unknown", route=f"/sample/{ID12}/findings",
+                       want=lambda page: "Unknown sample" in page)
+        about = _dom(server, tmp_path / "clia", route="/about/clia",
+                     want=lambda page: "What CLIA is." in page)
+    assert '<section class="clia-panel"' in dom
+    short = re.search(r'<div class="clia-short">(.*?)</div>', dom, re.DOTALL)
+    full = re.search(r'<div class="clia-full"[^>]*>(.*?)</div>', dom, re.DOTALL)
+    assert short is not None and full is not None
+    assert short.group(1).count("FLAG: LEGAL — verify") == 2
+    assert full.group(1).count("FLAG: LEGAL — verify") == 2
+    assert "Loading…" not in short.group(1) and "Loading…" not in full.group(1)
+    assert "What CLIA means for this demo" in dom
     assert "No Lab runs under this server's ROOT" in dom
     assert "traceback lab doctor" in dom and "traceback lab run --example" in dom
     assert "traceback lab run &lt;chunk dir&gt;" in dom
+    assert f"No Lab sample matches {ID12}" in unknown and "No Lab runs under" not in unknown
+    assert "What CLIA is." in about and "42 CFR 493.3(b)(2)" in about
+    assert "No Lab runs under" not in about
 
 
 @needs_chrome

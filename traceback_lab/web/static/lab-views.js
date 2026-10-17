@@ -116,8 +116,7 @@
   }
 
   // -- landing ------------------------------------------------------------------------------
-  function landing(sample) {
-    const out = [h("h1", { class: "visually-hidden" }, `Traceback Lab — ${sample.id12}`)];
+  function landingCliaPanel() {
     const panel = h("section", { class: "clia-panel", "aria-labelledby": "clia-title" }, h("h2", { id: "clia-title", class: "clia-title" }, "What CLIA means for this demo"));
     const shortBox = h("div", { class: "clia-short" }, h("p", {}, "Loading…"));
     const fullBox = h("div", { class: "clia-full", id: "clia-full", hidden: true });
@@ -135,7 +134,11 @@
       fullBox.replaceChildren(...paragraphs(c.full));
       measure();
     });
-    out.push(panel);
+    return panel;
+  }
+
+  function landing(sample) {
+    const out = [h("h1", { class: "visually-hidden" }, `Traceback Lab — ${sample.id12}`), landingCliaPanel()];
     const sentence = h("p", { class: "headline", id: "headline" }, sample.headline.sentence);
     if (sample.headline.unlock) sentence.append(" ", h("span", { title: "literature, not measured" }, sample.headline.unlock.text), h("span", { class: "visually-hidden" }, " (literature, not measured)"));
     out.push(sentence);
@@ -1219,6 +1222,7 @@
     "body-map": bodyMap,
     agreement,
     landing,
+    landingCliaPanel,
     findings,
     stability,
     evidence,
