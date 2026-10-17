@@ -136,18 +136,24 @@ uBAM.
 The reference is the one registered under ROOT (`traceback reference
 register`); with several, pass `--reference ID`.
 
-**Reruns.** Rerunning the same command recomputes only missing or failed
-results; unchanged chunks are not re-hashed and the alignment is reused.
+**Reruns.** Rerunning the same command recomputes missing or failed results
+and a dependent result when a selected upstream attempt has changed;
+unchanged chunks are not re-hashed and the alignment is reused.
 `traceback lab run latest` or `traceback lab run <id12>` reruns on the stored
 sample without the chunk paths. `--force` recomputes every result.
 `--only a,b` runs just those algorithms (overriding `--profile`), plus the
 intermediates they need, labelled "(upstream)".
 
 A result is reused only when its selected attempt matches the input, algorithm,
-and execution identity. New attempts record artifact file sizes; older attempts
+and execution identity. Dependents also record the exact upstream attempts
+they consumed, including a parent-input summary reused by a derived control.
+An older dependent attempt without that record is recomputed once; leaf results
+remain cacheable. New attempts record artifact file sizes; older attempts
 remain readable, with known upstream layouts checked against their metadata.
 Missing or truncated required artifacts are recomputed. A completed failed
 forced rerun is shown as failed; the prior successful attempt remains on disk.
+If the current upstream step fails or skips, its dependent step also skips;
+an older successful dependent result is not reused for that run.
 Artifact sizes check completeness, not byte-level integrity.
 
 **Dry run.** `--dry-run` writes nothing and takes no lock. It prints the
@@ -173,6 +179,7 @@ ROOT, home, login and chunk names redacted) is ever stored.
 | `bam-qc` | primaries, mapped and MAPQ ≥ 20 shares, supplementary share (chimera proxy), mean read Q, share of sampled genome covered ≥ 1x, GC-bias slope, duplicate share (only when marked) |
 | `depth` | eligible reads (primary, MAPQ ≥ 20, chr1–22/X/Y), mean span, approximate depth; the index count is shown only as an upper bound |
 | `fragment-size` | 1-bp aligned-span histogram, mode, short (< 150 bp) share, mono/di peaks, 10 bp periodicity |
+| `short-read-fragment-size` | separate exploratory paired-end Illumina histogram and size summaries from absolute BAM TLEN; requires a prealigned BAM with every `@RG PL:ILLUMINA` |
 | `copy-number` | tumour fraction, ploidy, genome log2 track and segments through the installed ichorCNA toolchain (no panel of normals yet, so read as not interpretable); needs 2M eligible reads, `traceback toolchain install ichor` and `traceback method-asset register --from-toolchain copy-number --root R` |
 | `instability` | bin-weighted median absolute deviation of the selected copy-number result's segment log2 values (`tmad`), with used-bin and null-estimate coverage counts; needs 2M eligible reads and a successful copy-number result for the same input; exploratory and cohort-relative, with no ONT cutoff |
 | `modbase-qc` | mod codes in the MM tags, MM-tagged share, mean ML at aligned CpG calls (read from `meth-calls`), share of those calls below 0.7 confidence, tagged reads with unusable MM/ML; skipped (`missing_tags`) when no read carries MM |
@@ -189,6 +196,27 @@ ROOT, home, login and chunk names redacted) is ever stored.
 | `hypometh-reads` | among reads with ≥ 4 CpG calls, the share under 25% methylated, and U/X/M counts (≤ 25% / between / ≥ 75%); needs 500,000 eligible reads |
 | `frag-x-meth` | descriptive molecule-count matrix of aligned-size bins by per-read 5mC fraction (at least four distinct CpG sites/read); the scalar is long (151–220 bp) mean minus short (100–150 bp) mean, null if either group is empty; no normal range |
 | `breakpoint-motifs` | 4-mer counts at aligned-reference-span start and end−1, stratified by CpG proximity; the scalar is the fraction of ends near a CpG. These are not proven physical cleavage positions, and the methylation link is unavailable without a supported joint input |
+
+**Short-read TLEN slice.** For a prealigned paired-end Illumina BAM against
+the registered hg38 reference, run the separate measurement explicitly:
+
+```bash
+traceback lab run YOUR_LOCAL_aligned_illumina.bam \
+  --reference hg38 --only short-read-fragment-size \
+  --no-downsample --no-controls --root R
+```
+
+Every BAM read group must declare `PL:ILLUMINA`; a BAM aligned by the Lab's
+ONT minimap2 path is skipped. Each qualifying proper first mate counts one
+template: it must pass the common primary, mapped, nonduplicate, QC-pass,
+MAPQ ≥ 20 and canonical-contig filter, have a mapped mate on the same contig,
+and carry nonzero TLEN. The reported length is `abs(TLEN)`, even when the
+first mate's TLEN is negative. Downsample and split selections use the same
+read-name predicate as other Lab full-BAM algorithms. The histogram and
+metrics are keyed to `short-read-fragment-size`; `fragment-size` remains the
+ONT aligned-span measurement. No clinical cutoff, short-read healthy range,
+or cross-platform comparison is supplied by this slice. Other Lab algorithms
+are still designed around the ONT run, so use `--only` for this opt-in path.
 
 **PMD asset.** `pmd-score` needs an operator-supplied Zhou 2018 hg38
 common-PMD BED.gz file. The repository does not ship or download it; its
