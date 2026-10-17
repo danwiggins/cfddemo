@@ -209,10 +209,12 @@ def _side(metric: Any, fraction: float) -> Side:
 
 
 def _split_half_status(view: InputView | None, algorithm_id: str, metric_id: str,
-                       full_value: Any, spec: Mapping[str, Any], *, other_half_recorded: bool = False) -> dict[str, Any]:
+                       full_value: Any, spec: Mapping[str, Any], *, other_half_recorded: bool = False,
+                       half_label: str | None = None) -> dict[str, Any]:
     if view is None:
         if other_half_recorded:
-            return {"state": "unavailable", "reason": "split half unavailable", "value": None, "deviation": None}
+            reason = f"no input labelled {half_label} recorded" if half_label else "split half input not recorded"
+            return {"state": "unavailable", "reason": reason, "value": None, "deviation": None}
         return {"state": "not_recorded", "reason": "no split-half input recorded", "value": None, "deviation": None}
     envelope = view.results.get(algorithm_id)
     if envelope is None:
@@ -355,13 +357,13 @@ def stability_panels(sample: SampleView, library: Library | None = None) -> list
             split = None
             split_status = {
                 half: _split_half_status(halves.get(half), algorithm_id, metric.metric_id, metric.value, spec,
-                                         other_half_recorded=bool(halves))
+                                         other_half_recorded=bool(halves), half_label=half)
                 for half in ("A", "B")
             }
             if any(half not in ("A", "B") for half in halves):
                 for half, status in split_status.items():
                     if half not in halves:
-                        status["reason"] = "split input has an unrecognized half label"
+                        status["reason"] += "; an unrecognized split label is present"
             a = _value(halves["A"].results.get(algorithm_id), metric.metric_id) if "A" in halves else None
             b = _value(halves["B"].results.get(algorithm_id), metric.metric_id) if "B" in halves else None
             if split_status["A"]["state"] == "ok" and split_status["B"]["state"] == "ok":
