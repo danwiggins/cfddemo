@@ -10,7 +10,7 @@ from pathlib import Path
 
 import pytest
 
-from tests.lab.test_landing import _body
+from tests.lab.test_landing import _body, needs_chrome
 from traceback_lab.doctor import lab_checks
 from traceback_lab.store import LabStore
 from traceback_runner import cli as signed_cli
@@ -181,8 +181,51 @@ def test_no_input_prints_the_three_line_quickstart(tmp_path, capsys) -> None:
     assert out.splitlines()[-3:] == ["  traceback lab doctor", "  traceback lab run --example", "  traceback lab serve --open"]
 
 
-def test_serve_step_uses_the_same_root_across_cwds_and_reaches_the_landing(journey_root, tmp_path) -> None:
-    """Run from a different cwd, then serve the guide's example from the repo cwd."""
+def test_serve_uses_the_run_root_across_cwds(journey_root, tmp_path) -> None:
+    """The guide's run and serve commands share TRACEBACK_ROOT across directories."""
+
+    import os
+    import signal
+    import subprocess
+
+    assert journey_root["run_cwd"] != REPO
+    argv = next(a for a in journey() if a[-2:] == ["serve", "--open"])
+    env = {**os.environ, "TRACEBACK_ROOT": str(journey_root["root"]), "BROWSER": "true", "PYTHONPATH": str(REPO)}
+    stdout_path = tmp_path / "root-stdout.log"
+    stderr_path = tmp_path / "root-stderr.log"
+    with stdout_path.open("w") as stdout, stderr_path.open("w") as stderr:
+        process = subprocess.Popen(
+            argv, cwd=REPO, env=env, stdout=stdout, stderr=stderr, stdin=subprocess.DEVNULL,
+            start_new_session=os.name != "nt",
+        )
+        try:
+            lines = _serve_banner(process, stdout_path, stderr_path, timeout=SERVE_BANNER_TIMEOUT_S)
+            assert lines[0] == f"ROOT  {journey_root['root']}"
+            assert re.match(r"^http://127\.0\.0\.1:\d+/#bootstrap=[A-Za-z0-9_-]{43,}$", lines[1]), lines
+            assert "has no Lab runs" not in stdout_path.read_text()
+        finally:
+            if os.name == "nt":
+                subprocess.run(["taskkill", "/PID", str(process.pid), "/T", "/F"],
+                               stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, check=False, timeout=10)
+            else:
+                try:
+                    os.killpg(process.pid, signal.SIGTERM)
+                except (ProcessLookupError, PermissionError):
+                    pass
+            try:
+                process.wait(timeout=20)
+            except subprocess.TimeoutExpired:
+                if os.name == "nt":
+                    subprocess.run(["taskkill", "/PID", str(process.pid), "/T", "/F"],
+                                   stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, check=False, timeout=10)
+                else:
+                    os.killpg(process.pid, signal.SIGKILL)
+                process.wait(timeout=5)
+
+
+@needs_chrome
+def test_serve_step_reaches_the_landing_with_curve_repeatability_and_example_pill(journey_root, tmp_path) -> None:
+    """The guide's own serve command, launched as a process (BROWSER=true keeps --open headless)."""
 
     import os
     import signal
@@ -191,13 +234,11 @@ def test_serve_step_uses_the_same_root_across_cwds_and_reaches_the_landing(journ
     from tests.lab.test_lab_server import _chrome
 
     argv = next(a for a in journey() if a[-2:] == ["serve", "--open"])
-    assert journey_root["run_cwd"] != REPO
     env = {**os.environ, "TRACEBACK_ROOT": str(journey_root["root"]), "BROWSER": "true", "PYTHONPATH": str(REPO)}
     stdout_path = tmp_path / "serve-stdout.log"
     stderr_path = tmp_path / "serve-stderr.log"
     stdout = stdout_path.open("w")
     stderr = stderr_path.open("w")
-    dom = None
     try:
         process = subprocess.Popen(
             argv,
@@ -213,17 +254,14 @@ def test_serve_step_uses_the_same_root_across_cwds_and_reaches_the_landing(journ
         assert lines[0] == f"ROOT  {journey_root['root']}", (lines, stderr_path.read_text()[-2000:])
         link = lines[1]
         assert re.match(r"^http://127\.0\.0\.1:\d+/#bootstrap=[A-Za-z0-9_-]{43,}$", link), lines
-        assert "has no Lab runs" not in stdout_path.read_text()
-        chrome = _chrome()
-        if chrome is not None:
-            from tests.lab.test_lab_server import _dom_cdp
+        from tests.lab.test_lab_server import _dom_cdp
 
-            profile = tmp_path / "profile"
-            dom = _dom_cdp(
-                [chrome, "--headless=new", "--disable-gpu", "--hide-scrollbars", "--no-first-run",
-                 f"--user-data-dir={profile}", "--window-size=1280,800", link], profile,
-                ok=lambda d: 'data-ready="1"' in d and "Depth → utility" in d,
-            )
+        profile = tmp_path / "profile"
+        dom = _dom_cdp(
+            [_chrome(), "--headless=new", "--disable-gpu", "--hide-scrollbars", "--no-first-run",
+             f"--user-data-dir={profile}", "--window-size=1280,800", link], profile,
+            ok=lambda d: 'data-ready="1"' in d and "Depth → utility" in d,
+        )
     finally:
         try:
             if os.name == "nt":
@@ -258,13 +296,12 @@ def test_serve_step_uses_the_same_root_across_cwds_and_reaches_the_landing(journ
         finally:
             stdout.close()
             stderr.close()
-    if dom is not None:
-        body = _body(dom)
-        assert body["csp-violations"] == "0"
-        assert "Depth → utility" in dom and 'class="curve-grid"' in dom
-        assert "REPEATABILITY" in dom and "Median split-half" in dom
-        assert "EXAMPLE (synthetic)" in dom
-        assert "Not in the synthetic example: copy-number needs hg38 assets." in dom
+    body = _body(dom)
+    assert body["csp-violations"] == "0"
+    assert "Depth → utility" in dom and 'class="curve-grid"' in dom
+    assert "REPEATABILITY" in dom and "Median split-half" in dom
+    assert "EXAMPLE (synthetic)" in dom
+    assert "Not in the synthetic example: copy-number needs hg38 assets." in dom
 
 
 def test_doctor_blocks_only_on_the_example_journey(tmp_path, monkeypatch, capsys) -> None:
