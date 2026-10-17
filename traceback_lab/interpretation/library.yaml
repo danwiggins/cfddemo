@@ -2550,7 +2550,7 @@ entries:
     license_ids: [kraken2-mit, bracken-gpl3]
     flags: [PRIVACY]
     headline: true
-    stability: {kind: scales_with_depth, tolerance: 0.10}
+    stability: {kind: relative, tolerance: 0.10}
     citations: []
     citation_checked: {by: "Lab S4 build", date: "2026-10-16", note: "No diagnostic performance or ONT reference interval claimed."}
 
@@ -2561,6 +2561,7 @@ entries:
     meaning_high: "More reads in the denominator for the reported candidate rate."
     meaning_low: "Fewer reads in the denominator; candidate rates are noisier."
     headline: false
+    stability: {kind: scales_with_depth, tolerance: 0.10}
   - <<: *microbial_base
     metric_id: candidate_unmapped_reads
     label: "Human-unmapped reads submitted to Kraken2"
@@ -2568,6 +2569,7 @@ entries:
     meaning_high: "More reads failed human alignment and met the registered clipping length."
     meaning_low: "Fewer reads were available for microbial classification."
     headline: false
+    stability: {kind: scales_with_depth, tolerance: 0.10}
   - <<: *microbial_base
     metric_id: too_short_unmapped_reads
     label: "Human-unmapped reads below Bracken length"
@@ -2575,6 +2577,7 @@ entries:
     meaning_high: "More unmapped reads were excluded to keep the Bracken length model exact."
     meaning_low: "Few reads were excluded by the registered length."
     headline: false
+    stability: {kind: scales_with_depth, tolerance: 0.10}
   - <<: *microbial_base
     metric_id: missing_sequence_unmapped_reads
     label: "Human-unmapped reads without sequence"
@@ -2582,6 +2585,7 @@ entries:
     meaning_high: "More unmapped reads lacked bases and could not be classified."
     meaning_low: "Few unmapped reads lacked sequence."
     headline: false
+    stability: {kind: scales_with_depth, tolerance: 0.10}
   - <<: *microbial_base
     metric_id: classified_candidate_reads
     label: "Kraken2 classified candidate reads"
@@ -2589,6 +2593,7 @@ entries:
     meaning_high: "More submitted reads received a taxonomy assignment, including non-microbial taxa."
     meaning_low: "More submitted reads remained unclassified."
     headline: false
+    stability: {kind: scales_with_depth, tolerance: 0.10}
   - <<: *microbial_base
     metric_id: unclassified_candidate_reads
     label: "Kraken2 unclassified candidate reads"
@@ -2596,6 +2601,7 @@ entries:
     meaning_high: "More submitted reads were not assigned within this database."
     meaning_low: "Fewer submitted reads remained unclassified."
     headline: false
+    stability: {kind: scales_with_depth, tolerance: 0.10}
   - <<: *microbial_base
     metric_id: microbial_estimated_reads
     label: "Bracken estimated microbial reads"
@@ -2603,6 +2609,7 @@ entries:
     meaning_high: "More estimated reads fall under explicitly microbial taxonomy roots."
     meaning_low: "Fewer estimated reads fall under those roots."
     headline: false
+    stability: {kind: scales_with_depth, tolerance: 0.10}
   - <<: *microbial_base
     metric_id: omitted_taxa
     label: "Microbial taxa omitted from the bounded display"
@@ -2610,6 +2617,7 @@ entries:
     meaning_high: "The displayed top taxa do not include every candidate species; missing taxa cannot be assumed zero."
     meaning_low: "All candidate microbial taxa fit in the displayed profile."
     headline: false
+    stability: {kind: absolute, tolerance: 1}
   # ----------------------------------------------- short-read-fragment-size
   - algorithm_id: short-read-fragment-size
     metric_id: mode_bp

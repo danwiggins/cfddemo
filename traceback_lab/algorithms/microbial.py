@@ -30,6 +30,8 @@ from ._base import Base, metric
 
 MAX_TAXA = 256
 MAX_REPORT_ROWS = 100_000
+_BRACKEN_COLUMNS = ("name", "taxonomy_id", "taxonomy_lvl", "kraken_assigned_reads",
+                    "added_reads", "new_est_reads", "fraction_total_reads")
 _ROOTS = {2: "bacteria", 2157: "archaea", 10239: "viruses", 4751: "fungi"}
 _TAXON = re.compile(r"[1-9][0-9]{0,11}\Z")
 
@@ -106,8 +108,7 @@ def _bracken_species(path: Path, lineages: dict[int, str], denominator: int) -> 
     seen: set[int] = set()
     with path.open("rt", encoding="utf-8") as stream:
         reader = csv.DictReader(stream, delimiter="\t")
-        required = {"name", "taxonomy_id", "taxonomy_lvl", "new_est_reads"}
-        if not reader.fieldnames or not required.issubset(reader.fieldnames):
+        if reader.fieldnames != list(_BRACKEN_COLUMNS):
             raise RuntimeError("Bracken output has an invalid header")
         for index, row in enumerate(reader):
             if index >= MAX_REPORT_ROWS or None in row:
@@ -121,9 +122,13 @@ def _bracken_species(path: Path, lineages: dict[int, str], denominator: int) -> 
             seen.add(taxid)
             try:
                 estimated = float(row["new_est_reads"])
+                assigned = int(row["kraken_assigned_reads"])
+                added = int(row["added_reads"])
+                fraction = float(row["fraction_total_reads"])
             except (TypeError, ValueError) as exc:
                 raise RuntimeError("Bracken output has an invalid estimate") from exc
-            if not math.isfinite(estimated) or estimated < 0:
+            if (not math.isfinite(estimated) or estimated < 0 or assigned < 0 or added < 0
+                    or not math.isfinite(fraction) or not 0 <= fraction <= 1):
                 raise RuntimeError("Bracken output has an invalid estimate")
             category = lineages.get(taxid)
             if category is None or estimated == 0:

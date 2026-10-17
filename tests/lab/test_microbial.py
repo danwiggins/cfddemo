@@ -27,6 +27,17 @@ def _hash(data: bytes) -> str:
     return hashlib.sha256(data).hexdigest()
 
 
+def _all_strings(value):
+    if isinstance(value, str):
+        yield value
+    elif isinstance(value, dict):
+        for child in value.values():
+            yield from _all_strings(child)
+    elif isinstance(value, list):
+        for child in value:
+            yield from _all_strings(child)
+
+
 def _database(tmp_path: Path) -> tuple[LabStore, Path]:
     store = LabStore(tmp_path / "root")
     directory = tmp_path / "kraken-db"
@@ -170,10 +181,10 @@ def test_database_registration_and_inspection_cli(tmp_path, capsys) -> None:
                      "--read-length", "75", "--source-label", "local-synthetic",
                      "--root", str(root), "--json"]) == 0
     added = json.loads(capsys.readouterr().out)
-    assert str(directory) not in json.dumps(added)
+    assert all(str(directory) not in value for value in _all_strings(added))
     assert cli.main(["lab", "microbial", "db", "inspect", "--root", str(root), "--json"]) == 0
     inspected = json.loads(capsys.readouterr().out)
-    assert str(directory) not in json.dumps(inspected)
+    assert all(str(directory) not in value for value in _all_strings(inspected))
 
 
 def test_tool_identity_changes_when_executed_helper_changes(tmp_path, monkeypatch) -> None:
@@ -212,6 +223,45 @@ def test_report_lineage_excludes_human_and_unknown_taxa(tmp_path) -> None:
     assert (classified, unclassified) == (2, 1)
     assert lineages[123] == "bacteria"
     assert 9606 not in lineages
+
+
+def test_bracken_bounded_species_retains_total_and_refuses_malformed_rows(tmp_path: Path) -> None:
+    header = "\t".join(algorithm._BRACKEN_COLUMNS) + "\n"
+    rows = [f"Species {taxid}\t{taxid}\tS\t1\t0\t1.0\t0.003" for taxid in range(1, 301)]
+    table = tmp_path / "bracken.tsv"
+    table.write_text(header + "\n".join(rows) + "\n")
+    displayed, total, omitted = algorithm._bracken_species(
+        table, {taxid: "bacteria" for taxid in range(1, 301)}, 1000)
+    assert len(displayed) == 256 and omitted == 44 and total == 300
+    assert displayed[0]["rpm_primary"] == 1000
+    assert 300 not in {row["taxid"] for row in displayed}
+
+    for bad in (
+        header + "Species 1\t1\tS\t1\t0\tnan\t0.1\n",
+        header + "Species 1\t1\tS\t1\t0\t1\tinf\n",
+        header + "Species 1\t1\tS\t1\t0\t1\n",
+        header + "Species 1\t1\tS\t-1\t0\t1\t0.1\n",
+        header.replace("added_reads", "unexpected") + rows[0] + "\n",
+    ):
+        table.write_text(bad)
+        with pytest.raises(RuntimeError, match="Bracken output"):
+            algorithm._bracken_species(table, {1: "bacteria"}, 1000)
+
+
+def test_kraken_accounting_must_cover_all_submitted_candidates(tmp_path: Path) -> None:
+    report = tmp_path / "kraken.report"
+    report.write_text("100.00\t1\t1\tU\t0\tunclassified\n")
+    with pytest.raises(RuntimeError, match="account for submitted"):
+        algorithm._report_lineages(report, 2)
+
+
+def test_microbe_rate_and_display_count_have_distinct_stability_policies() -> None:
+    from traceback_lab.interpretation.engine import load_library
+
+    library = load_library()
+    assert library.entry("microbial", "microbial_rpm_primary").stability["kind"] == "relative"
+    assert library.entry("microbial", "primary_reads").stability["kind"] == "scales_with_depth"
+    assert library.entry("microbial", "omitted_taxa").stability["kind"] == "absolute"
 
 
 def test_run_clips_only_unmapped_eligible_reads_and_uses_primary_denominator(tmp_path, monkeypatch) -> None:
@@ -460,6 +510,23 @@ def test_cohort_975_zero_fills_complete_absent_taxa_and_refuses_missing_referenc
     assert projected["cohort_n"] == 10
     assert projected["taxa"][0]["cohort_p975"] == pytest.approx(3.875)
     assert projected["taxa"][0]["above_cohort_p975"] is True
+    # An omitted taxon cannot be interpreted as a measured zero in that
+    # member; a tenth compatible value is then unavailable for this species.
+    limited_members = list(members)
+    first = members[0]
+    result = first.results[0]
+    limited_members[0] = CohortMember(
+        source_id=first.source_id, input_id=first.input_id,
+        aligner_identity=first.aligner_identity,
+        results=(CohortResult(algorithm_id="microbial", parameters_sha256=identity,
+                              cohort_compat_key=identity,
+                              metrics={**result.metrics, "omitted_taxa": 1}),),
+    )
+    limited_generation = CohortGeneration(cohort_id="healthy-v1", version=2,
+                                          members=tuple(limited_members))
+    limited = profile_for_sample(store, sample, limited_generation, target, "ready")
+    assert limited["taxa"][0]["cohort_n"] == 9
+    assert limited["taxa"][0]["cohort_p975"] is None
     missing_target = profile_for_sample(store, sample, generation, None, "ready")
     assert missing_target["state"] == "cohort_unavailable"
     assert "target" in missing_target["reason"].lower()
