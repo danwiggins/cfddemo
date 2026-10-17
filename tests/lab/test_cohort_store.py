@@ -270,12 +270,12 @@ def test_cohort_omits_dependent_after_same_identity_upstream_reselection(
     ]
 
 
-def test_consumed_attempts_use_declared_upstream_order() -> None:
+def test_consumed_attempts_use_sorted_selection_order() -> None:
     input_id = _sha(143)
     rows = [
         {"algorithm_id": name, "input_id": input_id,
          "parameters_sha256": _sha(index), "attempt_id": f"attempt-{name}"}
-        for index, name in ((1, "read-summary"), (2, "meth-calls"))
+        for index, name in ((2, "meth-calls"), (1, "read-summary"))
     ]
     snapshots = {
         row["algorithm_id"]: (Path(row["attempt_id"]), SimpleNamespace(
@@ -285,7 +285,7 @@ def test_consumed_attempts_use_declared_upstream_order() -> None:
     fake_store = SimpleNamespace(upstream_selections_at=lambda _attempt: rows)
     upstream = [
         {"algorithm_id": row["algorithm_id"], "parameters_sha256": row["parameters_sha256"]}
-        for row in rows
+        for row in reversed(rows)
     ]
     assert cohorts._consumed_attempts_current(
         fake_store, Path("dependent"), upstream, snapshots, input_id,
