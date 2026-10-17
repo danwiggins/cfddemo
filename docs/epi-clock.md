@@ -8,6 +8,14 @@ range. The four fixed coefficients come from `methylclockData`'s
 `9a3feb7d0c500f9ccdb61ffe243775587fa21b082536142bb1260c566cd39645`).
 The source R asset is not bundled.
 
+The fitted equation is `38.0 - 26.4 × ASPA - 23.7 × ITGA2B + 164.7 × PDE4C`,
+where each term is the modified fraction at its measured CpG. In this order,
+the assay sites are ASPA (`cg02228185`), ITGA2B (`cg25809905`), and the PDE4C
+CpG upstream of array probe `cg17861230`. The arithmetic can yield values
+from −12.1 to 202.7 years; those are mathematical bounds, not a valid age
+range or clinical interpretation. The one-year split-stability tolerance is
+an analysis check, not a guarantee at the five-call completeness gate.
+
 The operator must provide a verified hg38 coordinate mapping for the two
 Illumina probe CpGs and the **upstream PDE4C assay CpG** used for the third
 coefficient in [Weidner et al. 2014](https://doi.org/10.1186/gb-2014-15-2-r24).
@@ -35,7 +43,9 @@ The null values above make this template **unregisterable** until the real
 assay-site coordinates have been verified. Supply the actual chromosome and zero-based position of the
 forward-reference C for each measured CpG. Only
 autosomes are accepted. The registration checks structure, unique positions,
-and exact bytes; at run time the adapter checks the registered reference FASTA
+and exact bytes; at run time the adapter checks the [GRCh38 primary-assembly
+chromosome lengths](https://www.ncbi.nlm.nih.gov/grc/human/data?asm=GRCh38)
+in both the aligned input and reference FASTA, and checks the FASTA
 for `CG` at all three positions. Those checks cannot establish that a site ID
 was mapped to the correct locus. The operator must verify that mapping against
 the named annotation, and qualification remains pending until that evidence is

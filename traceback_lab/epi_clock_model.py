@@ -28,6 +28,8 @@ if TYPE_CHECKING:
 SCHEMA = "traceback.lab.epi-clock-map.v2"
 MODEL_ID = "Weidner-3"
 COEFFICIENTS_SHA256 = "9a3feb7d0c500f9ccdb61ffe243775587fa21b082536142bb1260c566cd39645"
+# Weidner equation: alpha=ASPA/cg02228185, beta=ITGA2B/cg25809905,
+# gamma=PDE4C assay CpG upstream of the cg17861230 array probe.
 WEIDNER_SITES = ("cg02228185", "cg25809905", "pde4c_upstream_of_cg17861230")
 WEIDNER_WEIGHTS = (-26.4, -23.7, 164.7)
 WEIDNER_INTERCEPT = 38.0
@@ -51,7 +53,7 @@ def _parse(raw: bytes, digest: str) -> ClockMap:
         raise ClockModelError("clock coordinate file exceeds 8 KiB")
     try:
         data = json.loads(raw)
-    except (UnicodeError, ValueError) as exc:
+    except (UnicodeError, ValueError, RecursionError) as exc:
         raise ClockModelError("clock coordinate file is invalid JSON") from exc
     if (not isinstance(data, dict) or set(data) != {"schema", "model_id", "genome_build", "source_label", "sites"}
             or data["schema"] != SCHEMA or data["model_id"] != MODEL_ID or data["genome_build"] != "hg38"
@@ -111,7 +113,7 @@ def inspect_map(store: LabStore) -> ClockMap:
                 or not _SHA.fullmatch(receipt["sha256"])):
             raise ClockModelError("clock map receipt is invalid")
         raw = _read_regular(directory / "coordinates.json")
-    except (OSError, ValueError, AssetError) as exc:
+    except (OSError, ValueError, AssetError, RecursionError) as exc:
         raise ClockModelError("clock map registration is missing or unsafe") from exc
     digest = hashlib.sha256(raw).hexdigest()
     if digest != receipt["sha256"]:
@@ -147,5 +149,8 @@ def register_map(store: LabStore, source: Path, expected_sha256: str) -> ClockMa
         (staging / "coordinates.json").write_bytes(raw)
         (staging / "receipt.json").write_bytes(canonical_json_bytes({"schema": SCHEMA, "sha256": digest}))
 
-    store.publish_directory(destination.parent, destination.name, build)
+    try:
+        store.publish_directory(destination.parent, destination.name, build)
+    except OSError as exc:
+        raise ClockModelError("clock map could not be published; inspect registration before retrying") from exc
     return inspect_map(store)

@@ -22,7 +22,17 @@ from ..registry import AlgorithmOutput, InputContext, Ready, Requirements, Skip
 from ._base import load_summary, metric
 from ._meth import MethBase, load_calls
 
-HG38_CHR1_LENGTH = 248_956_422
+# GRC GRCh38 primary assembly chromosome lengths. Check every mapped site,
+# since a chr1-only build check misses mixed-build BAMs and FASTAs.
+HG38_AUTOSOME_LENGTHS = dict(zip(
+    (f"chr{i}" for i in range(1, 23)),
+    (248_956_422, 242_193_529, 198_295_559, 190_214_555, 181_538_259,
+     170_805_979, 159_345_973, 145_138_636, 138_394_717, 133_797_422,
+     135_086_622, 133_275_309, 114_364_328, 107_043_718, 101_991_189,
+     90_338_345, 83_257_441, 80_373_285, 58_617_616, 64_444_167,
+     46_709_983, 50_818_468),
+))
+HG38_CHR1_LENGTH = HG38_AUTOSOME_LENGTHS["chr1"]
 MIN_SITE_CALLS = 5  # engineering completeness gate, not a published clinical threshold
 
 
@@ -55,8 +65,9 @@ class EpiClock(MethBase):
 
         try:
             model = inspect_map(LabStore(ctx.root))
-            if any(chrom not in lengths for _, chrom, _ in model.sites):
-                return Skip("reference", "Weidner assay-site chromosome is absent from the aligned input")
+            if any(lengths.get(chrom) != HG38_AUTOSOME_LENGTHS[chrom]
+                   for _, chrom, _ in model.sites):
+                return Skip("reference", "Weidner assay-site chromosome is not hg38 in the aligned input")
             if model.sha256 not in ctx.extras.get("planned_asset_sha256s", ()):
                 return Skip("missing_asset", "Weidner map changed after execution identity was planned")
             reference = ctx.extras.get("reference_fasta")
@@ -66,6 +77,8 @@ class EpiClock(MethBase):
                 if fasta.get_reference_length("chr1") != HG38_CHR1_LENGTH:
                     return Skip("reference", "clock coordinate map requires an hg38-length FASTA")
                 for _, chrom, pos0 in model.sites:
+                    if fasta.get_reference_length(chrom) != HG38_AUTOSOME_LENGTHS[chrom]:
+                        return Skip("reference", "Weidner assay-site chromosome is not hg38 in the FASTA")
                     if pos0 + 2 > fasta.get_reference_length(chrom) or fasta.fetch(chrom, pos0, pos0 + 2).upper() != "CG":
                         return Skip("missing_asset", "registered Weidner position is not an hg38 CpG")
         except (ClockModelError, OSError, ValueError, KeyError):
@@ -84,7 +97,8 @@ class EpiClock(MethBase):
         summary, _ = load_summary(ctx)
         lengths = dict(zip(summary.contigs, summary.lengths))
         if lengths.get("chr1") != HG38_CHR1_LENGTH or any(
-                chrom not in lengths for _, chrom, _ in model.sites):
+                lengths.get(chrom) != HG38_AUTOSOME_LENGTHS[chrom]
+                for _, chrom, _ in model.sites):
             raise RuntimeError("Weidner BAM reference layout changed after preflight")
         counts = np.zeros(3, dtype=np.int64)
         modified = np.zeros(3, dtype=np.int64)

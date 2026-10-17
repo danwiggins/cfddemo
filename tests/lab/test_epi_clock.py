@@ -15,6 +15,7 @@ import pytest
 
 from traceback_lab.algorithms import epi_clock
 from traceback_lab.algorithms.meth_calls import METH_CALLS
+from traceback_lab.cli import main as lab_main
 from traceback_lab.epi_clock_model import ClockModelError, WEIDNER_SITES, _parse, inspect_map, register_map
 from traceback_lab.meth_calls import DTYPE, HAS_H, HAS_M
 from traceback_lab.registry import InputContext
@@ -29,6 +30,8 @@ def test_clock_identity_pins_literal_coefficients() -> None:
     from traceback_lab.interpretation.engine import load_library
 
     algorithm = epi_clock.EPI_CLOCK
+    assert epi_clock.WEIDNER_INTERCEPT == 38.0
+    assert epi_clock.WEIDNER_WEIGHTS == (-26.4, -23.7, 164.7)
     assert algorithm.parameters["weights"] == epi_clock.WEIDNER_WEIGHTS
     original = execution_identity(algorithm, reference_sha256="a" * 64)
     changed = replace(algorithm, parameters={**algorithm.parameters, "weights": (0.0, 0.0, 0.0)})
@@ -74,6 +77,34 @@ def test_clock_map_requires_exact_model_and_immutable_sha(tmp_path: Path) -> Non
     (store.lab / "assets" / "epi-clock-map" / "coordinates.json").write_bytes(b"{}")
     with pytest.raises(ClockModelError, match="changed"):
         inspect_map(store)
+
+
+def test_clock_registration_publish_failure_is_blocked(tmp_path: Path, monkeypatch, capsys) -> None:
+    source = tmp_path / "map.json"
+    source.write_bytes(_map_bytes())
+    def fail_publish(*_args, **_kwargs):
+        raise OSError(f"private staging path: {source}")
+    monkeypatch.setattr(LabStore, "publish_directory", fail_publish)
+    assert lab_main(["asset", "register-clock-map", "--file", str(source),
+                     "--sha256", hashlib.sha256(source.read_bytes()).hexdigest(),
+                     "--root", str(tmp_path / "root"), "--json"]) != 0
+    result = json.loads(capsys.readouterr().out)
+    assert result["status"] == "blocked"
+    assert str(source) not in json.dumps(result)
+
+
+@pytest.mark.parametrize("filename", ["coordinates.json", "receipt.json"])
+def test_nested_clock_registration_json_is_refused(tmp_path: Path, filename: str) -> None:
+    raw = _map_bytes()
+    source = tmp_path / "map.json"
+    source.write_bytes(raw)
+    store = LabStore(tmp_path / "root")
+    register_map(store, source, hashlib.sha256(raw).hexdigest())
+    (store.lab / "assets" / "epi-clock-map" / filename).write_bytes(
+        b"[" * 4000 + b"0" + b"]" * 4000)
+    with pytest.raises(ClockModelError):
+        inspect_map(store)
+    assert epi_clock.EPI_CLOCK.asset_sha256s(store.root) == []
 
 
 @pytest.mark.parametrize("change", [
@@ -156,16 +187,49 @@ def test_clock_skips_when_probe_chromosome_is_absent_from_bam(monkeypatch, tmp_p
         epi_clock.EPI_CLOCK.run(ctx, tmp_path)
 
 
-def test_clock_preflight_and_worker_with_real_call_store(tmp_path: Path) -> None:
+def test_clock_rejects_mixed_build_site_chromosome_in_bam_or_fasta(monkeypatch, tmp_path: Path) -> None:
+    model = _parse(_map_bytes(), "a" * 64)
+    model = replace(model, sites=(model.sites[0], model.sites[1],
+                                  (model.sites[2][0], "chr19", model.sites[2][2])))
+    monkeypatch.setattr(epi_clock.MethBase, "preflight", lambda self, ctx: Ready())
+    monkeypatch.setattr(epi_clock, "inspect_map", lambda store: model)
+    lengths = {"chr1": epi_clock.HG38_CHR1_LENGTH, "chr19": 58_617_616 - 1}
+    monkeypatch.setattr(epi_clock, "load_summary", lambda ctx: (
+        SimpleNamespace(contigs=list(lengths), lengths=list(lengths.values())), None))
+    ctx = InputContext(tmp_path, "s", "i", "hg38", "a" * 64, tmp_path,
+                       eligible_reads=5_000_000,
+                       extras={"planned_asset_sha256s": [model.sha256],
+                               "reference_fasta": str(tmp_path / "reference.fa")})
+    assert epi_clock.EPI_CLOCK.preflight(ctx).reason_code == "reference"
+
+    lengths["chr19"] = epi_clock.HG38_AUTOSOME_LENGTHS["chr19"]
+    class FakeFasta:
+        def __init__(self, path):
+            pass
+        def __enter__(self):
+            return self
+        def __exit__(self, *args):
+            pass
+        def get_reference_length(self, chrom):
+            return lengths[chrom] - (chrom == "chr19")
+        def fetch(self, chrom, start, end):
+            return "CG"
+    monkeypatch.setattr(epi_clock.pysam, "FastaFile", FakeFasta)
+    assert epi_clock.EPI_CLOCK.preflight(ctx).reason_code == "reference"
+
+
+def test_clock_preflight_and_worker_with_real_call_store(tmp_path: Path, monkeypatch) -> None:
     """Synthetic coordinates and depth exercise plumbing, not biological qualification."""
 
     import pysam
 
+    monkeypatch.setattr(epi_clock, "HG38_CHR1_LENGTH", 200)
+    monkeypatch.setitem(epi_clock.HG38_AUTOSOME_LENGTHS, "chr1", 200)
     sequence = list("A" * 200)
     for pos0 in (100, 110, 120):
         sequence[pos0:pos0 + 2] = list("CG")
     fasta = tmp_path / "synthetic.fa"
-    # Stream a full-length synthetic chr1 without allocating 249 MB in memory.
+    # A short test seam exercises the real FASTA and call store without a 249 MB file.
     with fasta.open("w") as stream:
         stream.write(">chr1\n" + "".join(sequence))
         remaining = epi_clock.HG38_CHR1_LENGTH - len(sequence)
@@ -198,7 +262,14 @@ def test_clock_preflight_and_worker_with_real_call_store(tmp_path: Path) -> None
     request = scratch / "request.json"
     request.write_text(json.dumps({"entry": "epi_clock:EPI_CLOCK", "context": context_to_json(ctx),
                                    "out_dir": str(scratch)}))
-    subprocess.run([sys.executable, "-m", "traceback_lab.worker", str(request)], check=True)
+    worker_with_test_reference = (
+        "from traceback_lab.algorithms import epi_clock; "
+        "epi_clock.HG38_CHR1_LENGTH = 200; "
+        "epi_clock.HG38_AUTOSOME_LENGTHS['chr1'] = 200; "
+        "from traceback_lab.worker import main; import sys; "
+        "sys.exit(main(sys.argv[1:]))"
+    )
+    subprocess.run([sys.executable, "-c", worker_with_test_reference, str(request)], check=True)
     metrics = {item["metric_id"]: item for item in json.loads((scratch / "output.json").read_text())["metrics"]}
     assert metrics["epigenetic_age_years"]["value"] == pytest.approx(38 - 26.4 + 164.7)
     assert metrics["epigenetic_age_years"]["n"] == 5
