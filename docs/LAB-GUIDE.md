@@ -134,18 +134,24 @@ uBAM.
 The reference is the one registered under ROOT (`traceback reference
 register`); with several, pass `--reference ID`.
 
-**Reruns.** Rerunning the same command recomputes only missing or failed
-results; unchanged chunks are not re-hashed and the alignment is reused.
+**Reruns.** Rerunning the same command recomputes missing or failed results
+and a dependent result when a selected upstream attempt has changed;
+unchanged chunks are not re-hashed and the alignment is reused.
 `traceback lab run latest` or `traceback lab run <id12>` reruns on the stored
 sample without the chunk paths. `--force` recomputes every result.
 `--only a,b` runs just those algorithms (overriding `--profile`), plus the
 intermediates they need, labelled "(upstream)".
 
 A result is reused only when its selected attempt matches the input, algorithm,
-and execution identity. New attempts record artifact file sizes; older attempts
+and execution identity. Dependents also record the exact upstream attempts
+they consumed, including a parent-input summary reused by a derived control.
+An older dependent attempt without that record is recomputed once; leaf results
+remain cacheable. New attempts record artifact file sizes; older attempts
 remain readable, with known upstream layouts checked against their metadata.
 Missing or truncated required artifacts are recomputed. A completed failed
 forced rerun is shown as failed; the prior successful attempt remains on disk.
+If the current upstream step fails or skips, its dependent step also skips;
+an older successful dependent result is not reused for that run.
 Artifact sizes check completeness, not byte-level integrity.
 
 **Dry run.** `--dry-run` writes nothing and takes no lock. It prints the
