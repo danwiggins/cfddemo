@@ -137,6 +137,9 @@ def context_to_json(ctx: InputContext) -> dict[str, Any]:
 
 
 def context_from_json(data: Mapping[str, Any]) -> InputContext:
+    platform = data.get("platform")
+    if platform not in {"ont", "illumina"}:
+        raise ValueError("worker context has no supported platform")
     return InputContext(
         root=Path(data["root"]),
         source_id=data["source_id"],
@@ -144,7 +147,7 @@ def context_from_json(data: Mapping[str, Any]) -> InputContext:
         reference_id=data["reference_id"],
         reference_sha256=data["reference_sha256"],
         input_dir=Path(data["input_dir"]),
-        platform=str(data.get("platform", "ont")),
+        platform=platform,
         eligible_reads=data.get("eligible_reads"),
         approx_depth_x=data.get("approx_depth_x"),
         derived=data.get("derived"),
