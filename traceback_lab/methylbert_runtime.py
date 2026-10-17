@@ -51,15 +51,21 @@ class InstalledCodeIdentity:
 
 
 def installed_identity() -> InstalledCodeIdentity:
-    """Capture both the package's Git provenance and its actual Python bytes."""
+    """Capture Git provenance and distribution RECORD-listed Python file bytes.
+
+    This does not prove which package bytes a later child process imports.
+    """
 
     try:
         distribution = metadata.distribution("methylbert")
         direct = json.loads(distribution.read_text("direct_url.json") or "")
     except (metadata.PackageNotFoundError, OSError, ValueError, TypeError) as exc:
         raise RuntimeRefusal("MethylBERT is not installed from a pinned Git commit") from exc
+    raw_url = direct.get("url") if isinstance(direct, dict) else None
+    if not isinstance(raw_url, str):
+        raise RuntimeRefusal("MethylBERT has an invalid source URL")
     try:
-        url = urlparse(direct.get("url", "")) if isinstance(direct, dict) else urlparse("")
+        url = urlparse(raw_url)
     except ValueError as exc:
         raise RuntimeRefusal("MethylBERT has an invalid source URL") from exc
     path = url.path.removesuffix(".git").lower().strip("/")

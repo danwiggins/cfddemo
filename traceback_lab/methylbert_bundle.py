@@ -10,9 +10,10 @@ from __future__ import annotations
 import hashlib
 import json
 import os
+import shutil
 import stat
 import tarfile
-from contextlib import contextmanager
+from contextlib import ExitStack, contextmanager
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Iterator
@@ -170,8 +171,9 @@ def _scan_raw_headers(handle: Any, size: int) -> None:
 
 @contextmanager
 def _open_bundle(path: Path) -> Iterator[tarfile.TarFile]:
-    try:
-        with path.open("rb") as handle:
+    with ExitStack() as stack:
+        try:
+            handle = stack.enter_context(path.open("rb"))
             info = os.fstat(handle.fileno())
             if not stat.S_ISREG(info.st_mode):
                 raise BundleError("bundle is not a regular file")
@@ -179,10 +181,10 @@ def _open_bundle(path: Path) -> Iterator[tarfile.TarFile]:
                 raise BundleError("bundle archive exceeds the size cap")
             _scan_raw_headers(handle, info.st_size)
             handle.seek(0)
-            with tarfile.open(fileobj=handle, mode="r:") as archive:
-                yield archive
-    except (OSError, tarfile.TarError, UnicodeError) as exc:
-        raise BundleError("bundle is not a readable uncompressed TAR") from exc
+            archive = stack.enter_context(tarfile.open(fileobj=handle, mode="r:"))
+        except (OSError, tarfile.TarError, UnicodeError) as exc:
+            raise BundleError("bundle is not a readable uncompressed TAR") from exc
+        yield archive
 
 
 def verify_bundle(path: Path) -> Bundle:
@@ -199,12 +201,15 @@ def verify_bundle(path: Path) -> Bundle:
 def unpack_bundle(path: Path, destination: Path) -> Bundle:
     """Reverify and copy fixed members into a new private directory."""
 
+    created = False
+    complete = False
     try:
         with _open_bundle(path) as archive:
             bundle, members = _verified_members(archive)
             if destination.exists() or destination.is_symlink():
                 raise BundleError("bundle destination must not exist")
             destination.mkdir(mode=0o700, parents=True)
+            created = True
             total = 0
             for name in sorted(REQUIRED_FILES):
                 member = members[name]
@@ -233,6 +238,10 @@ def unpack_bundle(path: Path, destination: Path) -> Bundle:
                 with target.open("rb") as copied:
                     if _sha256(copied, member.size) != bundle.files[name]:
                         raise BundleError(f"{name} changed during private copy")
+            complete = True
             return bundle
     except (OSError, tarfile.TarError) as exc:
-        raise BundleError("bundle is not a readable uncompressed TAR") from exc
+        raise BundleError("bundle private copy failed") from exc
+    finally:
+        if created and not complete:
+            shutil.rmtree(destination, ignore_errors=True)

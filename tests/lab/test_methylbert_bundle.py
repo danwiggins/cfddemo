@@ -7,6 +7,7 @@ import io
 import json
 import os
 import tarfile
+from pathlib import Path
 
 import pytest
 
@@ -154,3 +155,22 @@ def test_private_copy_uses_verified_open_archive_when_path_is_replaced(tmp_path,
     assert (destination / "train_seq.csv").read_bytes() == files["train_seq.csv"]
     monkeypatch.setattr(bundle_module, "_verified_members", original)
     assert verify_bundle(archive).model_id == "replacement-model"
+
+
+def test_private_copy_failure_removes_partial_destination(tmp_path, monkeypatch):
+    archive = tmp_path / "model.tar"
+    _bundle(archive)
+    destination = tmp_path / "private"
+    original = bundle_module._sha256
+
+    def fail_after_copy(stream, size):
+        if getattr(stream, "name", None) and destination in Path(stream.name).parents:
+            raise OSError("injected private copy failure")
+        return original(stream, size)
+
+    monkeypatch.setattr(bundle_module, "_sha256", fail_after_copy)
+    with pytest.raises(BundleError, match="private copy failed"):
+        unpack_bundle(archive, destination)
+    assert not destination.exists()
+    monkeypatch.setattr(bundle_module, "_sha256", original)
+    assert unpack_bundle(archive, destination).model_id == "test-tumour-normal"

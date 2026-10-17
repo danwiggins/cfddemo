@@ -30,7 +30,7 @@ def _ready(**changes):
     return runtime.require_ready(_bundle(), **values)
 
 
-def test_install_identity_requires_pinned_git_source_and_hashes_actual_code(tmp_path, monkeypatch):
+def test_install_identity_requires_pinned_git_source_and_hashes_record_listed_code(tmp_path, monkeypatch):
     code = tmp_path / "methylbert" / "data" / "bam.py"
     code.parent.mkdir(parents=True)
     code.write_text("original source\n")
@@ -69,6 +69,10 @@ def test_install_identity_requires_pinned_git_source_and_hashes_actual_code(tmp_
     monkeypatch.setattr(runtime.metadata, "distribution", lambda _name: Distribution({**valid, "url": "https://example.org/model.git"}))
     with pytest.raises(runtime.RuntimeRefusal, match="pinned upstream repository"):
         runtime.installed_identity()
+    for malformed in (None, 42, ["https://github.com/CompEpigen/methylbert.git"]):
+        monkeypatch.setattr(runtime.metadata, "distribution", lambda _name: Distribution({**valid, "url": malformed}))
+        with pytest.raises(runtime.RuntimeRefusal, match="invalid source URL"):
+            runtime.installed_identity()
 
 
 def test_readiness_requires_pinned_model_reference_depth_ont_and_gpu(monkeypatch):
@@ -108,6 +112,10 @@ def test_only_small_finite_aggregate_without_per_read_fields_is_well_formed(tmp_
     _aggregate(path)
     result = runtime.read_aggregate(path, model_id="tumour-normal", eligible_reads=runtime.MIN_ELIGIBLE_READS)
     assert (result.tumour_fraction, result.classified_reads) == (0.2, 50)
+    _aggregate(path, classified_reads=runtime.MIN_ELIGIBLE_READS)
+    assert runtime.read_aggregate(
+        path, model_id="tumour-normal", eligible_reads=runtime.MIN_ELIGIBLE_READS,
+    ).classified_reads == runtime.MIN_ELIGIBLE_READS
     for change, message in (
         ({"read_name": "private"}, "unexpected fields"),
         ({"normal_fraction": 0.7}, "fractions"),
@@ -159,4 +167,13 @@ def test_worker_launch_uses_contained_deadline_and_private_aggregate(tmp_path, m
             [sys.executable, "worker.py"], scratch=scratch, env={},
             aggregate_path=scratch / "missing" / "aggregate.json", model_id="tumour-normal",
             eligible_reads=runtime.MIN_ELIGIBLE_READS,
+        )
+    aggregate.unlink()
+    monkeypatch.setattr(runtime, "run_contained", lambda *args, **kwargs: ContainedResult(
+        tuple(args[0]), "exited", 1, 1.0, b"", b"", 0, 0, False, False,
+    ))
+    with pytest.raises(runtime.RuntimeRefusal, match="failed"):
+        runtime.run_worker(
+            [sys.executable, "worker.py"], scratch=scratch, env={}, aggregate_path=aggregate,
+            model_id="tumour-normal", eligible_reads=runtime.MIN_ELIGIBLE_READS,
         )
