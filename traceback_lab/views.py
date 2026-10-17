@@ -16,6 +16,7 @@ definition).  Above this run's depth there are no cells; the library's
 
 from __future__ import annotations
 
+import math
 import os
 from collections.abc import Mapping
 from dataclasses import dataclass, field
@@ -198,6 +199,29 @@ def _side(metric: Any, fraction: float) -> Side:
     return Side(metric.value, n=metric.n, ci=metric.ci, ci_level=metric.ci_level, fraction=fraction)
 
 
+def _split_half_status(view: InputView | None, algorithm_id: str, metric_id: str,
+                       full_value: Any, spec: Mapping[str, Any], *, other_half_recorded: bool = False) -> dict[str, Any]:
+    if view is None:
+        if other_half_recorded:
+            return {"state": "unavailable", "reason": "split half unavailable", "value": None, "deviation": None}
+        return {"state": "not_recorded", "reason": "no split-half input recorded", "value": None, "deviation": None}
+    envelope = view.results.get(algorithm_id)
+    if envelope is None:
+        if algorithm_id in getattr(view, "unreadable", ()):
+            return {"state": "unavailable", "reason": "result unreadable", "value": None, "deviation": None}
+        if algorithm_id in getattr(view, "ambiguous", ()):
+            return {"state": "unavailable", "reason": "result selection ambiguous", "value": None, "deviation": None}
+        return {"state": "unavailable", "reason": "selected result unavailable", "value": None, "deviation": None}
+    if envelope.status != "ok":
+        reason = envelope.skip_reason if envelope.status == "skipped" else "algorithm failed"
+        return {"state": envelope.status, "reason": reason, "value": None, "deviation": None}
+    current = _value(envelope, metric_id)
+    if current is None or not _numeric(current.value) or not math.isfinite(float(current.value)):
+        return {"state": "not_interpretable", "reason": "metric value unavailable", "value": None, "deviation": None}
+    difference, _ = deviation(spec, current.value, full_value, 0.5)
+    return {"state": "ok", "reason": None, "value": current.value, "deviation": difference}
+
+
 def cell_state(
     view: InputView, full: InputView, algorithm_id: str, metric_id: str, library: Library
 ) -> dict[str, Any]:
@@ -313,9 +337,14 @@ def stability_panels(sample: SampleView, library: Library | None = None) -> list
                     }
                 )
             split = None
+            split_status = {
+                half: _split_half_status(halves.get(half), algorithm_id, metric.metric_id, metric.value, spec,
+                                         other_half_recorded=bool(halves))
+                for half in ("A", "B")
+            }
             a = _value(halves["A"].results.get(algorithm_id), metric.metric_id) if "A" in halves else None
             b = _value(halves["B"].results.get(algorithm_id), metric.metric_id) if "B" in halves else None
-            if a is not None and b is not None and _numeric(a.value) and _numeric(b.value):
+            if split_status["A"]["state"] == "ok" and split_status["B"]["state"] == "ok":
                 verdict = stable(spec, _side(a, 0.5), _side(b, 0.5))
                 da, unit = deviation(spec, a.value, metric.value, 0.5)
                 db, _ = deviation(spec, b.value, metric.value, 0.5)
@@ -348,6 +377,7 @@ def stability_panels(sample: SampleView, library: Library | None = None) -> list
                     "full_value": metric.value,
                     "points": points,
                     "split": split,
+                    "split_status": split_status,
                     "verdict": f"usable to {usable_to:g}" if usable_to is not None else "not measured below full depth" if not downs else "stability not validated" if unvalidated else "unstable below full depth",
                 }
             )
@@ -361,7 +391,7 @@ def repeatability(panels: list[dict[str, Any]]) -> dict[str, Any] | None:
     rows = [
         (panel["split"]["relative_abs_diff"], panel["label"], panel["split"]["stable"])
         for panel in panels
-        if panel.get("split") is not None and panel["split"]["stable"] is not None
+        if panel.get("split") is not None
     ]
     if not rows:
         return None
@@ -373,6 +403,7 @@ def repeatability(panels: list[dict[str, Any]]) -> dict[str, Any] | None:
         "median_relative_abs_diff": median,
         "metrics": len(rows),
         "unstable": sum(1 for row in rows if row[2] is False),
+        "no_verdict": sum(1 for row in rows if row[2] is None),
         "worst": [{"label": label, "relative_abs_diff": diff, "stable": ok} for diff, label, ok in worst],
     }
 

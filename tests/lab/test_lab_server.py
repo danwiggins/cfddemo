@@ -175,8 +175,8 @@ def test_stability_dom_names_unvalidated_wps_without_false_verdict(server, tmp_p
         ok=lambda page: 'data-ready="1"' in page and "Stability: every point" in page,
     )
     assert "Fraction of all autosomal 1 kb bins with positive mean WPS — stability not validated" in dom
-    assert "no stability verdict" in dom
-    assert "No stability tolerance has been validated; numeric values are in the table." in dom
+    assert "no split-half stability verdict" in dom
+    assert "No validated stability deviation scale; numeric values are in the table." in dom
     assert "0.4" in dom
 
 
