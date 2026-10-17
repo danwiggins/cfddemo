@@ -28,10 +28,14 @@ MIN_ELIGIBLE_READS = 2_500_000
 LOYFER_KINDS = ("loyfer-atlas", "loyfer-markers", "loyfer-regions")
 _IMPLEMENTATION_FILES = (
     "traceback_lab/algorithms/cell_origin.py",
+    "traceback_lab/algorithms/_base.py",
     "traceback_lab/adapters/cell_origin_inhouse.py",
     "traceback_lab/adapters/mmml_extract.py",
     "traceback_lab/algorithms/_records.py",
+    "traceback_lab/read_summary.py",
     "traceback_lab/modbase.py",
+    "traceback_runner/cell_origin_method.py",
+    "evidence_inspector/cell_origin_inputs.py",
     "evidence_inspector/cell_origin_pipeline.py",
     "evidence_inspector/cell_origin_prefilter.py",
     "evidence_inspector/cell_origin_models.py",
