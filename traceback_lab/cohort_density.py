@@ -11,12 +11,12 @@ from pathlib import Path
 from typing import Any
 
 from .cohort_contracts import CohortGeneration, CohortMember, CohortResult, SizeDensityVector
+from .file_access import open_regular_no_follow
 from .problems import LabProblem
 from .store import LabStore
 
 _HISTOGRAM = "artifacts/size_hist.json"
-_NOFOLLOW = getattr(os, "O_NOFOLLOW", 0)
-_DIRECTORY = getattr(os, "O_DIRECTORY", 0)
+_MAX_ARTIFACT_BYTES = 1024 * 1024
 
 
 def _invalid_density(source_id: str, detail: str) -> LabProblem:
@@ -28,32 +28,27 @@ def _invalid_density(source_id: str, detail: str) -> LabProblem:
 
 
 def _read_attempt_file(base: Path, parts: tuple[str, ...], source_id: str) -> bytes:
-    """Read below results_dir without traversing symlinks, with a 1 MiB cap."""
+    """Read a bounded regular artifact without following any ancestor symlink."""
 
     if any(part in ("", ".", "..") or "/" in part or "\\" in part for part in parts):
         raise _invalid_density(source_id, "outside its selected attempt")
     try:
-        fd = os.open(base, os.O_RDONLY | _DIRECTORY | _NOFOLLOW)
+        fd = open_regular_no_follow(base.joinpath(*parts))
         try:
-            for part in parts[:-1]:
-                next_fd = os.open(part, os.O_RDONLY | _DIRECTORY | _NOFOLLOW, dir_fd=fd)
-                os.close(fd)
-                fd = next_fd
-            file_fd = os.open(parts[-1], os.O_RDONLY | _NOFOLLOW, dir_fd=fd)
-        finally:
-            os.close(fd)
-        try:
-            info = os.fstat(file_fd)
-            if not stat.S_ISREG(info.st_mode) or info.st_nlink != 1 or info.st_size > 1024 * 1024:
+            info = os.fstat(fd)
+            if not stat.S_ISREG(info.st_mode) or info.st_nlink != 1 or info.st_size > _MAX_ARTIFACT_BYTES:
                 raise _invalid_density(source_id, "not a bounded regular artifact")
-            with os.fdopen(file_fd, "rb") as stream:
-                file_fd = -1
-                return stream.read(1024 * 1024 + 1)
+            with os.fdopen(fd, "rb") as stream:
+                fd = -1
+                content = stream.read(_MAX_ARTIFACT_BYTES + 1)
         finally:
-            if file_fd != -1:
-                os.close(file_fd)
+            if fd != -1:
+                os.close(fd)
     except OSError as exc:
         raise _invalid_density(source_id, "unreadable or unsafe") from exc
+    if len(content) > _MAX_ARTIFACT_BYTES:
+        raise _invalid_density(source_id, "larger than the artifact limit")
+    return content
 
 
 def _snapshot_vector(store: LabStore, member: CohortMember, result: CohortResult) -> SizeDensityVector | None:
