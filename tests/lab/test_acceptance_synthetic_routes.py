@@ -577,10 +577,10 @@ def test_stale_run_log_link_refuses_to_mix_new_attempt_with_loaded_results(tmp_p
               state.generationAtLoad = 1;
               state.lastStatus ||= {generation: 1};
               state.lastStatus.generation = 2;
-              const link = [...document.querySelectorAll('main a')]
-                .find((a) => a.textContent.includes('Run log line →'));
-              if (!link) return false;
-              link.click();
+              const button = [...document.querySelectorAll('main button')]
+                .find((item) => item.textContent.includes('Run log line →'));
+              if (!button) return false;
+              button.click();
               return true;
             })()""",
         )
