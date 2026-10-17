@@ -76,9 +76,15 @@ def test_outer_lab_timeout_kills_r_descendant(tmp_path: Path) -> None:
         "sys.path.insert(0, str(Path.cwd()))\n"
         "from traceback_lab.algorithms.fetal_fraction import _run_bounded_r\n"
         f"_run_bounded_r([sys.executable, {str(child)!r}, {str(marker)!r}], "
-        f"cwd=Path({str(tmp_path)!r}), timeout_seconds=30)\n")
+        f"cwd=Path({str(tmp_path)!r}), timeout_seconds=90)\n")
+    def wait_for_child(_elapsed: float) -> None:
+        deadline = time.monotonic() + 60
+        while not marker.is_file() and time.monotonic() < deadline:
+            time.sleep(0.05)
+        assert marker.is_file(), "R descendant did not start before the test deadline"
+
     result = run_pipeline([Stage("prenatal-worker", [sys.executable, str(worker)])],
-                          timeout_s=2, cwd=Path.cwd())
+                          timeout_s=2, cwd=Path.cwd(), on_tick=wait_for_child)
     assert result.timed_out
     assert marker.is_file()
     stopped_at = marker.stat().st_size
