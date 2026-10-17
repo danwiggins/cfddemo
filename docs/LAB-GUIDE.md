@@ -78,8 +78,8 @@ traceback lab run (<BAM|uBAM|chunk dir>... | <id12> | latest | --example)
     [--skip-bad-chunks] [--sex M|F] [--force] [--timeout-s 3600]
     [--threads N] [--sort-mem 1G] [--mmi PATH]
     [--dry-run] [--verbose] [--json] [--root R]
-traceback lab simulate cna <id12|latest> [--tf 0.03,0.10,0.30]   synthetic CNA spike, copy-number recovery
-traceback lab simulate split <id12|latest>                         split-half pseudo-replicate
+traceback lab simulate cna <id12|latest> [--tf 0.03,0.10,0.30] [--verbose]   synthetic CNA spike, copy-number recovery
+traceback lab simulate split <id12|latest> [--verbose]                         split-half pseudo-replicate
 traceback lab algorithms [--json]          registered algorithms (id, tier, min depth, licenses, footnote)
 traceback lab doctor [--json]              setup checks, each with a fix command
 traceback lab serve [--open]               the local page (loopback only)
@@ -190,6 +190,19 @@ and exits 6. Completed results are kept; rerun the same command.
 streams each tool's raw stderr to your terminal; only scrubbed stderr (paths,
 ROOT, home, login and chunk names redacted) is ever stored.
 
+Each executed algorithm reports the direct worker's `wait4` peak RSS,
+the sampled peak sum of live worker-group and descendant RSS, and sampled peak
+scratch-disk bytes separately in its step result and run log. The worker's
+`wait4` value can include descendants it waited for; the sampled sum can count
+shared pages more than once. Either memory number may be larger. Disk includes
+temporary worker files under that step's scratch directory. The disk and
+process-tree numbers are sampled observations, not resource ceilings: sampling
+can miss brief peaks. A short step may have no tree sample. A disk scan that
+cannot finish within the bounded reporting time leaves only earlier observations,
+if any. Step duration ends when direct workers are reaped; group cleanup and
+telemetry reporting can continue afterward. Cached and skipped steps have no
+new measurement.
+
 ## Algorithms
 
 `traceback lab algorithms` lists what is registered. The slice ships:
@@ -197,9 +210,10 @@ ROOT, home, login and chunk names redacted) is ever stored.
 | id | What it reports |
 |---|---|
 | `read-summary` | intermediate: one pass over the aligned BAM into memmapped columns (no read names); every pysam algorithm and every downsample or split-half view reads it |
-| `bam-qc` | primaries, mapped and MAPQ ≥ 20 shares, supplementary share (chimera proxy), mean read Q, share of sampled genome covered ≥ 1x, GC-bias slope, duplicate share (only when marked) |
-| `depth` | eligible reads (primary, MAPQ ≥ 20, chr1–22/X/Y), mean span, approximate depth; the index count is shown only as an upper bound |
+| `bam-qc` | primaries, mapped and MAPQ ≥ 20 shares, supplementary share, mean read Q, share of sampled genome covered ≥ 1x, GC-bias slope, duplicate share (only when marked); supplementary share as a chimera proxy and mean read Q interpretation are ONT-specific |
+| `depth` | eligible reads (primary, MAPQ ≥ 20, chr1–22/X/Y), mean aligned span per eligible read, approximate aligned-base depth; the index count is shown only as an upper bound, and Illumina aligned span is not template length (`abs(TLEN)`) |
 | `fragment-size` | 1-bp aligned-span histogram, mode, short (< 150 bp) share, mono/di peaks, 10 bp periodicity |
+| `lionheart` | opt-in upstream LIONHEART v2.2.0 extraction of 898 raw sample-standardized chromatin-accessibility correlation scores from the selected hg38 BAM; needs ≥5M eligible reads, the modified mosdepth and Zenodo v003 resources; ONT single-end mode is experimental, and no cancer prediction is run |
 | `short-read-fragment-size` | separate exploratory paired-end Illumina histogram and size summaries from absolute BAM TLEN; requires a prealigned BAM with every `@RG PL:ILLUMINA` |
 | `copy-number` | tumour fraction, ploidy, genome log2 track and segments through the installed ichorCNA toolchain (no panel of normals yet, so read as not interpretable); needs 2M eligible reads, `traceback toolchain install ichor` and `traceback method-asset register --from-toolchain copy-number --root R` |
 | `instability` | bin-weighted median absolute deviation of the selected copy-number result's segment log2 values (`tmad`), with used-bin and null-estimate coverage counts; needs 2M eligible reads and a successful copy-number result for the same input; exploratory and cohort-relative, with no ONT cutoff |
@@ -207,6 +221,7 @@ ROOT, home, login and chunk names redacted) is ever stored.
 | `long-tail` | shares of molecules > 300 bp, 1–4 kb (delayed processing) and > 7.5 kb (lysis); a supplementary-split read counts at its read length |
 | `sex-check` | chrY/chrX read density per Mb of non-N, non-PAR reference and a male / female / indeterminate call; needs 500,000 eligible reads |
 | `mtdna` | chrM reads (MAPQ ≥ 20) as a share of all primary reads, and the chrM fragment mode |
+| `viral-reads` | EBV, HPV and HBV reads per million human-unmapped primary reads from a separate minimap2 ≥ 2.28 alignment; needs an operator-registered viral FASTA and is exploratory for ONT cfDNA |
 | `cell-origin` | share of cfDNA from each of 40 Loyfer U250 cell types with bootstrap intervals, through the signed method's own `compute_measurement` (modkit, UXM, NNLS); needs 2.5M eligible reads, `traceback toolchain install modkit` and `traceback method-asset register --from-dir LOYFER_DIR --root R`; minor cell types are not interpretable below 5x. Downsample and split runs read a transient filtered BAM that is deleted after publish |
 | `end-motifs` | reference 4-mers at both ends of each molecule (5′ forward end and the reverse complement of the other end), motif diversity score and CCCA share; needs 500,000 eligible reads and the registered FASTA |
 | `delfi-ratio` | short (100–150 bp) / long (151–220 bp) ratio per 5 Mb bin on chr1–22, median-centred, and its SD; no GC correction, cohort-relative only; needs 1,000,000 eligible reads |
@@ -218,26 +233,100 @@ ROOT, home, login and chunk names redacted) is ever stored.
 | `frag-x-meth` | descriptive molecule-count matrix of aligned-size bins by per-read 5mC fraction (at least four distinct CpG sites/read); the scalar is long (151–220 bp) mean minus short (100–150 bp) mean, null if either group is empty; no normal range |
 | `breakpoint-motifs` | 4-mer counts at aligned-reference-span start and end−1, stratified by CpG proximity; the scalar is the fraction of ends near a CpG. These are not proven physical cleavage positions, and the methylation link is unavailable without a supported joint input |
 
-**Short-read TLEN slice.** For a prealigned paired-end Illumina BAM against
-the registered hg38 reference, run the separate measurement explicitly:
+**Experimental LIONHEART scores.** The [upstream v2.2.0 source](https://github.com/BesenbacherLab/lionheart/tree/v2.2.0)
+is pinned at commit `f49de07ce0d9a72ee3c883429085cfacfc54c1d2` (MIT code).
+Its `extract_features` command needs the
+[modified mosdepth fork](https://github.com/LudvigOlsen/mosdepth/tree/f61263176b62677dc0b7ad4692c53b8ca2b8365c)
+with `--single-end-length`. Download the 2.3 GB
+[v003 resource archive](https://zenodo.org/records/15747531) through an
+approved local process and verify MD5 `7ab368995ad5123ab665042e6ecc4410`.
+Keep both the archive and its extracted `inference_resources_v003` directory
+under `ROOT/lab/assets/lionheart/` (or set the paths below). The archive is
+checked against that published MD5, every extracted file is compared with the
+archive, and the verified resource bytes enter the result identity. Extraction
+uses a separate verified scratch copy, so a changed installed resource cannot
+silently enter a result. The CLI, its installed Python package code, and the
+modified mosdepth binary are hashed into the result identity; the installed
+package must report version 2.2.0. The selected mosdepth library directory
+must contain `libhts.so`; its loaded bytes and the `samtools` and `unpigz`
+executables are also pinned. Neither the pack nor scores are bundled in this repo;
+Zenodo says its shared scores and models derive from non-commercial,
+research-purpose-only data.
+
+```bash
+export TRACEBACK_LIONHEART_BIN=/path/to/pinned-lionheart-2.2.0/bin/lionheart
+export TRACEBACK_LIONHEART_MOSDEPTH_BIN=/path/to/modified-mosdepth
+export TRACEBACK_LIONHEART_LD_LIBRARY_PATH=/path/to/mosdepth-library-directory
+export TRACEBACK_LIONHEART_ARCHIVE=ROOT/lab/assets/lionheart/inference_resources_v003.tar.gz
+export TRACEBACK_LIONHEART_RESOURCES=ROOT/lab/assets/lionheart/inference_resources_v003
+export TRACEBACK_LIONHEART_ENABLE_ONT=1
+traceback lab run SAMPLE_ID12 --only lionheart --timeout-s 7200 --root ROOT
+```
+
+The binary's `--version` must report Lionheart 2.2.0; the modified mosdepth must expose
+`--single-end-length`. Install `samtools` and `unpigz` on `PATH` for upstream's
+BAM validation and coverage decompression. The library-directory setting supplies
+upstream's required `--ld_library_path` argument; it defaults to the mosdepth
+binary's directory when unset.
+Set it to the directory containing mosdepth's shared libraries when needed.
+Without the explicit ONT opt-in, or when a dependency,
+resource or hg38 input is missing, this algorithm skips with a reason and
+leaves other Lab results available. Signals shows the 898 raw scores with
+their ATAC/DNase labels and a research-only callout. The upstream single-end
+mode is experimental and its paired-end-trained cancer model is **not** run;
+these values are neither cell fractions nor a validated diagnostic.
+
+**Short-read support.** For a prealigned paired-end Illumina BAM against the
+registered hg38 reference, run the normal Lab command:
 
 ```bash
 traceback lab run YOUR_LOCAL_aligned_illumina.bam \
-  --reference hg38 --only short-read-fragment-size \
-  --no-downsample --no-controls --root R
+  --reference hg38 --root R
 ```
 
-Every BAM read group must declare `PL:ILLUMINA`; a BAM aligned by the Lab's
-ONT minimap2 path is skipped. Each qualifying proper first mate counts one
+Every BAM read group must declare `PL:ILLUMINA`. This declaration is recorded
+in the input manifest and run summary; it describes the BAM header, not
+instrument attestation. A prealigned BAM with missing, mixed, or unrecognized
+platform declarations is refused with TBX-LAB-024. Unaligned input must
+unanimously declare `PL:ONT` to use the Lab's
+`map-ont` alignment path. For short reads, align externally and supply a
+prealigned BAM. Each qualifying proper first mate counts one
 template: it must pass the common primary, mapped, nonduplicate, QC-pass,
-MAPQ ≥ 20 and canonical-contig filter, have a mapped mate on the same contig,
+MAPQ ≥ 20 and canonical nuclear contig filter (names with or without `chr`),
+have a mapped mate on the same contig,
 and carry nonzero TLEN. The reported length is `abs(TLEN)`, even when the
 first mate's TLEN is negative. Downsample and split selections use the same
 read-name predicate as other Lab full-BAM algorithms. The histogram and
 metrics are keyed to `short-read-fragment-size`; `fragment-size` remains the
-ONT aligned-span measurement. No clinical cutoff, short-read healthy range,
-or cross-platform comparison is supplied by this slice. Other Lab algorithms
-are still designed around the ONT run, so use `--only` for this opt-in path.
+ONT aligned-span measurement. The normal Illumina run also reports read
+summary, aligned-base depth, and BAM QC, including downsample and split views.
+Split halves are read-name pseudo-replicates, not independent molecules. On
+Illumina, unmarked PCR duplicates can place copies of one molecule in both
+halves and make agreement look stronger; inspect duplicate marking and do not
+treat split agreement as independent validation.
+ONT-only algorithms skip with reason `platform`; the CNA spike is omitted for
+Illumina. Result and cohort compatibility identities distinguish platforms
+while retaining the historical ONT identity encoding, so an Illumina
+measurement cannot reuse an ONT result or reference range. No clinical
+cutoff, short-read healthy range, or cross-platform comparison is supplied.
+If an Illumina BAM was ingested by the earlier opt-in TLEN path, run it again
+from the original BAM to create its platform-specific input identity. The old
+stored result remains available but does not enter new platform-aware cohorts.
+For a legacy prealigned BAM without a platform declaration, verify its
+instrument provenance and regenerate a BAM with the correct `@RG PL` value
+from the trusted source before ingesting it. The Lab does not infer ONT from
+an absent value. Previously stored Lab-aligned inputs with absent or
+unrecognized platform tags remain readable only when their manifest exactly
+pins the historical `map-ont` recipe for the BAM's read groups and no read
+group explicitly declares Illumina. A new input still needs an explicit
+platform declaration.
+Stored prealigned manifests without a platform field still read the BAM's
+unanimous platform declaration. Re-ingest short reads to record an Illumina
+input identity for new results and cohorts. Before rerun, historical ONT-only
+results on such an Illumina input remain stored but appear as platform skips
+in sample views and the local API; rerun records those skips in the store.
+The same read-side mask applies when an old prealigned input cannot verify ONT
+provenance from its BAM.
 
 **PMD asset.** `pmd-score` needs an operator-supplied Zhou 2018 hg38
 common-PMD BED.gz file. The repository does not ship or download it; its
@@ -254,6 +343,53 @@ traceback lab asset inspect pmd --root R
 `inspect` rehashes the pinned file; absent or altered bytes block
 `pmd-score` with an asset-specific recovery command. Registering a PMD
 asset does not establish redistribution rights or make a skipped result zero.
+
+**Viral reference.** `viral-reads` leaves the registered hg38 human reference
+unchanged. It takes human-unmapped primary reads from the aligned BAM, including
+duplicate-flagged and QC-fail primaries but excluding secondary and
+supplementary records, then runs
+minimap2 separately against an operator-supplied viral FASTA, and reports
+EBV/HPV/HBV aligned reads per million human-unmapped primaries. The count is
+null if that denominator is zero. A read with reported primary or secondary
+alignments to more than one virus group is excluded from all groups; multiple
+primary alignments within one group count once. The side alignment explicitly
+retains up to 100 secondary alignments per read at minimap2's 0.8 score ratio;
+bundles with many near-identical contigs can still hide cross-group alternatives.
+If any human-unmapped primary lacks stored sequence, the anonymized query
+FASTA exceeds its 512 MiB staging budget, or the side-alignment process exits
+nonzero or exceeds its 3600-second or 1 GiB PAF budget, all three RPM values
+are null; the aggregate
+artifact records the reason and read counts, with `hits: null` when no complete
+alignment was counted. Donor sequences are staged in private temporary FASTA
+and removed after the step; an abrupt host failure may leave that scratch for
+operator cleanup. There is no MAPQ or aligned-length threshold, so
+weak or short matches can contribute. No detection threshold or clinical
+interpretation is established for this ONT cfDNA measurement; inspect the
+denominator `n` before using an exploratory RPM value. Malformed PAF or an
+unexpected query/contig is an integrity failure and stops the algorithm rather
+than publishing a possibly wrong count.
+
+The FASTA must contain at least one nonempty IUPAC sequence for each group.
+Provide a TSV with exactly `contig`, `virus`, `accession` columns, one row per
+FASTA contig in FASTA order; `virus` must be `EBV`, `HPV` or `HBV` and the
+accession should include its version. Registration pins the exact bytes of
+both files and the declared source terms. It neither downloads nor
+redistributes the sequences. Registrations are write-once under a Lab ROOT;
+to change accession coverage or recover a corrupted registration, create a new
+ROOT and register the corrected bundle there:
+
+```bash
+traceback lab asset add viral-fasta --file YOUR_LOCAL_viral.fasta \
+  --targets YOUR_LOCAL_targets.tsv --source-label your-reference-bundle \
+  --terms unknown --root R
+traceback lab asset inspect viral-fasta --root R
+```
+
+Choose accession versions and HPV type coverage for the intended evaluation
+before registering a bundle. Until one is registered under ROOT, the
+algorithm reports an explicit `missing_asset` skip. Registering a FASTA
+does not validate sensitivity, specificity, a reference choice, or rights
+to redistribute source sequences.
 
 
 Fragment length is the aligned reference span, the same definition as the
@@ -273,6 +409,10 @@ page is open: the page polls every 15 seconds and shows "A Lab run is in
 progress", then "New results are available. [Reload]" (it never swaps
 content under you). The page is strict: same-origin scripts only, no inline
 script or style, no outside requests.
+
+The run-status banner follows the latest Lab writer; a later cohort update or
+other writer can supersede an earlier interrupted-run banner. It does not
+serve as a history of every interrupted run.
 
 ## What the page shows
 
@@ -301,7 +441,17 @@ script or style, no outside requests.
   generation is labelled as such. Missing or failed metrics are never zero.
   The synthetic EXAMPLE cannot be scored against a real kit cohort.
 - **Trust/QC**: depth against each algorithm's minimum, the run table with
-  scrubbed stderr for failures, provisional QC bands, library health.
+  scrubbed stderr for failures and a link to a matching numbered run-log line,
+  provisional QC bands, library health. The link searches up to 64 recently updated
+  runs and reveals only allowlisted status fields. A line must name the selected
+  immutable result attempt; legacy logs without that ID, older runs, or cached
+  steps may have no matching line. A latest-run in-progress or interrupted note
+  appears only when that run names the same source and full input; the selected
+  result status remains visible beside it. If the step published no result yet,
+  a sample-scoped run notice appears instead of a result row. If the latest
+  analysis or simulation run log is unreadable, unsafe, malformed, or outside
+  the 1 MiB / 4,096-line limit, the status banner reports an unavailable
+  status without inferring whether the run ended normally or was interrupted.
 - **Stability**: one small multiple per metric: deviation from full depth at
   each fraction, the stability band, and split halves A/B at 50%.
 
@@ -406,7 +556,7 @@ Chunks declare different `@RG` basecall models (exit 3). Run each model's chunks
 
 ### TBX-LAB-009
 
-An aligned BAM's `@SQ` lines differ from the registered reference, or the inputs mix aligned and unaligned BAMs (exit 3). The cause lists the first three differences. Pass the unaligned chunks and let the Lab align, or register the FASTA the BAM was aligned to.
+An aligned BAM's `@SQ` lines differ from the registered reference, the inputs mix aligned and unaligned BAMs, or more than one aligned BAM is supplied (exit 3). The cause lists the first three reference differences when applicable. Pass the unaligned chunks and let the Lab align, or register the FASTA the BAM was aligned to; supply one prealigned BAM at a time.
 
 ### TBX-LAB-010
 
@@ -487,6 +637,18 @@ An operator-supplied `--sex` conflicts with an assertion already recorded for
 the same sample, or the local sex metadata is malformed (exit 3). Reuse the
 recorded assertion or omit the flag. Inspect and restore malformed metadata
 from a known-good local backup before rerunning; no measured result is changed.
+
+### TBX-LAB-024
+
+An input has missing, mixed, or unrecognized platform declarations, an
+unaligned Illumina input would need the ONT-only aligner, or a stored input's
+platform disagrees with its BAM header (exit 3). Use a BAM whose read groups
+unanimously declare `PL:ONT` or `PL:ILLUMINA`; align Illumina reads externally
+before supplying the BAM. For a damaged or mismatched stored input, restore
+that input from a known-good backup or re-ingest the original BAM under a fresh
+ROOT. Reusing the same ROOT does not replace an existing input manifest.
+Rewriting a BAM header changes its source identity; remove an unrecoverable
+member from its cohort before rebuilding that cohort.
 
 ## Adding an algorithm
 
