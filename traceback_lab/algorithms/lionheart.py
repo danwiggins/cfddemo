@@ -262,6 +262,8 @@ class Lionheart(Base):
         pass
 
     def asset_sha256s(self, root: Path) -> list[str]:
+        if os.environ.get("TRACEBACK_LIONHEART_ENABLE_ONT") != "1":
+            return []  # disabled runs must not hash the multi-gigabyte archive
         directory, archive = _resources(root)
         try:
             return [validated_resource_digest(directory, archive)]

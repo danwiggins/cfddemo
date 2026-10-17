@@ -144,6 +144,15 @@ def test_lionheart_preflight_requires_opt_in_depth_reference_and_pinned_assets(t
     assert lionheart.LIONHEART.preflight(ctx).reason_code == "missing_asset"
 
 
+def test_lionheart_opt_out_does_not_read_resource_archive(tmp_path, monkeypatch) -> None:
+    ctx, _ = _setup(tmp_path, monkeypatch)
+    monkeypatch.delenv("TRACEBACK_LIONHEART_ENABLE_ONT")
+    monkeypatch.setattr(lionheart, "validated_resource_digest",
+                        lambda *_args: pytest.fail("disabled Lionheart must not read the resource archive"))
+    assert lionheart.LIONHEART.asset_sha256s(ctx.root) == []
+    assert lionheart.LIONHEART.preflight(ctx).reason_code == "platform_unverified"
+
+
 def test_lionheart_preflight_requires_upstream_helpers_and_library_dir(tmp_path, monkeypatch) -> None:
     ctx, _ = _setup(tmp_path, monkeypatch)
     original_pins = lionheart.LIONHEART.tools
