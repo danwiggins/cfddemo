@@ -2575,7 +2575,7 @@ entries:
     value_kind: categorical
     headline: false
     meaning_high: "A numerical solution exists; inspect the condition number because full rank does not establish a reliable biological estimate."
-    meaning_low: "The observed marker matrix cannot numerically separate the two reference columns."
+    meaning_low: "Too few covered markers, insufficient reference rank, or no nonzero nonnegative fit; inspect coverage and the condition number."
   - <<: *meth_tf_metric
     metric_id: markers_covered
     label: "Registered methylation markers with CpG calls"

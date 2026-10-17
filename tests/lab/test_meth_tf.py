@@ -27,7 +27,9 @@ from traceback_lab.envelope import SKIP_REASONS
 from traceback_lab.cli import main as lab_main
 from traceback_lab.meth_tf_reference import CALL_DEFINITION, add_reference, inspect_reference
 from traceback_lab.read_summary import SPLIT_SALT, ReadSummary, h64
-from traceback_lab.registry import Ready, Skip, context_to_json, load_registry, plan
+from traceback_lab.registry import Ready, Skip, context_to_json, load_registry, plan, registry_entries
+from traceback_lab.runner import RunTarget, run_plan
+from traceback_lab.scrub import Scrubber
 from traceback_lab.store import LabStore, new_run_id
 
 from .bam_fixtures import Read, context_for
@@ -206,6 +208,45 @@ def test_unidentifiable_worker_preserves_coverage_without_a_fraction(
     assert values["tumor_fraction"] is None and values["fit_rms"] is None
     assert values["markers_covered"] == 1 and values["cpg_calls_used"] == 1
     assert json.loads(output.artifacts["meth_tf_fit.json"])["identifiable"] is False
+    monkeypatch.setattr(meth_tf, "tally_markers", lambda *_: (np.asarray([0, 0]), np.asarray([8, 8])))
+    zero_fit = _metrics(METH_TF.run(ctx, tmp_path / "zero-fit-out"))
+    assert zero_fit["identifiable"] is False and zero_fit["tumor_fraction"] is None
+
+
+def test_planned_meth_tf_run_publishes_selected_result_without_handwired_upstream(tmp_path: Path) -> None:
+    ctx, _ = _fixture(tmp_path)
+    store = LabStore(tmp_path)
+    items = plan(load_registry(), only=("meth-tf",))
+    assert [item.algorithm.id for item in items] == ["read-summary", "meth-calls", "meth-tf"]
+    target = RunTarget(
+        input_id=ctx.input_id, source_id=ctx.source_id, input_dir=ctx.input_dir,
+        reference_id=ctx.reference_id, reference_sha256=ctx.reference_sha256,
+        eligible_reads=ctx.eligible_reads, extras={},
+    )
+    log = store.run_log(new_run_id())
+    entries = {algorithm.id: entry for entry, algorithm in registry_entries()}
+    upstream = run_plan(
+        store, None, log, target, items[:-1], entries,
+        run_id=log.run_id, scrubber=Scrubber(root=store.root), timeout_s=60,
+    )
+    assert [result.status for result in upstream] == ["ok", "ok"]
+    # The eight physical reads deliberately cannot satisfy the 2.5M-read gate.
+    # Stamp synthetic depth only after the real upstreams have been published.
+    target.eligible_reads = 2_500_000
+    results = run_plan(
+        store, None, log, target, items[-1:], entries,
+        run_id=log.run_id, scrubber=Scrubber(root=store.root), timeout_s=60,
+        upstream_results={result.algorithm_id: result for result in upstream},
+    )
+    assert [result.status for result in results] == ["ok"], [
+        (result.algorithm_id, result.status, result.skip_reason, result.skip_message) for result in results
+    ]
+    meth_result = results[0]
+    assert meth_result.attempt_id is not None
+    selected = store.selected_result_with_order(ctx.input_id, "meth-tf", meth_result.parameters_sha256)
+    assert selected is not None
+    assert selected[0].provenance.input_id == ctx.input_id
+    assert next(metric.value for metric in selected[0].metrics if metric.metric_id == "tumor_fraction") == pytest.approx(0.25)
 
 
 def test_registered_worker_produces_exploratory_fraction_and_pinned_attempt(tmp_path: Path) -> None:
