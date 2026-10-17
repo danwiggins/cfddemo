@@ -41,11 +41,13 @@ def test_sample_view_marks_old_copy_number_and_instability_as_superseded(tmp_pat
     }]
     source_path.write_text(json.dumps(record))
     for selected_input in (input_id, derived_id):
-        for algorithm_id in ("copy-number", "instability"):
+        for algorithm_id in ("copy-number", "instability", "arm-summary"):
             store.publish_result(ResultEnvelope(
                 algorithm_id=algorithm_id, algorithm_version="1", status="ok",
                 provenance=provenance(
-                    tool="fixture", parameters_sha256=("8" if algorithm_id == "copy-number" else "9") * 64,
+                    tool="fixture", parameters_sha256={
+                        "copy-number": "8", "instability": "9", "arm-summary": "a",
+                    }[algorithm_id] * 64,
                     source_id=source_id, input_id=selected_input, reference_id="hg38",
                 ),
             ), input_id=selected_input)
@@ -53,7 +55,7 @@ def test_sample_view_marks_old_copy_number_and_instability_as_superseded(tmp_pat
     assert view is not None
     assert len(view.derived) == 1
     for visible_input, selected_input in ((view.full, input_id), (view.derived[0], derived_id)):
-        for algorithm_id in ("copy-number", "instability"):
+        for algorithm_id in ("copy-number", "instability", "arm-summary"):
             shown = visible_input.results[algorithm_id]
             assert shown.status == "skipped" and shown.skip_reason == "superseded_method"
             assert selected_results(store, selected_input)[algorithm_id].status == "ok"
