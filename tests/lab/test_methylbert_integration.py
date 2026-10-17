@@ -75,6 +75,8 @@ def _publish_cohort_methylbert(
         provenance=provenance(tool="fixture", parameters_sha256=read_hash,
                               source_id=source_id, input_id=input_id, reference_id="hg38"),
     ), input_id=input_id, execution_plan=read_plan)
+    read_attempt = store.selected_attempt(input_id, READ_SUMMARY.id, read_hash)
+    assert read_attempt is not None
     ctx = InputContext(
         root=store.root, source_id=source_id, input_id=input_id, reference_id="hg38",
         reference_sha256=reference_sha256, input_dir=input_dir, eligible_reads=MIN_ELIGIBLE_READS,
@@ -103,11 +105,13 @@ def _publish_cohort_methylbert(
         provenance=provenance(tool="fixture", parameters_sha256=methylbert_hash,
                               source_id=source_id, input_id=input_id, reference_id="hg38"),
         metrics=[Metric(metric_id="tumour_fraction", value=0.25)],
-    ), input_id=input_id, execution_plan=plan)
+    ), input_id=input_id, execution_plan=plan, upstream_selections=[{
+        "algorithm_id": READ_SUMMARY.id, "input_id": input_id,
+        "parameters_sha256": read_hash, "attempt_id": read_attempt.name,
+    }])
     return source_id, methylbert_hash
 
 
-@pytest.mark.xfail(strict=True, reason="S5 owns the shared recorded-identity cohort reader repair")
 def test_cohort_reads_recorded_methylbert_identity_without_live_runtime(tmp_path, monkeypatch):
     store = LabStore(tmp_path)
     monkeypatch.setattr(cohorts, "load_registry", lambda: (READ_SUMMARY, adapter.METHYLBERT))
