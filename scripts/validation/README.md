@@ -57,11 +57,16 @@ qname and `ZS` stores source 0/1. Existing ZQ/ZS tags are refused. Source header
 private tags and BAMs may contain identifying material: keep all actual outputs
 local; never commit them, real read names or real source manifests.
 
+Output SQ checksums are retained only where both sources supplied matching M5;
+missing evidence is never filled from the other source. A BAM comment also states
+the reference-proof limitation. Original SQ metadata remains in the manifest.
+
 A disk-backed SQLite index rejects duplicates and selects exact rank boundaries.
 Its cache is 8 MiB; BAM merging holds one record from each source, without building
 an in-memory read set or invoking an unbounded sort. `--max-work-bytes` defaults
-to 20 GiB, bounds SQLite pages, and checks total staging files every 4096 selected
-records and after each index/manifest. This is a checkpointed budget, not a strict
+to 20 GiB, bounds SQLite pages, and checks total staging files every 4096 eligible
+scanned records and every 4096 selected output records, plus after each index and
+manifest. This is a checkpointed budget, not a strict
 per-byte filesystem quota: compressed writes/index creation can transiently exceed
 it between checks. Free-space errors fail construction. Input hashes are rechecked
 before publication to reject source mutation.

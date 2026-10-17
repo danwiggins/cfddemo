@@ -30,6 +30,7 @@ from traceback_runner.filesystem import rename_directory_exclusive_at
 FRACTIONS = ("0.01", "0.03", "0.10")
 CANONICAL = re.compile(r"^chr([1-9]|1[0-9]|2[0-2]|X|Y)$")
 SCHEMA = "traceback.validation.patient-source-mixture.v1"
+CHECKPOINT_READS = 4096
 
 
 class MixtureError(ValueError):
@@ -127,6 +128,9 @@ def _reference(headers: list[dict[str, Any]], fasta: Path | None) -> dict[str, A
 
 def _merged_header(headers: list[dict[str, Any]]) -> dict[str, Any]:
     output = {"HD": {"VN": "1.6", "SO": "coordinate"}, "SQ": copy.deepcopy(headers[0]["SQ"]), "RG": [], "PG": [], "CO": []}
+    for row, other in zip(output["SQ"], headers[1]["SQ"], strict=True):
+        if not row.get("M5") or not other.get("M5"):
+            row.pop("M5", None)
     for source, header in enumerate(headers):
         prefix = f"s{source}."
         for kind, links in (("RG", ("PG",)), ("PG", ("PP",))):
@@ -141,6 +145,7 @@ def _merged_header(headers: list[dict[str, Any]]) -> dict[str, Any]:
                 output[kind].append(row)
         output["CO"].extend(f"source {source}: {comment}" for comment in header.get("CO", []))
     output["CO"].append("Patient-source read mixture; source 1 fraction is NOT known tumour fraction.")
+    output["CO"].append("Reference SN/LN match; M5 retained only where both sources declare it. Original alignment reference is not independently proven; see private manifest.")
     return output
 
 
@@ -177,7 +182,7 @@ def _scan(path: Path, header: dict[str, Any], contigs: set[str], source: int,
             except sqlite3.IntegrityError as exc:
                 raise MixtureError("duplicate eligible read name within a source") from exc
             count += 1
-            if count % 4096 == 0:
+            if count % CHECKPOINT_READS == 0:
                 db.commit()
                 _budget(stage, maximum)
     db.commit()
@@ -211,7 +216,7 @@ def _write(path: Path, sources: list[Path], header: dict[str, Any], contigs: set
             writer.write(heads[source])
             counts[source] += 1
             heads[source] = next(streams[source], None)
-            if sum(counts) % 4096 == 0:
+            if sum(counts) % CHECKPOINT_READS == 0:
                 _budget(stage, maximum)
     pysam.index("-c", str(path))
     _budget(stage, maximum)
@@ -338,6 +343,10 @@ def main(argv: list[str] | None = None) -> int:
     try:
         mix_sources(args.background, args.patient, args.output, total=args.total, seed=args.seed,
                     reference_fasta=args.reference_fasta, max_work_bytes=args.max_work_bytes)
+    except MixtureError as exc:
+        # Every MixtureError is a fixed diagnostic without paths or read identifiers.
+        print(f"Mixture construction refused: {exc}.")
+        return 2
     except (OSError, ValueError, sqlite3.Error, pysam.SamtoolsError):
         # HTSlib errors may embed paths or names. Details stay local to API callers.
         print("Mixture construction refused or failed; no partial output was published. Check inputs, available reads, reference/platform and disk budget.")

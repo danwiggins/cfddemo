@@ -6,6 +6,7 @@ import array
 import copy
 import hashlib
 import json
+import sqlite3
 from pathlib import Path
 
 import numpy as np
@@ -109,11 +110,10 @@ def test_d21_matches_read_summary_nuclear_denominator(sources, tmp_path):
     background = write_bam(tmp_path / "excluded.bam", mutate=exclusions)
     # Exercise the actual summary predicate over equivalent columns, no fake policy.
     rr = records(background)
-    summary = ReadSummary.__new__(ReadSummary)
+    summary = ReadSummary(directory=tmp_path, meta={"contigs": ["chr2", "chr1", "chrM"]})
     columns = {"flag": np.array([r.flag for r in rr]), "mapq": np.array([r.mapping_quality for r in rr]),
                "contig": np.array([r.reference_id for r in rr])}
     summary.column = columns.__getitem__
-    summary.canonical_ids = lambda: np.array([0, 1])
     expected = int(summary.eligible().sum())
     manifest = mixer.mix_sources(background, sources[1], tmp_path / "out", total=100)
     assert expected == manifest["sources"][0]["unique_eligible_reads"] == 113
@@ -169,6 +169,11 @@ def test_fasta_dictionary_and_m5_checked(sources, tmp_path):
     a = write_bam(tmp_path / "with-m5.bam", h=h)
     result = mixer.mix_sources(a, sources[1], tmp_path / "out", total=100, reference_fasta=fasta)
     assert result["reference"]["fasta_sha256"] == mixer.sha256(fasta)
+    with pysam.AlignmentFile(str(tmp_path / "out" / result["mixtures"][0]["file"]), "rb") as bam:
+        published = bam.header.to_dict()
+        assert all("M5" not in row for row in published["SQ"])
+        assert any("not independently proven" in comment for comment in published["CO"])
+    assert result["sources"][0]["header"]["SQ"][0]["M5"] == h["SQ"][0]["M5"]
     fasta.write_text(fasta.read_text().replace("AAAA", "TTTT"))
     with pytest.raises(mixer.MixtureError, match="disagrees"):
         mixer.mix_sources(a, sources[1], tmp_path / "wrong", total=100, reference_fasta=fasta)
@@ -264,3 +269,23 @@ def test_disk_budget_and_source_mutation_refuse_publication(sources, tmp_path, m
         mixer.mix_sources(*sources, tmp_path / "mutated", total=100)
     assert not (tmp_path / "budget").exists() and not (tmp_path / "mutated").exists()
     assert not list(tmp_path.glob(".mixture-*"))
+
+
+def test_streaming_checkpoints_commit_index_and_check_during_merge(sources, tmp_path, monkeypatch):
+    monkeypatch.setattr(mixer, "CHECKPOINT_READS", 4)
+    actual = mixer._budget
+    committed_scan_rows = []
+    merge_checks = []
+    def observe(stage, maximum):
+        if not list(stage.glob("patient-source-*.bam")):
+            # A separate connection sees only committed rows, verifying the checkpoint.
+            with sqlite3.connect(stage / "selection.sqlite") as db:
+                committed_scan_rows.append(db.execute("SELECT COUNT(*) FROM reads").fetchone()[0])
+        else:
+            merge_checks.append(True)
+        actual(stage, maximum)
+    monkeypatch.setattr(mixer, "_budget", observe)
+    mixer.mix_sources(*sources, tmp_path / "out", total=100)
+    assert committed_scan_rows == list(range(4, 241, 4))
+    # Each output:25 in-loop checks plus post-index; one final manifest check.
+    assert len(merge_checks) == 3 * (25 + 1) + 1
