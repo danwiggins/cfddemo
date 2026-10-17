@@ -14,11 +14,13 @@ import io
 import json
 import os
 import stat
+import tarfile
 from contextlib import redirect_stdout
 from pathlib import Path
 
 import pytest
 
+from traceback_lab.methylbert_bundle import REQUIRED_FILES, SCHEMA
 from traceback_runner import cli
 from traceback_runner.references import (
     LOYFER_DIRECTORY_FILES,
@@ -55,6 +57,27 @@ MAP_WIG = (
 CENTROMERE = "Chr\tStart\tEnd\tGapType\nchr1\t1000\t3000\tcentromere\n"
 PON = gzip.compress(mtime=0, data=b"X\n\x00\x00\x00\x03synthetic")
 
+
+def _methylbert_bundle() -> bytes:
+    files = {name: name.encode() for name in REQUIRED_FILES}
+    manifest = {
+        "schema": SCHEMA, "model_id": "asset-test", "upstream_commit": "a" * 40,
+        "source": "synthetic fixture", "terms": "test-only", "reference_sha256": "b" * 64,
+        "n_mers": 3, "seq_len": 150,
+        "files": {name: hashlib.sha256(body).hexdigest() for name, body in files.items()},
+    }
+    files["bundle.json"] = json.dumps(manifest).encode()
+    output = io.BytesIO()
+    with tarfile.open(fileobj=output, mode="w:") as archive:
+        for name, body in files.items():
+            member = tarfile.TarInfo(name)
+            member.size = len(body)
+            archive.addfile(member, io.BytesIO(body))
+    return output.getvalue()
+
+
+METHYLBERT_BUNDLE = _methylbert_bundle()
+
 VALID: dict[AssetKind, bytes] = {
     AssetKind.LOYFER_ATLAS: ATLAS.encode(),
     AssetKind.LOYFER_MARKERS: MARKERS.encode(),
@@ -63,6 +86,7 @@ VALID: dict[AssetKind, bytes] = {
     AssetKind.ICHOR_MAP_WIG: MAP_WIG.encode(),
     AssetKind.ICHOR_CENTROMERE: CENTROMERE.encode(),
     AssetKind.ICHOR_PON: PON,
+    AssetKind.METHYLBERT_BUNDLE: METHYLBERT_BUNDLE,
 }
 FORMATS = {
     AssetKind.LOYFER_ATLAS: "loyfer-atlas-tsv",
@@ -72,6 +96,7 @@ FORMATS = {
     AssetKind.ICHOR_MAP_WIG: "wig-fixed-step",
     AssetKind.ICHOR_CENTROMERE: "ichor-centromere-tsv",
     AssetKind.ICHOR_PON: "r-serialized",
+    AssetKind.METHYLBERT_BUNDLE: "methylbert-bundle-tar",
 }
 
 
@@ -237,7 +262,7 @@ def test_registration_agrees_with_the_consumer_parser(
 def test_every_text_kind_has_parity_cases() -> None:
     covered = {(kind, accepted) for kind, _, accepted in PARITY_CASES}
     for kind in AssetKind:
-        if kind is not AssetKind.ICHOR_PON:
+        if kind not in (AssetKind.ICHOR_PON, AssetKind.METHYLBERT_BUNDLE):
             assert {(kind, True), (kind, False)} <= covered, kind
 
 

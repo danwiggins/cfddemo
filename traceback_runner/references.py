@@ -499,6 +499,7 @@ class AssetKind(StrEnum):
     ICHOR_MAP_WIG = "ichor-map-wig"
     ICHOR_CENTROMERE = "ichor-centromere"
     ICHOR_PON = "ichor-pon"
+    METHYLBERT_BUNDLE = "methylbert-bundle"
 
 
 # ``method-asset register --from-dir``: the Loyfer file each kind is read from
@@ -524,6 +525,7 @@ _ASSET_SUFFIX: dict[AssetKind, str] = {
     AssetKind.ICHOR_MAP_WIG: ".wig",
     AssetKind.ICHOR_CENTROMERE: ".txt",
     AssetKind.ICHOR_PON: ".rds",
+    AssetKind.METHYLBERT_BUNDLE: ".tar",
 }
 
 
@@ -539,6 +541,7 @@ ASSET_PARSERS: dict[AssetKind, str] = {
     # Python cannot read an RDS body: only the envelope is checked here and
     # the object itself is validated by readRDS when the analysis runs (CN3).
     AssetKind.ICHOR_PON: "traceback_runner.references.r_serialized_envelope",
+    AssetKind.METHYLBERT_BUNDLE: "traceback_lab.methylbert_bundle.verify_bundle",
 }
 
 
@@ -555,6 +558,7 @@ class AssetParseCheck(RunnerContract):
         "wig-fixed-step",
         "ichor-centromere-tsv",
         "r-serialized",
+        "methylbert-bundle-tar",
     ]
     parser: str = Field(min_length=1, max_length=128)
     data_rows: int | None = Field(default=None, ge=1)
@@ -675,6 +679,14 @@ def _parse_with_consumer(kind: AssetKind, path: Path) -> AssetParseCheck:
     """Run the kind's own consumer parser on ``path`` (imported lazily)."""
 
     parser = ASSET_PARSERS[kind]
+    if kind is AssetKind.METHYLBERT_BUNDLE:
+        from traceback_lab.methylbert_bundle import BundleError, verify_bundle
+
+        try:
+            verify_bundle(path)
+        except BundleError as exc:
+            raise _Malformed(str(exc)) from None
+        return AssetParseCheck(format="methylbert-bundle-tar", parser=parser)
     if kind in (AssetKind.LOYFER_ATLAS, AssetKind.LOYFER_MARKERS, AssetKind.LOYFER_REGIONS):
         from evidence_inspector.cell_origin_pipeline import (
             CellOriginPipelineError,
@@ -840,7 +852,8 @@ def _scan_asset(kind: AssetKind, path: Path) -> tuple[str, int, AssetParseCheck]
 
     digest = hashlib.sha256()
     size = 0
-    limit = _MAX_PON_BYTES if kind is AssetKind.ICHOR_PON else _MAX_TEXT_ASSET_BYTES
+    binary = kind in (AssetKind.ICHOR_PON, AssetKind.METHYLBERT_BUNDLE)
+    limit = _MAX_PON_BYTES if binary else _MAX_TEXT_ASSET_BYTES
     try:
         handle = path.open("rb")
     except FileNotFoundError:
@@ -859,7 +872,7 @@ def _scan_asset(kind: AssetKind, path: Path) -> tuple[str, int, AssetParseCheck]
                 if size > limit:
                     raise _Malformed("the file is implausibly large for its kind")
                 digest.update(chunk)
-                if kind is not AssetKind.ICHOR_PON:
+                if not binary:
                     # Every line, completed or not, is held to the cap.
                     parts = chunk.split(b"\n")
                     for index, part in enumerate(parts):
