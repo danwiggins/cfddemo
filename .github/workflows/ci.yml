@@ -70,6 +70,8 @@ jobs:
 
       - name: Sync environment with literal guide command
         run: |
+          test -f uv.lock
+          git ls-files --error-unmatch uv.lock
           uv sync
           git diff --exit-code -- uv.lock
 

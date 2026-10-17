@@ -124,14 +124,16 @@ def test_serve_step_reaches_the_landing_with_curve_repeatability_and_example_pil
 
     argv = next(a for a in journey() if a[-2:] == ["serve", "--open"])
     env = {**os.environ, "TRACEBACK_ROOT": str(journey_root["root"]), "BROWSER": "true", "PYTHONPATH": str(REPO)}
+    stderr_path = tmp_path / "serve-stderr.log"
+    stderr = stderr_path.open("w+")
     process = subprocess.Popen(
         argv,
-        cwd=REPO, env=env, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, stdin=subprocess.DEVNULL, text=True,
+        cwd=REPO, env=env, stdout=subprocess.PIPE, stderr=stderr, stdin=subprocess.DEVNULL, text=True,
         start_new_session=os.name != "nt",
     )
     try:
         lines = [process.stdout.readline().strip() for _ in range(2)]
-        assert lines[0] == f"ROOT  {journey_root['root']}"
+        assert lines[0] == f"ROOT  {journey_root['root']}", (lines, stderr_path.read_text()[-2000:])
         link = lines[1]
         assert re.match(r"^http://127\.0\.0\.1:\d+/#bootstrap=[A-Za-z0-9_-]{43,}$", link), lines
         from tests.lab.test_lab_server import _dom_cdp
@@ -143,24 +145,32 @@ def test_serve_step_reaches_the_landing_with_curve_repeatability_and_example_pil
             ok=lambda d: 'data-ready="1"' in d and "Depth → utility" in d,
         )
     finally:
-        if process.poll() is None:
+        if os.name == "nt":
+            if process.poll() is None:
+                try:
+                    subprocess.run(["taskkill", "/PID", str(process.pid), "/T", "/F"],
+                                   stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, check=False, timeout=10)
+                except subprocess.TimeoutExpired:
+                    pass
+        else:
+            try:
+                os.killpg(process.pid, signal.SIGTERM)
+            except ProcessLookupError:
+                pass
+        try:
+            process.wait(timeout=20)
+        except subprocess.TimeoutExpired:
             if os.name == "nt":
                 subprocess.run(["taskkill", "/PID", str(process.pid), "/T", "/F"],
                                stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, check=False, timeout=10)
             else:
                 try:
-                    os.killpg(process.pid, signal.SIGTERM)
+                    os.killpg(process.pid, signal.SIGKILL)
                 except ProcessLookupError:
                     pass
-        try:
-            process.wait(timeout=20)
-        except subprocess.TimeoutExpired:
-            if os.name == "nt":
-                process.kill()
-            else:
-                os.killpg(process.pid, signal.SIGKILL)
             process.wait(timeout=5)
         process.stdout.close()
+        stderr.close()
     body = _body(dom)
     assert body["csp-violations"] == "0"
     assert "Depth → utility" in dom and 'class="curve-grid"' in dom
