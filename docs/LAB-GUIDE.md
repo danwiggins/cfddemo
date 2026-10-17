@@ -283,9 +283,10 @@ until refreshed. If the sample page or execution planning reports changed
 registered files after a byte-identical restore or a file-stat-only change,
 repeat `lab microbial db add` with the original absolute directory, read
 length, and source label. It rehashes the required files and refreshes the
-receipt only when their bundle, directory, and source label match the existing
-registration. If the label was mistyped, retry with the original label; changed
-database bytes or a moved directory require a new Lab root.
+receipt only when the bundle (file hashes and read length), directory, and
+source label match the existing registration. If the read length or label was
+mistyped, retry with its original value; changed database bytes or a moved
+directory require a new Lab root.
 
 ```bash
 traceback lab microbial db add --directory KRAKEN_DB --read-length 75 \
