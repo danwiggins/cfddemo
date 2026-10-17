@@ -362,15 +362,13 @@ def stability_panels(sample: SampleView, library: Library | None = None) -> list
             b = _value(halves["B"].results.get(algorithm_id), metric.metric_id) if "B" in halves else None
             if split_status["A"]["state"] == "ok" and split_status["B"]["state"] == "ok":
                 verdict = stable(spec, _side(a, 0.5), _side(b, 0.5))
-                da, unit = deviation(spec, a.value, metric.value, 0.5)
-                db, _ = deviation(spec, b.value, metric.value, 0.5)
                 mean = (abs(a.value) + abs(b.value)) / 2
                 split = {
                     "a": a.value,
                     "b": b.value,
-                    "deviation_a": da,
-                    "deviation_b": db,
-                    "unit": unit,
+                    "deviation_a": split_status["A"]["deviation"],
+                    "deviation_b": split_status["B"]["deviation"],
+                    "unit": split_status["A"]["unit"],
                     "relative_abs_diff": (abs(a.value - b.value) / mean) if mean else 0.0,
                     "stable": verdict,
                 }
