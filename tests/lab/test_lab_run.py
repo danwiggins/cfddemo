@@ -70,18 +70,38 @@ def _no_staging(root: Path) -> bool:
     return not list((root / "lab").rglob(".staging-*"))
 
 
+def test_low_memory_example_preview_has_complete_warning_fields(tmp_path, capsys, monkeypatch) -> None:
+    monkeypatch.setattr(doctor, "_ram", lambda: 8 * doctor.GIB)
+    argv = ("run", "--example", "--dry-run", "--root", str(tmp_path / "root"))
+    code, human, _ = _lab(capsys, *argv)
+    assert code == 0
+    for label in ("CODE", "CAUSE", "FIX", "RETRYABLE", "DOCS"):
+        assert any(line.startswith(label) for line in human.splitlines()), label
+    code, payload = _json(capsys, *argv)
+    assert code == 0
+    warning, = payload["data"]["warnings"]
+    assert warning["code"] == "TBX-LAB-025"
+    assert warning["cause"] and warning["fix"] and warning["retryable"] is False
+    assert warning["docs"] == "docs/LAB-GUIDE.md#tbx-lab-025"
+    assert not (tmp_path / "root").exists()
+
+
 def test_low_memory_warning_is_advisory_in_run_and_dry_run(lab_world, capsys, monkeypatch, shared_mmi) -> None:
     _registry(monkeypatch)
     monkeypatch.setattr(doctor, "_ram", lambda: 8 * doctor.GIB)
     argv = ("run", str(lab_world["chunks"]), "--root", str(lab_world["root"]), "--mmi", str(shared_mmi))
     code, human, _ = _lab(capsys, *argv, "--dry-run")
     assert code == 0 and "TBX-LAB-025: Less than 16 GiB" in human
+    for label in ("CODE", "CAUSE", "FIX", "RETRYABLE", "DOCS"):
+        assert any(line.startswith(label) for line in human.splitlines()), label
     code, dry = _json(capsys, *argv, "--dry-run")
     assert code == 0 and [warning["code"] for warning in dry["data"]["warnings"]] == ["TBX-LAB-025"]
     code, human, _ = _lab(capsys, *argv)
     assert code == 0 and human.count("Less than 16 GiB") == 1
     assert "TBX-LAB-025: Less than 16 GiB" in human
     assert "Use a machine with at least 16 GiB RAM" in human
+    for label in ("CODE", "CAUSE", "FIX", "RETRYABLE", "DOCS"):
+        assert sum(line.startswith(label) for line in human.splitlines()) == 1, label
     code, payload = _json(capsys, *argv)
     assert code == 0
     low_memory = [row for row in payload["data"]["warnings"] if row.get("kind") == "low_memory"]
@@ -89,6 +109,7 @@ def test_low_memory_warning_is_advisory_in_run_and_dry_run(lab_world, capsys, mo
     (warning,) = low_memory
     assert warning["kind"] == "low_memory"
     assert warning["code"] == "TBX-LAB-025"
+    assert warning["retryable"] is False
     assert warning["cause"] and warning["docs"].endswith("#tbx-lab-025")
     assert warning["physical_ram_bytes"] == 8 * doctor.GIB
     assert warning["recommended_bytes"] == doctor.MIN_RAM

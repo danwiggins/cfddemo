@@ -291,6 +291,14 @@ def test_unaligned_non_ont_is_refused_before_alignment(
     payload = json.loads(capsys.readouterr().out)
     assert code == 3
     assert payload["data"]["code"] == "TBX-LAB-024"
+    data = payload["data"]
+    assert data["cause"] and data["fix"] and isinstance(data["retryable"], bool)
+    assert data["docs"] == "docs/LAB-GUIDE.md#tbx-lab-024"
+    code = signed_cli.main(["lab", "run", str(chunk), "--root", str(root), "--dry-run"])
+    human = capsys.readouterr().out
+    assert code == 3 and "TBX-LAB-024" in human
+    for label in ("CODE", "CAUSE", "FIX", "RETRYABLE", "DOCS"):
+        assert any(line.startswith(label) for line in human.splitlines()), label
 
 
 def _prealigned_world(tmp_path: Path, platforms: tuple[str | None, ...]) -> tuple[Path, Path]:

@@ -367,6 +367,15 @@ def _memory_warning() -> dict[str, Any] | None:
     }
 
 
+def _memory_warning_lines(warning: dict[str, Any]) -> list[str]:
+    return [
+        f"WARN      {warning['code']}: {warning['summary']}",
+        *problem_lines(LabProblem(
+            warning["code"], cause=warning["cause"], fix=warning["fix"],
+        )),
+    ]
+
+
 def _dry_run(args: argparse.Namespace, store: LabStore, progress: Callable[[str], None]) -> tuple[int, dict[str, Any]]:
     store.check_version()
     from .pon_consumer import require_built_cohort
@@ -383,8 +392,7 @@ def _dry_run(args: argparse.Namespace, store: LabStore, progress: Callable[[str]
                             "warnings": [memory_warning] if memory_warning else []}
     lines = [f"ROOT      {store.root}"]
     if memory_warning:
-        lines.append(f"WARN      {memory_warning['code']}: {memory_warning['summary']}")
-        lines.append(f"          {memory_warning['fix']}")
+        lines.extend(_memory_warning_lines(memory_warning))
     alignment_required = False
 
     def mark_platform_skips(platform: str) -> None:
@@ -583,8 +591,7 @@ def run_command(args: argparse.Namespace, store: LabStore) -> tuple[int, dict[st
             )
             lines = [f"ROOT      {store.root}", "EXAMPLE   not generated yet: generated and aligned on first run (~200k reads, under a minute)"]
             if memory_warning:
-                lines.append(f"WARN      {memory_warning['code']}: {memory_warning['summary']}")
-                lines.append(f"          {memory_warning['fix']}")
+                lines.extend(_memory_warning_lines(memory_warning))
             return EXIT_OK, _with_human(payload, lines, replace_data=True)
         # Generation and registration happen under the writer lock (below).
         args.inputs = [str(example_dir(store.root) / "chunks")]
@@ -617,8 +624,8 @@ def run_command(args: argparse.Namespace, store: LabStore) -> tuple[int, dict[st
                 memory_warning = _memory_warning()
                 if memory_warning:
                     warnings.append(memory_warning)
-                    progress(f"WARN {memory_warning['code']}: {memory_warning['summary']}")
-                    progress(f"     {memory_warning['fix']}")
+                    for line in _memory_warning_lines(memory_warning):
+                        progress(line)
                 example = False
                 if stored:
                     source_id = resolve_sample(store, args.inputs[0])
