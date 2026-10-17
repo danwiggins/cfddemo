@@ -5,6 +5,7 @@ from __future__ import annotations
 import argparse
 import errno
 import shlex
+import shutil
 import signal
 import sys
 import time
@@ -44,6 +45,7 @@ from .identity import aligned_input_id, prealigned_input_id
 from .problems import (
     EXIT_OK, EXIT_PARTIAL, EXIT_USAGE, LabProblem, problem_lines, problem_payload,
 )
+from .registry import execution_identity
 from .runner import DEFAULT_TIMEOUT_S, RunTarget, StepResult, run_plan
 from .scrub import Scrubber
 from .sample_metadata import with_sex_assertion
@@ -267,11 +269,55 @@ def _dry_run(args: argparse.Namespace, store: LabStore, progress: Callable[[str]
     if len(args.inputs) == 1 and _is_stored(args.inputs[0]):
         source_id = resolve_sample(store, args.inputs[0])
         with_sex_assertion(source_record(store, source_id) or {}, args.sex)
-        aligned, _ = _stored_input(store, source_id)
+        aligned, record = _stored_input(store, source_id)
         data["sample"] = {"id12": id12_for(store, source_id), "input_id": aligned.input_id}
+        data["reference_id"] = aligned.manifest["reference_id"]
         data["alignment"] = "reused (stored sample)"
+        chunks = record.get("chunks")
+        if isinstance(chunks, list) and all(
+            isinstance(chunk, dict) and isinstance(chunk.get("size"), int) and chunk["size"] >= 0
+            for chunk in chunks
+        ):
+            data["chunks"] = {
+                "count": len(chunks), "bytes": sum(chunk["size"] for chunk in chunks),
+                "excluded": record.get("excluded", []),
+            }
+        data["budget"] = {
+            "required_bytes": 0,
+            "free_bytes": shutil.disk_usage(store.root).free,
+            "parts": {},
+            "scope": "ingest and alignment (reused)",
+        }
         lines.append(f"SAMPLE    {id12_for(store, source_id)} (stored)")
+        lines.append(f"REFERENCE {data['reference_id']}")
+        if "chunks" in data:
+            lines.append(f"INPUT     {data['chunks']['count']} stored chunk(s) · {data['chunks']['bytes'] / GIB:.2f} GB")
         lines.append("ALIGN     reused (stored sample)")
+        lines.append(f"DISK      ingest/align needs 0 GB, has {data['budget']['free_bytes'] / GIB:.1f} GB (reused)")
+        summary = next((item.algorithm for item in items if item.algorithm.id == "read-summary"), None)
+        if summary is not None and not args.force:
+            identity = execution_identity(summary, reference_sha256=aligned.manifest["reference_sha256"])
+            selected = store.read_result(aligned.input_id, summary.id, identity)
+            if selected is not None and selected.status == "ok":
+                values = {metric.metric_id: metric.value for metric in selected.metrics}
+                eligible = values.get("eligible_reads")
+                if isinstance(eligible, int) and not isinstance(eligible, bool) and eligible >= 0:
+                    data["eligible_reads"] = eligible
+                    lines.append(f"DEPTH     {eligible:,} eligible reads (selected read-summary)")
+                    for row, item in zip(plan_rows, items):
+                        minimum = item.algorithm.requires.min_eligible_reads
+                        if minimum and eligible < minimum:
+                            row["decision"] = "will skip (below eligible-read minimum)"
+                            row["eligible_reads"] = eligible
+                            row["minimum_eligible_reads"] = minimum
+                        elif minimum:
+                            row["decision"] = "depth minimum met; other checks at run time"
+                    plan_rows[next(index for index, item in enumerate(items) if item.algorithm.id == "read-summary")][
+                        "decision"
+                    ] = "reused (selected result)"
+        for row in plan_rows:
+            if row["decision"] == "decided after alignment":
+                row["decision"] = "decided at run time"
     else:
         paths = collect_paths(args.inputs)
         chunkset = inspect_chunks(paths, store, skip_bad_chunks=args.skip_bad_chunks, write_cache=False)

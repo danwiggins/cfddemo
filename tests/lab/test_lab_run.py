@@ -6,6 +6,7 @@ installs versions at the D9 minimums.
 
 from __future__ import annotations
 
+import hashlib
 import json
 import os
 import shutil
@@ -329,6 +330,65 @@ def test_dry_run_writes_nothing_and_ignores_the_lock(lab_world, capsys, monkeypa
     assert data["plan"][0]["algorithm_id"] == "read-summary"
     assert data["budget"]["required_bytes"] > 0
     assert len(before) <= len(snapshot)
+
+
+def test_stored_dry_run_uses_selected_depth_without_writing(
+    lab_world, capsys, monkeypatch, shared_mmi,
+) -> None:
+    monkeypatch.setattr(registry, "ALGORITHMS", (
+        "read_summary:READ_SUMMARY", "delfi_ratio:DELFI_RATIO",
+    ))
+    root = lab_world["root"]
+    code, first = _json(
+        capsys, "run", str(lab_world["chunks"]), "--root", str(root),
+        "--mmi", str(shared_mmi), "--only", "read-summary",
+    )
+    assert code == 0, first
+    store = LabStore(root)
+
+    def snapshot() -> dict[str, str]:
+        return {
+            str(path.relative_to(root)): hashlib.sha256(path.read_bytes()).hexdigest()
+            for path in root.rglob("*") if path.is_file()
+        }
+
+    with store.writer("other", "r-20261017-1200-aaab"):
+        before = snapshot()
+        code, payload = _json(
+            capsys, "run", "latest", "--root", str(root),
+            "--only", "delfi-ratio", "--dry-run",
+        )
+        human_code, human, _ = _lab(
+            capsys, "run", "latest", "--root", str(root),
+            "--only", "delfi-ratio", "--dry-run",
+        )
+        forced_code, forced = _json(
+            capsys, "run", "latest", "--root", str(root),
+            "--only", "delfi-ratio", "--dry-run", "--force",
+        )
+        assert snapshot() == before
+    assert code == human_code == forced_code == 0
+    data = payload["data"]
+    assert data["sample"]["id12"] == first["data"]["sample"]["id12"]
+    assert data["sample"]["input_id"] == first["data"]["sample"]["input_id"]
+    assert data["reference_id"] == "synth"
+    assert data["chunks"]["count"] == 3 and data["chunks"]["bytes"] > 0
+    assert data["alignment"] == "reused (stored sample)"
+    assert data["budget"]["required_bytes"] == 0
+    assert data["eligible_reads"] < 1_000_000
+    assert data["plan"] == [
+        {"algorithm_id": "read-summary", "upstream": True, "decision": "reused (selected result)"},
+        {
+            "algorithm_id": "delfi-ratio", "upstream": False,
+            "decision": "will skip (below eligible-read minimum)",
+            "eligible_reads": data["eligible_reads"], "minimum_eligible_reads": 1_000_000,
+        },
+    ]
+    assert "REFERENCE synth" in human
+    assert "3 stored chunk(s)" in human
+    assert "will skip (below eligible-read minimum)" in human
+    assert "eligible_reads" not in forced["data"]
+    assert all(row["decision"] == "decided at run time" for row in forced["data"]["plan"])
 
 
 def test_second_writer_is_refused(lab_world, capsys, monkeypatch) -> None:

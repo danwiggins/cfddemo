@@ -179,7 +179,9 @@ Artifact sizes check completeness, not byte-level integrity.
 
 **Dry run.** `--dry-run` writes nothing and takes no lock. It prints the
 resolved ROOT and reference, chunk count and bytes, whether alignment is
-needed or reused, the disk budget against free space and the plan.
+needed or reused, the ingest/alignment disk budget against free space and the
+plan. For a stored sample, a selected read-summary can show eligible depth and
+known minimum-depth skips; other adapter checks remain decisions for the run.
 
 **Interruption.** Ctrl-C (or SIGTERM) stops the current step, kills its tools
 and exits 6. Completed results are kept; rerun the same command.
