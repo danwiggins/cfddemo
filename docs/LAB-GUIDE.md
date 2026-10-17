@@ -210,6 +210,7 @@ research-purpose-only data.
 ```bash
 export TRACEBACK_LIONHEART_BIN=/path/to/pinned-lionheart-2.2.0/bin/lionheart
 export TRACEBACK_LIONHEART_MOSDEPTH_BIN=/path/to/modified-mosdepth
+export TRACEBACK_LIONHEART_LD_LIBRARY_PATH=/path/to/mosdepth-library-directory
 export TRACEBACK_LIONHEART_ARCHIVE=ROOT/lab/assets/lionheart/inference_resources_v003.tar.gz
 export TRACEBACK_LIONHEART_RESOURCES=ROOT/lab/assets/lionheart/inference_resources_v003
 export TRACEBACK_LIONHEART_ENABLE_ONT=1
@@ -217,7 +218,12 @@ traceback lab run SAMPLE_ID12 --only lionheart --timeout-s 7200 --root ROOT
 ```
 
 The binary's `--version` must report Lionheart 2.2.0; the modified mosdepth must expose
-`--single-end-length`. Without the explicit ONT opt-in, or when a dependency,
+`--single-end-length`. Install `samtools` and `unpigz` on `PATH` for upstream's
+BAM validation and coverage decompression. The library-directory setting supplies
+upstream's required `--ld_library_path` argument; it defaults to the mosdepth
+binary's directory when unset.
+Set it to the directory containing mosdepth's shared libraries when needed.
+Without the explicit ONT opt-in, or when a dependency,
 resource or hg38 input is missing, this algorithm skips with a reason and
 leaves other Lab results available. Signals shows the 898 raw scores with
 their ATAC/DNase labels and a research-only callout. The upstream single-end

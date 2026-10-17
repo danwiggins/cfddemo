@@ -12,12 +12,12 @@ from pathlib import Path
 
 import pytest
 
+from tests.lab.test_landing import _dom, needs_chrome
 from traceback_lab.algorithms import lionheart
-from traceback_lab.registry import InputContext, Ready, execution_identity
 from traceback_lab.interpretation.engine import load_library
+from traceback_lab.registry import InputContext, Ready, execution_identity
 from traceback_lab.store import LabStore
 from traceback_lab.web.server import RunningLabServer
-from tests.lab.test_landing import _dom, needs_chrome
 
 ID12 = "3f9a1c2b7e04"
 
@@ -51,16 +51,17 @@ import argparse
 import os
 import pathlib
 import sys
-import numpy as np
 if sys.argv[1:] == ['--version']:
     print('lionheart, version 2.2.0')
     sys.exit(0)
+import numpy as np
 parser = argparse.ArgumentParser()
 parser.add_argument('command')
 parser.add_argument('--bam_file')
 parser.add_argument('--resources_dir')
 parser.add_argument('--out_dir')
 parser.add_argument('--mosdepth_path')
+parser.add_argument('--ld_library_path')
 parser.add_argument('--n_jobs')
 parser.add_argument('--single_end_mode', action='store_true')
 args = parser.parse_args()
@@ -68,6 +69,7 @@ assert args.command == 'extract_features' and args.single_end_mode
 assert pathlib.Path(args.bam_file).read_bytes() == b'BAM from selected input'
 assert pathlib.Path(args.resources_dir).is_dir()
 assert pathlib.Path(args.mosdepth_path).is_file()
+assert pathlib.Path(args.ld_library_path).is_dir()
 if os.environ.get('TRACEBACK_LIONHEART_MUTATE_RESOURCES'):
     (pathlib.Path(args.resources_dir) / 'gc_contents_bin_edges.npy').write_bytes(b'mutated')
 output = pathlib.Path(args.out_dir) / 'dataset'
@@ -80,6 +82,11 @@ np.save(output / 'feature_dataset.npy', matrix)
     mosdepth = tmp_path / "mosdepth"
     mosdepth.write_text("#!/bin/sh\necho 'modified mosdepth --single-end-length'\n")
     mosdepth.chmod(0o755)
+    for helper in ("samtools", "unpigz"):
+        helper_path = tmp_path / helper
+        helper_path.write_text("#!/bin/sh\nexit 0\n")
+        helper_path.chmod(0o755)
+    monkeypatch.setenv("PATH", str(tmp_path) + os.pathsep + os.environ.get("PATH", ""))
     monkeypatch.setenv("TRACEBACK_LIONHEART_BIN", str(executable))
     monkeypatch.setenv("TRACEBACK_LIONHEART_MOSDEPTH_BIN", str(mosdepth))
     monkeypatch.setenv("TRACEBACK_LIONHEART_RESOURCES", str(directory))
@@ -130,6 +137,22 @@ def test_lionheart_preflight_requires_opt_in_depth_reference_and_pinned_assets(t
     monkeypatch.setenv("TRACEBACK_LIONHEART_ENABLE_ONT", "1")
     (directory / "ATAC.idx_to_cell_type.csv").unlink()
     assert lionheart.LIONHEART.preflight(ctx).reason_code == "missing_asset"
+
+
+def test_lionheart_preflight_requires_upstream_helpers_and_library_dir(tmp_path, monkeypatch) -> None:
+    ctx, _ = _setup(tmp_path, monkeypatch)
+    original_pins = lionheart.LIONHEART.tools
+    alternate_library = tmp_path / "other-library"
+    alternate_library.mkdir()
+    monkeypatch.setenv("TRACEBACK_LIONHEART_LD_LIBRARY_PATH", str(alternate_library))
+    assert lionheart.LIONHEART.tools != original_pins
+    monkeypatch.delenv("TRACEBACK_LIONHEART_LD_LIBRARY_PATH")
+    (tmp_path / "unpigz").unlink()
+    assert lionheart.LIONHEART.preflight(ctx).reason_code == "missing_toolchain"
+    (tmp_path / "unpigz").write_text("#!/bin/sh\nexit 0\n")
+    (tmp_path / "unpigz").chmod(0o755)
+    monkeypatch.setenv("TRACEBACK_LIONHEART_LD_LIBRARY_PATH", str(tmp_path / "absent"))
+    assert lionheart.LIONHEART.preflight(ctx).reason_code == "missing_toolchain"
 
 
 def test_lionheart_resource_digest_rejects_symlink(tmp_path, monkeypatch) -> None:
