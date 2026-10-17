@@ -258,6 +258,9 @@ def test_pinned_upstream_attempt_binds_input_and_assets(tmp_path: Path, monkeypa
     assert "chroms: chr1" in (
         attempt / "griffin_nucleosome_profiling" / "config" / "config.yaml"
     ).read_text(encoding="utf-8")
+    assert "size_range: 100 200" in (
+        attempt / "griffin_nucleosome_profiling" / "config" / "config.yaml"
+    ).read_text(encoding="utf-8")
     for name in ("snakemake", "samtools", "bedtools"):
         assert manifest["runtime"]["executables"][name]["sha256"] == hashlib.sha256(name.encode()).hexdigest()
     assert manifest["runtime"]["packages"]["numpy"]
