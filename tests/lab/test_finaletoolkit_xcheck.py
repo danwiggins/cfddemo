@@ -13,7 +13,7 @@ import pysam
 import pytest
 
 from traceback_lab.algorithms.finaletoolkit_xcheck import (
-    FINALETOOLKIT_XCHECK, _delfi, _motifs, _tool,
+    FINALETOOLKIT_XCHECK, _command_base, _delfi, _motifs, _tool,
 )
 from traceback_lab.registry import InputContext, Skip, load_registry
 
@@ -148,6 +148,15 @@ def test_invalid_launcher_is_missing_toolchain(tmp_path: Path, monkeypatch: pyte
     assert _tool() is None
 
 
+def test_python_override_runs_the_attested_package() -> None:
+    launcher = Path("/operator/bin/finaletoolkit")
+    interpreter = Path("/operator/venv/bin/python")
+    assert _command_base(launcher, interpreter, overridden=False) == [str(launcher)]
+    assert _command_base(launcher, interpreter, overridden=True) == [
+        str(interpreter), "-m", "finaletoolkit.cli.main_cli",
+    ]
+
+
 def test_pinned_tool_outputs_exercise_run_without_external_install(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -159,7 +168,7 @@ def test_pinned_tool_outputs_exercise_run_without_external_install(
     fixtures = Path(__file__).parent / "data"
 
     def replay(command: list[str], **_kwargs: object) -> SimpleNamespace:
-        name = "finaletoolkit_110_motifs.tsv" if command[1] == "end-motifs" else "finaletoolkit_110_delfi.tsv"
+        name = "finaletoolkit_110_motifs.tsv" if "end-motifs" in command else "finaletoolkit_110_delfi.tsv"
         shutil.copyfile(fixtures / name, Path(command[command.index("-o") + 1]))
         return SimpleNamespace(returncode=0)
 

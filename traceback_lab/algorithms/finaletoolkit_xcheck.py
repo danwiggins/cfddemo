@@ -52,6 +52,13 @@ print(json.dumps({'version': md.version('finaletoolkit'), 'code_sha256': digest.
 """
 
 
+def _command_base(launcher: Path, interpreter: Path, *, overridden: bool) -> list[str]:
+    """Invoke the package under the interpreter whose runtime we attest."""
+    if overridden:
+        return [str(interpreter), "-m", "finaletoolkit.cli.main_cli"]
+    return [str(launcher)]
+
+
 def _tool() -> tuple[str, str] | None:
     selected = os.environ.get("TRACEBACK_FINALETOOLKIT_BIN") or shutil.which("finaletoolkit")
     if not selected:
@@ -60,10 +67,18 @@ def _tool() -> tuple[str, str] | None:
     if not path.is_file():
         return None
     try:
+        with path.open("rb") as stream:
+            launcher_prefix = stream.read(2)
+        if launcher_prefix not in {b"#!", b"MZ"}:
+            return None
         override = os.environ.get("TRACEBACK_FINALETOOLKIT_PYTHON")
         if override:
-            interpreter = Path(override)
+            # Preserve the venv executable path; resolve() follows its Python
+            # symlink to the base interpreter and loses the installed package.
+            interpreter = Path(override).absolute()
         else:
+            if launcher_prefix != b"#!":
+                return None
             with path.open("rb") as stream:
                 first_line = stream.readline(512).decode("utf-8")
             if not first_line.startswith("#!"):
@@ -81,7 +96,8 @@ def _tool() -> tuple[str, str] | None:
                 interpreter = Path(parts[0])
         if not interpreter.is_file():
             return None
-        cli = subprocess.run([str(path), "--version"], capture_output=True, text=True,
+        cli = subprocess.run([*_command_base(path, interpreter, overridden=bool(override)), "--version"],
+                             capture_output=True, text=True,
                              timeout=20, check=False)
         if cli.returncode or not re.search(r"\b1\.1\.0\b", cli.stdout + cli.stderr):
             return None
@@ -286,18 +302,21 @@ class FinaleToolkitXcheck(Base):
                     bin_stream.write(f"{name}\t{start}\t{min(start + BIN, length)}\n")
                     expected.add((name, start))
         motif_path, delfi_path = work / "motifs.tsv", work / "delfi.tsv"
+        override = os.environ.get("TRACEBACK_FINALETOOLKIT_PYTHON")
+        command_base = _command_base(Path(tool[0]), Path(override).absolute() if override else Path(tool[0]),
+                                     overridden=bool(override))
         commands = [
-            [tool[0], "end-motifs", str(bam_path), str(fasta), "-k", "4", "--min-length", "4",
+            [*command_base, "end-motifs", str(bam_path), str(fasta), "-k", "4", "--min-length", "4",
              "-q", str(MAPQ), "-t", "1", "-o", str(motif_path)],
-            [tool[0], "delfi", str(bam_path), str(sizes), str(fasta), str(bins),
+            [*command_base, "delfi", str(bam_path), str(sizes), str(fasta), str(bins),
              "--no-gc-correct", "--no-merge-bins", "--no-remove-nocov", "-q", str(MAPQ),
              "-t", "1", "-o", str(delfi_path)],
         ]
-        for command in commands:
+        for name, command in zip(("end-motifs", "delfi"), commands):
             completed = subprocess.run(command, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
                                        timeout=7200, check=False)
             if completed.returncode:
-                raise RuntimeError(f"FinaleToolkit {command[1]} failed (exit {completed.returncode})")
+                raise RuntimeError(f"FinaleToolkit {name} failed (exit {completed.returncode})")
         if _tool() != tool:
             raise RuntimeError("FinaleToolkit tool changed during execution")
         upstream_motifs = _motifs(motif_path)
