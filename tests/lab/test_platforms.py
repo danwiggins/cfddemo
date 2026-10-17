@@ -56,6 +56,21 @@ def test_stored_platform_must_match_bam_header(tmp_path: Path) -> None:
         for_input({"kind": "aligned", "platform": "ont"}, bam_path)
 
 
+def test_legacy_lab_aligned_without_read_groups_uses_pinned_map_ont(tmp_path: Path) -> None:
+    from traceback_lab.ingest import ALIGNER_IDENTITY_ARGV
+
+    bam_path = tmp_path / "legacy.bam"
+    header = {"HD": {"VN": "1.6"}, "SQ": [{"SN": "chr1", "LN": 1000}]}
+    with pysam.AlignmentFile(str(bam_path), "wb", header=header):
+        pass
+    old_manifest = {"kind": "aligned", "aligner_argv": list(ALIGNER_IDENTITY_ARGV)}
+    assert for_input(old_manifest, bam_path) == "ont"
+    with pytest.raises(ValueError, match="does not declare ONT"):
+        for_input({**old_manifest, "platform": "ont"}, bam_path)
+    with pytest.raises(ValueError, match="does not declare ONT"):
+        for_input({"kind": "aligned", "aligner_argv": ["other"]}, bam_path)
+
+
 @pytest.mark.parametrize("platform", ["ILLUMINA", None])
 def test_unaligned_non_ont_is_refused_before_alignment(
     tmp_path: Path, capsys: pytest.CaptureFixture[str], platform: str | None,
