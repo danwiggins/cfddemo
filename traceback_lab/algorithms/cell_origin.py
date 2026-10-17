@@ -64,10 +64,14 @@ def metric_id_for(contributor: str) -> str:
     return "fraction_" + "".join(ch if ch.isalnum() else "_" for ch in contributor.lower()).strip("_")
 
 
-def header_model(bam: Path) -> str | None:
+def declared_models(bam: Path) -> tuple[str, ...]:
     from traceback_runner.cell_origin import _header_models
 
-    models = _header_models(bam)
+    return _header_models(bam)
+
+
+def header_model(bam: Path) -> str | None:
+    models = declared_models(bam)
     return models[0] if len(models) == 1 else None
 
 

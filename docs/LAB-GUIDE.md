@@ -72,14 +72,14 @@ Lab data lives under `ROOT/lab/` and never touches signed records:
 
 ```
 traceback lab run (<BAM|uBAM|chunk dir>... | <id12> | latest | --example)
-    [--reference ID] [--profile all|fast] [--only a,b]
+    [--reference ID] [--profile all|fast] [--only a,b] [--cohort ID]
     [--downsample 0.5,0.25,0.1 | --no-downsample]
     [--controls | --no-controls] [--tf 0.03,0.10,0.30]
     [--skip-bad-chunks] [--sex M|F] [--force] [--timeout-s 3600]
     [--threads N] [--sort-mem 1G] [--mmi PATH]
     [--dry-run] [--verbose] [--json] [--root R]
-traceback lab simulate cna <id12|latest> [--tf 0.03,0.10,0.30] [--verbose]   synthetic CNA spike, copy-number recovery
-traceback lab simulate split <id12|latest> [--verbose]                         split-half pseudo-replicate
+traceback lab simulate cna <id12|latest> [--tf 0.03,0.10,0.30] [--cohort ID] [--verbose]   synthetic CNA spike, copy-number recovery
+traceback lab simulate split <id12|latest> [--cohort ID] [--verbose]                         split-half pseudo-replicate
 traceback lab algorithms [--json]          registered algorithms (id, tier, min depth, licenses, footnote)
 traceback lab doctor [--json]              setup checks, each with a fix command
 traceback lab serve [--open]               the local page (loopback only)
@@ -210,12 +210,12 @@ new measurement.
 | id | What it reports |
 |---|---|
 | `read-summary` | intermediate: one pass over the aligned BAM into memmapped columns (no read names); every pysam algorithm and every downsample or split-half view reads it |
-| `bam-qc` | primaries, mapped and MAPQ ≥ 20 shares, supplementary share (chimera proxy), mean read Q, share of sampled genome covered ≥ 1x, GC-bias slope, duplicate share (only when marked) |
-| `depth` | eligible reads (primary, MAPQ ≥ 20, chr1–22/X/Y), mean span, approximate depth; the index count is shown only as an upper bound |
+| `bam-qc` | primaries, mapped and MAPQ ≥ 20 shares, supplementary share, mean read Q, share of sampled genome covered ≥ 1x, GC-bias slope, duplicate share (only when marked); supplementary share as a chimera proxy and mean read Q interpretation are ONT-specific |
+| `depth` | eligible reads (primary, MAPQ ≥ 20, chr1–22/X/Y), mean aligned span per eligible read, approximate aligned-base depth; the index count is shown only as an upper bound, and Illumina aligned span is not template length (`abs(TLEN)`) |
 | `fragment-size` | 1-bp aligned-span histogram, mode, short (< 150 bp) share, mono/di peaks, 10 bp periodicity |
 | `lionheart` | opt-in upstream LIONHEART v2.2.0 extraction of 898 raw sample-standardized chromatin-accessibility correlation scores from the selected hg38 BAM; needs ≥5M eligible reads, the modified mosdepth and Zenodo v003 resources; ONT single-end mode is experimental, and no cancer prediction is run |
 | `short-read-fragment-size` | separate exploratory paired-end Illumina histogram and size summaries from absolute BAM TLEN; requires a prealigned BAM with every `@RG PL:ILLUMINA` |
-| `copy-number` | tumour fraction, ploidy, genome log2 track and segments through the installed ichorCNA toolchain (no panel of normals yet, so read as not interpretable); needs 2M eligible reads, `traceback toolchain install ichor` and `traceback method-asset register --from-toolchain copy-number --root R` |
+| `copy-number` | tumour fraction, ploidy, genome log2 track and segments through the installed ichorCNA toolchain; a built protocol-matched cohort supplies a verified technical panel, but no clinical calibration or interpretation; the unbuilt default runs without a panel and remains not interpretable; needs 2M eligible reads, `traceback toolchain install ichor` and `traceback method-asset register --from-toolchain copy-number --root R` |
 | `instability` | bin-weighted median absolute deviation of the selected copy-number result's segment log2 values (`tmad`), with used-bin and null-estimate coverage counts; needs 2M eligible reads and a successful copy-number result for the same input; exploratory and cohort-relative, with no ONT cutoff |
 | `modbase-qc` | mod codes in the MM tags, MM-tagged share, mean ML at aligned CpG calls (read from `meth-calls`), share of those calls below 0.7 confidence, tagged reads with unusable MM/ML; skipped (`missing_tags`) when no read carries MM |
 | `long-tail` | shares of molecules > 300 bp, 1–4 kb (delayed processing) and > 7.5 kb (lysis); a supplementary-split read counts at its read length |
@@ -223,15 +223,32 @@ new measurement.
 | `mtdna` | chrM reads (MAPQ ≥ 20) as a share of all primary reads, and the chrM fragment mode |
 | `viral-reads` | EBV, HPV and HBV reads per million human-unmapped primary reads from a separate minimap2 ≥ 2.28 alignment; needs an operator-registered viral FASTA and is exploratory for ONT cfDNA |
 | `cell-origin` | share of cfDNA from each of 40 Loyfer U250 cell types with bootstrap intervals, through the signed method's own `compute_measurement` (modkit, UXM, NNLS); needs 2.5M eligible reads, `traceback toolchain install modkit` and `traceback method-asset register --from-dir LOYFER_DIR --root R`; minor cell types are not interpretable below 5x. Downsample and split runs read a transient filtered BAM that is deleted after publish |
+| `meth-tf` | slow-profile exploratory tumour share of a two-component, nonnegative methylation-marker fit; needs 2.5M eligible reads, C+m calls, and an operator-registered reference with matching genome and modified-base model; no clinical calibration or threshold |
 | `end-motifs` | reference 4-mers at both ends of each molecule (5′ forward end and the reverse complement of the other end), motif diversity score and CCCA share; needs 500,000 eligible reads and the registered FASTA |
 | `delfi-ratio` | short (100–150 bp) / long (151–220 bp) ratio per 5 Mb bin on chr1–22, median-centred, and its SD; no GC correction, cohort-relative only; needs 1,000,000 eligible reads |
 | `meth-calls` | intermediate: decodes MM/ML once into site-level CpG call chunks (read row, forward-strand C position, strand, 5mC/5hmC/canonical ML); derived inputs reuse it through their row mask |
 | `global-5mc` | share of CpG site calls whose most likely state is 5mC |
 | `global-5hmc` | share of CpG site calls (with a 5hmC channel) whose most likely state is 5hmC; skipped (`missing_channel`) when the MM tags carry no `C+h` |
+| `epi-clock` | exploratory three-CpG Weidner age arithmetic transferred to ONT cfDNA; needs 5M eligible reads, MM-tagged CpG calls, and an operator-verified hg38 assay-site map; **SPECULATIVE**, without a clinical age range or ONT validation |
 | `pmd-score` | 5mC share inside vs outside the Zhou 2018 common PMDs and their difference; needs 500,000 eligible reads and the PMD asset (below) |
 | `hypometh-reads` | among reads with ≥ 4 CpG calls, the share under 25% methylated, and U/X/M counts (≤ 25% / between / ≥ 75%); needs 500,000 eligible reads |
 | `frag-x-meth` | descriptive molecule-count matrix of aligned-size bins by per-read 5mC fraction (at least four distinct CpG sites/read); the scalar is long (151–220 bp) mean minus short (100–150 bp) mean, null if either group is empty; no normal range |
 | `breakpoint-motifs` | 4-mer counts at aligned-reference-span start and end−1, stratified by CpG proximity; the scalar is the fraction of ends near a CpG. These are not proven physical cleavage positions, and the methylation link is unavailable without a supported joint input |
+
+**Exploratory epi-clock.** Verify the three hg38 assay-site coordinates, then
+follow the [epi-clock map instructions](epi-clock.md) to prepare the JSON map and
+its SHA-256. Register and inspect it with:
+
+```bash
+traceback lab asset register-clock-map --file MAP.json --sha256 HEX_SHA256 --root ROOT
+traceback lab asset inspect-clock-map --root ROOT
+```
+
+A numerical age requires at least five eligible calls at each CpG, but that is
+only a completeness gate:
+with five PDE4C calls, changing one call's modified state shifts the fitted
+arithmetic by 32.94 years. Treat even a non-null result as exploratory until
+matched-platform validation is available.
 
 **Experimental LIONHEART scores.** The [upstream v2.2.0 source](https://github.com/BesenbacherLab/lionheart/tree/v2.2.0)
 is pinned at commit `f49de07ce0d9a72ee3c883429085cfacfc54c1d2` (MIT code).
@@ -288,21 +305,52 @@ the registered hg38 reference, run the separate measurement explicitly:
 
 ```bash
 traceback lab run YOUR_LOCAL_aligned_illumina.bam \
-  --reference hg38 --only short-read-fragment-size \
-  --no-downsample --no-controls --root R
+  --reference hg38 --root R
 ```
 
-Every BAM read group must declare `PL:ILLUMINA`; a BAM aligned by the Lab's
-ONT minimap2 path is skipped. Each qualifying proper first mate counts one
+Every BAM read group must declare `PL:ILLUMINA`. This declaration is recorded
+in the input manifest and run summary; it describes the BAM header, not
+instrument attestation. A prealigned BAM with missing, mixed, or unrecognized
+platform declarations is refused with TBX-LAB-024. Unaligned input must
+unanimously declare `PL:ONT` to use the Lab's
+`map-ont` alignment path. For short reads, align externally and supply a
+prealigned BAM. Each qualifying proper first mate counts one
 template: it must pass the common primary, mapped, nonduplicate, QC-pass,
-MAPQ ≥ 20 and canonical-contig filter, have a mapped mate on the same contig,
+MAPQ ≥ 20 and canonical nuclear contig filter (names with or without `chr`),
+have a mapped mate on the same contig,
 and carry nonzero TLEN. The reported length is `abs(TLEN)`, even when the
 first mate's TLEN is negative. Downsample and split selections use the same
 read-name predicate as other Lab full-BAM algorithms. The histogram and
 metrics are keyed to `short-read-fragment-size`; `fragment-size` remains the
-ONT aligned-span measurement. No clinical cutoff, short-read healthy range,
-or cross-platform comparison is supplied by this slice. Other Lab algorithms
-are still designed around the ONT run, so use `--only` for this opt-in path.
+ONT aligned-span measurement. The normal Illumina run also reports read
+summary, aligned-base depth, and BAM QC, including downsample and split views.
+Split halves are read-name pseudo-replicates, not independent molecules. On
+Illumina, unmarked PCR duplicates can place copies of one molecule in both
+halves and make agreement look stronger; inspect duplicate marking and do not
+treat split agreement as independent validation.
+ONT-only algorithms skip with reason `platform`; the CNA spike is omitted for
+Illumina. Result and cohort compatibility identities distinguish platforms
+while retaining the historical ONT identity encoding, so an Illumina
+measurement cannot reuse an ONT result or reference range. No clinical
+cutoff, short-read healthy range, or cross-platform comparison is supplied.
+If an Illumina BAM was ingested by the earlier opt-in TLEN path, run it again
+from the original BAM to create its platform-specific input identity. The old
+stored result remains available but does not enter new platform-aware cohorts.
+For a legacy prealigned BAM without a platform declaration, verify its
+instrument provenance and regenerate a BAM with the correct `@RG PL` value
+from the trusted source before ingesting it. The Lab does not infer ONT from
+an absent value. Previously stored Lab-aligned inputs with absent or
+unrecognized platform tags remain readable only when their manifest exactly
+pins the historical `map-ont` recipe for the BAM's read groups and no read
+group explicitly declares Illumina. A new input still needs an explicit
+platform declaration.
+Stored prealigned manifests without a platform field still read the BAM's
+unanimous platform declaration. Re-ingest short reads to record an Illumina
+input identity for new results and cohorts. Before rerun, historical ONT-only
+results on such an Illumina input remain stored but appear as platform skips
+in sample views and the local API; rerun records those skips in the store.
+The same read-side mask applies when an old prealigned input cannot verify ONT
+provenance from its BAM.
 
 **PMD asset.** `pmd-score` needs an operator-supplied Zhou 2018 hg38
 common-PMD BED.gz file. The repository does not ship or download it; its
@@ -319,6 +367,63 @@ traceback lab asset inspect pmd --root R
 `inspect` rehashes the pinned file; absent or altered bytes block
 `pmd-score` with an asset-specific recovery command. Registering a PMD
 asset does not establish redistribution rights or make a skipped result zero.
+
+**Methylation tumour-fraction reference.** `meth-tf` needs an operator-supplied
+JSON marker panel. The repository does not bundle or download tumour/healthy
+marker fractions. The operator must establish the panel's source and use rights,
+then register its exact bytes under the same ROOT as the run:
+
+```bash
+traceback lab asset add meth-tf-reference --file YOUR_LOCAL_MARKER_REFERENCE.json \
+  --source-label YOUR_PANEL_DESCRIPTION --terms unknown --root R
+traceback lab asset inspect meth-tf-reference --root R
+```
+
+The JSON has schema `traceback.lab.meth-tf-reference.v1`, the exact genome
+`reference_sha256`, the BAM-header `modbase_model` ID, and mandatory
+`call_definition: "C+m_argmax_5mC_over_canonical_5mC_5hmC"`. Its sorted
+`markers` array contains autosomal `chrom`, zero-based CpG-C `pos0`, and
+`healthy` and `tumour` fractions between 0 and 1. These fractions must be
+measured as the share of observed C+m-channel CpG calls whose largest
+canonical/5mC/5hmC probability is 5mC, under a protocol compatible with the
+sample's modified-base model and filtering. Generic bisulfite beta values do
+not automatically meet that definition. For example,
+`{"chrom":"chr1","pos0":101,"healthy":0.25,"tumour":0.75}` illustrates the
+format only; these numbers are synthetic and are not a usable reference.
+The BAM must declare exactly one distinct modified-base model ID across its
+read groups. Meth-TF skips a BAM declaring multiple models rather than choosing
+one; register a reference for a single-model input.
+Registration is immutable within one Lab root: a different panel needs a
+separate root. Skipped, refused, or numerically unidentifiable results are
+unavailable rather than zero; a sparse but identifiable fit can estimate zero.
+The result has no detection limit, calibrated
+interval, or clinical cutoff. If an existing registration is damaged, `lab
+asset add` will not overwrite it: restore that registration's exact files from
+a known-good backup, or use a new ROOT. If planning could not pin a readable
+registration, retry the run after checking the asset's local storage.
+`identifiable` means only that the observed,
+count-weighted reference columns have numerical rank and a nonzero fit. The
+reported `reference_condition_number` describes how sensitive the numerical
+fit is to small changes; a large value warns of nearly collinear references,
+without implying a validated reliability cutoff.
+The `markers_covered` and `cpg_calls_used` diagnostics show the support for
+the numerical fit, not biological confidence. With exactly two covered
+markers, a full-rank two-weight fit is exactly determined: an interior feasible
+fit has zero residual up to numerical error, so a near-zero `fit_rms` is not
+evidence of goodness of fit. A boundary-clamped fit may retain mismatch, but
+the residual alone does not identify whether the solution lies on a boundary.
+`fit_rms` is the count-weighted residual of the unnormalized, nonnegative
+reference-weight fit, before its weights are normalized into a tumour share;
+it is not the residual of a sum-to-one mixture fit. It has no goodness-of-fit
+threshold or biological confidence claim.
+
+The Agreement lens pairs PoN-qualified copy-number tumour fraction with the
+methylation estimate, a cohort-relative fragment-size mode shift, and a
+cohort-relative mtDNA fraction trend. The latter two need at least ten compatible
+cohort members after excluding the target source. The lens computes no combined
+score, warns that the signals are not independent, and notes the
+whole-genome-doubling caveat for copy-number tumour fraction. When both sides
+of a pair are unavailable, it shows both reasons.
 
 **Viral reference.** `viral-reads` leaves the registered hg38 human reference
 unchanged. It takes human-unmapped primary reads from the aligned BAM, including
@@ -423,7 +528,8 @@ serve as a history of every interrupted run.
   immutable result attempt; legacy logs without that ID, older runs, or cached
   steps may have no matching line. A latest-run in-progress or interrupted note
   appears only when that run names the same source and full input; the selected
-  result status remains visible beside it. If the step published no result yet,
+  result status remains visible beside it. Unreadable or ambiguous selections
+  appear as separate run-table rows without a fabricated duration. If the step published no result yet,
   a sample-scoped run notice appears instead of a result row. If the latest
   analysis or simulation run log is unreadable, unsafe, malformed, or outside
   the 1 MiB / 4,096-line limit, the status banner reports an unavailable
@@ -440,6 +546,7 @@ idempotent; rerunning an analysis does not create a new member.
 
 ```bash
 traceback lab cohort add ID12 --cohort healthy --root R
+traceback lab cohort remove ID12 --cohort healthy --root R
 traceback lab cohort build --cohort healthy --root R
 traceback lab serve --root R --open
 ```
@@ -447,12 +554,43 @@ traceback lab serve --root R --open
 `build` publishes an immutable generation and changes the current pointer
 atomically. Open **Compare** and choose that cohort; the page names the exact
 generation used for the whole response. Build again after a member or its
-results change. Different aligners or incompatible algorithm parameters are
+results change. `cohort remove` removes one member from the pending roster by
+ID12 or full source ID, even if its stored source record is damaged. It does
+not delete that sample's input or results, or change the published generation;
+run `cohort build` to publish the revised membership. Different aligners or
+incompatible algorithm parameters are
 excluded per metric, with counts shown. Pre-aligned inputs whose processing
 provenance is unknown are isolated by their input identity; they are not
 pooled as protocol-matched references. Distinct source IDs are not proof of
 independent donors. The separate PoN denominator does not become a
 percentile denominator.
+
+For a verified internal cohort with at least ten eligible aligned members,
+`cohort build` creates one full panel and one leave-one-out panel per member.
+It recomputes each member's copy-number and instability results against that
+member's panel before publishing the generation. `pon_n` counts all panel
+sources; a selected member panel uses `pon_n - 1` sources. A nonmember uses
+the full panel. Both copy-number and instability still require 2M eligible
+reads on the target input. Copy-number also enforces the signed 1M counted-read
+floor after filtering, with or without a panel.
+The corrected copy-number method version does not reuse older copy-number or
+dependent instability attempts. Rerun affected inputs and rebuild existing
+cohorts to restore current-version comparisons. The sample view marks selected
+older copy-number and dependent instability results as `superseded_method`
+until rerun; their immutable attempts remain available for inspection.
+
+`lab run` and `lab simulate` use a built `healthy-v1` cohort by default when
+one exists for a real ONT input. Illumina and EXAMPLE inputs do not select
+that implicit ONT panel. An explicit ONT cohort refuses those inputs. Pass
+`--cohort ID` to pin another built cohort; an explicit cohort
+with no compatible verified panel fails rather than falling back. If the
+implicit `healthy-v1` is unbuilt, copy-number keeps its no-PoN baseline.
+If a built implicit panel's toolchain or registered method assets are missing,
+copy-number records `missing_toolchain` or `missing_asset`, its dependents
+skip upstream, and independent algorithms continue. An older uncorrected
+copy-number result is never reused. Other panel verification failures stop
+the run rather than silently substituting no-PoN copy number.
+An explicit `--cohort` is checked even when `--only` omits copy-number.
 
 If a selected cohort cannot be verified, **Compare** lists it as unavailable
 with a problem code and a next action. Other verified generations remain
@@ -460,10 +598,14 @@ selectable. Follow that action, then reload the page; an unavailable cohort or
 target sample has no comparison values, and the Lab does not fall back to an
 older generation. A cohort with members but no published generation needs
 `traceback lab cohort build --cohort ID --root R` before it can be selected.
+If only the selected panel's ichor toolchain or registered method assets are
+missing, Compare keeps independent metric comparisons from the pinned
+generation. It withholds copy-number and every dependent metric, names the
+missing panel dependency, and never substitutes an uncorrected result.
 
 ## Positive controls
 
-`traceback lab simulate cna <id12|latest>` builds a synthetic copy-number
+`traceback lab simulate cna <id12|latest>` requires an ONT sample and builds a synthetic copy-number
 spike from the healthy aligned input, with no external data: one-copy gains
 on 1q and 8q and losses on 13q and 17p at tumour fraction TF (default 0.03,
 0.10 and 0.30). Each read in a gain arm is duplicated with probability TF/2
@@ -532,7 +674,7 @@ Chunks declare different `@RG` basecall models (exit 3). Run each model's chunks
 
 ### TBX-LAB-009
 
-An aligned BAM's `@SQ` lines differ from the registered reference, or the inputs mix aligned and unaligned BAMs (exit 3). The cause lists the first three differences. Pass the unaligned chunks and let the Lab align, or register the FASTA the BAM was aligned to.
+An aligned BAM's `@SQ` lines differ from the registered reference, the inputs mix aligned and unaligned BAMs, or more than one aligned BAM is supplied (exit 3). The cause lists the first three reference differences when applicable. Pass the unaligned chunks and let the Lab align, or register the FASTA the BAM was aligned to; supply one prealigned BAM at a time.
 
 ### TBX-LAB-010
 
@@ -545,7 +687,7 @@ The volume filled up during a step (exit 3, retryable). The staging directory wa
 ### TBX-LAB-012
 
 Another Lab writer is running (exit 3, retryable). Only one writer (`lab run`,
-`lab simulate`, `lab cohort add`, `lab cohort build`) may hold `ROOT/lab/.lock`
+`lab simulate`, `lab cohort add`, `lab cohort remove`, `lab cohort build`) may hold `ROOT/lab/.lock`
 at a time. The cause names the holder's command, run id, pid, step and start
 time. Wait for it (`traceback lab runs`), or stop that process.
 
@@ -568,8 +710,10 @@ The run completed and one or more algorithms failed (exit 8). The summary's `FAI
 ### TBX-LAB-017
 
 A run id, sample `id12` or `latest` was not found, or a prefix is ambiguous
-(exit 4). `traceback lab runs` lists runs. Pass the same `--root` (or
-`TRACEBACK_ROOT`) you ran with.
+(exit 4). For `cohort remove`, use a unique member ID12 or full source ID from
+the pending roster; damaged source records do not prevent removal.
+`traceback lab runs` lists runs. Pass the same `--root` (or `TRACEBACK_ROOT`)
+you ran with.
 
 ### TBX-LAB-018
 
@@ -613,6 +757,19 @@ An operator-supplied `--sex` conflicts with an assertion already recorded for
 the same sample, or the local sex metadata is malformed (exit 3). Reuse the
 recorded assertion or omit the flag. Inspect and restore malformed metadata
 from a known-good local backup before rerunning; no measured result is changed.
+
+### TBX-LAB-024
+
+An input has missing, mixed, or unrecognized platform declarations, an
+unaligned Illumina input would need the ONT-only aligner, or a stored input's
+platform disagrees with its BAM header (exit 3). Use a BAM whose read groups
+unanimously declare `PL:ONT` or `PL:ILLUMINA`; align Illumina reads externally
+before supplying the BAM. For a damaged or mismatched stored input, restore
+that input from a known-good backup or re-ingest the original BAM under a fresh
+ROOT. Reusing the same ROOT does not replace an existing input manifest.
+Rewriting a BAM header changes its source identity. Use
+`traceback lab cohort remove ID12 --cohort ID --root R` for an unrecoverable member, then rebuild
+that cohort; the old published generation stays selected until the rebuild.
 
 ## Adding an algorithm
 

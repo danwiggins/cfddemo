@@ -6,12 +6,13 @@ from dataclasses import dataclass, field
 from pathlib import Path
 
 from ..read_summary import ReadSummary, depth_stamp, write_summary
-from ..registry import AlgorithmOutput, InputContext, Ready, Skip
+from ..registry import AlgorithmOutput, InputContext, Ready, Requirements, Skip
 from ._base import Base, metric
 
 
 @dataclass
 class ReadSummaryIntermediate(Base):
+    requires: Requirements = field(default_factory=lambda: Requirements(platforms=frozenset({"ont", "illumina"})))
     upstream: tuple[str, ...] = field(default=())
     consumes: str = "full_bam"
 

@@ -11,6 +11,9 @@ from typing import Any
 from traceback_runner.cli import _local_envelope, _result, _with_human
 
 from .assets import AssetError, AssetPublishUncertain, add_asset, inspect_asset
+from .epi_clock_model import ClockMapPublishUncertain, ClockModelError, inspect_map, register_map
+from .meth_tf_reference import KIND as METH_TF_KIND
+from .meth_tf_reference import add_reference, inspect_reference
 from .methylbert_assets import MethylbertPublishUncertain, inspect_methylbert_bundle, register_methylbert_bundle
 from .problems import EXIT_BLOCKED, EXIT_OK
 from .store import LabStore, new_run_id
@@ -21,7 +24,7 @@ def add_asset_parser(commands: Any, common: Callable[[argparse.ArgumentParser], 
     asset = commands.add_parser("asset", help="register or inspect local Lab assets")
     actions = asset.add_subparsers(dest="asset_action", required=True)
     add = actions.add_parser("add", help="register operator-supplied pinned bytes")
-    add.add_argument("kind", choices=("pmd", "tss-annotation", "methylbert-bundle", "viral-fasta"))
+    add.add_argument("kind", choices=("pmd", METH_TF_KIND, "tss-annotation", "methylbert-bundle", "viral-fasta"))
     add.add_argument("--file", type=Path, required=True, help="local pinned asset file")
     add.add_argument("--targets", type=Path, help="viral-fasta TSV: contig, virus, accession")
     add.add_argument(
@@ -33,10 +36,55 @@ def add_asset_parser(commands: Any, common: Callable[[argparse.ArgumentParser], 
     common(add)
     add.set_defaults(handler=_add)
     inspect = actions.add_parser("inspect", help="rehash and describe a local asset")
-    inspect.add_argument("kind", choices=("pmd", "tss-annotation", "methylbert-bundle", "viral-fasta"))
+    inspect.add_argument("kind", choices=("pmd", METH_TF_KIND, "tss-annotation", "methylbert-bundle", "viral-fasta"))
     inspect.add_argument("--sha256", help="registered MethylBERT bundle digest")
     common(inspect)
     inspect.set_defaults(handler=_inspect)
+
+    clock = actions.add_parser("register-clock-map", help="register a SHA-pinned hg38 Weidner assay-site map")
+    clock.add_argument("--file", type=Path, required=True)
+    clock.add_argument("--sha256", required=True, help="expected exact-byte SHA-256")
+    common(clock)
+    clock.set_defaults(handler=_register_clock_map)
+
+    clock_inspect = actions.add_parser("inspect-clock-map", help="verify the registered Weidner assay-site map")
+    common(clock_inspect)
+    clock_inspect.set_defaults(handler=_inspect_clock_map)
+
+
+def _clock_payload(store: LabStore, model: Any) -> dict[str, Any]:
+    return {"root": str(store.root), "model": "Weidner-3", "genome_build": "hg38",
+            "sha256": model.sha256, "source_label": model.source_label,
+            "sites": [{"cpg_id": name, "chrom": chrom, "pos0": pos0} for name, chrom, pos0 in model.sites]}
+
+
+def _register_clock_map(args: argparse.Namespace, store: LabStore) -> tuple[int, dict[str, Any]]:
+    store.check_version()
+    try:
+        with store.writer("asset register-clock-map", new_run_id(), step="epi-clock-map"):
+            model = register_map(store, args.file, args.sha256)
+    except ClockMapPublishUncertain as exc:
+        payload = _result_payload("lab asset register-clock-map", "blocked", "Clock map publication uncertain", store,
+                                  {"cause": str(exc)})
+        return EXIT_BLOCKED, _with_human(payload, [f"BLOCKED {exc}"])
+    except ClockModelError as exc:
+        payload = _result_payload("lab asset register-clock-map", "blocked", "Clock map not registered", store,
+                                  {"cause": str(exc)})
+        return EXIT_BLOCKED, _with_human(payload, [f"BLOCKED {exc}"])
+    payload = _result_payload("lab asset register-clock-map", "ok", "Clock map registered", store, _clock_payload(store, model))
+    return EXIT_OK, _with_human(payload, ["MODEL   Weidner-3", f"SHA256  {model.sha256}"])
+
+
+def _inspect_clock_map(args: argparse.Namespace, store: LabStore) -> tuple[int, dict[str, Any]]:
+    store.check_version()
+    try:
+        model = inspect_map(store)
+    except ClockModelError as exc:
+        payload = _result_payload("lab asset inspect-clock-map", "blocked", "Clock map unavailable", store,
+                                  {"cause": str(exc)})
+        return EXIT_BLOCKED, _with_human(payload, [f"BLOCKED {exc}"])
+    payload = _result_payload("lab asset inspect-clock-map", "ok", "Clock map verified", store, _clock_payload(store, model))
+    return EXIT_OK, _with_human(payload, ["MODEL   Weidner-3", f"SHA256  {model.sha256}"])
 
 
 def _result_payload(
@@ -62,6 +110,13 @@ def _add(args: argparse.Namespace, store: LabStore) -> tuple[int, dict[str, Any]
                 record = add_viral_reference(
                     store, args.file, args.targets,
                     source_label=args.source_label, terms=args.terms, license_id=args.license_id,
+                )
+            elif args.kind == METH_TF_KIND:
+                if getattr(args, "targets", None) is not None:
+                    raise AssetError("only viral-fasta accepts --targets")
+                record = add_reference(
+                    store, args.file, source_label=args.source_label,
+                    terms=args.terms, license_id=args.license_id,
                 )
             else:
                 if getattr(args, "targets", None) is not None:
@@ -110,7 +165,9 @@ def _inspect(args: argparse.Namespace, store: LabStore) -> tuple[int, dict[str, 
         else:
             if args.sha256:
                 raise AssetError("--sha256 is only for methylbert-bundle")
-            record = inspect_viral_reference(store) if args.kind == "viral-fasta" else inspect_asset(store, args.kind)
+            record = (inspect_reference(store) if args.kind == METH_TF_KIND else
+                      inspect_viral_reference(store) if args.kind == "viral-fasta" else
+                      inspect_asset(store, args.kind))
     except AssetError as exc:
         payload = _result_payload(
             "lab asset inspect", "blocked", "Asset unavailable", store,
