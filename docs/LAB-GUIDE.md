@@ -228,10 +228,26 @@ new measurement.
 | `meth-calls` | intermediate: decodes MM/ML once into site-level CpG call chunks (read row, forward-strand C position, strand, 5mC/5hmC/canonical ML); derived inputs reuse it through their row mask |
 | `global-5mc` | share of CpG site calls whose most likely state is 5mC |
 | `global-5hmc` | share of CpG site calls (with a 5hmC channel) whose most likely state is 5hmC; skipped (`missing_channel`) when the MM tags carry no `C+h` |
+| `epi-clock` | exploratory three-CpG Weidner age arithmetic transferred to ONT cfDNA; needs 5M eligible reads, MM-tagged CpG calls, and an operator-verified hg38 assay-site map; **SPECULATIVE**, without a clinical age range or ONT validation |
 | `pmd-score` | 5mC share inside vs outside the Zhou 2018 common PMDs and their difference; needs 500,000 eligible reads and the PMD asset (below) |
 | `hypometh-reads` | among reads with ≥ 4 CpG calls, the share under 25% methylated, and U/X/M counts (≤ 25% / between / ≥ 75%); needs 500,000 eligible reads |
 | `frag-x-meth` | descriptive molecule-count matrix of aligned-size bins by per-read 5mC fraction (at least four distinct CpG sites/read); the scalar is long (151–220 bp) mean minus short (100–150 bp) mean, null if either group is empty; no normal range |
 | `breakpoint-motifs` | 4-mer counts at aligned-reference-span start and end−1, stratified by CpG proximity; the scalar is the fraction of ends near a CpG. These are not proven physical cleavage positions, and the methylation link is unavailable without a supported joint input |
+
+**Exploratory epi-clock.** Verify the three hg38 assay-site coordinates, then
+follow the [epi-clock map instructions](epi-clock.md) to prepare the JSON map and
+its SHA-256. Register and inspect it with:
+
+```bash
+traceback lab asset register-clock-map --file MAP.json --sha256 HEX_SHA256 --root ROOT
+traceback lab asset inspect-clock-map --root ROOT
+```
+
+A numerical age requires at least five eligible calls at each CpG, but that is
+only a completeness gate:
+with five PDE4C calls, changing one call's modified state shifts the fitted
+arithmetic by 32.94 years. Treat even a non-null result as exploratory until
+matched-platform validation is available.
 
 **Experimental LIONHEART scores.** The [upstream v2.2.0 source](https://github.com/BesenbacherLab/lionheart/tree/v2.2.0)
 is pinned at commit `f49de07ce0d9a72ee3c883429085cfacfc54c1d2` (MIT code).
