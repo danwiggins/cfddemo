@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-import time
+import threading
 from pathlib import Path
 
 import pytest
@@ -45,19 +45,23 @@ def test_every_sample_surface_discloses_interrupted_run(route, tmp_path) -> None
 def test_every_sample_surface_has_loading_copy_while_listing_is_pending(route, tmp_path) -> None:
     with _server(tmp_path, _sample()) as server:
         listing = server.app.api.samples
+        release_listing = threading.Event()
 
         def delayed_listing():
-            time.sleep(3)
+            assert release_listing.wait(timeout=120), "browser did not release pending listing"
             return listing()
 
         server.app.api.samples = delayed_listing
         profile = tmp_path / "browser-profile"
         path = "/" if route == "home" else f"/sample/{ID12}/{route}"
-        dom = _dom_cdp(
-            [_chrome(), "--headless=new", "--disable-gpu", "--no-first-run",
-             f"--user-data-dir={profile}", server.issue_link() + f"&route={path}"],
-            profile, ok=lambda page: "Loading Lab results…" in page, timeout=10,
-        )
+        try:
+            dom = _dom_cdp(
+                [_chrome(), "--headless=new", "--disable-gpu", "--no-first-run",
+                 f"--user-data-dir={profile}", server.issue_link() + f"&route={path}"],
+                profile, ok=lambda page: "Loading Lab results…" in page, timeout=60,
+            )
+        finally:
+            release_listing.set()
     assert "Loading Lab results…" in dom
 
 

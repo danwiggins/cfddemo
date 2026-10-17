@@ -55,9 +55,13 @@ def test_lab_badge_text_pairs_meet_4_5_to_1() -> None:
 
 
 def _rgb_hex(value: str) -> str:
-    numbers = re.findall(r"\d+", value)
-    assert len(numbers) >= 3, value
-    return "#" + "".join(f"{int(number):02x}" for number in numbers[:3])
+    match = re.fullmatch(
+        r"rgba?\(\s*(\d{1,3}),\s*(\d{1,3}),\s*(\d{1,3})(?:,\s*([0-9.]+))?\s*\)", value,
+    )
+    assert match is not None and (match.group(4) is None or float(match.group(4)) == 1.0), value
+    channels = [int(match.group(index)) for index in (1, 2, 3)]
+    assert all(0 <= channel <= 255 for channel in channels), value
+    return "#" + "".join(f"{channel:02x}" for channel in channels)
 
 
 @needs_chrome
@@ -69,13 +73,14 @@ def test_rendered_lab_badge_text_has_computed_4_5_to_1_contrast(tmp_path) -> Non
         def inspect(_command, evaluate) -> None:
             rendered.extend(evaluate("""(() => [...document.querySelectorAll('#main .flag-pill, #main .state-chip, #main .tier, #main .unverified')].map((node) => {
               const style = getComputedStyle(node);
+              const opaque = (color) => /^rgb\\(/.test(color) || /^rgba\\([^)]*,\\s*1(?:\\.0+)?\\)$/.test(color);
               let ancestor = node;
-              let background = 'rgba(0, 0, 0, 0)';
-              while (ancestor && (background === 'transparent' || background === 'rgba(0, 0, 0, 0)')) {
+              let background = 'transparent';
+              while (ancestor && !opaque(background)) {
                 background = getComputedStyle(ancestor).backgroundColor;
                 ancestor = ancestor.parentElement;
               }
-              return {kind: node.className, foreground: style.color, background};
+              return {kind: node.className, foreground: style.color, background, opaque: opaque(background)};
             }))()"""))
 
         _dom_cdp(
@@ -89,6 +94,7 @@ def test_rendered_lab_badge_text_has_computed_4_5_to_1_contrast(tmp_path) -> Non
     assert any("state-chip" in kind for kind in kinds)
     assert any("tier" in kind for kind in kinds)
     for item in rendered:
+        assert item["opaque"], item
         assert _contrast(_rgb_hex(item["foreground"]), _rgb_hex(item["background"])) >= 4.5, item
 
 
