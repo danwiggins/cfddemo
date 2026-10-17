@@ -103,6 +103,10 @@ class Wps(Base):
     })
 
     def preflight(self, ctx: InputContext) -> Ready | Skip:
+        if ctx.platform != "ont":
+            return Skip("unsupported_platform", "long-fragment WPS needs single-molecule ONT aligned spans")
+        if ctx.reference_id != "hg38":
+            return Skip("reference", "long-fragment WPS needs hg38 coordinates")
         if ctx.approx_depth_x is None or ctx.approx_depth_x < MIN_DEPTH_X:
             return Skip("depth", "long-fragment WPS needs at least 10x approximate autosomal depth")
         return Ready()
@@ -124,10 +128,16 @@ class Wps(Base):
         total_centres = 0
         positive = 0
         valid_bins = 0
+        qualifying_fragments = 0
         for cid in ids:
             name = summary.contigs[int(cid)]
             on = eligible & (contig == cid)
-            mean, counts = chromosome_track(starts[on], ends[on], summary.lengths[int(cid)])
+            on_starts = starts[on]
+            on_ends = ends[on]
+            span = on_ends.astype(np.int64) - on_starts.astype(np.int64)
+            qualifying_fragments += int(((on_starts >= 0) & (on_ends <= summary.lengths[int(cid)])
+                                         & (span >= FRAGMENT_RANGE[0]) & (span <= FRAGMENT_RANGE[1])).sum())
+            mean, counts = chromosome_track(on_starts, on_ends, summary.lengths[int(cid)])
             tracks[name] = mean
             valid = counts > 0
             positive += int((mean[valid] > 0).sum())
@@ -139,11 +149,12 @@ class Wps(Base):
         np.savez_compressed(buffer, **tracks)
         panel = {"window_bp": WINDOW, "fragment_bp": list(FRAGMENT_RANGE), "bin_bp": BIN,
                  "contigs": metadata, "valid_centres": total_centres,
+                 "qualifying_fragments": qualifying_fragments,
                  "track_format": "npz float32 mean WPS per 1 kb genomic bin"}
         return AlgorithmOutput(
-            metrics=[metric("mean_wps", total_score / total_centres if total_centres else None,
-                            unit="fragments", n=total_centres),
-                     metric("positive_bin_fraction", positive / valid_bins if valid_bins else None,
+            metrics=[metric("mean_wps", total_score / total_centres if total_centres and qualifying_fragments else None,
+                            unit="fragments", n=qualifying_fragments),
+                     metric("positive_bin_fraction", positive / valid_bins if valid_bins and qualifying_fragments else None,
                             unit="fraction", n=valid_bins)],
             artifacts={"wps_track.npz": buffer.getvalue(),
                        "wps_summary.json": json.dumps(panel, separators=(",", ":")).encode()},

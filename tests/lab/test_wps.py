@@ -6,6 +6,7 @@ import io
 import json
 
 import numpy as np
+import pytest
 
 from traceback_lab.algorithms import wps
 from traceback_lab.algorithms.wps import HALF, WINDOW, WPS, chromosome_track, score_centres
@@ -56,15 +57,21 @@ def test_wps_depth_gate_requires_known_ten_x(tmp_path) -> None:
                        reference_id="hg38", reference_sha256="c" * 64,
                        input_dir=tmp_path, approx_depth_x=10.0)
     assert isinstance(WPS.preflight(ctx), Ready)
+    paired = InputContext(root=tmp_path, source_id="a" * 64, input_id="b" * 64,
+                          reference_id="hg38", reference_sha256="c" * 64,
+                          input_dir=tmp_path, platform="illumina-paired-end", approx_depth_x=10.0)
+    assert WPS.preflight(paired) == Skip(
+        "unsupported_platform", "long-fragment WPS needs single-molecule ONT aligned spans")
 
 
-def test_wps_registry_and_algorithm_output(tmp_path, monkeypatch) -> None:
+@pytest.mark.parametrize("valid_fragments", [True, False])
+def test_wps_registry_and_algorithm_output(tmp_path, monkeypatch, valid_fragments: bool) -> None:
     class Summary:
         contigs = ["chr1"]
         lengths = [1200]
         data = {"contig": np.zeros(3, dtype=np.int16),
                 "start": np.asarray([100, 250, 500]),
-                "end": np.asarray([220, 410, 680])}
+                "end": np.asarray([220, 410, 680] if valid_fragments else [310, 460, 750])}
 
         def autosome_ids(self):
             return np.asarray([0], dtype=np.int16)
@@ -85,7 +92,8 @@ def test_wps_registry_and_algorithm_output(tmp_path, monkeypatch) -> None:
         assert np.array_equal(track["chr1"], expected)
     panel = json.loads(result.artifacts["wps_summary.json"])
     assert panel["valid_centres"] == int(counts.sum())
-    assert result.metrics[0]["value"] is not None
-    assert result.metrics[1]["value"] is not None
+    assert panel["qualifying_fragments"] == (3 if valid_fragments else 0)
+    assert (result.metrics[0]["value"] is not None) == valid_fragments
+    assert (result.metrics[1]["value"] is not None) == valid_fragments
     assert any(algorithm.id == "wps" for algorithm in load_registry())
     assert load_library().entry("wps", "mean_wps") is not None
