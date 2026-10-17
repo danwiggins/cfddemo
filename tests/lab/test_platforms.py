@@ -139,15 +139,21 @@ def test_legacy_illumina_source_record_keeps_header_platform(tmp_path: Path) -> 
     assert record["inputs"][0]["platform"] == "illumina"
 
 
-@pytest.mark.parametrize("platforms,expected", [
-    (("ILLUMINA",), "skipped"), ((None,), "skipped"), (("ONT",), "ok"),
+@pytest.mark.parametrize("platforms,kind,declared,expected", [
+    (("ILLUMINA",), "prealigned", None, "skipped"),
+    ((None,), "prealigned", None, "skipped"),
+    (("ONT",), "prealigned", None, "ok"),
+    (("ILLUMINA",), "aligned", None, "skipped"),
+    ((None,), "prealigned", "unknown", "skipped"),
+    ((), "aligned", None, "ok"),
 ])
-def test_legacy_prealigned_view_qualifies_old_ont_only_selection_before_rerun(
-    tmp_path: Path, platforms: tuple[str | None, ...], expected: str,
+def test_stored_view_qualifies_unverified_platform_before_rerun(
+    tmp_path: Path, platforms: tuple[str | None, ...], kind: str, declared: str | None, expected: str,
 ) -> None:
     import shutil
 
     from traceback_lab.envelope import ResultEnvelope, provenance
+    from traceback_lab.ingest import ALIGNER_IDENTITY_ARGV
     from traceback_lab.store import LabStore
     from traceback_lab.interpretation.engine import load_library
     from traceback_lab.views import InputView, cell_state, load_sample, selected_results
@@ -160,11 +166,16 @@ def test_legacy_prealigned_view_qualifies_old_ont_only_selection_before_rerun(
     input_dir = store.inputs_dir / input_id
     input_dir.mkdir(parents=True)
     shutil.copyfile(bam_path, input_dir / "aligned.bam")
-    (input_dir / "manifest.json").write_text(json.dumps({"kind": "prealigned", "reference_id": "hg38"}))
+    manifest = {"kind": kind, "reference_id": "hg38"}
+    if declared is not None:
+        manifest["platform"] = declared
+    if kind == "aligned":
+        manifest["aligner_argv"] = list(ALIGNER_IDENTITY_ARGV)
+    (input_dir / "manifest.json").write_text(json.dumps(manifest))
     store.sources_dir.mkdir(parents=True)
     (store.sources_dir / f"{source_id}.json").write_text(json.dumps({
         "schema": "traceback.lab.source.v1", "source_id": source_id,
-        "inputs": [{"input_id": input_id, "kind": "prealigned", "used_utc": "2026-10-16T00:00:00Z"}],
+        "inputs": [{"input_id": input_id, "kind": kind, "used_utc": "2026-10-16T00:00:00Z"}],
         "derived": [],
     }))
     old = ResultEnvelope.model_validate({
