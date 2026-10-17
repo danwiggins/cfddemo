@@ -499,7 +499,9 @@ def test_stored_illumina_dry_run_uses_platform_bound_read_summary(
     from traceback_lab.registry import execution_identity
 
     root, bam = _prealigned_world(tmp_path, ("ILLUMINA",))
-    monkeypatch.setattr(registry, "ALGORITHMS", ("read_summary:READ_SUMMARY",))
+    monkeypatch.setattr(registry, "ALGORITHMS", (
+        "read_summary:READ_SUMMARY", "delfi_ratio:DELFI_RATIO",
+    ))
     code, first = _json(capsys, "run", str(bam), "--root", str(root),
                         "--reference", "hg38", "--only", "read-summary")
     assert code == 0, first
@@ -514,14 +516,14 @@ def test_stored_illumina_dry_run_uses_platform_bound_read_summary(
     eligible = next(metric.value for metric in selected.metrics if metric.metric_id == "eligible_reads")
 
     dry_code, dry = _json(capsys, "run", "latest", "--root", str(root),
-                          "--only", "read-summary", "--dry-run")
+                          "--only", "delfi-ratio", "--dry-run")
     assert dry_code == 0, dry
     assert dry["data"]["sample"]["platform"] == "illumina"
     assert dry["data"]["eligible_reads"] == eligible
-    assert dry["data"]["plan"] == [{
-        "algorithm_id": "read-summary", "upstream": False,
-        "decision": "reused (selected result)",
-    }]
+    assert dry["data"]["plan"] == [
+        {"algorithm_id": "read-summary", "upstream": True, "decision": "reused (selected result)"},
+        {"algorithm_id": "delfi-ratio", "upstream": False, "decision": "skip expected (platform)"},
+    ]
 
 
 def test_second_writer_is_refused(lab_world, capsys, monkeypatch) -> None:

@@ -367,6 +367,9 @@ def _dry_run(args: argparse.Namespace, store: LabStore, progress: Callable[[str]
             "(reused; not a sufficiency check)"
         )
         lines.append("ANALYSIS  scratch disk not predicted")
+        for row, item in zip(plan_rows, items):
+            if platform not in item.algorithm.requires.platforms:
+                row["decision"] = "skip expected (platform)"
         summary = next((item.algorithm for item in items if item.algorithm.id == "read-summary"), None)
         if summary is not None and not args.force:
             identity = execution_identity(
@@ -388,6 +391,8 @@ def _dry_run(args: argparse.Namespace, store: LabStore, progress: Callable[[str]
                     data["eligible_reads"] = eligible
                     lines.append(f"DEPTH     {eligible:,} eligible reads (selected read-summary)")
                     for row, item in zip(plan_rows, items):
+                        if row["decision"] != "decided after alignment":
+                            continue
                         minimum = item.algorithm.requires.min_eligible_reads
                         if minimum and eligible < minimum:
                             row["decision"] = "skip expected below depth minimum (unless cached)"
