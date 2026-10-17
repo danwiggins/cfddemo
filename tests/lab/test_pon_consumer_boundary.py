@@ -9,6 +9,7 @@ from types import SimpleNamespace
 
 import pytest
 
+from traceback_lab.adapters import ichor
 from traceback_lab.adapters.ichor import CopyNumberError, LabCopyNumberParameters, stage_verified_pon
 from traceback_lab.algorithms import copy_number as cn_module
 from traceback_lab import cohorts, pon, pon_consumer
@@ -97,6 +98,28 @@ def test_copy_number_configured_boundary_passes_one_verified_panel(tmp_path: Pat
     assert next(metric for metric in output.metrics if metric["metric_id"] == "pon_policy")["value"] == "lab_loo_v1"
     with pytest.raises(CopyNumberError, match="requires grid verification"):
         cn_module.COPY_NUMBER.run_configured(ctx, out, parameters=parameters, pon=panel)
+
+
+def test_grid_mismatch_stops_before_ichor_receives_panel(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    parameters = replace(ichor.default_parameters(), pon_policy="lab_loo_v1", pon_sha256="a" * 64)
+    called: list[str] = []
+    monkeypatch.setattr(ichor, "read_counter", lambda *args: called.append("read-counter"))
+    monkeypatch.setattr(ichor, "analysis_grid", lambda *args: (
+        SimpleNamespace(bin_definition_sha256="b" * 64), "c" * 64,
+    ))
+    monkeypatch.setattr(ichor, "run_ichor", lambda *args, **kwargs: called.append("ichor"))
+
+    def reject_grid(actual: str) -> None:
+        assert actual == "b" * 64
+        raise CopyNumberError("selected PoN grid mismatch")
+
+    with pytest.raises(CopyNumberError, match="grid mismatch"):
+        ichor.measure(
+            tmp_path / "counting.bam", 2_000_000, 2_000_000, tmp_path,
+            toolchain=object(), assets=object(), parameters=parameters,
+            pon=tmp_path / "selected.rds", validate_grid=reject_grid,
+        )
+    assert called == ["read-counter"]
 
 
 def test_bound_panel_changes_execution_but_not_cohort_compatibility() -> None:
