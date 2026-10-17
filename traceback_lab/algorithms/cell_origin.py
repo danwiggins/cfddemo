@@ -150,7 +150,7 @@ class CellOrigin(Base):
             return Skip("reference", "the registered reference FASTA is not available")
         if header_model(ctx.input_dir / "aligned.bam") is None:
             return Skip("missing_tags", "the BAM's @RG lines declare no single modified-base model")
-        return Ready()
+        return decision
 
     def run(self, ctx: InputContext, out: Path) -> AlgorithmOutput | Skip:
         import tempfile
