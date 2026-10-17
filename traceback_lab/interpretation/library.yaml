@@ -2674,7 +2674,7 @@ entries:
     headline: true
     stability: {kind: absolute, tolerance: 1.0}
     citations:
-      - {doi: "10.1186/gb-2014-15-2-r24", note: "Weidner three-CpG whole-blood clock"}
+      - "doi:10.1186/gb-2014-15-2-r24"
     citation_checked: {by: "Lab published-model review", date: "2026-10-17", note: "Coefficient asset methylclockData coefWeidner.rda SHA-256 9a3feb7d0c500f9ccdb61ffe243775587fa21b082536142bb1260c566cd39645; ONT cfDNA transfer unvalidated."}
 
   - algorithm_id: epi-clock
