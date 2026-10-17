@@ -11,7 +11,8 @@ import tarfile
 import pytest
 
 import traceback_lab.methylbert_bundle as bundle_module
-from traceback_lab.methylbert_bundle import BundleError, REQUIRED_FILES, SCHEMA, unpack_bundle, verify_bundle
+import traceback_runner.references as references
+from traceback_lab.methylbert_bundle import MAX_ARCHIVE_BYTES, BundleError, REQUIRED_FILES, SCHEMA, unpack_bundle, verify_bundle
 from traceback_runner.references import AssetKind, ReferenceProblem, copy_registered_asset, register_asset
 
 
@@ -78,6 +79,10 @@ def test_registration_refuses_malformed_bundle_before_publication(tmp_path):
     assert not (root / "assets-local" / AssetKind.METHYLBERT_BUNDLE.value / "asset_bad_model").exists()
 
 
+def test_registration_and_consumer_share_the_bundle_size_cap():
+    assert references._MAX_BUNDLE_BYTES == MAX_ARCHIVE_BYTES
+
+
 @pytest.mark.parametrize("damage,message", [
     ("bad_digest", "differs"), ("extra", "missing, extra"), ("link", "regular files"),
 ])
@@ -91,6 +96,10 @@ def test_bundle_rejects_bad_hash_membership_and_links(tmp_path, damage, message)
 def test_many_headers_are_rejected_before_unbounded_tar_parsing(tmp_path, monkeypatch):
     archive = tmp_path / "many.tar"
     with tarfile.open(archive, mode="w:") as output:
+        for name in sorted(REQUIRED_FILES | {"bundle.json"}):
+            member = tarfile.TarInfo(name)
+            member.size = 1
+            output.addfile(member, io.BytesIO(b"x"))
         for number in range(2000):
             body = b"x"
             member = tarfile.TarInfo(f"extra-{number}")
@@ -105,9 +114,26 @@ def test_many_headers_are_rejected_before_unbounded_tar_parsing(tmp_path, monkey
         return original(*args, **kwargs)
 
     monkeypatch.setattr(tarfile.TarInfo, "frombuf", counted)
+    monkeypatch.setattr(bundle_module.tarfile, "open", lambda *args, **kwargs: pytest.fail(
+        "tarfile must not parse beyond the raw header bound",
+    ))
     with pytest.raises(BundleError, match="missing, extra"):
         verify_bundle(archive)
-    assert parsed <= 8
+    assert parsed == 8
+
+
+def test_pax_extension_is_rejected_before_tarfile_parsing(tmp_path, monkeypatch):
+    archive = tmp_path / "pax.tar"
+    with tarfile.open(archive, mode="w:", format=tarfile.PAX_FORMAT) as output:
+        member = tarfile.TarInfo("bundle.json")
+        member.pax_headers = {"comment": "extended metadata"}
+        member.size = 1
+        output.addfile(member, io.BytesIO(b"x"))
+    monkeypatch.setattr(bundle_module.tarfile, "open", lambda *args, **kwargs: pytest.fail(
+        "PAX data must be rejected by the raw scanner",
+    ))
+    with pytest.raises(BundleError):
+        verify_bundle(archive)
 
 
 def test_private_copy_uses_verified_open_archive_when_path_is_replaced(tmp_path, monkeypatch):

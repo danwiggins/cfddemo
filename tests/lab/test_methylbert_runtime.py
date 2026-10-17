@@ -103,10 +103,10 @@ def _aggregate(path, **changes):
     path.write_text(json.dumps(values))
 
 
-def test_only_small_finite_aggregate_without_per_read_fields_is_publishable(tmp_path):
+def test_only_small_finite_aggregate_without_per_read_fields_is_well_formed(tmp_path):
     path = tmp_path / "aggregate.json"
     _aggregate(path)
-    result = runtime.read_aggregate(path, model_id="tumour-normal")
+    result = runtime.read_aggregate(path, model_id="tumour-normal", eligible_reads=runtime.MIN_ELIGIBLE_READS)
     assert (result.tumour_fraction, result.classified_reads) == (0.2, 50)
     for change, message in (
         ({"read_name": "private"}, "unexpected fields"),
@@ -114,20 +114,20 @@ def test_only_small_finite_aggregate_without_per_read_fields_is_publishable(tmp_
         ({"tumour_fraction": float("nan")}, "fractions"),
         ({"tumour_fraction": 10**1000}, "fractions"),
         ({"classified_reads": 0}, "no classified reads"),
-        ({"classified_reads": runtime.MAX_CLASSIFIED_READS + 1}, "exceeds the cap"),
+        ({"classified_reads": runtime.MIN_ELIGIBLE_READS + 1}, "more classified than eligible"),
     ):
         _aggregate(path, **change)
         with pytest.raises(runtime.RuntimeRefusal, match=message):
-            runtime.read_aggregate(path, model_id="tumour-normal")
+            runtime.read_aggregate(path, model_id="tumour-normal", eligible_reads=runtime.MIN_ELIGIBLE_READS)
     path.write_bytes(b"x" * (runtime.MAX_AGGREGATE_BYTES + 1))
     with pytest.raises(runtime.RuntimeRefusal, match="oversized"):
-        runtime.read_aggregate(path, model_id="tumour-normal")
+        runtime.read_aggregate(path, model_id="tumour-normal", eligible_reads=runtime.MIN_ELIGIBLE_READS)
     path.write_text('{"classified_reads":' + "9" * 5000 + "}")
     with pytest.raises(runtime.RuntimeRefusal):
-        runtime.read_aggregate(path, model_id="tumour-normal")
+        runtime.read_aggregate(path, model_id="tumour-normal", eligible_reads=runtime.MIN_ELIGIBLE_READS)
     path.write_text("[" * 3000 + "0" + "]" * 3000)
     with pytest.raises(runtime.RuntimeRefusal, match="invalid JSON"):
-        runtime.read_aggregate(path, model_id="tumour-normal")
+        runtime.read_aggregate(path, model_id="tumour-normal", eligible_reads=runtime.MIN_ELIGIBLE_READS)
 
 
 def test_worker_launch_uses_contained_deadline_and_private_aggregate(tmp_path, monkeypatch):
@@ -144,7 +144,7 @@ def test_worker_launch_uses_contained_deadline_and_private_aggregate(tmp_path, m
     monkeypatch.setattr(runtime, "run_contained", contained)
     result = runtime.run_worker(
         [sys.executable, "worker.py"], scratch=scratch, env={}, aggregate_path=aggregate,
-        model_id="tumour-normal",
+        model_id="tumour-normal", eligible_reads=runtime.MIN_ELIGIBLE_READS,
     )
     assert result.tumour_fraction == 0.2
     assert seen["timeout_seconds"] == runtime.MAX_WALL_SECONDS
@@ -152,10 +152,11 @@ def test_worker_launch_uses_contained_deadline_and_private_aggregate(tmp_path, m
     with pytest.raises(runtime.RuntimeRefusal, match="new file"):
         runtime.run_worker(
             [sys.executable, "worker.py"], scratch=scratch, env={}, aggregate_path=aggregate,
-            model_id="tumour-normal",
+            model_id="tumour-normal", eligible_reads=runtime.MIN_ELIGIBLE_READS,
         )
     with pytest.raises(runtime.RuntimeRefusal, match="parent is missing"):
         runtime.run_worker(
             [sys.executable, "worker.py"], scratch=scratch, env={},
             aggregate_path=scratch / "missing" / "aggregate.json", model_id="tumour-normal",
+            eligible_reads=runtime.MIN_ELIGIBLE_READS,
         )

@@ -27,7 +27,6 @@ MIN_ELIGIBLE_READS = 2_500_000
 MAX_WALL_SECONDS = 2 * 60 * 60
 MAX_LOG_BYTES = 64 * 1024
 MAX_AGGREGATE_BYTES = 16 * 1024
-MAX_CLASSIFIED_READS = 10_000_000_000
 MAX_CODE_FILE_BYTES = 8 * 1024 * 1024
 MAX_CODE_TOTAL_BYTES = 64 * 1024 * 1024
 AGGREGATE_SCHEMA = "traceback.methylbert-aggregate.v1"
@@ -84,7 +83,7 @@ def installed_identity() -> InstalledCodeIdentity:
             raise RuntimeRefusal("MethylBERT installed code path is invalid")
         path = Path(distribution.locate_file(name))
         try:
-            descriptor = os.open(path, os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0))
+            descriptor = os.open(path, os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_BINARY", 0))
             with os.fdopen(descriptor, "rb") as stream:
                 info = os.fstat(stream.fileno())
                 if not stat.S_ISREG(info.st_mode) or not 1 <= info.st_size <= MAX_CODE_FILE_BYTES:
@@ -133,13 +132,15 @@ def require_ready(
     return code
 
 
-def read_aggregate(path: Path, *, model_id: str) -> Aggregate:
+def read_aggregate(path: Path, *, model_id: str, eligible_reads: int) -> Aggregate:
     """Accept only one small aggregate object; never ingest per-read output."""
 
+    if type(eligible_reads) is not int or eligible_reads < 1:
+        raise RuntimeRefusal("MethylBERT eligible-read count is missing or invalid")
     try:
         if path.is_symlink():
             raise RuntimeRefusal("MethylBERT aggregate is missing, linked, or oversized")
-        descriptor = os.open(path, os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0))
+        descriptor = os.open(path, os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_BINARY", 0))
         with os.fdopen(descriptor, "rb") as stream:
             info = os.fstat(stream.fileno())
             if not stat.S_ISREG(info.st_mode) or not 1 <= info.st_size <= MAX_AGGREGATE_BYTES:
@@ -163,19 +164,22 @@ def read_aggregate(path: Path, *, model_id: str) -> Aggregate:
     count = raw["classified_reads"]
     if type(count) is not int or count < 1:
         raise RuntimeRefusal("MethylBERT aggregate has no classified reads")
-    if count > MAX_CLASSIFIED_READS:
-        raise RuntimeRefusal("MethylBERT aggregate classified-read count exceeds the cap")
+    if count > eligible_reads:
+        raise RuntimeRefusal("MethylBERT aggregate has more classified than eligible reads")
     return Aggregate(model_id, float(fractions[0]), float(fractions[1]), count)
 
 
 def run_worker(
     argv: Sequence[str], *, scratch: Path, env: Mapping[str, str],
-    aggregate_path: Path, model_id: str, should_abort: Callable[[], bool] | None = None,
+    aggregate_path: Path, model_id: str, eligible_reads: int,
+    should_abort: Callable[[], bool] | None = None,
 ) -> Aggregate:
     """Bound a pinned worker's process group, logs, time and published result."""
 
     if not argv or not os.path.isabs(argv[0]):
         raise RuntimeRefusal("MethylBERT worker executable must be absolute")
+    if type(eligible_reads) is not int or eligible_reads < MIN_ELIGIBLE_READS:
+        raise RuntimeRefusal("MethylBERT needs at least 2,500,000 eligible ONT reads")
     if not scratch.is_absolute() or not aggregate_path.is_absolute():
         raise RuntimeRefusal("MethylBERT scratch and aggregate paths must be absolute")
     try:
@@ -196,4 +200,4 @@ def run_worker(
             raise RuntimeRefusal("MethylBERT aggregate escaped private scratch")
     except OSError as exc:
         raise RuntimeRefusal("MethylBERT aggregate parent disappeared") from exc
-    return read_aggregate(aggregate_path, model_id=model_id)
+    return read_aggregate(aggregate_path, model_id=model_id, eligible_reads=eligible_reads)

@@ -481,6 +481,7 @@ ASSET_REGISTRATION_FILE = "registered-asset.json"
 ASSET_SOURCE_FILE = "source.json"
 _MAX_TEXT_ASSET_BYTES = 128 * 1024 * 1024
 _MAX_PON_BYTES = 2 * 1024 * 1024 * 1024
+_MAX_BUNDLE_BYTES = 2 * 1024 * 1024 * 1024
 _MAX_ASSET_LINE_BYTES = 1024 * 1024
 # The PoN envelope: decompressed output is read in bounded slices, in total at
 # most this much, and xz may use at most this much memory.
@@ -853,7 +854,8 @@ def _scan_asset(kind: AssetKind, path: Path) -> tuple[str, int, AssetParseCheck]
     digest = hashlib.sha256()
     size = 0
     binary = kind in (AssetKind.ICHOR_PON, AssetKind.METHYLBERT_BUNDLE)
-    limit = _MAX_PON_BYTES if binary else _MAX_TEXT_ASSET_BYTES
+    limit = (_MAX_PON_BYTES if kind is AssetKind.ICHOR_PON else
+             _MAX_BUNDLE_BYTES if kind is AssetKind.METHYLBERT_BUNDLE else _MAX_TEXT_ASSET_BYTES)
     try:
         handle = path.open("rb")
     except FileNotFoundError:

@@ -219,7 +219,8 @@ def unpack_bundle(path: Path, destination: Path) -> Bundle:
                 if source is None:
                     raise BundleError(f"{name} is unreadable")
                 descriptor = os.open(
-                    target, os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_NOFOLLOW", 0), 0o600,
+                    target, os.O_WRONLY | os.O_CREAT | os.O_EXCL
+                    | getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_BINARY", 0), 0o600,
                 )
                 with source, os.fdopen(descriptor, "wb") as output:
                     remaining = member.size
