@@ -5,18 +5,20 @@ from __future__ import annotations
 import hashlib
 import io
 import json
+import os
 import tarfile
 
 import pytest
 
+import traceback_lab.methylbert_bundle as bundle_module
 from traceback_lab.methylbert_bundle import BundleError, REQUIRED_FILES, SCHEMA, unpack_bundle, verify_bundle
 from traceback_runner.references import AssetKind, copy_registered_asset, register_asset
 
 
-def _bundle(path, *, bad_digest=False, extra=False, link=False):
+def _bundle(path, *, bad_digest=False, extra=False, link=False, model_id="test-tumour-normal"):
     files = {name: f"fixture {name}".encode() for name in REQUIRED_FILES}
     manifest = {
-        "schema": SCHEMA, "model_id": "test-tumour-normal", "upstream_commit": "a" * 40,
+        "schema": SCHEMA, "model_id": model_id, "upstream_commit": "a" * 40,
         "source": "synthetic fixture", "terms": "test-only", "reference_sha256": "b" * 64,
         "n_mers": 3, "seq_len": 150,
         "files": {name: hashlib.sha256(body).hexdigest() for name, body in files.items()},
@@ -74,3 +76,45 @@ def test_bundle_rejects_bad_hash_membership_and_links(tmp_path, damage, message)
     _bundle(archive, **{damage: True})
     with pytest.raises(BundleError, match=message):
         verify_bundle(archive)
+
+
+def test_many_headers_are_rejected_before_unbounded_tar_parsing(tmp_path, monkeypatch):
+    archive = tmp_path / "many.tar"
+    with tarfile.open(archive, mode="w:") as output:
+        for number in range(2000):
+            body = b"x"
+            member = tarfile.TarInfo(f"extra-{number}")
+            member.size = len(body)
+            output.addfile(member, io.BytesIO(body))
+    parsed = 0
+    original = tarfile.TarInfo.frombuf
+
+    def counted(*args, **kwargs):
+        nonlocal parsed
+        parsed += 1
+        return original(*args, **kwargs)
+
+    monkeypatch.setattr(tarfile.TarInfo, "frombuf", counted)
+    with pytest.raises(BundleError, match="missing, extra"):
+        verify_bundle(archive)
+    assert parsed <= 8
+
+
+def test_private_copy_uses_verified_open_archive_when_path_is_replaced(tmp_path, monkeypatch):
+    archive = tmp_path / "model.tar"
+    replacement = tmp_path / "replacement.tar"
+    files = _bundle(archive)
+    _bundle(replacement, model_id="replacement-model")
+    original = bundle_module._verified_members
+
+    def swap_after_verification(open_archive):
+        result = original(open_archive)
+        os.replace(replacement, archive)
+        return result
+
+    monkeypatch.setattr(bundle_module, "_verified_members", swap_after_verification)
+    destination = tmp_path / "private"
+    assert unpack_bundle(archive, destination).model_id == "test-tumour-normal"
+    assert (destination / "train_seq.csv").read_bytes() == files["train_seq.csv"]
+    monkeypatch.setattr(bundle_module, "_verified_members", original)
+    assert verify_bundle(archive).model_id == "replacement-model"

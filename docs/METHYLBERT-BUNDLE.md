@@ -2,7 +2,7 @@
 
 The Lab's planned `methylbert` result needs a **fine-tuned tumour/normal model**. The generic pretrained MethylBERT encoder is not a tumour-purity model. No suitable public checkpoint has been identified, so this contract is preparatory; registering a bundle does not yet enable a Lab result.
 
-An operator-trusted, uncompressed TAR contains exactly these seven regular files, with no links or extra members:
+An operator-trusted, uncompressed TAR contains exactly these seven regular files, with no links, PAX/GNU extensions, or extra members. The archive and sum of member sizes are each capped at 2 GiB:
 
 ```text
 bundle.json
