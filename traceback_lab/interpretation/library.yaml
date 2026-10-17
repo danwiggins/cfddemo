@@ -7,7 +7,7 @@
 # original evidence (D4).  citation_checked records who confirmed that every
 # DOI resolves and every displayed number matches the source (D27); an entry
 # without it renders an "UNVERIFIED citation" badge.
-version: 0.6.4
+version: 0.6.5
 hidden_algorithms: [read-summary, meth-calls]
 entries:
   # ---------------------------------------------------------------- bam-qc
@@ -2650,3 +2650,78 @@ entries:
     stability: {kind: proportion}
     citations: []
     citation_checked: {by: "Lab TLEN engineering review", date: "2026-10-16", note: "Engineering FFT statistic reused over TLEN bins, not an established clinical threshold."}
+
+  - algorithm_id: fetal-fraction
+    metric_id: fetal_fraction
+    label: "Fetal fraction (model unavailable)"
+    value_kind: proportion
+    tier: SPECULATIVE
+    origin_tier: PROVEN
+    origin_platform: "prenatal cfDNA; no ONT-matched fetal-fraction model"
+    min_depth_x: null
+    reference: {kind: none}
+    performance: null
+    performance_missing_reason: "NIPTeR does not calculate fetal fraction; a separately validated model is required"
+    missing_value_caption: "No validated fetal-fraction model is registered. NIPTeR only calculates chromosome z-scores."
+    meaning_high: "A higher measured fetal fraction would require a separately validated method."
+    meaning_low: "A lower measured fetal fraction would require a separately validated method."
+    confounders: ["gestational age", "maternal factors", "fetal sex", "assay platform"]
+    next_steps:
+      analytical: ["Obtain and validate an independent fetal-fraction model on the matched ONT protocol"]
+      clinical_setting: null
+    license_ids: [nipter-lgpl3]
+    flags: [FDA, PRIVACY, LEGAL]
+    headline: true
+    stability: {kind: proportion}
+    citations:
+      - {doi: "10.1186/s12859-018-2557-8", note: "NIPTeR z-score workflow; no fetal-fraction estimator"}
+    citation_checked: {by: "Lab NIPTeR method review", date: "2026-10-17", note: "Package function index and original NIPTeR paper reviewed; fetal fraction is not an NIPTeR output."}
+
+  - algorithm_id: fetal-fraction
+    metric_id: trisomy_13_z
+    label: "Chromosome 13 NIPTeR z-score"
+    value_kind: signed
+    tier: SPECULATIVE
+    origin_tier: PROVEN
+    origin_platform: "short-read prenatal cfDNA with a matched euploid NIPTeR control group"
+    min_depth_x: null
+    reference: {kind: none}
+    performance: null
+    performance_missing_reason: "No ONT-matched clinical cutoff or validation"
+    meaning_high: "Higher chromosome 13 fraction relative to the registered control group."
+    meaning_low: "Lower chromosome 13 fraction relative to the registered control group."
+    confounders: ["control group mismatch", "GC bias", "mapping bias", "fetal fraction"]
+    next_steps: {analytical: ["Inspect control-group match and protocol"], clinical_setting: null}
+    license_ids: [nipter-lgpl3]
+    flags: [FDA, PRIVACY, LEGAL]
+    headline: false
+    stability: {kind: absolute, tolerance: 0.1}
+    citations: [{doi: "10.1186/s12859-018-2557-8"}]
+
+  - algorithm_id: fetal-fraction
+    metric_id: trisomy_18_z
+    label: "Chromosome 18 NIPTeR z-score"
+    value_kind: signed
+    tier: SPECULATIVE
+    reference: {kind: none}
+    performance: null
+    performance_missing_reason: "No ONT-matched clinical cutoff or validation"
+    license_ids: [nipter-lgpl3]
+    flags: [FDA, PRIVACY, LEGAL]
+    headline: false
+    stability: {kind: absolute, tolerance: 0.1}
+    citations: [{doi: "10.1186/s12859-018-2557-8"}]
+
+  - algorithm_id: fetal-fraction
+    metric_id: trisomy_21_z
+    label: "Chromosome 21 NIPTeR z-score"
+    value_kind: signed
+    tier: SPECULATIVE
+    reference: {kind: none}
+    performance: null
+    performance_missing_reason: "No ONT-matched clinical cutoff or validation"
+    license_ids: [nipter-lgpl3]
+    flags: [FDA, PRIVACY, LEGAL]
+    headline: false
+    stability: {kind: absolute, tolerance: 0.1}
+    citations: [{doi: "10.1186/s12859-018-2557-8"}]

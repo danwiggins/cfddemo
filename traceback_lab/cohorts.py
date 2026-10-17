@@ -316,10 +316,14 @@ def _selected_results(store: LabStore, input_id: str, manifest: dict[str, Any]) 
         if len(upstream) != len(algorithm.upstream):
             continue
         assets_of = getattr(algorithm, "asset_sha256s", None)
+        scoped_assets_of = getattr(algorithm, "asset_sha256s_for_input", None)
         try:
+            assets = scoped_assets_of(store.root, input_id) if callable(scoped_assets_of) else (
+                assets_of(store.root) if callable(assets_of) else ()
+            )
             identity = execution_identity(
                 algorithm, reference_sha256=manifest["reference_sha256"], upstream=upstream,
-                asset_sha256s=assets_of(store.root) if callable(assets_of) else (),
+                asset_sha256s=assets,
             )
         except (OSError, ValueError, KeyError, LabProblem):
             # An unresolved asset cannot make an old result current-compatible.
@@ -342,6 +346,10 @@ def _selected_results(store: LabStore, input_id: str, manifest: dict[str, Any]) 
             pon_policy=str(algorithm.parameters.get("pon_policy", "none")),
             per_sample_asset_keys=("pon_asset_sha256",),
         )
+        if algorithm.id == "fetal-fraction":
+            # An input-scoped prenatal control is part of the measurement;
+            # never pool z-scores produced against different control RDS bytes.
+            compat = chosen.provenance.parameters_sha256
         found.append(CohortResult(
             algorithm_id=algorithm.id, parameters_sha256=chosen.provenance.parameters_sha256,
             cohort_compat_key=compat, metrics=metrics,
