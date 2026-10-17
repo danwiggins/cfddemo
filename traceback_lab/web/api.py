@@ -301,7 +301,8 @@ class LabApi:
                 reason = "malformed_or_empty"
                 events = []
             if reason:
-                run_log_unavailable = {"run_id": run_id, "reason": reason}
+                run_log_unavailable = {"run_id": None if reason == "invalid_run_id" else run_id,
+                                       "reason": reason}
             status["active"] = {**status["active"], **_run_sample_identity(events)}
         else:
             # Bounded (D22): one pointer file and that one run's log, never a scan.
