@@ -29,6 +29,16 @@ class MicrobialDbError(ValueError):
     """The database registration is missing, unsafe, or changed."""
 
 
+class MicrobialDbReceiptChanged(MicrobialDbError):
+    """File metadata no longer matches the last verified byte receipt."""
+
+
+RECEIPT_RECOVERY = (
+    "Registered microbial database file metadata changed; restore the pinned bytes if needed, "
+    "then rerun lab microbial db add with the same path, read length, and source label to verify the bytes"
+)
+
+
 @dataclass(frozen=True)
 class MicrobialDb:
     directory: Path
@@ -149,7 +159,7 @@ def inspect_database(store: LabStore, *, verify_bytes: bool = True) -> Microbial
         else:
             receipts = {name: _file_receipt(_regular_source(directory / name)) for name in names}
             if receipts != data["file_stats"]:
-                raise MicrobialDbError("registered database files changed since byte verification")
+                raise MicrobialDbReceiptChanged("registered database files changed since byte verification")
             files = data["files"]
     except (OSError, AssetError) as exc:
         raise MicrobialDbError("registered database files are unavailable or unsafe") from exc
