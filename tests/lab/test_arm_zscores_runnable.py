@@ -19,6 +19,7 @@ from traceback_lab.interpretation.engine import classify, load_library
 from traceback_lab.problems import LabProblem
 from traceback_lab.registry import InputContext, Skip, load_registry
 from traceback_lab.store import LabStore
+from traceback_runner.references import ReferenceProblem
 
 
 def _source(index: int) -> str:
@@ -66,6 +67,25 @@ def test_arm_summary_preflight_fails_closed_without_selected_pon(tmp_path: Path)
     )
     decision = arm_summary.ARM_SUMMARY.preflight(ctx)
     assert isinstance(decision, Skip) and decision.reason_code == "no_pon"
+
+
+def test_arm_summary_missing_registered_asset_is_an_advisory_skip(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(arm_summary, "toolchain_or_none", lambda: object())
+    missing = ReferenceProblem(
+        "TBX-ASSET-004", "Asset is not registered", cause="registration absent",
+        fix="Register the asset",
+    )
+    monkeypatch.setattr(arm_summary.ichor, "resolve_assets", lambda *_: (_ for _ in ()).throw(missing))
+    ctx = InputContext(
+        root=tmp_path, source_id=_source(100), input_id=_source(101),
+        reference_id="hg38", reference_sha256=_source(102), input_dir=tmp_path,
+        eligible_reads=2_000_000, extras={"pon_selection": {"pon_sha256": "b" * 64}},
+    )
+    assert arm_summary.ARM_SUMMARY.asset_sha256s(tmp_path) == []
+    decision = arm_summary.ARM_SUMMARY.preflight(ctx)
+    assert isinstance(decision, Skip) and decision.reason_code == "missing_asset"
 
 
 def test_arm_summary_run_uses_pinned_centromere_and_selected_track(
@@ -194,6 +214,7 @@ def test_read_side_arm_z_requires_ten_controls_after_self_exclusion(
     assert report.public()["target_panel_sha256"] == target.pon_asset_sha256
     assert report.public()["target_panel_n"] == 10
     assert report.public()["target_excluded"] is True
+    assert report.public()["target_arm_result_available"] is True
     score = report.scores["chr1p"]
     assert score.state == "ok" and score.reference_n == 10
     assert score.target_bins_used == 1 and score.reference_min_bins_used == 2
@@ -208,6 +229,11 @@ def test_read_side_arm_z_requires_ten_controls_after_self_exclusion(
     assert full_report.public()["target_panel_n"] == 11
     assert full_report.public()["target_excluded"] is False
     assert full_report.scores["chr1p"].reference_min_bins_used == 1
+    missing_external = external.model_copy(update={"results": external.results[:1]})
+    monkeypatch.setattr(arm_zscores, "member_for_generation", lambda *_: missing_external)
+    missing_report = report_arm_zscores(store, "synthetic", missing_external.source_id)
+    assert missing_report.public()["target_arm_result_available"] is False
+    assert missing_report.scores["chr1p"].state == "missing_target"
     monkeypatch.setattr(arm_zscores, "member_for_generation", lambda *_: target)
 
     ten_member_generation = generation_for(members[:10])

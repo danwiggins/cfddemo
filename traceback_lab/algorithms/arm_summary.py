@@ -90,13 +90,15 @@ def summarize_arms(
 
 
 def _registered_centromere(root: Path) -> tuple[Path, str] | None:
+    from traceback_runner.references import ReferenceProblem
+
     toolchain = toolchain_or_none()
     if toolchain is None:
         return None
     try:
         centromere = ichor.resolve_assets(root, toolchain).centromere
         digest = hashlib.sha256(centromere.read_bytes()).hexdigest()
-    except (OSError, ValueError, RuntimeError):
+    except (OSError, ValueError, RuntimeError, ReferenceProblem):
         return None
     return centromere, digest
 

@@ -21,6 +21,7 @@ class ArmZReport:
     target_panel_sha256: str
     target_panel_n: int
     target_excluded: bool
+    target_arm_result_available: bool
     scores: dict[str, ArmScore]
 
     def public(self) -> dict[str, Any]:
@@ -31,6 +32,7 @@ class ArmZReport:
             "target_panel_sha256": self.target_panel_sha256,
             "target_panel_n": self.target_panel_n,
             "target_excluded": self.target_excluded,
+            "target_arm_result_available": self.target_arm_result_available,
             "scores": {arm: asdict(score) for arm, score in self.scores.items()},
         }
 
@@ -95,7 +97,7 @@ def report_arm_zscores(store: LabStore, cohort_id: str, source_id: str) -> ArmZR
         )
     return ArmZReport(
         source_id, cohort_id, generation.version_id, asset_sha256,
-        target_panel_sha256, target_panel_n, target_excluded, scores,
+        target_panel_sha256, target_panel_n, target_excluded, arm_result is not None, scores,
     )
 
 

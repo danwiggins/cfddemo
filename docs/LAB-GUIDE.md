@@ -515,8 +515,10 @@ generation recorded them; older generations show `null` (or `?` in the human
 view). The human view labels the control count separately from bin support.
 This is exploratory: no abnormality
 cutoff, donor-independence claim, or clinical reference is assigned.
-The JSON response names the target panel digest and source count and whether
-the target was excluded. A nonmember uses the full panel while cohort members
+The JSON response names the target panel binding and source count, whether
+the target was excluded, and whether a selected arm result exists under that
+binding. A missing result leaves the panel binding visible for rerun planning;
+it does not claim the target was measured with that panel. A nonmember uses the full panel while cohort members
 use leave-one-out panels, so their correction baselines differ; the z score
 is a descriptive cohort comparison, not a calibrated test statistic.
 
