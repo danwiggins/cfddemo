@@ -197,6 +197,89 @@ def test_navigation_order_with_compare(page_root, tmp_path) -> None:
 
 
 @needs_chrome
+def test_stability_names_both_halves_without_a_numeric_verdict(page_root, tmp_path, monkeypatch) -> None:
+    from traceback_lab import views
+
+    original = views.stability_panels
+
+    def panels_with_missing_halves(sample, library=None):
+        panels = original(sample, library)
+        states = [
+            (("skipped", "depth"), ("failed", "algorithm failed")),
+            (("unavailable", "selected result unavailable"), ("not_interpretable", "metric value unavailable")),
+        ]
+        for panel, (a, b) in zip(panels, states):
+            panel["split"] = None
+            panel["split_status"] = {
+                half: {"state": state, "reason": reason, "value": None, "deviation": None}
+                for half, (state, reason) in zip(("A", "B"), (a, b))
+            }
+        assert len(panels) >= 3
+        panels[2]["split"] = {"a": 100, "b": 105, "deviation_a": None, "deviation_b": None,
+                               "relative_abs_diff": 5 / 102.5, "stable": None}
+        panels[2]["split_status"] = {
+            half: {"state": "ok", "reason": None, "value": value, "deviation": None}
+            for half, value in (("A", 100), ("B", 105))
+        }
+        panels[2]["split_warning"] = "an unrecognized split label is present"
+        for point in panels[2]["points"]:
+            point.update({"state": "not_interpretable", "unit": "none", "deviation": None, "band": None})
+        return panels
+
+    monkeypatch.setattr(views, "stability_panels", panels_with_missing_halves)
+    with RunningLabServer(LabStore(page_root)) as server:
+        dom = _dom(server, tmp_path, route=f"/sample/{_id12(page_root)}/stability",
+                   want=lambda page: "Split halves: split A skipped" in page)
+    assert "split A skipped (depth); split B failed (algorithm failed)" in dom
+    assert "split A unavailable (selected result unavailable); split B not interpretable (metric value unavailable)" in dom
+    assert "No split-half stability verdict." in dom
+    assert "100 / 105" in dom and "4.9% |A−B|" in dom
+    assert "no split-half stability verdict; an unrecognized split label is present" in dom
+    assert "No validated stability deviation scale" in dom
+
+
+@needs_chrome
+@pytest.mark.parametrize("comparable", [False, True])
+def test_home_names_unavailable_split_comparisons(page_root, tmp_path, comparable) -> None:
+    with RunningLabServer(LabStore(page_root)) as server:
+        original = server.app.api.sample
+
+        def sample(id12):
+            payload = original(id12)
+            payload["stability"] = [{"split": None, "split_status": {
+                "A": {"state": "skipped"}, "B": {"state": "unavailable"},
+            }}]
+            payload["repeatability"] = {
+                "median_relative_abs_diff": 0.05, "metrics": 1, "unstable": 0,
+                "verdict_metrics": 1, "no_verdict_metrics": 0,
+                "incomparable_metrics": 1, "worst": [],
+            } if comparable else None
+            return payload
+
+        server.app.api.sample = sample
+        expected = "1 metric comparison unavailable" if comparable else "1 split metric comparison unavailable"
+        dom = _dom(server, tmp_path, want=lambda page: expected in page)
+    assert expected in dom
+    if comparable:
+        assert "Median split-half |A−B|: 5.0%" in dom
+    else:
+        assert "no comparable pair is available" in dom
+        assert "See Stability" in dom
+
+
+@needs_chrome
+def test_stability_intro_does_not_call_recorded_halves_absent(page_root, tmp_path, monkeypatch) -> None:
+    from traceback_lab import views
+
+    monkeypatch.setattr(views, "repeatability", lambda panels: None)
+    with RunningLabServer(LabStore(page_root)) as server:
+        dom = _dom(server, tmp_path, route=f"/sample/{_id12(page_root)}/stability",
+                   want=lambda page: "Split halves were recorded, but no comparable pair is available." in page)
+    assert "Split halves were recorded, but no comparable pair is available." in dom
+    assert "Split-half markers absent" not in dom
+
+
+@needs_chrome
 def test_unchecked_library_entries_keep_their_badges_without_citations(page_root, tmp_path, monkeypatch) -> None:
     from traceback_lab.web.api import LabApi
 

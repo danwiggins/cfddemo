@@ -16,6 +16,7 @@ definition).  Above this run's depth there are no cells; the library's
 
 from __future__ import annotations
 
+import math
 import os
 from collections.abc import Mapping
 from dataclasses import dataclass, field
@@ -31,21 +32,23 @@ from .sample_metadata import sex_assertion, sex_concordance
 from .stability import Side, band_at, deviation, stable
 from .store import LabStore
 
-CELL_STATES = ("ok_usable", "ok_unstable", "not_interpretable", "skipped", "failed")
+CELL_STATES = ("ok_usable", "ok_unstable", "not_interpretable", "unavailable", "skipped", "failed")
 _ROW_ORDER = {state: index for index, state in enumerate(CELL_STATES)}
 _TIER_ORDER = {"PROVEN": 0, "NEWER": 1, "SPECULATIVE": 2, None: 3}
 
 
 def selected_results(
-    store: LabStore, input_id: str, identities: Mapping[str, str] | None = None
+    store: LabStore, input_id: str, identities: Mapping[str, str] | None = None,
+    *, issues: dict[str, set[str]] | None = None,
 ) -> dict[str, ResultEnvelope]:
     """Return only validated selected results; never fall back past an invalid selection."""
 
-    return _selected_results_with_unreadable(store, input_id, identities)[0]
+    return _selected_results_with_unreadable(store, input_id, identities, issues=issues)[0]
 
 
 def _selected_results_with_unreadable(
-    store: LabStore, input_id: str, identities: Mapping[str, str] | None = None
+    store: LabStore, input_id: str, identities: Mapping[str, str] | None = None,
+    *, issues: dict[str, set[str]] | None = None,
 ) -> tuple[dict[str, ResultEnvelope], set[str], set[str], dict[str, str]]:
     """The selected result per algorithm for one input.
 
@@ -60,6 +63,7 @@ def _selected_results_with_unreadable(
     base = store.results_dir / input_id
     out: dict[str, tuple[int | None, ResultEnvelope, str]] = {}
     ambiguous: set[str] = set()
+    stale: set[str] = set()
     invalid_orders: dict[str, int | None] = {}
     if not base.is_dir():
         return {}, set(), set(), {}
@@ -71,6 +75,14 @@ def _selected_results_with_unreadable(
             continue
         for identity_dir in sorted(algorithm_dir.iterdir()):
             if wanted is not None and identity_dir.name != wanted:
+                try:
+                    os.lstat(identity_dir / "selected.json")
+                except FileNotFoundError:
+                    pass
+                except OSError:
+                    pass
+                else:
+                    stale.add(algorithm_dir.name)
                 continue
             try:
                 selected = store.selected_result_with_attempt_and_order(
@@ -107,6 +119,10 @@ def _selected_results_with_unreadable(
         if (order is None or algorithm_id not in out or out[algorithm_id][0] is None
             or order >= out[algorithm_id][0])
     }
+    if issues is not None:
+        issues["unreadable"] = unreadable
+        issues["ambiguous"] = ambiguous - unreadable
+        issues["stale"] = stale - out.keys()
     return {
         key: value for key, (_, value, _) in out.items()
         if key not in ambiguous and key not in unreadable
@@ -126,6 +142,7 @@ class InputView:
     fraction: float = 1.0
     unreadable: set[str] = field(default_factory=set)
     ambiguous: set[str] = field(default_factory=set)
+    stale: set[str] = field(default_factory=set)
     attempt_ids: dict[str, str] = field(default_factory=dict)
 
     def depth_x(self) -> float | None:
@@ -182,8 +199,11 @@ def load_sample(store: LabStore, source_id: str) -> SampleView | None:
 
     def visible_results(
         input_id: str, identities: Mapping[str, str] | None = None,
+        *, issues: dict[str, set[str]] | None = None,
     ) -> tuple[dict[str, ResultEnvelope], set[str], set[str], dict[str, str]]:
-        selected, unreadable, ambiguous, attempts = _selected_results_with_unreadable(store, input_id, identities)
+        selected, unreadable, ambiguous, attempts = _selected_results_with_unreadable(
+            store, input_id, identities, issues=issues,
+        )
         old_cn = selected.get("copy-number")
         superseded_cn = (old_cn is not None and old_cn.status == "ok" and (current_cn_version is None
                          or old_cn.algorithm_version != current_cn_version))
@@ -254,8 +274,9 @@ def load_sample(store: LabStore, source_id: str) -> SampleView | None:
         if entry.get("parent_input_id") != full_input:
             continue
         fraction = 0.5 if entry["transform"] == "split" else float(entry["parameters"].get("fraction", 1.0))
+        issues: dict[str, set[str]] = {}
         derived_results, derived_unreadable, derived_ambiguous, derived_attempts = visible_results(
-            entry["input_id"], identities,
+            entry["input_id"], identities, issues=issues,
         )
         derived.append(
             InputView(
@@ -266,6 +287,7 @@ def load_sample(store: LabStore, source_id: str) -> SampleView | None:
                 derived_results,
                 fraction=fraction if entry["transform"] in ("downsample", "split") else 1.0,
                 unreadable=derived_unreadable, ambiguous=derived_ambiguous, attempt_ids=derived_attempts,
+                stale=issues.get("stale", set()),
             )
         )
     try:
@@ -318,6 +340,37 @@ def _side(metric: Any, fraction: float) -> Side:
     return Side(metric.value, n=metric.n, ci=metric.ci, ci_level=metric.ci_level, fraction=fraction)
 
 
+def _split_half_status(view: InputView | None, algorithm_id: str, metric_id: str,
+                       full_value: Any, spec: Mapping[str, Any], *, other_half_recorded: bool = False,
+                       half_label: str | None = None) -> dict[str, Any]:
+    if view is None:
+        if other_half_recorded:
+            reason = f"no input labelled {half_label} recorded" if half_label else "split half input not recorded"
+            return {"state": "unavailable", "reason": reason, "value": None, "deviation": None}
+        return {"state": "not_recorded", "reason": "no split-half input recorded", "value": None, "deviation": None}
+    envelope = view.results.get(algorithm_id)
+    if envelope is None:
+        if algorithm_id in getattr(view, "unreadable", ()):
+            return {"state": "unavailable", "reason": "result unreadable", "value": None, "deviation": None}
+        if algorithm_id in getattr(view, "ambiguous", ()):
+            return {"state": "unavailable", "reason": "result selection ambiguous", "value": None, "deviation": None}
+        if algorithm_id in getattr(view, "stale", ()):
+            return {"state": "unavailable", "reason": "result parameters differ from full depth", "value": None, "deviation": None}
+        return {"state": "not_recorded", "reason": "no selected result recorded", "value": None, "deviation": None}
+    if envelope.status != "ok":
+        reason = envelope.skip_reason if envelope.status == "skipped" else "algorithm failed"
+        return {"state": envelope.status, "reason": reason, "value": None, "deviation": None}
+    current = _value(envelope, metric_id)
+    try:
+        current_finite = current is not None and _numeric(current.value) and math.isfinite(current.value)
+    except OverflowError:
+        current_finite = False
+    if not current_finite:
+        return {"state": "not_interpretable", "reason": "metric value unavailable", "value": None, "deviation": None}
+    difference, unit = deviation(spec, current.value, full_value, 0.5)
+    return {"state": "ok", "reason": None, "value": current.value, "deviation": difference, "unit": unit}
+
+
 def cell_state(
     view: InputView, full: InputView, algorithm_id: str, metric_id: str, library: Library
 ) -> dict[str, Any]:
@@ -327,6 +380,8 @@ def cell_state(
             return {"state": "unavailable", "reason": "result unreadable"}
         if algorithm_id in view.ambiguous:
             return {"state": "unavailable", "reason": "result selection ambiguous"}
+        if algorithm_id in view.stale:
+            return {"state": "unavailable", "reason": "result parameters differ from full depth"}
         if view is not full:
             parent = full.results.get(algorithm_id)
             if parent is not None and parent.status == "skipped" and parent.skip_reason == "platform":
@@ -422,8 +477,11 @@ def stability_panels(sample: SampleView, library: Library | None = None) -> list
             if spec is None or not isinstance(metric.value, (int, float)) or isinstance(metric.value, bool):
                 continue
             points = []
+            unstable_below = False
             for view in [*downs, sample.full]:
                 state = cell_state(view, sample.full, algorithm_id, metric.metric_id, library)
+                if view.fraction < 1.0 and state.get("verdict") is False:
+                    unstable_below = True
                 envelope = view.results.get(algorithm_id)
                 current = _value(envelope, metric.metric_id) if envelope is not None else None
                 y, unit = deviation(spec, current.value if current else None, metric.value, view.fraction)
@@ -441,19 +499,27 @@ def stability_panels(sample: SampleView, library: Library | None = None) -> list
                     }
                 )
             split = None
+            split_status = {
+                half: _split_half_status(halves.get(half), algorithm_id, metric.metric_id, metric.value, spec,
+                                         other_half_recorded=bool(halves), half_label=half)
+                for half in ("A", "B")
+            }
+            unknown_split_label = any(half not in ("A", "B") for half in halves)
+            if unknown_split_label:
+                for half, status in split_status.items():
+                    if half not in halves:
+                        status["reason"] += "; an unrecognized split label is present"
             a = _value(halves["A"].results.get(algorithm_id), metric.metric_id) if "A" in halves else None
             b = _value(halves["B"].results.get(algorithm_id), metric.metric_id) if "B" in halves else None
-            if a is not None and b is not None and _numeric(a.value) and _numeric(b.value):
+            if split_status["A"]["state"] == "ok" and split_status["B"]["state"] == "ok":
                 verdict = stable(spec, _side(a, 0.5), _side(b, 0.5))
-                da, unit = deviation(spec, a.value, metric.value, 0.5)
-                db, _ = deviation(spec, b.value, metric.value, 0.5)
                 mean = (abs(a.value) + abs(b.value)) / 2
                 split = {
                     "a": a.value,
                     "b": b.value,
-                    "deviation_a": da,
-                    "deviation_b": db,
-                    "unit": unit,
+                    "deviation_a": split_status["A"]["deviation"],
+                    "deviation_b": split_status["B"]["deviation"],
+                    "unit": split_status["A"]["unit"],
                     "relative_abs_diff": (abs(a.value - b.value) / mean) if mean else 0.0,
                     "stable": verdict,
                 }
@@ -466,6 +532,16 @@ def stability_panels(sample: SampleView, library: Library | None = None) -> list
                 if point["state"] != "ok_usable":
                     break
                 usable_to = point["fraction"]
+            if usable_to is not None:
+                verdict_text = f"usable to {usable_to:g}"
+            elif not downs:
+                verdict_text = "not measured below full depth"
+            elif unstable_below:
+                verdict_text = "unstable below full depth"
+            elif any(point["state"] == "ok_usable" for point in points if point["fraction"] < 1.0):
+                verdict_text = "usable only at isolated lower depths"
+            else:
+                verdict_text = "no usable measurement below full depth"
             panels.append(
                 {
                     "algorithm_id": algorithm_id,
@@ -475,7 +551,10 @@ def stability_panels(sample: SampleView, library: Library | None = None) -> list
                     "full_value": metric.value,
                     "points": points,
                     "split": split,
-                    "verdict": f"usable to {usable_to:g}" if usable_to is not None else "not measured below full depth" if not downs else "unstable below full depth",
+                    "split_status": split_status,
+                    "split_warning": "an unrecognized split label is present"
+                    if unknown_split_label and all(half in halves for half in ("A", "B")) else None,
+                    "verdict": verdict_text,
                 }
             )
     panels.sort(key=lambda panel: (not panel["headline"], order.index(panel["algorithm_id"])))
@@ -499,7 +578,13 @@ def repeatability(panels: list[dict[str, Any]]) -> dict[str, Any] | None:
     return {
         "median_relative_abs_diff": median,
         "metrics": len(rows),
+        "verdict_metrics": sum(1 for row in rows if row[2] is not None),
+        "no_verdict_metrics": sum(1 for row in rows if row[2] is None),
         "unstable": sum(1 for row in rows if row[2] is False),
+        "incomparable_metrics": sum(
+            1 for panel in panels if panel.get("split") is None
+            and any(status.get("state") != "not_recorded" for status in panel.get("split_status", {}).values())
+        ),
         "worst": [{"label": label, "relative_abs_diff": diff, "stable": ok} for diff, label, ok in worst],
     }
 

@@ -737,6 +737,13 @@ class LabApi:
             ),
             "curve": curve,
             "stability": panels,
+            "stability_unavailable": [
+                {"algorithm_id": algorithm_id, "reason": "full-depth result unreadable"}
+                for algorithm_id in sorted(sample.full.unreadable & set(order))
+            ] + [
+                {"algorithm_id": algorithm_id, "reason": "full-depth result selection ambiguous"}
+                for algorithm_id in sorted(sample.full.ambiguous & set(order))
+            ],
             "repeatability": views.repeatability(panels),
             "synthetic": synthetic,
             "concordance": report_tf_concordance(sample, generation, target),
