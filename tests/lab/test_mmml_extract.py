@@ -241,7 +241,7 @@ def test_overmass_at_one_cpg_invalidates_the_whole_read_like_modkit(tmp_path: Pa
             assert list(csv.DictReader(stream, delimiter="\t")) == []
 
 
-def test_direct_extraction_rejects_nonprimary_and_hardclipped_records(tmp_path: Path) -> None:
+def test_direct_extraction_rejects_nonprimary_but_keeps_valid_hardclipped_primary(tmp_path: Path) -> None:
     fasta = tmp_path / "reference.fa"
     fasta.write_text(">chr1\nACG\n", encoding="ascii")
     pysam.faidx(str(fasta))
@@ -265,8 +265,10 @@ def test_direct_extraction_rejects_nonprimary_and_hardclipped_records(tmp_path: 
             writer.write(read)
     result = extract_cpg_calls(bam, fasta, maximum_calls=10, filter_threshold=0.9)
     assert result.records_scanned == 6
-    assert result.records_with_mm == 1
-    assert [(call.position0, call.state.value) for call in result.calls] == [(1, "methylated")]
+    assert result.records_with_mm == 2
+    assert [(call.position0, call.state.value) for call in result.calls] == [
+        (1, "methylated"), (1, "methylated"),
+    ]
 
 
 def test_extraction_cap_refuses_before_unbounded_growth(tmp_path: Path) -> None:

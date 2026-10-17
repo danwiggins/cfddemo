@@ -115,8 +115,7 @@ def extract_cpg_calls(
         for record in bam.fetch(until_eof=True):
             scanned += 1
             if (record.is_unmapped or record.is_secondary or record.is_supplementary
-                    or record.is_duplicate or record.is_qcfail
-                    or any(operation == 5 for operation, _ in record.cigartuples or ())):
+                    or record.is_duplicate or record.is_qcfail):
                 continue
             if mm_tag(record) is None:
                 continue
