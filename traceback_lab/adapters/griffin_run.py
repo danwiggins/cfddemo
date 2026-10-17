@@ -101,12 +101,18 @@ def _ref_options(reference: Path, assets: Path, scripts: Path) -> dict:
 
 
 def _require_paired_input(bam: Path) -> None:
-    """Upstream counts positive-TLEN pairs; native ONT single-end reads vanish."""
+    """Upstream needs Illumina pairs with positive TLEN across the full BAM."""
 
     import pysam
 
     primary = paired = usable = 0
     with pysam.AlignmentFile(str(bam), "rb") as alignments:
+        groups = alignments.header.to_dict().get("RG", [])
+        if not groups or any(group.get("PL", "").upper() != "ILLUMINA" for group in groups):
+            raise ValueError(
+                "pinned Griffin requires unanimous @RG PL:ILLUMINA; "
+                "native ONT single-end BAM is incompatible"
+            )
         for read in alignments.fetch(until_eof=True):
             if read.is_unmapped or read.is_secondary or read.is_supplementary:
                 continue
@@ -116,8 +122,6 @@ def _require_paired_input(bam: Path) -> None:
                 read.is_paired and not read.is_reverse and 100 <= read.template_length <= 200
                 and read.mapping_quality >= 20 and not read.is_duplicate and not read.is_qcfail
             )
-            if primary >= 10_000:
-                break
     if primary < 100 or paired / primary < 0.95 or usable == 0:
         raise ValueError(
             "pinned Griffin requires paired-end positive-TLEN WGS reads; "

@@ -3,6 +3,7 @@ from __future__ import annotations
 from pathlib import Path
 import hashlib
 import json
+import os
 import subprocess
 
 import pytest
@@ -209,6 +210,33 @@ def test_griffin_depth_gate_precedes_attempt(tmp_path: Path) -> None:
         ))
 
 
+@pytest.mark.skipif(os.name != "posix", reason="Griffin runner needs POSIX paths")
+@pytest.mark.parametrize(("head", "status", "message"), [
+    ("0" * 40, "", "not the pinned"),
+    (GRIFFIN_COMMIT, " M scripts/profile.py", "uncommitted changes"),
+])
+def test_pinned_checkout_gate_precedes_attempt(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, head: str, status: str, message: str,
+) -> None:
+    upstream = tmp_path / "upstream"
+    upstream.mkdir()
+
+    def fake_git(argv: list[str], **_: object) -> subprocess.CompletedProcess[str]:
+        return subprocess.CompletedProcess(argv, 0, head if argv[-2:] == ["rev-parse", "HEAD"] else status)
+
+    monkeypatch.setattr(subprocess, "run", fake_git)
+    attempt = tmp_path / "attempt"
+    with pytest.raises(ValueError, match=message):
+        run_upstream(GriffinRun(
+            input_id="abcdef012345", bam=tmp_path / "aligned.bam",
+            reference_fasta=tmp_path / "hg38.fa", reference_id="hg38",
+            reference_sha256="0" * 64, eligible_reads=5_000_000,
+            upstream_root=upstream, ref_assets=tmp_path,
+            site_lists={"CTCF": tmp_path / "sites.txt"}, attempt_dir=attempt,
+        ))
+    assert not attempt.exists()
+
+
 def test_native_ont_bam_fails_closed(tmp_path: Path) -> None:
     import pysam
 
@@ -229,3 +257,26 @@ def test_native_ont_bam_fails_closed(tmp_path: Path) -> None:
             out.write(read)
     with pytest.raises(ValueError, match="native ONT single-end"):
         _require_paired_input(bam)
+
+
+def test_paired_input_gate_scans_past_first_10000_records(tmp_path: Path) -> None:
+    import pysam
+
+    from traceback_lab.adapters.griffin_run import _require_paired_input
+
+    bam = tmp_path / "illumina.bam"
+    header = {"HD": {"VN": "1.6"}, "SQ": [{"SN": "chr1", "LN": 100000}],
+              "RG": [{"ID": "rg1", "PL": "ILLUMINA"}]}
+    with pysam.AlignmentFile(str(bam), "wb", header=header) as out:
+        for index in range(10_001):
+            read = pysam.AlignedSegment()
+            read.query_name = f"pair{index}"
+            read.query_sequence = "A" * 150
+            read.flag = 99
+            read.reference_id = 0
+            read.reference_start = index
+            read.mapping_quality = 60 if index == 10_000 else 0
+            read.cigarstring = "150M"
+            read.template_length = 150
+            out.write(read)
+    _require_paired_input(bam)
