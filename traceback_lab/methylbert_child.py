@@ -181,6 +181,8 @@ def main(argv: list[str]) -> int:
     if trainer.device.type != "cuda":
         raise ValueError("MethylBERT trainer fell back from CUDA")
     trainer.load(str(model_dir / "bert.model"), load_fine_tune=True, n_dmrs=n_dmrs)
+    apply_precision_flags(request["numerical_runtime"])
+    require_numerical_runtime(request["numerical_runtime"])
     rows, logits = trainer.read_classification(data_loader=loader, tokenizer=tokenizer, logit=True)
     if (logits.ndim != 2 or logits.shape[1] != 2 or not np.isfinite(logits).all()
             or np.any(logits < 0) or np.any(logits > 1)

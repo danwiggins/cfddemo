@@ -3,7 +3,24 @@
 from __future__ import annotations
 
 import json
+import sys
+from importlib import metadata
 from typing import Any
+
+NUMERICAL_PACKAGES = (
+    "torch", "transformers", "tokenizers", "safetensors", "huggingface-hub",
+    "numpy", "pandas", "scipy", "scikit-learn", "pysam",
+)
+
+
+def package_versions() -> dict[str, str | None]:
+    versions = {}
+    for name in NUMERICAL_PACKAGES:
+        try:
+            versions[name] = metadata.version(name)
+        except metadata.PackageNotFoundError:
+            versions[name] = None
+    return versions
 
 
 def probe_cuda() -> dict[str, Any]:
@@ -37,4 +54,5 @@ def probe_cuda() -> dict[str, Any]:
 
 
 if __name__ == "__main__":
-    print(json.dumps(probe_cuda(), sort_keys=True))
+    print(json.dumps({"python": sys.version.split()[0], "packages": package_versions(),
+                      "cuda": probe_cuda()}, sort_keys=True))
