@@ -344,20 +344,35 @@
   function outOfRange(sample) { return allMetrics(sample).filter((m) => ["above_typical", "markedly_above", "below_typical", "markedly_below"].includes(m.state)); }
 
   function cohortReadiness(sample, metrics) {
+    if (sample.example || sample.cohort_state === "example")
+      return "EXAMPLE sample; no kit cohort reference. Run a real sample for cohort comparison";
     if (["cohort_unavailable", "target_unavailable", "stale_target"].includes(sample.cohort_state))
-      return `cohort ${sample.cohort_state.replace(/_/g, " ")}`;
+      return `cohort ${sample.cohort_state.replace(/_/g, " ")}; ${sample.cohort_problem?.fix || "reload the sample and check the cohort"}`;
     const cohort = metrics.filter((m) => ["internal_cohort", "provisional_external"].includes(m.reference_kind));
     const eligible = cohort.filter((m) => Number.isInteger(m.eligible_n)).map((m) => m.eligible_n);
-    if (!eligible.length) return sample.cohort_state === "not_built" ? "cohort not built" : "no comparable cohort values for these metrics";
+    const stale = cohort.some((m) => m.cohort_target_state === "stale_parameters" || m.cohort_target_state === "missing_selected_result");
+    const excluded = {};
+    for (const metric of cohort) for (const [reason, count] of Object.entries(metric.cohort_excluded || {})) {
+      if (Number.isInteger(count) && count > 0) excluded[reason] = Math.max(excluded[reason] || 0, count);
+    }
+    const leaveOneOut = Boolean(excluded.self);
+    delete excluded.self;
+    const reasons = Object.entries(excluded).map(([reason, count]) =>
+      `${reason === "incompatible" ? "protocol incompatible" : reason.replace(/_/g, " ")} ${cohort.length > 1 ? `up to ${count} per metric` : count}`);
+    const detail = reasons.length ? `; exclusions: ${reasons.join(" · ")}` : "";
+    const needsMembers = !eligible.length || Math.min(...eligible) < (sample.cohort_min || 10);
+    const remedy = stale ? "; selected result identity changed—reload or recompute this sample, then rebuild the cohort if needed"
+      : excluded.incompatible && needsMembers ? "; recompute members with matching reference, aligner and counting protocol, then rebuild the cohort"
+        : excluded.missing_result || excluded.missing_metric ? "; recompute missing member results, then rebuild the cohort" : "";
+    if (!eligible.length) return (sample.cohort_state === "not_built" ? "cohort not built" : "no comparable cohort values for these metrics") + detail + remedy;
     const low = Math.min(...eligible), high = Math.max(...eligible);
     const n = low === high ? String(low) : `${low}–${high} by metric`;
-    const self = cohort.some((m) => m.cohort_excluded && m.cohort_excluded.self);
     const minimum = sample.cohort_min || 10;
     const phase = high < minimum ? ` of ${minimum} needed` : low < minimum ? `; some metrics need ${minimum}`
       : cohort.some((m) => m.percentile !== null && m.percentile !== undefined) ? "; percentile reference"
         : cohort.some((m) => m.exploratory_n !== null && m.exploratory_n !== undefined) ? "; exploratory reference"
           : "; metric not interpretable at this depth or QC";
-    return `eligible cohort n = ${n}${phase}${self ? " after leave-one-out" : ""}`;
+    return `eligible cohort n = ${n}${leaveOneOut ? " after leave-one-out" : ""}${phase}${detail}${remedy}`;
   }
 
   function strip(metric) {
@@ -392,11 +407,31 @@
     }
     if (metric.percentile !== null && metric.percentile !== undefined) {
       const x = (p) => 10 + (p / 100) * (width - 20);
+      const interval = Array.isArray(metric.interval) && metric.interval.length === 2 &&
+        metric.interval.every(Number.isFinite) ? metric.interval : null;
+      // Give the cutoff CI its own scale; an extreme sample must not compress
+      // the whisker to an unreadable stroke. Off-scale samples sit at an edge.
+      const low = interval ? Math.min(...interval) : 0;
+      const high = interval ? Math.max(...interval) : 1;
+      const valueX = (v) => 110 + ((v - low) / (high - low || 1)) * 200;
+      const sampleValue = Number(metric.value);
+      const sampleOffScale = sampleValue < low ? "left" : sampleValue > high ? "right" : null;
       return h("figure", { class: "strip" }, svg("svg", { viewBox: `0 0 ${width} ${height}`, role: "img", "aria-label": metric.caption, class: "strip-svg" },
         svg("title", {}, metric.caption),
         svg("rect", { x: x(5), y: 10, width: x(95) - x(5), height: 14, class: "strip-band" }),
         ...[1, 5, 95, 99].map((p) => svg("line", { x1: x(p), x2: x(p), y1: 6, y2: 28, class: "strip-tick" })),
-        svg("text", { x: x(metric.percentile), y: 22, class: "strip-mark", "text-anchor": "middle" }, "◆")), h("figcaption", {}, metric.caption));
+        svg("text", { x: x(metric.percentile), y: 22, class: "strip-mark", "text-anchor": "middle" }, "◆")),
+        interval ? svg("svg", { viewBox: "0 0 320 52", role: "img",
+          "aria-label": `95th-percentile cutoff: 90% bootstrap interval ${fmt(interval[0], metric.unit)} to ${fmt(interval[1], metric.unit)}; separate value scale`, class: "strip-svg cutoff-whisker" },
+          svg("title", {}, "95th-percentile cutoff bootstrap interval on the metric value scale"),
+          svg("text", { x: 6, y: 17, class: "axis" }, "Cutoff CI"),
+          svg("line", { x1: valueX(interval[0]), x2: valueX(interval[1]), y1: 14, y2: 14, class: "cohort-band" }),
+          ...interval.map((end) => svg("line", { x1: valueX(end), x2: valueX(end), y1: 8, y2: 20, class: "cohort-band" })),
+          svg("text", { x: 6, y: 43, class: "axis" }, "This sample"),
+          svg("text", { x: sampleOffScale === "left" ? 110 : sampleOffScale === "right" ? 310 : valueX(sampleValue), y: 43, "text-anchor": "middle", class: "strip-mark" },
+            sampleOffScale === "left" ? "◀" : sampleOffScale === "right" ? "▶" : "◆")) : "",
+        h("figcaption", {}, metric.caption, interval
+          ? ` Cutoff CI: ${fmt(interval[0], metric.unit)}–${fmt(interval[1], metric.unit)} on a separate value scale.${sampleOffScale ? ` This sample is outside the cutoff CI scale (${sampleOffScale}).` : ""}` : ""));
     }
     return h("p", { class: "help" }, metric.caption || (ref.kind === "none" ? "No published reference." : ""));
   }
@@ -478,7 +513,8 @@
     let first = true;
     if (!outside) {
       const withReference = metrics.filter((m) => m.state !== "no_reference" && m.state !== "not_interpretable").length;
-      out.push(h("p", { class: "empty" }, `No metric is outside a reference. ${withReference} metrics have a reference; ${groups.no_reference.length} have no reference (${cohortContext}). `,
+      const withoutReference = groups.no_reference.length;
+      out.push(h("p", { class: "empty" }, `No metric is outside a reference. ${withReference} ${withReference === 1 ? "metric has" : "metrics have"} a reference; ${withoutReference} ${withoutReference === 1 ? "metric has" : "metrics have"} no reference (${cohortContext}). `,
         h("a", { href: `#/sample/${sample.id12}/trust-qc` }, "Trust/QC"), " · ", h("a", { href: `#/sample/${sample.id12}/stability` }, "Stability")));
     }
     const titles = { markedly_above: "Markedly above", markedly_below: "Markedly below", above_typical: "Above typical", below_typical: "Below typical" };
@@ -726,14 +762,14 @@
     return out;
   }
 
-  function breakpointMotifSignals(sample) {
+  function breakpointMotifSignals(sample, seen) {
     const a = algo(sample, "breakpoint-motifs");
     if (!a) return [];
     const section = h("section", { class: "panel" }, h("h2", {}, "CpG-proximal aligned ends"), flagPill("LEGAL"));
     if (a.status !== "ok") return [section, absent(a, "breakpoint-motifs")];
     section.append(
       h("p", {}, "These are aligned-reference-span start and end−1 contexts; physical cleavage sites are not established by this BAM. Near and far 4-mer counts exclude invalid or off-contig contexts."),
-      ...context(sample, "breakpoint-motifs", new Set()),
+      ...context(sample, "breakpoint-motifs", seen),
     );
     const slot = h("div", { "aria-live": "polite" }, h("p", {}, "Loading 4-mer counts…"));
     section.append(slot);
@@ -791,28 +827,120 @@
     const a = algo(sample, "fragment-size");
     const seen = new Set();
     const section = h("section", { class: "panel" }, h("h2", {}, "Size density"));
-    if (!a || a.status !== "ok") section.append(absent(a, "fragment-size"), ...(a ? context(sample, "fragment-size", seen) : []));
-    else {
+    if (!a || a.status !== "ok") {
+      section.append(absent(a, "fragment-size"), ...(a ? context(sample, "fragment-size", seen) : []));
+    } else {
       const slot = h("div", {}, h("p", {}, "Loading…"));
       const short = a.metrics.find((m) => m.metric_id === "short_fraction_lt150");
-      section.append(h("p", { class: "help" }, `No size-density cohort band yet; 167 bp marked. Short-fragment reference: ${cohortReadiness(sample, short ? [short] : [])}.`), ...context(sample, "fragment-size", seen), slot);
+      const band = sample.size_density_band || { state: "no_pinned_band", eligible_n: 0, excluded: {} };
+      const exclusions = Object.entries(band.excluded || {}).map(([reason, n]) => `${reason.replace(/_/g, " ")} ${n}`).join(" · ");
+      const bandStatus = band.state === "ready"
+        ? `Observed cohort density min–max (n=${band.eligible_n}); descriptive, not a reference interval.`
+        : band.state === "no_usable_pinned_vectors"
+          ? "No cohort density band: no usable pinned size histograms (missing vectors or zero eligible 50–1000 bp molecules). Check member histograms and eligibility."
+          : band.state === "cohort_too_small"
+            ? `No cohort density band: ${band.eligible_n} eligible vectors of 10 needed.`
+            : `No cohort density band (${String(band.state).replace(/_/g, " ")}).`;
+      section.append(h("p", { class: "help" }, `${bandStatus} ${exclusions ? `Exclusions: ${exclusions}. ` : ""}167 bp marked. Short-fragment reference: ${cohortReadiness(sample, short ? [short] : [])}.`), ...context(sample, "fragment-size", seen), slot);
       artifact(sample, "fragment-size", "size-density").then((data) => {
-        const points = data.span_bp.map((x, i) => [x, data.count[i]]).filter((p) => p[0] >= 50 && p[0] <= 700);
-        slot.replaceWith(chart("Aligned-span density, 50 to 700 bp, with 167 bp marked.", {
-          grid: { left: 60, right: 20, top: 20, bottom: 40 }, xAxis: { type: "value", name: "bp", min: 50, max: 700 }, yAxis: { type: "value", name: "molecules" },
-          series: [{ type: "line", showSymbol: false, data: points, lineStyle: { color: "#1f5f8b" }, markLine: { symbol: "none", data: [{ xAxis: 167, label: { formatter: "167 bp" } }] } }],
-        }, dataTable("Molecules by aligned span (bp)", ["Span (bp)", "Molecules"], points)));
+        if (!Array.isArray(data.span_bp) || !Array.isArray(data.count) || data.span_bp.length !== 1000 ||
+            data.count.length !== 1000 || data.span_bp.some((bp, i) => bp !== i + 1) ||
+            data.count.some((count) => !Number.isSafeInteger(count) || count < 0)) throw new Error("size histogram invalid");
+        const denominator = data.count.slice(49).reduce((total, count) => total + count, 0);
+        if (!Number.isSafeInteger(denominator) || denominator === 0) throw new Error("no eligible 50–1000 bp molecules");
+        const spans = data.span_bp.slice(49, 700);
+        const sampleDensity = data.count.slice(49, 700).map((count) => count / denominator);
+        const ready = band.state === "ready" && Array.isArray(band.span_bp) &&
+          band.span_bp.length === spans.length && band.span_bp.every((bp, i) => bp === spans[i]) &&
+          Array.isArray(band.low) && Array.isArray(band.high) &&
+          band.low.length === spans.length && band.high.length === spans.length &&
+          band.low.every((v, i) => Number.isFinite(v) && v >= 0 && Number.isFinite(band.high[i]) && band.high[i] >= v);
+        if (band.state === "ready" && !ready) throw new Error("cohort density band invalid");
+        const series = ready ? [
+          { type: "line", name: "Observed minimum", stack: "band", showSymbol: false, data: band.low,
+            lineStyle: { opacity: 0 }, areaStyle: { opacity: 0 } },
+          { type: "line", name: "Observed min–max", stack: "band", showSymbol: false,
+            data: band.high.map((high, i) => high - band.low[i]),
+            lineStyle: { opacity: 0 }, areaStyle: { color: "#9eb9c9", opacity: 0.55 } },
+        ] : [];
+        series.push({ type: "line", name: "This sample", showSymbol: false, data: sampleDensity,
+          lineStyle: { color: "#1f5f8b" }, markLine: { symbol: "none", data: [{ xAxis: "167", label: { formatter: "167 bp" } }] } });
+        slot.replaceWith(chart(`Aligned-span density, 50 to 700 bp; ${bandStatus} 167 bp marked.`, {
+          grid: { left: 60, right: 20, top: 20, bottom: 40 },
+          xAxis: { type: "category", name: "bp", data: spans.map(String), axisLabel: { interval: 99 } },
+          yAxis: { type: "value", name: "fraction" }, series,
+        }, dataTable("Normalized aligned-span density (fraction of 50–1000 bp molecules)",
+          ["Span (bp)", "This sample", "Cohort observed min", "Cohort observed max"],
+          spans.map((bp, i) => [bp, sampleDensity[i], ready ? band.low[i] : null, ready ? band.high[i] : null]))));
       }).catch((e) => slot.replaceWith(h("div", { class: "problem" }, `Chart could not be drawn (${e.message}).`)));
     }
     const more = [];
     for (const id of ["end-motifs", "delfi-ratio", "long-tail", "mtdna"]) {
       const other = algo(sample, id);
-      if (other) more.push(h("section", { class: "panel" }, h("h2", {}, id), other.status === "ok"
-        ? h("table", { class: "data-table" }, h("tbody", {}, ...other.metrics.filter((m) => m.value === null || typeof m.value !== "object").map((m) => h("tr", {}, h("th", { scope: "row" }, m.label), h("td", {}, fmt(m.value, m.unit))))))
-        : absent(other, id), id === "end-motifs" || id === "delfi-ratio" ? flagPill("LEGAL") : "",
-        ...context(sample, id, seen)));
+      if (!other) continue;
+      const panel = h("section", { class: "panel" }, h("h2", {}, id),
+        id === "end-motifs" || id === "delfi-ratio" ? flagPill("LEGAL") : "");
+      if (other.status !== "ok") {
+        panel.append(absent(other, id), ...context(sample, id, seen));
+      } else {
+        panel.append(...context(sample, id, seen), h("table", { class: "data-table" },
+          h("tbody", {}, ...other.metrics.filter((m) => m.value === null || typeof m.value !== "object")
+            .map((m) => h("tr", {}, h("th", { scope: "row" }, m.label), h("td", {}, fmt(m.value, m.unit)))))));
+        if (id === "end-motifs") {
+          const slot = h("div", { "aria-live": "polite" }, h("p", {}, "Loading end-motif frequencies…"));
+          panel.append(h("p", { class: "help" }, "Aligned-reference 4-mers at both fragment ends; all 256 motifs are in the data table."), slot);
+          artifact(sample, id, "motif-freq").then((data) => {
+            if (!Array.isArray(data.motif) || data.motif.length !== 256 ||
+                !Array.isArray(data.count) || data.count.length !== 256 ||
+                !Array.isArray(data.freq) || data.freq.length !== 256) throw new Error("motif panel dimensions invalid");
+            if (new Set(data.motif).size !== 256 ||
+                data.motif.some((motif) => typeof motif !== "string" || !/^[ACGT]{4}$/.test(motif)) ||
+                data.count.some((count) => !Number.isSafeInteger(count) || count < 0) ||
+                data.freq.some((freq) => !Number.isFinite(freq) || freq < 0 || freq > 1)) {
+              throw new Error("motif panel values invalid");
+            }
+            const rows = data.motif.map((motif, i) => [motif, data.count[i], data.freq[i]]);
+            const top = [...rows].sort((a, b) => b[2] - a[2] || a[0].localeCompare(b[0])).slice(0, 16);
+            slot.replaceWith(chart("Sixteen most frequent aligned-end 4-mers; fraction of counted ends.", {
+              grid: { left: 60, right: 20, top: 20, bottom: 45 },
+              xAxis: { type: "category", name: "4-mer", data: top.map((row) => row[0]), axisLabel: { rotate: 45 } },
+              yAxis: { type: "value", name: "fraction", min: 0 },
+              series: [{ type: "bar", data: top.map((row) => row[2]), itemStyle: { color: "#1f5f8b" } }],
+            }, dataTable("All 256 aligned-end 4-mers", ["4-mer", "Count", "Fraction"], rows)));
+          }).catch((e) => slot.replaceWith(h("p", { class: "problem" }, `End-motif chart unavailable (${e.message}).`)));
+        }
+        if (id === "delfi-ratio") {
+          const slot = h("div", { "aria-live": "polite" }, h("p", {}, "Loading short/long ratio track…"));
+          panel.append(h("p", { class: "help" }, "5 Mb genomic bins; short (100–150 bp) divided by long (151–220 bp), median-centred. No GC correction or classifier."), slot);
+          artifact(sample, id, "ratio-track").then((data) => {
+            if (!Array.isArray(data.bins) || data.bin_bp !== 5000000 || data.median_ratio_removed !== true) {
+              throw new Error("ratio track contract invalid");
+            }
+            if (data.bins.length > 1024 || data.bins.some((bin) =>
+              !bin || typeof bin.contig !== "string" || !/^(?:chr)?(?:[1-9]|1[0-9]|2[0-2])$/.test(bin.contig) ||
+              !Number.isSafeInteger(bin.start) || bin.start < 0 || bin.start % data.bin_bp !== 0 ||
+              !Number.isSafeInteger(bin.short) || bin.short < 0 ||
+              !Number.isSafeInteger(bin.long) || bin.long < 0 ||
+              (bin.long === 0
+                ? bin.ratio !== null || bin.centred !== null
+                : !Number.isFinite(bin.ratio) || bin.ratio < 0 || !Number.isFinite(bin.centred)))) {
+              throw new Error("ratio track bin values invalid");
+            }
+            const labels = data.bins.map((b) => `${b.contig}:${(b.start / 1e6).toFixed(0)} Mb`);
+            const values = data.bins.map((b) => b.centred);
+            slot.replaceWith(chart(`Median-centred short/long ratio across ${data.bins.length} genomic bins; gaps have no long fragments.`, {
+              grid: { left: 65, right: 20, top: 20, bottom: 45 },
+              xAxis: { type: "category", name: "5 Mb bin (genome order)", data: labels, axisLabel: { show: false } },
+              yAxis: { type: "value", name: "centred ratio" },
+              series: [{ type: "line", showSymbol: false, connectNulls: false, data: values, lineStyle: { color: "#1f5f8b" } }],
+            }, dataTable("DELFI-style 5 Mb bins", ["Contig", "Start (bp)", "Short", "Long", "Ratio", "Median-centred ratio"],
+              data.bins.map((b) => [b.contig, b.start, b.short, b.long, b.ratio, b.centred]))));
+          }).catch((e) => slot.replaceWith(h("p", { class: "problem" }, `Short/long ratio track unavailable (${e.message}).`)));
+        }
+      }
+      more.push(panel);
     }
-    return [section, ...more, ...tssProfileSignals(sample), ...breakpointMotifSignals(sample), ...lionheartSignals(sample)];
+    return [section, ...more, ...tssProfileSignals(sample), ...breakpointMotifSignals(sample, seen), ...lionheartSignals(sample)];
   }
 
   function tssProfileSignals(sample) {
@@ -973,6 +1101,7 @@
       });
       const label = `${name}: ${members.length} cell types; dots are this sample, diamonds are eligible cohort means, upper lines are observed min–max for 10–29 eligible values or the 90% bootstrap interval of the 95th-percentile cutoff for 30 or more, lower lines are sample intervals. The mean may lie outside a cutoff interval. Hatched dots are not interpretable at this depth.`;
       out.push(h("section", { class: "panel" }, h("h2", {}, name),
+        h("p", { class: "help" }, "● Sample share · lower line: sample bootstrap interval · ◆ eligible cohort mean · upper line: cohort reference interval (observed min–max at n = 10–29; 90% bootstrap interval of the 95th-percentile cutoff at n ≥ 30)."),
         svg("svg", { viewBox: `0 0 ${w} ${hgt}`, role: "img", "aria-label": label, class: "composition-svg" }, svg("title", {}, label), ...marks,
           svg("line", { x1: left, x2: w - 20, y1: axisY, y2: axisY, class: "ci" }), ...ticks),
         dataTable(`${name} (${intervalName})`, ["Cell type", "Share", "Interval low", "Interval high", "Cohort mean", "Reference low", "Reference high", "Reference interval meaning", "Eligible n", "State"],
@@ -993,18 +1122,27 @@
     const mode = value(sample, "fragment-size", "mode_bp");
     const mt = value(sample, "mtdna", "chrm_fraction");
     const pairs = [
-      ["Size mode vs copy-number TF", "fragment-size mode (bp)", mode, "tumour fraction", tf],
-      ["mtDNA fraction vs copy-number TF", "chrM fraction", mt, "tumour fraction", tf],
+      ["size-cn", "Size mode vs copy-number TF", "fragment-size mode (bp)", mode, "tumour fraction", tf],
+      ["mtdna-cn", "mtDNA fraction vs copy-number TF", "chrM fraction", mt, "tumour fraction", tf],
     ];
-    for (const [title, xLabel, xValue, yLabel, yValue] of pairs) {
+    for (const [pairId, title, xLabel, xValue, yLabel, yValue] of pairs) {
       const section = h("section", { class: "panel" }, h("h2", {}, title), flagPill("FDA"));
+      const cohort = (sample.agreement_pairs || []).find((row) => row.pair_id === pairId);
+      const points = cohort && cohort.state === "ready" ? cohort.points : [];
+      const cohortText = points.length
+        ? `${points.length} compatible paired cohort ${points.length === 1 ? "source" : "sources"} from ${cohort.cohort_version}; this source is excluded. Descriptive points, not a reference interval.`
+        : `Cohort points unavailable (${cohort ? cohort.state.replace(/_/g, " ") : "no pinned pair data"}).`;
       if (xValue === null || yValue === null) {
-        section.append(h("p", { class: "empty" }, `Needs both signals at full depth (${xValue === null ? xLabel : yLabel} missing). Cohort samples are plotted once the kit cohort exists (n = ${sample.cohort_n}).`));
+        section.append(h("p", { class: "empty" }, `Needs both signals at full depth (${xValue === null ? xLabel : yLabel} missing). ${cohortText}`));
       } else {
-        section.append(chart(`${title}: this sample at ${fmt(xValue)} and ${fmt(yValue)}; no cohort samples yet.`, {
+        section.append(h("p", { class: "help" }, cohortText), chart(`${title}: this sample at ${fmt(xValue)} and ${fmt(yValue)}; ${cohortText}`, {
           grid: { left: 60, right: 20, top: 20, bottom: 40 }, xAxis: { type: "value", name: xLabel, scale: true }, yAxis: { type: "value", name: yLabel, min: 0 },
-          series: [{ type: "scatter", symbolSize: 12, data: [[xValue, yValue]], itemStyle: { color: "#8a4b08" } }],
-        }, dataTable(title, ["Sample", xLabel, yLabel], [[sample.id12, xValue, yValue]])));
+          series: [
+            { type: "scatter", name: "Paired cohort", symbolSize: 6, data: points.map((p) => [p.x, p.y]), itemStyle: { color: "#7892a1" } },
+            { type: "scatter", name: "This sample", symbolSize: 12, data: [[xValue, yValue]], itemStyle: { color: "#8a4b08" } },
+          ],
+        }, dataTable(`${title}; ${cohortText}`, ["Sample", xLabel, yLabel],
+          [[`${cohort?.target_display_id || sample.id12} (this sample)`, xValue, yValue], ...points.map((p) => [p.display_id || p.source_id, p.x, p.y])])));
       }
       out.push(section);
     }
@@ -1211,6 +1349,8 @@
                 h("thead", {}, h("tr", {}, ...["Metric", "Overlay", "Sample A", "Sample B", "B−A"].map((name) => h("th", { scope: "col" }, name)))),
                 h("tbody", {}, ...rows))));
           } else nodes.push(h("p", { class: "empty" }, "No compatible scalar metric is available for this pair. Missing values are not zero."));
+          if (data.unscored.some((row) => row.reason === "not_current_result")) nodes.push(h("p", { class: "help" },
+            "A stored result is no longer current for its registered method. Recompute with the current method, or restore its registration before comparing."));
           if (data.unscored.length) nodes.push(h("details", {}, h("summary", {}, `Not paired (${data.unscored.length})`),
             dataTable("Unpaired metrics and reasons", ["Algorithm", "Metric", "Reason"],
               data.unscored.map((row) => [row.algorithm_id, row.metric_id, row.reason.replace(/_/g, " ")]))));
