@@ -290,8 +290,10 @@
     // Run table.
     const active = state.lastStatus && state.lastStatus.active;
     const interrupted = state.lastStatus && state.lastStatus.interrupted;
+    const unavailable = new Set([...(sample.unreadable_results || []), ...(sample.ambiguous_results || [])]);
     const pending = [active, interrupted].find((run) => run && run.step && run.source_id === sample.source_id &&
-      run.input_id === sample.full_input_id && !sample.algorithms.some((a) => a.algorithm_id === run.step));
+      run.input_id === sample.full_input_id && !unavailable.has(run.step) &&
+      !sample.algorithms.some((a) => a.algorithm_id === run.step));
     const runRows = sample.algorithms.map((a) => {
       const status = a.status === "skipped" ? `skipped (${a.skip_reason})` : a.status;
       const matches = (run) => run && run.step === a.algorithm_id && run.source_id === sample.source_id && run.input_id === a.provenance.input_id;
@@ -300,7 +302,7 @@
         h("td", { class: a.status === "failed" ? "problem" : null }, status,
           runNote ? h("span", { class: "state-chip run-note" }, runNote) : ""),
         h("td", { class: "num" }, a.duration_s !== null && a.duration_s !== undefined ? `${a.duration_s.toFixed(1)} s` : "—")];
-      const logKey = `${sample.id12}:${a.algorithm_id}:${a.provenance.input_id}`;
+      const logKey = `${sample.id12}:${a.algorithm_id}:${a.provenance.input_id}:${a.provenance.parameters_sha256}`;
       const logLine = h("span", { class: "help", "aria-live": "polite" }, state.runLogLines.get(logKey) || "");
       const showLogLine = (message) => {
         state.runLogLines.set(logKey, message);
@@ -309,9 +311,13 @@
       };
       const logLink = h("a", { href: `#/sample/${sample.id12}/trust-qc`, onclick: async (event) => {
         event.preventDefault();
+        if (state.lastStatus && state.generationAtLoad !== null && state.lastStatus.generation > state.generationAtLoad) {
+          showLogLine("Results changed on disk; reload before viewing this run log line.");
+          return;
+        }
         showLogLine("Loading run log line…");
         try {
-          const line = await api(`/api/samples/${sample.id12}/run-log/${a.algorithm_id}`);
+          const line = await api(`/api/samples/${sample.id12}/run-log/${a.algorithm_id}/${a.provenance.input_id}/${a.provenance.parameters_sha256}`);
           showLogLine(line.found
             ? `${line.run_id} · line ${line.line} · ${line.utc || "time unavailable"} · step_end ${line.step} status=${line.status}${line.skip_reason ? ` (${line.skip_reason})` : ""}${line.duration_s !== null ? ` · ${line.duration_s} s` : ""}`
             : "Run log line unavailable (searched up to 64 recently updated runs; logs over 1 MiB or 4,096 lines are not shown).");
@@ -326,6 +332,14 @@
       cells.push(h("td", {}, detail));
       return h("tr", {}, ...cells);
     });
+    for (const id of sample.unreadable_results || []) {
+      runRows.push(h("tr", {}, h("th", { scope: "row" }, id), h("td", { class: "problem" }, "result unreadable"),
+        h("td", {}, "—"), h("td", {}, "—"), h("td", {}, "Selected result could not be read.")));
+    }
+    for (const id of sample.ambiguous_results || []) {
+      runRows.push(h("tr", {}, h("th", { scope: "row" }, id), h("td", { class: "problem" }, "result selection ambiguous"),
+        h("td", {}, "—"), h("td", {}, "—"), h("td", {}, "More than one selected result was found.")));
+    }
     out.push(h("section", { class: "panel" }, h("h2", {}, "Run"),
       pending ? h("p", { class: "status-line" }, `Latest run ${pending === active ? "in progress" : "interrupted"} during ${pending.step}; no result was published for this step.`) : "",
       h("div", { class: "table-wrap" }, h("table", {}, h("thead", {}, h("tr", {}, ...["Algorithm", "Status", "Duration", "Run log", "Detail"].map((t) => h("th", { scope: "col" }, t)))), h("tbody", {}, ...runRows)))));
@@ -422,7 +436,11 @@
         const priorInterrupted = status.interrupted && status.interrupted.run_id !== status.active.run_id
           ? ` Earlier run (${status.interrupted.run_id}) stopped during ${status.interrupted.step || "a step"}.` : "";
         const logNotice = logIssue ? ` ${logIssue.run_id ? `Run log for ${logIssue.run_id}` : "Run status"} is unavailable (${logReason}).` : "";
-        setStatus(`A Lab run is in progress (step: ${status.active.step || "starting"}, ${minutes} min). Results below are from completed steps.${priorInterrupted}${logNotice}`);
+        if (["run", "simulate cna", "simulate split"].includes(status.active.command)) {
+          setStatus(`A Lab run is in progress (step: ${status.active.step || "starting"}, ${minutes} min). Results below are from completed steps.${priorInterrupted}${logNotice}`);
+        } else {
+          setStatus(`Lab ${status.active.command || "work"} is in progress. Results below are from completed steps.${priorInterrupted}${logNotice}`);
+        }
       } else if (status.interrupted) {
         // A run that died (stale heartbeat, open log) is "interrupted", even
         // if it published results before it stopped.
@@ -446,7 +464,8 @@
       const runMarker = (row) => row ? [row.run_id, row.step, row.source_id, row.input_id].join(":") : null;
       if (state.route.name === "lens" &&
           (runMarker(previous && previous.active) !== runMarker(status.active) ||
-           runMarker(previous && previous.interrupted) !== runMarker(status.interrupted))) render();
+           runMarker(previous && previous.interrupted) !== runMarker(status.interrupted) ||
+           (previous && previous.generation <= state.generationAtLoad && status.generation > state.generationAtLoad))) render();
     } catch (error) {
       if (error.session) { setStatus("Session expired. Restart `traceback lab serve --open`; it opens a fresh page."); return; }
       state.missed += 1;

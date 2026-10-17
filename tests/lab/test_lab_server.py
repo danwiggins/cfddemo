@@ -953,7 +953,7 @@ def test_trust_qc_run_note_is_scoped_without_replacing_result_status(tmp_path, k
         shown_marker["step"] = None
     prior_run_id = "r-20261015-0101-eeee"
     if kind.startswith("active-unlogged"):
-        shown_marker = {"run_id": "r-20261015-0101-dddd", "step": "cohort add"}
+        shown_marker = {"run_id": "r-20261015-0101-dddd", "command": "cohort add", "step": "cohort add"}
     with RunningLabServer(LabStore(tmp_path / "root")) as running:
         running.app.api.status = lambda: {
             "generation": 1, "active": {**shown_marker, "started_utc": "2026-10-16T00:00:00Z"} if kind.startswith("active") else None,
@@ -984,6 +984,9 @@ def test_trust_qc_run_note_is_scoped_without_replacing_result_status(tmp_path, k
     assert (note in run_table) == (selected == "a" and kind in ("active", "interrupted"))
     if kind == "active-before-sample":
         assert "step: starting" in dom and "step: null" not in dom
+    if kind.startswith("active-unlogged"):
+        assert "Lab cohort add is in progress" in dom
+        assert "A Lab run is in progress" not in dom
     if kind == "active-unlogged-prior-badlog":
         assert f"Run log for {prior_run_id} is unavailable (log malformed or empty)" in dom
         assert "Run log status unavailable" not in dom
@@ -1082,12 +1085,17 @@ def test_run_log_line_is_authenticated_matched_and_allowlisted(tmp_path, monkeyp
         assert payload == {"found": True, "run_id": run_id, "line": 3, "step": "sex-check",
                            "utc": payload["utc"], "status": "ok", "skip_reason": None,
                            "duration_s": 1.25}
+        pinned = f"{path}/{input_id}/{identity}"
+        assert json.loads(_get(running, pinned, cookie)[1])["run_id"] == run_id
+        assert _get(running, f"{path}/{'e' * 64}/{identity}", cookie)[0].status == 404
+        assert _get(running, f"{path}/{input_id}/{'d' * 64}", cookie)[0].status == 404
         with log.path.open("ab") as stream:
             stream.write(b'{"event":"step_end"')
         assert json.loads(_get(running, path, cookie)[1])["line"] == 3
         assert "/secret/path" not in data.decode()
         sample.full.results["sex-check"] = _selected_sex_result(source_id, input_id, "d" * 64)
         assert _get(running, path, cookie)[0].status == 404
+        assert _get(running, pinned, cookie)[0].status == 404
         sample.full.results["sex-check"] = result
         sample.full.input_id = "e" * 64
         assert _get(running, path, cookie)[0].status == 404
