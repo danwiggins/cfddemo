@@ -6,6 +6,7 @@ import hashlib
 import json
 from dataclasses import replace
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 import numpy as np
@@ -55,7 +56,10 @@ def test_registration_is_immutable_and_cli_keeps_labels_private(tmp_path: Path, 
     assert "private study label" not in json.dumps(response)
     assert str(path) not in json.dumps(response)
     assert lab_main(["fetal", "chry-inspect", INPUT, "--root", str(store.root), "--json"]) == 0
-    assert json.loads(capsys.readouterr().out)["data"]["female_control_n"] == 10
+    inspected = json.loads(capsys.readouterr().out)["data"]
+    assert inspected["female_control_n"] == 10
+    assert inspected["female_background_y_per_million"] == 100_000.0
+    assert inspected["full_male_y_per_million"] == 300_000.0
     assert register_contract(store, path, digest) == inspect_contract(store, INPUT)
     original = path.read_bytes()
     changed, changed_digest = _file(tmp_path, full_male_y_per_million=400_000.0)
@@ -94,7 +98,9 @@ def test_synthetic_registration_needs_opt_in_and_cannot_run(tmp_path: Path) -> N
     with pytest.raises(FetalChrYContractError):
         inspect_contract(store, INPUT)
     assert lab_main(["fetal", "chry-inspect", INPUT, "--synthetic", "--root", str(store.root), "--json"]) == 0
-    ctx = context_for(tmp_path / "data", [("chr1", 248_956_422)],
+    contigs = [(f"chr{i}", 248_956_422 if i == 1 else 1_000_000) for i in range(1, 23)]
+    contigs += [("chrX", 1_000_000), ("chrY", 57_227_415)]
+    ctx = context_for(tmp_path / "data", contigs,
                       [Read("anonymous", "chr1", 100, "A" * 75)], eligible_reads=2_000_000)
     ctx = replace(ctx, root=store.root, source_id=SOURCE, input_id=INPUT,
                   reference_sha256=REFERENCE, approx_depth_x=1,
@@ -174,7 +180,9 @@ def test_duplicate_calibration_fields_are_rejected(tmp_path: Path) -> None:
         register_contract(LabStore(tmp_path / "root"), path, hashlib.sha256(path.read_bytes()).hexdigest())
 
 
-def test_real_summary_counts_nonpar_y_and_calibrates_only_within_bounds(tmp_path: Path) -> None:
+def test_real_summary_counts_nonpar_y_and_calibrates_only_within_bounds(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
     contigs = [(f"chr{i}", 248_956_422 if i == 1 else 1_000_000) for i in range(1, 23)]
     contigs += [("chrX", 1_000_000), ("chrY", 57_227_415)]
     reads = [Read(f"autosome-{i}", "chr1", 1000 + i * 1000, "A" * 75) for i in range(7)]
@@ -200,6 +208,15 @@ def test_real_summary_counts_nonpar_y_and_calibrates_only_within_bounds(tmp_path
     assert measured == {"fetal_fraction": pytest.approx(0.5),
                         "fetal_chry_nonpar_reads": 2,
                         "fetal_chry_reads_per_million": 200_000}
+    wrong_order = SimpleNamespace(contigs=("chrY", *summary.contigs[1:]), lengths=summary.lengths)
+    with monkeypatch.context() as patch:
+        patch.setattr(fetal, "load_summary", lambda _ctx: (wrong_order, None))
+        assert algorithm.preflight(replace(ctx, input_id="f" * 64)).reason_code == "reference"
+    with monkeypatch.context() as patch:
+        loads = iter(((summary, None), (wrong_order, None)))
+        patch.setattr(fetal, "load_summary", lambda _ctx: next(loads))
+        with pytest.raises(RuntimeError, match="BAM reference layout"):
+            algorithm.run(ctx, tmp_path)
     assert algorithm.preflight(replace(ctx, derived={"half": "A"})).reason_code == "unsupported_input"
     assert algorithm.preflight(replace(ctx, source_id="f" * 64)).reason_code == "missing_asset"
     assert algorithm.preflight(replace(ctx, reference_sha256="f" * 64)).reason_code == "missing_asset"

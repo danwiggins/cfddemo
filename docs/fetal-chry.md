@@ -68,6 +68,8 @@ registration needs the exact original bytes restored from backup; a different
 real calibration requires a new input identity. No registered calibration is
 silently overwritten. The raw chrY count and rate remain visible as exploratory,
 sex-informative measurements even when the calibrated fraction is null.
+`chry-inspect` shows the two calibration rates and counting protocol needed to
+recalculate the fraction, while withholding the operator's free-text labels.
 
 The numeric result still requires an independent ONT-matched accuracy,
 precision, and detection-limit study before biological or clinical use. Male

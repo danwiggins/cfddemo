@@ -11,7 +11,7 @@ from traceback_runner.cli import _local_envelope, _result, _with_human
 
 from .fetal_contract import FetalContractError, inspect_contract, register_contract
 from .fetal_chry_contract import (
-    FetalChrYContractError, inspect_contract as inspect_chry_contract,
+    COUNTING_PROTOCOL, FetalChrYContractError, inspect_contract as inspect_chry_contract,
     register_contract as register_chry_contract,
 )
 from .problems import EXIT_BLOCKED, EXIT_OK
@@ -89,9 +89,12 @@ def _public_chry(contract: Any) -> dict[str, Any]:
     return {"input_id": contract.input_id, "source_id": contract.source_id,
             "reference_sha256": contract.reference_sha256,
             "calibration_status": contract.calibration_status,
+            "counting_protocol": COUNTING_PROTOCOL,
             "female_control_n": contract.female_control_n,
             "male_mixture_n": contract.male_mixture_n,
             "min_depth_x": contract.min_depth_x,
+            "female_background_y_per_million": contract.female_background_y_per_million,
+            "full_male_y_per_million": contract.full_male_y_per_million,
             "validated_min_fraction": contract.validated_min_fraction,
             "validated_max_fraction": contract.validated_max_fraction,
             "manifest_sha256": contract.manifest_sha256}

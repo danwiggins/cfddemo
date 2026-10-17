@@ -32,6 +32,12 @@ def _protocol_matches() -> bool:
             and HG38_CHRY_PARS == _F1_PARS and HG38_CHRY_LENGTH == 57_227_415)
 
 
+def _canonical_layout(summary: Any) -> bool:
+    return (tuple(summary.contigs[:24]) == _CONTIGS and len(summary.lengths) >= 24
+            and summary.lengths[0] == _HG38_CHR1_LENGTH
+            and summary.lengths[23] == HG38_CHRY_LENGTH)
+
+
 def _counts(summary: Any) -> tuple[int, int]:
     """D21 denominator and non-PAR chrY numerator in bounded summary slices."""
 
@@ -96,6 +102,9 @@ class FetalFractionChrY(Base):
             return Skip("unsupported_input", "fetal chrY calibration applies to the full input")
         if not _protocol_matches():
             return Skip("unsupported_input", "fetal chrY counting protocol has changed")
+        summary, _ = load_summary(ctx)
+        if not _canonical_layout(summary):
+            return Skip("reference", "fetal calibration requires canonical hg38 chr1-22,X,Y layout")
         from ..store import LabStore
 
         try:
@@ -113,10 +122,6 @@ class FetalFractionChrY(Base):
         if (ctx.approx_depth_x is None or not math.isfinite(ctx.approx_depth_x)
                 or ctx.approx_depth_x < contract.min_depth_x):
             return _UNAVAILABLE
-        summary, _ = load_summary(ctx)
-        if (tuple(summary.contigs[:24]) != _CONTIGS or summary.lengths[0] != _HG38_CHR1_LENGTH
-                or summary.lengths[23] != HG38_CHRY_LENGTH):
-            return Skip("reference", "fetal calibration requires canonical hg38 chr1-22,X,Y layout")
         return Ready()
 
     def run(self, ctx: InputContext, out: Path) -> AlgorithmOutput:
@@ -126,6 +131,8 @@ class FetalFractionChrY(Base):
             raise RuntimeError("fetal calibration or input changed after preflight")
         contract = inspect_contract(LabStore(ctx.root), ctx.input_id)
         summary, _ = load_summary(ctx)
+        if not _canonical_layout(summary):
+            raise RuntimeError("fetal BAM reference layout changed after preflight")
         y_count, denominator = _counts(summary)
         if denominator != ctx.eligible_reads:
             raise RuntimeError("fetal read count changed after preflight")
