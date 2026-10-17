@@ -19,6 +19,7 @@ from typing import Mapping
 from .adapters.griffin_run import GRIFFIN_COMMIT, _REF_FILES, _digest, _safe_path
 
 SCHEMA = "traceback.lab.griffin-assets.v1"
+MAX_REGISTRATION_BYTES = 128_000
 _FREQUENCY_PREFIX = "k100_minus_exclusion_lists.mappable_regions.hg38."
 _HEX = re.compile(r"^[a-f0-9]{64}$")
 
@@ -41,6 +42,17 @@ class GriffinAssets:
 
 def _location(root: Path) -> Path:
     return root / "lab" / "assets" / "griffin" / "registration.json"
+
+
+def registration_available(root: Path) -> bool:
+    """Cheap preflight gate; full inspection still rehashes all pinned bytes."""
+
+    location = _location(root)
+    try:
+        return (not location.parent.is_symlink() and not location.is_symlink()
+                and location.is_file() and location.stat().st_size <= MAX_REGISTRATION_BYTES)
+    except OSError:
+        return False
 
 
 def _file(path: Path) -> Path:
@@ -122,14 +134,17 @@ def register_griffin_assets(
         "terms": terms, "license_id": license_id, "fingerprints": fingerprints,
     }
     data["sha256"] = _identity(data)
+    serialized = json.dumps(data, sort_keys=True).encode("utf-8")
+    if len(serialized) > MAX_REGISTRATION_BYTES:
+        raise GriffinAssetError("Griffin registration exceeds the supported size")
     location = _location(root)
     if location.parent.is_symlink():
         raise GriffinAssetError("Griffin asset directory must not be a symlink")
     location.parent.mkdir(parents=True, exist_ok=True)
     descriptor, temporary = tempfile.mkstemp(prefix=".griffin-", dir=location.parent)
     try:
-        with os.fdopen(descriptor, "w", encoding="utf-8") as stream:
-            json.dump(data, stream, sort_keys=True)
+        with os.fdopen(descriptor, "wb") as stream:
+            stream.write(serialized)
             stream.flush()
             os.fsync(stream.fileno())
         os.replace(temporary, location)
@@ -142,7 +157,7 @@ def register_griffin_assets(
 def inspect_griffin_assets(root: Path) -> GriffinAssets:
     location = _location(root)
     try:
-        if location.is_symlink() or location.stat().st_size > 128_000:
+        if location.parent.is_symlink() or location.is_symlink() or location.stat().st_size > MAX_REGISTRATION_BYTES:
             raise GriffinAssetError("Griffin registration is unsafe or oversized")
         data = json.loads(location.read_text(encoding="utf-8"))
         if set(data) != {

@@ -20,7 +20,7 @@ from ..adapters.griffin_run import (
     GRIFFIN_COMMIT, MIN_ELIGIBLE_READS, GriffinRun, _require_paired_input,
     count_d21_pairs, run_upstream,
 )
-from ..griffin_assets import GriffinAssetError, inspect_griffin_assets
+from ..griffin_assets import GriffinAssetError, inspect_griffin_assets, registration_available
 from ..registry import AlgorithmOutput, InputContext, Ready, Requirements, Skip, ToolPin
 from ._base import Base, metric
 
@@ -75,6 +75,8 @@ class Griffin(Base):
             return Skip("missing_toolchain", "Griffin's Snakemake version could not be checked")
         if version != "5.19.2":
             return Skip("missing_toolchain", "Griffin requires tested Snakemake 5.19.2")
+        if not registration_available(ctx.root):
+            return Skip("missing_asset", "Griffin assets are not registered or registration is unsafe")
         try:
             profile_reads = _require_paired_input(ctx.input_dir / "aligned.bam")
             pairs = count_d21_pairs(ctx.input_dir / "aligned.bam")

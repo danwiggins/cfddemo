@@ -326,6 +326,9 @@ def _selected_results(store: LabStore, input_id: str, manifest: dict[str, Any]) 
     found: list[CohortResult] = []
     identities: dict[str, str] = {}
     for algorithm in load_registry():
+        supported = getattr(getattr(algorithm, "requires", None), "platforms", frozenset({"ont"}))
+        if platform not in supported:
+            continue
         upstream = [
             {"algorithm_id": name, "parameters_sha256": identities[name]}
             for name in algorithm.upstream if name in identities

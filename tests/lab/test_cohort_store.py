@@ -189,6 +189,15 @@ def test_changed_asset_digest_cannot_reuse_old_result(store: LabStore) -> None:
     assert build_cohort(store, "healthy").members[0].results == ()
 
 
+def test_unsupported_platform_skips_asset_hashing_during_cohort_build(store: LabStore) -> None:
+    source_id = _sample(store, 1)
+    algorithm = cohorts.load_registry()[0]
+    algorithm.requires = SimpleNamespace(platforms=frozenset({"illumina"}))
+    algorithm.asset_sha256s = lambda root: pytest.fail("unsupported algorithm must not hash assets")
+    add_sample(store, "healthy", source_id)
+    assert build_cohort(store, "healthy").members[0].results == ()
+
+
 def test_symlinked_cohort_directory_is_refused(store: LabStore, tmp_path) -> None:
     outside = tmp_path / "outside"
     outside.mkdir()

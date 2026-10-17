@@ -27,6 +27,7 @@ def _available_toolchain(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(module.importlib.util, "find_spec", lambda name: object())
     monkeypatch.setattr(module.subprocess, "run", lambda *args, **kwargs:
                         subprocess.CompletedProcess(args[0], 0, "5.19.2\n"))
+    monkeypatch.setattr(module, "registration_available", lambda root: True)
 
 
 def _registered(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> tuple[Path, Path]:
@@ -73,6 +74,24 @@ def test_registered_assets_pin_site_bytes_and_execution_identity(tmp_path: Path,
     with pytest.raises(GriffinAssetError, match="changed"):
         inspect_griffin_assets(root)
     assert GRIFFIN.asset_sha256s(root) == []
+
+
+def test_oversized_registration_preserves_existing_verified_asset(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    import traceback_lab.griffin_assets as asset_module
+
+    root, sites = _registered(tmp_path, monkeypatch)
+    location = root / "lab" / "assets" / "griffin" / "registration.json"
+    original = location.read_bytes()
+    with monkeypatch.context() as patch:
+        patch.setattr(asset_module, "_fingerprints", lambda *args: {"oversized": "x" * 130_000})
+        with pytest.raises(GriffinAssetError, match="exceeds the supported size"):
+            register_griffin_assets(
+                root, upstream_root=tmp_path / "upstream", ref_assets=tmp_path / "ref-assets",
+                site_lists={"CTCF": sites}, primary_site="CTCF",
+                source_label="operator supplied TF sites", terms="unknown",
+            )
+    assert location.read_bytes() == original
+    assert inspect_griffin_assets(root).primary_site == "CTCF"
 
 
 def test_griffin_asset_commands_register_and_inspect(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -173,6 +192,21 @@ def test_missing_toolchain_skips_before_scanning_bam(tmp_path: Path, monkeypatch
                        extras={"reference_fasta": str(tmp_path / "hg38.fa")})
     decision = GRIFFIN.preflight(ctx)
     assert isinstance(decision, Skip) and decision.reason_code == "missing_toolchain"
+
+
+def test_missing_registration_skips_before_scanning_bam(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    import traceback_lab.algorithms.griffin as module
+
+    _available_toolchain(monkeypatch)
+    monkeypatch.setattr(module, "registration_available", lambda root: False)
+    monkeypatch.setattr(module, "_require_paired_input", lambda bam:
+                        pytest.fail("BAM must not be scanned before registration check"))
+    ctx = InputContext(root=tmp_path, source_id="1" * 64, input_id="2" * 64,
+                       reference_id="hg38", reference_sha256="3" * 64,
+                       input_dir=tmp_path, platform="illumina", eligible_reads=5_000_000,
+                       extras={"reference_fasta": str(tmp_path / "hg38.fa")})
+    decision = GRIFFIN.preflight(ctx)
+    assert isinstance(decision, Skip) and decision.reason_code == "missing_asset"
 
 
 def test_pair_gate_counts_molecules_once_and_requires_illumina_header(tmp_path: Path) -> None:
