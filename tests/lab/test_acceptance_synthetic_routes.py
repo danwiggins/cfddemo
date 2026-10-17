@@ -28,6 +28,10 @@ LICENSE_IDS = {
     for license_id in entry.get("license_ids") or []
 }
 DISCLOSURE_ROUTES = ("home", "findings", "stability", "evidence", "methods")
+SAMPLE_ROUTES = (
+    "findings", "trust-qc", "stability", "signals", "compare",
+    "body-map", "agreement", "evidence", "methods",
+)
 
 
 def _sample() -> dict:
@@ -285,6 +289,15 @@ def test_synthetic_state_copy_on_surface(state, route, copy_text, tmp_path) -> N
         assert "Details in Trust/QC" in dom
 
 
+@needs_chrome
+@pytest.mark.parametrize("route", SAMPLE_ROUTES)
+def test_unknown_sample_copy_on_every_sample_route(route, tmp_path) -> None:
+    with _server(tmp_path, _sample()) as server:
+        dom = _dom(server, tmp_path / "browser", route=f"/sample/aaaaaaaaaaaa/{route}")
+    assert "No Lab sample matches aaaaaaaaaaaa." in dom
+    assert "Back to Lab home" in dom
+
+
 STATUS_CASES = [
     ("run-in-progress", "A Lab run is in progress (step: bam-qc"),
     ("interrupted", f"The last run ({ID12}) stopped during bam-qc."),
@@ -334,6 +347,9 @@ def test_synthetic_status_copy_in_live_region(state, copy_text, tmp_path) -> Non
         assert ">Reload</button>" in dom
     if state == "disconnected":
         assert 'data-disconnected="1"' in dom
+        assert re.search(r'<body[^>]*class="[^"]*\bdimmed\b', dom)
+        assert re.search(r'<select[^>]*id="sample-switcher"[^>]*disabled', dom)
+        assert 'aria-disabled="true"' in dom
 
 
 @needs_chrome
