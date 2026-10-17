@@ -245,9 +245,14 @@ traceback lab asset inspect meth-tf-reference --root R
 ```
 
 The JSON has schema `traceback.lab.meth-tf-reference.v1`, the exact genome
-`reference_sha256`, the BAM-header `modbase_model` ID, and a sorted `markers`
-array. Each marker has an autosomal `chrom`, zero-based CpG-C `pos0`, and
-`healthy` and `tumour` methylated fractions between 0 and 1. For example,
+`reference_sha256`, the BAM-header `modbase_model` ID, and mandatory
+`call_definition: "C+m_argmax_5mC_over_canonical_5mC_5hmC"`. Its sorted
+`markers` array contains autosomal `chrom`, zero-based CpG-C `pos0`, and
+`healthy` and `tumour` fractions between 0 and 1. These fractions must be
+measured as the share of observed C+m-channel CpG calls whose largest
+canonical/5mC/5hmC probability is 5mC, under a protocol compatible with the
+sample's modified-base model and filtering. Generic bisulfite beta values do
+not automatically meet that definition. For example,
 `{"chrom":"chr1","pos0":101,"healthy":0.25,"tumour":0.75}` illustrates the
 format only; these numbers are synthetic and are not a usable reference.
 Registration is immutable within one Lab root: a different panel needs a

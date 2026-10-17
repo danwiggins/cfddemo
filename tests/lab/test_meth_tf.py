@@ -13,26 +13,35 @@ import numpy as np
 import pytest
 
 from traceback_lab.algorithms import cell_origin
-from traceback_lab.algorithms.meth_tf import METH_TF, solve_two_component
+from traceback_lab.algorithms._meth import load_calls
+from traceback_lab.algorithms.meth_calls import METH_CALLS
+from traceback_lab.algorithms.meth_tf import METH_TF, solve_two_component, tally_markers
 from traceback_lab.assets import AssetError
 from traceback_lab.cli import main as lab_main
 from traceback_lab.meth_calls import DTYPE, HAS_M, SCHEMA
-from traceback_lab.meth_tf_reference import add_reference, inspect_reference
+from traceback_lab.meth_tf_reference import CALL_DEFINITION, add_reference, inspect_reference
+from traceback_lab.read_summary import SPLIT_SALT, ReadSummary, h64
 from traceback_lab.registry import Ready, Skip, context_to_json, load_registry
 from traceback_lab.store import LabStore, new_run_id
 
 from .bam_fixtures import Read, context_for
 
 
-def _reference(path: Path, reference_sha256: str, *, model: str = "synthetic-model") -> Path:
+def _reference(
+    path: Path, reference_sha256: str, *, model: str = "synthetic-model", third: bool = False,
+) -> Path:
+    markers = [
+        {"chrom": "chr1", "pos0": 101, "healthy": 0.25, "tumour": 0.75},
+        {"chrom": "chr1", "pos0": 103 if third else 102, "healthy": 0.75, "tumour": 0.25},
+    ]
+    if third:
+        markers.append({"chrom": "chr1", "pos0": 105, "healthy": 0.5, "tumour": 0.5})
     path.write_text(json.dumps({
         "schema": "traceback.lab.meth-tf-reference.v1",
         "reference_sha256": reference_sha256,
         "modbase_model": model,
-        "markers": [
-            {"chrom": "chr1", "pos0": 101, "healthy": 0.25, "tumour": 0.75},
-            {"chrom": "chr1", "pos0": 102, "healthy": 0.75, "tumour": 0.25},
-        ],
+        "call_definition": CALL_DEFINITION,
+        "markers": markers,
     }))
     return path
 
@@ -88,6 +97,14 @@ def test_analytic_nnls_recovers_known_mixture_and_rejects_rank_deficiency() -> N
     assert solve_two_component(
         healthy, tumour, np.asarray([3, 0]), np.asarray([8, 0]),
     ) == (None, None)
+    boundary, _ = solve_two_component(
+        healthy, tumour, np.asarray([0, 7]), np.asarray([3, 7]),
+    )
+    assert boundary == pytest.approx(0)
+    boundary, _ = solve_two_component(
+        healthy, tumour, np.asarray([3, 0]), np.asarray([3, 7]),
+    )
+    assert boundary == pytest.approx(1)
 
 
 def test_public_asset_add_and_inspect_pin_marker_reference(
@@ -175,3 +192,64 @@ def test_registered_worker_produces_exploratory_fraction_and_pinned_attempt(
     assert completed.returncode == 0, completed.stderr
     measured = json.loads((out / "output.json").read_text())
     assert {item["metric_id"]: item["value"] for item in measured["metrics"]}["tumor_fraction"] == pytest.approx(0.25)
+
+
+def test_real_modification_bam_flows_through_call_store_worker_and_derived_mask(tmp_path: Path) -> None:
+    # Eight actual records, with a synthetic depth override solely to exercise
+    # the 2.5M gate's other branches; this is not a depth validation receipt.
+    a_names = [f"a-{index}" for index in range(100) if h64(SPLIT_SALT, f"a-{index}") < 2**63][:4]
+    b_names = [f"b-{index}" for index in range(100) if h64(SPLIT_SALT, f"b-{index}") >= 2**63][:4]
+    assert len(a_names) == len(b_names) == 4
+    reads = [
+        Read(
+            name, "chr1", 100, "ACGCGCGAAAA", mm="C+m?,0,0;",
+            ml=[230 if index < (1 if half == "A" else 2) else 10,
+                230 if index < (3 if half == "A" else 2) else 10],
+        )
+        for half, names in (("A", a_names), ("B", b_names))
+        for index, name in enumerate(names)
+    ]
+    ctx = context_for(
+        tmp_path, [("chr1", 10_000)], reads,
+        eligible_reads=2_500_000, modbase_model="synthetic-model",
+    )
+    reference_source = _reference(tmp_path / "marker-source.json", ctx.reference_sha256, third=True)
+    store = LabStore(tmp_path)
+    with store.writer("synthetic meth-TF reference", new_run_id()):
+        reference = add_reference(store, reference_source, source_label="synthetic CpG panel", terms="unknown")
+    ctx.extras["planned_asset_sha256s"] = [reference.sha256]
+    assert isinstance(METH_CALLS.preflight(ctx), Ready)
+    METH_CALLS.run(ctx, tmp_path / "decoded")
+    ctx.extras["upstream"]["meth-calls"] = str(tmp_path / "decoded")
+    assert cell_origin.header_model(ctx.input_dir / "aligned.bam") == "synthetic-model"
+    assert isinstance(METH_TF.preflight(ctx), Ready)
+    summary = ReadSummary.open(tmp_path / "read-summary" / "columns")
+    calls, mask = load_calls(ctx)
+    methylated, counts = tally_markers(calls, mask, summary, reference)
+    assert methylated.tolist() == [3, 5, 0]
+    assert counts.tolist() == [8, 8, 0]
+
+    request = tmp_path / "real-request.json"
+    out = tmp_path / "real-worker-out"
+    request.write_text(json.dumps({
+        "entry": "meth_tf:METH_TF", "context": context_to_json(ctx), "out_dir": str(out),
+    }))
+    completed = subprocess.run(
+        [sys.executable, "-m", "traceback_lab.worker", str(request)],
+        capture_output=True, text=True, check=False, timeout=30,
+    )
+    assert completed.returncode == 0, completed.stderr
+    measured = json.loads((out / "output.json").read_text())
+    assert {item["metric_id"]: item["value"] for item in measured["metrics"]}["tumor_fraction"] == pytest.approx(0.25)
+    fit = json.loads((out / "artifacts" / "meth_tf_fit.json").read_text())
+    assert fit["markers_registered"] == 3 and fit["markers_covered"] == 2
+    assert fit["cpg_calls_used"] == 16 and fit["call_definition"] == CALL_DEFINITION
+
+    derived_ctx = replace(ctx, derived={"transform": "split", "half": "A"})
+    derived_calls, derived_mask = load_calls(derived_ctx)
+    methylated, counts = tally_markers(derived_calls, derived_mask, summary, reference)
+    assert methylated.tolist() == [1, 3, 0]
+    assert counts.tolist() == [4, 4, 0]
+    assert isinstance(METH_TF.preflight(derived_ctx), Ready)
+    derived_output = METH_TF.run(derived_ctx, tmp_path / "derived-out")
+    assert _metrics(derived_output)["tumor_fraction"] == pytest.approx(0)

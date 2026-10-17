@@ -17,7 +17,7 @@ from typing import Any
 import numpy as np
 
 from ..meth_calls import HAS_M, argmax_state
-from ..meth_tf_reference import RegisteredReference, inspect_reference
+from ..meth_tf_reference import CALL_DEFINITION, RegisteredReference, inspect_reference
 from ..read_summary import ReadSummary
 from ..registry import AlgorithmOutput, InputContext, Ready, Requirements, Skip
 from ..store import LabStore
@@ -108,7 +108,7 @@ class MethTF(MethBase):
         default_factory=lambda: Requirements(mm_tags=True, min_eligible_reads=MIN_ELIGIBLE_READS)
     )
     parameters: dict[str, Any] = field(default_factory=lambda: {
-        "channel": "C+m", "call": "argmax_5mc_over_canonical_5mc_5hmc",
+        "channel": "C+m", "call": CALL_DEFINITION,
         "solver": "two-component-active-set-nnls-v1", "row_scale": "sqrt_call_count",
         "reported_fraction": "tumour_weight_over_sum", "minimum_covered_markers": 2,
     })
@@ -164,6 +164,7 @@ class MethTF(MethBase):
             "schema": "traceback.lab.meth-tf-fit.v1", "asset_sha256": reference.sha256,
             "reference_sha256": reference.reference.reference_sha256,
             "modbase_model": reference.reference.modbase_model,
+            "call_definition": reference.reference.call_definition,
             "solver": self.parameters["solver"], "row_scale": self.parameters["row_scale"],
             "markers_registered": len(markers), "markers_covered": covered,
             "cpg_calls_used": used, "identifiable": fraction is not None,

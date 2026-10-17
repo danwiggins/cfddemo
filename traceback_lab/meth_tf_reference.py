@@ -38,6 +38,7 @@ if TYPE_CHECKING:
 KIND = "meth-tf-reference"
 FILENAME = "reference.json"
 SCHEMA = "traceback.lab.meth-tf-reference.v1"
+CALL_DEFINITION = "C+m_argmax_5mC_over_canonical_5mC_5hmC"
 MANIFEST_SCHEMA = "traceback.lab.asset-registration.v1"
 MAX_BYTES = 32 << 20
 _MODEL = re.compile(r"^[A-Za-z0-9._@+-]{1,160}$")
@@ -65,6 +66,7 @@ class MethTFReference(BaseModel):
     schema_: Literal["traceback.lab.meth-tf-reference.v1"] = Field(alias="schema")
     reference_sha256: str = Field(pattern=SHA256_PATTERN.pattern)
     modbase_model: str
+    call_definition: Literal["C+m_argmax_5mC_over_canonical_5mC_5hmC"]
     markers: tuple[Marker, ...] = Field(min_length=2)
 
     @model_validator(mode="after")
@@ -101,6 +103,7 @@ class RegisteredReference:
             "file": str(self.file), "markers": len(self.reference.markers),
             "reference_sha256": self.reference.reference_sha256,
             "modbase_model": self.reference.modbase_model,
+            "call_definition": self.reference.call_definition,
         }
 
 
@@ -196,4 +199,4 @@ def add_reference(
     return inspect_reference(store, expected_sha256=descriptor.sha256)
 
 
-__all__ = ["KIND", "MethTFReference", "RegisteredReference", "add_reference", "inspect_reference"]
+__all__ = ["CALL_DEFINITION", "KIND", "MethTFReference", "RegisteredReference", "add_reference", "inspect_reference"]
