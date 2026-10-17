@@ -27,6 +27,7 @@
     lastOk: null,
     route: { name: "home" },
     loading: true,
+    runLogLines: new Map(),
   };
   window.TracebackLab = { state, LENSES, h, render, chart, dataTable, fmt };
 
@@ -102,6 +103,7 @@
   async function loadSample(id12) {
     if (!id12) { state.sample = null; return; }
     if (state.sample && state.sample.id12 === id12) return;
+    state.runLogLines.clear();
     const payload = await api(`/api/samples/${id12}`);
     state.sample = payload.found ? payload : { found: false, id12, candidates: payload.candidates || [] };
   }
@@ -286,10 +288,39 @@
     out.push(h("section", { class: "panel" }, h("h2", {}, "Depth against each algorithm's minimum"),
       h("div", { class: "table-wrap" }, h("table", {}, h("thead", {}, h("tr", {}, h("th", {}, "Algorithm"), h("th", {}, "Depth"), h("th", {}, "Verdict"))), h("tbody", {}, ...rows)))));
     // Run table.
-    const running = state.lastStatus && state.lastStatus.active ? state.lastStatus.active.step : null;
+    const active = state.lastStatus && state.lastStatus.active;
+    const interrupted = state.lastStatus && state.lastStatus.interrupted;
+    const pending = [active, interrupted].find((run) => run && run.step && run.source_id === sample.source_id &&
+      run.input_id === sample.full_input_id && !sample.algorithms.some((a) =>
+        a.algorithm_id === run.step && a.provenance.input_id === run.input_id));
     const runRows = sample.algorithms.map((a) => {
-      const status = running === a.algorithm_id ? "running" : a.status === "skipped" ? `skipped (${a.skip_reason})` : a.status;
-      const cells = [h("th", { scope: "row" }, a.algorithm_id + (a.hidden ? " (intermediate)" : "")), h("td", { class: a.status === "failed" ? "problem" : null }, status), h("td", { class: "num" }, a.duration_s !== null && a.duration_s !== undefined ? `${a.duration_s.toFixed(1)} s` : "—")];
+      const status = a.status === "skipped" ? `skipped (${a.skip_reason})` : a.status;
+      const matches = (run) => run && run.step === a.algorithm_id && run.source_id === sample.source_id && run.input_id === a.provenance.input_id;
+      const runNote = matches(active) ? "latest run in progress" : matches(interrupted) ? "latest run interrupted" : null;
+      const cells = [h("th", { scope: "row" }, a.algorithm_id + (a.hidden ? " (intermediate)" : "")),
+        h("td", { class: a.status === "failed" ? "problem" : null }, status,
+          runNote ? h("span", { class: "state-chip run-note" }, runNote) : ""),
+        h("td", { class: "num" }, a.duration_s !== null && a.duration_s !== undefined ? `${a.duration_s.toFixed(1)} s` : "—")];
+      const logKey = `${sample.id12}:${a.algorithm_id}:${a.provenance.input_id}`;
+      const logLine = h("span", { class: "help", "aria-live": "polite" }, state.runLogLines.get(logKey) || "");
+      const showLogLine = (message) => {
+        state.runLogLines.set(logKey, message);
+        if (logLine.isConnected) logLine.replaceChildren(message);
+        else if (state.route.name === "lens" && state.sample && state.sample.id12 === sample.id12) render();
+      };
+      const logLink = h("a", { href: `#/sample/${sample.id12}/trust-qc`, onclick: async (event) => {
+        event.preventDefault();
+        showLogLine("Loading run log line…");
+        try {
+          const line = await api(`/api/samples/${sample.id12}/run-log/${a.algorithm_id}`);
+          showLogLine(line.found
+            ? `${line.run_id} · line ${line.line} · ${line.utc || "time unavailable"} · step_end ${line.step} status=${line.status}${line.skip_reason ? ` (${line.skip_reason})` : ""}${line.duration_s !== null ? ` · ${line.duration_s} s` : ""}`
+            : "Run log line unavailable (searched up to 64 recently updated runs; logs over 1 MiB or 4,096 lines are not shown).");
+        } catch (error) {
+          showLogLine(error.session ? "Session expired; reopen Lab." : "Run log line unavailable.");
+        }
+      } }, "Run log line →");
+      cells.push(h("td", {}, logLink, " ", logLine));
       const detail = a.failure
         ? h("details", {}, h("summary", {}, "Last 50 stderr lines (scrubbed)"), h("pre", { class: "stderr" }, a.failure.stderr_tail.join("\n") || a.failure.first_line))
         : a.skip_message ? h("span", {}, a.skip_message) : "";
@@ -297,7 +328,8 @@
       return h("tr", {}, ...cells);
     });
     out.push(h("section", { class: "panel" }, h("h2", {}, "Run"),
-      h("div", { class: "table-wrap" }, h("table", {}, h("thead", {}, h("tr", {}, ...["Algorithm", "Status", "Duration", "Detail"].map((t) => h("th", { scope: "col" }, t)))), h("tbody", {}, ...runRows)))));
+      pending ? h("p", { class: "status-line" }, `Latest run ${pending === active ? "in progress" : "interrupted"} during ${pending.step}; no result was published for this step.`) : "",
+      h("div", { class: "table-wrap" }, h("table", {}, h("thead", {}, h("tr", {}, ...["Algorithm", "Status", "Duration", "Run log", "Detail"].map((t) => h("th", { scope: "col" }, t)))), h("tbody", {}, ...runRows)))));
     // QC bands.
     const banded = [];
     for (const a of sample.algorithms) for (const m of a.metrics) if (m.qc_band) banded.push([m.label, fmt(m.value), m.qc_band]);
@@ -381,14 +413,24 @@
       document.body.classList.remove("dimmed");
       const previous = state.lastStatus;
       state.lastStatus = status;
+      const logIssue = status.run_log_unavailable;
+      const logReason = logIssue && ({ invalid_run_id: "invalid run ID", unreadable_or_over_1mib: "log unreadable, unsafe, or over 1 MiB",
+        over_4096_lines: "log over 4,096 lines", malformed_or_empty: "log malformed or empty",
+        latest_run_pointer_unavailable: "latest-run pointer unavailable" }[logIssue.reason] || "log unavailable");
       if (state.generationAtLoad === null) state.generationAtLoad = status.generation;
       if (status.active) {
         const minutes = Math.max(0, Math.round((Date.now() - Date.parse(status.active.started_utc)) / 60000));
-        setStatus(`A Lab run is in progress (step: ${status.active.step}, ${minutes} min). Results below are from completed steps.`);
+        const priorInterrupted = status.interrupted && status.interrupted.run_id !== status.active.run_id
+          ? ` Earlier run (${status.interrupted.run_id}) stopped during ${status.interrupted.step || "a step"}.` : "";
+        const logNotice = logIssue ? ` ${logIssue.run_id ? `Run log for ${logIssue.run_id}` : "Run status"} is unavailable (${logReason}).` : "";
+        setStatus(`A Lab run is in progress (step: ${status.active.step || "starting"}, ${minutes} min). Results below are from completed steps.${priorInterrupted}${logNotice}`);
       } else if (status.interrupted) {
         // A run that died (stale heartbeat, open log) is "interrupted", even
         // if it published results before it stopped.
         setStatus(`The last run (${status.interrupted.run_id}) stopped during ${status.interrupted.step || "a step"}. Results shown are from completed steps. Rerun the same command; only missing results recompute.`,
+          status.generation > state.generationAtLoad ? "Reload" : null);
+      } else if (logIssue) {
+        setStatus(`The last run${logIssue.run_id ? ` (${logIssue.run_id})` : ""} status is unavailable (${logReason}). Results shown are from completed steps. Inspect the run log or rerun the command.`,
           status.generation > state.generationAtLoad ? "Reload" : null);
       } else if (status.generation > state.generationAtLoad && previous && previous.active) {
         setStatus("New results are available.", "Reload");
@@ -402,9 +444,10 @@
           ` Interpretation library on disk is invalid (${status.library.error}). Showing v${status.library.version}, loaded at ${status.library.loaded_at}.`));
       }
       setControlsEnabled(true);
-      const wasRunning = previous && previous.active ? previous.active.step : null;
-      const nowRunning = status.active ? status.active.step : null;
-      if (wasRunning !== nowRunning && state.route.name === "lens") render();
+      const runMarker = (row) => row ? [row.run_id, row.step, row.source_id, row.input_id].join(":") : null;
+      if (state.route.name === "lens" &&
+          (runMarker(previous && previous.active) !== runMarker(status.active) ||
+           runMarker(previous && previous.interrupted) !== runMarker(status.interrupted))) render();
     } catch (error) {
       if (error.session) { setStatus("Session expired. Restart `traceback lab serve --open`; it opens a fresh page."); return; }
       state.missed += 1;
