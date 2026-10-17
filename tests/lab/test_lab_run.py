@@ -116,7 +116,72 @@ def test_run_aligns_publishes_and_reruns_from_cache(lab_world, capsys, monkeypat
         assert str(chunks) not in text and "SYNTH0001" not in text
 
 
-def test_missing_cached_upstream_artifact_recomputes_only_that_step(
+def test_sex_assertion_is_local_metadata_and_does_not_rekey_results(
+    lab_world, capsys, monkeypatch, shared_mmi,
+) -> None:
+    _registry(monkeypatch, "SUMMARY", "COUNTER")
+    root = lab_world["root"]
+    args = ("run", str(lab_world["chunks"]), "--root", str(root), "--mmi", str(shared_mmi))
+    code, first = _json(capsys, *args)
+    assert code == 0
+    original = first["data"]["sample"]
+    store = LabStore(root)
+    generation = store.generation()
+    result_bytes = {path.relative_to(store.results_dir): path.read_bytes()
+                    for path in store.results_dir.rglob("result.json")}
+
+    code, asserted = _json(capsys, "run", "latest", "--sex", "M", "--root", str(root))
+    assert code == 0 and asserted["data"]["sample"] == original
+    assert all(step["cached"] for step in asserted["data"]["steps"])
+    assert store.generation() == generation + 1
+    assert {path.relative_to(store.results_dir): path.read_bytes()
+            for path in store.results_dir.rglob("result.json")} == result_bytes
+    from traceback_lab.ingest import source_record
+    from traceback_lab.views import load_sample, sex_check_view
+
+    record = source_record(LabStore(root), original["source_id"])
+    assert record is not None and record["operator_metadata"]["sex"] == "M"
+    sample = load_sample(LabStore(root), original["source_id"])
+    assert sample is not None
+    assert sex_check_view(sample)["state"] == "no_verdict"  # fake registry has no sex-check
+
+    code, conflict = _json(capsys, "run", "latest", "--sex", "F", "--root", str(root))
+    assert code == 3 and conflict["data"]["code"] == "TBX-LAB-023"
+    assert {"cause", "fix", "retryable", "docs"} <= set(conflict["data"])
+    code, human, _ = _lab(capsys, "run", "latest", "--sex", "F", "--root", str(root))
+    assert code == 3
+    for label in ("CODE", "CAUSE", "FIX", "RETRYABLE", "DOCS"):
+        assert any(line.startswith(label) for line in human.splitlines())
+    assert source_record(LabStore(root), original["source_id"]) == record
+    code, same = _json(capsys, "run", "latest", "--sex", "M", "--root", str(root))
+    assert code == 0 and same["data"]["sample"] == original
+    assert store.generation() == generation + 1
+    code, reingested = _json(capsys, *args)
+    assert code == 0 and reingested["data"]["sample"] == original
+    assert store.generation() == generation + 1
+    assert source_record(LabStore(root), original["source_id"])["operator_metadata"] == record["operator_metadata"]
+
+    code, conflict = _json(capsys, *args, "--sex", "F")
+    assert code == 3 and conflict["data"]["code"] == "TBX-LAB-023"
+    assert source_record(LabStore(root), original["source_id"])["operator_metadata"] == record["operator_metadata"]
+
+    # Optional metadata corruption blocks a new assertion, but must not block
+    # unrelated measurement work or disappear during source-record refresh.
+    malformed = {"schema": "invalid", "sex": "M", "recorded_utc": "invalid"}
+    source_file = store.sources_dir / f"{original['source_id']}.json"
+    source_file.write_text(json.dumps({**record, "operator_metadata": malformed}))
+    for target in ("latest", str(lab_world["chunks"])):
+        extra = () if target == "latest" else ("--mmi", str(shared_mmi))
+        code, dry = _json(capsys, "run", target, "--root", str(root), *extra, "--dry-run")
+        assert code == 0 and dry["data"]["dry_run"]
+        code, rerun = _json(capsys, "run", target, "--root", str(root), *extra)
+        assert code == 0 and rerun["data"]["sample"] == original
+        assert source_record(store, original["source_id"])["operator_metadata"] == malformed
+        code, refused = _json(capsys, "run", target, "--root", str(root), *extra, "--sex", "M")
+        assert code == 3 and refused["data"]["code"] == "TBX-LAB-023"
+
+
+def test_missing_cached_upstream_artifact_recomputes_its_dependent(
     lab_world, capsys, monkeypatch, shared_mmi,
 ) -> None:
     _registry(monkeypatch, "SUMMARY", "COUNTER")
@@ -130,16 +195,20 @@ def test_missing_cached_upstream_artifact_recomputes_only_that_step(
     identity_dir = next((store.results_dir / input_id / "read-summary").iterdir())
     attempt = store.selected_attempt(input_id, "read-summary", identity_dir.name)
     assert attempt is not None
+    dependent_identity = next((store.results_dir / input_id / "fragment-size").iterdir()).name
+    prior_dependent = store.selected_attempt(input_id, "fragment-size", dependent_identity)
+    assert prior_dependent is not None
     (attempt / "artifacts" / "counts.json").unlink()
 
     code, retry = _json(capsys, "run", "latest", "--root", str(root))
     assert code == 0
     steps = {step["algorithm_id"]: step for step in retry["data"]["steps"]}
     assert not steps["read-summary"]["cached"]
-    assert steps["fragment-size"]["cached"]
+    assert not steps["fragment-size"]["cached"]
     replacement = store.selected_attempt(input_id, "read-summary", identity_dir.name)
     assert replacement is not None and replacement != attempt
     assert (replacement / "artifacts" / "counts.json").is_file()
+    assert store.selected_attempt(input_id, "fragment-size", dependent_identity) != prior_dependent
 
 def test_json_stdout_is_one_object_and_progress_goes_to_stderr(lab_world, capsys, monkeypatch, shared_mmi) -> None:
     _registry(monkeypatch)

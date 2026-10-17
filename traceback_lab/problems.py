@@ -70,6 +70,7 @@ PROBLEMS: dict[str, ProblemSpec] = {
     "TBX-LAB-020": ProblemSpec(EXIT_INTERNAL, "Unexpected internal error"),
     "TBX-LAB-021": ProblemSpec(EXIT_BLOCKED, "An EXAMPLE (synthetic) sample cannot join a cohort"),
     "TBX-LAB-022": ProblemSpec(EXIT_BLOCKED, "Stored cohort metadata needs restoration"),
+    "TBX-LAB-023": ProblemSpec(EXIT_BLOCKED, "Sample sex assertion conflicts or needs restoration"),
 }
 
 

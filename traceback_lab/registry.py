@@ -44,7 +44,9 @@ ALGORITHMS: tuple[str, ...] = (
     "bam_qc:BAM_QC",
     "depth:DEPTH",
     "fragment_size:FRAGMENT_SIZE",
+    "short_read_fragment_size:SHORT_READ_FRAGMENT_SIZE",
     "copy_number:COPY_NUMBER",
+    "instability:INSTABILITY",
     "long_tail:LONG_TAIL",
     "sex_check:SEX_CHECK",
     "mtdna:MTDNA",
@@ -258,13 +260,14 @@ class PlanItem:
 
 
 def intermediate_ids(registry: Sequence[Algorithm]) -> frozenset[str]:
-    """Algorithms another algorithm lists as ``upstream`` (read-summary, meth-calls).
+    """Only column producers whose full-input rows can be masked for derived inputs.
 
-    Their full-input outputs are reused by every derived input (D33): a
-    downsample or split half reads them through its row mask.
+    An ordinary upstream dependency (for example copy-number -> instability)
+    must instead run on the derived input, so its result matches that input.
     """
 
-    return frozenset(name for algorithm in registry for name in algorithm.upstream)
+    reusable = {"read-summary", "meth-calls"}
+    return frozenset(algorithm.id for algorithm in registry if algorithm.id in reusable)
 
 
 def plan(

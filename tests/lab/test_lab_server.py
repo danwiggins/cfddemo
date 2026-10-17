@@ -122,8 +122,20 @@ def test_status_samples_and_sample(server) -> None:
     assert ids[:4] == ["read-summary", "bam-qc", "depth", "fragment-size"]
     assert payload["curve"]["fractions"] == [0.1, 0.25, 0.5, 1.0]
     assert payload["library_health"]["no_library_entry"] == 0
+    assert payload["preanalytic_sex"]["state"] == "no_verdict"
+    assert payload["preanalytic_sex"]["reason"] == "no_assertion"
     text = json.dumps(payload)
     assert "/Users/" not in text and "chunks" not in text.lower().replace("excluded_chunks", "")
+
+
+def test_sample_api_exposes_read_time_preanalytic_mismatch(server, monkeypatch) -> None:
+    comparison = {"state": "mismatch", "reason": None, "declared": "M", "observed": "female"}
+    monkeypatch.setattr(api_module.views, "sex_check_view", lambda _sample: comparison)
+    cookie = _session(server)
+    id12 = json.loads(_get(server, "/api/samples", cookie)[1])["samples"][0]["id12"]
+    response, data = _get(server, f"/api/samples/{id12}", cookie)
+    assert response.status == 200
+    assert json.loads(data)["preanalytic_sex"] == comparison
 
 
 def test_unknown_and_malformed_ids(server) -> None:
@@ -598,6 +610,39 @@ def test_headless_page_renders_a_chart_with_zero_csp_violations(server, tmp_path
     assert "Data table" in dom
     assert "Research use only. Not CLIA-validated. Not a diagnosis." in dom
     assert "FLAG: PII" in dom
+    assert "No operator sex assertion was supplied; no comparison was made." in dom
+    assert "FLAG: PRIVACY — can reveal pregnancy or transplant status." in dom
+
+
+@pytest.mark.skipif(_chrome() is None, reason="no Chrome/Chromium for the headless Trust/QC check")
+@pytest.mark.parametrize(
+    ("comparison", "expected"),
+    [
+        ({"state": "mismatch", "reason": None, "declared": "M", "observed": "female"},
+         "Pre-analytic mismatch: operator-declared M differs from the measured chrX/chrY call (female)"),
+        ({"state": "no_verdict", "reason": "no_definite_call", "declared": "M", "observed": None},
+         "No definite measured chrX/chrY call is available; no comparison verdict."),
+        ({"state": "no_verdict", "reason": "malformed_metadata", "declared": None, "observed": "female",
+          "problem": {"code": "TBX-LAB-023", "fix": "Restore the local sample record from a known-good backup before rerunning"}},
+         "Stored operator sex assertion metadata is malformed; no comparison verdict."),
+        ({"state": "unexpected", "reason": None, "declared": "M", "observed": "male"},
+         "Comparison state is unavailable; no comparison verdict."),
+    ],
+)
+def test_trust_qc_shows_preanalytic_verdict_and_privacy_flag(server, tmp_path, monkeypatch, comparison, expected) -> None:
+    monkeypatch.setattr(api_module.views, "sex_check_view", lambda _sample: comparison)
+    id12 = api_module.LabApi(server.app.store).samples()["samples"][0]["id12"]
+    dom = _dom_cdp(
+        [_chrome(), "--headless=new", "--disable-gpu", "--no-first-run", "--no-default-browser-check",
+         f"--user-data-dir={tmp_path / 'profile'}", "--window-size=1280,800",
+         server.issue_link() + f"&route=/sample/{id12}/trust-qc"], tmp_path / "profile",
+        ok=lambda page: 'data-ready="1"' in page and "Pre-analytic sex assertion check" in page,
+    )
+    assert expected in dom
+    assert "FLAG: PRIVACY — can reveal pregnancy or transplant status." in dom
+    assert "This is not a diagnostic sex or gender determination." in dom
+    if comparison["reason"] == "malformed_metadata":
+        assert "TBX-LAB-023: Restore the local sample record" in dom
 
 
 def test_read_contained_refuses_symlinked_ancestors_and_hard_links(tmp_path) -> None:

@@ -7,7 +7,7 @@
 # original evidence (D4).  citation_checked records who confirmed that every
 # DOI resolves and every displayed number matches the source (D27); an entry
 # without it renders an "UNVERIFIED citation" badge.
-version: 0.6.3
+version: 0.6.5
 hidden_algorithms: [read-summary, meth-calls]
 entries:
   # ---------------------------------------------------------------- bam-qc
@@ -604,6 +604,93 @@ entries:
     stability: {kind: absolute, tolerance: 3}
     citations: []
     citation_checked: {by: "lab build agent (Phase 1)", date: "2026-10-15", note: "No citation displayed."}
+
+  # ------------------------------------------------------------ instability
+  - algorithm_id: instability
+    metric_id: tmad
+    label: "Copy-number segment instability (weighted MAD)"
+    value_kind: positive
+    tier: SPECULATIVE
+    origin_tier: NEWER
+    origin_platform: "Illumina WGS; this estimator is an ONT Lab adaptation"
+    min_depth_x: null
+    reference: {kind: internal_cohort}
+    performance: null
+    performance_missing_reason: "No qualified ONT interval or cutoff for this bin-weighted estimator"
+    meaning_high: "More variation among copy-number segment log2 values; without a panel of normals, noise can have the same effect."
+    meaning_low: "Less variation among copy-number segment log2 values; a low value does not exclude a tumour."
+    confounders: ["no panel of normals", "low depth", "GC bias", "segmentation uncertainty", "constitutional CNVs"]
+    next_steps:
+      analytical: ["Compare only with protocol-matched cohort results", "Inspect copy-number bins and segments"]
+      clinical_setting: null
+    license_ids: [gpl-copyleft]
+    flags: []
+    headline: true
+    citations: []
+    citation_checked: {by: "lab build agent", date: "2026-10-16", note: "No citation or numerical performance claim displayed; exploratory Lab estimator."}
+
+  - algorithm_id: instability
+    metric_id: segments_used
+    label: "Segments with a log2 estimate used for TMAD"
+    value_kind: count
+    tier: SPECULATIVE
+    origin_tier: NEWER
+    origin_platform: "Lab copy-number artifact"
+    min_depth_x: null
+    reference: {kind: none}
+    performance: null
+    performance_missing_reason: "coverage count, not a diagnostic"
+    meaning_high: "More segments contributed to the instability estimate."
+    meaning_low: "Fewer segments contributed to the instability estimate."
+    confounders: ["segmentation", "masked bins"]
+    next_steps: {analytical: ["Inspect the selected copy-number segments"], clinical_setting: null}
+    license_ids: [gpl-copyleft]
+    flags: []
+    headline: false
+    citations: []
+    citation_checked: {by: "lab build agent", date: "2026-10-16", note: "No citation displayed; artifact coverage count."}
+
+  - algorithm_id: instability
+    metric_id: segments_missing_estimate
+    label: "Segments without a log2 estimate"
+    value_kind: count
+    tier: SPECULATIVE
+    origin_tier: NEWER
+    origin_platform: "Lab copy-number artifact"
+    min_depth_x: null
+    reference: {kind: none}
+    performance: null
+    performance_missing_reason: "coverage count, not a diagnostic"
+    meaning_high: "More segments were excluded because their log2 estimate was null."
+    meaning_low: "Fewer segments lacked a log2 estimate."
+    confounders: ["masked bins", "segmentation"]
+    next_steps: {analytical: ["Inspect the selected copy-number segments"], clinical_setting: null}
+    license_ids: [gpl-copyleft]
+    flags: []
+    headline: false
+    citations: []
+    citation_checked: {by: "lab build agent", date: "2026-10-16", note: "No citation displayed; missing-estimate count."}
+
+  - algorithm_id: instability
+    metric_id: bins_missing_estimate
+    label: "Segment bins without a log2 estimate"
+    value_kind: count
+    tier: SPECULATIVE
+    origin_tier: NEWER
+    origin_platform: "Lab copy-number artifact"
+    min_depth_x: null
+    reference: {kind: none}
+    performance: null
+    performance_missing_reason: "coverage count, not a diagnostic"
+    meaning_high: "More supporting bins were excluded because their segment log2 estimate was null."
+    meaning_low: "Fewer supporting bins lacked a segment log2 estimate."
+    confounders: ["masked bins", "segmentation"]
+    next_steps: {analytical: ["Inspect the selected copy-number segments"], clinical_setting: null}
+    license_ids: [gpl-copyleft]
+    flags: []
+    headline: false
+    citations: []
+    citation_checked: {by: "lab build agent", date: "2026-10-16", note: "No citation displayed; missing-estimate bin count."}
 
   # ------------------------------------------------------------ modbase-qc
   - algorithm_id: modbase-qc
@@ -2513,3 +2600,125 @@ entries:
     headline: false
     citations: []
     citation_checked: {by: "Lab method contract", date: "2026-10-16", note: "No ONT cfDNA assay citation or clinical cutoff is claimed; qPCR context is separate."}
+  # ----------------------------------------------- short-read-fragment-size
+  - algorithm_id: short-read-fragment-size
+    metric_id: mode_bp
+    label: "Short-read fragment mode (absolute TLEN, 100–250 bp)"
+    value_kind: positive
+    tier: SPECULATIVE
+    origin_tier: SPECULATIVE
+    origin_platform: "prealigned Illumina paired-end BAM"
+    min_depth_x: null
+    reference: {kind: none}
+    performance: null
+    performance_missing_reason: "No qualified platform-and-protocol-matched healthy interval for this TLEN estimator"
+    missing_value_caption: "No qualifying first-mate templates in the 100–250 bp mode window."
+    meaning_high: "The most frequent qualifying TLEN in the mono-nucleosome window is longer."
+    meaning_low: "The most frequent qualifying TLEN in the mono-nucleosome window is shorter."
+    confounders: ["library insert-size selection", "alignment and pair flags", "pre-analytic handling"]
+    next_steps:
+      analytical: ["Inspect the TLEN histogram and template count", "Compare only with a matched short-read cohort"]
+      clinical_setting: null
+    license_ids: []
+    flags: []
+    headline: true
+    stability: {kind: relative, tolerance: 0.10}
+    citations: []
+    citation_checked: {by: "Lab TLEN engineering review", date: "2026-10-16", note: "Exact estimator is absolute TLEN on one D21-eligible proper first mate per pair. No published clinical interval is claimed."}
+
+  - algorithm_id: short-read-fragment-size
+    metric_id: short_fraction_lt150
+    label: "Short-read template share (50–149 of 50–1000 bp TLEN)"
+    value_kind: proportion
+    tier: SPECULATIVE
+    origin_tier: SPECULATIVE
+    origin_platform: "prealigned Illumina paired-end BAM"
+    min_depth_x: null
+    reference: {kind: none}
+    performance: null
+    performance_missing_reason: "No qualified platform-and-protocol-matched healthy interval for this TLEN estimator"
+    missing_value_caption: "No qualifying templates in the 50–1000 bp denominator."
+    meaning_high: "A larger share of qualifying TLEN values falls below 150 bp."
+    meaning_low: "A smaller share of qualifying TLEN values falls below 150 bp."
+    confounders: ["library insert-size selection", "alignment and pair flags", "pre-analytic handling"]
+    next_steps:
+      analytical: ["Inspect the TLEN histogram and template count", "Compare only with a matched short-read cohort"]
+      clinical_setting: null
+    license_ids: []
+    flags: []
+    headline: false
+    stability: {kind: proportion}
+    citations: []
+    citation_checked: {by: "Lab TLEN engineering review", date: "2026-10-16", note: "Engineering numerator 50–149 bp and denominator 50–1000 bp; no healthy interval is claimed."}
+
+  - algorithm_id: short-read-fragment-size
+    metric_id: peak_mono_bp
+    label: "Short-read mono-nucleosome TLEN peak (100–250 bp)"
+    value_kind: positive
+    tier: SPECULATIVE
+    origin_tier: SPECULATIVE
+    origin_platform: "prealigned Illumina paired-end BAM"
+    min_depth_x: null
+    reference: {kind: none}
+    performance: null
+    performance_missing_reason: "No qualified short-read healthy interval"
+    meaning_high: "The observed mono-nucleosome TLEN peak is longer."
+    meaning_low: "The observed mono-nucleosome TLEN peak is shorter."
+    confounders: ["library insert-size selection", "alignment and pair flags"]
+    next_steps:
+      analytical: ["Inspect the TLEN histogram and template count"]
+      clinical_setting: null
+    license_ids: []
+    flags: []
+    headline: false
+    stability: {kind: relative, tolerance: 0.10}
+    citations: []
+    citation_checked: {by: "Lab TLEN engineering review", date: "2026-10-16", note: "Same engineering 100–250 bp mode window as the TLEN headline; no healthy interval is claimed."}
+
+  - algorithm_id: short-read-fragment-size
+    metric_id: peak_di_bp
+    label: "Short-read di-nucleosome TLEN peak (250–450 bp)"
+    value_kind: positive
+    tier: SPECULATIVE
+    origin_tier: SPECULATIVE
+    origin_platform: "prealigned Illumina paired-end BAM"
+    min_depth_x: null
+    reference: {kind: none}
+    performance: null
+    performance_missing_reason: "No qualified short-read healthy interval"
+    meaning_high: "The observed di-nucleosome TLEN peak is longer."
+    meaning_low: "The observed di-nucleosome TLEN peak is shorter."
+    confounders: ["library insert-size selection", "alignment and pair flags"]
+    next_steps:
+      analytical: ["Inspect the TLEN histogram and template count"]
+      clinical_setting: null
+    license_ids: []
+    flags: []
+    headline: false
+    stability: {kind: relative, tolerance: 0.10}
+    citations: []
+    citation_checked: {by: "Lab TLEN engineering review", date: "2026-10-16", note: "Engineering 250–450 bp mode window; no healthy interval is claimed."}
+
+  - algorithm_id: short-read-fragment-size
+    metric_id: periodicity_10bp_power
+    label: "Short-read TLEN 10 bp periodicity (FFT power share, 50–150 bp)"
+    value_kind: proportion
+    tier: SPECULATIVE
+    origin_tier: SPECULATIVE
+    origin_platform: "prealigned Illumina paired-end BAM"
+    min_depth_x: null
+    reference: {kind: none}
+    performance: null
+    performance_missing_reason: "No qualified short-read healthy interval"
+    meaning_high: "More of the measured short-TLEN histogram power falls in the 10–11 bp band."
+    meaning_low: "Less of the measured short-TLEN histogram power falls in the 10–11 bp band."
+    confounders: ["short-fragment count", "library insert-size selection", "alignment and pair flags"]
+    next_steps:
+      analytical: ["Inspect the 50–150 bp TLEN histogram and count"]
+      clinical_setting: null
+    license_ids: []
+    flags: []
+    headline: false
+    stability: {kind: proportion}
+    citations: []
+    citation_checked: {by: "Lab TLEN engineering review", date: "2026-10-16", note: "Engineering FFT statistic reused over TLEN bins, not an established clinical threshold."}
