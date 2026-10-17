@@ -336,6 +336,50 @@ def test_validated_microbe_exclusions_reach_profile_payload(tmp_path: Path, monk
     assert profile["missing_sequence_unmapped_reads"] == 2
 
 
+def test_profile_refuses_artifact_from_newly_selected_attempt(tmp_path: Path, monkeypatch) -> None:
+    from traceback_lab import microbial_view as view
+
+    store = LabStore(tmp_path / "root")
+    store.ensure()
+    source, input_id, identity = "a" * 64, "b" * 64, "c" * 64
+    prov = provenance(tool="fixture", parameters_sha256=identity, source_id=source,
+                      input_id=input_id, reference_id="ref")
+    summary = ResultEnvelope(algorithm_id="read-summary", algorithm_version="1", status="ok", provenance=prov)
+
+    def result(denominator: int) -> ResultEnvelope:
+        return ResultEnvelope(algorithm_id="microbial", algorithm_version="3", status="ok",
+                              provenance=prov, metrics=[
+                                  Metric(metric_id="primary_reads", value=denominator),
+                                  Metric(metric_id="candidate_unmapped_reads", value=0),
+                                  Metric(metric_id="too_short_unmapped_reads", value=0),
+                                  Metric(metric_id="missing_sequence_unmapped_reads", value=0),
+                                  Metric(metric_id="omitted_taxa", value=0),
+                                  Metric(metric_id="microbial_estimated_reads", value=0.0),
+                                  Metric(metric_id="microbial_rpm_primary", value=0.0)])
+
+    def artifact(denominator: int) -> bytes:
+        return json.dumps({
+            "schema": "traceback.lab.microbial-profile.v1", "source_id": source, "input_id": input_id,
+            "database_sha256": "d" * 64, "database_source_label": "synthetic database",
+            "read_length": 75, "denominator": denominator, "candidate_unmapped_reads": 0,
+            "too_short_unmapped_reads": 0, "missing_sequence_unmapped_reads": 0,
+            "omitted_taxa": 0, "taxa": [],
+        }).encode()
+
+    first = result(1)
+    store.publish_result(first, input_id=input_id, artifacts={"microbial_profile.json": artifact(1)})
+    sample = SampleView(source, source[:12], False,
+                        InputView("full", input_id, None, {}, {"read-summary": summary, "microbial": first}))
+    monkeypatch.setattr(view, "_tool", lambda name: (name, "e" * 64))
+    monkeypatch.setattr(view, "inspect_database", lambda *_args, **_kwargs: SimpleNamespace(
+        sha256="d" * 64, source_label="synthetic database", read_length=75))
+    monkeypatch.setattr(view, "resolve_reference", lambda *_args, **_kwargs: SimpleNamespace(sha256="f" * 64))
+    monkeypatch.setattr(view, "execution_identity", lambda *_args, **_kwargs: identity)
+    assert profile_for_sample(store, sample, None, None, "not_built")["state"] == "cohort_unavailable"
+    store.publish_result(result(2), input_id=input_id, artifacts={"microbial_profile.json": artifact(2)})
+    assert profile_for_sample(store, sample, None, None, "not_built")["state"] == "stored_profile_unavailable"
+
+
 @pytest.fixture(scope="module")
 def microbial_dom_root(tmp_path_factory, synthetic_world):
     from traceback_runner import cli as signed_cli
