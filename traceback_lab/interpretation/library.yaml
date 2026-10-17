@@ -2764,7 +2764,7 @@ entries:
     flags: [FDA, PRIVACY, LEGAL]
     headline: true
     stability: {kind: proportion}
-    citations: [{doi: "10.1371/journal.pone.0146997", note: "chrY background/full-male response approach on a different sequencing platform"}]
+    citations: ["doi:10.1371/journal.pone.0146997"]
     citation_checked: {by: "Lab S4 fetal-fraction method review", date: "2026-10-17", note: "Primary method reviewed; no ONT calibration supplied or assumed."}
 
   - <<: *fetal_chry_base
