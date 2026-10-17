@@ -21,7 +21,7 @@ from .controls import DEFAULT_TFS, TF_TOLERANCE, cna_specs, run_derived, split_s
 from .identity import validate_fraction
 from .ingest import id12_for, resolve_sample
 from .problems import EXIT_OK, EXIT_PARTIAL, LabProblem
-from .run_command import _interrupted_handler, _progress, _stored_input, _target_from_input
+from .run_command import _echo, _interrupted_handler, _progress, _stored_input, _stored_platform, _target_from_input
 from .runner import DEFAULT_TIMEOUT_S, run_plan
 from .scrub import Scrubber
 from .store import LabStore, new_run_id
@@ -57,12 +57,16 @@ def add_simulate_parser(commands: Any, common: Callable[[argparse.ArgumentParser
     cna.add_argument("sample", metavar="ID12|latest")
     cna.add_argument("--tf", default=",".join(str(tf) for tf in DEFAULT_TFS), metavar="0.03,0.10,0.30")
     cna.add_argument("--force", action="store_true")
+    cna.add_argument("--cohort", metavar="ID", help="use this built protocol-matched cohort's panel of normals")
+    cna.add_argument("--verbose", action="store_true", help="stream tool stderr live (never stored)")
     cna.add_argument("--timeout-s", type=float, default=DEFAULT_TIMEOUT_S, metavar="S")
     common(cna)
     cna.set_defaults(handler=simulate_command)
     halves = kinds.add_parser("split", help="split-half pseudo-replicate (sampling noise)")
     halves.add_argument("sample", metavar="ID12|latest")
     halves.add_argument("--force", action="store_true")
+    halves.add_argument("--cohort", metavar="ID", help="use this built protocol-matched cohort's panel of normals")
+    halves.add_argument("--verbose", action="store_true", help="stream tool stderr live (never stored)")
     halves.add_argument("--timeout-s", type=float, default=DEFAULT_TIMEOUT_S, metavar="S")
     common(halves)
     halves.set_defaults(handler=simulate_command)
@@ -75,6 +79,14 @@ def simulate_command(args: argparse.Namespace, store: LabStore) -> tuple[int, di
     progress = _progress(args.as_json)
     source_id = resolve_sample(store, args.sample)
     aligned, record = _stored_input(store, source_id)
+    if kind == "cna":
+        platform = _stored_platform(aligned)
+        if platform != "ont":
+            raise LabProblem(
+                "TBX-LAB-024", cause="synthetic CNA spike requires an ONT input",
+                fix="Use an ONT sample for CNA spike, or use simulate split for this Illumina sample",
+                data={"input_id": aligned.input_id, "platform": platform},
+            )
     entries = registry.registry_entries()
     by_id = {alg.id: entry for entry, alg in entries}
     items = registry.plan([alg for _, alg in entries])
@@ -95,6 +107,9 @@ def simulate_command(args: argparse.Namespace, store: LabStore) -> tuple[int, di
                 bool(record.get("example")),
                 store,
             )
+            from .pon_consumer import bind_target
+
+            items = bind_target(store, items, parent, aligned.manifest, cohort_id=args.cohort)
             scrubber = Scrubber(root=store.root)
             try:
                 # Intermediates (read-summary, meth-calls) on the parent; derived
@@ -104,6 +119,7 @@ def simulate_command(args: argparse.Namespace, store: LabStore) -> tuple[int, di
                 summary_results = run_plan(
                     store, lock, log, parent, summary_items, by_id, run_id=run_id,
                     timeout_s=args.timeout_s, scrubber=scrubber, progress=progress,
+                    echo=_echo(args.verbose),
                 )
                 read_summary = next((r for r in summary_results if r.algorithm_id == "read-summary"), None)
                 parent_upstream = {r.algorithm_id: r for r in summary_results if r.status == "ok"}
@@ -129,7 +145,8 @@ def simulate_command(args: argparse.Namespace, store: LabStore) -> tuple[int, di
                 runs = run_derived(
                     store, lock, log, parent, specs, items, by_id, run_id=run_id,
                     read_summary=read_summary, force=args.force, timeout_s=args.timeout_s,
-                    scrubber=scrubber, progress=progress, parent_upstream=parent_upstream,
+                    scrubber=scrubber, progress=progress, echo=_echo(args.verbose),
+                    parent_upstream=parent_upstream,
                 )
             except KeyboardInterrupt:
                 log.append("run_end", status="interrupted", exit_code=6, step=lock.step)

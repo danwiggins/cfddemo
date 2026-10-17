@@ -20,7 +20,7 @@ from traceback_lab.registry import AlgorithmOutput, InputContext, PlanItem, Skip
 from traceback_lab.run_command import _parent_intermediates
 from traceback_lab.runner import RunTarget, StepResult, run_plan
 from traceback_lab.scrub import Scrubber
-from traceback_lab.store import LabStore
+from traceback_lab.store import LabStore, new_run_id
 
 
 def _segment(value: float | None, bins: int) -> dict[str, float | int | None]:
@@ -201,6 +201,121 @@ def test_derived_runs_use_their_own_copy_number_artifacts(tmp_path: Path, monkey
         assert run.results[0].artifacts_dir != full[0].artifacts_dir
 
 
+def test_algorithm_run_records_resource_measurements(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from traceback_lab import runner
+
+    actual_run_pipeline = runner.run_pipeline
+
+    def known_tree_sample(*args, **kwargs):
+        outcome = actual_run_pipeline(*args, **kwargs)
+        outcome.sampled_tree_peak_rss_bytes = 7_654_321
+        return outcome
+
+    monkeypatch.setattr(runner, "run_pipeline", known_tree_sample)
+    store = LabStore(tmp_path / "store")
+    store.ensure()
+    log = store.run_log("r-20261016-1200-aaab")
+    target = RunTarget(
+        input_id="a" * 64, source_id="b" * 64, input_dir=tmp_path,
+        reference_id="hg38", reference_sha256="c" * 64, eligible_reads=2_000_000,
+    )
+    result = run_plan(
+        store, None, log, target, [PlanItem(FAKE_CN, False)],
+        {"copy-number": "tests.lab.test_instability:FAKE_CN"},
+        run_id=log.run_id, scrubber=Scrubber(root=store.root),
+    )[0]
+    assert result.status == "ok"
+    assert result.peak_rss_bytes is not None and result.peak_rss_bytes > 0
+    assert result.peak_tree_rss_bytes == 7_654_321
+    assert result.peak_disk_bytes is not None and result.peak_disk_bytes > 0
+    assert result.public()["peak_disk_bytes"] == result.peak_disk_bytes
+    assert result.public()["peak_tree_rss_bytes"] == 7_654_321
+    step = next(event for event in log.events() if event["event"] == "step_end")
+    assert step["peak_rss_bytes"] == result.peak_rss_bytes
+    assert step["peak_tree_rss_bytes"] == result.peak_tree_rss_bytes
+    assert step["peak_disk_bytes"] == result.peak_disk_bytes
+
+    cached_run_id = new_run_id()
+    cached_log = store.run_log(cached_run_id)
+    cached = run_plan(
+        store, None, cached_log, target, [PlanItem(FAKE_CN, False)],
+        {"copy-number": "tests.lab.test_instability:FAKE_CN"},
+        run_id=cached_run_id, scrubber=Scrubber(root=store.root),
+    )[0]
+    assert cached.status == "ok" and cached.cached
+    assert cached.parameters_sha256 == result.parameters_sha256
+    assert cached.attempt_id == result.attempt_id
+    assert (cached.peak_rss_bytes, cached.peak_tree_rss_bytes, cached.peak_disk_bytes) == (None, None, None)
+    assert cached.public()["cached"] is True
+
+
+def test_failed_algorithm_records_sampled_tree_memory(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from traceback_lab import runner
+
+    actual_run_pipeline = runner.run_pipeline
+
+    def known_tree_sample(*args, **kwargs):
+        outcome = actual_run_pipeline(*args, **kwargs)
+        outcome.sampled_tree_peak_rss_bytes = 8_765_432
+        outcome.stages[0].returncode = 1
+        return outcome
+
+    monkeypatch.setattr(runner, "run_pipeline", known_tree_sample)
+    store = LabStore(tmp_path / "store")
+    store.ensure()
+    log = store.run_log(new_run_id())
+    target = RunTarget(
+        input_id="a" * 64, source_id="b" * 64, input_dir=tmp_path,
+        reference_id="hg38", reference_sha256="c" * 64, eligible_reads=2_000_000,
+    )
+    result = run_plan(
+        store, None, log, target, [PlanItem(FAKE_CN, False)],
+        {"copy-number": "tests.lab.test_instability:FAKE_CN"},
+        run_id=log.run_id, scrubber=Scrubber(root=store.root),
+    )[0]
+    assert result.status == "failed"
+    assert result.public()["peak_tree_rss_bytes"] == 8_765_432
+    step = next(event for event in log.events() if event["event"] == "step_end")
+    assert step["peak_tree_rss_bytes"] == 8_765_432
+
+
+def test_disk_sampling_only_walks_the_current_step_scratch(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from traceback_lab import pipeline
+
+    store = LabStore(tmp_path / "store")
+    store.ensure()
+    stale = store.lab / "tmp" / "microbial-stale"
+    stale.mkdir(parents=True)
+    (stale / "leftover").write_bytes(b"x" * 2_000_000)
+    log = store.run_log(new_run_id())
+    expected = store.lab / "tmp" / log.run_id / "copy-number-full"
+    walked: list[Path] = []
+    directory_bytes = pipeline.directory_bytes
+
+    def record_walk(path: Path) -> int:
+        walked.append(path)
+        return directory_bytes(path)
+
+    monkeypatch.setattr(pipeline, "directory_bytes", record_walk)
+    target = RunTarget(
+        input_id="a" * 64, source_id="b" * 64, input_dir=tmp_path,
+        reference_id="hg38", reference_sha256="c" * 64, eligible_reads=2_000_000,
+    )
+    result = run_plan(
+        store, None, log, target, [PlanItem(FAKE_CN, False)],
+        {"copy-number": "tests.lab.test_instability:FAKE_CN"},
+        run_id=log.run_id, scrubber=Scrubber(root=store.root),
+    )[0]
+    assert result.status == "ok" and result.peak_disk_bytes is not None
+    assert walked and all(path == expected for path in walked)
+
+
 def test_non_ok_copy_number_propagates_as_upstream_skip(tmp_path: Path) -> None:
     @dataclass
     class SkippingCopyNumber(FakeCopyNumber):
@@ -222,3 +337,63 @@ def test_non_ok_copy_number_propagates_as_upstream_skip(tmp_path: Path) -> None:
     assert [(result.status, result.skip_reason) for result in results] == [
         ("skipped", "missing_asset"), ("skipped", "upstream"),
     ]
+
+
+def test_derived_copy_number_skip_overrides_seeded_parent_result(tmp_path: Path) -> None:
+    @dataclass
+    class SkippingCopyNumber(FakeCopyNumber):
+        def preflight(self, ctx: InputContext) -> Skip:
+            return Skip("missing_asset", "synthetic derived copy-number unavailable")
+
+    store = LabStore(tmp_path / "store")
+    store.ensure()
+    parent = StepResult("copy-number", "ok", True, "e" * 64, artifacts_dir=str(tmp_path))
+    target = RunTarget(
+        input_id="d" * 64, source_id="b" * 64, input_dir=tmp_path,
+        reference_id="hg38", reference_sha256="c" * 64, label="0.5",
+        eligible_reads=2_000_000, derived={"transform": "downsample", "fraction": 0.5},
+    )
+    results = run_plan(
+        store, None, store.run_log("r-20261016-1202-aaac"), target,
+        [PlanItem(SkippingCopyNumber("copy-number"), True), PlanItem(INSTABILITY, False)],
+        {"copy-number": "tests.lab.test_instability:FAKE_CN", "instability": "instability:INSTABILITY"},
+        run_id="r-20261016-1202-aaac", scrubber=Scrubber(root=store.root),
+        upstream_results={"copy-number": parent},
+    )
+    assert [(result.status, result.skip_reason) for result in results] == [
+        ("skipped", "missing_asset"), ("skipped", "upstream"),
+    ]
+    assert results[1].parameters_sha256 == execution_identity(
+        INSTABILITY, reference_sha256=target.reference_sha256,
+        upstream=[{"algorithm_id": "copy-number", "parameters_sha256": results[0].parameters_sha256}],
+    )
+    assert results[1].parameters_sha256 != execution_identity(
+        INSTABILITY, reference_sha256=target.reference_sha256,
+        upstream=[{"algorithm_id": "copy-number", "parameters_sha256": parent.parameters_sha256}],
+    )
+
+
+def test_null_instability_output_remains_uninterpretable_with_coverage_counts(tmp_path: Path) -> None:
+    selected = tmp_path / "copy-number" / "artifacts"
+    selected.mkdir(parents=True)
+    (selected / "cn_segments.json").write_text(json.dumps({"segments": [_segment(None, 2)]}))
+    ctx = InputContext(
+        root=tmp_path, source_id="a" * 64, input_id="b" * 64,
+        reference_id="hg38", reference_sha256="c" * 64, input_dir=tmp_path,
+        eligible_reads=2_000_000, extras={"upstream": {"copy-number": str(selected)}},
+    )
+    produced = INSTABILITY.run(ctx, tmp_path)
+    envelope = ResultEnvelope(
+        algorithm_id="instability", algorithm_version=INSTABILITY.version, status="ok",
+        provenance=provenance(tool="fixture", parameters_sha256="d" * 64,
+                              source_id=ctx.source_id, input_id=ctx.input_id, reference_id="hg38"),
+        metrics=produced.metrics,
+    )
+    interpreted = interpret_result(
+        envelope, load_library(), cohorts={"tmad": Cohort(values=[0.1] * 10)},
+    )
+    by_id = {item.metric_id: item for item in interpreted}
+    assert by_id["tmad"].value is None and by_id["tmad"].n == 0
+    assert by_id["tmad"].interpretation.state == "not_interpretable"
+    assert by_id["tmad"].interpretation.percentile is None
+    assert by_id["bins_missing_estimate"].value == 2
