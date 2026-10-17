@@ -130,11 +130,15 @@ class Methylbert(Base):
         probe_gpu = (_sha(ctx.extras.get("methylbert_bundle_sha256")) is not None
                      and _sha(ctx.extras.get("methylbert_code_sha256")) is not None
                      and type(ctx.extras.get("methylbert_min_classified_reads")) is int)
+        try:
+            runtime = numerical_runtime_identity(probe_gpu=probe_gpu, isolated_gpu=True)
+        except RuntimeRefusal:
+            runtime = {"probe_error": "isolated_numerical_runtime_unavailable"}
         return {**self.parameters, "basecall_model": model,
                 "bundle_sha256": ctx.extras.get("methylbert_bundle_sha256"),
                 "code_sha256": ctx.extras.get("methylbert_code_sha256"),
                 "min_classified_reads": ctx.extras.get("methylbert_min_classified_reads"),
-                "numerical_runtime": numerical_runtime_identity(probe_gpu=probe_gpu, isolated_gpu=True),
+                "numerical_runtime": runtime,
                 "execution_code_sha256s": _execution_code_sha256s()}
 
     def preflight(self, ctx: InputContext) -> Ready | Skip:
@@ -149,6 +153,11 @@ class Methylbert(Base):
         code_sha = _sha(ctx.extras.get("methylbert_code_sha256"))
         if bundle_sha is None or code_sha is None:
             return Skip("missing_asset", "supply a trusted registered bundle and installed-code SHA-256")
+        planned = ctx.extras.get("planned_parameters")
+        if isinstance(planned, dict) and planned.get("numerical_runtime") == {
+            "probe_error": "isolated_numerical_runtime_unavailable",
+        }:
+            return Skip("model_not_ready", "the isolated numerical runtime probe failed during planning")
         minimum_support = ctx.extras.get("methylbert_min_classified_reads")
         if type(minimum_support) is not int or not 1 <= minimum_support <= ctx.eligible_reads:
             return Skip("unqualified_support", "supply an independently established minimum classified-read count")
@@ -179,7 +188,10 @@ class Methylbert(Base):
             if directory.exists() or directory.is_symlink():
                 raise RuntimeError("registered MethylBERT bundle failed integrity verification") from exc
             return Skip("missing_asset", f"the trusted MethylBERT bundle is unavailable: {type(exc).__name__}")
-        runtime = numerical_runtime_identity(probe_gpu=True, isolated_gpu=True)
+        try:
+            runtime = numerical_runtime_identity(probe_gpu=True, isolated_gpu=True)
+        except RuntimeRefusal:
+            return Skip("model_not_ready", "the isolated numerical runtime probe failed")
         gpu = bool(runtime["cuda"] and runtime["cuda"]["available"])
         if not gpu:
             return Skip("missing_gpu", "MethylBERT needs a usable CUDA GPU")

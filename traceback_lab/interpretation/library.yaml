@@ -30,7 +30,7 @@ entries:
       clinical_setting: null
     license_ids: []
     flags: []
-    headline: false
+    headline: true
     stability: {kind: scales_with_depth, tolerance: 0.10}
     citations: []
     citation_checked: {by: "lab build agent", date: "2026-10-15", note: "No citation displayed; QC count."}
@@ -55,7 +55,7 @@ entries:
       clinical_setting: null
     license_ids: []
     flags: []
-    headline: true
+    headline: false
     stability: {kind: proportion}
     citations: []
     citation_checked: {by: "lab build agent", date: "2026-10-15", note: "No citation displayed; QC bands are provisional team defaults (not from literature)."}
@@ -2517,7 +2517,7 @@ entries:
       clinical_setting: null
     license_ids: [methylbert-mit]
     flags: []
-    headline: true
+    headline: false
     stability: {kind: proportion}
     citations: ["doi:10.1038/s41467-025-55920-z"]
     citation_checked: {by: "Lab integration", date: "2026-10-17", note: "The MethylBERT paper and pinned upstream source describe read-level tumour/normal deconvolution; they do not qualify this operator checkpoint or ONT Lab adapter."}

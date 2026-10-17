@@ -118,9 +118,12 @@ def main(argv: list[str]) -> int:
     if _file_sha256(Path(str(request["reference"]))) != request["reference_sha256"]:
         raise ValueError("MethylBERT child reference changed after registration")
 
-    # -I excludes the source checkout and environment PYTHONPATH. Insert only
-    # the Lab source that owns this script; the model package stays site-local.
-    sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
+    # Keep installed numerical packages ahead of the Lab source checkout.
+    sys.path.append(str(Path(__file__).resolve().parent.parent))
+    import traceback_lab
+
+    if Path(traceback_lab.__file__).resolve() != Path(__file__).resolve().parent / "__init__.py":
+        raise ValueError("MethylBERT child loaded a different Lab source tree")
     from traceback_lab.methylbert_runtime import (
         PINNED_UPSTREAM_COMMIT, apply_precision_flags, installed_identity, require_numerical_runtime,
     )

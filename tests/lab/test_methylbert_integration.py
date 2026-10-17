@@ -94,6 +94,25 @@ def test_bundle_code_and_basecaller_each_change_execution_identity(tmp_path, mon
     assert original != identity(first)
 
 
+def test_failed_isolated_probe_becomes_a_planned_methylbert_skip(tmp_path, monkeypatch):
+    monkeypatch.setattr(adapter, "header_model", lambda *_: "dorado-model")
+
+    def failed_probe(**_kwargs):
+        raise RuntimeRefusal("isolated numerical runtime probe failed")
+
+    monkeypatch.setattr(adapter, "numerical_runtime_identity", failed_probe)
+    ctx = _context(
+        tmp_path, methylbert_bundle_sha256="b" * 64, methylbert_code_sha256="c" * 64,
+        methylbert_min_classified_reads=100000,
+    )
+    planned = adapter.METHYLBERT.identity_parameters(ctx)
+    assert planned["numerical_runtime"] == {"probe_error": "isolated_numerical_runtime_unavailable"}
+    ctx.extras["planned_parameters"] = planned
+    assert adapter.METHYLBERT.preflight(ctx) == Skip(
+        "model_not_ready", "the isolated numerical runtime probe failed during planning",
+    )
+
+
 def test_preflight_uses_measured_eligible_depth_not_classified_support(tmp_path, monkeypatch):
     ctx = _context(
         tmp_path, reference_fasta=str(tmp_path / "reference.fa"),
