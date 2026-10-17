@@ -6,6 +6,7 @@ import hashlib
 import json
 import subprocess
 from argparse import Namespace
+from dataclasses import replace
 from pathlib import Path
 
 import pytest
@@ -16,8 +17,10 @@ from traceback_lab.adapters.griffin_run import count_d21_pairs
 from traceback_lab.algorithms.griffin import GRIFFIN
 from traceback_lab.griffin_assets import GriffinAssetError, inspect_griffin_assets, register_griffin_assets
 from traceback_lab.problems import EXIT_BLOCKED
-from traceback_lab.registry import InputContext, Skip
-from traceback_lab.store import LabStore
+from traceback_lab.registry import InputContext, PlanItem, Skip
+from traceback_lab.runner import RunTarget, run_plan
+from traceback_lab.scrub import Scrubber
+from traceback_lab.store import LabStore, new_run_id
 from traceback_lab.asset_command import _griffin_inspect, _griffin_register
 
 
@@ -258,6 +261,57 @@ def test_bam_scan_failure_omits_private_path_from_skip(
     assert decision.reason_code == ("input_unavailable" if error is OSError else "platform")
     assert str(tmp_path) not in decision.message
     assert "aligned BAM" in decision.message
+
+
+def test_unreadable_bam_skip_is_published_without_private_path(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    import traceback_lab.algorithms.griffin as module
+
+    _available_toolchain(monkeypatch)
+    private_path = tmp_path / "private-donor" / "aligned.bam"
+
+    def fail_scan(_: Path) -> None:
+        raise OSError(f"cannot open {private_path}")
+
+    monkeypatch.setattr(module, "_require_paired_input", fail_scan)
+    store = LabStore(tmp_path)
+    store.ensure()
+    run_id = new_run_id()
+    target = RunTarget(
+        input_id="2" * 64, source_id="1" * 64, input_dir=private_path.parent,
+        reference_id="hg38", reference_sha256="3" * 64, platform="illumina",
+        eligible_reads=5_000_000, extras={"reference_fasta": str(tmp_path / "hg38.fa")},
+    )
+    # The real read-summary upstream supplies the depth gate; this regression
+    # isolates publication after that gate has populated the RunTarget.
+    algorithm = replace(GRIFFIN, upstream=())
+    result = run_plan(
+        store, None, store.run_log(run_id), target, [PlanItem(algorithm, False)], {},
+        run_id=run_id, scrubber=Scrubber(root=tmp_path),
+    )[0]
+    assert result.status == "skipped" and result.skip_reason == "input_unavailable"
+    envelope = store.read_result(target.input_id, algorithm.id, result.parameters_sha256)
+    assert envelope is not None and envelope.status == "skipped"
+    assert envelope.skip_reason == "input_unavailable"
+    assert "aligned BAM" in envelope.skip_message
+    assert str(tmp_path) not in envelope.to_bytes().decode()
+
+
+def test_missing_canonical_hg38_autosomes_is_reference_skip(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    import traceback_lab.algorithms.griffin as module
+
+    _available_toolchain(monkeypatch)
+    monkeypatch.setattr(module, "_require_paired_input", lambda _: 10)
+
+    def no_autosomes(_: Path) -> int:
+        raise ValueError("Griffin requires canonical hg38 autosomes")
+
+    monkeypatch.setattr(module, "count_d21_pairs", no_autosomes)
+    ctx = InputContext(root=tmp_path, source_id="1" * 64, input_id="2" * 64,
+                       reference_id="hg38", reference_sha256="3" * 64,
+                       input_dir=tmp_path, platform="illumina", eligible_reads=5_000_000,
+                       extras={"reference_fasta": str(tmp_path / "hg38.fa")})
+    decision = GRIFFIN.preflight(ctx)
+    assert decision == Skip("reference", "Griffin requires canonical hg38 autosomes")
 
 
 def test_pair_gate_counts_molecules_once_and_requires_illumina_header(tmp_path: Path) -> None:

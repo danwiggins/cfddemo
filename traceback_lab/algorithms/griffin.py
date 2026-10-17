@@ -92,6 +92,8 @@ class Griffin(Base):
             return Skip("input_unavailable", "Griffin could not read aligned BAM; inspect the Lab input and retry")
         except ValueError as exc:
             message = str(exc)
+            if message == "Griffin requires canonical hg38 autosomes":
+                return Skip("reference", message)
             return Skip("platform", message if message in _SAFE_BAM_VALIDATION_MESSAGES else
                         "Griffin could not validate the aligned BAM for paired-end Illumina input")
         if profile_reads == 0:
