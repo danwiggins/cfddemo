@@ -918,15 +918,20 @@ def write_source(
 ) -> dict[str, Any]:
     """Hashes only, never paths: chunk list, exclusions and inputs by aligner."""
 
+    from .platforms import from_rg_lines
+
     stored = source_record(store, aligned.source_id) or {}
     previous = with_sex_assertion(stored, declared_sex)
     assertion_added = previous is not stored
+    platform = aligned.manifest.get("platform")
+    if platform is None:
+        platform = from_rg_lines(chunkset.rg_lines) if aligned.manifest.get("kind") == "prealigned" else "ont"
     inputs = [entry for entry in previous.get("inputs", []) if entry.get("input_id") != aligned.input_id]
     inputs.append(
         {
             "input_id": aligned.input_id,
             "kind": aligned.manifest.get("kind"),
-            "platform": aligned.manifest.get("platform", "ont"),
+            "platform": platform,
             "tools": aligned.manifest.get("tools"),
             "reference_id": aligned.manifest.get("reference_id"),
             "used_utc": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
