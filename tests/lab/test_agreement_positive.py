@@ -173,7 +173,7 @@ def test_positive_agreement_renders_three_plots_with_flags(tmp_path, monkeypatch
     assert dom.count("Data table") == 3
     assert dom.count("FLAG: FDA") >= 3 and "FLAG: CLIA" in dom
     assert "2 covered markers, 20 CpG calls" in dom
-    assert "condition number 1" in dom and "Fit residual RMS 0" in dom
+    assert "condition number 1" in dom and "Unnormalized weight-fit residual RMS 0" in dom
     assert "Matched cohort median 165 (n = 10)" in dom
     assert "not independent confirmation" in dom and "whole-genome doubling" in dom
     assert "aggregate score" not in dom.lower()

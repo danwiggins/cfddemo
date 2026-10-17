@@ -181,6 +181,9 @@ def test_reference_model_genome_and_depth_must_match(
     assert METH_TF.preflight(ctx).reason_code == "reference"
     monkeypatch.setattr(cell_origin, "header_model", lambda *_: None)
     assert METH_TF.preflight(ctx).reason_code == "missing_tags"
+    monkeypatch.setattr(cell_origin, "declared_models", lambda *_: ("model-a", "model-b"))
+    decision = METH_TF.preflight(ctx)
+    assert decision.reason_code == "missing_tags" and "multiple modified-base models" in decision.message
 
 
 def test_boundary_fit_keeps_nonzero_residual_with_two_markers(

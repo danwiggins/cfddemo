@@ -945,7 +945,7 @@
         const support = pair.support;
         const residual = support.fit_rms === null
           ? "Fit residual unavailable."
-          : `Fit residual RMS ${fmt(support.fit_rms)}.`;
+          : `Unnormalized weight-fit residual RMS ${fmt(support.fit_rms)}.`;
         section.append(h("p", { class: "help" },
           `Methylation numerical fit: ${String(support.markers_covered)} covered markers, ${String(support.cpg_calls_used)} CpG calls; condition number ${support.reference_condition_number === null ? "unavailable" : fmt(support.reference_condition_number)}. ${residual} These counts do not establish biological calibration.`));
       }

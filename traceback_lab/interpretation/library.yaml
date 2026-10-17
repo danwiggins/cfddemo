@@ -2592,7 +2592,7 @@ entries:
     meaning_low: "Few registered-marker calls contributed."
   - <<: *meth_tf_metric
     metric_id: fit_rms
-    label: "Marker methylation fit residual RMS"
+    label: "Unnormalized marker-weight fit residual RMS"
     value_kind: positive
     headline: false
     missing_value_caption: "The fit is unidentifiable; inspect marker coverage and call counts."

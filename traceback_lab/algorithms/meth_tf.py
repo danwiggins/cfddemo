@@ -161,10 +161,12 @@ class MethTF(MethBase):
             return Skip("asset_unavailable", message)
         if reference.reference.reference_sha256 != ctx.reference_sha256:
             return Skip("reference", "the meth-TF marker reference does not match this genome reference")
-        from .cell_origin import header_model
+        from .cell_origin import declared_models, header_model
 
         model = header_model(ctx.input_dir / "aligned.bam")
         if model is None:
+            if len(declared_models(ctx.input_dir / "aligned.bam")) > 1:
+                return Skip("missing_tags", "the BAM declares multiple modified-base models; meth-TF requires exactly one model ID")
             return Skip("missing_tags", "the BAM has no declared modified-base model")
         if model != reference.reference.modbase_model:
             return Skip("reference", "the BAM's declared modified-base model does not match the meth-TF reference")
