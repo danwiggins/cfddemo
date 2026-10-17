@@ -14,7 +14,8 @@ The POSIX checkout was at exact upstream commit
 Snakefiles ran under Snakemake 5.19.2. Python 3.11 requires the isolated
 `sitecustomize.py` shim for Snakemake's old `ratelimiter`
 dependency (`asyncio.coroutine`); no production code or upstream checkout
-was patched for that. The synthetic configs capped rule pools at one CPU.
+was patched for that. `setup_workflows.py` copies the shim and caps the
+synthetic rule pools at one CPU in its copied cluster configs.
 These were the two invocations, each with the isolated virtual environment
 and `PYTHONPATH=/var/tmp/cfdna-griffin/compat`:
 

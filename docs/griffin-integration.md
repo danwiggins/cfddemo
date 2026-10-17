@@ -45,9 +45,9 @@ all five generated workflow YAML files. It requires Snakemake 5.19.2, records
 the resolved Snakemake, Python, samtools, and bedtools executable digests and
 the numerical Python package versions, and checks the runtime again after
 execution. The attempt contains a `bin/python` link to the recorded Lab interpreter
-and a hashed compatibility shim for Snakemake 5.19.2 on Python 3.11+. Its PATH
-and PYTHONPATH ensure the upstream scripts' `#!/usr/bin/env python` and the
-Snakemake launcher use that interpreter and shim. The generated config sets the pinned
+and a hashed compatibility shim for Snakemake 5.19.2 on Python 3.11+. The
+adapter invokes Snakemake through that interpreter; PATH and PYTHONPATH make
+upstream scripts' `#!/usr/bin/env python` resolve to it too. The generated config sets the pinned
 upstream default `mappability_correction: false`, so the accepted output is
 GC-corrected only. The attempt only marks its manifest complete after Griffin returns
 a valid corrected TSV with exactly the requested site-list names. Partial outputs remain
@@ -58,8 +58,8 @@ characters. The runner is POSIX-only, matching upstream's environment.
 The current Lab does **not** register or display Griffin as an available
 algorithm. The adapter is an invocation boundary. A toy paired-end run through
 both pinned upstream Snakemake workflows completed on a 30 kb synthetic
-reference; this checks orchestration, not the biological signal or production
-resource needs. The commands, fixture generators, and output digest are in
+reference; it tested upstream orchestration, not `run_upstream`, the biological
+signal, or production resource needs. The commands, fixture generators, and output digest are in
 [`docs/proofs/griffin/README.md`](proofs/griffin/README.md). No real-sample
 end-to-end run has been completed. Native ONT
 input is incompatible with the exact upstream code. There is no
