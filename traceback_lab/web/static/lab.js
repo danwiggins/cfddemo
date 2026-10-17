@@ -287,8 +287,9 @@
       h("div", { class: "table-wrap" }, h("table", {}, h("thead", {}, h("tr", {}, h("th", {}, "Algorithm"), h("th", {}, "Depth"), h("th", {}, "Verdict"))), h("tbody", {}, ...rows)))));
     // Run table.
     const running = state.lastStatus && state.lastStatus.active ? state.lastStatus.active.step : null;
+    const interrupted = state.lastStatus && state.lastStatus.interrupted ? state.lastStatus.interrupted.step : null;
     const runRows = sample.algorithms.map((a) => {
-      const status = running === a.algorithm_id ? "running" : a.status === "skipped" ? `skipped (${a.skip_reason})` : a.status;
+      const status = running === a.algorithm_id ? "running" : interrupted === a.algorithm_id ? "interrupted" : a.status === "skipped" ? `skipped (${a.skip_reason})` : a.status;
       const cells = [h("th", { scope: "row" }, a.algorithm_id + (a.hidden ? " (intermediate)" : "")), h("td", { class: a.status === "failed" ? "problem" : null }, status), h("td", { class: "num" }, a.duration_s !== null && a.duration_s !== undefined ? `${a.duration_s.toFixed(1)} s` : "—")];
       const logLine = h("span", { class: "help", "aria-live": "polite" });
       const logLink = h("a", { href: `#/sample/${sample.id12}/trust-qc`, onclick: async (event) => {
@@ -398,7 +399,9 @@
       setControlsEnabled(true);
       const wasRunning = previous && previous.active ? previous.active.step : null;
       const nowRunning = status.active ? status.active.step : null;
-      if (wasRunning !== nowRunning && state.route.name === "lens") render();
+      const wasInterrupted = previous && previous.interrupted ? previous.interrupted.step : null;
+      const nowInterrupted = status.interrupted ? status.interrupted.step : null;
+      if ((wasRunning !== nowRunning || wasInterrupted !== nowInterrupted) && state.route.name === "lens") render();
     } catch (error) {
       if (error.session) { setStatus("Session expired. Restart `traceback lab serve --open`; it opens a fresh page."); return; }
       state.missed += 1;
