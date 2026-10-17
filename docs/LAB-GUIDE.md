@@ -192,6 +192,9 @@ depth predictions for the new run.
 With an explicit `--cohort`, it also checks that a built internal panel exists.
 Protocol and asset compatibility are checked during the run, after alignment
 when alignment is needed; the preview labels that decision as deferred.
+When detected physical RAM is below 16 GiB, both dry run and execution show
+an advisory warning in human and JSON output. This does not block a run; a
+full hg38 alignment may be slow or fail for lack of memory.
 
 **Interruption.** Ctrl-C (or SIGTERM) stops the current step, kills its tools
 and exits 6. Completed results are kept; rerun the same command.
@@ -235,6 +238,7 @@ new measurement.
 | `mtdna` | chrM reads (MAPQ ≥ 20) as a share of all primary reads, and the chrM fragment mode |
 | `viral-reads` | EBV, HPV and HBV reads per million human-unmapped primary reads from a separate minimap2 ≥ 2.28 alignment; needs an operator-registered viral FASTA and is exploratory for ONT cfDNA |
 | `cell-origin` | share of cfDNA from each of 40 Loyfer U250 cell types with bootstrap intervals, through the signed method's own `compute_measurement` (modkit, UXM, NNLS); needs 2.5M eligible reads, `traceback toolchain install modkit` and `traceback method-asset register --from-dir LOYFER_DIR --root R`; minor cell types are not interpretable below 5x. Downsample and split runs read a transient filtered BAM that is deleted after publish |
+| `meth-tf` | slow-profile exploratory tumour share of a two-component, nonnegative methylation-marker fit; needs 2.5M eligible reads, C+m calls, and an operator-registered reference with matching genome and modified-base model; no clinical calibration or threshold |
 | `end-motifs` | reference 4-mers at both ends of each molecule (5′ forward end and the reverse complement of the other end), motif diversity score and CCCA share; needs 500,000 eligible reads and the registered FASTA |
 | `delfi-ratio` | short (100–150 bp) / long (151–220 bp) ratio per 5 Mb bin on chr1–22, median-centred, and its SD; no GC correction, cohort-relative only; needs 1,000,000 eligible reads |
 | `meth-calls` | intermediate: decodes MM/ML once into site-level CpG call chunks (read row, forward-strand C position, strand, 5mC/5hmC/canonical ML); derived inputs reuse it through their row mask |
@@ -290,6 +294,13 @@ export TRACEBACK_LIONHEART_RESOURCES=ROOT/lab/assets/lionheart/inference_resourc
 export TRACEBACK_LIONHEART_ENABLE_ONT=1
 traceback lab run SAMPLE_ID12 --only lionheart --timeout-s 7200 --root ROOT
 ```
+
+When downsample and split controls are selected, LIONHEART extracts each
+eligible derived input from a temporary BAM containing only that fraction's
+or half's reads. The same opt-in, ONT platform, resources, and measured
+5-million-eligible-read gate apply independently to each input. A derived
+result below that gate is labelled skipped; it is not replaced by the full
+input's score.
 
 The binary's `--version` must report Lionheart 2.2.0; the modified mosdepth must expose
 `--single-end-length`. Install `samtools` and `unpigz` on `PATH` for upstream's
@@ -372,6 +383,65 @@ traceback lab asset inspect pmd --root R
 `inspect` rehashes the pinned file; absent or altered bytes block
 `pmd-score` with an asset-specific recovery command. Registering a PMD
 asset does not establish redistribution rights or make a skipped result zero.
+
+**Methylation tumour-fraction reference.** `meth-tf` needs an operator-supplied
+JSON marker panel. The repository does not bundle or download tumour/healthy
+marker fractions. The operator must establish the panel's source and use rights,
+then register its exact bytes under the same ROOT as the run:
+
+```bash
+traceback lab asset add meth-tf-reference --file YOUR_LOCAL_MARKER_REFERENCE.json \
+  --source-label YOUR_PANEL_DESCRIPTION --terms unknown --root R
+traceback lab asset inspect meth-tf-reference --root R
+```
+
+The JSON has schema `traceback.lab.meth-tf-reference.v1`, the exact genome
+`reference_sha256`, the BAM-header `modbase_model` ID, and mandatory
+`call_definition: "C+m_argmax_5mC_over_canonical_5mC_5hmC"`. Its sorted
+`markers` array contains autosomal `chrom`, zero-based CpG-C `pos0`, and
+`healthy` and `tumour` fractions between 0 and 1. These fractions must be
+measured as the share of observed C+m-channel CpG calls whose largest
+canonical/5mC/5hmC probability is 5mC, under a protocol compatible with the
+sample's modified-base model and filtering. Generic bisulfite beta values do
+not automatically meet that definition. For example,
+`{"chrom":"chr1","pos0":101,"healthy":0.25,"tumour":0.75}` illustrates the
+format only; these numbers are synthetic and are not a usable reference.
+The BAM must declare exactly one distinct modified-base model ID across its
+read groups. Meth-TF skips a BAM declaring multiple models rather than choosing
+one; register a reference for a single-model input.
+Registration is immutable within one Lab root: a different panel needs a
+separate root. Skipped, refused, or numerically unidentifiable results are
+unavailable rather than zero; a sparse but identifiable fit can estimate zero.
+The result has no detection limit, calibrated
+interval, or clinical cutoff. If an existing registration is damaged, `lab
+asset add` will not overwrite it: restore that registration's exact files from
+a known-good backup, or use a new ROOT. If planning could not pin a readable
+registration, retry the run after checking the asset's local storage.
+`identifiable` means only that the observed,
+count-weighted reference columns have numerical rank and a nonzero fit. The
+reported `reference_condition_number` describes how sensitive the numerical
+fit is to small changes; a large value warns of nearly collinear references,
+without implying a validated reliability cutoff.
+The `markers_covered` and `cpg_calls_used` diagnostics show the support for
+the numerical fit, not biological confidence. With exactly two covered
+markers, a full-rank two-weight fit is exactly determined: an interior feasible
+fit has zero residual up to numerical error, so a near-zero `fit_rms` is not
+evidence of goodness of fit. A boundary-clamped fit may retain mismatch, but
+the residual alone does not identify whether the solution lies on a boundary.
+`fit_rms` is the count-weighted residual of the unnormalized, nonnegative
+reference-weight fit, before its weights are normalized into a tumour share;
+it is not the residual of a sum-to-one mixture fit. It has no goodness-of-fit
+threshold or biological confidence claim.
+
+The Agreement lens pairs PoN-qualified copy-number tumour fraction with the
+methylation estimate. Its other plots show raw fragment-size mode and mtDNA
+fraction against copy-number tumour fraction, with compatible paired cohort
+points from one pinned generation when available. The target source is excluded
+from those points; they are descriptive and have no minimum-size gate or
+reference-interval claim. The lens computes no combined score, warns that the
+signals are not independent, and notes the whole-genome-doubling caveat for
+copy-number tumour fraction. The methylation pair shows its fit support and
+explicit unavailability reasons.
 
 **Viral reference.** `viral-reads` leaves the registered hg38 human reference
 unchanged. It takes human-unmapped primary reads from the aligned BAM, including
@@ -487,7 +557,24 @@ serve as a history of every interrupted run.
   the 1 MiB / 4,096-line limit, the status banner reports an unavailable
   status without inferring whether the run ended normally or was interrupted.
 - **Stability**: one small multiple per metric: deviation from full depth at
-  each fraction, the stability band, and split halves A/B at 50%.
+  each fraction, the stability band, and split halves A/B at 50%. Each half
+  shows its own status when a result is skipped, failed, or lacks a numeric
+  metric; a split-half verdict appears only when both values are available
+  and the stability comparison is interpretable. When both halves have numeric
+  usable values, their raw values and relative difference remain visible without a
+  verdict. When a half is unavailable, its status remains visible. A selected
+  half with parameters that differ from the current full-depth result
+  is named unavailable and excluded from the comparison. An extra
+  unrecognized split label is disclosed even when A and B are both usable. REPEATABILITY's
+  median and worst-three list include every numeric split comparison; only
+  metrics with a validated verdict enter its stability count. Home separately
+  counts unavailable metric comparisons, even when no pair is comparable.
+  Home also counts unavailable full-depth algorithm results, with their names
+  and reasons on Stability. Damaged downsample selections carry their reason
+  into the depth points. A measurement usable only at an isolated lower depth
+  is labelled as such rather than claiming stability through missing higher-depth
+  evidence. If a full-depth selected result is unreadable or ambiguous, Stability names that
+  algorithm without inventing a metric-level panel from damaged data.
 
 ## Building a Lab cohort
 
@@ -747,6 +834,13 @@ ROOT. Reusing the same ROOT does not replace an existing input manifest.
 Rewriting a BAM header changes its source identity. Use
 `traceback lab cohort remove ID12 --cohort ID --root R` for an unrecoverable member, then rebuild
 that cohort; the old published generation stays selected until the rebuild.
+
+### TBX-LAB-025
+
+An advisory warning (exit 0): physical RAM is below the 16 GiB recommendation
+for full hg38 alignment. The run continues, but alignment may fail or be slow.
+Use a machine with at least 16 GiB RAM for a full alignment. If physical RAM
+cannot be detected, the Lab omits this advisory rather than blocking the run.
 
 ## Adding an algorithm
 

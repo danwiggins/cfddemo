@@ -13,7 +13,7 @@ from tests.lab.test_landing import needs_chrome
 
 
 @needs_chrome
-@pytest.mark.parametrize("route,expected", [("/", 1), (f"/sample/{ID12}/agreement", 2)])
+@pytest.mark.parametrize("route,expected", [("/", 1), (f"/sample/{ID12}/agreement", 3)])
 def test_echarts_scatter_values_match_adjacent_table_without_animation(route, expected, tmp_path) -> None:
     sample = _sample()
     sample["synthetic"] = [

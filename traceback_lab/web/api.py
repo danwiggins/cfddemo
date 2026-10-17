@@ -21,6 +21,7 @@ from collections.abc import Iterable
 from pathlib import Path, PurePosixPath
 from typing import Any
 
+from .. import views
 from ..cohort_contracts import CohortGeneration, CohortMember, MetricProjection, project_metric
 from ..cohort_density import project_density_band
 from ..cohorts import list_cohorts, member_for_generation_or_independent, member_from_store, pon_dependent_algorithms, read_current
@@ -42,7 +43,7 @@ from ..interpretation.engine import (
 )
 from ..problems import LabProblem
 from ..store import LabStore, summarize_run
-from .. import views
+from ..tf_concordance import report_tf_concordance
 
 _LOGGED_SAMPLE_COMMANDS = frozenset({"run", "simulate cna", "simulate split", "cohort build"})
 _STATUS_COMMANDS = _LOGGED_SAMPLE_COMMANDS | frozenset({
@@ -736,8 +737,16 @@ class LabApi:
             ),
             "curve": curve,
             "stability": panels,
+            "stability_unavailable": [
+                {"algorithm_id": algorithm_id, "reason": "full-depth result unreadable"}
+                for algorithm_id in sorted(sample.full.unreadable & set(order))
+            ] + [
+                {"algorithm_id": algorithm_id, "reason": "full-depth result selection ambiguous"}
+                for algorithm_id in sorted(sample.full.ambiguous & set(order))
+            ],
             "repeatability": views.repeatability(panels),
             "synthetic": synthetic,
+            "concordance": report_tf_concordance(sample, generation, target),
             "defended": defended_block,
             "headline": headline_block,
             "derived": [{"label": view.label, "transform": view.transform} for view in sample.derived],

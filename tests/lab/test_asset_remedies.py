@@ -2,8 +2,8 @@
 
 from __future__ import annotations
 
-from pathlib import Path
 import shlex
+from pathlib import Path
 from types import SimpleNamespace
 
 from traceback_lab.run_command import _skip_remedy, _summary
@@ -17,6 +17,7 @@ def test_missing_dependencies_name_the_algorithm_and_asset(tmp_path: Path) -> No
         ("pmd-score", "missing_asset"): ("Zhou 2018", "traceback lab asset add pmd"),
         ("copy-number", "missing_asset"): ("ichorCNA", "method-asset register --from-toolchain copy-number"),
         ("cell-origin", "missing_asset"): ("Loyfer", "method-asset register --from-dir LOYFER_DIR"),
+        ("meth-tf", "missing_asset"): ("methylation marker reference", "lab asset add meth-tf-reference"),
         ("copy-number", "missing_toolchain"): ("ichor", "toolchain install ichor"),
         ("cell-origin", "missing_toolchain"): ("modkit", "toolchain install modkit"),
     }
@@ -65,6 +66,7 @@ def test_remediation_quotes_operator_root_and_preserves_json_argv(tmp_path: Path
         ("pmd-score", "missing_asset"),
         ("copy-number", "missing_asset"),
         ("cell-origin", "missing_asset"),
+        ("meth-tf", "missing_asset"),
     ):
         remedy = _skip_remedy(algorithm, reason, root)
         assert remedy is not None

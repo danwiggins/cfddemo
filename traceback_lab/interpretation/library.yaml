@@ -2742,6 +2742,67 @@ entries:
     citation_checked: {by: "lab build agent (Phase 1)", date: "2026-10-15", note: "PMC9811898: U <= 25%, M >= 75%, k = 4."}
 
 
+  # --------------------------------------------------------------- meth-tf
+  - &meth_tf_metric
+    algorithm_id: meth-tf
+    metric_id: tumor_fraction
+    label: "Tumour share of fitted methylation reference weights"
+    value_kind: proportion
+    tier: SPECULATIVE
+    origin_tier: SPECULATIVE
+    origin_platform: "ONT; operator-registered tumour/healthy CpG reference"
+    min_depth_x: null
+    reference: {kind: none}
+    performance: null
+    performance_missing_reason: "No validated ONT methylation tumour-fraction calibration, detection limit, or clinical cutoff"
+    missing_value_caption: "The observed reference columns lacked numerical rank or a nonzero nonnegative fit."
+    meaning_high: "The fitted tumour reference has a larger share of the two nonnegative weights; this is not a calibrated tumour burden."
+    meaning_low: "The fitted healthy reference has a larger share of the two nonnegative weights; a zero estimate is not evidence of no tumour."
+    confounders: ["marker panel provenance", "basecall modification model", "methylation heterogeneity", "coverage", "reference mismatch"]
+    next_steps: {analytical: ["Inspect reference registration, marker coverage, and fit diagnostics"], clinical_setting: null}
+    license_ids: [meth-tf-reference-operator]
+    flags: [CLIA]
+    headline: true
+    citations: []
+    citation_checked: {by: "Lab S3 implementation", date: "2026-10-17", note: "Software NNLS convention only; no supplied biological reference or performance citation."}
+  - <<: *meth_tf_metric
+    metric_id: identifiable
+    label: "Two methylation reference columns have numerical rank and nonzero fit"
+    value_kind: categorical
+    headline: false
+    meaning_high: "A numerical solution exists; inspect the condition number because full rank does not establish a reliable biological estimate."
+    meaning_low: "Too few covered markers, insufficient reference rank, or no nonzero nonnegative fit; inspect coverage and the condition number."
+  - <<: *meth_tf_metric
+    metric_id: markers_covered
+    label: "Registered methylation markers with CpG calls"
+    value_kind: count
+    headline: false
+    meaning_high: "More registered markers contributed observations."
+    meaning_low: "Few registered markers contributed; the mixture may be unidentifiable."
+  - <<: *meth_tf_metric
+    metric_id: cpg_calls_used
+    label: "CpG calls at registered methylation markers"
+    value_kind: count
+    headline: false
+    meaning_high: "More eligible 5mC-channel calls contributed at registered markers."
+    meaning_low: "Few registered-marker calls contributed."
+  - <<: *meth_tf_metric
+    metric_id: fit_rms
+    label: "Unnormalized marker-weight fit residual RMS"
+    value_kind: positive
+    headline: false
+    missing_value_caption: "The fit is unidentifiable; inspect marker coverage and call counts."
+    meaning_high: "Observed marker fractions differ more from the fitted two-reference mixture."
+    meaning_low: "Less numerical mismatch; with only two covered markers an interior fit is exactly determined, so a low residual does not establish fit quality."
+  - <<: *meth_tf_metric
+    metric_id: reference_condition_number
+    label: "Count-weighted methylation reference condition number"
+    value_kind: positive
+    headline: false
+    missing_value_caption: "Fewer than two markers were covered or the observed reference matrix was singular."
+    meaning_high: "The two observed reference columns are nearly collinear; small call or reference errors can strongly change the fitted fraction. No validated cutoff is available."
+    meaning_low: "The observed reference columns are better separated numerically; this alone does not establish biological validity."
+
   # ------------------------------------------------------------- frag-x-meth
   - algorithm_id: frag-x-meth
     metric_id: short_fragment_hypomethylation_delta

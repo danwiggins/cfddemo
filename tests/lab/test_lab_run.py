@@ -22,6 +22,7 @@ import pysam
 import pytest
 
 from traceback_lab import registry
+from traceback_lab import doctor
 from traceback_lab import run_command as run_module
 from traceback_lab.store import LabStore
 from traceback_runner import cli as signed_cli
@@ -67,6 +68,41 @@ def _path_with(monkeypatch, directory: Path) -> None:
 
 def _no_staging(root: Path) -> bool:
     return not list((root / "lab").rglob(".staging-*"))
+
+
+def test_low_memory_warning_is_advisory_in_run_and_dry_run(lab_world, capsys, monkeypatch, shared_mmi) -> None:
+    _registry(monkeypatch)
+    monkeypatch.setattr(doctor, "_ram", lambda: 8 * doctor.GIB)
+    argv = ("run", str(lab_world["chunks"]), "--root", str(lab_world["root"]), "--mmi", str(shared_mmi))
+    code, human, _ = _lab(capsys, *argv, "--dry-run")
+    assert code == 0 and "TBX-LAB-025: Less than 16 GiB" in human
+    code, dry = _json(capsys, *argv, "--dry-run")
+    assert code == 0 and [warning["code"] for warning in dry["data"]["warnings"]] == ["TBX-LAB-025"]
+    code, human, _ = _lab(capsys, *argv)
+    assert code == 0 and human.count("Less than 16 GiB") == 1
+    assert "TBX-LAB-025: Less than 16 GiB" in human
+    assert "Use a machine with at least 16 GiB RAM" in human
+    code, payload = _json(capsys, *argv)
+    assert code == 0
+    low_memory = [row for row in payload["data"]["warnings"] if row.get("kind") == "low_memory"]
+    assert len(low_memory) == 1
+    (warning,) = low_memory
+    assert warning["kind"] == "low_memory"
+    assert warning["code"] == "TBX-LAB-025"
+    assert warning["cause"] and warning["docs"].endswith("#tbx-lab-025")
+    assert warning["physical_ram_bytes"] == 8 * doctor.GIB
+    assert warning["recommended_bytes"] == doctor.MIN_RAM
+    assert warning["fix"]
+    for detected in (doctor.MIN_RAM, None):
+        monkeypatch.setattr(doctor, "_ram", lambda detected=detected: detected)
+        code, dry = _json(capsys, *argv, "--dry-run")
+        assert code == 0 and dry["data"]["warnings"] == []
+    def failed_probe():
+        raise OSError("RAM query unavailable")
+
+    monkeypatch.setattr(doctor, "_ram", failed_probe)
+    code, dry = _json(capsys, *argv, "--dry-run")
+    assert code == 0 and dry["data"]["warnings"] == []
 
 
 def test_lab_run_missing_ichor_skips_with_install_command(lab_world, capsys, monkeypatch, shared_mmi) -> None:
@@ -771,7 +807,7 @@ def test_aligner_version_change_warns_and_realigns(lab_world, capsys, monkeypatc
     assert code == 0
     assert second["data"]["sample"]["source_id"] == first["data"]["sample"]["source_id"]
     assert second["data"]["sample"]["input_id"] not in {first_input, second_input}
-    (warning,) = second["data"]["warnings"]
+    (warning,) = [row for row in second["data"]["warnings"] if row.get("code") == "TBX-LAB-019"]
     assert warning["code"] == "TBX-LAB-019" and warning["new"]["minimap2"] == "2.98-r9998"
     assert warning["cause"] and warning["fix"]
     assert isinstance(warning["retryable"], bool)

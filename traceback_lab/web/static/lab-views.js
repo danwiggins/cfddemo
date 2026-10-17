@@ -20,9 +20,14 @@
     ok_usable: ["●", "usable"],
     ok_unstable: ["◐", "unstable"],
     not_interpretable: ["▨", "not interpretable"],
+    unavailable: ["?", "unavailable"],
     skipped: ["○", "skipped"],
     failed: ["✕", "failed"],
     unavailable: ["?", "result unavailable"],
+  };
+  const cellText = (state, reason, fallback = "no result") => {
+    const text = (CELL[state] || ["", state || fallback])[1];
+    return reason ? `${text} (${reason})` : text;
   };
   const FLAG_TEXT = {
     CLIA: "FLAG: CLIA — health-assessment labels on an individual sample",
@@ -231,7 +236,7 @@
           h("thead", {}, h("tr", {}, h("th", { scope: "col" }, "Metric"), ...curve.fractions.map((f) => h("th", { scope: "col" }, `${f * 100}%`)))),
           h("tbody", {}, ...secondary.map((p) => h("tr", {}, h("th", { scope: "row" }, p.label), ...curve.fractions.map((f) => {
             const pt = p.points.find((q) => q.fraction === f);
-            return h("td", {}, pt ? (CELL[pt.state] || ["", pt.state || "—"])[1] : "—");
+            return h("td", {}, pt ? cellText(pt.state, pt.reason, "—") : "—");
           }))))) : "");
       name.addEventListener("click", () => { const open = name.getAttribute("aria-expanded") !== "true"; name.setAttribute("aria-expanded", String(open)); detail.hidden = !open; });
       line.append(name, cells);
@@ -273,12 +278,21 @@
     const rep = h("div", { class: "control-block" }, h("span", { class: "control-badge" }, "REPEATABILITY"), " sampling noise, not a known answer");
     if (sample.repeatability) {
       const r = sample.repeatability;
-      rep.append(h("p", {}, `Median split-half |A−B|: ${(r.median_relative_abs_diff * 100).toFixed(1)}% across ${r.metrics} metrics; ${r.unstable} outside their stability tolerance.`),
-        h("ul", {}, ...r.worst.map((w) => h("li", {}, `${w.label}: ${(w.relative_abs_diff * 100).toFixed(1)}%${w.stable === false ? " (unstable)" : ""}`))),
+      rep.append(h("p", {}, `Median split-half |A−B|: ${(r.median_relative_abs_diff * 100).toFixed(1)}% across ${r.metrics} comparable metrics; ${r.incomparable_metrics || 0} metric comparison${r.incomparable_metrics === 1 ? "" : "s"} unavailable; ${r.unstable} outside tolerance among ${r.verdict_metrics} with a validated verdict; ${r.no_verdict_metrics} without a validated verdict.`),
+        h("ul", {}, ...r.worst.map((w) => h("li", {}, `${w.label}: ${(w.relative_abs_diff * 100).toFixed(1)}%${w.stable === false ? " (unstable)" : w.stable === null ? " (no validated verdict)" : ""}`))),
         h("a", { href: `#/sample/${sample.id12}/stability` }, "→ Stability"));
     } else {
-      rep.append(h("p", { class: "empty" }, `Run traceback lab run ${sample.id12}.`));
+      const unavailable = (sample.stability || []).filter((panel) => !panel.split &&
+        [panel.split_status?.A?.state, panel.split_status?.B?.state].some((state) => state && state !== "not_recorded")).length;
+      rep.append(unavailable
+        ? h("p", { class: "empty" }, `${unavailable} split metric comparison${unavailable === 1 ? "" : "s"} unavailable; no comparable pair is available. `,
+          h("a", { href: `#/sample/${sample.id12}/stability` }, "See Stability"))
+        : h("p", { class: "empty" }, `Run traceback lab run ${sample.id12}.`));
     }
+    const fullUnavailable = (sample.stability_unavailable || []).length;
+    if (fullUnavailable) rep.append(h("p", { class: "problem" },
+      `${fullUnavailable} full-depth algorithm result${fullUnavailable === 1 ? "" : "s"} unavailable; `,
+      h("a", { href: `#/sample/${sample.id12}/stability` }, "See Stability")));
     const known = h("div", { class: "control-block" }, h("span", { class: "control-badge" }, "KNOWN-STATUS"), " public sample",
       h("p", { class: "empty" }, "Not loaded. Needs public data access. ", flagPill("LEGAL", "FLAG: LEGAL — public data-use terms (EGA controlled access).")));
     section.append(syn, rep, known);
@@ -590,17 +604,26 @@
   // -- Stability ------------------------------------------------------------------------------
   function stability(sample) {
     const out = [h("p", { class: "breadcrumb" }, `Lab › ${sample.id12} › Stability`), h("h1", { class: "view-title" }, "Stability")];
+    for (const issue of (sample.stability_unavailable || []))
+      out.push(h("p", { class: "problem" }, `${issue.algorithm_id}: ${issue.reason}; no metric-level Stability panel can be shown.`));
     if (!sample.curve.downsampled) out.push(h("p", { class: "empty" }, `This run used --no-downsample. Run traceback lab run ${sample.id12} to draw the curve.`));
-    if (!sample.repeatability) out.push(h("p", { class: "help" }, `Split-half markers absent: run traceback lab run ${sample.id12}.`));
+    if (!sample.repeatability) {
+      const recorded = (sample.stability || []).some((panel) =>
+        [panel.split_status?.A?.state, panel.split_status?.B?.state].some((state) => state && state !== "not_recorded"));
+      out.push(h("p", { class: "help" }, recorded
+        ? "Split halves were recorded, but no comparable pair is available."
+        : `Split-half markers absent: run traceback lab run ${sample.id12}.`));
+    }
     const grid = h("div", { class: "multiples" });
     const tableRows = [];
     for (const panel of sample.stability) {
       const w = 240, hgt = 140, pad = 28;
       const fracs = [0.1, 0.25, 0.5, 1.0];
       const x = (f) => pad + ((Math.log10(f) - Math.log10(0.08)) / (Math.log10(1.2) - Math.log10(0.08))) * (w - pad - 8);
-      const unit = (panel.points.find((p) => p.unit) || {}).unit || "percent";
+      const unit = (panel.points.find((p) => p.unit && p.unit !== "none") || {}).unit ||
+        [panel.split_status?.A?.unit, panel.split_status?.B?.unit].find((value) => value && value !== "none") || "none";
       const clip = 50;
-      const splitDevs = panel.split ? [Math.abs(panel.split.deviation_a || 0), Math.abs(panel.split.deviation_b || 0)] : [];
+      const splitDevs = [panel.split_status?.A?.deviation, panel.split_status?.B?.deviation].filter(Number.isFinite).map(Math.abs);
       const maxAbs = unit === "unit" ? Math.max(1e-9, ...splitDevs, ...panel.points.map((p) => Math.abs(p.deviation || 0)), ...(panel.points.map((p) => p.band ? Math.max(Math.abs(p.band.lo), Math.abs(p.band.hi)) : 0).filter(Number.isFinite))) : clip;
       const y = (v) => { const c = Math.max(-maxAbs, Math.min(maxAbs, v)); return hgt / 2 - (c / maxAbs) * (hgt / 2 - 12); };
       const marks = [svg("line", { x1: pad, x2: w - 8, y1: y(0), y2: y(0), class: "zero" })];
@@ -616,19 +639,44 @@
           marks.push(svg("text", { x: x(p.fraction), y: hgt - 6, "text-anchor": "middle", class: "gap" }, gapLabel));
         }
       }
-      if (panel.split) {
-        for (const [dx, d] of [[-9, panel.split.deviation_a], [9, panel.split.deviation_b]]) {
+      if (unit !== "none") {
+        for (const [dx, d] of [[-9, panel.split_status?.A?.deviation], [9, panel.split_status?.B?.deviation]]) {
+          if (!Number.isFinite(d)) continue;
           const clipped = unit !== "unit" && Math.abs(d) > clip;
           marks.push(svg("text", { x: x(0.5) + dx, y: y(d) + 4, "text-anchor": "middle", class: "split" }, clipped ? (d > 0 ? "⇡" : "⇣") : "○"));
         }
       }
+      const halfStatus = (half) => {
+        const part = panel.split_status && panel.split_status[half];
+        if (!part) return "status unavailable";
+        if (part.state === "ok") return `ok (${fmt(part.value)})`;
+        return `${part.state.replace(/_/g, " ")}${part.reason ? ` (${part.reason.replace(/_/g, " ")})` : ""}`;
+      };
+      const splitSummary = `split A ${halfStatus("A")}; split B ${halfStatus("B")}` +
+        (panel.split_warning ? `; ${panel.split_warning}` : "");
+      const hasSplitHalf = Boolean(panel.split_status) &&
+        (panel.split_status.A?.state !== "not_recorded" || panel.split_status.B?.state !== "not_recorded");
+      const splitVerdict = panel.split?.stable === true ? "stable" : panel.split?.stable === false ? "unstable" : "no split-half stability verdict";
       for (const f of fracs) marks.push(svg("text", { x: x(f), y: hgt - 18, "text-anchor": "middle", class: "axis" }, `${f * 100}%`));
-      const label = `${panel.label}: ${panel.verdict}. Deviation from full depth in ${unit === "unit" ? "the metric's unit" : "%"}${panel.split ? `; split halves ${panel.split.stable ? "stable" : "unstable"}` : ""}.`;
+      const scaleLabel = unit === "none" ? "no validated stability deviation scale" : unit === "unit" ? "the metric's unit" : "%";
+      const label = `${panel.label}: ${panel.verdict}. Deviation from full depth: ${scaleLabel}${hasSplitHalf ? `; ${splitSummary}; ${splitVerdict}` : ""}.`;
       grid.append(h("figure", { class: "multiple" }, h("figcaption", {}, h("strong", {}, panel.label), ` — ${panel.verdict}`),
         svg("svg", { viewBox: `0 0 ${w} ${hgt}`, role: "img", "aria-label": label, class: "multiple-svg" }, svg("title", {}, label), ...marks),
-        h("p", { class: "help" }, unit === "unit" ? "y: difference from full depth (metric's unit)" : "y: relative deviation from full depth, % (clipped ±50%)")));
-      for (const p of panel.points) tableRows.push([panel.label, `${p.fraction * 100}%`, p.value, p.deviation, stateReason(p.state, p.reason, p.state || "—")]);
-      if (panel.split) tableRows.push([panel.label, "split A / B", `${fmt(panel.split.a)} / ${fmt(panel.split.b)}`, `${(panel.split.relative_abs_diff * 100).toFixed(1)}% |A−B|`, panel.split.stable ? "stable" : "unstable"]);
+        h("p", { class: "help" }, unit === "none" ? "No validated stability deviation scale" : unit === "unit" ? "y: difference from full depth (metric's unit)" : "y: relative deviation from full depth, % (clipped ±50%)"),
+        hasSplitHalf ? h("p", { class: "help" }, `Split halves: ${splitSummary}. `,
+          splitVerdict === "no split-half stability verdict" ? "No split-half stability verdict." : `Split-half verdict: ${splitVerdict}.`) : ""));
+      for (const p of panel.points) tableRows.push([panel.label, `${p.fraction * 100}%`, p.value, p.deviation,
+        stateReason(p.state, p.reason, p.state || "—")]);
+      if (panel.split) tableRows.push([panel.label, "split A / B", `${fmt(panel.split.a)} / ${fmt(panel.split.b)}`, `${(panel.split.relative_abs_diff * 100).toFixed(1)}% |A−B|`,
+        panel.split_warning ? `${splitVerdict}; ${panel.split_warning}` : splitVerdict]);
+      else if (hasSplitHalf) {
+        const halfDeviation = (half) => {
+          const value = panel.split_status?.[half]?.deviation;
+          return Number.isFinite(value) ? `${fmt(value)}${unit === "percent" ? "%" : " metric units"}` : "—";
+        };
+        tableRows.push([panel.label, "split A / B", `${fmt(panel.split_status?.A?.value)} / ${fmt(panel.split_status?.B?.value)}`,
+          `${halfDeviation("A")} / ${halfDeviation("B")} (each vs full)`, splitSummary]);
+      }
     }
     out.push(grid, dataTable("Stability: every point", ["Metric", "Fraction", "Value", "Deviation", "State"], tableRows));
     const shown = new Set(sample.stability.map((p) => p.algorithm_id));
@@ -1116,8 +1164,10 @@
 
   // -- Agreement: paired signals only, no combined score (D29) ----------------------------------------
   function agreement(sample) {
+    const report = sample.concordance || { pairs: [] };
     const out = [h("p", { class: "breadcrumb" }, `Lab › ${sample.id12} › Agreement`), h("h1", { class: "view-title" }, "Agreement"),
-      h("p", { class: "status-line" }, "These signals share inputs and are not independent confirmation; agreement is not validation.")];
+      h("p", { class: "status-line" }, report.caption || "These signals share inputs and are not independent confirmation; agreement is not validation."),
+      h("p", { class: "help" }, report.wgd_caveat || "Copy-number tumour fraction can shift with whole-genome doubling.")];
     const tf = value(sample, "copy-number", "tumor_fraction");
     const mode = value(sample, "fragment-size", "mode_bp");
     const mt = value(sample, "mtdna", "chrm_fraction");
@@ -1143,6 +1193,39 @@
           ],
         }, dataTable(`${title}; ${cohortText}`, ["Sample", xLabel, yLabel],
           [[`${cohort?.target_display_id || sample.id12} (this sample)`, xValue, yValue], ...points.map((p) => [p.display_id || p.source_id, p.x, p.y])])));
+      }
+      out.push(section);
+    }
+    const methPair = (report.pairs || []).find((pair) => pair.id === "cn-meth");
+    if (methPair) {
+      const section = h("section", { class: "panel" }, h("h2", {}, methPair.label), flagPill("FDA"), flagPill("CLIA"));
+      const reasons = {
+        no_pon: "A verified panel of normals is needed before copy-number tumour fraction can be compared.",
+        missing_cn: "Copy-number tumour fraction is unavailable.",
+        unidentifiable_cn: "Copy-number tumour fraction was not identifiable.",
+        missing_meth_tf: "Methylation tumour fraction is unavailable; inspect the registered marker reference and method result.",
+        unidentifiable_meth_tf: "The observed markers did not identify a methylation tumour fraction.",
+      };
+      if (methPair.support && methPair.support.markers_covered !== null) {
+        const support = methPair.support;
+        const residual = support.fit_rms === null
+          ? "Fit residual unavailable."
+          : `Unnormalized weight-fit residual RMS ${fmt(support.fit_rms)}.`;
+        const exactFitCaveat = support.markers_covered === 2
+          ? " With two covered markers, an interior fit is exactly determined; zero residual does not establish fit quality." : "";
+        section.append(h("p", { class: "help" },
+          `Methylation numerical fit: ${String(support.markers_covered)} covered markers, ${String(support.cpg_calls_used)} CpG calls; condition number ${support.reference_condition_number === null ? "unavailable" : fmt(support.reference_condition_number)}. ${residual}${exactFitCaveat} These counts do not establish biological calibration.`));
+        if (support.markers_covered === 0)
+          section.append(h("p", { class: "problem" }, "No registered CpG marker has a usable C+m call on this input. Check zero-based CpG-C positions, the genome reference, and modification-call coverage."));
+      }
+      if (methPair.state !== "ok") {
+        const unavailable = methPair.unavailable_reasons?.length ? methPair.unavailable_reasons : [methPair.state];
+        section.append(h("p", { class: "empty" }, unavailable.map(reason => reasons[reason] || "This pair is unavailable.").join(" ")));
+      } else {
+        section.append(chart(`${methPair.label}: this sample at ${fmt(methPair.x)} and ${fmt(methPair.y)}.`, {
+          grid: { left: 60, right: 20, top: 20, bottom: 40 }, xAxis: { type: "value", name: methPair.x_label, scale: true }, yAxis: { type: "value", name: methPair.y_label, min: 0 },
+          series: [{ type: "scatter", symbolSize: 12, data: [[methPair.x, methPair.y]], itemStyle: { color: "#8a4b08" } }],
+        }, dataTable(methPair.label, ["Sample", methPair.x_label, methPair.y_label], [[sample.id12, methPair.x, methPair.y]])));
       }
       out.push(section);
     }
