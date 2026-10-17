@@ -71,6 +71,11 @@ jobs:
       - name: Sync locked environment
         run: uv sync --frozen
 
+      - name: Verify literal guide setup command
+        run: |
+          uv sync
+          git diff --exit-code -- uv.lock
+
       - name: Lint
         run: uvx ruff@0.7.4 check .
 

@@ -118,14 +118,13 @@ def test_serve_step_reaches_the_landing_with_curve_repeatability_and_example_pil
 
     import os
     import subprocess
-    import sys
 
     from tests.lab.test_lab_server import _chrome
 
     argv = next(a for a in journey() if a[-2:] == ["serve", "--open"])
     env = {**os.environ, "TRACEBACK_ROOT": str(journey_root["root"]), "BROWSER": "true", "PYTHONPATH": str(REPO)}
     process = subprocess.Popen(
-        [sys.executable, "-m", "traceback_runner", *argv[3:]],
+        argv,
         cwd=REPO, env=env, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, stdin=subprocess.DEVNULL, text=True,
     )
     try:
