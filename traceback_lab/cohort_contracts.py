@@ -72,10 +72,10 @@ class CohortGeneration(BaseModel):
 
     schema_: Literal["traceback.lab.cohort-generation.v1"] = Field(default=COHORT_SCHEMA, alias="schema")
     cohort_id: str = Field(pattern=r"^[a-z][a-z0-9-]{0,39}$")
-    version: int = Field(ge=1)
+    version: StrictInt = Field(ge=1)
     kind: Literal["internal_cohort", "provisional_external"] = "internal_cohort"
     members: tuple[CohortMember, ...]
-    pon_n: int = Field(default=0, ge=0)
+    pon_n: StrictInt = Field(default=0, ge=0)
 
     @model_validator(mode="after")
     def _independent_members(self) -> CohortGeneration:
