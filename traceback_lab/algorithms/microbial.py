@@ -15,6 +15,7 @@ import re
 import shutil
 import subprocess
 import tempfile
+import threading
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
@@ -148,10 +149,14 @@ def _bracken_species(path: Path, lineages: dict[int, str], denominator: int) -> 
     return rows[:MAX_TAXA], total, max(0, accepted - MAX_TAXA)
 
 
-def _write_candidates(bam: Path, fasta: Path, read_length: int) -> tuple[int, int, int, int]:
+class CandidateStagingExceeded(RuntimeError):
+    """The complete candidate set needs a streamed classifier invocation."""
+
+
+def _candidate_rows(bam: Path, read_length: int):
+    """Yield anonymized FASTA records and final full-input counts."""
     denominator = candidate = too_short = missing_sequence = 0
-    staged_bytes = 0
-    with pysam.AlignmentFile(bam, "rb", check_sq=False) as stream, fasta.open("wt", encoding="ascii") as out:
+    with pysam.AlignmentFile(bam, "rb", check_sq=False) as stream:
         for read in stream.fetch(until_eof=True):
             if read.is_secondary or read.is_supplementary or read.is_qcfail or read.is_duplicate:
                 continue
@@ -166,18 +171,81 @@ def _write_candidates(bam: Path, fasta: Path, read_length: int) -> tuple[int, in
                 too_short += 1
                 continue
             candidate += 1
-            row = f">r{candidate}\n{sequence[:read_length]}\n"
-            row_bytes = len(row)
-            if staged_bytes + row_bytes > MAX_CANDIDATE_FASTA_BYTES:
-                raise RuntimeError("microbial candidate FASTA exceeds the local 512 MiB staging budget")
-            out.write(row)
-            staged_bytes += row_bytes
+            yield f">r{candidate}\n{sequence[:read_length]}\n".encode("ascii")
     return denominator, candidate, too_short, missing_sequence
+
+
+def _write_candidates(bam: Path, fasta: Path, read_length: int) -> tuple[int, int, int, int]:
+    rows = _candidate_rows(bam, read_length)
+    staged_bytes = 0
+    try:
+        with fasta.open("wb") as out:
+            while True:
+                try:
+                    row = next(rows)
+                except StopIteration as done:
+                    return done.value
+                if staged_bytes + len(row) > MAX_CANDIDATE_FASTA_BYTES:
+                    raise CandidateStagingExceeded("microbial candidates exceed the local FASTA staging budget")
+                out.write(row)
+                staged_bytes += len(row)
+    except BaseException:
+        fasta.unlink(missing_ok=True)
+        raise
+    finally:
+        rows.close()
+
+
+def _classify_streamed(bam: Path, read_length: int, kraken: str, database: Path,
+                       report: Path) -> tuple[int, int, int, int]:
+    """Send every candidate to Kraken without retaining read-level output."""
+    argv = [kraken, "--db", str(database), "--threads", "1",
+            "--report", str(report), "--output", "-", "/dev/fd/0"]
+    process = subprocess.Popen(argv, stdin=subprocess.PIPE, stdout=subprocess.DEVNULL,
+                               stderr=subprocess.DEVNULL)
+    result: list[tuple[int, int, int, int]] = []
+    errors: list[BaseException] = []
+
+    def feed() -> None:
+        rows = _candidate_rows(bam, read_length)
+        try:
+            assert process.stdin is not None
+            while True:
+                try:
+                    row = next(rows)
+                except StopIteration as done:
+                    result.append(done.value)
+                    break
+                process.stdin.write(row)
+        except BaseException as exc:
+            errors.append(exc)
+        finally:
+            rows.close()
+            if process.stdin is not None:
+                try:
+                    process.stdin.close()
+                except BrokenPipeError:
+                    pass
+
+    writer = threading.Thread(target=feed, name="microbial-kraken-feed", daemon=True)
+    writer.start()
+    try:
+        process.wait(timeout=3600)
+        writer.join(timeout=2)
+        if writer.is_alive() or errors or process.returncode != 0 or not result:
+            raise RuntimeError("Kraken2 streamed classification failed or input was incomplete")
+        return result[0]
+    except BaseException:
+        if process.poll() is None:
+            process.kill()
+        process.wait()
+        writer.join(timeout=2)
+        raise
 
 
 @dataclass
 class Microbial(Base):
-    version: str = "4"
+    version: str = "5"
     family: str = "non-human"
     consumes: str = "full_bam"
     cost: str = "slow"
@@ -187,7 +255,7 @@ class Microbial(Base):
         "clipping": "first registered Bracken read-length bases",
         "bracken_level": "S", "bracken_threshold": 1,
         "microbial_roots": _ROOTS, "max_taxa": MAX_TAXA,
-        "candidate_fasta_budget_bytes": MAX_CANDIDATE_FASTA_BYTES,
+        "candidate_staging": "FASTA up to 512 MiB; otherwise stream complete input to Kraken2",
     })
 
     @property  # type: ignore[override]
@@ -261,19 +329,28 @@ class Microbial(Base):
                 bam = work / "derived.bam"
                 write_transient_bam(ctx.input_dir / "aligned.bam", bam, dict(ctx.derived))
             reads = work / "candidate.fa"
-            denominator, candidates, too_short, missing_sequence = _write_candidates(bam, reads, database.read_length)
+            try:
+                denominator, candidates, too_short, missing_sequence = _write_candidates(bam, reads, database.read_length)
+                streamed = False
+            except CandidateStagingExceeded:
+                streamed = True
+                candidates = 1  # The staging limit was crossed by an eligible read.
             taxa: list[dict[str, Any]] = []
             microbial_estimate = 0.0
             omitted = classified = unclassified = 0
             if candidates:
-                report, assignments, abundance = (work / "kraken.report", work / "kraken.output", work / "bracken.tsv")
-                kraken_run = subprocess.run(
-                    [kraken[0], "--db", str(database.directory), "--threads", "1", "--report", str(report),
-                     "--output", str(assignments), str(reads)],
-                    stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=3600, check=False,
-                )
-                if kraken_run.returncode != 0:
-                    raise RuntimeError("Kraken2 classification failed")
+                report, abundance = work / "kraken.report", work / "bracken.tsv"
+                if streamed:
+                    denominator, candidates, too_short, missing_sequence = _classify_streamed(
+                        bam, database.read_length, kraken[0], database.directory, report)
+                else:
+                    kraken_run = subprocess.run(
+                        [kraken[0], "--db", str(database.directory), "--threads", "1", "--report", str(report),
+                         "--output", "-", str(reads)],
+                        stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=3600, check=False,
+                    )
+                    if kraken_run.returncode != 0:
+                        raise RuntimeError("Kraken2 classification failed")
                 lineages, classified, unclassified, species_present = _report_lineages(report, candidates)
                 if classified and species_present:
                     bracken_run = subprocess.run(

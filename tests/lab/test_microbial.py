@@ -602,7 +602,7 @@ def test_run_clips_only_unmapped_eligible_reads_and_uses_primary_denominator(tmp
     assert b"private-id" not in artifact and b"candidate-private-id" not in artifact
 
 
-def test_candidate_staging_refuses_budget_without_partial_second_read(tmp_path, monkeypatch) -> None:
+def test_candidate_staging_streams_complete_input_when_budget_is_exceeded(tmp_path, monkeypatch) -> None:
     input_dir = tmp_path / "input"
     input_dir.mkdir()
     bam = input_dir / "aligned.bam"
@@ -618,17 +618,91 @@ def test_candidate_staging_refuses_budget_without_partial_second_read(tmp_path, 
             read.reference_start = -1
             stream.write(read)
     monkeypatch.setattr(algorithm, "MAX_CANDIDATE_FASTA_BYTES", 80)
-    with pytest.raises(RuntimeError, match="candidate FASTA exceeds.*staging budget"):
+    with pytest.raises(algorithm.CandidateStagingExceeded, match="candidates exceed.*staging budget"):
         algorithm._write_candidates(bam, fasta, 75)
-    assert fasta.read_text() == ">r1\n" + "A" * 75 + "\n"
-    assert fasta.stat().st_size == 80
+    assert not fasta.exists()
     store, _ = _database(tmp_path)
     monkeypatch.setattr(algorithm, "_tool", lambda name: (name, "a" * 64))
-    monkeypatch.setattr(algorithm.subprocess, "run", lambda *args, **kwargs: pytest.fail("classifier ran"))
+    import io
+    import threading
+
+    fed: list[bytes] = []
+
+    class InputPipe(io.BytesIO):
+        def close(self):
+            fed.append(self.getvalue())
+            super().close()
+
+    class KrakenProcess:
+        returncode = 0
+
+        def __init__(self, argv, **kwargs):
+            assert argv[-1] == "/dev/fd/0"
+            assert argv[argv.index("--output") + 1] == "-"
+            self.report = Path(argv[argv.index("--report") + 1])
+            self.stdin = InputPipe()
+            self.done = threading.Event()
+            original_close = self.stdin.close
+
+            def close():
+                original_close()
+                self.done.set()
+
+            self.stdin.close = close
+
+        def wait(self, timeout=None):
+            assert self.done.wait(timeout)
+            assert fed == [(">r1\n" + "A" * 75 + "\n>r2\n" + "A" * 75 + "\n").encode()]
+            self.report.write_text("0.00\t0\t0\tU\t0\tunclassified\n100.00\t2\t0\tR\t1\troot\n")
+            return 0
+
+        def poll(self):
+            return self.returncode
+
+    monkeypatch.setattr(algorithm.subprocess, "Popen", KrakenProcess)
+    monkeypatch.setattr(algorithm.subprocess, "run", lambda *args, **kwargs: pytest.fail("Bracken ran"))
     ctx = InputContext(store.root, "a" * 64, "b" * 64, "ref", "c" * 64, input_dir)
-    with pytest.raises(RuntimeError, match="candidate FASTA exceeds.*staging budget"):
-        algorithm.MICROBIAL.run(ctx, _private_out(store))
+    output = algorithm.MICROBIAL.run(ctx, _private_out(store))
+    metrics = {row["metric_id"]: row["value"] for row in output.metrics}
+    assert metrics["primary_reads"] == 2
+    assert metrics["candidate_unmapped_reads"] == 2
+    assert metrics["classified_candidate_reads"] == 2
     assert not list((store.lab / "tmp" / "test-worker").glob("microbial-*"))
+
+
+def test_streamed_classifier_timeout_kills_and_reaps_child(tmp_path, monkeypatch) -> None:
+    import io
+
+    bam = tmp_path / "aligned.bam"
+    with pysam.AlignmentFile(bam, "wb", header={"HD": {"VN": "1.6"}}) as stream:
+        read = pysam.AlignedSegment()
+        read.query_name = "private"
+        read.query_sequence = "A" * 75
+        read.flag = 4
+        stream.write(read)
+
+    class TimeoutProcess:
+        def __init__(self, argv, **kwargs):
+            self.stdin = io.BytesIO()
+            self.killed = False
+            self.reaped = False
+
+        def wait(self, timeout=None):
+            if not self.killed:
+                raise subprocess.TimeoutExpired("kraken2", timeout)
+            self.reaped = True
+
+        def poll(self):
+            return None if not self.killed else -9
+
+        def kill(self):
+            self.killed = True
+
+    process = TimeoutProcess([], stdin=None)
+    monkeypatch.setattr(algorithm.subprocess, "Popen", lambda *args, **kwargs: process)
+    with pytest.raises(subprocess.TimeoutExpired):
+        algorithm._classify_streamed(bam, 75, "kraken2", tmp_path, tmp_path / "report")
+    assert process.killed and process.reaped and process.stdin.closed
 
 
 def test_all_unclassified_candidates_yield_zero_without_bracken(tmp_path, monkeypatch) -> None:
