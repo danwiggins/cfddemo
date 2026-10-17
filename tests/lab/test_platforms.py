@@ -48,6 +48,10 @@ def test_derived_platform_skip_is_persisted_and_shown_in_depth_curve(
     scrubber = Scrubber(root=store.root)
     full, = run_plan(store, None, log, parent, items, entries, run_id=log.run_id, scrubber=scrubber)
     assert (full.status, full.skip_reason) == ("skipped", "platform")
+    from traceback_lab.registry import execution_identity
+    assert full.parameters_sha256 == execution_identity(
+        algorithm, reference_sha256=parent.reference_sha256,
+    )
 
     monkeypatch.setattr(controls.ReadSummary, "open", lambda *_: object())
     monkeypatch.setattr(controls, "derived_mask", lambda *_: None)

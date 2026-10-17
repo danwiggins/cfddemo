@@ -9,7 +9,7 @@ import pysam
 from traceback_lab import cohorts
 from traceback_lab.cohorts import add_sample, build_cohort, project_current_metric, project_sample_metric, read_current, read_roster
 from traceback_lab.envelope import Metric, ResultEnvelope, provenance
-from traceback_lab.identity import parameters_sha256
+from traceback_lab.identity import cohort_compat_key, parameters_sha256
 from traceback_lab.ingest import resolve_sample
 from traceback_lab.problems import LabProblem
 from traceback_lab.store import LabStore
@@ -79,6 +79,12 @@ def test_add_is_idempotent_and_build_publishes_immutable_generations(store: LabS
     assert one.percentile_n == 2
     assert one.members[0].results[0].cohort_compat_key == one.members[1].results[0].cohort_compat_key
     compat = one.members[0].results[0].cohort_compat_key
+    assert compat == cohort_compat_key(
+        algorithm_id="fragment-size", algorithm_version="1", parameters={}, tools=[],
+        reference_sha256=_sha(900),
+        aligner_identity={"kind": "aligned", "tools": {"samtools": "1.20", "minimap2": "2.28"},
+                          "mmi_sha256": _sha(901), "aligner_argv": ["minimap2", "-ax", "map-ont"]},
+    )
     projected = project_current_metric(store, "healthy", algorithm_id="fragment-size", metric_id="mode_bp",
                                        cohort_compat_key=compat, target_source_id=first)
     assert projected is not None
