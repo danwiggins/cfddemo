@@ -41,7 +41,9 @@ from .ingest import (
     EXAMPLE_REFERENCE_ID,
 )
 from .identity import aligned_input_id, prealigned_input_id
-from .problems import EXIT_OK, EXIT_PARTIAL, EXIT_USAGE, LabProblem, docs_anchor
+from .problems import (
+    EXIT_OK, EXIT_PARTIAL, EXIT_USAGE, LabProblem, problem_lines, problem_payload,
+)
 from .runner import DEFAULT_TIMEOUT_S, RunTarget, StepResult, run_plan
 from .scrub import Scrubber
 from .sample_metadata import with_sex_assertion
@@ -223,6 +225,33 @@ def _aligner_change(store: LabStore, source_id: str, tools: dict[str, str | None
     if last.get("tools") == tools:
         return None
     return {"old": last.get("tools"), "new": tools}
+
+
+def _aligner_warning(change: dict[str, Any], low: float, high: float) -> dict[str, Any]:
+    old = change["old"] if isinstance(change["old"], dict) else {}
+    new = change["new"] if isinstance(change["new"], dict) else {}
+    versions = ", ".join(
+        f"{tool} {old.get(tool) or 'unknown'} -> {new.get(tool) or 'unknown'}"
+        for tool in sorted(set(old) | set(new))
+    )
+    problem = LabProblem(
+        "TBX-LAB-019",
+        cause=(
+            f"aligner versions changed: {versions}; "
+            f"estimated realignment {low:.0f}-{high:.0f} min"
+        ),
+        fix=(
+            "No action is required for this run. Use --dry-run before future runs "
+            "and pin aligner versions to keep cohorts comparable."
+        ),
+    )
+    return {
+        "summary": problem.summary,
+        **problem_payload("lab run", problem)["data"],
+        "old": change["old"],
+        "new": change["new"],
+        "estimate_min": [round(low, 1), round(high, 1)],
+    }
 
 
 def _dry_run(args: argparse.Namespace, store: LabStore, progress: Callable[[str], None]) -> tuple[int, dict[str, Any]]:
@@ -438,14 +467,7 @@ def run_command(args: argparse.Namespace, store: LabStore) -> tuple[int, dict[st
                         )
                         if change is not None and not reusable:
                             low, high = estimate_align_minutes(chunkset.total_bytes)
-                            warning = {
-                                "code": "TBX-LAB-019",
-                                "old": change["old"],
-                                "new": change["new"],
-                                "estimate_min": [round(low, 1), round(high, 1)],
-                                "docs": docs_anchor("TBX-LAB-019"),
-                            }
-                            warnings.append(warning)
+                            warnings.append(_aligner_warning(change, low, high))
                             progress(
                                 f"WARN TBX-LAB-019 aligner identity changed {change['old']} -> {change['new']}; "
                                 f"realigning (~{low:.0f}-{high:.0f} min)"
@@ -738,6 +760,22 @@ def _summary(
     for result in failed:
         lines.append(f"FAILED  {result.algorithm_id}: {result.first_line}")
         lines.append(f"        details: traceback lab runs {run_id} --step {result.algorithm_id}")
+    for warning in warnings:
+        lines.append(f"WARN    {warning['summary']}")
+        lines.extend(problem_lines(LabProblem(
+            warning["code"], cause=warning["cause"], fix=warning["fix"],
+        )))
+    partial_problem = None
+    if failed:
+        partial_problem = LabProblem(
+            "TBX-LAB-016",
+            cause=f"{len(failed)} algorithm(s) failed: " + ", ".join(r.algorithm_id for r in failed),
+            fix=(
+                f"`traceback lab runs {run_id} --step {failed[0].algorithm_id}`; "
+                "rerun recomputes only failed results"
+            ),
+        )
+        lines.extend(problem_lines(partial_problem))
     for remedy in remedies:
         lines.append(
             f"SKIP    {remedy['algorithm_id']} skipped ({remedy['reason']}): "
@@ -746,17 +784,9 @@ def _summary(
     for argv in next_argv:
         lines.append(f"NEXT    {' '.join(argv)}")
     summary = f"run {run_id}: {ok} ok, {sum(skipped.values())} skipped, {len(failed)} failed"
-    if failed:
+    if partial_problem is not None:
+        data.update(problem_payload("lab run", partial_problem)["data"])
         payload = _local_envelope(_result("lab run", "partial_failure", summary, data=data))
-        payload["data"].update(
-            {
-                "code": "TBX-LAB-016",
-                "cause": f"{len(failed)} algorithm(s) failed: " + ", ".join(r.algorithm_id for r in failed),
-                "fix": f"`traceback lab runs {run_id} --step ALG`; rerun recomputes only failed results",
-                "retryable": False,
-                "docs": docs_anchor("TBX-LAB-016"),
-            }
-        )
         return EXIT_PARTIAL, _bare(_with_human(payload, lines, replace_data=True))
     payload = _local_envelope(_result("lab run", "ok", summary, data=data))
     return EXIT_OK, _bare(_with_human(payload, lines, replace_data=True))
