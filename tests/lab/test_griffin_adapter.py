@@ -46,6 +46,14 @@ def test_site_list_cannot_extend_beyond_profiled_autosomes(tmp_path: Path) -> No
         _require_site_contigs(sites, ("chr1",))
     sites.write_text("Chrom\tposition\nchr1\t100\n", encoding="utf-8")
     assert _require_site_contigs(sites, ("chr1",)) == 1
+    sites.write_text("position\tChrom\n100\tchr1\n", encoding="utf-8")
+    assert _require_site_contigs(sites, ("chr1",)) == 1
+    sites.write_text("chrom\tChrom\tposition\nchr1\tchrX\t100\n", encoding="utf-8")
+    with pytest.raises(ValueError, match="outside the workflow scope"):
+        _require_site_contigs(sites, ("chr1",))
+    sites.write_text("chrom\tposition\nchr1\t100\n", encoding="utf-8")
+    with pytest.raises(ValueError, match="one Chrom header"):
+        _require_site_contigs(sites, ("chr1",))
 
 
 def test_reads_pinned_upstream_healthy_demo_fixture() -> None:
