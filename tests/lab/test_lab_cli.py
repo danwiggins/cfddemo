@@ -148,7 +148,7 @@ def test_problem_table_exit_codes() -> None:
     assert PROBLEMS["TBX-LAB-025"].exit_code == 0
     if "TBX-LAB-024" in PROBLEMS:
         assert PROBLEMS["TBX-LAB-024"].exit_code == 3  # platform refusal, when that lane is integrated
-    assert len(PROBLEMS) >= 24
+    assert len(PROBLEMS) == 24 + int("TBX-LAB-024" in PROBLEMS)
 
 
 def test_usage_errors_keep_the_json_contract(tmp_path: Path, capsys) -> None:
