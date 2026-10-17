@@ -2,16 +2,17 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 
 from ..read_summary import depth_stamp
-from ..registry import AlgorithmOutput, InputContext
+from ..registry import AlgorithmOutput, InputContext, Requirements
 from ._base import Base, load_summary, metric
 
 
 @dataclass
 class Depth(Base):
+    requires: Requirements = field(default_factory=lambda: Requirements(platforms=frozenset({"ont", "illumina"})))
     def run(self, ctx: InputContext, out: Path) -> AlgorithmOutput:
         summary, mask = load_summary(ctx)
         stamp = depth_stamp(summary, mask)
