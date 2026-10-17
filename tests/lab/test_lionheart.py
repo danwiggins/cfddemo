@@ -97,6 +97,7 @@ np.save(output / 'feature_dataset.npy', matrix)
     monkeypatch.setenv("TRACEBACK_LIONHEART_ARCHIVE", str(archive))
     monkeypatch.setenv("TRACEBACK_LIONHEART_ENABLE_ONT", "1")
     monkeypatch.setattr(lionheart, "_package_pin", lambda _executable: ("2.2.0", "d" * 64))
+    monkeypatch.setattr(lionheart, "_pyarrow_available", lambda _python: True)
     ctx = InputContext(
         root=root, source_id="a" * 64, input_id="b" * 64, reference_id="hg38",
         reference_sha256="c" * 64, input_dir=input_dir,
@@ -151,6 +152,22 @@ def test_lionheart_opt_out_does_not_read_resource_archive(tmp_path, monkeypatch)
                         lambda *_args: pytest.fail("disabled Lionheart must not read the resource archive"))
     assert lionheart.LIONHEART.asset_sha256s(ctx.root) == []
     assert lionheart.LIONHEART.preflight(ctx).reason_code == "platform_unverified"
+
+
+def test_lionheart_preflight_requires_parquet_reader_in_cli_environment(tmp_path, monkeypatch) -> None:
+    ctx, _ = _setup(tmp_path, monkeypatch)
+    monkeypatch.setattr(lionheart, "_pyarrow_available", lambda _python: False)
+    decision = lionheart.LIONHEART.preflight(ctx)
+    assert decision.reason_code == "missing_toolchain"
+    assert "Install pyarrow in the LIONHEART CLI's Python environment" in decision.message
+
+
+def test_lionheart_preflight_explains_unsupported_launcher(tmp_path, monkeypatch) -> None:
+    ctx, _ = _setup(tmp_path, monkeypatch)
+    Path(os.environ["TRACEBACK_LIONHEART_BIN"]).write_text("#!/usr/bin/env python3\nprint('lionheart, version 2.2.0')\n")
+    decision = lionheart.LIONHEART.preflight(ctx)
+    assert decision.reason_code == "missing_toolchain"
+    assert "direct interpreter shebang" in decision.message
 
 
 def test_lionheart_preflight_requires_upstream_helpers_and_library_dir(tmp_path, monkeypatch) -> None:

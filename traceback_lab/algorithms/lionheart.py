@@ -104,9 +104,8 @@ print(json.dumps({'version': dist.version, 'sha256': digest.hexdigest()}))
 """
 
 
-def _package_pin(executable: Path) -> tuple[str, str] | None:
-    """Hash the installed package loaded by the CLI's Python environment."""
-
+def _cli_python(executable: Path) -> Path | None:
+    """Identify the interpreter named by a directly executable Python launcher."""
     try:
         with executable.open("rb") as stream:
             shebang = stream.readline(512).decode("utf-8").strip()
@@ -115,7 +114,19 @@ def _package_pin(executable: Path) -> tuple[str, str] | None:
         parts = shlex.split(shebang[2:])
         if len(parts) != 1 or not Path(parts[0]).is_file():
             return None
-        result = subprocess.run([parts[0], "-c", _PACKAGE_PIN_SCRIPT], capture_output=True,
+        return Path(parts[0])
+    except (OSError, ValueError):
+        return None
+
+
+def _package_pin(executable: Path) -> tuple[str, str] | None:
+    """Hash the installed package loaded by the CLI's Python environment."""
+
+    python = _cli_python(executable)
+    if python is None:
+        return None
+    try:
+        result = subprocess.run([str(python), "-c", _PACKAGE_PIN_SCRIPT], capture_output=True,
                                 text=True, timeout=15, check=False)
         if result.returncode != 0:
             return None
@@ -126,6 +137,17 @@ def _package_pin(executable: Path) -> tuple[str, str] | None:
         return version, sha256
     except (OSError, ValueError, KeyError, subprocess.SubprocessError):
         return None
+
+
+def _pyarrow_available(python: Path) -> bool:
+    """Upstream reads Parquet resources during feature calculation."""
+
+    try:
+        result = subprocess.run([str(python), "-c", "import pyarrow.parquet"],
+                                capture_output=True, timeout=15, check=False)
+    except (OSError, subprocess.SubprocessError):
+        return False
+    return result.returncode == 0
 
 
 def _tree_files(directory: Path) -> dict[str, str]:
@@ -290,9 +312,14 @@ class Lionheart(Base):
             return Skip("missing_toolchain", "Install LIONHEART v2.2.0, modified mosdepth, samtools, and unpigz")
         if _libhts(_mosdepth_library_dir(mosdepth)) is None:
             return Skip("missing_toolchain", "LIONHEART mosdepth library directory must contain libhts.so")
+        python = _cli_python(executable)
+        if python is None:
+            return Skip("missing_toolchain", "Use a LIONHEART Python launcher with a direct interpreter shebang so its package can be pinned")
         package = _package_pin(executable)
         if package is None or package[0] != LIONHEART_VERSION:
             return Skip("missing_toolchain", "LIONHEART v2.2.0 installed package files must be available for provenance")
+        if not _pyarrow_available(python):
+            return Skip("missing_toolchain", "Install pyarrow in the LIONHEART CLI's Python environment to read Parquet resources")
         try:
             version = subprocess.run([str(executable), "--version"], capture_output=True, text=True,
                                      timeout=30, check=False)
