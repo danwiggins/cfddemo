@@ -404,7 +404,10 @@
         // Outside the range the track continues past a break mark (⫽).
         v > hi ? svg("text", { x: (x(hi) + x(v)) / 2, y: 22, class: "strip-break", "text-anchor": "middle" }, "⫽") : "",
         v < lo ? svg("text", { x: (x(lo) + x(v)) / 2, y: 22, class: "strip-break", "text-anchor": "middle" }, "⫽") : "",
-        svg("text", { x: x(v), y: 22, class: "strip-mark", "text-anchor": "middle" }, "◆")), h("figcaption", {}, metric.caption));
+        svg("text", { x: x(v), y: 22, class: "strip-mark", "text-anchor": "middle" }, "◆")),
+        dataTable(`${metric.label}: published reference strip`, ["Mark", `Value (${metric.unit || "unitless"})`],
+          [["Reference low", lo], ["Reference high", hi], ["This sample", metric.value]]),
+        h("figcaption", {}, metric.caption));
     }
     if (metric.exploratory_n && metric.interval) {
       // Variant E: the cohort min–max bracket with this sample as ◆ (the dot plot
@@ -417,7 +420,12 @@
         svg("title", {}, metric.caption),
         svg("path", { d: `M${x(lo)},8 v18 M${x(lo)},17 H${x(hi)} M${x(hi)},8 v18`, class: "strip-track" }),
         ...(metric.cohort_values || []).map((value) => svg("circle", { cx: x(value), cy: 17, r: 2.5, class: "strip-member" })),
-        svg("text", { x: x(v), y: 22, class: "strip-mark", "text-anchor": "middle" }, "◆")), h("figcaption", {}, metric.caption));
+        svg("text", { x: x(v), y: 22, class: "strip-mark", "text-anchor": "middle" }, "◆")),
+        dataTable(`${metric.label}: exploratory cohort strip`, ["Mark", `Value (${metric.unit || "unitless"})`],
+          [["Cohort minimum", lo], ["Cohort maximum", hi],
+            ...(metric.cohort_values || []).map((value, index) => [`Cohort member ${index + 1}`, value]),
+            ["This sample", metric.value]]),
+        h("figcaption", {}, metric.caption));
     }
     if (metric.percentile !== null && metric.percentile !== undefined) {
       const x = (p) => 10 + (p / 100) * (width - 20);
@@ -435,6 +443,9 @@
         svg("rect", { x: x(5), y: 10, width: x(95) - x(5), height: 14, class: "strip-band" }),
         ...[1, 5, 95, 99].map((p) => svg("line", { x1: x(p), x2: x(p), y1: 6, y2: 28, class: "strip-tick" })),
         svg("text", { x: x(metric.percentile), y: 22, class: "strip-mark", "text-anchor": "middle" }, "◆")),
+        dataTable(`${metric.label}: percentile strip`, ["Mark", "Percentile (%)"],
+          [["Reference band low", 5], ["Reference band high", 95],
+            ...[1, 5, 95, 99].map((p) => [`Tick ${p}`, p]), ["This sample", metric.percentile]]),
         interval ? svg("svg", { viewBox: "0 0 320 52", role: "img",
           "aria-label": `95th-percentile cutoff: 90% bootstrap interval ${fmt(interval[0], metric.unit)} to ${fmt(interval[1], metric.unit)}; separate value scale`, class: "strip-svg cutoff-whisker" },
           svg("title", {}, "95th-percentile cutoff bootstrap interval on the metric value scale"),
@@ -444,6 +455,9 @@
           svg("text", { x: 6, y: 43, class: "axis" }, "This sample"),
           svg("text", { x: sampleOffScale === "left" ? 110 : sampleOffScale === "right" ? 310 : valueX(sampleValue), y: 43, "text-anchor": "middle", class: "strip-mark" },
             sampleOffScale === "left" ? "◀" : sampleOffScale === "right" ? "▶" : "◆")) : "",
+        interval ? dataTable(`${metric.label}: 95th-percentile cutoff`, ["Mark", `Value (${metric.unit || "unitless"})`, "Display"],
+          [["Cutoff interval low", interval[0], "On scale"], ["Cutoff interval high", interval[1], "On scale"],
+            ["This sample", metric.value, sampleOffScale ? `Off scale ${sampleOffScale}` : "On scale"]]) : "",
         h("figcaption", {}, metric.caption, interval
           ? ` Cutoff CI: ${fmt(interval[0], metric.unit)}–${fmt(interval[1], metric.unit)} on a separate value scale.${sampleOffScale ? ` This sample is outside the cutoff CI scale (${sampleOffScale}).` : ""}` : ""));
     }
@@ -587,7 +601,9 @@
         });
         const chartSvg = svg("svg", { viewBox: `0 0 ${w} ${hgt}`, role: "img", "aria-label": label, class: "composition-svg" }, svg("title", {}, label), ...marks);
         slot.replaceWith(h("div", {}, chartSvg,
-          dataTable(`Cell-type composition (${Math.round(data.confidence_level * 100)}% bootstrap interval)`, ["Cell type", "Share", "Interval low", "Interval high", "Interval"],
+          dataTable(`Plotted cell-type composition (${Math.round(data.confidence_level * 100)}% bootstrap interval)`, ["Cell type", "Share", "Interval low", "Interval high", "Interval"],
+            rows.map((c) => [c.contributor_id, c.fraction, c.interval ? c.interval[0] : null, c.interval ? c.interval[1] : null, c.interval_state])),
+          dataTable("All cell-type contributions, including zero-share rows", ["Cell type", "Share", "Interval low", "Interval high", "Interval"],
             data.contributors.map((c) => [c.contributor_id, c.fraction, c.interval ? c.interval[0] : null, c.interval ? c.interval[1] : null, c.interval_state]))));
       })
       .catch((error) => slot.replaceWith(h("div", { class: "problem" }, `Chart could not be drawn (${error.message}).`)));
@@ -661,8 +677,24 @@
       for (const f of fracs) marks.push(svg("text", { x: x(f), y: hgt - 18, "text-anchor": "middle", class: "axis" }, `${f * 100}%`));
       const scaleLabel = unit === "none" ? "no validated stability deviation scale" : unit === "unit" ? "the metric's unit" : "%";
       const label = `${panel.label}: ${panel.verdict}. Deviation from full depth: ${scaleLabel}${hasSplitHalf ? `; ${splitSummary}; ${splitVerdict}` : ""}.`;
+      const metric = sample.algorithms.find((algorithm) => algorithm.algorithm_id === panel.algorithm_id)
+        ?.metrics.find((entry) => entry.metric_id === panel.metric_id);
+      const pointRows = panel.points.map((p) => ["Measured fraction", p.fraction * 100, p.value, p.deviation,
+        p.band && Number.isFinite(p.band.lo) && Number.isFinite(p.band.hi) ? p.band.lo : null,
+        p.band && Number.isFinite(p.band.lo) && Number.isFinite(p.band.hi) ? p.band.hi : null,
+        stateReason(p.state, p.reason, p.state || "—")]);
+      if (unit !== "none") for (const half of ["A", "B"]) {
+        const part = panel.split_status?.[half];
+        if (Number.isFinite(part?.deviation))
+          pointRows.push([`Split ${half}`, 50, part.value, part.deviation, null, null,
+            stateReason(part.state, part.reason, part.state || "—")]);
+      }
       grid.append(h("figure", { class: "multiple" }, h("figcaption", {}, h("strong", {}, panel.label), ` — ${panel.verdict}`),
         svg("svg", { viewBox: `0 0 ${w} ${hgt}`, role: "img", "aria-label": label, class: "multiple-svg" }, svg("title", {}, label), ...marks),
+        dataTable(`${panel.label}: plotted stability points`, ["Mark", "Input fraction (%)", `Value (${metric?.unit || "unitless"})`,
+          `Deviation (${unit === "percent" ? "%" : unit === "unit" ? metric?.unit || "metric unit" : "unavailable"})`,
+          `Band low (${unit === "percent" ? "%" : unit === "unit" ? metric?.unit || "metric unit" : "unavailable"})`,
+          `Band high (${unit === "percent" ? "%" : unit === "unit" ? metric?.unit || "metric unit" : "unavailable"})`, "State"], pointRows),
         h("p", { class: "help" }, unit === "none" ? "No validated stability deviation scale; numeric values are in the table." : unit === "unit" ? "y: difference from full depth (metric's unit)" : "y: relative deviation from full depth, % (clipped ±50%)"),
         hasSplitHalf ? h("p", { class: "help" }, `Split halves: ${splitSummary}. `,
           splitVerdict === "no split-half stability verdict" ? "No split-half stability verdict." : `Split-half verdict: ${splitVerdict}.`) : ""));
@@ -1488,6 +1520,8 @@
         svg("line", { x1: 10, x2: 170, y1: 15, y2: 15, class: "strip-track" }),
         svg("circle", { cx: x(a), cy: 15, r: 5, class: "sample-a" }),
         svg("path", { d: `M${x(b)},9 l6,6 -6,6 -6,-6 z`, class: "sample-b" })),
+      dataTable(`${metric.label}: sample A and B overlay`, ["Mark", `Value (${metric.unit || "unitless"})`],
+        [["Sample A", a], ["Sample B", b], ["B−A", metric.delta_b_minus_a]]),
       h("figcaption", {}, "A ● · B ◆; local display scale"));
   }
 
