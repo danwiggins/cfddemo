@@ -404,6 +404,32 @@ def test_low_marker_support_refuses_an_estimate(world, monkeypatch, floor, value
     assert not list(out.parent.glob("co-*"))
 
 
+@pytest.mark.parametrize("stage,message", [
+    ("prefilter", "no alignment passed the marker-region prefilter"),
+    ("calls", "no known, confident CpG calls overlap marker regions"),
+])
+def test_empty_marker_evidence_is_a_low_support_skip(world, monkeypatch, stage, message) -> None:
+    from traceback_lab.adapters import cell_origin_inhouse as adapter
+
+    register_loyfer_directory(world["root"], world["inputs"].loyfer_dir)
+    monkeypatch.setattr(
+        adapter, "write_prefiltered_bam",
+        lambda *_args, **_kwargs: SimpleNamespace(written=0 if stage == "prefilter" else 1),
+    )
+    if stage == "calls":
+        monkeypatch.setattr(
+            adapter, "extract_cpg_calls",
+            lambda *_args, **_kwargs: SimpleNamespace(calls=()),
+        )
+    out = world["tmp"] / f"empty-{stage}" / "artifacts"
+    out.mkdir(parents=True)
+    decision = co.CELL_ORIGIN.run(world["ctx"], out)
+    assert isinstance(decision, Skip)
+    assert decision.reason_code == "low_support" and decision.message == message
+    assert not list(out.iterdir())
+    assert not list(out.parent.glob("co-*"))
+
+
 def test_pinned_modkit_and_inhouse_marker_classes_match(world) -> None:
     binary = os.environ.get("LAB_MODKIT_PARITY_BINARY")
     if not binary:
