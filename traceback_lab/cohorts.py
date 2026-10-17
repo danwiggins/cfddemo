@@ -25,7 +25,7 @@ from .identity import SHA256_PATTERN, cohort_compat_key
 from .ingest import resolve_sample, source_ids
 from .problems import LabProblem
 from .registry import execution_identity, load_registry
-from .store import LabStore, new_run_id, open_regular_no_follow, write_atomic
+from .store import LabStore, _fsync_dir, new_run_id, open_regular_no_follow, write_atomic
 
 if TYPE_CHECKING:
     from .pon import PonInput
@@ -480,6 +480,60 @@ def pon_inputs_for_members(store: LabStore, members: tuple[CohortMember, ...]) -
     return tuple(eligible)
 
 
+def _member_selection_paths(store: LabStore, input_ids: tuple[str, ...]) -> set[Path]:
+    """Find mutable selectors that a member recomputation can change."""
+
+    paths: set[Path] = set()
+    for input_id in input_ids:
+        for algorithm_id in ("read-summary", "copy-number", "instability"):
+            directory = store.results_dir / input_id / algorithm_id
+            if directory.is_symlink():
+                raise ValueError("member result directory is a symlink")
+            try:
+                with os.scandir(directory) as entries:
+                    for entry in entries:
+                        if not entry.is_dir(follow_symlinks=False):
+                            continue
+                        selector = Path(entry.path) / "selected.json"
+                        try:
+                            mode = selector.lstat().st_mode
+                        except FileNotFoundError:
+                            continue
+                        if not stat.S_ISREG(mode):
+                            raise ValueError("member result selection is not a regular file")
+                        paths.add(selector)
+            except FileNotFoundError:
+                continue
+    return paths
+
+
+def _snapshot_member_selections(store: LabStore, input_ids: tuple[str, ...]) -> dict[Path, bytes]:
+    before: dict[Path, bytes] = {}
+    for selector in _member_selection_paths(store, input_ids):
+        with os.fdopen(open_regular_no_follow(selector), "rb") as stream:
+            content = stream.read(16 * 1024 + 1)
+        if len(content) > 16 * 1024:
+            raise ValueError("member result selection is too large")
+        before[selector] = content
+    return before
+
+
+def _restore_member_selections(store: LabStore, input_ids: tuple[str, ...], before: dict[Path, bytes]) -> None:
+    """Keep immutable attempts, but undo selectors from an unpublished build."""
+
+    changed_dirs: set[Path] = set()
+    for selector in _member_selection_paths(store, input_ids) - before.keys():
+        selector.unlink()
+        changed_dirs.add(selector.parent)
+    for selector, content in before.items():
+        write_atomic(selector, content)
+        changed_dirs.add(selector.parent)
+    for directory in changed_dirs:
+        _fsync_dir(directory)
+    if changed_dirs:
+        store.bump_generation()
+
+
 def read_current(store: LabStore, cohort_id: str) -> CohortGeneration | None:
     """Pin one complete immutable generation with a single pointer read."""
 
@@ -585,6 +639,8 @@ def build_cohort(store: LabStore, cohort_id: str, *, kind: str = "internal_cohor
         members = tuple(member_from_store(store, source_id) for source_id in read_roster(store, cohort_id))
         version = max(versions, default=0) + 1
         snapshot = CohortGeneration(cohort_id=cohort_id, version=version, kind=kind, members=members)
+        selected_input_ids: tuple[str, ...] = ()
+        selections_before: dict[Path, bytes] | None = None
         if kind == "internal_cohort":
             inputs = pon_inputs_for_members(store, members)
             if len(inputs) >= 10:
@@ -601,25 +657,38 @@ def build_cohort(store: LabStore, cohort_id: str, *, kind: str = "internal_cohor
                     pon_n=built.pon_n, pon_asset_sha256=built.full_asset_sha256,
                     pon_build=built.provenance(),
                 )
-                updated = {
-                    source_id: recompute_member(
-                        store, pending, source_id, lock=lock, log=log, run_id=run_id,
-                        timeout_s=DEFAULT_TIMEOUT_S,
-                    )
-                    for source_id in built.source_ids
-                }
-                snapshot = CohortGeneration(
-                    cohort_id=cohort_id, version=version, kind=kind,
-                    members=tuple(updated.get(member.source_id, member) for member in annotated),
-                    pon_n=built.pon_n, pon_asset_sha256=built.full_asset_sha256,
-                    pon_build=built.provenance(),
+                selected_input_ids = tuple(
+                    member.input_id for member in members if member.source_id in built.source_ids
                 )
+                selections_before = _snapshot_member_selections(store, selected_input_ids)
+                try:
+                    updated = {
+                        source_id: recompute_member(
+                            store, pending, source_id, lock=lock, log=log, run_id=run_id,
+                            timeout_s=DEFAULT_TIMEOUT_S,
+                        )
+                        for source_id in built.source_ids
+                    }
+                    snapshot = CohortGeneration(
+                        cohort_id=cohort_id, version=version, kind=kind,
+                        members=tuple(updated.get(member.source_id, member) for member in annotated),
+                        pon_n=built.pon_n, pon_asset_sha256=built.full_asset_sha256,
+                        pon_build=built.provenance(),
+                    )
+                except BaseException:
+                    _restore_member_selections(store, selected_input_ids, selections_before)
+                    raise
 
         def write(staging: Path) -> None:
             (staging / "generation.json").write_bytes(canonical_json_bytes(snapshot.model_dump(mode="json", by_alias=True)))
 
-        store.publish_directory(generations, str(version), write)
-        write_atomic(directory / "current.json", canonical_json_bytes({"version": version}))
+        try:
+            store.publish_directory(generations, str(version), write)
+            write_atomic(directory / "current.json", canonical_json_bytes({"version": version}))
+        except BaseException:
+            if selections_before is not None:
+                _restore_member_selections(store, selected_input_ids, selections_before)
+            raise
         store.bump_generation()
         return snapshot
 
