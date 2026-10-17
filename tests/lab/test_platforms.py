@@ -2,6 +2,7 @@
 
 from pathlib import Path
 import json
+from types import SimpleNamespace
 
 import pysam
 import pytest
@@ -48,13 +49,26 @@ def test_stored_platform_must_match_bam_header(tmp_path: Path) -> None:
               "RG": [{"ID": "one", "PL": "ILLUMINA"}]}
     with pysam.AlignmentFile(str(bam_path), "wb", header=header):
         pass
-    with pytest.raises(ValueError, match="differs"):
-        for_input({"kind": "prealigned"}, bam_path)
+    assert for_input({"kind": "prealigned"}, bam_path) == "illumina"
     assert for_input({"kind": "prealigned", "platform": "illumina"}, bam_path) == "illumina"
     with pytest.raises(ValueError, match="differs"):
         for_input({"kind": "prealigned", "platform": "ont"}, bam_path)
     with pytest.raises(ValueError, match="does not declare ONT"):
         for_input({"kind": "aligned", "platform": "ont"}, bam_path)
+
+
+def test_legacy_illumina_source_record_keeps_header_platform(tmp_path: Path) -> None:
+    from traceback_lab.ingest import write_source
+    from traceback_lab.store import LabStore
+
+    store = LabStore(tmp_path)
+    store.ensure()
+    chunks = SimpleNamespace(chunks=[], excluded_indexes=[], basecall_model=None,
+                             rg_lines=["@RG\tID:legacy\tPL:ILLUMINA"])
+    aligned = SimpleNamespace(source_id="a" * 64, input_id="b" * 64,
+                              manifest={"kind": "prealigned", "reference_id": "hg38", "tools": None})
+    record = write_source(store, chunks, aligned)
+    assert record["inputs"][0]["platform"] == "illumina"
 
 
 def test_legacy_lab_aligned_without_read_groups_uses_pinned_map_ont(tmp_path: Path) -> None:
