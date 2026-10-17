@@ -138,6 +138,27 @@ def test_unprefixed_hg38_contig_uses_registered_chr_catalogues(tmp_path: Path) -
     assert metrics["preferred_end_support_fraction"] == 1.0
 
 
+def test_unprefixed_hg38_excludes_mt_and_decoys_from_end_denominator(tmp_path: Path) -> None:
+    root, _, _ = _catalogues(tmp_path)
+    summary_parent = tmp_path / "read-summary"
+    _summary(summary_parent, contig_name="1")
+    columns = summary_parent / "columns"
+    meta_path = columns / "meta.json"
+    meta = json.loads(meta_path.read_text(encoding="utf-8"))
+    meta["contigs"] = ["1", "MT", "GL000220.1"]
+    meta["lengths"] = [1000, 1000, 1000]
+    meta_path.write_text(json.dumps(meta), encoding="utf-8")
+    np.asarray([0, 1, 2], dtype=COLUMNS["contig"]).tofile(columns / "contig.bin")
+    np.asarray([0, 0, 0], dtype=COLUMNS["flag"]).tofile(columns / "flag.bin")
+    np.asarray([60, 60, 60], dtype=COLUMNS["mapq"]).tofile(columns / "mapq.bin")
+
+    output = ALIGNED_END_STRUCTURE.run(_context(root, summary_parent), tmp_path / "out")
+    artifact = json.loads(output.artifacts["aligned_end_structure.json"])
+    assert artifact["valid_molecules"] == 1
+    assert artifact["valid_ends"] == 2
+    assert artifact["preferred_u_hits"] == artifact["preferred_d_hits"] == 1
+
+
 def test_positive_direction_and_mirrored_window_boundaries(tmp_path: Path) -> None:
     root, _, _ = _catalogues(tmp_path)
     summary_parent = tmp_path / "read-summary"
