@@ -2453,6 +2453,7 @@ entries:
     reference: {kind: none}
     performance: null
     performance_missing_reason: "No validated ONT cfDNA viral-read cutoff or performance estimate"
+    missing_value_caption: "Viral RPM unavailable: no human-unmapped primaries or at least one lacks stored sequence; inspect the aggregate counts."
     meaning_high: "More human-unmapped reads align to the registered EBV sequences; this does not establish infection or cancer."
     meaning_low: "Few or no reads align to those EBV sequences; absence is not established."
     confounders: ["reference coverage", "cross-mapping", "contamination", "unmapped-read denominator"]
@@ -2476,6 +2477,7 @@ entries:
     reference: {kind: none}
     performance: null
     performance_missing_reason: "No validated ONT cfDNA viral-read cutoff or performance estimate"
+    missing_value_caption: "Viral RPM unavailable: no human-unmapped primaries or at least one lacks stored sequence; inspect the aggregate counts."
     meaning_high: "More human-unmapped reads align to the HPV types included in this registered bundle; other types are not assessed."
     meaning_low: "Few or no reads align to the included HPV types; absence is not established."
     confounders: ["included HPV types", "cross-mapping", "contamination", "unmapped-read denominator"]
@@ -2499,6 +2501,7 @@ entries:
     reference: {kind: none}
     performance: null
     performance_missing_reason: "No validated ONT cfDNA viral-read cutoff or performance estimate"
+    missing_value_caption: "Viral RPM unavailable: no human-unmapped primaries or at least one lacks stored sequence; inspect the aggregate counts."
     meaning_high: "More human-unmapped reads align to the registered HBV sequences; this does not establish infection."
     meaning_low: "Few or no reads align to those HBV sequences; absence is not established."
     confounders: ["reference coverage", "cross-mapping", "contamination", "unmapped-read denominator"]

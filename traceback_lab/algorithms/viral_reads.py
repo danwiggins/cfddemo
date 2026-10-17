@@ -15,6 +15,7 @@ import shutil
 import sqlite3
 import subprocess
 import tempfile
+from contextlib import closing
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
@@ -24,7 +25,7 @@ import pysam
 from ..file_access import open_regular_no_follow
 from ..pipeline import Stage, run_pipeline
 from ..registry import AlgorithmOutput, InputContext, Ready, Skip, ToolPin
-from ..viral_assets import VIRUSES, ViralReference, inspect_viral_reference
+from ..viral_assets import TARGETS_NAME, VIRUSES, ViralReference, inspect_viral_reference
 from ._base import Base, metric
 
 UNIT = "reads / 1M unmapped primaries"
@@ -97,7 +98,7 @@ def _copy_reference(reference: ViralReference, destination: Path) -> None:
 def _count_hits(paf: Path, reference: ViralReference, queries: int, db: Path) -> dict[str, int]:
     by_contig = {contig: virus for contig, virus, _ in reference.targets}
     counts = dict.fromkeys(VIRUSES, 0)
-    with sqlite3.connect(db) as connection:
+    with closing(sqlite3.connect(db)) as connection:
         connection.execute("CREATE TABLE hits (qid INTEGER NOT NULL, virus TEXT NOT NULL, PRIMARY KEY (qid, virus))")
         with paf.open("r", encoding="ascii") as stream:
             for line in stream:
@@ -170,6 +171,7 @@ class ViralReads(Base):
         return Ready()
 
     def run(self, ctx: InputContext, out: Path) -> AlgorithmOutput:
+        from ..assets import _digest
         from ..store import LabStore
 
         reference = inspect_viral_reference(LabStore(ctx.root))
@@ -195,16 +197,22 @@ class ViralReads(Base):
                 if not result.ok:
                     raise RuntimeError("viral side alignment failed or timed out")
                 counts = _count_hits(paf, reference, queries, work / "hits.sqlite")
-            if inspect_viral_reference(LabStore(ctx.root)).asset_sha256s != reference.asset_sha256s:
+            if (_digest(reference.fasta)[0], _digest(reference.fasta.parent / TARGETS_NAME)[0]) != reference.asset_sha256s:
                 raise RuntimeError("viral reference changed during side alignment")
+        missing_sequences = denominator - queries
+        available = denominator > 0 and missing_sequences == 0
         metrics = [
-            metric(f"{virus.lower()}_rpm", counts[virus] * 1_000_000 / denominator if denominator else None,
+            metric(f"{virus.lower()}_rpm", counts[virus] * 1_000_000 / denominator if available else None,
                    unit=UNIT, n=denominator)
             for virus in VIRUSES
         ]
         summary = {
             "denominator_unmapped_primaries": denominator,
             "queries_with_sequence": queries,
+            "missing_sequences": missing_sequences,
+            "availability_reason": (
+                "missing_sequence" if missing_sequences else "no_unmapped_primaries" if not denominator else None
+            ),
             "hits": counts,
             "reference_sha256": reference.sha256,
             "targets_sha256": reference.targets_sha256,

@@ -197,8 +197,11 @@ minimap2 separately against an operator-supplied viral FASTA, and reports
 EBV/HPV/HBV aligned reads per million human-unmapped primaries. The count is
 null if that denominator is zero. A read with primary alignments to more than
 one virus group is excluded from all groups; multiple alignments within a
-group count once. No detection threshold or clinical interpretation is
-established for this ONT cfDNA measurement.
+group count once. If any human-unmapped primary lacks stored sequence, all
+three RPM values are null because a complete measurement is unavailable;
+the aggregate artifact records how many sequences are missing. No detection
+threshold or clinical interpretation is established for this ONT cfDNA
+measurement.
 
 The FASTA must contain at least one nonempty IUPAC sequence for each group.
 Provide a TSV with exactly `contig`, `virus`, `accession` columns, one row per
