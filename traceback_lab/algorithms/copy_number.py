@@ -11,6 +11,7 @@ from __future__ import annotations
 import json
 import tempfile
 from collections.abc import Callable
+from dataclasses import replace
 from functools import lru_cache
 from pathlib import Path
 from typing import Any
@@ -81,6 +82,19 @@ class CopyNumber(Base):
         return super().preflight(ctx)
 
     def run(self, ctx: InputContext, out: Path) -> AlgorithmOutput:
+        selected = ctx.extras.get("pon_selection")
+        if selected is not None:
+            from ..pon import require_grid
+            from ..pon_consumer import selection_from_payload
+
+            selection = selection_from_payload(selected, ctx.root, ctx.reference_sha256)
+            parameters = replace(
+                ichor.default_parameters(), pon_policy="lab_loo_v1", pon_sha256=selection.pon_sha256
+            )
+            return self.run_configured(
+                ctx, out, parameters=parameters, pon=selection.path,
+                validate_grid=lambda actual: require_grid(selection, actual),
+            )
         parameters = ichor.default_parameters(min_counted_reads=int(ctx.extras.get("min_counted_reads", 1)))
         return self.run_configured(ctx, out, parameters=parameters)
 
