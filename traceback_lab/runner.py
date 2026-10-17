@@ -206,10 +206,13 @@ def run_plan(
         identity_ctx = target.context(store.root)
         identity_assets = getattr(algorithm, "identity_assets", None)
         assets_of = getattr(algorithm, "asset_sha256s", None)
+        scoped_assets_of = getattr(algorithm, "asset_sha256s_for_input", None)
         if platform_rejected or pon_unavailable:
             planned_assets = []
         elif callable(identity_assets):
             planned_assets = list(identity_assets(identity_ctx))
+        elif callable(scoped_assets_of):
+            planned_assets = list(scoped_assets_of(store.root, target.input_id))
         elif callable(assets_of):
             planned_assets = list(assets_of(store.root))
         else:
