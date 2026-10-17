@@ -280,7 +280,9 @@
       fill.style.width = `${Math.min(100, ((depth || 0) / maxDepth) * 100)}%`;
       bar.append(fill);
       if (a.min_depth_x) { const tick = h("div", { class: "tick" }); tick.style.left = `${(a.min_depth_x / maxDepth) * 100}%`; bar.append(tick); }
-      const text = a.min_depth_x
+      const text = a.input_gate
+        ? `${a.input_gate} → ${a.status === "skipped" ? `skipped (${a.skip_reason})` : a.status === "failed" ? "failed" : "ran"}`
+        : a.min_depth_x
         ? `needs ${a.min_depth_x}x; this run ${depth !== null ? depth.toFixed(3) : "—"}x → ${a.status === "skipped" ? `skipped (${a.skip_reason})` : a.status === "failed" ? "failed" : "ran"}`
         : `any depth → ${a.status === "skipped" ? `skipped (${a.skip_reason})` : a.status}`;
       return h("tr", {}, h("th", { scope: "row" }, a.algorithm_id), h("td", {}, bar), h("td", {}, text));

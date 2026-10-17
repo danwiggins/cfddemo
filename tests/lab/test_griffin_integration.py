@@ -177,6 +177,17 @@ def test_griffin_registration_write_failure_is_blocked_without_replacing_existin
 def test_griffin_preflight_depth_and_native_ont_skip(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     import pysam
     import traceback_lab.algorithms.griffin as module
+    from traceback_lab import views
+
+    assert GRIFFIN.requires.min_eligible_reads == 0
+    sample = views.SampleView("1" * 64, "1" * 12, False, views.InputView("full", "2" * 64, None, {}, {}))
+    row = next(row for row in views.depth_curve(sample)["rows"] if row["algorithm_id"] == "griffin")
+    assert row["input_gate"] == GRIFFIN.input_gate
+    from traceback_lab.cli import _algorithms
+    _, catalog = _algorithms(Namespace(), LabStore(tmp_path))
+    griffin_catalog = next(row for row in catalog["data"]["algorithms"] if row["id"] == "griffin")
+    assert griffin_catalog["min_eligible_reads"] == 0
+    assert griffin_catalog["input_gate"] == GRIFFIN.input_gate
 
     input_dir = tmp_path / "input"
     input_dir.mkdir()
@@ -199,6 +210,8 @@ def test_griffin_preflight_depth_and_native_ont_skip(tmp_path: Path, monkeypatch
     )
     depth = GRIFFIN.preflight(InputContext(**base, eligible_reads=4_999_999))
     assert isinstance(depth, Skip) and depth.reason_code == "depth"
+    assert "5,000,000 D21-eligible autosomal pairs" in depth.message
+    assert "4,999,999 eligible reads" in depth.message
     _available_toolchain(monkeypatch)
     unsupported = GRIFFIN.preflight(InputContext(**base, eligible_reads=5_000_000))
     assert isinstance(unsupported, Skip) and unsupported.reason_code == "platform"

@@ -18,7 +18,7 @@ from contextlib import nullcontext
 import sys
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any
+from typing import Any, ClassVar
 
 from ..adapters.griffin_run import (
     GRIFFIN_COMMIT, MIN_ELIGIBLE_AUTOSOMAL_PAIRS, GriffinRun, _require_paired_input,
@@ -55,11 +55,12 @@ def _public_provenance(manifest: dict[str, Any], raw_sha256: str,
 
 @dataclass
 class Griffin(Base):
+    input_gate: ClassVar[str] = f"at least {MIN_ELIGIBLE_AUTOSOMAL_PAIRS:,} D21-eligible autosomal pairs"
     family: str = "fragmentomics"
     consumes: str = "full_bam"
     cost: str = "slow"
     requires: Requirements = field(default_factory=lambda: Requirements(
-        min_eligible_reads=MIN_ELIGIBLE_AUTOSOMAL_PAIRS, platforms=frozenset({"illumina"}),
+        platforms=frozenset({"illumina"}),
     ))
     parameters: dict[str, Any] = field(default_factory=lambda: {
         "method": "upstream-Griffin-v0.2", "reference": "hg38",
@@ -94,6 +95,10 @@ class Griffin(Base):
             return Skip("derived_input", "Griffin supports only downsample and split selections")
         if ctx.eligible_reads is None:
             return Skip("depth", "Griffin needs a D21 eligible-read count to enforce the 5M gate")
+        if ctx.eligible_reads < MIN_ELIGIBLE_AUTOSOMAL_PAIRS:
+            return Skip(
+                "depth", f"Griffin needs {self.input_gate}; only {ctx.eligible_reads:,} eligible reads are available",
+            )
         if ctx.reference_id != "hg38" or not ctx.extras.get("reference_fasta"):
             return Skip("reference", "Griffin requires the registered hg38 FASTA")
         snakemake = shutil.which("snakemake")
