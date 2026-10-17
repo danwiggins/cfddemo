@@ -232,7 +232,9 @@ class Microbial(Base):
             raise RuntimeError("microbial database changed after execution planning")
         if planned_tools is not None and planned_tools != current_tools:
             raise RuntimeError("microbial toolchain changed after execution planning")
-        tmp_root = Path(ctx.root) / "lab" / "tmp"
+        # Keep read-level candidates in the enclosing worker scratch tree.
+        # The runner removes this tree even when the worker is group-killed.
+        tmp_root = out.parent
         try:
             _check_contained(LabStore(ctx.root), tmp_root)
         except AssetError as exc:

@@ -53,6 +53,12 @@ def _database(tmp_path: Path) -> tuple[LabStore, Path]:
     return store, directory
 
 
+def _private_out(store: LabStore) -> Path:
+    out = store.lab / "tmp" / "test-worker" / "artifacts"
+    out.parent.mkdir(parents=True, exist_ok=True)
+    return out
+
+
 def test_planned_result_resolves_into_sample_profile_without_identity_stubs(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, synthetic_world,
 ) -> None:
@@ -98,6 +104,46 @@ def test_planned_result_resolves_into_sample_profile_without_identity_stubs(
     assert profile is not None and profile["state"] == "cohort_unavailable"
     assert profile["candidate_unmapped_reads"] == 1
     assert profile["microbial_rpm_primary"] == 0
+
+
+def test_outer_timeout_removes_private_candidate_files(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, synthetic_world,
+) -> None:
+    """A killed worker cannot leave read-level sequence beside runner scratch."""
+    from traceback_runner import cli as signed_cli
+    from traceback_runner.references import register_reference
+    from tests.lab.bam_fixtures import Read, write_bam
+
+    store, _ = _database(tmp_path)
+    register_reference(store.root, synthetic_world["fasta"], "synth")
+    tools_dir = tmp_path / "tools"
+    tools_dir.mkdir()
+    kraken = tools_dir / "kraken2"
+    kraken.write_text('#!/bin/sh\ntouch "$(dirname "$0")/started"\nsleep 90\n')
+    bracken = tools_dir / "bracken"
+    bracken.write_text("#!/bin/sh\nexit 99\n")
+    for launcher in (kraken, bracken):
+        launcher.chmod(0o755)
+    (tools_dir / "classify").write_bytes(b"pinned synthetic helper")
+    (tools_dir / "kraken2lib.pm").write_bytes(b"pinned synthetic library")
+    (tools_dir / "src").mkdir()
+    (tools_dir / "src" / "est_abundance.py").write_bytes(b"pinned synthetic Bracken helper")
+    (tools_dir / "python").symlink_to(sys.executable)
+    monkeypatch.setenv("PATH", f"{tools_dir}{os.pathsep}{os.environ['PATH']}")
+    with pysam.FastaFile(str(synthetic_world["fasta"])) as fasta:
+        contigs = list(zip(fasta.references, fasta.lengths))
+    bam = write_bam(tmp_path / "aligned.bam", contigs, [
+        Read("mapped", "chr1", 100, "A" * 75),
+        Read("candidate", "chr1", 0, "A" * 75, flag=4),
+    ])
+    common = [str(bam), "--root", str(store.root), "--no-downsample", "--no-controls", "--json"]
+    assert signed_cli.main(["lab", "run", *common, "--only", "read-summary"]) == 0
+    signed_cli.main(["lab", "run", *common, "--only", "microbial", "--timeout-s", "15"])
+    assert (tools_dir / "started").exists(), "Kraken must start before the timeout assertion"
+    scratch = store.lab / "tmp"
+    assert not list(scratch.glob("microbial-*"))
+    assert not list(scratch.rglob("candidate.fa"))
+    assert not list(scratch.rglob("kraken.output"))
 
 
 def test_production_cohort_snapshot_excludes_unassayable_and_changed_db(tmp_path, monkeypatch) -> None:
@@ -545,7 +591,7 @@ def test_run_clips_only_unmapped_eligible_reads_and_uses_primary_denominator(tmp
 
     monkeypatch.setattr(algorithm.subprocess, "run", fake_run)
     ctx = InputContext(store.root, "a" * 64, "b" * 64, "ref", "c" * 64, input_dir)
-    output = algorithm.MICROBIAL.run(ctx, tmp_path / "out")
+    output = algorithm.MICROBIAL.run(ctx, _private_out(store))
     metrics = {row["metric_id"]: row["value"] for row in output.metrics}
     assert metrics["primary_reads"] == 3
     assert metrics["candidate_unmapped_reads"] == 1
@@ -580,7 +626,7 @@ def test_all_unclassified_candidates_yield_zero_without_bracken(tmp_path, monkey
 
     monkeypatch.setattr(algorithm.subprocess, "run", fake_run)
     ctx = InputContext(store.root, "a" * 64, "b" * 64, "ref", "c" * 64, input_dir)
-    output = algorithm.MICROBIAL.run(ctx, tmp_path / "out")
+    output = algorithm.MICROBIAL.run(ctx, _private_out(store))
     metrics = {row["metric_id"]: row["value"] for row in output.metrics}
     assert len(calls) == 1
     assert metrics["microbial_rpm_primary"] == 0
@@ -616,7 +662,7 @@ def test_classified_above_species_level_yields_zero_without_bracken(tmp_path, mo
 
     monkeypatch.setattr(algorithm.subprocess, "run", fake_run)
     ctx = InputContext(store.root, "a" * 64, "b" * 64, "ref", "c" * 64, input_dir)
-    output = algorithm.MICROBIAL.run(ctx, tmp_path / "out")
+    output = algorithm.MICROBIAL.run(ctx, _private_out(store))
     metrics = {row["metric_id"]: row["value"] for row in output.metrics}
     assert len(calls) == 1
     assert metrics["classified_candidate_reads"] == 1
@@ -648,7 +694,7 @@ def test_zero_primary_reads_are_unavailable_not_a_measured_zero(tmp_path, monkey
         pass
     monkeypatch.setattr(algorithm, "_tool", lambda name: (name, "a" * 64))
     ctx = InputContext(store.root, "a" * 64, "b" * 64, "ref", "c" * 64, input_dir)
-    output = algorithm.MICROBIAL.run(ctx, tmp_path / "out")
+    output = algorithm.MICROBIAL.run(ctx, _private_out(store))
     metrics = {row["metric_id"]: row["value"] for row in output.metrics}
     assert metrics["primary_reads"] == 0
     assert metrics["microbial_rpm_primary"] is None
@@ -669,7 +715,7 @@ def test_unassayable_unmapped_reads_are_unavailable(tmp_path, monkeypatch, seque
         bam.write(read)
     monkeypatch.setattr(algorithm, "_tool", lambda name: (name, "a" * 64))
     ctx = InputContext(store.root, "a" * 64, "b" * 64, "ref", "c" * 64, input_dir)
-    output = algorithm.MICROBIAL.run(ctx, tmp_path / "out")
+    output = algorithm.MICROBIAL.run(ctx, _private_out(store))
     metrics = {row["metric_id"]: row["value"] for row in output.metrics}
     assert metrics["primary_reads"] == 1
     assert metrics["candidate_unmapped_reads"] == 0
@@ -696,7 +742,7 @@ def test_all_human_mapped_reads_are_measured_zero(tmp_path, monkeypatch) -> None
         bam.write(read)
     monkeypatch.setattr(algorithm, "_tool", lambda name: (name, "a" * 64))
     ctx = InputContext(store.root, "a" * 64, "b" * 64, "ref", "c" * 64, input_dir)
-    output = algorithm.MICROBIAL.run(ctx, tmp_path / "out")
+    output = algorithm.MICROBIAL.run(ctx, _private_out(store))
     metrics = {row["metric_id"]: row["value"] for row in output.metrics}
     assert metrics["candidate_unmapped_reads"] == 0
     assert metrics["microbial_rpm_primary"] == 0
@@ -710,7 +756,7 @@ def test_run_refuses_symlinked_lab_temporary_directory(tmp_path, monkeypatch) ->
     monkeypatch.setattr(algorithm, "_tool", lambda name: (name, "a" * 64))
     ctx = InputContext(store.root, "a" * 64, "b" * 64, "ref", "c" * 64, tmp_path / "input")
     with pytest.raises(RuntimeError, match="temporary directory is unsafe"):
-        algorithm.MICROBIAL.run(ctx, tmp_path / "out")
+        algorithm.MICROBIAL.run(ctx, store.lab / "tmp" / "test-worker" / "artifacts")
     assert list(outside.iterdir()) == []
 
 
