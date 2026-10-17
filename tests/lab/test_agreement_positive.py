@@ -134,8 +134,8 @@ def _published_agreement(tmp_path, monkeypatch):
                                                       cohort_compat_key="f" * 64, metrics={"mode_bp": 999.0}),))
     generation = CohortGeneration(cohort_id="healthy-v1", version=1, members=(target, *peers, incompatible))
     monkeypatch.setattr(web_api, "read_current", lambda store, cohort_id: generation)
-    # Cohort identity is assembled from the actual selected publications; only the
-    # unrelated cohort members are supplied at the snapshot boundary.
+    # The fixture target copies parameter hashes from selected publications;
+    # compatibility keys and cohort peers are supplied at the snapshot boundary.
     monkeypatch.setattr(web_api, "member_from_store", lambda store, source: target)
     return store, id12
 
