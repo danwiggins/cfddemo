@@ -126,6 +126,34 @@ def test_malformed_newest_result_is_disclosed_without_stale_fallback(tmp_path) -
     assert sample["defended"]["rows"] == []
 
 
+def test_unregistered_result_directory_is_reported_without_exposing_its_name(tmp_path) -> None:
+    store = _malformed_store(tmp_path)
+    unknown = store.results_dir / INPUT / "private.sentinel" / ("e" * 64)
+    unknown.mkdir(parents=True)
+    (unknown / "selected.json").write_text('{"attempt_id":"invalid"}')
+
+    api = LabApi(store)
+    sample = api.sample(SOURCE[:12])
+    row = api.samples()["samples"][0]
+    assert sample["malformed_result_selections"] and row["malformed_result_selections"]
+    assert sample["unreadable_results"] == row["unreadable_results"] == ["fragment-size"]
+    assert "private.sentinel" not in json.dumps(sample)
+    assert "private.sentinel" not in json.dumps(row)
+
+
+@needs_chrome
+@pytest.mark.parametrize("route", ("findings", "trust-qc"))
+def test_unregistered_result_directory_has_generic_browser_notice(route, tmp_path) -> None:
+    store = _malformed_store(tmp_path / "store")
+    unknown = store.results_dir / INPUT / "private.sentinel" / ("e" * 64)
+    unknown.mkdir(parents=True)
+    (unknown / "selected.json").write_text('{"attempt_id":"invalid"}')
+    with RunningLabServer(store) as server:
+        dom = _dom(server, tmp_path / "browser", route=f"/sample/{SOURCE[:12]}/{route}")
+    assert "malformed result selection" in dom.lower()
+    assert "private.sentinel" not in dom
+
+
 def test_ambiguous_legacy_results_are_disclosed_without_guessing(tmp_path) -> None:
     store = _ambiguous_store(tmp_path)
     api = LabApi(store)
