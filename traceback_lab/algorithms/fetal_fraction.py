@@ -25,7 +25,7 @@ args <- commandArgs(trailingOnly=TRUE)
 if (length(args) != 3L || as.character(packageVersion("NIPTeR")) != "1.0.2") stop("NIPTeR version mismatch")
 control <- readRDS(args[[2L]])
 if (!inherits(control, "NIPTControlGroup") || is.null(control$samples) ||
-    length(control$samples) < as.integer(args[[3L]])) stop("invalid NIPTeR control group")
+    length(control$samples) != as.integer(args[[3L]])) stop("invalid NIPTeR control group")
 if (length(control$correction_status_autosomal_chromosomes) != 1L ||
     control$correction_status_autosomal_chromosomes != "Uncorrected" ||
     any(vapply(control$samples, function(item) length(item$autosomal_chromosome_reads) != 1L,
