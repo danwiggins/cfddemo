@@ -12,11 +12,13 @@ import pysam
 import pytest
 
 from traceback_lab.algorithms import microbial as algorithm
+from traceback_lab import cohorts
 from traceback_lab.cohort_contracts import CohortGeneration, CohortMember, CohortResult
 from traceback_lab.envelope import Metric, ResultEnvelope, provenance
 from traceback_lab.microbial_db import MicrobialDbError, inspect_database, register_database
 from traceback_lab.microbial_view import profile_for_sample
 from traceback_lab.registry import InputContext
+from traceback_lab.registry import execution_identity
 from traceback_lab.store import LabStore
 from traceback_lab.views import InputView, SampleView
 
@@ -34,6 +36,54 @@ def _database(tmp_path: Path) -> tuple[LabStore, Path]:
     with store.writer("microbial db add", "r-20261016-0000-aabb", step="database"):
         register_database(store, directory, 75, "synthetic database")
     return store, directory
+
+
+def test_production_cohort_snapshot_excludes_unassayable_and_changed_db(tmp_path, monkeypatch) -> None:
+    """The production selector must preserve microbial DB identity and zero semantics."""
+
+    store = LabStore(tmp_path / "root")
+    source_id, input_id, reference_sha = "a" * 64, "b" * 64, "c" * 64
+    db_digest = ["d" * 64]
+    summary = SimpleNamespace(id="read-summary", version="1", upstream=(), parameters={}, tools=[])
+    microbial = SimpleNamespace(id="microbial", version="3", upstream=("read-summary",),
+                                parameters={}, tools=[], asset_sha256s=lambda root: db_digest)
+    monkeypatch.setattr(cohorts, "load_registry", lambda: (summary, microbial))
+    manifest = {"kind": "prealigned", "source_id": source_id, "reference_sha256": reference_sha}
+    summary_identity = execution_identity(summary, reference_sha256=reference_sha)
+    microbial_identity = execution_identity(
+        microbial, reference_sha256=reference_sha, asset_sha256s=db_digest,
+        upstream=[{"algorithm_id": "read-summary", "parameters_sha256": summary_identity}],
+    )
+    for item, identity in ((summary, summary_identity), (microbial, microbial_identity)):
+        store.publish_result(ResultEnvelope(
+            algorithm_id=item.id, algorithm_version=item.version, status="ok",
+            provenance=provenance(tool="fixture", parameters_sha256=identity, source_id=source_id,
+                                  input_id=input_id, reference_id="synthetic"),
+            metrics=([Metric(metric_id="primary_reads", value=100),
+                      Metric(metric_id="candidate_unmapped_reads", value=0),
+                      Metric(metric_id="too_short_unmapped_reads", value=0),
+                      Metric(metric_id="missing_sequence_unmapped_reads", value=0),
+                      Metric(metric_id="microbial_rpm_primary", value=0.0)] if item.id == "microbial" else []),
+        ), input_id=input_id)
+    selected = cohorts._selected_results(store, input_id, manifest)
+    assert [result.algorithm_id for result in selected] == ["read-summary", "microbial"]
+    assert selected[1].cohort_compat_key == microbial_identity
+
+    db_digest[0] = "e" * 64
+    assert [result.algorithm_id for result in cohorts._selected_results(store, input_id, manifest)] == ["read-summary"]
+
+    db_digest[0] = "d" * 64
+    store.publish_result(ResultEnvelope(
+        algorithm_id="microbial", algorithm_version="3", status="ok",
+        provenance=provenance(tool="fixture", parameters_sha256=microbial_identity, source_id=source_id,
+                              input_id=input_id, reference_id="synthetic"),
+        metrics=[Metric(metric_id="primary_reads", value=100),
+                 Metric(metric_id="candidate_unmapped_reads", value=0),
+                 Metric(metric_id="too_short_unmapped_reads", value=2),
+                 Metric(metric_id="missing_sequence_unmapped_reads", value=0),
+                 Metric(metric_id="microbial_rpm_primary", value=0.0)],
+    ), input_id=input_id)
+    assert [result.algorithm_id for result in cohorts._selected_results(store, input_id, manifest)] == ["read-summary"]
 
 
 def test_database_is_pinned_and_refuses_changed_bytes(tmp_path) -> None:
