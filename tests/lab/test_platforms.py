@@ -24,6 +24,20 @@ def test_read_group_platform(lines: list[str], expected: str) -> None:
     assert from_rg_lines(lines) == expected
 
 
+@pytest.mark.parametrize("platform", [None, "unknown", "pacbio"])
+def test_worker_context_refuses_missing_or_unsupported_platform(platform: str | None) -> None:
+    from traceback_lab.registry import context_from_json
+
+    payload = {
+        "root": "/tmp/lab", "source_id": "s", "input_id": "i",
+        "reference_id": "hg38", "reference_sha256": "r", "input_dir": "/tmp/lab/input",
+    }
+    if platform is not None:
+        payload["platform"] = platform
+    with pytest.raises(ValueError, match="no supported platform"):
+        context_from_json(payload)
+
+
 def test_derived_platform_skip_is_persisted_and_shown_in_depth_curve(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -218,6 +232,43 @@ def test_legacy_lab_aligned_without_read_groups_uses_pinned_map_ont(tmp_path: Pa
         for_input({**old_manifest, "platform": "ont"}, bam_path)
     with pytest.raises(ValueError, match="does not declare ONT"):
         for_input({"kind": "aligned", "aligner_argv": ["other"]}, bam_path)
+
+
+@pytest.mark.parametrize("groups", [
+    [{"ID": "one", "PL": "PROMETHION"}],
+    [{"ID": "one"}, {"ID": "two", "PL": "nanopore"}],
+])
+def test_legacy_lab_aligned_with_unknown_read_group_platform_uses_exact_recipe(
+    tmp_path: Path, groups: list[dict[str, str]],
+) -> None:
+    from traceback_lab.ingest import aligner_argv_identity
+
+    bam_path = tmp_path / "legacy-rg.bam"
+    header = {"HD": {"VN": "1.6"}, "SQ": [{"SN": "chr1", "LN": 1000}], "RG": groups}
+    with pysam.AlignmentFile(str(bam_path), "wb", header=header):
+        pass
+    with pysam.AlignmentFile(str(bam_path), "rb") as bam:
+        rg_lines = [line for line in str(bam.header).splitlines() if line.startswith("@RG\t")]
+    old_manifest = {"kind": "aligned", "aligner_argv": aligner_argv_identity(rg_lines)}
+    assert for_input(old_manifest, bam_path) == "ont"
+    with pytest.raises(ValueError, match="does not declare ONT"):
+        for_input({**old_manifest, "platform": "ont"}, bam_path)
+    with pytest.raises(ValueError, match="does not declare ONT"):
+        for_input({**old_manifest, "aligner_argv": ["other"]}, bam_path)
+
+
+def test_legacy_lab_aligned_rejects_explicit_illumina_in_mixed_unknown_read_groups(tmp_path: Path) -> None:
+    from traceback_lab.ingest import aligner_argv_identity
+
+    bam_path = tmp_path / "mixed-rg.bam"
+    header = {"HD": {"VN": "1.6"}, "SQ": [{"SN": "chr1", "LN": 1000}],
+              "RG": [{"ID": "one", "PL": "ILLUMINA"}, {"ID": "two"}]}
+    with pysam.AlignmentFile(str(bam_path), "wb", header=header):
+        pass
+    with pysam.AlignmentFile(str(bam_path), "rb") as bam:
+        rg_lines = [line for line in str(bam.header).splitlines() if line.startswith("@RG\t")]
+    with pytest.raises(ValueError, match="does not declare ONT"):
+        for_input({"kind": "aligned", "aligner_argv": aligner_argv_identity(rg_lines)}, bam_path)
 
 
 @pytest.mark.parametrize("platform", ["ILLUMINA", None])
