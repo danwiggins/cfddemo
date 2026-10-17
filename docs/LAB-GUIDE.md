@@ -90,7 +90,9 @@ traceback lab runs [RUN_ID] [--step S]     the run log, or one run's steps
 
 `--sex M|F` records an operator assertion in versioned local sample metadata.
 It does not change the measured `sex-check` ratio, source or input identity, or
-cached results. Trust/QC compares a definite male/female call with the assertion
+cached results. Recording a new assertion advances the local page's change counter,
+including on a fully cached run; repeating the same assertion does not. Trust/QC
+compares a definite male/female call with the assertion
 at read time as a pre-analytic check. An absent assertion or indeterminate call
 has no mismatch verdict. The page marks the check as privacy-sensitive and does
 not present it as a diagnostic sex or gender determination. A later conflicting
@@ -405,7 +407,10 @@ A warning (exit 0): the samtools or minimap2 version changed since this sample w
 ### TBX-LAB-020
 
 Unexpected internal error (exit 7). Run `traceback lab runs RUN_ID`, then
-report the code and the command.
+report the code and the command. For `cohort add` or `cohort build`, this code
+also identifies a missing, malformed or unsafe stored source/input record.
+Restore the named regular JSON file from a known-good backup before retrying;
+the cohort's published generation is left unchanged.
 
 ### TBX-LAB-021
 

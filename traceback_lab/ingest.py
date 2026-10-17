@@ -900,7 +900,9 @@ def write_source(
 ) -> dict[str, Any]:
     """Hashes only, never paths: chunk list, exclusions and inputs by aligner."""
 
-    previous = with_sex_assertion(source_record(store, aligned.source_id) or {}, declared_sex)
+    stored = source_record(store, aligned.source_id) or {}
+    previous = with_sex_assertion(stored, declared_sex)
+    assertion_added = previous is not stored
     inputs = [entry for entry in previous.get("inputs", []) if entry.get("input_id") != aligned.input_id]
     inputs.append(
         {
@@ -929,6 +931,8 @@ def write_source(
     if assertion is not None:
         record["operator_metadata"] = assertion
     write_atomic(store.sources_dir / f"{aligned.source_id}.json", canonical_json_bytes(record))
+    if assertion_added:
+        store.bump_generation()
     return record
 
 
@@ -944,6 +948,7 @@ def record_source_sex(store: LabStore, source_id: str, declared_sex: str | None)
     updated = with_sex_assertion(record, declared_sex)
     if updated is not record:
         write_atomic(store.sources_dir / f"{source_id}.json", canonical_json_bytes(updated))
+        store.bump_generation()
     return updated
 
 
