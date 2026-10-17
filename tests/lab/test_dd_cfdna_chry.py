@@ -94,6 +94,24 @@ def test_registration_publish_failure_is_structured_and_path_free(tmp_path: Path
     assert not (root / "lab" / "assets" / "dd-cfdna-chry" / INPUT).exists()
 
 
+@pytest.mark.parametrize("filename", ["contract.json", "receipt.json"])
+def test_nested_registration_json_refuses_without_aborting_planning(
+    tmp_path: Path, filename: str,
+) -> None:
+    store = LabStore(tmp_path / "root")
+    path, digest = _file(tmp_path)
+    contract = register_contract(store, path, digest)
+    registration = store.lab / "assets" / "dd-cfdna-chry" / INPUT
+    (registration / filename).write_bytes(b"[" * 4000 + b"0" + b"]" * 4000)
+    with pytest.raises(DonorContractError):
+        inspect_contract(store, INPUT)
+    assert donor.DD_CFDNA_CHRY.asset_sha256s_for_input(store.root, INPUT) == []
+    ctx = InputContext(store.root, SOURCE, INPUT, "hg38", REFERENCE, tmp_path,
+                       eligible_reads=1000, approx_depth_x=5,
+                       extras={"planned_asset_sha256s": [contract.manifest_sha256]})
+    assert donor.DD_CFDNA_CHRY.preflight(ctx).reason_code == "missing_asset"
+
+
 @pytest.mark.parametrize("change", [
     {"male_donor_attested": False}, {"female_recipient_attested": False},
     {"transplant_attested": False},

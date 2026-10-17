@@ -86,7 +86,7 @@ def _finite_number(value: object) -> float | None:
 def _parse(raw: bytes) -> DonorContract:
     try:
         data = json.loads(raw)
-    except (UnicodeError, ValueError) as exc:
+    except (UnicodeError, ValueError, RecursionError) as exc:
         raise DonorContractError("donor calibration is invalid JSON") from exc
     if not isinstance(data, dict) or set(data) != _FIELDS or data.get("schema") != SCHEMA:
         raise DonorContractError("donor calibration has invalid fields")
@@ -132,7 +132,7 @@ def inspect_contract(store: LabStore, input_id: str) -> DonorContract:
         _check_contained(store, directory)
         contract = _parse(_read(directory / "contract.json"))
         receipt = json.loads(_read(directory / "receipt.json"))
-    except (AssetError, ValueError, OSError) as exc:
+    except (AssetError, ValueError, OSError, RecursionError) as exc:
         raise DonorContractError("donor calibration registration is missing or unsafe") from exc
     if (contract.input_id != input_id or not isinstance(receipt, dict)
             or set(receipt) != {"schema", "sha256"} or receipt.get("schema") != SCHEMA
