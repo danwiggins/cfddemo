@@ -59,6 +59,11 @@ def _agreement_pairs(
     """Pair only compatible scalar values from one pinned generation by source ID."""
 
     rows = []
+    # One generation-wide map keeps a source's label stable even when the
+    # eligible sets differ between agreement charts.
+    labels = shortest_unique_prefixes(
+        [source_id, *(member.source_id for member in generation.members)]
+    ) if generation is not None else {}
     for pair_id, (x_algorithm, x_metric), (y_algorithm, y_metric) in _AGREEMENT_AXES:
         row: dict[str, Any] = {
             "pair_id": pair_id, "state": cohort_state if cohort_state != "ready" else "unavailable",
@@ -91,7 +96,6 @@ def _agreement_pairs(
             for member_source, x_value in zip(x_projection.source_ids, x_projection.values, strict=True)
             if member_source in y_by_source
         ]
-        labels = shortest_unique_prefixes([source_id, *(point["source_id"] for point in points)])
         for point in points:
             point["display_id"] = labels[point["source_id"]]
         row.update({
