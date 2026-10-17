@@ -331,7 +331,7 @@ def test_member_recompute_runs_pinned_loo_chain_and_requires_success(
     assert len(sample_events) == 1
     assert sample_events[0]["source_id"] == source_id
     assert sample_events[0]["input_id"] == input_id
-    assert observed["ids"] == ["read-summary", "copy-number", "instability"]
+    assert observed["ids"] == ["read-summary", "copy-number", "instability", "arm-summary"]
     assert observed["digest"] == selection.pon_sha256
     assert observed["target"].extras["pon_selection"]["cohort_version"] == "healthy-v1:2"
 
