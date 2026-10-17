@@ -110,7 +110,7 @@ def inspect_methylbert_bundle(store: LabStore, sha256: str) -> AssetRecord:
                 or metadata["schema"] != SCHEMA or metadata["file"] != FILENAME):
             raise AssetError("MethylBERT registration manifest is invalid")
         descriptor = AssetDescriptor.model_validate(metadata["descriptor"])
-    except (OSError, ValueError, TypeError, ValidationError, UnicodeError) as exc:
+    except (OSError, ValueError, TypeError, ValidationError, UnicodeError, RecursionError) as exc:
         raise AssetError("MethylBERT registration manifest is invalid") from exc
     if (descriptor.kind != KIND or descriptor.origin != "user" or descriptor.sha256 != sha256
             or not 1 <= descriptor.size_bytes <= MAX_ARCHIVE_BYTES):
@@ -191,7 +191,10 @@ def register_methylbert_bundle(
         if directory.is_dir():
             raise MethylbertPublishUncertain(sha256) from exc
         raise AssetError("MethylBERT bundle could not be published") from exc
-    return inspect_methylbert_bundle(store, sha256)
+    try:
+        return inspect_methylbert_bundle(store, sha256)
+    except AssetError as exc:
+        raise MethylbertPublishUncertain(sha256) from exc
 
 
 def copy_methylbert_bundle(store: LabStore, sha256: str, destination: Path) -> Path:

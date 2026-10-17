@@ -67,7 +67,7 @@ def _sha256(stream: Any, size: int) -> str:
 def _manifest(data: bytes) -> Bundle:
     try:
         raw = json.loads(data)
-    except (UnicodeDecodeError, ValueError) as exc:
+    except (UnicodeDecodeError, ValueError, RecursionError) as exc:
         raise BundleError("bundle.json is not valid UTF-8 JSON") from exc
     if not isinstance(raw, dict) or set(raw) != {
         "schema", "model_id", "upstream_commit", "source", "terms", "reference_sha256",

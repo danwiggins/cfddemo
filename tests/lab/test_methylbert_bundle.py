@@ -13,6 +13,7 @@ from pathlib import Path
 import pytest
 
 import traceback_lab.methylbert_bundle as bundle_module
+import traceback_lab.methylbert_assets as assets_module
 from traceback_lab.assets import AssetError
 from traceback_lab.methylbert_assets import (
     MethylbertPublishUncertain, copy_methylbert_bundle, inspect_methylbert_bundle,
@@ -22,7 +23,7 @@ from traceback_lab.methylbert_bundle import MAX_ARCHIVE_BYTES, BundleError, REQU
 from traceback_lab.store import LabStore
 
 
-def _bundle(path, *, bad_digest=False, extra=False, link=False, model_id="test-tumour-normal"):
+def _bundle(path, *, bad_digest=False, extra=False, link=False, model_id="test-tumour-normal", manifest_bytes=None):
     files = {name: f"fixture {name}".encode() for name in REQUIRED_FILES}
     manifest = {
         "schema": SCHEMA, "model_id": model_id, "upstream_commit": "a" * 40,
@@ -32,7 +33,7 @@ def _bundle(path, *, bad_digest=False, extra=False, link=False, model_id="test-t
     }
     if bad_digest:
         manifest["files"]["train_seq.csv"] = "0" * 64
-    files["bundle.json"] = json.dumps(manifest).encode()
+    files["bundle.json"] = manifest_bytes if manifest_bytes is not None else json.dumps(manifest).encode()
     if extra:
         files["../escape"] = b"not allowed"
     with tarfile.open(path, mode="w:") as archive:
@@ -143,6 +144,36 @@ def test_uncertain_publication_retains_digest_for_inspection(tmp_path, monkeypat
             store, archive, source_label="fixture", terms="restricted",
         )
     assert inspect_methylbert_bundle(store, raised.value.sha256).sha256 == raised.value.sha256
+
+
+def test_post_publish_inspection_failure_retains_digest(tmp_path, monkeypatch):
+    archive = tmp_path / "model.tar"
+    _bundle(archive)
+    store = LabStore(tmp_path / "root")
+
+    def fail_inspection(*_):
+        raise AssetError("injected read failure")
+
+    monkeypatch.setattr(assets_module, "inspect_methylbert_bundle", fail_inspection)
+    with pytest.raises(MethylbertPublishUncertain) as raised:
+        register_methylbert_bundle(store, archive, source_label="fixture", terms="restricted")
+    assert raised.value.sha256 == hashlib.sha256(archive.read_bytes()).hexdigest()
+    assert (store.lab / "assets" / "methylbert-bundle" / raised.value.sha256 / "model.tar").exists()
+
+
+def test_deep_json_is_reported_as_bundle_or_asset_error(tmp_path):
+    archive = tmp_path / "deep.tar"
+    _bundle(archive, manifest_bytes=b"[" * 3000)
+    with pytest.raises(BundleError, match="valid UTF-8 JSON"):
+        verify_bundle(archive)
+
+    valid = tmp_path / "valid.tar"
+    _bundle(valid)
+    store = LabStore(tmp_path / "root")
+    record = register_methylbert_bundle(store, valid, source_label="fixture", terms="restricted")
+    (record.file.parent / "manifest.json").write_bytes(b"[" * 3000)
+    with pytest.raises(AssetError, match="registration manifest is invalid"):
+        inspect_methylbert_bundle(store, record.sha256)
 
 
 @pytest.mark.parametrize("damage,message", [
