@@ -79,6 +79,7 @@ def selection_for_generation(
     from .algorithms.copy_number import toolchain_or_none
     from .pon import binding_for
     from traceback_runner.copy_number_method import parameters_sha256 as signed_parameters_sha256
+    from traceback_runner.references import ReferenceProblem
 
     chosen = generation.cohort_id
     if generation.kind != "internal_cohort":
@@ -97,7 +98,7 @@ def selection_for_generation(
     try:
         assets = ichor.resolve_assets(store.root, toolchain)
         hashes = ichor.asset_sha256s(assets)
-    except (OSError, ValueError, RuntimeError) as exc:
+    except (OSError, ValueError, RuntimeError, ReferenceProblem) as exc:
         raise LabProblem(
             "TBX-LAB-020", cause="the selected PoN's registered ichor assets are unavailable",
             fix="Restore the matching registered ichor assets before rerunning",
